@@ -1,0 +1,15 @@
+# Build artifacts
+/target/
+
+# Test data (downloaded from OSF)
+/bids/
+bids.zip
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store

@@ -1,0 +1,148 @@
+name: Integration Tests
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:  # Allow manual trigger
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # First, download test data once and cache it
+  setup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache test data
+        id: cache-testdata
+        uses: actions/cache@v4
+        with:
+          path: bids
+          key: testdata-v1-y8adf
+
+      - name: Download test data from OSF
+        if: steps.cache-testdata.outputs.cache-hit != 'true'
+        env:
+          OSF_TOKEN: ${{ secrets.OSF_TOKEN }}
+        run: |
+          # Download from private OSF project y8adf using waterbutler API
+          curl -L -H "Authorization: Bearer ${OSF_TOKEN}" \
+            "https://files.osf.io/v1/resources/y8adf/providers/osfstorage/698ac9aecae88916d1e24f69" \
+            -o bids.zip
+          unzip -q bids.zip
+          rm bids.zip
+          ls -la bids/
+
+  # Run each algorithm test as a separate parallel job
+  bgremove-tests:
+    needs: setup
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        test:
+          - test_bgremove_sharp
+          - test_bgremove_vsharp
+          - test_bgremove_pdf
+          - test_bgremove_ismv
+          - test_bgremove_lbv
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Restore test data cache
+        uses: actions/cache@v4
+        with:
+          path: bids
+          key: testdata-v1
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Run ${{ matrix.test }}
+        run: |
+          cargo test --test integration_tests ${{ matrix.test }} -- --ignored --nocapture
+
+  inversion-tests:
+    needs: setup
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        test:
+          - test_inversion_tkd
+          - test_inversion_tsvd
+          - test_inversion_tikhonov
+          - test_inversion_tv
+          - test_inversion_rts
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Restore test data cache
+        uses: actions/cache@v4
+        with:
+          path: bids
+          key: testdata-v1
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Run ${{ matrix.test }}
+        run: |
+          cargo test --test integration_tests ${{ matrix.test }} -- --ignored --nocapture
+
+  # Full benchmark (optional, runs all and produces summary)
+  benchmark:
+    needs: [bgremove-tests, inversion-tests]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Restore test data cache
+        uses: actions/cache@v4
+        with:
+          path: bids
+          key: testdata-v1
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Run full benchmark
+        run: |
+          cargo test --test integration_tests benchmark_all_algorithms -- --ignored --nocapture
