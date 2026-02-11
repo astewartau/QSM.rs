@@ -31,6 +31,9 @@ NAMES = {
     "inversion_tikhonov": "Tikhonov",
     "inversion_tv": "TV-ADMM",
     "inversion_rts": "RTS",
+    "bet": "BET",
+    "pipeline_tgv": "TGV",
+    "pipeline_qsmart": "QSMART",
 }
 
 # Fixed display windows (ppm)
@@ -45,6 +48,9 @@ WINDOWS = {
     "inversion_tikhonov": (-0.1, 0.1),
     "inversion_tv": (-0.1, 0.1),
     "inversion_rts": (-0.1, 0.1),
+    "bet": (0, 1),
+    "pipeline_tgv": (-0.1, 0.1),
+    "pipeline_qsmart": (-0.1, 0.1),
 }
 
 
@@ -91,7 +97,8 @@ def render_figure(slices, name, slug, output_path):
         ax.axis("off")
 
     fig.suptitle(name, fontsize=14, fontweight="bold", y=1.0)
-    fig.colorbar(im, ax=axes, shrink=0.85, aspect=30, pad=0.02, label="ppm")
+    cb_label = "Mask" if slug == "bet" else "ppm"
+    fig.colorbar(im, ax=axes, shrink=0.85, aspect=30, pad=0.02, label=cb_label)
     fig.savefig(output_path, dpi=120, bbox_inches="tight", facecolor="white")
     plt.close(fig)
     print(f"  Rendered {output_path}")

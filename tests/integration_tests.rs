@@ -8,7 +8,17 @@ mod common;
 use std::time::Instant;
 use common::{TestData, TestResult};
 use qsm_core::bgremove;
+use qsm_core::bgremove::{sdf, SdfParams};
+use qsm_core::bet;
 use qsm_core::inversion;
+use qsm_core::inversion::{tgv_qsm, TgvParams, ilsqr_simple};
+use qsm_core::unwrap::laplacian_unwrap;
+use qsm_core::utils::{
+    calculate_b0_weighted, multi_echo_linear_fit, field_to_hz,
+    B0WeightType,
+    generate_vasculature_mask, VasculatureParams,
+    adjust_offset, compute_removed_voxels,
+};
 
 /// Helper macro to run an algorithm with timing and logging
 macro_rules! run_timed {
@@ -302,6 +312,259 @@ fn test_inversion_rts() {
 
     assert!(res.nrmse < 0.5, "RTS NRMSE too high: {}", res.nrmse);
     assert!(res.correlation > 0.7, "RTS correlation too low: {}", res.correlation);
+}
+
+// ============================================================================
+// Brain Extraction (BET) Test
+// ============================================================================
+
+#[test]
+#[ignore]
+fn test_bet() {
+    println!("[INFO] Loading test data...");
+    let data = TestData::load().expect("Failed to load test data");
+    let (nx, ny, nz) = data.dims;
+    let (vsx, vsy, vsz) = data.voxel_size;
+
+    let (predicted_mask, elapsed) = run_timed!("BET", bet::run_bet(
+        &data.mag_echoes[0],
+        nx, ny, nz,
+        vsx, vsy, vsz,
+        0.5,   // fractional_intensity
+        1.0,   // smoothness_factor
+        0.0,   // gradient_threshold
+        1000,  // iterations
+        4,     // subdivisions
+    ));
+
+    let dice = common::dice_coefficient(&predicted_mask, &data.mask);
+    println!("BET             Dice={:.4}      {:>10.2?}", dice, elapsed);
+    println!("RESULT:BET,{:.6},-,-,{:.2}", dice, elapsed.as_secs_f64());
+
+    // Save slices: result = predicted mask as f64, mask overlay = ground truth
+    let predicted_f64: Vec<f64> = predicted_mask.iter().map(|&v| v as f64).collect();
+    common::save_center_slices(&predicted_f64, &data.mask, data.dims, "bet");
+
+    assert!(dice > 0.7, "BET Dice coefficient too low: {}", dice);
+}
+
+// ============================================================================
+// Pipeline Tests (TGV, QSMART)
+// ============================================================================
+
+#[test]
+#[ignore]
+fn test_pipeline_tgv() {
+    println!("[INFO] Loading test data...");
+    let data = TestData::load().expect("Failed to load test data");
+    let (nx, ny, nz) = data.dims;
+    let (vsx, vsy, vsz) = data.voxel_size;
+    let n_total = nx * ny * nz;
+
+    let start = Instant::now();
+
+    // Step 1: Unwrap each echo using Laplacian unwrapping
+    println!("[INFO] Unwrapping phase echoes...");
+    let unwrapped_phases: Vec<Vec<f64>> = data.phase_echoes.iter()
+        .map(|phase| laplacian_unwrap(phase, &data.mask, nx, ny, nz, vsx, vsy, vsz))
+        .collect();
+
+    // Step 2: B0 estimation (TEs in milliseconds, output in Hz)
+    let tes_ms: Vec<f64> = data.echo_times.iter().map(|&t| t * 1000.0).collect();
+    println!("[INFO] Computing B0 field map...");
+    let b0_hz = calculate_b0_weighted(
+        &unwrapped_phases,
+        &data.mag_echoes,
+        &tes_ms,
+        &data.mask,
+        B0WeightType::PhaseSNR,
+        n_total,
+    );
+
+    // Step 3: Convert B0 (Hz) to single-echo phase (radians) for TGV
+    let te_for_tgv = data.echo_times[0]; // seconds
+    let phase_for_tgv: Vec<f32> = b0_hz.iter()
+        .map(|&hz| (hz * 2.0 * std::f64::consts::PI * te_for_tgv) as f32)
+        .collect();
+
+    // Step 4: Run TGV
+    let tgv_params = TgvParams {
+        alpha1: 0.003,
+        alpha0: 0.002,
+        iterations: 1000,
+        erosions: 3,
+        step_size: 3.0,
+        fieldstrength: data.field_strength as f32,
+        te: te_for_tgv as f32,
+        tol: 1e-5,
+    };
+
+    println!("[INFO] Running TGV...");
+    let result_f32 = tgv_qsm(
+        &phase_for_tgv,
+        &data.mask,
+        nx, ny, nz,
+        vsx as f32, vsy as f32, vsz as f32,
+        &tgv_params,
+        (data.b0_dir.0 as f32, data.b0_dir.1 as f32, data.b0_dir.2 as f32),
+    );
+
+    let elapsed = start.elapsed();
+
+    // Convert f32 result to f64 for comparison
+    let result: Vec<f64> = result_f32.iter().map(|&v| v as f64).collect();
+
+    let res = TestResult::new("TGV", &result, &data.chi, &data.mask);
+    res.print_with_time(elapsed);
+    res.print_ci_metrics(elapsed);
+    common::save_center_slices(&result, &data.mask, data.dims, "pipeline_tgv");
+
+    assert!(res.nrmse < 0.8, "TGV NRMSE too high: {}", res.nrmse);
+    assert!(res.correlation > 0.5, "TGV correlation too low: {}", res.correlation);
+}
+
+#[test]
+#[ignore]
+fn test_pipeline_qsmart() {
+    println!("[INFO] Loading test data...");
+    let data = TestData::load().expect("Failed to load test data");
+    let (nx, ny, nz) = data.dims;
+    let (vsx, vsy, vsz) = data.voxel_size;
+    let n_total = nx * ny * nz;
+
+    let start = Instant::now();
+
+    // ========================================================================
+    // Phase unwrapping and linear fit
+    // ========================================================================
+    println!("[INFO] Unwrapping phase echoes...");
+    let unwrapped_phases: Vec<Vec<f64>> = data.phase_echoes.iter()
+        .map(|phase| laplacian_unwrap(phase, &data.mask, nx, ny, nz, vsx, vsy, vsz))
+        .collect();
+
+    // Linear fit: TEs in seconds, output field in rad/s
+    println!("[INFO] Multi-echo linear fit...");
+    let fit_result = multi_echo_linear_fit(
+        &unwrapped_phases,
+        &data.mag_echoes,
+        &data.echo_times, // seconds
+        &data.mask,
+        true,  // estimate_offset
+        90.0,  // reliability_threshold_percentile
+    );
+
+    // Convert field from rad/s to Hz
+    let field_hz = field_to_hz(&fit_result.field);
+
+    // ========================================================================
+    // Vasculature mask generation
+    // ========================================================================
+    println!("[INFO] Generating vasculature mask...");
+    let vasc_mask = generate_vasculature_mask(
+        &data.mag_echoes[0],
+        &data.mask,
+        nx, ny, nz,
+        &VasculatureParams::default(),
+    );
+
+    // ========================================================================
+    // Unit conversion: Hz → ppm for SDF
+    // ========================================================================
+    let ppm_factor = 1e6 / (42.576e6 * data.field_strength);
+    let field_ppm: Vec<f64> = field_hz.iter()
+        .map(|&hz| hz * ppm_factor)
+        .collect();
+
+    // Convert mask to f64 for SDF (which takes weighted masks)
+    let mask_f64: Vec<f64> = data.mask.iter().map(|&v| v as f64).collect();
+
+    // ========================================================================
+    // Stage 1: Full mask (no vasculature exclusion)
+    // ========================================================================
+    println!("[INFO] QSMART Stage 1: SDF + iLSQR (full mask)...");
+
+    // All-ones vasculature mask for stage 1
+    let ones_vasc: Vec<f64> = vec![1.0; n_total];
+    let r0_f64: Vec<f64> = fit_result.reliability_mask.iter().map(|&v| v as f64).collect();
+
+    let lfs_stage1 = sdf(
+        &field_ppm,
+        &mask_f64,
+        &ones_vasc,
+        nx, ny, nz,
+        &SdfParams::stage1(),
+    );
+
+    let chi_stage1 = ilsqr_simple(
+        &lfs_stage1,
+        &data.mask,
+        nx, ny, nz,
+        vsx, vsy, vsz,
+        data.b0_dir,
+        0.01, // tolerance
+        50,   // max iterations
+    );
+
+    // ========================================================================
+    // Stage 2: Tissue-only (excluding vessels)
+    // ========================================================================
+    println!("[INFO] QSMART Stage 2: SDF + iLSQR (tissue only)...");
+
+    // Tissue mask = vasculature mask * reliability mask
+    let tissue_mask: Vec<f64> = vasc_mask.iter()
+        .zip(r0_f64.iter())
+        .map(|(&v, &r)| v * r)
+        .collect();
+
+    let lfs_stage2 = sdf(
+        &field_ppm,
+        &tissue_mask,
+        &vasc_mask,
+        nx, ny, nz,
+        &SdfParams::stage2(),
+    );
+
+    let tissue_mask_u8: Vec<u8> = tissue_mask.iter()
+        .map(|&v| if v > 0.5 { 1 } else { 0 })
+        .collect();
+
+    let chi_stage2 = ilsqr_simple(
+        &lfs_stage2,
+        &tissue_mask_u8,
+        nx, ny, nz,
+        vsx, vsy, vsz,
+        data.b0_dir,
+        0.01, // tolerance
+        50,   // max iterations
+    );
+
+    // ========================================================================
+    // Offset adjustment and combination
+    // ========================================================================
+    println!("[INFO] QSMART offset adjustment...");
+
+    let removed_voxels = compute_removed_voxels(&mask_f64, &r0_f64, &vasc_mask);
+
+    let chi_qsmart = adjust_offset(
+        &removed_voxels,
+        &lfs_stage1,
+        &chi_stage1,
+        &chi_stage2,
+        nx, ny, nz,
+        vsx, vsy, vsz,
+        data.b0_dir,
+        ppm_factor,
+    );
+
+    let elapsed = start.elapsed();
+
+    let res = TestResult::new("QSMART", &chi_qsmart, &data.chi, &data.mask);
+    res.print_with_time(elapsed);
+    res.print_ci_metrics(elapsed);
+    common::save_center_slices(&chi_qsmart, &data.mask, data.dims, "pipeline_qsmart");
+
+    assert!(res.nrmse < 0.8, "QSMART NRMSE too high: {}", res.nrmse);
+    assert!(res.correlation > 0.5, "QSMART correlation too low: {}", res.correlation);
 }
 
 // ============================================================================

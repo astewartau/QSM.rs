@@ -175,18 +175,135 @@ jobs:
           path: slices/
           retention-days: 1
 
+  bet-test:
+    needs: setup
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download test data
+        uses: actions/download-artifact@v4
+        with:
+          name: test-data
+          path: bids
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Run test_bet
+        run: |
+          cargo test --release --test integration_tests test_bet -- --ignored --nocapture 2>&1 | tee test_output.txt
+
+      - name: Save metrics
+        if: always()
+        run: |
+          if grep -q "^RESULT:" test_output.txt 2>/dev/null; then
+            grep "^RESULT:" test_output.txt > test_bet.csv
+          else
+            echo "RESULT:BET,-,-,-,-" > test_bet.csv
+          fi
+
+      - name: Upload metrics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: metrics-test_bet
+          path: test_bet.csv
+          retention-days: 1
+
+      - name: Upload slices
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: slices-test_bet
+          path: slices/
+          retention-days: 1
+
+  pipeline-tests:
+    needs: setup
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        test:
+          - test_pipeline_tgv
+          - test_pipeline_qsmart
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download test data
+        uses: actions/download-artifact@v4
+        with:
+          name: test-data
+          path: bids
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Run ${{ matrix.test }}
+        timeout-minutes: 30
+        run: |
+          cargo test --release --test integration_tests ${{ matrix.test }} -- --ignored --nocapture 2>&1 | tee test_output.txt
+
+      - name: Save metrics
+        if: always()
+        run: |
+          if grep -q "^RESULT:" test_output.txt 2>/dev/null; then
+            grep "^RESULT:" test_output.txt > ${{ matrix.test }}.csv
+          else
+            echo "RESULT:${{ matrix.test }},-,-,-,-" > ${{ matrix.test }}.csv
+          fi
+
+      - name: Upload metrics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: metrics-${{ matrix.test }}
+          path: ${{ matrix.test }}.csv
+          retention-days: 1
+
+      - name: Upload slices
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: slices-${{ matrix.test }}
+          path: slices/
+          retention-days: 1
+
   # Gate check for branch protection — fails if any test job fails.
   # After the first PR run, add "tests-passed" as a required status check
   # in Settings > Branches > Branch protection rules for main.
   tests-passed:
-    needs: [bgremove-tests, inversion-tests]
+    needs: [bgremove-tests, inversion-tests, bet-test, pipeline-tests]
     runs-on: ubuntu-latest
     steps:
       - run: echo "All tests passed"
 
   # Collect metrics from all parallel jobs and produce a single summary
   summary:
-    needs: [bgremove-tests, inversion-tests]
+    needs: [bgremove-tests, inversion-tests, bet-test, pipeline-tests]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -230,6 +347,42 @@ jobs:
             echo "|--------|------|-------|-------------|------|"
             for test in tkd tsvd tikhonov tv rts; do
               file="metrics/test_inversion_${test}.csv"
+              if [ -f "$file" ]; then
+                line=$(sed 's/^RESULT://' "$file")
+                IFS=',' read -r name rmse nrmse corr time <<< "$line"
+                if [ "$rmse" = "-" ]; then
+                  echo "| ${name} | :x: Failed | - | - | - |"
+                else
+                  time_fmt=$(printf "%.2fs" "$time")
+                  echo "| ${name} | ${rmse} | ${nrmse} | ${corr} | ${time_fmt} |"
+                fi
+              fi
+            done
+            echo ""
+            echo "## Brain Extraction"
+            echo "*Compared against ground truth mask*"
+            echo ""
+            echo "| Method | Dice | Time |"
+            echo "|--------|------|------|"
+            file="metrics/test_bet.csv"
+            if [ -f "$file" ]; then
+              line=$(sed 's/^RESULT://' "$file")
+              IFS=',' read -r name dice _nrmse _corr time <<< "$line"
+              if [ "$dice" = "-" ]; then
+                echo "| ${name} | :x: Failed | - |"
+              else
+                time_fmt=$(printf "%.2fs" "$time")
+                echo "| ${name} | ${dice} | ${time_fmt} |"
+              fi
+            fi
+            echo ""
+            echo "## Full Pipeline"
+            echo "*Compared against ground truth susceptibility map*"
+            echo ""
+            echo "| Method | RMSE | NRMSE | Correlation | Time |"
+            echo "|--------|------|-------|-------------|------|"
+            for test in tgv qsmart; do
+              file="metrics/test_pipeline_${test}.csv"
               if [ -f "$file" ]; then
                 line=$(sed 's/^RESULT://' "$file")
                 IFS=',' read -r name rmse nrmse corr time <<< "$line"
@@ -322,6 +475,56 @@ jobs:
             done
             echo ""
             for slug in inversion_tkd inversion_tsvd inversion_tikhonov inversion_tv inversion_rts; do
+              if [ -f "figures/${slug}.png" ]; then
+                echo "![${slug}](figures/${slug}.png)"
+                echo ""
+              fi
+            done
+
+            # Brain Extraction
+            echo "### Brain Extraction"
+            echo "*Compared against ground truth mask*"
+            echo ""
+            echo "| Method | Dice | Time |"
+            echo "|--------|------|------|"
+            file="metrics/test_bet.csv"
+            if [ -f "$file" ]; then
+              line=$(sed 's/^RESULT://' "$file")
+              IFS=',' read -r name dice _nrmse _corr time <<< "$line"
+              if [ "$dice" = "-" ]; then
+                echo "| ${name} | :x: Failed | - |"
+              else
+                time_fmt=$(printf "%.2fs" "$time")
+                echo "| ${name} | ${dice} | ${time_fmt} |"
+              fi
+            fi
+            echo ""
+            if [ -f "figures/bet.png" ]; then
+              echo "![bet](figures/bet.png)"
+              echo ""
+            fi
+
+            # Full Pipeline table + figures
+            echo "### Full Pipeline"
+            echo "*Compared against ground truth susceptibility map*"
+            echo ""
+            echo "| Method | RMSE | NRMSE | Correlation | Time |"
+            echo "|--------|------|-------|-------------|------|"
+            for test in tgv qsmart; do
+              file="metrics/test_pipeline_${test}.csv"
+              if [ -f "$file" ]; then
+                line=$(sed 's/^RESULT://' "$file")
+                IFS=',' read -r name rmse nrmse corr time <<< "$line"
+                if [ "$rmse" = "-" ]; then
+                  echo "| ${name} | :x: Failed | - | - | - |"
+                else
+                  time_fmt=$(printf "%.2fs" "$time")
+                  echo "| ${name} | ${rmse} | ${nrmse} | ${corr} | ${time_fmt} |"
+                fi
+              fi
+            done
+            echo ""
+            for slug in pipeline_tgv pipeline_qsmart; do
               if [ -f "figures/${slug}.png" ]; then
                 echo "![${slug}](figures/${slug}.png)"
                 echo ""

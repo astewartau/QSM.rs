@@ -2,6 +2,16 @@
 
 use std::fs;
 use std::path::Path;
+use serde::Deserialize;
+
+/// BIDS JSON sidecar fields
+#[derive(Deserialize)]
+struct BidsSidecar {
+    #[serde(rename = "EchoTime")]
+    echo_time: f64,
+    #[serde(rename = "MagneticFieldStrength")]
+    magnetic_field_strength: Option<f64>,
+}
 
 /// Compute RMSE between two arrays, only within mask (non-zero values)
 pub fn rmse(a: &[f64], b: &[f64], mask: &[u8]) -> f64 {
@@ -151,8 +161,20 @@ impl TestData {
         let fieldmap_local = load_nifti_file(&format!("{}/sub-1_fieldmap-local.nii", deriv))?.data;
         let chi = load_nifti_file(&format!("{}/sub-1_Chimap.nii", deriv))?.data;
 
-        // Echo times from JSON (hardcoded for now, could parse JSON)
-        let echo_times = vec![0.004, 0.008, 0.012, 0.016];
+        // Parse echo times and field strength from BIDS JSON sidecars
+        let mut echo_times = Vec::new();
+        let mut field_strength = 7.0_f64;
+        for e in 1..=4 {
+            let json_path = format!("{}/sub-1_echo-{}_part-phase_MEGRE.json", base, e);
+            let json_str = fs::read_to_string(&json_path)
+                .map_err(|err| format!("Failed to read {}: {}", json_path, err))?;
+            let sidecar: BidsSidecar = serde_json::from_str(&json_str)
+                .map_err(|err| format!("Failed to parse {}: {}", json_path, err))?;
+            echo_times.push(sidecar.echo_time);
+            if let Some(fs_val) = sidecar.magnetic_field_strength {
+                field_strength = fs_val;
+            }
+        }
 
         Ok(TestData {
             phase_echoes,
@@ -165,7 +187,7 @@ impl TestData {
             voxel_size,
             b0_dir: (0.0, 0.0, 1.0),
             echo_times,
-            field_strength: 7.0,
+            field_strength,
         })
     }
 }
@@ -283,4 +305,21 @@ pub fn save_center_slices(
         eprintln!("[WARN] Failed to save slices to {}: {}", path, e);
     });
     println!("[INFO] Saved center slices to {}", path);
+}
+
+/// Compute Dice coefficient between two binary masks
+pub fn dice_coefficient(predicted: &[u8], ground_truth: &[u8]) -> f64 {
+    let (mut tp, mut p_sum, mut gt_sum) = (0usize, 0usize, 0usize);
+    for i in 0..predicted.len() {
+        let p = (predicted[i] > 0) as usize;
+        let g = (ground_truth[i] > 0) as usize;
+        tp += p & g;
+        p_sum += p;
+        gt_sum += g;
+    }
+    if p_sum + gt_sum == 0 {
+        1.0
+    } else {
+        2.0 * tp as f64 / (p_sum + gt_sum) as f64
+    }
 }
