@@ -258,10 +258,10 @@ fn test_inversion_tv() {
         nx, ny, nz,
         vsx, vsy, vsz,
         data.b0_dir,
-        1e-4,  // lambda
-        1.0,   // rho
-        1e-4,  // tolerance
-        50,    // max iterations
+        1e-3,  // lambda
+        0.1,   // rho (= 100 * lambda)
+        1e-3,  // tolerance
+        250,   // max iterations
     ));
 
     let res = TestResult::new("TV-ADMM", &result, &data.chi, &data.mask);
@@ -287,12 +287,12 @@ fn test_inversion_rts() {
         nx, ny, nz,
         vsx, vsy, vsz,
         data.b0_dir,
-        0.2,   // delta (threshold)
-        1e-3,  // mu
-        1.0,   // rho
-        1e-4,  // tolerance
-        50,    // max iterations
-        20,    // lsmr iterations
+        0.15,  // delta (threshold)
+        1e5,   // mu
+        10.0,  // rho
+        1e-2,  // tolerance
+        20,    // max iterations
+        4,     // lsmr iterations
     ));
 
     let res = TestResult::new("RTS", &result, &data.chi, &data.mask);
@@ -394,14 +394,14 @@ fn benchmark_all_algorithms() {
     // TV-ADMM
     let (result, elapsed) = run_timed!("TV-ADMM", inversion::tv_admm(
         &data.fieldmap_local, &data.mask, nx, ny, nz, vsx, vsy, vsz,
-        data.b0_dir, 1e-4, 1.0, 1e-4, 50
+        data.b0_dir, 1e-3, 0.1, 1e-3, 250
     ));
     TestResult::new("TV-ADMM", &result, &data.chi, &data.mask).print_with_time(elapsed);
 
     // RTS
     let (result, elapsed) = run_timed!("RTS", inversion::rts(
         &data.fieldmap_local, &data.mask, nx, ny, nz, vsx, vsy, vsz,
-        data.b0_dir, 0.2, 1e-3, 1.0, 1e-4, 50, 20
+        data.b0_dir, 0.15, 1e5, 10.0, 1e-2, 20, 4
     ));
     TestResult::new("RTS", &result, &data.chi, &data.mask).print_with_time(elapsed);
 

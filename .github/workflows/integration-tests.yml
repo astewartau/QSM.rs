@@ -263,15 +263,34 @@ jobs:
       - name: Setup CML
         uses: iterative/setup-cml@v3
 
-      - name: Post PR comment with figures
+      - name: Post PR comment with results
         if: github.event_name == 'pull_request'
         env:
           REPO_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           {
-            echo "## QSM-Core Visual Results"
+            echo "## QSM-Core Integration Test Results"
             echo ""
+
+            # Background Field Removal table + figures
             echo "### Background Field Removal"
+            echo "*Compared against ground truth local field map*"
+            echo ""
+            echo "| Method | RMSE | NRMSE | Correlation | Time |"
+            echo "|--------|------|-------|-------------|------|"
+            for test in sharp vsharp pdf ismv lbv; do
+              file="metrics/test_bgremove_${test}.csv"
+              if [ -f "$file" ]; then
+                line=$(sed 's/^RESULT://' "$file")
+                IFS=',' read -r name rmse nrmse corr time <<< "$line"
+                if [ "$rmse" = "-" ]; then
+                  echo "| ${name} | :x: Failed | - | - | - |"
+                else
+                  time_fmt=$(printf "%.2fs" "$time")
+                  echo "| ${name} | ${rmse} | ${nrmse} | ${corr} | ${time_fmt} |"
+                fi
+              fi
+            done
             echo ""
             for slug in bgremove_sharp bgremove_vsharp bgremove_pdf bgremove_ismv bgremove_lbv; do
               if [ -f "figures/${slug}.png" ]; then
@@ -279,7 +298,26 @@ jobs:
                 echo ""
               fi
             done
+
+            # Dipole Inversion table + figures
             echo "### Dipole Inversion"
+            echo "*Compared against ground truth susceptibility map*"
+            echo ""
+            echo "| Method | RMSE | NRMSE | Correlation | Time |"
+            echo "|--------|------|-------|-------------|------|"
+            for test in tkd tsvd tikhonov tv rts; do
+              file="metrics/test_inversion_${test}.csv"
+              if [ -f "$file" ]; then
+                line=$(sed 's/^RESULT://' "$file")
+                IFS=',' read -r name rmse nrmse corr time <<< "$line"
+                if [ "$rmse" = "-" ]; then
+                  echo "| ${name} | :x: Failed | - | - | - |"
+                else
+                  time_fmt=$(printf "%.2fs" "$time")
+                  echo "| ${name} | ${rmse} | ${nrmse} | ${corr} | ${time_fmt} |"
+                fi
+              fi
+            done
             echo ""
             for slug in inversion_tkd inversion_tsvd inversion_tikhonov inversion_tv inversion_rts; do
               if [ -f "figures/${slug}.png" ]; then
