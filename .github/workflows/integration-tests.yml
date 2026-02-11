@@ -5,6 +5,10 @@ on:
     branches: [main, master]
   workflow_dispatch:  # Allow manual trigger
 
+permissions:
+  contents: read
+  pull-requests: write
+
 env:
   CARGO_TERM_COLOR: always
 
