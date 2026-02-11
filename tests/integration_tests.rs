@@ -14,10 +14,10 @@ use qsm_core::inversion;
 use qsm_core::inversion::{tgv_qsm, TgvParams, ilsqr_simple};
 use qsm_core::unwrap::laplacian_unwrap;
 use qsm_core::utils::{
-    calculate_b0_weighted, multi_echo_linear_fit, field_to_hz,
-    B0WeightType,
+    mcpc3ds_b0_pipeline, B0WeightType,
+    multi_echo_linear_fit, field_to_hz,
     generate_vasculature_mask, VasculatureParams,
-    adjust_offset, compute_removed_voxels,
+    adjust_offset,
 };
 
 /// Helper macro to run an algorithm with timing and logging
@@ -359,38 +359,39 @@ fn test_pipeline_tgv() {
     let data = TestData::load().expect("Failed to load test data");
     let (nx, ny, nz) = data.dims;
     let (vsx, vsy, vsz) = data.voxel_size;
-    let n_total = nx * ny * nz;
 
     let start = Instant::now();
 
-    // Step 1: Unwrap each echo using Laplacian unwrapping
-    println!("[INFO] Unwrapping phase echoes...");
-    let unwrapped_phases: Vec<Vec<f64>> = data.phase_echoes.iter()
-        .map(|phase| laplacian_unwrap(phase, &data.mask, nx, ny, nz, vsx, vsy, vsz))
-        .collect();
-
-    // Step 2: B0 estimation (TEs in milliseconds, output in Hz)
+    // Step 1: MCPC-3D-S phase offset removal + ROMEO unwrapping + B0 estimation
+    // (matching qsmbly's default TGV pipeline exactly)
+    //   - sigma = [10, 10, 5] voxels (qsmbly default)
+    //   - B0 weight type = PhaseSNR (mag * TE, qsmbly default)
+    //   - Internally: MCPC-3D-S offset correction → ROMEO unwrap per echo → echo
+    //     alignment → weighted B0 averaging → B0 in Hz
     let tes_ms: Vec<f64> = data.echo_times.iter().map(|&t| t * 1000.0).collect();
-    println!("[INFO] Computing B0 field map...");
-    let b0_hz = calculate_b0_weighted(
-        &unwrapped_phases,
+    println!("[INFO] Running MCPC-3D-S + ROMEO + B0 estimation...");
+    let (b0_hz, _phase_offset, _corrected_phases) = mcpc3ds_b0_pipeline(
+        &data.phase_echoes,
         &data.mag_echoes,
-        &tes_ms,
+        &tes_ms,  // milliseconds (calculate_b0_weighted uses 1000/2π scale)
         &data.mask,
+        [10.0, 10.0, 5.0],  // sigma in voxels (qsmbly default)
         B0WeightType::PhaseSNR,
-        n_total,
+        nx, ny, nz,
     );
 
-    // Step 3: Convert B0 (Hz) to single-echo phase (radians) for TGV
+    // Step 2: Convert B0 (Hz) to single-echo phase (radians) for TGV
+    // phase = 2π × B0_Hz × TE_seconds
     let te_for_tgv = data.echo_times[0]; // seconds
     let phase_for_tgv: Vec<f32> = b0_hz.iter()
         .map(|&hz| (hz * 2.0 * std::f64::consts::PI * te_for_tgv) as f32)
         .collect();
 
-    // Step 4: Run TGV
+    // Step 3: Run TGV
+    // Parameters match qsmbly defaults: regularization=2 → alpha0=0.002, alpha1=0.003
     let tgv_params = TgvParams {
-        alpha1: 0.003,
         alpha0: 0.002,
+        alpha1: 0.003,
         iterations: 1000,
         erosions: 3,
         step_size: 3.0,
@@ -411,7 +412,7 @@ fn test_pipeline_tgv() {
 
     let elapsed = start.elapsed();
 
-    // Convert f32 result to f64 for comparison
+    // TGV output is already in ppm — convert f32 to f64 for comparison
     let result: Vec<f64> = result_f32.iter().map(|&v| v as f64).collect();
 
     let res = TestResult::new("TGV", &result, &data.chi, &data.mask);
@@ -435,22 +436,24 @@ fn test_pipeline_qsmart() {
     let start = Instant::now();
 
     // ========================================================================
-    // Phase unwrapping and linear fit
+    // Phase unwrapping and linear fit (matching qsmbly's computeWeightedEchoFit)
     // ========================================================================
     println!("[INFO] Unwrapping phase echoes...");
     let unwrapped_phases: Vec<Vec<f64>> = data.phase_echoes.iter()
         .map(|phase| laplacian_unwrap(phase, &data.mask, nx, ny, nz, vsx, vsy, vsz))
         .collect();
 
-    // Linear fit: TEs in seconds, output field in rad/s
+    // Through-origin fit: slope = Σ(mag*phase*TE) / Σ(mag*TE²), tfs = slope/2π
+    // qsmbly uses fixed threshold 40 on box-filtered residuals for R_0;
+    // on synthetic data all voxels have low residuals, so disable R_0 here
     println!("[INFO] Multi-echo linear fit...");
     let fit_result = multi_echo_linear_fit(
         &unwrapped_phases,
         &data.mag_echoes,
         &data.echo_times, // seconds
         &data.mask,
-        true,  // estimate_offset
-        90.0,  // reliability_threshold_percentile
+        false, // no intercept — matches qsmbly's through-origin fit
+        0.0,   // disable R_0 — synthetic data has clean fits
     );
 
     // Convert field from rad/s to Hz
@@ -468,86 +471,109 @@ fn test_pipeline_qsmart() {
     );
 
     // ========================================================================
-    // Unit conversion: Hz → ppm for SDF
+    // Mask and unit preparation (matching qsmbly)
     // ========================================================================
-    let ppm_factor = 1e6 / (42.576e6 * data.field_strength);
-    let field_ppm: Vec<f64> = field_hz.iter()
-        .map(|&hz| hz * ppm_factor)
+
+    // weightedMask = mask * R_0 (with R_0 disabled, equals mask)
+    let mask_f64: Vec<f64> = data.mask.iter().map(|&v| v as f64).collect();
+    let weighted_mask: Vec<f64> = mask_f64.iter()
+        .zip(fit_result.reliability_mask.iter())
+        .map(|(&m, &r)| if m > 0.0 && r > 0 { 1.0 } else { 0.0 })
         .collect();
 
-    // Convert mask to f64 for SDF (which takes weighted masks)
-    let mask_f64: Vec<f64> = data.mask.iter().map(|&v| v as f64).collect();
+    // PPM factors matching qsmbly:
+    //   ppmFactor = gyro_rad * B0 / 1e6  (for adjust_offset input scaling)
+    //   scaleFactor = 1e6 / (gamma_hz * B0)  (for final Hz→ppm conversion)
+    let gyro_rad: f64 = 2.675e8; // rad/s/T
+    let ppm_factor = gyro_rad * data.field_strength / 1e6;
+    let scale_to_ppm = 1e6 / (42.576e6 * data.field_strength);
 
     // ========================================================================
-    // Stage 1: Full mask (no vasculature exclusion)
+    // Stage 1: SDF + iLSQR on whole ROI
     // ========================================================================
     println!("[INFO] QSMART Stage 1: SDF + iLSQR (full mask)...");
 
-    // All-ones vasculature mask for stage 1
     let ones_vasc: Vec<f64> = vec![1.0; n_total];
-    let r0_f64: Vec<f64> = fit_result.reliability_mask.iter().map(|&v| v as f64).collect();
 
+    // SDF operates on Hz field with weighted mask (not ppm!)
     let lfs_stage1 = sdf(
-        &field_ppm,
-        &mask_f64,
+        &field_hz,
+        &weighted_mask,
         &ones_vasc,
         nx, ny, nz,
         &SdfParams::stage1(),
     );
 
+    let mask_stage1_u8: Vec<u8> = weighted_mask.iter()
+        .map(|&v| if v > 0.1 { 1 } else { 0 })
+        .collect();
+
     let chi_stage1 = ilsqr_simple(
         &lfs_stage1,
-        &data.mask,
+        &mask_stage1_u8,
         nx, ny, nz,
         vsx, vsy, vsz,
         data.b0_dir,
-        0.01, // tolerance
-        50,   // max iterations
+        0.01,
+        50,
     );
 
     // ========================================================================
-    // Stage 2: Tissue-only (excluding vessels)
+    // Stage 2: SDF + iLSQR on tissue only
     // ========================================================================
     println!("[INFO] QSMART Stage 2: SDF + iLSQR (tissue only)...");
 
-    // Tissue mask = vasculature mask * reliability mask
-    let tissue_mask: Vec<f64> = vasc_mask.iter()
-        .zip(r0_f64.iter())
-        .map(|(&v, &r)| v * r)
+    // Weight field by reliability mask (zero unreliable voxels)
+    let field_hz_weighted: Vec<f64> = field_hz.iter()
+        .zip(weighted_mask.iter())
+        .map(|(&f, &m)| f * m)
         .collect();
 
+    // SDF stage 2: weighted_mask as mask (same as stage 1),
+    // vasc_mask as vessel param (vessel exclusion via vasc_only, not mask)
     let lfs_stage2 = sdf(
-        &field_ppm,
-        &tissue_mask,
+        &field_hz_weighted,
+        &weighted_mask,
         &vasc_mask,
         nx, ny, nz,
         &SdfParams::stage2(),
     );
 
-    let tissue_mask_u8: Vec<u8> = tissue_mask.iter()
-        .map(|&v| if v > 0.5 { 1 } else { 0 })
+    // iLSQR mask: tissue-only (weighted_mask AND vasc_only)
+    let mask_stage2_u8: Vec<u8> = weighted_mask.iter()
+        .zip(vasc_mask.iter())
+        .map(|(&wm, &v)| if wm > 0.1 && v > 0.5 { 1 } else { 0 })
         .collect();
 
     let chi_stage2 = ilsqr_simple(
         &lfs_stage2,
-        &tissue_mask_u8,
+        &mask_stage2_u8,
         nx, ny, nz,
         vsx, vsy, vsz,
         data.b0_dir,
-        0.01, // tolerance
-        50,   // max iterations
+        0.01,
+        50,
     );
 
     // ========================================================================
-    // Offset adjustment and combination
+    // Offset adjustment and final ppm scaling
     // ========================================================================
     println!("[INFO] QSMART offset adjustment...");
 
-    let removed_voxels = compute_removed_voxels(&mask_f64, &r0_f64, &vasc_mask);
+    // removed_voxels = weightedMask - vascOnly (matching qsmbly)
+    let removed_voxels: Vec<f64> = weighted_mask.iter()
+        .zip(vasc_mask.iter())
+        .map(|(&wm, &v)| wm - v)
+        .collect();
 
-    let chi_qsmart = adjust_offset(
+    // Scale lfs_stage1 to ppm for adjust_offset (matching qsmbly)
+    let lfs_stage1_ppm: Vec<f64> = lfs_stage1.iter()
+        .map(|&v| v * ppm_factor)
+        .collect();
+
+    let chi_qsmart_raw = adjust_offset(
         &removed_voxels,
-        &lfs_stage1,
+        &lfs_stage1_ppm,
         &chi_stage1,
         &chi_stage2,
         nx, ny, nz,
@@ -555,6 +581,12 @@ fn test_pipeline_qsmart() {
         data.b0_dir,
         ppm_factor,
     );
+
+    // Scale to ppm: χ(ppm) = χ_raw * 1e6 / (γ_Hz * B0)
+    let chi_qsmart: Vec<f64> = chi_qsmart_raw.iter()
+        .enumerate()
+        .map(|(i, &v)| if data.mask[i] > 0 { v * scale_to_ppm } else { 0.0 })
+        .collect();
 
     let elapsed = start.elapsed();
 
