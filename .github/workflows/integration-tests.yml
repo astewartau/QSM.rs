@@ -92,7 +92,7 @@ jobs:
           if grep -q "^RESULT:" test_output.txt 2>/dev/null; then
             grep "^RESULT:" test_output.txt > ${{ matrix.test }}.csv
           else
-            echo "RESULT:${{ matrix.test }},-,-,-,-" > ${{ matrix.test }}.csv
+            echo "RESULT:${{ matrix.test }},-,-,-,-,-" > ${{ matrix.test }}.csv
           fi
 
       - name: Upload metrics
@@ -156,7 +156,7 @@ jobs:
           if grep -q "^RESULT:" test_output.txt 2>/dev/null; then
             grep "^RESULT:" test_output.txt > ${{ matrix.test }}.csv
           else
-            echo "RESULT:${{ matrix.test }},-,-,-,-" > ${{ matrix.test }}.csv
+            echo "RESULT:${{ matrix.test }},-,-,-,-,-" > ${{ matrix.test }}.csv
           fi
 
       - name: Upload metrics
@@ -211,7 +211,7 @@ jobs:
           if grep -q "^RESULT:" test_output.txt 2>/dev/null; then
             grep "^RESULT:" test_output.txt > test_bet.csv
           else
-            echo "RESULT:BET,-,-,-,-" > test_bet.csv
+            echo "RESULT:BET,-,-,-,-,-" > test_bet.csv
           fi
 
       - name: Upload metrics
@@ -273,7 +273,7 @@ jobs:
           if grep -q "^RESULT:" test_output.txt 2>/dev/null; then
             grep "^RESULT:" test_output.txt > ${{ matrix.test }}.csv
           else
-            echo "RESULT:${{ matrix.test }},-,-,-,-" > ${{ matrix.test }}.csv
+            echo "RESULT:${{ matrix.test }},-,-,-,-,-" > ${{ matrix.test }}.csv
           fi
 
       - name: Upload metrics
@@ -324,18 +324,18 @@ jobs:
             echo "## Background Field Removal"
             echo "*Compared against ground truth local field map*"
             echo ""
-            echo "| Method | RMSE | NRMSE | Correlation | Time |"
-            echo "|--------|------|-------|-------------|------|"
+            echo "| Method | RMSE | NRMSE | Correlation | XSIM | Time |"
+            echo "|--------|------|-------|-------------|------|------|"
             for test in sharp vsharp pdf ismv lbv; do
               file="metrics/test_bgremove_${test}.csv"
               if [ -f "$file" ]; then
                 line=$(sed 's/^RESULT://' "$file")
-                IFS=',' read -r name rmse nrmse corr time <<< "$line"
+                IFS=',' read -r name rmse nrmse corr xsim time <<< "$line"
                 if [ "$rmse" = "-" ]; then
-                  echo "| ${name} | :x: Failed | - | - | - |"
+                  echo "| ${name} | :x: Failed | - | - | - | - |"
                 else
                   time_fmt=$(printf "%.2fs" "$time")
-                  echo "| ${name} | ${rmse} | ${nrmse} | ${corr} | ${time_fmt} |"
+                  echo "| ${name} | ${rmse} | ${nrmse} | ${corr} | ${xsim} | ${time_fmt} |"
                 fi
               fi
             done
@@ -343,18 +343,18 @@ jobs:
             echo "## Dipole Inversion"
             echo "*Compared against ground truth susceptibility map*"
             echo ""
-            echo "| Method | RMSE | NRMSE | Correlation | Time |"
-            echo "|--------|------|-------|-------------|------|"
+            echo "| Method | RMSE | NRMSE | Correlation | XSIM | Time |"
+            echo "|--------|------|-------|-------------|------|------|"
             for test in tkd tsvd tikhonov tv rts; do
               file="metrics/test_inversion_${test}.csv"
               if [ -f "$file" ]; then
                 line=$(sed 's/^RESULT://' "$file")
-                IFS=',' read -r name rmse nrmse corr time <<< "$line"
+                IFS=',' read -r name rmse nrmse corr xsim time <<< "$line"
                 if [ "$rmse" = "-" ]; then
-                  echo "| ${name} | :x: Failed | - | - | - |"
+                  echo "| ${name} | :x: Failed | - | - | - | - |"
                 else
                   time_fmt=$(printf "%.2fs" "$time")
-                  echo "| ${name} | ${rmse} | ${nrmse} | ${corr} | ${time_fmt} |"
+                  echo "| ${name} | ${rmse} | ${nrmse} | ${corr} | ${xsim} | ${time_fmt} |"
                 fi
               fi
             done
@@ -367,7 +367,7 @@ jobs:
             file="metrics/test_bet.csv"
             if [ -f "$file" ]; then
               line=$(sed 's/^RESULT://' "$file")
-              IFS=',' read -r name dice _nrmse _corr time <<< "$line"
+              IFS=',' read -r name dice _nrmse _corr _xsim time <<< "$line"
               if [ "$dice" = "-" ]; then
                 echo "| ${name} | :x: Failed | - |"
               else
@@ -379,18 +379,18 @@ jobs:
             echo "## Full Pipeline"
             echo "*Compared against ground truth susceptibility map*"
             echo ""
-            echo "| Method | RMSE | NRMSE | Correlation | Time |"
-            echo "|--------|------|-------|-------------|------|"
+            echo "| Method | RMSE | NRMSE | Correlation | XSIM | Time |"
+            echo "|--------|------|-------|-------------|------|------|"
             for test in tgv qsmart; do
               file="metrics/test_pipeline_${test}.csv"
               if [ -f "$file" ]; then
                 line=$(sed 's/^RESULT://' "$file")
-                IFS=',' read -r name rmse nrmse corr time <<< "$line"
+                IFS=',' read -r name rmse nrmse corr xsim time <<< "$line"
                 if [ "$rmse" = "-" ]; then
-                  echo "| ${name} | :x: Failed | - | - | - |"
+                  echo "| ${name} | :x: Failed | - | - | - | - |"
                 else
                   time_fmt=$(printf "%.2fs" "$time")
-                  echo "| ${name} | ${rmse} | ${nrmse} | ${corr} | ${time_fmt} |"
+                  echo "| ${name} | ${rmse} | ${nrmse} | ${corr} | ${xsim} | ${time_fmt} |"
                 fi
               fi
             done
@@ -431,18 +431,18 @@ jobs:
             echo "### Background Field Removal"
             echo "*Compared against ground truth local field map*"
             echo ""
-            echo "| Method | RMSE | NRMSE | Correlation | Time |"
-            echo "|--------|------|-------|-------------|------|"
+            echo "| Method | RMSE | NRMSE | Correlation | XSIM | Time |"
+            echo "|--------|------|-------|-------------|------|------|"
             for test in sharp vsharp pdf ismv lbv; do
               file="metrics/test_bgremove_${test}.csv"
               if [ -f "$file" ]; then
                 line=$(sed 's/^RESULT://' "$file")
-                IFS=',' read -r name rmse nrmse corr time <<< "$line"
+                IFS=',' read -r name rmse nrmse corr xsim time <<< "$line"
                 if [ "$rmse" = "-" ]; then
-                  echo "| ${name} | :x: Failed | - | - | - |"
+                  echo "| ${name} | :x: Failed | - | - | - | - |"
                 else
                   time_fmt=$(printf "%.2fs" "$time")
-                  echo "| ${name} | ${rmse} | ${nrmse} | ${corr} | ${time_fmt} |"
+                  echo "| ${name} | ${rmse} | ${nrmse} | ${corr} | ${xsim} | ${time_fmt} |"
                 fi
               fi
             done
@@ -458,18 +458,18 @@ jobs:
             echo "### Dipole Inversion"
             echo "*Compared against ground truth susceptibility map*"
             echo ""
-            echo "| Method | RMSE | NRMSE | Correlation | Time |"
-            echo "|--------|------|-------|-------------|------|"
+            echo "| Method | RMSE | NRMSE | Correlation | XSIM | Time |"
+            echo "|--------|------|-------|-------------|------|------|"
             for test in tkd tsvd tikhonov tv rts; do
               file="metrics/test_inversion_${test}.csv"
               if [ -f "$file" ]; then
                 line=$(sed 's/^RESULT://' "$file")
-                IFS=',' read -r name rmse nrmse corr time <<< "$line"
+                IFS=',' read -r name rmse nrmse corr xsim time <<< "$line"
                 if [ "$rmse" = "-" ]; then
-                  echo "| ${name} | :x: Failed | - | - | - |"
+                  echo "| ${name} | :x: Failed | - | - | - | - |"
                 else
                   time_fmt=$(printf "%.2fs" "$time")
-                  echo "| ${name} | ${rmse} | ${nrmse} | ${corr} | ${time_fmt} |"
+                  echo "| ${name} | ${rmse} | ${nrmse} | ${corr} | ${xsim} | ${time_fmt} |"
                 fi
               fi
             done
@@ -490,7 +490,7 @@ jobs:
             file="metrics/test_bet.csv"
             if [ -f "$file" ]; then
               line=$(sed 's/^RESULT://' "$file")
-              IFS=',' read -r name dice _nrmse _corr time <<< "$line"
+              IFS=',' read -r name dice _nrmse _corr _xsim time <<< "$line"
               if [ "$dice" = "-" ]; then
                 echo "| ${name} | :x: Failed | - |"
               else
@@ -508,18 +508,18 @@ jobs:
             echo "### Full Pipeline"
             echo "*Compared against ground truth susceptibility map*"
             echo ""
-            echo "| Method | RMSE | NRMSE | Correlation | Time |"
-            echo "|--------|------|-------|-------------|------|"
+            echo "| Method | RMSE | NRMSE | Correlation | XSIM | Time |"
+            echo "|--------|------|-------|-------------|------|------|"
             for test in tgv qsmart; do
               file="metrics/test_pipeline_${test}.csv"
               if [ -f "$file" ]; then
                 line=$(sed 's/^RESULT://' "$file")
-                IFS=',' read -r name rmse nrmse corr time <<< "$line"
+                IFS=',' read -r name rmse nrmse corr xsim time <<< "$line"
                 if [ "$rmse" = "-" ]; then
-                  echo "| ${name} | :x: Failed | - | - | - |"
+                  echo "| ${name} | :x: Failed | - | - | - | - |"
                 else
                   time_fmt=$(printf "%.2fs" "$time")
-                  echo "| ${name} | ${rmse} | ${nrmse} | ${corr} | ${time_fmt} |"
+                  echo "| ${name} | ${rmse} | ${nrmse} | ${corr} | ${xsim} | ${time_fmt} |"
                 fi
               fi
             done

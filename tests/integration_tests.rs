@@ -11,7 +11,7 @@ use qsm_core::bgremove;
 use qsm_core::bgremove::{sdf, SdfParams};
 use qsm_core::bet;
 use qsm_core::inversion;
-use qsm_core::inversion::{tgv_qsm, TgvParams, ilsqr_simple};
+use qsm_core::inversion::{tgv_qsm, TgvParams, get_default_iterations, ilsqr_simple};
 use qsm_core::unwrap::laplacian_unwrap;
 use qsm_core::utils::{
     mcpc3ds_b0_pipeline, B0WeightType,
@@ -53,7 +53,7 @@ fn test_bgremove_sharp() {
         0.05,  // threshold
     ));
 
-    let res = TestResult::new("SHARP", &result, &data.fieldmap_local, &data.mask);
+    let res = TestResult::new("SHARP", &result, &data.fieldmap_local, &data.mask, data.dims);
     res.print_with_time(elapsed);
     res.print_ci_metrics(elapsed);
     common::save_center_slices(&result, &data.mask, data.dims, "bgremove_sharp");
@@ -82,7 +82,7 @@ fn test_bgremove_vsharp() {
         0.05,  // threshold
     ));
 
-    let res = TestResult::new("V-SHARP", &result, &data.fieldmap_local, &data.mask);
+    let res = TestResult::new("V-SHARP", &result, &data.fieldmap_local, &data.mask, data.dims);
     res.print_with_time(elapsed);
     res.print_ci_metrics(elapsed);
     common::save_center_slices(&result, &data.mask, data.dims, "bgremove_vsharp");
@@ -109,7 +109,7 @@ fn test_bgremove_pdf() {
         100,   // max iterations
     ));
 
-    let res = TestResult::new("PDF", &result, &data.fieldmap_local, &data.mask);
+    let res = TestResult::new("PDF", &result, &data.fieldmap_local, &data.mask, data.dims);
     res.print_with_time(elapsed);
     res.print_ci_metrics(elapsed);
     common::save_center_slices(&result, &data.mask, data.dims, "bgremove_pdf");
@@ -136,7 +136,7 @@ fn test_bgremove_ismv() {
         50,    // max iterations
     ));
 
-    let res = TestResult::new("iSMV", &result, &data.fieldmap_local, &data.mask);
+    let res = TestResult::new("iSMV", &result, &data.fieldmap_local, &data.mask, data.dims);
     res.print_with_time(elapsed);
     res.print_ci_metrics(elapsed);
     common::save_center_slices(&result, &data.mask, data.dims, "bgremove_ismv");
@@ -162,7 +162,7 @@ fn test_bgremove_lbv() {
         100,   // max iterations
     ));
 
-    let res = TestResult::new("LBV", &result, &data.fieldmap_local, &data.mask);
+    let res = TestResult::new("LBV", &result, &data.fieldmap_local, &data.mask, data.dims);
     res.print_with_time(elapsed);
     res.print_ci_metrics(elapsed);
     common::save_center_slices(&result, &data.mask, data.dims, "bgremove_lbv");
@@ -192,7 +192,7 @@ fn test_inversion_tkd() {
         0.2,  // threshold
     ));
 
-    let res = TestResult::new("TKD", &result, &data.chi, &data.mask);
+    let res = TestResult::new("TKD", &result, &data.chi, &data.mask, data.dims);
     res.print_with_time(elapsed);
     res.print_ci_metrics(elapsed);
     common::save_center_slices(&result, &data.mask, data.dims, "inversion_tkd");
@@ -218,7 +218,7 @@ fn test_inversion_tsvd() {
         0.2,  // threshold
     ));
 
-    let res = TestResult::new("TSVD", &result, &data.chi, &data.mask);
+    let res = TestResult::new("TSVD", &result, &data.chi, &data.mask, data.dims);
     res.print_with_time(elapsed);
     res.print_ci_metrics(elapsed);
     common::save_center_slices(&result, &data.mask, data.dims, "inversion_tsvd");
@@ -245,7 +245,7 @@ fn test_inversion_tikhonov() {
         inversion::tikhonov::Regularization::Gradient,
     ));
 
-    let res = TestResult::new("Tikhonov", &result, &data.chi, &data.mask);
+    let res = TestResult::new("Tikhonov", &result, &data.chi, &data.mask, data.dims);
     res.print_with_time(elapsed);
     res.print_ci_metrics(elapsed);
     common::save_center_slices(&result, &data.mask, data.dims, "inversion_tikhonov");
@@ -274,7 +274,7 @@ fn test_inversion_tv() {
         250,   // max iterations
     ));
 
-    let res = TestResult::new("TV-ADMM", &result, &data.chi, &data.mask);
+    let res = TestResult::new("TV-ADMM", &result, &data.chi, &data.mask, data.dims);
     res.print_with_time(elapsed);
     res.print_ci_metrics(elapsed);
     common::save_center_slices(&result, &data.mask, data.dims, "inversion_tv");
@@ -305,7 +305,7 @@ fn test_inversion_rts() {
         4,     // lsmr iterations
     ));
 
-    let res = TestResult::new("RTS", &result, &data.chi, &data.mask);
+    let res = TestResult::new("RTS", &result, &data.chi, &data.mask, data.dims);
     res.print_with_time(elapsed);
     res.print_ci_metrics(elapsed);
     common::save_center_slices(&result, &data.mask, data.dims, "inversion_rts");
@@ -388,13 +388,17 @@ fn test_pipeline_tgv() {
         .collect();
 
     // Step 3: Run TGV
-    // Parameters match qsmbly defaults: regularization=2 → alpha0=0.002, alpha1=0.003
+    // Parameters match qsmbly/Julia defaults: regularization=2 → alpha0=0.002, alpha1=0.003
+    let step_size = 3.0_f32;
+    let res_tgv = (vsx as f32, vsy as f32, vsz as f32);
+    let iterations = get_default_iterations(res_tgv, step_size);
+    println!("[INFO] TGV iterations (auto): {}", iterations);
     let tgv_params = TgvParams {
         alpha0: 0.002,
         alpha1: 0.003,
-        iterations: 1000,
+        iterations,
         erosions: 3,
-        step_size: 3.0,
+        step_size,
         fieldstrength: data.field_strength as f32,
         te: te_for_tgv as f32,
         tol: 1e-5,
@@ -415,7 +419,7 @@ fn test_pipeline_tgv() {
     // TGV output is already in ppm — convert f32 to f64 for comparison
     let result: Vec<f64> = result_f32.iter().map(|&v| v as f64).collect();
 
-    let res = TestResult::new("TGV", &result, &data.chi, &data.mask);
+    let res = TestResult::new("TGV", &result, &data.chi, &data.mask, data.dims);
     res.print_with_time(elapsed);
     res.print_ci_metrics(elapsed);
     common::save_center_slices(&result, &data.mask, data.dims, "pipeline_tgv");
@@ -590,7 +594,7 @@ fn test_pipeline_qsmart() {
 
     let elapsed = start.elapsed();
 
-    let res = TestResult::new("QSMART", &chi_qsmart, &data.chi, &data.mask);
+    let res = TestResult::new("QSMART", &chi_qsmart, &data.chi, &data.mask, data.dims);
     res.print_with_time(elapsed);
     res.print_ci_metrics(elapsed);
     common::save_center_slices(&chi_qsmart, &data.mask, data.dims, "pipeline_qsmart");
@@ -625,80 +629,80 @@ fn benchmark_all_algorithms() {
     // -------------------------------------------------------------------------
     println!("BACKGROUND REMOVAL (vs ground truth local field)");
     println!("{}", "-".repeat(70));
-    println!("{:<15} {:>12} {:>10} {:>10} {:>12}", "Method", "RMSE", "NRMSE", "Corr", "Time");
+    println!("{:<15} {:>12} {:>10} {:>10} {:>10} {:>12}", "Method", "RMSE", "NRMSE", "Corr", "XSIM", "Time");
     println!("{}", "-".repeat(70));
 
     // SHARP
     let ((result, _), elapsed) = run_timed!("SHARP", bgremove::sharp(
         &data.fieldmap, &data.mask, nx, ny, nz, vsx, vsy, vsz, 6.0, 0.05
     ));
-    TestResult::new("SHARP", &result, &data.fieldmap_local, &data.mask).print_with_time(elapsed);
+    TestResult::new("SHARP", &result, &data.fieldmap_local, &data.mask, data.dims).print_with_time(elapsed);
 
     // V-SHARP
     let radii: Vec<f64> = (1..=12).map(|r| r as f64).collect();
     let ((result, _), elapsed) = run_timed!("V-SHARP", bgremove::vsharp(
         &data.fieldmap, &data.mask, nx, ny, nz, vsx, vsy, vsz, &radii, 0.05
     ));
-    TestResult::new("V-SHARP", &result, &data.fieldmap_local, &data.mask).print_with_time(elapsed);
+    TestResult::new("V-SHARP", &result, &data.fieldmap_local, &data.mask, data.dims).print_with_time(elapsed);
 
     // PDF
     let (result, elapsed) = run_timed!("PDF", bgremove::pdf(
         &data.fieldmap, &data.mask, nx, ny, nz, vsx, vsy, vsz, data.b0_dir, 1e-6, 100
     ));
-    TestResult::new("PDF", &result, &data.fieldmap_local, &data.mask).print_with_time(elapsed);
+    TestResult::new("PDF", &result, &data.fieldmap_local, &data.mask, data.dims).print_with_time(elapsed);
 
     // iSMV
     let ((result, _), elapsed) = run_timed!("iSMV", bgremove::ismv(
         &data.fieldmap, &data.mask, nx, ny, nz, vsx, vsy, vsz, 5.0, 1e-6, 50
     ));
-    TestResult::new("iSMV", &result, &data.fieldmap_local, &data.mask).print_with_time(elapsed);
+    TestResult::new("iSMV", &result, &data.fieldmap_local, &data.mask, data.dims).print_with_time(elapsed);
 
     // LBV
     let ((result, _), elapsed) = run_timed!("LBV", bgremove::lbv(
         &data.fieldmap, &data.mask, nx, ny, nz, vsx, vsy, vsz, 1e-6, 100
     ));
-    TestResult::new("LBV", &result, &data.fieldmap_local, &data.mask).print_with_time(elapsed);
+    TestResult::new("LBV", &result, &data.fieldmap_local, &data.mask, data.dims).print_with_time(elapsed);
 
     // -------------------------------------------------------------------------
     // Dipole Inversion
     // -------------------------------------------------------------------------
     println!("\nDIPOLE INVERSION (vs ground truth chi)");
     println!("{}", "-".repeat(70));
-    println!("{:<15} {:>12} {:>10} {:>10} {:>12}", "Method", "RMSE", "NRMSE", "Corr", "Time");
+    println!("{:<15} {:>12} {:>10} {:>10} {:>10} {:>12}", "Method", "RMSE", "NRMSE", "Corr", "XSIM", "Time");
     println!("{}", "-".repeat(70));
 
     // TKD
     let (result, elapsed) = run_timed!("TKD", inversion::tkd(
         &data.fieldmap_local, &data.mask, nx, ny, nz, vsx, vsy, vsz, data.b0_dir, 0.2
     ));
-    TestResult::new("TKD", &result, &data.chi, &data.mask).print_with_time(elapsed);
+    TestResult::new("TKD", &result, &data.chi, &data.mask, data.dims).print_with_time(elapsed);
 
     // TSVD
     let (result, elapsed) = run_timed!("TSVD", inversion::tsvd(
         &data.fieldmap_local, &data.mask, nx, ny, nz, vsx, vsy, vsz, data.b0_dir, 0.2
     ));
-    TestResult::new("TSVD", &result, &data.chi, &data.mask).print_with_time(elapsed);
+    TestResult::new("TSVD", &result, &data.chi, &data.mask, data.dims).print_with_time(elapsed);
 
     // Tikhonov
     let (result, elapsed) = run_timed!("Tikhonov", inversion::tikhonov(
         &data.fieldmap_local, &data.mask, nx, ny, nz, vsx, vsy, vsz,
         data.b0_dir, 1e-3, inversion::tikhonov::Regularization::Gradient
     ));
-    TestResult::new("Tikhonov", &result, &data.chi, &data.mask).print_with_time(elapsed);
+    TestResult::new("Tikhonov", &result, &data.chi, &data.mask, data.dims).print_with_time(elapsed);
 
     // TV-ADMM
     let (result, elapsed) = run_timed!("TV-ADMM", inversion::tv_admm(
         &data.fieldmap_local, &data.mask, nx, ny, nz, vsx, vsy, vsz,
         data.b0_dir, 1e-3, 0.1, 1e-3, 250
     ));
-    TestResult::new("TV-ADMM", &result, &data.chi, &data.mask).print_with_time(elapsed);
+    TestResult::new("TV-ADMM", &result, &data.chi, &data.mask, data.dims).print_with_time(elapsed);
 
     // RTS
     let (result, elapsed) = run_timed!("RTS", inversion::rts(
         &data.fieldmap_local, &data.mask, nx, ny, nz, vsx, vsy, vsz,
         data.b0_dir, 0.15, 1e5, 10.0, 1e-2, 20, 4
     ));
-    TestResult::new("RTS", &result, &data.chi, &data.mask).print_with_time(elapsed);
+    TestResult::new("RTS", &result, &data.chi, &data.mask, data.dims).print_with_time(elapsed);
 
     println!("\n{}", "=".repeat(70));
 }

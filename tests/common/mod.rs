@@ -85,6 +85,83 @@ pub fn correlation(a: &[f64], b: &[f64], mask: &[u8]) -> f64 {
     numerator / denominator
 }
 
+/// Compute XSIM (SSIM optimized for QSM) between two 3D volumes within mask.
+///
+/// Uses the same formula as SSIM but with QSM-optimized parameters:
+///   L = 1.0 (native ppm range), K1 = 0.01, K2 = 0.001
+/// Local statistics computed in 5×5×5 uniform windows.
+///
+/// Reference: Milovic et al., "XSIM: A structural similarity index measure
+/// optimized for MRI QSM", Magn Reson Med. 2025;93:411-421.
+pub fn xsim(a: &[f64], b: &[f64], mask: &[u8], dims: (usize, usize, usize)) -> f64 {
+    let (nx, ny, nz) = dims;
+    // XSIM parameters: L=1, K1=0.01, K2=0.001
+    let c1: f64 = 1e-4;  // (K1 * L)² = (0.01)²
+    let c2: f64 = 1e-6;  // (K2 * L)² = (0.001)²
+    let half_w: usize = 2; // 5×5×5 window
+
+    let mut sum_xsim = 0.0;
+    let mut count = 0usize;
+
+    for k in 0..nz {
+        let k_lo = k.saturating_sub(half_w);
+        let k_hi = (k + half_w + 1).min(nz);
+        for j in 0..ny {
+            let j_lo = j.saturating_sub(half_w);
+            let j_hi = (j + half_w + 1).min(ny);
+            for i in 0..nx {
+                let idx = i + j * nx + k * nx * ny;
+                if mask[idx] == 0 {
+                    continue;
+                }
+
+                let i_lo = i.saturating_sub(half_w);
+                let i_hi = (i + half_w + 1).min(nx);
+
+                let mut sa = 0.0;
+                let mut sb = 0.0;
+                let mut sa2 = 0.0;
+                let mut sb2 = 0.0;
+                let mut sab = 0.0;
+                let mut n = 0usize;
+
+                for kk in k_lo..k_hi {
+                    for jj in j_lo..j_hi {
+                        for ii in i_lo..i_hi {
+                            let nidx = ii + jj * nx + kk * nx * ny;
+                            let va = a[nidx];
+                            let vb = b[nidx];
+                            sa += va;
+                            sb += vb;
+                            sa2 += va * va;
+                            sb2 += vb * vb;
+                            sab += va * vb;
+                            n += 1;
+                        }
+                    }
+                }
+
+                let nf = n as f64;
+                let mu_a = sa / nf;
+                let mu_b = sb / nf;
+                let var_a = sa2 / nf - mu_a * mu_a;
+                let var_b = sb2 / nf - mu_b * mu_b;
+                let cov_ab = sab / nf - mu_a * mu_b;
+
+                let num = (2.0 * mu_a * mu_b + c1) * (2.0 * cov_ab + c2);
+                let den = (mu_a * mu_a + mu_b * mu_b + c1) * (var_a + var_b + c2);
+
+                if den > 0.0 {
+                    sum_xsim += num / den;
+                    count += 1;
+                }
+            }
+        }
+    }
+
+    if count == 0 { 0.0 } else { sum_xsim / count as f64 }
+}
+
 /// Load a NIfTI file from disk and return the data
 pub fn load_nifti_file(path: &str) -> Result<qsm_core::nifti_io::NiftiData, String> {
     let bytes = fs::read(path)
@@ -199,32 +276,40 @@ pub struct TestResult {
     pub rmse: f64,
     pub nrmse: f64,
     pub correlation: f64,
+    pub xsim: f64,
 }
 
 impl TestResult {
-    pub fn new(name: &str, output: &[f64], ground_truth: &[f64], mask: &[u8]) -> Self {
+    pub fn new(
+        name: &str,
+        output: &[f64],
+        ground_truth: &[f64],
+        mask: &[u8],
+        dims: (usize, usize, usize),
+    ) -> Self {
         TestResult {
             name: name.to_string(),
             rmse: rmse(output, ground_truth, mask),
             nrmse: nrmse(output, ground_truth, mask),
             correlation: correlation(output, ground_truth, mask),
+            xsim: xsim(output, ground_truth, mask, dims),
         }
     }
 
     pub fn print(&self) {
-        println!("{:<15} RMSE={:.6}  NRMSE={:.4}  r={:.4}",
-            self.name, self.rmse, self.nrmse, self.correlation);
+        println!("{:<15} RMSE={:.6}  NRMSE={:.4}  r={:.4}  XSIM={:.4}",
+            self.name, self.rmse, self.nrmse, self.correlation, self.xsim);
     }
 
     pub fn print_with_time(&self, elapsed: std::time::Duration) {
-        println!("{:<15} {:>12.6} {:>10.4} {:>10.4} {:>10.2?}",
-            self.name, self.rmse, self.nrmse, self.correlation, elapsed);
+        println!("{:<15} {:>12.6} {:>10.4} {:>10.4} {:>10.4} {:>10.2?}",
+            self.name, self.rmse, self.nrmse, self.correlation, self.xsim, elapsed);
     }
 
     /// Print machine-readable CSV line for CI metric collection
     pub fn print_ci_metrics(&self, elapsed: std::time::Duration) {
-        println!("RESULT:{},{:.6},{:.4},{:.4},{:.2}",
-            self.name, self.rmse, self.nrmse, self.correlation, elapsed.as_secs_f64());
+        println!("RESULT:{},{:.6},{:.4},{:.4},{:.4},{:.2}",
+            self.name, self.rmse, self.nrmse, self.correlation, self.xsim, elapsed.as_secs_f64());
     }
 }
 
