@@ -238,9 +238,15 @@ pub fn compute_dipole_stencil(
 /// Compute SVD-fitted oblique 27-point dipole stencil via DST-based Poisson solves.
 ///
 /// Matches the Julia reference implementation from QuantitativeSusceptibilityMappingTGV.jl.
-/// For each of the 26 off-center stencil positions, a Poisson equation is solved using
-/// DST-I to obtain Green's function values. These are then fitted to the analytical dipole
-/// field via least squares, and resolution-weighted to produce the final stencil.
+/// For each unique centrosymmetric pair of the 26 off-center stencil positions, a Poisson
+/// equation is solved using DST-I to obtain Green's function values. These are then fitted
+/// to the analytical dipole field via least squares, and resolution-weighted to produce
+/// the final stencil.
+///
+/// Note: The delta function for offsets (di,dj,dk) and (-di,-dj,-dk) are identical
+/// (both place +1 at mid±I and -2 at mid), so we only compute 13 unique Poisson
+/// solutions and solve a full-rank 13×13 system. This avoids the rank deficiency
+/// that would occur with all 26 positions.
 pub fn compute_oblique_stencil(
     res: (f32, f32, f32),
     b0_dir: (f32, f32, f32),
@@ -306,7 +312,7 @@ pub fn compute_oblique_stencil(
     // so the inverse is (2/(N+1))^3 for 3D (unlike FFTW which uses 1/(2*(N+1))^3).
     let idst_scale = (2.0 / (n as f64 + 1.0)).powi(3);
 
-    // Enumerate 26 stencil positions (excluding center), column-major order
+    // Enumerate all 26 stencil positions (excluding center), column-major order
     let mut stencil_positions: Vec<(i32, i32, i32)> = Vec::with_capacity(26);
     for dk in -1..=1_i32 {
         for dj in -1..=1_i32 {
@@ -326,11 +332,16 @@ pub fn compute_oblique_stencil(
         .filter(|(_, &m)| m)
         .map(|(idx, _)| idx)
         .collect();
-    // For each stencil position, solve Poisson equation and extract at valid dipole points
-    let num_stencil = stencil_positions.len(); // 26
-    let mut a_rows: Vec<Vec<f64>> = Vec::with_capacity(num_stencil);
 
-    for &(di, dj, dk) in &stencil_positions {
+    // Exploit centrosymmetry: delta for (di,dj,dk) is identical to (-di,-dj,-dk),
+    // so only compute 13 unique Poisson solutions (one per centrosymmetric pair).
+    // Pair p corresponds to stencil_positions[p] and stencil_positions[25-p].
+    let num_pairs = 13;
+    let mut a_rows: Vec<Vec<f64>> = Vec::with_capacity(num_pairs);
+
+    for p in 0..num_pairs {
+        let (di, dj, dk) = stencil_positions[p];
+
         // Create delta function: delta[mid+I] = 1, delta[mid-I] = 1, delta[mid] = -2
         let mut delta = vec![0.0_f64; n3];
         let pi = (mid as i32 + di) as usize;
@@ -366,10 +377,10 @@ pub fn compute_oblique_stencil(
     // Extract dipole values at valid points
     let d_valid: Vec<f64> = valid_indices.iter().map(|&idx| d[idx]).collect();
 
-    // Solve least squares: A^T * x ≈ d_valid via normal equations
-    // G = A * A^T (26×26), h = A * d_valid (26×1)
-    let mut g = vec![vec![0.0_f64; num_stencil]; num_stencil];
-    for i in 0..num_stencil {
+    // Solve least squares: B^T * y ≈ d_valid via normal equations (13 unknowns, full rank)
+    // G = B * B^T (13×13), h = B * d_valid (13×1)
+    let mut g = vec![vec![0.0_f64; num_pairs]; num_pairs];
+    for i in 0..num_pairs {
         for j in 0..=i {
             let dot: f64 = a_rows[i]
                 .iter()
@@ -381,8 +392,8 @@ pub fn compute_oblique_stencil(
         }
     }
 
-    let mut h = vec![0.0_f64; num_stencil];
-    for i in 0..num_stencil {
+    let mut h = vec![0.0_f64; num_pairs];
+    for i in 0..num_pairs {
         h[i] = a_rows[i]
             .iter()
             .zip(d_valid.iter())
@@ -390,16 +401,23 @@ pub fn compute_oblique_stencil(
             .sum();
     }
 
-    // Solve G * x = h via Gaussian elimination with partial pivoting
-    let x = solve_26x26(&mut g, &mut h);
+    // Solve G * y = h via eigendecomposition with thresholding (handles rank deficiency
+    // from centrosymmetry and other spatial symmetries like x-y equivalence)
+    let y = solve_symmetric_pseudoinverse(&g, &h);
 
-    // Assemble stencil: stencil[I] = 2 * x[ind]
+    // Assemble stencil: assign each pair's coefficient to both positions
+    // y[p] = x[p] + x[25-p] = 2*x[p] (by symmetry), so stencil[I] = 2*x[I] = y[p]
     let mut result = [[[0.0f32; 3]; 3]; 3];
-    for (idx, &(di, dj, dk)) in stencil_positions.iter().enumerate() {
-        let si = (di + 1) as usize;
-        let sj = (dj + 1) as usize;
-        let sk = (dk + 1) as usize;
-        result[si][sj][sk] = (2.0 * x[idx]) as f32;
+    for p in 0..num_pairs {
+        let coeff = y[p] as f32;
+
+        // First member of pair
+        let (di, dj, dk) = stencil_positions[p];
+        result[(di + 1) as usize][(dj + 1) as usize][(dk + 1) as usize] = coeff;
+
+        // Second member (centrosymmetric partner)
+        let (di2, dj2, dk2) = stencil_positions[25 - p];
+        result[(di2 + 1) as usize][(dj2 + 1) as usize][(dk2 + 1) as usize] = coeff;
     }
 
     // Apply resolution weights: w = (i²/dx² + j²/dy² + k²/dz²) / (i² + j² + k²)
@@ -509,47 +527,113 @@ fn dst1(input: &[f64], sin_table: &[Vec<f64>], output: &mut [f64]) {
     }
 }
 
-/// Solve a small linear system via Gaussian elimination with partial pivoting.
-fn solve_26x26(g: &mut [Vec<f64>], h: &mut [f64]) -> Vec<f64> {
+/// Solve a symmetric positive semi-definite system via eigendecomposition with thresholding.
+///
+/// Computes the pseudo-inverse solution: x = V * diag(1/λ, thresholded) * V^T * h
+/// where G = V Λ V^T is the eigendecomposition. Small eigenvalues (< threshold * max_eigenvalue)
+/// are zeroed, matching Julia's SVD-based approach for handling rank-deficient systems.
+fn solve_symmetric_pseudoinverse(g: &[Vec<f64>], h: &[f64]) -> Vec<f64> {
     let n = h.len();
 
-    // Forward elimination with partial pivoting
-    for col in 0..n {
-        let mut max_val = g[col][col].abs();
-        let mut max_row = col;
-        for row in (col + 1)..n {
-            if g[row][col].abs() > max_val {
-                max_val = g[row][col].abs();
-                max_row = row;
+    // Copy g for eigendecomposition (Jacobi method modifies in place)
+    let mut a: Vec<Vec<f64>> = g.to_vec();
+    let mut v = vec![vec![0.0_f64; n]; n];
+    for i in 0..n {
+        v[i][i] = 1.0;
+    }
+
+    // Jacobi eigendecomposition for symmetric matrices
+    let max_sweeps = 100;
+    let tol = 1e-15;
+
+    for _ in 0..max_sweeps {
+        // Find largest off-diagonal element
+        let mut max_off = 0.0_f64;
+        for i in 0..n {
+            for j in (i + 1)..n {
+                max_off = max_off.max(a[i][j].abs());
             }
         }
-
-        g.swap(col, max_row);
-        h.swap(col, max_row);
-
-        let pivot = g[col][col];
-        if pivot.abs() < 1e-15 {
-            continue;
+        if max_off < tol {
+            break;
         }
 
-        for row in (col + 1)..n {
-            let factor = g[row][col] / pivot;
-            for j in col..n {
-                g[row][j] -= factor * g[col][j];
+        // Sweep all off-diagonal pairs
+        for p in 0..n {
+            for q in (p + 1)..n {
+                if a[p][q].abs() < tol {
+                    continue;
+                }
+
+                // Compute Givens rotation angle to zero a[p][q]
+                let app = a[p][p];
+                let aqq = a[q][q];
+                let apq = a[p][q];
+                let tau = (aqq - app) / (2.0 * apq);
+                let t = if tau >= 0.0 {
+                    1.0 / (tau + (1.0 + tau * tau).sqrt())
+                } else {
+                    -1.0 / (-tau + (1.0 + tau * tau).sqrt())
+                };
+                let c = 1.0 / (1.0 + t * t).sqrt();
+                let s = t * c;
+
+                // Update matrix A' = G^T A G (only rows/cols p, q change)
+                // First update off-diagonal rows
+                for i in 0..n {
+                    if i == p || i == q {
+                        continue;
+                    }
+                    let aip = a[i][p];
+                    let aiq = a[i][q];
+                    a[i][p] = c * aip - s * aiq;
+                    a[p][i] = a[i][p];
+                    a[i][q] = s * aip + c * aiq;
+                    a[q][i] = a[i][q];
+                }
+
+                // Update 2×2 block
+                a[p][p] = c * c * app - 2.0 * c * s * apq + s * s * aqq;
+                a[q][q] = s * s * app + 2.0 * c * s * apq + c * c * aqq;
+                a[p][q] = 0.0;
+                a[q][p] = 0.0;
+
+                // Accumulate eigenvectors: V' = V * G
+                for i in 0..n {
+                    let vip = v[i][p];
+                    let viq = v[i][q];
+                    v[i][p] = c * vip - s * viq;
+                    v[i][q] = s * vip + c * viq;
+                }
             }
-            h[row] -= factor * h[col];
         }
     }
 
-    // Back substitution
-    let mut x = vec![0.0_f64; n];
-    for col in (0..n).rev() {
-        let mut sum = h[col];
-        for j in (col + 1)..n {
-            sum -= g[col][j] * x[j];
+    // Eigenvalues are on diagonal
+    let eigenvalues: Vec<f64> = (0..n).map(|i| a[i][i]).collect();
+    let max_eigen = eigenvalues.iter().cloned().fold(0.0_f64, |a, b| a.max(b.abs()));
+    let threshold = 1e-10 * max_eigen;
+
+    // Solve: x = V * diag(1/λ_thresholded) * V^T * h
+    let mut vt_h = vec![0.0_f64; n];
+    for i in 0..n {
+        for j in 0..n {
+            vt_h[i] += v[j][i] * h[j];
         }
-        if g[col][col].abs() > 1e-15 {
-            x[col] = sum / g[col][col];
+    }
+
+    for i in 0..n {
+        if eigenvalues[i].abs() > threshold {
+            vt_h[i] /= eigenvalues[i];
+        } else {
+            vt_h[i] = 0.0;
+        }
+    }
+
+    let mut x = vec![0.0_f64; n];
+    for i in 0..n {
+        for j in 0..n {
+            x[i] += v[i][j] * vt_h[j];
         }
     }
 
@@ -995,9 +1079,6 @@ where
     let (bx, by, bz) = bbox.dims();
     let b_total = bbox.total();
 
-    // Calculate reduction ratio (used for debug info)
-    let _reduction = n_total as f32 / b_total as f32;
-
     // Extract sub-volumes for the bounding box region
     let phase_sub = extract_subvolume(phase, &bbox, nx, ny, nz);
     let mask0_sub = extract_subvolume(&mask0, &bbox, nx, ny, nz);
@@ -1023,17 +1104,11 @@ where
     let stencil = compute_oblique_stencil(res, b0_dir);
 
     // Compute step sizes for convergence (matching Julia implementation)
-    // Julia computes SVD of the operator matrix to get spectral norm
     let grad_norm_squared = grad_norm_sq(res);
     let grad_norm = grad_norm_squared.sqrt();
     let wave_norm: f32 = stencil.iter().flatten().flatten().map(|x| x.abs()).sum();
-
-    // Compute spectral norm via SVD of operator matrix:
-    // M = [0, grad_norm, 1; 0, 0, grad_norm; grad_norm_sq, wave_norm, 0]
-    // norm_sqr = largest eigenvalue of M^T * M
     let norm_sqr = compute_operator_norm_sqr(grad_norm, grad_norm_squared, wave_norm);
 
-    // Base step sizes (tau = sigma in Julia)
     let tau = 1.0 / norm_sqr.sqrt();
     let sigma = tau;
 
