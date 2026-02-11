@@ -262,6 +262,8 @@ jobs:
 
       - name: Setup CML
         uses: iterative/setup-cml@v3
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Post PR comment with results
         if: github.event_name == 'pull_request'

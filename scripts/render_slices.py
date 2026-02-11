@@ -33,6 +33,20 @@ NAMES = {
     "inversion_rts": "RTS",
 }
 
+# Fixed display windows (ppm)
+WINDOWS = {
+    "bgremove_sharp": (-0.025, 0.025),
+    "bgremove_vsharp": (-0.025, 0.025),
+    "bgremove_pdf": (-0.025, 0.025),
+    "bgremove_ismv": (-0.025, 0.025),
+    "bgremove_lbv": (-0.025, 0.025),
+    "inversion_tkd": (-0.1, 0.1),
+    "inversion_tsvd": (-0.1, 0.1),
+    "inversion_tikhonov": (-0.1, 0.1),
+    "inversion_tv": (-0.1, 0.1),
+    "inversion_rts": (-0.1, 0.1),
+}
+
 
 def load_slices(path):
     """Load center slices from a binary file.
@@ -53,37 +67,26 @@ def load_slices(path):
         coronal = np.frombuffer(f.read(nx * nz * 8), dtype="<f8").reshape(nz, nx)
         sagittal = np.frombuffer(f.read(ny * nz * 8), dtype="<f8").reshape(nz, ny)
 
-        mask_ax = np.frombuffer(f.read(nx * ny), dtype=np.uint8).reshape(ny, nx)
-        mask_cor = np.frombuffer(f.read(nx * nz), dtype=np.uint8).reshape(nz, nx)
-        mask_sag = np.frombuffer(f.read(ny * nz), dtype=np.uint8).reshape(nz, ny)
+        # Skip mask slices (not needed with fixed windows)
+        f.read(nx * ny + nx * nz + ny * nz)
 
     return {
-        "axial": np.where(mask_ax > 0, axial, np.nan),
-        "coronal": np.where(mask_cor > 0, coronal, np.nan),
-        "sagittal": np.where(mask_sag > 0, sagittal, np.nan),
+        "axial": axial,
+        "coronal": coronal,
+        "sagittal": sagittal,
     }
 
 
-def render_figure(slices, name, output_path):
+def render_figure(slices, name, slug, output_path):
     """Render a 3-panel figure (axial, coronal, sagittal) and save as PNG."""
     fig, axes = plt.subplots(1, 3, figsize=(10, 3.5))
 
-    # Color limits from the 1st and 99th percentiles
-    all_vals = np.concatenate([
-        slices["axial"][np.isfinite(slices["axial"])],
-        slices["coronal"][np.isfinite(slices["coronal"])],
-        slices["sagittal"][np.isfinite(slices["sagittal"])],
-    ])
-    vmin = np.percentile(all_vals, 1)
-    vmax = np.percentile(all_vals, 99)
-
-    cmap = plt.cm.gray.copy()
-    cmap.set_bad("black")
+    vmin, vmax = WINDOWS.get(slug, (-0.1, 0.1))
 
     for ax, (label, key) in zip(
         axes, [("Axial", "axial"), ("Coronal", "coronal"), ("Sagittal", "sagittal")]
     ):
-        im = ax.imshow(slices[key], cmap=cmap, vmin=vmin, vmax=vmax, origin="lower")
+        im = ax.imshow(slices[key], cmap="gray", vmin=vmin, vmax=vmax, origin="lower")
         ax.set_title(label, fontsize=11)
         ax.axis("off")
 
@@ -110,7 +113,7 @@ def main():
         name = NAMES.get(slug, slug)
         try:
             slices = load_slices(bin_file)
-            render_figure(slices, name, output_dir / f"{slug}.png")
+            render_figure(slices, name, slug, output_dir / f"{slug}.png")
         except Exception as e:
             print(f"  WARNING: Failed to render {slug}: {e}")
 
