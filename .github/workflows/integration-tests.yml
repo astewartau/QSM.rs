@@ -171,6 +171,15 @@ jobs:
           path: slices/
           retention-days: 1
 
+  # Gate check for branch protection — fails if any test job fails.
+  # After the first PR run, add "tests-passed" as a required status check
+  # in Settings > Branches > Branch protection rules for main.
+  tests-passed:
+    needs: [bgremove-tests, inversion-tests]
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "All tests passed"
+
   # Collect metrics from all parallel jobs and produce a single summary
   summary:
     needs: [bgremove-tests, inversion-tests]
