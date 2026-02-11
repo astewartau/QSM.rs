@@ -302,7 +302,9 @@ pub fn compute_oblique_stencil(
 
     // Pre-compute DST-I sin table
     let sin_table = dst_sin_table(n);
-    let idst_scale = 1.0 / (2.0 * (n as f64 + 1.0)).powi(3);
+    // Inverse DST-I scale: our DST computes Σ x[n]*sin(...) (no factor of 2),
+    // so the inverse is (2/(N+1))^3 for 3D (unlike FFTW which uses 1/(2*(N+1))^3).
+    let idst_scale = (2.0 / (n as f64 + 1.0)).powi(3);
 
     // Enumerate 26 stencil positions (excluding center), column-major order
     let mut stencil_positions: Vec<(i32, i32, i32)> = Vec::with_capacity(26);
