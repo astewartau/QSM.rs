@@ -11,5 +11,9 @@ bids.zip
 *.swp
 *.swo
 
+# CI artifacts
+/slices/
+/figures/
+
 # OS
 .DS_Store

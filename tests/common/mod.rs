@@ -198,4 +198,89 @@ impl TestResult {
         println!("{:<15} {:>12.6} {:>10.4} {:>10.4} {:>10.2?}",
             self.name, self.rmse, self.nrmse, self.correlation, elapsed);
     }
+
+    /// Print machine-readable CSV line for CI metric collection
+    pub fn print_ci_metrics(&self, elapsed: std::time::Duration) {
+        println!("RESULT:{},{:.6},{:.4},{:.4},{:.2}",
+            self.name, self.rmse, self.nrmse, self.correlation, elapsed.as_secs_f64());
+    }
+}
+
+/// Save center orthogonal slices of a 3D volume for CI visualization.
+///
+/// Writes a compact binary file containing the center axial, coronal, and
+/// sagittal slices of both the result volume and mask. The Python script
+/// `scripts/render_slices.py` reads these to produce matplotlib figures.
+///
+/// Binary format (all little-endian):
+///   nx: u64, ny: u64, nz: u64
+///   axial result:    f64 * (nx * ny)   -- z = nz/2
+///   coronal result:  f64 * (nx * nz)   -- y = ny/2
+///   sagittal result: f64 * (ny * nz)   -- x = nx/2
+///   axial mask:      u8  * (nx * ny)
+///   coronal mask:    u8  * (nx * nz)
+///   sagittal mask:   u8  * (ny * nz)
+pub fn save_center_slices(
+    result: &[f64],
+    mask: &[u8],
+    dims: (usize, usize, usize),
+    slug: &str,
+) {
+    let (nx, ny, nz) = dims;
+    let dir = "slices";
+    fs::create_dir_all(dir).ok();
+
+    let mut buf: Vec<u8> = Vec::new();
+
+    // Header
+    buf.extend_from_slice(&(nx as u64).to_le_bytes());
+    buf.extend_from_slice(&(ny as u64).to_le_bytes());
+    buf.extend_from_slice(&(nz as u64).to_le_bytes());
+
+    // Axial slice at z = nz/2, stored row-major (ny rows of nx pixels)
+    let z_mid = nz / 2;
+    for y in 0..ny {
+        for x in 0..nx {
+            buf.extend_from_slice(&result[x + y * nx + z_mid * nx * ny].to_le_bytes());
+        }
+    }
+
+    // Coronal slice at y = ny/2, stored row-major (nz rows of nx pixels)
+    let y_mid = ny / 2;
+    for z in 0..nz {
+        for x in 0..nx {
+            buf.extend_from_slice(&result[x + y_mid * nx + z * nx * ny].to_le_bytes());
+        }
+    }
+
+    // Sagittal slice at x = nx/2, stored row-major (nz rows of ny pixels)
+    let x_mid = nx / 2;
+    for z in 0..nz {
+        for y in 0..ny {
+            buf.extend_from_slice(&result[x_mid + y * nx + z * nx * ny].to_le_bytes());
+        }
+    }
+
+    // Mask slices (same layout)
+    for y in 0..ny {
+        for x in 0..nx {
+            buf.push(mask[x + y * nx + z_mid * nx * ny]);
+        }
+    }
+    for z in 0..nz {
+        for x in 0..nx {
+            buf.push(mask[x + y_mid * nx + z * nx * ny]);
+        }
+    }
+    for z in 0..nz {
+        for y in 0..ny {
+            buf.push(mask[x_mid + y * nx + z * nx * ny]);
+        }
+    }
+
+    let path = format!("{}/{}.bin", dir, slug);
+    fs::write(&path, &buf).unwrap_or_else(|e| {
+        eprintln!("[WARN] Failed to save slices to {}: {}", path, e);
+    });
+    println!("[INFO] Saved center slices to {}", path);
 }

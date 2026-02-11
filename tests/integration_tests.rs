@@ -45,6 +45,8 @@ fn test_bgremove_sharp() {
 
     let res = TestResult::new("SHARP", &result, &data.fieldmap_local, &data.mask);
     res.print_with_time(elapsed);
+    res.print_ci_metrics(elapsed);
+    common::save_center_slices(&result, &data.mask, data.dims, "bgremove_sharp");
 
     assert!(res.nrmse < 0.5, "SHARP NRMSE too high: {}", res.nrmse);
     assert!(res.correlation > 0.7, "SHARP correlation too low: {}", res.correlation);
@@ -72,6 +74,8 @@ fn test_bgremove_vsharp() {
 
     let res = TestResult::new("V-SHARP", &result, &data.fieldmap_local, &data.mask);
     res.print_with_time(elapsed);
+    res.print_ci_metrics(elapsed);
+    common::save_center_slices(&result, &data.mask, data.dims, "bgremove_vsharp");
 
     assert!(res.nrmse < 0.5, "V-SHARP NRMSE too high: {}", res.nrmse);
     assert!(res.correlation > 0.7, "V-SHARP correlation too low: {}", res.correlation);
@@ -97,6 +101,8 @@ fn test_bgremove_pdf() {
 
     let res = TestResult::new("PDF", &result, &data.fieldmap_local, &data.mask);
     res.print_with_time(elapsed);
+    res.print_ci_metrics(elapsed);
+    common::save_center_slices(&result, &data.mask, data.dims, "bgremove_pdf");
 
     assert!(res.nrmse < 0.5, "PDF NRMSE too high: {}", res.nrmse);
     assert!(res.correlation > 0.7, "PDF correlation too low: {}", res.correlation);
@@ -122,6 +128,8 @@ fn test_bgremove_ismv() {
 
     let res = TestResult::new("iSMV", &result, &data.fieldmap_local, &data.mask);
     res.print_with_time(elapsed);
+    res.print_ci_metrics(elapsed);
+    common::save_center_slices(&result, &data.mask, data.dims, "bgremove_ismv");
 
     assert!(res.nrmse < 0.5, "iSMV NRMSE too high: {}", res.nrmse);
     assert!(res.correlation > 0.7, "iSMV correlation too low: {}", res.correlation);
@@ -146,6 +154,8 @@ fn test_bgremove_lbv() {
 
     let res = TestResult::new("LBV", &result, &data.fieldmap_local, &data.mask);
     res.print_with_time(elapsed);
+    res.print_ci_metrics(elapsed);
+    common::save_center_slices(&result, &data.mask, data.dims, "bgremove_lbv");
 
     assert!(res.nrmse < 0.5, "LBV NRMSE too high: {}", res.nrmse);
     assert!(res.correlation > 0.7, "LBV correlation too low: {}", res.correlation);
@@ -174,6 +184,8 @@ fn test_inversion_tkd() {
 
     let res = TestResult::new("TKD", &result, &data.chi, &data.mask);
     res.print_with_time(elapsed);
+    res.print_ci_metrics(elapsed);
+    common::save_center_slices(&result, &data.mask, data.dims, "inversion_tkd");
 
     assert!(res.nrmse < 0.5, "TKD NRMSE too high: {}", res.nrmse);
     assert!(res.correlation > 0.7, "TKD correlation too low: {}", res.correlation);
@@ -198,6 +210,8 @@ fn test_inversion_tsvd() {
 
     let res = TestResult::new("TSVD", &result, &data.chi, &data.mask);
     res.print_with_time(elapsed);
+    res.print_ci_metrics(elapsed);
+    common::save_center_slices(&result, &data.mask, data.dims, "inversion_tsvd");
 
     assert!(res.nrmse < 0.5, "TSVD NRMSE too high: {}", res.nrmse);
     assert!(res.correlation > 0.7, "TSVD correlation too low: {}", res.correlation);
@@ -223,6 +237,8 @@ fn test_inversion_tikhonov() {
 
     let res = TestResult::new("Tikhonov", &result, &data.chi, &data.mask);
     res.print_with_time(elapsed);
+    res.print_ci_metrics(elapsed);
+    common::save_center_slices(&result, &data.mask, data.dims, "inversion_tikhonov");
 
     assert!(res.nrmse < 0.5, "Tikhonov NRMSE too high: {}", res.nrmse);
     assert!(res.correlation > 0.7, "Tikhonov correlation too low: {}", res.correlation);
@@ -250,6 +266,8 @@ fn test_inversion_tv() {
 
     let res = TestResult::new("TV-ADMM", &result, &data.chi, &data.mask);
     res.print_with_time(elapsed);
+    res.print_ci_metrics(elapsed);
+    common::save_center_slices(&result, &data.mask, data.dims, "inversion_tv");
 
     assert!(res.nrmse < 0.5, "TV-ADMM NRMSE too high: {}", res.nrmse);
     assert!(res.correlation > 0.7, "TV-ADMM correlation too low: {}", res.correlation);
@@ -279,6 +297,8 @@ fn test_inversion_rts() {
 
     let res = TestResult::new("RTS", &result, &data.chi, &data.mask);
     res.print_with_time(elapsed);
+    res.print_ci_metrics(elapsed);
+    common::save_center_slices(&result, &data.mask, data.dims, "inversion_rts");
 
     assert!(res.nrmse < 0.5, "RTS NRMSE too high: {}", res.nrmse);
     assert!(res.correlation > 0.7, "RTS correlation too low: {}", res.correlation);

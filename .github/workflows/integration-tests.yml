@@ -1,8 +1,6 @@
 name: Integration Tests
 
 on:
-  push:
-    branches: [main, master]
   pull_request:
     branches: [main, master]
   workflow_dispatch:  # Allow manual trigger
@@ -84,12 +82,30 @@ jobs:
         run: |
           cargo test --release --test integration_tests ${{ matrix.test }} -- --ignored --nocapture 2>&1 | tee test_output.txt
 
-          # Extract metrics and write to summary
-          echo "## ${{ matrix.test }}" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
-          grep -E "(INFO|RMSE|NRMSE|Corr|completed)" test_output.txt >> $GITHUB_STEP_SUMMARY || true
-          echo '```' >> $GITHUB_STEP_SUMMARY
+      - name: Save metrics
+        if: always()
+        run: |
+          if grep -q "^RESULT:" test_output.txt 2>/dev/null; then
+            grep "^RESULT:" test_output.txt > ${{ matrix.test }}.csv
+          else
+            echo "RESULT:${{ matrix.test }},-,-,-,-" > ${{ matrix.test }}.csv
+          fi
+
+      - name: Upload metrics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: metrics-${{ matrix.test }}
+          path: ${{ matrix.test }}.csv
+          retention-days: 1
+
+      - name: Upload slices
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: slices-${{ matrix.test }}
+          path: slices/
+          retention-days: 1
 
   inversion-tests:
     needs: setup
@@ -130,48 +146,133 @@ jobs:
         run: |
           cargo test --release --test integration_tests ${{ matrix.test }} -- --ignored --nocapture 2>&1 | tee test_output.txt
 
-          # Extract metrics and write to summary
-          echo "## ${{ matrix.test }}" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
-          grep -E "(INFO|RMSE|NRMSE|Corr|completed)" test_output.txt >> $GITHUB_STEP_SUMMARY || true
-          echo '```' >> $GITHUB_STEP_SUMMARY
+      - name: Save metrics
+        if: always()
+        run: |
+          if grep -q "^RESULT:" test_output.txt 2>/dev/null; then
+            grep "^RESULT:" test_output.txt > ${{ matrix.test }}.csv
+          else
+            echo "RESULT:${{ matrix.test }},-,-,-,-" > ${{ matrix.test }}.csv
+          fi
 
-  # Full benchmark produces a summary table
-  benchmark:
+      - name: Upload metrics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: metrics-${{ matrix.test }}
+          path: ${{ matrix.test }}.csv
+          retention-days: 1
+
+      - name: Upload slices
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: slices-${{ matrix.test }}
+          path: slices/
+          retention-days: 1
+
+  # Collect metrics from all parallel jobs and produce a single summary
+  summary:
     needs: [bgremove-tests, inversion-tests]
+    if: always()
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download test data
+      - name: Download all metrics
         uses: actions/download-artifact@v4
         with:
-          name: test-data
-          path: bids
+          pattern: metrics-*
+          merge-multiple: true
+          path: metrics
 
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+      - name: Generate metrics summary
+        run: |
+          {
+            echo "# QSM-Core Integration Test Results"
+            echo ""
+            echo "## Background Field Removal"
+            echo "*Compared against ground truth local field map*"
+            echo ""
+            echo "| Method | RMSE | NRMSE | Correlation | Time |"
+            echo "|--------|------|-------|-------------|------|"
+            for test in sharp vsharp pdf ismv lbv; do
+              file="metrics/test_bgremove_${test}.csv"
+              if [ -f "$file" ]; then
+                line=$(sed 's/^RESULT://' "$file")
+                IFS=',' read -r name rmse nrmse corr time <<< "$line"
+                if [ "$rmse" = "-" ]; then
+                  echo "| ${name} | :x: Failed | - | - | - |"
+                else
+                  time_fmt=$(printf "%.2fs" "$time")
+                  echo "| ${name} | ${rmse} | ${nrmse} | ${corr} | ${time_fmt} |"
+                fi
+              fi
+            done
+            echo ""
+            echo "## Dipole Inversion"
+            echo "*Compared against ground truth susceptibility map*"
+            echo ""
+            echo "| Method | RMSE | NRMSE | Correlation | Time |"
+            echo "|--------|------|-------|-------------|------|"
+            for test in tkd tsvd tikhonov tv rts; do
+              file="metrics/test_inversion_${test}.csv"
+              if [ -f "$file" ]; then
+                line=$(sed 's/^RESULT://' "$file")
+                IFS=',' read -r name rmse nrmse corr time <<< "$line"
+                if [ "$rmse" = "-" ]; then
+                  echo "| ${name} | :x: Failed | - | - | - |"
+                else
+                  time_fmt=$(printf "%.2fs" "$time")
+                  echo "| ${name} | ${rmse} | ${nrmse} | ${corr} | ${time_fmt} |"
+                fi
+              fi
+            done
+          } >> $GITHUB_STEP_SUMMARY
 
-      - name: Cache cargo
-        uses: actions/cache@v4
+      - name: Download all slices
+        uses: actions/download-artifact@v4
         with:
-          path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          pattern: slices-*
+          merge-multiple: true
+          path: slices
 
-      - name: Run full benchmark
-        run: |
-          cargo test --release --test integration_tests benchmark_all_algorithms -- --ignored --nocapture 2>&1 | tee benchmark_output.txt
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
 
-      - name: Generate summary
+      - name: Render figures
         run: |
-          echo "# QSM-Core Benchmark Results" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
-          cat benchmark_output.txt | grep -E "(^=|^-|Method|SHARP|V-SHARP|PDF|iSMV|LBV|TKD|TSVD|Tikhonov|TV-ADMM|RTS|BACKGROUND|DIPOLE|Volume)" >> $GITHUB_STEP_SUMMARY || true
-          echo '```' >> $GITHUB_STEP_SUMMARY
+          pip install matplotlib numpy
+          python scripts/render_slices.py slices figures
+
+      - name: Setup CML
+        uses: iterative/setup-cml@v3
+
+      - name: Post PR comment with figures
+        if: github.event_name == 'pull_request'
+        env:
+          REPO_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          {
+            echo "## QSM-Core Visual Results"
+            echo ""
+            echo "### Background Field Removal"
+            echo ""
+            for slug in bgremove_sharp bgremove_vsharp bgremove_pdf bgremove_ismv bgremove_lbv; do
+              if [ -f "figures/${slug}.png" ]; then
+                echo "![${slug}](figures/${slug}.png)"
+                echo ""
+              fi
+            done
+            echo "### Dipole Inversion"
+            echo ""
+            for slug in inversion_tkd inversion_tsvd inversion_tikhonov inversion_tv inversion_rts; do
+              if [ -f "figures/${slug}.png" ]; then
+                echo "![${slug}](figures/${slug}.png)"
+                echo ""
+              fi
+            done
+          } > report.md
+          cml comment create report.md
