@@ -68,16 +68,16 @@ def render_figure(slices, name, output_path):
     """Render a 3-panel figure (axial, coronal, sagittal) and save as PNG."""
     fig, axes = plt.subplots(1, 3, figsize=(10, 3.5))
 
-    # Symmetric color limits from the 99th percentile of absolute values
+    # Color limits from the 1st and 99th percentiles
     all_vals = np.concatenate([
         slices["axial"][np.isfinite(slices["axial"])],
         slices["coronal"][np.isfinite(slices["coronal"])],
         slices["sagittal"][np.isfinite(slices["sagittal"])],
     ])
-    vmax = np.percentile(np.abs(all_vals), 99)
-    vmin = -vmax
+    vmin = np.percentile(all_vals, 1)
+    vmax = np.percentile(all_vals, 99)
 
-    cmap = plt.cm.RdBu_r.copy()
+    cmap = plt.cm.gray.copy()
     cmap.set_bad("black")
 
     for ax, (label, key) in zip(
