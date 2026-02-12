@@ -29,9 +29,9 @@ impl Default for VasculatureParams {
     fn default() -> Self {
         Self {
             sphere_radius: 8,
-            // QSMART reference defaults: FrangiScaleRange=[1,10], FrangiScaleRatio=2
-            frangi_scale_range: [1.0, 10.0],
-            frangi_scale_ratio: 2.0,
+            // QSMART Demo defaults: FrangiScaleRange=[0.5,6], FrangiScaleRatio=0.5
+            frangi_scale_range: [0.5, 6.0],
+            frangi_scale_ratio: 0.5,
             frangi_c: 500.0,
         }
     }
@@ -361,34 +361,33 @@ fn erode_grayscale_optimized(
 
 /// Otsu's method for automatic threshold selection
 ///
-/// Finds the threshold that maximizes inter-class variance
+/// Finds the threshold that maximizes inter-class variance.
+/// Matches MATLAB's graythresh: operates on all values including zeros,
+/// normalizes to [0,1] range, and returns threshold at bin edge.
 fn otsu_threshold(data: &[f64]) -> f64 {
-    // Filter out zeros and find min/max
-    let non_zero: Vec<f64> = data.iter().filter(|&&v| v > 0.0).copied().collect();
-
-    if non_zero.is_empty() {
+    if data.is_empty() {
         return 0.0;
     }
 
-    let min_val = non_zero.iter().fold(f64::MAX, |a, &b| a.min(b));
-    let max_val = non_zero.iter().fold(f64::MIN, |a, &b| a.max(b));
+    let min_val = data.iter().fold(f64::MAX, |a, &b| a.min(b));
+    let max_val = data.iter().fold(f64::MIN, |a, &b| a.max(b));
 
     if (max_val - min_val).abs() < 1e-10 {
         return min_val;
     }
 
-    // Build histogram (256 bins)
+    // Build histogram (256 bins) over full range including zeros
     let num_bins = 256;
     let bin_width = (max_val - min_val) / num_bins as f64;
     let mut histogram = vec![0usize; num_bins];
 
-    for &v in &non_zero {
+    for &v in data {
         let bin = ((v - min_val) / bin_width).floor() as usize;
         let bin = bin.min(num_bins - 1);
         histogram[bin] += 1;
     }
 
-    let total_pixels = non_zero.len() as f64;
+    let total_pixels = data.len() as f64;
 
     // Compute cumulative sums
     let mut sum_total = 0.0;
@@ -427,8 +426,8 @@ fn otsu_threshold(data: &[f64]) -> f64 {
         }
     }
 
-    // Convert bin to threshold value
-    min_val + (optimal_threshold_bin as f64 + 0.5) * bin_width
+    // Convert bin to threshold value (bin edge, matching MATLAB's graythresh)
+    min_val + optimal_threshold_bin as f64 * bin_width
 }
 
 /// Simple wrapper with default parameters

@@ -85,43 +85,18 @@ struct Triangle {
 
 /// Extract surface voxels from a binary mask
 ///
-/// Surface voxels are mask voxels with at least one non-mask neighbor (6-connectivity)
+/// Matches MATLAB's approach: curvMask = mask - imerode(mask, strel('sphere',1))
+/// Surface voxels are those in the mask but not in the eroded mask.
 fn extract_surface_voxels(
     mask: &[u8],
     nx: usize, ny: usize, nz: usize,
 ) -> Vec<usize> {
-    let idx = |i: usize, j: usize, k: usize| i + j * nx + k * nx * ny;
+    let eroded = erode_mask(mask, nx, ny, nz, 1);
 
     let mut surface = Vec::new();
-
-    for k in 0..nz {
-        for j in 0..ny {
-            for i in 0..nx {
-                let center_idx = idx(i, j, k);
-                if mask[center_idx] == 0 {
-                    continue;
-                }
-
-                // Check 6-connectivity neighbors
-                let mut is_surface = false;
-
-                // Check each neighbor
-                if i > 0 && mask[idx(i - 1, j, k)] == 0 { is_surface = true; }
-                if !is_surface && i < nx - 1 && mask[idx(i + 1, j, k)] == 0 { is_surface = true; }
-                if !is_surface && j > 0 && mask[idx(i, j - 1, k)] == 0 { is_surface = true; }
-                if !is_surface && j < ny - 1 && mask[idx(i, j + 1, k)] == 0 { is_surface = true; }
-                if !is_surface && k > 0 && mask[idx(i, j, k - 1)] == 0 { is_surface = true; }
-                if !is_surface && k < nz - 1 && mask[idx(i, j, k + 1)] == 0 { is_surface = true; }
-
-                // Also check boundary
-                if !is_surface && (i == 0 || i == nx - 1 || j == 0 || j == ny - 1 || k == 0 || k == nz - 1) {
-                    is_surface = true;
-                }
-
-                if is_surface {
-                    surface.push(center_idx);
-                }
-            }
+    for i in 0..mask.len() {
+        if mask[i] != 0 && eroded[i] == 0 {
+            surface.push(i);
         }
     }
 
@@ -132,14 +107,15 @@ fn extract_surface_voxels(
 ///
 /// This matches MATLAB's approach: `tri = delaunay(x, y)`
 /// Triangulates on x,y coordinates, treating z as a height field.
-/// This is appropriate for brain surfaces which are mostly single-valued when
-/// viewed from above/below.
+///
+/// Returns (triangles, boundary_flags) where boundary_flags[i] is true
+/// if vertex i is on the convex hull boundary (matching MATLAB's freeBoundary).
 fn triangulate_surface(
     points: &[Point3D],
     _nx: usize, _ny: usize, _nz: usize,
-) -> Vec<Triangle> {
+) -> (Vec<Triangle>, Vec<bool>) {
     if points.len() < 3 {
-        return Vec::new();
+        return (Vec::new(), vec![false; points.len()]);
     }
 
     // Convert to delaunator's Point format (2D: x, y only)
@@ -150,8 +126,14 @@ fn triangulate_surface(
     // Run 2D Delaunay triangulation
     let result = triangulate(&coords);
 
-    // Convert triangles back to our format
-    // delaunator returns triangles as flat array: [t0_v0, t0_v1, t0_v2, t1_v0, t1_v1, t1_v2, ...]
+    // Identify boundary vertices (convex hull of the 2D triangulation)
+    // Matches MATLAB's freeBoundary(triangulation(tri, x, y, z))
+    let mut boundary = vec![false; points.len()];
+    for &idx in &result.hull {
+        boundary[idx] = true;
+    }
+
+    // Convert triangles — no edge length filtering, matching MATLAB
     let mut triangles = Vec::with_capacity(result.triangles.len() / 3);
 
     for i in (0..result.triangles.len()).step_by(3) {
@@ -159,31 +141,22 @@ fn triangulate_surface(
         let v1 = result.triangles[i + 1];
         let v2 = result.triangles[i + 2];
 
-        // Filter out degenerate triangles (edges too long for voxel surface)
-        // Max edge length ~5 voxels to avoid connecting distant surface regions
-        let p0 = &points[v0];
-        let p1 = &points[v1];
-        let p2 = &points[v2];
-
-        let d01 = p0.sub(p1).norm();
-        let d12 = p1.sub(p2).norm();
-        let d20 = p2.sub(p0).norm();
-
-        let max_edge = 5.0;  // Maximum edge length in voxels
-        if d01 <= max_edge && d12 <= max_edge && d20 <= max_edge {
-            triangles.push(Triangle { v0, v1, v2 });
-        }
+        triangles.push(Triangle { v0, v1, v2 });
     }
 
-    triangles
+    (triangles, boundary)
 }
 
 /// Compute Gaussian and mean curvatures using discrete differential geometry
 ///
 /// Based on Meyer et al., "Discrete differential-geometry operators for triangulated 2-manifolds"
+///
+/// Boundary vertices (on the triangulation free boundary) get GC=0, MC=0
+/// to match MATLAB's curvatures.m behavior.
 fn compute_curvatures_from_mesh(
     points: &[Point3D],
     triangles: &[Triangle],
+    boundary: &[bool],
 ) -> (Vec<f64>, Vec<f64>) {
     let n_points = points.len();
     let mut gaussian_curvature = vec![0.0f64; n_points];
@@ -273,20 +246,35 @@ fn compute_curvatures_from_mesh(
         }
 
         // Mean curvature vector contribution
-        // For vertex 0: (cot(a2) * e01 + cot(a1) * e20) / (4 * A_mixed)
         mean_curv_vec[tri.v0] = mean_curv_vec[tri.v0].add(&e01.scale(cot_a2).add(&e20.scale(-cot_a1)));
         mean_curv_vec[tri.v1] = mean_curv_vec[tri.v1].add(&e12.scale(cot_a0).add(&e01.scale(-cot_a2)));
         mean_curv_vec[tri.v2] = mean_curv_vec[tri.v2].add(&e20.scale(cot_a1).add(&e12.scale(-cot_a0)));
 
-        // Accumulate face normal for vertex normal
-        let weight = 1.0 / (p0.sub(&points[tri.v0]).norm() + 1.0);
-        normal_vec[tri.v0] = normal_vec[tri.v0].add(&face_normal.scale(weight));
-        normal_vec[tri.v1] = normal_vec[tri.v1].add(&face_normal.scale(weight));
-        normal_vec[tri.v2] = normal_vec[tri.v2].add(&face_normal.scale(weight));
+        // Accumulate face normal for vertex normal using incenter-based distance weighting
+        // Matches MATLAB: wi = 1/norm(incenter - vertex); n_vec += wi * faceNormal
+        // Incenter = (a*P0 + b*P1 + c*P2) / (a+b+c) where a=|P1P2|, b=|P0P2|, c=|P0P1|
+        let perim = l12 + l20 + l01;
+        if perim > 1e-10 {
+            let incenter = p0.scale(l12).add(&p1.scale(l20)).add(&p2.scale(l01)).scale(1.0 / perim);
+
+            let w0 = 1.0 / p0.sub(&incenter).norm().max(1e-10);
+            let w1 = 1.0 / p1.sub(&incenter).norm().max(1e-10);
+            let w2 = 1.0 / p2.sub(&incenter).norm().max(1e-10);
+
+            normal_vec[tri.v0] = normal_vec[tri.v0].add(&face_normal.scale(w0));
+            normal_vec[tri.v1] = normal_vec[tri.v1].add(&face_normal.scale(w1));
+            normal_vec[tri.v2] = normal_vec[tri.v2].add(&face_normal.scale(w2));
+        }
     }
 
     // Compute final curvature values
+    // Skip boundary vertices (GC=0, MC=0) matching MATLAB's freeBoundary check
     for i in 0..n_points {
+        if boundary[i] {
+            // Boundary vertices get zero curvature (unreliable)
+            continue;
+        }
+
         if area_mixed[i] > 1e-10 {
             // Gaussian curvature: K = (2π - Σθ) / A_mixed
             gaussian_curvature[i] = (2.0 * PI - angle_sum[i]) / area_mixed[i];
@@ -349,10 +337,10 @@ pub fn calculate_curvature_proximity(
         .collect();
 
     // Triangulate surface
-    let triangles = triangulate_surface(&points, nx, ny, nz);
+    let (triangles, boundary) = triangulate_surface(&points, nx, ny, nz);
 
-    // Compute curvatures
-    let (gc, _mc) = compute_curvatures_from_mesh(&points, &triangles);
+    // Compute curvatures (boundary vertices get GC=0, MC=0)
+    let (gc, _mc) = compute_curvatures_from_mesh(&points, &triangles, &boundary);
 
     // Create full curvature volume
     let mut curv_i = vec![1.0f64; n_total];
@@ -364,16 +352,19 @@ pub fn calculate_curvature_proximity(
         .fold(1.0f64, |a, b| a.max(b));
 
     // Scale and assign curvature values
+    // Matches MATLAB: scaledGC = GC./max(abs(GC(GC<0)))*curvConstant; scaledGC(GC>0) = 1;
+    // GC==0 → scaled to 0 (MATLAB: 0/max*curv = 0, not overwritten by GC>0 check)
     for (point_idx, &vol_idx) in surface_indices.iter().enumerate() {
         let g = gc[point_idx];
         let scaled = if g < 0.0 {
-            // Scale negative curvatures by curv_constant
             g / max_neg_gc * curv_constant
-        } else {
-            // Positive curvatures (convex regions) get 1.0
+        } else if g > 0.0 {
             1.0
+        } else {
+            // GC == 0: stays at 0 (boundary vertices, flat regions)
+            0.0
         };
-        curv_i[vol_idx] = scaled.max(-curv_constant).min(1.0);
+        curv_i[vol_idx] = scaled;
     }
 
     // Smooth the curvature map
@@ -400,15 +391,28 @@ pub fn calculate_curvature_proximity(
         .collect();
 
     // Edge proximity calculation (prox4)
-    // Surface voxels get their prox value, dilated region gets 0
+    // Matches MATLAB order of operations:
+    //   prox4 = prox .* (mask - imerode(mask, strel('sphere',1)));
+    //   prox4(prox4==0) = 1;
+    //   prox4((imdilate(mask, strel('sphere',5)) - mask)==1) = 0;
     let surface_mask = create_surface_mask(mask, nx, ny, nz);
     let dilated_mask = dilate_mask(mask, nx, ny, nz, 5);
 
-    let mut prox4 = vec![1.0f64; n_total];
+    // Step 1: prox4 = prox * surface_mask (surface voxels get prox, rest get 0)
+    let mut prox4 = vec![0.0f64; n_total];
     for i in 0..n_total {
         if surface_mask[i] != 0 {
             prox4[i] = prox[i];
         }
+    }
+    // Step 2: set ALL zero-valued voxels to 1 (interior + outside + surface with prox==0)
+    for i in 0..n_total {
+        if prox4[i] == 0.0 {
+            prox4[i] = 1.0;
+        }
+    }
+    // Step 3: set dilated shell outside mask to 0
+    for i in 0..n_total {
         if dilated_mask[i] != 0 && mask[i] == 0 {
             prox4[i] = 0.0;
         }
@@ -583,7 +587,8 @@ fn convolve_1d_direction_masked(
     let mut result = vec![0.0f64; n_total];
 
     // Create 1D Gaussian kernel
-    let kernel_radius = (3.0 * sigma).ceil() as i32;
+    // Match MATLAB's imgaussfilt3 default: filterSize = 2*ceil(2*sigma)+1
+    let kernel_radius = (2.0 * sigma).ceil() as i32;
     let kernel_size = 2 * kernel_radius + 1;
     let mut kernel = vec![0.0f64; kernel_size as usize];
 
@@ -695,10 +700,10 @@ pub fn calculate_gaussian_curvature(
         .collect();
 
     // Triangulate surface
-    let triangles = triangulate_surface(&points, nx, ny, nz);
+    let (triangles, boundary) = triangulate_surface(&points, nx, ny, nz);
 
     // Compute curvatures
-    let (gc_points, mc_points) = compute_curvatures_from_mesh(&points, &triangles);
+    let (gc_points, mc_points) = compute_curvatures_from_mesh(&points, &triangles, &boundary);
 
     // Create full volumes
     let mut gaussian_curvature = vec![0.0f64; n_total];

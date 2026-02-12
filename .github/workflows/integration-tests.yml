@@ -13,7 +13,163 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # First, download test data once and cache it
+  # Detect which source files changed and map to affected tests
+  detect-changes:
+    runs-on: ubuntu-latest
+    outputs:
+      run_bgremove: ${{ steps.detect.outputs.run_bgremove }}
+      bgremove_matrix: ${{ steps.detect.outputs.bgremove_matrix }}
+      run_inversion: ${{ steps.detect.outputs.run_inversion }}
+      inversion_matrix: ${{ steps.detect.outputs.inversion_matrix }}
+      run_bet: ${{ steps.detect.outputs.run_bet }}
+      run_pipeline: ${{ steps.detect.outputs.run_pipeline }}
+      pipeline_matrix: ${{ steps.detect.outputs.pipeline_matrix }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Map changed files to tests
+        id: detect
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_ACTION: ${{ github.event.action }}
+          BEFORE_SHA: ${{ github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -e
+
+          all_bgremove='["test_bgremove_sharp","test_bgremove_vsharp","test_bgremove_pdf","test_bgremove_ismv","test_bgremove_lbv"]'
+          all_inversion='["test_inversion_tkd","test_inversion_tsvd","test_inversion_tikhonov","test_inversion_tv","test_inversion_rts"]'
+          all_pipeline='["test_pipeline_tgv","test_pipeline_qsmart"]'
+
+          output_all() {
+            echo "run_bgremove=true" >> "$GITHUB_OUTPUT"
+            echo "bgremove_matrix=$all_bgremove" >> "$GITHUB_OUTPUT"
+            echo "run_inversion=true" >> "$GITHUB_OUTPUT"
+            echo "inversion_matrix=$all_inversion" >> "$GITHUB_OUTPUT"
+            echo "run_bet=true" >> "$GITHUB_OUTPUT"
+            echo "run_pipeline=true" >> "$GITHUB_OUTPUT"
+            echo "pipeline_matrix=$all_pipeline" >> "$GITHUB_OUTPUT"
+          }
+
+          # Manual trigger: run everything
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            echo "workflow_dispatch: running all tests"
+            output_all
+            exit 0
+          fi
+
+          # Determine diff range based on PR event type
+          if [ "$PR_ACTION" = "synchronize" ] && [ -n "$BEFORE_SHA" ] && \
+             [ "$BEFORE_SHA" != "0000000000000000000000000000000000000000" ]; then
+            echo "synchronize: diffing ${BEFORE_SHA:0:8}..${HEAD_SHA:0:8}"
+            CHANGED=$(git diff --name-only "$BEFORE_SHA".."$HEAD_SHA" || true)
+          else
+            echo "opened/reopened: diffing ${BASE_SHA:0:8}...${HEAD_SHA:0:8}"
+            CHANGED=$(git diff --name-only "$BASE_SHA"..."$HEAD_SHA" || true)
+          fi
+
+          echo "Changed files:"
+          echo "$CHANGED"
+          echo ""
+
+          # Map changed files to test names
+          bgremove=""
+          inversion=""
+          run_bet=false
+          pipeline=""
+
+          for file in $CHANGED; do
+            case "$file" in
+              # Core infrastructure → run everything
+              src/lib.rs|src/fft.rs|src/nifti_io.rs|src/region_grow.rs|src/priority_queue.rs)
+                echo "Core file changed: $file → all tests"
+                output_all; exit 0 ;;
+              src/kernels/*|src/solvers/*)
+                echo "Core file changed: $file → all tests"
+                output_all; exit 0 ;;
+              src/utils/gradient.rs|src/utils/padding.rs|src/utils/simd_ops.rs|src/utils/mod.rs)
+                echo "Core util changed: $file → all tests"
+                output_all; exit 0 ;;
+              tests/*|Cargo.toml|Cargo.lock)
+                echo "Test/build file changed: $file → all tests"
+                output_all; exit 0 ;;
+              .github/workflows/integration-tests.yml|scripts/*)
+                echo "CI file changed: $file → all tests"
+                output_all; exit 0 ;;
+
+              # Background removal
+              src/bgremove/mod.rs)
+                bgremove="$bgremove test_bgremove_sharp test_bgremove_vsharp test_bgremove_pdf test_bgremove_ismv test_bgremove_lbv" ;;
+              src/bgremove/smv.rs)
+                bgremove="$bgremove test_bgremove_sharp test_bgremove_vsharp test_bgremove_ismv" ;;
+              src/bgremove/sharp.rs)  bgremove="$bgremove test_bgremove_sharp" ;;
+              src/bgremove/vsharp.rs) bgremove="$bgremove test_bgremove_vsharp" ;;
+              src/bgremove/pdf.rs)    bgremove="$bgremove test_bgremove_pdf" ;;
+              src/bgremove/ismv.rs)   bgremove="$bgremove test_bgremove_ismv" ;;
+              src/bgremove/lbv.rs)    bgremove="$bgremove test_bgremove_lbv" ;;
+              src/bgremove/sdf.rs)    pipeline="$pipeline test_pipeline_qsmart" ;;
+
+              # Dipole inversion
+              src/inversion/mod.rs)
+                inversion="$inversion test_inversion_tkd test_inversion_tsvd test_inversion_tikhonov test_inversion_tv test_inversion_rts" ;;
+              src/inversion/tkd.rs)       inversion="$inversion test_inversion_tkd test_inversion_tsvd" ;;
+              src/inversion/tikhonov.rs)  inversion="$inversion test_inversion_tikhonov" ;;
+              src/inversion/tv.rs)        inversion="$inversion test_inversion_tv" ;;
+              src/inversion/rts.rs)       inversion="$inversion test_inversion_rts" ;;
+              src/inversion/tgv.rs)       pipeline="$pipeline test_pipeline_tgv" ;;
+              src/inversion/ilsqr.rs)     pipeline="$pipeline test_pipeline_qsmart" ;;
+
+              # Brain extraction
+              src/bet/*) run_bet=true ;;
+
+              # Phase unwrapping
+              src/unwrap/mod.rs)      pipeline="$pipeline test_pipeline_tgv test_pipeline_qsmart" ;;
+              src/unwrap/romeo.rs)    pipeline="$pipeline test_pipeline_tgv" ;;
+              src/unwrap/laplacian.rs) pipeline="$pipeline test_pipeline_qsmart" ;;
+
+              # Utils (QSMART components)
+              src/utils/multi_echo.rs)
+                pipeline="$pipeline test_pipeline_tgv test_pipeline_qsmart" ;;
+              src/utils/vasculature.rs|src/utils/frangi.rs|src/utils/curvature.rs|src/utils/qsmart.rs|src/utils/bias_correction.rs)
+                pipeline="$pipeline test_pipeline_qsmart" ;;
+            esac
+          done
+
+          # Deduplicate and format as JSON arrays
+          to_json() {
+            local items
+            items=$(echo "$@" | tr ' ' '\n' | sort -u | grep -v '^$' || true)
+            if [ -z "$items" ]; then
+              echo '[]'
+              return
+            fi
+            echo "$items" | jq -R . | jq -s -c .
+          }
+
+          bgremove_json=$(to_json $bgremove)
+          inversion_json=$(to_json $inversion)
+          pipeline_json=$(to_json $pipeline)
+
+          has_items() { [ "$1" != '[]' ] && echo true || echo false; }
+
+          echo "run_bgremove=$(has_items "$bgremove_json")" >> "$GITHUB_OUTPUT"
+          echo "bgremove_matrix=$bgremove_json" >> "$GITHUB_OUTPUT"
+          echo "run_inversion=$(has_items "$inversion_json")" >> "$GITHUB_OUTPUT"
+          echo "inversion_matrix=$inversion_json" >> "$GITHUB_OUTPUT"
+          echo "run_bet=$run_bet" >> "$GITHUB_OUTPUT"
+          echo "run_pipeline=$(has_items "$pipeline_json")" >> "$GITHUB_OUTPUT"
+          echo "pipeline_matrix=$pipeline_json" >> "$GITHUB_OUTPUT"
+
+          echo "Selected tests:"
+          echo "  bgremove:  $bgremove_json"
+          echo "  inversion: $inversion_json"
+          echo "  bet:       $run_bet"
+          echo "  pipeline:  $pipeline_json"
+
+  # Download test data once and cache it
   setup:
     runs-on: ubuntu-latest
     steps:
@@ -48,17 +204,13 @@ jobs:
 
   # Run each algorithm test as a separate parallel job
   bgremove-tests:
-    needs: setup
+    needs: [setup, detect-changes]
+    if: needs.detect-changes.outputs.run_bgremove == 'true'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        test:
-          - test_bgremove_sharp
-          - test_bgremove_vsharp
-          - test_bgremove_pdf
-          - test_bgremove_ismv
-          - test_bgremove_lbv
+        test: ${{ fromJSON(needs.detect-changes.outputs.bgremove_matrix) }}
     steps:
       - uses: actions/checkout@v4
 
@@ -112,17 +264,13 @@ jobs:
           retention-days: 1
 
   inversion-tests:
-    needs: setup
+    needs: [setup, detect-changes]
+    if: needs.detect-changes.outputs.run_inversion == 'true'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        test:
-          - test_inversion_tkd
-          - test_inversion_tsvd
-          - test_inversion_tikhonov
-          - test_inversion_tv
-          - test_inversion_rts
+        test: ${{ fromJSON(needs.detect-changes.outputs.inversion_matrix) }}
     steps:
       - uses: actions/checkout@v4
 
@@ -176,7 +324,8 @@ jobs:
           retention-days: 1
 
   bet-test:
-    needs: setup
+    needs: [setup, detect-changes]
+    if: needs.detect-changes.outputs.run_bet == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -231,14 +380,13 @@ jobs:
           retention-days: 1
 
   pipeline-tests:
-    needs: setup
+    needs: [setup, detect-changes]
+    if: needs.detect-changes.outputs.run_pipeline == 'true'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        test:
-          - test_pipeline_tgv
-          - test_pipeline_qsmart
+        test: ${{ fromJSON(needs.detect-changes.outputs.pipeline_matrix) }}
     steps:
       - uses: actions/checkout@v4
 
@@ -292,29 +440,59 @@ jobs:
           path: slices/
           retention-days: 1
 
-  # Gate check for branch protection — fails if any test job fails.
-  # After the first PR run, add "tests-passed" as a required status check
-  # in Settings > Branches > Branch protection rules for main.
+  # Gate check for branch protection — fails if any test job fails,
+  # but allows skipped jobs (no relevant changes).
+  # Add "tests-passed" as a required status check in branch protection rules.
   tests-passed:
     needs: [bgremove-tests, inversion-tests, bet-test, pipeline-tests]
+    if: always()
     runs-on: ubuntu-latest
     steps:
-      - run: echo "All tests passed"
+      - name: Check results
+        run: |
+          for result in \
+            "${{ needs.bgremove-tests.result }}" \
+            "${{ needs.inversion-tests.result }}" \
+            "${{ needs.bet-test.result }}" \
+            "${{ needs.pipeline-tests.result }}"; do
+            if [ "$result" = "failure" ] || [ "$result" = "cancelled" ]; then
+              echo "Test job failed or was cancelled: $result"
+              exit 1
+            fi
+          done
+          echo "All tests passed or were skipped"
 
   # Collect metrics from all parallel jobs and produce a single summary
   summary:
     needs: [bgremove-tests, inversion-tests, bet-test, pipeline-tests]
-    if: always()
+    if: >-
+      always() &&
+      !(needs.bgremove-tests.result == 'skipped' &&
+        needs.inversion-tests.result == 'skipped' &&
+        needs.bet-test.result == 'skipped' &&
+        needs.pipeline-tests.result == 'skipped')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
       - name: Download all metrics
+        continue-on-error: true
         uses: actions/download-artifact@v4
         with:
           pattern: metrics-*
           merge-multiple: true
           path: metrics
+
+      - name: Download all slices
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          pattern: slices-*
+          merge-multiple: true
+          path: slices
+
+      - name: Ensure directories exist
+        run: mkdir -p metrics slices figures
 
       - name: Generate metrics summary
         run: |
@@ -396,22 +574,18 @@ jobs:
             done
           } >> $GITHUB_STEP_SUMMARY
 
-      - name: Download all slices
-        uses: actions/download-artifact@v4
-        with:
-          pattern: slices-*
-          merge-multiple: true
-          path: slices
-
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.x"
 
       - name: Render figures
+        continue-on-error: true
         run: |
-          pip install matplotlib numpy
-          python scripts/render_slices.py slices figures
+          if [ -n "$(ls slices/ 2>/dev/null)" ]; then
+            pip install matplotlib numpy
+            python scripts/render_slices.py slices figures
+          fi
 
       - name: Setup CML
         uses: iterative/setup-cml@v3

@@ -28,9 +28,9 @@ pub struct FrangiParams {
 impl Default for FrangiParams {
     fn default() -> Self {
         Self {
-            // QSMART reference defaults: FrangiScaleRange=[1,10], FrangiScaleRatio=2
-            scale_range: [1.0, 10.0],
-            scale_ratio: 2.0,
+            // QSMART Demo defaults: FrangiScaleRange=[0.5,6], FrangiScaleRatio=0.5
+            scale_range: [0.5, 6.0],
+            scale_ratio: 0.5,
             alpha: 0.5,
             beta: 0.5,
             c: 500.0,
@@ -324,7 +324,8 @@ fn gaussian_smooth_3d(data: &[f64], nx: usize, ny: usize, nz: usize, sigma: f64)
     smoothed_xyz
 }
 
-/// Apply 1D convolution along specified axis
+/// Apply 1D convolution along specified axis with replicate padding
+/// Matches MATLAB's imgaussian which uses 'replicate' boundary handling
 fn convolve_1d_direction(
     data: &[f64],
     nx: usize, ny: usize, nz: usize,
@@ -337,25 +338,25 @@ fn convolve_1d_direction(
 
     let idx = |i: usize, j: usize, k: usize| i + j * nx + k * nx * ny;
 
+    // Clamp helpers for replicate padding
+    let clamp_x = |x: isize| -> usize { x.max(0).min(nx as isize - 1) as usize };
+    let clamp_y = |y: isize| -> usize { y.max(0).min(ny as isize - 1) as usize };
+    let clamp_z = |z: isize| -> usize { z.max(0).min(nz as isize - 1) as usize };
+
     match direction {
         'x' => {
             for k in 0..nz {
                 for j in 0..ny {
                     for i in 0..nx {
                         let mut sum = 0.0;
-                        let mut weight_sum = 0.0;
 
                         for ki in 0..kernel.len() {
                             let offset = ki as isize - kernel_radius as isize;
-                            let ni = i as isize + offset;
-
-                            if ni >= 0 && ni < nx as isize {
-                                sum += data[idx(ni as usize, j, k)] * kernel[ki];
-                                weight_sum += kernel[ki];
-                            }
+                            let ni = clamp_x(i as isize + offset);
+                            sum += data[idx(ni, j, k)] * kernel[ki];
                         }
 
-                        result[idx(i, j, k)] = if weight_sum > 0.0 { sum / weight_sum } else { 0.0 };
+                        result[idx(i, j, k)] = sum;
                     }
                 }
             }
@@ -365,19 +366,14 @@ fn convolve_1d_direction(
                 for j in 0..ny {
                     for i in 0..nx {
                         let mut sum = 0.0;
-                        let mut weight_sum = 0.0;
 
                         for ki in 0..kernel.len() {
                             let offset = ki as isize - kernel_radius as isize;
-                            let nj = j as isize + offset;
-
-                            if nj >= 0 && nj < ny as isize {
-                                sum += data[idx(i, nj as usize, k)] * kernel[ki];
-                                weight_sum += kernel[ki];
-                            }
+                            let nj = clamp_y(j as isize + offset);
+                            sum += data[idx(i, nj, k)] * kernel[ki];
                         }
 
-                        result[idx(i, j, k)] = if weight_sum > 0.0 { sum / weight_sum } else { 0.0 };
+                        result[idx(i, j, k)] = sum;
                     }
                 }
             }
@@ -387,19 +383,14 @@ fn convolve_1d_direction(
                 for j in 0..ny {
                     for i in 0..nx {
                         let mut sum = 0.0;
-                        let mut weight_sum = 0.0;
 
                         for ki in 0..kernel.len() {
                             let offset = ki as isize - kernel_radius as isize;
-                            let nk = k as isize + offset;
-
-                            if nk >= 0 && nk < nz as isize {
-                                sum += data[idx(i, j, nk as usize)] * kernel[ki];
-                                weight_sum += kernel[ki];
-                            }
+                            let nk = clamp_z(k as isize + offset);
+                            sum += data[idx(i, j, nk)] * kernel[ki];
                         }
 
-                        result[idx(i, j, k)] = if weight_sum > 0.0 { sum / weight_sum } else { 0.0 };
+                        result[idx(i, j, k)] = sum;
                     }
                 }
             }
