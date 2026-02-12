@@ -499,51 +499,69 @@ jobs:
           {
             echo "# QSM-Core Integration Test Results"
             echo ""
-            echo "## Background Field Removal"
-            echo "*Compared against ground truth local field map*"
-            echo ""
-            echo "| Method | RMSE | NRMSE | Correlation | XSIM | Time |"
-            echo "|--------|------|-------|-------------|------|------|"
+
+            # Background Field Removal
+            has_bgremove=false
             for test in sharp vsharp pdf ismv lbv; do
-              file="metrics/test_bgremove_${test}.csv"
-              if [ -f "$file" ]; then
-                line=$(sed 's/^RESULT://' "$file")
-                IFS=',' read -r name rmse nrmse corr xsim time <<< "$line"
-                if [ "$rmse" = "-" ]; then
-                  echo "| ${name} | :x: Failed | - | - | - | - |"
-                else
-                  time_fmt=$(printf "%.2fs" "$time")
-                  echo "| ${name} | ${rmse} | ${nrmse} | ${corr} | ${xsim} | ${time_fmt} |"
-                fi
-              fi
+              [ -f "metrics/test_bgremove_${test}.csv" ] && has_bgremove=true
             done
-            echo ""
-            echo "## Dipole Inversion"
-            echo "*Compared against ground truth susceptibility map*"
-            echo ""
-            echo "| Method | RMSE | NRMSE | Correlation | XSIM | Time |"
-            echo "|--------|------|-------|-------------|------|------|"
+            if [ "$has_bgremove" = true ]; then
+              echo "## Background Field Removal"
+              echo "*Compared against ground truth local field map*"
+              echo ""
+              echo "| Method | RMSE | NRMSE | Correlation | XSIM | Time |"
+              echo "|--------|------|-------|-------------|------|------|"
+              for test in sharp vsharp pdf ismv lbv; do
+                file="metrics/test_bgremove_${test}.csv"
+                if [ -f "$file" ]; then
+                  line=$(sed 's/^RESULT://' "$file")
+                  IFS=',' read -r name rmse nrmse corr xsim time <<< "$line"
+                  if [ "$rmse" = "-" ]; then
+                    echo "| ${name} | :x: Failed | - | - | - | - |"
+                  else
+                    time_fmt=$(printf "%.2fs" "$time")
+                    echo "| ${name} | ${rmse} | ${nrmse} | ${corr} | ${xsim} | ${time_fmt} |"
+                  fi
+                fi
+              done
+              echo ""
+            fi
+
+            # Dipole Inversion
+            has_inversion=false
             for test in tkd tsvd tikhonov tv rts; do
-              file="metrics/test_inversion_${test}.csv"
-              if [ -f "$file" ]; then
-                line=$(sed 's/^RESULT://' "$file")
-                IFS=',' read -r name rmse nrmse corr xsim time <<< "$line"
-                if [ "$rmse" = "-" ]; then
-                  echo "| ${name} | :x: Failed | - | - | - | - |"
-                else
-                  time_fmt=$(printf "%.2fs" "$time")
-                  echo "| ${name} | ${rmse} | ${nrmse} | ${corr} | ${xsim} | ${time_fmt} |"
-                fi
-              fi
+              [ -f "metrics/test_inversion_${test}.csv" ] && has_inversion=true
             done
-            echo ""
-            echo "## Brain Extraction"
-            echo "*Compared against ground truth mask*"
-            echo ""
-            echo "| Method | Dice | Time |"
-            echo "|--------|------|------|"
-            file="metrics/test_bet.csv"
-            if [ -f "$file" ]; then
+            if [ "$has_inversion" = true ]; then
+              echo "## Dipole Inversion"
+              echo "*Compared against ground truth susceptibility map*"
+              echo ""
+              echo "| Method | RMSE | NRMSE | Correlation | XSIM | Time |"
+              echo "|--------|------|-------|-------------|------|------|"
+              for test in tkd tsvd tikhonov tv rts; do
+                file="metrics/test_inversion_${test}.csv"
+                if [ -f "$file" ]; then
+                  line=$(sed 's/^RESULT://' "$file")
+                  IFS=',' read -r name rmse nrmse corr xsim time <<< "$line"
+                  if [ "$rmse" = "-" ]; then
+                    echo "| ${name} | :x: Failed | - | - | - | - |"
+                  else
+                    time_fmt=$(printf "%.2fs" "$time")
+                    echo "| ${name} | ${rmse} | ${nrmse} | ${corr} | ${xsim} | ${time_fmt} |"
+                  fi
+                fi
+              done
+              echo ""
+            fi
+
+            # Brain Extraction
+            if [ -f "metrics/test_bet.csv" ]; then
+              echo "## Brain Extraction"
+              echo "*Compared against ground truth mask*"
+              echo ""
+              echo "| Method | Dice | Time |"
+              echo "|--------|------|------|"
+              file="metrics/test_bet.csv"
               line=$(sed 's/^RESULT://' "$file")
               IFS=',' read -r name dice _nrmse _corr _xsim time <<< "$line"
               if [ "$dice" = "-" ]; then
@@ -552,26 +570,35 @@ jobs:
                 time_fmt=$(printf "%.2fs" "$time")
                 echo "| ${name} | ${dice} | ${time_fmt} |"
               fi
+              echo ""
             fi
-            echo ""
-            echo "## Full Pipeline"
-            echo "*Compared against ground truth susceptibility map*"
-            echo ""
-            echo "| Method | RMSE | NRMSE | Correlation | XSIM | Time |"
-            echo "|--------|------|-------|-------------|------|------|"
+
+            # Full Pipeline
+            has_pipeline=false
             for test in tgv qsmart; do
-              file="metrics/test_pipeline_${test}.csv"
-              if [ -f "$file" ]; then
-                line=$(sed 's/^RESULT://' "$file")
-                IFS=',' read -r name rmse nrmse corr xsim time <<< "$line"
-                if [ "$rmse" = "-" ]; then
-                  echo "| ${name} | :x: Failed | - | - | - | - |"
-                else
-                  time_fmt=$(printf "%.2fs" "$time")
-                  echo "| ${name} | ${rmse} | ${nrmse} | ${corr} | ${xsim} | ${time_fmt} |"
-                fi
-              fi
+              [ -f "metrics/test_pipeline_${test}.csv" ] && has_pipeline=true
             done
+            if [ "$has_pipeline" = true ]; then
+              echo "## Full Pipeline"
+              echo "*Compared against ground truth susceptibility map*"
+              echo ""
+              echo "| Method | RMSE | NRMSE | Correlation | XSIM | Time |"
+              echo "|--------|------|-------|-------------|------|------|"
+              for test in tgv qsmart; do
+                file="metrics/test_pipeline_${test}.csv"
+                if [ -f "$file" ]; then
+                  line=$(sed 's/^RESULT://' "$file")
+                  IFS=',' read -r name rmse nrmse corr xsim time <<< "$line"
+                  if [ "$rmse" = "-" ]; then
+                    echo "| ${name} | :x: Failed | - | - | - | - |"
+                  else
+                    time_fmt=$(printf "%.2fs" "$time")
+                    echo "| ${name} | ${rmse} | ${nrmse} | ${corr} | ${xsim} | ${time_fmt} |"
+                  fi
+                fi
+              done
+              echo ""
+            fi
           } >> $GITHUB_STEP_SUMMARY
 
       - name: Setup Python
@@ -602,67 +629,79 @@ jobs:
             echo ""
 
             # Background Field Removal table + figures
-            echo "### Background Field Removal"
-            echo "*Compared against ground truth local field map*"
-            echo ""
-            echo "| Method | RMSE | NRMSE | Correlation | XSIM | Time |"
-            echo "|--------|------|-------|-------------|------|------|"
+            has_bgremove=false
             for test in sharp vsharp pdf ismv lbv; do
-              file="metrics/test_bgremove_${test}.csv"
-              if [ -f "$file" ]; then
-                line=$(sed 's/^RESULT://' "$file")
-                IFS=',' read -r name rmse nrmse corr xsim time <<< "$line"
-                if [ "$rmse" = "-" ]; then
-                  echo "| ${name} | :x: Failed | - | - | - | - |"
-                else
-                  time_fmt=$(printf "%.2fs" "$time")
-                  echo "| ${name} | ${rmse} | ${nrmse} | ${corr} | ${xsim} | ${time_fmt} |"
+              [ -f "metrics/test_bgremove_${test}.csv" ] && has_bgremove=true
+            done
+            if [ "$has_bgremove" = true ]; then
+              echo "### Background Field Removal"
+              echo "*Compared against ground truth local field map*"
+              echo ""
+              echo "| Method | RMSE | NRMSE | Correlation | XSIM | Time |"
+              echo "|--------|------|-------|-------------|------|------|"
+              for test in sharp vsharp pdf ismv lbv; do
+                file="metrics/test_bgremove_${test}.csv"
+                if [ -f "$file" ]; then
+                  line=$(sed 's/^RESULT://' "$file")
+                  IFS=',' read -r name rmse nrmse corr xsim time <<< "$line"
+                  if [ "$rmse" = "-" ]; then
+                    echo "| ${name} | :x: Failed | - | - | - | - |"
+                  else
+                    time_fmt=$(printf "%.2fs" "$time")
+                    echo "| ${name} | ${rmse} | ${nrmse} | ${corr} | ${xsim} | ${time_fmt} |"
+                  fi
                 fi
-              fi
-            done
-            echo ""
-            for slug in bgremove_sharp bgremove_vsharp bgremove_pdf bgremove_ismv bgremove_lbv; do
-              if [ -f "figures/${slug}.png" ]; then
-                echo "![${slug}](figures/${slug}.png)"
-                echo ""
-              fi
-            done
+              done
+              echo ""
+              for slug in bgremove_sharp bgremove_vsharp bgremove_pdf bgremove_ismv bgremove_lbv; do
+                if [ -f "figures/${slug}.png" ]; then
+                  echo "![${slug}](figures/${slug}.png)"
+                  echo ""
+                fi
+              done
+            fi
 
             # Dipole Inversion table + figures
-            echo "### Dipole Inversion"
-            echo "*Compared against ground truth susceptibility map*"
-            echo ""
-            echo "| Method | RMSE | NRMSE | Correlation | XSIM | Time |"
-            echo "|--------|------|-------|-------------|------|------|"
+            has_inversion=false
             for test in tkd tsvd tikhonov tv rts; do
-              file="metrics/test_inversion_${test}.csv"
-              if [ -f "$file" ]; then
-                line=$(sed 's/^RESULT://' "$file")
-                IFS=',' read -r name rmse nrmse corr xsim time <<< "$line"
-                if [ "$rmse" = "-" ]; then
-                  echo "| ${name} | :x: Failed | - | - | - | - |"
-                else
-                  time_fmt=$(printf "%.2fs" "$time")
-                  echo "| ${name} | ${rmse} | ${nrmse} | ${corr} | ${xsim} | ${time_fmt} |"
+              [ -f "metrics/test_inversion_${test}.csv" ] && has_inversion=true
+            done
+            if [ "$has_inversion" = true ]; then
+              echo "### Dipole Inversion"
+              echo "*Compared against ground truth susceptibility map*"
+              echo ""
+              echo "| Method | RMSE | NRMSE | Correlation | XSIM | Time |"
+              echo "|--------|------|-------|-------------|------|------|"
+              for test in tkd tsvd tikhonov tv rts; do
+                file="metrics/test_inversion_${test}.csv"
+                if [ -f "$file" ]; then
+                  line=$(sed 's/^RESULT://' "$file")
+                  IFS=',' read -r name rmse nrmse corr xsim time <<< "$line"
+                  if [ "$rmse" = "-" ]; then
+                    echo "| ${name} | :x: Failed | - | - | - | - |"
+                  else
+                    time_fmt=$(printf "%.2fs" "$time")
+                    echo "| ${name} | ${rmse} | ${nrmse} | ${corr} | ${xsim} | ${time_fmt} |"
+                  fi
                 fi
-              fi
-            done
-            echo ""
-            for slug in inversion_tkd inversion_tsvd inversion_tikhonov inversion_tv inversion_rts; do
-              if [ -f "figures/${slug}.png" ]; then
-                echo "![${slug}](figures/${slug}.png)"
-                echo ""
-              fi
-            done
+              done
+              echo ""
+              for slug in inversion_tkd inversion_tsvd inversion_tikhonov inversion_tv inversion_rts; do
+                if [ -f "figures/${slug}.png" ]; then
+                  echo "![${slug}](figures/${slug}.png)"
+                  echo ""
+                fi
+              done
+            fi
 
             # Brain Extraction
-            echo "### Brain Extraction"
-            echo "*Compared against ground truth mask*"
-            echo ""
-            echo "| Method | Dice | Time |"
-            echo "|--------|------|------|"
-            file="metrics/test_bet.csv"
-            if [ -f "$file" ]; then
+            if [ -f "metrics/test_bet.csv" ]; then
+              echo "### Brain Extraction"
+              echo "*Compared against ground truth mask*"
+              echo ""
+              echo "| Method | Dice | Time |"
+              echo "|--------|------|------|"
+              file="metrics/test_bet.csv"
               line=$(sed 's/^RESULT://' "$file")
               IFS=',' read -r name dice _nrmse _corr _xsim time <<< "$line"
               if [ "$dice" = "-" ]; then
@@ -671,38 +710,44 @@ jobs:
                 time_fmt=$(printf "%.2fs" "$time")
                 echo "| ${name} | ${dice} | ${time_fmt} |"
               fi
-            fi
-            echo ""
-            if [ -f "figures/bet.png" ]; then
-              echo "![bet](figures/bet.png)"
               echo ""
+              if [ -f "figures/bet.png" ]; then
+                echo "![bet](figures/bet.png)"
+                echo ""
+              fi
             fi
 
             # Full Pipeline table + figures
-            echo "### Full Pipeline"
-            echo "*Compared against ground truth susceptibility map*"
-            echo ""
-            echo "| Method | RMSE | NRMSE | Correlation | XSIM | Time |"
-            echo "|--------|------|-------|-------------|------|------|"
+            has_pipeline=false
             for test in tgv qsmart; do
-              file="metrics/test_pipeline_${test}.csv"
-              if [ -f "$file" ]; then
-                line=$(sed 's/^RESULT://' "$file")
-                IFS=',' read -r name rmse nrmse corr xsim time <<< "$line"
-                if [ "$rmse" = "-" ]; then
-                  echo "| ${name} | :x: Failed | - | - | - | - |"
-                else
-                  time_fmt=$(printf "%.2fs" "$time")
-                  echo "| ${name} | ${rmse} | ${nrmse} | ${corr} | ${xsim} | ${time_fmt} |"
+              [ -f "metrics/test_pipeline_${test}.csv" ] && has_pipeline=true
+            done
+            if [ "$has_pipeline" = true ]; then
+              echo "### Full Pipeline"
+              echo "*Compared against ground truth susceptibility map*"
+              echo ""
+              echo "| Method | RMSE | NRMSE | Correlation | XSIM | Time |"
+              echo "|--------|------|-------|-------------|------|------|"
+              for test in tgv qsmart; do
+                file="metrics/test_pipeline_${test}.csv"
+                if [ -f "$file" ]; then
+                  line=$(sed 's/^RESULT://' "$file")
+                  IFS=',' read -r name rmse nrmse corr xsim time <<< "$line"
+                  if [ "$rmse" = "-" ]; then
+                    echo "| ${name} | :x: Failed | - | - | - | - |"
+                  else
+                    time_fmt=$(printf "%.2fs" "$time")
+                    echo "| ${name} | ${rmse} | ${nrmse} | ${corr} | ${xsim} | ${time_fmt} |"
+                  fi
                 fi
-              fi
-            done
-            echo ""
-            for slug in pipeline_tgv pipeline_qsmart; do
-              if [ -f "figures/${slug}.png" ]; then
-                echo "![${slug}](figures/${slug}.png)"
-                echo ""
-              fi
-            done
+              done
+              echo ""
+              for slug in pipeline_tgv pipeline_qsmart; do
+                if [ -f "figures/${slug}.png" ]; then
+                  echo "![${slug}](figures/${slug}.png)"
+                  echo ""
+                fi
+              done
+            fi
           } > report.md
           cml comment create report.md
