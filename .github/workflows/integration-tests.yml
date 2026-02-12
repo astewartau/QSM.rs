@@ -22,6 +22,8 @@ jobs:
       run_inversion: ${{ steps.detect.outputs.run_inversion }}
       inversion_matrix: ${{ steps.detect.outputs.inversion_matrix }}
       run_bet: ${{ steps.detect.outputs.run_bet }}
+      run_combined: ${{ steps.detect.outputs.run_combined }}
+      combined_matrix: ${{ steps.detect.outputs.combined_matrix }}
       run_pipeline: ${{ steps.detect.outputs.run_pipeline }}
       pipeline_matrix: ${{ steps.detect.outputs.pipeline_matrix }}
     steps:
@@ -42,6 +44,7 @@ jobs:
 
           all_bgremove='["test_bgremove_sharp","test_bgremove_vsharp","test_bgremove_pdf","test_bgremove_ismv","test_bgremove_lbv"]'
           all_inversion='["test_inversion_tkd","test_inversion_tsvd","test_inversion_tikhonov","test_inversion_tv","test_inversion_rts"]'
+          all_combined='["test_combined_tgv"]'
           all_pipeline='["test_pipeline_tgv","test_pipeline_qsmart"]'
 
           output_all() {
@@ -50,6 +53,8 @@ jobs:
             echo "run_inversion=true" >> "$GITHUB_OUTPUT"
             echo "inversion_matrix=$all_inversion" >> "$GITHUB_OUTPUT"
             echo "run_bet=true" >> "$GITHUB_OUTPUT"
+            echo "run_combined=true" >> "$GITHUB_OUTPUT"
+            echo "combined_matrix=$all_combined" >> "$GITHUB_OUTPUT"
             echo "run_pipeline=true" >> "$GITHUB_OUTPUT"
             echo "pipeline_matrix=$all_pipeline" >> "$GITHUB_OUTPUT"
           }
@@ -79,6 +84,7 @@ jobs:
           bgremove=""
           inversion=""
           run_bet=false
+          combined=""
           pipeline=""
 
           for file in $CHANGED; do
@@ -119,7 +125,7 @@ jobs:
               src/inversion/tikhonov.rs)  inversion="$inversion test_inversion_tikhonov" ;;
               src/inversion/tv.rs)        inversion="$inversion test_inversion_tv" ;;
               src/inversion/rts.rs)       inversion="$inversion test_inversion_rts" ;;
-              src/inversion/tgv.rs)       pipeline="$pipeline test_pipeline_tgv" ;;
+              src/inversion/tgv.rs)       combined="$combined test_combined_tgv"; pipeline="$pipeline test_pipeline_tgv" ;;
               src/inversion/ilsqr.rs)     pipeline="$pipeline test_pipeline_qsmart" ;;
 
               # Brain extraction
@@ -151,6 +157,7 @@ jobs:
 
           bgremove_json=$(to_json $bgremove)
           inversion_json=$(to_json $inversion)
+          combined_json=$(to_json $combined)
           pipeline_json=$(to_json $pipeline)
 
           has_items() { [ "$1" != '[]' ] && echo true || echo false; }
@@ -160,6 +167,8 @@ jobs:
           echo "run_inversion=$(has_items "$inversion_json")" >> "$GITHUB_OUTPUT"
           echo "inversion_matrix=$inversion_json" >> "$GITHUB_OUTPUT"
           echo "run_bet=$run_bet" >> "$GITHUB_OUTPUT"
+          echo "run_combined=$(has_items "$combined_json")" >> "$GITHUB_OUTPUT"
+          echo "combined_matrix=$combined_json" >> "$GITHUB_OUTPUT"
           echo "run_pipeline=$(has_items "$pipeline_json")" >> "$GITHUB_OUTPUT"
           echo "pipeline_matrix=$pipeline_json" >> "$GITHUB_OUTPUT"
 
@@ -167,6 +176,7 @@ jobs:
           echo "  bgremove:  $bgremove_json"
           echo "  inversion: $inversion_json"
           echo "  bet:       $run_bet"
+          echo "  combined:  $combined_json"
           echo "  pipeline:  $pipeline_json"
 
   # Download test data once and cache it
@@ -379,6 +389,67 @@ jobs:
           path: slices/
           retention-days: 1
 
+  combined-tests:
+    needs: [setup, detect-changes]
+    if: needs.detect-changes.outputs.run_combined == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        test: ${{ fromJSON(needs.detect-changes.outputs.combined_matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download test data
+        uses: actions/download-artifact@v4
+        with:
+          name: test-data
+          path: bids
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Run ${{ matrix.test }}
+        timeout-minutes: 30
+        run: |
+          cargo test --release --test integration_tests ${{ matrix.test }} -- --ignored --nocapture 2>&1 | tee test_output.txt
+
+      - name: Save metrics
+        if: always()
+        run: |
+          if grep -q "^RESULT:" test_output.txt 2>/dev/null; then
+            grep "^RESULT:" test_output.txt > ${{ matrix.test }}.csv
+          else
+            echo "RESULT:${{ matrix.test }},-,-,-,-,-" > ${{ matrix.test }}.csv
+          fi
+
+      - name: Upload metrics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: metrics-${{ matrix.test }}
+          path: ${{ matrix.test }}.csv
+          retention-days: 1
+
+      - name: Upload slices
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: slices-${{ matrix.test }}
+          path: slices/
+          retention-days: 1
+
   pipeline-tests:
     needs: [setup, detect-changes]
     if: needs.detect-changes.outputs.run_pipeline == 'true'
@@ -444,7 +515,7 @@ jobs:
   # but allows skipped jobs (no relevant changes).
   # Add "tests-passed" as a required status check in branch protection rules.
   tests-passed:
-    needs: [bgremove-tests, inversion-tests, bet-test, pipeline-tests]
+    needs: [bgremove-tests, inversion-tests, bet-test, combined-tests, pipeline-tests]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -454,6 +525,7 @@ jobs:
             "${{ needs.bgremove-tests.result }}" \
             "${{ needs.inversion-tests.result }}" \
             "${{ needs.bet-test.result }}" \
+            "${{ needs.combined-tests.result }}" \
             "${{ needs.pipeline-tests.result }}"; do
             if [ "$result" = "failure" ] || [ "$result" = "cancelled" ]; then
               echo "Test job failed or was cancelled: $result"
@@ -464,12 +536,13 @@ jobs:
 
   # Collect metrics from all parallel jobs and produce a single summary
   summary:
-    needs: [bgremove-tests, inversion-tests, bet-test, pipeline-tests]
+    needs: [bgremove-tests, inversion-tests, bet-test, combined-tests, pipeline-tests]
     if: >-
       always() &&
       !(needs.bgremove-tests.result == 'skipped' &&
         needs.inversion-tests.result == 'skipped' &&
         needs.bet-test.result == 'skipped' &&
+        needs.combined-tests.result == 'skipped' &&
         needs.pipeline-tests.result == 'skipped')
     runs-on: ubuntu-latest
     steps:
@@ -570,6 +643,33 @@ jobs:
                 time_fmt=$(printf "%.2fs" "$time")
                 echo "| ${name} | ${dice} | ${time_fmt} |"
               fi
+              echo ""
+            fi
+
+            # Combined Background Removal + Dipole Inversion
+            has_combined=false
+            for test in tgv; do
+              [ -f "metrics/test_combined_${test}.csv" ] && has_combined=true
+            done
+            if [ "$has_combined" = true ]; then
+              echo "## Combined Background Removal + Dipole Inversion"
+              echo "*Compared against ground truth susceptibility map (input: total field map)*"
+              echo ""
+              echo "| Method | RMSE | NRMSE | Correlation | XSIM | Time |"
+              echo "|--------|------|-------|-------------|------|------|"
+              for test in tgv; do
+                file="metrics/test_combined_${test}.csv"
+                if [ -f "$file" ]; then
+                  line=$(sed 's/^RESULT://' "$file")
+                  IFS=',' read -r name rmse nrmse corr xsim time <<< "$line"
+                  if [ "$rmse" = "-" ]; then
+                    echo "| ${name} | :x: Failed | - | - | - | - |"
+                  else
+                    time_fmt=$(printf "%.2fs" "$time")
+                    echo "| ${name} | ${rmse} | ${nrmse} | ${corr} | ${xsim} | ${time_fmt} |"
+                  fi
+                fi
+              done
               echo ""
             fi
 
@@ -715,6 +815,39 @@ jobs:
                 echo "![bet](figures/bet.png)"
                 echo ""
               fi
+            fi
+
+            # Combined Background Removal + Dipole Inversion table + figures
+            has_combined=false
+            for test in tgv; do
+              [ -f "metrics/test_combined_${test}.csv" ] && has_combined=true
+            done
+            if [ "$has_combined" = true ]; then
+              echo "### Combined Background Removal + Dipole Inversion"
+              echo "*Compared against ground truth susceptibility map (input: total field map)*"
+              echo ""
+              echo "| Method | RMSE | NRMSE | Correlation | XSIM | Time |"
+              echo "|--------|------|-------|-------------|------|------|"
+              for test in tgv; do
+                file="metrics/test_combined_${test}.csv"
+                if [ -f "$file" ]; then
+                  line=$(sed 's/^RESULT://' "$file")
+                  IFS=',' read -r name rmse nrmse corr xsim time <<< "$line"
+                  if [ "$rmse" = "-" ]; then
+                    echo "| ${name} | :x: Failed | - | - | - | - |"
+                  else
+                    time_fmt=$(printf "%.2fs" "$time")
+                    echo "| ${name} | ${rmse} | ${nrmse} | ${corr} | ${xsim} | ${time_fmt} |"
+                  fi
+                fi
+              done
+              echo ""
+              for slug in combined_tgv; do
+                if [ -f "figures/${slug}.png" ]; then
+                  echo "![${slug}](figures/${slug}.png)"
+                  echo ""
+                fi
+              done
             fi
 
             # Full Pipeline table + figures

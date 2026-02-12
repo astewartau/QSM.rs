@@ -349,6 +349,74 @@ fn test_bet() {
 }
 
 // ============================================================================
+// Combined Background Removal + Dipole Inversion Tests
+// ============================================================================
+
+#[test]
+#[ignore]
+fn test_combined_tgv() {
+    println!("[INFO] Loading test data...");
+    let data = TestData::load().expect("Failed to load test data");
+    let (nx, ny, nz) = data.dims;
+    let (vsx, vsy, vsz) = data.voxel_size;
+
+    let start = Instant::now();
+
+    // Convert total field map from ppm to phase (radians) for TGV
+    // phase = fieldmap_ppm × 2π × TE × B0 × γ
+    // where γ = 42.5781 Hz/T (matches TGV's internal scaling constant)
+    // The specific TE and B0 values are arbitrary — the ppm→rad→ppm round-trip
+    // cancels out as long as TGV receives the same values.
+    let te = data.echo_times[0] as f32; // seconds
+    let b0 = data.field_strength as f32; // Tesla
+    let gamma = 42.5781_f32; // Hz/T
+    let ppm_to_rad = 2.0 * std::f32::consts::PI * te * b0 * gamma;
+
+    let phase_for_tgv: Vec<f32> = data.fieldmap.iter()
+        .map(|&ppm| (ppm as f32) * ppm_to_rad)
+        .collect();
+
+    // Run TGV with same TE and field strength so internal scaling inverts correctly
+    let step_size = 3.0_f32;
+    let res_tgv = (vsx as f32, vsy as f32, vsz as f32);
+    let iterations = get_default_iterations(res_tgv, step_size);
+    println!("[INFO] TGV iterations (auto): {}", iterations);
+    let tgv_params = TgvParams {
+        alpha0: 0.002,
+        alpha1: 0.003,
+        iterations,
+        erosions: 3,
+        step_size,
+        fieldstrength: b0,
+        te,
+        tol: 1e-5,
+    };
+
+    println!("[INFO] Running TGV (from total field map)...");
+    let result_f32 = tgv_qsm(
+        &phase_for_tgv,
+        &data.mask,
+        nx, ny, nz,
+        vsx as f32, vsy as f32, vsz as f32,
+        &tgv_params,
+        (data.b0_dir.0 as f32, data.b0_dir.1 as f32, data.b0_dir.2 as f32),
+    );
+
+    let elapsed = start.elapsed();
+
+    // TGV output is already in ppm
+    let result: Vec<f64> = result_f32.iter().map(|&v| v as f64).collect();
+
+    let res = TestResult::new("TGV (from field)", &result, &data.chi, &data.mask, data.dims);
+    res.print_with_time(elapsed);
+    res.print_ci_metrics(elapsed);
+    common::save_center_slices(&result, &data.mask, data.dims, "combined_tgv");
+
+    assert!(res.nrmse < 0.8, "TGV NRMSE too high: {}", res.nrmse);
+    assert!(res.correlation > 0.5, "TGV correlation too low: {}", res.correlation);
+}
+
+// ============================================================================
 // Pipeline Tests (TGV, QSMART)
 // ============================================================================
 
