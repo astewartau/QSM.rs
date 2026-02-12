@@ -176,9 +176,11 @@ where
         }
         fft3d(&mut work_complex, nx, ny, nz);
 
-        // x_hat = f_hat + rho * FFT(div) * inv_a
+        // x_hat = f_hat - rho * FFT(div) * inv_a
+        // Note: bdiv computes positive divergence ∇·, but the adjoint ∇ᵀ = -∇·,
+        // so we subtract (see Eq. [7] in Kames et al. 2018).
         for i in 0..n_total {
-            work_complex[i] = f_hat[i] + rho * work_complex[i] * inv_a[i];
+            work_complex[i] = f_hat[i] - rho * work_complex[i] * inv_a[i];
         }
 
         // IFFT to get x

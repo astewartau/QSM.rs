@@ -33,7 +33,10 @@ impl Default for SdfParams {
     fn default() -> Self {
         Self {
             sigma1: 10.0,
-            sigma2: 0.0,
+            // MATLAB passes sigma1 for both sigma args in stage 1.
+            // sigma2 affects the combined sigma even though vasculature
+            // proximity is skipped when vasc_only is all-ones.
+            sigma2: 10.0,
             spatial_radius: 8,
             lower_lim: 0.6,
             curv_constant: 500.0,
@@ -44,10 +47,11 @@ impl Default for SdfParams {
 
 impl SdfParams {
     /// Create parameters for QSMART Stage 1
+    /// MATLAB passes sigma1 for both sigma args in stage 1.
     pub fn stage1() -> Self {
         Self {
             sigma1: 10.0,
-            sigma2: 0.0,
+            sigma2: 10.0,
             spatial_radius: 8,
             lower_lim: 0.6,
             curv_constant: 500.0,
@@ -243,7 +247,7 @@ where
     let local_field: Vec<f64> = tfs.iter()
         .zip(background.iter())
         .zip(mask.iter())
-        .map(|((&t, &b), &m)| if m > 0.0 { (t - b) * m.signum() } else { 0.0 })
+        .map(|((&t, &b), &m)| (t - b) * m)
         .collect();
 
     local_field
@@ -411,7 +415,8 @@ fn convolve_1d_direction_sigma(
     }
 
     // Create 1D Gaussian kernel
-    let kernel_radius = (3.0 * sigma).ceil() as usize;
+    // Match MATLAB's imgaussfilt3 default: filterSize = 2*ceil(2*sigma)+1
+    let kernel_radius = (2.0 * sigma).ceil() as usize;
     let kernel_size = 2 * kernel_radius + 1;
     let mut kernel = vec![0.0f64; kernel_size];
 

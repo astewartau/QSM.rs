@@ -162,16 +162,16 @@ impl Default for QsmartParams {
         Self {
             ppm: 2.675e8 * 7.0 / 1e6, // gyro * field / 1e6
             sdf_sigma1_stage1: 10.0,
-            sdf_sigma2_stage1: 0.0,
+            sdf_sigma2_stage1: 10.0,
             sdf_sigma1_stage2: 8.0,
             sdf_sigma2_stage2: 2.0,
             sdf_spatial_radius: 8,
             sdf_lower_lim: 0.6,
             sdf_curv_constant: 500.0,
             vasc_sphere_radius: 8,
-            // QSMART reference defaults: FrangiScaleRange=[1,10], FrangiScaleRatio=2
-            frangi_scale_range: [1.0, 10.0],
-            frangi_scale_ratio: 2.0,
+            // QSMART Demo defaults: FrangiScaleRange=[0.5,6], FrangiScaleRatio=0.5
+            frangi_scale_range: [0.5, 6.0],
+            frangi_scale_ratio: 0.5,
             frangi_c: 500.0,
             ilsqr_tol: 0.01,
             ilsqr_max_iter: 50,

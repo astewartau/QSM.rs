@@ -1,17 +1,185 @@
 name: Integration Tests
 
 on:
-  push:
-    branches: [main, master]
   pull_request:
     branches: [main, master]
   workflow_dispatch:  # Allow manual trigger
+
+permissions:
+  contents: read
+  pull-requests: write
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # First, download test data once and cache it
+  # Detect which source files changed and map to affected tests
+  detect-changes:
+    runs-on: ubuntu-latest
+    outputs:
+      run_bgremove: ${{ steps.detect.outputs.run_bgremove }}
+      bgremove_matrix: ${{ steps.detect.outputs.bgremove_matrix }}
+      run_inversion: ${{ steps.detect.outputs.run_inversion }}
+      inversion_matrix: ${{ steps.detect.outputs.inversion_matrix }}
+      run_bet: ${{ steps.detect.outputs.run_bet }}
+      run_combined: ${{ steps.detect.outputs.run_combined }}
+      combined_matrix: ${{ steps.detect.outputs.combined_matrix }}
+      run_pipeline: ${{ steps.detect.outputs.run_pipeline }}
+      pipeline_matrix: ${{ steps.detect.outputs.pipeline_matrix }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Map changed files to tests
+        id: detect
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_ACTION: ${{ github.event.action }}
+          BEFORE_SHA: ${{ github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -e
+
+          all_bgremove='["test_bgremove_sharp","test_bgremove_vsharp","test_bgremove_pdf","test_bgremove_ismv","test_bgremove_lbv"]'
+          all_inversion='["test_inversion_tkd","test_inversion_tsvd","test_inversion_tikhonov","test_inversion_tv","test_inversion_rts"]'
+          all_combined='["test_combined_tgv"]'
+          all_pipeline='["test_pipeline_tgv","test_pipeline_qsmart"]'
+
+          output_all() {
+            echo "run_bgremove=true" >> "$GITHUB_OUTPUT"
+            echo "bgremove_matrix=$all_bgremove" >> "$GITHUB_OUTPUT"
+            echo "run_inversion=true" >> "$GITHUB_OUTPUT"
+            echo "inversion_matrix=$all_inversion" >> "$GITHUB_OUTPUT"
+            echo "run_bet=true" >> "$GITHUB_OUTPUT"
+            echo "run_combined=true" >> "$GITHUB_OUTPUT"
+            echo "combined_matrix=$all_combined" >> "$GITHUB_OUTPUT"
+            echo "run_pipeline=true" >> "$GITHUB_OUTPUT"
+            echo "pipeline_matrix=$all_pipeline" >> "$GITHUB_OUTPUT"
+          }
+
+          # Manual trigger: run everything
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            echo "workflow_dispatch: running all tests"
+            output_all
+            exit 0
+          fi
+
+          # Determine diff range based on PR event type
+          if [ "$PR_ACTION" = "synchronize" ] && [ -n "$BEFORE_SHA" ] && \
+             [ "$BEFORE_SHA" != "0000000000000000000000000000000000000000" ]; then
+            echo "synchronize: diffing ${BEFORE_SHA:0:8}..${HEAD_SHA:0:8}"
+            CHANGED=$(git diff --name-only "$BEFORE_SHA".."$HEAD_SHA" || true)
+          else
+            echo "opened/reopened: diffing ${BASE_SHA:0:8}...${HEAD_SHA:0:8}"
+            CHANGED=$(git diff --name-only "$BASE_SHA"..."$HEAD_SHA" || true)
+          fi
+
+          echo "Changed files:"
+          echo "$CHANGED"
+          echo ""
+
+          # Map changed files to test names
+          bgremove=""
+          inversion=""
+          run_bet=false
+          combined=""
+          pipeline=""
+
+          for file in $CHANGED; do
+            case "$file" in
+              # Core infrastructure → run everything
+              src/lib.rs|src/fft.rs|src/nifti_io.rs|src/region_grow.rs|src/priority_queue.rs)
+                echo "Core file changed: $file → all tests"
+                output_all; exit 0 ;;
+              src/kernels/*|src/solvers/*)
+                echo "Core file changed: $file → all tests"
+                output_all; exit 0 ;;
+              src/utils/gradient.rs|src/utils/padding.rs|src/utils/simd_ops.rs|src/utils/mod.rs)
+                echo "Core util changed: $file → all tests"
+                output_all; exit 0 ;;
+              tests/*|Cargo.toml|Cargo.lock)
+                echo "Test/build file changed: $file → all tests"
+                output_all; exit 0 ;;
+              .github/workflows/integration-tests.yml|scripts/*)
+                echo "CI file changed: $file → all tests"
+                output_all; exit 0 ;;
+
+              # Background removal
+              src/bgremove/mod.rs)
+                bgremove="$bgremove test_bgremove_sharp test_bgremove_vsharp test_bgremove_pdf test_bgremove_ismv test_bgremove_lbv" ;;
+              src/bgremove/smv.rs)
+                bgremove="$bgremove test_bgremove_sharp test_bgremove_vsharp test_bgremove_ismv" ;;
+              src/bgremove/sharp.rs)  bgremove="$bgremove test_bgremove_sharp" ;;
+              src/bgremove/vsharp.rs) bgremove="$bgremove test_bgremove_vsharp" ;;
+              src/bgremove/pdf.rs)    bgremove="$bgremove test_bgremove_pdf" ;;
+              src/bgremove/ismv.rs)   bgremove="$bgremove test_bgremove_ismv" ;;
+              src/bgremove/lbv.rs)    bgremove="$bgremove test_bgremove_lbv" ;;
+              src/bgremove/sdf.rs)    pipeline="$pipeline test_pipeline_qsmart" ;;
+
+              # Dipole inversion
+              src/inversion/mod.rs)
+                inversion="$inversion test_inversion_tkd test_inversion_tsvd test_inversion_tikhonov test_inversion_tv test_inversion_rts" ;;
+              src/inversion/tkd.rs)       inversion="$inversion test_inversion_tkd test_inversion_tsvd" ;;
+              src/inversion/tikhonov.rs)  inversion="$inversion test_inversion_tikhonov" ;;
+              src/inversion/tv.rs)        inversion="$inversion test_inversion_tv" ;;
+              src/inversion/rts.rs)       inversion="$inversion test_inversion_rts" ;;
+              src/inversion/tgv.rs)       combined="$combined test_combined_tgv"; pipeline="$pipeline test_pipeline_tgv" ;;
+              src/inversion/ilsqr.rs)     pipeline="$pipeline test_pipeline_qsmart" ;;
+
+              # Brain extraction
+              src/bet/*) run_bet=true ;;
+
+              # Phase unwrapping
+              src/unwrap/mod.rs)      pipeline="$pipeline test_pipeline_tgv test_pipeline_qsmart" ;;
+              src/unwrap/romeo.rs)    pipeline="$pipeline test_pipeline_tgv" ;;
+              src/unwrap/laplacian.rs) pipeline="$pipeline test_pipeline_qsmart" ;;
+
+              # Utils (QSMART components)
+              src/utils/multi_echo.rs)
+                pipeline="$pipeline test_pipeline_tgv test_pipeline_qsmart" ;;
+              src/utils/vasculature.rs|src/utils/frangi.rs|src/utils/curvature.rs|src/utils/qsmart.rs|src/utils/bias_correction.rs)
+                pipeline="$pipeline test_pipeline_qsmart" ;;
+            esac
+          done
+
+          # Deduplicate and format as JSON arrays
+          to_json() {
+            local items
+            items=$(echo "$@" | tr ' ' '\n' | sort -u | grep -v '^$' || true)
+            if [ -z "$items" ]; then
+              echo '[]'
+              return
+            fi
+            echo "$items" | jq -R . | jq -s -c .
+          }
+
+          bgremove_json=$(to_json $bgremove)
+          inversion_json=$(to_json $inversion)
+          combined_json=$(to_json $combined)
+          pipeline_json=$(to_json $pipeline)
+
+          has_items() { [ "$1" != '[]' ] && echo true || echo false; }
+
+          echo "run_bgremove=$(has_items "$bgremove_json")" >> "$GITHUB_OUTPUT"
+          echo "bgremove_matrix=$bgremove_json" >> "$GITHUB_OUTPUT"
+          echo "run_inversion=$(has_items "$inversion_json")" >> "$GITHUB_OUTPUT"
+          echo "inversion_matrix=$inversion_json" >> "$GITHUB_OUTPUT"
+          echo "run_bet=$run_bet" >> "$GITHUB_OUTPUT"
+          echo "run_combined=$(has_items "$combined_json")" >> "$GITHUB_OUTPUT"
+          echo "combined_matrix=$combined_json" >> "$GITHUB_OUTPUT"
+          echo "run_pipeline=$(has_items "$pipeline_json")" >> "$GITHUB_OUTPUT"
+          echo "pipeline_matrix=$pipeline_json" >> "$GITHUB_OUTPUT"
+
+          echo "Selected tests:"
+          echo "  bgremove:  $bgremove_json"
+          echo "  inversion: $inversion_json"
+          echo "  bet:       $run_bet"
+          echo "  combined:  $combined_json"
+          echo "  pipeline:  $pipeline_json"
+
+  # Download test data once and cache it
   setup:
     runs-on: ubuntu-latest
     steps:
@@ -46,17 +214,13 @@ jobs:
 
   # Run each algorithm test as a separate parallel job
   bgremove-tests:
-    needs: setup
+    needs: [setup, detect-changes]
+    if: needs.detect-changes.outputs.run_bgremove == 'true'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        test:
-          - test_bgremove_sharp
-          - test_bgremove_vsharp
-          - test_bgremove_pdf
-          - test_bgremove_ismv
-          - test_bgremove_lbv
+        test: ${{ fromJSON(needs.detect-changes.outputs.bgremove_matrix) }}
     steps:
       - uses: actions/checkout@v4
 
@@ -84,25 +248,39 @@ jobs:
         run: |
           cargo test --release --test integration_tests ${{ matrix.test }} -- --ignored --nocapture 2>&1 | tee test_output.txt
 
-          # Extract metrics and write to summary
-          echo "## ${{ matrix.test }}" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
-          grep -E "(INFO|RMSE|NRMSE|Corr|completed)" test_output.txt >> $GITHUB_STEP_SUMMARY || true
-          echo '```' >> $GITHUB_STEP_SUMMARY
+      - name: Save metrics
+        if: always()
+        run: |
+          if grep -q "^RESULT:" test_output.txt 2>/dev/null; then
+            grep "^RESULT:" test_output.txt > ${{ matrix.test }}.csv
+          else
+            echo "RESULT:${{ matrix.test }},-,-,-,-,-" > ${{ matrix.test }}.csv
+          fi
+
+      - name: Upload metrics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: metrics-${{ matrix.test }}
+          path: ${{ matrix.test }}.csv
+          retention-days: 1
+
+      - name: Upload slices
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: slices-${{ matrix.test }}
+          path: slices/
+          retention-days: 1
 
   inversion-tests:
-    needs: setup
+    needs: [setup, detect-changes]
+    if: needs.detect-changes.outputs.run_inversion == 'true'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        test:
-          - test_inversion_tkd
-          - test_inversion_tsvd
-          - test_inversion_tikhonov
-          - test_inversion_tv
-          - test_inversion_rts
+        test: ${{ fromJSON(needs.detect-changes.outputs.inversion_matrix) }}
     steps:
       - uses: actions/checkout@v4
 
@@ -130,16 +308,34 @@ jobs:
         run: |
           cargo test --release --test integration_tests ${{ matrix.test }} -- --ignored --nocapture 2>&1 | tee test_output.txt
 
-          # Extract metrics and write to summary
-          echo "## ${{ matrix.test }}" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
-          grep -E "(INFO|RMSE|NRMSE|Corr|completed)" test_output.txt >> $GITHUB_STEP_SUMMARY || true
-          echo '```' >> $GITHUB_STEP_SUMMARY
+      - name: Save metrics
+        if: always()
+        run: |
+          if grep -q "^RESULT:" test_output.txt 2>/dev/null; then
+            grep "^RESULT:" test_output.txt > ${{ matrix.test }}.csv
+          else
+            echo "RESULT:${{ matrix.test }},-,-,-,-,-" > ${{ matrix.test }}.csv
+          fi
 
-  # Full benchmark produces a summary table
-  benchmark:
-    needs: [bgremove-tests, inversion-tests]
+      - name: Upload metrics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: metrics-${{ matrix.test }}
+          path: ${{ matrix.test }}.csv
+          retention-days: 1
+
+      - name: Upload slices
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: slices-${{ matrix.test }}
+          path: slices/
+          retention-days: 1
+
+  bet-test:
+    needs: [setup, detect-changes]
+    if: needs.detect-changes.outputs.run_bet == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -164,14 +360,527 @@ jobs:
             target/
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
-      - name: Run full benchmark
+      - name: Run test_bet
         run: |
-          cargo test --release --test integration_tests benchmark_all_algorithms -- --ignored --nocapture 2>&1 | tee benchmark_output.txt
+          cargo test --release --test integration_tests test_bet -- --ignored --nocapture 2>&1 | tee test_output.txt
 
-      - name: Generate summary
+      - name: Save metrics
+        if: always()
         run: |
-          echo "# QSM-Core Benchmark Results" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
-          cat benchmark_output.txt | grep -E "(^=|^-|Method|SHARP|V-SHARP|PDF|iSMV|LBV|TKD|TSVD|Tikhonov|TV-ADMM|RTS|BACKGROUND|DIPOLE|Volume)" >> $GITHUB_STEP_SUMMARY || true
-          echo '```' >> $GITHUB_STEP_SUMMARY
+          if grep -q "^RESULT:" test_output.txt 2>/dev/null; then
+            grep "^RESULT:" test_output.txt > test_bet.csv
+          else
+            echo "RESULT:BET,-,-,-,-,-" > test_bet.csv
+          fi
+
+      - name: Upload metrics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: metrics-test_bet
+          path: test_bet.csv
+          retention-days: 1
+
+      - name: Upload slices
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: slices-test_bet
+          path: slices/
+          retention-days: 1
+
+  combined-tests:
+    needs: [setup, detect-changes]
+    if: needs.detect-changes.outputs.run_combined == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        test: ${{ fromJSON(needs.detect-changes.outputs.combined_matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download test data
+        uses: actions/download-artifact@v4
+        with:
+          name: test-data
+          path: bids
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Run ${{ matrix.test }}
+        timeout-minutes: 30
+        run: |
+          cargo test --release --test integration_tests ${{ matrix.test }} -- --ignored --nocapture 2>&1 | tee test_output.txt
+
+      - name: Save metrics
+        if: always()
+        run: |
+          if grep -q "^RESULT:" test_output.txt 2>/dev/null; then
+            grep "^RESULT:" test_output.txt > ${{ matrix.test }}.csv
+          else
+            echo "RESULT:${{ matrix.test }},-,-,-,-,-" > ${{ matrix.test }}.csv
+          fi
+
+      - name: Upload metrics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: metrics-${{ matrix.test }}
+          path: ${{ matrix.test }}.csv
+          retention-days: 1
+
+      - name: Upload slices
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: slices-${{ matrix.test }}
+          path: slices/
+          retention-days: 1
+
+  pipeline-tests:
+    needs: [setup, detect-changes]
+    if: needs.detect-changes.outputs.run_pipeline == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        test: ${{ fromJSON(needs.detect-changes.outputs.pipeline_matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download test data
+        uses: actions/download-artifact@v4
+        with:
+          name: test-data
+          path: bids
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Run ${{ matrix.test }}
+        timeout-minutes: 30
+        run: |
+          cargo test --release --test integration_tests ${{ matrix.test }} -- --ignored --nocapture 2>&1 | tee test_output.txt
+
+      - name: Save metrics
+        if: always()
+        run: |
+          if grep -q "^RESULT:" test_output.txt 2>/dev/null; then
+            grep "^RESULT:" test_output.txt > ${{ matrix.test }}.csv
+          else
+            echo "RESULT:${{ matrix.test }},-,-,-,-,-" > ${{ matrix.test }}.csv
+          fi
+
+      - name: Upload metrics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: metrics-${{ matrix.test }}
+          path: ${{ matrix.test }}.csv
+          retention-days: 1
+
+      - name: Upload slices
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: slices-${{ matrix.test }}
+          path: slices/
+          retention-days: 1
+
+  # Gate check for branch protection — fails if any test job fails,
+  # but allows skipped jobs (no relevant changes).
+  # Add "tests-passed" as a required status check in branch protection rules.
+  tests-passed:
+    needs: [bgremove-tests, inversion-tests, bet-test, combined-tests, pipeline-tests]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check results
+        run: |
+          for result in \
+            "${{ needs.bgremove-tests.result }}" \
+            "${{ needs.inversion-tests.result }}" \
+            "${{ needs.bet-test.result }}" \
+            "${{ needs.combined-tests.result }}" \
+            "${{ needs.pipeline-tests.result }}"; do
+            if [ "$result" = "failure" ] || [ "$result" = "cancelled" ]; then
+              echo "Test job failed or was cancelled: $result"
+              exit 1
+            fi
+          done
+          echo "All tests passed or were skipped"
+
+  # Collect metrics from all parallel jobs and produce a single summary
+  summary:
+    needs: [bgremove-tests, inversion-tests, bet-test, combined-tests, pipeline-tests]
+    if: >-
+      always() &&
+      !(needs.bgremove-tests.result == 'skipped' &&
+        needs.inversion-tests.result == 'skipped' &&
+        needs.bet-test.result == 'skipped' &&
+        needs.combined-tests.result == 'skipped' &&
+        needs.pipeline-tests.result == 'skipped')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all metrics
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          pattern: metrics-*
+          merge-multiple: true
+          path: metrics
+
+      - name: Download all slices
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          pattern: slices-*
+          merge-multiple: true
+          path: slices
+
+      - name: Ensure directories exist
+        run: mkdir -p metrics slices figures
+
+      - name: Generate metrics summary
+        run: |
+          {
+            echo "# QSM-Core Integration Test Results"
+            echo ""
+
+            # Background Field Removal
+            has_bgremove=false
+            for test in sharp vsharp pdf ismv lbv; do
+              [ -f "metrics/test_bgremove_${test}.csv" ] && has_bgremove=true
+            done
+            if [ "$has_bgremove" = true ]; then
+              echo "## Background Field Removal"
+              echo "*Compared against ground truth local field map*"
+              echo ""
+              echo "| Method | RMSE | NRMSE | Correlation | XSIM | Time |"
+              echo "|--------|------|-------|-------------|------|------|"
+              for test in sharp vsharp pdf ismv lbv; do
+                file="metrics/test_bgremove_${test}.csv"
+                if [ -f "$file" ]; then
+                  line=$(sed 's/^RESULT://' "$file")
+                  IFS=',' read -r name rmse nrmse corr xsim time <<< "$line"
+                  if [ "$rmse" = "-" ]; then
+                    echo "| ${name} | :x: Failed | - | - | - | - |"
+                  else
+                    time_fmt=$(printf "%.2fs" "$time")
+                    echo "| ${name} | ${rmse} | ${nrmse} | ${corr} | ${xsim} | ${time_fmt} |"
+                  fi
+                fi
+              done
+              echo ""
+            fi
+
+            # Dipole Inversion
+            has_inversion=false
+            for test in tkd tsvd tikhonov tv rts; do
+              [ -f "metrics/test_inversion_${test}.csv" ] && has_inversion=true
+            done
+            if [ "$has_inversion" = true ]; then
+              echo "## Dipole Inversion"
+              echo "*Compared against ground truth susceptibility map*"
+              echo ""
+              echo "| Method | RMSE | NRMSE | Correlation | XSIM | Time |"
+              echo "|--------|------|-------|-------------|------|------|"
+              for test in tkd tsvd tikhonov tv rts; do
+                file="metrics/test_inversion_${test}.csv"
+                if [ -f "$file" ]; then
+                  line=$(sed 's/^RESULT://' "$file")
+                  IFS=',' read -r name rmse nrmse corr xsim time <<< "$line"
+                  if [ "$rmse" = "-" ]; then
+                    echo "| ${name} | :x: Failed | - | - | - | - |"
+                  else
+                    time_fmt=$(printf "%.2fs" "$time")
+                    echo "| ${name} | ${rmse} | ${nrmse} | ${corr} | ${xsim} | ${time_fmt} |"
+                  fi
+                fi
+              done
+              echo ""
+            fi
+
+            # Brain Extraction
+            if [ -f "metrics/test_bet.csv" ]; then
+              echo "## Brain Extraction"
+              echo "*Compared against ground truth mask*"
+              echo ""
+              echo "| Method | Dice | Time |"
+              echo "|--------|------|------|"
+              file="metrics/test_bet.csv"
+              line=$(sed 's/^RESULT://' "$file")
+              IFS=',' read -r name dice _nrmse _corr _xsim time <<< "$line"
+              if [ "$dice" = "-" ]; then
+                echo "| ${name} | :x: Failed | - |"
+              else
+                time_fmt=$(printf "%.2fs" "$time")
+                echo "| ${name} | ${dice} | ${time_fmt} |"
+              fi
+              echo ""
+            fi
+
+            # Combined Background Removal + Dipole Inversion
+            has_combined=false
+            for test in tgv; do
+              [ -f "metrics/test_combined_${test}.csv" ] && has_combined=true
+            done
+            if [ "$has_combined" = true ]; then
+              echo "## Combined Background Removal + Dipole Inversion"
+              echo "*Compared against ground truth susceptibility map (input: total field map)*"
+              echo ""
+              echo "| Method | RMSE | NRMSE | Correlation | XSIM | Time |"
+              echo "|--------|------|-------|-------------|------|------|"
+              for test in tgv; do
+                file="metrics/test_combined_${test}.csv"
+                if [ -f "$file" ]; then
+                  line=$(sed 's/^RESULT://' "$file")
+                  IFS=',' read -r name rmse nrmse corr xsim time <<< "$line"
+                  if [ "$rmse" = "-" ]; then
+                    echo "| ${name} | :x: Failed | - | - | - | - |"
+                  else
+                    time_fmt=$(printf "%.2fs" "$time")
+                    echo "| ${name} | ${rmse} | ${nrmse} | ${corr} | ${xsim} | ${time_fmt} |"
+                  fi
+                fi
+              done
+              echo ""
+            fi
+
+            # Full Pipeline
+            has_pipeline=false
+            for test in tgv qsmart; do
+              [ -f "metrics/test_pipeline_${test}.csv" ] && has_pipeline=true
+            done
+            if [ "$has_pipeline" = true ]; then
+              echo "## Full Pipeline"
+              echo "*Compared against ground truth susceptibility map*"
+              echo ""
+              echo "| Method | RMSE | NRMSE | Correlation | XSIM | Time |"
+              echo "|--------|------|-------|-------------|------|------|"
+              for test in tgv qsmart; do
+                file="metrics/test_pipeline_${test}.csv"
+                if [ -f "$file" ]; then
+                  line=$(sed 's/^RESULT://' "$file")
+                  IFS=',' read -r name rmse nrmse corr xsim time <<< "$line"
+                  if [ "$rmse" = "-" ]; then
+                    echo "| ${name} | :x: Failed | - | - | - | - |"
+                  else
+                    time_fmt=$(printf "%.2fs" "$time")
+                    echo "| ${name} | ${rmse} | ${nrmse} | ${corr} | ${xsim} | ${time_fmt} |"
+                  fi
+                fi
+              done
+              echo ""
+            fi
+          } >> $GITHUB_STEP_SUMMARY
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Render figures
+        continue-on-error: true
+        run: |
+          if [ -n "$(ls slices/ 2>/dev/null)" ]; then
+            pip install matplotlib numpy
+            python scripts/render_slices.py slices figures
+          fi
+
+      - name: Setup CML
+        uses: iterative/setup-cml@v3
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Post PR comment with results
+        if: github.event_name == 'pull_request'
+        env:
+          REPO_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          {
+            echo "## QSM-Core Integration Test Results"
+            echo ""
+
+            # Background Field Removal table + figures
+            has_bgremove=false
+            for test in sharp vsharp pdf ismv lbv; do
+              [ -f "metrics/test_bgremove_${test}.csv" ] && has_bgremove=true
+            done
+            if [ "$has_bgremove" = true ]; then
+              echo "### Background Field Removal"
+              echo "*Compared against ground truth local field map*"
+              echo ""
+              echo "| Method | RMSE | NRMSE | Correlation | XSIM | Time |"
+              echo "|--------|------|-------|-------------|------|------|"
+              for test in sharp vsharp pdf ismv lbv; do
+                file="metrics/test_bgremove_${test}.csv"
+                if [ -f "$file" ]; then
+                  line=$(sed 's/^RESULT://' "$file")
+                  IFS=',' read -r name rmse nrmse corr xsim time <<< "$line"
+                  if [ "$rmse" = "-" ]; then
+                    echo "| ${name} | :x: Failed | - | - | - | - |"
+                  else
+                    time_fmt=$(printf "%.2fs" "$time")
+                    echo "| ${name} | ${rmse} | ${nrmse} | ${corr} | ${xsim} | ${time_fmt} |"
+                  fi
+                fi
+              done
+              echo ""
+              for slug in bgremove_sharp bgremove_vsharp bgremove_pdf bgremove_ismv bgremove_lbv; do
+                if [ -f "figures/${slug}.png" ]; then
+                  echo "![${slug}](figures/${slug}.png)"
+                  echo ""
+                fi
+              done
+            fi
+
+            # Dipole Inversion table + figures
+            has_inversion=false
+            for test in tkd tsvd tikhonov tv rts; do
+              [ -f "metrics/test_inversion_${test}.csv" ] && has_inversion=true
+            done
+            if [ "$has_inversion" = true ]; then
+              echo "### Dipole Inversion"
+              echo "*Compared against ground truth susceptibility map*"
+              echo ""
+              echo "| Method | RMSE | NRMSE | Correlation | XSIM | Time |"
+              echo "|--------|------|-------|-------------|------|------|"
+              for test in tkd tsvd tikhonov tv rts; do
+                file="metrics/test_inversion_${test}.csv"
+                if [ -f "$file" ]; then
+                  line=$(sed 's/^RESULT://' "$file")
+                  IFS=',' read -r name rmse nrmse corr xsim time <<< "$line"
+                  if [ "$rmse" = "-" ]; then
+                    echo "| ${name} | :x: Failed | - | - | - | - |"
+                  else
+                    time_fmt=$(printf "%.2fs" "$time")
+                    echo "| ${name} | ${rmse} | ${nrmse} | ${corr} | ${xsim} | ${time_fmt} |"
+                  fi
+                fi
+              done
+              echo ""
+              for slug in inversion_tkd inversion_tsvd inversion_tikhonov inversion_tv inversion_rts; do
+                if [ -f "figures/${slug}.png" ]; then
+                  echo "![${slug}](figures/${slug}.png)"
+                  echo ""
+                fi
+              done
+            fi
+
+            # Brain Extraction
+            if [ -f "metrics/test_bet.csv" ]; then
+              echo "### Brain Extraction"
+              echo "*Compared against ground truth mask*"
+              echo ""
+              echo "| Method | Dice | Time |"
+              echo "|--------|------|------|"
+              file="metrics/test_bet.csv"
+              line=$(sed 's/^RESULT://' "$file")
+              IFS=',' read -r name dice _nrmse _corr _xsim time <<< "$line"
+              if [ "$dice" = "-" ]; then
+                echo "| ${name} | :x: Failed | - |"
+              else
+                time_fmt=$(printf "%.2fs" "$time")
+                echo "| ${name} | ${dice} | ${time_fmt} |"
+              fi
+              echo ""
+              if [ -f "figures/bet.png" ]; then
+                echo "![bet](figures/bet.png)"
+                echo ""
+              fi
+            fi
+
+            # Combined Background Removal + Dipole Inversion table + figures
+            has_combined=false
+            for test in tgv; do
+              [ -f "metrics/test_combined_${test}.csv" ] && has_combined=true
+            done
+            if [ "$has_combined" = true ]; then
+              echo "### Combined Background Removal + Dipole Inversion"
+              echo "*Compared against ground truth susceptibility map (input: total field map)*"
+              echo ""
+              echo "| Method | RMSE | NRMSE | Correlation | XSIM | Time |"
+              echo "|--------|------|-------|-------------|------|------|"
+              for test in tgv; do
+                file="metrics/test_combined_${test}.csv"
+                if [ -f "$file" ]; then
+                  line=$(sed 's/^RESULT://' "$file")
+                  IFS=',' read -r name rmse nrmse corr xsim time <<< "$line"
+                  if [ "$rmse" = "-" ]; then
+                    echo "| ${name} | :x: Failed | - | - | - | - |"
+                  else
+                    time_fmt=$(printf "%.2fs" "$time")
+                    echo "| ${name} | ${rmse} | ${nrmse} | ${corr} | ${xsim} | ${time_fmt} |"
+                  fi
+                fi
+              done
+              echo ""
+              for slug in combined_tgv; do
+                if [ -f "figures/${slug}.png" ]; then
+                  echo "![${slug}](figures/${slug}.png)"
+                  echo ""
+                fi
+              done
+            fi
+
+            # Full Pipeline table + figures
+            has_pipeline=false
+            for test in tgv qsmart; do
+              [ -f "metrics/test_pipeline_${test}.csv" ] && has_pipeline=true
+            done
+            if [ "$has_pipeline" = true ]; then
+              echo "### Full Pipeline"
+              echo "*Compared against ground truth susceptibility map*"
+              echo ""
+              echo "| Method | RMSE | NRMSE | Correlation | XSIM | Time |"
+              echo "|--------|------|-------|-------------|------|------|"
+              for test in tgv qsmart; do
+                file="metrics/test_pipeline_${test}.csv"
+                if [ -f "$file" ]; then
+                  line=$(sed 's/^RESULT://' "$file")
+                  IFS=',' read -r name rmse nrmse corr xsim time <<< "$line"
+                  if [ "$rmse" = "-" ]; then
+                    echo "| ${name} | :x: Failed | - | - | - | - |"
+                  else
+                    time_fmt=$(printf "%.2fs" "$time")
+                    echo "| ${name} | ${rmse} | ${nrmse} | ${corr} | ${xsim} | ${time_fmt} |"
+                  fi
+                fi
+              done
+              echo ""
+              for slug in pipeline_tgv pipeline_qsmart; do
+                if [ -f "figures/${slug}.png" ]; then
+                  echo "![${slug}](figures/${slug}.png)"
+                  echo ""
+                fi
+              done
+            fi
+          } > report.md
+          cml comment create report.md

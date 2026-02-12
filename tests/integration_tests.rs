@@ -8,7 +8,17 @@ mod common;
 use std::time::Instant;
 use common::{TestData, TestResult};
 use qsm_core::bgremove;
+use qsm_core::bgremove::{sdf, SdfParams};
+use qsm_core::bet;
 use qsm_core::inversion;
+use qsm_core::inversion::{tgv_qsm, TgvParams, get_default_iterations, ilsqr_simple};
+use qsm_core::unwrap::laplacian_unwrap;
+use qsm_core::utils::{
+    mcpc3ds_b0_pipeline, B0WeightType,
+    multi_echo_linear_fit, field_to_hz,
+    generate_vasculature_mask, VasculatureParams,
+    adjust_offset,
+};
 
 /// Helper macro to run an algorithm with timing and logging
 macro_rules! run_timed {
@@ -43,8 +53,10 @@ fn test_bgremove_sharp() {
         0.05,  // threshold
     ));
 
-    let res = TestResult::new("SHARP", &result, &data.fieldmap_local, &data.mask);
+    let res = TestResult::new("SHARP", &result, &data.fieldmap_local, &data.mask, data.dims);
     res.print_with_time(elapsed);
+    res.print_ci_metrics(elapsed);
+    common::save_center_slices(&result, &data.mask, data.dims, "bgremove_sharp");
 
     assert!(res.nrmse < 0.5, "SHARP NRMSE too high: {}", res.nrmse);
     assert!(res.correlation > 0.7, "SHARP correlation too low: {}", res.correlation);
@@ -70,8 +82,10 @@ fn test_bgremove_vsharp() {
         0.05,  // threshold
     ));
 
-    let res = TestResult::new("V-SHARP", &result, &data.fieldmap_local, &data.mask);
+    let res = TestResult::new("V-SHARP", &result, &data.fieldmap_local, &data.mask, data.dims);
     res.print_with_time(elapsed);
+    res.print_ci_metrics(elapsed);
+    common::save_center_slices(&result, &data.mask, data.dims, "bgremove_vsharp");
 
     assert!(res.nrmse < 0.5, "V-SHARP NRMSE too high: {}", res.nrmse);
     assert!(res.correlation > 0.7, "V-SHARP correlation too low: {}", res.correlation);
@@ -95,8 +109,10 @@ fn test_bgremove_pdf() {
         100,   // max iterations
     ));
 
-    let res = TestResult::new("PDF", &result, &data.fieldmap_local, &data.mask);
+    let res = TestResult::new("PDF", &result, &data.fieldmap_local, &data.mask, data.dims);
     res.print_with_time(elapsed);
+    res.print_ci_metrics(elapsed);
+    common::save_center_slices(&result, &data.mask, data.dims, "bgremove_pdf");
 
     assert!(res.nrmse < 0.5, "PDF NRMSE too high: {}", res.nrmse);
     assert!(res.correlation > 0.7, "PDF correlation too low: {}", res.correlation);
@@ -120,8 +136,10 @@ fn test_bgremove_ismv() {
         50,    // max iterations
     ));
 
-    let res = TestResult::new("iSMV", &result, &data.fieldmap_local, &data.mask);
+    let res = TestResult::new("iSMV", &result, &data.fieldmap_local, &data.mask, data.dims);
     res.print_with_time(elapsed);
+    res.print_ci_metrics(elapsed);
+    common::save_center_slices(&result, &data.mask, data.dims, "bgremove_ismv");
 
     assert!(res.nrmse < 0.5, "iSMV NRMSE too high: {}", res.nrmse);
     assert!(res.correlation > 0.7, "iSMV correlation too low: {}", res.correlation);
@@ -144,8 +162,10 @@ fn test_bgremove_lbv() {
         100,   // max iterations
     ));
 
-    let res = TestResult::new("LBV", &result, &data.fieldmap_local, &data.mask);
+    let res = TestResult::new("LBV", &result, &data.fieldmap_local, &data.mask, data.dims);
     res.print_with_time(elapsed);
+    res.print_ci_metrics(elapsed);
+    common::save_center_slices(&result, &data.mask, data.dims, "bgremove_lbv");
 
     assert!(res.nrmse < 0.5, "LBV NRMSE too high: {}", res.nrmse);
     assert!(res.correlation > 0.7, "LBV correlation too low: {}", res.correlation);
@@ -172,8 +192,10 @@ fn test_inversion_tkd() {
         0.2,  // threshold
     ));
 
-    let res = TestResult::new("TKD", &result, &data.chi, &data.mask);
+    let res = TestResult::new("TKD", &result, &data.chi, &data.mask, data.dims);
     res.print_with_time(elapsed);
+    res.print_ci_metrics(elapsed);
+    common::save_center_slices(&result, &data.mask, data.dims, "inversion_tkd");
 
     assert!(res.nrmse < 0.5, "TKD NRMSE too high: {}", res.nrmse);
     assert!(res.correlation > 0.7, "TKD correlation too low: {}", res.correlation);
@@ -196,8 +218,10 @@ fn test_inversion_tsvd() {
         0.2,  // threshold
     ));
 
-    let res = TestResult::new("TSVD", &result, &data.chi, &data.mask);
+    let res = TestResult::new("TSVD", &result, &data.chi, &data.mask, data.dims);
     res.print_with_time(elapsed);
+    res.print_ci_metrics(elapsed);
+    common::save_center_slices(&result, &data.mask, data.dims, "inversion_tsvd");
 
     assert!(res.nrmse < 0.5, "TSVD NRMSE too high: {}", res.nrmse);
     assert!(res.correlation > 0.7, "TSVD correlation too low: {}", res.correlation);
@@ -221,8 +245,10 @@ fn test_inversion_tikhonov() {
         inversion::tikhonov::Regularization::Gradient,
     ));
 
-    let res = TestResult::new("Tikhonov", &result, &data.chi, &data.mask);
+    let res = TestResult::new("Tikhonov", &result, &data.chi, &data.mask, data.dims);
     res.print_with_time(elapsed);
+    res.print_ci_metrics(elapsed);
+    common::save_center_slices(&result, &data.mask, data.dims, "inversion_tikhonov");
 
     assert!(res.nrmse < 0.5, "Tikhonov NRMSE too high: {}", res.nrmse);
     assert!(res.correlation > 0.7, "Tikhonov correlation too low: {}", res.correlation);
@@ -242,14 +268,16 @@ fn test_inversion_tv() {
         nx, ny, nz,
         vsx, vsy, vsz,
         data.b0_dir,
-        1e-4,  // lambda
-        1.0,   // rho
-        1e-4,  // tolerance
-        50,    // max iterations
+        1e-3,  // lambda
+        0.1,   // rho (= 100 * lambda)
+        1e-3,  // tolerance
+        250,   // max iterations
     ));
 
-    let res = TestResult::new("TV-ADMM", &result, &data.chi, &data.mask);
+    let res = TestResult::new("TV-ADMM", &result, &data.chi, &data.mask, data.dims);
     res.print_with_time(elapsed);
+    res.print_ci_metrics(elapsed);
+    common::save_center_slices(&result, &data.mask, data.dims, "inversion_tv");
 
     assert!(res.nrmse < 0.5, "TV-ADMM NRMSE too high: {}", res.nrmse);
     assert!(res.correlation > 0.7, "TV-ADMM correlation too low: {}", res.correlation);
@@ -269,19 +297,378 @@ fn test_inversion_rts() {
         nx, ny, nz,
         vsx, vsy, vsz,
         data.b0_dir,
-        0.2,   // delta (threshold)
-        1e-3,  // mu
-        1.0,   // rho
-        1e-4,  // tolerance
-        50,    // max iterations
-        20,    // lsmr iterations
+        0.15,  // delta (threshold)
+        1e5,   // mu
+        10.0,  // rho
+        1e-2,  // tolerance
+        20,    // max iterations
+        4,     // lsmr iterations
     ));
 
-    let res = TestResult::new("RTS", &result, &data.chi, &data.mask);
+    let res = TestResult::new("RTS", &result, &data.chi, &data.mask, data.dims);
     res.print_with_time(elapsed);
+    res.print_ci_metrics(elapsed);
+    common::save_center_slices(&result, &data.mask, data.dims, "inversion_rts");
 
     assert!(res.nrmse < 0.5, "RTS NRMSE too high: {}", res.nrmse);
     assert!(res.correlation > 0.7, "RTS correlation too low: {}", res.correlation);
+}
+
+// ============================================================================
+// Brain Extraction (BET) Test
+// ============================================================================
+
+#[test]
+#[ignore]
+fn test_bet() {
+    println!("[INFO] Loading test data...");
+    let data = TestData::load().expect("Failed to load test data");
+    let (nx, ny, nz) = data.dims;
+    let (vsx, vsy, vsz) = data.voxel_size;
+
+    let (predicted_mask, elapsed) = run_timed!("BET", bet::run_bet(
+        &data.mag_echoes[0],
+        nx, ny, nz,
+        vsx, vsy, vsz,
+        0.5,   // fractional_intensity
+        1.0,   // smoothness_factor
+        0.0,   // gradient_threshold
+        1000,  // iterations
+        4,     // subdivisions
+    ));
+
+    let dice = common::dice_coefficient(&predicted_mask, &data.mask);
+    println!("BET             Dice={:.4}      {:>10.2?}", dice, elapsed);
+    println!("RESULT:BET,{:.6},-,-,{:.2}", dice, elapsed.as_secs_f64());
+
+    // Save slices: result = predicted mask as f64, mask overlay = ground truth
+    let predicted_f64: Vec<f64> = predicted_mask.iter().map(|&v| v as f64).collect();
+    common::save_center_slices(&predicted_f64, &data.mask, data.dims, "bet");
+
+    assert!(dice > 0.7, "BET Dice coefficient too low: {}", dice);
+}
+
+// ============================================================================
+// Combined Background Removal + Dipole Inversion Tests
+// ============================================================================
+
+#[test]
+#[ignore]
+fn test_combined_tgv() {
+    println!("[INFO] Loading test data...");
+    let data = TestData::load().expect("Failed to load test data");
+    let (nx, ny, nz) = data.dims;
+    let (vsx, vsy, vsz) = data.voxel_size;
+
+    let start = Instant::now();
+
+    // Convert total field map from ppm to phase (radians) for TGV
+    // phase = fieldmap_ppm × 2π × TE × B0 × γ
+    // where γ = 42.5781 Hz/T (matches TGV's internal scaling constant)
+    // The specific TE and B0 values are arbitrary — the ppm→rad→ppm round-trip
+    // cancels out as long as TGV receives the same values.
+    let te = data.echo_times[0] as f32; // seconds
+    let b0 = data.field_strength as f32; // Tesla
+    let gamma = 42.5781_f32; // Hz/T
+    let ppm_to_rad = 2.0 * std::f32::consts::PI * te * b0 * gamma;
+
+    let phase_for_tgv: Vec<f32> = data.fieldmap.iter()
+        .map(|&ppm| (ppm as f32) * ppm_to_rad)
+        .collect();
+
+    // Run TGV with same TE and field strength so internal scaling inverts correctly
+    let step_size = 3.0_f32;
+    let res_tgv = (vsx as f32, vsy as f32, vsz as f32);
+    let iterations = get_default_iterations(res_tgv, step_size);
+    println!("[INFO] TGV iterations (auto): {}", iterations);
+    let tgv_params = TgvParams {
+        alpha0: 0.002,
+        alpha1: 0.003,
+        iterations,
+        erosions: 3,
+        step_size,
+        fieldstrength: b0,
+        te,
+        tol: 1e-5,
+    };
+
+    println!("[INFO] Running TGV (from total field map)...");
+    let result_f32 = tgv_qsm(
+        &phase_for_tgv,
+        &data.mask,
+        nx, ny, nz,
+        vsx as f32, vsy as f32, vsz as f32,
+        &tgv_params,
+        (data.b0_dir.0 as f32, data.b0_dir.1 as f32, data.b0_dir.2 as f32),
+    );
+
+    let elapsed = start.elapsed();
+
+    // TGV output is already in ppm
+    let result: Vec<f64> = result_f32.iter().map(|&v| v as f64).collect();
+
+    let res = TestResult::new("TGV (from field)", &result, &data.chi, &data.mask, data.dims);
+    res.print_with_time(elapsed);
+    res.print_ci_metrics(elapsed);
+    common::save_center_slices(&result, &data.mask, data.dims, "combined_tgv");
+
+    assert!(res.nrmse < 0.8, "TGV NRMSE too high: {}", res.nrmse);
+    assert!(res.correlation > 0.5, "TGV correlation too low: {}", res.correlation);
+}
+
+// ============================================================================
+// Pipeline Tests (TGV, QSMART)
+// ============================================================================
+
+#[test]
+#[ignore]
+fn test_pipeline_tgv() {
+    println!("[INFO] Loading test data...");
+    let data = TestData::load().expect("Failed to load test data");
+    let (nx, ny, nz) = data.dims;
+    let (vsx, vsy, vsz) = data.voxel_size;
+
+    let start = Instant::now();
+
+    // Step 1: MCPC-3D-S phase offset removal + ROMEO unwrapping + B0 estimation
+    // (matching qsmbly's default TGV pipeline exactly)
+    //   - sigma = [10, 10, 5] voxels (qsmbly default)
+    //   - B0 weight type = PhaseSNR (mag * TE, qsmbly default)
+    //   - Internally: MCPC-3D-S offset correction → ROMEO unwrap per echo → echo
+    //     alignment → weighted B0 averaging → B0 in Hz
+    let tes_ms: Vec<f64> = data.echo_times.iter().map(|&t| t * 1000.0).collect();
+    println!("[INFO] Running MCPC-3D-S + ROMEO + B0 estimation...");
+    let (b0_hz, _phase_offset, _corrected_phases) = mcpc3ds_b0_pipeline(
+        &data.phase_echoes,
+        &data.mag_echoes,
+        &tes_ms,  // milliseconds (calculate_b0_weighted uses 1000/2π scale)
+        &data.mask,
+        [10.0, 10.0, 5.0],  // sigma in voxels (qsmbly default)
+        B0WeightType::PhaseSNR,
+        nx, ny, nz,
+    );
+
+    // Step 2: Convert B0 (Hz) to single-echo phase (radians) for TGV
+    // phase = 2π × B0_Hz × TE_seconds
+    let te_for_tgv = data.echo_times[0]; // seconds
+    let phase_for_tgv: Vec<f32> = b0_hz.iter()
+        .map(|&hz| (hz * 2.0 * std::f64::consts::PI * te_for_tgv) as f32)
+        .collect();
+
+    // Step 3: Run TGV
+    // Parameters match qsmbly/Julia defaults: regularization=2 → alpha0=0.002, alpha1=0.003
+    let step_size = 3.0_f32;
+    let res_tgv = (vsx as f32, vsy as f32, vsz as f32);
+    let iterations = get_default_iterations(res_tgv, step_size);
+    println!("[INFO] TGV iterations (auto): {}", iterations);
+    let tgv_params = TgvParams {
+        alpha0: 0.002,
+        alpha1: 0.003,
+        iterations,
+        erosions: 3,
+        step_size,
+        fieldstrength: data.field_strength as f32,
+        te: te_for_tgv as f32,
+        tol: 1e-5,
+    };
+
+    println!("[INFO] Running TGV...");
+    let result_f32 = tgv_qsm(
+        &phase_for_tgv,
+        &data.mask,
+        nx, ny, nz,
+        vsx as f32, vsy as f32, vsz as f32,
+        &tgv_params,
+        (data.b0_dir.0 as f32, data.b0_dir.1 as f32, data.b0_dir.2 as f32),
+    );
+
+    let elapsed = start.elapsed();
+
+    // TGV output is already in ppm — convert f32 to f64 for comparison
+    let result: Vec<f64> = result_f32.iter().map(|&v| v as f64).collect();
+
+    let res = TestResult::new("TGV", &result, &data.chi, &data.mask, data.dims);
+    res.print_with_time(elapsed);
+    res.print_ci_metrics(elapsed);
+    common::save_center_slices(&result, &data.mask, data.dims, "pipeline_tgv");
+
+    assert!(res.nrmse < 0.8, "TGV NRMSE too high: {}", res.nrmse);
+    assert!(res.correlation > 0.5, "TGV correlation too low: {}", res.correlation);
+}
+
+#[test]
+#[ignore]
+fn test_pipeline_qsmart() {
+    println!("[INFO] Loading test data...");
+    let data = TestData::load().expect("Failed to load test data");
+    let (nx, ny, nz) = data.dims;
+    let (vsx, vsy, vsz) = data.voxel_size;
+    let n_total = nx * ny * nz;
+
+    let start = Instant::now();
+
+    // ========================================================================
+    // Phase unwrapping and linear fit (matching qsmbly's computeWeightedEchoFit)
+    // ========================================================================
+    println!("[INFO] Unwrapping phase echoes...");
+    let unwrapped_phases: Vec<Vec<f64>> = data.phase_echoes.iter()
+        .map(|phase| laplacian_unwrap(phase, &data.mask, nx, ny, nz, vsx, vsy, vsz))
+        .collect();
+
+    // Through-origin fit: slope = Σ(mag*phase*TE) / Σ(mag*TE²), tfs = slope/2π
+    // qsmbly uses fixed threshold 40 on box-filtered residuals for R_0;
+    // on synthetic data all voxels have low residuals, so disable R_0 here
+    println!("[INFO] Multi-echo linear fit...");
+    let fit_result = multi_echo_linear_fit(
+        &unwrapped_phases,
+        &data.mag_echoes,
+        &data.echo_times, // seconds
+        &data.mask,
+        false, // no intercept — matches qsmbly's through-origin fit
+        0.0,   // disable R_0 — synthetic data has clean fits
+    );
+
+    // Convert field from rad/s to Hz
+    let field_hz = field_to_hz(&fit_result.field);
+
+    // ========================================================================
+    // Vasculature mask generation
+    // ========================================================================
+    println!("[INFO] Generating vasculature mask...");
+    let vasc_mask = generate_vasculature_mask(
+        &data.mag_echoes[0],
+        &data.mask,
+        nx, ny, nz,
+        &VasculatureParams::default(),
+    );
+
+    // ========================================================================
+    // Mask and unit preparation (matching qsmbly)
+    // ========================================================================
+
+    // weightedMask = mask * R_0 (with R_0 disabled, equals mask)
+    let mask_f64: Vec<f64> = data.mask.iter().map(|&v| v as f64).collect();
+    let weighted_mask: Vec<f64> = mask_f64.iter()
+        .zip(fit_result.reliability_mask.iter())
+        .map(|(&m, &r)| if m > 0.0 && r > 0 { 1.0 } else { 0.0 })
+        .collect();
+
+    // PPM factors matching qsmbly:
+    //   ppmFactor = gyro_rad * B0 / 1e6  (for adjust_offset input scaling)
+    //   scaleFactor = 1e6 / (gamma_hz * B0)  (for final Hz→ppm conversion)
+    let gyro_rad: f64 = 2.675e8; // rad/s/T
+    let ppm_factor = gyro_rad * data.field_strength / 1e6;
+    let scale_to_ppm = 1e6 / (42.576e6 * data.field_strength);
+
+    // ========================================================================
+    // Stage 1: SDF + iLSQR on whole ROI
+    // ========================================================================
+    println!("[INFO] QSMART Stage 1: SDF + iLSQR (full mask)...");
+
+    let ones_vasc: Vec<f64> = vec![1.0; n_total];
+
+    // SDF operates on Hz field with weighted mask (not ppm!)
+    let lfs_stage1 = sdf(
+        &field_hz,
+        &weighted_mask,
+        &ones_vasc,
+        nx, ny, nz,
+        &SdfParams::stage1(),
+    );
+
+    let mask_stage1_u8: Vec<u8> = weighted_mask.iter()
+        .map(|&v| if v > 0.1 { 1 } else { 0 })
+        .collect();
+
+    let chi_stage1 = ilsqr_simple(
+        &lfs_stage1,
+        &mask_stage1_u8,
+        nx, ny, nz,
+        vsx, vsy, vsz,
+        data.b0_dir,
+        0.01,
+        50,
+    );
+
+    // ========================================================================
+    // Stage 2: SDF + iLSQR on tissue only
+    // ========================================================================
+    println!("[INFO] QSMART Stage 2: SDF + iLSQR (tissue only)...");
+
+    // Weight field by reliability mask (zero unreliable voxels)
+    let field_hz_weighted: Vec<f64> = field_hz.iter()
+        .zip(weighted_mask.iter())
+        .map(|(&f, &m)| f * m)
+        .collect();
+
+    // SDF stage 2: weighted_mask as mask (same as stage 1),
+    // vasc_mask as vessel param (vessel exclusion via vasc_only, not mask)
+    let lfs_stage2 = sdf(
+        &field_hz_weighted,
+        &weighted_mask,
+        &vasc_mask,
+        nx, ny, nz,
+        &SdfParams::stage2(),
+    );
+
+    // iLSQR mask: tissue-only (weighted_mask AND vasc_only)
+    let mask_stage2_u8: Vec<u8> = weighted_mask.iter()
+        .zip(vasc_mask.iter())
+        .map(|(&wm, &v)| if wm > 0.1 && v > 0.5 { 1 } else { 0 })
+        .collect();
+
+    let chi_stage2 = ilsqr_simple(
+        &lfs_stage2,
+        &mask_stage2_u8,
+        nx, ny, nz,
+        vsx, vsy, vsz,
+        data.b0_dir,
+        0.01,
+        50,
+    );
+
+    // ========================================================================
+    // Offset adjustment and final ppm scaling
+    // ========================================================================
+    println!("[INFO] QSMART offset adjustment...");
+
+    // removed_voxels = weightedMask - vascOnly (matching qsmbly)
+    let removed_voxels: Vec<f64> = weighted_mask.iter()
+        .zip(vasc_mask.iter())
+        .map(|(&wm, &v)| wm - v)
+        .collect();
+
+    // Scale lfs_stage1 to ppm for adjust_offset (matching qsmbly)
+    let lfs_stage1_ppm: Vec<f64> = lfs_stage1.iter()
+        .map(|&v| v * ppm_factor)
+        .collect();
+
+    let chi_qsmart_raw = adjust_offset(
+        &removed_voxels,
+        &lfs_stage1_ppm,
+        &chi_stage1,
+        &chi_stage2,
+        nx, ny, nz,
+        vsx, vsy, vsz,
+        data.b0_dir,
+        ppm_factor,
+    );
+
+    // Scale to ppm: χ(ppm) = χ_raw * 1e6 / (γ_Hz * B0)
+    let chi_qsmart: Vec<f64> = chi_qsmart_raw.iter()
+        .enumerate()
+        .map(|(i, &v)| if data.mask[i] > 0 { v * scale_to_ppm } else { 0.0 })
+        .collect();
+
+    let elapsed = start.elapsed();
+
+    let res = TestResult::new("QSMART", &chi_qsmart, &data.chi, &data.mask, data.dims);
+    res.print_with_time(elapsed);
+    res.print_ci_metrics(elapsed);
+    common::save_center_slices(&chi_qsmart, &data.mask, data.dims, "pipeline_qsmart");
+
+    assert!(res.nrmse < 0.8, "QSMART NRMSE too high: {}", res.nrmse);
+    assert!(res.correlation > 0.5, "QSMART correlation too low: {}", res.correlation);
 }
 
 // ============================================================================
@@ -310,80 +697,80 @@ fn benchmark_all_algorithms() {
     // -------------------------------------------------------------------------
     println!("BACKGROUND REMOVAL (vs ground truth local field)");
     println!("{}", "-".repeat(70));
-    println!("{:<15} {:>12} {:>10} {:>10} {:>12}", "Method", "RMSE", "NRMSE", "Corr", "Time");
+    println!("{:<15} {:>12} {:>10} {:>10} {:>10} {:>12}", "Method", "RMSE", "NRMSE", "Corr", "XSIM", "Time");
     println!("{}", "-".repeat(70));
 
     // SHARP
     let ((result, _), elapsed) = run_timed!("SHARP", bgremove::sharp(
         &data.fieldmap, &data.mask, nx, ny, nz, vsx, vsy, vsz, 6.0, 0.05
     ));
-    TestResult::new("SHARP", &result, &data.fieldmap_local, &data.mask).print_with_time(elapsed);
+    TestResult::new("SHARP", &result, &data.fieldmap_local, &data.mask, data.dims).print_with_time(elapsed);
 
     // V-SHARP
     let radii: Vec<f64> = (1..=12).map(|r| r as f64).collect();
     let ((result, _), elapsed) = run_timed!("V-SHARP", bgremove::vsharp(
         &data.fieldmap, &data.mask, nx, ny, nz, vsx, vsy, vsz, &radii, 0.05
     ));
-    TestResult::new("V-SHARP", &result, &data.fieldmap_local, &data.mask).print_with_time(elapsed);
+    TestResult::new("V-SHARP", &result, &data.fieldmap_local, &data.mask, data.dims).print_with_time(elapsed);
 
     // PDF
     let (result, elapsed) = run_timed!("PDF", bgremove::pdf(
         &data.fieldmap, &data.mask, nx, ny, nz, vsx, vsy, vsz, data.b0_dir, 1e-6, 100
     ));
-    TestResult::new("PDF", &result, &data.fieldmap_local, &data.mask).print_with_time(elapsed);
+    TestResult::new("PDF", &result, &data.fieldmap_local, &data.mask, data.dims).print_with_time(elapsed);
 
     // iSMV
     let ((result, _), elapsed) = run_timed!("iSMV", bgremove::ismv(
         &data.fieldmap, &data.mask, nx, ny, nz, vsx, vsy, vsz, 5.0, 1e-6, 50
     ));
-    TestResult::new("iSMV", &result, &data.fieldmap_local, &data.mask).print_with_time(elapsed);
+    TestResult::new("iSMV", &result, &data.fieldmap_local, &data.mask, data.dims).print_with_time(elapsed);
 
     // LBV
     let ((result, _), elapsed) = run_timed!("LBV", bgremove::lbv(
         &data.fieldmap, &data.mask, nx, ny, nz, vsx, vsy, vsz, 1e-6, 100
     ));
-    TestResult::new("LBV", &result, &data.fieldmap_local, &data.mask).print_with_time(elapsed);
+    TestResult::new("LBV", &result, &data.fieldmap_local, &data.mask, data.dims).print_with_time(elapsed);
 
     // -------------------------------------------------------------------------
     // Dipole Inversion
     // -------------------------------------------------------------------------
     println!("\nDIPOLE INVERSION (vs ground truth chi)");
     println!("{}", "-".repeat(70));
-    println!("{:<15} {:>12} {:>10} {:>10} {:>12}", "Method", "RMSE", "NRMSE", "Corr", "Time");
+    println!("{:<15} {:>12} {:>10} {:>10} {:>10} {:>12}", "Method", "RMSE", "NRMSE", "Corr", "XSIM", "Time");
     println!("{}", "-".repeat(70));
 
     // TKD
     let (result, elapsed) = run_timed!("TKD", inversion::tkd(
         &data.fieldmap_local, &data.mask, nx, ny, nz, vsx, vsy, vsz, data.b0_dir, 0.2
     ));
-    TestResult::new("TKD", &result, &data.chi, &data.mask).print_with_time(elapsed);
+    TestResult::new("TKD", &result, &data.chi, &data.mask, data.dims).print_with_time(elapsed);
 
     // TSVD
     let (result, elapsed) = run_timed!("TSVD", inversion::tsvd(
         &data.fieldmap_local, &data.mask, nx, ny, nz, vsx, vsy, vsz, data.b0_dir, 0.2
     ));
-    TestResult::new("TSVD", &result, &data.chi, &data.mask).print_with_time(elapsed);
+    TestResult::new("TSVD", &result, &data.chi, &data.mask, data.dims).print_with_time(elapsed);
 
     // Tikhonov
     let (result, elapsed) = run_timed!("Tikhonov", inversion::tikhonov(
         &data.fieldmap_local, &data.mask, nx, ny, nz, vsx, vsy, vsz,
         data.b0_dir, 1e-3, inversion::tikhonov::Regularization::Gradient
     ));
-    TestResult::new("Tikhonov", &result, &data.chi, &data.mask).print_with_time(elapsed);
+    TestResult::new("Tikhonov", &result, &data.chi, &data.mask, data.dims).print_with_time(elapsed);
 
     // TV-ADMM
     let (result, elapsed) = run_timed!("TV-ADMM", inversion::tv_admm(
         &data.fieldmap_local, &data.mask, nx, ny, nz, vsx, vsy, vsz,
-        data.b0_dir, 1e-4, 1.0, 1e-4, 50
+        data.b0_dir, 1e-3, 0.1, 1e-3, 250
     ));
-    TestResult::new("TV-ADMM", &result, &data.chi, &data.mask).print_with_time(elapsed);
+    TestResult::new("TV-ADMM", &result, &data.chi, &data.mask, data.dims).print_with_time(elapsed);
 
     // RTS
     let (result, elapsed) = run_timed!("RTS", inversion::rts(
         &data.fieldmap_local, &data.mask, nx, ny, nz, vsx, vsy, vsz,
-        data.b0_dir, 0.2, 1e-3, 1.0, 1e-4, 50, 20
+        data.b0_dir, 0.15, 1e5, 10.0, 1e-2, 20, 4
     ));
-    TestResult::new("RTS", &result, &data.chi, &data.mask).print_with_time(elapsed);
+    TestResult::new("RTS", &result, &data.chi, &data.mask, data.dims).print_with_time(elapsed);
 
     println!("\n{}", "=".repeat(70));
 }
