@@ -1,6 +1,6 @@
 [package]
 name = "qsm-core"
-version = "0.1.0"
+version = "0.0.0" # Set automatically by release workflow from git tag
 edition = "2021"
 description = "Core QSM (Quantitative Susceptibility Mapping) algorithms"
 

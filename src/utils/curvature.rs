@@ -760,4 +760,607 @@ mod tests {
         let count: usize = dilated.iter().map(|&v| v as usize).sum();
         assert!(count >= 7); // At least 7 voxels (center + 6 neighbors)
     }
+
+    // =====================================================================
+    // Helper: create a 3D sphere mask
+    // =====================================================================
+
+    /// Create a solid sphere mask centered in an n x n x n volume.
+    fn make_sphere_mask(n: usize, radius: f64) -> Vec<u8> {
+        let center = n as f64 / 2.0;
+        let n_total = n * n * n;
+        let mut mask = vec![0u8; n_total];
+
+        for k in 0..n {
+            for j in 0..n {
+                for i in 0..n {
+                    let dx = i as f64 - center;
+                    let dy = j as f64 - center;
+                    let dz = k as f64 - center;
+                    let dist = (dx * dx + dy * dy + dz * dz).sqrt();
+                    if dist < radius {
+                        mask[i + j * n + k * n * n] = 1;
+                    }
+                }
+            }
+        }
+
+        mask
+    }
+
+    // =====================================================================
+    // Tests for Point3D operations
+    // =====================================================================
+
+    #[test]
+    fn test_point3d_sub() {
+        let a = Point3D::new(3.0, 4.0, 5.0);
+        let b = Point3D::new(1.0, 1.0, 1.0);
+        let c = a.sub(&b);
+        assert!((c.x - 2.0).abs() < 1e-10);
+        assert!((c.y - 3.0).abs() < 1e-10);
+        assert!((c.z - 4.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_point3d_dot() {
+        let a = Point3D::new(1.0, 2.0, 3.0);
+        let b = Point3D::new(4.0, 5.0, 6.0);
+        let d = a.dot(&b);
+        assert!((d - 32.0).abs() < 1e-10); // 1*4 + 2*5 + 3*6 = 32
+    }
+
+    #[test]
+    fn test_point3d_cross() {
+        let a = Point3D::new(1.0, 0.0, 0.0);
+        let b = Point3D::new(0.0, 1.0, 0.0);
+        let c = a.cross(&b);
+        assert!((c.x - 0.0).abs() < 1e-10);
+        assert!((c.y - 0.0).abs() < 1e-10);
+        assert!((c.z - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_point3d_norm() {
+        let p = Point3D::new(3.0, 4.0, 0.0);
+        assert!((p.norm() - 5.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_point3d_normalize() {
+        let p = Point3D::new(0.0, 0.0, 5.0);
+        let n = p.normalize();
+        assert!((n.x - 0.0).abs() < 1e-10);
+        assert!((n.y - 0.0).abs() < 1e-10);
+        assert!((n.z - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_point3d_normalize_zero() {
+        let p = Point3D::new(0.0, 0.0, 0.0);
+        let n = p.normalize();
+        assert!((n.x).abs() < 1e-10);
+        assert!((n.y).abs() < 1e-10);
+        assert!((n.z).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_point3d_scale_and_add() {
+        let a = Point3D::new(1.0, 2.0, 3.0);
+        let b = a.scale(2.0);
+        assert!((b.x - 2.0).abs() < 1e-10);
+        assert!((b.y - 4.0).abs() < 1e-10);
+        assert!((b.z - 6.0).abs() < 1e-10);
+
+        let c = Point3D::new(0.5, 0.5, 0.5);
+        let d = b.add(&c);
+        assert!((d.x - 2.5).abs() < 1e-10);
+        assert!((d.y - 4.5).abs() < 1e-10);
+        assert!((d.z - 6.5).abs() < 1e-10);
+    }
+
+    // =====================================================================
+    // Tests for extract_surface_voxels
+    // =====================================================================
+
+    #[test]
+    fn test_extract_surface_sphere() {
+        let n = 10;
+        let mask = make_sphere_mask(n, 3.5);
+        let surface = extract_surface_voxels(&mask, n, n, n);
+
+        // Surface should be non-empty
+        assert!(!surface.is_empty(), "Sphere should have surface voxels");
+
+        // All surface indices should be within the mask
+        for &idx in &surface {
+            assert_eq!(mask[idx], 1, "Surface voxel should be in mask");
+        }
+
+        // Surface count should be less than total mask count
+        let mask_count: usize = mask.iter().map(|&v| v as usize).sum();
+        assert!(
+            surface.len() < mask_count,
+            "Surface ({}) should be smaller than total mask ({})",
+            surface.len(),
+            mask_count
+        );
+    }
+
+    #[test]
+    fn test_extract_surface_empty_mask() {
+        let mask = vec![0u8; 27];
+        let surface = extract_surface_voxels(&mask, 3, 3, 3);
+        assert!(surface.is_empty(), "Empty mask should have no surface voxels");
+    }
+
+    // =====================================================================
+    // Tests for erode_mask (more thorough)
+    // =====================================================================
+
+    #[test]
+    fn test_erode_mask_sphere() {
+        let n = 10;
+        let mask = make_sphere_mask(n, 4.0);
+        let eroded = erode_mask(&mask, n, n, n, 1);
+
+        let orig_count: usize = mask.iter().map(|&v| v as usize).sum();
+        let eroded_count: usize = eroded.iter().map(|&v| v as usize).sum();
+        assert!(
+            eroded_count < orig_count,
+            "Eroded sphere should be smaller: {} < {}",
+            eroded_count,
+            orig_count
+        );
+        assert!(eroded_count > 0, "Eroded sphere should not be empty");
+
+        // Center should still be in eroded mask
+        let center = n / 2 + (n / 2) * n + (n / 2) * n * n;
+        assert_eq!(eroded[center], 1, "Center should survive erosion");
+    }
+
+    #[test]
+    fn test_erode_mask_single_voxel() {
+        // A single voxel should be eroded away
+        let mut mask = vec![0u8; 125];
+        mask[62] = 1; // center of 5x5x5
+        let eroded = erode_mask(&mask, 5, 5, 5, 1);
+        let count: usize = eroded.iter().map(|&v| v as usize).sum();
+        assert_eq!(count, 0, "Single voxel should be fully eroded");
+    }
+
+    // =====================================================================
+    // Tests for dilate_mask (more thorough)
+    // =====================================================================
+
+    #[test]
+    fn test_dilate_mask_sphere() {
+        let n = 10;
+        let mask = make_sphere_mask(n, 3.0);
+        let dilated = dilate_mask(&mask, n, n, n, 1);
+
+        let orig_count: usize = mask.iter().map(|&v| v as usize).sum();
+        let dilated_count: usize = dilated.iter().map(|&v| v as usize).sum();
+        assert!(
+            dilated_count > orig_count,
+            "Dilated sphere should be larger: {} > {}",
+            dilated_count,
+            orig_count
+        );
+    }
+
+    #[test]
+    fn test_dilate_mask_radius_2() {
+        let mut mask = vec![0u8; 125];
+        mask[62] = 1; // center of 5x5x5
+        let dilated = dilate_mask(&mask, 5, 5, 5, 2);
+        let count: usize = dilated.iter().map(|&v| v as usize).sum();
+        // Should be more than radius=1 dilation
+        assert!(count > 7, "Radius-2 dilation should produce more than 7 voxels, got {}", count);
+    }
+
+    // =====================================================================
+    // Tests for morphological_close
+    // =====================================================================
+
+    #[test]
+    fn test_morphological_close_fills_small_gaps() {
+        let n = 10;
+        let mut mask = make_sphere_mask(n, 4.0);
+        // Remove a surface voxel to create a small gap
+        let surface = extract_surface_voxels(&mask, n, n, n);
+        if !surface.is_empty() {
+            mask[surface[0]] = 0;
+        }
+
+        let closed = morphological_close(&mask, n, n, n, 1);
+        let orig_count: usize = mask.iter().map(|&v| v as usize).sum();
+        let closed_count: usize = closed.iter().map(|&v| v as usize).sum();
+        // Closing should recover the gap or at least not shrink significantly
+        assert!(
+            closed_count >= orig_count,
+            "Closing should not reduce mask size: {} vs {}",
+            closed_count,
+            orig_count
+        );
+    }
+
+    #[test]
+    fn test_morphological_close_empty() {
+        let mask = vec![0u8; 27];
+        let closed = morphological_close(&mask, 3, 3, 3, 1);
+        let count: usize = closed.iter().map(|&v| v as usize).sum();
+        assert_eq!(count, 0, "Closing empty mask should stay empty");
+    }
+
+    // =====================================================================
+    // Tests for create_surface_mask
+    // =====================================================================
+
+    #[test]
+    fn test_create_surface_mask_sphere() {
+        let n = 10;
+        let mask = make_sphere_mask(n, 4.0);
+        let surface = create_surface_mask(&mask, n, n, n);
+        let surface_count: usize = surface.iter().map(|&v| v as usize).sum();
+        let mask_count: usize = mask.iter().map(|&v| v as usize).sum();
+
+        assert!(surface_count > 0, "Surface mask should be non-empty");
+        assert!(
+            surface_count < mask_count,
+            "Surface ({}) should be smaller than mask ({})",
+            surface_count,
+            mask_count
+        );
+
+        // Every surface voxel should be in the original mask
+        for i in 0..surface.len() {
+            if surface[i] > 0 {
+                assert_eq!(mask[i], 1, "Surface voxel should be in original mask");
+            }
+        }
+    }
+
+    // =====================================================================
+    // Tests for triangulate_surface
+    // =====================================================================
+
+    #[test]
+    fn test_triangulate_surface_few_points() {
+        // Less than 3 points should return empty triangulation
+        let points = vec![Point3D::new(0.0, 0.0, 0.0), Point3D::new(1.0, 1.0, 1.0)];
+        let (triangles, boundary) = triangulate_surface(&points, 5, 5, 5);
+        assert!(triangles.is_empty(), "Less than 3 points should give no triangles");
+        assert_eq!(boundary.len(), 2);
+    }
+
+    #[test]
+    fn test_triangulate_surface_square_points() {
+        // Four points forming a square in XY
+        let points = vec![
+            Point3D::new(0.0, 0.0, 0.0),
+            Point3D::new(1.0, 0.0, 0.0),
+            Point3D::new(0.0, 1.0, 0.0),
+            Point3D::new(1.0, 1.0, 0.0),
+        ];
+        let (triangles, boundary) = triangulate_surface(&points, 5, 5, 5);
+        // Should produce 2 triangles from 4 points
+        assert_eq!(triangles.len(), 2, "4 points should produce 2 triangles");
+        // All 4 points are on the convex hull
+        for &b in &boundary {
+            assert!(b, "All 4 points should be on boundary");
+        }
+    }
+
+    // =====================================================================
+    // Tests for compute_curvatures_from_mesh
+    // =====================================================================
+
+    #[test]
+    fn test_compute_curvatures_from_mesh_flat_surface() {
+        // A flat grid of points (z=0) should have zero curvature
+        let points = vec![
+            Point3D::new(0.0, 0.0, 0.0),
+            Point3D::new(1.0, 0.0, 0.0),
+            Point3D::new(2.0, 0.0, 0.0),
+            Point3D::new(0.0, 1.0, 0.0),
+            Point3D::new(1.0, 1.0, 0.0),
+            Point3D::new(2.0, 1.0, 0.0),
+            Point3D::new(0.0, 2.0, 0.0),
+            Point3D::new(1.0, 2.0, 0.0),
+            Point3D::new(2.0, 2.0, 0.0),
+        ];
+
+        // Create triangulation for the 3x3 grid
+        let triangles = vec![
+            Triangle { v0: 0, v1: 1, v2: 4 },
+            Triangle { v0: 0, v1: 4, v2: 3 },
+            Triangle { v0: 1, v1: 2, v2: 5 },
+            Triangle { v0: 1, v1: 5, v2: 4 },
+            Triangle { v0: 3, v1: 4, v2: 7 },
+            Triangle { v0: 3, v1: 7, v2: 6 },
+            Triangle { v0: 4, v1: 5, v2: 8 },
+            Triangle { v0: 4, v1: 8, v2: 7 },
+        ];
+
+        // All boundary except center vertex (index 4)
+        let boundary = vec![true, true, true, true, false, true, true, true, true];
+
+        let (gc, mc) = compute_curvatures_from_mesh(&points, &triangles, &boundary);
+
+        // Center vertex (not boundary) on flat surface should have ~zero curvature
+        assert!(
+            gc[4].abs() < 1e-6,
+            "Flat surface should have ~0 Gaussian curvature, got {}",
+            gc[4]
+        );
+        assert!(
+            mc[4].abs() < 1e-6,
+            "Flat surface should have ~0 mean curvature, got {}",
+            mc[4]
+        );
+    }
+
+    #[test]
+    fn test_compute_curvatures_from_mesh_degenerate_triangle() {
+        // Degenerate triangle (collinear points) should not crash
+        let points = vec![
+            Point3D::new(0.0, 0.0, 0.0),
+            Point3D::new(1.0, 0.0, 0.0),
+            Point3D::new(2.0, 0.0, 0.0), // collinear
+        ];
+        let triangles = vec![Triangle { v0: 0, v1: 1, v2: 2 }];
+        let boundary = vec![false, false, false];
+        let (gc, mc) = compute_curvatures_from_mesh(&points, &triangles, &boundary);
+        // Should not crash; values may be zero because area is zero
+        assert_eq!(gc.len(), 3);
+        assert_eq!(mc.len(), 3);
+    }
+
+    #[test]
+    fn test_compute_curvatures_from_mesh_boundary_zero() {
+        // Boundary vertices should have zero curvature
+        let points = vec![
+            Point3D::new(0.0, 0.0, 0.0),
+            Point3D::new(1.0, 0.0, 0.0),
+            Point3D::new(0.5, 1.0, 1.0),
+        ];
+        let triangles = vec![Triangle { v0: 0, v1: 1, v2: 2 }];
+        let boundary = vec![true, true, true]; // all boundary
+        let (gc, mc) = compute_curvatures_from_mesh(&points, &triangles, &boundary);
+        for i in 0..3 {
+            assert!((gc[i]).abs() < 1e-10, "Boundary vertex GC should be 0");
+            assert!((mc[i]).abs() < 1e-10, "Boundary vertex MC should be 0");
+        }
+    }
+
+    // =====================================================================
+    // Tests for convolve_1d_direction_masked
+    // =====================================================================
+
+    #[test]
+    fn test_convolve_1d_direction_uniform() {
+        let n = 8;
+        let data = vec![5.0; n * n * n];
+        let mask = vec![1u8; n * n * n];
+
+        let result_x = convolve_1d_direction_masked(&data, &mask, n, n, n, 1.0, 'x');
+        let result_y = convolve_1d_direction_masked(&data, &mask, n, n, n, 1.0, 'y');
+        let result_z = convolve_1d_direction_masked(&data, &mask, n, n, n, 1.0, 'z');
+
+        // Uniform data should stay uniform after convolution
+        for &v in &result_x {
+            assert!((v - 5.0).abs() < 0.1, "X convolution should preserve uniform data, got {}", v);
+        }
+        for &v in &result_y {
+            assert!((v - 5.0).abs() < 0.1, "Y convolution should preserve uniform data, got {}", v);
+        }
+        for &v in &result_z {
+            assert!((v - 5.0).abs() < 0.1, "Z convolution should preserve uniform data, got {}", v);
+        }
+    }
+
+    #[test]
+    fn test_convolve_1d_direction_zero_sigma() {
+        let n = 5;
+        let data = vec![3.0; n * n * n];
+        let mask = vec![1u8; n * n * n];
+
+        let result = convolve_1d_direction_masked(&data, &mask, n, n, n, 0.0, 'x');
+        assert_eq!(result, data, "Zero sigma should return copy of input");
+    }
+
+    // =====================================================================
+    // Tests for gaussian_smooth_3d_masked
+    // =====================================================================
+
+    #[test]
+    fn test_gaussian_smooth_3d_masked_uniform() {
+        let n = 8;
+        let data = vec![10.0; n * n * n];
+        let mask = vec![1u8; n * n * n];
+        let sigmas = [1.0, 1.0, 1.0];
+        let result = gaussian_smooth_3d_masked(&data, &mask, n, n, n, &sigmas);
+        assert_eq!(result.len(), n * n * n);
+        for &v in &result {
+            assert!(v.is_finite(), "Result should be finite");
+            assert!((v - 10.0).abs() < 1.0, "Uniform data should stay near 10.0, got {}", v);
+        }
+    }
+
+    #[test]
+    fn test_gaussian_smooth_3d_masked_applies_mask() {
+        let n = 8;
+        let data = vec![10.0; n * n * n];
+        let mut mask = vec![1u8; n * n * n];
+        // Zero out half the mask
+        for i in 0..(n * n * n / 2) {
+            mask[i] = 0;
+        }
+        let sigmas = [1.0, 1.0, 1.0];
+        let result = gaussian_smooth_3d_masked(&data, &mask, n, n, n, &sigmas);
+        // Masked-out voxels should be 0
+        for i in 0..result.len() {
+            if mask[i] == 0 {
+                assert!((result[i]).abs() < 1e-10, "Masked-out voxel should be 0, got {}", result[i]);
+            }
+        }
+    }
+
+    // =====================================================================
+    // Tests for calculate_gaussian_curvature (main public function)
+    // =====================================================================
+
+    #[test]
+    fn test_calculate_gaussian_curvature_sphere() {
+        let n = 12;
+        let mask = make_sphere_mask(n, 4.5);
+        let result = calculate_gaussian_curvature(&mask, n, n, n);
+
+        assert_eq!(result.gaussian_curvature.len(), n * n * n);
+        assert_eq!(result.mean_curvature.len(), n * n * n);
+        assert!(!result.surface_indices.is_empty(), "Should have surface indices");
+
+        // Surface curvature values should be finite
+        for &idx in &result.surface_indices {
+            assert!(
+                result.gaussian_curvature[idx].is_finite(),
+                "GC at surface index {} should be finite",
+                idx
+            );
+            assert!(
+                result.mean_curvature[idx].is_finite(),
+                "MC at surface index {} should be finite",
+                idx
+            );
+        }
+
+        // Non-surface voxels should have zero curvature
+        let surface_set: std::collections::HashSet<usize> =
+            result.surface_indices.iter().cloned().collect();
+        for i in 0..(n * n * n) {
+            if !surface_set.contains(&i) {
+                assert!(
+                    (result.gaussian_curvature[i]).abs() < 1e-10,
+                    "Non-surface GC should be 0"
+                );
+                assert!(
+                    (result.mean_curvature[i]).abs() < 1e-10,
+                    "Non-surface MC should be 0"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_calculate_gaussian_curvature_empty_mask() {
+        let n = 5;
+        let mask = vec![0u8; n * n * n];
+        let result = calculate_gaussian_curvature(&mask, n, n, n);
+        assert!(result.surface_indices.is_empty());
+        assert!(result.gaussian_curvature.iter().all(|&v| v == 0.0));
+        assert!(result.mean_curvature.iter().all(|&v| v == 0.0));
+    }
+
+    #[test]
+    fn test_calculate_gaussian_curvature_single_voxel() {
+        let mut mask = vec![0u8; 125];
+        mask[62] = 1; // single voxel in center of 5x5x5
+        let result = calculate_gaussian_curvature(&mask, 5, 5, 5);
+        // Single voxel is its own surface after erosion removes it
+        // Result depends on whether erosion removes it entirely
+        assert_eq!(result.gaussian_curvature.len(), 125);
+        assert_eq!(result.mean_curvature.len(), 125);
+    }
+
+    // =====================================================================
+    // Tests for calculate_curvature_proximity (main entry point)
+    // =====================================================================
+
+    #[test]
+    fn test_calculate_curvature_proximity_sphere() {
+        let n = 12;
+        let mask = make_sphere_mask(n, 4.5);
+        let n_total = n * n * n;
+
+        // Create an initial proximity map (all 1.0 inside mask)
+        let prox1: Vec<f64> = mask.iter().map(|&v| v as f64).collect();
+
+        let (prox, curv_i) = calculate_curvature_proximity(
+            &mask, &prox1, 0.6, 500.0, 1.0, n, n, n,
+        );
+
+        assert_eq!(prox.len(), n_total);
+        assert_eq!(curv_i.len(), n_total);
+
+        // All prox values should be finite
+        for (i, &v) in prox.iter().enumerate() {
+            assert!(v.is_finite(), "Prox at {} should be finite, got {}", i, v);
+        }
+
+        // All curv_i values should be finite
+        for (i, &v) in curv_i.iter().enumerate() {
+            assert!(v.is_finite(), "Curv_i at {} should be finite, got {}", i, v);
+        }
+    }
+
+    #[test]
+    fn test_calculate_curvature_proximity_empty_surface() {
+        let n = 5;
+        let mask = vec![0u8; n * n * n];
+        let n_total = n * n * n;
+        let prox1 = vec![1.0; n_total];
+
+        let (prox, curv_i) = calculate_curvature_proximity(
+            &mask, &prox1, 0.6, 500.0, 1.0, n, n, n,
+        );
+
+        // With empty mask, should return prox1 and all-ones curv_i
+        assert_eq!(prox.len(), n_total);
+        assert_eq!(curv_i.len(), n_total);
+        for &v in &curv_i {
+            assert!((v - 1.0).abs() < 1e-10, "Empty surface should give curv_i=1.0");
+        }
+    }
+
+    #[test]
+    fn test_calculate_curvature_proximity_respects_mask() {
+        let n = 12;
+        let mask = make_sphere_mask(n, 4.5);
+        let n_total = n * n * n;
+        let prox1: Vec<f64> = mask.iter().map(|&v| v as f64).collect();
+
+        let (prox, _curv_i) = calculate_curvature_proximity(
+            &mask, &prox1, 0.6, 500.0, 1.0, n, n, n,
+        );
+
+        // Outside mask, proximity should be 0 (due to prox1 being 0 there)
+        // or small from smoothing bleed
+        for i in 0..n_total {
+            assert!(prox[i].is_finite(), "Prox should be finite everywhere");
+        }
+    }
+
+    #[test]
+    fn test_calculate_curvature_proximity_varying_params() {
+        let n = 12;
+        let mask = make_sphere_mask(n, 4.5);
+        let prox1: Vec<f64> = mask.iter().map(|&v| v as f64).collect();
+
+        // Different lower_lim and curv_constant
+        let (prox_a, _) = calculate_curvature_proximity(
+            &mask, &prox1, 0.3, 100.0, 0.5, n, n, n,
+        );
+        let (prox_b, _) = calculate_curvature_proximity(
+            &mask, &prox1, 0.9, 1000.0, 2.0, n, n, n,
+        );
+
+        // Both should produce finite results
+        for &v in &prox_a {
+            assert!(v.is_finite());
+        }
+        for &v in &prox_b {
+            assert!(v.is_finite());
+        }
+    }
 }

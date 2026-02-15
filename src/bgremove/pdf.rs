@@ -488,4 +488,313 @@ mod tests {
         assert_eq!(local[0], 0.0, "Masked voxel should be zero");
         assert_eq!(local[10], 0.0, "Masked voxel should be zero");
     }
+
+    #[test]
+    fn test_pdf_nonuniform_voxels() {
+        let n = 8;
+        let field: Vec<f64> = (0..n*n*n).map(|i| (i as f64) * 0.001).collect();
+
+        // Create a spherical mask in the center
+        let mut mask = vec![0u8; n * n * n];
+        let center = n / 2;
+        let radius = n / 4;
+
+        for z in 0..n {
+            for y in 0..n {
+                for x in 0..n {
+                    let dx = (x as i32) - (center as i32);
+                    let dy = (y as i32) - (center as i32);
+                    let dz = (z as i32) - (center as i32);
+                    if dx*dx + dy*dy + dz*dz <= (radius * radius) as i32 {
+                        mask[x + y * n + z * n * n] = 1;
+                    }
+                }
+            }
+        }
+
+        // Anisotropic voxel sizes
+        let local = pdf(
+            &field, &mask, n, n, n, 0.5, 1.0, 2.0,
+            (0.0, 0.0, 1.0), 1e-5, 20
+        );
+
+        for (i, &val) in local.iter().enumerate() {
+            assert!(val.is_finite(), "PDF with nonuniform voxels should be finite at index {}", i);
+        }
+
+        // Masked voxels should be zero
+        for i in 0..n*n*n {
+            if mask[i] == 0 {
+                assert_eq!(local[i], 0.0, "Outside mask should be zero");
+            }
+        }
+    }
+
+    #[test]
+    fn test_pdf_varying_field() {
+        let n = 8;
+
+        // Create a spatially varying field (quadratic in z)
+        let mut field = vec![0.0; n * n * n];
+        for z in 0..n {
+            for y in 0..n {
+                for x in 0..n {
+                    let idx = x + y * n + z * n * n;
+                    let zf = (z as f64) / (n as f64);
+                    field[idx] = zf * zf * 0.5;
+                }
+            }
+        }
+
+        // Spherical mask
+        let mut mask = vec![0u8; n * n * n];
+        let center = n / 2;
+        let radius = n / 4;
+        for z in 0..n {
+            for y in 0..n {
+                for x in 0..n {
+                    let dx = (x as i32) - (center as i32);
+                    let dy = (y as i32) - (center as i32);
+                    let dz = (z as i32) - (center as i32);
+                    if dx*dx + dy*dy + dz*dz <= (radius * radius) as i32 {
+                        mask[x + y * n + z * n * n] = 1;
+                    }
+                }
+            }
+        }
+
+        let local = pdf(
+            &field, &mask, n, n, n, 1.0, 1.0, 1.0,
+            (0.0, 0.0, 1.0), 1e-5, 30
+        );
+
+        // All values should be finite
+        for (i, &val) in local.iter().enumerate() {
+            assert!(val.is_finite(), "Varying field should produce finite results at index {}", i);
+        }
+
+        // The local field inside the mask should differ from the total field
+        // (some background was removed)
+        let mut any_changed = false;
+        for i in 0..n*n*n {
+            if mask[i] != 0 && (local[i] - field[i]).abs() > 1e-10 {
+                any_changed = true;
+                break;
+            }
+        }
+        assert!(any_changed, "PDF should modify the field inside the mask for a varying field");
+    }
+
+    #[test]
+    fn test_pdf_larger_volume() {
+        // Use 16x16x16 to exercise more of the LSMR loop
+        let n = 16;
+
+        // Create a dipole-like field pattern
+        let mut field = vec![0.0; n * n * n];
+        let center = n / 2;
+        for z in 0..n {
+            for y in 0..n {
+                for x in 0..n {
+                    let dx = (x as f64) - (center as f64);
+                    let dy = (y as f64) - (center as f64);
+                    let dz = (z as f64) - (center as f64);
+                    let r2 = dx * dx + dy * dy + dz * dz;
+                    if r2 > 0.5 {
+                        // Dipole-like field: (3*cos^2(theta) - 1) / r^3
+                        let r = r2.sqrt();
+                        let cos_theta = dz / r;
+                        field[x + y * n + z * n * n] = (3.0 * cos_theta * cos_theta - 1.0) / (r * r * r) * 0.01;
+                    }
+                }
+            }
+        }
+
+        // Spherical mask
+        let mut mask = vec![0u8; n * n * n];
+        let radius = n / 3;
+        for z in 0..n {
+            for y in 0..n {
+                for x in 0..n {
+                    let dx = (x as i32) - (center as i32);
+                    let dy = (y as i32) - (center as i32);
+                    let dz = (z as i32) - (center as i32);
+                    if dx * dx + dy * dy + dz * dz <= (radius * radius) as i32 {
+                        mask[x + y * n + z * n * n] = 1;
+                    }
+                }
+            }
+        }
+
+        let local = pdf(
+            &field, &mask, n, n, n, 1.0, 1.0, 1.0,
+            (0.0, 0.0, 1.0), 1e-4, 50
+        );
+
+        assert_eq!(local.len(), n * n * n);
+        for (i, &val) in local.iter().enumerate() {
+            assert!(val.is_finite(), "PDF larger volume: finite at index {}", i);
+        }
+
+        // Masked-out voxels must be zero
+        for i in 0..n * n * n {
+            if mask[i] == 0 {
+                assert_eq!(local[i], 0.0);
+            }
+        }
+    }
+
+    #[test]
+    fn test_pdf_more_iterations() {
+        // Test with more LSMR iterations to exercise convergence check
+        let n = 8;
+        let field: Vec<f64> = (0..n * n * n).map(|i| (i as f64) * 0.001).collect();
+
+        let mut mask = vec![0u8; n * n * n];
+        let center = n / 2;
+        let radius = n / 4;
+        for z in 0..n {
+            for y in 0..n {
+                for x in 0..n {
+                    let dx = (x as i32) - (center as i32);
+                    let dy = (y as i32) - (center as i32);
+                    let dz = (z as i32) - (center as i32);
+                    if dx * dx + dy * dy + dz * dz <= (radius * radius) as i32 {
+                        mask[x + y * n + z * n * n] = 1;
+                    }
+                }
+            }
+        }
+
+        // With many iterations the result should converge
+        let local_many = pdf(
+            &field, &mask, n, n, n, 1.0, 1.0, 1.0,
+            (0.0, 0.0, 1.0), 1e-8, 100
+        );
+
+        let local_few = pdf(
+            &field, &mask, n, n, n, 1.0, 1.0, 1.0,
+            (0.0, 0.0, 1.0), 1e-8, 5
+        );
+
+        // Both should be finite
+        for &val in local_many.iter().chain(local_few.iter()) {
+            assert!(val.is_finite());
+        }
+    }
+
+    #[test]
+    fn test_pdf_different_bdir() {
+        // Test with non-standard B0 direction
+        let n = 8;
+        let field: Vec<f64> = (0..n * n * n).map(|i| (i as f64) * 0.001).collect();
+
+        let mut mask = vec![0u8; n * n * n];
+        let center = n / 2;
+        let radius = n / 4;
+        for z in 0..n {
+            for y in 0..n {
+                for x in 0..n {
+                    let dx = (x as i32) - (center as i32);
+                    let dy = (y as i32) - (center as i32);
+                    let dz = (z as i32) - (center as i32);
+                    if dx * dx + dy * dy + dz * dz <= (radius * radius) as i32 {
+                        mask[x + y * n + z * n * n] = 1;
+                    }
+                }
+            }
+        }
+
+        // Tilted B0 direction
+        let local = pdf(
+            &field, &mask, n, n, n, 1.0, 1.0, 1.0,
+            (0.1, 0.2, 0.97), 1e-5, 20
+        );
+
+        for &val in &local {
+            assert!(val.is_finite());
+        }
+    }
+
+    #[test]
+    fn test_pdf_with_progress() {
+        let n = 8;
+        let field: Vec<f64> = (0..n * n * n).map(|i| (i as f64) * 0.001).collect();
+
+        let mut mask = vec![0u8; n * n * n];
+        let center = n / 2;
+        let radius = n / 4;
+        for z in 0..n {
+            for y in 0..n {
+                for x in 0..n {
+                    let dx = (x as i32) - (center as i32);
+                    let dy = (y as i32) - (center as i32);
+                    let dz = (z as i32) - (center as i32);
+                    if dx * dx + dy * dy + dz * dz <= (radius * radius) as i32 {
+                        mask[x + y * n + z * n * n] = 1;
+                    }
+                }
+            }
+        }
+
+        let mut progress_calls = Vec::new();
+        let local = pdf_with_progress(
+            &field, &mask, n, n, n, 1.0, 1.0, 1.0,
+            (0.0, 0.0, 1.0), 1e-5, 20,
+            |iter, max| { progress_calls.push((iter, max)); }
+        );
+
+        assert_eq!(local.len(), n * n * n);
+        assert!(!progress_calls.is_empty(), "Progress should be called at least once");
+        for &val in &local {
+            assert!(val.is_finite());
+        }
+    }
+
+    #[test]
+    fn test_pdf_default_wrapper() {
+        let n = 8;
+        let field: Vec<f64> = (0..n * n * n).map(|i| (i as f64) * 0.001).collect();
+
+        let mut mask = vec![0u8; n * n * n];
+        let center = n / 2;
+        let radius = n / 4;
+        for z in 0..n {
+            for y in 0..n {
+                for x in 0..n {
+                    let dx = (x as i32) - (center as i32);
+                    let dy = (y as i32) - (center as i32);
+                    let dz = (z as i32) - (center as i32);
+                    if dx * dx + dy * dy + dz * dz <= (radius * radius) as i32 {
+                        mask[x + y * n + z * n * n] = 1;
+                    }
+                }
+            }
+        }
+
+        let local = pdf_default(&field, &mask, n, n, n, 1.0, 1.0, 1.0);
+        assert_eq!(local.len(), n * n * n);
+        for &val in &local {
+            assert!(val.is_finite());
+        }
+    }
+
+    #[test]
+    fn test_pdf_all_mask() {
+        // All voxels masked (no background) - should still work
+        let n = 8;
+        let field: Vec<f64> = (0..n * n * n).map(|i| (i as f64) * 0.001).collect();
+        let mask = vec![1u8; n * n * n];
+
+        let local = pdf(
+            &field, &mask, n, n, n, 1.0, 1.0, 1.0,
+            (0.0, 0.0, 1.0), 1e-5, 10
+        );
+
+        // With all voxels as "brain", the background mask is empty
+        // so there's nothing to project onto => local should approximate field
+        for &val in &local {
+            assert!(val.is_finite());
+        }
+    }
 }

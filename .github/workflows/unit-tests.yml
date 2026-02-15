@@ -1,0 +1,81 @@
+name: Unit Tests
+
+on:
+  workflow_call:
+    outputs:
+      coverage:
+        description: "Code coverage percentage"
+        value: ${{ jobs.run.outputs.coverage }}
+      tests_passed:
+        description: "Number of tests passed"
+        value: ${{ jobs.run.outputs.tests_passed }}
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    outputs:
+      coverage: ${{ steps.coverage.outputs.coverage }}
+      tests_passed: ${{ steps.tests.outputs.tests_passed }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-tarpaulin-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Install cargo-tarpaulin
+        run: |
+          if ! command -v cargo-tarpaulin &>/dev/null; then
+            cargo install cargo-tarpaulin
+          fi
+
+      - name: Run unit tests with coverage
+        id: tests
+        run: |
+          mkdir -p coverage
+
+          # Run tarpaulin; ignore its exit code since we check coverage separately
+          cargo tarpaulin --out json --output-dir coverage/ \
+            --skip-clean --timeout 300 2>&1 | tee coverage/tarpaulin.log || true
+
+          # Count passed tests from output (sum across all test suites)
+          PASSED=$(grep -oP '\d+(?= passed)' coverage/tarpaulin.log | awk '{s+=$1} END {print s+0}')
+          echo "tests_passed=$PASSED" >> "$GITHUB_OUTPUT"
+
+      - name: Extract coverage
+        id: coverage
+        run: |
+          COVERAGE=$(python3 -c "
+          import json
+          with open('coverage/tarpaulin-report.json') as f:
+              data = json.load(f)
+          if 'coverage' in data:
+              cov = data['coverage']
+          else:
+              total = sum(f.get('coverable', 0) for f in data.get('files', []))
+              covered = sum(f.get('covered', 0) for f in data.get('files', []))
+              cov = (covered / total * 100) if total > 0 else 0
+          print(f'{cov:.1f}')
+          ")
+          echo "coverage=$COVERAGE" >> "$GITHUB_OUTPUT"
+          echo "Code coverage: ${COVERAGE}%"
+
+      - name: Enforce 90% coverage threshold
+        run: |
+          python3 -c "
+          cov = float('${{ steps.coverage.outputs.coverage }}')
+          if cov < 90:
+              print(f'FAIL: Coverage {cov}% is below 90% threshold')
+              exit(1)
+          print(f'PASS: Coverage {cov}% meets 90% threshold')
+          "

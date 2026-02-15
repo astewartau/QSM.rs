@@ -379,4 +379,284 @@ mod tests {
         // Allow some tolerance due to discrete Laplacian
         assert!(max_local < 0.5, "Harmonic field should be mostly removed, got max {}", max_local);
     }
+
+    #[test]
+    fn test_lbv_nonuniform_voxels() {
+        let n = 16;
+
+        // Linear field
+        let mut field = vec![0.0; n * n * n];
+        for z in 0..n {
+            for y in 0..n {
+                for x in 0..n {
+                    let idx = x + y * n + z * n * n;
+                    field[idx] = (z as f64) * 0.1;
+                }
+            }
+        }
+
+        // Spherical mask
+        let mut mask = vec![0u8; n * n * n];
+        let center = n / 2;
+        let radius = n / 3;
+        for z in 0..n {
+            for y in 0..n {
+                for x in 0..n {
+                    let dx = (x as i32) - (center as i32);
+                    let dy = (y as i32) - (center as i32);
+                    let dz = (z as i32) - (center as i32);
+                    if dx*dx + dy*dy + dz*dz <= (radius * radius) as i32 {
+                        mask[x + y * n + z * n * n] = 1;
+                    }
+                }
+            }
+        }
+
+        // Use anisotropic voxel sizes
+        let (local, eroded_mask) = lbv(
+            &field, &mask, n, n, n, 0.5, 1.0, 2.0, 1e-5, 200
+        );
+
+        // All values should be finite
+        for (i, &val) in local.iter().enumerate() {
+            assert!(val.is_finite(), "LBV nonuniform voxels: finite at index {}", i);
+        }
+
+        // Eroded mask should have some voxels
+        let eroded_count: usize = eroded_mask.iter().map(|&x| x as usize).sum();
+        assert!(eroded_count > 0, "LBV nonuniform: eroded mask should not be empty");
+    }
+
+    #[test]
+    fn test_lbv_tolerance() {
+        let n = 16;
+
+        // Linear field (harmonic)
+        let mut field = vec![0.0; n * n * n];
+        for z in 0..n {
+            for y in 0..n {
+                for x in 0..n {
+                    let idx = x + y * n + z * n * n;
+                    field[idx] = (z as f64) * 0.1;
+                }
+            }
+        }
+
+        // Spherical mask
+        let mut mask = vec![0u8; n * n * n];
+        let center = n / 2;
+        let radius = n / 3;
+        for z in 0..n {
+            for y in 0..n {
+                for x in 0..n {
+                    let dx = (x as i32) - (center as i32);
+                    let dy = (y as i32) - (center as i32);
+                    let dz = (z as i32) - (center as i32);
+                    if dx*dx + dy*dy + dz*dz <= (radius * radius) as i32 {
+                        mask[x + y * n + z * n * n] = 1;
+                    }
+                }
+            }
+        }
+
+        // Tight tolerance should produce better harmonic removal
+        let (local_tight, _) = lbv(&field, &mask, n, n, n, 1.0, 1.0, 1.0, 1e-8, 1000);
+
+        // Loose tolerance
+        let (local_loose, _) = lbv(&field, &mask, n, n, n, 1.0, 1.0, 1.0, 1e-2, 50);
+
+        // Compute max residual for each
+        let max_tight: f64 = local_tight.iter()
+            .zip(mask.iter())
+            .filter(|(_, &m)| m != 0)
+            .map(|(&v, _)| v.abs())
+            .fold(0.0f64, f64::max);
+
+        let max_loose: f64 = local_loose.iter()
+            .zip(mask.iter())
+            .filter(|(_, &m)| m != 0)
+            .map(|(&v, _)| v.abs())
+            .fold(0.0f64, f64::max);
+
+        // Tight tolerance should give at least as good results as loose
+        assert!(
+            max_tight <= max_loose + 1e-6,
+            "Tight tolerance max={} should be <= loose tolerance max={}",
+            max_tight, max_loose
+        );
+    }
+
+    #[test]
+    fn test_lbv_with_progress() {
+        let n = 16;
+        let mut field = vec![0.0; n * n * n];
+        for z in 0..n {
+            for y in 0..n {
+                for x in 0..n {
+                    field[x + y * n + z * n * n] = (z as f64) * 0.1;
+                }
+            }
+        }
+
+        let mut mask = vec![0u8; n * n * n];
+        let center = n / 2;
+        let radius = n / 3;
+        for z in 0..n {
+            for y in 0..n {
+                for x in 0..n {
+                    let dx = (x as i32) - (center as i32);
+                    let dy = (y as i32) - (center as i32);
+                    let dz = (z as i32) - (center as i32);
+                    if dx * dx + dy * dy + dz * dz <= (radius * radius) as i32 {
+                        mask[x + y * n + z * n * n] = 1;
+                    }
+                }
+            }
+        }
+
+        let mut progress_calls = Vec::new();
+        let (local, eroded) = lbv_with_progress(
+            &field, &mask, n, n, n, 1.0, 1.0, 1.0, 1e-5, 200,
+            |iter, max| { progress_calls.push((iter, max)); }
+        );
+
+        assert_eq!(local.len(), n * n * n);
+        assert!(!progress_calls.is_empty(), "Progress callback should be called");
+        for &val in &local {
+            assert!(val.is_finite());
+        }
+        let eroded_count: usize = eroded.iter().map(|&x| x as usize).sum();
+        assert!(eroded_count > 0);
+    }
+
+    #[test]
+    fn test_lbv_default_wrapper() {
+        let n = 16;
+        let mut field = vec![0.0; n * n * n];
+        for z in 0..n {
+            for y in 0..n {
+                for x in 0..n {
+                    field[x + y * n + z * n * n] = (z as f64) * 0.1;
+                }
+            }
+        }
+
+        let mut mask = vec![0u8; n * n * n];
+        let center = n / 2;
+        let radius = n / 3;
+        for z in 0..n {
+            for y in 0..n {
+                for x in 0..n {
+                    let dx = (x as i32) - (center as i32);
+                    let dy = (y as i32) - (center as i32);
+                    let dz = (z as i32) - (center as i32);
+                    if dx * dx + dy * dy + dz * dz <= (radius * radius) as i32 {
+                        mask[x + y * n + z * n * n] = 1;
+                    }
+                }
+            }
+        }
+
+        let (local, eroded) = lbv_default(&field, &mask, n, n, n, 1.0, 1.0, 1.0);
+        assert_eq!(local.len(), n * n * n);
+        for &val in &local {
+            assert!(val.is_finite());
+        }
+        let eroded_count: usize = eroded.iter().map(|&x| x as usize).sum();
+        assert!(eroded_count > 0);
+    }
+
+    #[test]
+    fn test_lbv_non_harmonic_field() {
+        // A non-harmonic field should not be fully removed
+        let n = 16;
+        let mut field = vec![0.0; n * n * n];
+        // Quadratic field: x^2 - not harmonic in 3D (Laplacian = 2)
+        for z in 0..n {
+            for y in 0..n {
+                for x in 0..n {
+                    let xf = (x as f64) / (n as f64);
+                    field[x + y * n + z * n * n] = xf * xf;
+                }
+            }
+        }
+
+        let mut mask = vec![0u8; n * n * n];
+        let center = n / 2;
+        let radius = n / 3;
+        for z in 0..n {
+            for y in 0..n {
+                for x in 0..n {
+                    let dx = (x as i32) - (center as i32);
+                    let dy = (y as i32) - (center as i32);
+                    let dz = (z as i32) - (center as i32);
+                    if dx * dx + dy * dy + dz * dz <= (radius * radius) as i32 {
+                        mask[x + y * n + z * n * n] = 1;
+                    }
+                }
+            }
+        }
+
+        let (local, eroded_mask) = lbv(&field, &mask, n, n, n, 1.0, 1.0, 1.0, 1e-6, 500);
+
+        // Local field should have some non-zero values (non-harmonic part remains)
+        let mut has_nonzero = false;
+        for i in 0..n * n * n {
+            assert!(local[i].is_finite());
+            if eroded_mask[i] != 0 && local[i].abs() > 1e-10 {
+                has_nonzero = true;
+            }
+        }
+        assert!(has_nonzero, "Non-harmonic field should leave non-zero local field");
+    }
+
+    #[test]
+    fn test_lbv_small_mask() {
+        // Test with a very small mask (just a few voxels) to exercise boundary logic
+        let n = 8;
+        let field: Vec<f64> = (0..n * n * n).map(|i| (i as f64) * 0.01).collect();
+
+        // Small central mask
+        let mut mask = vec![0u8; n * n * n];
+        for z in 2..6 {
+            for y in 2..6 {
+                for x in 2..6 {
+                    mask[x + y * n + z * n * n] = 1;
+                }
+            }
+        }
+
+        let (local, eroded) = lbv(&field, &mask, n, n, n, 1.0, 1.0, 1.0, 1e-5, 100);
+
+        for &val in &local {
+            assert!(val.is_finite());
+        }
+
+        // Eroded mask should be smaller than original
+        let eroded_count: usize = eroded.iter().map(|&x| x as usize).sum();
+        let mask_count: usize = mask.iter().map(|&x| x as usize).sum();
+        assert!(eroded_count <= mask_count);
+    }
+
+    #[test]
+    fn test_lbv_edge_mask_voxels() {
+        // Mask that includes edge voxels of the volume
+        let n = 8;
+        let field = vec![1.0; n * n * n];
+        let mask = vec![1u8; n * n * n]; // Full mask including edges
+
+        let (local, eroded) = lbv(&field, &mask, n, n, n, 1.0, 1.0, 1.0, 1e-5, 100);
+
+        for &val in &local {
+            assert!(val.is_finite());
+        }
+
+        // Edge voxels should be boundary, not interior, so they should not be in eroded mask
+        // Check corners
+        assert_eq!(eroded[0], 0, "Corner should not be in eroded mask");
+        assert_eq!(eroded[n - 1], 0, "Corner should not be in eroded mask");
+
+        let eroded_count: usize = eroded.iter().map(|&x| x as usize).sum();
+        assert!(eroded_count > 0, "Should have some interior voxels");
+    }
 }

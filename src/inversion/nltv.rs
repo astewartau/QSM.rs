@@ -174,8 +174,11 @@ where
             }
             fft3d(&mut work_complex, nx, ny, nz);
 
+            // x_hat = f_hat - rho * FFT(div) * inv_a
+            // Note: bdiv computes positive divergence ∇·, but the adjoint ∇ᵀ = -∇·,
+            // so we subtract (see Eq. [7] in Kames et al. 2018).
             for i in 0..n_total {
-                work_complex[i] = f_hat[i] + rho * work_complex[i] * inv_a[i];
+                work_complex[i] = f_hat[i] - rho * work_complex[i] * inv_a[i];
             }
 
             ifft3d(&mut work_complex, nx, ny, nz);
@@ -273,7 +276,7 @@ pub fn nltv_default(
     nltv(
         local_field, mask, nx, ny, nz, vsx, vsy, vsz,
         (0.0, 0.0, 1.0),  // bdir
-        1e-3,             // lambda
+        3e-4,             // lambda
         1.0,              // mu
         1e-3,             // tol
         250,              // max_iter

@@ -1381,4 +1381,239 @@ mod tests {
         assert_eq!(bbox.j_min, 2);
         assert_eq!(bbox.j_max, 8);
     }
+
+    #[test]
+    fn test_tgv_qsm_small() {
+        let n = 12;
+        let n_total = n * n * n;
+        let center = 6.0_f32;
+        let radius = 4.0_f32;
+
+        // Build a sphere mask
+        let mut mask = vec![0u8; n_total];
+        for k in 0..n {
+            for j in 0..n {
+                for i in 0..n {
+                    let dx = i as f32 - center;
+                    let dy = j as f32 - center;
+                    let dz = k as f32 - center;
+                    if (dx * dx + dy * dy + dz * dz).sqrt() < radius {
+                        mask[i + j * n + k * n * n] = 1;
+                    }
+                }
+            }
+        }
+
+        // Fill phase with a linear ramp (z direction) masked
+        let mut phase = vec![0.0f32; n_total];
+        for k in 0..n {
+            for j in 0..n {
+                for i in 0..n {
+                    let idx = i + j * n + k * n * n;
+                    if mask[idx] != 0 {
+                        phase[idx] = 0.1 * k as f32;
+                    }
+                }
+            }
+        }
+
+        let params = TgvParams {
+            iterations: 10,
+            erosions: 1,
+            ..TgvParams::default()
+        };
+
+        let result = tgv_qsm(&phase, &mask, n, n, n, 1.0, 1.0, 1.0, &params, (0.0, 0.0, 1.0));
+
+        assert_eq!(result.len(), n_total);
+
+        // All values should be finite
+        for &v in &result {
+            assert!(v.is_finite(), "Result contains non-finite value: {}", v);
+        }
+
+        // There should be at least some non-zero values within the (eroded) mask
+        let has_nonzero = result.iter().any(|&v| v.abs() > 1e-20);
+        assert!(has_nonzero, "Result is entirely zero; expected non-zero values within mask");
+    }
+
+    #[test]
+    fn test_oblique_stencil() {
+        let stencil = compute_oblique_stencil((1.0, 1.0, 1.0), (0.0, 0.0, 1.0));
+
+        // Sum of all elements should be ~0 (Laplacian-like operator)
+        let mut sum = 0.0f32;
+        for k in 0..3 {
+            for j in 0..3 {
+                for i in 0..3 {
+                    sum += stencil[i][j][k];
+                }
+            }
+        }
+        assert!(
+            sum.abs() < 1e-4,
+            "Oblique stencil sum should be ~0, got {}",
+            sum
+        );
+
+        // Center element should be approximately -sum(others), so verify it matches
+        let mut off_sum = 0.0f32;
+        for k in 0..3 {
+            for j in 0..3 {
+                for i in 0..3 {
+                    if !(i == 1 && j == 1 && k == 1) {
+                        off_sum += stencil[i][j][k];
+                    }
+                }
+            }
+        }
+        assert!(
+            (stencil[1][1][1] + off_sum).abs() < 1e-6,
+            "Center should be -sum(others): center={}, off_sum={}",
+            stencil[1][1][1], off_sum
+        );
+    }
+
+    #[test]
+    fn test_oblique_stencil_aniso() {
+        let stencil = compute_oblique_stencil((1.0, 1.0, 2.0), (0.2, 0.3, 0.9));
+
+        // Sum of all elements should be ~0
+        let mut sum = 0.0f32;
+        for k in 0..3 {
+            for j in 0..3 {
+                for i in 0..3 {
+                    sum += stencil[i][j][k];
+                }
+            }
+        }
+        assert!(
+            sum.abs() < 1e-4,
+            "Anisotropic oblique stencil sum should be ~0, got {}",
+            sum
+        );
+    }
+
+    #[test]
+    fn test_get_default_iterations() {
+        // With isotropic 1mm voxels and step_size=1.0
+        let it = get_default_iterations((1.0, 1.0, 1.0), 1.0);
+        assert!(it >= 1000, "Iterations should be >= 1000 for 1mm iso, got {}", it);
+
+        // With larger voxels the count should decrease (prod_res is larger)
+        let it_large = get_default_iterations((2.0, 2.0, 2.0), 1.0);
+        assert!(it_large >= 1000, "Iterations should still be >= 1000 for 2mm iso");
+
+        // With very small voxels the count should be larger than 1mm iso
+        let it_small = get_default_iterations((0.5, 0.5, 0.5), 1.0);
+        assert!(it_small > it, "Smaller voxels should need more iterations: {} vs {}", it_small, it);
+
+        // Higher step_size should reduce iterations
+        let it_fast = get_default_iterations((1.0, 1.0, 1.0), 3.0);
+        assert!(it_fast < it, "Higher step_size should give fewer iterations: {} vs {}", it_fast, it);
+    }
+
+    #[test]
+    fn test_compute_relative_change() {
+        // Two identical arrays -> relative change = 0
+        let chi = vec![1.0f32, 2.0, 3.0, 4.0];
+        let chi_prev = vec![1.0f32, 2.0, 3.0, 4.0];
+        let mask = vec![1u8, 1, 1, 1];
+        let rc = compute_relative_change(&chi, &chi_prev, &mask);
+        assert!(rc.abs() < 1e-10, "Identical arrays should give 0 change, got {}", rc);
+
+        // One element changed
+        let chi2 = vec![1.1f32, 2.0, 3.0, 4.0];
+        let rc2 = compute_relative_change(&chi2, &chi_prev, &mask);
+        assert!(rc2 > 0.0, "Different arrays should give positive change");
+        // Expected: sqrt(0.01 / (1.21 + 4 + 9 + 16)) = sqrt(0.01 / 30.21)
+        let expected = (0.01f32 / 30.21).sqrt();
+        assert!(
+            (rc2 - expected).abs() < 1e-5,
+            "Expected relative change ~{}, got {}",
+            expected,
+            rc2
+        );
+
+        // Masked elements should be ignored
+        let mask_partial = vec![1u8, 0, 0, 0];
+        let chi3 = vec![2.0f32, 999.0, 999.0, 999.0];
+        let chi_prev3 = vec![1.0f32, 0.0, 0.0, 0.0];
+        let rc3 = compute_relative_change(&chi3, &chi_prev3, &mask_partial);
+        // diff_sq = (2-1)^2 = 1, norm_sq = 4 => sqrt(1/4) = 0.5
+        let expected3 = (1.0f32 / 4.0).sqrt();
+        assert!(
+            (rc3 - expected3).abs() < 1e-6,
+            "Masked relative change expected {}, got {}",
+            expected3,
+            rc3
+        );
+
+        // All zeros -> should return 1.0 (norm_sq < 1e-10)
+        let zeros = vec![0.0f32; 4];
+        let rc4 = compute_relative_change(&zeros, &zeros, &mask);
+        assert!(
+            (rc4 - 1.0).abs() < 1e-6,
+            "Zero norm should return 1.0, got {}",
+            rc4
+        );
+    }
+
+    #[test]
+    fn test_tgv_convergence() {
+        // Zero phase => chi should be ~0. Set tol=1.0 so convergence triggers at iter 100.
+        let n = 12;
+        let n_total = n * n * n;
+        let center = 6.0_f32;
+        let radius = 4.0_f32;
+
+        let mut mask = vec![0u8; n_total];
+        for k in 0..n {
+            for j in 0..n {
+                for i in 0..n {
+                    let dx = i as f32 - center;
+                    let dy = j as f32 - center;
+                    let dz = k as f32 - center;
+                    if (dx * dx + dy * dy + dz * dz).sqrt() < radius {
+                        mask[i + j * n + k * n * n] = 1;
+                    }
+                }
+            }
+        }
+
+        let phase = vec![0.0f32; n_total];
+
+        let params = TgvParams {
+            iterations: 1000,
+            erosions: 1,
+            tol: 1.1, // Very loose tolerance so convergence triggers at first check (iter 100)
+            ..TgvParams::default()
+        };
+
+        let progress_iters = std::cell::RefCell::new(Vec::new());
+        let result = tgv_qsm_with_progress(
+            &phase, &mask, n, n, n, 1.0, 1.0, 1.0, &params, (0.0, 0.0, 1.0),
+            |iter, _total| { progress_iters.borrow_mut().push(iter); }
+        );
+
+        assert_eq!(result.len(), n_total);
+
+        // With zero phase, all output values should be very close to zero
+        let max_abs = result.iter().map(|v| v.abs()).fold(0.0f32, f32::max);
+        assert!(
+            max_abs < 1e-3,
+            "Zero-phase TGV result should be ~0, got max abs {}",
+            max_abs
+        );
+
+        // Early convergence: the last progress call should report iter <= 100
+        // (it converges at the iter-100 check since chi and chi_prev are both ~0)
+        let iters = progress_iters.borrow();
+        let &last_iter = iters.last().unwrap();
+        assert!(
+            last_iter <= 100,
+            "Expected early convergence by iter 100, but last progress was at iter {}",
+            last_iter
+        );
+    }
 }

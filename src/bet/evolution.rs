@@ -853,6 +853,29 @@ where
 mod tests {
     use super::*;
 
+    /// Helper: create a 3D sphere volume (Fortran order) centered in the grid.
+    /// Returns (data, nx, ny, nz) where the sphere has intensity `intensity`
+    /// and background is 0. Sphere radius in voxels is `radius`.
+    fn make_sphere_volume(n: usize, radius: f64, intensity: f64) -> (Vec<f64>, usize, usize, usize) {
+        let center = (n as f64) / 2.0;
+        let mut data = vec![0.0; n * n * n];
+        for k in 0..n {
+            for j in 0..n {
+                for i in 0..n {
+                    let di = (i as f64) - center;
+                    let dj = (j as f64) - center;
+                    let dk = (k as f64) - center;
+                    let dist = (di * di + dj * dj + dk * dk).sqrt();
+                    if dist <= radius {
+                        // Smoothly varying intensity: bright at center, dimmer at edge
+                        data[i + j * n + k * n * n] = intensity * (1.0 - 0.5 * dist / radius);
+                    }
+                }
+            }
+        }
+        (data, n, n, n)
+    }
+
     #[test]
     fn test_estimate_brain_parameters() {
         let nx = 10;
@@ -891,6 +914,39 @@ mod tests {
     }
 
     #[test]
+    fn test_estimate_brain_parameters_empty_data() {
+        // All zeros should trigger the nonzero.is_empty() branch
+        let nx = 4;
+        let ny = 4;
+        let nz = 4;
+        let data = vec![0.0; nx * ny * nz];
+        let bp = estimate_brain_parameters(&data, nx, ny, nz, &[1.0, 1.0, 1.0]);
+
+        assert!((bp.t2 - 0.0).abs() < 1e-10);
+        assert!((bp.t98 - 1.0).abs() < 1e-10);
+        assert!((bp.t - 0.1).abs() < 1e-10);
+        assert!((bp.tm - 0.5).abs() < 1e-10);
+        assert!((bp.cog[0] - 2.0).abs() < 1e-10);
+        assert!((bp.cog[1] - 2.0).abs() < 1e-10);
+        assert!((bp.cog[2] - 2.0).abs() < 1e-10);
+        assert!((bp.radius - 50.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_estimate_brain_parameters_anisotropic_voxels() {
+        let (data, nx, ny, nz) = make_sphere_volume(12, 4.0, 200.0);
+        let voxel_size = [2.0, 2.0, 2.0];
+        let bp = estimate_brain_parameters(&data, nx, ny, nz, &voxel_size);
+
+        // cog_mm should be cog * voxel_size
+        assert!((bp.cog_mm[0] - bp.cog[0] * voxel_size[0]).abs() < 1e-10);
+        assert!((bp.cog_mm[1] - bp.cog[1] * voxel_size[1]).abs() < 1e-10);
+        assert!((bp.cog_mm[2] - bp.cog[2] * voxel_size[2]).abs() < 1e-10);
+        assert!(bp.radius > 0.0);
+        assert!(bp.t98 > bp.t2);
+    }
+
+    #[test]
     fn test_sample_intensity() {
         let data = vec![
             0.0, 1.0, 2.0, 3.0,
@@ -902,11 +958,584 @@ mod tests {
     }
 
     #[test]
+    fn test_sample_intensity_at_corners() {
+        // 2x2x2 cube: values 0..7
+        let data = vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0];
+        // Sampling at integer corners should return exact values
+        assert!((sample_intensity(&data, 2, 2, 2, 0.0, 0.0, 0.0) - 0.0).abs() < 1e-10);
+        assert!((sample_intensity(&data, 2, 2, 2, 1.0, 0.0, 0.0) - 1.0).abs() < 1e-10);
+        assert!((sample_intensity(&data, 2, 2, 2, 0.0, 1.0, 0.0) - 2.0).abs() < 1e-10);
+        assert!((sample_intensity(&data, 2, 2, 2, 1.0, 1.0, 0.0) - 3.0).abs() < 1e-10);
+        assert!((sample_intensity(&data, 2, 2, 2, 0.0, 0.0, 1.0) - 4.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_sample_intensity_clamping() {
+        // Out-of-bounds coordinates should be clamped
+        let data = vec![10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0];
+        // Negative coordinates should clamp to 0
+        let val = sample_intensity(&data, 2, 2, 2, -1.0, -1.0, -1.0);
+        assert!((val - 10.0).abs() < 1e-10, "Expected 10.0, got {}", val);
+        // Beyond max should clamp to max
+        let val = sample_intensity(&data, 2, 2, 2, 5.0, 5.0, 5.0);
+        assert!((val - 80.0).abs() < 1e-10, "Expected 80.0, got {}", val);
+    }
+
+    #[test]
+    fn test_sample_intensity_larger_volume() {
+        // 4x4x4 volume with known pattern
+        let n = 4;
+        let mut data = vec![0.0; n * n * n];
+        for k in 0..n {
+            for j in 0..n {
+                for i in 0..n {
+                    data[i + j * n + k * n * n] = (i + j + k) as f64;
+                }
+            }
+        }
+        // At center (1.5, 1.5, 1.5), each corner = i+j+k
+        // Average of corners: (1+1+1=3, 2+1+1=4, 1+2+1=4, 2+2+1=5, 1+1+2=4, 2+1+2=5, 1+2+2=5, 2+2+2=6) / 8 = 4.5
+        let val = sample_intensity(&data, n, n, n, 1.5, 1.5, 1.5);
+        assert!((val - 4.5).abs() < 1e-10, "Expected 4.5, got {}", val);
+    }
+
+    #[test]
+    fn test_percentile() {
+        let sorted = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0];
+        let p0 = percentile(&sorted, 0.0);
+        assert!((p0 - 1.0).abs() < 1e-10);
+
+        let p50 = percentile(&sorted, 50.0);
+        // Index = round(0.5 * 9) = round(4.5) = 5, value = 6.0
+        assert!((p50 - 5.0).abs() < 1.5, "p50={}", p50);
+
+        let p100 = percentile(&sorted, 100.0);
+        assert!((p100 - 10.0).abs() < 1e-10);
+
+        // Empty array
+        let empty: Vec<f64> = vec![];
+        assert!((percentile(&empty, 50.0) - 0.0).abs() < 1e-10);
+    }
+
+    #[test]
     fn test_power_transform() {
         // Verify power transform matches FSL
         let f = 0.5_f64;
         let bt = f.powf(0.275);
-        // 0.5^0.275 ≈ 0.826
+        // 0.5^0.275 ~ 0.826
         assert!((bt - 0.826).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_sample_intensities_fsl_basic() {
+        // Create a 16x16x16 uniform volume
+        let n = 16;
+        let data = vec![100.0; n * n * n];
+        let voxel_size = [1.0, 1.0, 1.0];
+        // Point at the center, normal pointing inward
+        let point_mm = [8.0, 8.0, 8.0];
+        let normal = [0.0, 0.0, 1.0]; // outward along z
+
+        let t2 = 10.0;
+        let t = 20.0;
+        let tm = 100.0;
+
+        let (i_min, i_max, ok) = sample_intensities_fsl(
+            &data, n, n, n, &point_mm, &normal, &voxel_size, t2, t, tm,
+        );
+
+        assert!(ok, "Sampling should succeed for center point");
+        assert!(i_min.is_finite());
+        assert!(i_max.is_finite());
+        // Uniform volume: i_min should be clamped to >= t2
+        assert!(i_min >= t2, "i_min={} should be >= t2={}", i_min, t2);
+        // i_max should be clamped to <= tm
+        assert!(i_max <= tm, "i_max={} should be <= tm={}", i_max, tm);
+    }
+
+    #[test]
+    fn test_sample_intensities_fsl_out_of_bounds() {
+        // Point near edge, normal pointing outward -- should fail bounds check
+        let n = 8;
+        let data = vec![100.0; n * n * n];
+        let voxel_size = [1.0, 1.0, 1.0];
+        // Point at the edge
+        let point_mm = [0.5, 0.5, 0.5];
+        let normal = [-1.0, 0.0, 0.0]; // pointing outward (further out of bounds)
+
+        let (_, _, _ok) = sample_intensities_fsl(
+            &data, n, n, n, &point_mm, &normal, &voxel_size, 10.0, 20.0, 100.0,
+        );
+
+        // Construct a case that goes out of bounds on the first inward step:
+        // point - normal = (0.5 - 1.0, 0.5, 0.5) = (-0.5, 0.5, 0.5) -> voxel (-0.5) is OOB
+        let point_mm2 = [0.5, 0.5, 0.5];
+        let normal2 = [1.0, 0.0, 0.0]; // point - normal = (-0.5, 0.5, 0.5) -> voxel (-0.5) out of bounds
+        let (_, _, ok2) = sample_intensities_fsl(
+            &data, n, n, n, &point_mm2, &normal2, &voxel_size, 10.0, 20.0, 100.0,
+        );
+        assert!(!ok2, "Sampling should fail when initial step goes out of bounds");
+    }
+
+    #[test]
+    fn test_sample_intensities_fsl_varying_intensity() {
+        // Create a volume with intensity gradient along z
+        let n = 16;
+        let mut data = vec![0.0; n * n * n];
+        for k in 0..n {
+            for j in 0..n {
+                for i in 0..n {
+                    data[i + j * n + k * n * n] = 50.0 + (k as f64) * 10.0;
+                }
+            }
+        }
+        let voxel_size = [1.0, 1.0, 1.0];
+        let point_mm = [8.0, 8.0, 8.0];
+        // Normal pointing in -z direction (inward sampling goes into higher z)
+        let normal = [0.0, 0.0, -1.0];
+
+        let t2 = 50.0;
+        let t = 55.0;
+        let tm = 120.0;
+
+        let (i_min, i_max, ok) = sample_intensities_fsl(
+            &data, n, n, n, &point_mm, &normal, &voxel_size, t2, t, tm,
+        );
+
+        assert!(ok, "Sampling should succeed");
+        assert!(i_min.is_finite() && i_max.is_finite());
+        assert!(i_min >= t2);
+        assert!(i_max <= tm);
+    }
+
+    #[test]
+    fn test_fill_holes_no_holes() {
+        // A solid 3x3x3 cube with no holes should remain unchanged
+        let nx = 5;
+        let ny = 5;
+        let nz = 5;
+        let mut mask = vec![0u8; nx * ny * nz];
+        let idx = |i: usize, j: usize, k: usize| i + j * nx + k * nx * ny;
+
+        // Place a solid 3x3x3 block in the center
+        for k in 1..4 {
+            for j in 1..4 {
+                for i in 1..4 {
+                    mask[idx(i, j, k)] = 1;
+                }
+            }
+        }
+
+        let original = mask.clone();
+        fill_holes(&mut mask, nx, ny, nz);
+
+        assert_eq!(mask, original, "Solid mask should not change");
+    }
+
+    #[test]
+    fn test_fill_holes_with_interior_hole() {
+        // A 7x7x7 volume with a shell of 1s and a hole (0) inside
+        let n = 7;
+        let idx = |i: usize, j: usize, k: usize| i + j * n + k * n * n;
+        let mut mask = vec![0u8; n * n * n];
+
+        // Create a hollow cube: 1 on shell from (1,1,1) to (5,5,5), 0 inside
+        for k in 1..6 {
+            for j in 1..6 {
+                for i in 1..6 {
+                    mask[idx(i, j, k)] = 1;
+                }
+            }
+        }
+        // Carve out the interior
+        for k in 2..5 {
+            for j in 2..5 {
+                for i in 2..5 {
+                    mask[idx(i, j, k)] = 0;
+                }
+            }
+        }
+
+        // The interior (2..5)^3 should be 0 before fill_holes
+        assert_eq!(mask[idx(3, 3, 3)], 0, "Center should be 0 before fill");
+
+        fill_holes(&mut mask, n, n, n);
+
+        // After fill_holes, interior holes should be filled
+        assert_eq!(mask[idx(3, 3, 3)], 1, "Center hole should be filled");
+        assert_eq!(mask[idx(2, 2, 2)], 1, "Interior corner should be filled");
+
+        // Exterior should still be 0
+        assert_eq!(mask[idx(0, 0, 0)], 0, "Exterior should remain 0");
+        assert_eq!(mask[idx(6, 6, 6)], 0, "Exterior should remain 0");
+    }
+
+    #[test]
+    fn test_fill_holes_exterior_connected() {
+        // All zeros (no brain): nothing to fill
+        let n = 5;
+        let mut mask = vec![0u8; n * n * n];
+        fill_holes(&mut mask, n, n, n);
+        assert!(mask.iter().all(|&v| v == 0), "All-zero mask should stay all-zero");
+    }
+
+    #[test]
+    fn test_surface_to_mask_small_sphere() {
+        // Create a small icosphere mesh centered in a 16x16x16 grid
+        let (unit_verts, faces) = create_icosphere(2);
+        let n = 16;
+        let center = (n as f64) / 2.0;
+        let radius = 5.0; // 5 voxel radius
+        let voxel_size = [1.0, 1.0, 1.0];
+
+        // Place vertices in mm (= voxel coords since voxel_size is 1)
+        let vertices_mm: Vec<[f64; 3]> = unit_verts
+            .iter()
+            .map(|v| [
+                v[0] * radius + center,
+                v[1] * radius + center,
+                v[2] * radius + center,
+            ])
+            .collect();
+
+        let mask = surface_to_mask(&vertices_mm, &faces, n, n, n, &voxel_size);
+
+        assert_eq!(mask.len(), n * n * n);
+
+        // Center should be inside the mask
+        let idx = |i: usize, j: usize, k: usize| i + j * n + k * n * n;
+        assert_eq!(mask[idx(8, 8, 8)], 1, "Center should be brain");
+
+        // Corners should be outside the mask
+        assert_eq!(mask[idx(0, 0, 0)], 0, "Corner should be background");
+        assert_eq!(mask[idx(15, 15, 15)], 0, "Corner should be background");
+
+        // Count brain voxels -- should be a reasonable fraction of total
+        let brain_count: usize = mask.iter().map(|&v| v as usize).sum();
+        assert!(brain_count > 0, "Should have some brain voxels");
+        // Sphere volume ~ 4/3 * pi * 5^3 = 524 voxels; total = 4096
+        // Allow generous range
+        assert!(brain_count > 100 && brain_count < 2000,
+                "Brain voxels ({}) should be roughly sphere-like", brain_count);
+    }
+
+    #[test]
+    fn test_surface_to_mask_anisotropic_voxels() {
+        let (unit_verts, faces) = create_icosphere(1);
+        let n = 16;
+        let voxel_size = [2.0, 2.0, 2.0];
+        let center_mm = [(n as f64) * voxel_size[0] / 2.0,
+                         (n as f64) * voxel_size[1] / 2.0,
+                         (n as f64) * voxel_size[2] / 2.0];
+        let radius_mm = 8.0;
+
+        let vertices_mm: Vec<[f64; 3]> = unit_verts
+            .iter()
+            .map(|v| [
+                v[0] * radius_mm + center_mm[0],
+                v[1] * radius_mm + center_mm[1],
+                v[2] * radius_mm + center_mm[2],
+            ])
+            .collect();
+
+        let mask = surface_to_mask(&vertices_mm, &faces, n, n, n, &voxel_size);
+        assert_eq!(mask.len(), n * n * n);
+
+        let brain_count: usize = mask.iter().map(|&v| v as usize).sum();
+        assert!(brain_count > 0, "Should have brain voxels with anisotropic voxels");
+    }
+
+    #[test]
+    fn test_run_bet_small_synthetic_volume() {
+        // Create a 16x16x16 volume with a bright sphere
+        let (data, nx, ny, nz) = make_sphere_volume(16, 6.0, 200.0);
+
+        let mask = run_bet(
+            &data,
+            nx, ny, nz,
+            1.0, 1.0, 1.0, // voxel size
+            0.5,            // fractional_intensity
+            1.0,            // smoothness_factor
+            0.0,            // gradient_threshold
+            50,             // iterations (few for speed)
+            1,              // subdivisions (low for speed)
+        );
+
+        assert_eq!(mask.len(), nx * ny * nz);
+
+        // Should produce a valid binary mask
+        assert!(mask.iter().all(|&v| v == 0 || v == 1), "Mask should be binary");
+
+        // Should have some brain voxels
+        let brain_count: usize = mask.iter().map(|&v| v as usize).sum();
+        assert!(brain_count > 0, "BET should extract some brain voxels");
+
+        // Center should be brain
+        let idx = |i: usize, j: usize, k: usize| i + j * nx + k * nx * ny;
+        assert_eq!(mask[idx(8, 8, 8)], 1, "Center of sphere should be brain");
+    }
+
+    #[test]
+    fn test_run_bet_with_gradient_threshold() {
+        // Exercise the gradient threshold code path
+        let (data, nx, ny, nz) = make_sphere_volume(16, 6.0, 200.0);
+
+        let mask = run_bet(
+            &data,
+            nx, ny, nz,
+            1.0, 1.0, 1.0,
+            0.5,
+            1.0,
+            0.3,  // non-zero gradient threshold
+            50,
+            1,
+        );
+
+        assert_eq!(mask.len(), nx * ny * nz);
+        assert!(mask.iter().all(|&v| v == 0 || v == 1));
+        let brain_count: usize = mask.iter().map(|&v| v as usize).sum();
+        assert!(brain_count > 0, "BET with gradient should extract brain voxels");
+    }
+
+    #[test]
+    fn test_run_bet_with_progress() {
+        // Test the progress callback variant
+        let (data, nx, ny, nz) = make_sphere_volume(16, 6.0, 200.0);
+
+        let mut progress_calls = Vec::new();
+        let mask = run_bet_with_progress(
+            &data,
+            nx, ny, nz,
+            1.0, 1.0, 1.0,
+            0.5,
+            1.0,
+            0.0,
+            50,
+            1,
+            |current, total| {
+                progress_calls.push((current, total));
+            },
+        );
+
+        assert_eq!(mask.len(), nx * ny * nz);
+        assert!(mask.iter().all(|&v| v == 0 || v == 1));
+
+        // Progress callback should have been called at least twice (start + end)
+        assert!(progress_calls.len() >= 2,
+                "Progress callback should be called at least twice, got {} calls",
+                progress_calls.len());
+
+        // First call should be (0, iterations)
+        assert_eq!(progress_calls[0].0, 0);
+
+        // Last call should be (iterations, iterations)
+        let last = progress_calls.last().unwrap();
+        assert_eq!(last.0, last.1, "Final progress should be complete");
+    }
+
+    #[test]
+    fn test_run_bet_different_fractional_intensities() {
+        let (data, nx, ny, nz) = make_sphere_volume(16, 6.0, 200.0);
+
+        // Higher fractional_intensity = smaller brain
+        let mask_small = run_bet(&data, nx, ny, nz, 1.0, 1.0, 1.0, 0.7, 1.0, 0.0, 50, 1);
+        let mask_large = run_bet(&data, nx, ny, nz, 1.0, 1.0, 1.0, 0.3, 1.0, 0.0, 50, 1);
+
+        let count_small: usize = mask_small.iter().map(|&v| v as usize).sum();
+        let count_large: usize = mask_large.iter().map(|&v| v as usize).sum();
+
+        // Both should produce valid masks
+        assert!(count_small > 0);
+        assert!(count_large > 0);
+    }
+
+    #[test]
+    fn test_run_bet_anisotropic_voxels() {
+        let (data, nx, ny, nz) = make_sphere_volume(16, 6.0, 200.0);
+
+        let mask = run_bet(
+            &data,
+            nx, ny, nz,
+            2.0, 2.0, 2.0, // 2mm voxels
+            0.5,
+            1.0,
+            0.0,
+            50,
+            1,
+        );
+
+        assert_eq!(mask.len(), nx * ny * nz);
+        assert!(mask.iter().all(|&v| v == 0 || v == 1));
+    }
+
+    #[test]
+    fn test_evolution_pass_basic() {
+        // Directly test evolution_pass with a small icosphere
+        let n = 16;
+        let (data, nx, ny, nz) = make_sphere_volume(n, 6.0, 200.0);
+        let voxel_size = [1.0, 1.0, 1.0];
+        let bp = estimate_brain_parameters(&data, nx, ny, nz, &voxel_size);
+
+        let (unit_verts, faces) = create_icosphere(1);
+        let n_vertices = unit_verts.len();
+        let initial_radius_mm = bp.radius * 0.5;
+
+        let mut vertices: Vec<[f64; 3]> = unit_verts
+            .iter()
+            .map(|v| [
+                v[0] * initial_radius_mm + bp.cog_mm[0],
+                v[1] * initial_radius_mm + bp.cog_mm[1],
+                v[2] * initial_radius_mm + bp.cog_mm[2],
+            ])
+            .collect();
+
+        let (neighbor_matrix, neighbor_counts) = build_neighbor_matrix(n_vertices, &faces, 6);
+        let bt = 0.5_f64.powf(0.275);
+
+        let vertices_before = vertices.clone();
+
+        evolution_pass(
+            &data, nx, ny, nz, &voxel_size, &bp,
+            &mut vertices, &faces,
+            &neighbor_matrix, &neighbor_counts,
+            bt, 1.0, 0.0,
+            10, // few iterations
+            0,  // first pass
+            &mut None,
+        );
+
+        // Vertices should have moved
+        let mut any_moved = false;
+        for (before, after) in vertices_before.iter().zip(vertices.iter()) {
+            let dist = ((after[0] - before[0]).powi(2) +
+                       (after[1] - before[1]).powi(2) +
+                       (after[2] - before[2]).powi(2)).sqrt();
+            if dist > 1e-10 {
+                any_moved = true;
+            }
+            // All coordinates should be finite
+            assert!(after[0].is_finite() && after[1].is_finite() && after[2].is_finite());
+        }
+        assert!(any_moved, "Evolution should move at least some vertices");
+    }
+
+    #[test]
+    fn test_evolution_pass_recovery_pass() {
+        // Test with pass > 0 to exercise recovery smoothing code paths
+        let n = 16;
+        let (data, nx, ny, nz) = make_sphere_volume(n, 6.0, 200.0);
+        let voxel_size = [1.0, 1.0, 1.0];
+        let bp = estimate_brain_parameters(&data, nx, ny, nz, &voxel_size);
+
+        let (unit_verts, faces) = create_icosphere(1);
+        let n_vertices = unit_verts.len();
+        let initial_radius_mm = bp.radius * 0.5;
+
+        let mut vertices: Vec<[f64; 3]> = unit_verts
+            .iter()
+            .map(|v| [
+                v[0] * initial_radius_mm + bp.cog_mm[0],
+                v[1] * initial_radius_mm + bp.cog_mm[1],
+                v[2] * initial_radius_mm + bp.cog_mm[2],
+            ])
+            .collect();
+
+        let (neighbor_matrix, neighbor_counts) = build_neighbor_matrix(n_vertices, &faces, 6);
+        let bt = 0.5_f64.powf(0.275);
+
+        // Run with pass=1 and enough iterations to hit the 75% tapering code
+        evolution_pass(
+            &data, nx, ny, nz, &voxel_size, &bp,
+            &mut vertices, &faces,
+            &neighbor_matrix, &neighbor_counts,
+            bt, 1.0, 0.0,
+            20,  // enough iterations to hit 75% mark
+            1,   // recovery pass
+            &mut None,
+        );
+
+        // All coordinates should remain finite
+        for v in &vertices {
+            assert!(v[0].is_finite() && v[1].is_finite() && v[2].is_finite());
+        }
+    }
+
+    #[test]
+    fn test_evolution_pass_with_gradient() {
+        // Exercise the z-gradient threshold branch
+        let n = 16;
+        let (data, nx, ny, nz) = make_sphere_volume(n, 6.0, 200.0);
+        let voxel_size = [1.0, 1.0, 1.0];
+        let bp = estimate_brain_parameters(&data, nx, ny, nz, &voxel_size);
+
+        let (unit_verts, faces) = create_icosphere(1);
+        let n_vertices = unit_verts.len();
+        let initial_radius_mm = bp.radius * 0.5;
+
+        let mut vertices: Vec<[f64; 3]> = unit_verts
+            .iter()
+            .map(|v| [
+                v[0] * initial_radius_mm + bp.cog_mm[0],
+                v[1] * initial_radius_mm + bp.cog_mm[1],
+                v[2] * initial_radius_mm + bp.cog_mm[2],
+            ])
+            .collect();
+
+        let (neighbor_matrix, neighbor_counts) = build_neighbor_matrix(n_vertices, &faces, 6);
+        let bt = 0.5_f64.powf(0.275);
+
+        evolution_pass(
+            &data, nx, ny, nz, &voxel_size, &bp,
+            &mut vertices, &faces,
+            &neighbor_matrix, &neighbor_counts,
+            bt, 1.0, 0.5, // gradient_threshold = 0.5
+            10, 0,
+            &mut None,
+        );
+
+        for v in &vertices {
+            assert!(v[0].is_finite() && v[1].is_finite() && v[2].is_finite());
+        }
+    }
+
+    #[test]
+    fn test_evolution_pass_with_progress_callback() {
+        let n = 16;
+        let (data, nx, ny, nz) = make_sphere_volume(n, 6.0, 200.0);
+        let voxel_size = [1.0, 1.0, 1.0];
+        let bp = estimate_brain_parameters(&data, nx, ny, nz, &voxel_size);
+
+        let (unit_verts, faces) = create_icosphere(1);
+        let n_vertices = unit_verts.len();
+        let initial_radius_mm = bp.radius * 0.5;
+
+        let mut vertices: Vec<[f64; 3]> = unit_verts
+            .iter()
+            .map(|v| [
+                v[0] * initial_radius_mm + bp.cog_mm[0],
+                v[1] * initial_radius_mm + bp.cog_mm[1],
+                v[2] * initial_radius_mm + bp.cog_mm[2],
+            ])
+            .collect();
+
+        let (neighbor_matrix, neighbor_counts) = build_neighbor_matrix(n_vertices, &faces, 6);
+        let bt = 0.5_f64.powf(0.275);
+
+        let mut calls = 0usize;
+        let mut callback = |_iter: usize, _total: usize| {
+            calls += 1;
+        };
+        let mut cb: Option<&mut dyn FnMut(usize, usize)> = Some(&mut callback);
+
+        evolution_pass(
+            &data, nx, ny, nz, &voxel_size, &bp,
+            &mut vertices, &faces,
+            &neighbor_matrix, &neighbor_counts,
+            bt, 1.0, 0.0,
+            20, 0,
+            &mut cb,
+        );
+
+        assert!(calls > 0, "Progress callback should have been called");
     }
 }

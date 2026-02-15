@@ -262,8 +262,8 @@ pub fn tv_admm_default(
     tv_admm(
         local_field, mask, nx, ny, nz, vsx, vsy, vsz,
         (0.0, 0.0, 1.0),  // bdir
-        1e-3,             // lambda
-        0.1,              // rho = 100 * lambda
+        2e-4,             // lambda
+        2e-2,             // rho = 100 * lambda
         1e-3,             // tol
         250               // max_iter
     )

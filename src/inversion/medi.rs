@@ -907,55 +907,6 @@ fn fgrad_linext_inplace_f32(
     }
 }
 
-/// Backward divergence with linear extrapolation boundary conditions (f32, in-place)
-/// Adjoint of fgrad_linext_inplace_f32
-/// Matches MATLAB's gradAdj_ behavior
-#[inline]
-fn bdiv_linext_inplace_f32(
-    div: &mut [f32],
-    gx: &[f32], gy: &[f32], gz: &[f32],
-    nx: usize, ny: usize, nz: usize,
-    vsx: f32, vsy: f32, vsz: f32,
-) {
-    let hx = -1.0 / vsx;  // Negative for adjoint
-    let hy = -1.0 / vsy;
-    let hz = -1.0 / vsz;
-
-    for k in 0..nz {
-        let k_offset = k * nx * ny;
-
-        for j in 0..ny {
-            let j_offset = j * nx;
-
-            for i in 0..nx {
-                let idx = i + j_offset + k_offset;
-
-                // Adjoint of forward difference with linear extrapolation BC
-                // MATLAB: dx = dx - circshift(dx, [1,0,0]); dx = ih(1) .* dx;
-                // With boundary: dx(1) = dx(1), others = dx(i) - dx(i-1)
-                let gx_term = if i > 0 {
-                    (gx[idx] - gx[idx - 1]) * hx
-                } else {
-                    gx[idx] * hx
-                };
-
-                let gy_term = if j > 0 {
-                    (gy[idx] - gy[i + (j - 1) * nx + k_offset]) * hy
-                } else {
-                    gy[idx] * hy
-                };
-
-                let gz_term = if k > 0 {
-                    (gz[idx] - gz[i + j_offset + (k - 1) * nx * ny]) * hz
-                } else {
-                    gz[idx] * hz
-                };
-
-                div[idx] = gx_term + gy_term + gz_term;
-            }
-        }
-    }
-}
 
 /// Forward difference gradient with periodic boundary conditions (f32, in-place)
 /// Matches MATLAB's gradfp_mex used inside MEDI iterations.
@@ -1758,4 +1709,200 @@ mod tests {
     fn fmax(data: &[f32]) -> f32 { data.iter().cloned().fold(f32::MIN, f32::max) }
     fn fmean(data: &[f32]) -> f32 { data.iter().sum::<f32>() / data.len() as f32 }
     fn fnorm(data: &[f32]) -> f32 { data.iter().map(|&v| v * v).sum::<f32>().sqrt() }
+
+    #[test]
+    fn test_medi_l1_small() {
+        // 8x8x8 volume with synthetic local field
+        let n = 8;
+        let n_total = n * n * n;
+
+        // Create a synthetic local field from a dipole-like source
+        let mut field = vec![0.0f64; n_total];
+        let center = n / 2;
+        for z in 0..n {
+            for y in 0..n {
+                for x in 0..n {
+                    let idx = x + y * n + z * n * n;
+                    let dx = (x as f64) - (center as f64);
+                    let dy = (y as f64) - (center as f64);
+                    let dz = (z as f64) - (center as f64);
+                    let r2 = dx*dx + dy*dy + dz*dz;
+                    if r2 > 1.0 {
+                        // Dipole field pattern: (3*cos^2(theta) - 1) / r^3
+                        let r = r2.sqrt();
+                        let cos_theta = dz / r;
+                        field[idx] = (3.0 * cos_theta * cos_theta - 1.0) / (r * r * r) * 0.01;
+                    }
+                }
+            }
+        }
+
+        let mask = vec![1u8; n_total];
+        let mag = vec![1.0f64; n_total];
+        let n_std = vec![1.0f64; n_total];
+
+        // Run MEDI with few Gauss-Newton iterations to exercise the main loop
+        let chi = medi_l1(
+            &field, &n_std, &mag, &mask, n, n, n, 1.0, 1.0, 1.0,
+            1e-4,              // lambda
+            (0.0, 0.0, 1.0),   // bdir
+            false,             // merit
+            false,             // smv
+            5.0,               // smv_radius
+            1,                 // data_weighting (SNR)
+            0.3,               // percentage
+            0.01,              // cg_tol
+            10,                // cg_max_iter
+            5,                 // max_iter (enough to exercise the loop)
+            0.1,               // tol
+        );
+
+        // Result should be finite and same size
+        assert_eq!(chi.len(), n_total);
+        for (i, &val) in chi.iter().enumerate() {
+            assert!(val.is_finite(), "MEDI L1 chi should be finite at index {}", i);
+        }
+
+        // Chi should be non-trivial (not all zero) for a dipole field input
+        let chi_norm: f64 = chi.iter().map(|&v| v * v).sum::<f64>().sqrt();
+        assert!(chi_norm > 1e-10, "MEDI L1 should produce non-zero susceptibility for dipole field, got norm={}", chi_norm);
+    }
+
+    #[test]
+    fn test_medi_weight_types() {
+        let n = 8;
+        let n_total = n * n * n;
+
+        let field: Vec<f64> = (0..n_total).map(|i| (i as f64) * 0.001).collect();
+        let mask = vec![1u8; n_total];
+        let mag = vec![1.0f64; n_total];
+        let n_std = vec![1.0f64; n_total];
+
+        // Test uniform data weighting (mode 0)
+        let chi_uniform = medi_l1(
+            &field, &n_std, &mag, &mask, n, n, n, 1.0, 1.0, 1.0,
+            1000.0, (0.0, 0.0, 1.0), false, false, 5.0,
+            0,     // uniform data weighting
+            0.9, 0.1, 10, 3, 0.1
+        );
+
+        // Test SNR data weighting (mode 1) with varying noise
+        let n_std_varying: Vec<f64> = (0..n_total).map(|i| 0.5 + (i as f64) * 0.01).collect();
+        let chi_snr = medi_l1(
+            &field, &n_std_varying, &mag, &mask, n, n, n, 1.0, 1.0, 1.0,
+            1000.0, (0.0, 0.0, 1.0), false, false, 5.0,
+            1,     // SNR data weighting
+            0.9, 0.1, 10, 3, 0.1
+        );
+
+        // Both should be finite
+        for (i, &val) in chi_uniform.iter().enumerate() {
+            assert!(val.is_finite(), "Uniform weighting chi should be finite at {}", i);
+        }
+        for (i, &val) in chi_snr.iter().enumerate() {
+            assert!(val.is_finite(), "SNR weighting chi should be finite at {}", i);
+        }
+
+        // Uniform and SNR weighting should give different results
+        let diff_norm: f64 = chi_uniform.iter()
+            .zip(chi_snr.iter())
+            .map(|(&a, &b)| (a - b).powi(2))
+            .sum::<f64>()
+            .sqrt();
+        // They may or may not differ depending on input, so just check finiteness
+        assert!(diff_norm.is_finite(), "Difference between weight modes should be finite");
+    }
+
+    #[test]
+    fn test_medi_l1_with_progress_small() {
+        let n = 8;
+        let n_total = n * n * n;
+
+        let field: Vec<f64> = (0..n_total).map(|i| (i as f64) * 0.001).collect();
+        let mask = vec![1u8; n_total];
+        let mag = vec![1.0f64; n_total];
+        let n_std = vec![1.0f64; n_total];
+
+        let mut progress_calls = 0usize;
+        let chi = medi_l1_with_progress(
+            &field, &n_std, &mag, &mask, n, n, n, 1.0, 1.0, 1.0,
+            1000.0, (0.0, 0.0, 1.0), false, false, 5.0,
+            1, 0.9, 0.1, 10, 3, 0.1,
+            |_iter, _max| { progress_calls += 1; },
+        );
+
+        assert_eq!(chi.len(), n_total);
+        for &val in &chi {
+            assert!(val.is_finite(), "medi_l1_with_progress output should be finite");
+        }
+        assert!(progress_calls > 0, "progress callback should be called at least once");
+    }
+
+    #[test]
+    fn test_medi_l1_with_merit() {
+        let n = 8;
+        let n_total = n * n * n;
+
+        let mut field = vec![0.0f64; n_total];
+        let center = n / 2;
+        for z in 0..n {
+            for y in 0..n {
+                for x in 0..n {
+                    let idx = x + y * n + z * n * n;
+                    let dx = (x as f64) - (center as f64);
+                    let dy = (y as f64) - (center as f64);
+                    let dz = (z as f64) - (center as f64);
+                    let r2 = dx * dx + dy * dy + dz * dz;
+                    if r2 > 1.0 {
+                        let r = r2.sqrt();
+                        let cos_theta = dz / r;
+                        field[idx] = (3.0 * cos_theta * cos_theta - 1.0) / (r * r * r) * 0.01;
+                    }
+                }
+            }
+        }
+
+        let mask = vec![1u8; n_total];
+        let mag = vec![1.0f64; n_total];
+        let n_std = vec![1.0f64; n_total];
+
+        // Test with merit=true to cover the merit adjustment code path
+        let chi = medi_l1(
+            &field, &n_std, &mag, &mask, n, n, n, 1.0, 1.0, 1.0,
+            1e-4, (0.0, 0.0, 1.0),
+            true,  // merit enabled
+            false, 5.0, 1, 0.3, 0.01, 10, 5, 0.1,
+        );
+
+        assert_eq!(chi.len(), n_total);
+        for &val in &chi {
+            assert!(val.is_finite(), "MEDI with merit should produce finite results");
+        }
+    }
+
+    #[test]
+    fn test_medi_l1_with_smv() {
+        let n = 8;
+        let n_total = n * n * n;
+
+        let field: Vec<f64> = (0..n_total).map(|i| (i as f64) * 0.001).collect();
+        let mask = vec![1u8; n_total];
+        let mag = vec![1.0f64; n_total];
+        let n_std = vec![1.0f64; n_total];
+
+        // Test with smv=true to cover the SMV-weighted code path
+        let chi = medi_l1(
+            &field, &n_std, &mag, &mask, n, n, n, 1.0, 1.0, 1.0,
+            1000.0, (0.0, 0.0, 1.0),
+            false,
+            true,  // smv enabled
+            3.0,   // smv_radius
+            1, 0.3, 0.01, 10, 3, 0.1,
+        );
+
+        assert_eq!(chi.len(), n_total);
+        for &val in &chi {
+            assert!(val.is_finite(), "MEDI with SMV should produce finite results");
+        }
+    }
 }

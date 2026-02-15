@@ -1107,4 +1107,251 @@ mod tests {
         let s = sign_array(&x);
         assert_eq!(s, vec![-1.0, 0.0, 1.0]);
     }
+
+    #[test]
+    fn test_lsqr_complex_diagonal() {
+        // Test complex LSQR on a diagonal system: A = diag(1, 2, 3), b = [1+i, 4+2i, 9+3i]
+        // Expected solution: x = [1+i, 2+i, 3+i]
+        let diag = vec![1.0, 2.0, 3.0];
+        let expected = vec![
+            Complex64::new(1.0, 1.0),
+            Complex64::new(2.0, 1.0),
+            Complex64::new(3.0, 1.0),
+        ];
+        let b: Vec<Complex64> = expected.iter().zip(diag.iter())
+            .map(|(&xi, &di)| xi * di)
+            .collect();
+
+        let diag_a = diag.clone();
+        let diag_ah = diag.clone();
+        let apply_a = move |x: &[Complex64]| -> Vec<Complex64> {
+            x.iter().zip(diag_a.iter()).map(|(&xi, &di)| xi * di).collect()
+        };
+        let apply_ah = move |x: &[Complex64]| -> Vec<Complex64> {
+            x.iter().zip(diag_ah.iter()).map(|(&xi, &di)| xi * di).collect()
+        };
+
+        let x = lsqr_complex(apply_a, apply_ah, &b, 1e-10, 100);
+
+        for (i, (xi, ei)) in x.iter().zip(expected.iter()).enumerate() {
+            assert!((xi.re - ei.re).abs() < 1e-6,
+                "x[{}].re = {}, expected {}", i, xi.re, ei.re);
+            assert!((xi.im - ei.im).abs() < 1e-6,
+                "x[{}].im = {}, expected {}", i, xi.im, ei.im);
+        }
+    }
+
+    #[test]
+    fn test_lsmr_diagonal() {
+        // Test the LSMR solver (inside ilsqr.rs) exercises all code paths.
+        // Use a well-conditioned diagonal system: A = diag(1, 1, 1) (identity)
+        // b = [3, 5, 7], expected x = [3, 5, 7]
+        let b = vec![3.0, 5.0, 7.0];
+
+        let apply_a = |x: &[f64]| -> Vec<f64> { x.to_vec() };
+        let apply_at = |x: &[f64]| -> Vec<f64> { x.to_vec() };
+
+        let x = lsmr(apply_a, apply_at, &b, 3, 1e-6, 1e-6, 200, false);
+
+        // Verify that the solver returns finite values and the output has correct length
+        assert_eq!(x.len(), 3);
+        for (i, &xi) in x.iter().enumerate() {
+            assert!(xi.is_finite(), "x[{}] = {} is not finite", i, xi);
+        }
+
+        // Compute residual: ||Ax - b|| should be reduced from ||b||
+        let residual: f64 = x.iter().zip(b.iter())
+            .map(|(&xi, &bi)| (xi - bi).powi(2))
+            .sum::<f64>()
+            .sqrt();
+        let bnorm: f64 = b.iter().map(|&bi| bi * bi).sum::<f64>().sqrt();
+        assert!(residual < bnorm,
+            "residual {} should be less than ||b|| = {}", residual, bnorm);
+    }
+
+    #[test]
+    fn test_laplacian_weights() {
+        // Test laplacian_weights_ilsqr on a small 4x4x4 volume with a uniform field
+        // inside a mask. A constant field has zero Laplacian, so weights should be 1.0.
+        let (nx, ny, nz) = (4, 4, 4);
+        let n_total = nx * ny * nz;
+        let mut mask = vec![0u8; n_total];
+        let mut field = vec![0.0; n_total];
+
+        // Create a sphere mask and constant field inside
+        for k in 0..nz {
+            for j in 0..ny {
+                for i in 0..nx {
+                    let idx = i + j * nx + k * nx * ny;
+                    let ci = i as f64 - 1.5;
+                    let cj = j as f64 - 1.5;
+                    let ck = k as f64 - 1.5;
+                    let r2 = ci * ci + cj * cj + ck * ck;
+                    if r2 < 2.5 {
+                        mask[idx] = 1;
+                        field[idx] = 5.0; // constant field => Laplacian is 0
+                    }
+                }
+            }
+        }
+
+        let w = laplacian_weights_ilsqr(&field, &mask, nx, ny, nz, 1.0, 1.0, 1.0, 10.0, 90.0);
+
+        // All weights should be finite and in [0, 1]
+        for (i, &wi) in w.iter().enumerate() {
+            assert!(wi.is_finite(), "weight[{}] is not finite", i);
+            assert!(wi >= 0.0 && wi <= 1.0, "weight[{}] = {} out of [0,1]", i, wi);
+        }
+
+        // Masked-out voxels should have weight 0
+        for i in 0..n_total {
+            if mask[i] == 0 {
+                assert_eq!(w[i], 0.0, "weight outside mask should be 0 at index {}", i);
+            }
+        }
+    }
+
+    #[test]
+    fn test_dipole_kspace_weights() {
+        // Test dipole_kspace_weights_ilsqr with synthetic dipole values
+        let d = vec![0.0, 0.01, 0.1, 0.3, 0.5, 0.7, 1.0, -0.5, -1.0, 0.0];
+
+        let w = dipole_kspace_weights_ilsqr(&d, 1.0, 1.0, 90.0);
+
+        // All weights should be in [0, 1]
+        for (i, &wi) in w.iter().enumerate() {
+            assert!(wi >= 0.0 && wi <= 1.0,
+                "weight[{}] = {} out of [0,1]", i, wi);
+        }
+
+        // Zero dipole values should produce weight 0 (or very small) since |0|^n = 0
+        assert!(w[0] <= 1e-10, "weight at D=0 should be ~0, got {}", w[0]);
+
+        // The largest |D| values should have weight near 1.0
+        // d[6]=1.0 and d[8]=-1.0 have the largest |D|
+        assert!(w[6] > 0.5, "weight at |D|=1.0 should be large, got {}", w[6]);
+        assert!(w[8] > 0.5, "weight at |D|=1.0 should be large, got {}", w[8]);
+    }
+
+    #[test]
+    fn test_gradient_weights() {
+        // Test gradient_weights_ilsqr on a small 4x4x4 volume
+        let (nx, ny, nz) = (4, 4, 4);
+        let n_total = nx * ny * nz;
+
+        // Create a mask (all ones for simplicity)
+        let mask = vec![1u8; n_total];
+
+        // Create a field with a linear gradient in x
+        let mut field = vec![0.0; n_total];
+        for k in 0..nz {
+            for j in 0..ny {
+                for i in 0..nx {
+                    let idx = i + j * nx + k * nx * ny;
+                    field[idx] = i as f64; // linear in x
+                }
+            }
+        }
+
+        let (wx, wy, wz) = gradient_weights_ilsqr(
+            &field, &mask, nx, ny, nz, 1.0, 1.0, 1.0, 10.0, 90.0
+        );
+
+        // All weights should be finite and in [0, 1]
+        for i in 0..n_total {
+            assert!(wx[i].is_finite(), "wx[{}] is not finite", i);
+            assert!(wy[i].is_finite(), "wy[{}] is not finite", i);
+            assert!(wz[i].is_finite(), "wz[{}] is not finite", i);
+            assert!(wx[i] >= 0.0 && wx[i] <= 1.0, "wx[{}] = {} out of [0,1]", i, wx[i]);
+            assert!(wy[i] >= 0.0 && wy[i] <= 1.0, "wy[{}] = {} out of [0,1]", i, wy[i]);
+            assert!(wz[i] >= 0.0 && wz[i] <= 1.0, "wz[{}] = {} out of [0,1]", i, wz[i]);
+        }
+
+        // The y and z gradients are zero for this field, so wy and wz should reflect
+        // that all gradient values are identical (zero). Check they are well-defined.
+        let wy_sum: f64 = wy.iter().sum();
+        let wz_sum: f64 = wz.iter().sum();
+        assert!(wy_sum.is_finite(), "wy sum is not finite");
+        assert!(wz_sum.is_finite(), "wz sum is not finite");
+    }
+
+    #[test]
+    fn test_ilsqr_small() {
+        // Run ilsqr_simple on a small 8x8x8 volume with a sphere mask
+        // and synthetic local field data. This exercises the full pipeline:
+        // lsqr_step, fastqsm_step, susceptibility_artifacts_step.
+        let (nx, ny, nz) = (8, 8, 8);
+        let n_total = nx * ny * nz;
+        let vsx = 1.0;
+        let vsy = 1.0;
+        let vsz = 1.0;
+        let bdir = (0.0, 0.0, 1.0);
+
+        // Create a sphere mask centered in the volume
+        let mut mask = vec![0u8; n_total];
+        let cx = (nx as f64 - 1.0) / 2.0;
+        let cy = (ny as f64 - 1.0) / 2.0;
+        let cz = (nz as f64 - 1.0) / 2.0;
+        let radius = 3.0;
+
+        for k in 0..nz {
+            for j in 0..ny {
+                for i in 0..nx {
+                    let idx = i + j * nx + k * nx * ny;
+                    let di = i as f64 - cx;
+                    let dj = j as f64 - cy;
+                    let dk = k as f64 - cz;
+                    if di * di + dj * dj + dk * dk < radius * radius {
+                        mask[idx] = 1;
+                    }
+                }
+            }
+        }
+
+        // Create synthetic local field: a simple dipole-like pattern
+        // Use a small susceptibility source and forward-model through the dipole kernel
+        let mut field = vec![0.0; n_total];
+        for k in 0..nz {
+            for j in 0..ny {
+                for i in 0..nx {
+                    let idx = i + j * nx + k * nx * ny;
+                    if mask[idx] > 0 {
+                        let di = i as f64 - cx;
+                        let dj = j as f64 - cy;
+                        let dk = k as f64 - cz;
+                        // Simulate a simple field variation
+                        field[idx] = 0.01 * (dk * dk - di * di - dj * dj)
+                            / (di * di + dj * dj + dk * dk + 1.0);
+                    }
+                }
+            }
+        }
+
+        let tol = 0.1;
+        let maxit = 5; // Few iterations for speed
+
+        let chi = ilsqr_simple(&field, &mask, nx, ny, nz, vsx, vsy, vsz, bdir, tol, maxit);
+
+        // Check output dimensions
+        assert_eq!(chi.len(), n_total, "output size mismatch");
+
+        // Check all values are finite
+        for (i, &v) in chi.iter().enumerate() {
+            assert!(v.is_finite(), "chi[{}] = {} is not finite", i, v);
+        }
+
+        // Check mask is respected: outside mask should be zero
+        for i in 0..n_total {
+            if mask[i] == 0 {
+                assert_eq!(chi[i], 0.0, "chi outside mask should be 0 at index {}", i);
+            }
+        }
+
+        // Check that the result is not all zeros inside the mask
+        let inside_sum: f64 = chi.iter().zip(mask.iter())
+            .filter(|(_, &m)| m > 0)
+            .map(|(&v, _)| v.abs())
+            .sum();
+        assert!(inside_sum > 0.0, "chi should not be all zeros inside the mask");
+    }
 }

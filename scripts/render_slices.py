@@ -31,7 +31,11 @@ NAMES = {
     "inversion_tikhonov": "Tikhonov",
     "inversion_tv": "TV-ADMM",
     "inversion_rts": "RTS",
+    "inversion_medi": "MEDI",
+    "inversion_nltv": "NLTV",
     "bet": "BET",
+    "combined_tgv": "TGV (Combined)",
+    "bias_correction": "Bias Correction",
     "pipeline_tgv": "TGV",
     "pipeline_qsmart": "QSMART",
 }
@@ -48,7 +52,11 @@ WINDOWS = {
     "inversion_tikhonov": (-0.1, 0.1),
     "inversion_tv": (-0.1, 0.1),
     "inversion_rts": (-0.1, 0.1),
+    "inversion_medi": (-0.1, 0.1),
+    "inversion_nltv": (-0.1, 0.1),
     "bet": (0, 1),
+    "combined_tgv": (-0.1, 0.1),
+    "bias_correction": (-0.1, 0.1),  # fallback; before/after rendering uses auto-range
     "pipeline_tgv": (-0.1, 0.1),
     "pipeline_qsmart": (-0.1, 0.1),
 }
@@ -87,7 +95,14 @@ def render_figure(slices, name, slug, output_path):
     """Render a 3-panel figure (axial, coronal, sagittal) and save as PNG."""
     fig, axes = plt.subplots(1, 3, figsize=(10, 3.5))
 
-    vmin, vmax = WINDOWS.get(slug, (-0.1, 0.1))
+    window = WINDOWS.get(slug, (-0.1, 0.1))
+    if window is not None:
+        vmin, vmax = window
+    else:
+        # Auto-range from data (e.g. magnitude images)
+        all_vals = np.concatenate([slices[k].ravel() for k in ("axial", "coronal", "sagittal")])
+        finite = all_vals[np.isfinite(all_vals)]
+        vmin, vmax = (float(finite.min()), float(finite.max())) if len(finite) > 0 else (0, 1)
 
     for ax, (label, key) in zip(
         axes, [("Axial", "axial"), ("Coronal", "coronal"), ("Sagittal", "sagittal")]
@@ -104,6 +119,31 @@ def render_figure(slices, name, slug, output_path):
     print(f"  Rendered {output_path}")
 
 
+def render_before_after(before_slices, after_slices, name, output_path):
+    """Render a 2-panel before/after axial figure with independent ranges."""
+    fig, axes = plt.subplots(1, 2, figsize=(8, 4))
+
+    def auto_range(data):
+        finite = data[np.isfinite(data)]
+        return (float(finite.min()), float(finite.max())) if len(finite) > 0 else (0, 1)
+
+    bmin, bmax = auto_range(before_slices["axial"].ravel())
+    amin, amax = auto_range(after_slices["axial"].ravel())
+
+    axes[0].imshow(before_slices["axial"], cmap="gray", vmin=bmin, vmax=bmax, origin="lower")
+    axes[0].set_title("Before", fontsize=11)
+    axes[0].axis("off")
+
+    axes[1].imshow(after_slices["axial"], cmap="gray", vmin=amin, vmax=amax, origin="lower")
+    axes[1].set_title("After", fontsize=11)
+    axes[1].axis("off")
+
+    fig.suptitle(name, fontsize=14, fontweight="bold", y=1.0)
+    fig.savefig(output_path, dpi=120, bbox_inches="tight", facecolor="white")
+    plt.close(fig)
+    print(f"  Rendered {output_path}")
+
+
 def main():
     input_dir = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("slices")
     output_dir = Path(sys.argv[2]) if len(sys.argv) > 2 else Path("figures")
@@ -114,9 +154,31 @@ def main():
         print(f"No .bin files found in {input_dir}")
         sys.exit(0)
 
-    print(f"Rendering {len(bin_files)} figures...")
+    # Handle before/after pairs (e.g. bias_correction_before + bias_correction)
+    BEFORE_AFTER = {
+        "bias_correction": "bias_correction_before",
+    }
+
+    print(f"Rendering figures from {len(bin_files)} files...")
+    rendered = set()
+    for slug, before_slug in BEFORE_AFTER.items():
+        after_file = input_dir / f"{slug}.bin"
+        before_file = input_dir / f"{before_slug}.bin"
+        if after_file.exists() and before_file.exists():
+            name = NAMES.get(slug, slug)
+            try:
+                before_slices = load_slices(before_file)
+                after_slices = load_slices(after_file)
+                render_before_after(before_slices, after_slices, name, output_dir / f"{slug}.png")
+                rendered.add(slug)
+                rendered.add(before_slug)
+            except Exception as e:
+                print(f"  WARNING: Failed to render {slug} before/after: {e}")
+
     for bin_file in bin_files:
         slug = bin_file.stem
+        if slug in rendered:
+            continue
         name = NAMES.get(slug, slug)
         try:
             slices = load_slices(bin_file)

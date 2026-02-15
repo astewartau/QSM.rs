@@ -18,6 +18,7 @@ use qsm_core::utils::{
     multi_echo_linear_fit, field_to_hz,
     generate_vasculature_mask, VasculatureParams,
     adjust_offset,
+    makehomogeneous,
 };
 
 /// Helper macro to run an algorithm with timing and logging
@@ -268,8 +269,8 @@ fn test_inversion_tv() {
         nx, ny, nz,
         vsx, vsy, vsz,
         data.b0_dir,
-        1e-3,  // lambda
-        0.1,   // rho (= 100 * lambda)
+        2e-4,  // lambda (reduced from 1e-3 for less smoothing)
+        2e-2,  // rho (= 100 * lambda)
         1e-3,  // tolerance
         250,   // max iterations
     ));
@@ -312,6 +313,118 @@ fn test_inversion_rts() {
 
     assert!(res.nrmse < 0.5, "RTS NRMSE too high: {}", res.nrmse);
     assert!(res.correlation > 0.7, "RTS correlation too low: {}", res.correlation);
+}
+
+#[test]
+#[ignore]
+fn test_inversion_medi() {
+    println!("[INFO] Loading test data...");
+    let data = TestData::load().expect("Failed to load test data");
+    let (nx, ny, nz) = data.dims;
+    let (vsx, vsy, vsz) = data.voxel_size;
+    let n_total = nx * ny * nz;
+
+    // MEDI needs magnitude and noise std; use uniform noise std for synthetic data
+    let n_std = vec![1.0; n_total];
+
+    let (result, elapsed) = run_timed!("MEDI", inversion::medi_l1(
+        &data.fieldmap_local,
+        &n_std,
+        &data.mag_echoes[0],
+        &data.mask,
+        nx, ny, nz,
+        vsx, vsy, vsz,
+        7.5e-5,            // lambda (MATLAB default)
+        data.b0_dir,
+        false,             // merit
+        false,             // smv
+        5.0,               // smv_radius
+        1,                 // data_weighting (SNR mode)
+        0.3,               // percentage (30% edges)
+        0.01,              // cg_tol
+        10,                // cg_max_iter
+        30,                // max_iter
+        0.1,               // tol
+    ));
+
+    let res = TestResult::new("MEDI", &result, &data.chi, &data.mask, data.dims);
+    res.print_with_time(elapsed);
+    res.print_ci_metrics(elapsed);
+    common::save_center_slices(&result, &data.mask, data.dims, "inversion_medi");
+
+    assert!(res.nrmse < 0.5, "MEDI NRMSE too high: {}", res.nrmse);
+    assert!(res.correlation > 0.7, "MEDI correlation too low: {}", res.correlation);
+}
+
+#[test]
+#[ignore]
+fn test_inversion_nltv() {
+    println!("[INFO] Loading test data...");
+    let data = TestData::load().expect("Failed to load test data");
+    let (nx, ny, nz) = data.dims;
+    let (vsx, vsy, vsz) = data.voxel_size;
+
+    let (result, elapsed) = run_timed!("NLTV", inversion::nltv(
+        &data.fieldmap_local,
+        &data.mask,
+        nx, ny, nz,
+        vsx, vsy, vsz,
+        data.b0_dir,
+        3e-4,  // lambda
+        1.0,   // mu
+        1e-3,  // tolerance
+        250,   // max iterations
+        10,    // newton iterations
+    ));
+
+    let res = TestResult::new("NLTV", &result, &data.chi, &data.mask, data.dims);
+    res.print_with_time(elapsed);
+    res.print_ci_metrics(elapsed);
+    common::save_center_slices(&result, &data.mask, data.dims, "inversion_nltv");
+
+    assert!(res.nrmse < 0.5, "NLTV NRMSE too high: {}", res.nrmse);
+    assert!(res.correlation > 0.7, "NLTV correlation too low: {}", res.correlation);
+}
+
+// ============================================================================
+// Bias Field Correction Test
+// ============================================================================
+
+#[test]
+#[ignore]
+fn test_bias_correction() {
+    println!("[INFO] Loading test data...");
+    let data = TestData::load().expect("Failed to load test data");
+    let (nx, ny, nz) = data.dims;
+    let (vsx, vsy, vsz) = data.voxel_size;
+
+    let (result, elapsed) = run_timed!("Makehomogeneous", makehomogeneous(
+        &data.mag_echoes[0],
+        nx, ny, nz,
+        vsx, vsy, vsz,
+        7.0,  // sigma_mm
+        6,    // nbox
+    ));
+
+    println!("Makehomogeneous {:>10.2?}", elapsed);
+    println!("RESULT:Makehomogeneous,-,-,-,-,{:.2}", elapsed.as_secs_f64());
+    common::save_center_slices(&data.mag_echoes[0], &data.mask, data.dims, "bias_correction_before");
+    common::save_center_slices(&result, &data.mask, data.dims, "bias_correction");
+
+    // Bias correction should produce finite, positive values within the mask
+    let mut valid_count = 0;
+    let mut positive_count = 0;
+    for i in 0..result.len() {
+        if data.mask[i] > 0 {
+            valid_count += 1;
+            if result[i].is_finite() && result[i] > 0.0 {
+                positive_count += 1;
+            }
+        }
+    }
+    let valid_fraction = positive_count as f64 / valid_count as f64;
+    println!("[INFO] Bias correction: {:.1}% valid positive voxels in mask", valid_fraction * 100.0);
+    assert!(valid_fraction > 0.9, "Too few valid voxels after bias correction: {:.1}%", valid_fraction * 100.0);
 }
 
 // ============================================================================

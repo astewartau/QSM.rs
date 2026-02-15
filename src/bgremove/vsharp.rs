@@ -353,4 +353,231 @@ mod tests {
             "V-SHARP {} should preserve at least as many as SHARP {}",
             vsharp_count, sharp_count);
     }
+
+    #[test]
+    fn test_vsharp_nonuniform_voxels() {
+        let n = 8;
+        let field: Vec<f64> = (0..n*n*n).map(|i| (i as f64) * 0.001).collect();
+        let mask = vec![1u8; n * n * n];
+
+        // Anisotropic voxel sizes
+        let radii = vec![4.0, 3.0, 2.0];
+        let (local, final_mask) = vsharp(
+            &field, &mask, n, n, n, 0.5, 1.0, 2.0, &radii, 0.05
+        );
+
+        // All values should be finite
+        for (i, &val) in local.iter().enumerate() {
+            assert!(val.is_finite(), "V-SHARP nonuniform voxels: finite at index {}", i);
+        }
+
+        // Final mask should have some voxels
+        let mask_count: usize = final_mask.iter().map(|&m| m as usize).sum();
+        assert!(mask_count > 0, "V-SHARP nonuniform: final mask should have some voxels");
+    }
+
+    #[test]
+    fn test_vsharp_single_radius() {
+        let n = 8;
+        let field: Vec<f64> = (0..n*n*n).map(|i| (i as f64) * 0.001).collect();
+        let mask = vec![1u8; n * n * n];
+
+        // Single radius should delegate to SHARP
+        let radii = vec![3.0];
+        let (local, final_mask) = vsharp(
+            &field, &mask, n, n, n, 1.0, 1.0, 1.0, &radii, 0.05
+        );
+
+        // All values should be finite
+        for (i, &val) in local.iter().enumerate() {
+            assert!(val.is_finite(), "V-SHARP single radius: finite at index {}", i);
+        }
+
+        // Result should match SHARP with same radius
+        let (sharp_local, sharp_mask) = crate::bgremove::sharp::sharp(
+            &field, &mask, n, n, n, 1.0, 1.0, 1.0, 3.0, 0.05
+        );
+
+        for i in 0..n*n*n {
+            assert!(
+                (local[i] - sharp_local[i]).abs() < 1e-10,
+                "Single-radius V-SHARP should match SHARP at index {}", i
+            );
+        }
+
+        assert_eq!(final_mask, sharp_mask, "Single-radius V-SHARP mask should match SHARP mask");
+    }
+
+    #[test]
+    fn test_vsharp_empty_radii() {
+        // Empty radii should return zeros and the original mask
+        let n = 8;
+        let field: Vec<f64> = (0..n * n * n).map(|i| (i as f64) * 0.001).collect();
+        let mask = vec![1u8; n * n * n];
+
+        let (local, returned_mask) = vsharp(
+            &field, &mask, n, n, n, 1.0, 1.0, 1.0, &[], 0.05
+        );
+
+        for &val in &local {
+            assert_eq!(val, 0.0, "Empty radii should return zero local field");
+        }
+        assert_eq!(returned_mask, mask, "Empty radii should return original mask");
+    }
+
+    #[test]
+    fn test_vsharp_larger_volume() {
+        // 16x16x16 volume with spherical mask
+        let n = 16;
+        let mut field = vec![0.0; n * n * n];
+        // Linear background field in z
+        for z in 0..n {
+            for y in 0..n {
+                for x in 0..n {
+                    field[x + y * n + z * n * n] = (z as f64) * 0.1;
+                }
+            }
+        }
+
+        // Spherical mask
+        let mut mask = vec![0u8; n * n * n];
+        let center = n / 2;
+        let radius = n / 3;
+        for z in 0..n {
+            for y in 0..n {
+                for x in 0..n {
+                    let dx = (x as i32) - (center as i32);
+                    let dy = (y as i32) - (center as i32);
+                    let dz = (z as i32) - (center as i32);
+                    if dx * dx + dy * dy + dz * dz <= (radius * radius) as i32 {
+                        mask[x + y * n + z * n * n] = 1;
+                    }
+                }
+            }
+        }
+
+        let radii = vec![6.0, 4.0, 3.0, 2.0];
+        let (local, final_mask) = vsharp(
+            &field, &mask, n, n, n, 1.0, 1.0, 1.0, &radii, 0.05
+        );
+
+        assert_eq!(local.len(), n * n * n);
+        for &val in &local {
+            assert!(val.is_finite(), "V-SHARP larger volume values should be finite");
+        }
+
+        let mask_count: usize = final_mask.iter().map(|&m| m as usize).sum();
+        assert!(mask_count > 0, "V-SHARP larger volume should have voxels in final mask");
+
+        // Voxels outside the final mask should be zero
+        for i in 0..n * n * n {
+            if final_mask[i] == 0 {
+                assert_eq!(local[i], 0.0, "Outside final mask should be zero");
+            }
+        }
+    }
+
+    #[test]
+    fn test_vsharp_with_progress() {
+        let n = 8;
+        let field: Vec<f64> = (0..n * n * n).map(|i| (i as f64) * 0.001).collect();
+        let mask = vec![1u8; n * n * n];
+
+        let radii = vec![4.0, 3.0, 2.0];
+        let mut progress_calls = Vec::new();
+        let (local, _) = vsharp_with_progress(
+            &field, &mask, n, n, n, 1.0, 1.0, 1.0, &radii, 0.05,
+            |idx, total| { progress_calls.push((idx, total)); }
+        );
+
+        assert_eq!(local.len(), n * n * n);
+        assert!(!progress_calls.is_empty(), "Progress should be called");
+        for &val in &local {
+            assert!(val.is_finite());
+        }
+    }
+
+    #[test]
+    fn test_vsharp_with_progress_single_radius() {
+        let n = 8;
+        let field: Vec<f64> = (0..n * n * n).map(|i| (i as f64) * 0.001).collect();
+        let mask = vec![1u8; n * n * n];
+
+        let radii = vec![3.0];
+        let mut progress_calls = Vec::new();
+        let (local, _) = vsharp_with_progress(
+            &field, &mask, n, n, n, 1.0, 1.0, 1.0, &radii, 0.05,
+            |idx, total| { progress_calls.push((idx, total)); }
+        );
+
+        assert_eq!(local.len(), n * n * n);
+        assert!(!progress_calls.is_empty(), "Progress should be called for single radius");
+        for &val in &local {
+            assert!(val.is_finite());
+        }
+    }
+
+    #[test]
+    fn test_vsharp_with_progress_empty_radii() {
+        let n = 8;
+        let field = vec![0.0; n * n * n];
+        let mask = vec![1u8; n * n * n];
+
+        let mut progress_calls = Vec::new();
+        let (local, returned_mask) = vsharp_with_progress(
+            &field, &mask, n, n, n, 1.0, 1.0, 1.0, &[], 0.05,
+            |idx, total| { progress_calls.push((idx, total)); }
+        );
+
+        for &val in &local {
+            assert_eq!(val, 0.0);
+        }
+        assert_eq!(returned_mask, mask);
+    }
+
+    #[test]
+    fn test_vsharp_default_wrapper() {
+        let n = 8;
+        let field: Vec<f64> = (0..n * n * n).map(|i| (i as f64) * 0.001).collect();
+        let mask = vec![1u8; n * n * n];
+
+        let (local, final_mask) = vsharp_default(&field, &mask, n, n, n, 1.0, 1.0, 1.0);
+
+        assert_eq!(local.len(), n * n * n);
+        for &val in &local {
+            assert!(val.is_finite());
+        }
+        // Final mask should have some voxels
+        let count: usize = final_mask.iter().map(|&m| m as usize).sum();
+        // May be 0 if volume is too small for default radii, but should not crash
+        assert!(count <= n * n * n);
+    }
+
+    #[test]
+    fn test_vsharp_unsorted_radii() {
+        // Radii given in arbitrary order - should be sorted internally
+        let n = 8;
+        let field: Vec<f64> = (0..n * n * n).map(|i| (i as f64) * 0.001).collect();
+        let mask = vec![1u8; n * n * n];
+
+        let radii_sorted = vec![4.0, 3.0, 2.0];
+        let radii_unsorted = vec![2.0, 4.0, 3.0];
+
+        let (local_sorted, mask_sorted) = vsharp(
+            &field, &mask, n, n, n, 1.0, 1.0, 1.0, &radii_sorted, 0.05
+        );
+        let (local_unsorted, mask_unsorted) = vsharp(
+            &field, &mask, n, n, n, 1.0, 1.0, 1.0, &radii_unsorted, 0.05
+        );
+
+        // Results should be the same regardless of input order
+        assert_eq!(mask_sorted, mask_unsorted, "Sorted and unsorted radii should give same mask");
+        for i in 0..n * n * n {
+            assert!(
+                (local_sorted[i] - local_unsorted[i]).abs() < 1e-10,
+                "Results should match at index {}",
+                i
+            );
+        }
+    }
 }

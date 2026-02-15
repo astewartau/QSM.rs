@@ -368,6 +368,37 @@ pub fn save_nifti_gz(
         .map_err(|e| format!("Gzip finish failed: {}", e))
 }
 
+/// Read a NIfTI file from a filesystem path
+///
+/// Supports both .nii and .nii.gz files.
+pub fn read_nifti_file(path: &std::path::Path) -> Result<NiftiData, String> {
+    let bytes = std::fs::read(path)
+        .map_err(|e| format!("Failed to read file '{}': {}", path.display(), e))?;
+    load_nifti(&bytes)
+}
+
+/// Save NIfTI data to a file
+///
+/// If the path ends with .nii.gz, the file is gzip compressed.
+/// Otherwise it is saved as uncompressed .nii.
+pub fn save_nifti_to_file(
+    path: &std::path::Path,
+    data: &[f64],
+    dims: (usize, usize, usize),
+    voxel_size: (f64, f64, f64),
+    affine: &[f64; 16],
+) -> Result<(), String> {
+    let path_str = path.to_string_lossy();
+    let bytes = if path_str.ends_with(".nii.gz") {
+        save_nifti_gz(data, dims, voxel_size, affine)?
+    } else {
+        save_nifti(data, dims, voxel_size, affine)?
+    };
+
+    std::fs::write(path, &bytes)
+        .map_err(|e| format!("Failed to write file '{}': {}", path.display(), e))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -416,5 +447,376 @@ mod tests {
         // Check sizeof_hdr
         let sizeof_hdr = i32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
         assert_eq!(sizeof_hdr, 348);
+    }
+
+    #[test]
+    fn test_save_and_read_nifti_roundtrip() {
+        let dims = (4, 4, 4);
+        let n = dims.0 * dims.1 * dims.2;
+        let voxel_size = (1.0, 2.0, 3.0);
+        let affine = [
+            1.0, 0.0, 0.0, 10.0,
+            0.0, 2.0, 0.0, 20.0,
+            0.0, 0.0, 3.0, 30.0,
+            0.0, 0.0, 0.0, 1.0,
+        ];
+
+        // Create test data with known values
+        let data: Vec<f64> = (0..n).map(|i| (i as f64) * 0.5 + 1.0).collect();
+
+        // Save to temp file
+        let tmp_dir = std::env::temp_dir();
+        let tmp_path = tmp_dir.join("test_nifti_roundtrip.nii");
+
+        save_nifti_to_file(&tmp_path, &data, dims, voxel_size, &affine).unwrap();
+
+        // Read back
+        let loaded = read_nifti_file(&tmp_path).unwrap();
+
+        // Verify dimensions
+        assert_eq!(loaded.dims, dims, "Dimensions should match");
+
+        // Verify voxel sizes
+        assert!((loaded.voxel_size.0 - voxel_size.0).abs() < 1e-5, "Voxel size X mismatch");
+        assert!((loaded.voxel_size.1 - voxel_size.1).abs() < 1e-5, "Voxel size Y mismatch");
+        assert!((loaded.voxel_size.2 - voxel_size.2).abs() < 1e-5, "Voxel size Z mismatch");
+
+        // Verify data values (saved as f32, so some precision loss expected)
+        assert_eq!(loaded.data.len(), n, "Data length should match");
+        for i in 0..n {
+            assert!(
+                (loaded.data[i] - data[i]).abs() < 0.01,
+                "Data mismatch at index {}: expected {}, got {}",
+                i, data[i], loaded.data[i]
+            );
+        }
+
+        // Cleanup
+        std::fs::remove_file(&tmp_path).ok();
+    }
+
+    #[test]
+    fn test_save_and_read_nifti_f32() {
+        let dims = (4, 4, 4);
+        let n = dims.0 * dims.1 * dims.2;
+        let voxel_size = (1.5, 1.5, 1.5);
+        let affine = [
+            1.5, 0.0, 0.0, 0.0,
+            0.0, 1.5, 0.0, 0.0,
+            0.0, 0.0, 1.5, 0.0,
+            0.0, 0.0, 0.0, 1.0,
+        ];
+
+        // Create small f32-precision data
+        let data: Vec<f64> = (0..n).map(|i| (i as f32 * 0.1) as f64).collect();
+
+        let tmp_dir = std::env::temp_dir();
+        let tmp_path = tmp_dir.join("test_nifti_f32.nii");
+
+        save_nifti_to_file(&tmp_path, &data, dims, voxel_size, &affine).unwrap();
+        let loaded = read_nifti_file(&tmp_path).unwrap();
+
+        assert_eq!(loaded.dims, dims);
+        assert_eq!(loaded.data.len(), n);
+
+        // f32 precision: data is saved as f32, so roundtrip should be exact for f32 values
+        for i in 0..n {
+            assert!(
+                (loaded.data[i] - data[i]).abs() < 1e-5,
+                "f32 data mismatch at index {}: expected {}, got {}",
+                i, data[i], loaded.data[i]
+            );
+        }
+
+        std::fs::remove_file(&tmp_path).ok();
+    }
+
+    #[test]
+    fn test_save_nifti_gzip() {
+        let dims = (4, 4, 4);
+        let n = dims.0 * dims.1 * dims.2;
+        let voxel_size = (1.0, 1.0, 1.0);
+        let affine = [
+            1.0, 0.0, 0.0, 0.0,
+            0.0, 1.0, 0.0, 0.0,
+            0.0, 0.0, 1.0, 0.0,
+            0.0, 0.0, 0.0, 1.0,
+        ];
+
+        let data: Vec<f64> = (0..n).map(|i| i as f64).collect();
+
+        let tmp_dir = std::env::temp_dir();
+        let tmp_path = tmp_dir.join("test_nifti_gz.nii.gz");
+
+        save_nifti_to_file(&tmp_path, &data, dims, voxel_size, &affine).unwrap();
+
+        // Verify the file is actually gzip compressed
+        let bytes = std::fs::read(&tmp_path).unwrap();
+        assert!(is_gzip(&bytes), "File should be gzip compressed");
+
+        // Read it back
+        let loaded = read_nifti_file(&tmp_path).unwrap();
+        assert_eq!(loaded.dims, dims);
+        assert_eq!(loaded.data.len(), n);
+
+        for i in 0..n {
+            assert!(
+                (loaded.data[i] - data[i]).abs() < 0.01,
+                "Gzip roundtrip mismatch at index {}: expected {}, got {}",
+                i, data[i], loaded.data[i]
+            );
+        }
+
+        std::fs::remove_file(&tmp_path).ok();
+    }
+
+    #[test]
+    fn test_load_nifti_invalid_bytes() {
+        // Invalid bytes should return an error
+        let result = load_nifti(&[0u8; 10]);
+        assert!(result.is_err(), "Loading invalid bytes should error");
+    }
+
+    #[test]
+    fn test_load_nifti_invalid_gzip() {
+        // Bytes that look like gzip but are corrupt
+        let result = load_nifti(&[0x1f, 0x8b, 0x00, 0x00, 0x00]);
+        assert!(result.is_err(), "Loading invalid gzip should error");
+    }
+
+    #[test]
+    fn test_get_header_info_small_file() {
+        let info = get_header_info(&[0u8; 10]);
+        assert!(info.contains("too small"), "Should report file too small");
+    }
+
+    #[test]
+    fn test_get_header_info_normal() {
+        // Create a 348-byte mock header
+        let mut bytes = vec![0u8; 348];
+        // sizeof_hdr at offset 0
+        bytes[0..4].copy_from_slice(&348i32.to_le_bytes());
+        // magic at offset 344
+        bytes[344..348].copy_from_slice(b"n+1\0");
+        // datatype at offset 70
+        bytes[70..72].copy_from_slice(&16i16.to_le_bytes());
+
+        let info = get_header_info(&bytes);
+        assert!(info.contains("sizeof_hdr=348"), "Should contain sizeof_hdr");
+        assert!(info.contains("datatype=16"), "Should contain datatype");
+    }
+
+    #[test]
+    fn test_affine_sform() {
+        // Test with sform_code > 0
+        let mut header = NiftiHeader::default();
+        header.sform_code = 1;
+        header.srow_x = [1.0, 0.0, 0.0, 10.0];
+        header.srow_y = [0.0, 2.0, 0.0, 20.0];
+        header.srow_z = [0.0, 0.0, 3.0, 30.0];
+
+        let affine = get_affine(&header);
+        assert_eq!(affine[0], 1.0);
+        assert_eq!(affine[3], 10.0);
+        assert_eq!(affine[5], 2.0);
+        assert_eq!(affine[7], 20.0);
+        assert_eq!(affine[10], 3.0);
+        assert_eq!(affine[11], 30.0);
+        assert_eq!(affine[15], 1.0);
+    }
+
+    #[test]
+    fn test_save_nifti_header_details() {
+        let data = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]; // 2x2x2
+        let dims = (2, 2, 2);
+        let voxel_size = (1.5, 2.5, 3.5);
+        let affine = [
+            1.5, 0.0, 0.0, 5.0,
+            0.0, 2.5, 0.0, 10.0,
+            0.0, 0.0, 3.5, 15.0,
+            0.0, 0.0, 0.0, 1.0,
+        ];
+
+        let bytes = save_nifti(&data, dims, voxel_size, &affine).unwrap();
+
+        // Verify datatype = 16 (FLOAT32)
+        let datatype = i16::from_le_bytes([bytes[70], bytes[71]]);
+        assert_eq!(datatype, 16);
+
+        // Verify bitpix = 32
+        let bitpix = i16::from_le_bytes([bytes[72], bytes[73]]);
+        assert_eq!(bitpix, 32);
+
+        // Verify dim[0] = 3
+        let ndim = i16::from_le_bytes([bytes[40], bytes[41]]);
+        assert_eq!(ndim, 3);
+
+        // Verify dim[1] = 2
+        let nx = i16::from_le_bytes([bytes[42], bytes[43]]);
+        assert_eq!(nx, 2);
+
+        // Verify vox_offset = 352
+        let vox_offset = f32::from_le_bytes([bytes[108], bytes[109], bytes[110], bytes[111]]);
+        assert_eq!(vox_offset, 352.0);
+
+        // Verify scl_slope = 1.0
+        let scl_slope = f32::from_le_bytes([bytes[112], bytes[113], bytes[114], bytes[115]]);
+        assert_eq!(scl_slope, 1.0);
+
+        // Verify sform_code = 1
+        let sform_code = i16::from_le_bytes([bytes[254], bytes[255]]);
+        assert_eq!(sform_code, 1);
+
+        // Verify pixdim[1] matches voxel_size
+        let pixdim1 = f32::from_le_bytes([bytes[80], bytes[81], bytes[82], bytes[83]]);
+        assert!((pixdim1 - 1.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_save_nifti_data_values() {
+        let data = vec![1.0f64, 2.0, -3.0, 4.5, 0.0, 100.0, -0.5, 999.0]; // 2x2x2
+        let dims = (2, 2, 2);
+        let voxel_size = (1.0, 1.0, 1.0);
+        let affine = [
+            1.0, 0.0, 0.0, 0.0,
+            0.0, 1.0, 0.0, 0.0,
+            0.0, 0.0, 1.0, 0.0,
+            0.0, 0.0, 0.0, 1.0,
+        ];
+
+        let bytes = save_nifti(&data, dims, voxel_size, &affine).unwrap();
+
+        // Data starts at offset 352
+        for i in 0..8 {
+            let offset = 352 + i * 4;
+            let val = f32::from_le_bytes([
+                bytes[offset], bytes[offset + 1],
+                bytes[offset + 2], bytes[offset + 3],
+            ]);
+            assert!(
+                (val as f64 - data[i]).abs() < 0.01,
+                "Data value {} mismatch: saved {}, expected {}",
+                i, val, data[i]
+            );
+        }
+    }
+
+    #[test]
+    fn test_save_nifti_gz_bytes() {
+        let data = vec![0.0; 8]; // 2x2x2
+        let dims = (2, 2, 2);
+        let voxel_size = (1.0, 1.0, 1.0);
+        let affine = [
+            1.0, 0.0, 0.0, 0.0,
+            0.0, 1.0, 0.0, 0.0,
+            0.0, 0.0, 1.0, 0.0,
+            0.0, 0.0, 0.0, 1.0,
+        ];
+
+        let bytes = save_nifti_gz(&data, dims, voxel_size, &affine).unwrap();
+        assert!(is_gzip(&bytes), "save_nifti_gz should produce gzip bytes");
+
+        // Should be able to load it back
+        let loaded = load_nifti(&bytes).unwrap();
+        assert_eq!(loaded.dims, dims);
+    }
+
+    #[test]
+    fn test_read_nonexistent_file() {
+        let result = read_nifti_file(std::path::Path::new("/tmp/nonexistent_file_12345.nii"));
+        assert!(result.is_err(), "Reading nonexistent file should error");
+        match result {
+            Err(err) => {
+                assert!(err.contains("Failed to read file"), "Error should mention file reading: {}", err);
+            }
+            Ok(_) => panic!("Should have returned an error"),
+        }
+    }
+
+    #[test]
+    fn test_save_nifti_large_volume() {
+        // Test with 8x8x8 volume (512 elements)
+        let dims = (8, 8, 8);
+        let n = dims.0 * dims.1 * dims.2;
+        let voxel_size = (0.5, 0.5, 0.5);
+        let affine = [
+            0.5, 0.0, 0.0, -2.0,
+            0.0, 0.5, 0.0, -2.0,
+            0.0, 0.0, 0.5, -2.0,
+            0.0, 0.0, 0.0, 1.0,
+        ];
+
+        let data: Vec<f64> = (0..n).map(|i| (i as f64).sin()).collect();
+
+        let bytes = save_nifti(&data, dims, voxel_size, &affine).unwrap();
+        assert_eq!(bytes.len(), 352 + n * 4);
+
+        // Load it back
+        let loaded = load_nifti(&bytes).unwrap();
+        assert_eq!(loaded.dims, dims);
+        assert_eq!(loaded.data.len(), n);
+
+        for i in 0..n {
+            assert!(
+                (loaded.data[i] - data[i]).abs() < 0.01,
+                "Roundtrip mismatch at {}: expected {}, got {}",
+                i, data[i], loaded.data[i]
+            );
+        }
+    }
+
+    #[test]
+    fn test_nifti_roundtrip_affine() {
+        // Verify affine is preserved through save/load
+        let dims = (4, 4, 4);
+        let n = dims.0 * dims.1 * dims.2;
+        let voxel_size = (1.0, 2.0, 3.0);
+        let affine = [
+            1.0, 0.1, 0.2, 10.0,
+            0.3, 2.0, 0.4, 20.0,
+            0.5, 0.6, 3.0, 30.0,
+            0.0, 0.0, 0.0, 1.0,
+        ];
+
+        let data: Vec<f64> = (0..n).map(|i| i as f64).collect();
+
+        let tmp_dir = std::env::temp_dir();
+        let tmp_path = tmp_dir.join("test_nifti_affine_rt.nii");
+
+        save_nifti_to_file(&tmp_path, &data, dims, voxel_size, &affine).unwrap();
+        let loaded = read_nifti_file(&tmp_path).unwrap();
+
+        // Affine values are stored as f32, so expect f32-level precision
+        for i in 0..16 {
+            assert!(
+                (loaded.affine[i] - affine[i]).abs() < 0.01,
+                "Affine[{}] mismatch: expected {}, got {}",
+                i, affine[i], loaded.affine[i]
+            );
+        }
+
+        std::fs::remove_file(&tmp_path).ok();
+    }
+
+    #[test]
+    fn test_nifti_scl_slope_intercept() {
+        // Test that scl_slope and scl_inter are reported correctly
+        let dims = (4, 4, 4);
+        let n = dims.0 * dims.1 * dims.2;
+        let voxel_size = (1.0, 1.0, 1.0);
+        let affine = [
+            1.0, 0.0, 0.0, 0.0,
+            0.0, 1.0, 0.0, 0.0,
+            0.0, 0.0, 1.0, 0.0,
+            0.0, 0.0, 0.0, 1.0,
+        ];
+
+        let data = vec![1.0; n];
+        let bytes = save_nifti(&data, dims, voxel_size, &affine).unwrap();
+        let loaded = load_nifti(&bytes).unwrap();
+
+        // Our save sets scl_slope = 1.0 and scl_inter = 0.0
+        assert!((loaded.scl_slope - 1.0).abs() < 1e-5);
+        assert!((loaded.scl_inter - 0.0).abs() < 1e-5);
     }
 }

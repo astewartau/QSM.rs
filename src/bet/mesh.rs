@@ -270,4 +270,264 @@ mod tests {
             assert!(dot > 0.9, "Normal not pointing outward");
         }
     }
+
+    #[test]
+    fn test_neighbor_matrix_symmetry() {
+        // Neighbor relationships must be symmetric: if A neighbors B then B neighbors A
+        let (vertices, faces) = create_icosphere(2);
+        let n = vertices.len();
+        let (neighbor_matrix, neighbor_counts) = build_neighbor_matrix(n, &faces, 6);
+
+        for i in 0..n {
+            for j in 0..neighbor_counts[i] {
+                let ni = neighbor_matrix[i][j];
+                // ni should have i in its neighbor list
+                let found = (0..neighbor_counts[ni]).any(|k| neighbor_matrix[ni][k] == i);
+                assert!(found, "Asymmetric neighbors: {} -> {} but not reverse", i, ni);
+            }
+        }
+    }
+
+    #[test]
+    fn test_neighbor_matrix_single_triangle() {
+        // Minimal mesh: one triangle with 3 vertices
+        let faces = vec![[0, 1, 2]];
+        let (neighbor_matrix, neighbor_counts) = build_neighbor_matrix(3, &faces, 6);
+
+        assert_eq!(neighbor_counts.len(), 3);
+        // Each vertex in a single triangle should have exactly 2 neighbors
+        for &count in &neighbor_counts {
+            assert_eq!(count, 2);
+        }
+
+        // Padding should be usize::MAX
+        for row in &neighbor_matrix {
+            for &val in row.iter().skip(2) {
+                assert_eq!(val, usize::MAX);
+            }
+        }
+    }
+
+    #[test]
+    fn test_neighbor_matrix_max_neighbors_padding() {
+        // When max_neighbors > actual neighbors, rows should be padded
+        let faces = vec![[0, 1, 2]];
+        let (neighbor_matrix, _neighbor_counts) = build_neighbor_matrix(3, &faces, 10);
+
+        // Each row should have at least 10 entries (max_neighbors)
+        for row in &neighbor_matrix {
+            assert!(row.len() >= 10);
+        }
+    }
+
+    #[test]
+    fn test_compute_mean_edge_length_voxel() {
+        // A unit cube triangle (vertices in voxel coords, voxel_size = [2, 2, 2])
+        let vertices: Vec<[f64; 3]> = vec![
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+        ];
+        let faces = vec![[0, 1, 2]];
+        let voxel_size = [2.0, 2.0, 2.0];
+
+        let mel = compute_mean_edge_length(&vertices, &faces, &voxel_size);
+        // Edge lengths in mm: 2.0, 2.0, 2*sqrt(2) = 2.828...
+        // Mean = (2 + 2 + 2.828) / 3 = 2.276
+        assert!(mel > 2.0 && mel < 3.0, "mean edge length = {}", mel);
+        assert!(mel.is_finite());
+    }
+
+    #[test]
+    fn test_compute_mean_edge_length_mm_unit_triangle() {
+        let vertices_mm: Vec<[f64; 3]> = vec![
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+        ];
+        let faces = vec![[0, 1, 2]];
+
+        let mel = compute_mean_edge_length_mm(&vertices_mm, &faces);
+        // Edge lengths: 1.0, 1.0, sqrt(2) = 1.414
+        // Mean = (1 + 1 + 1.414) / 3 = 1.138
+        let expected = (1.0 + 1.0 + 2.0_f64.sqrt()) / 3.0;
+        assert!((mel - expected).abs() < 1e-10, "mel={}, expected={}", mel, expected);
+    }
+
+    #[test]
+    fn test_compute_mean_edge_length_mm_empty_faces() {
+        let vertices_mm: Vec<[f64; 3]> = vec![[0.0, 0.0, 0.0]];
+        let faces: Vec<[usize; 3]> = vec![];
+
+        let mel = compute_mean_edge_length_mm(&vertices_mm, &faces);
+        // With no faces, should return fallback of 1.0
+        assert!((mel - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_compute_mean_edge_length_empty_faces() {
+        let vertices: Vec<[f64; 3]> = vec![[0.0, 0.0, 0.0]];
+        let faces: Vec<[usize; 3]> = vec![];
+        let voxel_size = [1.0, 1.0, 1.0];
+
+        let mel = compute_mean_edge_length(&vertices, &faces, &voxel_size);
+        assert!((mel - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_compute_mean_edge_length_mm_icosphere() {
+        // Icosphere with subdivision 2, scaled by radius 5.0
+        let (unit_verts, faces) = create_icosphere(2);
+        let radius = 5.0;
+        let vertices_mm: Vec<[f64; 3]> = unit_verts
+            .iter()
+            .map(|v| [v[0] * radius, v[1] * radius, v[2] * radius])
+            .collect();
+
+        let mel = compute_mean_edge_length_mm(&vertices_mm, &faces);
+        assert!(mel > 0.0 && mel.is_finite(), "mel should be positive and finite, got {}", mel);
+        // For a sphere of radius 5, edges should be a fraction of the radius
+        assert!(mel < radius, "Edge length should be smaller than radius");
+    }
+
+    #[test]
+    fn test_vertex_normals_degenerate_face() {
+        // Include a degenerate triangle (zero area) alongside a valid one
+        let vertices: Vec<[f64; 3]> = vec![
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.5, 0.0, 0.0], // collinear with v0 and v1
+        ];
+        let faces = vec![
+            [0, 1, 2],  // valid triangle
+            [0, 1, 3],  // degenerate (collinear points)
+        ];
+
+        let normals = compute_vertex_normals(&vertices, &faces);
+        assert_eq!(normals.len(), 4);
+        // The valid triangle's normal contribution should still produce finite normals
+        for n in &normals {
+            assert!(n[0].is_finite() && n[1].is_finite() && n[2].is_finite());
+        }
+    }
+
+    #[test]
+    fn test_vertex_normals_icosphere_subdivision_2() {
+        // Higher subdivision level
+        let (vertices, faces) = create_icosphere(2);
+        let normals = compute_vertex_normals(&vertices, &faces);
+
+        assert_eq!(normals.len(), vertices.len());
+        for (v, n) in vertices.iter().zip(normals.iter()) {
+            let norm = (n[0].powi(2) + n[1].powi(2) + n[2].powi(2)).sqrt();
+            assert!((norm - 1.0).abs() < 1e-6, "Normal not unit length: {}", norm);
+
+            let dot = v[0] * n[0] + v[1] * n[1] + v[2] * n[2];
+            assert!(dot > 0.9, "Normal not pointing outward, dot={}", dot);
+        }
+    }
+
+    #[test]
+    fn test_vertex_distance() {
+        let v1 = [0.0, 0.0, 0.0];
+        let v2 = [3.0, 4.0, 0.0];
+        let d = vertex_distance(&v1, &v2);
+        assert!((d - 5.0).abs() < 1e-10, "Expected 5.0, got {}", d);
+
+        // Same point
+        let d0 = vertex_distance(&v1, &v1);
+        assert!((d0 - 0.0).abs() < 1e-10);
+
+        // 3D case
+        let v3 = [1.0, 2.0, 3.0];
+        let v4 = [4.0, 6.0, 3.0];
+        let d34 = vertex_distance(&v3, &v4);
+        let expected = (9.0 + 16.0 + 0.0_f64).sqrt();
+        assert!((d34 - expected).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_self_intersection_heuristic_no_intersection() {
+        // An icosphere that hasn't changed should have very low score
+        let (vertices, faces) = create_icosphere(1);
+        let radius = 5.0;
+        let scaled: Vec<[f64; 3]> = vertices
+            .iter()
+            .map(|v| [v[0] * radius, v[1] * radius, v[2] * radius])
+            .collect();
+
+        let score = self_intersection_heuristic(&scaled, &scaled, &faces, &[1.0, 1.0, 1.0]);
+        // Identical meshes should yield 0 (no differences)
+        assert!((score - 0.0).abs() < 1e-6, "Expected ~0, got {}", score);
+    }
+
+    #[test]
+    fn test_self_intersection_heuristic_expanded_mesh() {
+        // Slightly expand the mesh uniformly -- should not indicate self-intersection
+        let (vertices, faces) = create_icosphere(1);
+        let radius = 5.0;
+        let original: Vec<[f64; 3]> = vertices
+            .iter()
+            .map(|v| [v[0] * radius, v[1] * radius, v[2] * radius])
+            .collect();
+
+        let expanded: Vec<[f64; 3]> = vertices
+            .iter()
+            .map(|v| [v[0] * radius * 1.1, v[1] * radius * 1.1, v[2] * radius * 1.1])
+            .collect();
+
+        let score = self_intersection_heuristic(&expanded, &original, &faces, &[1.0, 1.0, 1.0]);
+        assert!(score.is_finite(), "Score should be finite, got {}", score);
+        // Uniform expansion should have a very low score (no folding)
+        assert!(score < 4000.0, "Uniform expansion should not trigger self-intersection, score={}", score);
+    }
+
+    #[test]
+    fn test_self_intersection_heuristic_mismatched_vertices() {
+        let faces = vec![[0, 1, 2]];
+        let v1: Vec<[f64; 3]> = vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
+        let v2: Vec<[f64; 3]> = vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]]; // wrong size
+
+        let score = self_intersection_heuristic(&v1, &v2, &faces, &[1.0, 1.0, 1.0]);
+        assert_eq!(score, f64::MAX);
+    }
+
+    #[test]
+    fn test_self_intersection_heuristic_collapsed_mesh() {
+        // Collapse all vertices to the center -- extreme folding
+        let (vertices, faces) = create_icosphere(1);
+        let radius = 5.0;
+        let original: Vec<[f64; 3]> = vertices
+            .iter()
+            .map(|v| [v[0] * radius, v[1] * radius, v[2] * radius])
+            .collect();
+
+        // Collapse to a single point
+        let collapsed: Vec<[f64; 3]> = vec![[0.0, 0.0, 0.0]; vertices.len()];
+
+        let score = self_intersection_heuristic(&collapsed, &original, &faces, &[1.0, 1.0, 1.0]);
+        // All vertices at same point means ml ~ 0, which should give MAX
+        assert_eq!(score, f64::MAX, "Collapsed mesh should have MAX score");
+    }
+
+    #[test]
+    fn test_compute_mean_edge_length_anisotropic_voxel() {
+        // Test with anisotropic voxel sizes
+        let vertices: Vec<[f64; 3]> = vec![
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0],
+        ];
+        let faces = vec![[0, 1, 2]];
+        let voxel_size = [1.0, 1.0, 3.0]; // z is 3x larger
+
+        let mel = compute_mean_edge_length(&vertices, &faces, &voxel_size);
+        // Edge 0->1: (1*1, 0, 0) -> length 1.0
+        // Edge 1->2: (-1*1, 0, 1*3) -> length sqrt(1+9) = sqrt(10) = 3.162
+        // Edge 2->0: (0, 0, -1*3) -> length 3.0
+        // Mean = (1.0 + 3.162 + 3.0) / 3 = 2.387
+        let expected = (1.0 + 10.0_f64.sqrt() + 3.0) / 3.0;
+        assert!((mel - expected).abs() < 1e-6, "mel={}, expected={}", mel, expected);
+    }
 }
