@@ -8,7 +8,8 @@ on:
       - "tests/**"
       - "Cargo.toml"
       - "Cargo.lock"
-      - ".github/workflows/**"
+      - ".github/workflows/integration-tests.yml"
+      - ".github/workflows/unit-tests.yml"
       - "scripts/**"
   workflow_dispatch:  # Allow manual trigger
 
@@ -113,7 +114,7 @@ jobs:
               tests/*|Cargo.toml|Cargo.lock)
                 echo "Test/build file changed: $file → all tests"
                 output_all; exit 0 ;;
-              .github/workflows/integration-tests.yml|scripts/*)
+              .github/workflows/integration-tests.yml|.github/workflows/unit-tests.yml|scripts/*)
                 echo "CI file changed: $file → all tests"
                 output_all; exit 0 ;;
 
@@ -747,6 +748,7 @@ jobs:
               echo "*Compared against ground truth local field map*"
               echo ""
               echo "$TABLE"
+              echo ""
               emit_figures bgremove_sharp bgremove_vsharp bgremove_pdf bgremove_ismv bgremove_lbv
             }
 
@@ -755,6 +757,7 @@ jobs:
               echo "*Compared against ground truth susceptibility map*"
               echo ""
               echo "$TABLE"
+              echo ""
               emit_figures inversion_tkd inversion_tsvd inversion_tikhonov inversion_tv inversion_rts inversion_medi inversion_nltv
             }
 
@@ -780,6 +783,7 @@ jobs:
               echo "*Compared against ground truth susceptibility map (input: total field map)*"
               echo ""
               echo "$TABLE"
+              echo ""
               emit_figures combined_tgv
             }
 
@@ -788,6 +792,7 @@ jobs:
               echo "*Compared against ground truth susceptibility map*"
               echo ""
               echo "$TABLE"
+              echo ""
               emit_figures pipeline_tgv pipeline_qsmart
             }
 
