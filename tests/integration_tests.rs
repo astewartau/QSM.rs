@@ -65,6 +65,31 @@ fn test_bgremove_sharp() {
 
 #[test]
 #[ignore]
+fn test_bgremove_smv() {
+    println!("[INFO] Loading test data...");
+    let data = TestData::load().expect("Failed to load test data");
+    let (nx, ny, nz) = data.dims;
+    let (vsx, vsy, vsz) = data.voxel_size;
+
+    let ((result, _new_mask), elapsed) = run_timed!("SMV", bgremove::smv(
+        &data.fieldmap,
+        &data.mask,
+        nx, ny, nz,
+        vsx, vsy, vsz,
+        5.0,  // radius in mm
+    ));
+
+    let res = TestResult::new("SMV", &result, &data.fieldmap_local, &data.mask, data.dims);
+    res.print_with_time(elapsed);
+    res.print_ci_metrics(elapsed);
+    common::save_center_slices(&result, &data.mask, data.dims, "bgremove_smv");
+
+    assert!(res.nrmse < 0.5, "SMV NRMSE too high: {}", res.nrmse);
+    assert!(res.correlation > 0.7, "SMV correlation too low: {}", res.correlation);
+}
+
+#[test]
+#[ignore]
 fn test_bgremove_vsharp() {
     println!("[INFO] Loading test data...");
     let data = TestData::load().expect("Failed to load test data");
