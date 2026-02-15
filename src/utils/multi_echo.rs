@@ -293,8 +293,8 @@ pub fn hermitian_inner_product(
 /// - corrected_phases: phases with offset removed
 /// - phase_offset: estimated phase offset
 pub fn mcpc3ds_single_coil(
-    phases: &[Vec<f64>],
-    mags: &[Vec<f64>],
+    phases: &[impl AsRef<[f64]>],
+    mags: &[impl AsRef<[f64]>],
     tes: &[f64],
     mask: &[u8],
     sigma: [f64; 3],
@@ -313,42 +313,39 @@ pub fn mcpc3ds_single_coil(
     // Compute HIP between the two echoes
     // HIP = conj(echo1) * echo2, so hip_phase = phase2 - phase1
     let (hip_phase, hip_mag) = hermitian_inner_product(
-        &phases[e1], &mags[e1],
-        &phases[e2], &mags[e2],
+        phases[e1].as_ref(), mags[e1].as_ref(),
+        phases[e2].as_ref(), mags[e2].as_ref(),
         mask, n_total
     );
 
     // Weight for ROMEO = sqrt(|HIP|) - matches Julia: weight = sqrt.(abs.(hip))
     let weight: Vec<f64> = hip_mag.iter().map(|&x| x.sqrt()).collect();
+    drop(hip_mag); // Free ~82 MB early
 
     // Unwrap HIP phase using ROMEO (matching Julia line 48)
     // Julia: phaseevolution = (TEs[echoes[1]] / ΔTE) .* romeo(angle.(hip); mag=weight, mask)
     let unwrapped_hip = unwrap_with_romeo(&hip_phase, &weight, mask, nx, ny, nz);
+    drop(hip_phase); // Free ~82 MB early
+    drop(weight);    // Free ~82 MB early
 
     // Phase evolution at TE1: (TE1 / ΔTE) * unwrapped_hip
     // This gives the phase that would have evolved from TE=0 to TE=TE1
     let scale = tes[e1] / delta_te;
-    let mut phase_evolution = vec![0.0; n_total];
-    for i in 0..n_total {
-        if mask[i] > 0 {
-            phase_evolution[i] = scale * unwrapped_hip[i];
-        }
-    }
-
-    // Phase offset = phase[echo1] - phase_evolution
-    // IMPORTANT: Do NOT wrap here! Julia line 49 does raw subtraction:
-    //   po .= getangle(image, echoes[1]) .- phaseevolution
-    // The smoothing function will handle the wrapping internally
     let mut phase_offset = vec![0.0; n_total];
     for i in 0..n_total {
         if mask[i] > 0 {
-            phase_offset[i] = phases[e1][i] - phase_evolution[i];
+            // Phase offset = phase[echo1] - phase_evolution
+            // phase_evolution = scale * unwrapped_hip
+            // IMPORTANT: Do NOT wrap here! Julia line 49 does raw subtraction
+            phase_offset[i] = phases[e1].as_ref()[i] - scale * unwrapped_hip[i];
         }
     }
+    drop(unwrapped_hip); // Free ~82 MB early
 
     // Smooth the phase offset (handles wrapping via complex representation)
     // Julia line 51: po[:,:,:,icha] .= gaussiansmooth3d_phase(view(po,:,:,:,icha), sigma; mask)
     let phase_offset_smoothed = gaussian_smooth_3d_phase(&phase_offset, sigma, mask, nx, ny, nz);
+    drop(phase_offset); // Free ~82 MB early
 
     // Remove phase offset from all echoes
     // Julia combinewithPO does: exp.(1im .* (phase - po)) then angle()
@@ -358,7 +355,7 @@ pub fn mcpc3ds_single_coil(
         let mut corrected = vec![0.0; n_total];
         for i in 0..n_total {
             if mask[i] > 0 {
-                corrected[i] = wrap_to_pi(phases[e][i] - phase_offset_smoothed[i]);
+                corrected[i] = wrap_to_pi(phases[e].as_ref()[i] - phase_offset_smoothed[i]);
             }
         }
         corrected_phases.push(corrected);
@@ -441,8 +438,8 @@ fn find_seed_point(mask: &[u8], nx: usize, ny: usize, nz: usize) -> (usize, usiz
 /// # Returns
 /// B0 field in Hz
 pub fn calculate_b0_weighted(
-    unwrapped_phases: &[Vec<f64>],
-    mags: &[Vec<f64>],
+    unwrapped_phases: &[impl AsRef<[f64]>],
+    mags: &[impl AsRef<[f64]>],
     tes: &[f64],
     mask: &[u8],
     weight_type: B0WeightType,
@@ -451,36 +448,7 @@ pub fn calculate_b0_weighted(
     let n_echoes = unwrapped_phases.len();
     let mut b0 = vec![0.0; n_total];
 
-    // Precompute weights for each echo
-    let weights: Vec<Vec<f64>> = (0..n_echoes)
-        .map(|e| {
-            let te = tes[e];
-            let mag = &mags[e];
-
-            match weight_type {
-                B0WeightType::PhaseSNR => {
-                    // mag * TE
-                    (0..n_total).map(|i| mag[i] * te).collect()
-                }
-                B0WeightType::PhaseVar => {
-                    // mag² * TE²
-                    (0..n_total).map(|i| mag[i] * mag[i] * te * te).collect()
-                }
-                B0WeightType::Average => {
-                    // Uniform
-                    vec![1.0; n_total]
-                }
-                B0WeightType::TEs => {
-                    // TE only
-                    vec![te; n_total]
-                }
-                B0WeightType::Mag => {
-                    // Magnitude only
-                    mag.clone()
-                }
-            }
-        })
-        .collect();
+    // Compute inline to avoid allocating per-echo weight arrays
 
     // B0 = (1000 / 2π) * Σ(phase / TE * weight) / Σ(weight)
     let scale = 1000.0 / TWO_PI;
@@ -494,8 +462,17 @@ pub fn calculate_b0_weighted(
         let mut weight_sum = 0.0;
 
         for e in 0..n_echoes {
-            let w = weights[e][i];
-            let phase_over_te = unwrapped_phases[e][i] / tes[e];
+            let te = tes[e];
+            let mag_val = mags[e].as_ref()[i];
+            let phase_over_te = unwrapped_phases[e].as_ref()[i] / te;
+
+            let w = match weight_type {
+                B0WeightType::PhaseSNR => mag_val * te,
+                B0WeightType::PhaseVar => mag_val * mag_val * te * te,
+                B0WeightType::Average => 1.0,
+                B0WeightType::TEs => te,
+                B0WeightType::Mag => mag_val,
+            };
 
             weighted_sum += phase_over_te * w;
             weight_sum += w;
@@ -525,8 +502,8 @@ pub fn calculate_b0_weighted(
 /// # Returns
 /// (b0_hz, phase_offset, corrected_phases)
 pub fn mcpc3ds_b0_pipeline(
-    phases: &[Vec<f64>],
-    mags: &[Vec<f64>],
+    phases: &[impl AsRef<[f64]>],
+    mags: &[impl AsRef<[f64]>],
     tes: &[f64],
     mask: &[u8],
     sigma: [f64; 3],
@@ -547,7 +524,7 @@ pub fn mcpc3ds_b0_pipeline(
     // Each echo needs to be unwrapped independently
     let mut unwrapped_phases = Vec::with_capacity(n_echoes);
     for e in 0..n_echoes {
-        let unwrapped = unwrap_with_romeo(&corrected_phases[e], &mags[e], mask, nx, ny, nz);
+        let unwrapped = unwrap_with_romeo(&corrected_phases[e], mags[e].as_ref(), mask, nx, ny, nz);
         unwrapped_phases.push(unwrapped);
     }
 
@@ -624,15 +601,15 @@ pub struct LinearFitResult {
 /// # Returns
 /// LinearFitResult containing field, phase_offset, fit_residual, reliability_mask
 pub fn multi_echo_linear_fit(
-    unwrapped_phases: &[Vec<f64>],
-    mags: &[Vec<f64>],
+    unwrapped_phases: &[impl AsRef<[f64]>],
+    mags: &[impl AsRef<[f64]>],
     tes: &[f64],
     mask: &[u8],
     estimate_offset: bool,
     reliability_threshold_percentile: f64,
 ) -> LinearFitResult {
     let n_echoes = unwrapped_phases.len();
-    let n_total = unwrapped_phases[0].len();
+    let n_total = unwrapped_phases[0].as_ref().len();
 
     let mut field = vec![0.0; n_total];
     let mut phase_offset = vec![0.0; n_total];
@@ -658,10 +635,10 @@ pub fn multi_echo_linear_fit(
             let mut sum_w_phase = 0.0;
 
             for e in 0..n_echoes {
-                let w = mags[e][v];
+                let w = mags[e].as_ref()[v];
                 sum_w += w;
                 sum_w_te += w * tes[e];
-                sum_w_phase += w * unwrapped_phases[e][v];
+                sum_w_phase += w * unwrapped_phases[e].as_ref()[v];
             }
 
             if sum_w < 1e-10 {
@@ -676,9 +653,9 @@ pub fn multi_echo_linear_fit(
             let mut sum_w_te_centered_phase_centered = 0.0;
 
             for e in 0..n_echoes {
-                let w = mags[e][v];
+                let w = mags[e].as_ref()[v];
                 let te_centered = tes[e] - te_mean;
-                let phase_centered = unwrapped_phases[e][v] - phase_mean;
+                let phase_centered = unwrapped_phases[e].as_ref()[v] - phase_mean;
                 sum_w_te_centered_sq += w * te_centered * te_centered;
                 sum_w_te_centered_phase_centered += w * te_centered * phase_centered;
             }
@@ -692,9 +669,9 @@ pub fn multi_echo_linear_fit(
                 // Compute weighted residual
                 let mut sum_w_resid_sq = 0.0;
                 for e in 0..n_echoes {
-                    let w = mags[e][v];
+                    let w = mags[e].as_ref()[v];
                     let predicted = intercept + slope * tes[e];
-                    let diff = unwrapped_phases[e][v] - predicted;
+                    let diff = unwrapped_phases[e].as_ref()[v] - predicted;
                     sum_w_resid_sq += w * diff * diff;
                 }
                 // Normalize by sum of weights and number of echoes (matching echofit.m)
@@ -716,9 +693,9 @@ pub fn multi_echo_linear_fit(
             let mut sum_w = 0.0;
 
             for e in 0..n_echoes {
-                let w = mags[e][v];
+                let w = mags[e].as_ref()[v];
                 let te = tes[e];
-                let phase = unwrapped_phases[e][v];
+                let phase = unwrapped_phases[e].as_ref()[v];
                 sum_w_te_phase += w * te * phase;
                 sum_w_te_sq += w * te * te;
                 sum_w += w;
@@ -731,9 +708,9 @@ pub fn multi_echo_linear_fit(
                 // Compute weighted residual
                 let mut sum_w_resid_sq = 0.0;
                 for e in 0..n_echoes {
-                    let w = mags[e][v];
+                    let w = mags[e].as_ref()[v];
                     let predicted = slope * tes[e];
-                    let diff = unwrapped_phases[e][v] - predicted;
+                    let diff = unwrapped_phases[e].as_ref()[v] - predicted;
                     sum_w_resid_sq += w * diff * diff;
                 }
                 // Normalize by sum of weights and number of echoes
