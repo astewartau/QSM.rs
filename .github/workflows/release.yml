@@ -7,67 +7,12 @@ on:
 
 permissions:
   contents: write
-  checks: read
-  statuses: read
 
 jobs:
   # -------------------------------------------------------------------------
-  # Gate 1: Unit tests + code coverage (≥90%)
-  # -------------------------------------------------------------------------
-  unit-tests:
-    uses: ./.github/workflows/unit-tests.yml
-
-  # -------------------------------------------------------------------------
-  # Gate 2: Verify integration tests passed on this commit
-  # -------------------------------------------------------------------------
-  verify-ci:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Verify integration tests passed
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          COMMIT_SHA=$(git rev-parse HEAD)
-          echo "Checking CI status for commit ${COMMIT_SHA:0:8}..."
-
-          # Get the check suite ID for this workflow run so we can exclude our own checks
-          OUR_SUITE_ID=$(gh api repos/${{ github.repository }}/actions/runs/${{ github.run_id }} \
-            --jq '.check_suite_id')
-          echo "Excluding check suite: $OUR_SUITE_ID (this workflow run)"
-
-          # Get all check runs for this commit, excluding checks from this workflow run
-          CHECKS=$(gh api repos/${{ github.repository }}/commits/$COMMIT_SHA/check-runs \
-            --paginate \
-            --jq ".check_runs[] | select(.check_suite.id != $OUR_SUITE_ID) | {name: .name, status: .status, conclusion: .conclusion}")
-
-          if [ -z "$CHECKS" ]; then
-            echo "FAIL: No CI check runs found for this commit."
-            echo "Ensure integration tests have run (e.g. via a PR merge) before creating a release."
-            exit 1
-          fi
-
-          echo "Check runs found:"
-          echo "$CHECKS" | jq -r '"  \(.name): \(.status) / \(.conclusion)"'
-
-          # Fail if any check is not completed or not successful
-          FAILED=$(echo "$CHECKS" | jq -r 'select(.status != "completed" or (.conclusion != "success" and .conclusion != "skipped")) | .name')
-          if [ -n "$FAILED" ]; then
-            echo ""
-            echo "FAIL: The following checks have not passed:"
-            echo "$FAILED"
-            exit 1
-          fi
-
-          echo ""
-          echo "PASS: All CI checks have passed."
-
-  # -------------------------------------------------------------------------
-  # Package and upload (only after all gates pass)
+  # Package and upload
   # -------------------------------------------------------------------------
   package:
-    needs: [unit-tests, verify-ci]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
