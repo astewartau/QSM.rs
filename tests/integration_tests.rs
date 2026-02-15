@@ -269,8 +269,8 @@ fn test_inversion_tv() {
         nx, ny, nz,
         vsx, vsy, vsz,
         data.b0_dir,
-        1e-3,  // lambda
-        0.1,   // rho (= 100 * lambda)
+        2e-4,  // lambda (reduced from 1e-3 for less smoothing)
+        2e-2,  // rho (= 100 * lambda)
         1e-3,  // tolerance
         250,   // max iterations
     ));
@@ -370,7 +370,7 @@ fn test_inversion_nltv() {
         nx, ny, nz,
         vsx, vsy, vsz,
         data.b0_dir,
-        1e-3,  // lambda
+        2e-4,  // lambda (reduced from 1e-3 for less smoothing)
         1.0,   // mu
         1e-3,  // tolerance
         250,   // max iterations
