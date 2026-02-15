@@ -8,7 +8,8 @@ on:
       - "tests/**"
       - "Cargo.toml"
       - "Cargo.lock"
-      - ".github/workflows/**"
+      - ".github/workflows/integration-tests.yml"
+      - ".github/workflows/unit-tests.yml"
       - "scripts/**"
   workflow_dispatch:  # Allow manual trigger
 
@@ -113,7 +114,7 @@ jobs:
               tests/*|Cargo.toml|Cargo.lock)
                 echo "Test/build file changed: $file → all tests"
                 output_all; exit 0 ;;
-              .github/workflows/integration-tests.yml|scripts/*)
+              .github/workflows/integration-tests.yml|.github/workflows/unit-tests.yml|scripts/*)
                 echo "CI file changed: $file → all tests"
                 output_all; exit 0 ;;
 
