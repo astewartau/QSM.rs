@@ -1,0 +1,42 @@
+name: Release Crate
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Extract version from release tag
+        id: version
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          # Strip leading 'v' if present (v0.1.0 → 0.1.0)
+          VERSION="${TAG#v}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Version: $VERSION"
+
+      - name: Set version in Cargo.toml
+        run: |
+          sed -i 's/^version = ".*"/version = "${{ steps.version.outputs.version }}"/' Cargo.toml
+          echo "Cargo.toml version set to:"
+          grep '^version' Cargo.toml
+
+      - name: Package crate
+        run: cargo package --allow-dirty
+
+      - name: Upload crate to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          CRATE="target/package/qsm-core-${{ steps.version.outputs.version }}.crate"
+          gh release upload "$GITHUB_REF_NAME" "$CRATE"
