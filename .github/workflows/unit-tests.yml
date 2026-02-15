@@ -48,8 +48,8 @@ jobs:
           cargo tarpaulin --out json --output-dir coverage/ \
             --skip-clean --timeout 300 2>&1 | tee coverage/tarpaulin.log || true
 
-          # Count passed tests from output
-          PASSED=$(grep -oP '\d+ passed' coverage/tarpaulin.log | grep -oP '\d+' || echo "0")
+          # Count passed tests from output (sum across all test suites)
+          PASSED=$(grep -oP '\d+(?= passed)' coverage/tarpaulin.log | awk '{s+=$1} END {print s+0}')
           echo "tests_passed=$PASSED" >> "$GITHUB_OUTPUT"
 
       - name: Extract coverage
