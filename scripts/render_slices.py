@@ -120,27 +120,25 @@ def render_figure(slices, name, slug, output_path):
 
 
 def render_before_after(before_slices, after_slices, name, output_path):
-    """Render a 2-panel before/after axial figure."""
+    """Render a 2-panel before/after axial figure with independent ranges."""
     fig, axes = plt.subplots(1, 2, figsize=(8, 4))
 
-    # Shared auto-range across both panels
-    all_vals = np.concatenate([
-        before_slices["axial"].ravel(),
-        after_slices["axial"].ravel(),
-    ])
-    finite = all_vals[np.isfinite(all_vals)]
-    vmin, vmax = (float(finite.min()), float(finite.max())) if len(finite) > 0 else (0, 1)
+    def auto_range(data):
+        finite = data[np.isfinite(data)]
+        return (float(finite.min()), float(finite.max())) if len(finite) > 0 else (0, 1)
 
-    axes[0].imshow(before_slices["axial"], cmap="gray", vmin=vmin, vmax=vmax, origin="lower")
+    bmin, bmax = auto_range(before_slices["axial"].ravel())
+    amin, amax = auto_range(after_slices["axial"].ravel())
+
+    axes[0].imshow(before_slices["axial"], cmap="gray", vmin=bmin, vmax=bmax, origin="lower")
     axes[0].set_title("Before", fontsize=11)
     axes[0].axis("off")
 
-    im = axes[1].imshow(after_slices["axial"], cmap="gray", vmin=vmin, vmax=vmax, origin="lower")
+    axes[1].imshow(after_slices["axial"], cmap="gray", vmin=amin, vmax=amax, origin="lower")
     axes[1].set_title("After", fontsize=11)
     axes[1].axis("off")
 
     fig.suptitle(name, fontsize=14, fontweight="bold", y=1.0)
-    fig.colorbar(im, ax=axes, shrink=0.85, aspect=30, pad=0.02, label="Intensity")
     fig.savefig(output_path, dpi=120, bbox_inches="tight", facecolor="white")
     plt.close(fig)
     print(f"  Rendered {output_path}")
