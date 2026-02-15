@@ -3,6 +3,13 @@ name: Integration Tests
 on:
   pull_request:
     branches: [main, master]
+    paths:
+      - "src/**"
+      - "tests/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/**"
+      - "scripts/**"
   workflow_dispatch:  # Allow manual trigger
 
 permissions:
