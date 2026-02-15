@@ -1,4 +1,5 @@
 name: Release Crate
+run-name: Release Crate ${{ github.event.release.tag_name }}
 
 on:
   release:
@@ -31,9 +32,15 @@ jobs:
           COMMIT_SHA=$(git rev-parse HEAD)
           echo "Checking CI status for commit ${COMMIT_SHA:0:8}..."
 
-          # Get all check runs for this commit (exclude our own workflow)
+          # Get the check suite ID for this workflow run so we can exclude our own checks
+          OUR_SUITE_ID=$(gh api repos/${{ github.repository }}/actions/runs/${{ github.run_id }} \
+            --jq '.check_suite_id')
+          echo "Excluding check suite: $OUR_SUITE_ID (this workflow run)"
+
+          # Get all check runs for this commit, excluding checks from this workflow run
           CHECKS=$(gh api repos/${{ github.repository }}/commits/$COMMIT_SHA/check-runs \
-            --jq '.check_runs[] | select(.name != "Release Crate") | {name: .name, status: .status, conclusion: .conclusion}')
+            --paginate \
+            --jq ".check_runs[] | select(.check_suite.id != $OUR_SUITE_ID) | {name: .name, status: .status, conclusion: .conclusion}")
 
           if [ -z "$CHECKS" ]; then
             echo "FAIL: No CI check runs found for this commit."
