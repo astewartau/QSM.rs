@@ -276,7 +276,7 @@ pub fn nltv_default(
     nltv(
         local_field, mask, nx, ny, nz, vsx, vsy, vsz,
         (0.0, 0.0, 1.0),  // bdir
-        2e-4,             // lambda
+        3e-4,             // lambda
         1.0,              // mu
         1e-3,             // tol
         250,              // max_iter

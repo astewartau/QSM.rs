@@ -42,6 +42,7 @@ jobs:
       - name: Run unit tests with coverage
         id: tests
         run: |
+          mkdir -p coverage
           cargo tarpaulin --out json --output-dir coverage/ \
             --skip-clean --timeout 300 2>&1 | tee coverage/tarpaulin.log
 
