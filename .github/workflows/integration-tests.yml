@@ -748,6 +748,7 @@ jobs:
               echo "*Compared against ground truth local field map*"
               echo ""
               echo "$TABLE"
+              echo ""
               emit_figures bgremove_sharp bgremove_vsharp bgremove_pdf bgremove_ismv bgremove_lbv
             }
 
@@ -756,6 +757,7 @@ jobs:
               echo "*Compared against ground truth susceptibility map*"
               echo ""
               echo "$TABLE"
+              echo ""
               emit_figures inversion_tkd inversion_tsvd inversion_tikhonov inversion_tv inversion_rts inversion_medi inversion_nltv
             }
 
@@ -781,6 +783,7 @@ jobs:
               echo "*Compared against ground truth susceptibility map (input: total field map)*"
               echo ""
               echo "$TABLE"
+              echo ""
               emit_figures combined_tgv
             }
 
@@ -789,6 +792,7 @@ jobs:
               echo "*Compared against ground truth susceptibility map*"
               echo ""
               echo "$TABLE"
+              echo ""
               emit_figures pipeline_tgv pipeline_qsmart
             }
 
