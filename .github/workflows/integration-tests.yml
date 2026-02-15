@@ -3,6 +3,13 @@ name: Integration Tests
 on:
   pull_request:
     branches: [main, master]
+    paths:
+      - "src/**"
+      - "tests/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/**"
+      - "scripts/**"
   workflow_dispatch:  # Allow manual trigger
 
 permissions:
@@ -610,15 +617,19 @@ jobs:
             echo "- **Code coverage:** ${COVERAGE:-N/A}%"
             echo ""
 
-            echo "## Background Field Removal"
-            echo "*Compared against ground truth local field map*"
-            echo ""
-            emit_table "test_bgremove_" sharp vsharp pdf ismv lbv || true
+            TABLE=$(emit_table "test_bgremove_" sharp vsharp pdf ismv lbv) && {
+              echo "## Background Field Removal"
+              echo "*Compared against ground truth local field map*"
+              echo ""
+              echo "$TABLE"
+            }
 
-            echo "## Dipole Inversion"
-            echo "*Compared against ground truth susceptibility map*"
-            echo ""
-            emit_table "test_inversion_" tkd tsvd tikhonov tv rts medi nltv || true
+            TABLE=$(emit_table "test_inversion_" tkd tsvd tikhonov tv rts medi nltv) && {
+              echo "## Dipole Inversion"
+              echo "*Compared against ground truth susceptibility map*"
+              echo ""
+              echo "$TABLE"
+            }
 
             if [ -f "metrics/test_bet.csv" ]; then
               echo "## Brain Extraction"
@@ -636,15 +647,19 @@ jobs:
               echo ""
             fi
 
-            echo "## Combined Background Removal + Dipole Inversion"
-            echo "*Compared against ground truth susceptibility map (input: total field map)*"
-            echo ""
-            emit_table "test_combined_" tgv || true
+            TABLE=$(emit_table "test_combined_" tgv) && {
+              echo "## Combined Background Removal + Dipole Inversion"
+              echo "*Compared against ground truth susceptibility map (input: total field map)*"
+              echo ""
+              echo "$TABLE"
+            }
 
-            echo "## Full Pipeline"
-            echo "*Compared against ground truth susceptibility map*"
-            echo ""
-            emit_table "test_pipeline_" tgv qsmart || true
+            TABLE=$(emit_table "test_pipeline_" tgv qsmart) && {
+              echo "## Full Pipeline"
+              echo "*Compared against ground truth susceptibility map*"
+              echo ""
+              echo "$TABLE"
+            }
 
             if [ -f "metrics/test_bias_correction.csv" ]; then
               echo "## Utilities"
@@ -727,17 +742,21 @@ jobs:
             echo "- **Code coverage:** ${COVERAGE:-N/A}%"
             echo ""
 
-            echo "### Background Field Removal"
-            echo "*Compared against ground truth local field map*"
-            echo ""
-            emit_table "test_bgremove_" sharp vsharp pdf ismv lbv || true
-            emit_figures bgremove_sharp bgremove_vsharp bgremove_pdf bgremove_ismv bgremove_lbv
+            TABLE=$(emit_table "test_bgremove_" sharp vsharp pdf ismv lbv) && {
+              echo "### Background Field Removal"
+              echo "*Compared against ground truth local field map*"
+              echo ""
+              echo "$TABLE"
+              emit_figures bgremove_sharp bgremove_vsharp bgremove_pdf bgremove_ismv bgremove_lbv
+            }
 
-            echo "### Dipole Inversion"
-            echo "*Compared against ground truth susceptibility map*"
-            echo ""
-            emit_table "test_inversion_" tkd tsvd tikhonov tv rts medi nltv || true
-            emit_figures inversion_tkd inversion_tsvd inversion_tikhonov inversion_tv inversion_rts inversion_medi inversion_nltv
+            TABLE=$(emit_table "test_inversion_" tkd tsvd tikhonov tv rts medi nltv) && {
+              echo "### Dipole Inversion"
+              echo "*Compared against ground truth susceptibility map*"
+              echo ""
+              echo "$TABLE"
+              emit_figures inversion_tkd inversion_tsvd inversion_tikhonov inversion_tv inversion_rts inversion_medi inversion_nltv
+            }
 
             if [ -f "metrics/test_bet.csv" ]; then
               echo "### Brain Extraction"
@@ -756,17 +775,21 @@ jobs:
               emit_figures bet
             fi
 
-            echo "### Combined Background Removal + Dipole Inversion"
-            echo "*Compared against ground truth susceptibility map (input: total field map)*"
-            echo ""
-            emit_table "test_combined_" tgv || true
-            emit_figures combined_tgv
+            TABLE=$(emit_table "test_combined_" tgv) && {
+              echo "### Combined Background Removal + Dipole Inversion"
+              echo "*Compared against ground truth susceptibility map (input: total field map)*"
+              echo ""
+              echo "$TABLE"
+              emit_figures combined_tgv
+            }
 
-            echo "### Full Pipeline"
-            echo "*Compared against ground truth susceptibility map*"
-            echo ""
-            emit_table "test_pipeline_" tgv qsmart || true
-            emit_figures pipeline_tgv pipeline_qsmart
+            TABLE=$(emit_table "test_pipeline_" tgv qsmart) && {
+              echo "### Full Pipeline"
+              echo "*Compared against ground truth susceptibility map*"
+              echo ""
+              echo "$TABLE"
+              emit_figures pipeline_tgv pipeline_qsmart
+            }
 
             if [ -f "metrics/test_bias_correction.csv" ]; then
               echo "### Utilities"
