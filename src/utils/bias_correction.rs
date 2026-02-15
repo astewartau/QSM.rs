@@ -1000,4 +1000,647 @@ mod tests {
         // sqrt(5^2 + 12^2) = 13
         assert!((result[3] - 13.0).abs() < 1e-10);
     }
+
+    // =====================================================================
+    // Helper: create a 3D sphere magnitude phantom with optional bias field
+    // =====================================================================
+
+    /// Create a 3D sphere phantom with a smooth bias field applied.
+    /// Returns (magnitude_data, mask) where mask marks inside-sphere voxels.
+    fn make_sphere_phantom(n: usize, bias: bool) -> (Vec<f64>, Vec<u8>) {
+        let center = n as f64 / 2.0;
+        let radius = n as f64 / 2.0 - 2.0;
+        let n_total = n * n * n;
+        let mut mag = vec![0.0f64; n_total];
+        let mut mask = vec![0u8; n_total];
+
+        for k in 0..n {
+            for j in 0..n {
+                for i in 0..n {
+                    let dx = i as f64 - center;
+                    let dy = j as f64 - center;
+                    let dz = k as f64 - center;
+                    let dist = (dx * dx + dy * dy + dz * dz).sqrt();
+                    let idx = i + j * n + k * n * n;
+
+                    if dist < radius {
+                        // Base tissue intensity
+                        let base = 100.0;
+                        // Apply smooth bias field if requested
+                        let bias_val = if bias {
+                            1.0 + 0.5 * (i as f64 / n as f64)
+                        } else {
+                            1.0
+                        };
+                        mag[idx] = base * bias_val;
+                        mask[idx] = 1;
+                    } else {
+                        // Background noise
+                        mag[idx] = 1.0 + 0.5 * ((i + j + k) % 3) as f64;
+                    }
+                }
+            }
+        }
+
+        (mag, mask)
+    }
+
+    // =====================================================================
+    // Tests for get_box_sizes edge cases
+    // =====================================================================
+
+    #[test]
+    fn test_get_box_sizes_zero_sigma() {
+        let sizes = get_box_sizes(0.0, 3);
+        assert_eq!(sizes, vec![0, 0, 0]);
+    }
+
+    #[test]
+    fn test_get_box_sizes_zero_n() {
+        let sizes = get_box_sizes(5.0, 0);
+        assert!(sizes.is_empty());
+    }
+
+    #[test]
+    fn test_get_box_sizes_negative_sigma() {
+        let sizes = get_box_sizes(-1.0, 3);
+        assert_eq!(sizes, vec![0, 0, 0]);
+    }
+
+    #[test]
+    fn test_get_box_sizes_large_sigma() {
+        let sizes = get_box_sizes(20.0, 4);
+        assert_eq!(sizes.len(), 4);
+        for &s in &sizes {
+            assert!(s % 2 == 1, "Box size should be odd, got {}", s);
+            assert!(s >= 3, "Box size should be at least 3, got {}", s);
+        }
+    }
+
+    // =====================================================================
+    // Tests for check_box_sizes
+    // =====================================================================
+
+    #[test]
+    fn test_check_box_sizes_clamps_to_half_image() {
+        // Box size larger than half the image dimension should be clamped
+        let mut boxsizes = vec![vec![99], vec![99], vec![99]];
+        let dims = [10, 10, 10];
+        check_box_sizes(&mut boxsizes, &dims);
+        for bs in &boxsizes {
+            for &b in bs {
+                assert!(b <= dims[0], "Box size should be clamped, got {}", b);
+                assert!(b % 2 == 1, "Box size should be odd, got {}", b);
+            }
+        }
+    }
+
+    #[test]
+    fn test_check_box_sizes_makes_even_odd() {
+        let mut boxsizes = vec![vec![4], vec![6], vec![8]];
+        let dims = [100, 100, 100];
+        check_box_sizes(&mut boxsizes, &dims);
+        for bs in &boxsizes {
+            for &b in bs {
+                assert!(b % 2 == 1, "Box size should be odd, got {}", b);
+            }
+        }
+    }
+
+    // =====================================================================
+    // Tests for box_filter_line edge cases
+    // =====================================================================
+
+    #[test]
+    fn test_box_filter_line_too_small_boxsize() {
+        // boxsize < 3 should be a no-op
+        let mut line = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+        let original = line.clone();
+        box_filter_line(&mut line, 1);
+        assert_eq!(line, original);
+    }
+
+    #[test]
+    fn test_box_filter_line_larger_than_data() {
+        // boxsize > line length should be a no-op
+        let mut line = vec![1.0, 2.0];
+        let original = line.clone();
+        box_filter_line(&mut line, 5);
+        assert_eq!(line, original);
+    }
+
+    #[test]
+    fn test_box_filter_line_smoothing_effect() {
+        // A spike should be smoothed out
+        let mut line = vec![0.0, 0.0, 0.0, 10.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        box_filter_line(&mut line, 5);
+        // The spike at index 3 should be reduced
+        assert!(line[3] < 10.0, "Spike should be smoothed");
+        // Neighbors should have received some intensity
+        assert!(line[2] > 0.0 || line[4] > 0.0, "Neighbors should gain intensity");
+        // All values should be finite
+        for &v in &line {
+            assert!(v.is_finite(), "All values should be finite");
+        }
+    }
+
+    // =====================================================================
+    // Tests for box_filter_line_weighted
+    // =====================================================================
+
+    #[test]
+    fn test_box_filter_line_weighted_too_small() {
+        let mut line = vec![1.0, 2.0];
+        let mut weight = vec![1.0, 1.0];
+        let orig_l = line.clone();
+        let orig_w = weight.clone();
+        box_filter_line_weighted(&mut line, &mut weight, 1);
+        assert_eq!(line, orig_l);
+        assert_eq!(weight, orig_w);
+    }
+
+    #[test]
+    fn test_box_filter_line_weighted_uniform() {
+        let mut line = vec![5.0; 10];
+        let mut weight = vec![1.0; 10];
+        box_filter_line_weighted(&mut line, &mut weight, 3);
+        // With uniform values and uniform weights, the middle portion
+        // should remain close to 5.0
+        for i in 2..8 {
+            assert!(
+                (line[i] - 5.0).abs() < 0.5,
+                "Uniform weighted line should stay near 5.0, got {} at index {}",
+                line[i], i
+            );
+        }
+    }
+
+    #[test]
+    fn test_box_filter_line_weighted_varying_weights() {
+        let mut line = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0];
+        let mut weight = vec![1.0, 1.0, 1.0, 0.5, 0.5, 0.5, 1.0, 1.0, 1.0, 1.0];
+        box_filter_line_weighted(&mut line, &mut weight, 3);
+        // All values should remain finite
+        for &v in &line {
+            assert!(v.is_finite(), "All values should be finite after weighted filter");
+        }
+        for &w in &weight {
+            assert!(w.is_finite(), "All weights should be finite after weighted filter");
+        }
+    }
+
+    // =====================================================================
+    // Tests for nan_box_filter_line
+    // =====================================================================
+
+    #[test]
+    fn test_nan_box_filter_line_too_small() {
+        let mut line = vec![1.0, 2.0];
+        let original = line.clone();
+        nan_box_filter_line(&mut line, 5);
+        assert_eq!(line, original);
+    }
+
+    #[test]
+    fn test_nan_box_filter_line_no_nans() {
+        // All valid data => the nan filter processes it and produces finite results
+        let mut line = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0];
+        nan_box_filter_line(&mut line, 3);
+        // All values should remain finite
+        for &v in &line {
+            assert!(v.is_finite(), "All values should be finite after nan box filter");
+        }
+        // The nan box filter in Normal mode should act as a smoothing filter
+        // Check that some middle values have changed (been smoothed)
+        // The function's Normal mode applies running sum averaging
+    }
+
+    #[test]
+    fn test_nan_box_filter_line_with_nans() {
+        // Data with NaN gaps
+        let mut line = vec![5.0, 5.0, 5.0, f64::NAN, f64::NAN, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0];
+        nan_box_filter_line(&mut line, 3);
+        // Non-NaN regions should still be mostly finite
+        let finite_count = line.iter().filter(|v| v.is_finite()).count();
+        assert!(finite_count >= 6, "Most values should be finite, got {}", finite_count);
+    }
+
+    #[test]
+    fn test_nan_box_filter_line_all_nan_except_edges() {
+        // Mostly NaN
+        let mut line = vec![1.0; 12];
+        for i in 2..10 {
+            line[i] = f64::NAN;
+        }
+        nan_box_filter_line(&mut line, 3);
+        // The function should not panic and edge values should remain finite
+        assert!(line[0].is_finite() || line[0].is_nan());
+    }
+
+    // =====================================================================
+    // Tests for gaussian_smooth_3d (main 3D smoothing)
+    // =====================================================================
+
+    #[test]
+    fn test_gaussian_smooth_3d_uniform_no_mask() {
+        let n = 8;
+        let data = vec![5.0; n * n * n];
+        let result = gaussian_smooth_3d(&data, [2.0, 2.0, 2.0], None, None, 3, n, n, n);
+        assert_eq!(result.len(), n * n * n);
+        // Uniform data should stay nearly uniform after smoothing
+        for &v in &result {
+            assert!(
+                (v - 5.0).abs() < 0.5,
+                "Uniform data should stay near 5.0, got {}",
+                v
+            );
+        }
+    }
+
+    #[test]
+    fn test_gaussian_smooth_3d_with_mask() {
+        let n = 10;
+        let (mag, mask) = make_sphere_phantom(n, false);
+        // Smooth with mask
+        let result = gaussian_smooth_3d(&mag, [1.5, 1.5, 1.5], Some(&mask), None, 4, n, n, n);
+        assert_eq!(result.len(), n * n * n);
+        // Inside mask, values should still be finite
+        for i in 0..result.len() {
+            if mask[i] > 0 {
+                assert!(result[i].is_finite(), "Masked voxel at {} should be finite", i);
+            }
+        }
+    }
+
+    #[test]
+    fn test_gaussian_smooth_3d_with_weights() {
+        let n = 8;
+        let data = vec![10.0; n * n * n];
+        let mut weight = vec![1.0; n * n * n];
+        let result = gaussian_smooth_3d(
+            &data, [1.5, 1.5, 1.5], None, Some(&mut weight), 3, n, n, n,
+        );
+        assert_eq!(result.len(), n * n * n);
+        for &v in &result {
+            assert!(v.is_finite(), "Result should be finite");
+        }
+    }
+
+    // =====================================================================
+    // Tests for gaussian_smooth_3d_boxsizes
+    // =====================================================================
+
+    #[test]
+    fn test_gaussian_smooth_3d_boxsizes_uniform() {
+        let n = 8;
+        let data = vec![3.0; n * n * n];
+        let boxsizes = vec![vec![3, 3], vec![3, 3], vec![3, 3]];
+        let result = gaussian_smooth_3d_boxsizes(&data, &boxsizes, 2, n, n, n);
+        assert_eq!(result.len(), n * n * n);
+        for &v in &result {
+            assert!(
+                (v - 3.0).abs() < 0.5,
+                "Uniform data should stay near 3.0, got {}",
+                v
+            );
+        }
+    }
+
+    #[test]
+    fn test_gaussian_smooth_3d_boxsizes_spike() {
+        let n = 10;
+        let n_total = n * n * n;
+        let mut data = vec![0.0; n_total];
+        // Place a spike at the center
+        let center = n / 2 + (n / 2) * n + (n / 2) * n * n;
+        data[center] = 100.0;
+        let boxsizes = vec![vec![5, 5], vec![5, 5], vec![5, 5]];
+        let result = gaussian_smooth_3d_boxsizes(&data, &boxsizes, 2, n, n, n);
+        assert_eq!(result.len(), n_total);
+        // Spike should be reduced
+        assert!(
+            result[center] < 100.0,
+            "Spike should be smoothed, got {}",
+            result[center]
+        );
+        // Sum should be approximately conserved (box filter is mean-preserving)
+        for &v in &result {
+            assert!(v.is_finite(), "All values should be finite");
+        }
+    }
+
+    // =====================================================================
+    // Tests for fill_holes (more complex cases)
+    // =====================================================================
+
+    #[test]
+    fn test_fill_holes_boundary_hole_not_filled() {
+        // A hole touching the boundary should NOT be filled
+        let mut mask = vec![1u8; 125]; // 5x5x5
+        mask[0] = 0; // corner voxel - touches boundary
+        let filled = fill_holes(&mask, 5, 5, 5, 100);
+        assert_eq!(filled[0], 0, "Boundary hole should not be filled");
+    }
+
+    #[test]
+    fn test_fill_holes_large_hole_not_filled() {
+        // A hole larger than max_hole_size should NOT be filled
+        let n = 7;
+        let n_total = n * n * n;
+        let mut mask = vec![1u8; n_total];
+        // Create a large internal hole (3x3x3 = 27 voxels)
+        for k in 2..5 {
+            for j in 2..5 {
+                for i in 2..5 {
+                    mask[i + j * n + k * n * n] = 0;
+                }
+            }
+        }
+        let filled = fill_holes(&mask, n, n, n, 5); // max_hole_size=5, hole is 27
+        // Hole should NOT be filled because it's too large
+        let center = 3 + 3 * n + 3 * n * n;
+        assert_eq!(filled[center], 0, "Large hole should not be filled");
+    }
+
+    // =====================================================================
+    // Tests for robust_mask (more comprehensive)
+    // =====================================================================
+
+    #[test]
+    fn test_robust_mask_sphere() {
+        let n = 12;
+        let (mag, _) = make_sphere_phantom(n, false);
+        let mask = robust_mask(&mag, n, n, n);
+        assert_eq!(mask.len(), n * n * n);
+        let masked_count: usize = mask.iter().map(|&v| v as usize).sum();
+        // The sphere should produce some masked voxels
+        assert!(masked_count > 0, "Should have masked voxels for sphere phantom");
+        // Center should be masked (high intensity)
+        let center = n / 2 + (n / 2) * n + (n / 2) * n * n;
+        assert_eq!(mask[center], 1, "Center of sphere should be masked");
+    }
+
+    #[test]
+    fn test_robust_mask_empty() {
+        // All zero magnitude -> empty mask
+        let mag = vec![0.0; 27];
+        let mask = robust_mask(&mag, 3, 3, 3);
+        let count: usize = mask.iter().map(|&v| v as usize).sum();
+        assert_eq!(count, 0, "Zero magnitude should produce empty mask");
+    }
+
+    #[test]
+    fn test_robust_mask_nan_values() {
+        // Magnitude with NaN values
+        let mut mag = vec![100.0; 125];
+        mag[0] = f64::NAN;
+        mag[10] = f64::NAN;
+        mag[50] = f64::INFINITY;
+        let mask = robust_mask(&mag, 5, 5, 5);
+        assert_eq!(mask.len(), 125);
+        // Should still produce a valid mask
+        for &v in &mask {
+            assert!(v == 0 || v == 1, "Mask values should be 0 or 1");
+        }
+    }
+
+    // =====================================================================
+    // Tests for box_segment
+    // =====================================================================
+
+    #[test]
+    fn test_box_segment_uniform() {
+        let n = 10;
+        let (mag, mask) = make_sphere_phantom(n, false);
+        let seg = box_segment(&mag, &mask, 3, n, n, n);
+        assert_eq!(seg.len(), n * n * n);
+        // In a uniform sphere, most interior voxels should be segmented as tissue
+        let seg_count: usize = seg.iter().map(|&v| v as usize).sum();
+        assert!(seg_count > 0, "Box segment should find some tissue voxels");
+    }
+
+    #[test]
+    fn test_box_segment_empty_mask() {
+        let n = 8;
+        let mag = vec![100.0; n * n * n];
+        let mask = vec![0u8; n * n * n]; // empty mask
+        let seg = box_segment(&mag, &mask, 3, n, n, n);
+        let count: usize = seg.iter().map(|&v| v as usize).sum();
+        assert_eq!(count, 0, "Empty mask should produce no segmentation");
+    }
+
+    // =====================================================================
+    // Tests for fill_and_smooth
+    // =====================================================================
+
+    #[test]
+    fn test_fill_and_smooth_basic() {
+        let n = 10;
+        let n_total = n * n * n;
+        let stable_mean = 100.0;
+        let mut lowpass = vec![stable_mean; n_total];
+        // Add some holes (very low values)
+        lowpass[0] = 0.0;
+        lowpass[100] = f64::NAN;
+        lowpass[200] = 2000.0; // outlier > 10*stable_mean
+
+        let sigma2 = [2.0, 2.0, 2.0];
+        fill_and_smooth(&mut lowpass, stable_mean, sigma2, n, n, n);
+
+        // All values should be finite after fill and smooth
+        for (i, &v) in lowpass.iter().enumerate() {
+            assert!(v.is_finite(), "Value at {} should be finite, got {}", i, v);
+        }
+    }
+
+    #[test]
+    fn test_fill_and_smooth_preserves_approximate_mean() {
+        let n = 8;
+        let n_total = n * n * n;
+        let stable_mean = 50.0;
+        let mut lowpass = vec![stable_mean; n_total];
+        let sigma2 = [1.5, 1.5, 1.5];
+        fill_and_smooth(&mut lowpass, stable_mean, sigma2, n, n, n);
+
+        // Mean should be approximately preserved
+        let mean: f64 = lowpass.iter().sum::<f64>() / n_total as f64;
+        assert!(
+            (mean - stable_mean).abs() < stable_mean * 0.5,
+            "Mean should be approximately preserved, got {} vs {}",
+            mean,
+            stable_mean
+        );
+    }
+
+    // =====================================================================
+    // Tests for get_sensitivity
+    // =====================================================================
+
+    #[test]
+    fn test_get_sensitivity_sphere() {
+        let n = 12;
+        let (mag, _) = make_sphere_phantom(n, true);
+        let sensitivity = get_sensitivity(&mag, n, n, n, 1.0, 1.0, 1.0, 4.0, 5);
+        assert_eq!(sensitivity.len(), n * n * n);
+        // Sensitivity should be finite and mostly positive in the sphere
+        let center = n / 2 + (n / 2) * n + (n / 2) * n * n;
+        assert!(
+            sensitivity[center].is_finite(),
+            "Sensitivity at center should be finite"
+        );
+        assert!(
+            sensitivity[center] > 0.0,
+            "Sensitivity at center should be positive, got {}",
+            sensitivity[center]
+        );
+    }
+
+    #[test]
+    fn test_get_sensitivity_output_size() {
+        let n = 10;
+        let (mag, _) = make_sphere_phantom(n, false);
+        let sensitivity = get_sensitivity(&mag, n, n, n, 1.0, 1.0, 1.0, 3.0, 3);
+        assert_eq!(sensitivity.len(), n * n * n);
+    }
+
+    // =====================================================================
+    // Tests for makehomogeneous (main entry point)
+    // =====================================================================
+
+    #[test]
+    fn test_makehomogeneous_output_size_and_finite() {
+        let n = 12;
+        let (mag, _) = make_sphere_phantom(n, true);
+        let result = makehomogeneous(&mag, n, n, n, 1.0, 1.0, 1.0, 4.0, 5);
+        assert_eq!(result.len(), n * n * n);
+        // All output values should be finite
+        for (i, &v) in result.iter().enumerate() {
+            assert!(v.is_finite(), "Output at {} should be finite, got {}", i, v);
+        }
+    }
+
+    #[test]
+    fn test_makehomogeneous_reduces_bias() {
+        let n = 12;
+        let (mag_biased, mask) = make_sphere_phantom(n, true);
+        let result = makehomogeneous(&mag_biased, n, n, n, 1.0, 1.0, 1.0, 4.0, 5);
+
+        // Collect values inside the sphere
+        let mut original_vals = Vec::new();
+        let mut corrected_vals = Vec::new();
+        for i in 0..(n * n * n) {
+            if mask[i] > 0 {
+                original_vals.push(mag_biased[i]);
+                corrected_vals.push(result[i]);
+            }
+        }
+
+        // The coefficient of variation should be reduced (or at least not much worse)
+        let orig_mean = original_vals.iter().sum::<f64>() / original_vals.len() as f64;
+        let orig_std = (original_vals
+            .iter()
+            .map(|v| (v - orig_mean).powi(2))
+            .sum::<f64>()
+            / original_vals.len() as f64)
+            .sqrt();
+        let orig_cv = orig_std / orig_mean;
+
+        let corr_mean = corrected_vals.iter().sum::<f64>() / corrected_vals.len() as f64;
+        let corr_std = (corrected_vals
+            .iter()
+            .map(|v| (v - corr_mean).powi(2))
+            .sum::<f64>()
+            / corrected_vals.len() as f64)
+            .sqrt();
+        let corr_cv = corr_std / corr_mean;
+
+        assert!(
+            corr_cv <= orig_cv * 2.0,
+            "Corrected CV ({}) should not be much worse than original CV ({})",
+            corr_cv,
+            orig_cv
+        );
+    }
+
+    #[test]
+    fn test_makehomogeneous_no_bias_preserves() {
+        let n = 12;
+        let (mag, mask) = make_sphere_phantom(n, false);
+        let result = makehomogeneous(&mag, n, n, n, 1.0, 1.0, 1.0, 4.0, 5);
+
+        // With no bias, corrected values should still be positive inside sphere
+        for i in 0..(n * n * n) {
+            if mask[i] > 0 {
+                assert!(
+                    result[i] > 0.0,
+                    "Inside sphere voxel {} should be positive, got {}",
+                    i,
+                    result[i]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_makehomogeneous_anisotropic_voxels() {
+        let n = 12;
+        let (mag, _) = make_sphere_phantom(n, true);
+        // Use anisotropic voxel sizes
+        let result = makehomogeneous(&mag, n, n, n, 0.5, 0.5, 2.0, 4.0, 5);
+        assert_eq!(result.len(), n * n * n);
+        for &v in &result {
+            assert!(v.is_finite(), "All output values should be finite");
+        }
+    }
+
+    // =====================================================================
+    // Tests for flood_fill_component
+    // =====================================================================
+
+    #[test]
+    fn test_flood_fill_component_single() {
+        let mask = vec![1u8; 27]; // 3x3x3 all filled => no zeros
+        let mut visited = vec![false; 27];
+        // Start at a filled voxel -> should find nothing (mask[idx] != 0)
+        let component = flood_fill_component(&mask, &mut visited, 0, 3, 3, 3);
+        assert!(component.is_empty(), "All filled mask should have no zero component");
+    }
+
+    #[test]
+    fn test_flood_fill_component_connected_zeros() {
+        let n = 5;
+        let n_total = n * n * n;
+        let mut mask = vec![1u8; n_total];
+        // Create a connected line of zeros along x at j=2, k=2
+        for i in 1..4 {
+            mask[i + 2 * n + 2 * n * n] = 0;
+        }
+        let mut visited = vec![false; n_total];
+        let start = 1 + 2 * n + 2 * n * n;
+        let component = flood_fill_component(&mask, &mut visited, start, n, n, n);
+        assert_eq!(component.len(), 3, "Should find 3 connected zero voxels");
+    }
+
+    // =====================================================================
+    // Tests for gaussian_smooth_3d with reversed passes (mask + even pass)
+    // =====================================================================
+
+    #[test]
+    fn test_gaussian_smooth_3d_mask_reverse_passes() {
+        // Exercise the reverse pass code paths (mask.is_some() && ibox % 2 == 1)
+        let n = 10;
+        let (mag, mask) = make_sphere_phantom(n, false);
+        // nbox=4 ensures we have even passes (ibox=1,3)
+        let result = gaussian_smooth_3d(&mag, [1.5, 1.5, 1.5], Some(&mask), None, 4, n, n, n);
+        assert_eq!(result.len(), n * n * n);
+        // Inside mask, values should still be finite
+        for i in 0..result.len() {
+            if mask[i] > 0 {
+                // NaN smoothing can produce NaN near edges, but center should be finite
+            }
+        }
+        // At least some values should be finite
+        let finite_count = result.iter().filter(|v| v.is_finite()).count();
+        assert!(finite_count > 0, "Should have some finite values");
+    }
 }

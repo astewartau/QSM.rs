@@ -433,6 +433,7 @@ fn test_bias_correction() {
 
     println!("Makehomogeneous {:>10.2?}", elapsed);
     println!("RESULT:Makehomogeneous,-,-,-,-,{:.2}", elapsed.as_secs_f64());
+    common::save_center_slices(&data.mag_echoes[0], &data.mask, data.dims, "bias_correction_before");
     common::save_center_slices(&result, &data.mask, data.dims, "bias_correction");
 
     // Bias correction should produce finite, positive values within the mask

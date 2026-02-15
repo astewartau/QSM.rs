@@ -367,4 +367,245 @@ mod tests {
         // Should preserve at least some interior voxels
         assert!(eroded_count > 0, "Eroded mask should have some voxels");
     }
+
+    #[test]
+    fn test_ismv_convergence() {
+        let n = 8;
+        let field: Vec<f64> = (0..n*n*n).map(|i| (i as f64) * 0.001).collect();
+        let mask = vec![1u8; n * n * n];
+
+        // Run with more iterations and tight tolerance
+        let (local_many, _) = ismv(
+            &field, &mask, n, n, n, 1.0, 1.0, 1.0,
+            2.0, 1e-6, 100
+        );
+
+        // Run with fewer iterations
+        let (local_few, _) = ismv(
+            &field, &mask, n, n, n, 1.0, 1.0, 1.0,
+            2.0, 1e-6, 5
+        );
+
+        // Both should be finite
+        for (i, &val) in local_many.iter().enumerate() {
+            assert!(val.is_finite(), "iSMV many iters: finite at index {}", i);
+        }
+        for (i, &val) in local_few.iter().enumerate() {
+            assert!(val.is_finite(), "iSMV few iters: finite at index {}", i);
+        }
+
+        // More iterations should give different (hopefully more converged) result
+        // or the same if already converged
+        let diff_norm: f64 = local_many.iter()
+            .zip(local_few.iter())
+            .map(|(&a, &b)| (a - b).powi(2))
+            .sum::<f64>()
+            .sqrt();
+
+        // The difference should be finite (no NaN/Inf)
+        assert!(diff_norm.is_finite(), "Difference between runs should be finite");
+    }
+
+    #[test]
+    fn test_ismv_different_radius() {
+        let n = 8;
+        let field: Vec<f64> = (0..n*n*n).map(|i| (i as f64) * 0.001).collect();
+        let mask = vec![1u8; n * n * n];
+
+        // Small radius
+        let (local_small, eroded_small) = ismv(
+            &field, &mask, n, n, n, 1.0, 1.0, 1.0,
+            1.5, 1e-3, 20
+        );
+
+        // Larger radius
+        let (local_large, eroded_large) = ismv(
+            &field, &mask, n, n, n, 1.0, 1.0, 1.0,
+            3.0, 1e-3, 20
+        );
+
+        // Both should produce finite results
+        for (i, &val) in local_small.iter().enumerate() {
+            assert!(val.is_finite(), "iSMV small radius: finite at index {}", i);
+        }
+        for (i, &val) in local_large.iter().enumerate() {
+            assert!(val.is_finite(), "iSMV large radius: finite at index {}", i);
+        }
+
+        // Larger radius should erode more
+        let small_count: usize = eroded_small.iter().map(|&m| m as usize).sum();
+        let large_count: usize = eroded_large.iter().map(|&m| m as usize).sum();
+        assert!(
+            large_count <= small_count,
+            "Larger radius should erode more: large={}, small={}",
+            large_count, small_count
+        );
+    }
+
+    #[test]
+    fn test_ismv_larger_volume() {
+        // Test with 16x16x16 volume and spherical mask
+        let n = 16;
+
+        // Create a field with a linear background
+        let mut field = vec![0.0; n * n * n];
+        for z in 0..n {
+            for y in 0..n {
+                for x in 0..n {
+                    field[x + y * n + z * n * n] = (z as f64) * 0.1;
+                }
+            }
+        }
+
+        // Spherical mask
+        let mut mask = vec![0u8; n * n * n];
+        let center = n / 2;
+        let radius = n / 3;
+        for z in 0..n {
+            for y in 0..n {
+                for x in 0..n {
+                    let dx = (x as i32) - (center as i32);
+                    let dy = (y as i32) - (center as i32);
+                    let dz = (z as i32) - (center as i32);
+                    if dx * dx + dy * dy + dz * dz <= (radius * radius) as i32 {
+                        mask[x + y * n + z * n * n] = 1;
+                    }
+                }
+            }
+        }
+
+        let (local, eroded) = ismv(
+            &field, &mask, n, n, n, 1.0, 1.0, 1.0,
+            2.0, 1e-3, 50
+        );
+
+        assert_eq!(local.len(), n * n * n);
+        for &val in &local {
+            assert!(val.is_finite());
+        }
+
+        // Eroded mask should be non-empty
+        let eroded_count: usize = eroded.iter().map(|&m| m as usize).sum();
+        assert!(eroded_count > 0, "Eroded mask should have some voxels");
+
+        // Outside original mask should be zero
+        for i in 0..n * n * n {
+            if mask[i] == 0 {
+                assert_eq!(local[i], 0.0, "Outside mask should be zero");
+            }
+        }
+    }
+
+    #[test]
+    fn test_ismv_with_progress() {
+        let n = 8;
+        let field: Vec<f64> = (0..n * n * n).map(|i| (i as f64) * 0.001).collect();
+        let mask = vec![1u8; n * n * n];
+
+        let mut progress_calls = Vec::new();
+        let (local, _) = ismv_with_progress(
+            &field, &mask, n, n, n, 1.0, 1.0, 1.0,
+            2.0, 1e-3, 20,
+            |iter, max| { progress_calls.push((iter, max)); }
+        );
+
+        assert_eq!(local.len(), n * n * n);
+        assert!(!progress_calls.is_empty(), "Progress callback should be called");
+        for &val in &local {
+            assert!(val.is_finite());
+        }
+    }
+
+    #[test]
+    fn test_ismv_default_wrapper() {
+        let n = 8;
+        let field: Vec<f64> = (0..n * n * n).map(|i| (i as f64) * 0.001).collect();
+        let mask = vec![1u8; n * n * n];
+
+        let (local, eroded) = ismv_default(&field, &mask, n, n, n, 1.0, 1.0, 1.0);
+
+        assert_eq!(local.len(), n * n * n);
+        for &val in &local {
+            assert!(val.is_finite());
+        }
+        let eroded_count: usize = eroded.iter().map(|&m| m as usize).sum();
+        assert!(eroded_count > 0, "Default iSMV should produce non-empty eroded mask");
+    }
+
+    #[test]
+    fn test_ismv_anisotropic_voxels() {
+        let n = 8;
+        let field: Vec<f64> = (0..n * n * n).map(|i| (i as f64) * 0.001).collect();
+        let mask = vec![1u8; n * n * n];
+
+        // Anisotropic voxel sizes
+        let (local, eroded) = ismv(
+            &field, &mask, n, n, n, 0.5, 1.0, 2.0,
+            3.0, 1e-3, 20
+        );
+
+        for &val in &local {
+            assert!(val.is_finite());
+        }
+        // Should still produce some eroded mask
+        let count: usize = eroded.iter().map(|&m| m as usize).sum();
+        assert!(count <= n * n * n);
+    }
+
+    #[test]
+    fn test_ismv_tight_convergence() {
+        // Test tight convergence to ensure the convergence check branch is hit
+        let n = 8;
+        let field = vec![0.5; n * n * n]; // Constant field
+        let mask = vec![1u8; n * n * n];
+
+        let (local, _) = ismv(
+            &field, &mask, n, n, n, 1.0, 1.0, 1.0,
+            2.0, 1e-12, 200 // Very tight tolerance, many iterations allowed
+        );
+
+        for &val in &local {
+            assert!(val.is_finite());
+        }
+    }
+
+    #[test]
+    fn test_ismv_with_background_mask() {
+        // Test where some voxels are outside the mask
+        let n = 8;
+        let field: Vec<f64> = (0..n * n * n).map(|i| (i as f64) * 0.001).collect();
+
+        // Mask with zero border
+        let mut mask = vec![0u8; n * n * n];
+        for z in 1..(n - 1) {
+            for y in 1..(n - 1) {
+                for x in 1..(n - 1) {
+                    mask[x + y * n + z * n * n] = 1;
+                }
+            }
+        }
+
+        let (local, eroded) = ismv(
+            &field, &mask, n, n, n, 1.0, 1.0, 1.0,
+            1.5, 1e-3, 30
+        );
+
+        for &val in &local {
+            assert!(val.is_finite());
+        }
+
+        // Outside mask should be zero
+        for i in 0..n * n * n {
+            if mask[i] == 0 {
+                assert_eq!(local[i], 0.0, "Outside mask should be zero at index {}", i);
+            }
+        }
+
+        // Eroded mask should be subset of original mask
+        for i in 0..n * n * n {
+            if eroded[i] != 0 {
+                assert_eq!(mask[i], 1, "Eroded voxel must be inside original mask");
+            }
+        }
+    }
 }

@@ -777,6 +777,7 @@ jobs:
               echo "|--------|------|"
               echo "| ${name} | $(printf '%.2fs' "$time") |"
               echo ""
+              emit_figures bias_correction
             fi
           } > report.md
           cml comment create report.md

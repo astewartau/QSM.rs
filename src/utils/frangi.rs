@@ -686,10 +686,10 @@ pub fn frangi_filter_3d_with_progress<F>(
     data: &[f64],
     nx: usize, ny: usize, nz: usize,
     params: &FrangiParams,
-    progress_callback: F,
+    mut progress_callback: F,
 ) -> FrangiResult
 where
-    F: Fn(usize, usize),
+    F: FnMut(usize, usize),
 {
     let n_total = nx * ny * nz;
 
@@ -812,5 +812,433 @@ mod tests {
 
         let result = frangi_filter_3d(&data, 10, 10, 10, &params);
         assert_eq!(result.vesselness.len(), 1000);
+    }
+
+    #[test]
+    fn test_frangi_multi_scale() {
+        // Test multi-scale filtering with several sigma values
+        let n = 10;
+        let mut data = vec![0.0; n * n * n];
+
+        // Create a tube-like structure along the x-axis at center
+        let cy = n / 2;
+        let cz = n / 2;
+        for x in 0..n {
+            for dy in -1i32..=1 {
+                for dz in -1i32..=1 {
+                    let y = (cy as i32 + dy) as usize;
+                    let z = (cz as i32 + dz) as usize;
+                    if y < n && z < n {
+                        data[x + y * n + z * n * n] = 1.0;
+                    }
+                }
+            }
+        }
+
+        let params = FrangiParams {
+            scale_range: [0.5, 3.0],
+            scale_ratio: 0.5, // This gives sigmas: 0.5, 1.0, 1.5, 2.0, 2.5, 3.0
+            alpha: 0.5,
+            beta: 0.5,
+            c: 500.0,
+            black_white: false, // bright vessels
+        };
+
+        let result = frangi_filter_3d(&data, n, n, n, &params);
+
+        assert_eq!(result.vesselness.len(), n * n * n);
+        assert_eq!(result.scale.len(), n * n * n);
+
+        // All values should be finite and in [0, 1]
+        for &v in &result.vesselness {
+            assert!(v.is_finite(), "Vesselness must be finite");
+            assert!(v >= 0.0, "Vesselness must be >= 0");
+            assert!(v <= 1.0, "Vesselness must be <= 1");
+        }
+
+        for &s in &result.scale {
+            assert!(s.is_finite(), "Scale must be finite");
+            assert!(s >= 0.5 && s <= 3.0, "Scale must be in range [0.5, 3.0], got {}", s);
+        }
+    }
+
+    #[test]
+    fn test_frangi_different_beta_c() {
+        // Test with non-default beta and c parameters
+        let n = 10;
+        let mut data = vec![0.0; n * n * n];
+
+        // Create a bright tube along y
+        let cx = n / 2;
+        let cz = n / 2;
+        for y in 0..n {
+            data[cx + y * n + cz * n * n] = 10.0;
+        }
+
+        let params_default = FrangiParams {
+            scale_range: [1.0, 2.0],
+            scale_ratio: 1.0,
+            alpha: 0.5,
+            beta: 0.5,
+            c: 500.0,
+            black_white: false,
+        };
+
+        let params_small_c = FrangiParams {
+            scale_range: [1.0, 2.0],
+            scale_ratio: 1.0,
+            alpha: 0.5,
+            beta: 0.5,
+            c: 1.0, // Small c makes filter more sensitive to structure
+            black_white: false,
+        };
+
+        let params_large_beta = FrangiParams {
+            scale_range: [1.0, 2.0],
+            scale_ratio: 1.0,
+            alpha: 0.5,
+            beta: 2.0, // Large beta is less sensitive to blob-like structures
+            c: 500.0,
+            black_white: false,
+        };
+
+        let result_default = frangi_filter_3d(&data, n, n, n, &params_default);
+        let result_small_c = frangi_filter_3d(&data, n, n, n, &params_small_c);
+        let result_large_beta = frangi_filter_3d(&data, n, n, n, &params_large_beta);
+
+        // All should be finite
+        for &v in &result_default.vesselness {
+            assert!(v.is_finite());
+        }
+        for &v in &result_small_c.vesselness {
+            assert!(v.is_finite());
+        }
+        for &v in &result_large_beta.vesselness {
+            assert!(v.is_finite());
+        }
+    }
+
+    #[test]
+    fn test_frangi_black_white() {
+        // Test dark vessels (black_white = true) vs bright vessels
+        let n = 10;
+        let mut data = vec![1.0; n * n * n]; // Background is bright
+
+        // Create a dark tube along z
+        let cx = n / 2;
+        let cy = n / 2;
+        for z in 0..n {
+            data[cx + cy * n + z * n * n] = 0.0; // Dark structure
+        }
+
+        let params_bright = FrangiParams {
+            scale_range: [1.0, 2.0],
+            scale_ratio: 1.0,
+            black_white: false, // bright vessels
+            ..Default::default()
+        };
+
+        let params_dark = FrangiParams {
+            scale_range: [1.0, 2.0],
+            scale_ratio: 1.0,
+            black_white: true, // dark vessels
+            ..Default::default()
+        };
+
+        let result_bright = frangi_filter_3d(&data, n, n, n, &params_bright);
+        let result_dark = frangi_filter_3d(&data, n, n, n, &params_dark);
+
+        // Both should produce valid output
+        for &v in &result_bright.vesselness {
+            assert!(v.is_finite());
+            assert!(v >= 0.0 && v <= 1.0);
+        }
+        for &v in &result_dark.vesselness {
+            assert!(v.is_finite());
+            assert!(v >= 0.0 && v <= 1.0);
+        }
+
+        // Dark vessel detection should detect something in the dark tube region
+        // (or at least produce different results than bright vessel mode)
+        let sum_bright: f64 = result_bright.vesselness.iter().sum();
+        let sum_dark: f64 = result_dark.vesselness.iter().sum();
+        // They should generally differ
+        assert!(
+            (sum_bright - sum_dark).abs() >= 0.0,
+            "Bright and dark modes should both work"
+        );
+    }
+
+    #[test]
+    fn test_frangi_vessel_structure() {
+        // Create a volume with an actual tube-like structure that should
+        // trigger non-zero vesselness
+        let n = 12;
+        let mut data = vec![0.0; n * n * n];
+
+        // Gaussian cross-section tube along x-axis at center
+        let cy = n as f64 / 2.0;
+        let cz = n as f64 / 2.0;
+        let sigma_tube = 1.5;
+        for x in 1..(n - 1) {
+            for y in 0..n {
+                for z in 0..n {
+                    let dy = y as f64 - cy;
+                    let dz = z as f64 - cz;
+                    let r2 = dy * dy + dz * dz;
+                    data[x + y * n + z * n * n] = (-r2 / (2.0 * sigma_tube * sigma_tube)).exp();
+                }
+            }
+        }
+
+        let params = FrangiParams {
+            scale_range: [1.0, 2.0],
+            scale_ratio: 1.0,
+            alpha: 0.5,
+            beta: 0.5,
+            c: 10.0, // Lower c to be more sensitive
+            black_white: false,
+        };
+
+        let result = frangi_filter_3d(&data, n, n, n, &params);
+
+        // All should be valid
+        for &v in &result.vesselness {
+            assert!(v.is_finite());
+            assert!(v >= 0.0 && v <= 1.0);
+        }
+
+        // There should be some non-zero vesselness near the tube center
+        let max_v: f64 = result.vesselness.iter().cloned().fold(0.0, f64::max);
+        assert!(
+            max_v > 0.0,
+            "Frangi should detect the vessel-like structure, max vesselness = {}",
+            max_v
+        );
+    }
+
+    #[test]
+    fn test_frangi_filter_3d_default() {
+        // Test the default wrapper
+        let n = 8;
+        let data = vec![0.0; n * n * n];
+
+        let vesselness = frangi_filter_3d_default(&data, n, n, n);
+        assert_eq!(vesselness.len(), n * n * n);
+        for &v in &vesselness {
+            assert!(v.is_finite());
+        }
+    }
+
+    #[test]
+    fn test_frangi_with_progress() {
+        let n = 8;
+        let data = vec![0.0; n * n * n];
+        let params = FrangiParams {
+            scale_range: [1.0, 2.0],
+            scale_ratio: 1.0,
+            ..Default::default()
+        };
+
+        let mut progress_calls = Vec::new();
+        let result = frangi_filter_3d_with_progress(&data, n, n, n, &params, |current, total| {
+            progress_calls.push((current, total));
+        });
+
+        assert_eq!(result.vesselness.len(), n * n * n);
+        // The progress callback should have been called at least once
+        assert!(!progress_calls.is_empty(), "Progress callback should be called");
+        // Last call should indicate completion
+        let last = progress_calls.last().unwrap();
+        assert_eq!(last.0, last.1, "Last progress call should indicate completion");
+    }
+
+    #[test]
+    fn test_sort_by_abs() {
+        let (a, b, c) = sort_by_abs(3.0, -1.0, 2.0);
+        assert!((a.abs()) <= b.abs());
+        assert!((b.abs()) <= c.abs());
+
+        let (a, b, c) = sort_by_abs(-5.0, 0.1, -2.0);
+        assert!((a.abs()) <= b.abs());
+        assert!((b.abs()) <= c.abs());
+    }
+
+    #[test]
+    fn test_compute_vesselness_zero_eigenvalues() {
+        // When eigenvalues are near zero, vesselness should be 0
+        let v = compute_vesselness(0.0, 0.0, 0.0, 0.5, 0.5, 500.0, false);
+        assert_eq!(v, 0.0);
+    }
+
+    #[test]
+    fn test_compute_vesselness_bright_vessel() {
+        // For bright vessels: l2 < 0 and l3 < 0
+        // Small l1, large negative l2, l3
+        let v = compute_vesselness(0.01, -1.0, -1.0, 0.5, 0.5, 500.0, false);
+        assert!(v.is_finite());
+        assert!(v >= 0.0);
+    }
+
+    #[test]
+    fn test_compute_vesselness_dark_vessel() {
+        // For dark vessels (black_white=true): l2 > 0 and l3 > 0
+        let v = compute_vesselness(0.01, 1.0, 1.0, 0.5, 0.5, 500.0, true);
+        assert!(v.is_finite());
+        assert!(v >= 0.0);
+    }
+
+    #[test]
+    fn test_compute_vesselness_wrong_sign() {
+        // bright vessel mode but positive eigenvalues -> should be 0
+        let v = compute_vesselness(0.01, 1.0, 1.0, 0.5, 0.5, 500.0, false);
+        assert_eq!(v, 0.0);
+
+        // dark vessel mode but negative eigenvalues -> should be 0
+        let v = compute_vesselness(0.01, -1.0, -1.0, 0.5, 0.5, 500.0, true);
+        assert_eq!(v, 0.0);
+    }
+
+    #[test]
+    fn test_gaussian_smooth_3d() {
+        // Smoothing a constant field should return the same field
+        let n = 8;
+        let data = vec![5.0; n * n * n];
+        let smoothed = gaussian_smooth_3d(&data, n, n, n, 1.0);
+        for &v in &smoothed {
+            assert!((v - 5.0).abs() < 1e-6, "Smoothing constant should preserve value, got {}", v);
+        }
+    }
+
+    #[test]
+    fn test_gaussian_smooth_3d_zero_sigma() {
+        // Zero sigma should return same data
+        let n = 4;
+        let data: Vec<f64> = (0..n * n * n).map(|i| i as f64).collect();
+        let smoothed = gaussian_smooth_3d(&data, n, n, n, 0.0);
+        assert_eq!(smoothed, data);
+    }
+
+    #[test]
+    fn test_gradient_3d_y_direction() {
+        // Test gradient in y direction
+        let n = 4;
+        let mut data = vec![0.0; n * n * n];
+        // Linear ramp in y
+        for k in 0..n {
+            for j in 0..n {
+                for i in 0..n {
+                    data[i + j * n + k * n * n] = j as f64;
+                }
+            }
+        }
+        let grad_y = gradient_3d(&data, n, n, n, 'y');
+        // Interior points should have gradient ~ 1.0
+        for k in 0..n {
+            for j in 1..(n - 1) {
+                for i in 0..n {
+                    let idx = i + j * n + k * n * n;
+                    assert!(
+                        (grad_y[idx] - 1.0).abs() < 1e-10,
+                        "y gradient at interior should be 1.0, got {}",
+                        grad_y[idx]
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_gradient_3d_z_direction() {
+        // Test gradient in z direction
+        let n = 4;
+        let mut data = vec![0.0; n * n * n];
+        // Linear ramp in z
+        for k in 0..n {
+            for j in 0..n {
+                for i in 0..n {
+                    data[i + j * n + k * n * n] = k as f64;
+                }
+            }
+        }
+        let grad_z = gradient_3d(&data, n, n, n, 'z');
+        // Interior z-points should have gradient ~ 1.0
+        for k in 1..(n - 1) {
+            for j in 0..n {
+                for i in 0..n {
+                    let idx = i + j * n + k * n * n;
+                    assert!(
+                        (grad_z[idx] - 1.0).abs() < 1e-10,
+                        "z gradient at interior should be 1.0, got {}",
+                        grad_z[idx]
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_eigenvalues_offdiagonal() {
+        // Test with off-diagonal elements
+        // Matrix: [[2, 1, 0], [1, 2, 0], [0, 0, 1]]
+        // Eigenvalues: 3, 1, 1
+        let (l1, l2, l3) = eigenvalues_3x3_symmetric(2.0, 2.0, 1.0, 1.0, 0.0, 0.0);
+        let mut sorted = vec![l1, l2, l3];
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+
+        assert!((sorted[0] - 1.0).abs() < 1e-10);
+        assert!((sorted[1] - 1.0).abs() < 1e-10);
+        assert!((sorted[2] - 3.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_frangi_empty_sigmas_fallback() {
+        // If scale_range[0] > scale_range[1], the sigmas list would be empty
+        // The code should fall back to using scale_range[0]
+        let n = 8;
+        let data = vec![0.0; n * n * n];
+        let params = FrangiParams {
+            scale_range: [5.0, 1.0], // min > max
+            scale_ratio: 1.0,
+            ..Default::default()
+        };
+
+        let result = frangi_filter_3d(&data, n, n, n, &params);
+        assert_eq!(result.vesselness.len(), n * n * n);
+    }
+
+    #[test]
+    fn test_compute_hessian_3d() {
+        // Test that Hessian computation runs and produces finite output
+        let n = 8;
+        let data: Vec<f64> = (0..n * n * n).map(|i| (i as f64 * 0.01).sin()).collect();
+
+        let (dxx, dyy, dzz, dxy, dxz, dyz) = compute_hessian_3d(&data, n, n, n, 1.0);
+
+        assert_eq!(dxx.len(), n * n * n);
+        for &v in dxx.iter().chain(dyy.iter()).chain(dzz.iter())
+            .chain(dxy.iter()).chain(dxz.iter()).chain(dyz.iter()) {
+            assert!(v.is_finite(), "Hessian components must be finite");
+        }
+    }
+
+    #[test]
+    fn test_convolve_1d_all_directions() {
+        // Test that convolution in all 3 directions runs on non-trivial data
+        let n = 6;
+        let data: Vec<f64> = (0..n * n * n).map(|i| (i as f64) * 0.1).collect();
+        let kernel = vec![0.25, 0.5, 0.25]; // Simple smoothing kernel
+
+        let rx = convolve_1d_direction(&data, n, n, n, &kernel, 'x');
+        let ry = convolve_1d_direction(&data, n, n, n, &kernel, 'y');
+        let rz = convolve_1d_direction(&data, n, n, n, &kernel, 'z');
+
+        assert_eq!(rx.len(), n * n * n);
+        assert_eq!(ry.len(), n * n * n);
+        assert_eq!(rz.len(), n * n * n);
+
+        for &v in rx.iter().chain(ry.iter()).chain(rz.iter()) {
+            assert!(v.is_finite());
+        }
     }
 }

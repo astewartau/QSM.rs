@@ -522,6 +522,87 @@ pub fn fftfreq_f32(n: usize, d: f32) -> Vec<f32> {
     freq
 }
 
+/// 3D FFT shift: swap quadrants so zero-frequency is at center
+///
+/// Returns a new array with the zero-frequency component shifted to the center.
+/// Matches numpy.fft.fftshift behavior for 3D data in Fortran order.
+pub fn fftshift(data: &[f64], nx: usize, ny: usize, nz: usize) -> Vec<f64> {
+    let n_total = nx * ny * nz;
+    let mut out = vec![0.0; n_total];
+
+    let hx = nx / 2;
+    let hy = ny / 2;
+    let hz = nz / 2;
+
+    for k in 0..nz {
+        for j in 0..ny {
+            for i in 0..nx {
+                let si = (i + hx) % nx;
+                let sj = (j + hy) % ny;
+                let sk = (k + hz) % nz;
+                out[idx3d(si, sj, sk, nx, ny)] = data[idx3d(i, j, k, nx, ny)];
+            }
+        }
+    }
+
+    out
+}
+
+/// 3D inverse FFT shift: undo fftshift
+///
+/// Returns a new array with the zero-frequency component shifted back to the corner.
+/// Matches numpy.fft.ifftshift behavior for 3D data in Fortran order.
+pub fn ifftshift(data: &[f64], nx: usize, ny: usize, nz: usize) -> Vec<f64> {
+    let n_total = nx * ny * nz;
+    let mut out = vec![0.0; n_total];
+
+    let hx = (nx + 1) / 2;
+    let hy = (ny + 1) / 2;
+    let hz = (nz + 1) / 2;
+
+    for k in 0..nz {
+        for j in 0..ny {
+            for i in 0..nx {
+                let si = (i + hx) % nx;
+                let sj = (j + hy) % ny;
+                let sk = (k + hz) % nz;
+                out[idx3d(si, sj, sk, nx, ny)] = data[idx3d(i, j, k, nx, ny)];
+            }
+        }
+    }
+
+    out
+}
+
+/// 3D FFT shift in-place: swap quadrants so zero-frequency is at center
+///
+/// Modifies the input array in place. Only works correctly for even-sized dimensions.
+pub fn fftshift_inplace(data: &mut [f64], nx: usize, ny: usize, nz: usize) {
+    let hx = nx / 2;
+    let hy = ny / 2;
+    let hz = nz / 2;
+
+    // For even dimensions, fftshift is its own inverse and can be done
+    // by swapping pairs of elements
+    for k in 0..nz {
+        for j in 0..ny {
+            for i in 0..nx {
+                let si = (i + hx) % nx;
+                let sj = (j + hy) % ny;
+                let sk = (k + hz) % nz;
+
+                let idx_src = idx3d(i, j, k, nx, ny);
+                let idx_dst = idx3d(si, sj, sk, nx, ny);
+
+                // Only swap once (when src < dst)
+                if idx_src < idx_dst {
+                    data.swap(idx_src, idx_dst);
+                }
+            }
+        }
+    }
+}
+
 /// Wrap angle to [-π, π]
 #[inline]
 pub fn wrap_angle(angle: f64) -> f64 {
@@ -586,5 +667,110 @@ mod tests {
         assert!((freq[2] - 0.4).abs() < 1e-10);
         assert!((freq[3] - (-0.4)).abs() < 1e-10);
         assert!((freq[4] - (-0.2)).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_fft_f32_roundtrip() {
+        let nx = 4;
+        let ny = 4;
+        let nz = 4;
+
+        let original: Vec<f32> = (0..nx * ny * nz).map(|i| i as f32).collect();
+
+        let mut data: Vec<Complex32> = original.iter()
+            .map(|&x| Complex32::new(x, 0.0))
+            .collect();
+
+        let mut ws = Fft3dWorkspaceF32::new(nx, ny, nz);
+        ws.fft3d(&mut data);
+        ws.ifft3d(&mut data);
+
+        for (i, (&orig, result)) in original.iter().zip(data.iter()).enumerate() {
+            assert!(
+                (result.re - orig).abs() < 1e-4,
+                "f32 roundtrip mismatch at index {}: expected {}, got {}",
+                i, orig, result.re
+            );
+            assert!(
+                result.im.abs() < 1e-4,
+                "f32 imaginary part not zero at index {}: {}",
+                i, result.im
+            );
+        }
+    }
+
+    #[test]
+    fn test_fftshift_even() {
+        // 4x4x4 array with sequential values
+        let nx = 4;
+        let ny = 4;
+        let nz = 4;
+        let n = nx * ny * nz;
+
+        let data: Vec<f64> = (0..n).map(|i| i as f64).collect();
+        let shifted = fftshift(&data, nx, ny, nz);
+
+        // After fftshift, element at (0,0,0) should move to (2,2,2)
+        // Original index for (0,0,0) = 0
+        // Shifted position (2,2,2) -> index = 2 + 2*4 + 2*4*4 = 2 + 8 + 32 = 42
+        assert!(
+            (shifted[idx3d(2, 2, 2, nx, ny)] - data[idx3d(0, 0, 0, nx, ny)]).abs() < 1e-12,
+            "fftshift: element at (0,0,0) should move to (2,2,2)"
+        );
+
+        // Element at (1,1,1) should move to (3,3,3)
+        assert!(
+            (shifted[idx3d(3, 3, 3, nx, ny)] - data[idx3d(1, 1, 1, nx, ny)]).abs() < 1e-12,
+            "fftshift: element at (1,1,1) should move to (3,3,3)"
+        );
+
+        // Size should be preserved
+        assert_eq!(shifted.len(), n);
+    }
+
+    #[test]
+    fn test_ifftshift_roundtrip() {
+        let nx = 4;
+        let ny = 4;
+        let nz = 4;
+        let n = nx * ny * nz;
+
+        let data: Vec<f64> = (0..n).map(|i| (i as f64) * 0.1).collect();
+
+        // fftshift then ifftshift should be identity (for even dimensions)
+        let shifted = fftshift(&data, nx, ny, nz);
+        let unshifted = ifftshift(&shifted, nx, ny, nz);
+
+        for i in 0..n {
+            assert!(
+                (unshifted[i] - data[i]).abs() < 1e-12,
+                "ifftshift(fftshift(x)) != x at index {}: expected {}, got {}",
+                i, data[i], unshifted[i]
+            );
+        }
+    }
+
+    #[test]
+    fn test_fftshift_inplace() {
+        let nx = 4;
+        let ny = 4;
+        let nz = 4;
+        let n = nx * ny * nz;
+
+        let original: Vec<f64> = (0..n).map(|i| i as f64).collect();
+
+        // Compare in-place version with out-of-place version
+        let shifted_copy = fftshift(&original, nx, ny, nz);
+
+        let mut data = original.clone();
+        fftshift_inplace(&mut data, nx, ny, nz);
+
+        for i in 0..n {
+            assert!(
+                (data[i] - shifted_copy[i]).abs() < 1e-12,
+                "fftshift_inplace mismatch at index {}: expected {}, got {}",
+                i, shifted_copy[i], data[i]
+            );
+        }
     }
 }

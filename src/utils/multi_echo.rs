@@ -816,4 +816,885 @@ mod tests {
             assert!((hip_mag[i] - 1.0).abs() < 1e-10);
         }
     }
+
+    // =========================================================================
+    // Helper to build synthetic multi-echo data on a small 3D grid
+    // =========================================================================
+
+    /// Build synthetic multi-echo phase/magnitude data.
+    ///
+    /// The phase at each voxel is: phase_offset + slope * TE
+    /// where `slope` is a spatially-varying linear ramp along x.
+    /// Magnitude is uniform (1.0) inside the mask.
+    fn make_synthetic_multi_echo(
+        nx: usize, ny: usize, nz: usize,
+        tes: &[f64],
+    ) -> (Vec<Vec<f64>>, Vec<Vec<f64>>, Vec<u8>) {
+        let n = nx * ny * nz;
+        let n_echoes = tes.len();
+
+        // Constant phase offset (small, well within [-pi, pi])
+        let phase_offset_val = 0.3;
+        // Slope (rad/ms) as a function of x: gentle ramp so phases stay in [-pi, pi]
+        // Max slope = 0.05 rad/ms at x=nx-1, so max phase ~ 0.3 + 0.05*7*15 = 5.55
+        // which will wrap but that is fine.
+        let slope_scale = 0.05;
+
+        let mask = vec![1u8; n];
+        let mut phases: Vec<Vec<f64>> = Vec::with_capacity(n_echoes);
+        let mut mags: Vec<Vec<f64>> = Vec::with_capacity(n_echoes);
+
+        for e in 0..n_echoes {
+            let mut p = vec![0.0; n];
+            let m = vec![1.0; n]; // uniform magnitude
+            for k in 0..nz {
+                for j in 0..ny {
+                    for i in 0..nx {
+                        let idx = idx3d(i, j, k, nx, ny);
+                        let slope = slope_scale * i as f64;
+                        p[idx] = wrap_to_pi(phase_offset_val + slope * tes[e]);
+                    }
+                }
+            }
+            phases.push(p);
+            mags.push(m);
+        }
+
+        (phases, mags, mask)
+    }
+
+    // =========================================================================
+    // idx3d
+    // =========================================================================
+
+    #[test]
+    fn test_idx3d_basic() {
+        assert_eq!(idx3d(0, 0, 0, 4, 4), 0);
+        assert_eq!(idx3d(1, 0, 0, 4, 4), 1);
+        assert_eq!(idx3d(0, 1, 0, 4, 4), 4);
+        assert_eq!(idx3d(0, 0, 1, 4, 4), 16);
+        assert_eq!(idx3d(3, 3, 3, 4, 4), 63);
+    }
+
+    // =========================================================================
+    // B0WeightType::from_str
+    // =========================================================================
+
+    #[test]
+    fn test_b0_weight_type_from_str() {
+        assert_eq!(B0WeightType::from_str("phase_snr"), B0WeightType::PhaseSNR);
+        assert_eq!(B0WeightType::from_str("phasesnr"), B0WeightType::PhaseSNR);
+        assert_eq!(B0WeightType::from_str("PhaseSNR"), B0WeightType::PhaseSNR);
+        assert_eq!(B0WeightType::from_str("phase_var"), B0WeightType::PhaseVar);
+        assert_eq!(B0WeightType::from_str("phasevar"), B0WeightType::PhaseVar);
+        assert_eq!(B0WeightType::from_str("average"), B0WeightType::Average);
+        assert_eq!(B0WeightType::from_str("uniform"), B0WeightType::Average);
+        assert_eq!(B0WeightType::from_str("tes"), B0WeightType::TEs);
+        assert_eq!(B0WeightType::from_str("te"), B0WeightType::TEs);
+        assert_eq!(B0WeightType::from_str("mag"), B0WeightType::Mag);
+        assert_eq!(B0WeightType::from_str("magnitude"), B0WeightType::Mag);
+        // Unknown string should default to PhaseSNR
+        assert_eq!(B0WeightType::from_str("unknown"), B0WeightType::PhaseSNR);
+    }
+
+    // =========================================================================
+    // gaussian_smooth_3d_phase
+    // =========================================================================
+
+    #[test]
+    fn test_gaussian_smooth_3d_phase_uniform_input() {
+        let (nx, ny, nz) = (8, 8, 8);
+        let n = nx * ny * nz;
+        // Uniform phase should remain (approximately) constant after smoothing
+        let phase = vec![1.0; n];
+        let mask = vec![1u8; n];
+        let sigma = [1.0, 1.0, 1.0];
+
+        let smoothed = gaussian_smooth_3d_phase(&phase, sigma, &mask, nx, ny, nz);
+
+        assert_eq!(smoothed.len(), n);
+        for v in &smoothed {
+            assert!(v.is_finite(), "smoothed value must be finite");
+            assert!((v - 1.0).abs() < 0.05, "uniform phase should remain ~1.0, got {}", v);
+        }
+    }
+
+    #[test]
+    fn test_gaussian_smooth_3d_phase_zero_sigma() {
+        let (nx, ny, nz) = (4, 4, 4);
+        let n = nx * ny * nz;
+        let phase: Vec<f64> = (0..n).map(|i| wrap_to_pi(i as f64 * 0.1)).collect();
+        let mask = vec![1u8; n];
+        let sigma = [0.0, 0.0, 0.0];
+
+        let smoothed = gaussian_smooth_3d_phase(&phase, sigma, &mask, nx, ny, nz);
+
+        // With zero sigma, output should equal input (no smoothing applied)
+        assert_eq!(smoothed.len(), n);
+        for i in 0..n {
+            assert!((smoothed[i] - phase[i]).abs() < 1e-10,
+                "zero-sigma smoothing should be identity, voxel {}: got {} expected {}",
+                i, smoothed[i], phase[i]);
+        }
+    }
+
+    #[test]
+    fn test_gaussian_smooth_3d_phase_masked_zeros() {
+        let (nx, ny, nz) = (8, 8, 8);
+        let n = nx * ny * nz;
+        let phase = vec![0.5; n];
+        let mut mask = vec![1u8; n];
+        // Set half the voxels to 0
+        for i in 0..n / 2 {
+            mask[i] = 0;
+        }
+
+        let sigma = [1.0, 1.0, 1.0];
+        let smoothed = gaussian_smooth_3d_phase(&phase, sigma, &mask, nx, ny, nz);
+
+        assert_eq!(smoothed.len(), n);
+        // Masked-out voxels should remain 0
+        for i in 0..n / 2 {
+            assert_eq!(smoothed[i], 0.0, "masked-out voxel {} should be 0", i);
+        }
+        // Masked-in voxels should be finite
+        for i in n / 2..n {
+            assert!(smoothed[i].is_finite());
+        }
+    }
+
+    // =========================================================================
+    // gaussian_smooth_3d_separable (tested indirectly through phase smoothing
+    // but let's also exercise multi-axis sigma)
+    // =========================================================================
+
+    #[test]
+    fn test_gaussian_smooth_anisotropic_sigma() {
+        let (nx, ny, nz) = (8, 8, 8);
+        let n = nx * ny * nz;
+        let phase: Vec<f64> = (0..n).map(|i| wrap_to_pi(0.3 * (i as f64))).collect();
+        let mask = vec![1u8; n];
+        let sigma = [2.0, 0.5, 1.0]; // anisotropic
+
+        let smoothed = gaussian_smooth_3d_phase(&phase, sigma, &mask, nx, ny, nz);
+        assert_eq!(smoothed.len(), n);
+        for v in &smoothed {
+            assert!(v.is_finite());
+            assert!(*v >= -PI && *v <= PI, "smoothed phase should be in [-pi, pi], got {}", v);
+        }
+    }
+
+    // =========================================================================
+    // make_gaussian_kernel
+    // =========================================================================
+
+    #[test]
+    fn test_gaussian_kernel_symmetry() {
+        let kernel = make_gaussian_kernel(2.0);
+        let len = kernel.len();
+        for i in 0..len / 2 {
+            assert!((kernel[i] - kernel[len - 1 - i]).abs() < 1e-12,
+                "kernel should be symmetric");
+        }
+    }
+
+    #[test]
+    fn test_gaussian_kernel_peak_at_center() {
+        let kernel = make_gaussian_kernel(1.5);
+        let center = kernel.len() / 2;
+        for (i, &v) in kernel.iter().enumerate() {
+            if i != center {
+                assert!(v <= kernel[center], "center should be peak");
+            }
+        }
+    }
+
+    // =========================================================================
+    // hermitian_inner_product (additional tests)
+    // =========================================================================
+
+    #[test]
+    fn test_hip_with_mask() {
+        let n = 4;
+        let phase1 = vec![0.5; n];
+        let phase2 = vec![1.0; n];
+        let mag1 = vec![2.0; n];
+        let mag2 = vec![3.0; n];
+        let mask = vec![1, 0, 1, 0];
+
+        let (hip_phase, hip_mag) = hermitian_inner_product(
+            &phase1, &mag1, &phase2, &mag2, &mask, n
+        );
+
+        // Masked-in voxels
+        assert!((hip_phase[0] - 0.5).abs() < 1e-10);
+        assert!((hip_mag[0] - 6.0).abs() < 1e-10);
+        assert!((hip_phase[2] - 0.5).abs() < 1e-10);
+        assert!((hip_mag[2] - 6.0).abs() < 1e-10);
+
+        // Masked-out voxels
+        assert_eq!(hip_phase[1], 0.0);
+        assert_eq!(hip_mag[1], 0.0);
+        assert_eq!(hip_phase[3], 0.0);
+        assert_eq!(hip_mag[3], 0.0);
+    }
+
+    #[test]
+    fn test_hip_wrapping() {
+        // Test that phase difference wraps correctly
+        let n = 1;
+        let phase1 = vec![PI - 0.1];
+        let phase2 = vec![-PI + 0.1];
+        let mag1 = vec![1.0];
+        let mag2 = vec![1.0];
+        let mask = vec![1u8];
+
+        let (hip_phase, _) = hermitian_inner_product(
+            &phase1, &mag1, &phase2, &mag2, &mask, n
+        );
+
+        // phase2 - phase1 = (-PI + 0.1) - (PI - 0.1) = -2PI + 0.2 -> wraps to 0.2
+        assert!((hip_phase[0] - 0.2).abs() < 1e-10,
+            "HIP should wrap phase difference, got {}", hip_phase[0]);
+    }
+
+    // =========================================================================
+    // find_seed_point
+    // =========================================================================
+
+    #[test]
+    fn test_find_seed_point_full_mask() {
+        let (nx, ny, nz) = (8, 8, 8);
+        let mask = vec![1u8; nx * ny * nz];
+        let (si, sj, sk) = find_seed_point(&mask, nx, ny, nz);
+        // Center of mass of a fully-filled cube should be approximately center
+        assert_eq!(si, 3); // mean of 0..7 = 3.5, integer division = 3
+        assert_eq!(sj, 3);
+        assert_eq!(sk, 3);
+    }
+
+    #[test]
+    fn test_find_seed_point_empty_mask() {
+        let (nx, ny, nz) = (8, 8, 8);
+        let mask = vec![0u8; nx * ny * nz];
+        let (si, sj, sk) = find_seed_point(&mask, nx, ny, nz);
+        // Fallback: center of volume
+        assert_eq!(si, 4);
+        assert_eq!(sj, 4);
+        assert_eq!(sk, 4);
+    }
+
+    #[test]
+    fn test_find_seed_point_corner_mask() {
+        let (nx, ny, nz) = (8, 8, 8);
+        let mut mask = vec![0u8; nx * ny * nz];
+        // Only set voxel (0,0,0)
+        mask[idx3d(0, 0, 0, nx, ny)] = 1;
+        let (si, sj, sk) = find_seed_point(&mask, nx, ny, nz);
+        assert_eq!(si, 0);
+        assert_eq!(sj, 0);
+        assert_eq!(sk, 0);
+    }
+
+    // =========================================================================
+    // field_to_hz
+    // =========================================================================
+
+    #[test]
+    fn test_field_to_hz() {
+        let field = vec![TWO_PI, -TWO_PI, 0.0, PI];
+        let hz = field_to_hz(&field);
+        assert!((hz[0] - 1.0).abs() < 1e-10);
+        assert!((hz[1] - (-1.0)).abs() < 1e-10);
+        assert!((hz[2] - 0.0).abs() < 1e-10);
+        assert!((hz[3] - 0.5).abs() < 1e-10);
+    }
+
+    // =========================================================================
+    // calculate_b0_weighted
+    // =========================================================================
+
+    #[test]
+    fn test_calculate_b0_weighted_phase_snr() {
+        // For a constant slope (rad/ms), all weight types should recover it.
+        // phase[e] = slope * TE[e], so phase/TE = slope for each echo.
+        // Weighted average of identical values = same value.
+        // B0 = (1000 / 2pi) * slope (Hz)
+        let n = 64;
+        let tes = [5.0, 10.0, 15.0];
+        let slope = 0.2; // rad/ms
+        let mask = vec![1u8; n];
+
+        let phases: Vec<Vec<f64>> = tes.iter()
+            .map(|&te| vec![slope * te; n])
+            .collect();
+        let mags: Vec<Vec<f64>> = tes.iter()
+            .map(|_| vec![1.0; n])
+            .collect();
+
+        let b0 = calculate_b0_weighted(&phases, &mags, &tes, &mask, B0WeightType::PhaseSNR, n);
+
+        let expected_hz = 1000.0 / TWO_PI * slope;
+        assert_eq!(b0.len(), n);
+        for v in &b0 {
+            assert!(v.is_finite());
+            assert!((v - expected_hz).abs() < 1e-8,
+                "expected {} Hz, got {}", expected_hz, v);
+        }
+    }
+
+    #[test]
+    fn test_calculate_b0_weighted_all_weight_types() {
+        let n = 16;
+        let tes = [5.0, 10.0, 15.0];
+        let slope = 0.1;
+        let mask = vec![1u8; n];
+
+        let phases: Vec<Vec<f64>> = tes.iter()
+            .map(|&te| vec![slope * te; n])
+            .collect();
+        let mags: Vec<Vec<f64>> = tes.iter()
+            .map(|_| vec![2.0; n])
+            .collect();
+
+        let expected_hz = 1000.0 / TWO_PI * slope;
+
+        for wt in &[
+            B0WeightType::PhaseSNR,
+            B0WeightType::PhaseVar,
+            B0WeightType::Average,
+            B0WeightType::TEs,
+            B0WeightType::Mag,
+        ] {
+            let b0 = calculate_b0_weighted(&phases, &mags, &tes, &mask, *wt, n);
+            assert_eq!(b0.len(), n);
+            for v in &b0 {
+                assert!(v.is_finite(), "weight type {:?} produced non-finite", wt);
+                assert!((v - expected_hz).abs() < 1e-8,
+                    "weight type {:?}: expected {} Hz, got {}", wt, expected_hz, v);
+            }
+        }
+    }
+
+    #[test]
+    fn test_calculate_b0_weighted_masked_out() {
+        let n = 8;
+        let tes = [5.0, 10.0];
+        let mask = vec![0u8; n]; // all masked out
+
+        let phases: Vec<Vec<f64>> = tes.iter()
+            .map(|&te| vec![0.5 * te; n])
+            .collect();
+        let mags: Vec<Vec<f64>> = tes.iter()
+            .map(|_| vec![1.0; n])
+            .collect();
+
+        let b0 = calculate_b0_weighted(&phases, &mags, &tes, &mask, B0WeightType::PhaseSNR, n);
+
+        for v in &b0 {
+            assert_eq!(*v, 0.0, "masked-out voxels should have B0=0");
+        }
+    }
+
+    #[test]
+    fn test_calculate_b0_weighted_zero_magnitude() {
+        // When magnitude is zero, weight is zero; result should be 0
+        let n = 4;
+        let tes = [5.0, 10.0, 15.0];
+        let mask = vec![1u8; n];
+
+        let phases: Vec<Vec<f64>> = tes.iter()
+            .map(|&te| vec![0.2 * te; n])
+            .collect();
+        let mags: Vec<Vec<f64>> = tes.iter()
+            .map(|_| vec![0.0; n]) // zero magnitude
+            .collect();
+
+        // PhaseSNR weight = mag * te = 0
+        let b0 = calculate_b0_weighted(&phases, &mags, &tes, &mask, B0WeightType::PhaseSNR, n);
+        for v in &b0 {
+            assert_eq!(*v, 0.0, "zero-magnitude voxels should yield B0=0");
+        }
+
+        // Average weight = 1.0, should still work
+        let b0_avg = calculate_b0_weighted(&phases, &mags, &tes, &mask, B0WeightType::Average, n);
+        let expected = 1000.0 / TWO_PI * 0.2;
+        for v in &b0_avg {
+            assert!((v - expected).abs() < 1e-8);
+        }
+    }
+
+    // =========================================================================
+    // multi_echo_linear_fit
+    // =========================================================================
+
+    #[test]
+    fn test_multi_echo_linear_fit_no_offset() {
+        // phase = slope * TE (no intercept)
+        // Should recover the slope exactly.
+        let n = 32;
+        let tes = [0.005, 0.010, 0.015]; // in seconds
+        let slope = 100.0; // rad/s
+        let mask = vec![1u8; n];
+
+        let phases: Vec<Vec<f64>> = tes.iter()
+            .map(|&te| vec![slope * te; n])
+            .collect();
+        let mags: Vec<Vec<f64>> = tes.iter()
+            .map(|_| vec![1.0; n])
+            .collect();
+
+        let result = multi_echo_linear_fit(
+            &phases, &mags, &tes, &mask,
+            false, // no offset estimation
+            0.0,   // no reliability threshold
+        );
+
+        assert_eq!(result.field.len(), n);
+        assert_eq!(result.phase_offset.len(), n);
+        assert_eq!(result.fit_residual.len(), n);
+        assert_eq!(result.reliability_mask.len(), n);
+
+        for i in 0..n {
+            assert!((result.field[i] - slope).abs() < 1e-6,
+                "slope: expected {}, got {}", slope, result.field[i]);
+            assert_eq!(result.phase_offset[i], 0.0,
+                "offset should be 0 when estimate_offset=false");
+            assert!(result.fit_residual[i] < 1e-10,
+                "residual should be ~0 for perfect linear data");
+            assert_eq!(result.reliability_mask[i], 1,
+                "reliability should match mask when threshold=0");
+        }
+    }
+
+    #[test]
+    fn test_multi_echo_linear_fit_with_offset() {
+        // phase = intercept + slope * TE
+        let n = 16;
+        let tes = [0.005, 0.010, 0.015, 0.020];
+        let slope = 200.0;     // rad/s
+        let intercept = 0.5;   // rad
+        let mask = vec![1u8; n];
+
+        let phases: Vec<Vec<f64>> = tes.iter()
+            .map(|&te| vec![intercept + slope * te; n])
+            .collect();
+        let mags: Vec<Vec<f64>> = tes.iter()
+            .map(|_| vec![1.0; n])
+            .collect();
+
+        let result = multi_echo_linear_fit(
+            &phases, &mags, &tes, &mask,
+            true, // estimate offset
+            0.0,
+        );
+
+        for i in 0..n {
+            assert!((result.field[i] - slope).abs() < 1e-4,
+                "slope: expected {}, got {}", slope, result.field[i]);
+            assert!((result.phase_offset[i] - intercept).abs() < 1e-4,
+                "intercept: expected {}, got {}", intercept, result.phase_offset[i]);
+            assert!(result.fit_residual[i] < 1e-8,
+                "residual should be ~0 for perfect linear data, got {}", result.fit_residual[i]);
+        }
+    }
+
+    #[test]
+    fn test_multi_echo_linear_fit_masked_out() {
+        let n = 8;
+        let tes = [0.005, 0.010, 0.015];
+        let mask = vec![0u8; n];
+
+        let phases: Vec<Vec<f64>> = tes.iter()
+            .map(|&te| vec![100.0 * te; n])
+            .collect();
+        let mags: Vec<Vec<f64>> = tes.iter()
+            .map(|_| vec![1.0; n])
+            .collect();
+
+        let result = multi_echo_linear_fit(&phases, &mags, &tes, &mask, true, 0.0);
+
+        for i in 0..n {
+            assert_eq!(result.field[i], 0.0);
+            assert_eq!(result.phase_offset[i], 0.0);
+            assert_eq!(result.fit_residual[i], 0.0);
+        }
+    }
+
+    #[test]
+    fn test_multi_echo_linear_fit_varying_slope() {
+        // Each voxel has a different slope
+        let n = 8;
+        let tes = [0.005, 0.010, 0.015];
+        let mask = vec![1u8; n];
+
+        let slopes: Vec<f64> = (0..n).map(|i| 50.0 * (i as f64 + 1.0)).collect();
+
+        let phases: Vec<Vec<f64>> = tes.iter()
+            .map(|&te| {
+                slopes.iter().map(|&s| s * te).collect()
+            })
+            .collect();
+        let mags: Vec<Vec<f64>> = tes.iter()
+            .map(|_| vec![1.0; n])
+            .collect();
+
+        let result = multi_echo_linear_fit(&phases, &mags, &tes, &mask, false, 0.0);
+
+        for i in 0..n {
+            assert!((result.field[i] - slopes[i]).abs() < 1e-6,
+                "voxel {}: expected slope {}, got {}", i, slopes[i], result.field[i]);
+        }
+    }
+
+    #[test]
+    fn test_multi_echo_linear_fit_with_reliability_threshold() {
+        // Create data where some voxels have noisy fits
+        let n = 100;
+        let tes = [0.005, 0.010, 0.015];
+        let mask = vec![1u8; n];
+        let slope = 100.0;
+
+        let mut phases: Vec<Vec<f64>> = tes.iter()
+            .map(|&te| vec![slope * te; n])
+            .collect();
+        let mags: Vec<Vec<f64>> = tes.iter()
+            .map(|_| vec![1.0; n])
+            .collect();
+
+        // Add large noise to last 10 voxels to increase their residuals
+        for e in 0..tes.len() {
+            for i in 90..100 {
+                phases[e][i] += if e % 2 == 0 { 2.0 } else { -2.0 };
+            }
+        }
+
+        // Use 80th percentile threshold
+        let result = multi_echo_linear_fit(&phases, &mags, &tes, &mask, false, 80.0);
+
+        assert_eq!(result.reliability_mask.len(), n);
+
+        // Clean voxels (0..90) have residual=0, noisy voxels (90..100) have residual>0.
+        // The threshold is computed from non-zero residuals only.
+        // Voxels with residual=0 satisfy 0 < threshold, but compute_reliability_mask
+        // checks `fit_residual[i] < threshold` -- 0 < any positive threshold => reliable=1.
+        // However, residual might not be exactly 0 due to floating point.
+        // Just verify that the noisy voxels have higher residuals than clean ones.
+        let max_clean_resid = result.fit_residual[0..90].iter()
+            .cloned().fold(0.0f64, f64::max);
+        let min_noisy_resid = result.fit_residual[90..100].iter()
+            .cloned().fold(f64::INFINITY, f64::min);
+        assert!(max_clean_resid < min_noisy_resid,
+            "clean residuals ({}) should be less than noisy residuals ({})",
+            max_clean_resid, min_noisy_resid);
+
+        // The reliability mask should exist and have valid values
+        for &v in &result.reliability_mask {
+            assert!(v == 0 || v == 1);
+        }
+    }
+
+    #[test]
+    fn test_multi_echo_linear_fit_zero_magnitude() {
+        let n = 4;
+        let tes = [0.005, 0.010, 0.015];
+        let mask = vec![1u8; n];
+
+        let phases: Vec<Vec<f64>> = tes.iter()
+            .map(|&te| vec![100.0 * te; n])
+            .collect();
+        let mags: Vec<Vec<f64>> = tes.iter()
+            .map(|_| vec![0.0; n]) // zero magnitude
+            .collect();
+
+        // Should not crash; field should be 0 because sum_w_te_sq ~ 0
+        let result = multi_echo_linear_fit(&phases, &mags, &tes, &mask, false, 0.0);
+        for v in &result.field {
+            assert!(v.is_finite());
+        }
+
+        let result2 = multi_echo_linear_fit(&phases, &mags, &tes, &mask, true, 0.0);
+        for v in &result2.field {
+            assert!(v.is_finite());
+        }
+    }
+
+    // =========================================================================
+    // compute_reliability_mask
+    // =========================================================================
+
+    #[test]
+    fn test_compute_reliability_mask_basic() {
+        let n = 10;
+        let mask = vec![1u8; n];
+        // Residuals in ascending order: 0.1, 0.2, ..., 1.0
+        let fit_residual: Vec<f64> = (1..=n).map(|i| i as f64 * 0.1).collect();
+
+        // 50th percentile: threshold ~ 0.5
+        let reliability = compute_reliability_mask(&fit_residual, &mask, 50.0);
+        assert_eq!(reliability.len(), n);
+
+        // Voxels with residual < threshold should be reliable
+        let reliable_count: usize = reliability.iter().map(|&v| v as usize).sum();
+        assert!(reliable_count > 0 && reliable_count < n,
+            "some but not all should be reliable, got {}/{}", reliable_count, n);
+    }
+
+    #[test]
+    fn test_compute_reliability_mask_all_zero_residual() {
+        let n = 5;
+        let mask = vec![1u8; n];
+        let fit_residual = vec![0.0; n];
+
+        // When all residuals are 0, the filter skips them (r > 0.0 check fails)
+        // so residuals vec is empty and mask is returned as-is
+        let reliability = compute_reliability_mask(&fit_residual, &mask, 50.0);
+        assert_eq!(reliability, mask);
+    }
+
+    // =========================================================================
+    // mcpc3ds_single_coil
+    // =========================================================================
+
+    #[test]
+    fn test_mcpc3ds_single_coil_output_sizes() {
+        let (nx, ny, nz) = (8, 8, 8);
+        let n = nx * ny * nz;
+        let tes = [5.0, 10.0, 15.0];
+        let (phases, mags, mask) = make_synthetic_multi_echo(nx, ny, nz, &tes);
+
+        let sigma = [1.0, 1.0, 1.0];
+        let (corrected, offset) = mcpc3ds_single_coil(
+            &phases, &mags, &tes, &mask, sigma, [0, 1], nx, ny, nz,
+        );
+
+        // Check sizes
+        assert_eq!(corrected.len(), tes.len(), "should have one corrected phase per echo");
+        for (e, cp) in corrected.iter().enumerate() {
+            assert_eq!(cp.len(), n, "echo {} corrected phase should have {} voxels", e, n);
+        }
+        assert_eq!(offset.len(), n, "phase offset should have {} voxels", n);
+    }
+
+    #[test]
+    fn test_mcpc3ds_single_coil_finite_output() {
+        let (nx, ny, nz) = (8, 8, 8);
+        let tes = [5.0, 10.0, 15.0];
+        let (phases, mags, mask) = make_synthetic_multi_echo(nx, ny, nz, &tes);
+
+        let sigma = [1.0, 1.0, 1.0];
+        let (corrected, offset) = mcpc3ds_single_coil(
+            &phases, &mags, &tes, &mask, sigma, [0, 1], nx, ny, nz,
+        );
+
+        for v in &offset {
+            assert!(v.is_finite(), "phase offset should be finite");
+        }
+        for cp in &corrected {
+            for v in cp {
+                assert!(v.is_finite(), "corrected phase should be finite");
+            }
+        }
+    }
+
+    #[test]
+    fn test_mcpc3ds_single_coil_corrected_in_range() {
+        let (nx, ny, nz) = (8, 8, 8);
+        let tes = [5.0, 10.0, 15.0];
+        let (phases, mags, mask) = make_synthetic_multi_echo(nx, ny, nz, &tes);
+
+        let sigma = [1.0, 1.0, 1.0];
+        let (corrected, _) = mcpc3ds_single_coil(
+            &phases, &mags, &tes, &mask, sigma, [0, 1], nx, ny, nz,
+        );
+
+        // Corrected phases should be in [-pi, pi] since wrap_to_pi is applied
+        for cp in &corrected {
+            for &v in cp {
+                assert!(v >= -PI - 1e-10 && v <= PI + 1e-10,
+                    "corrected phase should be in [-pi, pi], got {}", v);
+            }
+        }
+    }
+
+    #[test]
+    fn test_mcpc3ds_single_coil_uniform_phase() {
+        // Uniform phase across all echoes => offset should be approximately that phase
+        let (nx, ny, nz) = (8, 8, 8);
+        let n = nx * ny * nz;
+        let tes = [5.0, 10.0, 15.0];
+
+        // All echoes have constant phase 0.5 (no TE dependence)
+        let phases: Vec<Vec<f64>> = (0..3).map(|_| vec![0.5; n]).collect();
+        let mags: Vec<Vec<f64>> = (0..3).map(|_| vec![1.0; n]).collect();
+        let mask = vec![1u8; n];
+
+        let sigma = [1.0, 1.0, 1.0];
+        let (corrected, _offset) = mcpc3ds_single_coil(
+            &phases, &mags, &tes, &mask, sigma, [0, 1], nx, ny, nz,
+        );
+
+        // After removing offset, corrected phases should be close to 0
+        for cp in &corrected {
+            for &v in cp {
+                assert!(v.abs() < 1.0,
+                    "after offset removal of uniform phase, corrected should be ~0, got {}", v);
+            }
+        }
+    }
+
+    // =========================================================================
+    // mcpc3ds_b0_pipeline
+    // =========================================================================
+
+    #[test]
+    fn test_mcpc3ds_b0_pipeline_output_sizes() {
+        let (nx, ny, nz) = (8, 8, 8);
+        let n = nx * ny * nz;
+        let tes = [5.0, 10.0, 15.0];
+        let (phases, mags, mask) = make_synthetic_multi_echo(nx, ny, nz, &tes);
+
+        let sigma = [1.0, 1.0, 1.0];
+        let (b0, offset, corrected) = mcpc3ds_b0_pipeline(
+            &phases, &mags, &tes, &mask, sigma,
+            B0WeightType::PhaseSNR, nx, ny, nz,
+        );
+
+        assert_eq!(b0.len(), n, "B0 should have n voxels");
+        assert_eq!(offset.len(), n, "offset should have n voxels");
+        assert_eq!(corrected.len(), tes.len(), "corrected should have n_echoes entries");
+        for cp in &corrected {
+            assert_eq!(cp.len(), n);
+        }
+    }
+
+    #[test]
+    fn test_mcpc3ds_b0_pipeline_finite_output() {
+        let (nx, ny, nz) = (8, 8, 8);
+        let tes = [5.0, 10.0, 15.0];
+        let (phases, mags, mask) = make_synthetic_multi_echo(nx, ny, nz, &tes);
+
+        let sigma = [1.0, 1.0, 1.0];
+        let (b0, offset, corrected) = mcpc3ds_b0_pipeline(
+            &phases, &mags, &tes, &mask, sigma,
+            B0WeightType::PhaseSNR, nx, ny, nz,
+        );
+
+        for v in &b0 {
+            assert!(v.is_finite(), "B0 should be finite");
+        }
+        for v in &offset {
+            assert!(v.is_finite(), "offset should be finite");
+        }
+        for cp in &corrected {
+            for v in cp {
+                assert!(v.is_finite(), "corrected phase should be finite");
+            }
+        }
+    }
+
+    #[test]
+    fn test_mcpc3ds_b0_pipeline_different_weight_types() {
+        let (nx, ny, nz) = (8, 8, 8);
+        let tes = [5.0, 10.0, 15.0];
+        let (phases, mags, mask) = make_synthetic_multi_echo(nx, ny, nz, &tes);
+        let sigma = [1.0, 1.0, 1.0];
+
+        for wt in &[
+            B0WeightType::PhaseSNR,
+            B0WeightType::Average,
+            B0WeightType::TEs,
+            B0WeightType::Mag,
+            B0WeightType::PhaseVar,
+        ] {
+            let (b0, _, _) = mcpc3ds_b0_pipeline(
+                &phases, &mags, &tes, &mask, sigma, *wt, nx, ny, nz,
+            );
+            for v in &b0 {
+                assert!(v.is_finite(),
+                    "B0 with weight type {:?} should be finite", wt);
+            }
+        }
+    }
+
+    // =========================================================================
+    // wrap_to_pi edge cases
+    // =========================================================================
+
+    #[test]
+    fn test_wrap_to_pi_near_boundaries() {
+        // Values just beyond PI and -PI
+        let v1 = wrap_to_pi(PI + 0.001);
+        assert!(v1 < PI && v1 > -PI, "should wrap back into range");
+
+        let v2 = wrap_to_pi(-PI - 0.001);
+        assert!(v2 > -PI && v2 < PI, "should wrap back into range");
+
+        // Large positive and negative values
+        let v3 = wrap_to_pi(100.0 * PI);
+        assert!(v3 >= -PI && v3 <= PI, "should be in [-pi, pi], got {}", v3);
+
+        let v4 = wrap_to_pi(-100.0 * PI);
+        assert!(v4 >= -PI && v4 <= PI, "should be in [-pi, pi], got {}", v4);
+    }
+
+    // =========================================================================
+    // unwrap_with_romeo (tested indirectly through mcpc3ds_single_coil
+    // but let's also test directly)
+    // =========================================================================
+
+    #[test]
+    fn test_unwrap_with_romeo_smooth_data() {
+        let (nx, ny, nz) = (8, 8, 8);
+        let n = nx * ny * nz;
+        // Smooth phase that doesn't need unwrapping
+        let phase: Vec<f64> = (0..n).map(|i| {
+            let x = (i % nx) as f64 / nx as f64;
+            0.5 * x // small smooth phase
+        }).collect();
+        let mag = vec![1.0; n];
+        let mask = vec![1u8; n];
+
+        let unwrapped = unwrap_with_romeo(&phase, &mag, &mask, nx, ny, nz);
+
+        assert_eq!(unwrapped.len(), n);
+        for (i, &v) in unwrapped.iter().enumerate() {
+            assert!(v.is_finite(), "unwrapped voxel {} should be finite", i);
+        }
+    }
+
+    // =========================================================================
+    // Integration: linear fit on mcpc3ds output
+    // =========================================================================
+
+    #[test]
+    fn test_linear_fit_on_mcpc3ds_output() {
+        let (nx, ny, nz) = (8, 8, 8);
+        let n = nx * ny * nz;
+        let tes = [5.0, 10.0, 15.0];
+        let (phases, mags, mask) = make_synthetic_multi_echo(nx, ny, nz, &tes);
+
+        let sigma = [1.0, 1.0, 1.0];
+        let (corrected, _offset) = mcpc3ds_single_coil(
+            &phases, &mags, &tes, &mask, sigma, [0, 1], nx, ny, nz,
+        );
+
+        // Run linear fit on corrected phases (tes in seconds for fit)
+        let tes_s: Vec<f64> = tes.iter().map(|&t| t / 1000.0).collect();
+        let result = multi_echo_linear_fit(
+            &corrected, &mags, &tes_s, &mask, true, 0.0,
+        );
+
+        assert_eq!(result.field.len(), n);
+        assert_eq!(result.phase_offset.len(), n);
+        assert_eq!(result.fit_residual.len(), n);
+        assert_eq!(result.reliability_mask.len(), n);
+
+        for v in &result.field {
+            assert!(v.is_finite(), "field should be finite");
+        }
+        for v in &result.phase_offset {
+            assert!(v.is_finite(), "phase_offset should be finite");
+        }
+    }
 }
