@@ -43,9 +43,9 @@ jobs:
           set -e
 
           all_bgremove='["test_bgremove_sharp","test_bgremove_vsharp","test_bgremove_pdf","test_bgremove_ismv","test_bgremove_lbv"]'
-          all_inversion='["test_inversion_tkd","test_inversion_tsvd","test_inversion_tikhonov","test_inversion_tv","test_inversion_rts"]'
+          all_inversion='["test_inversion_tkd","test_inversion_tsvd","test_inversion_tikhonov","test_inversion_tv","test_inversion_rts","test_inversion_medi","test_inversion_nltv"]'
           all_combined='["test_combined_tgv"]'
-          all_pipeline='["test_pipeline_tgv","test_pipeline_qsmart"]'
+          all_pipeline='["test_pipeline_tgv","test_pipeline_qsmart","test_bias_correction"]'
 
           output_all() {
             echo "run_bgremove=true" >> "$GITHUB_OUTPUT"
@@ -120,11 +120,13 @@ jobs:
 
               # Dipole inversion
               src/inversion/mod.rs)
-                inversion="$inversion test_inversion_tkd test_inversion_tsvd test_inversion_tikhonov test_inversion_tv test_inversion_rts" ;;
+                inversion="$inversion test_inversion_tkd test_inversion_tsvd test_inversion_tikhonov test_inversion_tv test_inversion_rts test_inversion_medi test_inversion_nltv" ;;
               src/inversion/tkd.rs)       inversion="$inversion test_inversion_tkd test_inversion_tsvd" ;;
               src/inversion/tikhonov.rs)  inversion="$inversion test_inversion_tikhonov" ;;
               src/inversion/tv.rs)        inversion="$inversion test_inversion_tv" ;;
               src/inversion/rts.rs)       inversion="$inversion test_inversion_rts" ;;
+              src/inversion/medi.rs)      inversion="$inversion test_inversion_medi" ;;
+              src/inversion/nltv.rs)      inversion="$inversion test_inversion_nltv" ;;
               src/inversion/tgv.rs)       combined="$combined test_combined_tgv"; pipeline="$pipeline test_pipeline_tgv" ;;
               src/inversion/ilsqr.rs)     pipeline="$pipeline test_pipeline_qsmart" ;;
 
@@ -139,8 +141,10 @@ jobs:
               # Utils (QSMART components)
               src/utils/multi_echo.rs)
                 pipeline="$pipeline test_pipeline_tgv test_pipeline_qsmart" ;;
-              src/utils/vasculature.rs|src/utils/frangi.rs|src/utils/curvature.rs|src/utils/qsmart.rs|src/utils/bias_correction.rs)
+              src/utils/vasculature.rs|src/utils/frangi.rs|src/utils/curvature.rs|src/utils/qsmart.rs)
                 pipeline="$pipeline test_pipeline_qsmart" ;;
+              src/utils/bias_correction.rs)
+                pipeline="$pipeline test_pipeline_qsmart test_bias_correction" ;;
             esac
           done
 
