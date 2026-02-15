@@ -21,7 +21,6 @@ import matplotlib.pyplot as plt
 
 # Mapping from binary file slug to display name
 NAMES = {
-    "bgremove_smv": "SMV",
     "bgremove_sharp": "SHARP",
     "bgremove_vsharp": "V-SHARP",
     "bgremove_pdf": "PDF",
@@ -43,7 +42,6 @@ NAMES = {
 
 # Fixed display windows (ppm)
 WINDOWS = {
-    "bgremove_smv": (-0.025, 0.025),
     "bgremove_sharp": (-0.025, 0.025),
     "bgremove_vsharp": (-0.025, 0.025),
     "bgremove_pdf": (-0.025, 0.025),

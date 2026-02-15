@@ -1,13 +1,17 @@
 //! Background field removal methods
 //!
 //! This module provides methods to separate local from background field:
-//! - SMV: Simple spherical mean value (basic subtraction)
 //! - SHARP: Sophisticated harmonic artifact reduction for phase data
 //! - V-SHARP: Variable kernel SHARP
 //! - PDF: Projection onto dipole fields
 //! - iSMV: Iterative spherical mean value
 //! - LBV: Laplacian boundary value
 //! - SDF: Spatially Dependent Filtering (QSMART)
+//!
+//! Note: The `smv` module provides simple spherical mean value filtering,
+//! used internally by SHARP, V-SHARP, and iSMV. It is not recommended as
+//! a standalone background removal method (it lacks the deconvolution step
+//! that SHARP provides).
 
 pub mod smv;
 pub mod sharp;

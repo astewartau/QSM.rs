@@ -46,7 +46,7 @@ jobs:
         run: |
           set -e
 
-          all_bgremove='["test_bgremove_smv","test_bgremove_sharp","test_bgremove_vsharp","test_bgremove_pdf","test_bgremove_ismv","test_bgremove_lbv"]'
+          all_bgremove='["test_bgremove_sharp","test_bgremove_vsharp","test_bgremove_pdf","test_bgremove_ismv","test_bgremove_lbv"]'
           all_inversion='["test_inversion_tkd","test_inversion_tsvd","test_inversion_tikhonov","test_inversion_tv","test_inversion_rts","test_inversion_medi","test_inversion_nltv"]'
           all_combined='["test_combined_tgv"]'
           all_pipeline='["test_pipeline_tgv","test_pipeline_qsmart","test_bias_correction"]'
@@ -112,9 +112,9 @@ jobs:
 
               # Background removal
               src/bgremove/mod.rs)
-                bgremove="$bgremove test_bgremove_smv test_bgremove_sharp test_bgremove_vsharp test_bgremove_pdf test_bgremove_ismv test_bgremove_lbv" ;;
+                bgremove="$bgremove test_bgremove_sharp test_bgremove_vsharp test_bgremove_pdf test_bgremove_ismv test_bgremove_lbv" ;;
               src/bgremove/smv.rs)
-                bgremove="$bgremove test_bgremove_smv test_bgremove_sharp test_bgremove_vsharp test_bgremove_ismv" ;;
+                bgremove="$bgremove test_bgremove_sharp test_bgremove_vsharp test_bgremove_ismv" ;;
               src/bgremove/sharp.rs)  bgremove="$bgremove test_bgremove_sharp" ;;
               src/bgremove/vsharp.rs) bgremove="$bgremove test_bgremove_vsharp" ;;
               src/bgremove/pdf.rs)    bgremove="$bgremove test_bgremove_pdf" ;;
@@ -613,7 +613,7 @@ jobs:
             echo "## Background Field Removal"
             echo "*Compared against ground truth local field map*"
             echo ""
-            emit_table "test_bgremove_" smv sharp vsharp pdf ismv lbv || true
+            emit_table "test_bgremove_" sharp vsharp pdf ismv lbv || true
 
             echo "## Dipole Inversion"
             echo "*Compared against ground truth susceptibility map*"
@@ -730,8 +730,8 @@ jobs:
             echo "### Background Field Removal"
             echo "*Compared against ground truth local field map*"
             echo ""
-            emit_table "test_bgremove_" smv sharp vsharp pdf ismv lbv || true
-            emit_figures bgremove_smv bgremove_sharp bgremove_vsharp bgremove_pdf bgremove_ismv bgremove_lbv
+            emit_table "test_bgremove_" sharp vsharp pdf ismv lbv || true
+            emit_figures bgremove_sharp bgremove_vsharp bgremove_pdf bgremove_ismv bgremove_lbv
 
             echo "### Dipole Inversion"
             echo "*Compared against ground truth susceptibility map*"
