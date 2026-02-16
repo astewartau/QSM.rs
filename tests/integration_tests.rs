@@ -100,11 +100,15 @@ fn test_bgremove_pdf() {
     let (nx, ny, nz) = data.dims;
     let (vsx, vsy, vsz) = data.voxel_size;
 
-    let (result, elapsed) = run_timed!("PDF", bgremove::pdf_default(
+    // Use explicit maxit for CI (adaptive default = 2626 for this volume, too slow)
+    let (result, elapsed) = run_timed!("PDF", bgremove::pdf(
         &data.fieldmap,
         &data.mask,
         nx, ny, nz,
         vsx, vsy, vsz,
+        data.b0_dir,
+        1e-5,  // tol (matches default)
+        100,   // max_iter (capped for CI speed)
     ));
 
     let res = TestResult::new("PDF", &result, &data.fieldmap_local, &data.mask, data.dims);
@@ -812,9 +816,9 @@ fn benchmark_all_algorithms() {
     ));
     TestResult::new("V-SHARP", &result, &data.fieldmap_local, &data.mask, data.dims).print_with_time(elapsed);
 
-    // PDF (using defaults: tol=1e-5, adaptive max_iter)
-    let (result, elapsed) = run_timed!("PDF", bgremove::pdf_default(
-        &data.fieldmap, &data.mask, nx, ny, nz, vsx, vsy, vsz
+    // PDF (explicit maxit=100 for CI speed; adaptive default would be ~2626)
+    let (result, elapsed) = run_timed!("PDF", bgremove::pdf(
+        &data.fieldmap, &data.mask, nx, ny, nz, vsx, vsy, vsz, data.b0_dir, 1e-5, 100
     ));
     TestResult::new("PDF", &result, &data.fieldmap_local, &data.mask, data.dims).print_with_time(elapsed);
 
