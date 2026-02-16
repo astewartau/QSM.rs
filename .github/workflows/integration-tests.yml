@@ -3,14 +3,6 @@ name: Integration Tests
 on:
   pull_request:
     branches: [main, master]
-    paths:
-      - "src/**"
-      - "tests/**"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - ".github/workflows/integration-tests.yml"
-      - ".github/workflows/unit-tests.yml"
-      - "scripts/**"
   workflow_dispatch:  # Allow manual trigger
 
 permissions:
@@ -21,14 +13,11 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # Unit tests + code coverage (reusable workflow)
-  unit-tests:
-    uses: ./.github/workflows/unit-tests.yml
-
   # Detect which source files changed and map to affected tests
   detect-changes:
     runs-on: ubuntu-latest
     outputs:
+      run_unit_tests: ${{ steps.detect.outputs.run_unit_tests }}
       run_bgremove: ${{ steps.detect.outputs.run_bgremove }}
       bgremove_matrix: ${{ steps.detect.outputs.bgremove_matrix }}
       run_inversion: ${{ steps.detect.outputs.run_inversion }}
@@ -59,7 +48,10 @@ jobs:
           all_combined='["test_combined_tgv"]'
           all_pipeline='["test_pipeline_tgv","test_pipeline_qsmart","test_bias_correction"]'
 
+          run_unit_tests=false
+
           output_all() {
+            echo "run_unit_tests=true" >> "$GITHUB_OUTPUT"
             echo "run_bgremove=true" >> "$GITHUB_OUTPUT"
             echo "bgremove_matrix=$all_bgremove" >> "$GITHUB_OUTPUT"
             echo "run_inversion=true" >> "$GITHUB_OUTPUT"
@@ -92,6 +84,14 @@ jobs:
           echo "$CHANGED"
           echo ""
 
+          # Check if any Rust/CI files changed (for unit tests)
+          for file in $CHANGED; do
+            case "$file" in
+              src/**|tests/**|Cargo.toml|Cargo.lock|.github/workflows/unit-tests.yml)
+                run_unit_tests=true; break ;;
+            esac
+          done
+
           # Map changed files to test names
           bgremove=""
           inversion=""
@@ -114,9 +114,21 @@ jobs:
               tests/*|Cargo.toml|Cargo.lock)
                 echo "Test/build file changed: $file → all tests"
                 output_all; exit 0 ;;
-              .github/workflows/integration-tests.yml|.github/workflows/unit-tests.yml|scripts/*)
-                echo "CI file changed: $file → all tests"
-                output_all; exit 0 ;;
+              .github/workflows/unit-tests.yml)
+                run_unit_tests=true ;;
+              .github/workflows/integration-tests.yml|scripts/*)
+                echo "CI file changed: $file → all integration tests"
+                echo "run_bgremove=true" >> "$GITHUB_OUTPUT"
+                echo "bgremove_matrix=$all_bgremove" >> "$GITHUB_OUTPUT"
+                echo "run_inversion=true" >> "$GITHUB_OUTPUT"
+                echo "inversion_matrix=$all_inversion" >> "$GITHUB_OUTPUT"
+                echo "run_bet=true" >> "$GITHUB_OUTPUT"
+                echo "run_combined=true" >> "$GITHUB_OUTPUT"
+                echo "combined_matrix=$all_combined" >> "$GITHUB_OUTPUT"
+                echo "run_pipeline=true" >> "$GITHUB_OUTPUT"
+                echo "pipeline_matrix=$all_pipeline" >> "$GITHUB_OUTPUT"
+                echo "run_unit_tests=$run_unit_tests" >> "$GITHUB_OUTPUT"
+                exit 0 ;;
 
               # Background removal
               src/bgremove/mod.rs)
@@ -178,6 +190,7 @@ jobs:
 
           has_items() { [ "$1" != '[]' ] && echo true || echo false; }
 
+          echo "run_unit_tests=$run_unit_tests" >> "$GITHUB_OUTPUT"
           echo "run_bgremove=$(has_items "$bgremove_json")" >> "$GITHUB_OUTPUT"
           echo "bgremove_matrix=$bgremove_json" >> "$GITHUB_OUTPUT"
           echo "run_inversion=$(has_items "$inversion_json")" >> "$GITHUB_OUTPUT"
@@ -194,6 +207,12 @@ jobs:
           echo "  bet:       $run_bet"
           echo "  combined:  $combined_json"
           echo "  pipeline:  $pipeline_json"
+
+  # Unit tests + code coverage (reusable workflow)
+  unit-tests:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.run_unit_tests == 'true'
+    uses: ./.github/workflows/unit-tests.yml
 
   # Download test data once and cache it
   setup:
