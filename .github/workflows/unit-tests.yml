@@ -55,6 +55,12 @@ jobs:
       - name: Extract coverage
         id: coverage
         run: |
+          if [ ! -f coverage/tarpaulin-report.json ]; then
+            echo "WARNING: tarpaulin report not found (tarpaulin may have crashed)"
+            echo "coverage=0.0" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
           COVERAGE=$(python3 -c "
           import json
           with open('coverage/tarpaulin-report.json') as f:
@@ -71,6 +77,7 @@ jobs:
           echo "Code coverage: ${COVERAGE}%"
 
       - name: Enforce 90% coverage threshold
+        if: steps.coverage.outcome == 'success'
         run: |
           python3 -c "
           cov = float('${{ steps.coverage.outputs.coverage }}')
