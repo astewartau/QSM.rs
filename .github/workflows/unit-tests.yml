@@ -46,7 +46,8 @@ jobs:
 
           # Run tarpaulin; ignore its exit code since we check coverage separately
           cargo tarpaulin --out json --output-dir coverage/ \
-            --skip-clean --timeout 300 --jobs 1 2>&1 | tee coverage/tarpaulin.log || true
+            --skip-clean --timeout 300 -- --test-threads 1 \
+            2>&1 | tee coverage/tarpaulin.log || true
 
           # Count passed tests from output (sum across all test suites)
           PASSED=$(grep -oP '\d+(?= passed)' coverage/tarpaulin.log | awk '{s+=$1} END {print s+0}')
