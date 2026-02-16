@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: write
+  pull-requests: write
 
 jobs:
   # -------------------------------------------------------------------------
@@ -44,3 +45,28 @@ jobs:
         run: |
           CRATE="target/package/qsm-core-${{ steps.version.outputs.version }}.crate"
           gh release upload "$GITHUB_REF_NAME" "$CRATE"
+
+      - name: Update README dependency tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          BRANCH="chore/readme-tag-$TAG"
+          git fetch origin main
+          git checkout main
+          sed -i "s|tag = \"v[^\"]*\"|tag = \"$TAG\"|" README.md
+          if git diff --quiet README.md; then
+            echo "README.md already up to date"
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git checkout -b "$BRANCH"
+            git add README.md
+            git commit -m "Update README dependency tag to $TAG"
+            git push origin "$BRANCH"
+            gh pr create \
+              --title "Update README dependency tag to $TAG" \
+              --body "Automated PR to update the dependency tag in README.md after release $TAG." \
+              --base main \
+              --head "$BRANCH"
+          fi
