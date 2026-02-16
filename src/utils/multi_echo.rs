@@ -1,9 +1,15 @@
 //! Multi-echo phase combination utilities
 //!
 //! Implements MCPC-3D-S (Multi-Channel Phase Combination - 3D - Smoothed) algorithm
-//! and weighted B0 calculation from MriResearchTools.jl
+//! and weighted B0 calculation.
 //!
-//! Reference: https://github.com/korbinian90/MriResearchTools.jl
+//! Reference:
+//! Eckstein, K., Dymerska, B., Bachrata, B., Bogner, W., Poljanc, K., Trattnig, S.,
+//! Robinson, S.D. (2018). "Computationally Efficient Combination of Multi-channel Phase
+//! Data From Multi-echo Acquisitions (ASPIRE)."
+//! Magnetic Resonance in Medicine, 79:2996-3006. https://doi.org/10.1002/mrm.26963
+//!
+//! Reference implementation: https://github.com/korbinian90/MriResearchTools.jl
 
 use std::f64::consts::PI;
 use crate::unwrap::romeo::calculate_weights_romeo;

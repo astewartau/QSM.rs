@@ -8,8 +8,10 @@
 //! χ̂ = D* · f̂ / (|D|² + λ|Γ|²)
 //!
 //! Reference:
-//! Bilgic B, et al. Fast image reconstruction with L2-regularization.
-//! JMRI 2014;40(1):181-91.
+//! Bilgic, B., et al. (2014). "Fast image reconstruction with L2-regularization."
+//! Journal of Magnetic Resonance Imaging, 40(1):181-191. https://doi.org/10.1002/jmri.24365
+//!
+//! Reference implementation: https://github.com/kamesy/QSM.jl
 
 use num_complex::Complex64;
 use crate::fft::{fft3d, ifft3d};

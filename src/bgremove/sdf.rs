@@ -8,7 +8,12 @@
 //! The algorithm includes optional curvature-based weighting to further reduce artifacts
 //! at highly curved brain regions.
 //!
-//! Reference: Syeda et al., QSMART: Quantitative Susceptibility Mapping Artifact Reduction Technique
+//! Reference:
+//! Yaghmaie, N., Syeda, W., et al. (2021).
+//! "QSMART: Quantitative Susceptibility Mapping Artifact Reduction Technique."
+//! NeuroImage, 231:117701. https://doi.org/10.1016/j.neuroimage.2020.117701
+//!
+//! Reference implementation: https://github.com/wtsyeda/QSMART
 
 use crate::utils::curvature::calculate_curvature_proximity;
 

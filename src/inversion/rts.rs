@@ -5,9 +5,11 @@
 //! 2. TV regularization for ill-conditioned regions
 //!
 //! Reference:
-//! Kames C, Wiggermann V, Rauscher A. Rapid two-step dipole inversion for
-//! susceptibility mapping with sparsity priors.
-//! Neuroimage. 2018 Feb 15;167:276-83.
+//! Kames, C., Wiggermann, V., Rauscher, A. (2018).
+//! "Rapid two-step dipole inversion for susceptibility mapping with sparsity priors."
+//! NeuroImage, 167:276-283. https://doi.org/10.1016/j.neuroimage.2017.11.018
+//!
+//! Reference implementation: https://github.com/kamesy/QSM.jl
 
 use num_complex::Complex64;
 use crate::fft::{fft3d, ifft3d};

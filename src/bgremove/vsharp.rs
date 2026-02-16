@@ -5,8 +5,11 @@
 //! removing background fields.
 //!
 //! Reference:
-//! Wu B, et al. Whole brain susceptibility mapping using compressed sensing.
-//! Magnetic Resonance in Medicine. 2012;67(1):137-47.
+//! Wu, B., Li, W., Guidon, A., Liu, C. (2012).
+//! "Whole brain susceptibility mapping using compressed sensing."
+//! Magnetic Resonance in Medicine, 67(1):137-147. https://doi.org/10.1002/mrm.23000
+//!
+//! Reference implementation: https://github.com/kamesy/QSM.jl
 
 use num_complex::Complex64;
 use crate::fft::{fft3d, ifft3d};

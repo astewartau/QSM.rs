@@ -1,10 +1,13 @@
 //! Frangi Vesselness Filter for 3D tubular structure detection
 //!
-//! Implementation of the Frangi vesselness filter based on:
-//! - Frangi et al., "Multiscale vessel enhancement filtering", MICCAI 1998
-//! - Manniesing et al., "Multiscale Vessel Enhancing Diffusion in CT Angiography Noise Filtering"
-//!
 //! This filter uses eigenvalues of the Hessian matrix to detect tubular (vessel-like) structures.
+//!
+//! Reference:
+//! Frangi, A.F., Niessen, W.J., Vincken, K.L., Viergever, M.A. (1998).
+//! "Multiscale vessel enhancement filtering." MICCAI'98, LNCS vol 1496, 130-137.
+//! https://doi.org/10.1007/BFb0056195
+//!
+//! Reference implementation: https://www.mathworks.com/matlabcentral/fileexchange/24409-hessian-based-frangi-vesselness-filter
 
 
 /// Parameters for Frangi vesselness filter

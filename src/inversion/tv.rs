@@ -6,9 +6,12 @@
 //! using Alternating Direction Method of Multipliers (ADMM).
 //!
 //! Reference:
-//! Bilgic B, et al. Fast quantitative susceptibility mapping with
-//! L1-regularization and automatic parameter selection.
-//! Magnetic Resonance in Medicine. 2014;72(5):1444-59.
+//! Bilgic, B., Fan, A.P., Polimeni, J.R., et al. (2014).
+//! "Fast quantitative susceptibility mapping with L1-regularization and automatic
+//! parameter selection." Magnetic Resonance in Medicine, 72(5):1444-1459.
+//! https://doi.org/10.1002/mrm.25029
+//!
+//! Reference implementation: https://github.com/kamesy/QSM.jl
 
 use num_complex::Complex64;
 use crate::fft::{fft3d, ifft3d};

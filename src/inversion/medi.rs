@@ -15,16 +15,18 @@
 //! - **Linear extrapolation boundary conditions** matching MATLAB's gradf
 //!
 //! Reference:
-//! Liu T, Liu J, de Rochefort L, Spincemaille P, Khalidov I, Ledoux JR,
-//! Wang Y. Morphology enabled dipole inversion (MEDI) from a single-angle
-//! acquisition: comparison with COSMOS in human brain imaging.
-//! Magnetic resonance in medicine. 2011 Aug;66(3):777-83.
+//! Liu, T., Liu, J., de Rochefort, L., Spincemaille, P., Khalidov, I., Ledoux, J.R.,
+//! Wang, Y. (2011). "Morphology enabled dipole inversion (MEDI) from a single-angle
+//! acquisition: comparison with COSMOS in human brain imaging."
+//! Magnetic Resonance in Medicine, 66(3):777-783. https://doi.org/10.1002/mrm.22816
 //!
-//! Liu J, Liu T, de Rochefort L, Ledoux J, Khalidov I, Chen W, Tsiouris AJ,
-//! Wisnieff C, Spincemaille P, Prince MR, Wang Y. Morphology enabled dipole
-//! inversion for quantitative susceptibility mapping using structural
-//! consistency between the magnitude image and the susceptibility map.
-//! Neuroimage. 2012 Feb 1;59(3):2560-8.
+//! Liu, J., Liu, T., de Rochefort, L., Ledoux, J., Khalidov, I., Chen, W., Tsiouris, A.J.,
+//! Wisnieff, C., Spincemaille, P., Prince, M.R., Wang, Y. (2012).
+//! "Morphology enabled dipole inversion for quantitative susceptibility mapping using
+//! structural consistency between the magnitude image and the susceptibility map."
+//! NeuroImage, 59(3):2560-2568.
+//!
+//! Reference implementation: https://github.com/huawu02/MEDI_toolbox
 
 use num_complex::Complex32;
 use crate::fft::Fft3dWorkspaceF32;

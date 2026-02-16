@@ -1,15 +1,20 @@
 //! Surface Curvature Calculation for QSMART
 //!
 //! This module computes Gaussian and mean curvatures at the surface of a 3D binary mask,
-//! based on the discrete differential geometry approach from:
-//! Meyer, M., Desbrun, M., Schröder, P., & Barr, A. H. (2003).
-//! "Discrete differential-geometry operators for triangulated 2-manifolds."
+//! based on the discrete differential geometry approach.
 //!
 //! The curvatures are used in QSMART to weight the spatially-dependent filtering
 //! near brain boundaries to reduce artifacts.
 //!
 //! Uses 2D Delaunay triangulation (via delaunator crate) matching MATLAB's approach:
 //! `tri = delaunay(x, y)` - triangulates on x,y coordinates with z as height.
+//!
+//! Reference:
+//! Meyer, M., Desbrun, M., Schröder, P., Barr, A.H. (2003).
+//! "Discrete Differential-Geometry Operators for Triangulated 2-Manifolds."
+//! Visualization and Mathematics III, 35-57. https://doi.org/10.1007/978-3-662-05105-4_2
+//!
+//! Reference implementation: https://www.mathworks.com/matlabcentral/fileexchange/61136-curvatures
 
 use std::f64::consts::PI;
 use delaunator::{triangulate, Point};

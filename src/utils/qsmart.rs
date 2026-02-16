@@ -5,7 +5,12 @@
 //! - Offset adjustment for combining the two stages
 //! - Integration of SDF background removal with iLSQR inversion
 //!
-//! Reference: Syeda et al., QSMART: Quantitative Susceptibility Mapping Artifact Reduction Technique
+//! Reference:
+//! Yaghmaie, N., Syeda, W., et al. (2021).
+//! "QSMART: Quantitative Susceptibility Mapping Artifact Reduction Technique."
+//! NeuroImage, 231:117701. https://doi.org/10.1016/j.neuroimage.2020.117701
+//!
+//! Reference implementation: https://github.com/wtsyeda/QSMART
 
 use crate::fft::{fft3d, ifft3d};
 use crate::kernels::dipole::dipole_kernel;

@@ -1,10 +1,14 @@
 //! Bias field correction (homogeneity correction)
 //!
-//! Implements the makehomogeneous algorithm from MriResearchTools.jl
-//! for correcting RF receive field inhomogeneities.
-//!
-//! Reference: CLEAR-SWI paper - Eckstein et al. (2021)
+//! Implements the makehomogeneous algorithm for correcting RF receive field inhomogeneities.
 //! This uses the "boxsegment" approach with box filter Gaussian approximation.
+//!
+//! Reference:
+//! Eckstein, K., Trattnig, S., Robinson, S.D. (2019).
+//! "A Simple Homogeneity Correction for Neuroimaging at 7T."
+//! Proc. ISMRM 27th Annual Meeting.
+//!
+//! Reference implementation: https://github.com/korbinian90/MriResearchTools.jl
 
 use std::collections::VecDeque;
 

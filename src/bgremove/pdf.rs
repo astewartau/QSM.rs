@@ -4,9 +4,11 @@
 //! the brain mask, separating background and local fields.
 //!
 //! Reference:
-//! Liu T, Khalidov I, de Rochefort L, Spincemaille P, Liu J, Tsiouris AJ,
-//! Wang Y. A novel background field removal method for MRI using projection
-//! onto dipole fields. NMR in Biomedicine. 2011 Nov;24(9):1129-36.
+//! Liu, T., Khalidov, I., de Rochefort, L., Spincemaille, P., Liu, J., Tsiouris, A.J.,
+//! Wang, Y. (2011). "A novel background field removal method for MRI using projection
+//! onto dipole fields." NMR in Biomedicine, 24(9):1129-1136. https://doi.org/10.1002/nbm.1670
+//!
+//! Reference implementation: https://github.com/kamesy/QSM.jl
 
 use num_complex::Complex64;
 use crate::fft::{fft3d, ifft3d};
