@@ -114,9 +114,21 @@ jobs:
               tests/*|Cargo.toml|Cargo.lock)
                 echo "Test/build file changed: $file → all tests"
                 output_all; exit 0 ;;
-              .github/workflows/integration-tests.yml|.github/workflows/unit-tests.yml|scripts/*)
-                echo "CI file changed: $file → all tests"
-                output_all; exit 0 ;;
+              .github/workflows/unit-tests.yml)
+                run_unit_tests=true ;;
+              .github/workflows/integration-tests.yml|scripts/*)
+                echo "CI file changed: $file → all integration tests"
+                echo "run_bgremove=true" >> "$GITHUB_OUTPUT"
+                echo "bgremove_matrix=$all_bgremove" >> "$GITHUB_OUTPUT"
+                echo "run_inversion=true" >> "$GITHUB_OUTPUT"
+                echo "inversion_matrix=$all_inversion" >> "$GITHUB_OUTPUT"
+                echo "run_bet=true" >> "$GITHUB_OUTPUT"
+                echo "run_combined=true" >> "$GITHUB_OUTPUT"
+                echo "combined_matrix=$all_combined" >> "$GITHUB_OUTPUT"
+                echo "run_pipeline=true" >> "$GITHUB_OUTPUT"
+                echo "pipeline_matrix=$all_pipeline" >> "$GITHUB_OUTPUT"
+                echo "run_unit_tests=$run_unit_tests" >> "$GITHUB_OUTPUT"
+                exit 0 ;;
 
               # Background removal
               src/bgremove/mod.rs)
