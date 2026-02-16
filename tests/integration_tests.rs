@@ -11,7 +11,7 @@ use qsm_core::bgremove;
 use qsm_core::bgremove::{sdf, SdfParams};
 use qsm_core::bet;
 use qsm_core::inversion;
-use qsm_core::inversion::{tgv_qsm, TgvParams, get_default_iterations, ilsqr_simple};
+use qsm_core::inversion::{tgv_qsm, TgvParams, get_default_alpha, get_default_iterations, ilsqr_simple};
 use qsm_core::unwrap::laplacian_unwrap;
 use qsm_core::utils::{
     mcpc3ds_b0_pipeline, B0WeightType,
@@ -100,14 +100,16 @@ fn test_bgremove_pdf() {
     let (nx, ny, nz) = data.dims;
     let (vsx, vsy, vsz) = data.voxel_size;
 
+    // Use explicit params for CI (pdf_default uses adaptive maxit=2626 for this volume,
+    // which converges correctly but takes ~10 minutes; cap at 100 for CI speed)
     let (result, elapsed) = run_timed!("PDF", bgremove::pdf(
         &data.fieldmap,
         &data.mask,
         nx, ny, nz,
         vsx, vsy, vsz,
-        data.b0_dir,
-        1e-6,  // tolerance
-        100,   // max iterations
+        (0.0, 0.0, 1.0),
+        1e-5,
+        100,
     ));
 
     let res = TestResult::new("PDF", &result, &data.fieldmap_local, &data.mask, data.dims);
@@ -154,13 +156,11 @@ fn test_bgremove_lbv() {
     let (nx, ny, nz) = data.dims;
     let (vsx, vsy, vsz) = data.voxel_size;
 
-    let ((result, _new_mask), elapsed) = run_timed!("LBV", bgremove::lbv(
+    let ((result, _new_mask), elapsed) = run_timed!("LBV", bgremove::lbv_default(
         &data.fieldmap,
         &data.mask,
         nx, ny, nz,
         vsx, vsy, vsz,
-        1e-6,  // tolerance
-        100,   // max iterations
     ));
 
     let res = TestResult::new("LBV", &result, &data.fieldmap_local, &data.mask, data.dims);
@@ -263,16 +263,11 @@ fn test_inversion_tv() {
     let (nx, ny, nz) = data.dims;
     let (vsx, vsy, vsz) = data.voxel_size;
 
-    let (result, elapsed) = run_timed!("TV-ADMM", inversion::tv_admm(
+    let (result, elapsed) = run_timed!("TV-ADMM", inversion::tv_admm_default(
         &data.fieldmap_local,
         &data.mask,
         nx, ny, nz,
         vsx, vsy, vsz,
-        data.b0_dir,
-        2e-4,  // lambda (reduced from 1e-3 for less smoothing)
-        2e-2,  // rho (= 100 * lambda)
-        1e-3,  // tolerance
-        250,   // max iterations
     ));
 
     let res = TestResult::new("TV-ADMM", &result, &data.chi, &data.mask, data.dims);
@@ -364,17 +359,11 @@ fn test_inversion_nltv() {
     let (nx, ny, nz) = data.dims;
     let (vsx, vsy, vsz) = data.voxel_size;
 
-    let (result, elapsed) = run_timed!("NLTV", inversion::nltv(
+    let (result, elapsed) = run_timed!("NLTV", inversion::nltv_default(
         &data.fieldmap_local,
         &data.mask,
         nx, ny, nz,
         vsx, vsy, vsz,
-        data.b0_dir,
-        3e-4,  // lambda
-        1.0,   // mu
-        1e-3,  // tolerance
-        250,   // max iterations
-        10,    // newton iterations
     ));
 
     let res = TestResult::new("NLTV", &result, &data.chi, &data.mask, data.dims);
@@ -492,11 +481,12 @@ fn test_combined_tgv() {
     // Run TGV with same TE and field strength so internal scaling inverts correctly
     let step_size = 3.0_f32;
     let res_tgv = (vsx as f32, vsy as f32, vsz as f32);
+    let (alpha0, alpha1) = get_default_alpha(2);
     let iterations = get_default_iterations(res_tgv, step_size);
-    println!("[INFO] TGV iterations (auto): {}", iterations);
+    println!("[INFO] TGV iterations (auto): {}, alpha0={}, alpha1={}", iterations, alpha0, alpha1);
     let tgv_params = TgvParams {
-        alpha0: 0.002,
-        alpha1: 0.003,
+        alpha0,
+        alpha1,
         iterations,
         erosions: 3,
         step_size,
@@ -569,14 +559,15 @@ fn test_pipeline_tgv() {
         .collect();
 
     // Step 3: Run TGV
-    // Parameters match qsmbly/Julia defaults: regularization=2 → alpha0=0.002, alpha1=0.003
+    // Parameters from get_default_alpha(2) and get_default_iterations
     let step_size = 3.0_f32;
     let res_tgv = (vsx as f32, vsy as f32, vsz as f32);
+    let (alpha0, alpha1) = get_default_alpha(2);
     let iterations = get_default_iterations(res_tgv, step_size);
-    println!("[INFO] TGV iterations (auto): {}", iterations);
+    println!("[INFO] TGV iterations (auto): {}, alpha0={}, alpha1={}", iterations, alpha0, alpha1);
     let tgv_params = TgvParams {
-        alpha0: 0.002,
-        alpha1: 0.003,
+        alpha0,
+        alpha1,
         iterations,
         erosions: 3,
         step_size,
@@ -826,9 +817,9 @@ fn benchmark_all_algorithms() {
     ));
     TestResult::new("V-SHARP", &result, &data.fieldmap_local, &data.mask, data.dims).print_with_time(elapsed);
 
-    // PDF
+    // PDF (explicit maxit=100 for CI speed; adaptive default would be ~2626)
     let (result, elapsed) = run_timed!("PDF", bgremove::pdf(
-        &data.fieldmap, &data.mask, nx, ny, nz, vsx, vsy, vsz, data.b0_dir, 1e-6, 100
+        &data.fieldmap, &data.mask, nx, ny, nz, vsx, vsy, vsz, data.b0_dir, 1e-5, 100
     ));
     TestResult::new("PDF", &result, &data.fieldmap_local, &data.mask, data.dims).print_with_time(elapsed);
 
@@ -838,9 +829,9 @@ fn benchmark_all_algorithms() {
     ));
     TestResult::new("iSMV", &result, &data.fieldmap_local, &data.mask, data.dims).print_with_time(elapsed);
 
-    // LBV
-    let ((result, _), elapsed) = run_timed!("LBV", bgremove::lbv(
-        &data.fieldmap, &data.mask, nx, ny, nz, vsx, vsy, vsz, 1e-6, 100
+    // LBV (using defaults: tol=1e-6, adaptive max_iter)
+    let ((result, _), elapsed) = run_timed!("LBV", bgremove::lbv_default(
+        &data.fieldmap, &data.mask, nx, ny, nz, vsx, vsy, vsz
     ));
     TestResult::new("LBV", &result, &data.fieldmap_local, &data.mask, data.dims).print_with_time(elapsed);
 
@@ -871,10 +862,9 @@ fn benchmark_all_algorithms() {
     ));
     TestResult::new("Tikhonov", &result, &data.chi, &data.mask, data.dims).print_with_time(elapsed);
 
-    // TV-ADMM
-    let (result, elapsed) = run_timed!("TV-ADMM", inversion::tv_admm(
-        &data.fieldmap_local, &data.mask, nx, ny, nz, vsx, vsy, vsz,
-        data.b0_dir, 1e-3, 0.1, 1e-3, 250
+    // TV-ADMM (using defaults: lambda=1e-3, rho=0.1)
+    let (result, elapsed) = run_timed!("TV-ADMM", inversion::tv_admm_default(
+        &data.fieldmap_local, &data.mask, nx, ny, nz, vsx, vsy, vsz
     ));
     TestResult::new("TV-ADMM", &result, &data.chi, &data.mask, data.dims).print_with_time(elapsed);
 

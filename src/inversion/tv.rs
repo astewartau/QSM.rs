@@ -255,7 +255,7 @@ where
     x
 }
 
-/// TV-ADMM with default parameters
+/// TV-ADMM with default parameters (matches QSM.jl tv.jl defaults)
 pub fn tv_admm_default(
     local_field: &[f64],
     mask: &[u8],
@@ -265,8 +265,8 @@ pub fn tv_admm_default(
     tv_admm(
         local_field, mask, nx, ny, nz, vsx, vsy, vsz,
         (0.0, 0.0, 1.0),  // bdir
-        2e-4,             // lambda
-        2e-2,             // rho = 100 * lambda
+        1e-3,             // lambda (QSM.jl default)
+        1e-1,             // rho = 100 * lambda
         1e-3,             // tol
         250               // max_iter
     )

@@ -270,14 +270,15 @@ where
     (local_field, eroded_mask)
 }
 
-/// LBV with default parameters
+/// LBV with default parameters (matches QSM.jl: tol=1e-6, max_iter=max(dims))
 pub fn lbv_default(
     field: &[f64],
     mask: &[u8],
     nx: usize, ny: usize, nz: usize,
     vsx: f64, vsy: f64, vsz: f64,
 ) -> (Vec<f64>, Vec<u8>) {
-    lbv(field, mask, nx, ny, nz, vsx, vsy, vsz, 0.001, 500)
+    let max_iter = nx.max(ny).max(nz);
+    lbv(field, mask, nx, ny, nz, vsx, vsy, vsz, 1e-6, max_iter)
 }
 
 #[cfg(test)]

@@ -95,10 +95,31 @@ pub fn pdf(
         v[i] /= alpha;
     }
 
-    // LSMR variables
+    // LSMR variables (following Fong & Saunders 2011 / QSM.jl implementation)
+    let norm_b = beta;
     let mut w = v.clone();
     let mut phi_bar = beta;
     let mut rho_bar = alpha;
+
+    // Variables for ||r|| estimation (matching Julia's lsmr.jl)
+    let mut beta_dd = beta;
+    let mut beta_d = 0.0;
+    let mut rho_d_old = 1.0;
+    let mut tau_tilde_old = 0.0;
+    let mut theta_tilde = 0.0;
+    let mut zeta = 0.0;
+    let d_accum = 0.0; // beta_check^2 accumulator; always 0 when lambda=0
+
+    // Variables for ||A|| estimation
+    let mut norm_a2 = alpha * alpha;
+
+    // Variables for the QR factorization (needed for ||r|| recurrence)
+    let mut zeta_bar = alpha * beta;
+    let mut alpha_bar = alpha;
+    let mut c_bar = 1.0;
+    let mut s_bar = 0.0;
+    let mut rho_val = 1.0;
+    let mut rho_bar_lsmr = 1.0;
 
     for _iter in 0..max_iter {
         // Bidiagonalization
@@ -132,7 +153,7 @@ pub fn pdf(
             v[i] /= alpha;
         }
 
-        // Construct and apply rotation
+        // Construct and apply rotation Q_i (for solution update)
         let rho = (rho_bar * rho_bar + beta * beta).sqrt();
         let c = rho_bar / rho;
         let s = beta / rho;
@@ -150,10 +171,62 @@ pub fn pdf(
             w[i] = v[i] - theta_rho * w[i];
         }
 
-        // Check convergence
-        let norm_r = phi_bar.abs();
+        // LSMR QR factorization (matching Julia lsmr.jl, with lambda=0)
+        // Use a plane rotation Q_i to turn B_i to R_i
+        let _rho_old = rho_val;
+        rho_val = (alpha_bar * alpha_bar + beta * beta).sqrt();
+        let c_lsmr = alpha_bar / rho_val;
+        let s_lsmr = beta / rho_val;
+        let theta_new = s_lsmr * alpha;
+        alpha_bar = c_lsmr * alpha;
+
+        // Use a plane rotation Qbar_i to turn R_i^T to R_i^bar
+        let _rho_bar_old = rho_bar_lsmr;
+        let zeta_old = zeta;
+        let theta_bar = s_bar * rho_val;
+        let rho_tmp = c_bar * rho_val;
+        rho_bar_lsmr = (rho_tmp * rho_tmp + theta_new * theta_new).sqrt();
+        c_bar = rho_tmp / rho_bar_lsmr;
+        s_bar = theta_new / rho_bar_lsmr;
+        zeta = c_bar * zeta_bar;
+        zeta_bar = -s_bar * zeta_bar;
+
+        // Estimate ||r|| (matching Julia lsmr.jl lines 264-287, with lambda=0)
+        // When lambda=0: chat=1, shat=0, so beta_acute=beta_dd, beta_check=0
+        let beta_hat = c_lsmr * beta_dd;
+        beta_dd = -s_lsmr * beta_dd;
+
+        let theta_tilde_old = theta_tilde;
+        let rho_tilde_old = (rho_d_old * rho_d_old + theta_bar * theta_bar).sqrt();
+        let c_tilde_old = rho_d_old / rho_tilde_old;
+        let s_tilde_old = theta_bar / rho_tilde_old;
+        theta_tilde = s_tilde_old * rho_bar_lsmr;
+        rho_d_old = c_tilde_old * rho_bar_lsmr;
+        beta_d = -s_tilde_old * beta_d + c_tilde_old * beta_hat;
+
+        tau_tilde_old = (zeta_old - theta_tilde_old * tau_tilde_old) / rho_tilde_old;
+        let tau_d = (zeta - theta_tilde * tau_tilde_old) / rho_d_old;
+
+        // d_accum += beta_check^2, but beta_check=0 when lambda=0
+        let norm_r = (d_accum + (beta_d - tau_d).powi(2) + beta_dd.powi(2)).sqrt();
+
+        // Estimate ||A||
+        norm_a2 += beta * beta;
+        let norm_a = norm_a2.sqrt();
+        norm_a2 += alpha * alpha;
+
+        // ||A'r|| estimate
+        let norm_ar = zeta_bar.abs();
+
+        // Convergence tests (matching Julia lsmr.jl lines 308-318)
         let norm_x = vec_norm(&x);
-        if norm_r < tol * (norm_x + 1e-20) {
+        let test1 = norm_r / norm_b;  // ||r|| / ||b||
+        let test2 = if norm_a * norm_r > 0.0 { norm_ar / (norm_a * norm_r) } else { 0.0 };
+
+        // Effective tolerance for test1 (includes both atol and btol terms)
+        let eps_r = tol + tol * norm_a * norm_x / norm_b;
+
+        if test1 <= eps_r || test2 <= tol {
             break;
         }
     }
@@ -319,14 +392,37 @@ where
         v[i] /= alpha;
     }
 
+    // LSMR variables (following Fong & Saunders 2011 / QSM.jl implementation)
+    let norm_b = beta;
     let mut w = v.clone();
     let mut phi_bar = beta;
     let mut rho_bar = alpha;
+
+    // Variables for ||r|| estimation (matching Julia's lsmr.jl)
+    let mut beta_dd = beta;
+    let mut beta_d = 0.0;
+    let mut rho_d_old = 1.0;
+    let mut tau_tilde_old = 0.0;
+    let mut theta_tilde = 0.0;
+    let mut zeta = 0.0;
+    let d_accum = 0.0; // beta_check^2 accumulator; always 0 when lambda=0
+
+    // Variables for ||A|| estimation
+    let mut norm_a2 = alpha * alpha;
+
+    // Variables for the QR factorization (needed for ||r|| recurrence)
+    let mut zeta_bar = alpha * beta;
+    let mut alpha_bar = alpha;
+    let mut c_bar = 1.0;
+    let mut s_bar = 0.0;
+    let mut rho_val = 1.0;
+    let mut rho_bar_lsmr = 1.0;
 
     for iter in 0..max_iter {
         // Report progress
         progress_callback(iter + 1, max_iter);
 
+        // Bidiagonalization
         let av = apply_a(&v, &bg_mask, &d_kernel, &brain_mask, nx, ny, nz);
         for i in 0..n_total {
             u[i] = av[i] - alpha * u[i];
@@ -357,6 +453,7 @@ where
             v[i] /= alpha;
         }
 
+        // Construct and apply rotation Q_i (for solution update)
         let rho = (rho_bar * rho_bar + beta * beta).sqrt();
         let c = rho_bar / rho;
         let s = beta / rho;
@@ -365,6 +462,7 @@ where
         let phi = c * phi_bar;
         phi_bar = s * phi_bar;
 
+        // Update x and w
         let phi_rho = phi / rho;
         let theta_rho = theta / rho;
 
@@ -373,9 +471,56 @@ where
             w[i] = v[i] - theta_rho * w[i];
         }
 
-        let norm_r = phi_bar.abs();
+        // LSMR QR factorization (matching Julia lsmr.jl, with lambda=0)
+        let _rho_old = rho_val;
+        rho_val = (alpha_bar * alpha_bar + beta * beta).sqrt();
+        let c_lsmr = alpha_bar / rho_val;
+        let s_lsmr = beta / rho_val;
+        let theta_new = s_lsmr * alpha;
+        alpha_bar = c_lsmr * alpha;
+
+        let _rho_bar_old = rho_bar_lsmr;
+        let zeta_old = zeta;
+        let theta_bar = s_bar * rho_val;
+        let rho_tmp = c_bar * rho_val;
+        rho_bar_lsmr = (rho_tmp * rho_tmp + theta_new * theta_new).sqrt();
+        c_bar = rho_tmp / rho_bar_lsmr;
+        s_bar = theta_new / rho_bar_lsmr;
+        zeta = c_bar * zeta_bar;
+        zeta_bar = -s_bar * zeta_bar;
+
+        // Estimate ||r|| (matching Julia lsmr.jl lines 264-287, with lambda=0)
+        let beta_hat = c_lsmr * beta_dd;
+        beta_dd = -s_lsmr * beta_dd;
+
+        let theta_tilde_old = theta_tilde;
+        let rho_tilde_old = (rho_d_old * rho_d_old + theta_bar * theta_bar).sqrt();
+        let c_tilde_old = rho_d_old / rho_tilde_old;
+        let s_tilde_old = theta_bar / rho_tilde_old;
+        theta_tilde = s_tilde_old * rho_bar_lsmr;
+        rho_d_old = c_tilde_old * rho_bar_lsmr;
+        beta_d = -s_tilde_old * beta_d + c_tilde_old * beta_hat;
+
+        tau_tilde_old = (zeta_old - theta_tilde_old * tau_tilde_old) / rho_tilde_old;
+        let tau_d = (zeta - theta_tilde * tau_tilde_old) / rho_d_old;
+
+        let norm_r = (d_accum + (beta_d - tau_d).powi(2) + beta_dd.powi(2)).sqrt();
+
+        // Estimate ||A||
+        norm_a2 += beta * beta;
+        let norm_a = norm_a2.sqrt();
+        norm_a2 += alpha * alpha;
+
+        // ||A'r|| estimate
+        let norm_ar = zeta_bar.abs();
+
+        // Convergence tests (matching Julia lsmr.jl lines 308-318)
         let norm_x = vec_norm(&x);
-        if norm_r < tol * (norm_x + 1e-20) {
+        let test1 = norm_r / norm_b;
+        let test2 = if norm_a * norm_r > 0.0 { norm_ar / (norm_a * norm_r) } else { 0.0 };
+        let eps_r = tol + tol * norm_a * norm_x / norm_b;
+
+        if test1 <= eps_r || test2 <= tol {
             progress_callback(iter + 1, iter + 1);
             break;
         }
@@ -406,18 +551,19 @@ where
     local_field
 }
 
-/// PDF with default parameters
+/// PDF with default parameters (adaptive max_iter matching QSM.jl: ceil(sqrt(nx*ny*nz)))
 pub fn pdf_default(
     field: &[f64],
     mask: &[u8],
     nx: usize, ny: usize, nz: usize,
     vsx: f64, vsy: f64, vsz: f64,
 ) -> Vec<f64> {
+    let max_iter = ((nx * ny * nz) as f64).sqrt().ceil() as usize;
     pdf(
         field, mask, nx, ny, nz, vsx, vsy, vsz,
         (0.0, 0.0, 1.0),  // bdir
         1e-5,              // tol
-        100                // max_iter
+        max_iter           // adaptive max_iter
     )
 }
 

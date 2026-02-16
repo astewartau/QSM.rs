@@ -55,7 +55,7 @@ impl Default for TgvParams {
     fn default() -> Self {
         Self {
             alpha1: 0.003,
-            alpha0: 0.001,
+            alpha0: 0.002,
             iterations: 1000,
             erosions: 3,
             step_size: 3.0,
@@ -68,10 +68,12 @@ impl Default for TgvParams {
 
 /// Get default alpha values based on regularization level (1-4)
 ///
-/// Level 2 (default) matches the Python TGV_QSM reference: α₀=0.001, α₁=0.003
+/// Matches Julia QuantitativeSusceptibilityMappingTGV.jl reference:
+/// `alpha = [0.001, 0.001] + [0.001, 0.002] * (regularization - 1)`
+/// Level 2 (default) gives α₀=0.002, α₁=0.003
 pub fn get_default_alpha(regularization: u8) -> (f32, f32) {
     let reg = regularization.clamp(1, 4) as f32;
-    let alpha0 = 0.0005 + 0.0005 * (reg - 1.0);
+    let alpha0 = 0.001 + 0.001 * (reg - 1.0);
     let alpha1 = 0.001 + 0.002 * (reg - 1.0);
     (alpha0.max(0.0), alpha1.max(0.0))
 }
@@ -1362,7 +1364,7 @@ mod tests {
     #[test]
     fn test_default_alpha() {
         let (a0, a1) = get_default_alpha(2);
-        assert!((a0 - 0.001).abs() < 1e-6);
+        assert!((a0 - 0.002).abs() < 1e-6);
         assert!((a1 - 0.003).abs() < 1e-6);
     }
 
