@@ -100,15 +100,16 @@ fn test_bgremove_pdf() {
     let (nx, ny, nz) = data.dims;
     let (vsx, vsy, vsz) = data.voxel_size;
 
-    // Use explicit maxit for CI (adaptive default = 2626 for this volume, too slow)
+    // Use explicit params for CI (pdf_default uses adaptive maxit=2626 for this volume,
+    // which converges correctly but takes ~10 minutes; cap at 100 for CI speed)
     let (result, elapsed) = run_timed!("PDF", bgremove::pdf(
         &data.fieldmap,
         &data.mask,
         nx, ny, nz,
         vsx, vsy, vsz,
-        data.b0_dir,
-        1e-5,  // tol (matches default)
-        100,   // max_iter (capped for CI speed)
+        (0.0, 0.0, 1.0),
+        1e-5,
+        100,
     ));
 
     let res = TestResult::new("PDF", &result, &data.fieldmap_local, &data.mask, data.dims);
