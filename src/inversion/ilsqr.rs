@@ -1279,6 +1279,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(tarpaulin, ignore)] // tarpaulin ptrace instrumentation triggers spurious UB in Vec
     fn test_ilsqr_small() {
         // Run ilsqr_simple on a small 8x8x8 volume with a sphere mask
         // and synthetic local field data. This exercises the full pipeline:
