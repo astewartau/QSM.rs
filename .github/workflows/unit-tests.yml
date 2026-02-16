@@ -21,6 +21,8 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
 
       - name: Cache cargo
         uses: actions/cache@v4
@@ -45,7 +47,7 @@ jobs:
           mkdir -p coverage
 
           # Run tarpaulin; ignore its exit code since we check coverage separately
-          cargo tarpaulin --out json --output-dir coverage/ \
+          cargo tarpaulin --engine llvm --out json --output-dir coverage/ \
             --skip-clean --timeout 300 -- --test-threads 1 \
             2>&1 | tee coverage/tarpaulin.log || true
 
