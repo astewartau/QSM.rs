@@ -21,6 +21,8 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
 
       - name: Cache cargo
         uses: actions/cache@v4
@@ -45,8 +47,9 @@ jobs:
           mkdir -p coverage
 
           # Run tarpaulin; ignore its exit code since we check coverage separately
-          cargo tarpaulin --out json --output-dir coverage/ \
-            --skip-clean --timeout 300 2>&1 | tee coverage/tarpaulin.log || true
+          cargo tarpaulin --engine llvm --out json --output-dir coverage/ \
+            --skip-clean --timeout 300 -- --test-threads 1 \
+            2>&1 | tee coverage/tarpaulin.log || true
 
           # Count passed tests from output (sum across all test suites)
           PASSED=$(grep -oP '\d+(?= passed)' coverage/tarpaulin.log | awk '{s+=$1} END {print s+0}')
@@ -55,6 +58,12 @@ jobs:
       - name: Extract coverage
         id: coverage
         run: |
+          if [ ! -f coverage/tarpaulin-report.json ]; then
+            echo "WARNING: tarpaulin report not found (tarpaulin may have crashed)"
+            echo "coverage=0.0" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
           COVERAGE=$(python3 -c "
           import json
           with open('coverage/tarpaulin-report.json') as f:
@@ -71,6 +80,7 @@ jobs:
           echo "Code coverage: ${COVERAGE}%"
 
       - name: Enforce 90% coverage threshold
+        if: steps.coverage.outcome == 'success'
         run: |
           python3 -c "
           cov = float('${{ steps.coverage.outputs.coverage }}')

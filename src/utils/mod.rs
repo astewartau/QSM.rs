@@ -20,6 +20,8 @@ pub mod frangi;
 pub mod curvature;
 pub mod vasculature;
 pub mod qsmart;
+pub mod threshold;
+pub mod mask;
 pub mod simd_ops;
 
 pub use gradient::*;
@@ -30,4 +32,6 @@ pub use frangi::*;
 pub use curvature::*;
 pub use vasculature::*;
 pub use qsmart::*;
+pub use threshold::*;
+pub use mask::*;
 pub use simd_ops::*;

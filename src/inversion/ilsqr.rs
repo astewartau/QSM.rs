@@ -14,6 +14,7 @@
 //! 3. Streaking artifact estimation using LSMR
 //! 4. Artifact subtraction
 
+use std::cell::RefCell;
 use num_complex::Complex64;
 use crate::fft::Fft3dWorkspace;
 use crate::kernels::dipole::dipole_kernel;
@@ -654,6 +655,8 @@ fn lsqr_step(
 
     // Define A*x operator: D * FFT(w .* real(IFFT(D .* x)))
     // Works with complex vectors throughout
+    // Reuse a single workspace across all LSQR iterations to avoid repeated allocation
+    let lsqr_ws = RefCell::new(Fft3dWorkspace::new(nx, ny, nz));
     let apply_a = |x: &[Complex64]| -> Vec<Complex64> {
         // D .* x (in k-space) - x is complex, D is real
         let dx: Vec<Complex64> = x.iter().zip(d.iter())
@@ -662,8 +665,8 @@ fn lsqr_step(
 
         // IFFT(D .* x)
         let mut dx_ifft = dx.clone();
-        let mut temp_ws = Fft3dWorkspace::new(nx, ny, nz);
-        temp_ws.ifft3d(&mut dx_ifft);
+        let mut ws = lsqr_ws.borrow_mut();
+        ws.ifft3d(&mut dx_ifft);
 
         // w .* real(IFFT(D .* x)) - take real part here as per MATLAB reference
         let wdx: Vec<Complex64> = w.iter().zip(dx_ifft.iter())
@@ -672,7 +675,7 @@ fn lsqr_step(
 
         // FFT(w .* ...)
         let mut wdx_fft = wdx.clone();
-        temp_ws.fft3d(&mut wdx_fft);
+        ws.fft3d(&mut wdx_fft);
 
         // D .* FFT(...)
         wdx_fft.iter().zip(d.iter())
@@ -885,7 +888,9 @@ fn susceptibility_artifacts_step(
     b.extend_from_slice(&by);
     b.extend_from_slice(&bz);
 
-    // Define forward operator A
+    // Define forward operator A and adjoint A^T
+    // Reuse a single workspace across all LSMR iterations to avoid repeated allocation
+    let lsmr_ws = RefCell::new(Fft3dWorkspace::new(nx, ny, nz));
     let apply_a = |x_in: &[f64]| -> Vec<f64> {
         // x_in is in image space
         // Apply Mic in k-space
@@ -894,8 +899,8 @@ fn susceptibility_artifacts_step(
             .collect();
 
         let mut x_fft = x_complex;
-        let mut temp_ws = Fft3dWorkspace::new(nx, ny, nz);
-        temp_ws.fft3d(&mut x_fft);
+        let mut ws = lsmr_ws.borrow_mut();
+        ws.fft3d(&mut x_fft);
 
         // Apply ill-conditioned mask
         let x_mic: Vec<Complex64> = x_fft.iter().zip(mic.iter())
@@ -903,7 +908,7 @@ fn susceptibility_artifacts_step(
             .collect();
 
         let mut x_ifft = x_mic;
-        temp_ws.ifft3d(&mut x_ifft);
+        ws.ifft3d(&mut x_ifft);
 
         let x_filtered: Vec<f64> = x_ifft.iter().map(|xi| xi.re).collect();
 
@@ -940,15 +945,15 @@ fn susceptibility_artifacts_step(
             .collect();
 
         let mut div_fft = div_complex;
-        let mut temp_ws = Fft3dWorkspace::new(nx, ny, nz);
-        temp_ws.fft3d(&mut div_fft);
+        let mut ws = lsmr_ws.borrow_mut();
+        ws.fft3d(&mut div_fft);
 
         let div_mic: Vec<Complex64> = div_fft.iter().zip(mic.iter())
             .map(|(di, &mi)| di * mi)
             .collect();
 
         let mut div_ifft = div_mic;
-        temp_ws.ifft3d(&mut div_ifft);
+        ws.ifft3d(&mut div_ifft);
 
         div_ifft.iter().map(|di| di.re).collect()
     };
