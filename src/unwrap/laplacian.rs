@@ -5,8 +5,11 @@
 //! recover the true phase by solving a Poisson equation.
 //!
 //! Reference:
-//! Schofield MA, Zhu Y. Fast phase unwrapping algorithm for interferometric
-//! applications. Optics letters. 2003 Jul 15;28(14):1194-6.
+//! Schofield, M.A., Zhu, Y. (2003). "Fast phase unwrapping algorithm for
+//! interferometric applications." Optics Letters, 28(14):1194-1196.
+//! https://doi.org/10.1364/OL.28.001194
+//!
+//! Reference implementation: https://github.com/kamesy/QSM.jl
 
 use std::f64::consts::PI;
 use num_complex::Complex64;

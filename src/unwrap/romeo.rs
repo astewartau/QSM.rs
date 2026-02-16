@@ -7,8 +7,12 @@
 //! - Magnitude weights
 //!
 //! Reference:
-//! Dymerska B, et al. Phase unwrapping with a rapid opensource minimum spanning
-//! tree algorithm (ROMEO). Magnetic Resonance in Medicine. 2021;85(4):2294-2308.
+//! Dymerska, B., Eckstein, K., Bachrata, B., Siow, B., Trattnig, S., Shmueli, K.,
+//! Robinson, S.D. (2021). "Phase unwrapping with a rapid opensource minimum spanning
+//! tree algorithm (ROMEO)." Magnetic Resonance in Medicine, 85(4):2294-2308.
+//! https://doi.org/10.1002/mrm.28563
+//!
+//! Reference implementation: https://github.com/korbinian90/MriResearchTools.jl
 
 use std::f64::consts::PI;
 

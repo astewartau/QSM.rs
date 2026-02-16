@@ -5,8 +5,11 @@
 //! separate local from background fields.
 //!
 //! Reference:
-//! Schweser F, et al. Quantitative imaging of intrinsic magnetic tissue
-//! properties using MRI signal phase. Neuroimage. 2011;54(4):2789-807.
+//! Schweser, F., Deistung, A., Lehr, B.W., Reichenbach, J.R. (2011).
+//! "Quantitative imaging of intrinsic magnetic tissue properties using MRI signal phase."
+//! NeuroImage, 54(4):2789-2807. https://doi.org/10.1016/j.neuroimage.2010.10.070
+//!
+//! Reference implementation: https://github.com/kamesy/QSM.jl
 
 use num_complex::Complex64;
 use crate::fft::{fft3d, ifft3d};

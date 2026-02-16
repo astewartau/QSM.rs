@@ -1,12 +1,15 @@
-//! Truncated k-space division (TKD) for QSM
+//! Truncated k-space division (TKD) / TSVD for QSM
 //!
 //! TKD is the simplest dipole inversion method. It directly divides the
 //! field in k-space by the dipole kernel, with truncation to avoid
 //! division by small values near the magic angle.
 //!
 //! Reference:
-//! Shmueli K, de Zwart JA, van Gelderen P, et al. Magnetic susceptibility mapping
-//! of brain tissue in vivo using MRI phase data. MRM 2009;62(6):1510-22.
+//! Shmueli, K., de Zwart, J.A., van Gelderen, P., Li, T.Q., Dodd, S.J., Duyn, J.H. (2009).
+//! "Magnetic susceptibility mapping of brain tissue in vivo using MRI phase data."
+//! Magnetic Resonance in Medicine, 62(6):1510-1522. https://doi.org/10.1002/mrm.22135
+//!
+//! Reference implementation: https://github.com/kamesy/QSM.jl
 
 use num_complex::Complex64;
 use crate::fft::{fft3d, ifft3d};

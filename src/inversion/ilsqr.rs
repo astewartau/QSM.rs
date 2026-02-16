@@ -1,9 +1,12 @@
 //! iLSQR: Iterative LSQR for QSM with streaking artifact removal
 //!
-//! Implementation based on:
-//! Li W, Wang N, Yu F, Han H, Cao W, Romero R, Tantiwongkosi B, Duong TQ, Liu C.
-//! "A method for estimating and removing streaking artifacts in quantitative
-//! susceptibility mapping." NeuroImage. 2015 Mar 1;108:111-22.
+//! Reference:
+//! Li, W., Wang, N., Yu, F., Han, H., Cao, W., Romero, R., Tantiwongkosi, B.,
+//! Duong, T.Q., Liu, C. (2015). "A method for estimating and removing streaking
+//! artifacts in quantitative susceptibility mapping."
+//! NeuroImage, 108:111-122. https://doi.org/10.1016/j.neuroimage.2014.12.043
+//!
+//! Reference implementation: https://github.com/kamesy/QSM.m
 //!
 //! The algorithm consists of 4 steps:
 //! 1. Initial LSQR solution with Laplacian-based weights

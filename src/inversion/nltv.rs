@@ -9,8 +9,11 @@
 //! where weights w_i are iteratively updated based on the current solution.
 //!
 //! Reference:
-//! Bilgic B, et al. Nonlinear regularization for quantitative susceptibility mapping.
-//! Magnetic Resonance in Medicine. 2017.
+//! Kames, C., Wiggermann, V., Rauscher, A. (2018).
+//! "Rapid two-step dipole inversion for susceptibility mapping with sparsity priors."
+//! NeuroImage, 167:276-283. https://doi.org/10.1016/j.neuroimage.2017.11.018
+//!
+//! Reference implementation: https://github.com/kamesy/QSM.jl
 
 use num_complex::Complex64;
 use crate::fft::{fft3d, ifft3d};

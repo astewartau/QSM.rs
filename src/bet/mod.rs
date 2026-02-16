@@ -1,9 +1,10 @@
 //! BET (Brain Extraction Tool) Implementation
 //!
-//! Based on: Smith, S.M. (2002) "Fast robust automated brain extraction"
-//! Human Brain Mapping, 17(3):143-155
+//! Reference:
+//! Smith, S.M. (2002). "Fast robust automated brain extraction."
+//! Human Brain Mapping, 17(3):143-155. https://doi.org/10.1002/hbm.10062
 //!
-//! Ported from Python vectorized implementation.
+//! Reference implementation: https://github.com/Bostrix/FSL-BET2
 
 mod icosphere;
 mod mesh;

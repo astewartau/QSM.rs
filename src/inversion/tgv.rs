@@ -1,8 +1,17 @@
 //! TGV-QSM: Total Generalized Variation for Quantitative Susceptibility Mapping
 //!
 //! Single-step QSM reconstruction from wrapped phase data using TGV regularization.
-//! Based on Langkammer et al. (2015) "Fast quantitative susceptibility mapping using 3D EPI"
-//! and Bredies et al. (2014) "Single-step quantitative susceptibility mapping using TGV".
+//!
+//! References:
+//! Langkammer, C., Bredies, K., Poser, B.A., et al. (2015).
+//! "Fast quantitative susceptibility mapping using 3D EPI and total generalized variation."
+//! NeuroImage, 111:622-630. https://doi.org/10.1016/j.neuroimage.2015.02.041
+//!
+//! Chatnuntawech, I., McDaniel, P., et al. (2017).
+//! "Single-step quantitative susceptibility mapping with variational penalties."
+//! NMR in Biomedicine, 30(4):e3570. https://doi.org/10.1002/nbm.3570
+//!
+//! Reference implementation: https://github.com/korbinian90/QuantitativeSusceptibilityMappingTGV.jl
 //!
 //! The algorithm solves:
 //!   min_χ ||∇²(phase) - D*χ||₂² + α₁||∇χ - w||₁ + α₀||ε(w)||₁

@@ -4,9 +4,11 @@
 //! correcting boundary values.
 //!
 //! Reference:
-//! Wen Y, Zhou D, Liu T, Spincemaille P, Wang Y. An iterative spherical mean
-//! value method for background field removal in MRI.
-//! Magnetic resonance in medicine. 2014 Oct;72(4):1065-71.
+//! Wen, Y., Zhou, D., Liu, T., Spincemaille, P., Wang, Y. (2014).
+//! "An iterative spherical mean value method for background field removal in MRI."
+//! Magnetic Resonance in Medicine, 72(4):1065-1071. https://doi.org/10.1002/mrm.24998
+//!
+//! Reference implementation: https://github.com/kamesy/QSM.jl
 
 use num_complex::Complex64;
 use crate::fft::{fft3d, ifft3d};

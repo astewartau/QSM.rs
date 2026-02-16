@@ -6,8 +6,11 @@
 //! The method exploits that background fields satisfy ∇²b = 0 inside the ROI.
 //!
 //! Reference:
-//! Zhou D, Liu T, Spincemaille P, Wang Y. Background field removal by solving the
-//! Laplacian boundary value problem. NMR in Biomedicine. 2014;27(3):312-319.
+//! Zhou, D., Liu, T., Spincemaille, P., Wang, Y. (2014).
+//! "Background field removal by solving the Laplacian boundary value problem."
+//! NMR in Biomedicine, 27(3):312-319. https://doi.org/10.1002/nbm.3064
+//!
+//! Reference implementation: https://github.com/kamesy/QSM.jl
 
 /// LBV background field removal
 ///
