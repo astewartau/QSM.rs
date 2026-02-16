@@ -125,7 +125,7 @@ pub fn tikhonov(
     chi
 }
 
-/// Tikhonov with default parameters (gradient regularization, λ=0.01)
+/// Tikhonov with default parameters (identity regularization, λ=0.01; matches QSM.jl)
 pub fn tikhonov_default(
     local_field: &[f64],
     mask: &[u8],
@@ -134,7 +134,7 @@ pub fn tikhonov_default(
 ) -> Vec<f64> {
     tikhonov(
         local_field, mask, nx, ny, nz, vsx, vsy, vsz,
-        (0.0, 0.0, 1.0), 0.01, Regularization::Gradient
+        (0.0, 0.0, 1.0), 0.01, Regularization::Identity
     )
 }
 

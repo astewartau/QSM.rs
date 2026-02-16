@@ -406,18 +406,19 @@ where
     local_field
 }
 
-/// PDF with default parameters
+/// PDF with default parameters (adaptive max_iter matching QSM.jl: ceil(sqrt(nx*ny*nz)))
 pub fn pdf_default(
     field: &[f64],
     mask: &[u8],
     nx: usize, ny: usize, nz: usize,
     vsx: f64, vsy: f64, vsz: f64,
 ) -> Vec<f64> {
+    let max_iter = ((nx * ny * nz) as f64).sqrt().ceil() as usize;
     pdf(
         field, mask, nx, ny, nz, vsx, vsy, vsz,
         (0.0, 0.0, 1.0),  // bdir
         1e-5,              // tol
-        100                // max_iter
+        max_iter           // adaptive max_iter
     )
 }
 

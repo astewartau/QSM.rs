@@ -269,7 +269,7 @@ where
     x
 }
 
-/// NLTV with default parameters
+/// NLTV with default parameters (matches QSM.jl nltv.jl defaults)
 pub fn nltv_default(
     local_field: &[f64],
     mask: &[u8],
@@ -279,7 +279,7 @@ pub fn nltv_default(
     nltv(
         local_field, mask, nx, ny, nz, vsx, vsy, vsz,
         (0.0, 0.0, 1.0),  // bdir
-        3e-4,             // lambda
+        1e-3,             // lambda (QSM.jl default)
         1.0,              // mu
         1e-3,             // tol
         250,              // max_iter
