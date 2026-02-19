@@ -38,6 +38,8 @@ NAMES = {
     "bias_correction": "Bias Correction",
     "pipeline_tgv": "TGV",
     "pipeline_qsmart": "QSMART",
+    "swi": "CLEAR-SWI",
+    "swi_mip": "CLEAR-SWI mIP",
 }
 
 # Fixed display windows (ppm)
@@ -59,6 +61,8 @@ WINDOWS = {
     "bias_correction": (-0.1, 0.1),  # fallback; before/after rendering uses auto-range
     "pipeline_tgv": (-0.1, 0.1),
     "pipeline_qsmart": (-0.1, 0.1),
+    "swi": None,       # auto-range (magnitude-weighted)
+    "swi_mip": None,   # auto-range (magnitude-weighted)
 }
 
 

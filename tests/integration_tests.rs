@@ -12,6 +12,7 @@ use qsm_core::bgremove::{sdf, SdfParams};
 use qsm_core::bet;
 use qsm_core::inversion;
 use qsm_core::inversion::{tgv_qsm, TgvParams, get_default_alpha, get_default_iterations, ilsqr_simple};
+use qsm_core::swi;
 use qsm_core::unwrap::laplacian_unwrap;
 use qsm_core::utils::{
     mcpc3ds_b0_pipeline, B0WeightType,
@@ -414,6 +415,89 @@ fn test_bias_correction() {
     let valid_fraction = positive_count as f64 / valid_count as f64;
     println!("[INFO] Bias correction: {:.1}% valid positive voxels in mask", valid_fraction * 100.0);
     assert!(valid_fraction > 0.9, "Too few valid voxels after bias correction: {:.1}%", valid_fraction * 100.0);
+}
+
+// ============================================================================
+// Susceptibility Weighted Imaging (SWI) Test
+// ============================================================================
+
+#[test]
+#[ignore]
+fn test_swi() {
+    println!("[INFO] Loading test data...");
+    let data = TestData::load().expect("Failed to load test data");
+    let (nx, ny, nz) = data.dims;
+    let (vsx, vsy, vsz) = data.voxel_size;
+
+    let start = Instant::now();
+
+    // Step 1: Laplacian unwrap first echo phase
+    println!("[INFO] Unwrapping phase (Laplacian)...");
+    let unwrapped = laplacian_unwrap(
+        &data.phase_echoes[0], &data.mask,
+        nx, ny, nz, vsx, vsy, vsz,
+    );
+
+    // Step 2: Calculate SWI with default parameters (sigma=[4,4,0], tanh, strength=4)
+    println!("[INFO] Computing SWI...");
+    let swi_result = swi::calculate_swi_default(
+        &unwrapped, &data.mag_echoes[0], &data.mask,
+        nx, ny, nz, vsx, vsy, vsz,
+    );
+
+    // Step 3: Minimum intensity projection
+    println!("[INFO] Computing mIP...");
+    let mip = swi::create_mip_default(&swi_result, nx, ny, nz);
+
+    let elapsed = start.elapsed();
+
+    // Validate SWI output
+    let n_total = nx * ny * nz;
+    let mut finite_count = 0usize;
+    let mut positive_count = 0usize;
+    let mut mask_count = 0usize;
+    for i in 0..n_total {
+        if data.mask[i] > 0 {
+            mask_count += 1;
+            if swi_result[i].is_finite() {
+                finite_count += 1;
+            }
+            if swi_result[i] > 0.0 {
+                positive_count += 1;
+            }
+        } else {
+            assert!(swi_result[i].abs() < 1e-10,
+                "SWI outside mask should be ~0 at index {}, got {}", i, swi_result[i]);
+        }
+    }
+
+    let finite_frac = finite_count as f64 / mask_count as f64;
+    let positive_frac = positive_count as f64 / mask_count as f64;
+    println!("[INFO] SWI: {:.1}% finite, {:.1}% positive within mask",
+        finite_frac * 100.0, positive_frac * 100.0);
+    println!("CLEAR-SWI      {:>10.2?}", elapsed);
+    println!("RESULT:CLEAR-SWI,-,-,-,-,{:.2}", elapsed.as_secs_f64());
+
+    // Save center slices for visualization
+    common::save_center_slices(&swi_result, &data.mask, data.dims, "swi");
+
+    // Save mIP slices (output has fewer z-slices, so pad back to original dims for slicing)
+    let nz_mip = nz.saturating_sub(6); // window=7 → nz-6 output slices
+    if nz_mip > 0 {
+        // Embed mIP into full-size volume for center-slice visualization
+        let nxy = nx * ny;
+        let mut mip_full = vec![0.0; n_total];
+        let z_offset = 3; // center the mIP output
+        for k in 0..nz_mip {
+            for idx_xy in 0..nxy {
+                mip_full[idx_xy + (k + z_offset) * nxy] = mip[idx_xy + k * nxy];
+            }
+        }
+        common::save_center_slices(&mip_full, &data.mask, data.dims, "swi_mip");
+    }
+
+    assert!(finite_frac > 0.99, "SWI should be >99% finite within mask, got {:.1}%", finite_frac * 100.0);
+    assert!(positive_frac > 0.5, "SWI should be >50% positive within mask, got {:.1}%", positive_frac * 100.0);
 }
 
 // ============================================================================
