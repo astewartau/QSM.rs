@@ -10,6 +10,7 @@
 //! - `inversion`: Dipole inversion (TKD, Tikhonov, TV, RTS, MEDI)
 //! - `solvers`: Iterative solvers (CG, LSMR)
 //! - `utils`: Gradient operators, padding, etc.
+//! - `swi`: Susceptibility Weighted Imaging (CLEAR-SWI)
 //! - `bet`: Brain extraction tool
 
 // Core modules
@@ -24,6 +25,7 @@ pub mod bgremove;
 pub mod inversion;
 pub mod solvers;
 pub mod utils;
+pub mod swi;
 
 // I/O modules
 pub mod nifti_io;
