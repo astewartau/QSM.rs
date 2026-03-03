@@ -310,7 +310,6 @@ jobs:
           retention-days: 1
 
   inversion-tests:
-    # Note: inversion, combined, and pipeline tests also emit CHALLENGE: lines
     needs: [setup, detect-changes]
     if: needs.detect-changes.outputs.run_inversion == 'true'
     runs-on: ubuntu-latest
@@ -353,7 +352,6 @@ jobs:
           else
             echo "RESULT:${{ matrix.test }},-,-,-,-,-" > ${{ matrix.test }}.csv
           fi
-          grep "^CHALLENGE:" test_output.txt >> ${{ matrix.test }}.csv 2>/dev/null || true
 
       - name: Upload metrics
         if: always()
@@ -471,7 +469,6 @@ jobs:
           else
             echo "RESULT:${{ matrix.test }},-,-,-,-,-" > ${{ matrix.test }}.csv
           fi
-          grep "^CHALLENGE:" test_output.txt >> ${{ matrix.test }}.csv 2>/dev/null || true
 
       - name: Upload metrics
         if: always()
@@ -533,7 +530,6 @@ jobs:
           else
             echo "RESULT:${{ matrix.test }},-,-,-,-,-" > ${{ matrix.test }}.csv
           fi
-          grep "^CHALLENGE:" test_output.txt >> ${{ matrix.test }}.csv 2>/dev/null || true
 
       - name: Upload metrics
         if: always()
@@ -607,7 +603,7 @@ jobs:
           COVERAGE: ${{ needs.unit-tests.outputs.coverage }}
           TESTS_PASSED: ${{ needs.unit-tests.outputs.tests_passed }}
         run: |
-          # Helper: emit a metrics table for a list of test slugs
+          # Helper: emit a metrics table for background removal tests (RMSE/NRMSE/Corr/XSIM)
           emit_table() {
             local prefix="$1"; shift
             local has_any=false
@@ -626,31 +622,35 @@ jobs:
                 if [ "$rmse" = "-" ]; then
                   echo "| ${name} | :x: Failed | - | - | - | - |"
                 else
-                  time_fmt=$(printf "%.2fs" "$time")
-                  echo "| ${name} | ${rmse} | ${nrmse} | ${corr} | ${xsim} | ${time_fmt} |"
+                  echo "| ${name} | ${rmse} | ${nrmse} | ${corr} | ${xsim} | $(printf '%.2fs' "$time") |"
                 fi
               fi
             done
             echo ""
           }
 
-          # Helper: emit a challenge metrics table for a list of test slugs
-          emit_challenge_table() {
+          # Helper: emit a unified metrics table for susceptibility map tests
+          # RESULT format: name,nrmse%,detrend%,tissue%,blood%,dgm%,dgm_lin,calc_dev,streak,corr,xsim,time
+          emit_chi_table() {
             local prefix="$1"; shift
             local has_any=false
             for test in "$@"; do
-              [ -f "metrics/${prefix}${test}.csv" ] && grep -q "^CHALLENGE:" "metrics/${prefix}${test}.csv" 2>/dev/null && has_any=true
+              [ -f "metrics/${prefix}${test}.csv" ] && has_any=true
             done
             [ "$has_any" = false ] && return 1
 
-            echo "| Method | NRMSE% | Detrend% | Tissue% | Blood% | DGM% | DGM Lin | Calc Dev | Streak |"
-            echo "|--------|--------|----------|---------|--------|------|---------|----------|--------|"
+            echo "| Method | NRMSE% | Detrend% | Tissue% | Blood% | DGM% | DGM Lin | Calc Dev | Streak | Corr | XSIM | Time |"
+            echo "|--------|--------|----------|---------|--------|------|---------|----------|--------|------|------|------|"
             for test in "$@"; do
               file="metrics/${prefix}${test}.csv"
-              if [ -f "$file" ] && grep -q "^CHALLENGE:" "$file" 2>/dev/null; then
-                line=$(grep "^CHALLENGE:" "$file" | head -1 | sed 's/^CHALLENGE://')
-                IFS=',' read -r name nrmse dt tissue blood dgm dgm_lin calc_dev streak <<< "$line"
-                echo "| ${name} | ${nrmse} | ${dt} | ${tissue} | ${blood} | ${dgm} | ${dgm_lin} | ${calc_dev} | ${streak} |"
+              if [ -f "$file" ]; then
+                line=$(grep "^RESULT:" "$file" | head -1 | sed 's/^RESULT://')
+                IFS=',' read -r name nrmse dt tissue blood dgm dgm_lin calc_dev streak corr xsim time <<< "$line"
+                if [ "$nrmse" = "-" ]; then
+                  echo "| ${name} | :x: Failed | - | - | - | - | - | - | - | - | - | - |"
+                else
+                  echo "| ${name} | ${nrmse} | ${dt} | ${tissue} | ${blood} | ${dgm} | ${dgm_lin} | ${calc_dev} | ${streak} | ${corr} | ${xsim} | $(printf '%.2fs' "$time") |"
+                fi
               fi
             done
             echo ""
@@ -671,18 +671,11 @@ jobs:
               echo "$TABLE"
             }
 
-            TABLE=$(emit_table "test_inversion_" tkd tsvd tikhonov tv rts medi nltv) && {
+            TABLE=$(emit_chi_table "test_inversion_" tkd tsvd tikhonov tv rts medi nltv) && {
               echo "## Dipole Inversion"
               echo "*Compared against ground truth susceptibility map*"
               echo ""
               echo "$TABLE"
-            }
-
-            CTABLE=$(emit_challenge_table "test_inversion_" tkd tsvd tikhonov tv rts medi nltv) && {
-              echo "### Challenge Metrics (Dipole Inversion)"
-              echo "*Tissue-specific evaluation — NRMSE after demeaning/detrending (%)*"
-              echo ""
-              echo "$CTABLE"
             }
 
             if [ -f "metrics/test_bet.csv" ]; then
@@ -701,30 +694,18 @@ jobs:
               echo ""
             fi
 
-            TABLE=$(emit_table "test_combined_" tgv) && {
+            TABLE=$(emit_chi_table "test_combined_" tgv) && {
               echo "## Combined Background Removal + Dipole Inversion"
               echo "*Compared against ground truth susceptibility map (input: total field map)*"
               echo ""
               echo "$TABLE"
             }
 
-            CTABLE=$(emit_challenge_table "test_combined_" tgv) && {
-              echo "### Challenge Metrics (Combined)"
-              echo ""
-              echo "$CTABLE"
-            }
-
-            TABLE=$(emit_table "test_pipeline_" tgv qsmart) && {
+            TABLE=$(emit_chi_table "test_pipeline_" tgv qsmart) && {
               echo "## Full Pipeline"
               echo "*Compared against ground truth susceptibility map*"
               echo ""
               echo "$TABLE"
-            }
-
-            CTABLE=$(emit_challenge_table "test_pipeline_" tgv qsmart) && {
-              echo "### Challenge Metrics (Pipeline)"
-              echo ""
-              echo "$CTABLE"
             }
 
             if [ -f "metrics/test_bias_correction.csv" ] || [ -f "metrics/test_swi.csv" ]; then
@@ -771,7 +752,7 @@ jobs:
           COVERAGE: ${{ needs.unit-tests.outputs.coverage }}
           TESTS_PASSED: ${{ needs.unit-tests.outputs.tests_passed }}
         run: |
-          # Helper: emit a metrics table for a list of tests
+          # Helper: emit a metrics table for background removal tests (RMSE/NRMSE/Corr/XSIM)
           emit_table() {
             local prefix="$1"; shift
             local has_any=false
@@ -797,23 +778,28 @@ jobs:
             echo ""
           }
 
-          # Helper: emit a challenge metrics table for a list of test slugs
-          emit_challenge_table() {
+          # Helper: emit a unified metrics table for susceptibility map tests
+          # RESULT format: name,nrmse%,detrend%,tissue%,blood%,dgm%,dgm_lin,calc_dev,streak,corr,xsim,time
+          emit_chi_table() {
             local prefix="$1"; shift
             local has_any=false
             for test in "$@"; do
-              [ -f "metrics/${prefix}${test}.csv" ] && grep -q "^CHALLENGE:" "metrics/${prefix}${test}.csv" 2>/dev/null && has_any=true
+              [ -f "metrics/${prefix}${test}.csv" ] && has_any=true
             done
             [ "$has_any" = false ] && return 1
 
-            echo "| Method | NRMSE% | Detrend% | Tissue% | Blood% | DGM% | DGM Lin | Calc Dev | Streak |"
-            echo "|--------|--------|----------|---------|--------|------|---------|----------|--------|"
+            echo "| Method | NRMSE% | Detrend% | Tissue% | Blood% | DGM% | DGM Lin | Calc Dev | Streak | Corr | XSIM | Time |"
+            echo "|--------|--------|----------|---------|--------|------|---------|----------|--------|------|------|------|"
             for test in "$@"; do
               file="metrics/${prefix}${test}.csv"
-              if [ -f "$file" ] && grep -q "^CHALLENGE:" "$file" 2>/dev/null; then
-                line=$(grep "^CHALLENGE:" "$file" | head -1 | sed 's/^CHALLENGE://')
-                IFS=',' read -r name nrmse dt tissue blood dgm dgm_lin calc_dev streak <<< "$line"
-                echo "| ${name} | ${nrmse} | ${dt} | ${tissue} | ${blood} | ${dgm} | ${dgm_lin} | ${calc_dev} | ${streak} |"
+              if [ -f "$file" ]; then
+                line=$(grep "^RESULT:" "$file" | head -1 | sed 's/^RESULT://')
+                IFS=',' read -r name nrmse dt tissue blood dgm dgm_lin calc_dev streak corr xsim time <<< "$line"
+                if [ "$nrmse" = "-" ]; then
+                  echo "| ${name} | :x: Failed | - | - | - | - | - | - | - | - | - | - |"
+                else
+                  echo "| ${name} | ${nrmse} | ${dt} | ${tissue} | ${blood} | ${dgm} | ${dgm_lin} | ${calc_dev} | ${streak} | ${corr} | ${xsim} | $(printf '%.2fs' "$time") |"
+                fi
               fi
             done
             echo ""
@@ -846,20 +832,13 @@ jobs:
               emit_figures bgremove_sharp bgremove_vsharp bgremove_pdf bgremove_ismv bgremove_lbv
             }
 
-            TABLE=$(emit_table "test_inversion_" tkd tsvd tikhonov tv rts medi nltv) && {
+            TABLE=$(emit_chi_table "test_inversion_" tkd tsvd tikhonov tv rts medi nltv) && {
               echo "### Dipole Inversion"
               echo "*Compared against ground truth susceptibility map*"
               echo ""
               echo "$TABLE"
               echo ""
               emit_figures inversion_tkd inversion_tsvd inversion_tikhonov inversion_tv inversion_rts inversion_medi inversion_nltv
-            }
-
-            CTABLE=$(emit_challenge_table "test_inversion_" tkd tsvd tikhonov tv rts medi nltv) && {
-              echo "#### Challenge Metrics (Dipole Inversion)"
-              echo "*Tissue-specific evaluation — NRMSE after demeaning/detrending (%)*"
-              echo ""
-              echo "$CTABLE"
             }
 
             if [ -f "metrics/test_bet.csv" ]; then
@@ -879,7 +858,7 @@ jobs:
               emit_figures bet
             fi
 
-            TABLE=$(emit_table "test_combined_" tgv) && {
+            TABLE=$(emit_chi_table "test_combined_" tgv) && {
               echo "### Combined Background Removal + Dipole Inversion"
               echo "*Compared against ground truth susceptibility map (input: total field map)*"
               echo ""
@@ -888,25 +867,13 @@ jobs:
               emit_figures combined_tgv
             }
 
-            CTABLE=$(emit_challenge_table "test_combined_" tgv) && {
-              echo "#### Challenge Metrics (Combined)"
-              echo ""
-              echo "$CTABLE"
-            }
-
-            TABLE=$(emit_table "test_pipeline_" tgv qsmart) && {
+            TABLE=$(emit_chi_table "test_pipeline_" tgv qsmart) && {
               echo "### Full Pipeline"
               echo "*Compared against ground truth susceptibility map*"
               echo ""
               echo "$TABLE"
               echo ""
               emit_figures pipeline_tgv pipeline_qsmart
-            }
-
-            CTABLE=$(emit_challenge_table "test_pipeline_" tgv qsmart) && {
-              echo "#### Challenge Metrics (Pipeline)"
-              echo ""
-              echo "$CTABLE"
             }
 
             if [ -f "metrics/test_bias_correction.csv" ] || [ -f "metrics/test_swi.csv" ]; then

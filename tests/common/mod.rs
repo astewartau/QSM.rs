@@ -766,6 +766,10 @@ pub struct ChallengeMetrics {
     pub calc_moment_dev: f64,
     /// Calcification streak artifact level (normalized residual std)
     pub calc_streak: f64,
+    /// Pearson correlation coefficient (unique to QSM.rs)
+    pub correlation: f64,
+    /// XSIM structural similarity (unique to QSM.rs)
+    pub xsim: f64,
 }
 
 impl ChallengeMetrics {
@@ -808,6 +812,10 @@ impl ChallengeMetrics {
             output, ground_truth, segmentation, dims,
         );
 
+        // QSM.rs-unique metrics
+        let corr = correlation(output, ground_truth, mask);
+        let xsim_val = xsim(output, ground_truth, mask, dims);
+
         ChallengeMetrics {
             name: name.to_string(),
             nrmse,
@@ -818,28 +826,33 @@ impl ChallengeMetrics {
             dgm_linearity: dgm_lin,
             calc_moment_dev,
             calc_streak,
+            correlation: corr,
+            xsim: xsim_val,
         }
     }
 
     pub fn print(&self) {
-        println!("{:<15} NRMSE={:.2}%  DT={:.2}%  Tissue={:.2}%  Blood={:.2}%  DGM={:.2}%  DGM_lin={:.4}  CalcDev={:.4}  Streak={:.4}",
+        println!("{:<15} NRMSE={:.2}%  DT={:.2}%  Tissue={:.2}%  Blood={:.2}%  DGM={:.2}%  DGM_lin={:.4}  CalcDev={:.4}  Streak={:.4}  r={:.4}  XSIM={:.4}",
             self.name, self.nrmse, self.nrmse_detrend, self.nrmse_tissue,
             self.nrmse_blood, self.nrmse_dgm, self.dgm_linearity,
-            self.calc_moment_dev, self.calc_streak);
+            self.calc_moment_dev, self.calc_streak,
+            self.correlation, self.xsim);
     }
 
     pub fn print_with_time(&self, elapsed: std::time::Duration) {
-        println!("{:<15} {:>8.2} {:>8.2} {:>8.2} {:>8.2} {:>8.2} {:>10.4} {:>10.4} {:>10.4} {:>10.2?}",
+        println!("{:<15} {:>8.2} {:>8.2} {:>8.2} {:>8.2} {:>8.2} {:>10.4} {:>10.4} {:>10.4} {:>8.4} {:>8.4} {:>10.2?}",
             self.name, self.nrmse, self.nrmse_detrend, self.nrmse_tissue,
             self.nrmse_blood, self.nrmse_dgm, self.dgm_linearity,
-            self.calc_moment_dev, self.calc_streak, elapsed);
+            self.calc_moment_dev, self.calc_streak,
+            self.correlation, self.xsim, elapsed);
     }
 
-    /// Print machine-readable CSV line for CI metric collection
-    pub fn print_ci_metrics(&self) {
-        println!("CHALLENGE:{},{:.2},{:.2},{:.2},{:.2},{:.2},{:.4},{:.4},{:.4}",
+    /// Print machine-readable CSV line for CI metric collection (unified RESULT format)
+    pub fn print_ci_metrics(&self, elapsed: std::time::Duration) {
+        println!("RESULT:{},{:.2},{:.2},{:.2},{:.2},{:.2},{:.4},{:.4},{:.4},{:.4},{:.4},{:.2}",
             self.name, self.nrmse, self.nrmse_detrend, self.nrmse_tissue,
             self.nrmse_blood, self.nrmse_dgm, self.dgm_linearity,
-            self.calc_moment_dev, self.calc_streak);
+            self.calc_moment_dev, self.calc_streak,
+            self.correlation, self.xsim, elapsed.as_secs_f64());
     }
 }
