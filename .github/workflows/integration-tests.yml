@@ -310,6 +310,7 @@ jobs:
           retention-days: 1
 
   inversion-tests:
+    # Note: inversion, combined, and pipeline tests also emit CHALLENGE: lines
     needs: [setup, detect-changes]
     if: needs.detect-changes.outputs.run_inversion == 'true'
     runs-on: ubuntu-latest
@@ -352,6 +353,7 @@ jobs:
           else
             echo "RESULT:${{ matrix.test }},-,-,-,-,-" > ${{ matrix.test }}.csv
           fi
+          grep "^CHALLENGE:" test_output.txt >> ${{ matrix.test }}.csv 2>/dev/null || true
 
       - name: Upload metrics
         if: always()
@@ -469,6 +471,7 @@ jobs:
           else
             echo "RESULT:${{ matrix.test }},-,-,-,-,-" > ${{ matrix.test }}.csv
           fi
+          grep "^CHALLENGE:" test_output.txt >> ${{ matrix.test }}.csv 2>/dev/null || true
 
       - name: Upload metrics
         if: always()
@@ -530,6 +533,7 @@ jobs:
           else
             echo "RESULT:${{ matrix.test }},-,-,-,-,-" > ${{ matrix.test }}.csv
           fi
+          grep "^CHALLENGE:" test_output.txt >> ${{ matrix.test }}.csv 2>/dev/null || true
 
       - name: Upload metrics
         if: always()
@@ -617,7 +621,7 @@ jobs:
             for test in "$@"; do
               file="metrics/${prefix}${test}.csv"
               if [ -f "$file" ]; then
-                line=$(sed 's/^RESULT://' "$file")
+                line=$(grep "^RESULT:" "$file" | head -1 | sed 's/^RESULT://')
                 IFS=',' read -r name rmse nrmse corr xsim time <<< "$line"
                 if [ "$rmse" = "-" ]; then
                   echo "| ${name} | :x: Failed | - | - | - | - |"
@@ -625,6 +629,28 @@ jobs:
                   time_fmt=$(printf "%.2fs" "$time")
                   echo "| ${name} | ${rmse} | ${nrmse} | ${corr} | ${xsim} | ${time_fmt} |"
                 fi
+              fi
+            done
+            echo ""
+          }
+
+          # Helper: emit a challenge metrics table for a list of test slugs
+          emit_challenge_table() {
+            local prefix="$1"; shift
+            local has_any=false
+            for test in "$@"; do
+              [ -f "metrics/${prefix}${test}.csv" ] && grep -q "^CHALLENGE:" "metrics/${prefix}${test}.csv" 2>/dev/null && has_any=true
+            done
+            [ "$has_any" = false ] && return 1
+
+            echo "| Method | NRMSE% | Detrend% | Tissue% | Blood% | DGM% | DGM Lin | Calc Dev | Streak |"
+            echo "|--------|--------|----------|---------|--------|------|---------|----------|--------|"
+            for test in "$@"; do
+              file="metrics/${prefix}${test}.csv"
+              if [ -f "$file" ] && grep -q "^CHALLENGE:" "$file" 2>/dev/null; then
+                line=$(grep "^CHALLENGE:" "$file" | head -1 | sed 's/^CHALLENGE://')
+                IFS=',' read -r name nrmse dt tissue blood dgm dgm_lin calc_dev streak <<< "$line"
+                echo "| ${name} | ${nrmse} | ${dt} | ${tissue} | ${blood} | ${dgm} | ${dgm_lin} | ${calc_dev} | ${streak} |"
               fi
             done
             echo ""
@@ -652,13 +678,20 @@ jobs:
               echo "$TABLE"
             }
 
+            CTABLE=$(emit_challenge_table "test_inversion_" tkd tsvd tikhonov tv rts medi nltv) && {
+              echo "### Challenge Metrics (Dipole Inversion)"
+              echo "*Tissue-specific evaluation — NRMSE after demeaning/detrending (%)*"
+              echo ""
+              echo "$CTABLE"
+            }
+
             if [ -f "metrics/test_bet.csv" ]; then
               echo "## Brain Extraction"
               echo "*Compared against ground truth mask*"
               echo ""
               echo "| Method | Dice | Time |"
               echo "|--------|------|------|"
-              line=$(sed 's/^RESULT://' "metrics/test_bet.csv")
+              line=$(grep "^RESULT:" "metrics/test_bet.csv" | head -1 | sed 's/^RESULT://')
               IFS=',' read -r name dice _ _ _ time <<< "$line"
               if [ "$dice" = "-" ]; then
                 echo "| ${name} | :x: Failed | - |"
@@ -675,11 +708,23 @@ jobs:
               echo "$TABLE"
             }
 
+            CTABLE=$(emit_challenge_table "test_combined_" tgv) && {
+              echo "### Challenge Metrics (Combined)"
+              echo ""
+              echo "$CTABLE"
+            }
+
             TABLE=$(emit_table "test_pipeline_" tgv qsmart) && {
               echo "## Full Pipeline"
               echo "*Compared against ground truth susceptibility map*"
               echo ""
               echo "$TABLE"
+            }
+
+            CTABLE=$(emit_challenge_table "test_pipeline_" tgv qsmart) && {
+              echo "### Challenge Metrics (Pipeline)"
+              echo ""
+              echo "$CTABLE"
             }
 
             if [ -f "metrics/test_bias_correction.csv" ] || [ -f "metrics/test_swi.csv" ]; then
@@ -688,12 +733,12 @@ jobs:
               echo "| Method | Time |"
               echo "|--------|------|"
               if [ -f "metrics/test_bias_correction.csv" ]; then
-                line=$(sed 's/^RESULT://' "metrics/test_bias_correction.csv")
+                line=$(grep "^RESULT:" "metrics/test_bias_correction.csv" | head -1 | sed 's/^RESULT://')
                 IFS=',' read -r name _ _ _ _ time <<< "$line"
                 echo "| ${name} | $(printf '%.2fs' "$time") |"
               fi
               if [ -f "metrics/test_swi.csv" ]; then
-                line=$(sed 's/^RESULT://' "metrics/test_swi.csv")
+                line=$(grep "^RESULT:" "metrics/test_swi.csv" | head -1 | sed 's/^RESULT://')
                 IFS=',' read -r name _ _ _ _ time <<< "$line"
                 echo "| ${name} | $(printf '%.2fs' "$time") |"
               fi
@@ -740,13 +785,35 @@ jobs:
             for test in "$@"; do
               file="metrics/${prefix}${test}.csv"
               if [ -f "$file" ]; then
-                line=$(sed 's/^RESULT://' "$file")
+                line=$(grep "^RESULT:" "$file" | head -1 | sed 's/^RESULT://')
                 IFS=',' read -r name rmse nrmse corr xsim time <<< "$line"
                 if [ "$rmse" = "-" ]; then
                   echo "| ${name} | :x: Failed | - | - | - | - |"
                 else
                   echo "| ${name} | ${rmse} | ${nrmse} | ${corr} | ${xsim} | $(printf '%.2fs' "$time") |"
                 fi
+              fi
+            done
+            echo ""
+          }
+
+          # Helper: emit a challenge metrics table for a list of test slugs
+          emit_challenge_table() {
+            local prefix="$1"; shift
+            local has_any=false
+            for test in "$@"; do
+              [ -f "metrics/${prefix}${test}.csv" ] && grep -q "^CHALLENGE:" "metrics/${prefix}${test}.csv" 2>/dev/null && has_any=true
+            done
+            [ "$has_any" = false ] && return 1
+
+            echo "| Method | NRMSE% | Detrend% | Tissue% | Blood% | DGM% | DGM Lin | Calc Dev | Streak |"
+            echo "|--------|--------|----------|---------|--------|------|---------|----------|--------|"
+            for test in "$@"; do
+              file="metrics/${prefix}${test}.csv"
+              if [ -f "$file" ] && grep -q "^CHALLENGE:" "$file" 2>/dev/null; then
+                line=$(grep "^CHALLENGE:" "$file" | head -1 | sed 's/^CHALLENGE://')
+                IFS=',' read -r name nrmse dt tissue blood dgm dgm_lin calc_dev streak <<< "$line"
+                echo "| ${name} | ${nrmse} | ${dt} | ${tissue} | ${blood} | ${dgm} | ${dgm_lin} | ${calc_dev} | ${streak} |"
               fi
             done
             echo ""
@@ -788,13 +855,20 @@ jobs:
               emit_figures inversion_tkd inversion_tsvd inversion_tikhonov inversion_tv inversion_rts inversion_medi inversion_nltv
             }
 
+            CTABLE=$(emit_challenge_table "test_inversion_" tkd tsvd tikhonov tv rts medi nltv) && {
+              echo "#### Challenge Metrics (Dipole Inversion)"
+              echo "*Tissue-specific evaluation — NRMSE after demeaning/detrending (%)*"
+              echo ""
+              echo "$CTABLE"
+            }
+
             if [ -f "metrics/test_bet.csv" ]; then
               echo "### Brain Extraction"
               echo "*Compared against ground truth mask*"
               echo ""
               echo "| Method | Dice | Time |"
               echo "|--------|------|------|"
-              line=$(sed 's/^RESULT://' "metrics/test_bet.csv")
+              line=$(grep "^RESULT:" "metrics/test_bet.csv" | head -1 | sed 's/^RESULT://')
               IFS=',' read -r name dice _ _ _ time <<< "$line"
               if [ "$dice" = "-" ]; then
                 echo "| ${name} | :x: Failed | - |"
@@ -814,6 +888,12 @@ jobs:
               emit_figures combined_tgv
             }
 
+            CTABLE=$(emit_challenge_table "test_combined_" tgv) && {
+              echo "#### Challenge Metrics (Combined)"
+              echo ""
+              echo "$CTABLE"
+            }
+
             TABLE=$(emit_table "test_pipeline_" tgv qsmart) && {
               echo "### Full Pipeline"
               echo "*Compared against ground truth susceptibility map*"
@@ -823,18 +903,24 @@ jobs:
               emit_figures pipeline_tgv pipeline_qsmart
             }
 
+            CTABLE=$(emit_challenge_table "test_pipeline_" tgv qsmart) && {
+              echo "#### Challenge Metrics (Pipeline)"
+              echo ""
+              echo "$CTABLE"
+            }
+
             if [ -f "metrics/test_bias_correction.csv" ] || [ -f "metrics/test_swi.csv" ]; then
               echo "### Utilities"
               echo ""
               echo "| Method | Time |"
               echo "|--------|------|"
               if [ -f "metrics/test_bias_correction.csv" ]; then
-                line=$(sed 's/^RESULT://' "metrics/test_bias_correction.csv")
+                line=$(grep "^RESULT:" "metrics/test_bias_correction.csv" | head -1 | sed 's/^RESULT://')
                 IFS=',' read -r name _ _ _ _ time <<< "$line"
                 echo "| ${name} | $(printf '%.2fs' "$time") |"
               fi
               if [ -f "metrics/test_swi.csv" ]; then
-                line=$(sed 's/^RESULT://' "metrics/test_swi.csv")
+                line=$(grep "^RESULT:" "metrics/test_swi.csv" | head -1 | sed 's/^RESULT://')
                 IFS=',' read -r name _ _ _ _ time <<< "$line"
                 echo "| ${name} | $(printf '%.2fs' "$time") |"
               fi
