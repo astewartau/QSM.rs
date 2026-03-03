@@ -6,7 +6,7 @@
 mod common;
 
 use std::time::Instant;
-use common::{TestData, TestResult};
+use common::{TestData, TestResult, ChallengeMetrics};
 use qsm_core::bgremove;
 use qsm_core::bgremove::{sdf, SdfParams};
 use qsm_core::bet;
@@ -197,6 +197,9 @@ fn test_inversion_tkd() {
     let res = TestResult::new("TKD", &result, &data.chi, &data.mask, data.dims);
     res.print_with_time(elapsed);
     res.print_ci_metrics(elapsed);
+    let challenge = ChallengeMetrics::compute("TKD", &result, &data.chi, &data.mask, &data.segmentation, data.dims);
+    challenge.print();
+    challenge.print_ci_metrics();
     common::save_center_slices(&result, &data.mask, data.dims, "inversion_tkd");
 
     assert!(res.nrmse < 0.5, "TKD NRMSE too high: {}", res.nrmse);
@@ -223,6 +226,9 @@ fn test_inversion_tsvd() {
     let res = TestResult::new("TSVD", &result, &data.chi, &data.mask, data.dims);
     res.print_with_time(elapsed);
     res.print_ci_metrics(elapsed);
+    let challenge = ChallengeMetrics::compute("TSVD", &result, &data.chi, &data.mask, &data.segmentation, data.dims);
+    challenge.print();
+    challenge.print_ci_metrics();
     common::save_center_slices(&result, &data.mask, data.dims, "inversion_tsvd");
 
     assert!(res.nrmse < 0.5, "TSVD NRMSE too high: {}", res.nrmse);
@@ -250,6 +256,9 @@ fn test_inversion_tikhonov() {
     let res = TestResult::new("Tikhonov", &result, &data.chi, &data.mask, data.dims);
     res.print_with_time(elapsed);
     res.print_ci_metrics(elapsed);
+    let challenge = ChallengeMetrics::compute("Tikhonov", &result, &data.chi, &data.mask, &data.segmentation, data.dims);
+    challenge.print();
+    challenge.print_ci_metrics();
     common::save_center_slices(&result, &data.mask, data.dims, "inversion_tikhonov");
 
     assert!(res.nrmse < 0.5, "Tikhonov NRMSE too high: {}", res.nrmse);
@@ -274,6 +283,9 @@ fn test_inversion_tv() {
     let res = TestResult::new("TV-ADMM", &result, &data.chi, &data.mask, data.dims);
     res.print_with_time(elapsed);
     res.print_ci_metrics(elapsed);
+    let challenge = ChallengeMetrics::compute("TV-ADMM", &result, &data.chi, &data.mask, &data.segmentation, data.dims);
+    challenge.print();
+    challenge.print_ci_metrics();
     common::save_center_slices(&result, &data.mask, data.dims, "inversion_tv");
 
     assert!(res.nrmse < 0.5, "TV-ADMM NRMSE too high: {}", res.nrmse);
@@ -305,6 +317,9 @@ fn test_inversion_rts() {
     let res = TestResult::new("RTS", &result, &data.chi, &data.mask, data.dims);
     res.print_with_time(elapsed);
     res.print_ci_metrics(elapsed);
+    let challenge = ChallengeMetrics::compute("RTS", &result, &data.chi, &data.mask, &data.segmentation, data.dims);
+    challenge.print();
+    challenge.print_ci_metrics();
     common::save_center_slices(&result, &data.mask, data.dims, "inversion_rts");
 
     assert!(res.nrmse < 0.5, "RTS NRMSE too high: {}", res.nrmse);
@@ -346,6 +361,9 @@ fn test_inversion_medi() {
     let res = TestResult::new("MEDI", &result, &data.chi, &data.mask, data.dims);
     res.print_with_time(elapsed);
     res.print_ci_metrics(elapsed);
+    let challenge = ChallengeMetrics::compute("MEDI", &result, &data.chi, &data.mask, &data.segmentation, data.dims);
+    challenge.print();
+    challenge.print_ci_metrics();
     common::save_center_slices(&result, &data.mask, data.dims, "inversion_medi");
 
     assert!(res.nrmse < 0.5, "MEDI NRMSE too high: {}", res.nrmse);
@@ -370,6 +388,9 @@ fn test_inversion_nltv() {
     let res = TestResult::new("NLTV", &result, &data.chi, &data.mask, data.dims);
     res.print_with_time(elapsed);
     res.print_ci_metrics(elapsed);
+    let challenge = ChallengeMetrics::compute("NLTV", &result, &data.chi, &data.mask, &data.segmentation, data.dims);
+    challenge.print();
+    challenge.print_ci_metrics();
     common::save_center_slices(&result, &data.mask, data.dims, "inversion_nltv");
 
     assert!(res.nrmse < 0.5, "NLTV NRMSE too high: {}", res.nrmse);
@@ -597,6 +618,9 @@ fn test_combined_tgv() {
     let res = TestResult::new("TGV (from field)", &result, &data.chi, &data.mask, data.dims);
     res.print_with_time(elapsed);
     res.print_ci_metrics(elapsed);
+    let challenge = ChallengeMetrics::compute("TGV (from field)", &result, &data.chi, &data.mask, &data.segmentation, data.dims);
+    challenge.print();
+    challenge.print_ci_metrics();
     common::save_center_slices(&result, &data.mask, data.dims, "combined_tgv");
 
     assert!(res.nrmse < 0.8, "TGV NRMSE too high: {}", res.nrmse);
@@ -678,6 +702,9 @@ fn test_pipeline_tgv() {
     let res = TestResult::new("TGV", &result, &data.chi, &data.mask, data.dims);
     res.print_with_time(elapsed);
     res.print_ci_metrics(elapsed);
+    let challenge = ChallengeMetrics::compute("TGV", &result, &data.chi, &data.mask, &data.segmentation, data.dims);
+    challenge.print();
+    challenge.print_ci_metrics();
     common::save_center_slices(&result, &data.mask, data.dims, "pipeline_tgv");
 
     assert!(res.nrmse < 0.8, "TGV NRMSE too high: {}", res.nrmse);
@@ -853,6 +880,9 @@ fn test_pipeline_qsmart() {
     let res = TestResult::new("QSMART", &chi_qsmart, &data.chi, &data.mask, data.dims);
     res.print_with_time(elapsed);
     res.print_ci_metrics(elapsed);
+    let challenge = ChallengeMetrics::compute("QSMART", &chi_qsmart, &data.chi, &data.mask, &data.segmentation, data.dims);
+    challenge.print();
+    challenge.print_ci_metrics();
     common::save_center_slices(&chi_qsmart, &data.mask, data.dims, "pipeline_qsmart");
 
     assert!(res.nrmse < 0.8, "QSMART NRMSE too high: {}", res.nrmse);
@@ -927,17 +957,21 @@ fn benchmark_all_algorithms() {
     println!("{:<15} {:>12} {:>10} {:>10} {:>10} {:>12}", "Method", "RMSE", "NRMSE", "Corr", "XSIM", "Time");
     println!("{}", "-".repeat(70));
 
+    let mut inversion_results: Vec<(String, Vec<f64>, std::time::Duration)> = Vec::new();
+
     // TKD
     let (result, elapsed) = run_timed!("TKD", inversion::tkd(
         &data.fieldmap_local, &data.mask, nx, ny, nz, vsx, vsy, vsz, data.b0_dir, 0.2
     ));
     TestResult::new("TKD", &result, &data.chi, &data.mask, data.dims).print_with_time(elapsed);
+    inversion_results.push(("TKD".to_string(), result, elapsed));
 
     // TSVD
     let (result, elapsed) = run_timed!("TSVD", inversion::tsvd(
         &data.fieldmap_local, &data.mask, nx, ny, nz, vsx, vsy, vsz, data.b0_dir, 0.2
     ));
     TestResult::new("TSVD", &result, &data.chi, &data.mask, data.dims).print_with_time(elapsed);
+    inversion_results.push(("TSVD".to_string(), result, elapsed));
 
     // Tikhonov
     let (result, elapsed) = run_timed!("Tikhonov", inversion::tikhonov(
@@ -945,12 +979,14 @@ fn benchmark_all_algorithms() {
         data.b0_dir, 1e-3, inversion::tikhonov::Regularization::Gradient
     ));
     TestResult::new("Tikhonov", &result, &data.chi, &data.mask, data.dims).print_with_time(elapsed);
+    inversion_results.push(("Tikhonov".to_string(), result, elapsed));
 
     // TV-ADMM (using defaults: lambda=1e-3, rho=0.1)
     let (result, elapsed) = run_timed!("TV-ADMM", inversion::tv_admm_default(
         &data.fieldmap_local, &data.mask, nx, ny, nz, vsx, vsy, vsz
     ));
     TestResult::new("TV-ADMM", &result, &data.chi, &data.mask, data.dims).print_with_time(elapsed);
+    inversion_results.push(("TV-ADMM".to_string(), result, elapsed));
 
     // RTS
     let (result, elapsed) = run_timed!("RTS", inversion::rts(
@@ -958,6 +994,20 @@ fn benchmark_all_algorithms() {
         data.b0_dir, 0.15, 1e5, 10.0, 1e-2, 20, 4
     ));
     TestResult::new("RTS", &result, &data.chi, &data.mask, data.dims).print_with_time(elapsed);
+    inversion_results.push(("RTS".to_string(), result, elapsed));
 
-    println!("\n{}", "=".repeat(70));
+    // -------------------------------------------------------------------------
+    // Challenge Metrics (tissue-specific evaluation)
+    // -------------------------------------------------------------------------
+    println!("\nCHALLENGE METRICS (tissue-specific evaluation)");
+    println!("{}", "-".repeat(120));
+    println!("{:<15} {:>8} {:>8} {:>8} {:>8} {:>8} {:>10} {:>10} {:>10} {:>12}",
+        "Method", "NRMSE%", "DT%", "Tissue%", "Blood%", "DGM%", "DGM_lin", "CalcDev", "Streak", "Time");
+    println!("{}", "-".repeat(120));
+    for (name, result, elapsed) in &inversion_results {
+        let c = ChallengeMetrics::compute(name, result, &data.chi, &data.mask, &data.segmentation, data.dims);
+        c.print_with_time(*elapsed);
+    }
+
+    println!("\n{}", "=".repeat(120));
 }
