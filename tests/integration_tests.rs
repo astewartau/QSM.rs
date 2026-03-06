@@ -173,6 +173,51 @@ fn test_bgremove_lbv() {
     assert!(res.correlation > 0.7, "LBV correlation too low: {}", res.correlation);
 }
 
+/// Test LBV with Hz-scale input (simulates qsmbly pipeline where B0 is in Hz)
+#[test]
+#[ignore]
+fn test_bgremove_lbv_hz_scale() {
+    println!("[INFO] Loading test data...");
+    let data = TestData::load().expect("Failed to load test data");
+    let (nx, ny, nz) = data.dims;
+    let (vsx, vsy, vsz) = data.voxel_size;
+    let n_total = nx * ny * nz;
+
+    // Convert ground truth field from ppm to Hz
+    let gamma = 42.576e6_f64; // Hz/T
+    let b0 = data.field_strength;
+    let ppm_to_hz = gamma * b0 / 1e6;
+    let fieldmap_hz: Vec<f64> = data.fieldmap.iter().map(|&v| v * ppm_to_hz).collect();
+    let local_hz: Vec<f64> = data.fieldmap_local.iter().map(|&v| v * ppm_to_hz).collect();
+
+    println!("[INFO] PPM->Hz scale factor: {:.2}, B0: {}T", ppm_to_hz, b0);
+
+    // Run LBV on Hz-scale field
+    let ((result_hz, mask_hz), elapsed) = run_timed!("LBV-Hz", bgremove::lbv_default(
+        &fieldmap_hz, &data.mask, nx, ny, nz, vsx, vsy, vsz,
+    ));
+
+    // Compare against Hz-scale ground truth local field
+    let res = TestResult::new("LBV-Hz", &result_hz, &local_hz, &data.mask, data.dims);
+    res.print_with_time(elapsed);
+
+    // Also run ppm for comparison
+    let ((result_ppm, _), elapsed_ppm) = run_timed!("LBV-ppm", bgremove::lbv_default(
+        &data.fieldmap, &data.mask, nx, ny, nz, vsx, vsy, vsz,
+    ));
+    let res_ppm = TestResult::new("LBV-ppm", &result_ppm, &data.fieldmap_local, &data.mask, data.dims);
+    res_ppm.print_with_time(elapsed_ppm);
+
+    // Hz-scale LBV should produce comparable quality to ppm-scale
+    assert!(res.nrmse < 0.5, "LBV-Hz NRMSE too high: {}", res.nrmse);
+    assert!(res.correlation > 0.7, "LBV-Hz correlation too low: {}", res.correlation);
+
+    // Verify quality is comparable (within 2x of ppm result)
+    let ratio = res.nrmse / res_ppm.nrmse;
+    println!("[INFO] NRMSE ratio (Hz/ppm): {:.2}x", ratio);
+    assert!(ratio < 2.0, "Hz-scale LBV significantly worse than ppm: ratio={:.2}", ratio);
+}
+
 // ============================================================================
 // Dipole Inversion Tests
 // ============================================================================
@@ -877,6 +922,110 @@ fn test_pipeline_qsmart() {
 
     assert!(res.nrmse < 0.8, "QSMART NRMSE too high: {}", res.nrmse);
     assert!(res.correlation > 0.5, "QSMART correlation too low: {}", res.correlation);
+}
+
+/// Full pipeline test: ROMEO → B0 (Hz) → LBV → TV-ADMM → ppm
+/// This matches qsmbly's standard pipeline and verifies LBV works with Hz-scale input
+#[test]
+#[ignore]
+fn test_pipeline_lbv_tv() {
+    println!("[INFO] Loading test data...");
+    let data = TestData::load().expect("Failed to load test data");
+    let (nx, ny, nz) = data.dims;
+    let (vsx, vsy, vsz) = data.voxel_size;
+    let n_total = nx * ny * nz;
+
+    let start = Instant::now();
+
+    // Step 1: MCPC-3D-S + ROMEO → B0 in Hz (same as TGV pipeline)
+    let tes_ms: Vec<f64> = data.echo_times.iter().map(|&t| t * 1000.0).collect();
+    println!("[INFO] Running MCPC-3D-S + ROMEO + B0 estimation...");
+    let (b0_hz, _phase_offset, _corrected_phases) = mcpc3ds_b0_pipeline(
+        &data.phase_echoes,
+        &data.mag_echoes,
+        &tes_ms,
+        &data.mask,
+        [10.0, 10.0, 5.0],
+        B0WeightType::PhaseSNR,
+        nx, ny, nz,
+    );
+
+    // Log B0 range
+    let (mut b0_min, mut b0_max) = (f64::MAX, f64::MIN);
+    for i in 0..n_total {
+        if data.mask[i] > 0 {
+            if b0_hz[i] < b0_min { b0_min = b0_hz[i]; }
+            if b0_hz[i] > b0_max { b0_max = b0_hz[i]; }
+        }
+    }
+    println!("[INFO] B0 range: [{:.1}, {:.1}] Hz", b0_min, b0_max);
+
+    // Step 2a: LBV background removal on Hz-scale B0
+    println!("[INFO] Running LBV on Hz-scale B0...");
+    let ((local_lbv_hz, mask_lbv), elapsed_lbv) = run_timed!("LBV", bgremove::lbv::lbv(
+        &b0_hz, &data.mask, nx, ny, nz, vsx, vsy, vsz,
+        1e-6, 500 // matches qsmbly defaults
+    ));
+
+    // Step 2b: V-SHARP for comparison
+    let radii: Vec<f64> = (1..=12).map(|r| r as f64).collect();
+    let ((local_vsharp_hz, mask_vsharp), elapsed_vsharp) = run_timed!("V-SHARP", bgremove::vsharp(
+        &b0_hz, &data.mask, nx, ny, nz, vsx, vsy, vsz, &radii, 0.05
+    ));
+
+    // Step 3: TV-ADMM dipole inversion on both
+    println!("[INFO] Running TV-ADMM on LBV result...");
+    let (chi_lbv_raw, elapsed_inv_lbv) = run_timed!("TV-ADMM(LBV)", inversion::tv_admm_default(
+        &local_lbv_hz, &mask_lbv, nx, ny, nz, vsx, vsy, vsz
+    ));
+
+    println!("[INFO] Running TV-ADMM on V-SHARP result...");
+    let (chi_vsharp_raw, elapsed_inv_vs) = run_timed!("TV-ADMM(VSHARP)", inversion::tv_admm_default(
+        &local_vsharp_hz, &mask_vsharp, nx, ny, nz, vsx, vsy, vsz
+    ));
+
+    let elapsed_total = start.elapsed();
+
+    // Scale to ppm: χ(ppm) = χ_raw × 1e6 / (γ × B0)
+    let scale_to_ppm = 1e6 / (42.576e6 * data.field_strength);
+    let chi_lbv: Vec<f64> = chi_lbv_raw.iter().enumerate()
+        .map(|(i, &v)| if mask_lbv[i] > 0 { v * scale_to_ppm } else { 0.0 })
+        .collect();
+    let chi_vsharp: Vec<f64> = chi_vsharp_raw.iter().enumerate()
+        .map(|(i, &v)| if mask_vsharp[i] > 0 { v * scale_to_ppm } else { 0.0 })
+        .collect();
+
+    // Compare background removal results (local field quality)
+    // Convert ground truth local field to Hz for comparison
+    let gamma_hz = 42.576e6_f64;
+    let local_hz_truth: Vec<f64> = data.fieldmap_local.iter()
+        .map(|&v| v * gamma_hz * data.field_strength / 1e6)
+        .collect();
+
+    println!("\n{}", "=".repeat(70));
+    println!("BACKGROUND REMOVAL (Hz-scale): raw mag/phase → ROMEO → B0 (Hz) → BG removal");
+    println!("{}", "-".repeat(70));
+
+    let res_lbv_bg = TestResult::new("LBV (Hz)", &local_lbv_hz, &local_hz_truth, &data.mask, data.dims);
+    res_lbv_bg.print_with_time(elapsed_lbv);
+
+    let res_vsharp_bg = TestResult::new("V-SHARP (Hz)", &local_vsharp_hz, &local_hz_truth, &data.mask, data.dims);
+    res_vsharp_bg.print_with_time(elapsed_vsharp);
+
+    println!("\n{}", "=".repeat(70));
+    println!("FULL PIPELINE: → TV-ADMM → ppm (using b0_dir and scaled lambda)");
+    println!("{}", "-".repeat(70));
+
+    let res_lbv = TestResult::new("LBV→TV", &chi_lbv, &data.chi, &data.mask, data.dims);
+    res_lbv.print_with_time(elapsed_total);
+
+    let res_vsharp = TestResult::new("VSHARP→TV", &chi_vsharp, &data.chi, &data.mask, data.dims);
+    res_vsharp.print_with_time(elapsed_total);
+
+    // LBV background removal should produce reasonable local field
+    println!("\n[INFO] BG removal - LBV NRMSE: {:.4}, V-SHARP NRMSE: {:.4}", res_lbv_bg.nrmse, res_vsharp_bg.nrmse);
+    assert!(res_lbv_bg.nrmse < 0.5, "LBV local field NRMSE too high: {}", res_lbv_bg.nrmse);
+    assert!(res_lbv_bg.correlation > 0.5, "LBV local field correlation too low: {}", res_lbv_bg.correlation);
 }
 
 // ============================================================================

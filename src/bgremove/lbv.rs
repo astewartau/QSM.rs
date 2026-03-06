@@ -97,6 +97,15 @@ pub fn lbv(
     // Background field = total field on boundary, solve for interior
     let mut bg_field = field.to_vec();
 
+    // Compute field scale for relative convergence criterion
+    // This makes convergence independent of field units (Hz vs ppm)
+    // Matches QSM.jl's rtol behavior
+    let field_scale = field.iter()
+        .map(|&v| v.abs())
+        .fold(0.0f64, f64::max)
+        .max(1.0); // floor at 1.0 to avoid division issues with zero fields
+    let scaled_tol = tol * field_scale;
+
     // Solve ∇²b = 0 on interior voxels using Gauss-Seidel with over-relaxation
     // The boundary values are fixed (Dirichlet BC)
     let omega = 1.5; // Over-relaxation parameter
@@ -131,8 +140,8 @@ pub fn lbv(
             }
         }
 
-        // Check convergence
-        if max_change < tol {
+        // Check convergence using relative tolerance (scale-independent)
+        if max_change < scaled_tol {
             break;
         }
     }
@@ -217,6 +226,14 @@ where
     }
 
     let mut bg_field = field.to_vec();
+
+    // Compute field scale for relative convergence criterion
+    let field_scale = field.iter()
+        .map(|&v| v.abs())
+        .fold(0.0f64, f64::max)
+        .max(1.0);
+    let scaled_tol = tol * field_scale;
+
     let omega = 1.5;
 
     for iter in 0..max_iter {
@@ -249,7 +266,7 @@ where
             }
         }
 
-        if max_change < tol {
+        if max_change < scaled_tol {
             progress_callback(iter + 1, iter + 1);
             break;
         }
@@ -270,14 +287,18 @@ where
     (local_field, eroded_mask)
 }
 
-/// LBV with default parameters (matches QSM.jl: tol=1e-6, max_iter=max(dims))
+/// LBV with default parameters
+///
+/// Note: QSM.jl uses multigrid-preconditioned CG which converges in ~max(dims)
+/// iterations. Our Gauss-Seidel SOR needs more iterations, so we use 3*max(dims)
+/// with a floor of 500.
 pub fn lbv_default(
     field: &[f64],
     mask: &[u8],
     nx: usize, ny: usize, nz: usize,
     vsx: f64, vsy: f64, vsz: f64,
 ) -> (Vec<f64>, Vec<u8>) {
-    let max_iter = nx.max(ny).max(nz);
+    let max_iter = (3 * nx.max(ny).max(nz)).max(500);
     lbv(field, mask, nx, ny, nz, vsx, vsy, vsz, 1e-6, max_iter)
 }
 
