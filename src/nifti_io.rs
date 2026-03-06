@@ -368,6 +368,65 @@ pub fn save_nifti_gz(
         .map_err(|e| format!("Gzip finish failed: {}", e))
 }
 
+/// Read only the dimensions from a NIfTI file header without loading volume data.
+///
+/// Returns (nx, ny, nz). Much faster and uses negligible memory compared to
+/// `read_nifti_file` since it only reads and parses the 348-byte header.
+pub fn read_nifti_dims(path: &std::path::Path) -> Result<(usize, usize, usize), String> {
+    use std::io::Read;
+
+    let mut file = std::fs::File::open(path)
+        .map_err(|e| format!("Failed to open '{}': {}", path.display(), e))?;
+
+    // Read enough bytes to detect gzip and parse header
+    let mut header_bytes = [0u8; 348];
+
+    let path_str = path.to_string_lossy();
+    if path_str.ends_with(".gz") {
+        // Decompress just the header
+        let mut decoder = GzDecoder::new(file);
+        decoder.read_exact(&mut header_bytes)
+            .map_err(|e| format!("Failed to read gzipped NIfTI header '{}': {}", path.display(), e))?;
+    } else {
+        file.read_exact(&mut header_bytes)
+            .map_err(|e| format!("Failed to read NIfTI header '{}': {}", path.display(), e))?;
+    }
+
+    // Determine endianness from sizeof_hdr (bytes 0-3, should be 348)
+    let sizeof_hdr_le = i32::from_le_bytes([header_bytes[0], header_bytes[1], header_bytes[2], header_bytes[3]]);
+    let is_le = sizeof_hdr_le == 348;
+
+    if !is_le {
+        let sizeof_hdr_be = i32::from_be_bytes([header_bytes[0], header_bytes[1], header_bytes[2], header_bytes[3]]);
+        if sizeof_hdr_be != 348 {
+            return Err(format!(
+                "Invalid NIfTI header in '{}': sizeof_hdr={} (LE) / {} (BE), expected 348",
+                path.display(), sizeof_hdr_le, sizeof_hdr_be
+            ));
+        }
+    }
+
+    // dim[0..7] at offset 40, each i16
+    let read_i16 = |offset: usize| -> i16 {
+        if is_le {
+            i16::from_le_bytes([header_bytes[offset], header_bytes[offset + 1]])
+        } else {
+            i16::from_be_bytes([header_bytes[offset], header_bytes[offset + 1]])
+        }
+    };
+
+    let ndim = read_i16(40);
+    if ndim < 3 {
+        return Err(format!("Expected at least 3D volume in '{}', got {}D", path.display(), ndim));
+    }
+
+    let nx = read_i16(42) as usize;
+    let ny = read_i16(44) as usize;
+    let nz = read_i16(46) as usize;
+
+    Ok((nx, ny, nz))
+}
+
 /// Read a NIfTI file from a filesystem path
 ///
 /// Supports both .nii and .nii.gz files.
