@@ -971,7 +971,7 @@ fn benchmark_all_algorithms() {
     TestResult::new("Tikhonov", &result, &data.chi, &data.mask, data.dims).print_with_time(elapsed);
     inversion_results.push(("Tikhonov".to_string(), result, elapsed));
 
-    // TV-ADMM (using defaults: lambda=1e-3, rho=0.1)
+    // TV-ADMM (using defaults: lambda=2e-4, rho=2e-2)
     let (result, elapsed) = run_timed!("TV-ADMM", inversion::tv_admm_default(
         &data.fieldmap_local, &data.mask, nx, ny, nz, vsx, vsy, vsz
     ));
