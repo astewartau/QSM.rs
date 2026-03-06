@@ -16,7 +16,7 @@
 //! Reference implementation: https://github.com/kamesy/QSM.jl
 
 use num_complex::Complex64;
-use crate::fft::{fft3d, ifft3d};
+use crate::fft::Fft3dWorkspace;
 use crate::kernels::dipole::dipole_kernel;
 use crate::kernels::laplacian::laplacian_kernel;
 use crate::utils::gradient::{bdiv_inplace, fgrad_inplace};
@@ -93,6 +93,9 @@ where
     // Pre-compute kernels (done once)
     // ========================================================================
 
+    // Create FFT workspace (caches plans and scratch buffers for reuse)
+    let mut fft_ws = Fft3dWorkspace::new(nx, ny, nz);
+
     let d_kernel = dipole_kernel(nx, ny, nz, vsx, vsy, vsz, bdir);
     let l_kernel = laplacian_kernel(nx, ny, nz, vsx, vsy, vsz, true);
 
@@ -100,7 +103,7 @@ where
     let mut l_complex: Vec<Complex64> = l_kernel.iter()
         .map(|&x| Complex64::new(x, 0.0))
         .collect();
-    fft3d(&mut l_complex, nx, ny, nz);
+    fft_ws.fft3d(&mut l_complex);
 
     // Compute rho adaptively (for ADMM)
     let rho = 100.0 * lambda;
@@ -117,7 +120,7 @@ where
     for i in 0..n_total {
         f_hat[i] = Complex64::new(local_field[i], 0.0);
     }
-    fft3d(f_hat, nx, ny, nz);
+    fft_ws.fft3d(f_hat);
     for i in 0..n_total {
         f_hat[i] = f_hat[i] * d_kernel[i] * inv_a[i];
     }
@@ -175,7 +178,7 @@ where
             for i in 0..n_total {
                 work_complex[i] = Complex64::new(div_d[i], 0.0);
             }
-            fft3d(&mut work_complex, nx, ny, nz);
+            fft_ws.fft3d(&mut work_complex);
 
             // x_hat = f_hat - rho * FFT(div) * inv_a
             // Note: bdiv computes positive divergence ∇·, but the adjoint ∇ᵀ = -∇·,
@@ -184,7 +187,7 @@ where
                 work_complex[i] = f_hat[i] - rho * work_complex[i] * inv_a[i];
             }
 
-            ifft3d(&mut work_complex, nx, ny, nz);
+            fft_ws.ifft3d(&mut work_complex);
             for i in 0..n_total {
                 x[i] = work_complex[i].re;
             }

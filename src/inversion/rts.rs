@@ -12,7 +12,7 @@
 //! Reference implementation: https://github.com/kamesy/QSM.jl
 
 use num_complex::Complex64;
-use crate::fft::{fft3d, ifft3d};
+use crate::fft::Fft3dWorkspace;
 use crate::kernels::dipole::dipole_kernel;
 use crate::kernels::laplacian::laplacian_kernel;
 use crate::utils::gradient::{fgrad_inplace, bdiv_inplace};
@@ -98,6 +98,9 @@ where
     // Pre-compute kernels (done once)
     // ========================================================================
 
+    // Create FFT workspace (caches plans and scratch buffers for reuse)
+    let mut fft_ws = Fft3dWorkspace::new(nx, ny, nz);
+
     // Generate dipole kernel D
     let d_kernel = dipole_kernel(nx, ny, nz, vsx, vsy, vsz, bdir);
 
@@ -108,7 +111,7 @@ where
     let mut work_complex: Vec<Complex64> = l_kernel.iter()
         .map(|&x| Complex64::new(x, 0.0))
         .collect();
-    fft3d(&mut work_complex, nx, ny, nz);
+    fft_ws.fft3d(&mut work_complex);
 
     // Compute well-conditioned mask M and inverse operator iA
     let mut m_mask: Vec<f64> = vec![0.0; n_total];
@@ -133,7 +136,7 @@ where
     for i in 0..n_total {
         work_complex[i] = Complex64::new(local_field[i], 0.0);
     }
-    fft3d(&mut work_complex, nx, ny, nz);
+    fft_ws.fft3d(&mut work_complex);
 
     // Store field_fft for LSMR iterations
     let field_fft: Vec<Complex64> = work_complex.clone();
@@ -168,7 +171,7 @@ where
     }
 
     // Transform to spatial domain
-    ifft3d(&mut work_complex, nx, ny, nz);
+    fft_ws.ifft3d(&mut work_complex);
 
     // Initialize x and apply mask
     let mut x = vec![0.0; n_total];
@@ -184,7 +187,7 @@ where
     for i in 0..n_total {
         work_complex[i] = Complex64::new(x[i], 0.0);
     }
-    fft3d(&mut work_complex, nx, ny, nz);
+    fft_ws.fft3d(&mut work_complex);
 
     let mut f_hat: Vec<Complex64> = vec![Complex64::new(0.0, 0.0); n_total];
     for i in 0..n_total {
@@ -235,7 +238,7 @@ where
         for i in 0..n_total {
             work_complex[i] = Complex64::new(div_v[i], 0.0);
         }
-        fft3d(&mut work_complex, nx, ny, nz);
+        fft_ws.fft3d(&mut work_complex);
 
         // x_hat = f_hat - inv_a * div_hat
         // Note: bdiv computes positive divergence ∇·, but the adjoint ∇ᵀ = -∇·,
@@ -245,7 +248,7 @@ where
         }
 
         // IFFT to get x
-        ifft3d(&mut work_complex, nx, ny, nz);
+        fft_ws.ifft3d(&mut work_complex);
         for i in 0..n_total {
             x[i] = work_complex[i].re;
         }
