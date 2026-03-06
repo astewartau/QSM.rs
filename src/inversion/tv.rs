@@ -14,7 +14,7 @@
 //! Reference implementation: https://github.com/kamesy/QSM.jl
 
 use num_complex::Complex64;
-use crate::fft::{fft3d, ifft3d};
+use crate::fft::Fft3dWorkspace;
 use crate::kernels::dipole::dipole_kernel;
 use crate::kernels::laplacian::laplacian_kernel;
 use crate::utils::gradient::{bdiv_inplace, fgrad_inplace};
@@ -95,6 +95,9 @@ where
     // Pre-compute kernels (done once)
     // ========================================================================
 
+    // Create FFT workspace (caches plans and scratch buffers for reuse)
+    let mut fft_ws = Fft3dWorkspace::new(nx, ny, nz);
+
     // Generate dipole kernel D
     let d_kernel = dipole_kernel(nx, ny, nz, vsx, vsy, vsz, bdir);
 
@@ -105,7 +108,7 @@ where
     let mut l_complex: Vec<Complex64> = l_kernel.iter()
         .map(|&x| Complex64::new(x, 0.0))
         .collect();
-    fft3d(&mut l_complex, nx, ny, nz);
+    fft_ws.fft3d(&mut l_complex);
 
     // Pre-compute inverse of (D^H D + ρ L) for x-subproblem
     let mut inv_a: Vec<f64> = vec![0.0; n_total];
@@ -119,7 +122,7 @@ where
     for i in 0..n_total {
         f_hat[i] = Complex64::new(local_field[i], 0.0);
     }
-    fft3d(f_hat, nx, ny, nz);
+    fft_ws.fft3d(f_hat);
 
     // f_hat = D^H * FFT(f) * inv_a
     for i in 0..n_total {
@@ -177,7 +180,7 @@ where
         for i in 0..n_total {
             work_complex[i] = Complex64::new(div_d[i], 0.0);
         }
-        fft3d(&mut work_complex, nx, ny, nz);
+        fft_ws.fft3d(&mut work_complex);
 
         // x_hat = f_hat - rho * FFT(div) * inv_a
         // Note: bdiv computes positive divergence ∇·, but the adjoint ∇ᵀ = -∇·,
@@ -187,7 +190,7 @@ where
         }
 
         // IFFT to get x
-        ifft3d(&mut work_complex, nx, ny, nz);
+        fft_ws.ifft3d(&mut work_complex);
         for i in 0..n_total {
             x[i] = work_complex[i].re;
         }
