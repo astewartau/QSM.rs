@@ -202,6 +202,92 @@ pub fn calculate_weights_single_echo(
     calculate_weights_romeo(phase, mag, None, 1.0, 1.0, mask, nx, ny, nz)
 }
 
+/// Calculate per-voxel quality map from ROMEO edge weights
+///
+/// Computes ROMEO edge weights and then aggregates them per-voxel by averaging
+/// the incident edge weights across all 6 neighboring directions (±x, ±y, ±z).
+/// This produces a quality map where high values indicate voxels with coherent
+/// phase and magnitude, suitable for thresholding into a brain mask.
+///
+/// Reference: MriResearchTools.jl `romeovoxelquality()` function
+///
+/// # Arguments
+/// * `phase` - Wrapped phase data (nx * ny * nz), first echo
+/// * `mag` - Magnitude data (nx * ny * nz), optional (pass empty slice if none)
+/// * `phase2` - Second echo phase for gradient coherence (optional)
+/// * `te1`, `te2` - Echo times for gradient coherence scaling
+/// * `mask` - Binary mask (nx * ny * nz), 1 = process
+/// * `nx`, `ny`, `nz` - Array dimensions
+///
+/// # Returns
+/// Quality map of size nx * ny * nz with values in range [0, 100]
+pub fn voxel_quality_romeo(
+    phase: &[f64],
+    mag: &[f64],
+    phase2: Option<&[f64]>,
+    te1: f64,
+    te2: f64,
+    mask: &[u8],
+    nx: usize, ny: usize, nz: usize,
+) -> Vec<f64> {
+    let n_total = nx * ny * nz;
+    let weights = calculate_weights_romeo(phase, mag, phase2, te1, te2, mask, nx, ny, nz);
+
+    let mut quality = vec![0.0_f64; n_total];
+
+    for i in 0..nx {
+        for j in 0..ny {
+            for k in 0..nz {
+                let idx = idx3d(i, j, k, nx, ny);
+                if mask[idx] == 0 {
+                    continue;
+                }
+
+                let mut sum = 0.0_f64;
+                let mut count = 0u32;
+
+                // +x edge: stored at (i, j, k) in dim=0
+                if i + 1 < nx && mask[idx3d(i + 1, j, k, nx, ny)] != 0 {
+                    sum += weights[0 * n_total + idx] as f64;
+                    count += 1;
+                }
+                // -x edge: stored at (i-1, j, k) in dim=0
+                if i > 0 && mask[idx3d(i - 1, j, k, nx, ny)] != 0 {
+                    sum += weights[0 * n_total + idx3d(i - 1, j, k, nx, ny)] as f64;
+                    count += 1;
+                }
+                // +y edge: stored at (i, j, k) in dim=1
+                if j + 1 < ny && mask[idx3d(i, j + 1, k, nx, ny)] != 0 {
+                    sum += weights[1 * n_total + idx] as f64;
+                    count += 1;
+                }
+                // -y edge: stored at (i, j-1, k) in dim=1
+                if j > 0 && mask[idx3d(i, j - 1, k, nx, ny)] != 0 {
+                    sum += weights[1 * n_total + idx3d(i, j - 1, k, nx, ny)] as f64;
+                    count += 1;
+                }
+                // +z edge: stored at (i, j, k) in dim=2
+                if k + 1 < nz && mask[idx3d(i, j, k + 1, nx, ny)] != 0 {
+                    sum += weights[2 * n_total + idx] as f64;
+                    count += 1;
+                }
+                // -z edge: stored at (i, j, k-1) in dim=2
+                if k > 0 && mask[idx3d(i, j, k - 1, nx, ny)] != 0 {
+                    sum += weights[2 * n_total + idx3d(i, j, k - 1, nx, ny)] as f64;
+                    count += 1;
+                }
+
+                if count > 0 {
+                    // Normalize from 0-255 to 0-1, then scale to 0-100
+                    quality[idx] = (sum / count as f64) / 255.0 * 100.0;
+                }
+            }
+        }
+    }
+
+    quality
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -275,5 +361,53 @@ mod tests {
         // Edges connected to masked-out voxels should be 0
         // Weight at edge (0,0,0)-(1,0,0) should be 0 since idx 0 is masked out
         assert_eq!(weights[0], 0);  // x-direction edge at (0,0,0)
+    }
+
+    #[test]
+    fn test_voxel_quality_constant_phase() {
+        // Constant phase + uniform magnitude → all quality values should be 100
+        let n = 4;
+        let phase = vec![0.0; n * n * n];
+        let mag = vec![1.0; n * n * n];
+        let mask = vec![1u8; n * n * n];
+
+        let quality = voxel_quality_romeo(&phase, &mag, None, 1.0, 1.0, &mask, n, n, n);
+
+        assert_eq!(quality.len(), n * n * n);
+
+        // Interior voxels (not on boundary) should have quality = 100
+        let interior_q = quality[idx3d(1, 1, 1, n, n)];
+        assert!((interior_q - 100.0).abs() < 1e-6,
+                "Interior voxel quality should be 100, got {}", interior_q);
+    }
+
+    #[test]
+    fn test_voxel_quality_masked() {
+        // Masked-out voxels should have quality = 0
+        let n = 4;
+        let phase = vec![0.0; n * n * n];
+        let mut mask = vec![1u8; n * n * n];
+        mask[idx3d(1, 1, 1, n, n)] = 0;
+
+        let quality = voxel_quality_romeo(&phase, &[], None, 1.0, 1.0, &mask, n, n, n);
+
+        assert_eq!(quality[idx3d(1, 1, 1, n, n)], 0.0,
+                   "Masked-out voxel should have quality 0");
+    }
+
+    #[test]
+    fn test_voxel_quality_range() {
+        // Quality values should be in range [0, 100]
+        let n = 6;
+        let phase: Vec<f64> = (0..n * n * n).map(|i| (i as f64) * 0.7).collect();
+        let mag: Vec<f64> = (0..n * n * n).map(|i| (i as f64) / (n * n * n) as f64).collect();
+        let mask = vec![1u8; n * n * n];
+
+        let quality = voxel_quality_romeo(&phase, &mag, None, 1.0, 1.0, &mask, n, n, n);
+
+        for &q in quality.iter() {
+            assert!(q >= 0.0 && q <= 100.0,
+                    "Quality should be in [0, 100], got {}", q);
+        }
     }
 }
