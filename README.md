@@ -10,7 +10,13 @@ Add `qsm-core` to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-qsm-core = { git = "https://github.com/astewartau/QSM.rs", tag = "v0.2.0" }
+qsm-core = { git = "https://github.com/astewartau/QSM.rs" }  # latest
+```
+
+To pin a specific version, add a tag (see [releases](https://github.com/astewartau/QSM.rs/releases)):
+
+```toml
+qsm-core = { git = "https://github.com/astewartau/QSM.rs", tag = "v0.4.0" }
 ```
 
 ### Full Pipeline Example
