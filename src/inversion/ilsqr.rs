@@ -149,19 +149,24 @@ fn axpy_complex(y: &mut [Complex64], a: f64, x: &[Complex64]) {
 /// LSQR iterative solver for Ax = b (complex version)
 ///
 /// Solves the least squares problem min ||Ax - b||² using the LSQR algorithm.
-/// Works with complex vectors, using A^H (conjugate transpose) for the adjoint.
+/// Based on Paige & Saunders (1982), with convergence tests matching MATLAB's lsqr.
+///
+/// Convergence tests (matching MATLAB):
+/// 1. ||r|| / ||b|| <= btol + atol * ||A|| * ||x|| / ||b||  (residual test)
+/// 2. ||A'r|| / (||A|| * ||r||) <= atol  (normal equations test)
 pub fn lsqr_complex<F, G>(
     apply_a: F,
     apply_ah: G,
     b: &[Complex64],
     tol: f64,
     max_iter: usize,
+    verbose: bool,
 ) -> Vec<Complex64>
 where
     F: Fn(&[Complex64]) -> Vec<Complex64>,
     G: Fn(&[Complex64]) -> Vec<Complex64>,
 {
-    // Initialize
+    // Initialize: beta_1 * u_1 = b
     let mut u = b.to_vec();
     let mut beta = norm_complex(&u);
 
@@ -169,6 +174,7 @@ where
         scale_complex_inplace(&mut u, 1.0 / beta);
     }
 
+    // alpha_1 * v_1 = A^H * u_1
     let mut v = apply_ah(&u);
     let n = v.len();
     let mut alpha = norm_complex(&v);
@@ -184,9 +190,25 @@ where
     let mut rho_bar = alpha;
 
     let bnorm = beta;
+    let atol = tol;
+    let btol = tol;
+
+    // Track ||A|| estimate
+    let mut norm_a2 = alpha * alpha;
+
+    // ||x|| estimate using plane rotations (matches MATLAB's built-in lsqr xxnorm)
+    // Verified: produces identical values to exact norm_complex(&x)
+    let mut xxnorm = 0.0;
+    let mut z_sol = 0.0;
+    let mut cs2 = -1.0;
+    let mut sn2 = 0.0;
+
+    if alpha * beta == 0.0 {
+        return x;
+    }
 
     for _iter in 0..max_iter {
-        // Bidiagonalization
+        // Bidiagonalization step
         let mut u_new = apply_a(&v);
         axpy_complex(&mut u_new, -alpha, &u);
         beta = norm_complex(&u_new);
@@ -205,7 +227,7 @@ where
         }
         v = v_new;
 
-        // Construct and apply rotation
+        // Construct and apply Givens rotation
         let rho = (rho_bar * rho_bar + beta * beta).sqrt();
         let c = rho_bar / rho;
         let s = beta / rho;
@@ -213,6 +235,18 @@ where
         rho_bar = -c * alpha;
         let phi = c * phi_bar;
         phi_bar = s * phi_bar;
+
+        // ||x|| estimation via plane rotations (MATLAB's xxnorm approach)
+        let delta = sn2 * rho;
+        let gambar = -cs2 * rho;
+        let rhs = phi - delta * z_sol;
+        let zbar = rhs / gambar;
+        let xnorm = (xxnorm + zbar * zbar).sqrt();
+        let gamma = (gambar * gambar + theta * theta).sqrt();
+        cs2 = gambar / gamma;
+        sn2 = theta / gamma;
+        z_sol = rhs / gamma;
+        xxnorm += z_sol * z_sol;
 
         // Update x and w
         let t1 = phi / rho;
@@ -222,9 +256,28 @@ where
             w[i] = v[i] + t2 * w[i];
         }
 
-        // Check convergence
-        let rel_residual = phi_bar / (bnorm + 1e-20);
-        if rel_residual < tol {
+        // Estimate norms for convergence tests
+        let normr = phi_bar;
+        let norm_ar = alpha * (c * phi_bar).abs();
+
+        norm_a2 += beta * beta + alpha * alpha;
+        let norm_a = norm_a2.sqrt();
+
+        // Convergence tests (matching MATLAB's lsqr)
+        let test1 = normr / (bnorm + 1e-20);
+        let test2 = norm_ar / ((norm_a * normr) + 1e-20);
+        let rtol = btol + atol * norm_a * xnorm / (bnorm + 1e-20);
+
+        if verbose {
+            eprintln!("  LSQR iter {:>3}: ||r||/||b||={:.6e}  ||A'r||/(||A||·||r||)={:.6e}  rtol={:.6e}",
+                _iter + 1, test1, test2, rtol);
+        }
+
+        if test2 <= atol || test1 <= rtol {
+            if verbose {
+                eprintln!("  LSQR converged at iteration {} (test1={:.4e}, test2={:.4e})",
+                    _iter + 1, test1, test2);
+            }
             break;
         }
     }
@@ -267,7 +320,11 @@ where
     F: Fn(&[f64]) -> Vec<f64>,
     G: Fn(&[f64]) -> Vec<f64>,
 {
-    // Initialize
+    // Reference: Fong & Saunders (2011), "LSMR: An iterative algorithm for
+    // sparse least-squares problems", SIAM J. Sci. Comput.
+    // Based on the official MATLAB implementation by Fong & Saunders.
+
+    // Initialize: beta*u = b, alpha*v = A'*u
     let mut u = b.to_vec();
     let mut beta = norm(&u);
 
@@ -282,17 +339,39 @@ where
         scale_inplace(&mut v, 1.0 / alpha);
     }
 
-    // Initialize variables for Golub-Kahan process
+    // Initialize variables (matching MATLAB reference variable names)
     let mut alpha_bar = alpha;
     let mut zeta_bar = alpha * beta;
     let mut rho = 1.0;
     let mut rho_bar = 1.0;
+    let mut c_bar = 1.0;
+    let mut s_bar = 0.0;
 
     let mut h = v.clone();
     let mut h_bar = vec![0.0; n];
     let mut x = vec![0.0; n];
 
-    let bnorm = beta;
+    // Variables for ||r|| estimation
+    let normb = beta;
+    let mut betadd = beta;
+    let mut betad = 0.0;
+    let mut rhodold = 1.0;
+    let mut tautildeold = 0.0;
+    let mut thetatilde = 0.0;
+    let mut zeta = 0.0;
+    let d = 0.0;
+
+    // Variables for ||A|| and cond(A) estimation
+    let mut norm_a2 = alpha * alpha;
+    let mut maxrbar = 0.0f64;
+    let mut minrbar = 1e100f64;
+    let conlim = 1e8;
+    let ctol = if conlim > 0.0 { 1.0 / conlim } else { 0.0 };
+
+    // Early exit if A'b = 0
+    if alpha * beta == 0.0 {
+        return x;
+    }
 
     for _iter in 0..max_iter {
         // Bidiagonalization
@@ -314,38 +393,87 @@ where
         }
         v = v_new;
 
-        // Construct rotation Q_hat
-        let rho_temp = (alpha_bar * alpha_bar + beta * beta).sqrt();
-        let c_temp = alpha_bar / rho_temp;
-        let s_temp = beta / rho_temp;
-        let theta_new = s_temp * alpha;
-        alpha_bar = c_temp * alpha;
+        // Construct rotation Q_i (undamped: alphahat = alphabar)
+        let rho_old = rho;
+        rho = (alpha_bar * alpha_bar + beta * beta).sqrt();
+        let c = alpha_bar / rho;
+        let s = beta / rho;
+        let theta_new = s * alpha;
+        alpha_bar = c * alpha;
 
-        // Construct rotation Q_bar
-        let rho_bar_temp = (rho_bar * rho_bar + theta_new * theta_new).sqrt();
-        let c_bar_new = rho_bar / rho_bar_temp;
-        let s_bar_new = theta_new / rho_bar_temp;
-        let zeta = c_bar_new * zeta_bar;
-        zeta_bar = -s_bar_new * zeta_bar;
+        // Construct rotation Qbar_i
+        let rho_bar_old = rho_bar;
+        let zeta_old = zeta;
+        let theta_bar = s_bar * rho;
+        let rho_temp = c_bar * rho;
+        rho_bar = (rho_temp * rho_temp + theta_new * theta_new).sqrt();
+        c_bar = rho_temp / rho_bar;
+        s_bar = theta_new / rho_bar;
+        zeta = c_bar * zeta_bar;
+        zeta_bar = -s_bar * zeta_bar;
 
         // Update h_bar, x, h
         for i in 0..n {
-            h_bar[i] = h[i] - (theta_new * rho / (rho_temp * rho_bar_temp)) * h_bar[i];
-            x[i] += (zeta / rho_bar_temp) * h_bar[i];
-            h[i] = v[i] - (theta_new / rho_temp) * h[i];
+            h_bar[i] = h[i] - (theta_bar * rho / (rho_old * rho_bar_old)) * h_bar[i];
+            x[i] += (zeta / (rho * rho_bar)) * h_bar[i];
+            h[i] = v[i] - (theta_new / rho) * h[i];
         }
 
-        rho = rho_temp;
-        rho_bar = rho_bar_temp;
+        // Estimate ||r|| (from reference implementation)
+        // For undamped case: chat=1, shat=0, so betaacute=betadd, betacheck=0
+        let betaacute = betadd;      // chat * betadd (chat=1 for undamped)
+        // betacheck = 0 for undamped (shat=0), so d += 0
+        let betahat = c * betaacute;
+        betadd = -s * betaacute;
 
-        // Check convergence
+        let thetatildeold = thetatilde;
+        let rhotildeold = (rhodold * rhodold + theta_bar * theta_bar).sqrt();
+        let ctildeold = rhodold / rhotildeold;
+        let stildeold = theta_bar / rhotildeold;
+        thetatilde = stildeold * rho_bar;
+        rhodold = ctildeold * rho_bar;
+        betad = -stildeold * betad + ctildeold * betahat;
+
+        tautildeold = (zeta_old - thetatildeold * tautildeold) / rhotildeold;
+        let taud = (zeta - thetatilde * tautildeold) / rhodold;
+        // d += betacheck^2 = 0 for undamped case
+        let normr = (d + (betad - taud).powi(2) + betadd * betadd).sqrt();
+
+        // Estimate ||A||
+        norm_a2 += beta * beta;
+        let norm_a = norm_a2.sqrt();
+        norm_a2 += alpha * alpha;
+
+        // Estimate cond(A) (matching MATLAB reference)
+        maxrbar = maxrbar.max(rho_bar_old);
+        if _iter > 0 {
+            minrbar = minrbar.min(rho_bar_old);
+        }
+        let cond_a = maxrbar.max(rho_temp) / minrbar.min(rho_temp);
+
+        // Convergence tests (matching reference implementation)
         let norm_ar = zeta_bar.abs();
-        let norm_r = ((bnorm * bnorm) - (zeta_bar * zeta_bar)).abs().sqrt();
+        let normx = norm(&x);
 
-        let test1 = norm_r / (bnorm + 1e-20);
-        let test2 = norm_ar / (norm(&x) + 1e-20);
+        let test1 = normr / (normb + 1e-20);
+        let test2 = norm_ar / ((norm_a * normr) + 1e-20);
+        let test3 = 1.0 / (cond_a + 1e-20);
+        let rtol = btol + atol * norm_a * normx / (normb + 1e-20);
 
-        if test1 < btol || test2 < atol {
+        if _verbose {
+            eprintln!("  LSMR iter {:>3}: ||r||/||b||={:.6e}  ||A'r||/(||A||·||r||)={:.6e}  1/condA={:.6e}  rtol={:.6e}",
+                _iter + 1, test1, test2, test3, rtol);
+        }
+
+        // Test3 (condition number) checked first, then test2, then test1
+        // matching MATLAB priority where later tests override earlier istop
+        if test3 <= ctol || test2 <= atol || test1 <= rtol {
+            if _verbose {
+                let reason = if test1 <= rtol { "test1 (residual)"
+                } else if test2 <= atol { "test2 (||A'r||)"
+                } else { "test3 (cond(A))" };
+                eprintln!("  LSMR converged at iteration {} via {}", _iter + 1, reason);
+            }
             break;
         }
     }
@@ -357,7 +485,11 @@ where
 // Weight Functions
 // ============================================================================
 
-/// Compute Laplacian of a 3D field using finite differences
+/// Compute Laplacian of a 3D field using mask-adaptive finite differences
+///
+/// Matches MATLAB's lap1_mex.c: uses central differences where both neighbors
+/// are in the mask, forward/backward one-sided stencils near mask boundaries,
+/// and zero contribution where neither neighbor is in the mask.
 fn compute_laplacian(
     f: &[f64],
     mask: &[u8],
@@ -371,39 +503,137 @@ fn compute_laplacian(
     let hy = 1.0 / (vsy * vsy);
     let hz = 1.0 / (vsz * vsz);
 
+    let nxny = nx * ny;
+
     for k in 0..nz {
-        let km1 = if k > 0 { k - 1 } else { 0 };
-        let kp1 = if k + 1 < nz { k + 1 } else { nz - 1 };
-
         for j in 0..ny {
-            let jm1 = if j > 0 { j - 1 } else { 0 };
-            let jp1 = if j + 1 < ny { j + 1 } else { ny - 1 };
-
+            let jk_offset = j * nx + k * nxny;
             for i in 0..nx {
-                let idx = i + j * nx + k * nx * ny;
+                let l = i + jk_offset;
 
-                if mask[idx] == 0 {
+                if mask[l] == 0 {
                     continue;
                 }
 
-                let im1 = if i > 0 { i - 1 } else { 0 };
-                let ip1 = if i + 1 < nx { i + 1 } else { nx - 1 };
+                // X-axis contribution
+                lap[l] += hx * lap1_axis(f, mask, l, 1, nx, i, nx);
 
-                let idx_xm = im1 + j * nx + k * nx * ny;
-                let idx_xp = ip1 + j * nx + k * nx * ny;
-                let idx_ym = i + jm1 * nx + k * nx * ny;
-                let idx_yp = i + jp1 * nx + k * nx * ny;
-                let idx_zm = i + j * nx + km1 * nx * ny;
-                let idx_zp = i + j * nx + kp1 * nx * ny;
+                // Y-axis contribution
+                lap[l] += hy * lap1_axis(f, mask, l, nx, nxny, j * nx, nxny);
 
-                lap[idx] = hx * (f[idx_xp] - 2.0 * f[idx] + f[idx_xm])
-                         + hy * (f[idx_yp] - 2.0 * f[idx] + f[idx_ym])
-                         + hz * (f[idx_zp] - 2.0 * f[idx] + f[idx_zm]);
+                // Z-axis contribution
+                lap[l] += hz * lap1_axis(f, mask, l, nxny, n_total, k * nxny, n_total);
             }
         }
     }
 
     lap
+}
+
+/// Compute second derivative along one axis using mask-adaptive stencil.
+///
+/// Matches MATLAB's lap1_mex.c logic:
+/// - `idx = 2*G[l+a] + G[l-a]` selects the stencil type:
+///   3 = central, 2 = forward, 1 = backward, 0 = zero
+/// - At domain boundaries: i=0 → forward, i=N-1 → backward
+///
+/// # Arguments
+/// * `f` - field values
+/// * `mask` - binary mask
+/// * `l` - linear index of current voxel
+/// * `a` - stride for this axis (1 for x, nx for y, nx*ny for z)
+/// * `n_axis` - total extent for this axis (nx for x, nx*ny for y, nx*ny*nz for z)
+/// * `coord` - axis coordinate as linear offset (i for x, j*nx for y, k*nx*ny for z)
+/// * `n_total` - total number of voxels (only used for z boundary detection)
+#[inline]
+fn lap1_axis(
+    f: &[f64],
+    mask: &[u8],
+    l: usize,
+    a: usize,
+    n_axis: usize,
+    coord: usize,
+    n_total: usize,
+) -> f64 {
+    // Determine the stencil type based on mask of neighbors and boundary
+    // MATLAB: (i-1) < NXX ? 2*G[l+a]+G[l-a] : (i==0)*2 + (i==NX)
+    // where NXX = N_axis_size - 2 (using size_t underflow trick for boundary detection)
+    let n_end = n_axis - a; // corresponds to NX, NY, NZ in MATLAB (last element coord)
+    let n_interior = n_axis - 2 * a; // corresponds to NXX, NYY, NZZ
+
+    let stencil = if coord.wrapping_sub(a) < n_interior {
+        // Interior: check mask neighbors
+        2 * (mask[l + a] as u8) + (mask[l - a] as u8)
+    } else {
+        // Boundary: first → forward(2), last → backward(1)
+        if coord == 0 { 2 } else if coord == n_end { 1 } else { 0 }
+    };
+
+    match stencil {
+        3 => {
+            // Central: u[l-a] - 2u[l] + u[l+a]
+            f[l - a] - 2.0 * f[l] + f[l + a]
+        }
+        2 => {
+            // Forward one-sided
+            lap1_forward(f, mask, l, a, n_axis, coord, n_total)
+        }
+        1 => {
+            // Backward one-sided
+            lap1_backward(f, mask, l, a, n_axis, coord, n_total)
+        }
+        _ => 0.0, // Neither neighbor in mask
+    }
+}
+
+/// Forward one-sided second derivative (matching MATLAB's fd/ff functions)
+#[inline]
+fn lap1_forward(
+    f: &[f64],
+    mask: &[u8],
+    l: usize,
+    a: usize,
+    n_axis: usize,
+    coord: usize,
+    _n_total: usize,
+) -> f64 {
+    // 4th order: 2u - 5u[+a] + 4u[+2a] - u[+3a]
+    if coord + 3 * a < n_axis && mask[l + 2 * a] != 0 && mask[l + 3 * a] != 0 {
+        2.0 * f[l] - 5.0 * f[l + a] + 4.0 * f[l + 2 * a] - f[l + 3 * a]
+    }
+    // 2nd order: u - 2u[+a] + u[+2a]
+    else if coord + 2 * a < n_axis && mask[l + 2 * a] != 0 {
+        f[l] - 2.0 * f[l + a] + f[l + 2 * a]
+    }
+    // 1st order: u[+a] - u
+    else {
+        f[l + a] - f[l]
+    }
+}
+
+/// Backward one-sided second derivative (matching MATLAB's bd/bf functions)
+#[inline]
+fn lap1_backward(
+    f: &[f64],
+    mask: &[u8],
+    l: usize,
+    a: usize,
+    n_axis: usize,
+    coord: usize,
+    _n_total: usize,
+) -> f64 {
+    // 4th order: -u[-3a] + 4u[-2a] - 5u[-a] + 2u
+    if coord.wrapping_sub(3 * a) < n_axis && mask[l - 3 * a] != 0 && mask[l - 2 * a] != 0 {
+        -f[l - 3 * a] + 4.0 * f[l - 2 * a] - 5.0 * f[l - a] + 2.0 * f[l]
+    }
+    // 2nd order: u[-2a] - 2u[-a] + u
+    else if coord.wrapping_sub(2 * a) < n_axis && mask[l - 2 * a] != 0 {
+        f[l - 2 * a] - 2.0 * f[l - a] + f[l]
+    }
+    // 1st order: u[-a] - u
+    else {
+        f[l - a] - f[l]
+    }
 }
 
 /// Laplacian weights for iLSQR (Equation 7)
@@ -434,15 +664,11 @@ fn laplacian_weights_ilsqr(
         return w;
     }
 
-    // Sort for percentile calculation
+    // Sort for percentile calculation (MATLAB: prctile with linear interpolation)
     masked_lap.sort_by(|a, b| a.partial_cmp(b).unwrap());
 
-    let n_masked = masked_lap.len();
-    let idx_min = ((pmin / 100.0) * n_masked as f64) as usize;
-    let idx_max = ((pmax / 100.0) * n_masked as f64).min(n_masked as f64 - 1.0) as usize;
-
-    let thr_min = masked_lap[idx_min.min(n_masked - 1)];
-    let thr_max = masked_lap[idx_max.min(n_masked - 1)];
+    let thr_min = prctile(&masked_lap, pmin);
+    let thr_max = prctile(&masked_lap, pmax);
 
     let range = thr_max - thr_min;
 
@@ -483,21 +709,16 @@ fn dipole_kspace_weights_ilsqr(
         w[i] = d[i].abs().powf(n_exp);
     }
 
-    // Collect non-zero values for percentile
-    let mut vals: Vec<f64> = w.iter().filter(|&&v| v > 1e-20).copied().collect();
+    // Percentile on ALL values (matching MATLAB: prctile(vec(w), [pa, pb]))
+    let mut vals: Vec<f64> = w.to_vec();
+    vals.sort_by(|a, b| a.partial_cmp(b).unwrap());
 
     if vals.is_empty() {
         return vec![0.0; len];
     }
 
-    vals.sort_by(|a, b| a.partial_cmp(b).unwrap());
-
-    let n_vals = vals.len();
-    let idx_a = ((pa / 100.0) * n_vals as f64) as usize;
-    let idx_b = ((pb / 100.0) * n_vals as f64).min(n_vals as f64 - 1.0) as usize;
-
-    let ab_min = vals[idx_a.min(n_vals - 1)];
-    let ab_max = vals[idx_b.min(n_vals - 1)];
+    let ab_min = prctile(&vals, pa);
+    let ab_max = prctile(&vals, pb);
 
     let range = ab_max - ab_min;
 
@@ -512,6 +733,68 @@ fn dipole_kspace_weights_ilsqr(
     w
 }
 
+/// Mask-adaptive forward gradient (matching MATLAB's gradfm_mex)
+///
+/// For masked voxels: uses forward difference where forward neighbor is in mask,
+/// falls back to backward difference, or 0 if neither neighbor is in mask.
+/// Outside mask: gradient is 0.
+fn fgrad_masked(
+    f: &[f64],
+    mask: &[u8],
+    nx: usize, ny: usize, nz: usize,
+    vsx: f64, vsy: f64, vsz: f64,
+) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
+    let n_total = nx * ny * nz;
+    let mut dx = vec![0.0; n_total];
+    let mut dy = vec![0.0; n_total];
+    let mut dz = vec![0.0; n_total];
+
+    let hx = 1.0 / vsx;
+    let hy = 1.0 / vsy;
+    let hz = 1.0 / vsz;
+
+    let nxny = nx * ny;
+
+    for k in 0..nz {
+        for j in 0..ny {
+            let jk = j * nx + k * nxny;
+            for i in 0..nx {
+                let l = i + jk;
+                if mask[l] == 0 { continue; }
+
+                // X-axis: forward if possible, else backward, else 0
+                dx[l] = if i < nx - 1 && mask[l + 1] != 0 {
+                    hx * (f[l + 1] - f[l])
+                } else if i > 0 && mask[l - 1] != 0 {
+                    hx * (f[l] - f[l - 1])
+                } else {
+                    0.0
+                };
+
+                // Y-axis
+                dy[l] = if j < ny - 1 && mask[l + nx] != 0 {
+                    hy * (f[l + nx] - f[l])
+                } else if j > 0 && mask[l - nx] != 0 {
+                    hy * (f[l] - f[l - nx])
+                } else {
+                    0.0
+                };
+
+                // Z-axis
+                dz[l] = if k < nz - 1 && mask[l + nxny] != 0 {
+                    hz * (f[l + nxny] - f[l])
+                } else if k > 0 && mask[l - nxny] != 0 {
+                    hz * (f[l] - f[l - nxny])
+                } else {
+                    0.0
+                };
+            }
+        }
+    }
+
+    (dx, dy, dz)
+}
+
 /// Gradient weights for streaking artifact estimation (Equation 15)
 fn gradient_weights_ilsqr(
     x: &[f64],
@@ -521,8 +804,8 @@ fn gradient_weights_ilsqr(
     pmin: f64,
     pmax: f64,
 ) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
-    // Compute gradients
-    let (gx, gy, gz) = fgrad(x, nx, ny, nz, vsx, vsy, vsz);
+    // MATLAB uses gradf(x, mask, vsz) — mask-adaptive forward differences
+    let (gx, gy, gz) = fgrad_masked(x, mask, nx, ny, nz, vsx, vsy, vsz);
 
     // Apply percentile-based weights to each component
     let wx = gradient_weights_component(&gx, mask, pmin, pmax);
@@ -554,12 +837,8 @@ fn gradient_weights_component(
 
     masked_g.sort_by(|a, b| a.partial_cmp(b).unwrap());
 
-    let n_masked = masked_g.len();
-    let idx_min = ((pmin / 100.0) * n_masked as f64) as usize;
-    let idx_max = ((pmax / 100.0) * n_masked as f64).min(n_masked as f64 - 1.0) as usize;
-
-    let thr_min = masked_g[idx_min.min(n_masked - 1)];
-    let thr_max = masked_g[idx_max.min(n_masked - 1)];
+    let thr_min = prctile(&masked_g, pmin);
+    let thr_max = prctile(&masked_g, pmax);
 
     let range = thr_max - thr_min;
 
@@ -615,6 +894,20 @@ fn sign_array(x: &[f64]) -> Vec<f64> {
         else if v < 0.0 { -1.0 }
         else { 0.0 }
     }).collect()
+}
+
+/// Percentile with linear interpolation (matching MATLAB's prctile)
+///
+/// Input must be a sorted slice. Returns the p-th percentile (p in [0, 100]).
+fn prctile(sorted: &[f64], p: f64) -> f64 {
+    let n = sorted.len();
+    if n == 0 { return 0.0; }
+    if n == 1 { return sorted[0]; }
+    let h = (p / 100.0) * (n - 1) as f64;
+    let lo = h.floor() as usize;
+    let hi = (lo + 1).min(n - 1);
+    let frac = h - lo as f64;
+    sorted[lo] + frac * (sorted[hi] - sorted[lo])
 }
 
 // ============================================================================
@@ -689,7 +982,7 @@ fn lsqr_step(
     };
 
     // Solve with complex LSQR
-    let x_lsqr = lsqr_complex(apply_a, apply_ah, &b, tol_lsqr, maxit_lsqr);
+    let x_lsqr = lsqr_complex(apply_a, apply_ah, &b, tol_lsqr, maxit_lsqr, false);
 
     // IFFT to get result in image space
     let mut x_ifft = x_lsqr;
@@ -740,19 +1033,20 @@ fn fastqsm_step(
     let r_smv = 3.0;
     let h = smv_kernel(nx, ny, nz, vsx, vsy, vsz, r_smv);
 
-    // FFT of SMV kernel
+    // FFT of SMV kernel — take real part to match MATLAB: real(fft3(ifftshift(h)))
     let h_complex: Vec<Complex64> = h.iter()
         .map(|&v| Complex64::new(v, 0.0))
         .collect();
-    let mut h_fft = h_complex;
-    workspace.fft3d(&mut h_fft);
+    let mut h_fft_complex = h_complex;
+    workspace.fft3d(&mut h_fft_complex);
+    let h_fft: Vec<f64> = h_fft_complex.iter().map(|c| c.re).collect();
 
     // Equation (9): Apply weighted combination
     // x = FFT(mask .* IFFT(wfs .* x + (1-wfs) .* (h .* x)))
     let mut x_filtered: Vec<Complex64> = x.iter()
         .zip(wfs.iter())
         .zip(h_fft.iter())
-        .map(|((xi, &wi), hi)| {
+        .map(|((xi, &wi), &hi)| {
             xi * wi + xi * hi * (1.0 - wi)
         })
         .collect();
@@ -774,7 +1068,7 @@ fn fastqsm_step(
     let mut x_filtered2: Vec<Complex64> = x_filtered.iter()
         .zip(wfs.iter())
         .zip(h_fft.iter())
-        .map(|((xi, &wi), hi)| {
+        .map(|((xi, &wi), &hi)| {
             xi * wi + xi * hi * (1.0 - wi)
         })
         .collect();
@@ -809,33 +1103,21 @@ fn fastqsm_step(
 
     // Equations (13-14): Linear regression to scale FastQSM
     // Solve: xtkd ≈ a * xfs + b
-    let sum_xfs: f64 = x_fs.iter().zip(mask.iter())
-        .filter(|(_, &m)| m > 0)
-        .map(|(&v, _)| v)
+    // MATLAB reference uses ALL voxels (including zeros outside mask) for the regression
+    let sum_xfs: f64 = x_fs.iter().map(|&v| v).sum();
+    let sum_xtkd: f64 = x_tkd.iter().map(|&v| v).sum();
+    let sum_xfs2: f64 = x_fs.iter().map(|&v| v * v).sum();
+    let sum_xfs_xtkd: f64 = x_fs.iter().zip(x_tkd.iter())
+        .map(|(&xf, &xt)| xf * xt)
         .sum();
 
-    let sum_xtkd: f64 = x_tkd.iter().zip(mask.iter())
-        .filter(|(_, &m)| m > 0)
-        .map(|(&v, _)| v)
-        .sum();
-
-    let sum_xfs2: f64 = x_fs.iter().zip(mask.iter())
-        .filter(|(_, &m)| m > 0)
-        .map(|(&v, _)| v * v)
-        .sum();
-
-    let sum_xfs_xtkd: f64 = x_fs.iter().zip(x_tkd.iter()).zip(mask.iter())
-        .filter(|(_, &m)| m > 0)
-        .map(|((&xf, &xt), _)| xf * xt)
-        .sum();
-
-    let n_mask: f64 = mask.iter().filter(|&&m| m > 0).count() as f64;
+    let n_all: f64 = n_total as f64;
 
     // Solve 2x2 system: [sum_xfs2, sum_xfs; sum_xfs, n] * [a; b] = [sum_xfs_xtkd; sum_xtkd]
-    let det = sum_xfs2 * n_mask - sum_xfs * sum_xfs;
+    let det = sum_xfs2 * n_all - sum_xfs * sum_xfs;
 
     let (a, b) = if det.abs() > 1e-20 {
-        let a = (n_mask * sum_xfs_xtkd - sum_xfs * sum_xtkd) / det;
+        let a = (n_all * sum_xfs_xtkd - sum_xfs * sum_xtkd) / det;
         let b = (sum_xfs2 * sum_xtkd - sum_xfs * sum_xfs_xtkd) / det;
         (a, b)
     } else {
@@ -936,12 +1218,14 @@ fn susceptibility_artifacts_step(
         let wyy: Vec<f64> = wy.iter().zip(yy.iter()).map(|(&w, &y)| w * y).collect();
         let wyz: Vec<f64> = wz.iter().zip(yz.iter()).map(|(&w, &y)| w * y).collect();
 
-        // Adjoint of gradient (negative divergence)
+        // Adjoint of forward gradient = -div (bdiv returns +div, so negate)
+        // MATLAB's gradfp_adj_mex uses h = -1/voxel_size, including the negation.
+        // Rust's bdiv uses h = +1/voxel_size, so we negate here.
         let div = bdiv(&wyx, &wyy, &wyz, nx, ny, nz, vsx, vsy, vsz);
 
         // Apply Mic in k-space
         let div_complex: Vec<Complex64> = div.iter()
-            .map(|&v| Complex64::new(v, 0.0))
+            .map(|&v| Complex64::new(-v, 0.0))
             .collect();
 
         let mut div_fft = div_complex;
@@ -1139,7 +1423,7 @@ mod tests {
             x.iter().zip(diag_ah.iter()).map(|(&xi, &di)| xi * di).collect()
         };
 
-        let x = lsqr_complex(apply_a, apply_ah, &b, 1e-10, 100);
+        let x = lsqr_complex(apply_a, apply_ah, &b, 1e-10, 100, false);
 
         for (i, (xi, ei)) in x.iter().zip(expected.iter()).enumerate() {
             assert!((xi.re - ei.re).abs() < 1e-6,
