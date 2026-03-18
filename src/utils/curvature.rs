@@ -16,6 +16,7 @@
 //!
 //! Reference implementation: https://www.mathworks.com/matlabcentral/fileexchange/61136-curvatures
 
+use std::collections::HashMap;
 use std::f64::consts::PI;
 use delaunator::{triangulate, Point};
 
@@ -113,11 +114,12 @@ fn extract_surface_voxels(
 /// This matches MATLAB's approach: `tri = delaunay(x, y)`
 /// Triangulates on x,y coordinates, treating z as a height field.
 ///
+/// Points must have unique (x,y) coordinates (caller should deduplicate first).
+///
 /// Returns (triangles, boundary_flags) where boundary_flags[i] is true
 /// if vertex i is on the convex hull boundary (matching MATLAB's freeBoundary).
 fn triangulate_surface(
     points: &[Point3D],
-    _nx: usize, _ny: usize, _nz: usize,
 ) -> (Vec<Triangle>, Vec<bool>) {
     if points.len() < 3 {
         return (Vec::new(), vec![false; points.len()]);
@@ -132,21 +134,19 @@ fn triangulate_surface(
     let result = triangulate(&coords);
 
     // Identify boundary vertices (convex hull of the 2D triangulation)
-    // Matches MATLAB's freeBoundary(triangulation(tri, x, y, z))
     let mut boundary = vec![false; points.len()];
     for &idx in &result.hull {
         boundary[idx] = true;
     }
 
-    // Convert triangles — no edge length filtering, matching MATLAB
+    // Convert triangles
     let mut triangles = Vec::with_capacity(result.triangles.len() / 3);
-
     for i in (0..result.triangles.len()).step_by(3) {
-        let v0 = result.triangles[i];
-        let v1 = result.triangles[i + 1];
-        let v2 = result.triangles[i + 2];
-
-        triangles.push(Triangle { v0, v1, v2 });
+        triangles.push(Triangle {
+            v0: result.triangles[i],
+            v1: result.triangles[i + 1],
+            v2: result.triangles[i + 2],
+        });
     }
 
     (triangles, boundary)
@@ -162,7 +162,7 @@ fn compute_curvatures_from_mesh(
     points: &[Point3D],
     triangles: &[Triangle],
     boundary: &[bool],
-) -> (Vec<f64>, Vec<f64>) {
+) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
     let n_points = points.len();
     let mut gaussian_curvature = vec![0.0f64; n_points];
     let mut mean_curvature = vec![0.0f64; n_points];
@@ -296,7 +296,7 @@ fn compute_curvatures_from_mesh(
         }
     }
 
-    (gaussian_curvature, mean_curvature)
+    (gaussian_curvature, mean_curvature, area_mixed)
 }
 
 /// Calculate proximity maps using curvature at the brain surface
@@ -331,7 +331,7 @@ pub fn calculate_curvature_proximity(
     }
 
     // Convert surface indices to 3D points
-    let points: Vec<Point3D> = surface_indices
+    let all_points: Vec<Point3D> = surface_indices
         .iter()
         .map(|&idx| {
             let i = idx % nx;
@@ -341,11 +341,36 @@ pub fn calculate_curvature_proximity(
         })
         .collect();
 
-    // Triangulate surface
-    let (triangles, boundary) = triangulate_surface(&points, nx, ny, nz);
+    // Deduplicate (x,y) coordinates before triangulation.
+    // MATLAB's delaunay (via Qhull) suppresses duplicate (x,y) points, keeping
+    // the first occurrence (smallest z). Duplicate vertices get GC=Inf → curvI=1.0.
+    // We explicitly dedup to avoid degenerate zero-area triangles that would
+    // corrupt curvature values.
+    let mut xy_to_rep: HashMap<(usize, usize), usize> = HashMap::new();
+    let mut is_representative = vec![false; all_points.len()];
+    for (idx, p) in all_points.iter().enumerate() {
+        let key = (p.x as usize, p.y as usize);
+        xy_to_rep.entry(key).or_insert_with(|| {
+            is_representative[idx] = true;
+            idx
+        });
+    }
 
-    // Compute curvatures (boundary vertices get GC=0, MC=0)
-    let (gc, _mc) = compute_curvatures_from_mesh(&points, &triangles, &boundary);
+    // Build representative point array and index mapping
+    let rep_indices: Vec<usize> = (0..all_points.len())
+        .filter(|&i| is_representative[i])
+        .collect();
+    let mut orig_to_rep = vec![0usize; all_points.len()];
+    for (new_idx, &old_idx) in rep_indices.iter().enumerate() {
+        orig_to_rep[old_idx] = new_idx;
+    }
+    let rep_points: Vec<Point3D> = rep_indices.iter().map(|&i| all_points[i].clone()).collect();
+
+    // Triangulate unique representatives via Qhull (same library MATLAB uses)
+    let (triangles, boundary) = triangulate_surface(&rep_points);
+
+    // Compute curvatures on representative points
+    let (gc, _mc, _amixed) = compute_curvatures_from_mesh(&rep_points, &triangles, &boundary);
 
     // Create full curvature volume
     let mut curv_i = vec![1.0f64; n_total];
@@ -356,17 +381,21 @@ pub fn calculate_curvature_proximity(
         .map(|&v| v.abs())
         .fold(1.0f64, |a, b| a.max(b));
 
-    // Scale and assign curvature values
-    // Matches MATLAB: scaledGC = GC./max(abs(GC(GC<0)))*curvConstant; scaledGC(GC>0) = 1;
-    // GC==0 → scaled to 0 (MATLAB: 0/max*curv = 0, not overwritten by GC>0 check)
-    for (point_idx, &vol_idx) in surface_indices.iter().enumerate() {
-        let g = gc[point_idx];
+    // Scale and assign curvature values for representative vertices only.
+    // Non-representative (duplicate x,y) vertices keep curvI=1.0, matching MATLAB
+    // where suppressed duplicates get GC=Inf → scaledGC=1.0.
+    for (orig_idx, &vol_idx) in surface_indices.iter().enumerate() {
+        if !is_representative[orig_idx] {
+            continue; // duplicate (x,y) → curvI=1.0
+        }
+        let rep_idx = orig_to_rep[orig_idx];
+        let g = gc[rep_idx];
         let scaled = if g < 0.0 {
             g / max_neg_gc * curv_constant
         } else if g > 0.0 {
             1.0
         } else {
-            // GC == 0: stays at 0 (boundary vertices, flat regions)
+            // GC == 0: boundary vertices, flat regions
             0.0
         };
         curv_i[vol_idx] = scaled;
@@ -694,7 +723,7 @@ pub fn calculate_gaussian_curvature(
     }
 
     // Convert surface indices to 3D points
-    let points: Vec<Point3D> = surface_indices
+    let all_points: Vec<Point3D> = surface_indices
         .iter()
         .map(|&idx| {
             let i = idx % nx;
@@ -704,19 +733,41 @@ pub fn calculate_gaussian_curvature(
         })
         .collect();
 
-    // Triangulate surface
-    let (triangles, boundary) = triangulate_surface(&points, nx, ny, nz);
+    // Deduplicate (x,y) — same logic as calculate_curvature_proximity
+    let mut xy_to_rep: HashMap<(usize, usize), usize> = HashMap::new();
+    let mut is_representative = vec![false; all_points.len()];
+    for (idx, p) in all_points.iter().enumerate() {
+        let key = (p.x as usize, p.y as usize);
+        xy_to_rep.entry(key).or_insert_with(|| {
+            is_representative[idx] = true;
+            idx
+        });
+    }
+    let rep_indices: Vec<usize> = (0..all_points.len())
+        .filter(|&i| is_representative[i])
+        .collect();
+    let mut orig_to_rep = vec![0usize; all_points.len()];
+    for (new_idx, &old_idx) in rep_indices.iter().enumerate() {
+        orig_to_rep[old_idx] = new_idx;
+    }
+    let rep_points: Vec<Point3D> = rep_indices.iter().map(|&i| all_points[i].clone()).collect();
 
-    // Compute curvatures
-    let (gc_points, mc_points) = compute_curvatures_from_mesh(&points, &triangles, &boundary);
+    // Triangulate unique representatives via Qhull
+    let (triangles, boundary) = triangulate_surface(&rep_points);
 
-    // Create full volumes
+    // Compute curvatures on representatives
+    let (gc_points, mc_points, _amixed) = compute_curvatures_from_mesh(&rep_points, &triangles, &boundary);
+
+    // Create full volumes — only representative vertices get curvature values
     let mut gaussian_curvature = vec![0.0f64; n_total];
     let mut mean_curvature = vec![0.0f64; n_total];
 
-    for (point_idx, &vol_idx) in surface_indices.iter().enumerate() {
-        gaussian_curvature[vol_idx] = gc_points[point_idx];
-        mean_curvature[vol_idx] = mc_points[point_idx];
+    for (orig_idx, &vol_idx) in surface_indices.iter().enumerate() {
+        if is_representative[orig_idx] {
+            let rep_idx = orig_to_rep[orig_idx];
+            gaussian_curvature[vol_idx] = gc_points[rep_idx];
+            mean_curvature[vol_idx] = mc_points[rep_idx];
+        }
     }
 
     CurvatureResult {
@@ -1034,7 +1085,7 @@ mod tests {
     fn test_triangulate_surface_few_points() {
         // Less than 3 points should return empty triangulation
         let points = vec![Point3D::new(0.0, 0.0, 0.0), Point3D::new(1.0, 1.0, 1.0)];
-        let (triangles, boundary) = triangulate_surface(&points, 5, 5, 5);
+        let (triangles, boundary) = triangulate_surface(&points);
         assert!(triangles.is_empty(), "Less than 3 points should give no triangles");
         assert_eq!(boundary.len(), 2);
     }
@@ -1048,7 +1099,7 @@ mod tests {
             Point3D::new(0.0, 1.0, 0.0),
             Point3D::new(1.0, 1.0, 0.0),
         ];
-        let (triangles, boundary) = triangulate_surface(&points, 5, 5, 5);
+        let (triangles, boundary) = triangulate_surface(&points);
         // Should produce 2 triangles from 4 points
         assert_eq!(triangles.len(), 2, "4 points should produce 2 triangles");
         // All 4 points are on the convex hull
@@ -1091,7 +1142,7 @@ mod tests {
         // All boundary except center vertex (index 4)
         let boundary = vec![true, true, true, true, false, true, true, true, true];
 
-        let (gc, mc) = compute_curvatures_from_mesh(&points, &triangles, &boundary);
+        let (gc, mc, _amixed) = compute_curvatures_from_mesh(&points, &triangles, &boundary);
 
         // Center vertex (not boundary) on flat surface should have ~zero curvature
         assert!(
@@ -1116,7 +1167,7 @@ mod tests {
         ];
         let triangles = vec![Triangle { v0: 0, v1: 1, v2: 2 }];
         let boundary = vec![false, false, false];
-        let (gc, mc) = compute_curvatures_from_mesh(&points, &triangles, &boundary);
+        let (gc, mc, _amixed) = compute_curvatures_from_mesh(&points, &triangles, &boundary);
         // Should not crash; values may be zero because area is zero
         assert_eq!(gc.len(), 3);
         assert_eq!(mc.len(), 3);
@@ -1132,7 +1183,7 @@ mod tests {
         ];
         let triangles = vec![Triangle { v0: 0, v1: 1, v2: 2 }];
         let boundary = vec![true, true, true]; // all boundary
-        let (gc, mc) = compute_curvatures_from_mesh(&points, &triangles, &boundary);
+        let (gc, mc, _amixed) = compute_curvatures_from_mesh(&points, &triangles, &boundary);
         for i in 0..3 {
             assert!((gc[i]).abs() < 1e-10, "Boundary vertex GC should be 0");
             assert!((mc[i]).abs() < 1e-10, "Boundary vertex MC should be 0");

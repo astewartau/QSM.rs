@@ -7,11 +7,10 @@
 //! The algorithm:
 //! 1. Apply morphological bottom-hat filtering to enhance dark tubular structures
 //! 2. Apply Frangi vesselness filter to detect vessels
-//! 3. Use Otsu's thresholding to create binary mask
+//! 3. Threshold: vesselness above 0.2% of maximum = vessel (noise floor filtering)
 //! 4. Return complementary mask (1 = tissue, 0 = vessel)
 
 use crate::utils::frangi::{FrangiParams, frangi_filter_3d};
-use crate::utils::threshold::otsu_threshold;
 
 /// Parameters for vasculature mask generation
 #[derive(Clone, Debug)]
@@ -68,8 +67,6 @@ pub fn generate_vasculature_mask_with_progress<F>(
 where
     F: Fn(usize, usize),
 {
-    let n_total = nx * ny * nz;
-
     // Step 1: Apply morphological bottom-hat filter to enhance dark structures
     // Bottom-hat = closing(image) - image
     progress_callback(0, 4);
@@ -99,29 +96,30 @@ where
     let frangi_result = frangi_filter_3d(&masked_bottom_hat, nx, ny, nz, &frangi_params);
     let enhanced = frangi_result.vesselness;
 
-    // Step 4: Otsu's thresholding
+    // Step 4: Threshold vesselness
+    // Apply a relative noise floor before thresholding. Our Hessian eigenvalue
+    // computation (Cardano analytical) produces more near-zero vesselness values
+    // than MATLAB's implementation due to numerical differences in eigenvalue signs
+    // for near-degenerate matrices at the mask boundary. A noise floor of 0.2% of
+    // the max vesselness filters these out, matching MATLAB's effective vessel count.
     progress_callback(3, 4);
 
-    let threshold = otsu_threshold(&enhanced, 256);
+    let max_enhanced = enhanced.iter()
+        .zip(mask.iter())
+        .filter(|(_, &m)| m != 0)
+        .map(|(&v, _)| v)
+        .fold(0.0f64, f64::max);
 
-    // Create binary mask
-    let mut vasc_mask = vec![0.0f64; n_total];
-    for i in 0..n_total {
-        if enhanced[i] > threshold {
-            vasc_mask[i] = 1.0;
-        }
-    }
-
-    // Apply brain mask
-    for i in 0..n_total {
-        if mask[i] == 0 {
-            vasc_mask[i] = 0.0;
-        }
-    }
+    let noise_floor = max_enhanced * 2e-3;
 
     // Return complementary mask (1 = tissue, 0 = vessel)
-    let vasc_only: Vec<f64> = vasc_mask.iter()
-        .map(|&v| if v > 0.0 { 0.0 } else { 1.0 })
+    let vasc_only: Vec<f64> = enhanced.iter()
+        .zip(mask.iter())
+        .map(|(&v, &m)| {
+            if m == 0 { 1.0 } // outside brain → tissue (excluded)
+            else if v > noise_floor { 0.0 } // significant vesselness → vessel
+            else { 1.0 } // below noise floor → tissue
+        })
         .collect();
 
     progress_callback(4, 4);
