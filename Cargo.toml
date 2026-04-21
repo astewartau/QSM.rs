@@ -9,6 +9,7 @@ crate-type = ["rlib"]
 
 [features]
 default = []
+parallel = ["rayon"]
 simd = ["wide"]
 
 [dependencies]
@@ -22,6 +23,9 @@ nifti = { version = "0.17", default-features = false, features = ["ndarray_volum
 ndarray = "0.16"
 flate2 = "1.1"
 bytemuck = "1.24"
+
+# Parallelism (optional)
+rayon = { version = "1", optional = true }
 
 # SIMD acceleration (optional)
 wide = { version = "0.7", optional = true }

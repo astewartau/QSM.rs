@@ -46,6 +46,9 @@ fn test_bgremove_sharp() {
     let (nx, ny, nz) = data.dims;
     let (vsx, vsy, vsz) = data.voxel_size;
 
+    // Save ground truth tissue field for figure generation
+    common::save_center_slices(&data.fieldmap_local, &data.mask, data.dims, "ground_truth_local_field");
+
     let ((result, _new_mask), elapsed) = run_timed!("SHARP", bgremove::sharp(
         &data.fieldmap,
         &data.mask,
@@ -229,6 +232,9 @@ fn test_inversion_tkd() {
     let data = TestData::load().expect("Failed to load test data");
     let (nx, ny, nz) = data.dims;
     let (vsx, vsy, vsz) = data.voxel_size;
+
+    // Save ground truth susceptibility map for figure generation
+    common::save_center_slices(&data.chi, &data.mask, data.dims, "ground_truth_chi");
 
     let (result, elapsed) = run_timed!("TKD", inversion::tkd(
         &data.fieldmap_local,
@@ -1160,4 +1166,279 @@ fn benchmark_all_algorithms() {
     }
 
     println!("\n{}", "=".repeat(140));
+}
+
+// ============================================================================
+// Combinatorial BFR + Inversion Test
+// ============================================================================
+
+/// Run all combinations of background field removal + dipole inversion methods,
+/// plus end-to-end pipelines (TGV, QSMART), and write full challenge metrics to
+/// a CSV file.
+///
+/// Run with: cargo test --release test_all_combinations -- --ignored --nocapture
+#[test]
+#[ignore]
+fn test_all_combinations() {
+    use std::io::Write;
+
+    println!("[INFO] Loading test data...");
+    let data = TestData::load().expect("Failed to load test data");
+    let (nx, ny, nz) = data.dims;
+    let (vsx, vsy, vsz) = data.voxel_size;
+    let n_total = nx * ny * nz;
+
+    let csv_path = "combo_results.csv";
+    let mut csv = std::fs::File::create(csv_path).expect("Failed to create CSV");
+    writeln!(csv, "BFR,Inversion,NRMSE%,Detrend%,Tissue%,Blood%,DGM%,DGM_Lin,Calc_Dev,Streak,Corr,XSIM,BFR_Time,Inv_Time,Total_Time").unwrap();
+
+    /// Write one row to the CSV and print to stdout
+    fn emit_row(
+        csv: &mut std::fs::File,
+        bfr_name: &str,
+        inv_name: &str,
+        c: &ChallengeMetrics,
+        bfr_time: f64,
+        inv_time: f64,
+    ) {
+        c.print();
+        let line = format!(
+            "{},{},{:.2},{:.2},{:.2},{:.2},{:.2},{:.4},{:.4},{:.4},{:.4},{:.4},{:.2},{:.2},{:.2}",
+            bfr_name, inv_name,
+            c.nrmse, c.nrmse_detrend, c.nrmse_tissue, c.nrmse_blood, c.nrmse_dgm,
+            c.dgm_linearity, c.calc_moment_dev, c.calc_streak, c.correlation, c.xsim,
+            bfr_time, inv_time, bfr_time + inv_time,
+        );
+        writeln!(csv, "{}", line).unwrap();
+        println!("CSV: {}", line);
+    }
+
+    // =========================================================================
+    // Step 1: Run all BFR methods
+    // =========================================================================
+    println!("\n{}", "=".repeat(120));
+    println!("STEP 1: BACKGROUND FIELD REMOVAL");
+    println!("{}", "=".repeat(120));
+
+    struct BfrResult {
+        name: String,
+        local_field: Vec<f64>,
+        mask: Vec<u8>,
+        elapsed: std::time::Duration,
+    }
+
+    let mut bfr_results: Vec<BfrResult> = Vec::new();
+
+    // SHARP
+    let ((result, mask), elapsed) = run_timed!("SHARP", bgremove::sharp(
+        &data.fieldmap, &data.mask, nx, ny, nz, vsx, vsy, vsz, 6.0, 0.05
+    ));
+    TestResult::new("SHARP", &result, &data.fieldmap_local, &data.mask, data.dims).print_with_time(elapsed);
+    bfr_results.push(BfrResult { name: "SHARP".into(), local_field: result, mask, elapsed });
+
+    // V-SHARP
+    let radii: Vec<f64> = (1..=12).map(|r| r as f64).collect();
+    let ((result, mask), elapsed) = run_timed!("V-SHARP", bgremove::vsharp(
+        &data.fieldmap, &data.mask, nx, ny, nz, vsx, vsy, vsz, &radii, 0.05
+    ));
+    TestResult::new("V-SHARP", &result, &data.fieldmap_local, &data.mask, data.dims).print_with_time(elapsed);
+    bfr_results.push(BfrResult { name: "V-SHARP".into(), local_field: result, mask, elapsed });
+
+    // PDF
+    let (result, elapsed) = run_timed!("PDF", bgremove::pdf(
+        &data.fieldmap, &data.mask, nx, ny, nz, vsx, vsy, vsz, data.b0_dir, 1e-5, 100
+    ));
+    TestResult::new("PDF", &result, &data.fieldmap_local, &data.mask, data.dims).print_with_time(elapsed);
+    bfr_results.push(BfrResult { name: "PDF".into(), local_field: result, mask: data.mask.clone(), elapsed });
+
+    // iSMV
+    let ((result, mask), elapsed) = run_timed!("iSMV", bgremove::ismv(
+        &data.fieldmap, &data.mask, nx, ny, nz, vsx, vsy, vsz, 5.0, 1e-6, 50
+    ));
+    TestResult::new("iSMV", &result, &data.fieldmap_local, &data.mask, data.dims).print_with_time(elapsed);
+    bfr_results.push(BfrResult { name: "iSMV".into(), local_field: result, mask, elapsed });
+
+    // LBV
+    let ((result, mask), elapsed) = run_timed!("LBV", bgremove::lbv_default(
+        &data.fieldmap, &data.mask, nx, ny, nz, vsx, vsy, vsz
+    ));
+    TestResult::new("LBV", &result, &data.fieldmap_local, &data.mask, data.dims).print_with_time(elapsed);
+    bfr_results.push(BfrResult { name: "LBV".into(), local_field: result, mask, elapsed });
+
+    // Ground truth local field (baseline — shows inversion-only error)
+    bfr_results.push(BfrResult {
+        name: "GT-Field".into(),
+        local_field: data.fieldmap_local.clone(),
+        mask: data.mask.clone(),
+        elapsed: std::time::Duration::from_secs(0),
+    });
+
+    // =========================================================================
+    // Step 2: All BFR x Inversion combinations
+    // =========================================================================
+    println!("\n{}", "=".repeat(120));
+    println!("STEP 2: ALL COMBINATIONS — BFR x INVERSION");
+    println!("{}", "=".repeat(120));
+
+    for bfr in &bfr_results {
+        println!("\n--- BFR: {} ({:.2?}) ---", bfr.name, bfr.elapsed);
+        let bt = bfr.elapsed.as_secs_f64();
+
+        // TKD
+        let (result, elapsed) = run_timed!("TKD", inversion::tkd(
+            &bfr.local_field, &bfr.mask, nx, ny, nz, vsx, vsy, vsz, data.b0_dir, 0.2
+        ));
+        let c = ChallengeMetrics::compute("TKD", &result, &data.chi, &bfr.mask, &data.segmentation, data.dims);
+        emit_row(&mut csv, &bfr.name, "TKD", &c, bt, elapsed.as_secs_f64());
+
+        // TSVD
+        let (result, elapsed) = run_timed!("TSVD", inversion::tsvd(
+            &bfr.local_field, &bfr.mask, nx, ny, nz, vsx, vsy, vsz, data.b0_dir, 0.2
+        ));
+        let c = ChallengeMetrics::compute("TSVD", &result, &data.chi, &bfr.mask, &data.segmentation, data.dims);
+        emit_row(&mut csv, &bfr.name, "TSVD", &c, bt, elapsed.as_secs_f64());
+
+        // Tikhonov
+        let (result, elapsed) = run_timed!("Tikhonov", inversion::tikhonov(
+            &bfr.local_field, &bfr.mask, nx, ny, nz, vsx, vsy, vsz,
+            data.b0_dir, 1e-3, inversion::tikhonov::Regularization::Gradient
+        ));
+        let c = ChallengeMetrics::compute("Tikhonov", &result, &data.chi, &bfr.mask, &data.segmentation, data.dims);
+        emit_row(&mut csv, &bfr.name, "Tikhonov", &c, bt, elapsed.as_secs_f64());
+
+        // TV-ADMM
+        let (result, elapsed) = run_timed!("TV-ADMM", inversion::tv_admm_default(
+            &bfr.local_field, &bfr.mask, nx, ny, nz, vsx, vsy, vsz
+        ));
+        let c = ChallengeMetrics::compute("TV-ADMM", &result, &data.chi, &bfr.mask, &data.segmentation, data.dims);
+        emit_row(&mut csv, &bfr.name, "TV-ADMM", &c, bt, elapsed.as_secs_f64());
+
+        // NLTV
+        let (result, elapsed) = run_timed!("NLTV", inversion::nltv_default(
+            &bfr.local_field, &bfr.mask, nx, ny, nz, vsx, vsy, vsz
+        ));
+        let c = ChallengeMetrics::compute("NLTV", &result, &data.chi, &bfr.mask, &data.segmentation, data.dims);
+        emit_row(&mut csv, &bfr.name, "NLTV", &c, bt, elapsed.as_secs_f64());
+
+        // RTS
+        let (result, elapsed) = run_timed!("RTS", inversion::rts(
+            &bfr.local_field, &bfr.mask, nx, ny, nz, vsx, vsy, vsz,
+            data.b0_dir, 0.15, 1e5, 10.0, 1e-2, 20, 4
+        ));
+        let c = ChallengeMetrics::compute("RTS", &result, &data.chi, &bfr.mask, &data.segmentation, data.dims);
+        emit_row(&mut csv, &bfr.name, "RTS", &c, bt, elapsed.as_secs_f64());
+
+        // MEDI
+        let n_std = vec![1.0; n_total];
+        let (result, elapsed) = run_timed!("MEDI", inversion::medi_l1(
+            &bfr.local_field, &n_std, &data.mag_echoes[0], &bfr.mask,
+            nx, ny, nz, vsx, vsy, vsz,
+            7.5e-5, data.b0_dir, false, false, 5.0, 1, 0.3, 0.01, 10, 30, 0.1
+        ));
+        let c = ChallengeMetrics::compute("MEDI", &result, &data.chi, &bfr.mask, &data.segmentation, data.dims);
+        emit_row(&mut csv, &bfr.name, "MEDI", &c, bt, elapsed.as_secs_f64());
+    }
+
+    // =========================================================================
+    // Step 3: End-to-end pipelines (TGV, QSMART)
+    // =========================================================================
+    println!("\n{}", "=".repeat(120));
+    println!("STEP 3: END-TO-END PIPELINES");
+    println!("{}", "=".repeat(120));
+
+    // --- TGV (from total field map) ---
+    {
+        let start = Instant::now();
+        let te = data.echo_times[0] as f32;
+        let b0 = data.field_strength as f32;
+        let gamma = 42.5781_f32;
+        let ppm_to_rad = 2.0 * std::f32::consts::PI * te * b0 * gamma;
+        let phase_for_tgv: Vec<f32> = data.fieldmap.iter()
+            .map(|&ppm| (ppm as f32) * ppm_to_rad)
+            .collect();
+
+        let step_size = 3.0_f32;
+        let res_tgv = (vsx as f32, vsy as f32, vsz as f32);
+        let (alpha0, alpha1) = get_default_alpha(2);
+        let iterations = get_default_iterations(res_tgv, step_size);
+        let tgv_params = TgvParams {
+            alpha0, alpha1, iterations, erosions: 3, step_size,
+            fieldstrength: b0, te, tol: 1e-5,
+        };
+        let result_f32 = tgv_qsm(
+            &phase_for_tgv, &data.mask, nx, ny, nz,
+            vsx as f32, vsy as f32, vsz as f32,
+            &tgv_params,
+            (data.b0_dir.0 as f32, data.b0_dir.1 as f32, data.b0_dir.2 as f32),
+        );
+        let elapsed = start.elapsed();
+        let result: Vec<f64> = result_f32.iter().map(|&v| v as f64).collect();
+
+        let c = ChallengeMetrics::compute("TGV", &result, &data.chi, &data.mask, &data.segmentation, data.dims);
+        emit_row(&mut csv, "E2E", "TGV", &c, 0.0, elapsed.as_secs_f64());
+    }
+
+    // --- QSMART (full pipeline from phase) ---
+    {
+        let start = Instant::now();
+
+        // Phase unwrapping
+        let unwrapped_phases: Vec<Vec<f64>> = data.phase_echoes.iter()
+            .map(|phase| laplacian_unwrap(phase, &data.mask, nx, ny, nz, vsx, vsy, vsz))
+            .collect();
+
+        // Multi-echo linear fit
+        let fit_result = multi_echo_linear_fit(
+            &unwrapped_phases, &data.mag_echoes, &data.echo_times, &data.mask,
+            false, 0.0,
+        );
+        let field_hz = field_to_hz(&fit_result.field);
+
+        // Vasculature mask
+        let vasc_mask = generate_vasculature_mask(
+            &data.mag_echoes[0], &data.mask, nx, ny, nz,
+            &VasculatureParams::default(),
+        );
+
+        let mask_f64: Vec<f64> = data.mask.iter().map(|&v| v as f64).collect();
+        let weighted_mask: Vec<f64> = mask_f64.iter()
+            .zip(fit_result.reliability_mask.iter())
+            .map(|(&m, &r)| if m > 0.0 && r > 0 { 1.0 } else { 0.0 })
+            .collect();
+
+        let gyro_rad: f64 = 2.675e8;
+        let ppm_factor = gyro_rad * data.field_strength / 1e6;
+        let scale_to_ppm = 1e6 / (42.576e6 * data.field_strength);
+
+        // Stage 1
+        let ones_vasc: Vec<f64> = vec![1.0; n_total];
+        let lfs_stage1 = sdf(&field_hz, &weighted_mask, &ones_vasc, nx, ny, nz, &SdfParams::stage1());
+        let mask_stage1_u8: Vec<u8> = weighted_mask.iter().map(|&v| if v > 0.1 { 1 } else { 0 }).collect();
+        let chi_stage1 = ilsqr_simple(&lfs_stage1, &mask_stage1_u8, nx, ny, nz, vsx, vsy, vsz, data.b0_dir, 0.01, 50);
+
+        // Stage 2
+        let field_hz_weighted: Vec<f64> = field_hz.iter().zip(weighted_mask.iter()).map(|(&f, &m)| f * m).collect();
+        let lfs_stage2 = sdf(&field_hz_weighted, &weighted_mask, &vasc_mask, nx, ny, nz, &SdfParams::stage2());
+        let mask_stage2_u8: Vec<u8> = weighted_mask.iter().zip(vasc_mask.iter())
+            .map(|(&wm, &v)| if wm > 0.1 && v > 0.5 { 1 } else { 0 }).collect();
+        let chi_stage2 = ilsqr_simple(&lfs_stage2, &mask_stage2_u8, nx, ny, nz, vsx, vsy, vsz, data.b0_dir, 0.01, 50);
+
+        // Offset adjustment
+        let removed_voxels: Vec<f64> = weighted_mask.iter().zip(vasc_mask.iter()).map(|(&wm, &v)| wm - v).collect();
+        let lfs_stage1_ppm: Vec<f64> = lfs_stage1.iter().map(|&v| v * ppm_factor).collect();
+        let chi_qsmart_raw = adjust_offset(
+            &removed_voxels, &lfs_stage1_ppm, &chi_stage1, &chi_stage2,
+            nx, ny, nz, vsx, vsy, vsz, data.b0_dir, ppm_factor,
+        );
+        let chi_qsmart: Vec<f64> = chi_qsmart_raw.iter().enumerate()
+            .map(|(i, &v)| if data.mask[i] > 0 { v * scale_to_ppm } else { 0.0 }).collect();
+
+        let elapsed = start.elapsed();
+        let c = ChallengeMetrics::compute("QSMART", &chi_qsmart, &data.chi, &data.mask, &data.segmentation, data.dims);
+        emit_row(&mut csv, "E2E", "QSMART", &c, 0.0, elapsed.as_secs_f64());
+    }
+
+    println!("\n{}", "=".repeat(120));
+    println!("DONE — results written to {}", csv_path);
+    println!("{}", "=".repeat(120));
 }

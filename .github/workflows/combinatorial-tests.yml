@@ -1,0 +1,49 @@
+name: Combinatorial BFR x Inversion
+
+on:
+  workflow_dispatch:  # Manual trigger only
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache test data
+        id: cache-testdata
+        uses: actions/cache@v4
+        with:
+          path: bids
+          key: testdata-v1-y8adf
+
+      - name: Download test data from OSF
+        if: steps.cache-testdata.outputs.cache-hit != 'true'
+        env:
+          OSF_TOKEN: ${{ secrets.OSF_TOKEN }}
+        run: |
+          curl -L -H "Authorization: Bearer ${OSF_TOKEN}" \
+            "https://files.osf.io/v1/resources/y8adf/providers/osfstorage/698ac9aecae88916d1e24f69" \
+            -o bids.zip
+          unzip -q bids.zip
+          rm bids.zip
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Run combinatorial test
+        run: |
+          cargo test --release test_all_combinations -- --ignored --nocapture --test-threads 1
+
+      - name: Upload CSV results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: combo-results
+          path: combo_results.csv
+          retention-days: 90
