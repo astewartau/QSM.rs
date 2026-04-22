@@ -282,7 +282,7 @@ jobs:
 
       - name: Run ${{ matrix.test }}
         run: |
-          cargo test --release --test integration_tests ${{ matrix.test }} -- --ignored --nocapture 2>&1 | tee test_output.txt
+          cargo test --release --features parallel --test integration_tests ${{ matrix.test }} -- --ignored --nocapture 2>&1 | tee test_output.txt
 
       - name: Save metrics
         if: always()
@@ -342,7 +342,7 @@ jobs:
 
       - name: Run ${{ matrix.test }}
         run: |
-          cargo test --release --test integration_tests ${{ matrix.test }} -- --ignored --nocapture 2>&1 | tee test_output.txt
+          cargo test --release --features parallel --test integration_tests ${{ matrix.test }} -- --ignored --nocapture 2>&1 | tee test_output.txt
 
       - name: Save metrics
         if: always()
@@ -398,7 +398,7 @@ jobs:
 
       - name: Run test_bet
         run: |
-          cargo test --release --test integration_tests test_bet -- --ignored --nocapture 2>&1 | tee test_output.txt
+          cargo test --release --features parallel --test integration_tests test_bet -- --ignored --nocapture 2>&1 | tee test_output.txt
 
       - name: Save metrics
         if: always()
@@ -459,7 +459,7 @@ jobs:
       - name: Run ${{ matrix.test }}
         timeout-minutes: 30
         run: |
-          cargo test --release --test integration_tests ${{ matrix.test }} -- --ignored --nocapture 2>&1 | tee test_output.txt
+          cargo test --release --features parallel --test integration_tests ${{ matrix.test }} -- --ignored --nocapture 2>&1 | tee test_output.txt
 
       - name: Save metrics
         if: always()
@@ -520,7 +520,7 @@ jobs:
       - name: Run ${{ matrix.test }}
         timeout-minutes: 30
         run: |
-          cargo test --release --test integration_tests ${{ matrix.test }} -- --ignored --nocapture 2>&1 | tee test_output.txt
+          cargo test --release --features parallel --test integration_tests ${{ matrix.test }} -- --ignored --nocapture 2>&1 | tee test_output.txt
 
       - name: Save metrics
         if: always()

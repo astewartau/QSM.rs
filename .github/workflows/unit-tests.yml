@@ -48,7 +48,7 @@ jobs:
 
           # Run tarpaulin; ignore its exit code since we check coverage separately
           cargo tarpaulin --engine llvm --out json --output-dir coverage/ \
-            --skip-clean --timeout 300 -- --test-threads 1 \
+            --features parallel --skip-clean --timeout 300 -- --test-threads 1 \
             2>&1 | tee coverage/tarpaulin.log || true
 
           # Count passed tests from output (sum across all test suites)

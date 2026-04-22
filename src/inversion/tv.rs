@@ -19,6 +19,9 @@ use crate::kernels::dipole::dipole_kernel;
 use crate::kernels::laplacian::laplacian_kernel;
 use crate::utils::gradient::{bdiv_inplace, fgrad_inplace};
 
+#[cfg(feature = "parallel")]
+use crate::par::*;
+
 /// Soft thresholding (shrinkage) operator for L1 regularization
 /// shrink(x, t) = sign(x) * max(|x| - t, 0)
 #[inline]
@@ -219,29 +222,20 @@ where
         // Compute gradient of x into gx/gy/gz
         fgrad_inplace(&mut gx, &mut gy, &mut gz, &x, nx, ny, nz, vsx, vsy, vsz);
 
-        // Fused loop: z = shrink(∇x + u), u = u + ∇x - z, store (z - u) in gx/gy/gz
+        // Fused z-subproblem + u-update
         for i in 0..n_total {
-            // x-gradient
-            let grad_x = gx[i];
-            let grad_y = gy[i];
-            let grad_z = gz[i];
+            let vx = gx[i] + ux[i];
+            let vy = gy[i] + uy[i];
+            let vz = gz[i] + uz[i];
 
-            // ∇x + u (temporary)
-            let vx = grad_x + ux[i];
-            let vy = grad_y + uy[i];
-            let vz = grad_z + uz[i];
-
-            // z = shrink(∇x + u, λ/ρ)
             let zx_i = shrink(vx, lambda_over_rho);
             let zy_i = shrink(vy, lambda_over_rho);
             let zz_i = shrink(vz, lambda_over_rho);
 
-            // u_new = u + ∇x - z = v - z
             ux[i] = vx - zx_i;
             uy[i] = vy - zy_i;
             uz[i] = vz - zz_i;
 
-            // Store (z - u_new) = z - (v - z) = 2z - v for next iteration's div
             gx[i] = 2.0 * zx_i - vx;
             gy[i] = 2.0 * zy_i - vy;
             gz[i] = 2.0 * zz_i - vz;
@@ -250,9 +244,7 @@ where
 
     // Apply mask
     for i in 0..n_total {
-        if mask[i] == 0 {
-            x[i] = 0.0;
-        }
+        if mask[i] == 0 { x[i] = 0.0; }
     }
 
     x
@@ -347,5 +339,34 @@ mod tests {
         // TV result should have small total variation
         // (exact value depends on parameters, but should be bounded)
         assert!(tv.is_finite(), "TV should be finite");
+    }
+
+    /// Verify parallel and sequential TV-ADMM produce identical results.
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn test_tv_parallel_matches_sequential() {
+        let n = 16;
+        let field: Vec<f64> = (0..n*n*n).map(|i| ((i as f64) * 0.7).sin() * 0.01).collect();
+        let mask = vec![1u8; n * n * n];
+
+        // Sequential (1 thread)
+        let pool_1 = rayon::ThreadPoolBuilder::new().num_threads(1).build().unwrap();
+        let chi_seq = pool_1.install(|| {
+            tv_admm(&field, &mask, n, n, n, 1.0, 1.0, 1.0,
+                (0.0, 0.0, 1.0), 1e-3, 0.1, 1e-3, 50)
+        });
+
+        // Parallel (default threads)
+        let chi_par = tv_admm(&field, &mask, n, n, n, 1.0, 1.0, 1.0,
+            (0.0, 0.0, 1.0), 1e-3, 0.1, 1e-3, 50);
+
+        // Compare
+        for (i, (s, p)) in chi_seq.iter().zip(chi_par.iter()).enumerate() {
+            assert!(
+                (s - p).abs() < 1e-10,
+                "TV mismatch at voxel {}: seq={} par={} diff={}",
+                i, s, p, (s - p).abs()
+            );
+        }
     }
 }

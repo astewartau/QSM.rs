@@ -765,7 +765,7 @@ fn dataterm_mask_f32(mode: i32, n_std: &[f32], mask: &[u8]) -> Vec<f32> {
 ///
 /// # Returns
 /// Tuple of (mx, my, mz) per-direction binary gradient masks
-fn gradient_mask_f32(
+pub(crate) fn gradient_mask_f32(
     magnitude: &[f32],
     mask: &[u8],
     nx: usize, ny: usize, nz: usize,
@@ -842,7 +842,7 @@ fn gradient_mask_f32(
 
 /// Forward difference gradient with linear extrapolation boundary conditions (f32)
 /// Matches MATLAB's gradf behavior: dx(end) = dx(end-1)
-fn fgrad_linext_f32(
+pub(crate) fn fgrad_linext_f32(
     x: &[f32],
     nx: usize, ny: usize, nz: usize,
     vsx: f32, vsy: f32, vsz: f32,
@@ -858,7 +858,7 @@ fn fgrad_linext_f32(
 /// Forward difference gradient with linear extrapolation boundary conditions (f32, in-place)
 /// Matches MATLAB's gradf behavior: dx(end) = dx(end-1)
 #[inline]
-fn fgrad_linext_inplace_f32(
+pub(crate) fn fgrad_linext_inplace_f32(
     gx: &mut [f32], gy: &mut [f32], gz: &mut [f32],
     x: &[f32],
     nx: usize, ny: usize, nz: usize,
@@ -914,7 +914,7 @@ fn fgrad_linext_inplace_f32(
 /// Matches MATLAB's gradfp_mex used inside MEDI iterations.
 /// At boundaries, wraps around: dx(end) = (x(1) - x(end)) / h
 #[inline]
-fn fgrad_periodic_inplace_f32(
+pub(crate) fn fgrad_periodic_inplace_f32(
     gx: &mut [f32], gy: &mut [f32], gz: &mut [f32],
     x: &[f32],
     nx: usize, ny: usize, nz: usize,
@@ -955,7 +955,7 @@ fn fgrad_periodic_inplace_f32(
 /// Adjoint of fgrad_periodic_inplace_f32, matching MATLAB's gradfp_adj_mex.
 /// At boundaries, wraps around: at i=0, uses gx(end) instead of zero.
 #[inline]
-fn bdiv_periodic_inplace_f32(
+pub(crate) fn bdiv_periodic_inplace_f32(
     div: &mut [f32],
     gx: &[f32], gy: &[f32], gz: &[f32],
     nx: usize, ny: usize, nz: usize,

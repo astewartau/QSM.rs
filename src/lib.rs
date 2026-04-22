@@ -13,6 +13,10 @@
 //! - `swi`: Susceptibility Weighted Imaging (CLEAR-SWI)
 //! - `bet`: Brain extraction tool
 
+// Conditional parallelism (must be first for macro visibility)
+#[macro_use]
+pub mod par;
+
 // Core modules
 pub mod fft;
 pub mod priority_queue;
@@ -23,6 +27,7 @@ pub mod kernels;
 pub mod unwrap;
 pub mod bgremove;
 pub mod inversion;
+pub mod separation;
 pub mod solvers;
 pub mod utils;
 pub mod swi;

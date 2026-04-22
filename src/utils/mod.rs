@@ -23,6 +23,7 @@ pub mod qsmart;
 pub mod threshold;
 pub mod mask;
 pub mod simd_ops;
+pub mod r2star;
 
 pub use gradient::*;
 pub use padding::*;
@@ -35,3 +36,4 @@ pub use qsmart::*;
 pub use threshold::*;
 pub use mask::*;
 pub use simd_ops::*;
+pub use r2star::*;
