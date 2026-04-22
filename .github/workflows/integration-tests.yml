@@ -46,7 +46,7 @@ jobs:
           all_bgremove='["test_bgremove_sharp","test_bgremove_vsharp","test_bgremove_pdf","test_bgremove_ismv","test_bgremove_lbv"]'
           all_inversion='["test_inversion_tkd","test_inversion_tsvd","test_inversion_tikhonov","test_inversion_tv","test_inversion_rts","test_inversion_medi","test_inversion_nltv"]'
           all_combined='["test_combined_tgv"]'
-          all_pipeline='["test_pipeline_tgv","test_pipeline_qsmart","test_bias_correction","test_swi"]'
+          all_pipeline='["test_pipeline_tgv","test_pipeline_qsmart","test_bias_correction","test_swi","test_r2star_t2star"]'
 
           run_unit_tests=false
 
@@ -169,6 +169,7 @@ jobs:
                 pipeline="$pipeline test_pipeline_qsmart" ;;
               src/utils/bias_correction.rs)
                 pipeline="$pipeline test_pipeline_qsmart test_bias_correction test_swi" ;;
+              src/utils/r2star.rs) pipeline="$pipeline test_r2star_t2star" ;;
               src/swi.rs) pipeline="$pipeline test_swi" ;;
             esac
           done
@@ -708,7 +709,7 @@ jobs:
               echo "$TABLE"
             }
 
-            if [ -f "metrics/test_bias_correction.csv" ] || [ -f "metrics/test_swi.csv" ]; then
+            if [ -f "metrics/test_bias_correction.csv" ] || [ -f "metrics/test_swi.csv" ] || [ -f "metrics/test_r2star_t2star.csv" ]; then
               echo "## Utilities"
               echo ""
               echo "| Method | Time |"
@@ -720,6 +721,11 @@ jobs:
               fi
               if [ -f "metrics/test_swi.csv" ]; then
                 line=$(grep "^RESULT:" "metrics/test_swi.csv" | head -1 | sed 's/^RESULT://')
+                IFS=',' read -r name _ _ _ _ time <<< "$line"
+                echo "| ${name} | $(printf '%.2fs' "$time") |"
+              fi
+              if [ -f "metrics/test_r2star_t2star.csv" ]; then
+                line=$(grep "^RESULT:" "metrics/test_r2star_t2star.csv" | head -1 | sed 's/^RESULT://')
                 IFS=',' read -r name _ _ _ _ time <<< "$line"
                 echo "| ${name} | $(printf '%.2fs' "$time") |"
               fi
@@ -876,7 +882,7 @@ jobs:
               emit_figures pipeline_tgv pipeline_qsmart
             }
 
-            if [ -f "metrics/test_bias_correction.csv" ] || [ -f "metrics/test_swi.csv" ]; then
+            if [ -f "metrics/test_bias_correction.csv" ] || [ -f "metrics/test_swi.csv" ] || [ -f "metrics/test_r2star_t2star.csv" ]; then
               echo "### Utilities"
               echo ""
               echo "| Method | Time |"
@@ -891,8 +897,13 @@ jobs:
                 IFS=',' read -r name _ _ _ _ time <<< "$line"
                 echo "| ${name} | $(printf '%.2fs' "$time") |"
               fi
+              if [ -f "metrics/test_r2star_t2star.csv" ]; then
+                line=$(grep "^RESULT:" "metrics/test_r2star_t2star.csv" | head -1 | sed 's/^RESULT://')
+                IFS=',' read -r name _ _ _ _ time <<< "$line"
+                echo "| ${name} | $(printf '%.2fs' "$time") |"
+              fi
               echo ""
-              emit_figures bias_correction swi swi_mip
+              emit_figures bias_correction swi swi_mip r2star t2star
             fi
           } > report.md
           cml comment create report.md
