@@ -1,0 +1,85 @@
+name: Deploy Documentation
+run-name: Deploy Docs ${{ github.event.release.tag_name }}
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:  # Allow manual trigger
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Only allow one deployment at a time
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Extract version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "release" ]; then
+            TAG="${GITHUB_REF_NAME}"
+          else
+            TAG="$(git describe --tags --abbrev=0 2>/dev/null || echo 'dev')"
+          fi
+          VERSION="${TAG#v}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Version: $VERSION (tag: $TAG)"
+
+      - name: Set version in Cargo.toml
+        run: |
+          sed -i 's/^version = ".*"/version = "${{ steps.version.outputs.version }}"/' Cargo.toml
+
+      - name: Build documentation
+        env:
+          RUSTDOCFLAGS: >-
+            --cfg docsrs
+            -Z unstable-options
+            --default-theme ayu
+        run: |
+          cargo doc --no-deps --all-features --document-private-items 2>&1
+
+      - name: Create index redirect
+        run: |
+          echo '<!DOCTYPE html>
+          <html>
+          <head><meta http-equiv="refresh" content="0; url=qsm_core/index.html"></head>
+          <body><a href="qsm_core/index.html">Redirecting to qsm_core docs...</a></body>
+          </html>' > target/doc/index.html
+
+      - name: Add version badge
+        run: |
+          VERSION="${{ steps.version.outputs.tag }}"
+          # Inject version into the crate index page
+          if [ -f target/doc/qsm_core/index.html ]; then
+            sed -i "s|<h1>Crate <a[^>]*>qsm_core</a></h1>|<h1>Crate <a class=\"mod\" href=\"#\">qsm_core</a> <span style=\"font-size:0.6em;color:#999;font-weight:normal\">${VERSION}</span></h1>|" \
+              target/doc/qsm_core/index.html
+          fi
+
+      - name: Upload pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: target/doc
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
