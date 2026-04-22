@@ -43,11 +43,6 @@ jobs:
           sed -i 's/^version = ".*"/version = "${{ steps.version.outputs.version }}"/' Cargo.toml
 
       - name: Build documentation
-        env:
-          RUSTDOCFLAGS: >-
-            --cfg docsrs
-            -Z unstable-options
-            --default-theme ayu
         run: |
           cargo doc --no-deps --all-features --document-private-items 2>&1
 
