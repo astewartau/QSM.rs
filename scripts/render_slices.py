@@ -40,6 +40,8 @@ NAMES = {
     "pipeline_qsmart": "QSMART",
     "swi": "CLEAR-SWI",
     "swi_mip": "CLEAR-SWI mIP",
+    "r2star": "R2* (Hz)",
+    "t2star": "T2* (s)",
 }
 
 # Fixed display windows (ppm)
@@ -63,6 +65,8 @@ WINDOWS = {
     "pipeline_qsmart": (-0.1, 0.1),
     "swi": None,       # auto-range (magnitude-weighted)
     "swi_mip": None,   # auto-range (magnitude-weighted)
+    "r2star": (0, 100),    # Hz
+    "t2star": (0, 0.08),   # seconds (0-80 ms)
 }
 
 

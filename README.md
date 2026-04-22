@@ -4,13 +4,22 @@ A Rust library for Quantitative Susceptibility Mapping (QSM) of the brain.
 
 QSM.rs provides a complete set of algorithms for reconstructing magnetic susceptibility maps from MRI phase data, including brain extraction, phase unwrapping, background field removal, and dipole inversion.
 
+**[API Documentation](https://astewartau.github.io/QSM.rs/qsm_core/)**
+
 ## Usage
 
 Add `qsm-core` to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-qsm-core = { git = "https://github.com/astewartau/QSM.rs", tag = "v0.2.0" }
+qsm-core = { git = "https://github.com/astewartau/QSM.rs", tag = "v0.5.0" }
+```
+
+Enable optional multi-threaded parallelism with Rayon:
+
+```toml
+[dependencies]
+qsm-core = { git = "https://github.com/astewartau/QSM.rs", tag = "v0.5.0", features = ["parallel"] }
 ```
 
 ### Full Pipeline Example
@@ -126,6 +135,7 @@ fn main() -> Result<(), String> {
 | Algorithm | Description | Reference |
 |-----------|-------------|-----------|
 | **MCPC-3D-S** | Multi-Channel Phase Combination (ASPIRE) — removes phase offsets across echoes | Eckstein, K., et al. (2018). "Computationally Efficient Combination of Multi-channel Phase Data From Multi-echo Acquisitions (ASPIRE)." *Magnetic Resonance in Medicine*, 79:2996-3006. [DOI](https://doi.org/10.1002/mrm.26963) |
+| **R2\*/T2\* (ARLO)** | R2* mapping from multi-echo magnitude using Auto-Regression on Linear Operations; T2* = 1/R2* | Pei, M., et al. (2015). "Algorithm for fast monoexponential fitting based on Auto-Regression on Linear Operations (ARLO) of data." *Magnetic Resonance in Medicine*, 73(2):843-850. [DOI](https://doi.org/10.1002/mrm.25137) |
 | **Bias Correction** | Homogeneity correction for high-field MRI | Eckstein, K., Trattnig, S., Robinson, S.D. (2019). "A Simple Homogeneity Correction for Neuroimaging at 7T." *Proc. ISMRM 27th Annual Meeting*. |
 
 ### Utilities
@@ -136,6 +146,7 @@ fn main() -> Result<(), String> {
 | **Frangi Filter** | 3D multi-scale vesselness enhancement filter | Frangi, A.F., et al. (1998). "Multiscale vessel enhancement filtering." *MICCAI'98*, LNCS vol 1496, 130-137. [DOI](https://doi.org/10.1007/BFb0056195) |
 | **Surface Curvature** | Discrete differential geometry operators for triangulated meshes | Meyer, M., et al. (2003). "Discrete Differential-Geometry Operators for Triangulated 2-Manifolds." *Visualization and Mathematics III*, 35-57. [DOI](https://doi.org/10.1007/978-3-662-05105-4_2) |
 | **QSMART** | Two-stage QSM artifact reduction using SDF and Frangi vesselness to separate tissue and vasculature | Yaghmaie, N., Syeda, W., et al. (2021). "QSMART: Quantitative Susceptibility Mapping Artifact Reduction Technique." *NeuroImage*, 231:117701. [DOI](https://doi.org/10.1016/j.neuroimage.2020.117701) |
+| **Chi-separation** | MEDI-based Gauss-Newton optimization separating total susceptibility into paramagnetic (iron) and diamagnetic (myelin) components using coupled field + R2' constraints | Shin, H., et al. (2021). "χ-separation: Magnetic susceptibility source separation toward iron and myelin mapping in the brain." *NeuroImage*, 240:118371. [DOI](https://doi.org/10.1016/j.neuroimage.2021.118371) |
 
 ## Reference Implementations
 
@@ -151,6 +162,7 @@ This library was developed with reference to the following open-source implement
 | [FSL-BET2](https://github.com/Bostrix/FSL-BET2) | BET | C++ |
 | [QSMART](https://github.com/wtsyeda/QSMART) | SDF, QSMART pipeline, Frangi filter, curvature | MATLAB |
 | [CLEARSWI.jl](https://github.com/korbinian90/CLEARSWI.jl) | CLEAR-SWI | Julia |
+| [chi-separation](https://github.com/SNU-LIST/chi-separation) | Chi-separation | MATLAB |
 
 ## License
 

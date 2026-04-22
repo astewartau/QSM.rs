@@ -1,7 +1,8 @@
-//! R2* mapping from multi-echo magnitude data
+//! R2* and T2* mapping from multi-echo magnitude data
 //!
 //! Provides R2* estimation using the ARLO (Auto-Regression on Linear Operations)
 //! algorithm for equi-spaced echo times, with a log-linear fallback for edge cases.
+//! T2* maps can be computed as the reciprocal of R2* via [`t2star_from_r2star`].
 //!
 //! Reference:
 //! Pei, M., et al. (2015). "Algorithm for fast monoexponential fitting based on
@@ -122,6 +123,13 @@ pub fn r2star_arlo(
     (r2star_map, s0_map)
 }
 
+/// Convert an R2* map (Hz) to a T2* map (seconds).
+///
+/// T2* = 1 / R2* for voxels where R2* > 0; zero otherwise.
+pub fn t2star_from_r2star(r2star: &[f64]) -> Vec<f64> {
+    r2star.iter().map(|&r| if r > 0.0 { 1.0 / r } else { 0.0 }).collect()
+}
+
 /// Log-linear R2* fit: log(S) = log(S0) - R2* * TE
 /// Solves via normal equations.
 fn log_linear_fit(signal: &[f64], echo_times: &[f64]) -> (f64, f64) {
@@ -206,6 +214,16 @@ mod tests {
 
         assert!(r2star_err < 0.01, "R2* error {:.4}% should be < 1%", r2star_err * 100.0);
         assert!(s0_err < 0.01, "S0 error {:.4}% should be < 1%", s0_err * 100.0);
+    }
+
+    #[test]
+    fn test_t2star_from_r2star() {
+        let r2star = vec![50.0, 0.0, 100.0, 25.0];
+        let t2star = t2star_from_r2star(&r2star);
+        assert!((t2star[0] - 0.02).abs() < 1e-10);
+        assert_eq!(t2star[1], 0.0);
+        assert!((t2star[2] - 0.01).abs() < 1e-10);
+        assert!((t2star[3] - 0.04).abs() < 1e-10);
     }
 
     #[test]
