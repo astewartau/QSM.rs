@@ -25,6 +25,19 @@
 /// * `tol` - Convergence tolerance for iterative solver
 /// * `max_iter` - Maximum iterations
 ///
+/// LBV algorithm parameters
+#[derive(Clone, Debug)]
+pub struct LbvParams {
+    /// Convergence tolerance
+    pub tol: f64,
+}
+
+impl Default for LbvParams {
+    fn default() -> Self {
+        Self { tol: 1e-6 }
+    }
+}
+
 /// # Returns
 /// Tuple of (local_field, eroded_mask)
 pub fn lbv(

@@ -28,6 +28,19 @@ use crate::par::*;
 /// * `tol` - Convergence tolerance for LSMR
 /// * `max_iter` - Maximum iterations for LSMR
 ///
+/// PDF algorithm parameters
+#[derive(Clone, Debug)]
+pub struct PdfParams {
+    /// Convergence tolerance
+    pub tol: f64,
+}
+
+impl Default for PdfParams {
+    fn default() -> Self {
+        Self { tol: 1e-5 }
+    }
+}
+
 /// # Returns
 /// Local field with background removed
 pub fn pdf(

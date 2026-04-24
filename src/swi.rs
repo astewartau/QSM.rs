@@ -14,6 +14,27 @@
 
 use crate::utils::gaussian_smooth_3d;
 
+/// SWI algorithm parameters
+#[derive(Clone, Debug)]
+pub struct SwiParams {
+    /// High-pass filter sigma in voxels [x, y, z]
+    pub hp_sigma: [f64; 3],
+    /// Phase scaling strength
+    pub strength: f64,
+    /// MIP window size in slices
+    pub mip_window: usize,
+}
+
+impl Default for SwiParams {
+    fn default() -> Self {
+        Self {
+            hp_sigma: [4.0, 4.0, 0.0],
+            strength: 4.0,
+            mip_window: 7,
+        }
+    }
+}
+
 /// Phase mask scaling type
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum PhaseScaling {

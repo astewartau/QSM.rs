@@ -35,6 +35,30 @@ fn shrink(x: f64, threshold: f64) -> f64 {
     }
 }
 
+/// TV-ADMM algorithm parameters
+#[derive(Clone, Debug)]
+pub struct TvParams {
+    /// Regularization parameter (typically 1e-3 to 1e-4)
+    pub lambda: f64,
+    /// ADMM penalty parameter (typically 100*lambda)
+    pub rho: f64,
+    /// Convergence tolerance
+    pub tol: f64,
+    /// Maximum iterations
+    pub max_iter: usize,
+}
+
+impl Default for TvParams {
+    fn default() -> Self {
+        Self {
+            lambda: 2e-4,
+            rho: 2e-2,
+            tol: 1e-3,
+            max_iter: 250,
+        }
+    }
+}
+
 /// TV-ADMM dipole inversion (optimized)
 ///
 /// # Arguments
@@ -257,13 +281,11 @@ pub fn tv_admm_default(
     nx: usize, ny: usize, nz: usize,
     vsx: f64, vsy: f64, vsz: f64,
 ) -> Vec<f64> {
+    let p = TvParams::default();
     tv_admm(
         local_field, mask, nx, ny, nz, vsx, vsy, vsz,
-        (0.0, 0.0, 1.0),  // bdir
-        2e-4,             // lambda
-        2e-2,             // rho = 100 * lambda
-        1e-3,             // tol
-        250               // max_iter
+        (0.0, 0.0, 1.0),
+        p.lambda, p.rho, p.tol, p.max_iter,
     )
 }
 
