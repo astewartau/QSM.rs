@@ -22,7 +22,7 @@ pub mod lbv;
 pub mod sdf;
 
 pub use smv::{smv, smv_default};
-pub use sharp::{sharp, sharp_default};
+pub use sharp::{sharp, sharp_default, SharpParams};
 pub use vsharp::{vsharp, vsharp_default, vsharp_with_progress, VsharpParams};
 pub use pdf::{pdf, pdf_default, pdf_with_progress, PdfParams};
 pub use ismv::{ismv, ismv_default, ismv_with_progress, IsmvParams};
