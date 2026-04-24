@@ -678,6 +678,33 @@ fn evolution_pass(
 /// * `iterations` - Number of surface evolution iterations
 /// * `subdivisions` - Icosphere subdivision level
 ///
+/// BET algorithm parameters
+#[derive(Clone, Debug)]
+pub struct BetParams {
+    /// Fractional intensity threshold (0.0-1.0, smaller = larger brain)
+    pub fractional_intensity: f64,
+    /// Surface smoothness factor
+    pub smoothness: f64,
+    /// Gradient threshold (-1 to 1)
+    pub gradient_threshold: f64,
+    /// Number of iterations
+    pub iterations: usize,
+    /// Icosphere subdivision level
+    pub subdivisions: usize,
+}
+
+impl Default for BetParams {
+    fn default() -> Self {
+        Self {
+            fractional_intensity: 0.5,
+            smoothness: 1.0,
+            gradient_threshold: 0.0,
+            iterations: 1000,
+            subdivisions: 4,
+        }
+    }
+}
+
 /// # Returns
 /// Binary mask (1 = brain, 0 = background)
 pub fn run_bet(

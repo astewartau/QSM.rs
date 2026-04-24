@@ -15,6 +15,19 @@ use num_complex::Complex64;
 use crate::fft::{fft3d, ifft3d};
 use crate::kernels::dipole::dipole_kernel;
 
+/// TKD algorithm parameters
+#[derive(Clone, Debug)]
+pub struct TkdParams {
+    /// Truncation threshold (typically 0.1-0.2)
+    pub threshold: f64,
+}
+
+impl Default for TkdParams {
+    fn default() -> Self {
+        Self { threshold: 0.15 }
+    }
+}
+
 /// Truncated k-space division (TKD) for dipole inversion
 ///
 /// Computes susceptibility map from local field using direct k-space division
@@ -94,7 +107,8 @@ pub fn tkd_default(
     nx: usize, ny: usize, nz: usize,
     vsx: f64, vsy: f64, vsz: f64,
 ) -> Vec<f64> {
-    tkd(local_field, mask, nx, ny, nz, vsx, vsy, vsz, (0.0, 0.0, 1.0), 0.15)
+    let p = TkdParams::default();
+    tkd(local_field, mask, nx, ny, nz, vsx, vsy, vsz, (0.0, 0.0, 1.0), p.threshold)
 }
 
 /// Truncated singular value decomposition (TSVD) variant

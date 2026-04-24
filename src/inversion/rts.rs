@@ -32,6 +32,36 @@ fn shrink(x: f64, threshold: f64) -> f64 {
     }
 }
 
+/// RTS algorithm parameters
+#[derive(Clone, Debug)]
+pub struct RtsParams {
+    /// Threshold for ill-conditioned region (typically 0.15)
+    pub delta: f64,
+    /// Regularization parameter for well-conditioned region (typically 1e5)
+    pub mu: f64,
+    /// ADMM penalty parameter (typically 10)
+    pub rho: f64,
+    /// Convergence tolerance
+    pub tol: f64,
+    /// Maximum ADMM iterations
+    pub max_iter: usize,
+    /// LSMR iterations for step 1 (typically 4)
+    pub lsmr_iter: usize,
+}
+
+impl Default for RtsParams {
+    fn default() -> Self {
+        Self {
+            delta: 0.15,
+            mu: 1e5,
+            rho: 10.0,
+            tol: 1e-2,
+            max_iter: 20,
+            lsmr_iter: 4,
+        }
+    }
+}
+
 /// RTS dipole inversion (optimized)
 ///
 /// # Arguments
@@ -314,15 +344,11 @@ pub fn rts_default(
     nx: usize, ny: usize, nz: usize,
     vsx: f64, vsy: f64, vsz: f64,
 ) -> Vec<f64> {
+    let p = RtsParams::default();
     rts(
         local_field, mask, nx, ny, nz, vsx, vsy, vsz,
-        (0.0, 0.0, 1.0),  // bdir
-        0.15,              // delta
-        1e5,               // mu
-        10.0,              // rho
-        1e-2,              // tol
-        20,                // max_iter
-        4                  // lsmr_iter
+        (0.0, 0.0, 1.0),
+        p.delta, p.mu, p.rho, p.tol, p.max_iter, p.lsmr_iter,
     )
 }
 

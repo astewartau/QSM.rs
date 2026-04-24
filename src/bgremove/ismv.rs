@@ -25,6 +25,21 @@ use crate::kernels::smv::smv_kernel;
 /// * `tol` - Convergence tolerance
 /// * `max_iter` - Maximum iterations
 ///
+/// iSMV algorithm parameters
+#[derive(Clone, Debug)]
+pub struct IsmvParams {
+    /// Convergence tolerance
+    pub tol: f64,
+    /// Maximum iterations
+    pub max_iter: usize,
+}
+
+impl Default for IsmvParams {
+    fn default() -> Self {
+        Self { tol: 1e-3, max_iter: 500 }
+    }
+}
+
 /// # Returns
 /// Tuple of (local field, eroded mask)
 pub fn ismv(

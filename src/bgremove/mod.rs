@@ -23,8 +23,8 @@ pub mod sdf;
 
 pub use smv::{smv, smv_default};
 pub use sharp::{sharp, sharp_default};
-pub use vsharp::{vsharp, vsharp_default, vsharp_with_progress};
-pub use pdf::{pdf, pdf_default, pdf_with_progress};
-pub use ismv::{ismv, ismv_default, ismv_with_progress};
-pub use lbv::{lbv, lbv_default, lbv_with_progress};
+pub use vsharp::{vsharp, vsharp_default, vsharp_with_progress, VsharpParams};
+pub use pdf::{pdf, pdf_default, pdf_with_progress, PdfParams};
+pub use ismv::{ismv, ismv_default, ismv_with_progress, IsmvParams};
+pub use lbv::{lbv, lbv_default, lbv_with_progress, LbvParams};
 pub use sdf::{sdf, sdf_curvature, sdf_simple, SdfParams};

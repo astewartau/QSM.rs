@@ -10,4 +10,4 @@ mod icosphere;
 mod mesh;
 mod evolution;
 
-pub use evolution::{run_bet, run_bet_with_progress};
+pub use evolution::{run_bet, run_bet_with_progress, BetParams};
