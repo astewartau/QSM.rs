@@ -34,6 +34,33 @@ fn weighted_shrink(x: f64, threshold: f64, weight: f64) -> f64 {
     }
 }
 
+/// NLTV algorithm parameters
+#[derive(Clone, Debug)]
+pub struct NltvParams {
+    /// Regularization parameter
+    pub lambda: f64,
+    /// Penalty parameter
+    pub mu: f64,
+    /// Convergence tolerance
+    pub tol: f64,
+    /// Maximum ADMM iterations
+    pub max_iter: usize,
+    /// Newton iterations for weight update
+    pub newton_iter: usize,
+}
+
+impl Default for NltvParams {
+    fn default() -> Self {
+        Self {
+            lambda: 1e-3,
+            mu: 1.0,
+            tol: 1e-3,
+            max_iter: 250,
+            newton_iter: 10,
+        }
+    }
+}
+
 /// NLTV dipole inversion using iteratively reweighted ADMM
 ///
 /// # Arguments

@@ -28,6 +28,19 @@ use crate::kernels::smv::smv_kernel;
 /// * `radius` - SMV kernel radius in mm
 /// * `threshold` - High-pass filter threshold (typically 0.05)
 ///
+/// SHARP algorithm parameters
+#[derive(Clone, Debug)]
+pub struct SharpParams {
+    /// Deconvolution threshold
+    pub threshold: f64,
+}
+
+impl Default for SharpParams {
+    fn default() -> Self {
+        Self { threshold: 0.05 }
+    }
+}
+
 /// # Returns
 /// (local_field, eroded_mask)
 pub fn sharp(

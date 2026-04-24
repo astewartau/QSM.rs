@@ -41,6 +41,48 @@ use crate::utils::simd_ops::{
 // Uses fgrad_linext_inplace_f32 (linear extrapolation BCs) only for gradient mask
 // computation, matching MATLAB's gradf_mex.
 
+/// MEDI algorithm parameters
+#[derive(Clone, Debug)]
+pub struct MediParams {
+    /// Regularization weight
+    pub lambda: f64,
+    /// Enable MERIT (outlier adjustment)
+    pub merit: bool,
+    /// Enable SMV preprocessing
+    pub smv: bool,
+    /// SMV radius in mm
+    pub smv_radius: f64,
+    /// Data weighting mode (1 = SNR)
+    pub data_weighting: i32,
+    /// Fraction of voxels considered edges (0.0-1.0)
+    pub percentage: f64,
+    /// CG convergence tolerance
+    pub cg_tol: f64,
+    /// Maximum CG iterations
+    pub cg_max_iter: usize,
+    /// Maximum outer iterations
+    pub max_iter: usize,
+    /// Outer convergence tolerance
+    pub tol: f64,
+}
+
+impl Default for MediParams {
+    fn default() -> Self {
+        Self {
+            lambda: 7.5e-5,
+            merit: false,
+            smv: false,
+            smv_radius: 5.0,
+            data_weighting: 1,
+            percentage: 0.3,
+            cg_tol: 0.01,
+            cg_max_iter: 10,
+            max_iter: 30,
+            tol: 0.1,
+        }
+    }
+}
+
 /// Workspace for MEDI operations - holds all reusable buffers (f32 version)
 /// Uses single precision for ~2x speedup on WASM
 pub struct MediWorkspace {

@@ -29,6 +29,21 @@ pub enum Regularization {
     Laplacian,
 }
 
+/// Tikhonov algorithm parameters
+#[derive(Clone, Debug)]
+pub struct TikhonovParams {
+    /// Regularization weight
+    pub lambda: f64,
+    /// Regularization type
+    pub reg: Regularization,
+}
+
+impl Default for TikhonovParams {
+    fn default() -> Self {
+        Self { lambda: 0.01, reg: Regularization::Identity }
+    }
+}
+
 /// Tikhonov regularization for dipole inversion
 ///
 /// # Arguments

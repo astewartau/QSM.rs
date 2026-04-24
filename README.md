@@ -12,7 +12,7 @@ Add `qsm-core` to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-qsm-core = { git = "https://github.com/astewartau/QSM.rs", tag = "v0.5.0" }
+qsm-core = { git = "https://github.com/astewartau/QSM.rs" }
 ```
 
 Enable optional multi-threaded parallelism with Rayon:
