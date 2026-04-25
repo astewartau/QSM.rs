@@ -32,11 +32,13 @@ pub struct IsmvParams {
     pub tol: f64,
     /// Maximum iterations
     pub max_iter: usize,
+    /// Kernel radius factor (multiplied by max voxel size; default: 2.0)
+    pub radius_factor: f64,
 }
 
 impl Default for IsmvParams {
     fn default() -> Self {
-        Self { tol: 1e-3, max_iter: 500 }
+        Self { tol: 1e-3, max_iter: 500, radius_factor: 2.0 }
     }
 }
 

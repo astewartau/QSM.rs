@@ -33,11 +33,19 @@ use crate::kernels::smv::smv_kernel;
 pub struct VsharpParams {
     /// Deconvolution threshold
     pub threshold: f64,
+    /// Maximum kernel radius in mm (as multiple of min voxel size; default: 18.0)
+    pub max_radius_factor: f64,
+    /// Minimum kernel radius in mm (as multiple of max voxel size; default: 2.0)
+    pub min_radius_factor: f64,
 }
 
 impl Default for VsharpParams {
     fn default() -> Self {
-        Self { threshold: 0.001 }
+        Self {
+            threshold: 0.001,
+            max_radius_factor: 18.0,
+            min_radius_factor: 2.0,
+        }
     }
 }
 

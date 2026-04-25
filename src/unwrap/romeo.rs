@@ -14,6 +14,27 @@
 //!
 //! Reference implementation: https://github.com/korbinian90/MriResearchTools.jl
 
+/// Parameters for ROMEO weight calculation.
+#[derive(Clone, Debug)]
+pub struct RomeoParams {
+    /// Use phase gradient coherence weights (multi-echo)
+    pub phase_gradient_coherence: bool,
+    /// Use magnitude coherence weights
+    pub mag_coherence: bool,
+    /// Use magnitude weighting
+    pub mag_weight: bool,
+}
+
+impl Default for RomeoParams {
+    fn default() -> Self {
+        Self {
+            phase_gradient_coherence: true,
+            mag_coherence: true,
+            mag_weight: true,
+        }
+    }
+}
+
 use std::f64::consts::PI;
 
 const TWO_PI: f64 = 2.0 * PI;

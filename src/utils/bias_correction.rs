@@ -10,6 +10,24 @@
 //!
 //! Reference implementation: https://github.com/korbinian90/MriResearchTools.jl
 
+/// Parameters for inhomogeneity correction (bias field removal).
+#[derive(Clone, Debug)]
+pub struct HomogeneityParams {
+    /// Gaussian smoothing sigma in mm (default: 7.0)
+    pub sigma_mm: f64,
+    /// Number of box filter passes for Gaussian approximation (default: 3)
+    pub nbox: usize,
+}
+
+impl Default for HomogeneityParams {
+    fn default() -> Self {
+        Self {
+            sigma_mm: 7.0,
+            nbox: 3,
+        }
+    }
+}
+
 use std::collections::VecDeque;
 
 /// Index into 3D array (Fortran/column-major order)
