@@ -33,11 +33,16 @@ use crate::kernels::smv::smv_kernel;
 pub struct SharpParams {
     /// Deconvolution threshold
     pub threshold: f64,
+    /// Kernel radius factor (multiplied by min voxel size to get radius in mm; default: 18.0)
+    pub radius_factor: f64,
 }
 
 impl Default for SharpParams {
     fn default() -> Self {
-        Self { threshold: 0.05 }
+        Self {
+            threshold: 0.05,
+            radius_factor: 18.0,
+        }
     }
 }
 

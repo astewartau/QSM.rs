@@ -11,6 +11,39 @@
 //!
 //! Reference implementation: https://github.com/korbinian90/MriResearchTools.jl
 
+/// Parameters for MCPC-3D-S phase combination.
+#[derive(Clone, Debug)]
+pub struct Mcpc3dsParams {
+    /// Gaussian smoothing sigma in voxels [x, y, z] for phase offset estimation
+    pub sigma: [f64; 3],
+}
+
+impl Default for Mcpc3dsParams {
+    fn default() -> Self {
+        Self {
+            sigma: [4.0, 4.0, 4.0],
+        }
+    }
+}
+
+/// Parameters for multi-echo linear fit.
+#[derive(Clone, Debug)]
+pub struct LinearFitParams {
+    /// Estimate and remove constant phase offset
+    pub estimate_offset: bool,
+    /// Percentile threshold for reliability-based voxel exclusion (degrees)
+    pub reliability_threshold_percentile: f64,
+}
+
+impl Default for LinearFitParams {
+    fn default() -> Self {
+        Self {
+            estimate_offset: true,
+            reliability_threshold_percentile: 90.0,
+        }
+    }
+}
+
 use std::f64::consts::PI;
 use crate::unwrap::romeo::calculate_weights_romeo;
 use crate::region_grow::grow_region_unwrap;
