@@ -71,7 +71,7 @@ impl Default for MediParams {
         Self {
             lambda: 7.5e-5,
             merit: false,
-            smv: false,
+            smv: true,
             smv_radius: 5.0,
             data_weighting: 1,
             percentage: 0.3,
