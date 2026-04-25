@@ -14,6 +14,24 @@
 //! 3. Streaking artifact estimation using LSMR
 //! 4. Artifact subtraction
 
+/// Parameters for the iLSQR algorithm.
+#[derive(Clone, Debug)]
+pub struct IlsqrParams {
+    /// Convergence tolerance (default: 0.01)
+    pub tol: f64,
+    /// Maximum iterations (default: 50)
+    pub max_iter: usize,
+}
+
+impl Default for IlsqrParams {
+    fn default() -> Self {
+        Self {
+            tol: 0.01,
+            max_iter: 50,
+        }
+    }
+}
+
 use std::cell::RefCell;
 use num_complex::Complex64;
 use crate::fft::Fft3dWorkspace;
