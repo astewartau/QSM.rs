@@ -19,6 +19,8 @@ use crate::utils::gaussian_smooth_3d;
 pub struct SwiParams {
     /// High-pass filter sigma in voxels [x, y, z]
     pub hp_sigma: [f64; 3],
+    /// Phase scaling type
+    pub scaling: PhaseScaling,
     /// Phase scaling strength
     pub strength: f64,
     /// MIP window size in slices
@@ -29,6 +31,7 @@ impl Default for SwiParams {
     fn default() -> Self {
         Self {
             hp_sigma: [4.0, 4.0, 0.0],
+            scaling: PhaseScaling::Tanh,
             strength: 4.0,
             mip_window: 7,
         }
