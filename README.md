@@ -123,8 +123,14 @@ fn main() -> Result<(), String> {
 | **NLTV** | Nonlinear Total Variation — nonlinear data fidelity with iterative reweighting | Kames, C., Wiggermann, V., Rauscher, A. (2018). "Rapid two-step dipole inversion for susceptibility mapping with sparsity priors." *NeuroImage*, 167:276-283. [DOI](https://doi.org/10.1016/j.neuroimage.2017.11.018) |
 | **RTS** | Rapid Two-Step — LSMR solve followed by TV refinement | Kames, C., Wiggermann, V., Rauscher, A. (2018). "Rapid two-step dipole inversion for susceptibility mapping with sparsity priors." *NeuroImage*, 167:276-283. [DOI](https://doi.org/10.1016/j.neuroimage.2017.11.018) |
 | **MEDI** | Morphology Enabled Dipole Inversion — L1 regularization with gradient and SNR weighting | Liu, T., et al. (2011). "Morphology enabled dipole inversion (MEDI) from a single-angle acquisition." *Magnetic Resonance in Medicine*, 66(3):777-783. [DOI](https://doi.org/10.1002/mrm.22816) |
-| **TGV** | Total Generalized Variation — single-step QSM from wrapped phase | Langkammer, C., et al. (2015). "Fast quantitative susceptibility mapping using 3D EPI and total generalized variation." *NeuroImage*, 111:622-630. [DOI](https://doi.org/10.1016/j.neuroimage.2015.02.041) |
 | **iLSQR** | Iterative LSQR with streaking artifact removal | Li, W., et al. (2015). "A method for estimating and removing streaking artifacts in quantitative susceptibility mapping." *NeuroImage*, 108:111-122. [DOI](https://doi.org/10.1016/j.neuroimage.2014.12.043) |
+
+### End-to-End QSM
+
+| Algorithm | Description | Reference |
+|-----------|-------------|-----------|
+| **TGV** | Total Generalized Variation — single-step QSM from wrapped phase, combining unwrapping, background removal, and dipole inversion | Langkammer, C., et al. (2015). "Fast quantitative susceptibility mapping using 3D EPI and total generalized variation." *NeuroImage*, 111:622-630. [DOI](https://doi.org/10.1016/j.neuroimage.2015.02.041) |
+| **QSMART** | Two-stage QSM artifact reduction using SDF background removal, TKD inversion, and Frangi vesselness-based tissue/vasculature separation | Yaghmaie, N., Syeda, W., et al. (2021). "QSMART: Quantitative Susceptibility Mapping Artifact Reduction Technique." *NeuroImage*, 231:117701. [DOI](https://doi.org/10.1016/j.neuroimage.2020.117701) |
 
 ### SWI Processing
 
@@ -138,7 +144,18 @@ fn main() -> Result<(), String> {
 |-----------|-------------|-----------|
 | **MCPC-3D-S** | Multi-Channel Phase Combination (ASPIRE) — removes phase offsets across echoes | Eckstein, K., et al. (2018). "Computationally Efficient Combination of Multi-channel Phase Data From Multi-echo Acquisitions (ASPIRE)." *Magnetic Resonance in Medicine*, 79:2996-3006. [DOI](https://doi.org/10.1002/mrm.26963) |
 | **R2\*/T2\* (ARLO)** | R2* mapping from multi-echo magnitude using Auto-Regression on Linear Operations; T2* = 1/R2* | Pei, M., et al. (2015). "Algorithm for fast monoexponential fitting based on Auto-Regression on Linear Operations (ARLO) of data." *Magnetic Resonance in Medicine*, 73(2):843-850. [DOI](https://doi.org/10.1002/mrm.25137) |
+
+### Preprocessing
+
+| Algorithm | Description | Reference |
+|-----------|-------------|-----------|
 | **Bias Correction** | Homogeneity correction for high-field MRI | Eckstein, K., Trattnig, S., Robinson, S.D. (2019). "A Simple Homogeneity Correction for Neuroimaging at 7T." *Proc. ISMRM 27th Annual Meeting*. |
+
+### Susceptibility Source Separation
+
+| Algorithm | Description | Reference |
+|-----------|-------------|-----------|
+| **χ-separation** | Gauss-Newton optimization separating total susceptibility into paramagnetic (iron) and diamagnetic (myelin) components using coupled field and R2' constraints | Shin, H., et al. (2021). "χ-separation: Magnetic susceptibility source separation toward iron and myelin mapping in the brain." *NeuroImage*, 240:118371. [DOI](https://doi.org/10.1016/j.neuroimage.2021.118371) |
 
 ### Utilities
 
@@ -147,8 +164,6 @@ fn main() -> Result<(), String> {
 | **Otsu Thresholding** | Automatic threshold selection for bimodal histograms | Otsu, N. (1979). "A Threshold Selection Method from Gray-Level Histograms." *IEEE Transactions on Systems, Man, and Cybernetics*, 9(1):62-66. [DOI](https://doi.org/10.1109/TSMC.1979.4310076) |
 | **Frangi Filter** | 3D multi-scale vesselness enhancement filter | Frangi, A.F., et al. (1998). "Multiscale vessel enhancement filtering." *MICCAI'98*, LNCS vol 1496, 130-137. [DOI](https://doi.org/10.1007/BFb0056195) |
 | **Surface Curvature** | Discrete differential geometry operators for triangulated meshes | Meyer, M., et al. (2003). "Discrete Differential-Geometry Operators for Triangulated 2-Manifolds." *Visualization and Mathematics III*, 35-57. [DOI](https://doi.org/10.1007/978-3-662-05105-4_2) |
-| **QSMART** | Two-stage QSM artifact reduction using SDF and Frangi vesselness to separate tissue and vasculature | Yaghmaie, N., Syeda, W., et al. (2021). "QSMART: Quantitative Susceptibility Mapping Artifact Reduction Technique." *NeuroImage*, 231:117701. [DOI](https://doi.org/10.1016/j.neuroimage.2020.117701) |
-| **Chi-separation** | MEDI-based Gauss-Newton optimization separating total susceptibility into paramagnetic (iron) and diamagnetic (myelin) components using coupled field + R2' constraints | Shin, H., et al. (2021). "χ-separation: Magnetic susceptibility source separation toward iron and myelin mapping in the brain." *NeuroImage*, 240:118371. [DOI](https://doi.org/10.1016/j.neuroimage.2021.118371) |
 
 ## Reference Implementations
 
