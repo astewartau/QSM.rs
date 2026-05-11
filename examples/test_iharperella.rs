@@ -45,24 +45,23 @@ fn main() {
     };
 
     // Run iHARPERELLA
-    println!("\nRunning iHARPERELLA (40 iterations, radius=5mm)...");
+    println!("\nRunning iHARPERELLA (40 CG iterations, radius=10mm)...");
     let start = Instant::now();
-    let (tissue_phase, eroded_mask) = pipeline::iharperella(
+    let (tissue_phase, output_mask) = pipeline::iharperella(
         &phase, &mask,
         nx, ny, nz,
         vsx, vsy, vsz,
-        5.0, 40,
+        10.0, 40,
     );
     let elapsed = start.elapsed();
     println!("Completed in {:.2?}", elapsed);
 
-    let eroded_count: usize = eroded_mask.iter().map(|&m| m as usize).sum();
-    println!("Eroded mask voxels: {} ({:.1}% of original)",
-        eroded_count, 100.0 * eroded_count as f64 / mask_count as f64);
+    let output_count: usize = output_mask.iter().map(|&m| m as usize).sum();
+    println!("Output mask voxels: {}", output_count);
 
     // Stats on tissue phase
     let mut vals: Vec<f64> = tissue_phase.iter()
-        .zip(eroded_mask.iter())
+        .zip(output_mask.iter())
         .filter(|(_, &m)| m == 1)
         .map(|(&v, _)| v)
         .collect();

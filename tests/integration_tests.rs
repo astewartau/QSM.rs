@@ -796,8 +796,8 @@ fn test_pipeline_iharperella() {
         &data.mask,
         nx, ny, nz,
         vsx, vsy, vsz,
-        5.0,   // radius in mm
-        40,    // iterations
+        10.0,  // radius in mm (paper default)
+        40,    // max CG iterations
     ));
 
     let res = TestResult::new("iHARPERELLA", &result, &data.fieldmap_local, &data.mask, data.dims);
