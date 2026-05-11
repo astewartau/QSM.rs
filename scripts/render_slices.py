@@ -65,8 +65,8 @@ WINDOWS = {
     "bet": (0, 1),
     "combined_tgv": (-0.1, 0.1),
     "bias_correction": (-0.1, 0.1),  # fallback; before/after rendering uses auto-range
-    "pipeline_harperella": (-0.1, 0.1),
-    "pipeline_iharperella": (-0.1, 0.1),
+    "pipeline_harperella": (-0.025, 0.025),
+    "pipeline_iharperella": (-0.025, 0.025),
     "pipeline_tgv": (-0.1, 0.1),
     "pipeline_qsmart": (-0.1, 0.1),
     "swi": None,       # auto-range (magnitude-weighted)
