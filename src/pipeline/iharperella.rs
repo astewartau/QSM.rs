@@ -206,11 +206,13 @@ where F: FnMut(usize, usize),
     // Normal equations: A'A(x) = A'(-b)
     // (1-M) · inv_lap(W² · inv_lap((1-M) · x)) = (1-M) · inv_lap(W² · inv_lap(∇²φ_brain))
 
-    // Compute A'b = (1-M) · inv_lap(W² · inv_lap(∇²φ_brain))
+    // Compute -A'c = -(1-M) · inv_lap(W² · inv_lap(∇²φ_brain))
+    // The objective is min ||Ax + c||₂ where c = W · inv_lap(∇²φ_brain · M)
+    // Normal equations: A'Ax = -A'c
     let phase_from_brain = apply_inv_lap(&lap_brain, &lap_eig, nx, ny, nz);
     let w2_phase: Vec<f64> = (0..n_total).map(|i| w_brain[i] * w_brain[i] * phase_from_brain[i]).collect();
     let atb_raw = apply_inv_lap(&w2_phase, &lap_eig, nx, ny, nz);
-    let atb: Vec<f64> = (0..n_total).map(|i| exterior_mask[i] * atb_raw[i]).collect();
+    let atb: Vec<f64> = (0..n_total).map(|i| -exterior_mask[i] * atb_raw[i]).collect();
 
     let lap_ext = cg_solve_masked(
         &atb, &exterior_mask, max_iter, tol, &mut callback,
