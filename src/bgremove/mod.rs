@@ -2,6 +2,7 @@
 //!
 //! This module provides methods to separate local from background field:
 //! - SHARP: Sophisticated harmonic artifact reduction for phase data
+//! - RESHARP: Regularized SHARP with Tikhonov regularization
 //! - V-SHARP: Variable kernel SHARP
 //! - PDF: Projection onto dipole fields
 //! - iSMV: Iterative spherical mean value
@@ -15,6 +16,7 @@
 
 pub mod smv;
 pub mod sharp;
+pub mod resharp;
 pub mod vsharp;
 pub mod pdf;
 pub mod ismv;
@@ -23,6 +25,7 @@ pub mod sdf;
 
 pub use smv::{smv, smv_default};
 pub use sharp::{sharp, sharp_default, SharpParams};
+pub use resharp::{resharp, resharp_default, resharp_with_progress, ResharpParams};
 pub use vsharp::{vsharp, vsharp_default, vsharp_with_progress, VsharpParams};
 pub use pdf::{pdf, pdf_default, pdf_with_progress, PdfParams};
 pub use ismv::{ismv, ismv_default, ismv_with_progress, IsmvParams};

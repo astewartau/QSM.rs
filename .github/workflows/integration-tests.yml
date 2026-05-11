@@ -132,10 +132,11 @@ jobs:
 
               # Background removal
               src/bgremove/mod.rs)
-                bgremove="$bgremove test_bgremove_sharp test_bgremove_vsharp test_bgremove_pdf test_bgremove_ismv test_bgremove_lbv" ;;
+                bgremove="$bgremove test_bgremove_sharp test_bgremove_resharp test_bgremove_vsharp test_bgremove_pdf test_bgremove_ismv test_bgremove_lbv" ;;
               src/bgremove/smv.rs)
                 bgremove="$bgremove test_bgremove_sharp test_bgremove_vsharp test_bgremove_ismv" ;;
               src/bgremove/sharp.rs)  bgremove="$bgremove test_bgremove_sharp" ;;
+              src/bgremove/resharp.rs) bgremove="$bgremove test_bgremove_resharp" ;;
               src/bgremove/vsharp.rs) bgremove="$bgremove test_bgremove_vsharp" ;;
               src/bgremove/pdf.rs)    bgremove="$bgremove test_bgremove_pdf" ;;
               src/bgremove/ismv.rs)   bgremove="$bgremove test_bgremove_ismv" ;;
@@ -160,7 +161,11 @@ jobs:
               # Phase unwrapping
               src/unwrap/mod.rs)      pipeline="$pipeline test_pipeline_tgv test_pipeline_qsmart" ;;
               src/unwrap/romeo.rs)    pipeline="$pipeline test_pipeline_tgv" ;;
-              src/unwrap/laplacian.rs) pipeline="$pipeline test_pipeline_qsmart" ;;
+              src/unwrap/laplacian.rs) pipeline="$pipeline test_pipeline_qsmart test_pipeline_iharperella" ;;
+
+              # Pipeline (combined algorithms)
+              src/pipeline/mod.rs)    pipeline="$pipeline test_pipeline_iharperella" ;;
+              src/pipeline/iharperella.rs) pipeline="$pipeline test_pipeline_iharperella" ;;
 
               # Utils (QSMART components)
               src/utils/multi_echo.rs)

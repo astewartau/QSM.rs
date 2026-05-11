@@ -17,7 +17,7 @@ use crate::fft::{fft3d, ifft3d};
 
 /// Wrap angle to [-π, π]
 #[inline]
-fn wrap(x: f64) -> f64 {
+pub(crate) fn wrap(x: f64) -> f64 {
     let mut y = x % (2.0 * PI);
     if y > PI {
         y -= 2.0 * PI;
@@ -30,7 +30,7 @@ fn wrap(x: f64) -> f64 {
 /// Compute wrapped Laplacian of phase with periodic boundary conditions
 ///
 /// Uses second-order central finite differences on wrapped phase differences.
-fn wrapped_laplacian_periodic(
+pub(crate) fn wrapped_laplacian_periodic(
     phase: &[f64],
     nx: usize, ny: usize, nz: usize,
     vsx: f64, vsy: f64, vsz: f64,
@@ -85,7 +85,7 @@ fn wrapped_laplacian_periodic(
 ///
 /// Solves: ∇²u = f
 /// In Fourier domain: λ * û = f̂, where λ are eigenvalues of discrete Laplacian
-fn solve_poisson_fft(
+pub(crate) fn solve_poisson_fft(
     f: &[f64],
     nx: usize, ny: usize, nz: usize,
     vsx: f64, vsy: f64, vsz: f64,
