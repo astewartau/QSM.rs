@@ -35,7 +35,7 @@
 //! | Phase unwrapping | ROMEO, Laplacian |
 //! | Background removal | V-SHARP, SHARP, RESHARP, PDF, iSMV, LBV, SDF |
 //! | Dipole inversion | TKD, TSVD, Tikhonov, TV-ADMM, NLTV, RTS, MEDI, TGV, iLSQR |
-//! | Combined unwrap+BFR | iHARPERELLA |
+//! | Combined unwrap+BFR | HARPERELLA, iHARPERELLA |
 //! | SWI | CLEAR-SWI |
 //! | Separation | Chi-separation (MEDI-based) |
 //! | Multi-echo | MCPC-3D-S, R2\*/T2\* (ARLO), bias correction |

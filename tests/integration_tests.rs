@@ -768,8 +768,47 @@ fn test_combined_tgv() {
 }
 
 // ============================================================================
-// Pipeline Tests (iHARPERELLA, TGV, QSMART)
+// Pipeline Tests (HARPERELLA, iHARPERELLA, TGV, QSMART)
 // ============================================================================
+
+/// Helper: wrap fieldmap to simulate wrapped phase input for HARPERELLA/iHARPERELLA
+fn wrap_fieldmap(fieldmap: &[f64]) -> Vec<f64> {
+    fieldmap.iter()
+        .map(|&f| {
+            let mut y = f % (2.0 * std::f64::consts::PI);
+            if y > std::f64::consts::PI { y -= 2.0 * std::f64::consts::PI; }
+            else if y < -std::f64::consts::PI { y += 2.0 * std::f64::consts::PI; }
+            y
+        })
+        .collect()
+}
+
+#[test]
+#[ignore]
+fn test_pipeline_harperella() {
+    println!("[INFO] Loading test data...");
+    let data = TestData::load().expect("Failed to load test data");
+    let (nx, ny, nz) = data.dims;
+    let (vsx, vsy, vsz) = data.voxel_size;
+
+    let wrapped_phase = wrap_fieldmap(&data.fieldmap);
+
+    let ((result, _new_mask), elapsed) = run_timed!("HARPERELLA", pipeline::harperella(
+        &wrapped_phase,
+        &data.mask,
+        nx, ny, nz,
+        vsx, vsy, vsz,
+        10.0, 40,
+    ));
+
+    let res = TestResult::new("HARPERELLA", &result, &data.fieldmap_local, &data.mask, data.dims);
+    res.print_with_time(elapsed);
+    res.print_ci_metrics(elapsed);
+    common::save_center_slices(&result, &data.mask, data.dims, "pipeline_harperella");
+
+    assert!(res.nrmse < 0.8, "HARPERELLA NRMSE too high: {}", res.nrmse);
+    assert!(res.correlation > 0.5, "HARPERELLA correlation too low: {}", res.correlation);
+}
 
 #[test]
 #[ignore]
@@ -779,25 +818,14 @@ fn test_pipeline_iharperella() {
     let (nx, ny, nz) = data.dims;
     let (vsx, vsy, vsz) = data.voxel_size;
 
-    // iHARPERELLA works on wrapped phase directly.
-    // The test data fieldmap is in field units (ppm), not radians.
-    // Wrap it to simulate wrapped phase input.
-    let wrapped_phase: Vec<f64> = data.fieldmap.iter()
-        .map(|&f| {
-            let mut y = f % (2.0 * std::f64::consts::PI);
-            if y > std::f64::consts::PI { y -= 2.0 * std::f64::consts::PI; }
-            else if y < -std::f64::consts::PI { y += 2.0 * std::f64::consts::PI; }
-            y
-        })
-        .collect();
+    let wrapped_phase = wrap_fieldmap(&data.fieldmap);
 
     let ((result, _new_mask), elapsed) = run_timed!("iHARPERELLA", pipeline::iharperella(
         &wrapped_phase,
         &data.mask,
         nx, ny, nz,
         vsx, vsy, vsz,
-        10.0,  // radius in mm (paper default)
-        40,    // max CG iterations
+        10.0, 40,
     ));
 
     let res = TestResult::new("iHARPERELLA", &result, &data.fieldmap_local, &data.mask, data.dims);
@@ -805,7 +833,6 @@ fn test_pipeline_iharperella() {
     res.print_ci_metrics(elapsed);
     common::save_center_slices(&result, &data.mask, data.dims, "pipeline_iharperella");
 
-    // More lenient thresholds since this is a combined method working from wrapped phase
     assert!(res.nrmse < 0.8, "iHARPERELLA NRMSE too high: {}", res.nrmse);
     assert!(res.correlation > 0.5, "iHARPERELLA correlation too low: {}", res.correlation);
 }
