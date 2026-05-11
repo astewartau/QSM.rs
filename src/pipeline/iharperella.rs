@@ -183,16 +183,32 @@ pub fn iharperella_with_progress<F>(
     nx: usize, ny: usize, nz: usize,
     vsx: f64, vsy: f64, vsz: f64,
     radius: f64, max_iter: usize, tol: f64,
+    callback: F,
+) -> (Vec<f64>, Vec<u8>)
+where F: FnMut(usize, usize),
+{
+    let w_brain: Vec<f64> = mask.iter().map(|&m| m as f64).collect();
+    iharperella_with_weights(phase, mask, nx, ny, nz, vsx, vsy, vsz,
+                             max_iter, tol, &w_brain, callback)
+}
+
+/// iHARPERELLA with custom W_Brain weighting
+///
+/// Allows specifying an arbitrary weighting function for the phase minimization.
+/// The weighting should be non-negative and defined over the full volume (nx*ny*nz).
+pub fn iharperella_with_weights<F>(
+    phase: &[f64], mask: &[u8],
+    nx: usize, ny: usize, nz: usize,
+    vsx: f64, vsy: f64, vsz: f64,
+    max_iter: usize, tol: f64,
+    w_brain: &[f64],
     mut callback: F,
 ) -> (Vec<f64>, Vec<u8>)
 where F: FnMut(usize, usize),
 {
     let n_total = nx * ny * nz;
-    let (lap_brain, interior_mask, exterior_mask) =
+    let (lap_brain, _interior_mask, exterior_mask) =
         prepare_laplacian(phase, mask, nx, ny, nz, vsx, vsy, vsz);
-
-    // W_Brain = eroded interior mask (weighting for phase minimization)
-    let w_brain: Vec<f64> = interior_mask.iter().map(|&m| m as f64).collect();
 
     // Pre-compute Laplacian eigenvalues for inverse Laplacian
     let lap_eig = compute_laplacian_eigenvalues(nx, ny, nz, vsx, vsy, vsz);

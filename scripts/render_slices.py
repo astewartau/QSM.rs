@@ -22,6 +22,7 @@ import matplotlib.pyplot as plt
 # Mapping from binary file slug to display name
 NAMES = {
     "bgremove_sharp": "SHARP",
+    "bgremove_resharp": "RESHARP",
     "bgremove_vsharp": "V-SHARP",
     "bgremove_pdf": "PDF",
     "bgremove_ismv": "iSMV",
@@ -36,6 +37,8 @@ NAMES = {
     "bet": "BET",
     "combined_tgv": "TGV (Combined)",
     "bias_correction": "Bias Correction",
+    "pipeline_harperella": "HARPERELLA",
+    "pipeline_iharperella": "iHARPERELLA",
     "pipeline_tgv": "TGV",
     "pipeline_qsmart": "QSMART",
     "swi": "CLEAR-SWI",
@@ -47,6 +50,7 @@ NAMES = {
 # Fixed display windows (ppm)
 WINDOWS = {
     "bgremove_sharp": (-0.025, 0.025),
+    "bgremove_resharp": (-0.025, 0.025),
     "bgremove_vsharp": (-0.025, 0.025),
     "bgremove_pdf": (-0.025, 0.025),
     "bgremove_ismv": (-0.025, 0.025),
@@ -61,6 +65,8 @@ WINDOWS = {
     "bet": (0, 1),
     "combined_tgv": (-0.1, 0.1),
     "bias_correction": (-0.1, 0.1),  # fallback; before/after rendering uses auto-range
+    "pipeline_harperella": (-0.1, 0.1),
+    "pipeline_iharperella": (-0.1, 0.1),
     "pipeline_tgv": (-0.1, 0.1),
     "pipeline_qsmart": (-0.1, 0.1),
     "swi": None,       # auto-range (magnitude-weighted)

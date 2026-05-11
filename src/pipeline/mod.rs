@@ -11,5 +11,6 @@ pub mod iharperella;
 pub use iharperella::{
     harperella, harperella_default, harperella_with_progress,
     iharperella, iharperella_default, iharperella_with_progress,
+    iharperella_with_weights,
     HarperellaParams, IharperellaParams,
 };
