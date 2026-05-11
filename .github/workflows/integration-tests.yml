@@ -43,10 +43,10 @@ jobs:
         run: |
           set -e
 
-          all_bgremove='["test_bgremove_sharp","test_bgremove_vsharp","test_bgremove_pdf","test_bgremove_ismv","test_bgremove_lbv"]'
+          all_bgremove='["test_bgremove_sharp","test_bgremove_resharp","test_bgremove_vsharp","test_bgremove_pdf","test_bgremove_ismv","test_bgremove_lbv"]'
           all_inversion='["test_inversion_tkd","test_inversion_tsvd","test_inversion_tikhonov","test_inversion_tv","test_inversion_rts","test_inversion_medi","test_inversion_nltv"]'
           all_combined='["test_combined_tgv"]'
-          all_pipeline='["test_pipeline_tgv","test_pipeline_qsmart","test_bias_correction","test_swi","test_r2star_t2star"]'
+          all_pipeline='["test_pipeline_tgv","test_pipeline_qsmart","test_pipeline_iharperella","test_bias_correction","test_swi","test_r2star_t2star"]'
 
           run_unit_tests=false
 
