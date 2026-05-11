@@ -670,9 +670,16 @@ jobs:
             echo "- **Code coverage:** ${COVERAGE:-N/A}%"
             echo ""
 
-            TABLE=$(emit_table "test_bgremove_" sharp vsharp pdf ismv lbv) && {
+            TABLE=$(emit_table "test_bgremove_" sharp resharp vsharp pdf ismv lbv) && {
               echo "## Background Field Removal"
               echo "*Compared against ground truth local field map*"
+              echo ""
+              echo "$TABLE"
+            }
+
+            TABLE=$(emit_table "test_pipeline_" iharperella) && {
+              echo "## Combined Phase Unwrapping + Background Removal"
+              echo "*Compared against ground truth local field map (input: wrapped phase)*"
               echo ""
               echo "$TABLE"
             }
@@ -834,13 +841,22 @@ jobs:
             echo "- **Code coverage:** ${COVERAGE:-N/A}%"
             echo ""
 
-            TABLE=$(emit_table "test_bgremove_" sharp vsharp pdf ismv lbv) && {
+            TABLE=$(emit_table "test_bgremove_" sharp resharp vsharp pdf ismv lbv) && {
               echo "### Background Field Removal"
               echo "*Compared against ground truth local field map*"
               echo ""
               echo "$TABLE"
               echo ""
-              emit_figures bgremove_sharp bgremove_vsharp bgremove_pdf bgremove_ismv bgremove_lbv
+              emit_figures bgremove_sharp bgremove_resharp bgremove_vsharp bgremove_pdf bgremove_ismv bgremove_lbv
+            }
+
+            TABLE=$(emit_table "test_pipeline_" iharperella) && {
+              echo "### Combined Phase Unwrapping + Background Removal"
+              echo "*Compared against ground truth local field map (input: wrapped phase)*"
+              echo ""
+              echo "$TABLE"
+              echo ""
+              emit_figures pipeline_iharperella
             }
 
             TABLE=$(emit_chi_table "test_inversion_" tkd tsvd tikhonov tv rts medi nltv) && {
