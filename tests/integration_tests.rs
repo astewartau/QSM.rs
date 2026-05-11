@@ -14,6 +14,7 @@ use qsm_core::inversion;
 use qsm_core::inversion::{tgv_qsm, TgvParams, get_default_alpha, get_default_iterations, ilsqr_simple};
 use qsm_core::swi;
 use qsm_core::unwrap::laplacian_unwrap;
+use qsm_core::pipeline;
 use qsm_core::utils::{
     mcpc3ds_b0_pipeline, B0WeightType,
     multi_echo_linear_fit, field_to_hz,
@@ -175,6 +176,34 @@ fn test_bgremove_lbv() {
 
     assert!(res.nrmse < 0.5, "LBV NRMSE too high: {}", res.nrmse);
     assert!(res.correlation > 0.7, "LBV correlation too low: {}", res.correlation);
+}
+
+#[test]
+#[ignore]
+fn test_bgremove_resharp() {
+    println!("[INFO] Loading test data...");
+    let data = TestData::load().expect("Failed to load test data");
+    let (nx, ny, nz) = data.dims;
+    let (vsx, vsy, vsz) = data.voxel_size;
+
+    let ((result, _new_mask), elapsed) = run_timed!("RESHARP", bgremove::resharp(
+        &data.fieldmap,
+        &data.mask,
+        nx, ny, nz,
+        vsx, vsy, vsz,
+        6.0,   // radius in mm
+        1e-4,  // Tikhonov regularization
+        1e-6,  // tolerance
+        200,   // max iterations
+    ));
+
+    let res = TestResult::new("RESHARP", &result, &data.fieldmap_local, &data.mask, data.dims);
+    res.print_with_time(elapsed);
+    res.print_ci_metrics(elapsed);
+    common::save_center_slices(&result, &data.mask, data.dims, "bgremove_resharp");
+
+    assert!(res.nrmse < 0.5, "RESHARP NRMSE too high: {}", res.nrmse);
+    assert!(res.correlation > 0.7, "RESHARP correlation too low: {}", res.correlation);
 }
 
 /// Test LBV with Hz-scale input (simulates qsmbly pipeline where B0 is in Hz)
@@ -739,8 +768,74 @@ fn test_combined_tgv() {
 }
 
 // ============================================================================
-// Pipeline Tests (TGV, QSMART)
+// Pipeline Tests (HARPERELLA, iHARPERELLA, TGV, QSMART)
 // ============================================================================
+
+/// Helper: wrap fieldmap to simulate wrapped phase input for HARPERELLA/iHARPERELLA
+fn wrap_fieldmap(fieldmap: &[f64]) -> Vec<f64> {
+    fieldmap.iter()
+        .map(|&f| {
+            let mut y = f % (2.0 * std::f64::consts::PI);
+            if y > std::f64::consts::PI { y -= 2.0 * std::f64::consts::PI; }
+            else if y < -std::f64::consts::PI { y += 2.0 * std::f64::consts::PI; }
+            y
+        })
+        .collect()
+}
+
+#[test]
+#[ignore]
+fn test_pipeline_harperella() {
+    println!("[INFO] Loading test data...");
+    let data = TestData::load().expect("Failed to load test data");
+    let (nx, ny, nz) = data.dims;
+    let (vsx, vsy, vsz) = data.voxel_size;
+
+    let wrapped_phase = wrap_fieldmap(&data.fieldmap);
+
+    let ((result, _new_mask), elapsed) = run_timed!("HARPERELLA", pipeline::harperella(
+        &wrapped_phase,
+        &data.mask,
+        nx, ny, nz,
+        vsx, vsy, vsz,
+        10.0, 40,
+    ));
+
+    let res = TestResult::new("HARPERELLA", &result, &data.fieldmap_local, &data.mask, data.dims);
+    res.print_with_time(elapsed);
+    res.print_ci_metrics(elapsed);
+    common::save_center_slices(&result, &data.mask, data.dims, "pipeline_harperella");
+
+    assert!(res.nrmse < 0.8, "HARPERELLA NRMSE too high: {}", res.nrmse);
+    assert!(res.correlation > 0.5, "HARPERELLA correlation too low: {}", res.correlation);
+}
+
+#[test]
+#[ignore]
+fn test_pipeline_iharperella() {
+    println!("[INFO] Loading test data...");
+    let data = TestData::load().expect("Failed to load test data");
+    let (nx, ny, nz) = data.dims;
+    let (vsx, vsy, vsz) = data.voxel_size;
+
+    let wrapped_phase = wrap_fieldmap(&data.fieldmap);
+
+    let ((result, _new_mask), elapsed) = run_timed!("iHARPERELLA", pipeline::iharperella(
+        &wrapped_phase,
+        &data.mask,
+        nx, ny, nz,
+        vsx, vsy, vsz,
+        10.0, 40,
+    ));
+
+    let res = TestResult::new("iHARPERELLA", &result, &data.fieldmap_local, &data.mask, data.dims);
+    res.print_with_time(elapsed);
+    res.print_ci_metrics(elapsed);
+    common::save_center_slices(&result, &data.mask, data.dims, "pipeline_iharperella");
+
+    assert!(res.nrmse < 0.8, "iHARPERELLA NRMSE too high: {}", res.nrmse);
+    assert!(res.correlation > 0.5, "iHARPERELLA correlation too low: {}", res.correlation);
+}
 
 #[test]
 #[ignore]
@@ -1332,6 +1427,13 @@ fn test_all_combinations() {
     ));
     TestResult::new("LBV", &result, &data.fieldmap_local, &data.mask, data.dims).print_with_time(elapsed);
     bfr_results.push(BfrResult { name: "LBV".into(), local_field: result, mask, elapsed });
+
+    // RESHARP
+    let ((result, mask), elapsed) = run_timed!("RESHARP", bgremove::resharp(
+        &data.fieldmap, &data.mask, nx, ny, nz, vsx, vsy, vsz, 6.0, 1e-4, 1e-6, 200
+    ));
+    TestResult::new("RESHARP", &result, &data.fieldmap_local, &data.mask, data.dims).print_with_time(elapsed);
+    bfr_results.push(BfrResult { name: "RESHARP".into(), local_field: result, mask, elapsed });
 
     // Ground truth local field (baseline — shows inversion-only error)
     bfr_results.push(BfrResult {
