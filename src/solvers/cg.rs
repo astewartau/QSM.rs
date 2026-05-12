@@ -25,6 +25,24 @@ pub fn cg_solve<F>(
 where
     F: Fn(&[f64]) -> Vec<f64>,
 {
+    cg_solve_with_progress(a_op, b, x0, tol, max_iter, |_, _| {})
+}
+
+/// Conjugate gradient solver with progress callback.
+///
+/// Callback receives (current_iteration, max_iterations).
+pub fn cg_solve_with_progress<F, P>(
+    a_op: F,
+    b: &[f64],
+    x0: &[f64],
+    tol: f64,
+    max_iter: usize,
+    mut progress: P,
+) -> Vec<f64>
+where
+    F: Fn(&[f64]) -> Vec<f64>,
+    P: FnMut(usize, usize),
+{
     let n = b.len();
     let mut x = x0.to_vec();
 
@@ -39,7 +57,8 @@ where
     let mut rsold: f64 = r.iter().map(|&ri| ri * ri).sum();
     let b_norm: f64 = b.iter().map(|&bi| bi * bi).sum::<f64>().sqrt();
 
-    for _iter in 0..max_iter {
+    for iter in 0..max_iter {
+        progress(iter, max_iter);
         let ap = a_op(&p);
 
         let pap: f64 = p.iter().zip(ap.iter())

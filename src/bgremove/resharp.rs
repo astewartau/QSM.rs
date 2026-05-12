@@ -16,7 +16,7 @@
 use num_complex::Complex64;
 use crate::fft::{fft3d, ifft3d};
 use crate::kernels::smv::smv_kernel;
-use crate::solvers::cg_solve;
+use crate::solvers::cg_solve_with_progress;
 
 /// RESHARP algorithm parameters
 #[derive(Clone, Debug)]
@@ -37,7 +37,7 @@ impl Default for ResharpParams {
             radius: 6.0,
             tik_reg: 1e-4,
             tol: 1e-6,
-            max_iter: 200,
+            max_iter: 30,
         }
     }
 }
@@ -94,7 +94,7 @@ pub fn resharp_with_progress<F>(
     tik_reg: f64,
     tol: f64,
     max_iter: usize,
-    _callback: F,
+    callback: F,
 ) -> (Vec<f64>, Vec<u8>)
 where
     F: FnMut(usize, usize),
@@ -144,7 +144,7 @@ where
 
     // Solve (H'H + λI)x = b via CG
     let x0 = vec![0.0; n_total];
-    let x = cg_solve(
+    let x = cg_solve_with_progress(
         |x_vec| {
             let mut result = apply_ht_h(&dker, &eroded_mask_f64, x_vec, nx, ny, nz);
             // Add Tikhonov term: + λx
@@ -157,6 +157,7 @@ where
         &x0,
         tol,
         max_iter,
+        callback,
     );
 
     // Apply eroded mask to result
