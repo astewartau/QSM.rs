@@ -37,6 +37,20 @@ impl<T> BucketQueue<T> {
         }
     }
 
+    /// Peek at the priority of the next item to be popped (highest non-empty bin).
+    /// Returns None if queue is empty.
+    #[inline]
+    pub fn peek_max_priority(&self) -> Option<usize> {
+        if self.count == 0 {
+            return None;
+        }
+        let mut p = self.current_priority;
+        while p >= 0 && self.bins[p as usize].is_empty() {
+            p -= 1;
+        }
+        if p < 0 { None } else { Some(p as usize) }
+    }
+
     #[inline]
     pub fn pop(&mut self) -> Option<T> {
         if self.count == 0 {

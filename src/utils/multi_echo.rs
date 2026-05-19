@@ -45,8 +45,7 @@ impl Default for LinearFitParams {
 }
 
 use std::f64::consts::PI;
-use crate::unwrap::romeo::calculate_weights_romeo;
-use crate::region_grow::grow_region_unwrap;
+use crate::unwrap::romeo::{unwrap_romeo, unwrap_romeo_multi_echo, RomeoParams};
 
 const TWO_PI: f64 = 2.0 * PI;
 
@@ -363,7 +362,7 @@ pub fn mcpc3ds_single_coil(
 
     // Unwrap HIP phase using ROMEO (matching Julia line 48)
     // Julia: phaseevolution = (TEs[echoes[1]] / ΔTE) .* romeo(angle.(hip); mag=weight, mask)
-    let unwrapped_hip = unwrap_with_romeo(&hip_phase, &weight, mask, nx, ny, nz);
+    let unwrapped_hip = unwrap_romeo(&hip_phase, &weight, None, 0.0, 0.0, mask, &RomeoParams::default(), nx, ny, nz);
     drop(hip_phase); // Free ~82 MB early
     drop(weight);    // Free ~82 MB early
 
@@ -401,63 +400,6 @@ pub fn mcpc3ds_single_coil(
     }
 
     (corrected_phases, phase_offset_smoothed)
-}
-
-/// Unwrap phase using ROMEO algorithm
-fn unwrap_with_romeo(
-    phase: &[f64],
-    mag: &[f64],
-    mask: &[u8],
-    nx: usize, ny: usize, nz: usize,
-) -> Vec<f64> {
-    // Calculate ROMEO weights (no second echo)
-    let weights = calculate_weights_romeo(
-        phase, mag, None, // No second echo for single phase
-        0.0, 0.0, // TEs not used when phase2 is None
-        mask, nx, ny, nz
-    );
-
-    // Find seed point (center of mass of mask)
-    let (seed_i, seed_j, seed_k) = find_seed_point(mask, nx, ny, nz);
-
-    // Perform region growing unwrap
-    let mut unwrapped = phase.to_vec();
-    let mut work_mask = mask.to_vec();
-
-    grow_region_unwrap(
-        &mut unwrapped, &weights, &mut work_mask,
-        nx, ny, nz, seed_i, seed_j, seed_k
-    );
-
-    unwrapped
-}
-
-/// Find a good seed point (center of mass of the mask)
-fn find_seed_point(mask: &[u8], nx: usize, ny: usize, nz: usize) -> (usize, usize, usize) {
-    let mut sum_i = 0usize;
-    let mut sum_j = 0usize;
-    let mut sum_k = 0usize;
-    let mut count = 0usize;
-
-    for k in 0..nz {
-        for j in 0..ny {
-            for i in 0..nx {
-                let idx = idx3d(i, j, k, nx, ny);
-                if mask[idx] > 0 {
-                    sum_i += i;
-                    sum_j += j;
-                    sum_k += k;
-                    count += 1;
-                }
-            }
-        }
-    }
-
-    if count == 0 {
-        return (nx / 2, ny / 2, nz / 2);
-    }
-
-    (sum_i / count, sum_j / count, sum_k / count)
 }
 
 /// Calculate B0 field from unwrapped phase using weighted averaging
@@ -525,9 +467,106 @@ pub fn calculate_b0_weighted(
     b0
 }
 
+// =========================================================================
+// Bipolar Correction
+// =========================================================================
+
+/// Bipolar gradient correction for multi-echo phase data.
+///
+/// Removes linear phase artefact caused by bipolar readout gradients.
+/// Requires at least 3 echoes.
+///
+/// Reference: Eckstein PhD thesis (2021), Section 3.1.3
+/// https://doi.org/10.34726/hss.2021.43447
+///
+/// # Arguments
+/// * `phases` - Mutable phase data per echo (modified in-place)
+/// * `mags` - Magnitude data per echo
+/// * `tes` - Echo times in ms
+/// * `mask` - Binary mask
+/// * `sigma` - Smoothing sigma for artefact estimation
+/// * `nx`, `ny`, `nz` - Dimensions
+pub fn bipolar_correction<P: AsMut<[f64]> + AsRef<[f64]>>(
+    phases: &mut [P],
+    mags: &[impl AsRef<[f64]>],
+    tes: &[f64],
+    mask: &[u8],
+    sigma: [f64; 3],
+    nx: usize, ny: usize, nz: usize,
+) {
+    let n_echoes = phases.len();
+    if n_echoes < 3 {
+        return; // Need at least 3 echoes
+    }
+
+    let n_total = nx * ny * nz;
+    let delta_te = tes[1] - tes[0];
+    let m = tes[0] / delta_te;
+    let k = (tes[0] + tes[2]) / tes[1];
+
+    // Step 1: Compute artefact phase = φ1 + φ3 - k*φ2
+    // If k is near-integer, unwrap φ2 first to avoid wrap issues
+    let phi2 = if (k - k.round()).abs() < 0.01 {
+        // k is integer-ish: unwrap φ2 with ROMEO
+        let mag2 = if mags.is_empty() { &[] as &[f64] } else { mags[1].as_ref() };
+        unwrap_romeo(
+            phases[1].as_ref(), mag2, None, 0.0, 0.0,
+            mask, &RomeoParams::default(), nx, ny, nz,
+        )
+    } else {
+        phases[1].as_ref().to_vec()
+    };
+
+    let mut artefact = vec![0.0; n_total];
+    for i in 0..n_total {
+        if mask[i] > 0 {
+            artefact[i] = wrap_to_pi(
+                phases[0].as_ref()[i] + phases[2].as_ref()[i] - k * phi2[i]
+            );
+        }
+    }
+
+    // Step 2: Smooth the artefact
+    artefact = gaussian_smooth_3d_phase(&artefact, sigma, mask, nx, ny, nz);
+
+    // Step 3: Unwrap the artefact with ROMEO
+    let mag1 = if mags.is_empty() { &[] as &[f64] } else { mags[0].as_ref() };
+    let romeo_params = RomeoParams {
+        correct_global: true,
+        ..Default::default()
+    };
+    artefact = unwrap_romeo(
+        &artefact, mag1, None, 0.0, 0.0,
+        mask, &romeo_params, nx, ny, nz,
+    );
+
+    // Step 4: Remove artefact from each echo
+    // f = (2 - k) * m - k
+    // even echoes: t = (m + 1) / f
+    // odd echoes:  t = m / f
+    let f = (2.0 - k) * m - k;
+    if f.abs() < 1e-10 {
+        return; // Degenerate case
+    }
+
+    for ieco in 0..n_echoes {
+        // Julia is 1-indexed: iseven(ieco) checks 1-indexed echo number
+        // Echo 1 (idx 0) is odd, echo 2 (idx 1) is even, etc.
+        let t = if (ieco + 1) % 2 == 0 { (m + 1.0) / f } else { m / f };
+        for i in 0..n_total {
+            if mask[i] > 0 {
+                phases[ieco].as_mut()[i] = wrap_to_pi(
+                    phases[ieco].as_ref()[i] - t * artefact[i]
+                );
+            }
+        }
+    }
+}
+
 /// Full MCPC-3D-S + B0 calculation pipeline
 ///
-/// This combines phase offset removal with weighted B0 calculation
+/// This combines phase offset removal with weighted B0 calculation.
+/// Optionally applies bipolar correction (requires ≥3 echoes).
 ///
 /// # Arguments
 /// * `phases` - Wrapped phase for each echo
@@ -536,6 +575,7 @@ pub fn calculate_b0_weighted(
 /// * `mask` - Binary mask
 /// * `sigma` - Smoothing sigma for phase offset [sx, sy, sz]
 /// * `weight_type` - B0 weighting type
+/// * `do_bipolar_correction` - Apply bipolar gradient correction (requires ≥3 echoes)
 /// * `nx`, `ny`, `nz` - Dimensions
 ///
 /// # Returns
@@ -547,57 +587,37 @@ pub fn mcpc3ds_b0_pipeline(
     mask: &[u8],
     sigma: [f64; 3],
     weight_type: B0WeightType,
+    do_bipolar_correction: bool,
     nx: usize, ny: usize, nz: usize,
 ) -> (Vec<f64>, Vec<f64>, Vec<Vec<f64>>) {
     let n_total = nx * ny * nz;
     let n_echoes = phases.len();
 
     // Step 1: MCPC-3D-S to remove phase offset
-    let (corrected_phases, phase_offset) = mcpc3ds_single_coil(
+    let (mut corrected_phases, phase_offset) = mcpc3ds_single_coil(
         phases, mags, tes, mask,
         sigma, [0, 1], // use first two echoes
         nx, ny, nz
     );
 
-    // Step 2: Unwrap the corrected phases using ROMEO
-    // Each echo needs to be unwrapped independently
-    let mut unwrapped_phases = Vec::with_capacity(n_echoes);
-    for e in 0..n_echoes {
-        let unwrapped = unwrap_with_romeo(&corrected_phases[e], mags[e].as_ref(), mask, nx, ny, nz);
-        unwrapped_phases.push(unwrapped);
+    // Step 1.5: Bipolar correction (if requested and ≥3 echoes)
+    if do_bipolar_correction && n_echoes >= 3 {
+        let mag_refs: Vec<&[f64]> = (0..n_echoes).map(|e| mags[e].as_ref()).collect();
+        bipolar_correction(
+            &mut corrected_phases, &mag_refs, tes, mask,
+            sigma, nx, ny, nz,
+        );
     }
 
-    // Step 3: Align echoes to remove 2π ambiguities
-    // Use first echo as reference
-    for e in 1..n_echoes {
-        let te_ratio = tes[e] / tes[0];
+    // Step 2: Unwrap the corrected phases using ROMEO multi-echo
+    let mag_refs: Vec<&[f64]> = (0..n_echoes).map(|e| mags[e].as_ref()).collect();
+    let unwrapped_phases = unwrap_romeo_multi_echo(
+        &corrected_phases, &mag_refs, tes, mask,
+        &RomeoParams::default(),
+        nx, ny, nz,
+    );
 
-        // Calculate mean difference
-        let mut sum_diff = 0.0;
-        let mut count = 0;
-        for i in 0..n_total {
-            if mask[i] > 0 {
-                let expected = unwrapped_phases[0][i] * te_ratio;
-                sum_diff += unwrapped_phases[e][i] - expected;
-                count += 1;
-            }
-        }
-
-        if count > 0 {
-            let mean_diff = sum_diff / count as f64;
-            let correction = (mean_diff / TWO_PI).round() * TWO_PI;
-
-            if correction.abs() > 0.1 {
-                for i in 0..n_total {
-                    if mask[i] > 0 {
-                        unwrapped_phases[e][i] -= correction;
-                    }
-                }
-            }
-        }
-    }
-
-    // Step 4: Calculate B0 with weighted averaging
+    // Step 3: Calculate B0 with weighted averaging
     let b0 = calculate_b0_weighted(
         &unwrapped_phases, mags, tes, mask,
         weight_type, n_total
@@ -1098,11 +1118,12 @@ mod tests {
     }
 
     // =========================================================================
-    // find_seed_point
+    // find_seed_point (now in romeo.rs, tested here for coverage)
     // =========================================================================
 
     #[test]
     fn test_find_seed_point_full_mask() {
+        use crate::unwrap::romeo::find_seed_point;
         let (nx, ny, nz) = (8, 8, 8);
         let mask = vec![1u8; nx * ny * nz];
         let (si, sj, sk) = find_seed_point(&mask, nx, ny, nz);
@@ -1114,6 +1135,7 @@ mod tests {
 
     #[test]
     fn test_find_seed_point_empty_mask() {
+        use crate::unwrap::romeo::find_seed_point;
         let (nx, ny, nz) = (8, 8, 8);
         let mask = vec![0u8; nx * ny * nz];
         let (si, sj, sk) = find_seed_point(&mask, nx, ny, nz);
@@ -1125,6 +1147,7 @@ mod tests {
 
     #[test]
     fn test_find_seed_point_corner_mask() {
+        use crate::unwrap::romeo::find_seed_point;
         let (nx, ny, nz) = (8, 8, 8);
         let mut mask = vec![0u8; nx * ny * nz];
         // Only set voxel (0,0,0)
@@ -1596,7 +1619,7 @@ mod tests {
         let sigma = [1.0, 1.0, 1.0];
         let (b0, offset, corrected) = mcpc3ds_b0_pipeline(
             &phases, &mags, &tes, &mask, sigma,
-            B0WeightType::PhaseSNR, nx, ny, nz,
+            B0WeightType::PhaseSNR, false, nx, ny, nz,
         );
 
         assert_eq!(b0.len(), n, "B0 should have n voxels");
@@ -1616,7 +1639,7 @@ mod tests {
         let sigma = [1.0, 1.0, 1.0];
         let (b0, offset, corrected) = mcpc3ds_b0_pipeline(
             &phases, &mags, &tes, &mask, sigma,
-            B0WeightType::PhaseSNR, nx, ny, nz,
+            B0WeightType::PhaseSNR, false, nx, ny, nz,
         );
 
         for v in &b0 {
@@ -1647,7 +1670,7 @@ mod tests {
             B0WeightType::PhaseVar,
         ] {
             let (b0, _, _) = mcpc3ds_b0_pipeline(
-                &phases, &mags, &tes, &mask, sigma, *wt, nx, ny, nz,
+                &phases, &mags, &tes, &mask, sigma, *wt, false, nx, ny, nz,
             );
             for v in &b0 {
                 assert!(v.is_finite(),
@@ -1678,12 +1701,13 @@ mod tests {
     }
 
     // =========================================================================
-    // unwrap_with_romeo (tested indirectly through mcpc3ds_single_coil
-    // but let's also test directly)
+    // unwrap_romeo (tested indirectly through mcpc3ds_single_coil
+    // but let's also test directly via the public API)
     // =========================================================================
 
     #[test]
-    fn test_unwrap_with_romeo_smooth_data() {
+    fn test_unwrap_romeo_smooth_data() {
+        use crate::unwrap::romeo::{unwrap_romeo, RomeoParams};
         let (nx, ny, nz) = (8, 8, 8);
         let n = nx * ny * nz;
         // Smooth phase that doesn't need unwrapping
@@ -1694,7 +1718,10 @@ mod tests {
         let mag = vec![1.0; n];
         let mask = vec![1u8; n];
 
-        let unwrapped = unwrap_with_romeo(&phase, &mag, &mask, nx, ny, nz);
+        let unwrapped = unwrap_romeo(
+            &phase, &mag, None, 0.0, 0.0,
+            &mask, &RomeoParams::default(), nx, ny, nz,
+        );
 
         assert_eq!(unwrapped.len(), n);
         for (i, &v) in unwrapped.iter().enumerate() {
@@ -1734,6 +1761,75 @@ mod tests {
         }
         for v in &result.phase_offset {
             assert!(v.is_finite(), "phase_offset should be finite");
+        }
+    }
+
+    // =========================================================================
+    // bipolar_correction
+    // =========================================================================
+
+    #[test]
+    fn test_bipolar_correction_3_echoes() {
+        let (nx, ny, nz) = (8, 8, 8);
+        let n = nx * ny * nz;
+        let tes = [5.0, 10.0, 15.0];
+        let (phases, mags, mask) = make_synthetic_multi_echo(nx, ny, nz, &tes);
+
+        let mut phases_mut = phases;
+        let sigma = [1.0, 1.0, 1.0];
+        bipolar_correction(
+            &mut phases_mut, &mags, &tes, &mask,
+            sigma, nx, ny, nz,
+        );
+
+        // All values should remain finite
+        for echo in &phases_mut {
+            for &v in echo {
+                assert!(v.is_finite(), "bipolar-corrected phase should be finite");
+            }
+        }
+    }
+
+    #[test]
+    fn test_bipolar_correction_2_echoes_noop() {
+        // With only 2 echoes, bipolar correction should be a no-op
+        let (nx, ny, nz) = (8, 8, 8);
+        let n = nx * ny * nz;
+        let tes = [5.0, 10.0];
+        let (phases, mags, mask) = make_synthetic_multi_echo(nx, ny, nz, &tes);
+
+        let original: Vec<Vec<f64>> = phases.iter().map(|p| p.clone()).collect();
+        let mut phases_mut = phases;
+        bipolar_correction(
+            &mut phases_mut, &mags, &tes, &mask,
+            [1.0, 1.0, 1.0], nx, ny, nz,
+        );
+
+        // Should be unchanged (2 echoes = noop)
+        for (e, echo) in phases_mut.iter().enumerate() {
+            for (i, &v) in echo.iter().enumerate() {
+                assert_eq!(v, original[e][i],
+                    "2-echo bipolar correction should be no-op");
+            }
+        }
+    }
+
+    #[test]
+    fn test_mcpc3ds_b0_pipeline_with_bipolar() {
+        let (nx, ny, nz) = (8, 8, 8);
+        let n = nx * ny * nz;
+        let tes = [5.0, 10.0, 15.0];
+        let (phases, mags, mask) = make_synthetic_multi_echo(nx, ny, nz, &tes);
+
+        let sigma = [1.0, 1.0, 1.0];
+        let (b0, offset, corrected) = mcpc3ds_b0_pipeline(
+            &phases, &mags, &tes, &mask, sigma,
+            B0WeightType::PhaseSNR, true, nx, ny, nz,
+        );
+
+        assert_eq!(b0.len(), n);
+        for v in &b0 {
+            assert!(v.is_finite(), "B0 with bipolar correction should be finite");
         }
     }
 }

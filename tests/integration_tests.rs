@@ -839,6 +839,43 @@ fn test_pipeline_iharperella() {
 
 #[test]
 #[ignore]
+fn test_pipeline_romeo_b0() {
+    println!("[INFO] Loading test data...");
+    let data = TestData::load().expect("Failed to load test data");
+    let (nx, ny, nz) = data.dims;
+
+    let start = Instant::now();
+
+    // MCPC-3D-S + ROMEO unwrapping + B0 estimation → total field in Hz
+    let tes_ms: Vec<f64> = data.echo_times.iter().map(|&t| t * 1000.0).collect();
+    println!("[INFO] Running MCPC-3D-S + ROMEO + B0 estimation...");
+    let (b0_hz, _phase_offset, _corrected_phases) = mcpc3ds_b0_pipeline(
+        &data.phase_echoes,
+        &data.mag_echoes,
+        &tes_ms,
+        &data.mask,
+        [10.0, 10.0, 5.0],
+        B0WeightType::PhaseSNR,
+        false,
+        nx, ny, nz,
+    );
+
+    let elapsed = start.elapsed();
+
+    // Convert Hz → ppm for comparison with ground truth fieldmap
+    let gamma = 42.576e6_f64;
+    let scale = 1e6 / (gamma * data.field_strength);
+    let b0_ppm: Vec<f64> = b0_hz.iter().map(|&v| v * scale).collect();
+
+    let res = TestResult::new("ROMEO+B0", &b0_ppm, &data.fieldmap, &data.mask, data.dims);
+    res.print_with_time(elapsed);
+    common::save_center_slices(&b0_ppm, &data.mask, data.dims, "pipeline_romeo_b0");
+
+    assert!(res.nrmse < 0.5, "ROMEO+B0 NRMSE too high: {}", res.nrmse);
+}
+
+#[test]
+#[ignore]
 fn test_pipeline_tgv() {
     println!("[INFO] Loading test data...");
     let data = TestData::load().expect("Failed to load test data");
@@ -862,6 +899,7 @@ fn test_pipeline_tgv() {
         &data.mask,
         [10.0, 10.0, 5.0],  // sigma in voxels (qsmbly default)
         B0WeightType::PhaseSNR,
+        false,  // no bipolar correction
         nx, ny, nz,
     );
 
@@ -1121,6 +1159,7 @@ fn test_pipeline_lbv_tv() {
         &data.mask,
         [10.0, 10.0, 5.0],
         B0WeightType::PhaseSNR,
+        false,  // no bipolar correction
         nx, ny, nz,
     );
 
