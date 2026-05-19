@@ -539,30 +539,173 @@ mod tests {
 
     #[test]
     fn test_simple_unwrap() {
-        // 3x3x3 test case
         let nx = 3;
         let ny = 3;
         let nz = 3;
 
-        // Create wrapped phase with a 2π jump
         let mut phase = vec![0.0f64; nx * ny * nz];
         phase[idx3d(0, 0, 0, nx, ny)] = 0.0;
         phase[idx3d(1, 0, 0, nx, ny)] = 0.1;
-        phase[idx3d(2, 0, 0, nx, ny)] = 0.2 - TWO_PI; // Wrapped value
+        phase[idx3d(2, 0, 0, nx, ny)] = 0.2 - TWO_PI;
 
-        // All weights = 255 (high quality)
         let weights = vec![255u8; 3 * nx * ny * nz];
-
-        // All voxels in mask (1 = in ROI, not visited)
         let mut mask = vec![1u8; nx * ny * nz];
 
-        // Unwrap from center
         let processed = grow_region_unwrap(&mut phase, &weights, &mut mask, nx, ny, nz, 1, 1, 1);
 
         assert!(processed > 0);
-
-        // Check that the wrapped value was unwrapped
         let unwrapped_val = phase[idx3d(2, 0, 0, nx, ny)];
         assert!((unwrapped_val - 0.2).abs() < 0.5, "Expected ~0.2, got {}", unwrapped_val);
+    }
+
+    #[test]
+    fn test_grow_from_visited_unwraps_neighbors() {
+        let (nx, ny, nz) = (5, 5, 5);
+        let n = nx * ny * nz;
+        let weights = vec![255u8; 3 * n];
+
+        // Center voxel is visited (2), neighbors are uncertain (1)
+        let mut mask = vec![0u8; n];
+        let mut phase = vec![0.0f64; n];
+        let ci = 2; let cj = 2; let ck = 2;
+        let c_idx = idx3d(ci, cj, ck, nx, ny);
+        mask[c_idx] = 2;
+        phase[c_idx] = 1.0;
+
+        // Neighbor with a 2π wrap
+        let n_idx = idx3d(3, 2, 2, nx, ny);
+        mask[n_idx] = 1;
+        phase[n_idx] = 1.1 + TWO_PI;
+
+        let processed = grow_region_unwrap_from_visited(&mut phase, &weights, &mut mask, nx, ny, nz);
+        assert_eq!(processed, 1);
+        assert_eq!(mask[n_idx], 2);
+        assert!((phase[n_idx] - 1.1).abs() < 0.5);
+    }
+
+    #[test]
+    fn test_grow_from_visited_no_uncertain() {
+        let (nx, ny, nz) = (3, 3, 3);
+        let n = nx * ny * nz;
+        let weights = vec![255u8; 3 * n];
+        let mut mask = vec![2u8; n]; // all visited
+        let mut phase = vec![0.0f64; n];
+
+        let processed = grow_region_unwrap_from_visited(&mut phase, &weights, &mut mask, nx, ny, nz);
+        assert_eq!(processed, 0);
+    }
+
+    #[test]
+    fn test_grow_full_single_seed() {
+        let (nx, ny, nz) = (5, 5, 5);
+        let n = nx * ny * nz;
+        let weights = vec![200u8; 3 * n];
+        let mask = vec![1u8; n];
+        let mut visited = vec![0u8; n];
+
+        let mut phase = vec![0.0f64; n];
+        // Create a smooth gradient with a wrap
+        for i in 0..nx {
+            for j in 0..ny {
+                for k in 0..nz {
+                    let idx = idx3d(i, j, k, nx, ny);
+                    let v = 0.1 * i as f64;
+                    // Wrap the value
+                    phase[idx] = v - TWO_PI * (v / TWO_PI).floor();
+                    if phase[idx] > PI { phase[idx] -= TWO_PI; }
+                }
+            }
+        }
+
+        let num_regions = grow_region_unwrap_full(
+            &mut phase, &weights, &mask, &mut visited,
+            nx, ny, nz, 0.0, 1, None, None,
+        );
+        assert_eq!(num_regions, 1);
+
+        // All masked voxels should be visited
+        for idx in 0..n {
+            if mask[idx] > 0 {
+                assert!(visited[idx] > 0, "voxel {} not visited", idx);
+            }
+        }
+    }
+
+    #[test]
+    fn test_wrap_to_pi() {
+        assert!((wrap_to_pi(0.0) - 0.0).abs() < 1e-10);
+        assert!((wrap_to_pi(PI + 0.1) - (-PI + 0.1)).abs() < 1e-10);
+        assert!((wrap_to_pi(-PI - 0.1) - (PI - 0.1)).abs() < 1e-10);
+        assert!((wrap_to_pi(TWO_PI) - 0.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_seed_correction_no_multi_echo() {
+        let mut phase = vec![0.0f64; 8];
+        phase[0] = 5.0; // > π, should wrap to [-π, π]
+        seed_correction(&mut phase, 0, None, None);
+        assert!(phase[0].abs() <= PI + 1e-10, "should wrap to [-π,π], got {}", phase[0]);
+    }
+
+    #[test]
+    fn test_seed_correction_multi_echo() {
+        let mut phase = vec![0.0f64; 1];
+        let phase2 = vec![0.0f64; 1];
+        // phase=0, phase2=0, te1=5, te2=10 — no correction needed
+        phase[0] = 0.5;
+        seed_correction(&mut phase, 0, Some(&phase2), Some((5.0, 10.0)));
+        // Best offset should be 0 (already aligned)
+        assert!((phase[0] - 0.5).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_seed_correction_multi_echo_with_wrap() {
+        let mut phase = vec![0.0f64; 1];
+        let te1 = 5.0;
+        let te2 = 10.0;
+        // phase/te1 should match phase2/te2 — if phase has extra 2π, correction removes it
+        let true_rate = 0.3; // rad/ms
+        phase[0] = true_rate * te1 + TWO_PI; // wrapped by +2π
+        let phase2 = vec![true_rate * te2];
+        seed_correction(&mut phase, 0, Some(&phase2), Some((te1, te2)));
+        // Should correct to ~true_rate * te1
+        assert!((phase[0] - true_rate * te1).abs() < 0.5,
+            "expected ~{}, got {}", true_rate * te1, phase[0]);
+    }
+
+    #[test]
+    fn test_unwrap_edge_wa_no_addition() {
+        let (nx, ny, nz) = (3, 1, 1);
+        let mut phase = vec![0.0, 0.1, 0.2 + TWO_PI];
+        let visited = vec![0u8, 1, 0];
+        unwrap_edge_wa(&mut phase, &visited, 2, 1, 2, 0, 0, 1, 0, 0, 0.0, nx, ny, nz);
+        assert!((phase[2] - 0.2).abs() < 0.5);
+    }
+
+    #[test]
+    fn test_unwrap_edge_wa_with_addition() {
+        let (nx, ny, nz) = (5, 1, 1);
+        // Linear gradient: 0.0, 0.5, 1.0, 1.5+2π (wrapped)
+        let mut phase = vec![0.0, 0.5, 1.0, 1.5 + TWO_PI, 0.0];
+        let visited = vec![1u8, 1, 1, 0, 0];
+        // Unwrap voxel 3 from voxel 2, with wrap_addition=0.5
+        unwrap_edge_wa(&mut phase, &visited, 3, 2, 3, 0, 0, 2, 0, 0, 0.5, nx, ny, nz);
+        assert!((phase[3] - 1.5).abs() < 0.5, "expected ~1.5, got {}", phase[3]);
+    }
+
+    #[test]
+    fn test_grow_full_empty_mask() {
+        let (nx, ny, nz) = (3, 3, 3);
+        let n = nx * ny * nz;
+        let weights = vec![255u8; 3 * n];
+        let mask = vec![0u8; n]; // empty mask
+        let mut visited = vec![0u8; n];
+        let mut phase = vec![0.0f64; n];
+
+        let num_regions = grow_region_unwrap_full(
+            &mut phase, &weights, &mask, &mut visited,
+            nx, ny, nz, 0.0, 1, None, None,
+        );
+        assert_eq!(num_regions, 0);
     }
 }
