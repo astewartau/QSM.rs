@@ -13,10 +13,11 @@ use qsm_core::bet;
 use qsm_core::inversion;
 use qsm_core::inversion::{tgv_qsm, TgvParams, get_default_alpha, get_default_iterations, ilsqr_simple};
 use qsm_core::swi;
-use qsm_core::unwrap::laplacian_unwrap;
+use qsm_core::unwrap::{laplacian_unwrap, UnwrapMethod};
+use qsm_core::unwrap::romeo::{unwrap_romeo_multi_echo, RomeoParams};
 use qsm_core::pipeline;
 use qsm_core::utils::{
-    mcpc3ds_b0_pipeline, B0WeightType,
+    phase_offset_removal, calculate_b0_weighted, B0WeightType,
     multi_echo_linear_fit, field_to_hz,
     generate_vasculature_mask, VasculatureParams,
     adjust_offset,
@@ -34,6 +35,39 @@ macro_rules! run_timed {
         println!("[INFO] {} completed in {:.2?}", $name, elapsed);
         (result, elapsed)
     }};
+}
+
+/// Helper: run the standard field mapping pipeline (offset removal → ROMEO → B0 weighted avg).
+/// Returns B0 in Hz.
+fn run_field_mapping(data: &common::TestData) -> Vec<f64> {
+    let (nx, ny, nz) = data.dims;
+    let (vsx, vsy, vsz) = data.voxel_size;
+    let n_total = nx * ny * nz;
+    let n_echoes = data.phase_echoes.len();
+    let tes_ms: Vec<f64> = data.echo_times.iter().map(|&t| t * 1000.0).collect();
+
+    // Step 1: Phase offset removal
+    println!("[INFO] Phase offset removal...");
+    let (corrected_phases, _offset) = phase_offset_removal(
+        &data.phase_echoes, &data.mag_echoes, &tes_ms, &data.mask,
+        [10.0, 10.0, 5.0], [0, 1], UnwrapMethod::Romeo,
+        [vsx, vsy, vsz], nx, ny, nz,
+    );
+
+    // Step 2: Multi-echo ROMEO unwrapping
+    println!("[INFO] ROMEO multi-echo unwrapping...");
+    let mag_refs: Vec<&[f64]> = (0..n_echoes).map(|e| data.mag_echoes[e].as_slice()).collect();
+    let unwrapped = unwrap_romeo_multi_echo(
+        &corrected_phases, &mag_refs, &tes_ms, &data.mask,
+        &RomeoParams::default(), nx, ny, nz,
+    );
+
+    // Step 3: Weighted B0 averaging
+    println!("[INFO] Weighted B0 estimation...");
+    calculate_b0_weighted(
+        &unwrapped, &data.mag_echoes, &tes_ms, &data.mask,
+        B0WeightType::PhaseSNR, n_total,
+    )
 }
 
 // ============================================================================
@@ -845,21 +879,7 @@ fn test_pipeline_romeo_b0() {
     let (nx, ny, nz) = data.dims;
 
     let start = Instant::now();
-
-    // MCPC-3D-S + ROMEO unwrapping + B0 estimation → total field in Hz
-    let tes_ms: Vec<f64> = data.echo_times.iter().map(|&t| t * 1000.0).collect();
-    println!("[INFO] Running MCPC-3D-S + ROMEO + B0 estimation...");
-    let (b0_hz, _phase_offset, _corrected_phases) = mcpc3ds_b0_pipeline(
-        &data.phase_echoes,
-        &data.mag_echoes,
-        &tes_ms,
-        &data.mask,
-        [10.0, 10.0, 5.0],
-        B0WeightType::PhaseSNR,
-        false,
-        nx, ny, nz,
-    );
-
+    let b0_hz = run_field_mapping(&data);
     let elapsed = start.elapsed();
 
     // Convert Hz → ppm for comparison with ground truth fieldmap
@@ -891,17 +911,8 @@ fn test_pipeline_tgv() {
     //   - Internally: MCPC-3D-S offset correction → ROMEO unwrap per echo → echo
     //     alignment → weighted B0 averaging → B0 in Hz
     let tes_ms: Vec<f64> = data.echo_times.iter().map(|&t| t * 1000.0).collect();
-    println!("[INFO] Running MCPC-3D-S + ROMEO + B0 estimation...");
-    let (b0_hz, _phase_offset, _corrected_phases) = mcpc3ds_b0_pipeline(
-        &data.phase_echoes,
-        &data.mag_echoes,
-        &tes_ms,  // milliseconds (calculate_b0_weighted uses 1000/2π scale)
-        &data.mask,
-        [10.0, 10.0, 5.0],  // sigma in voxels (qsmbly default)
-        B0WeightType::PhaseSNR,
-        false,  // no bipolar correction
-        nx, ny, nz,
-    );
+    println!("[INFO] Running phase offset removal + ROMEO + B0 estimation...");
+    let b0_hz = run_field_mapping(&data);
 
     // Step 2: Convert B0 (Hz) to single-echo phase (radians) for TGV
     // phase = 2π × B0_Hz × TE_seconds
@@ -1149,19 +1160,9 @@ fn test_pipeline_lbv_tv() {
     let scale = 1e6 / (gamma * data.field_strength); // Hz→ppm
     println!("[INFO] Hz→ppm scale: {:.6e} (B0={:.1}T)", scale, data.field_strength);
 
-    // Step 1: MCPC-3D-S + ROMEO → B0 in Hz
-    let tes_ms: Vec<f64> = data.echo_times.iter().map(|&t| t * 1000.0).collect();
-    println!("[INFO] Running MCPC-3D-S + ROMEO + B0 estimation...");
-    let (b0_hz, _phase_offset, _corrected_phases) = mcpc3ds_b0_pipeline(
-        &data.phase_echoes,
-        &data.mag_echoes,
-        &tes_ms,
-        &data.mask,
-        [10.0, 10.0, 5.0],
-        B0WeightType::PhaseSNR,
-        false,  // no bipolar correction
-        nx, ny, nz,
-    );
+    // Step 1: Phase offset removal + ROMEO → B0 in Hz
+    println!("[INFO] Running phase offset removal + ROMEO + B0 estimation...");
+    let b0_hz = run_field_mapping(&data);
 
     let (mut b0_min, mut b0_max) = (f64::MAX, f64::MIN);
     for i in 0..n_total {

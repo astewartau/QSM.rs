@@ -1,30 +1,31 @@
-//! Multi-echo phase combination utilities
+//! Multi-echo field mapping utilities
 //!
-//! Implements MCPC-3D-S (Multi-Channel Phase Combination - 3D - Smoothed) algorithm
-//! and weighted B0 calculation.
+//! Provides phase offset removal, weighted B0 estimation, bipolar correction,
+//! and multi-echo linear fit for multi-echo GRE data.
 //!
-//! Reference:
-//! Eckstein, K., Dymerska, B., Bachrata, B., Bogner, W., Poljanc, K., Trattnig, S.,
-//! Robinson, S.D. (2018). "Computationally Efficient Combination of Multi-channel Phase
-//! Data From Multi-echo Acquisitions (ASPIRE)."
+//! Phase offset removal is based on the HIP (Hermitian Inner Product) technique
+//! from ASPIRE/MCPC-3D-S:
+//! Eckstein, K., et al. (2018). "Computationally Efficient Combination of
+//! Multi-channel Phase Data From Multi-echo Acquisitions (ASPIRE)."
 //! Magnetic Resonance in Medicine, 79:2996-3006. https://doi.org/10.1002/mrm.26963
-//!
-//! Reference implementation: https://github.com/korbinian90/MriResearchTools.jl
 
-/// Parameters for MCPC-3D-S phase combination.
+/// Parameters for phase offset removal.
 #[derive(Clone, Debug)]
-pub struct Mcpc3dsParams {
+pub struct PhaseOffsetParams {
     /// Gaussian smoothing sigma in voxels [x, y, z] for phase offset estimation
     pub sigma: [f64; 3],
 }
 
-impl Default for Mcpc3dsParams {
+impl Default for PhaseOffsetParams {
     fn default() -> Self {
         Self {
             sigma: [4.0, 4.0, 4.0],
         }
     }
 }
+
+/// Backward-compatible alias.
+pub type Mcpc3dsParams = PhaseOffsetParams;
 
 /// Parameters for multi-echo linear fit.
 #[derive(Clone, Debug)]
@@ -45,7 +46,9 @@ impl Default for LinearFitParams {
 }
 
 use std::f64::consts::PI;
-use crate::unwrap::romeo::{unwrap_romeo, unwrap_romeo_multi_echo, RomeoParams};
+use crate::unwrap::romeo::{unwrap_romeo, RomeoParams};
+use crate::unwrap::laplacian::laplacian_unwrap;
+use crate::unwrap::UnwrapMethod;
 
 const TWO_PI: f64 = 2.0 * PI;
 
@@ -330,13 +333,33 @@ pub fn hermitian_inner_product(
 /// (corrected_phases, phase_offset) where:
 /// - corrected_phases: phases with offset removed
 /// - phase_offset: estimated phase offset
-pub fn mcpc3ds_single_coil(
+/// Remove phase offset from multi-echo phase data using HIP (Hermitian Inner Product).
+///
+/// Estimates the spatially-varying phase offset from the phase difference between two
+/// echoes, smooths it with a Gaussian filter, and subtracts it from all echoes.
+///
+/// # Arguments
+/// * `phases` - Wrapped phase per echo (n_echoes arrays of nx*ny*nz)
+/// * `mags` - Magnitude per echo
+/// * `tes` - Echo times (any consistent unit)
+/// * `mask` - Binary mask
+/// * `sigma` - Gaussian smoothing sigma in voxels [x, y, z]
+/// * `echoes` - Which two echoes to use for HIP [e1, e2]
+/// * `unwrap_method` - Method to unwrap the HIP phase (Romeo or Laplacian)
+/// * `voxel_size` - Voxel dimensions in mm [vsx, vsy, vsz] (needed for Laplacian unwrapping)
+/// * `nx`, `ny`, `nz` - Volume dimensions
+///
+/// # Returns
+/// `(corrected_phases, phase_offset)` — offset-corrected phases and the estimated offset
+pub fn phase_offset_removal(
     phases: &[impl AsRef<[f64]>],
     mags: &[impl AsRef<[f64]>],
     tes: &[f64],
     mask: &[u8],
     sigma: [f64; 3],
     echoes: [usize; 2],
+    unwrap_method: UnwrapMethod,
+    voxel_size: [f64; 3],
     nx: usize, ny: usize, nz: usize,
 ) -> (Vec<Vec<f64>>, Vec<f64>) {
     let n_echoes = phases.len();
@@ -356,15 +379,18 @@ pub fn mcpc3ds_single_coil(
         mask, n_total
     );
 
-    // Weight for ROMEO = sqrt(|HIP|) - matches Julia: weight = sqrt.(abs.(hip))
-    let weight: Vec<f64> = hip_mag.iter().map(|&x| x.sqrt()).collect();
-    drop(hip_mag); // Free ~82 MB early
-
-    // Unwrap HIP phase using ROMEO (matching Julia line 48)
-    // Julia: phaseevolution = (TEs[echoes[1]] / ΔTE) .* romeo(angle.(hip); mag=weight, mask)
-    let unwrapped_hip = unwrap_romeo(&hip_phase, &weight, None, 0.0, 0.0, mask, &RomeoParams::default(), nx, ny, nz);
-    drop(hip_phase); // Free ~82 MB early
-    drop(weight);    // Free ~82 MB early
+    // Unwrap HIP phase
+    let unwrapped_hip = match unwrap_method {
+        UnwrapMethod::Romeo => {
+            let weight: Vec<f64> = hip_mag.iter().map(|&x| x.sqrt()).collect();
+            unwrap_romeo(&hip_phase, &weight, None, 0.0, 0.0, mask, &RomeoParams::default(), nx, ny, nz)
+        }
+        UnwrapMethod::Laplacian => {
+            laplacian_unwrap(&hip_phase, mask, nx, ny, nz, voxel_size[0], voxel_size[1], voxel_size[2])
+        }
+    };
+    drop(hip_phase);
+    drop(hip_mag);
 
     // Phase evolution at TE1: (TE1 / ΔTE) * unwrapped_hip
     // This gives the phase that would have evolved from TE=0 to TE=TE1
@@ -563,68 +589,6 @@ pub fn bipolar_correction<P: AsMut<[f64]> + AsRef<[f64]>>(
     }
 }
 
-/// Full MCPC-3D-S + B0 calculation pipeline
-///
-/// This combines phase offset removal with weighted B0 calculation.
-/// Optionally applies bipolar correction (requires ≥3 echoes).
-///
-/// # Arguments
-/// * `phases` - Wrapped phase for each echo
-/// * `mags` - Magnitude for each echo
-/// * `tes` - Echo times in ms
-/// * `mask` - Binary mask
-/// * `sigma` - Smoothing sigma for phase offset [sx, sy, sz]
-/// * `weight_type` - B0 weighting type
-/// * `do_bipolar_correction` - Apply bipolar gradient correction (requires ≥3 echoes)
-/// * `nx`, `ny`, `nz` - Dimensions
-///
-/// # Returns
-/// (b0_hz, phase_offset, corrected_phases)
-pub fn mcpc3ds_b0_pipeline(
-    phases: &[impl AsRef<[f64]>],
-    mags: &[impl AsRef<[f64]>],
-    tes: &[f64],
-    mask: &[u8],
-    sigma: [f64; 3],
-    weight_type: B0WeightType,
-    do_bipolar_correction: bool,
-    nx: usize, ny: usize, nz: usize,
-) -> (Vec<f64>, Vec<f64>, Vec<Vec<f64>>) {
-    let n_total = nx * ny * nz;
-    let n_echoes = phases.len();
-
-    // Step 1: MCPC-3D-S to remove phase offset
-    let (mut corrected_phases, phase_offset) = mcpc3ds_single_coil(
-        phases, mags, tes, mask,
-        sigma, [0, 1], // use first two echoes
-        nx, ny, nz
-    );
-
-    // Step 1.5: Bipolar correction (if requested and ≥3 echoes)
-    if do_bipolar_correction && n_echoes >= 3 {
-        let mag_refs: Vec<&[f64]> = (0..n_echoes).map(|e| mags[e].as_ref()).collect();
-        bipolar_correction(
-            &mut corrected_phases, &mag_refs, tes, mask,
-            sigma, nx, ny, nz,
-        );
-    }
-
-    // Step 2: Unwrap the corrected phases using ROMEO multi-echo
-    let mag_refs: Vec<&[f64]> = (0..n_echoes).map(|e| mags[e].as_ref()).collect();
-    let unwrapped_phases = unwrap_romeo_multi_echo(
-        &corrected_phases, &mag_refs, tes, mask,
-        &RomeoParams::default(),
-        nx, ny, nz,
-    );
-
-    // Step 3: Calculate B0 with weighted averaging
-    let b0 = calculate_b0_weighted(
-        &unwrapped_phases, mags, tes, mask,
-        weight_type, n_total
-    );
-
-    (b0, phase_offset, corrected_phases)
-}
 
 //=============================================================================
 // Multi-Echo Linear Fit
@@ -1519,15 +1483,15 @@ mod tests {
     // =========================================================================
 
     #[test]
-    fn test_mcpc3ds_single_coil_output_sizes() {
+    fn test_phase_offset_removal_output_sizes() {
         let (nx, ny, nz) = (8, 8, 8);
         let n = nx * ny * nz;
         let tes = [5.0, 10.0, 15.0];
         let (phases, mags, mask) = make_synthetic_multi_echo(nx, ny, nz, &tes);
 
         let sigma = [1.0, 1.0, 1.0];
-        let (corrected, offset) = mcpc3ds_single_coil(
-            &phases, &mags, &tes, &mask, sigma, [0, 1], nx, ny, nz,
+        let (corrected, offset) = phase_offset_removal(
+            &phases, &mags, &tes, &mask, sigma, [0, 1], UnwrapMethod::Romeo, [1.0, 1.0, 1.0], nx, ny, nz,
         );
 
         // Check sizes
@@ -1539,14 +1503,14 @@ mod tests {
     }
 
     #[test]
-    fn test_mcpc3ds_single_coil_finite_output() {
+    fn test_phase_offset_removal_finite_output() {
         let (nx, ny, nz) = (8, 8, 8);
         let tes = [5.0, 10.0, 15.0];
         let (phases, mags, mask) = make_synthetic_multi_echo(nx, ny, nz, &tes);
 
         let sigma = [1.0, 1.0, 1.0];
-        let (corrected, offset) = mcpc3ds_single_coil(
-            &phases, &mags, &tes, &mask, sigma, [0, 1], nx, ny, nz,
+        let (corrected, offset) = phase_offset_removal(
+            &phases, &mags, &tes, &mask, sigma, [0, 1], UnwrapMethod::Romeo, [1.0, 1.0, 1.0], nx, ny, nz,
         );
 
         for v in &offset {
@@ -1560,14 +1524,14 @@ mod tests {
     }
 
     #[test]
-    fn test_mcpc3ds_single_coil_corrected_in_range() {
+    fn test_phase_offset_removal_corrected_in_range() {
         let (nx, ny, nz) = (8, 8, 8);
         let tes = [5.0, 10.0, 15.0];
         let (phases, mags, mask) = make_synthetic_multi_echo(nx, ny, nz, &tes);
 
         let sigma = [1.0, 1.0, 1.0];
-        let (corrected, _) = mcpc3ds_single_coil(
-            &phases, &mags, &tes, &mask, sigma, [0, 1], nx, ny, nz,
+        let (corrected, _) = phase_offset_removal(
+            &phases, &mags, &tes, &mask, sigma, [0, 1], UnwrapMethod::Romeo, [1.0, 1.0, 1.0], nx, ny, nz,
         );
 
         // Corrected phases should be in [-pi, pi] since wrap_to_pi is applied
@@ -1580,7 +1544,7 @@ mod tests {
     }
 
     #[test]
-    fn test_mcpc3ds_single_coil_uniform_phase() {
+    fn test_phase_offset_removal_uniform_phase() {
         // Uniform phase across all echoes => offset should be approximately that phase
         let (nx, ny, nz) = (8, 8, 8);
         let n = nx * ny * nz;
@@ -1592,8 +1556,8 @@ mod tests {
         let mask = vec![1u8; n];
 
         let sigma = [1.0, 1.0, 1.0];
-        let (corrected, _offset) = mcpc3ds_single_coil(
-            &phases, &mags, &tes, &mask, sigma, [0, 1], nx, ny, nz,
+        let (corrected, _offset) = phase_offset_removal(
+            &phases, &mags, &tes, &mask, sigma, [0, 1], UnwrapMethod::Romeo, [1.0, 1.0, 1.0], nx, ny, nz,
         );
 
         // After removing offset, corrected phases should be close to 0
@@ -1606,61 +1570,62 @@ mod tests {
     }
 
     // =========================================================================
-    // mcpc3ds_b0_pipeline
+    // Composed field mapping pipeline (offset removal → unwrap → B0)
     // =========================================================================
 
     #[test]
-    fn test_mcpc3ds_b0_pipeline_output_sizes() {
+    fn test_field_mapping_composed() {
+        use crate::unwrap::romeo::{unwrap_romeo_multi_echo, RomeoParams};
         let (nx, ny, nz) = (8, 8, 8);
         let n = nx * ny * nz;
         let tes = [5.0, 10.0, 15.0];
         let (phases, mags, mask) = make_synthetic_multi_echo(nx, ny, nz, &tes);
-
         let sigma = [1.0, 1.0, 1.0];
-        let (b0, offset, corrected) = mcpc3ds_b0_pipeline(
-            &phases, &mags, &tes, &mask, sigma,
-            B0WeightType::PhaseSNR, false, nx, ny, nz,
+
+        // Step 1: Phase offset removal
+        let (corrected, offset) = phase_offset_removal(
+            &phases, &mags, &tes, &mask, sigma, [0, 1],
+            UnwrapMethod::Romeo, [1.0, 1.0, 1.0], nx, ny, nz,
         );
+        assert_eq!(corrected.len(), tes.len());
+        assert_eq!(offset.len(), n);
 
-        assert_eq!(b0.len(), n, "B0 should have n voxels");
-        assert_eq!(offset.len(), n, "offset should have n voxels");
-        assert_eq!(corrected.len(), tes.len(), "corrected should have n_echoes entries");
-        for cp in &corrected {
-            assert_eq!(cp.len(), n);
-        }
-    }
-
-    #[test]
-    fn test_mcpc3ds_b0_pipeline_finite_output() {
-        let (nx, ny, nz) = (8, 8, 8);
-        let tes = [5.0, 10.0, 15.0];
-        let (phases, mags, mask) = make_synthetic_multi_echo(nx, ny, nz, &tes);
-
-        let sigma = [1.0, 1.0, 1.0];
-        let (b0, offset, corrected) = mcpc3ds_b0_pipeline(
-            &phases, &mags, &tes, &mask, sigma,
-            B0WeightType::PhaseSNR, false, nx, ny, nz,
+        // Step 2: Multi-echo unwrapping
+        let mag_refs: Vec<&[f64]> = mags.iter().map(|m| m.as_slice()).collect();
+        let unwrapped = unwrap_romeo_multi_echo(
+            &corrected, &mag_refs, &tes, &mask,
+            &RomeoParams::default(), nx, ny, nz,
         );
+        assert_eq!(unwrapped.len(), tes.len());
 
+        // Step 3: Weighted B0
+        let b0 = calculate_b0_weighted(
+            &unwrapped, &mags, &tes, &mask, B0WeightType::PhaseSNR, n,
+        );
+        assert_eq!(b0.len(), n);
         for v in &b0 {
             assert!(v.is_finite(), "B0 should be finite");
         }
-        for v in &offset {
-            assert!(v.is_finite(), "offset should be finite");
-        }
-        for cp in &corrected {
-            for v in cp {
-                assert!(v.is_finite(), "corrected phase should be finite");
-            }
-        }
     }
 
     #[test]
-    fn test_mcpc3ds_b0_pipeline_different_weight_types() {
+    fn test_field_mapping_different_weight_types() {
+        use crate::unwrap::romeo::{unwrap_romeo_multi_echo, RomeoParams};
         let (nx, ny, nz) = (8, 8, 8);
+        let n = nx * ny * nz;
         let tes = [5.0, 10.0, 15.0];
         let (phases, mags, mask) = make_synthetic_multi_echo(nx, ny, nz, &tes);
         let sigma = [1.0, 1.0, 1.0];
+
+        let (corrected, _) = phase_offset_removal(
+            &phases, &mags, &tes, &mask, sigma, [0, 1],
+            UnwrapMethod::Romeo, [1.0, 1.0, 1.0], nx, ny, nz,
+        );
+        let mag_refs: Vec<&[f64]> = mags.iter().map(|m| m.as_slice()).collect();
+        let unwrapped = unwrap_romeo_multi_echo(
+            &corrected, &mag_refs, &tes, &mask,
+            &RomeoParams::default(), nx, ny, nz,
+        );
 
         for wt in &[
             B0WeightType::PhaseSNR,
@@ -1669,12 +1634,9 @@ mod tests {
             B0WeightType::Mag,
             B0WeightType::PhaseVar,
         ] {
-            let (b0, _, _) = mcpc3ds_b0_pipeline(
-                &phases, &mags, &tes, &mask, sigma, *wt, false, nx, ny, nz,
-            );
+            let b0 = calculate_b0_weighted(&unwrapped, &mags, &tes, &mask, *wt, n);
             for v in &b0 {
-                assert!(v.is_finite(),
-                    "B0 with weight type {:?} should be finite", wt);
+                assert!(v.is_finite(), "B0 with {:?} should be finite", wt);
             }
         }
     }
@@ -1701,7 +1663,7 @@ mod tests {
     }
 
     // =========================================================================
-    // unwrap_romeo (tested indirectly through mcpc3ds_single_coil
+    // unwrap_romeo (tested indirectly through phase_offset_removal
     // but let's also test directly via the public API)
     // =========================================================================
 
@@ -1741,8 +1703,8 @@ mod tests {
         let (phases, mags, mask) = make_synthetic_multi_echo(nx, ny, nz, &tes);
 
         let sigma = [1.0, 1.0, 1.0];
-        let (corrected, _offset) = mcpc3ds_single_coil(
-            &phases, &mags, &tes, &mask, sigma, [0, 1], nx, ny, nz,
+        let (corrected, _offset) = phase_offset_removal(
+            &phases, &mags, &tes, &mask, sigma, [0, 1], UnwrapMethod::Romeo, [1.0, 1.0, 1.0], nx, ny, nz,
         );
 
         // Run linear fit on corrected phases (tes in seconds for fit)
@@ -1815,17 +1777,25 @@ mod tests {
     }
 
     #[test]
-    fn test_mcpc3ds_b0_pipeline_with_bipolar() {
+    fn test_field_mapping_with_bipolar() {
+        use crate::unwrap::romeo::{unwrap_romeo_multi_echo, RomeoParams};
         let (nx, ny, nz) = (8, 8, 8);
         let n = nx * ny * nz;
         let tes = [5.0, 10.0, 15.0];
         let (phases, mags, mask) = make_synthetic_multi_echo(nx, ny, nz, &tes);
-
         let sigma = [1.0, 1.0, 1.0];
-        let (b0, offset, corrected) = mcpc3ds_b0_pipeline(
-            &phases, &mags, &tes, &mask, sigma,
-            B0WeightType::PhaseSNR, true, nx, ny, nz,
+
+        let (mut corrected, _) = phase_offset_removal(
+            &phases, &mags, &tes, &mask, sigma, [0, 1],
+            UnwrapMethod::Romeo, [1.0, 1.0, 1.0], nx, ny, nz,
         );
+        let mag_refs: Vec<&[f64]> = mags.iter().map(|m| m.as_slice()).collect();
+        bipolar_correction(&mut corrected, &mag_refs, &tes, &mask, sigma, nx, ny, nz);
+        let unwrapped = unwrap_romeo_multi_echo(
+            &corrected, &mag_refs, &tes, &mask,
+            &RomeoParams::default(), nx, ny, nz,
+        );
+        let b0 = calculate_b0_weighted(&unwrapped, &mags, &tes, &mask, B0WeightType::PhaseSNR, n);
 
         assert_eq!(b0.len(), n);
         for v in &b0 {
