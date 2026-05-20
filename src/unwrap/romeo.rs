@@ -56,12 +56,36 @@ impl RomeoWeightType {
 
 /// Parameters for ROMEO phase unwrapping.
 ///
-/// Matches ROMEO.jl keyword arguments. Used for both 3D single-volume
-/// and 4D multi-echo unwrapping.
+/// Weight components can be toggled individually. Each multiplies into the
+/// final edge weight as `0.1 + 0.9 * component_value`.
+///
+/// The default enables phase coherence, phase gradient coherence,
+/// phase linearity, and magnitude coherence (equivalent to `:romeo` in ROMEO.jl).
 #[derive(Clone, Debug)]
 pub struct RomeoParams {
-    /// Weight calculation scheme (default: Romeo).
-    pub weight_type: RomeoWeightType,
+    // -- Weight component flags --
+
+    /// Phase coherence: `1 - |wrap(Δφ)| / π`. Always recommended. (default: true)
+    pub phase_coherence: bool,
+    /// Phase gradient coherence: consistency between echo pairs. Needs multi-echo
+    /// data (phase2 + TEs). Automatically disabled if unavailable. (default: true)
+    pub phase_gradient_coherence: bool,
+    /// Phase linearity: second-derivative smoothness along each edge. (default: true)
+    pub phase_linearity: bool,
+    /// Magnitude coherence: `(min/max)²` of neighbor magnitudes. (default: true)
+    pub mag_coherence: bool,
+    /// Magnitude weight: penalizes low-signal voxels relative to the 95th
+    /// percentile. (default: false)
+    pub mag_weight: bool,
+    /// Magnitude weight 2: penalizes abnormally high signal (flow artifacts).
+    /// (default: false)
+    pub mag_weight2: bool,
+    /// Use Best-path weights (Abdul-Rahman) instead of ROMEO weights.
+    /// When true, the individual weight flags above are ignored. (default: false)
+    pub bestpath: bool,
+
+    // -- Multi-echo options --
+
     /// Template echo index for spatial unwrapping, 0-indexed (default: 0).
     /// Only used for multi-echo template-based unwrapping.
     pub template: usize,
@@ -74,24 +98,27 @@ pub struct RomeoParams {
     /// unwrapping. Range \[0, 1\], set to 0 to disable. (default: 0.5)
     pub temporal_uncertain_unwrapping: f64,
     /// Maximum number of seed regions (default: 1, max: 255).
-    /// Values > 1 not yet implemented.
     pub max_seeds: u8,
     /// Merge neighboring regions after unwrapping (default: false).
-    /// Not yet implemented.
     pub merge_regions: bool,
     /// Correct each region's median to nearest 0 by adding n·2π (default: false).
-    /// Not yet implemented.
     pub correct_regions: bool,
     /// Additional phase tolerance beyond π for neighbor differences.
-    /// Range \[0, π\]. Allows phase jumps up to π + wrap_addition. (default: 0.0)
-    /// Not yet implemented.
+    /// Range \[0, π\]. (default: 0.0)
     pub wrap_addition: f64,
 }
 
 impl Default for RomeoParams {
     fn default() -> Self {
         Self {
-            weight_type: RomeoWeightType::Romeo,
+            // Default matches :romeo in ROMEO.jl
+            phase_coherence: true,
+            phase_gradient_coherence: true,
+            phase_linearity: true,
+            mag_coherence: true,
+            mag_weight: false,
+            mag_weight2: false,
+            bestpath: false,
             template: 0,
             individual: false,
             correct_global: false,
@@ -101,6 +128,37 @@ impl Default for RomeoParams {
             correct_regions: false,
             wrap_addition: 0.0,
         }
+    }
+}
+
+impl RomeoParams {
+    /// Create params matching a ROMEO.jl weight type preset.
+    pub fn from_weight_type(wt: RomeoWeightType) -> Self {
+        if wt == RomeoWeightType::BestPath {
+            return Self { bestpath: true, ..Default::default() };
+        }
+        let f = wt.weight_flags();
+        Self {
+            phase_coherence: f[0],
+            phase_gradient_coherence: f[1],
+            phase_linearity: f[2],
+            mag_coherence: f[3],
+            mag_weight: f[4],
+            mag_weight2: f[5],
+            ..Default::default()
+        }
+    }
+
+    /// Convert the boolean fields to the 6-element flag array used internally.
+    pub fn weight_flags(&self) -> [bool; 6] {
+        [
+            self.phase_coherence,
+            self.phase_gradient_coherence,
+            self.phase_linearity,
+            self.mag_coherence,
+            self.mag_weight,
+            self.mag_weight2,
+        ]
     }
 }
 
@@ -575,9 +633,9 @@ pub fn find_seed_point(mask: &[u8], nx: usize, ny: usize, nz: usize) -> (usize, 
     (sum_i / count, sum_j / count, sum_k / count)
 }
 
-/// Compute weights for a given weight type, handling BestPath vs Romeo variants.
-fn compute_weights(
-    weight_type: RomeoWeightType,
+/// Compute weights from params (dispatches BestPath vs ROMEO).
+fn compute_weights_from_params(
+    params: &RomeoParams,
     phase: &[f64],
     mag: &[f64],
     phase2: Option<&[f64]>,
@@ -585,12 +643,12 @@ fn compute_weights(
     mask: &[u8],
     nx: usize, ny: usize, nz: usize,
 ) -> Vec<u8> {
-    if weight_type == RomeoWeightType::BestPath {
+    if params.bestpath {
         calculate_weights_bestpath(phase, mask, nx, ny, nz)
     } else {
         calculate_weights_romeo_with_flags(
             phase, mag, phase2, te1, te2, mask, nx, ny, nz,
-            weight_type.weight_flags(),
+            params.weight_flags(),
         )
     }
 }
@@ -620,8 +678,8 @@ pub fn unwrap_romeo(
     params: &RomeoParams,
     nx: usize, ny: usize, nz: usize,
 ) -> Vec<f64> {
-    let weights = compute_weights(
-        params.weight_type, phase, mag, phase2, te1, te2,
+    let weights = compute_weights_from_params(
+        params, phase, mag, phase2, te1, te2,
         mask, nx, ny, nz,
     );
 
@@ -743,8 +801,8 @@ fn unwrap_template<P: AsRef<[f64]>, M: AsRef<[f64]>>(
 
     // Calculate weights using template echo + p2ref
     let template_mag = if mags.is_empty() { &[] as &[f64] } else { mags[template].as_ref() };
-    let weights = compute_weights(
-        params.weight_type,
+    let weights = compute_weights_from_params(
+        params,
         phases[template].as_ref(),
         template_mag,
         Some(phases[p2ref].as_ref()),
@@ -837,8 +895,8 @@ fn unwrap_individual<P: AsRef<[f64]>, M: AsRef<[f64]>>(
         let e2 = if i == 0 { 1 } else { i - 1 };
 
         let mag = if mags.is_empty() { &[] as &[f64] } else { mags[i].as_ref() };
-        let weights = compute_weights(
-            params.weight_type,
+        let weights = compute_weights_from_params(
+            params,
             phases[i].as_ref(),
             mag,
             Some(phases[e2].as_ref()),
@@ -1784,7 +1842,7 @@ mod tests {
         let mask = vec![1u8; total];
 
         let params = RomeoParams {
-            weight_type: RomeoWeightType::BestPath,
+            bestpath: true,
             ..Default::default()
         };
 
