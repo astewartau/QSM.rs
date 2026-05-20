@@ -1618,6 +1618,41 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_params_weight_flags_roundtrip() {
+        // Default params should match Romeo preset
+        let default_params = RomeoParams::default();
+        assert_eq!(default_params.weight_flags(), RomeoWeightType::Romeo.weight_flags());
+        assert!(!default_params.bestpath);
+
+        // from_weight_type preserves flags
+        for wt in [RomeoWeightType::Romeo, RomeoWeightType::Romeo2,
+                    RomeoWeightType::Romeo3, RomeoWeightType::Romeo6] {
+            let params = RomeoParams::from_weight_type(wt);
+            assert_eq!(params.weight_flags(), wt.weight_flags());
+            assert!(!params.bestpath);
+        }
+
+        // BestPath sets the bestpath flag
+        let bp = RomeoParams::from_weight_type(RomeoWeightType::BestPath);
+        assert!(bp.bestpath);
+    }
+
+    #[test]
+    fn test_params_custom_weight_combination() {
+        // Custom combination: only phase coherence + mag weight (no preset matches this)
+        let params = RomeoParams {
+            phase_coherence: true,
+            phase_gradient_coherence: false,
+            phase_linearity: false,
+            mag_coherence: false,
+            mag_weight: true,
+            mag_weight2: false,
+            ..Default::default()
+        };
+        assert_eq!(params.weight_flags(), [true, false, false, false, true, false]);
+    }
+
     // =========================================================================
     // Template selection
     // =========================================================================
