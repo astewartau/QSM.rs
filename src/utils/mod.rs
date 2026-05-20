@@ -4,7 +4,7 @@
 //! - Gradient operators (forward/backward differences)
 //! - Padding utilities
 //! - Mask operations
-//! - Multi-echo phase combination (MCPC-3D-S)
+//! - Multi-echo field mapping (phase offset removal, B0 estimation)
 //! - Bias field correction (makehomogeneous)
 //! - Frangi vesselness filter for vessel detection
 //! - Surface curvature calculation

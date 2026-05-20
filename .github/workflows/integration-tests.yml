@@ -46,7 +46,7 @@ jobs:
           all_bgremove='["test_bgremove_sharp","test_bgremove_resharp","test_bgremove_vsharp","test_bgremove_pdf","test_bgremove_ismv","test_bgremove_lbv"]'
           all_inversion='["test_inversion_tkd","test_inversion_tsvd","test_inversion_tikhonov","test_inversion_tv","test_inversion_rts","test_inversion_medi","test_inversion_nltv"]'
           all_combined='["test_combined_tgv"]'
-          all_pipeline='["test_pipeline_tgv","test_pipeline_qsmart","test_pipeline_harperella","test_pipeline_iharperella","test_bias_correction","test_swi","test_r2star_t2star"]'
+          all_pipeline='["test_pipeline_romeo_b0","test_pipeline_tgv","test_pipeline_qsmart","test_pipeline_harperella","test_pipeline_iharperella","test_bias_correction","test_swi","test_r2star_t2star"]'
 
           run_unit_tests=false
 
@@ -160,7 +160,7 @@ jobs:
 
               # Phase unwrapping
               src/unwrap/mod.rs)      pipeline="$pipeline test_pipeline_tgv test_pipeline_qsmart" ;;
-              src/unwrap/romeo.rs)    pipeline="$pipeline test_pipeline_tgv" ;;
+              src/unwrap/romeo.rs)    pipeline="$pipeline test_pipeline_romeo_b0 test_pipeline_tgv" ;;
               src/unwrap/laplacian.rs) pipeline="$pipeline test_pipeline_qsmart test_pipeline_harperella test_pipeline_iharperella" ;;
 
               # Pipeline (combined algorithms)
@@ -169,7 +169,7 @@ jobs:
 
               # Utils (QSMART components)
               src/utils/multi_echo.rs)
-                pipeline="$pipeline test_pipeline_tgv test_pipeline_qsmart" ;;
+                pipeline="$pipeline test_pipeline_romeo_b0 test_pipeline_tgv test_pipeline_qsmart" ;;
               src/utils/vasculature.rs|src/utils/frangi.rs|src/utils/curvature.rs|src/utils/qsmart.rs)
                 pipeline="$pipeline test_pipeline_qsmart" ;;
               src/utils/bias_correction.rs)
@@ -883,6 +883,14 @@ jobs:
               fi
               echo ""
               emit_figures bet
+            fi
+
+            if [ -f "slices/pipeline_romeo_b0.bin" ]; then
+              echo "### Phase Unwrapping + B0 Estimation"
+              echo "*MCPC-3D-S + ROMEO → total field map (compared against ground truth B0)*"
+              echo ""
+              emit_figures pipeline_romeo_b0
+              echo ""
             fi
 
             TABLE=$(emit_chi_table "test_combined_" tgv) && {
