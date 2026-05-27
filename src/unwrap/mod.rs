@@ -8,6 +8,7 @@ pub mod romeo;
 pub mod laplacian;
 
 pub use romeo::*;
+pub use romeo::correct_multi_echo_wraps;
 pub use laplacian::*;
 
 /// Phase unwrapping method selection.

@@ -938,7 +938,7 @@ fn unwrap_voxel(new: f64, old: f64) -> f64 {
 /// between the TE-scaled reference and the current echo, then corrects.
 ///
 /// Matches ROMEO.jl `correct_multi_echo_wraps!`.
-fn correct_multi_echo_wraps(
+pub fn correct_multi_echo_wraps(
     phases: &mut [Vec<f64>],
     tes: &[f64],
     mask: &[u8],

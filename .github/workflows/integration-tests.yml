@@ -758,6 +758,11 @@ jobs:
             python scripts/render_slices.py slices figures
           fi
 
+      - name: Setup Node.js (canvas@2 needs prebuilt binary)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
       - name: Setup CML
         uses: iterative/setup-cml@v3
         env:
