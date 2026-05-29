@@ -36,6 +36,7 @@ pub mod masking;
 pub mod field_mapping;
 pub mod bg_removal;
 pub mod inversion;
+pub mod qsmart;
 
 pub use config::*;
 pub use phase_utils::{
@@ -47,3 +48,4 @@ pub use masking::run_masking;
 pub use field_mapping::run_field_mapping;
 pub use bg_removal::run_bg_removal;
 pub use inversion::{run_dipole_inversion, run_tgv};
+pub use qsmart::run_qsmart;
