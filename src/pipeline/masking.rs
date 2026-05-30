@@ -290,6 +290,70 @@ mod tests {
     }
 
     #[test]
+    fn test_masking_fixed_threshold() {
+        let meta = test_metadata();
+        let n = 8 * 8 * 8;
+        let mag = vec![10.0; n];
+        let sections = vec![MaskSection {
+            input: MaskingInput::Magnitude,
+            generator: MaskOp::Threshold { method: MaskThresholdMethod::Fixed, value: Some(5.0) },
+            refinements: vec![],
+        }];
+        let result = run_masking(&sections, &[], Some(&mag), &meta).unwrap();
+        let count: usize = result.iter().map(|&m| m as usize).sum();
+        assert_eq!(count, n, "all voxels above threshold=5");
+    }
+
+    #[test]
+    fn test_masking_percentile_threshold() {
+        let meta = test_metadata();
+        let n = 8 * 8 * 8;
+        let mag: Vec<f64> = (0..n).map(|i| i as f64).collect();
+        let sections = vec![MaskSection {
+            input: MaskingInput::Magnitude,
+            generator: MaskOp::Threshold { method: MaskThresholdMethod::Percentile, value: Some(50.0) },
+            refinements: vec![],
+        }];
+        let result = run_masking(&sections, &[], Some(&mag), &meta).unwrap();
+        let count: usize = result.iter().map(|&m| m as usize).sum();
+        assert!(count > 0 && count < n, "percentile should mask ~half");
+    }
+
+    #[test]
+    fn test_masking_close_and_fill_holes() {
+        let meta = test_metadata();
+        let n = 8 * 8 * 8;
+        let mag = vec![10.0; n];
+        let sections = vec![MaskSection {
+            input: MaskingInput::Magnitude,
+            generator: MaskOp::Threshold { method: MaskThresholdMethod::Fixed, value: Some(0.5) },
+            refinements: vec![
+                MaskOp::Close { radius: 1 },
+                MaskOp::FillHoles { max_size: 0 },
+                MaskOp::GaussianSmooth { sigma_mm: 1.0 },
+            ],
+        }];
+        let result = run_masking(&sections, &[], Some(&mag), &meta).unwrap();
+        assert_eq!(result.len(), n);
+    }
+
+    #[test]
+    fn test_masking_phase_quality_input() {
+        let meta = test_metadata();
+        let n = 8 * 8 * 8;
+        let phase1 = vec![0.5; n];
+        let phase2 = vec![1.0; n];
+        let mag = vec![1.0; n];
+        let sections = vec![MaskSection {
+            input: MaskingInput::PhaseQuality,
+            generator: MaskOp::Threshold { method: MaskThresholdMethod::Otsu, value: None },
+            refinements: vec![],
+        }];
+        let result = run_masking(&sections, &[&phase1, &phase2], Some(&mag), &meta).unwrap();
+        assert_eq!(result.len(), n);
+    }
+
+    #[test]
     fn test_run_masking_empty_sections() {
         let meta = test_metadata();
         let result = run_masking(&[], &[], None, &meta);

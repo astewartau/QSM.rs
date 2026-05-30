@@ -261,6 +261,34 @@ mod tests {
     }
 
     #[test]
+    fn test_inversion_nltv() {
+        let chi = make_inversion_test(InversionAlgorithm::Nltv);
+        assert_eq!(chi.len(), 8 * 8 * 8);
+    }
+
+    #[test]
+    fn test_inversion_ilsqr() {
+        let chi = make_inversion_test(InversionAlgorithm::Ilsqr);
+        assert_eq!(chi.len(), 8 * 8 * 8);
+    }
+
+    #[test]
+    fn test_inversion_medi() {
+        let (nx, ny, nz) = (8, 8, 8);
+        let n = nx * ny * nz;
+        let field = vec![0.01; n];
+        let mask = vec![1u8; n];
+        let mag = vec![1.0; n];
+        let meta = ScanMetadata {
+            dims: (nx, ny, nz), voxel_size: (1.0, 1.0, 1.0),
+            echo_times: vec![0.005], field_strength: 3.0, b0_direction: (0.0, 0.0, 1.0),
+        };
+        let config = InversionConfig { algorithm: InversionAlgorithm::Medi, ..Default::default() };
+        let chi = run_dipole_inversion(&field, &mask, &meta, &config, Some(&mag), &mut |_, _| {}).unwrap();
+        assert_eq!(chi.len(), n);
+    }
+
+    #[test]
     fn test_inversion_rejects_tgv() {
         let n = 64;
         let meta = ScanMetadata {
