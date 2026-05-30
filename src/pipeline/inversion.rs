@@ -223,6 +223,43 @@ mod tests {
         assert_eq!(result.unwrap().len(), n);
     }
 
+    fn make_inversion_test(alg: InversionAlgorithm) -> Vec<f64> {
+        let (nx, ny, nz) = (8, 8, 8);
+        let n = nx * ny * nz;
+        let field = vec![0.01; n];
+        let mask = vec![1u8; n];
+        let meta = ScanMetadata {
+            dims: (nx, ny, nz), voxel_size: (1.0, 1.0, 1.0),
+            echo_times: vec![0.005], field_strength: 3.0, b0_direction: (0.0, 0.0, 1.0),
+        };
+        let config = InversionConfig { algorithm: alg, ..Default::default() };
+        run_dipole_inversion(&field, &mask, &meta, &config, None, &mut |_, _| {}).unwrap()
+    }
+
+    #[test]
+    fn test_inversion_tsvd() {
+        let chi = make_inversion_test(InversionAlgorithm::Tsvd);
+        assert_eq!(chi.len(), 8 * 8 * 8);
+    }
+
+    #[test]
+    fn test_inversion_tikhonov() {
+        let chi = make_inversion_test(InversionAlgorithm::Tikhonov);
+        assert_eq!(chi.len(), 8 * 8 * 8);
+    }
+
+    #[test]
+    fn test_inversion_tv() {
+        let chi = make_inversion_test(InversionAlgorithm::Tv);
+        assert_eq!(chi.len(), 8 * 8 * 8);
+    }
+
+    #[test]
+    fn test_inversion_rts() {
+        let chi = make_inversion_test(InversionAlgorithm::Rts);
+        assert_eq!(chi.len(), 8 * 8 * 8);
+    }
+
     #[test]
     fn test_inversion_rejects_tgv() {
         let n = 64;

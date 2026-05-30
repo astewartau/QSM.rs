@@ -150,6 +150,81 @@ mod tests {
     }
 
     #[test]
+    fn test_bg_removal_dispatches_pdf() {
+        let (nx, ny, nz) = (8, 8, 8);
+        let n = nx * ny * nz;
+        let field = vec![0.1; n];
+        let mask = vec![1u8; n];
+        let meta = ScanMetadata {
+            dims: (nx, ny, nz), voxel_size: (1.0, 1.0, 1.0),
+            echo_times: vec![0.005], field_strength: 3.0, b0_direction: (0.0, 0.0, 1.0),
+        };
+        let config = BgRemovalConfig { algorithm: BgRemovalAlgorithm::Pdf, ..Default::default() };
+        let r = run_bg_removal(&field, &mask, &meta, &config, &mut |_, _| {}).unwrap();
+        assert_eq!(r.local_field_ppm.len(), n);
+    }
+
+    #[test]
+    fn test_bg_removal_dispatches_lbv() {
+        let (nx, ny, nz) = (8, 8, 8);
+        let n = nx * ny * nz;
+        let field = vec![0.1; n];
+        let mask = vec![1u8; n];
+        let meta = ScanMetadata {
+            dims: (nx, ny, nz), voxel_size: (1.0, 1.0, 1.0),
+            echo_times: vec![0.005], field_strength: 3.0, b0_direction: (0.0, 0.0, 1.0),
+        };
+        let config = BgRemovalConfig { algorithm: BgRemovalAlgorithm::Lbv, ..Default::default() };
+        let r = run_bg_removal(&field, &mask, &meta, &config, &mut |_, _| {}).unwrap();
+        assert_eq!(r.local_field_ppm.len(), n);
+    }
+
+    #[test]
+    fn test_bg_removal_dispatches_sharp() {
+        let (nx, ny, nz) = (8, 8, 8);
+        let n = nx * ny * nz;
+        let field = vec![0.1; n];
+        let mask = vec![1u8; n];
+        let meta = ScanMetadata {
+            dims: (nx, ny, nz), voxel_size: (1.0, 1.0, 1.0),
+            echo_times: vec![0.005], field_strength: 3.0, b0_direction: (0.0, 0.0, 1.0),
+        };
+        let config = BgRemovalConfig { algorithm: BgRemovalAlgorithm::Sharp, ..Default::default() };
+        let r = run_bg_removal(&field, &mask, &meta, &config, &mut |_, _| {}).unwrap();
+        assert_eq!(r.local_field_ppm.len(), n);
+    }
+
+    #[test]
+    fn test_bg_removal_dispatches_ismv() {
+        let (nx, ny, nz) = (8, 8, 8);
+        let n = nx * ny * nz;
+        let field = vec![0.1; n];
+        let mask = vec![1u8; n];
+        let meta = ScanMetadata {
+            dims: (nx, ny, nz), voxel_size: (1.0, 1.0, 1.0),
+            echo_times: vec![0.005], field_strength: 3.0, b0_direction: (0.0, 0.0, 1.0),
+        };
+        let config = BgRemovalConfig { algorithm: BgRemovalAlgorithm::Ismv, ..Default::default() };
+        let r = run_bg_removal(&field, &mask, &meta, &config, &mut |_, _| {}).unwrap();
+        assert_eq!(r.local_field_ppm.len(), n);
+    }
+
+    #[test]
+    fn test_bg_removal_dispatches_resharp() {
+        let (nx, ny, nz) = (8, 8, 8);
+        let n = nx * ny * nz;
+        let field = vec![0.1; n];
+        let mask = vec![1u8; n];
+        let meta = ScanMetadata {
+            dims: (nx, ny, nz), voxel_size: (1.0, 1.0, 1.0),
+            echo_times: vec![0.005], field_strength: 3.0, b0_direction: (0.0, 0.0, 1.0),
+        };
+        let config = BgRemovalConfig { algorithm: BgRemovalAlgorithm::Resharp, ..Default::default() };
+        let r = run_bg_removal(&field, &mask, &meta, &config, &mut |_, _| {}).unwrap();
+        assert_eq!(r.local_field_ppm.len(), n);
+    }
+
+    #[test]
     fn test_bg_removal_validates_dims() {
         let meta = ScanMetadata {
             dims: (4, 4, 4),
