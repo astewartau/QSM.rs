@@ -15,22 +15,9 @@ use num_complex::Complex64;
 use crate::fft::Fft3dWorkspace;
 use crate::kernels::dipole::dipole_kernel;
 use crate::kernels::laplacian::laplacian_kernel;
-use crate::utils::gradient::{fgrad_inplace, bdiv_inplace};
-
-#[cfg(feature = "parallel")]
-use crate::par::*;
-
-/// Soft thresholding (shrinkage) operator
-#[inline]
-fn shrink(x: f64, threshold: f64) -> f64 {
-    if x > threshold {
-        x - threshold
-    } else if x < -threshold {
-        x + threshold
-    } else {
-        0.0
-    }
-}
+use crate::utils::{shrink, apply_mask_zero};
+use crate::Grid;
+use super::admm::{AdmmBuffers, admm_step};
 
 /// RTS algorithm parameters
 #[derive(Clone, Debug)]
@@ -230,111 +217,34 @@ where
     }
 
     // ========================================================================
-    // Pre-allocate ALL working buffers for ADMM (zero allocations in loop)
+    // Pre-allocate working buffers and run ADMM iterations
     // ========================================================================
 
-    let mut x_prev = vec![0.0; n_total];
-
-    // Dual variables (scaled Lagrange multipliers)
-    let mut ux = vec![0.0; n_total];
-    let mut uy = vec![0.0; n_total];
-    let mut uz = vec![0.0; n_total];
-
-    // Gradient buffers (reused for z-u computation)
-    let mut gx = vec![0.0; n_total];
-    let mut gy = vec![0.0; n_total];
-    let mut gz = vec![0.0; n_total];
-
-    // Divergence buffer
-    let mut div_v = vec![0.0; n_total];
+    let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
+    let mut buf = AdmmBuffers::new(n_total);
+    // Copy LSMR result into buf.x
+    buf.x.copy_from_slice(&x);
 
     let inv_rho = 1.0 / rho;
-
-    // ========================================================================
-    // Step 2: ADMM iterations (zero allocations per iteration)
-    // ========================================================================
 
     for iter in 0..max_iter {
         progress_callback(iter + 1, max_iter);
 
-        // Swap x and x_prev (no allocation)
-        std::mem::swap(&mut x, &mut x_prev);
+        // RTS uses rho=1.0 in admm_step because inv_a already incorporates ρ
+        let converged = admm_step(
+            &mut buf, &mut fft_ws, &f_hat, &inv_a, 1.0, &grid, tol,
+            |vx, vy, vz, _| (shrink(vx, inv_rho), shrink(vy, inv_rho), shrink(vz, inv_rho)),
+        );
 
-        // ====================================================================
-        // x-subproblem: (M + ρL)x = F + ρ∇ᵀ(z - u)
-        // ====================================================================
-
-        // gx/gy/gz hold (z - u) from previous iteration (or zero initially)
-        bdiv_inplace(&mut div_v, &gx, &gy, &gz, nx, ny, nz, vsx, vsy, vsz);
-
-        // Prepare FFT
-        for i in 0..n_total {
-            work_complex[i] = Complex64::new(div_v[i], 0.0);
-        }
-        fft_ws.fft3d(&mut work_complex);
-
-        // x_hat = f_hat - inv_a * div_hat
-        // Note: bdiv computes positive divergence ∇·, but the adjoint ∇ᵀ = -∇·,
-        // so we subtract (see Eq. [7] in Kames et al. 2018).
-        for i in 0..n_total {
-            work_complex[i] = f_hat[i] - work_complex[i] * inv_a[i];
-        }
-
-        // IFFT to get x
-        fft_ws.ifft3d(&mut work_complex);
-        for i in 0..n_total {
-            x[i] = work_complex[i].re;
-        }
-
-        // ====================================================================
-        // Convergence check
-        // ====================================================================
-        let mut norm_diff_sq = 0.0;
-        let mut norm_x_sq = 0.0;
-        for i in 0..n_total {
-            let diff = x[i] - x_prev[i];
-            norm_diff_sq += diff * diff;
-            norm_x_sq += x[i] * x[i];
-        }
-
-        let rel_change = norm_diff_sq.sqrt() / (norm_x_sq.sqrt() + 1e-20);
-        if rel_change < tol {
+        if converged {
             progress_callback(iter + 1, iter + 1);
             break;
         }
-
-        // ====================================================================
-        // Fused: z-subproblem + u-update + prepare (z-u) for next iteration
-        // ====================================================================
-
-        fgrad_inplace(&mut gx, &mut gy, &mut gz, &x, nx, ny, nz, vsx, vsy, vsz);
-
-        // Fused z-subproblem + u-update
-        for i in 0..n_total {
-            let vx = gx[i] + ux[i];
-            let vy = gy[i] + uy[i];
-            let vz = gz[i] + uz[i];
-
-            let zx_i = shrink(vx, inv_rho);
-            let zy_i = shrink(vy, inv_rho);
-            let zz_i = shrink(vz, inv_rho);
-
-            ux[i] = vx - zx_i;
-            uy[i] = vy - zy_i;
-            uz[i] = vz - zz_i;
-
-            gx[i] = 2.0 * zx_i - vx;
-            gy[i] = 2.0 * zy_i - vy;
-            gz[i] = 2.0 * zz_i - vz;
-        }
     }
 
-    // Apply mask
-    for i in 0..n_total {
-        if mask[i] == 0 { x[i] = 0.0; }
-    }
+    apply_mask_zero(&mut buf.x, mask);
 
-    x
+    buf.x
 }
 
 /// RTS with default parameters

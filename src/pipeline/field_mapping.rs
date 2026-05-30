@@ -58,7 +58,6 @@ pub fn run_field_mapping(
         }
     }
 
-    let tes = &metadata.echo_times;
     let is_laplacian = config.unwrapping_algorithm == UnwrappingAlgorithm::Laplacian;
     let do_offset = n_echoes > 1 && config.phase_offset_removal && !is_laplacian;
 
@@ -172,7 +171,7 @@ fn field_mapping_direct(
     mask: &[u8],
     metadata: &ScanMetadata,
     config: &FieldMappingConfig,
-    n_voxels: usize,
+    _n_voxels: usize,
     nx: usize, ny: usize, nz: usize,
     vsx: f64, vsy: f64, vsz: f64,
     progress: &mut dyn FnMut(usize, usize),

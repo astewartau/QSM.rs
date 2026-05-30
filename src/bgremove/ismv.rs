@@ -11,8 +11,8 @@
 //! Reference implementation: https://github.com/kamesy/QSM.jl
 
 use num_complex::Complex64;
-use crate::fft::{fft3d, ifft3d};
-use crate::kernels::smv::smv_kernel;
+use crate::fft::{fft3d, ifft3d, fft_real_kernel};
+use crate::kernels::smv::{smv_kernel, erode_mask_smv};
 
 /// iSMV background field removal
 ///
@@ -57,8 +57,9 @@ pub fn ismv(
 
     // Generate SMV kernel
     let smv = smv_kernel(nx, ny, nz, vsx, vsy, vsz, radius);
+    let smv_fft_real = fft_real_kernel(&smv, nx, ny, nz);
 
-    // FFT of SMV kernel
+    // Complex FFT needed for iteration loop
     let mut smv_complex: Vec<Complex64> = smv.iter()
         .map(|&x| Complex64::new(x, 0.0))
         .collect();
@@ -71,7 +72,7 @@ pub fn ismv(
         .collect();
 
     // Erode mask using SMV
-    let eroded_mask = erode_mask(&m0, &smv_fft, nx, ny, nz);
+    let eroded_mask = erode_mask_f64(mask, &smv_fft_real, nx, ny, nz);
 
     // Boundary mask: original mask minus eroded mask
     let boundary: Vec<f64> = m0.iter()
@@ -148,27 +149,10 @@ pub fn ismv(
     (local_field, eroded_mask_u8)
 }
 
-/// Erode mask using SMV convolution
-fn erode_mask(mask: &[f64], smv_fft: &[Complex64], nx: usize, ny: usize, nz: usize) -> Vec<f64> {
-    let n_total = nx * ny * nz;
-    let delta = 1.0 - 1e-10;
-
-    let mut m_complex: Vec<Complex64> = mask.iter()
-        .map(|&x| Complex64::new(x, 0.0))
-        .collect();
-
-    fft3d(&mut m_complex, nx, ny, nz);
-
-    for i in 0..n_total {
-        m_complex[i] *= smv_fft[i];
-    }
-
-    ifft3d(&mut m_complex, nx, ny, nz);
-
-    // Threshold: eroded where SMV(mask) > delta
-    m_complex.iter()
-        .map(|c| if c.re > delta { 1.0 } else { 0.0 })
-        .collect()
+/// Erode mask using SMV convolution (returns f64 for arithmetic compatibility)
+fn erode_mask_f64(mask: &[u8], smv_kernel_fft: &[f64], nx: usize, ny: usize, nz: usize) -> Vec<f64> {
+    let eroded = erode_mask_smv(mask, smv_kernel_fft, nx, ny, nz, 1.0 - 1e-10);
+    eroded.iter().map(|&m| m as f64).collect()
 }
 
 /// Vector 2-norm
@@ -196,8 +180,9 @@ where
 
     // Generate SMV kernel
     let smv = smv_kernel(nx, ny, nz, vsx, vsy, vsz, radius);
+    let smv_fft_real = fft_real_kernel(&smv, nx, ny, nz);
 
-    // FFT of SMV kernel
+    // Complex FFT needed for iteration loop
     let mut smv_complex: Vec<Complex64> = smv.iter()
         .map(|&x| Complex64::new(x, 0.0))
         .collect();
@@ -210,7 +195,7 @@ where
         .collect();
 
     // Erode mask using SMV
-    let eroded_mask = erode_mask(&m0, &smv_fft, nx, ny, nz);
+    let eroded_mask = erode_mask_f64(mask, &smv_fft_real, nx, ny, nz);
 
     // Boundary mask: original mask minus eroded mask
     let boundary: Vec<f64> = m0.iter()

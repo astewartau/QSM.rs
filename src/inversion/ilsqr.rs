@@ -119,7 +119,7 @@ where
         let theta = s * alpha;
         rho_bar = -c * alpha;
         let phi = c * phi_bar;
-        phi_bar = s * phi_bar;
+        phi_bar *= s;
 
         // Update x and w
         let t1 = phi / rho;
@@ -252,7 +252,7 @@ where
         let theta = s * alpha;
         rho_bar = -c * alpha;
         let phi = c * phi_bar;
-        phi_bar = s * phi_bar;
+        phi_bar *= s;
 
         // ||x|| estimation via plane rotations (MATLAB's xxnorm approach)
         let delta = sn2 * rho;
@@ -428,7 +428,7 @@ where
         c_bar = rho_temp / rho_bar;
         s_bar = theta_new / rho_bar;
         zeta = c_bar * zeta_bar;
-        zeta_bar = -s_bar * zeta_bar;
+        zeta_bar *= -s_bar;
 
         // Update h_bar, x, h
         for i in 0..n {

@@ -43,8 +43,6 @@ pub fn adjust_offset(
     b0_dir: (f64, f64, f64),
     ppm: f64,
 ) -> Vec<f64> {
-    let n_total = nx * ny * nz;
-
     // Scale lfs_sdf back (it was multiplied by ppm in the QSMART pipeline)
     let lfs_scaled: Vec<f64> = lfs_sdf.iter().map(|&v| v / ppm).collect();
 

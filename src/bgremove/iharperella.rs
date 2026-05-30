@@ -182,7 +182,7 @@ pub fn iharperella_with_progress<F>(
     phase: &[f64], mask: &[u8],
     nx: usize, ny: usize, nz: usize,
     vsx: f64, vsy: f64, vsz: f64,
-    radius: f64, max_iter: usize, tol: f64,
+    _radius: f64, max_iter: usize, tol: f64,
     callback: F,
 ) -> (Vec<f64>, Vec<u8>)
 where F: FnMut(usize, usize),

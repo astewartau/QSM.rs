@@ -12,7 +12,7 @@
 //!
 //! Reference implementation: https://github.com/korbinian90/CLEARSWI.jl
 
-use crate::utils::gaussian_smooth_3d;
+use crate::utils::{gaussian_smooth_3d, apply_mask_zero};
 
 /// SWI algorithm parameters
 #[derive(Clone, Debug)]
@@ -191,12 +191,7 @@ pub fn create_phase_mask(
         }
     }
 
-    // Zero outside mask
-    for i in 0..n {
-        if mask[i] == 0 {
-            result[i] = 0.0;
-        }
-    }
+    apply_mask_zero(&mut result, mask);
 
     result
 }

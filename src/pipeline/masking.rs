@@ -5,7 +5,7 @@
 //! Multiple mask sections can be OR'd together.
 
 use super::config::*;
-use super::phase_utils::{erode_mask, dilate_mask, rss_combine};
+use super::phase_utils::{erode_mask, dilate_mask};
 
 /// Resolve masking input data based on the MaskingInput type.
 ///

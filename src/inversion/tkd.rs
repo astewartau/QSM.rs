@@ -14,7 +14,7 @@
 use num_complex::Complex64;
 use crate::fft::{fft3d, ifft3d};
 use crate::kernels::dipole::dipole_kernel;
-
+use crate::utils::apply_mask_zero;
 /// TKD algorithm parameters
 #[derive(Clone, Debug)]
 pub struct TkdParams {
@@ -90,12 +90,7 @@ pub fn tkd(
         .map(|c| c.re)
         .collect();
 
-    // Apply mask
-    for i in 0..n_total {
-        if mask[i] == 0 {
-            chi[i] = 0.0;
-        }
-    }
+    apply_mask_zero(&mut chi, mask);
 
     chi
 }
@@ -159,12 +154,7 @@ pub fn tsvd(
         .map(|c| c.re)
         .collect();
 
-    // Apply mask
-    for i in 0..n_total {
-        if mask[i] == 0 {
-            chi[i] = 0.0;
-        }
-    }
+    apply_mask_zero(&mut chi, mask);
 
     chi
 }

@@ -11,9 +11,9 @@ pub fn next_fast_fft_size(size: usize) -> usize {
     loop {
         let mut m = n;
         // Factor out 2, 3, 5
-        while m % 2 == 0 { m /= 2; }
-        while m % 3 == 0 { m /= 3; }
-        while m % 5 == 0 { m /= 5; }
+        while m.is_multiple_of(2) { m /= 2; }
+        while m.is_multiple_of(3) { m /= 3; }
+        while m.is_multiple_of(5) { m /= 5; }
         if m == 1 {
             return n;
         }

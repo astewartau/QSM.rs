@@ -91,10 +91,6 @@ pub fn load_nifti(bytes: &[u8]) -> Result<NiftiData, String> {
         return Err(format!("Expected at least 3D volume, got {}D", ndim));
     }
 
-    let nx = dim[1] as usize;
-    let ny = dim[2] as usize;
-    let nz = dim[3] as usize;
-
     // Get voxel sizes
     let pixdim = header.pixdim;
     let vsx = pixdim[1] as f64;
@@ -176,12 +172,7 @@ pub fn load_nifti_4d(bytes: &[u8]) -> Result<(Vec<f64>, (usize, usize, usize, us
 
     let header = obj.header();
     let dim = header.dim;
-    let ndim = dim[0] as usize;
-
-    let nx = dim[1] as usize;
-    let ny = dim[2] as usize;
-    let nz = dim[3] as usize;
-    let nt = if ndim >= 4 { dim[4] as usize } else { 1 };
+    let _ndim = dim[0] as usize;
 
     let pixdim = header.pixdim;
     let vsx = pixdim[1] as f64;

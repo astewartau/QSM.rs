@@ -12,8 +12,8 @@
 //! Reference implementation: https://github.com/kamesy/QSM.jl
 
 use num_complex::Complex64;
-use crate::fft::{fft3d, ifft3d};
-use crate::kernels::smv::smv_kernel;
+use crate::fft::{fft3d, ifft3d, fft_real_kernel};
+use crate::kernels::smv::{smv_kernel, erode_mask_smv};
 
 /// V-SHARP background field removal
 ///
@@ -95,15 +95,9 @@ pub fn vsharp(
     let mut inverse_kernel: Option<Vec<f64>> = None;
 
     for &radius in &sorted_radii {
-        // Generate SMV kernel
+        // Generate SMV kernel and FFT
         let s_kernel = smv_kernel(nx, ny, nz, vsx, vsy, vsz, radius);
-
-        // FFT of SMV kernel
-        let mut s_complex: Vec<Complex64> = s_kernel.iter()
-            .map(|&x| Complex64::new(x, 0.0))
-            .collect();
-        fft3d(&mut s_complex, nx, ny, nz);
-        let s_fft: Vec<f64> = s_complex.iter().map(|c| c.re).collect();
+        let s_fft = fft_real_kernel(&s_kernel, nx, ny, nz);
 
         // Store inverse of first (largest) kernel
         if inverse_kernel.is_none() {
@@ -118,24 +112,8 @@ pub fn vsharp(
         }
 
         // Erode mask for this radius
-        let mask_f64: Vec<f64> = mask.iter().map(|&m| m as f64).collect();
-        let mut mask_complex: Vec<Complex64> = mask_f64.iter()
-            .map(|&x| Complex64::new(x, 0.0))
-            .collect();
-
-        fft3d(&mut mask_complex, nx, ny, nz);
-
-        // Convolve mask with SMV kernel
-        for i in 0..n_total {
-            mask_complex[i] *= s_fft[i];
-        }
-
-        ifft3d(&mut mask_complex, nx, ny, nz);
-
-        // Current eroded mask
-        let current_mask: Vec<bool> = mask_complex.iter()
-            .map(|c| c.re > delta)
-            .collect();
+        let eroded = erode_mask_smv(mask, &s_fft, nx, ny, nz, delta);
+        let current_mask: Vec<bool> = eroded.iter().map(|&m| m == 1).collect();
 
         // Apply high-pass filter: multiply by (1-S)
         let mut filtered = field_fft.clone();

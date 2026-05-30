@@ -29,6 +29,7 @@
 //! - Early termination: convergence check every 100 iterations
 
 use std::f32::consts::PI;
+use crate::utils::mask::erode_mask;
 
 /// TGV parameters
 #[derive(Clone, Debug)]
@@ -809,40 +810,6 @@ fn apply_laplacian_inplace(
     }
 }
 
-/// Erode mask by one voxel (6-connected)
-pub fn erode_mask(mask: &[u8], nx: usize, ny: usize, nz: usize) -> Vec<u8> {
-    let n_total = nx * ny * nz;
-    let mut eroded = vec![0u8; n_total];
-
-    for k in 0..nz {
-        for j in 0..ny {
-            for i in 0..nx {
-                let idx = i + j * nx + k * nx * ny;
-
-                if mask[idx] == 0 {
-                    continue;
-                }
-
-                // Voxels at the boundary of the volume are always eroded
-                if i == 0 || i == nx - 1 || j == 0 || j == ny - 1 || k == 0 || k == nz - 1 {
-                    continue;
-                }
-
-                // Check 6-connected neighbors
-                let all_neighbors = mask[idx - 1] != 0
-                    && mask[idx + 1] != 0
-                    && mask[idx - nx] != 0
-                    && mask[idx + nx] != 0
-                    && mask[idx - nx * ny] != 0
-                    && mask[idx + nx * ny] != 0;
-
-                eroded[idx] = if all_neighbors { 1 } else { 0 };
-            }
-        }
-    }
-
-    eroded
-}
 
 /// Compute gradient norm squared
 #[inline]
@@ -1081,11 +1048,11 @@ where
     // Erode mask
     let mut mask_eroded = mask.to_vec();
     for _ in 0..params.erosions {
-        mask_eroded = erode_mask(&mask_eroded, nx, ny, nz);
+        mask_eroded = erode_mask(&mask_eroded, nx, ny, nz, 1);
     }
 
     // Create mask0 (one more erosion for internal computations)
-    let mask0 = erode_mask(&mask_eroded, nx, ny, nz);
+    let mask0 = erode_mask(&mask_eroded, nx, ny, nz, 1);
 
     // Find bounding box (with padding of 2 voxels)
     let bbox = BoundingBox::from_mask(&mask0, nx, ny, nz, 2);
@@ -1354,7 +1321,7 @@ mod tests {
         let nz = 5;
 
         let mask = vec![1u8; nx * ny * nz];
-        let eroded = erode_mask(&mask, nx, ny, nz);
+        let eroded = erode_mask(&mask, nx, ny, nz, 1);
 
         let center = 2 + 2 * nx + 2 * nx * ny;
         assert_eq!(eroded[center], 1);

@@ -362,7 +362,7 @@ fn phase_linearity_edge(
     phase: &[f64],
     i: usize, j: usize, k: usize,
     ni: usize, nj: usize, nk: usize,
-    dim: usize,
+    _dim: usize,
     nx: usize, ny: usize, nz: usize,
 ) -> f64 {
     let idx = idx3d(i, j, k, nx, ny);
@@ -534,6 +534,7 @@ pub fn calculate_weights_single_echo(
 ///
 /// # Returns
 /// Quality map of size nx * ny * nz with values in range [0, 100]
+#[allow(clippy::erasing_op)]
 pub fn voxel_quality_romeo(
     phase: &[f64],
     mag: &[f64],

@@ -55,7 +55,7 @@ fn get_box_sizes(sigma: f64, n: usize) -> Vec<usize> {
     // wl = next lower odd integer
     let wl_float = wideal - (wideal + 1.0) % 2.0;
     let wl = wl_float.round() as usize;
-    let wl = if wl % 2 == 0 { wl + 1 } else { wl }; // ensure odd
+    let wl = if wl.is_multiple_of(2) { wl + 1 } else { wl }; // ensure odd
     let wu = wl + 2;
 
     // mideal = (12*sigma^2 - n*wl^2 - 4*n*wl - 3*n) / (-4*wl - 4)
@@ -82,7 +82,7 @@ fn check_box_sizes(boxsizes: &mut [Vec<usize>], dims: &[usize]) {
             // Limit to half image size
             let max_size = dims[dim] / 2;
             if *b > max_size {
-                *b = if max_size % 2 == 0 { max_size + 1 } else { max_size };
+                *b = if max_size.is_multiple_of(2) { max_size + 1 } else { max_size };
             }
         }
     }
@@ -717,9 +717,9 @@ fn box_segment(
     let mut vote_count = vec![0u8; n_total];
 
     // Calculate box shift (stride between box centers)
-    let box_shift_x = (nx + nbox - 1) / nbox;
-    let box_shift_y = (ny + nbox - 1) / nbox;
-    let box_shift_z = (nz + nbox - 1) / nbox;
+    let box_shift_x = nx.div_ceil(nbox);
+    let box_shift_y = ny.div_ceil(nbox);
+    let box_shift_z = nz.div_ceil(nbox);
 
     // For each box center
     let mut cz = 0;

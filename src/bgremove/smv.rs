@@ -12,9 +12,8 @@
 //!
 //! Reference implementation: https://github.com/kamesy/QSM.jl
 
-use num_complex::Complex64;
-use crate::fft::{fft3d, ifft3d};
-use crate::kernels::smv::smv_kernel;
+use crate::fft::fft_real_kernel;
+use crate::kernels::smv::{smv_kernel, erode_mask_smv};
 
 /// Simple SMV background field removal
 ///
@@ -36,62 +35,22 @@ pub fn smv(
     vsx: f64, vsy: f64, vsz: f64,
     radius: f64,
 ) -> (Vec<f64>, Vec<u8>) {
-    let n_total = nx * ny * nz;
-
     // Generate SMV kernel and FFT it
     let s_kernel = smv_kernel(nx, ny, nz, vsx, vsy, vsz, radius);
+    let s_fft = fft_real_kernel(&s_kernel, nx, ny, nz);
 
-    // FFT of SMV kernel
-    let mut s_complex: Vec<Complex64> = s_kernel.iter()
-        .map(|&x| Complex64::new(x, 0.0))
-        .collect();
-    fft3d(&mut s_complex, nx, ny, nz);
-    let s_fft = s_complex;
-
-    // Erode mask: convolve mask with SMV kernel
-    let mask_f64: Vec<f64> = mask.iter().map(|&m| m as f64).collect();
-    let mut mask_complex: Vec<Complex64> = mask_f64.iter()
-        .map(|&x| Complex64::new(x, 0.0))
-        .collect();
-
-    fft3d(&mut mask_complex, nx, ny, nz);
-
-    // Convolve mask with SMV kernel
-    for i in 0..n_total {
-        mask_complex[i] *= s_fft[i].re;
-    }
-
-    ifft3d(&mut mask_complex, nx, ny, nz);
-
-    // Eroded mask: values close to 1 are fully inside
-    let delta = 1.0 - 1e-10;
-    let eroded_mask: Vec<u8> = mask_complex.iter()
-        .map(|c| if c.re > delta { 1 } else { 0 })
-        .collect();
+    // Erode mask via SMV convolution
+    let eroded_mask = erode_mask_smv(mask, &s_fft, nx, ny, nz, 1.0 - 1e-10);
 
     // Compute SMV(field) = background field estimate
-    let mut field_complex: Vec<Complex64> = field.iter()
-        .map(|&x| Complex64::new(x, 0.0))
-        .collect();
-    fft3d(&mut field_complex, nx, ny, nz);
-
-    // Multiply by SMV kernel in k-space
-    for i in 0..n_total {
-        field_complex[i] *= s_fft[i].re;
-    }
-
-    ifft3d(&mut field_complex, nx, ny, nz);
+    let smv_field = crate::fft::apply_real_kernel(field, &s_fft, nx, ny, nz);
 
     // Local field = field - SMV(field), within eroded mask
     let local_field: Vec<f64> = field.iter()
-        .zip(field_complex.iter())
+        .zip(smv_field.iter())
         .enumerate()
-        .map(|(i, (&f, smv_f))| {
-            if eroded_mask[i] == 1 {
-                f - smv_f.re
-            } else {
-                0.0
-            }
+        .map(|(i, (&f, &smv_f))| {
+            if eroded_mask[i] == 1 { f - smv_f } else { 0.0 }
         })
         .collect();
 

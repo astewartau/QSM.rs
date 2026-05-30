@@ -64,6 +64,43 @@ pub fn smv_kernel(
     s
 }
 
+/// Erode a binary mask using FFT-based SMV convolution.
+///
+/// Convolves the mask with an SMV kernel in Fourier space and thresholds.
+/// Voxels where SMV(mask) > delta are kept; others are removed.
+///
+/// # Arguments
+/// * `mask` - Binary input mask
+/// * `smv_kernel_fft` - Pre-computed FFT of SMV kernel (real parts via `fft_real_kernel`)
+/// * `nx`, `ny`, `nz` - Volume dimensions
+/// * `delta` - Threshold (e.g. `1.0 - 1e-7_f64.sqrt()`)
+pub fn erode_mask_smv(
+    mask: &[u8],
+    smv_kernel_fft: &[f64],
+    nx: usize, ny: usize, nz: usize,
+    delta: f64,
+) -> Vec<u8> {
+    use num_complex::Complex64;
+    use crate::fft::{fft3d, ifft3d};
+
+    let n_total = nx * ny * nz;
+    let mut mask_complex: Vec<Complex64> = mask.iter()
+        .map(|&m| Complex64::new(m as f64, 0.0))
+        .collect();
+
+    fft3d(&mut mask_complex, nx, ny, nz);
+
+    for i in 0..n_total {
+        mask_complex[i] *= smv_kernel_fft[i];
+    }
+
+    ifft3d(&mut mask_complex, nx, ny, nz);
+
+    mask_complex.iter()
+        .map(|c| if c.re > delta { 1 } else { 0 })
+        .collect()
+}
+
 // ============================================================================
 // F32 (Single Precision) SMV Kernel Functions
 // ============================================================================

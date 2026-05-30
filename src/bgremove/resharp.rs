@@ -14,8 +14,8 @@
 //! Magn Reson Med, 71(3):1151-1157. https://doi.org/10.1002/mrm.24765
 
 use num_complex::Complex64;
-use crate::fft::{fft3d, ifft3d};
-use crate::kernels::smv::smv_kernel;
+use crate::fft::{fft3d, ifft3d, fft_real_kernel};
+use crate::kernels::smv::{smv_kernel, erode_mask_smv};
 use crate::solvers::cg_solve_with_progress;
 
 /// RESHARP algorithm parameters
@@ -101,36 +101,15 @@ where
 {
     let n_total = nx * ny * nz;
 
-    // Generate SMV kernel (centered at origin with wraparound) and FFT
+    // Generate SMV kernel and FFT
     let s_kernel = smv_kernel(nx, ny, nz, vsx, vsy, vsz, radius);
-
-    let mut s_complex: Vec<Complex64> = s_kernel.iter()
-        .map(|&x| Complex64::new(x, 0.0))
-        .collect();
-    fft3d(&mut s_complex, nx, ny, nz);
-
-    // S_fft is real (kernel is real and symmetric)
-    let s_fft: Vec<f64> = s_complex.iter().map(|c| c.re).collect();
+    let s_fft = fft_real_kernel(&s_kernel, nx, ny, nz);
 
     // DKER = 1 - S (high-pass / delta-kernel) in k-space
     let dker: Vec<f64> = s_fft.iter().map(|&s| 1.0 - s).collect();
 
-    // Erode mask: convolve mask with SMV kernel, keep voxels where result ≈ 1
-    let mask_f64: Vec<f64> = mask.iter().map(|&m| m as f64).collect();
-    let mut mask_complex: Vec<Complex64> = mask_f64.iter()
-        .map(|&x| Complex64::new(x, 0.0))
-        .collect();
-    fft3d(&mut mask_complex, nx, ny, nz);
-
-    for i in 0..n_total {
-        mask_complex[i] *= s_fft[i];
-    }
-    ifft3d(&mut mask_complex, nx, ny, nz);
-
-    let delta = 1.0 - 1e-7_f64.sqrt();
-    let eroded_mask: Vec<u8> = mask_complex.iter()
-        .map(|c| if c.re > delta { 1 } else { 0 })
-        .collect();
+    // Erode mask via SMV convolution
+    let eroded_mask = erode_mask_smv(mask, &s_fft, nx, ny, nz, 1.0 - 1e-7_f64.sqrt());
     let eroded_mask_f64: Vec<f64> = eroded_mask.iter()
         .map(|&m| m as f64)
         .collect();

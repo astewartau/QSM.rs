@@ -66,6 +66,7 @@ pub fn negative_laplacian_kernel(
     laplacian_kernel(nx, ny, nz, vsx, vsy, vsz, true)
 }
 
+
 #[cfg(test)]
 mod tests {
     use super::*;

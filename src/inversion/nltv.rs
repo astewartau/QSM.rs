@@ -19,20 +19,10 @@ use num_complex::Complex64;
 use crate::fft::Fft3dWorkspace;
 use crate::kernels::dipole::dipole_kernel;
 use crate::kernels::laplacian::laplacian_kernel;
-use crate::utils::gradient::{bdiv_inplace, fgrad_inplace};
-
-/// Weighted soft thresholding operator
-#[inline]
-fn weighted_shrink(x: f64, threshold: f64, weight: f64) -> f64 {
-    let t = threshold * weight;
-    if x > t {
-        x - t
-    } else if x < -t {
-        x + t
-    } else {
-        0.0
-    }
-}
+use crate::utils::gradient::fgrad_inplace;
+use crate::utils::{weighted_shrink, apply_mask_zero};
+use crate::Grid;
+use super::admm::{AdmmBuffers, admm_step};
 
 /// NLTV algorithm parameters
 #[derive(Clone, Debug)]
@@ -153,130 +143,44 @@ where
     }
 
     // ========================================================================
-    // Pre-allocate working buffers
+    // Pre-allocate working buffers and run ADMM iterations
     // ========================================================================
 
-    let mut x = vec![0.0; n_total];
-    let mut x_prev = vec![0.0; n_total];
-
-    // Dual variables
-    let mut ux = vec![0.0; n_total];
-    let mut uy = vec![0.0; n_total];
-    let mut uz = vec![0.0; n_total];
-
-    // Gradient buffers
-    let mut gx = vec![0.0; n_total];
-    let mut gy = vec![0.0; n_total];
-    let mut gz = vec![0.0; n_total];
-
-    // Divergence buffer
-    let mut div_d = vec![0.0; n_total];
-
-    // Complex FFT buffer
-    let mut work_complex = vec![Complex64::new(0.0, 0.0); n_total];
-
-    // Adaptive weights for nonlinear term
+    let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
+    let mut buf = AdmmBuffers::new(n_total);
     let mut weights = vec![1.0; n_total];
 
     let total_iter = max_iter * newton_iter;
     let mut current_iter = 0;
 
-    // ========================================================================
     // Outer loop: Newton-like reweighting
-    // ========================================================================
     for _newton in 0..newton_iter {
         let lambda_over_rho = lambda / rho;
 
-        // ====================================================================
         // Inner loop: ADMM with current weights
-        // ====================================================================
         for _iter in 0..max_iter {
             current_iter += 1;
             progress_callback(current_iter, total_iter);
 
-            // Swap x and x_prev
-            std::mem::swap(&mut x, &mut x_prev);
+            let converged = admm_step(
+                &mut buf, &mut fft_ws, f_hat, &inv_a, rho, &grid, tol,
+                |vx, vy, vz, i| (
+                    weighted_shrink(vx, lambda_over_rho, weights[i]),
+                    weighted_shrink(vy, lambda_over_rho, weights[i]),
+                    weighted_shrink(vz, lambda_over_rho, weights[i]),
+                ),
+            );
 
-            // ================================================================
-            // x-subproblem
-            // ================================================================
-            bdiv_inplace(&mut div_d, &gx, &gy, &gz, nx, ny, nz, vsx, vsy, vsz);
-
-            for i in 0..n_total {
-                work_complex[i] = Complex64::new(div_d[i], 0.0);
-            }
-            fft_ws.fft3d(&mut work_complex);
-
-            // x_hat = f_hat - rho * FFT(div) * inv_a
-            // Note: bdiv computes positive divergence ∇·, but the adjoint ∇ᵀ = -∇·,
-            // so we subtract (see Eq. [7] in Kames et al. 2018).
-            for i in 0..n_total {
-                work_complex[i] = f_hat[i] - rho * work_complex[i] * inv_a[i];
-            }
-
-            fft_ws.ifft3d(&mut work_complex);
-            for i in 0..n_total {
-                x[i] = work_complex[i].re;
-            }
-
-            // ================================================================
-            // Convergence check
-            // ================================================================
-            let mut norm_diff_sq = 0.0;
-            let mut norm_x_sq = 0.0;
-            for i in 0..n_total {
-                let diff = x[i] - x_prev[i];
-                norm_diff_sq += diff * diff;
-                norm_x_sq += x[i] * x[i];
-            }
-
-            let rel_change = norm_diff_sq.sqrt() / (norm_x_sq.sqrt() + 1e-20);
-            if rel_change < tol {
+            if converged {
                 break;
-            }
-
-            // ================================================================
-            // z-subproblem + u-update with adaptive weights
-            // ================================================================
-            fgrad_inplace(&mut gx, &mut gy, &mut gz, &x, nx, ny, nz, vsx, vsy, vsz);
-
-            for i in 0..n_total {
-                let grad_x = gx[i];
-                let grad_y = gy[i];
-                let grad_z = gz[i];
-
-                let vx = grad_x + ux[i];
-                let vy = grad_y + uy[i];
-                let vz = grad_z + uz[i];
-
-                // Weighted soft thresholding
-                let zx_i = weighted_shrink(vx, lambda_over_rho, weights[i]);
-                let zy_i = weighted_shrink(vy, lambda_over_rho, weights[i]);
-                let zz_i = weighted_shrink(vz, lambda_over_rho, weights[i]);
-
-                // u update
-                ux[i] = vx - zx_i;
-                uy[i] = vy - zy_i;
-                uz[i] = vz - zz_i;
-
-                // Store (z - u_new) for next iteration's div
-                gx[i] = 2.0 * zx_i - vx;
-                gy[i] = 2.0 * zy_i - vy;
-                gz[i] = 2.0 * zz_i - vz;
             }
         }
 
-        // ====================================================================
-        // Update weights based on current gradient magnitude (Newton update)
-        // ====================================================================
-        fgrad_inplace(&mut gx, &mut gy, &mut gz, &x, nx, ny, nz, vsx, vsy, vsz);
+        // Update weights based on current gradient magnitude
+        fgrad_inplace(&mut buf.gx, &mut buf.gy, &mut buf.gz, &buf.x, nx, ny, nz, vsx, vsy, vsz);
 
         for i in 0..n_total {
-            // Gradient magnitude
-            let grad_mag = (gx[i] * gx[i] + gy[i] * gy[i] + gz[i] * gz[i]).sqrt();
-
-            // Reweighting: w = 1 / (|∇x| + eps)^(1-q) where q is close to 1 for L1
-            // Using mu to control nonlinearity: w = 1 / (|∇x| + mu*eps)
+            let grad_mag = (buf.gx[i] * buf.gx[i] + buf.gy[i] * buf.gy[i] + buf.gz[i] * buf.gz[i]).sqrt();
             weights[i] = 1.0 / (grad_mag + mu * eps);
         }
 
@@ -289,14 +193,9 @@ where
         }
     }
 
-    // Apply mask
-    for i in 0..n_total {
-        if mask[i] == 0 {
-            x[i] = 0.0;
-        }
-    }
+    apply_mask_zero(&mut buf.x, mask);
 
-    x
+    buf.x
 }
 
 /// NLTV with default parameters (matches QSM.jl nltv.jl defaults)

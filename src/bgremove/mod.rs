@@ -22,6 +22,7 @@ pub mod pdf;
 pub mod ismv;
 pub mod lbv;
 pub mod sdf;
+pub mod iharperella;
 
 pub use smv::{smv, smv_default};
 pub use sharp::{sharp, sharp_default, SharpParams};
@@ -31,3 +32,9 @@ pub use pdf::{pdf, pdf_default, pdf_with_progress, PdfParams};
 pub use ismv::{ismv, ismv_default, ismv_with_progress, IsmvParams};
 pub use lbv::{lbv, lbv_default, lbv_with_progress, LbvParams};
 pub use sdf::{sdf, sdf_curvature, sdf_simple, SdfParams};
+pub use iharperella::{
+    harperella, harperella_default, harperella_with_progress,
+    iharperella, iharperella_default, iharperella_with_progress,
+    iharperella_with_weights,
+    HarperellaParams, IharperellaParams,
+};

@@ -84,69 +84,8 @@ pub fn rss_combine(magnitudes: &[&[f64]]) -> Vec<f64> {
     combined
 }
 
-/// Erode a binary mask by iteratively removing boundary voxels (6-connectivity).
-pub fn erode_mask(mask: &[u8], nx: usize, ny: usize, nz: usize, iterations: usize) -> Vec<u8> {
-    let mut current = mask.to_vec();
-    for _ in 0..iterations {
-        let mut eroded = current.clone();
-        for z in 0..nz {
-            for y in 0..ny {
-                for x in 0..nx {
-                    let idx = x + y * nx + z * nx * ny;
-                    if current[idx] == 0 {
-                        continue;
-                    }
-                    if x == 0
-                        || x == nx - 1
-                        || y == 0
-                        || y == ny - 1
-                        || z == 0
-                        || z == nz - 1
-                        || current[idx - 1] == 0
-                        || current[idx + 1] == 0
-                        || current[idx - nx] == 0
-                        || current[idx + nx] == 0
-                        || current[idx - nx * ny] == 0
-                        || current[idx + nx * ny] == 0
-                    {
-                        eroded[idx] = 0;
-                    }
-                }
-            }
-        }
-        current = eroded;
-    }
-    current
-}
-
-/// Dilate a binary mask by iteratively expanding boundary voxels (6-connectivity).
-pub fn dilate_mask(mask: &[u8], nx: usize, ny: usize, nz: usize, iterations: usize) -> Vec<u8> {
-    let mut current = mask.to_vec();
-    for _ in 0..iterations {
-        let mut dilated = current.clone();
-        for z in 0..nz {
-            for y in 0..ny {
-                for x in 0..nx {
-                    let idx = x + y * nx + z * nx * ny;
-                    if current[idx] == 1 {
-                        continue;
-                    }
-                    let has_neighbor = (x > 0 && current[idx - 1] == 1)
-                        || (x < nx - 1 && current[idx + 1] == 1)
-                        || (y > 0 && current[idx - nx] == 1)
-                        || (y < ny - 1 && current[idx + nx] == 1)
-                        || (z > 0 && current[idx - nx * ny] == 1)
-                        || (z < nz - 1 && current[idx + nx * ny] == 1);
-                    if has_neighbor {
-                        dilated[idx] = 1;
-                    }
-                }
-            }
-        }
-        current = dilated;
-    }
-    current
-}
+// Re-export mask operations from canonical location
+pub use crate::utils::mask::{erode_mask, dilate_mask};
 
 #[cfg(test)]
 mod tests {

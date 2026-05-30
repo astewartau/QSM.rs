@@ -1,8 +1,6 @@
-/// Bucket-based priority queue for O(1) push/pop operations
-/// Used for region growing phase unwrapping where priorities are discrete (0-255)
-///
-/// Higher priority = better quality = processed first (starts from highest bin)
-
+/// Bucket-based priority queue for O(1) push/pop operations.
+/// Used for region growing phase unwrapping where priorities are discrete (0-255).
+/// Higher priority = better quality = processed first (starts from highest bin).
 pub struct BucketQueue<T> {
     bins: Vec<Vec<T>>,
     current_priority: isize,  // Can go negative when exhausted
@@ -20,8 +18,8 @@ impl<T> BucketQueue<T> {
         }
     }
 
+    #[cfg(test)]
     #[inline]
-    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.count == 0
     }

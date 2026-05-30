@@ -17,6 +17,7 @@ use num_complex::Complex64;
 use crate::fft::{fft3d, ifft3d};
 use crate::kernels::dipole::dipole_kernel;
 use crate::kernels::laplacian::laplacian_kernel;
+use crate::utils::apply_mask_zero;
 
 /// Regularization type for Tikhonov
 #[derive(Clone, Copy, Debug)]
@@ -130,12 +131,7 @@ pub fn tikhonov(
         .map(|c| c.re)
         .collect();
 
-    // Apply mask
-    for i in 0..n_total {
-        if mask[i] == 0 {
-            chi[i] = 0.0;
-        }
-    }
+    apply_mask_zero(&mut chi, mask);
 
     chi
 }

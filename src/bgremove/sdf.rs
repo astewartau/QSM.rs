@@ -171,8 +171,7 @@ where
         .zip(mask.iter())
         .map(|(&p, &m)| {
             if m > 0.0 {
-                let val = sigma * (p.powf(n) * 100.0).round() / 100.0;
-                val
+                sigma * (p.powf(n) * 100.0).round() / 100.0
             } else {
                 0.0
             }
@@ -307,9 +306,7 @@ fn gaussian_smooth_3d_with_filter_size(
     // Apply separable convolution
     let smoothed_x = convolve_1d_direction(data, nx, ny, nz, &kernel, 'x');
     let smoothed_xy = convolve_1d_direction(&smoothed_x, nx, ny, nz, &kernel, 'y');
-    let smoothed_xyz = convolve_1d_direction(&smoothed_xy, nx, ny, nz, &kernel, 'z');
-
-    smoothed_xyz
+    convolve_1d_direction(&smoothed_xy, nx, ny, nz, &kernel, 'z')
 }
 
 /// Gaussian smoothing with anisotropic sigma and mask

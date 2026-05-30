@@ -289,7 +289,6 @@ pub fn grow_region_unwrap_full(
     seed_phase2: Option<&[f64]>,
     seed_tes: Option<(f64, f64)>,
 ) -> u8 {
-    let n_total = nx * ny * nz;
     let max_seeds = max_seeds.max(1);
     let mut pq: BucketQueue<QueueItem> = BucketQueue::new(256);
     let mut num_seeds: u8 = 0;

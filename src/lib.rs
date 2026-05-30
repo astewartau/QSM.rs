@@ -46,9 +46,12 @@
 pub mod par;
 
 // Core modules
+pub mod grid;
 pub mod fft;
 pub mod priority_queue;
 pub mod region_grow;
+
+pub use grid::Grid;
 
 // Algorithm modules
 pub mod kernels;

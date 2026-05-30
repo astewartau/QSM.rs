@@ -90,8 +90,6 @@ pub(crate) fn solve_poisson_fft(
     nx: usize, ny: usize, nz: usize,
     vsx: f64, vsy: f64, vsz: f64,
 ) -> Vec<f64> {
-    let n_total = nx * ny * nz;
-
     // FFT of RHS
     let mut f_complex: Vec<Complex64> = f.iter()
         .map(|&x| Complex64::new(x, 0.0))

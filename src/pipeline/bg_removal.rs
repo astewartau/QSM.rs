@@ -83,11 +83,10 @@ pub fn run_bg_removal(
         }
         BgRemovalAlgorithm::Sharp => {
             let radius = config.sharp.radius_factor * vsx.min(vsy).min(vsz);
-            let result = crate::bgremove::sharp(
+            crate::bgremove::sharp(
                 field_ppm, mask, nx, ny, nz, vsx, vsy, vsz,
                 config.sharp.threshold, radius,
-            );
-            result
+            )
         }
         BgRemovalAlgorithm::Resharp => {
             crate::bgremove::resharp_with_progress(
@@ -98,7 +97,7 @@ pub fn run_bg_removal(
             )
         }
         BgRemovalAlgorithm::Harperella => {
-            crate::pipeline::harperella_with_progress(
+            crate::bgremove::harperella_with_progress(
                 field_ppm, mask, nx, ny, nz, vsx, vsy, vsz,
                 config.harperella.radius, config.harperella.max_iter,
                 config.harperella.tol,
@@ -106,7 +105,7 @@ pub fn run_bg_removal(
             )
         }
         BgRemovalAlgorithm::Iharperella => {
-            crate::pipeline::iharperella_with_progress(
+            crate::bgremove::iharperella_with_progress(
                 field_ppm, mask, nx, ny, nz, vsx, vsy, vsz,
                 config.harperella.radius, config.harperella.max_iter,
                 config.harperella.tol,

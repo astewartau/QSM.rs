@@ -78,6 +78,7 @@ pub fn dipole_kernel_default(
     dipole_kernel(nx, ny, nz, vsx, vsy, vsz, (0.0, 0.0, 1.0))
 }
 
+
 // ============================================================================
 // F32 (Single Precision) Dipole Kernel Functions
 // ============================================================================

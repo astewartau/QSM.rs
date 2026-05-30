@@ -10,7 +10,6 @@
 use std::f64::consts::PI;
 
 use super::config::*;
-use super::phase_utils::{hz_to_ppm, rads_to_ppm};
 
 /// Run standard dipole inversion on a local field.
 ///
@@ -182,6 +181,7 @@ pub fn run_tgv(
     // Cast to f32 for TGV (operates in single precision)
     let phase_f32: Vec<f32> = phase_data.iter().map(|&v| v as f32).collect();
 
+    let _progress = progress; // TODO: wire once TGV accepts FnMut
     let chi_f32 = crate::inversion::tgv_qsm_with_progress(
         &phase_f32, mask,
         nx, ny, nz, vsx as f32, vsy as f32, vsz as f32,

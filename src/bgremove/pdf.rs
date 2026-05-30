@@ -14,9 +14,6 @@ use num_complex::Complex64;
 use crate::fft::{fft3d, ifft3d};
 use crate::kernels::dipole::dipole_kernel;
 
-#[cfg(feature = "parallel")]
-use crate::par::*;
-
 /// PDF background field removal
 ///
 /// # Arguments
@@ -260,7 +257,7 @@ where
         let theta = s * alpha;
         rho_bar = -c * alpha;
         let phi = c * phi_bar;
-        phi_bar = s * phi_bar;
+        phi_bar *= s;
 
         // Update x and w
         let phi_rho = phi / rho;
@@ -287,11 +284,11 @@ where
         c_bar = rho_tmp / rho_bar_lsmr;
         s_bar = theta_new / rho_bar_lsmr;
         zeta = c_bar * zeta_bar;
-        zeta_bar = -s_bar * zeta_bar;
+        zeta_bar *= -s_bar;
 
         // Estimate ||r|| (matching Julia lsmr.jl lines 264-287, with lambda=0)
         let beta_hat = c_lsmr * beta_dd;
-        beta_dd = -s_lsmr * beta_dd;
+        beta_dd *= -s_lsmr;
 
         let theta_tilde_old = theta_tilde;
         let rho_tilde_old = (rho_d_old * rho_d_old + theta_bar * theta_bar).sqrt();
