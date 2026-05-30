@@ -163,8 +163,22 @@ jobs:
               src/unwrap/romeo.rs)    pipeline="$pipeline test_pipeline_romeo_b0 test_pipeline_tgv" ;;
               src/unwrap/laplacian.rs) pipeline="$pipeline test_pipeline_qsmart test_pipeline_harperella test_pipeline_iharperella" ;;
 
-              # Pipeline (combined algorithms)
-              src/pipeline/mod.rs)    pipeline="$pipeline test_pipeline_harperella test_pipeline_iharperella" ;;
+              # Pipeline (combined algorithms + shared stages)
+              src/pipeline/mod.rs|src/pipeline/config.rs|src/pipeline/phase_utils.rs|src/pipeline/referencing.rs)
+                echo "Pipeline core changed: $file → all tests"
+                output_all; exit 0 ;;
+              src/pipeline/field_mapping.rs)
+                pipeline="$pipeline test_pipeline_romeo_b0 test_pipeline_tgv test_pipeline_qsmart" ;;
+              src/pipeline/bg_removal.rs)
+                bgremove="$bgremove test_bgremove_sharp test_bgremove_resharp test_bgremove_vsharp test_bgremove_pdf test_bgremove_ismv test_bgremove_lbv"
+                pipeline="$pipeline test_pipeline_harperella test_pipeline_iharperella" ;;
+              src/pipeline/inversion.rs)
+                inversion="$inversion test_inversion_tkd test_inversion_tsvd test_inversion_tikhonov test_inversion_tv test_inversion_rts test_inversion_medi test_inversion_nltv"
+                combined="$combined test_combined_tgv" ;;
+              src/pipeline/masking.rs)
+                pipeline="$pipeline test_pipeline_romeo_b0" ;;
+              src/pipeline/qsmart.rs)
+                pipeline="$pipeline test_pipeline_qsmart" ;;
               src/pipeline/iharperella.rs) pipeline="$pipeline test_pipeline_harperella test_pipeline_iharperella" ;;
 
               # Utils (QSMART components)

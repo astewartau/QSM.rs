@@ -437,7 +437,7 @@ pub fn phase_offset_removal(
 /// # Arguments
 /// * `unwrapped_phases` - Unwrapped phase for each echo [n_echoes][nx*ny*nz]
 /// * `mags` - Magnitude for each echo (used for some weighting types)
-/// * `tes` - Echo times in ms
+/// * `tes` - Echo times in seconds
 /// * `mask` - Binary mask
 /// * `weight_type` - Type of weighting to use
 /// * `n_total` - Total number of voxels
@@ -457,8 +457,8 @@ pub fn calculate_b0_weighted(
 
     // Compute inline to avoid allocating per-echo weight arrays
 
-    // B0 = (1000 / 2π) * Σ(phase / TE * weight) / Σ(weight)
-    let scale = 1000.0 / TWO_PI;
+    // B0 = (1 / 2π) * Σ(phase / TE * weight) / Σ(weight)
+    let scale = 1.0 / TWO_PI;
 
     for i in 0..n_total {
         if mask[i] == 0 {
@@ -508,7 +508,7 @@ pub fn calculate_b0_weighted(
 /// # Arguments
 /// * `phases` - Mutable phase data per echo (modified in-place)
 /// * `mags` - Magnitude data per echo
-/// * `tes` - Echo times in ms
+/// * `tes` - Echo times (any consistent unit; only ratios are used)
 /// * `mask` - Binary mask
 /// * `sigma` - Smoothing sigma for artefact estimation
 /// * `nx`, `ny`, `nz` - Dimensions
@@ -848,7 +848,7 @@ mod tests {
     ///
     /// The phase at each voxel is: phase_offset + slope * TE
     /// where `slope` is a spatially-varying linear ramp along x.
-    /// Magnitude is uniform (1.0) inside the mask.
+    /// TEs are in seconds. Magnitude is uniform (1.0) inside the mask.
     fn make_synthetic_multi_echo(
         nx: usize, ny: usize, nz: usize,
         tes: &[f64],
@@ -858,10 +858,10 @@ mod tests {
 
         // Constant phase offset (small, well within [-pi, pi])
         let phase_offset_val = 0.3;
-        // Slope (rad/ms) as a function of x: gentle ramp so phases stay in [-pi, pi]
-        // Max slope = 0.05 rad/ms at x=nx-1, so max phase ~ 0.3 + 0.05*7*15 = 5.55
+        // Slope (rad/s) as a function of x: gentle ramp so phases stay in [-pi, pi]
+        // Max slope = 50 rad/s at x=nx-1, so max phase ~ 0.3 + 50*7*0.015 = 5.55
         // which will wrap but that is fine.
-        let slope_scale = 0.05;
+        let slope_scale = 50.0;
 
         let mask = vec![1u8; n];
         let mut phases: Vec<Vec<f64>> = Vec::with_capacity(n_echoes);
@@ -1142,13 +1142,13 @@ mod tests {
 
     #[test]
     fn test_calculate_b0_weighted_phase_snr() {
-        // For a constant slope (rad/ms), all weight types should recover it.
+        // For a constant slope (rad/s), all weight types should recover it.
         // phase[e] = slope * TE[e], so phase/TE = slope for each echo.
         // Weighted average of identical values = same value.
-        // B0 = (1000 / 2pi) * slope (Hz)
+        // B0 = (1 / 2pi) * slope (Hz)
         let n = 64;
-        let tes = [5.0, 10.0, 15.0];
-        let slope = 0.2; // rad/ms
+        let tes = [0.005, 0.010, 0.015]; // seconds
+        let slope = 200.0; // rad/s
         let mask = vec![1u8; n];
 
         let phases: Vec<Vec<f64>> = tes.iter()
@@ -1160,7 +1160,7 @@ mod tests {
 
         let b0 = calculate_b0_weighted(&phases, &mags, &tes, &mask, B0WeightType::PhaseSNR, n);
 
-        let expected_hz = 1000.0 / TWO_PI * slope;
+        let expected_hz = 1.0 / TWO_PI * slope;
         assert_eq!(b0.len(), n);
         for v in &b0 {
             assert!(v.is_finite());
@@ -1172,8 +1172,8 @@ mod tests {
     #[test]
     fn test_calculate_b0_weighted_all_weight_types() {
         let n = 16;
-        let tes = [5.0, 10.0, 15.0];
-        let slope = 0.1;
+        let tes = [0.005, 0.010, 0.015]; // seconds
+        let slope = 100.0; // rad/s
         let mask = vec![1u8; n];
 
         let phases: Vec<Vec<f64>> = tes.iter()
@@ -1183,7 +1183,7 @@ mod tests {
             .map(|_| vec![2.0; n])
             .collect();
 
-        let expected_hz = 1000.0 / TWO_PI * slope;
+        let expected_hz = 1.0 / TWO_PI * slope;
 
         for wt in &[
             B0WeightType::PhaseSNR,
@@ -1205,11 +1205,11 @@ mod tests {
     #[test]
     fn test_calculate_b0_weighted_masked_out() {
         let n = 8;
-        let tes = [5.0, 10.0];
+        let tes = [0.005, 0.010]; // seconds
         let mask = vec![0u8; n]; // all masked out
 
         let phases: Vec<Vec<f64>> = tes.iter()
-            .map(|&te| vec![0.5 * te; n])
+            .map(|&te| vec![500.0 * te; n])
             .collect();
         let mags: Vec<Vec<f64>> = tes.iter()
             .map(|_| vec![1.0; n])
@@ -1226,7 +1226,7 @@ mod tests {
     fn test_calculate_b0_weighted_zero_magnitude() {
         // When magnitude is zero, weight is zero; result should be 0
         let n = 4;
-        let tes = [5.0, 10.0, 15.0];
+        let tes = [0.005, 0.010, 0.015];
         let mask = vec![1u8; n];
 
         let phases: Vec<Vec<f64>> = tes.iter()
@@ -1244,7 +1244,7 @@ mod tests {
 
         // Average weight = 1.0, should still work
         let b0_avg = calculate_b0_weighted(&phases, &mags, &tes, &mask, B0WeightType::Average, n);
-        let expected = 1000.0 / TWO_PI * 0.2;
+        let expected = 1.0 / TWO_PI * 0.2;
         for v in &b0_avg {
             assert!((v - expected).abs() < 1e-8);
         }
@@ -1486,7 +1486,7 @@ mod tests {
     fn test_phase_offset_removal_output_sizes() {
         let (nx, ny, nz) = (8, 8, 8);
         let n = nx * ny * nz;
-        let tes = [5.0, 10.0, 15.0];
+        let tes = [0.005, 0.010, 0.015];
         let (phases, mags, mask) = make_synthetic_multi_echo(nx, ny, nz, &tes);
 
         let sigma = [1.0, 1.0, 1.0];
@@ -1505,7 +1505,7 @@ mod tests {
     #[test]
     fn test_phase_offset_removal_finite_output() {
         let (nx, ny, nz) = (8, 8, 8);
-        let tes = [5.0, 10.0, 15.0];
+        let tes = [0.005, 0.010, 0.015];
         let (phases, mags, mask) = make_synthetic_multi_echo(nx, ny, nz, &tes);
 
         let sigma = [1.0, 1.0, 1.0];
@@ -1526,7 +1526,7 @@ mod tests {
     #[test]
     fn test_phase_offset_removal_corrected_in_range() {
         let (nx, ny, nz) = (8, 8, 8);
-        let tes = [5.0, 10.0, 15.0];
+        let tes = [0.005, 0.010, 0.015];
         let (phases, mags, mask) = make_synthetic_multi_echo(nx, ny, nz, &tes);
 
         let sigma = [1.0, 1.0, 1.0];
@@ -1548,7 +1548,7 @@ mod tests {
         // Uniform phase across all echoes => offset should be approximately that phase
         let (nx, ny, nz) = (8, 8, 8);
         let n = nx * ny * nz;
-        let tes = [5.0, 10.0, 15.0];
+        let tes = [0.005, 0.010, 0.015];
 
         // All echoes have constant phase 0.5 (no TE dependence)
         let phases: Vec<Vec<f64>> = (0..3).map(|_| vec![0.5; n]).collect();
@@ -1578,7 +1578,7 @@ mod tests {
         use crate::unwrap::romeo::{unwrap_romeo_multi_echo, RomeoParams};
         let (nx, ny, nz) = (8, 8, 8);
         let n = nx * ny * nz;
-        let tes = [5.0, 10.0, 15.0];
+        let tes = [0.005, 0.010, 0.015];
         let (phases, mags, mask) = make_synthetic_multi_echo(nx, ny, nz, &tes);
         let sigma = [1.0, 1.0, 1.0];
 
@@ -1613,7 +1613,7 @@ mod tests {
         use crate::unwrap::romeo::{unwrap_romeo_multi_echo, RomeoParams};
         let (nx, ny, nz) = (8, 8, 8);
         let n = nx * ny * nz;
-        let tes = [5.0, 10.0, 15.0];
+        let tes = [0.005, 0.010, 0.015];
         let (phases, mags, mask) = make_synthetic_multi_echo(nx, ny, nz, &tes);
         let sigma = [1.0, 1.0, 1.0];
 
@@ -1699,7 +1699,7 @@ mod tests {
     fn test_linear_fit_on_mcpc3ds_output() {
         let (nx, ny, nz) = (8, 8, 8);
         let n = nx * ny * nz;
-        let tes = [5.0, 10.0, 15.0];
+        let tes = [0.005, 0.010, 0.015];
         let (phases, mags, mask) = make_synthetic_multi_echo(nx, ny, nz, &tes);
 
         let sigma = [1.0, 1.0, 1.0];
@@ -1734,7 +1734,7 @@ mod tests {
     fn test_bipolar_correction_3_echoes() {
         let (nx, ny, nz) = (8, 8, 8);
         let n = nx * ny * nz;
-        let tes = [5.0, 10.0, 15.0];
+        let tes = [0.005, 0.010, 0.015];
         let (phases, mags, mask) = make_synthetic_multi_echo(nx, ny, nz, &tes);
 
         let mut phases_mut = phases;
@@ -1757,7 +1757,7 @@ mod tests {
         // With only 2 echoes, bipolar correction should be a no-op
         let (nx, ny, nz) = (8, 8, 8);
         let n = nx * ny * nz;
-        let tes = [5.0, 10.0];
+        let tes = [0.005, 0.010];
         let (phases, mags, mask) = make_synthetic_multi_echo(nx, ny, nz, &tes);
 
         let original: Vec<Vec<f64>> = phases.iter().map(|p| p.clone()).collect();
@@ -1781,7 +1781,7 @@ mod tests {
         use crate::unwrap::romeo::{unwrap_romeo_multi_echo, RomeoParams};
         let (nx, ny, nz) = (8, 8, 8);
         let n = nx * ny * nz;
-        let tes = [5.0, 10.0, 15.0];
+        let tes = [0.005, 0.010, 0.015];
         let (phases, mags, mask) = make_synthetic_multi_echo(nx, ny, nz, &tes);
         let sigma = [1.0, 1.0, 1.0];
 
