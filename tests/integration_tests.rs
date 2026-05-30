@@ -44,28 +44,27 @@ fn run_field_mapping(data: &common::TestData) -> Vec<f64> {
     let (vsx, vsy, vsz) = data.voxel_size;
     let n_total = nx * ny * nz;
     let n_echoes = data.phase_echoes.len();
-    let tes_ms: Vec<f64> = data.echo_times.iter().map(|&t| t * 1000.0).collect();
 
-    // Step 1: Phase offset removal
+    // Step 1: Phase offset removal (uses TE ratios only — unit-agnostic)
     println!("[INFO] Phase offset removal...");
     let (corrected_phases, _offset) = phase_offset_removal(
-        &data.phase_echoes, &data.mag_echoes, &tes_ms, &data.mask,
+        &data.phase_echoes, &data.mag_echoes, &data.echo_times, &data.mask,
         [10.0, 10.0, 5.0], [0, 1], UnwrapMethod::Romeo,
         [vsx, vsy, vsz], nx, ny, nz,
     );
 
-    // Step 2: Multi-echo ROMEO unwrapping
+    // Step 2: Multi-echo ROMEO unwrapping (uses TE ratios only — unit-agnostic)
     println!("[INFO] ROMEO multi-echo unwrapping...");
     let mag_refs: Vec<&[f64]> = (0..n_echoes).map(|e| data.mag_echoes[e].as_slice()).collect();
     let unwrapped = unwrap_romeo_multi_echo(
-        &corrected_phases, &mag_refs, &tes_ms, &data.mask,
+        &corrected_phases, &mag_refs, &data.echo_times, &data.mask,
         &RomeoParams::default(), nx, ny, nz,
     );
 
-    // Step 3: Weighted B0 averaging
+    // Step 3: Weighted B0 averaging (expects seconds)
     println!("[INFO] Weighted B0 estimation...");
     calculate_b0_weighted(
-        &unwrapped, &data.mag_echoes, &tes_ms, &data.mask,
+        &unwrapped, &data.mag_echoes, &data.echo_times, &data.mask,
         B0WeightType::PhaseSNR, n_total,
     )
 }
@@ -910,7 +909,6 @@ fn test_pipeline_tgv() {
     //   - B0 weight type = PhaseSNR (mag * TE, qsmbly default)
     //   - Internally: MCPC-3D-S offset correction → ROMEO unwrap per echo → echo
     //     alignment → weighted B0 averaging → B0 in Hz
-    let tes_ms: Vec<f64> = data.echo_times.iter().map(|&t| t * 1000.0).collect();
     println!("[INFO] Running phase offset removal + ROMEO + B0 estimation...");
     let b0_hz = run_field_mapping(&data);
 
