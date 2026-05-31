@@ -58,6 +58,12 @@ pub fn weighted_shrink(x: f64, threshold: f64, weight: f64) -> f64 {
     shrink(x, threshold * weight)
 }
 
+/// Vector 2-norm (L2 norm).
+#[inline]
+pub fn vec_norm(v: &[f64]) -> f64 {
+    v.iter().map(|&x| x * x).sum::<f64>().sqrt()
+}
+
 /// Compute relative change ||x_new - x_prev||₂ / (||x_new||₂ + ε) for convergence checking.
 #[inline]
 pub fn relative_change(x: &[f64], x_prev: &[f64]) -> f64 {
