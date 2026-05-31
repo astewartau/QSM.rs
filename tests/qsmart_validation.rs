@@ -22,8 +22,9 @@ mod common;
 use std::path::Path;
 use std::time::Instant;
 use common::load_nifti_file;
+use qsm_core::Grid;
 use qsm_core::bgremove::{sdf, SdfParams};
-use qsm_core::inversion::{ilsqr, ilsqr_simple};
+use qsm_core::inversion::{ilsqr, ilsqr_simple, IlsqrParams};
 use qsm_core::inversion::tkd;
 use qsm_core::utils::{
     calculate_curvature_proximity,
@@ -475,13 +476,14 @@ fn test_qsmart_02_curvature() {
     );
 
     // Then compute curvature proximity
+    let grid = Grid::new(nx, ny, nz, data.voxel_size.0, data.voxel_size.1, data.voxel_size.2);
     let (prox_curv, curv_i) = calculate_curvature_proximity(
         &data.mask_u8,
         &prox1,
         SDF_LOWER_LIM,
         SDF_CURV_CONSTANT,
         sigma1,
-        nx, ny, nz,
+        &grid,
     );
 
     let elapsed = start.elapsed();
@@ -524,13 +526,14 @@ fn test_qsmart_03_alpha() {
     );
 
     // Compute curvature-weighted proximity
+    let grid = Grid::new(nx, ny, nz, data.voxel_size.0, data.voxel_size.1, data.voxel_size.2);
     let (prox_curv, _) = calculate_curvature_proximity(
         &data.mask_u8,
         &prox1,
         SDF_LOWER_LIM,
         SDF_CURV_CONSTANT,
         sigma1,
-        nx, ny, nz,
+        &grid,
     );
 
     // For stage 1: sigma2=0, so prox_final = prox_curv (no vasculature weighting)
@@ -583,11 +586,13 @@ fn test_qsmart_04_vasculature() {
         frangi_c: FRANGI_C,
     };
 
+    let grid = Grid::new(nx, ny, nz, data.voxel_size.0, data.voxel_size.1, data.voxel_size.2);
     let vasc_only_rust = generate_vasculature_mask(
         &data.magnitude,
         &data.mask_u8,
-        nx, ny, nz,
+        &grid,
         &vasc_params,
+        |_, _| {},
     );
 
     let elapsed = start.elapsed();
@@ -650,6 +655,7 @@ fn test_qsmart_05_sdf_stage1() {
 
     // Stage 1 SDF: no vasculature weighting (all ones)
     let ones = vec![1.0f64; data.tfs.len()];
+    let grid = Grid::new(nx, ny, nz, data.voxel_size.0, data.voxel_size.1, data.voxel_size.2);
     let params_stage1 = SdfParams {
         sigma1: SDF_SIGMA1_STAGE1,
         sigma2: SDF_SIGMA2_STAGE1, // 0.0 per Warda
@@ -663,8 +669,9 @@ fn test_qsmart_05_sdf_stage1() {
         &data.tfs,
         &data.mask,
         &ones,
-        nx, ny, nz,
+        &grid,
         &params_stage1,
+        |_, _| {},
     );
 
     let elapsed = start.elapsed();
@@ -684,7 +691,7 @@ fn test_qsmart_05_sdf_stage1() {
         curv_constant: SDF_CURV_CONSTANT,
         use_curvature: true,
     };
-    let lfs_stage1_old = sdf(&data.tfs, &data.mask, &ones, nx, ny, nz, &params_stage1_old);
+    let lfs_stage1_old = sdf(&data.tfs, &data.mask, &ones, &grid, &params_stage1_old, |_, _| {});
     let result_old = compare_volumes("SDF S1 (sigma2=10)", &lfs_stage1_old, matlab_lfs1, &data.mask);
 
     println!("\n[RESULT] SDF Stage 1 (sigma2=0) NRMSE={:.4}, r={:.4}", result.nrmse, result.correlation);
@@ -851,6 +858,7 @@ fn test_qsmart_06_sdf_stage2() {
 
     let data = QsmartTestData::load().expect("Failed to load QSMART test data");
     let (nx, ny, nz) = data.dims;
+    let grid = Grid::new(nx, ny, nz, data.voxel_size.0, data.voxel_size.1, data.voxel_size.2);
 
     let matlab_lfs2 = match &data.lfs_sdf_2_matlab {
         Some(l) => l,
@@ -871,7 +879,7 @@ fn test_qsmart_06_sdf_stage2() {
                 frangi_scale_ratio: FRANGI_SCALE_RATIO,
                 frangi_c: FRANGI_C,
             };
-            generate_vasculature_mask(&data.magnitude, &data.mask_u8, nx, ny, nz, &vasc_params)
+            generate_vasculature_mask(&data.magnitude, &data.mask_u8, &grid, &vasc_params, |_, _| {})
         }
     };
 
@@ -890,8 +898,9 @@ fn test_qsmart_06_sdf_stage2() {
         &data.tfs,
         &data.mask,
         &vasc_only,
-        nx, ny, nz,
+        &grid,
         &params_stage2,
+        |_, _| {},
     );
 
     let elapsed = start.elapsed();
@@ -919,6 +928,7 @@ fn test_qsmart_07_ilsqr_stage1() {
     let data = QsmartTestData::load().expect("Failed to load QSMART test data");
     let (nx, ny, nz) = data.dims;
     let (vsx, vsy, vsz) = data.voxel_size;
+    let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
 
     let matlab_lfs1 = match &data.lfs_sdf_1_matlab {
         Some(l) => l,
@@ -935,11 +945,9 @@ fn test_qsmart_07_ilsqr_stage1() {
     let chi_stage1_rust = ilsqr_simple(
         matlab_lfs1,
         &data.mask_u8,
-        nx, ny, nz,
-        vsx, vsy, vsz,
+        &grid,
         B0_DIR,
-        ILSQR_TOL,
-        ILSQR_MAX_ITER,
+        &IlsqrParams { tol: ILSQR_TOL, max_iter: ILSQR_MAX_ITER },
     );
 
     let elapsed = start.elapsed();
@@ -966,6 +974,7 @@ fn test_qsmart_08_ilsqr_stage2() {
     let data = QsmartTestData::load().expect("Failed to load QSMART test data");
     let (nx, ny, nz) = data.dims;
     let (vsx, vsy, vsz) = data.voxel_size;
+    let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
 
     let matlab_lfs2 = match &data.lfs_sdf_2_matlab {
         Some(l) => l,
@@ -995,11 +1004,9 @@ fn test_qsmart_08_ilsqr_stage2() {
     let chi_stage2_rust = ilsqr_simple(
         matlab_lfs2,
         &mask_stage2,
-        nx, ny, nz,
-        vsx, vsy, vsz,
+        &grid,
         B0_DIR,
-        ILSQR_TOL,
-        ILSQR_MAX_ITER,
+        &IlsqrParams { tol: ILSQR_TOL, max_iter: ILSQR_MAX_ITER },
     );
 
     let elapsed = start.elapsed();
@@ -1068,6 +1075,7 @@ fn test_qsmart_10_offset_adjustment() {
     let data = QsmartTestData::load().expect("Failed to load QSMART test data");
     let (nx, ny, nz) = data.dims;
     let (vsx, vsy, vsz) = data.voxel_size;
+    let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
 
     let matlab_qsm1 = match &data.qsm_1_matlab {
         Some(q) => q,
@@ -1105,8 +1113,7 @@ fn test_qsmart_10_offset_adjustment() {
         &lfs_scaled,
         matlab_qsm1,
         matlab_qsm2,
-        nx, ny, nz,
-        vsx, vsy, vsz,
+        &grid,
         B0_DIR,
         ppm,
     );
@@ -1151,6 +1158,7 @@ fn test_qsmart_full_pipeline() {
     let data = QsmartTestData::load().expect("Failed to load QSMART test data");
     let (nx, ny, nz) = data.dims;
     let (vsx, vsy, vsz) = data.voxel_size;
+    let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
     let n_total = nx * ny * nz;
 
     let pipeline_start = Instant::now();
@@ -1168,7 +1176,7 @@ fn test_qsmart_full_pipeline() {
         frangi_c: FRANGI_C,
     };
     let vasc_only = generate_vasculature_mask(
-        &data.magnitude, &data.mask_u8, nx, ny, nz, &vasc_params,
+        &data.magnitude, &data.mask_u8, &grid, &vasc_params, |_, _| {},
     );
 
     println!("[INFO] Vasculature detection: {:.2?}", step_start.elapsed());
@@ -1189,7 +1197,7 @@ fn test_qsmart_full_pipeline() {
         use_curvature: true,
     };
 
-    let lfs_stage1 = sdf(&data.tfs, &data.mask, &ones, nx, ny, nz, &params_stage1);
+    let lfs_stage1 = sdf(&data.tfs, &data.mask, &ones, &grid, &params_stage1, |_, _| {});
     println!("[INFO] SDF Stage 1: {:.2?}", step_start.elapsed());
 
     // ========================================================================
@@ -1200,8 +1208,8 @@ fn test_qsmart_full_pipeline() {
 
     let chi_stage1 = ilsqr_simple(
         &lfs_stage1, &data.mask_u8,
-        nx, ny, nz, vsx, vsy, vsz,
-        B0_DIR, ILSQR_TOL, ILSQR_MAX_ITER,
+        &grid, B0_DIR,
+        &IlsqrParams { tol: ILSQR_TOL, max_iter: ILSQR_MAX_ITER },
     );
     println!("[INFO] iLSQR Stage 1: {:.2?}", step_start.elapsed());
 
@@ -1220,7 +1228,7 @@ fn test_qsmart_full_pipeline() {
         use_curvature: true,
     };
 
-    let lfs_stage2 = sdf(&data.tfs, &data.mask, &vasc_only, nx, ny, nz, &params_stage2);
+    let lfs_stage2 = sdf(&data.tfs, &data.mask, &vasc_only, &grid, &params_stage2, |_, _| {});
     println!("[INFO] SDF Stage 2: {:.2?}", step_start.elapsed());
 
     // ========================================================================
@@ -1236,8 +1244,8 @@ fn test_qsmart_full_pipeline() {
 
     let chi_stage2 = ilsqr_simple(
         &lfs_stage2, &mask_stage2,
-        nx, ny, nz, vsx, vsy, vsz,
-        B0_DIR, ILSQR_TOL, ILSQR_MAX_ITER,
+        &grid, B0_DIR,
+        &IlsqrParams { tol: ILSQR_TOL, max_iter: ILSQR_MAX_ITER },
     );
     println!("[INFO] iLSQR Stage 2: {:.2?}", step_start.elapsed());
 
@@ -1260,8 +1268,7 @@ fn test_qsmart_full_pipeline() {
         &lfs_scaled,
         &chi_stage1,
         &chi_stage2,
-        nx, ny, nz,
-        vsx, vsy, vsz,
+        &grid,
         B0_DIR,
         ppm,
     );
@@ -1388,6 +1395,7 @@ fn test_qsmart_07b_ilsqr_diagnostics() {
     let data = QsmartTestData::load().expect("Failed to load QSMART test data");
     let (nx, ny, nz) = data.dims;
     let (vsx, vsy, vsz) = data.voxel_size;
+    let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
 
     let matlab_lfs1 = match &data.lfs_sdf_1_matlab {
         Some(l) => l,
@@ -1403,11 +1411,10 @@ fn test_qsmart_07b_ilsqr_diagnostics() {
     let (chi, xsa, xfs, xlsqr) = ilsqr(
         matlab_lfs1,
         &data.mask_u8,
-        nx, ny, nz,
-        vsx, vsy, vsz,
+        &grid,
         B0_DIR,
-        ILSQR_TOL,
-        ILSQR_MAX_ITER,
+        &IlsqrParams { tol: ILSQR_TOL, max_iter: ILSQR_MAX_ITER },
+        |_, _| {},
     );
     let elapsed = start.elapsed();
     println!("[INFO] iLSQR completed in {:.2?}", elapsed);
@@ -1430,8 +1437,7 @@ fn test_qsmart_07b_ilsqr_diagnostics() {
     let chi_tkd = tkd(
         matlab_lfs1,
         &data.mask_u8,
-        nx, ny, nz,
-        vsx, vsy, vsz,
+        &grid,
         B0_DIR,
         0.1, // threshold
     );
@@ -1475,6 +1481,7 @@ fn test_qsmart_04b_frangi_debug() {
 
     let data = QsmartTestData::load().expect("Failed to load QSMART test data");
     let (nx, ny, nz) = data.dims;
+    let grid = Grid::new(nx, ny, nz, data.voxel_size.0, data.voxel_size.1, data.voxel_size.2);
     let n_total = nx * ny * nz;
 
     // ========================================================================
@@ -1578,7 +1585,7 @@ fn test_qsmart_04b_frangi_debug() {
     };
 
     let frangi_result = qsm_core::utils::frangi::frangi_filter_3d(
-        &masked_bottom_hat, nx, ny, nz, &frangi_params,
+        &masked_bottom_hat, &grid, &frangi_params, |_, _| {},
     );
     let enhanced = &frangi_result.vesselness;
 
@@ -1717,7 +1724,7 @@ fn test_qsmart_04b_frangi_debug() {
         };
 
         let test_result = qsm_core::utils::frangi::frangi_filter_3d(
-            &masked_bottom_hat, nx, ny, nz, &test_params,
+            &masked_bottom_hat, &grid, &test_params, |_, _| {},
         );
 
         let nz_count = test_result.vesselness.iter()

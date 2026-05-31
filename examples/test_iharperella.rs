@@ -6,6 +6,7 @@ use std::path::Path;
 use std::time::Instant;
 use qsm_core::nifti_io;
 use qsm_core::pipeline;
+use qsm_core::Grid;
 
 fn main() {
     let bids_dir = std::env::args().nth(1)
@@ -46,12 +47,14 @@ fn main() {
 
     // Run iHARPERELLA
     println!("\nRunning iHARPERELLA (40 CG iterations, radius=10mm)...");
+    let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
+    let params = pipeline::HarperellaParams::default();
     let start = Instant::now();
     let (tissue_phase, output_mask) = pipeline::iharperella(
         &phase, &mask,
-        nx, ny, nz,
-        vsx, vsy, vsz,
-        10.0, 40,
+        &grid,
+        &params,
+        |_iter, _total| {},
     );
     let elapsed = start.elapsed();
     println!("Completed in {:.2?}", elapsed);
