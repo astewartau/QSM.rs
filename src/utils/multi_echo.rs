@@ -46,6 +46,7 @@ impl Default for LinearFitParams {
 }
 
 use std::f64::consts::PI;
+use crate::Grid;
 use crate::unwrap::romeo::{unwrap_romeo, RomeoParams};
 use crate::unwrap::laplacian::laplacian_unwrap;
 use crate::unwrap::UnwrapMethod;
@@ -107,7 +108,7 @@ impl B0WeightType {
 /// * `phase` - Input phase data (nx * ny * nz)
 /// * `sigma` - Smoothing sigma in voxels [sx, sy, sz]
 /// * `mask` - Binary mask (1 = include, 0 = exclude)
-/// * `nx`, `ny`, `nz` - Dimensions
+/// * `grid` - Volume grid (dimensions and voxel sizes)
 ///
 /// # Returns
 /// Smoothed phase data
@@ -115,8 +116,9 @@ pub fn gaussian_smooth_3d_phase(
     phase: &[f64],
     sigma: [f64; 3],
     mask: &[u8],
-    nx: usize, ny: usize, nz: usize,
+    grid: &Grid,
 ) -> Vec<f64> {
+    let (nx, ny, nz) = grid.dims;
     let n_total = nx * ny * nz;
 
     // For phase smoothing, we smooth the complex representation
@@ -346,8 +348,7 @@ pub fn hermitian_inner_product(
 /// * `sigma` - Gaussian smoothing sigma in voxels [x, y, z]
 /// * `echoes` - Which two echoes to use for HIP [e1, e2]
 /// * `unwrap_method` - Method to unwrap the HIP phase (Romeo or Laplacian)
-/// * `voxel_size` - Voxel dimensions in mm [vsx, vsy, vsz] (needed for Laplacian unwrapping)
-/// * `nx`, `ny`, `nz` - Volume dimensions
+/// * `grid` - Volume grid (dimensions and voxel sizes)
 ///
 /// # Returns
 /// `(corrected_phases, phase_offset)` — offset-corrected phases and the estimated offset
@@ -359,9 +360,9 @@ pub fn phase_offset_removal(
     sigma: [f64; 3],
     echoes: [usize; 2],
     unwrap_method: UnwrapMethod,
-    voxel_size: [f64; 3],
-    nx: usize, ny: usize, nz: usize,
+    grid: &Grid,
 ) -> (Vec<Vec<f64>>, Vec<f64>) {
+    let (nx, ny, nz) = grid.dims;
     let n_echoes = phases.len();
     let n_total = nx * ny * nz;
 
@@ -383,10 +384,10 @@ pub fn phase_offset_removal(
     let unwrapped_hip = match unwrap_method {
         UnwrapMethod::Romeo => {
             let weight: Vec<f64> = hip_mag.iter().map(|&x| x.sqrt()).collect();
-            unwrap_romeo(&hip_phase, &weight, None, 0.0, 0.0, mask, &RomeoParams::default(), nx, ny, nz)
+            unwrap_romeo(&hip_phase, &weight, None, 0.0, 0.0, mask, &RomeoParams::default(), grid)
         }
         UnwrapMethod::Laplacian => {
-            laplacian_unwrap(&hip_phase, mask, nx, ny, nz, voxel_size[0], voxel_size[1], voxel_size[2])
+            laplacian_unwrap(&hip_phase, mask, grid)
         }
     };
     drop(hip_phase);
@@ -408,7 +409,7 @@ pub fn phase_offset_removal(
 
     // Smooth the phase offset (handles wrapping via complex representation)
     // Julia line 51: po[:,:,:,icha] .= gaussiansmooth3d_phase(view(po,:,:,:,icha), sigma; mask)
-    let phase_offset_smoothed = gaussian_smooth_3d_phase(&phase_offset, sigma, mask, nx, ny, nz);
+    let phase_offset_smoothed = gaussian_smooth_3d_phase(&phase_offset, sigma, mask, grid);
     drop(phase_offset); // Free ~82 MB early
 
     // Remove phase offset from all echoes
@@ -440,7 +441,7 @@ pub fn phase_offset_removal(
 /// * `tes` - Echo times in seconds
 /// * `mask` - Binary mask
 /// * `weight_type` - Type of weighting to use
-/// * `n_total` - Total number of voxels
+/// * `grid` - Volume grid (dimensions and voxel sizes)
 ///
 /// # Returns
 /// B0 field in Hz
@@ -450,8 +451,9 @@ pub fn calculate_b0_weighted(
     tes: &[f64],
     mask: &[u8],
     weight_type: B0WeightType,
-    n_total: usize,
+    grid: &Grid,
 ) -> Vec<f64> {
+    let n_total = grid.n_total();
     let n_echoes = unwrapped_phases.len();
     let mut b0 = vec![0.0; n_total];
 
@@ -511,15 +513,16 @@ pub fn calculate_b0_weighted(
 /// * `tes` - Echo times (any consistent unit; only ratios are used)
 /// * `mask` - Binary mask
 /// * `sigma` - Smoothing sigma for artefact estimation
-/// * `nx`, `ny`, `nz` - Dimensions
+/// * `grid` - Volume grid (dimensions and voxel sizes)
 pub fn bipolar_correction<P: AsMut<[f64]> + AsRef<[f64]>>(
     phases: &mut [P],
     mags: &[impl AsRef<[f64]>],
     tes: &[f64],
     mask: &[u8],
     sigma: [f64; 3],
-    nx: usize, ny: usize, nz: usize,
+    grid: &Grid,
 ) {
+    let (nx, ny, nz) = grid.dims;
     let n_echoes = phases.len();
     if n_echoes < 3 {
         return; // Need at least 3 echoes
@@ -537,7 +540,7 @@ pub fn bipolar_correction<P: AsMut<[f64]> + AsRef<[f64]>>(
         let mag2 = if mags.is_empty() { &[] as &[f64] } else { mags[1].as_ref() };
         unwrap_romeo(
             phases[1].as_ref(), mag2, None, 0.0, 0.0,
-            mask, &RomeoParams::default(), nx, ny, nz,
+            mask, &RomeoParams::default(), grid,
         )
     } else {
         phases[1].as_ref().to_vec()
@@ -553,7 +556,7 @@ pub fn bipolar_correction<P: AsMut<[f64]> + AsRef<[f64]>>(
     }
 
     // Step 2: Smooth the artefact
-    artefact = gaussian_smooth_3d_phase(&artefact, sigma, mask, nx, ny, nz);
+    artefact = gaussian_smooth_3d_phase(&artefact, sigma, mask, grid);
 
     // Step 3: Unwrap the artefact with ROMEO
     let mag1 = if mags.is_empty() { &[] as &[f64] } else { mags[0].as_ref() };
@@ -563,7 +566,7 @@ pub fn bipolar_correction<P: AsMut<[f64]> + AsRef<[f64]>>(
     };
     artefact = unwrap_romeo(
         &artefact, mag1, None, 0.0, 0.0,
-        mask, &romeo_params, nx, ny, nz,
+        mask, &romeo_params, grid,
     );
 
     // Step 4: Remove artefact from each echo
@@ -807,6 +810,10 @@ pub fn field_to_hz(field: &[f64]) -> Vec<f64> {
 mod tests {
     use super::*;
 
+    fn grid(nx: usize, ny: usize, nz: usize) -> Grid {
+        Grid::new(nx, ny, nz, 1.0, 1.0, 1.0)
+    }
+
     #[test]
     fn test_wrap_to_pi() {
         assert!((wrap_to_pi(0.0) - 0.0).abs() < 1e-10);
@@ -933,7 +940,7 @@ mod tests {
         let mask = vec![1u8; n];
         let sigma = [1.0, 1.0, 1.0];
 
-        let smoothed = gaussian_smooth_3d_phase(&phase, sigma, &mask, nx, ny, nz);
+        let smoothed = gaussian_smooth_3d_phase(&phase, sigma, &mask, &grid(nx, ny, nz));
 
         assert_eq!(smoothed.len(), n);
         for v in &smoothed {
@@ -950,7 +957,7 @@ mod tests {
         let mask = vec![1u8; n];
         let sigma = [0.0, 0.0, 0.0];
 
-        let smoothed = gaussian_smooth_3d_phase(&phase, sigma, &mask, nx, ny, nz);
+        let smoothed = gaussian_smooth_3d_phase(&phase, sigma, &mask, &grid(nx, ny, nz));
 
         // With zero sigma, output should equal input (no smoothing applied)
         assert_eq!(smoothed.len(), n);
@@ -973,7 +980,7 @@ mod tests {
         }
 
         let sigma = [1.0, 1.0, 1.0];
-        let smoothed = gaussian_smooth_3d_phase(&phase, sigma, &mask, nx, ny, nz);
+        let smoothed = gaussian_smooth_3d_phase(&phase, sigma, &mask, &grid(nx, ny, nz));
 
         assert_eq!(smoothed.len(), n);
         // Masked-out voxels should remain 0
@@ -999,7 +1006,7 @@ mod tests {
         let mask = vec![1u8; n];
         let sigma = [2.0, 0.5, 1.0]; // anisotropic
 
-        let smoothed = gaussian_smooth_3d_phase(&phase, sigma, &mask, nx, ny, nz);
+        let smoothed = gaussian_smooth_3d_phase(&phase, sigma, &mask, &grid(nx, ny, nz));
         assert_eq!(smoothed.len(), n);
         for v in &smoothed {
             assert!(v.is_finite());
@@ -1158,7 +1165,7 @@ mod tests {
             .map(|_| vec![1.0; n])
             .collect();
 
-        let b0 = calculate_b0_weighted(&phases, &mags, &tes, &mask, B0WeightType::PhaseSNR, n);
+        let b0 = calculate_b0_weighted(&phases, &mags, &tes, &mask, B0WeightType::PhaseSNR, &grid(n, 1, 1));
 
         let expected_hz = 1.0 / TWO_PI * slope;
         assert_eq!(b0.len(), n);
@@ -1192,7 +1199,7 @@ mod tests {
             B0WeightType::TEs,
             B0WeightType::Mag,
         ] {
-            let b0 = calculate_b0_weighted(&phases, &mags, &tes, &mask, *wt, n);
+            let b0 = calculate_b0_weighted(&phases, &mags, &tes, &mask, *wt, &grid(n, 1, 1));
             assert_eq!(b0.len(), n);
             for v in &b0 {
                 assert!(v.is_finite(), "weight type {:?} produced non-finite", wt);
@@ -1215,7 +1222,7 @@ mod tests {
             .map(|_| vec![1.0; n])
             .collect();
 
-        let b0 = calculate_b0_weighted(&phases, &mags, &tes, &mask, B0WeightType::PhaseSNR, n);
+        let b0 = calculate_b0_weighted(&phases, &mags, &tes, &mask, B0WeightType::PhaseSNR, &grid(n, 1, 1));
 
         for v in &b0 {
             assert_eq!(*v, 0.0, "masked-out voxels should have B0=0");
@@ -1237,13 +1244,13 @@ mod tests {
             .collect();
 
         // PhaseSNR weight = mag * te = 0
-        let b0 = calculate_b0_weighted(&phases, &mags, &tes, &mask, B0WeightType::PhaseSNR, n);
+        let b0 = calculate_b0_weighted(&phases, &mags, &tes, &mask, B0WeightType::PhaseSNR, &grid(n, 1, 1));
         for v in &b0 {
             assert_eq!(*v, 0.0, "zero-magnitude voxels should yield B0=0");
         }
 
         // Average weight = 1.0, should still work
-        let b0_avg = calculate_b0_weighted(&phases, &mags, &tes, &mask, B0WeightType::Average, n);
+        let b0_avg = calculate_b0_weighted(&phases, &mags, &tes, &mask, B0WeightType::Average, &grid(n, 1, 1));
         let expected = 1.0 / TWO_PI * 0.2;
         for v in &b0_avg {
             assert!((v - expected).abs() < 1e-8);
@@ -1491,7 +1498,7 @@ mod tests {
 
         let sigma = [1.0, 1.0, 1.0];
         let (corrected, offset) = phase_offset_removal(
-            &phases, &mags, &tes, &mask, sigma, [0, 1], UnwrapMethod::Romeo, [1.0, 1.0, 1.0], nx, ny, nz,
+            &phases, &mags, &tes, &mask, sigma, [0, 1], UnwrapMethod::Romeo, &grid(nx, ny, nz),
         );
 
         // Check sizes
@@ -1510,7 +1517,7 @@ mod tests {
 
         let sigma = [1.0, 1.0, 1.0];
         let (corrected, offset) = phase_offset_removal(
-            &phases, &mags, &tes, &mask, sigma, [0, 1], UnwrapMethod::Romeo, [1.0, 1.0, 1.0], nx, ny, nz,
+            &phases, &mags, &tes, &mask, sigma, [0, 1], UnwrapMethod::Romeo, &grid(nx, ny, nz),
         );
 
         for v in &offset {
@@ -1531,7 +1538,7 @@ mod tests {
 
         let sigma = [1.0, 1.0, 1.0];
         let (corrected, _) = phase_offset_removal(
-            &phases, &mags, &tes, &mask, sigma, [0, 1], UnwrapMethod::Romeo, [1.0, 1.0, 1.0], nx, ny, nz,
+            &phases, &mags, &tes, &mask, sigma, [0, 1], UnwrapMethod::Romeo, &grid(nx, ny, nz),
         );
 
         // Corrected phases should be in [-pi, pi] since wrap_to_pi is applied
@@ -1557,7 +1564,7 @@ mod tests {
 
         let sigma = [1.0, 1.0, 1.0];
         let (corrected, _offset) = phase_offset_removal(
-            &phases, &mags, &tes, &mask, sigma, [0, 1], UnwrapMethod::Romeo, [1.0, 1.0, 1.0], nx, ny, nz,
+            &phases, &mags, &tes, &mask, sigma, [0, 1], UnwrapMethod::Romeo, &grid(nx, ny, nz),
         );
 
         // After removing offset, corrected phases should be close to 0
@@ -1585,7 +1592,7 @@ mod tests {
         // Step 1: Phase offset removal
         let (corrected, offset) = phase_offset_removal(
             &phases, &mags, &tes, &mask, sigma, [0, 1],
-            UnwrapMethod::Romeo, [1.0, 1.0, 1.0], nx, ny, nz,
+            UnwrapMethod::Romeo, &grid(nx, ny, nz),
         );
         assert_eq!(corrected.len(), tes.len());
         assert_eq!(offset.len(), n);
@@ -1594,13 +1601,13 @@ mod tests {
         let mag_refs: Vec<&[f64]> = mags.iter().map(|m| m.as_slice()).collect();
         let unwrapped = unwrap_romeo_multi_echo(
             &corrected, &mag_refs, &tes, &mask,
-            &RomeoParams::default(), nx, ny, nz,
+            &RomeoParams::default(), &grid(nx, ny, nz),
         );
         assert_eq!(unwrapped.len(), tes.len());
 
         // Step 3: Weighted B0
         let b0 = calculate_b0_weighted(
-            &unwrapped, &mags, &tes, &mask, B0WeightType::PhaseSNR, n,
+            &unwrapped, &mags, &tes, &mask, B0WeightType::PhaseSNR, &grid(nx, ny, nz),
         );
         assert_eq!(b0.len(), n);
         for v in &b0 {
@@ -1619,12 +1626,12 @@ mod tests {
 
         let (corrected, _) = phase_offset_removal(
             &phases, &mags, &tes, &mask, sigma, [0, 1],
-            UnwrapMethod::Romeo, [1.0, 1.0, 1.0], nx, ny, nz,
+            UnwrapMethod::Romeo, &grid(nx, ny, nz),
         );
         let mag_refs: Vec<&[f64]> = mags.iter().map(|m| m.as_slice()).collect();
         let unwrapped = unwrap_romeo_multi_echo(
             &corrected, &mag_refs, &tes, &mask,
-            &RomeoParams::default(), nx, ny, nz,
+            &RomeoParams::default(), &grid(nx, ny, nz),
         );
 
         for wt in &[
@@ -1634,7 +1641,7 @@ mod tests {
             B0WeightType::Mag,
             B0WeightType::PhaseVar,
         ] {
-            let b0 = calculate_b0_weighted(&unwrapped, &mags, &tes, &mask, *wt, n);
+            let b0 = calculate_b0_weighted(&unwrapped, &mags, &tes, &mask, *wt, &grid(n, 1, 1));
             for v in &b0 {
                 assert!(v.is_finite(), "B0 with {:?} should be finite", wt);
             }
@@ -1682,7 +1689,7 @@ mod tests {
 
         let unwrapped = unwrap_romeo(
             &phase, &mag, None, 0.0, 0.0,
-            &mask, &RomeoParams::default(), nx, ny, nz,
+            &mask, &RomeoParams::default(), &grid(nx, ny, nz),
         );
 
         assert_eq!(unwrapped.len(), n);
@@ -1704,7 +1711,7 @@ mod tests {
 
         let sigma = [1.0, 1.0, 1.0];
         let (corrected, _offset) = phase_offset_removal(
-            &phases, &mags, &tes, &mask, sigma, [0, 1], UnwrapMethod::Romeo, [1.0, 1.0, 1.0], nx, ny, nz,
+            &phases, &mags, &tes, &mask, sigma, [0, 1], UnwrapMethod::Romeo, &grid(nx, ny, nz),
         );
 
         // Run linear fit on corrected phases (tes in seconds for fit)
@@ -1741,7 +1748,7 @@ mod tests {
         let sigma = [1.0, 1.0, 1.0];
         bipolar_correction(
             &mut phases_mut, &mags, &tes, &mask,
-            sigma, nx, ny, nz,
+            sigma, &grid(nx, ny, nz),
         );
 
         // All values should remain finite
@@ -1764,7 +1771,7 @@ mod tests {
         let mut phases_mut = phases;
         bipolar_correction(
             &mut phases_mut, &mags, &tes, &mask,
-            [1.0, 1.0, 1.0], nx, ny, nz,
+            [1.0, 1.0, 1.0], &grid(nx, ny, nz),
         );
 
         // Should be unchanged (2 echoes = noop)
@@ -1787,15 +1794,15 @@ mod tests {
 
         let (mut corrected, _) = phase_offset_removal(
             &phases, &mags, &tes, &mask, sigma, [0, 1],
-            UnwrapMethod::Romeo, [1.0, 1.0, 1.0], nx, ny, nz,
+            UnwrapMethod::Romeo, &grid(nx, ny, nz),
         );
         let mag_refs: Vec<&[f64]> = mags.iter().map(|m| m.as_slice()).collect();
-        bipolar_correction(&mut corrected, &mag_refs, &tes, &mask, sigma, nx, ny, nz);
+        bipolar_correction(&mut corrected, &mag_refs, &tes, &mask, sigma, &grid(nx, ny, nz));
         let unwrapped = unwrap_romeo_multi_echo(
             &corrected, &mag_refs, &tes, &mask,
-            &RomeoParams::default(), nx, ny, nz,
+            &RomeoParams::default(), &grid(nx, ny, nz),
         );
-        let b0 = calculate_b0_weighted(&unwrapped, &mags, &tes, &mask, B0WeightType::PhaseSNR, n);
+        let b0 = calculate_b0_weighted(&unwrapped, &mags, &tes, &mask, B0WeightType::PhaseSNR, &grid(n, 1, 1));
 
         assert_eq!(b0.len(), n);
         for v in &b0 {

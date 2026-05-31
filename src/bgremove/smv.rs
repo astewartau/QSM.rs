@@ -12,6 +12,7 @@
 //!
 //! Reference implementation: https://github.com/kamesy/QSM.jl
 
+use crate::Grid;
 use crate::fft::fft_real_kernel;
 use crate::kernels::smv::{smv_kernel, erode_mask_smv};
 
@@ -22,8 +23,7 @@ use crate::kernels::smv::{smv_kernel, erode_mask_smv};
 /// # Arguments
 /// * `field` - Unwrapped total field (nx * ny * nz)
 /// * `mask` - Binary mask (nx * ny * nz), 1 = inside ROI
-/// * `nx`, `ny`, `nz` - Array dimensions
-/// * `vsx`, `vsy`, `vsz` - Voxel sizes in mm
+/// * `grid` - Volume dimensions and voxel sizes
 /// * `radius` - SMV kernel radius in mm
 ///
 /// # Returns
@@ -31,16 +31,17 @@ use crate::kernels::smv::{smv_kernel, erode_mask_smv};
 pub fn smv(
     field: &[f64],
     mask: &[u8],
-    nx: usize, ny: usize, nz: usize,
-    vsx: f64, vsy: f64, vsz: f64,
+    grid: &Grid,
     radius: f64,
 ) -> (Vec<f64>, Vec<u8>) {
+    let (nx, ny, nz) = grid.dims;
+
     // Generate SMV kernel and FFT it
-    let s_kernel = smv_kernel(nx, ny, nz, vsx, vsy, vsz, radius);
+    let s_kernel = smv_kernel(grid, radius);
     let s_fft = fft_real_kernel(&s_kernel, nx, ny, nz);
 
     // Erode mask via SMV convolution
-    let eroded_mask = erode_mask_smv(mask, &s_fft, nx, ny, nz, 1.0 - 1e-10);
+    let eroded_mask = erode_mask_smv(mask, &s_fft, grid, 1.0 - 1e-10);
 
     // Compute SMV(field) = background field estimate
     let smv_field = crate::fft::apply_real_kernel(field, &s_fft, nx, ny, nz);
@@ -57,18 +58,6 @@ pub fn smv(
     (local_field, eroded_mask)
 }
 
-/// Simple SMV with default parameters
-pub fn smv_default(
-    field: &[f64],
-    mask: &[u8],
-    nx: usize, ny: usize, nz: usize,
-    vsx: f64, vsy: f64, vsz: f64,
-) -> (Vec<f64>, Vec<u8>) {
-    // Default radius: 5mm (typical for brain imaging)
-    let radius = 5.0;
-    smv(field, mask, nx, ny, nz, vsx, vsy, vsz, radius)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -78,8 +67,9 @@ mod tests {
         let n = 16;
         let field = vec![0.0; n * n * n];
         let mask = vec![1u8; n * n * n];
+        let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
 
-        let (local, _) = smv(&field, &mask, n, n, n, 1.0, 1.0, 1.0, 2.0);
+        let (local, _) = smv(&field, &mask, &grid, 2.0);
 
         for &val in local.iter() {
             assert!(val.abs() < 1e-8, "Zero field should give zero local field, got {}", val);
@@ -91,8 +81,9 @@ mod tests {
         let n = 16;
         let field: Vec<f64> = (0..n*n*n).map(|i| (i as f64) * 0.01).collect();
         let mask = vec![1u8; n * n * n];
+        let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
 
-        let (local, eroded) = smv(&field, &mask, n, n, n, 1.0, 1.0, 1.0, 2.0);
+        let (local, eroded) = smv(&field, &mask, &grid, 2.0);
 
         for (i, &val) in local.iter().enumerate() {
             assert!(val.is_finite(), "Local field should be finite at index {}", i);

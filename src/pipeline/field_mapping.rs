@@ -94,7 +94,7 @@ fn field_mapping_with_offset(
     mask: &[u8],
     metadata: &ScanMetadata,
     config: &FieldMappingConfig,
-    n_voxels: usize,
+    _n_voxels: usize,
     nx: usize, ny: usize, nz: usize,
     vsx: f64, vsy: f64, vsz: f64,
     progress: &mut dyn FnMut(usize, usize),
@@ -104,19 +104,19 @@ fn field_mapping_with_offset(
 
     // Step 1: Phase offset removal
     progress(1, 4);
+    let grid = crate::Grid::new(nx, ny, nz, vsx, vsy, vsz);
     let (mut corrected, phase_offset) = crate::utils::phase_offset_removal(
         phases, mag_slices, tes, mask,
         config.phase_offset_sigma, [0, 1],
         crate::unwrap::UnwrapMethod::Romeo,
-        [vsx, vsy, vsz],
-        nx, ny, nz,
+        &grid,
     );
 
     // Step 2: Bipolar correction (optional, >= 3 echoes)
     if config.bipolar_correction && n_echoes >= 3 {
         crate::utils::bipolar_correction(
             &mut corrected, mag_slices, tes, mask,
-            config.phase_offset_sigma, nx, ny, nz,
+            config.phase_offset_sigma, &grid,
         );
     }
 
@@ -125,13 +125,13 @@ fn field_mapping_with_offset(
     let unwrapped: Vec<Vec<f64>> = match config.unwrapping_algorithm {
         UnwrappingAlgorithm::Laplacian => {
             corrected.iter()
-                .map(|p| crate::unwrap::laplacian_unwrap(p, mask, nx, ny, nz, vsx, vsy, vsz))
+                .map(|p| crate::unwrap::laplacian_unwrap(p, mask, &grid))
                 .collect()
         }
         UnwrappingAlgorithm::Romeo => {
             crate::unwrap::unwrap_romeo_multi_echo(
                 &corrected, mag_slices, tes, mask,
-                &config.romeo_params, nx, ny, nz,
+                &config.romeo_params, &grid,
             )
         }
     };
@@ -142,7 +142,7 @@ fn field_mapping_with_offset(
         B0EstimationMethod::WeightedAvg => {
             crate::utils::calculate_b0_weighted(
                 &unwrapped, mag_slices, tes, mask,
-                config.b0_weight_type, n_voxels,
+                config.b0_weight_type, &grid,
             )
         }
         B0EstimationMethod::LinearFit => {
@@ -251,14 +251,15 @@ fn unwrap_single(
     phase2: Option<&[f64]>,
     te1: f64, te2: f64,
 ) -> Vec<f64> {
+    let grid = crate::Grid::new(nx, ny, nz, vsx, vsy, vsz);
     match config.unwrapping_algorithm {
         UnwrappingAlgorithm::Laplacian => {
-            crate::unwrap::laplacian_unwrap(phase, mask, nx, ny, nz, vsx, vsy, vsz)
+            crate::unwrap::laplacian_unwrap(phase, mask, &grid)
         }
         UnwrappingAlgorithm::Romeo => {
             crate::unwrap::unwrap_romeo(
                 phase, mag, phase2, te1, te2,
-                mask, &config.romeo_params, nx, ny, nz,
+                mask, &config.romeo_params, &grid,
             )
         }
     }

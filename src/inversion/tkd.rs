@@ -15,6 +15,8 @@ use num_complex::Complex64;
 use crate::fft::{fft3d, ifft3d};
 use crate::kernels::dipole::dipole_kernel;
 use crate::utils::apply_mask_zero;
+use crate::Grid;
+
 /// TKD algorithm parameters
 #[derive(Clone, Debug)]
 pub struct TkdParams {
@@ -36,8 +38,7 @@ impl Default for TkdParams {
 /// # Arguments
 /// * `local_field` - Local field values (unwrapped phase / TE / gamma / B0)
 /// * `mask` - Binary mask (1 = inside ROI, 0 = outside)
-/// * `nx`, `ny`, `nz` - Array dimensions
-/// * `vsx`, `vsy`, `vsz` - Voxel sizes in mm
+/// * `grid` - Volume grid (dimensions and voxel sizes)
 /// * `bdir` - B0 field direction (bx, by, bz)
 /// * `threshold` - Truncation threshold (typically 0.1-0.2)
 ///
@@ -46,15 +47,15 @@ impl Default for TkdParams {
 pub fn tkd(
     local_field: &[f64],
     mask: &[u8],
-    nx: usize, ny: usize, nz: usize,
-    vsx: f64, vsy: f64, vsz: f64,
+    grid: &Grid,
     bdir: (f64, f64, f64),
     threshold: f64,
 ) -> Vec<f64> {
-    let n_total = nx * ny * nz;
+    let (nx, ny, nz) = grid.dims;
+    let n_total = grid.n_total();
 
     // Generate dipole kernel
-    let d = dipole_kernel(nx, ny, nz, vsx, vsy, vsz, bdir);
+    let d = dipole_kernel(grid, bdir);
 
     // Compute inverse dipole kernel with truncation
     // TKD: if |D| <= threshold, use sign(D)/threshold; else use 1/D
@@ -95,17 +96,6 @@ pub fn tkd(
     chi
 }
 
-/// TKD with default B direction (0, 0, 1) and threshold 0.15
-pub fn tkd_default(
-    local_field: &[f64],
-    mask: &[u8],
-    nx: usize, ny: usize, nz: usize,
-    vsx: f64, vsy: f64, vsz: f64,
-) -> Vec<f64> {
-    let p = TkdParams::default();
-    tkd(local_field, mask, nx, ny, nz, vsx, vsy, vsz, (0.0, 0.0, 1.0), p.threshold)
-}
-
 /// Truncated singular value decomposition (TSVD) variant
 ///
 /// Similar to TKD but zeros out values below threshold instead of truncating.
@@ -113,15 +103,15 @@ pub fn tkd_default(
 pub fn tsvd(
     local_field: &[f64],
     mask: &[u8],
-    nx: usize, ny: usize, nz: usize,
-    vsx: f64, vsy: f64, vsz: f64,
+    grid: &Grid,
     bdir: (f64, f64, f64),
     threshold: f64,
 ) -> Vec<f64> {
-    let n_total = nx * ny * nz;
+    let (nx, ny, nz) = grid.dims;
+    let n_total = grid.n_total();
 
     // Generate dipole kernel
-    let d = dipole_kernel(nx, ny, nz, vsx, vsy, vsz, bdir);
+    let d = dipole_kernel(grid, bdir);
 
     // Compute inverse dipole kernel with TSVD truncation
     // TSVD: if |D| <= threshold, use 0; else use 1/D
@@ -169,8 +159,9 @@ mod tests {
         let n = 8;
         let field = vec![0.0; n * n * n];
         let mask = vec![1u8; n * n * n];
+        let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
 
-        let chi = tkd_default(&field, &mask, n, n, n, 1.0, 1.0, 1.0);
+        let chi = tkd(&field, &mask, &grid, (0.0, 0.0, 1.0), 0.15);
 
         for val in chi.iter() {
             assert!(val.abs() < 1e-10, "Zero field should give zero chi");
@@ -183,12 +174,13 @@ mod tests {
         let n = 8;
         let field = vec![1.0; n * n * n];
         let mut mask = vec![1u8; n * n * n];
+        let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
 
         // Set some voxels outside mask
         mask[0] = 0;
         mask[1] = 0;
 
-        let chi = tkd_default(&field, &mask, n, n, n, 1.0, 1.0, 1.0);
+        let chi = tkd(&field, &mask, &grid, (0.0, 0.0, 1.0), 0.15);
 
         assert_eq!(chi[0], 0.0, "Outside mask should be 0");
         assert_eq!(chi[1], 0.0, "Outside mask should be 0");
@@ -200,8 +192,9 @@ mod tests {
         let n = 8;
         let field: Vec<f64> = (0..n*n*n).map(|i| (i as f64) * 0.01).collect();
         let mask = vec![1u8; n * n * n];
+        let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
 
-        let chi = tkd_default(&field, &mask, n, n, n, 1.0, 1.0, 1.0);
+        let chi = tkd(&field, &mask, &grid, (0.0, 0.0, 1.0), 0.15);
 
         for (i, val) in chi.iter().enumerate() {
             assert!(val.is_finite(), "Chi should be finite at index {}", i);
@@ -214,9 +207,10 @@ mod tests {
         let n = 16;
         let field: Vec<f64> = (0..n*n*n).map(|i| ((i as f64) * 0.1).sin()).collect();
         let mask = vec![1u8; n * n * n];
+        let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
 
-        let chi_tkd = tkd(&field, &mask, n, n, n, 1.0, 1.0, 1.0, (0.0, 0.0, 1.0), 0.15);
-        let chi_tsvd = tsvd(&field, &mask, n, n, n, 1.0, 1.0, 1.0, (0.0, 0.0, 1.0), 0.15);
+        let chi_tkd = tkd(&field, &mask, &grid, (0.0, 0.0, 1.0), 0.15);
+        let chi_tsvd = tsvd(&field, &mask, &grid, (0.0, 0.0, 1.0), 0.15);
 
         // They should be different
         let diff: f64 = chi_tkd.iter().zip(chi_tsvd.iter())

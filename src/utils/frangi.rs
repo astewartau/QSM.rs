@@ -54,17 +54,20 @@ pub struct FrangiResult {
 ///
 /// # Arguments
 /// * `data` - Input 3D volume (nx * ny * nz)
-/// * `nx`, `ny`, `nz` - Volume dimensions
+/// * `grid` - Volume grid (dimensions and voxel sizes)
 /// * `params` - Frangi filter parameters
+/// * `progress` - Progress callback `(current_scale, total_scales)`
 ///
 /// # Returns
 /// FrangiResult with vesselness map and optimal scale map
 pub fn frangi_filter_3d(
     data: &[f64],
-    nx: usize, ny: usize, nz: usize,
+    grid: &crate::Grid,
     params: &FrangiParams,
+    progress: impl FnMut(usize, usize),
 ) -> FrangiResult {
-    frangi_filter_3d_with_progress(data, nx, ny, nz, params, |_, _| {})
+    let (nx, ny, nz) = grid.dims;
+    frangi_filter_3d_inner(data, nx, ny, nz, params, progress)
 }
 
 /// Compute vesselness measure from sorted eigenvalues
@@ -388,22 +391,13 @@ fn eigenvalues_3x3_cardano(a: f64, b: f64, c: f64, d: f64, e: f64, f: f64) -> (f
 // NOTE: eigenvalues_3x3_symmetric (Householder+QL) was removed — it hangs on
 // near-degenerate matrices in real brain data. Use eigenvalues_3x3_cardano instead.
 
-/// Simple wrapper for Frangi filter with default parameters
-pub fn frangi_filter_3d_default(
-    data: &[f64],
-    nx: usize, ny: usize, nz: usize,
-) -> Vec<f64> {
-    let params = FrangiParams::default();
-    frangi_filter_3d(data, nx, ny, nz, &params).vesselness
-}
-
-/// Frangi filter with progress callback
+/// Inner implementation of Frangi filter (takes raw dimensions)
 ///
 /// Uses a fused approach: Hessian components are computed inline from the smoothed
 /// array using composed central-difference stencils, then eigenvalues and vesselness
 /// are computed immediately. This avoids allocating 9 intermediate gradient arrays
 /// (~927 MB per scale for typical brain volumes) and improves cache utilization.
-pub fn frangi_filter_3d_with_progress<F>(
+fn frangi_filter_3d_inner<F>(
     data: &[f64],
     nx: usize, ny: usize, nz: usize,
     params: &FrangiParams,
@@ -527,6 +521,11 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Grid;
+
+    fn grid(nx: usize, ny: usize, nz: usize) -> Grid {
+        Grid::new(nx, ny, nz, 1.0, 1.0, 1.0)
+    }
 
     #[test]
     fn test_eigenvalues_diagonal() {
@@ -571,7 +570,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = frangi_filter_3d(&data, 10, 10, 10, &params);
+        let result = frangi_filter_3d(&data, &grid(10, 10, 10), &params, |_, _| {});
         assert_eq!(result.vesselness.len(), 1000);
     }
 
@@ -605,7 +604,7 @@ mod tests {
             black_white: false, // bright vessels
         };
 
-        let result = frangi_filter_3d(&data, n, n, n, &params);
+        let result = frangi_filter_3d(&data, &grid(n, n, n), &params, |_, _| {});
 
         assert_eq!(result.vesselness.len(), n * n * n);
         assert_eq!(result.scale.len(), n * n * n);
@@ -663,9 +662,9 @@ mod tests {
             black_white: false,
         };
 
-        let result_default = frangi_filter_3d(&data, n, n, n, &params_default);
-        let result_small_c = frangi_filter_3d(&data, n, n, n, &params_small_c);
-        let result_large_beta = frangi_filter_3d(&data, n, n, n, &params_large_beta);
+        let result_default = frangi_filter_3d(&data, &grid(n, n, n), &params_default, |_, _| {});
+        let result_small_c = frangi_filter_3d(&data, &grid(n, n, n), &params_small_c, |_, _| {});
+        let result_large_beta = frangi_filter_3d(&data, &grid(n, n, n), &params_large_beta, |_, _| {});
 
         // All should be finite
         for &v in &result_default.vesselness {
@@ -706,8 +705,8 @@ mod tests {
             ..Default::default()
         };
 
-        let result_bright = frangi_filter_3d(&data, n, n, n, &params_bright);
-        let result_dark = frangi_filter_3d(&data, n, n, n, &params_dark);
+        let result_bright = frangi_filter_3d(&data, &grid(n, n, n), &params_bright, |_, _| {});
+        let result_dark = frangi_filter_3d(&data, &grid(n, n, n), &params_dark, |_, _| {});
 
         // Both should produce valid output
         for &v in &result_bright.vesselness {
@@ -761,7 +760,7 @@ mod tests {
             black_white: false,
         };
 
-        let result = frangi_filter_3d(&data, n, n, n, &params);
+        let result = frangi_filter_3d(&data, &grid(n, n, n), &params, |_, _| {});
 
         // All should be valid
         for &v in &result.vesselness {
@@ -779,14 +778,14 @@ mod tests {
     }
 
     #[test]
-    fn test_frangi_filter_3d_default() {
-        // Test the default wrapper
+    fn test_frangi_filter_3d_default_params() {
+        // Test with default params
         let n = 8;
         let data = vec![0.0; n * n * n];
 
-        let vesselness = frangi_filter_3d_default(&data, n, n, n);
-        assert_eq!(vesselness.len(), n * n * n);
-        for &v in &vesselness {
+        let result = frangi_filter_3d(&data, &grid(n, n, n), &FrangiParams::default(), |_, _| {});
+        assert_eq!(result.vesselness.len(), n * n * n);
+        for &v in &result.vesselness {
             assert!(v.is_finite());
         }
     }
@@ -802,7 +801,7 @@ mod tests {
         };
 
         let mut progress_calls = Vec::new();
-        let result = frangi_filter_3d_with_progress(&data, n, n, n, &params, |current, total| {
+        let result = frangi_filter_3d(&data, &grid(n, n, n), &params, |current, total| {
             progress_calls.push((current, total));
         });
 
@@ -964,7 +963,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = frangi_filter_3d(&data, n, n, n, &params);
+        let result = frangi_filter_3d(&data, &grid(n, n, n), &params, |_, _| {});
         assert_eq!(result.vesselness.len(), n * n * n);
     }
 

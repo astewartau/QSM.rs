@@ -24,17 +24,15 @@ pub mod lbv;
 pub mod sdf;
 pub mod iharperella;
 
-pub use smv::{smv, smv_default};
-pub use sharp::{sharp, sharp_default, SharpParams};
-pub use resharp::{resharp, resharp_default, resharp_with_progress, ResharpParams};
-pub use vsharp::{vsharp, vsharp_default, vsharp_with_progress, VsharpParams};
-pub use pdf::{pdf, pdf_default, pdf_with_progress, PdfParams};
-pub use ismv::{ismv, ismv_default, ismv_with_progress, IsmvParams};
-pub use lbv::{lbv, lbv_default, lbv_with_progress, LbvParams};
+pub use smv::smv;
+pub use sharp::{sharp, SharpParams};
+pub use resharp::{resharp, ResharpParams};
+pub use vsharp::{vsharp, VsharpParams};
+pub use pdf::{pdf, PdfParams};
+pub use ismv::{ismv, IsmvParams};
+pub use lbv::{lbv, LbvParams};
 pub use sdf::{sdf, sdf_curvature, sdf_simple, SdfParams};
 pub use iharperella::{
-    harperella, harperella_default, harperella_with_progress,
-    iharperella, iharperella_default, iharperella_with_progress,
-    iharperella_with_weights,
+    harperella, iharperella, iharperella_with_weights,
     HarperellaParams, IharperellaParams,
 };

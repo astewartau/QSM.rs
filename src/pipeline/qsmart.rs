@@ -29,9 +29,9 @@ pub fn run_qsmart(
     progress: &mut dyn FnMut(usize, usize),
 ) -> Result<Vec<f64>, PipelineError> {
     let (nx, ny, nz) = metadata.dims;
-    let (vsx, vsy, vsz) = metadata.voxel_size;
     let bdir = metadata.b0_direction;
     let n_voxels = nx * ny * nz;
+    let grid = metadata.grid();
 
     // Step 1: Vasculature detection
     progress(1, 6);
@@ -44,7 +44,7 @@ pub fn run_qsmart(
         frangi_c: qsmart_params.frangi_c,
     };
     let vasc_mask = crate::utils::generate_vasculature_mask(
-        mag, mask, nx, ny, nz, &vasc_params,
+        mag, mask, &grid, &vasc_params, |_, _| {},
     );
 
     let mask_f64: Vec<f64> = mask.iter().map(|&m| m as f64).collect();
@@ -62,14 +62,17 @@ pub fn run_qsmart(
         use_curvature: true,
     };
     let lfs1 = crate::bgremove::sdf::sdf(
-        field_ppm, &w1, &vasc_mask, nx, ny, nz, &sdf_params1,
+        field_ppm, &w1, &vasc_mask, &grid, &sdf_params1, |_, _| {},
     );
 
     // Step 3: iLSQR stage 1
     progress(3, 6);
+    let ilsqr_params = crate::inversion::IlsqrParams {
+        tol: qsmart_params.ilsqr_tol,
+        max_iter: qsmart_params.ilsqr_max_iter,
+    };
     let (_, _, _, chi1) = crate::inversion::ilsqr(
-        &lfs1, mask, nx, ny, nz, vsx, vsy, vsz, bdir,
-        qsmart_params.ilsqr_tol, qsmart_params.ilsqr_max_iter,
+        &lfs1, mask, &grid, bdir, &ilsqr_params, |_, _| {},
     );
 
     // Step 4: SDF stage 2
@@ -83,21 +86,20 @@ pub fn run_qsmart(
         use_curvature: true,
     };
     let lfs2 = crate::bgremove::sdf::sdf(
-        field_ppm, &w2, &vasc_mask, nx, ny, nz, &sdf_params2,
+        field_ppm, &w2, &vasc_mask, &grid, &sdf_params2, |_, _| {},
     );
 
     // Step 5: iLSQR stage 2
     progress(5, 6);
     let (_, _, _, chi2) = crate::inversion::ilsqr(
-        &lfs2, mask, nx, ny, nz, vsx, vsy, vsz, bdir,
-        qsmart_params.ilsqr_tol, qsmart_params.ilsqr_max_iter,
+        &lfs2, mask, &grid, bdir, &ilsqr_params, |_, _| {},
     );
 
     // Step 6: Combine and reference
     progress(6, 6);
     let chi = crate::utils::adjust_offset(
         &vasc_mask, &lfs1, &chi1, &chi2,
-        nx, ny, nz, vsx, vsy, vsz, bdir, qsmart_params.ppm,
+        &grid, bdir, qsmart_params.ppm,
     );
 
     Ok(super::referencing::apply_reference(&chi, mask, reference))

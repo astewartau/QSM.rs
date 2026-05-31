@@ -6,6 +6,8 @@
 use num_complex::Complex64;
 use crate::fft::Fft3dWorkspace;
 use crate::Grid;
+use crate::kernels::dipole::dipole_kernel;
+use crate::kernels::laplacian::laplacian_kernel;
 use crate::utils::gradient::{bdiv_inplace, fgrad_inplace};
 use crate::utils::relative_change;
 
@@ -85,8 +87,6 @@ where
     S: Fn(f64, f64, f64, usize) -> (f64, f64, f64),
 {
     let n_total = grid.n_total();
-    let (nx, ny, nz) = grid.dims;
-    let (vsx, vsy, vsz) = grid.voxel_size;
 
     // Swap x and x_prev (no allocation, just pointer swap)
     std::mem::swap(&mut buf.x, &mut buf.x_prev);
@@ -94,7 +94,7 @@ where
     // === x-subproblem: solve in frequency domain ===
 
     // Compute div(z - u) — gx/gy/gz hold (z-u) from previous step
-    bdiv_inplace(&mut buf.div_buf, &buf.gx, &buf.gy, &buf.gz, nx, ny, nz, vsx, vsy, vsz);
+    bdiv_inplace(&mut buf.div_buf, &buf.gx, &buf.gy, &buf.gz, grid);
 
     // FFT of divergence
     for i in 0..n_total {
@@ -121,7 +121,7 @@ where
     // === Fused z-subproblem + u-update ===
 
     // Compute gradient of x
-    fgrad_inplace(&mut buf.gx, &mut buf.gy, &mut buf.gz, &buf.x, nx, ny, nz, vsx, vsy, vsz);
+    fgrad_inplace(&mut buf.gx, &mut buf.gy, &mut buf.gz, &buf.x, grid);
 
     // Apply proximal operator and update duals
     for i in 0..n_total {
@@ -142,4 +142,37 @@ where
     }
 
     false
+}
+
+/// Pre-compute ADMM spectral operators (dipole kernel, inverse operator, and RHS).
+///
+/// Shared by TV-ADMM and NLTV. Returns (fft_workspace, inv_a, f_hat).
+pub fn prepare_admm_spectral(
+    local_field: &[f64],
+    grid: &Grid,
+    bdir: (f64, f64, f64),
+    rho: f64,
+) -> (Fft3dWorkspace, Vec<f64>, Vec<Complex64>) {
+    let n_total = grid.n_total();
+    let mut fft_ws = Fft3dWorkspace::new(grid.nx(), grid.ny(), grid.nz());
+    let d_kernel = dipole_kernel(grid, bdir);
+    let l_kernel = laplacian_kernel(grid, true);
+    let mut l_complex: Vec<Complex64> = l_kernel.iter()
+        .map(|&x| Complex64::new(x, 0.0))
+        .collect();
+    fft_ws.fft3d(&mut l_complex);
+    let mut inv_a: Vec<f64> = vec![0.0; n_total];
+    for i in 0..n_total {
+        let a = d_kernel[i] * d_kernel[i] + rho * l_complex[i].re;
+        inv_a[i] = if a.abs() > 1e-20 { 1.0 / a } else { 0.0 };
+    }
+    let f_hat = &mut l_complex;
+    for i in 0..n_total {
+        f_hat[i] = Complex64::new(local_field[i], 0.0);
+    }
+    fft_ws.fft3d(f_hat);
+    for i in 0..n_total {
+        f_hat[i] = f_hat[i] * d_kernel[i] * inv_a[i];
+    }
+    (fft_ws, inv_a, l_complex)
 }

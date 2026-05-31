@@ -26,8 +26,7 @@ use num_complex::Complex64;
 /// * `lfs_sdf` - Local field shift from stage 1 SDF (in ppm, will be scaled back)
 /// * `chi_1` - Susceptibility from stage 1 (whole ROI)
 /// * `chi_2` - Susceptibility from stage 2 (tissue only)
-/// * `nx`, `ny`, `nz` - Volume dimensions
-/// * `vsx`, `vsy`, `vsz` - Voxel sizes in mm
+/// * `grid` - Volume grid (dimensions and voxel sizes)
 /// * `b0_dir` - B0 field direction (unit vector)
 /// * `ppm` - PPM conversion factor (to scale lfs_sdf back)
 ///
@@ -38,11 +37,11 @@ pub fn adjust_offset(
     lfs_sdf: &[f64],
     chi_1: &[f64],
     chi_2: &[f64],
-    nx: usize, ny: usize, nz: usize,
-    vsx: f64, vsy: f64, vsz: f64,
+    grid: &crate::Grid,
     b0_dir: (f64, f64, f64),
     ppm: f64,
 ) -> Vec<f64> {
+    let (nx, ny, nz) = grid.dims;
     // Scale lfs_sdf back (it was multiplied by ppm in the QSMART pipeline)
     let lfs_scaled: Vec<f64> = lfs_sdf.iter().map(|&v| v / ppm).collect();
 
@@ -64,7 +63,7 @@ pub fn adjust_offset(
         .collect();
 
     // Get dipole kernel
-    let d_kernel = dipole_kernel(nx, ny, nz, vsx, vsy, vsz, b0_dir);
+    let d_kernel = dipole_kernel(grid, b0_dir);
 
     // Compute offset using Fourier-space relationship
     // x1 = ifft(D * fft(removed_voxels))
@@ -245,12 +244,14 @@ pub fn compute_weighted_mask_stage2(mask: &[f64], r_0: &[f64], vasc_only: &[f64]
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Grid;
 
     #[test]
     fn test_offset_adjustment_basic() {
         // Basic test: should run without panic
         let n = 8;
         let n_total = n * n * n;
+        let g = Grid::new(n, n, n, 1.0, 1.0, 1.0);
 
         let removed = vec![1.0f64; n_total];
         let lfs = vec![0.0f64; n_total];
@@ -259,8 +260,7 @@ mod tests {
 
         let result = adjust_offset(
             &removed, &lfs, &chi_1, &chi_2,
-            n, n, n, 1.0, 1.0, 1.0,
-            (0.0, 0.0, 1.0), 1.0
+            &g, (0.0, 0.0, 1.0), 1.0
         );
 
         assert_eq!(result.len(), n_total);

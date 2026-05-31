@@ -33,10 +33,9 @@ pub fn run_dipole_inversion(
     magnitude: Option<&[f64]>,
     progress: &mut dyn FnMut(usize, usize),
 ) -> Result<Vec<f64>, PipelineError> {
-    let (nx, ny, nz) = metadata.dims;
-    let (vsx, vsy, vsz) = metadata.voxel_size;
-    let (bx, by, bz) = metadata.b0_direction;
-    let n_voxels = nx * ny * nz;
+    let grid = metadata.grid();
+    let bdir = metadata.b0_direction;
+    let n_voxels = grid.n_total();
 
     if local_field_ppm.len() != n_voxels {
         return Err(PipelineError::DimensionMismatch {
@@ -48,48 +47,32 @@ pub fn run_dipole_inversion(
     let chi = match config.algorithm {
         InversionAlgorithm::Tkd => {
             crate::inversion::tkd(
-                local_field_ppm, mask, nx, ny, nz, vsx, vsy, vsz,
-                (bx, by, bz), config.tkd.threshold,
+                local_field_ppm, mask, &grid, bdir, config.tkd.threshold,
             )
         }
         InversionAlgorithm::Tsvd => {
             crate::inversion::tsvd(
-                local_field_ppm, mask, nx, ny, nz, vsx, vsy, vsz,
-                (bx, by, bz), config.tsvd.threshold,
+                local_field_ppm, mask, &grid, bdir, config.tsvd.threshold,
             )
         }
         InversionAlgorithm::Tikhonov => {
             crate::inversion::tikhonov(
-                local_field_ppm, mask, nx, ny, nz, vsx, vsy, vsz,
-                (bx, by, bz), config.tikhonov.lambda,
-                config.tikhonov.reg,
+                local_field_ppm, mask, &grid, bdir, &config.tikhonov,
             )
         }
         InversionAlgorithm::Tv => {
-            crate::inversion::tv_admm_with_progress(
-                local_field_ppm, mask, nx, ny, nz, vsx, vsy, vsz,
-                (bx, by, bz),
-                config.tv.lambda, config.tv.rho,
-                config.tv.tol, config.tv.max_iter,
-                progress,
+            crate::inversion::tv_admm(
+                local_field_ppm, mask, &grid, bdir, &config.tv, progress,
             )
         }
         InversionAlgorithm::Rts => {
-            crate::inversion::rts_with_progress(
-                local_field_ppm, mask, nx, ny, nz, vsx, vsy, vsz,
-                (bx, by, bz),
-                config.rts.delta, config.rts.mu, config.rts.rho,
-                config.rts.tol, config.rts.max_iter, config.rts.lsmr_iter,
-                progress,
+            crate::inversion::rts(
+                local_field_ppm, mask, &grid, bdir, &config.rts, progress,
             )
         }
         InversionAlgorithm::Nltv => {
-            crate::inversion::nltv_with_progress(
-                local_field_ppm, mask, nx, ny, nz, vsx, vsy, vsz,
-                (bx, by, bz),
-                config.nltv.lambda, config.nltv.mu,
-                config.nltv.tol, config.nltv.max_iter, config.nltv.newton_iter,
-                progress,
+            crate::inversion::nltv(
+                local_field_ppm, mask, &grid, bdir, &config.nltv, progress,
             )
         }
         InversionAlgorithm::Medi => {
@@ -102,32 +85,21 @@ pub fn run_dipole_inversion(
                 .map(|&v| v * ppm_to_rad)
                 .collect();
 
-            // Use provided magnitude or uniform
             let uniform_mag = vec![1.0f64; n_voxels];
             let mag = magnitude.unwrap_or(&uniform_mag);
             let n_std = vec![1.0f64; n_voxels];
 
-            let chi_rad = crate::inversion::medi_l1_with_progress(
+            let chi_rad = crate::inversion::medi_l1(
                 &local_field_rad, &n_std, mag, mask,
-                nx, ny, nz, vsx, vsy, vsz,
-                config.medi.lambda, (bx, by, bz),
-                config.medi.merit, config.medi.smv, config.medi.smv_radius,
-                config.medi.data_weighting, config.medi.percentage,
-                config.medi.cg_tol, config.medi.cg_max_iter,
-                config.medi.max_iter, config.medi.tol,
-                progress,
+                &grid, bdir, &config.medi, progress,
             );
 
-            // Convert back from radians to ppm
             let rad_to_ppm = 1.0 / ppm_to_rad;
             chi_rad.iter().map(|&v| v * rad_to_ppm).collect()
         }
         InversionAlgorithm::Ilsqr => {
-            crate::inversion::ilsqr_with_progress(
-                local_field_ppm, mask, nx, ny, nz, vsx, vsy, vsz,
-                (bx, by, bz),
-                config.ilsqr.tol, config.ilsqr.max_iter,
-                progress,
+            crate::inversion::ilsqr_simple(
+                local_field_ppm, mask, &grid, bdir, &config.ilsqr,
             )
         }
         InversionAlgorithm::Tgv | InversionAlgorithm::Qsmart => {
@@ -158,8 +130,7 @@ pub fn run_tgv(
     reference: QsmReference,
     progress: &mut dyn FnMut(usize, usize),
 ) -> Result<Vec<f64>, PipelineError> {
-    let (nx, ny, nz) = metadata.dims;
-    let (vsx, vsy, vsz) = metadata.voxel_size;
+    let grid = metadata.grid();
     let (bx, by, bz) = metadata.b0_direction;
 
     // For multi-echo: compute B0 field map first, then convert to phase
@@ -169,7 +140,6 @@ pub fn run_tgv(
             phases, magnitudes, mask, metadata,
             field_mapping_config, &mut |_, _| {},
         )?;
-        // Convert B0 ppm → phase at TE1
         let gamma_hz = 42.576e6;
         let te1 = metadata.echo_times[0];
         let ppm_to_rad = 2.0 * PI * gamma_hz * metadata.field_strength * te1 * 1e-6;
@@ -178,14 +148,10 @@ pub fn run_tgv(
         phases[0].to_vec()
     };
 
-    // Cast to f32 for TGV (operates in single precision)
     let phase_f32: Vec<f32> = phase_data.iter().map(|&v| v as f32).collect();
 
-    let _progress = progress; // TODO: wire once TGV accepts FnMut
-    let chi_f32 = crate::inversion::tgv_qsm_with_progress(
-        &phase_f32, mask,
-        nx, ny, nz, vsx as f32, vsy as f32, vsz as f32,
-        tgv_params,
+    let chi_f32 = crate::inversion::tgv_qsm(
+        &phase_f32, mask, &grid, tgv_params,
         (bx as f32, by as f32, bz as f32),
         |_, _| {},
     );

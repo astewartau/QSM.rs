@@ -10,6 +10,7 @@
 //! 3. Threshold: vesselness above 0.2% of maximum = vessel (noise floor filtering)
 //! 4. Return complementary mask (1 = tissue, 0 = vessel)
 
+use crate::Grid;
 use crate::utils::frangi::{FrangiParams, frangi_filter_3d};
 
 /// Parameters for vasculature mask generation
@@ -42,31 +43,20 @@ impl Default for VasculatureParams {
 /// # Arguments
 /// * `magnitude` - Average magnitude image (ideally bias-corrected)
 /// * `mask` - Binary brain mask
-/// * `nx`, `ny`, `nz` - Volume dimensions
+/// * `grid` - Volume grid (dimensions and voxel sizes)
 /// * `params` - Vasculature detection parameters
+/// * `progress` - Progress callback `(current_step, total_steps)`
 ///
 /// # Returns
 /// Complementary vasculature mask (1 = tissue, 0 = vessel)
 pub fn generate_vasculature_mask(
     magnitude: &[f64],
     mask: &[u8],
-    nx: usize, ny: usize, nz: usize,
+    grid: &Grid,
     params: &VasculatureParams,
+    progress_callback: impl Fn(usize, usize),
 ) -> Vec<f64> {
-    generate_vasculature_mask_with_progress(magnitude, mask, nx, ny, nz, params, |_, _| {})
-}
-
-/// Generate vasculature mask with progress callback
-pub fn generate_vasculature_mask_with_progress<F>(
-    magnitude: &[f64],
-    mask: &[u8],
-    nx: usize, ny: usize, nz: usize,
-    params: &VasculatureParams,
-    progress_callback: F,
-) -> Vec<f64>
-where
-    F: Fn(usize, usize),
-{
+    let (nx, ny, nz) = grid.dims;
     // Step 1: Apply morphological bottom-hat filter to enhance dark structures
     // Bottom-hat = closing(image) - image
     progress_callback(0, 4);
@@ -93,7 +83,7 @@ where
         black_white: false, // Detect bright structures (after bottom-hat)
     };
 
-    let frangi_result = frangi_filter_3d(&masked_bottom_hat, nx, ny, nz, &frangi_params);
+    let frangi_result = frangi_filter_3d(&masked_bottom_hat, grid, &frangi_params, |_, _| {});
     let enhanced = frangi_result.vesselness;
 
     // Step 4: Threshold vesselness
@@ -358,18 +348,13 @@ fn erode_grayscale_optimized(
 }
 
 
-/// Simple wrapper with default parameters
-pub fn generate_vasculature_mask_default(
-    magnitude: &[f64],
-    mask: &[u8],
-    nx: usize, ny: usize, nz: usize,
-) -> Vec<f64> {
-    generate_vasculature_mask(magnitude, mask, nx, ny, nz, &VasculatureParams::default())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn grid(nx: usize, ny: usize, nz: usize) -> Grid {
+        Grid::new(nx, ny, nz, 1.0, 1.0, 1.0)
+    }
 
     #[test]
     fn test_bottom_hat_basic() {
@@ -395,7 +380,7 @@ mod tests {
             frangi_c: 100.0,
         };
 
-        let result = generate_vasculature_mask(&magnitude, &mask, 10, 10, 10, &params);
+        let result = generate_vasculature_mask(&magnitude, &mask, &grid(10, 10, 10), &params, |_, _| {});
         assert_eq!(result.len(), 1000);
     }
 }

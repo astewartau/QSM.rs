@@ -25,16 +25,17 @@ pub fn next_fast_fft_size(size: usize) -> usize {
 ///
 /// # Arguments
 /// * `data` - Input array (nx * ny * nz)
-/// * `nx`, `ny`, `nz` - Original dimensions
+/// * `grid` - Volume grid (dimensions and voxel sizes)
 /// * `min_pad` - Minimum padding on each side (negative means no padding)
 ///
 /// # Returns
 /// (padded_data, new_nx, new_ny, new_nz)
 pub fn pad_to_fast_fft(
     data: &[f64],
-    nx: usize, ny: usize, nz: usize,
+    grid: &crate::Grid,
     min_pad: (i32, i32, i32),
 ) -> (Vec<f64>, usize, usize, usize) {
+    let (nx, ny, nz) = grid.dims;
     // Calculate new sizes
     let new_nx = if min_pad.0 >= 0 {
         next_fast_fft_size(nx + 2 * min_pad.0 as usize)
@@ -74,8 +75,9 @@ pub fn pad_to_fast_fft(
 pub fn unpad(
     padded: &[f64],
     padded_nx: usize, padded_ny: usize, _padded_nz: usize,
-    orig_nx: usize, orig_ny: usize, orig_nz: usize,
+    orig_grid: &crate::Grid,
 ) -> Vec<f64> {
+    let (orig_nx, orig_ny, orig_nz) = orig_grid.dims;
     let orig_total = orig_nx * orig_ny * orig_nz;
     let mut data = vec![0.0; orig_total];
 
@@ -96,6 +98,11 @@ pub fn unpad(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Grid;
+
+    fn grid(nx: usize, ny: usize, nz: usize) -> Grid {
+        Grid::new(nx, ny, nz, 1.0, 1.0, 1.0)
+    }
 
     #[test]
     fn test_fast_fft_sizes() {
@@ -118,16 +125,17 @@ mod tests {
         let nx = 5;
         let ny = 6;
         let nz = 7;
+        let g = grid(nx, ny, nz);
         let data: Vec<f64> = (0..nx*ny*nz).map(|i| i as f64).collect();
 
-        let (padded, pnx, pny, pnz) = pad_to_fast_fft(&data, nx, ny, nz, (2, 2, 2));
+        let (padded, pnx, pny, pnz) = pad_to_fast_fft(&data, &g, (2, 2, 2));
 
         // Padded size should be >= original + 2*padding
         assert!(pnx >= nx + 4);
         assert!(pny >= ny + 4);
         assert!(pnz >= nz + 4);
 
-        let recovered = unpad(&padded, pnx, pny, pnz, nx, ny, nz);
+        let recovered = unpad(&padded, pnx, pny, pnz, &g);
 
         // Should match original
         for (orig, rec) in data.iter().zip(recovered.iter()) {

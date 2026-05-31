@@ -1,7 +1,7 @@
 //! Total Variation (TV) regularized dipole inversion using ADMM
 //!
 //! Solves the L1-regularized inverse problem:
-//! min_x ||Dx - f||₂² + λ||∇x||₁
+//! min_x ||Dx - f||_2^2 + lambda||grad(x)||_1
 //!
 //! using Alternating Direction Method of Multipliers (ADMM).
 //!
@@ -13,13 +13,9 @@
 //!
 //! Reference implementation: https://github.com/kamesy/QSM.jl
 
-use num_complex::Complex64;
-use crate::fft::Fft3dWorkspace;
-use crate::kernels::dipole::dipole_kernel;
-use crate::kernels::laplacian::laplacian_kernel;
 use crate::utils::{shrink, apply_mask_zero};
 use crate::Grid;
-use super::admm::{AdmmBuffers, admm_step};
+use super::admm::{AdmmBuffers, admm_step, prepare_admm_spectral};
 
 /// TV-ADMM algorithm parameters
 #[derive(Clone, Debug)]
@@ -45,40 +41,7 @@ impl Default for TvParams {
     }
 }
 
-/// TV-ADMM dipole inversion (optimized)
-///
-/// # Arguments
-/// * `local_field` - Local field values (nx * ny * nz)
-/// * `mask` - Binary mask (nx * ny * nz), 1 = inside ROI
-/// * `nx`, `ny`, `nz` - Array dimensions
-/// * `vsx`, `vsy`, `vsz` - Voxel sizes in mm
-/// * `bdir` - B0 field direction
-/// * `lambda` - Regularization parameter (typically 1e-3 to 1e-4)
-/// * `rho` - ADMM penalty parameter (typically 100*lambda)
-/// * `tol` - Convergence tolerance
-/// * `max_iter` - Maximum iterations
-///
-/// # Returns
-/// Susceptibility map
-pub fn tv_admm(
-    local_field: &[f64],
-    mask: &[u8],
-    nx: usize, ny: usize, nz: usize,
-    vsx: f64, vsy: f64, vsz: f64,
-    bdir: (f64, f64, f64),
-    lambda: f64,
-    rho: f64,
-    tol: f64,
-    max_iter: usize,
-) -> Vec<f64> {
-    tv_admm_with_progress(
-        local_field, mask, nx, ny, nz, vsx, vsy, vsz,
-        bdir, lambda, rho, tol, max_iter,
-        |_, _| {} // no-op progress callback
-    )
-}
-
-/// TV-ADMM with progress callback (optimized)
+/// TV-ADMM dipole inversion
 ///
 /// Optimized implementation with:
 /// - Pre-allocated buffers (zero allocations per iteration)
@@ -86,80 +49,43 @@ pub fn tv_admm(
 /// - Buffer swapping instead of cloning
 /// - Fused z-subproblem and u-update
 ///
-/// Same as `tv_admm` but calls `progress_callback(iteration, max_iter)` each iteration.
-pub fn tv_admm_with_progress<F>(
+/// # Arguments
+/// * `local_field` - Local field values (nx * ny * nz)
+/// * `mask` - Binary mask (nx * ny * nz), 1 = inside ROI
+/// * `grid` - Volume grid (dimensions and voxel sizes)
+/// * `bdir` - B0 field direction
+/// * `params` - TV-ADMM parameters
+/// * `progress` - Progress callback `(iteration, max_iter)`
+///
+/// # Returns
+/// Susceptibility map
+pub fn tv_admm(
     local_field: &[f64],
     mask: &[u8],
-    nx: usize, ny: usize, nz: usize,
-    vsx: f64, vsy: f64, vsz: f64,
+    grid: &Grid,
     bdir: (f64, f64, f64),
-    lambda: f64,
-    rho: f64,
-    tol: f64,
-    max_iter: usize,
-    mut progress_callback: F,
-) -> Vec<f64>
-where
-    F: FnMut(usize, usize),
-{
-    let n_total = nx * ny * nz;
+    params: &TvParams,
+    mut progress: impl FnMut(usize, usize),
+) -> Vec<f64> {
+    let n_total = grid.n_total();
 
-    // ========================================================================
-    // Pre-compute kernels (done once)
-    // ========================================================================
+    // Pre-compute spectral operators
+    let (mut fft_ws, inv_a, f_hat) = prepare_admm_spectral(local_field, grid, bdir, params.rho);
 
-    // Create FFT workspace (caches plans and scratch buffers for reuse)
-    let mut fft_ws = Fft3dWorkspace::new(nx, ny, nz);
-
-    // Generate dipole kernel D
-    let d_kernel = dipole_kernel(nx, ny, nz, vsx, vsy, vsz, bdir);
-
-    // Generate negative Laplacian kernel (for -Δ = ∇ᵀ∇)
-    let l_kernel = laplacian_kernel(nx, ny, nz, vsx, vsy, vsz, true);
-
-    // FFT of Laplacian kernel
-    let mut l_complex: Vec<Complex64> = l_kernel.iter()
-        .map(|&x| Complex64::new(x, 0.0))
-        .collect();
-    fft_ws.fft3d(&mut l_complex);
-
-    // Pre-compute inverse of (D^H D + ρ L) for x-subproblem
-    let mut inv_a: Vec<f64> = vec![0.0; n_total];
-    for i in 0..n_total {
-        let a = d_kernel[i] * d_kernel[i] + rho * l_complex[i].re;
-        inv_a[i] = if a.abs() > 1e-20 { 1.0 / a } else { 0.0 };
-    }
-
-    // Pre-compute D^H * f for constant part of RHS (reuse l_complex as work buffer)
-    let f_hat = &mut l_complex; // Reuse buffer
-    for i in 0..n_total {
-        f_hat[i] = Complex64::new(local_field[i], 0.0);
-    }
-    fft_ws.fft3d(f_hat);
-
-    // f_hat = D^H * FFT(f) * inv_a
-    for i in 0..n_total {
-        f_hat[i] = f_hat[i] * d_kernel[i] * inv_a[i];
-    }
-
-    // ========================================================================
     // Pre-allocate working buffers and run ADMM iterations
-    // ========================================================================
-
-    let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
     let mut buf = AdmmBuffers::new(n_total);
-    let lambda_over_rho = lambda / rho;
+    let lambda_over_rho = params.lambda / params.rho;
 
-    for iter in 0..max_iter {
-        progress_callback(iter + 1, max_iter);
+    for iter in 0..params.max_iter {
+        progress(iter + 1, params.max_iter);
 
         let converged = admm_step(
-            &mut buf, &mut fft_ws, f_hat, &inv_a, rho, &grid, tol,
+            &mut buf, &mut fft_ws, &f_hat, &inv_a, params.rho, grid, params.tol,
             |vx, vy, vz, _| (shrink(vx, lambda_over_rho), shrink(vy, lambda_over_rho), shrink(vz, lambda_over_rho)),
         );
 
         if converged {
-            progress_callback(iter + 1, iter + 1);
+            progress(iter + 1, iter + 1);
             break;
         }
     }
@@ -167,21 +93,6 @@ where
     apply_mask_zero(&mut buf.x, mask);
 
     buf.x
-}
-
-/// TV-ADMM with default parameters
-pub fn tv_admm_default(
-    local_field: &[f64],
-    mask: &[u8],
-    nx: usize, ny: usize, nz: usize,
-    vsx: f64, vsy: f64, vsz: f64,
-) -> Vec<f64> {
-    let p = TvParams::default();
-    tv_admm(
-        local_field, mask, nx, ny, nz, vsx, vsy, vsz,
-        (0.0, 0.0, 1.0),
-        p.lambda, p.rho, p.tol, p.max_iter,
-    )
 }
 
 #[cfg(test)]
@@ -203,11 +114,10 @@ mod tests {
         let n = 8;
         let field = vec![0.0; n * n * n];
         let mask = vec![1u8; n * n * n];
+        let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
+        let params = TvParams { lambda: 1e-3, rho: 0.1, tol: 1e-2, max_iter: 10 };
 
-        let chi = tv_admm(
-            &field, &mask, n, n, n, 1.0, 1.0, 1.0,
-            (0.0, 0.0, 1.0), 1e-3, 0.1, 1e-2, 10
-        );
+        let chi = tv_admm(&field, &mask, &grid, (0.0, 0.0, 1.0), &params, |_, _| {});
 
         for &val in chi.iter() {
             assert!(val.abs() < 1e-8, "Zero field should give zero chi, got {}", val);
@@ -220,11 +130,10 @@ mod tests {
         let n = 8;
         let field: Vec<f64> = (0..n*n*n).map(|i| (i as f64) * 0.001).collect();
         let mask = vec![1u8; n * n * n];
+        let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
+        let params = TvParams { lambda: 1e-3, rho: 0.1, tol: 1e-2, max_iter: 10 };
 
-        let chi = tv_admm(
-            &field, &mask, n, n, n, 1.0, 1.0, 1.0,
-            (0.0, 0.0, 1.0), 1e-3, 0.1, 1e-2, 10
-        );
+        let chi = tv_admm(&field, &mask, &grid, (0.0, 0.0, 1.0), &params, |_, _| {});
 
         for (i, &val) in chi.iter().enumerate() {
             assert!(val.is_finite(), "Chi should be finite at index {}", i);
@@ -241,14 +150,13 @@ mod tests {
             field[i] = if i % 2 == 0 { 0.01 } else { -0.01 };  // Alternating
         }
         let mask = vec![1u8; n * n * n];
+        let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
+        let params = TvParams { lambda: 1e-2, rho: 1.0, tol: 1e-2, max_iter: 50 };
 
-        let chi_tv = tv_admm(
-            &field, &mask, n, n, n, 1.0, 1.0, 1.0,
-            (0.0, 0.0, 1.0), 1e-2, 1.0, 1e-2, 50  // Strong regularization
-        );
+        let chi_tv = tv_admm(&field, &mask, &grid, (0.0, 0.0, 1.0), &params, |_, _| {});
 
         // Compute total variation (L1 norm of gradient)
-        let (gx, gy, gz) = fgrad(&chi_tv, n, n, n, 1.0, 1.0, 1.0);
+        let (gx, gy, gz) = fgrad(&chi_tv, &grid);
         let tv: f64 = gx.iter().chain(gy.iter()).chain(gz.iter())
             .map(|&g| g.abs())
             .sum();
@@ -265,17 +173,17 @@ mod tests {
         let n = 16;
         let field: Vec<f64> = (0..n*n*n).map(|i| ((i as f64) * 0.7).sin() * 0.01).collect();
         let mask = vec![1u8; n * n * n];
+        let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
+        let params = TvParams { lambda: 1e-3, rho: 0.1, tol: 1e-3, max_iter: 50 };
 
         // Sequential (1 thread)
         let pool_1 = rayon::ThreadPoolBuilder::new().num_threads(1).build().unwrap();
         let chi_seq = pool_1.install(|| {
-            tv_admm(&field, &mask, n, n, n, 1.0, 1.0, 1.0,
-                (0.0, 0.0, 1.0), 1e-3, 0.1, 1e-3, 50)
+            tv_admm(&field, &mask, &grid, (0.0, 0.0, 1.0), &params, |_, _| {})
         });
 
         // Parallel (default threads)
-        let chi_par = tv_admm(&field, &mask, n, n, n, 1.0, 1.0, 1.0,
-            (0.0, 0.0, 1.0), 1e-3, 0.1, 1e-3, 50);
+        let chi_par = tv_admm(&field, &mask, &grid, (0.0, 0.0, 1.0), &params, |_, _| {});
 
         // Compare
         for (i, (s, p)) in chi_seq.iter().zip(chi_par.iter()).enumerate() {

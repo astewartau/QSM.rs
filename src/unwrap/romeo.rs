@@ -17,6 +17,7 @@
 use std::f64::consts::PI;
 
 use crate::region_grow::{grow_region_unwrap, grow_region_unwrap_from_visited, grow_region_unwrap_full};
+use crate::Grid;
 
 /// Weight calculation scheme for ROMEO unwrapping.
 ///
@@ -542,8 +543,9 @@ pub fn voxel_quality_romeo(
     te1: f64,
     te2: f64,
     mask: &[u8],
-    nx: usize, ny: usize, nz: usize,
+    grid: &Grid,
 ) -> Vec<f64> {
+    let (nx, ny, nz) = grid.dims;
     let n_total = nx * ny * nz;
     let weights = calculate_weights_romeo(phase, mag, phase2, te1, te2, mask, nx, ny, nz);
 
@@ -677,8 +679,9 @@ pub fn unwrap_romeo(
     te2: f64,
     mask: &[u8],
     params: &RomeoParams,
-    nx: usize, ny: usize, nz: usize,
+    grid: &Grid,
 ) -> Vec<f64> {
+    let (nx, ny, nz) = grid.dims;
     let weights = compute_weights_from_params(
         params, phase, mag, phase2, te1, te2,
         mask, nx, ny, nz,
@@ -755,8 +758,9 @@ pub fn unwrap_romeo_multi_echo<P: AsRef<[f64]>, M: AsRef<[f64]>>(
     tes: &[f64],
     mask: &[u8],
     params: &RomeoParams,
-    nx: usize, ny: usize, nz: usize,
+    grid: &Grid,
 ) -> Vec<Vec<f64>> {
+    let (nx, ny, nz) = grid.dims;
     let n_echoes = phases.len();
     assert!(n_echoes > 0, "phases must have at least one echo");
     assert_eq!(n_echoes, tes.len(), "phases and tes must have same length");
@@ -765,7 +769,7 @@ pub fn unwrap_romeo_multi_echo<P: AsRef<[f64]>, M: AsRef<[f64]>>(
         let mag = if mags.is_empty() { &[] as &[f64] } else { mags[0].as_ref() };
         return vec![unwrap_romeo(
             phases[0].as_ref(), mag, None, 0.0, 0.0,
-            mask, params, nx, ny, nz,
+            mask, params, grid,
         )];
     }
 
@@ -1173,9 +1177,10 @@ fn temporal_uncertain_rewrap(
     let half_phase: Vec<f64> = phase.iter().map(|&v| v * 0.5).collect();
     let half_ref: Vec<f64> = ref_scaled.iter().map(|&v| v * 0.5).collect();
 
+    let grid = crate::Grid::new(nx, ny, nz, 1.0, 1.0, 1.0);
     let quality = voxel_quality_romeo(
         &half_phase, &[], Some(&half_ref), 1.0, 1.0,
-        mask, nx, ny, nz,
+        mask, &grid,
     );
 
     // Build visited mask:
@@ -1210,6 +1215,9 @@ fn temporal_uncertain_rewrap(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Grid;
+
+    fn grid(n: usize) -> Grid { Grid::new(n, n, n, 1.0, 1.0, 1.0) }
 
     #[test]
     fn test_wrap_angle() {
@@ -1290,7 +1298,7 @@ mod tests {
         let mag = vec![1.0; n * n * n];
         let mask = vec![1u8; n * n * n];
 
-        let quality = voxel_quality_romeo(&phase, &mag, None, 1.0, 1.0, &mask, n, n, n);
+        let quality = voxel_quality_romeo(&phase, &mag, None, 1.0, 1.0, &mask, &grid(n));
 
         assert_eq!(quality.len(), n * n * n);
 
@@ -1309,7 +1317,7 @@ mod tests {
         let mut mask = vec![1u8; n * n * n];
         mask[idx3d(1, 1, 1, n, n)] = 0;
 
-        let quality = voxel_quality_romeo(&phase, &[], None, 1.0, 1.0, &mask, n, n, n);
+        let quality = voxel_quality_romeo(&phase, &[], None, 1.0, 1.0, &mask, &grid(n));
 
         assert_eq!(quality[idx3d(1, 1, 1, n, n)], 0.0,
                    "Masked-out voxel should have quality 0");
@@ -1323,7 +1331,7 @@ mod tests {
         let mag: Vec<f64> = (0..n * n * n).map(|i| (i as f64) / (n * n * n) as f64).collect();
         let mask = vec![1u8; n * n * n];
 
-        let quality = voxel_quality_romeo(&phase, &mag, None, 1.0, 1.0, &mask, n, n, n);
+        let quality = voxel_quality_romeo(&phase, &mag, None, 1.0, 1.0, &mask, &grid(n));
 
         for &q in quality.iter() {
             assert!(q >= 0.0 && q <= 100.0,
@@ -1371,7 +1379,7 @@ mod tests {
 
         let unwrapped = unwrap_romeo(
             &phase, &mag, None, 0.0, 0.0,
-            &mask, &RomeoParams::default(), n, n, n,
+            &mask, &RomeoParams::default(), &grid(n),
         );
 
         assert_eq!(unwrapped.len(), total);
@@ -1401,7 +1409,7 @@ mod tests {
         let mask = vec![1u8; total];
         let unwrapped = unwrap_romeo(
             &phase, &[], None, 0.0, 0.0,
-            &mask, &RomeoParams::default(), n, n, n,
+            &mask, &RomeoParams::default(), &grid(n),
         );
 
         // After unwrapping, the 2π jump should be removed
@@ -1441,7 +1449,7 @@ mod tests {
 
         let result = unwrap_romeo_multi_echo(
             &phases, &mags, &tes, &mask,
-            &RomeoParams::default(), n, n, n,
+            &RomeoParams::default(), &grid(n),
         );
 
         assert_eq!(result.len(), 3);
@@ -1473,7 +1481,7 @@ mod tests {
 
         let result = unwrap_romeo_multi_echo(
             &phases, &mags, &tes, &mask,
-            &RomeoParams::default(), n, n, n,
+            &RomeoParams::default(), &grid(n),
         );
 
         // Check TE-scaling consistency at interior voxels
@@ -1497,7 +1505,7 @@ mod tests {
 
         let result = unwrap_romeo_multi_echo(
             &[&phase[..]], &[] as &[&[f64]], &[5.0], &mask,
-            &RomeoParams::default(), n, n, n,
+            &RomeoParams::default(), &grid(n),
         );
 
         assert_eq!(result.len(), 1);
@@ -1532,7 +1540,7 @@ mod tests {
 
         let result = unwrap_romeo_multi_echo(
             &phases, &mags, &tes, &mask,
-            &params, n, n, n,
+            &params, &grid(n),
         );
 
         assert_eq!(result.len(), 3);
@@ -1677,7 +1685,7 @@ mod tests {
 
         let result = unwrap_romeo_multi_echo(
             &phases, &mags, &tes, &mask,
-            &params, n, n, n,
+            &params, &grid(n),
         );
 
         assert_eq!(result.len(), 3);
@@ -1761,7 +1769,7 @@ mod tests {
 
         let unwrapped = unwrap_romeo(
             &phase, &[], None, 0.0, 0.0,
-            &mask, &params, n, n, n,
+            &mask, &params, &grid(n),
         );
 
         for &v in &unwrapped {
@@ -1789,7 +1797,7 @@ mod tests {
 
         let unwrapped = unwrap_romeo(
             &phase, &[], None, 0.0, 0.0,
-            &mask, &params, n, n, n,
+            &mask, &params, &grid(n),
         );
 
         for &v in &unwrapped {
@@ -1815,7 +1823,7 @@ mod tests {
 
         let unwrapped = unwrap_romeo(
             &phase, &[], None, 0.0, 0.0,
-            &mask, &params, n, n, n,
+            &mask, &params, &grid(n),
         );
 
         for &v in &unwrapped {
@@ -1856,7 +1864,7 @@ mod tests {
 
         let unwrapped = unwrap_romeo(
             &phase, &[], None, 0.0, 0.0,
-            &mask, &params, n, n, n,
+            &mask, &params, &grid(n),
         );
 
         for &v in &unwrapped {
@@ -1884,7 +1892,7 @@ mod tests {
 
         let unwrapped = unwrap_romeo(
             &phase, &[], None, 0.0, 0.0,
-            &mask, &params, n, n, n,
+            &mask, &params, &grid(n),
         );
 
         for &v in &unwrapped {

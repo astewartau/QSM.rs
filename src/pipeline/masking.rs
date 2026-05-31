@@ -43,19 +43,20 @@ pub fn resolve_masking_input(
                 mag.to_vec()
             };
 
+            let grid = metadata.grid();
             if phases.len() >= 2 && metadata.echo_times.len() >= 2 {
                 crate::unwrap::voxel_quality_romeo(
                     phases[0], &mag_data,
                     Some(phases[1]),
                     metadata.echo_times[0], metadata.echo_times[1],
-                    &all_ones, nx, ny, nz,
+                    &all_ones, &grid,
                 )
             } else {
                 crate::unwrap::voxel_quality_romeo(
                     phases[0], &mag_data,
                     None,
                     metadata.echo_times.first().copied().unwrap_or(0.02),
-                    0.0, &all_ones, nx, ny, nz,
+                    0.0, &all_ones, &grid,
                 )
             }
         }
@@ -77,6 +78,7 @@ pub fn build_mask_section(
 ) -> Result<Vec<u8>, PipelineError> {
     let (nx, ny, nz) = metadata.dims;
     let (vsx, vsy, vsz) = metadata.voxel_size;
+    let grid = metadata.grid();
     let n_voxels = nx * ny * nz;
     let mut mask = vec![1u8; n_voxels];
 
@@ -110,25 +112,27 @@ pub fn build_mask_section(
                     PipelineError::InvalidInput("BET requires magnitude data".into())
                 })?;
                 let bet_defaults = crate::bet::BetParams::default();
+                let grid = crate::Grid::new(nx, ny, nz, vsx, vsy, vsz);
                 mask = crate::bet::run_bet(
-                    mag_data, nx, ny, nz, vsx, vsy, vsz,
+                    mag_data, &grid,
                     *fractional_intensity, bet_defaults.smoothness,
                     bet_defaults.gradient_threshold, bet_defaults.iterations,
                     bet_defaults.subdivisions,
+                    |_, _| {},
                 );
             }
             MaskOp::Erode { iterations } => {
-                mask = erode_mask(&mask, nx, ny, nz, *iterations);
+                mask = erode_mask(&mask, &grid, *iterations);
             }
             MaskOp::Dilate { iterations } => {
-                mask = dilate_mask(&mask, nx, ny, nz, *iterations);
+                mask = dilate_mask(&mask, &grid, *iterations);
             }
             MaskOp::Close { radius } => {
-                mask = crate::utils::morphological_close(&mask, nx, ny, nz, *radius as i32);
+                mask = crate::utils::morphological_close(&mask, &grid, *radius as i32);
             }
             MaskOp::FillHoles { max_size } => {
                 let effective_size = if *max_size == 0 { n_voxels / 20 } else { *max_size };
-                mask = crate::utils::fill_holes(&mask, nx, ny, nz, effective_size);
+                mask = crate::utils::fill_holes(&mask, &grid, effective_size);
             }
             MaskOp::GaussianSmooth { sigma_mm } => {
                 let sigma = *sigma_mm;
@@ -137,7 +141,7 @@ pub fn build_mask_section(
                     &mask_f64,
                     [sigma, sigma, sigma],
                     None, None, 3,
-                    nx, ny, nz,
+                    &grid,
                 );
                 mask = smoothed.iter().map(|&v| if v > 0.5 { 1u8 } else { 0u8 }).collect();
             }

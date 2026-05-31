@@ -15,6 +15,7 @@
 //!
 //! Reference implementation: https://github.com/wtsyeda/QSMART
 
+use crate::Grid;
 use crate::utils::curvature::calculate_curvature_proximity;
 
 /// Parameters for SDF background field removal
@@ -85,8 +86,9 @@ impl SdfParams {
 /// * `tfs` - Total field shift (unwrapped phase / ppm)
 /// * `mask` - Binary brain mask (weighted by reliability if R_0 is incorporated)
 /// * `vasc_only` - Vasculature-only mask (1 = tissue, 0 = vessel). Pass all-ones for stage 1.
-/// * `nx`, `ny`, `nz` - Volume dimensions
+/// * `grid` - Volume dimensions and voxel sizes
 /// * `params` - SDF parameters
+/// * `progress` - Progress callback (alpha_index, total_alphas)
 ///
 /// # Returns
 /// Local field shift (background removed)
@@ -94,24 +96,11 @@ pub fn sdf(
     tfs: &[f64],
     mask: &[f64],
     vasc_only: &[f64],
-    nx: usize, ny: usize, nz: usize,
+    grid: &Grid,
     params: &SdfParams,
+    progress: impl Fn(usize, usize),
 ) -> Vec<f64> {
-    sdf_with_progress(tfs, mask, vasc_only, nx, ny, nz, params, |_, _| {})
-}
-
-/// SDF with progress callback
-pub fn sdf_with_progress<F>(
-    tfs: &[f64],
-    mask: &[f64],
-    vasc_only: &[f64],
-    nx: usize, ny: usize, nz: usize,
-    params: &SdfParams,
-    progress_callback: F,
-) -> Vec<f64>
-where
-    F: Fn(usize, usize),
-{
+    let (nx, ny, nz) = grid.dims;
     let n_total = nx * ny * nz;
 
     // Convert mask to binary for morphological operations
@@ -137,7 +126,7 @@ where
             params.lower_lim,
             params.curv_constant,
             params.sigma1,
-            nx, ny, nz,
+            grid,
         );
         prox_curv
     } else {
@@ -214,7 +203,7 @@ where
     let filter_size = 2 * (2.0 * sigma).ceil() as usize + 1;
 
     for (alpha_idx, &current_alpha) in unique_alphas.iter().enumerate() {
-        progress_callback(alpha_idx, total_alphas);
+        progress(alpha_idx, total_alphas);
 
         // Compute smoothed field for this alpha
         let smoothed: Vec<f64> = if current_alpha > 0.0 {
@@ -245,7 +234,7 @@ where
         }
     }
 
-    progress_callback(total_alphas, total_alphas);
+    progress(total_alphas, total_alphas);
 
     // Compute local field: (tfs - background) * mask
     let local_field: Vec<f64> = tfs.iter()
@@ -264,7 +253,7 @@ pub fn sdf_curvature(
     tfs: &[f64],
     mask: &[f64],
     vasc_only: &[f64],
-    nx: usize, ny: usize, nz: usize,
+    grid: &Grid,
     params: &SdfParams,
 ) -> Vec<f64> {
     // Ensure curvature is enabled
@@ -273,7 +262,7 @@ pub fn sdf_curvature(
         ..params.clone()
     };
 
-    sdf(tfs, mask, vasc_only, nx, ny, nz, &params_with_curv)
+    sdf(tfs, mask, vasc_only, grid, &params_with_curv, |_, _| {})
 }
 
 /// 3D Gaussian smoothing with specified filter size
@@ -441,7 +430,7 @@ fn convolve_1d_direction_sigma(
 pub fn sdf_simple(
     tfs: &[f64],
     mask: &[f64],
-    nx: usize, ny: usize, nz: usize,
+    grid: &Grid,
     sigma1: f64,
 ) -> Vec<f64> {
     let vasc_only = vec![1.0f64; mask.len()];
@@ -452,27 +441,7 @@ pub fn sdf_simple(
         ..Default::default()
     };
 
-    sdf(tfs, mask, &vasc_only, nx, ny, nz, &params)
-}
-
-/// Default SDF parameters for stage 1
-pub fn sdf_default_stage1(
-    tfs: &[f64],
-    mask: &[f64],
-    nx: usize, ny: usize, nz: usize,
-) -> Vec<f64> {
-    let vasc_only = vec![1.0f64; mask.len()];
-    sdf(tfs, mask, &vasc_only, nx, ny, nz, &SdfParams::stage1())
-}
-
-/// Default SDF parameters for stage 2
-pub fn sdf_default_stage2(
-    tfs: &[f64],
-    mask: &[f64],
-    vasc_only: &[f64],
-    nx: usize, ny: usize, nz: usize,
-) -> Vec<f64> {
-    sdf(tfs, mask, vasc_only, nx, ny, nz, &SdfParams::stage2())
+    sdf(tfs, mask, &vasc_only, grid, &params, |_, _| {})
 }
 
 #[cfg(test)]
@@ -487,8 +456,9 @@ mod tests {
 
         let tfs = vec![1.0f64; n_total];
         let mask = vec![1.0f64; n_total];
+        let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
 
-        let lfs = sdf_simple(&tfs, &mask, n, n, n, 2.0);
+        let lfs = sdf_simple(&tfs, &mask, &grid, 2.0);
 
         // Local field should be near zero for constant total field
         let max_lfs = lfs.iter().fold(0.0f64, |a, &b| a.max(b.abs()));

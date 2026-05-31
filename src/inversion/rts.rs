@@ -49,44 +49,7 @@ impl Default for RtsParams {
     }
 }
 
-/// RTS dipole inversion (optimized)
-///
-/// # Arguments
-/// * `local_field` - Local field values (nx * ny * nz)
-/// * `mask` - Binary mask (nx * ny * nz), 1 = inside ROI
-/// * `nx`, `ny`, `nz` - Array dimensions
-/// * `vsx`, `vsy`, `vsz` - Voxel sizes in mm
-/// * `bdir` - B0 field direction
-/// * `delta` - Threshold for ill-conditioned region (typically 0.15)
-/// * `mu` - Regularization parameter for well-conditioned region (typically 1e5)
-/// * `rho` - ADMM penalty parameter (typically 10)
-/// * `tol` - Convergence tolerance
-/// * `max_iter` - Maximum ADMM iterations
-/// * `lsmr_iter` - LSMR iterations for step 1 (typically 4)
-///
-/// # Returns
-/// Susceptibility map
-pub fn rts(
-    local_field: &[f64],
-    mask: &[u8],
-    nx: usize, ny: usize, nz: usize,
-    vsx: f64, vsy: f64, vsz: f64,
-    bdir: (f64, f64, f64),
-    delta: f64,
-    mu: f64,
-    rho: f64,
-    tol: f64,
-    max_iter: usize,
-    lsmr_iter: usize,
-) -> Vec<f64> {
-    rts_with_progress(
-        local_field, mask, nx, ny, nz, vsx, vsy, vsz,
-        bdir, delta, mu, rho, tol, max_iter, lsmr_iter,
-        |_, _| {} // no-op progress callback
-    )
-}
-
-/// RTS with progress callback (optimized)
+/// RTS dipole inversion
 ///
 /// Optimized implementation with:
 /// - Pre-allocated buffers (zero allocations per iteration)
@@ -94,25 +57,26 @@ pub fn rts(
 /// - Buffer swapping instead of cloning
 /// - Fused z-subproblem and u-update
 ///
-/// Same as `rts` but calls `progress_callback(iteration, max_iter)` each iteration.
-pub fn rts_with_progress<F>(
+/// # Arguments
+/// * `local_field` - Local field values (nx * ny * nz)
+/// * `mask` - Binary mask (nx * ny * nz), 1 = inside ROI
+/// * `grid` - Volume grid (dimensions and voxel sizes)
+/// * `bdir` - B0 field direction
+/// * `params` - RTS parameters
+/// * `progress` - Progress callback `(iteration, max_iter)`
+///
+/// # Returns
+/// Susceptibility map
+pub fn rts(
     local_field: &[f64],
     mask: &[u8],
-    nx: usize, ny: usize, nz: usize,
-    vsx: f64, vsy: f64, vsz: f64,
+    grid: &Grid,
     bdir: (f64, f64, f64),
-    delta: f64,
-    mu: f64,
-    rho: f64,
-    tol: f64,
-    max_iter: usize,
-    lsmr_iter: usize,
-    mut progress_callback: F,
-) -> Vec<f64>
-where
-    F: FnMut(usize, usize),
-{
-    let n_total = nx * ny * nz;
+    params: &RtsParams,
+    mut progress: impl FnMut(usize, usize),
+) -> Vec<f64> {
+    let (nx, ny, nz) = grid.dims;
+    let n_total = grid.n_total();
 
     // ========================================================================
     // Pre-compute kernels (done once)
@@ -122,10 +86,10 @@ where
     let mut fft_ws = Fft3dWorkspace::new(nx, ny, nz);
 
     // Generate dipole kernel D
-    let d_kernel = dipole_kernel(nx, ny, nz, vsx, vsy, vsz, bdir);
+    let d_kernel = dipole_kernel(grid, bdir);
 
     // Generate negative Laplacian kernel
-    let l_kernel = laplacian_kernel(nx, ny, nz, vsx, vsy, vsz, true);
+    let l_kernel = laplacian_kernel(grid, true);
 
     // FFT of Laplacian kernel (reuse buffer for other purposes later)
     let mut work_complex: Vec<Complex64> = l_kernel.iter()
@@ -139,12 +103,12 @@ where
 
     for i in 0..n_total {
         let l_fft_i = work_complex[i].re;
-        if d_kernel[i].abs() > delta {
-            m_mask[i] = mu;
+        if d_kernel[i].abs() > params.delta {
+            m_mask[i] = params.mu;
         }
-        let a = m_mask[i] + rho * l_fft_i;
+        let a = m_mask[i] + params.rho * l_fft_i;
         if a.abs() > 1e-20 {
-            inv_a[i] = rho / a;
+            inv_a[i] = params.rho / a;
         }
     }
 
@@ -165,7 +129,7 @@ where
     // Stored in work_complex
     for i in 0..n_total {
         let d = d_kernel[i];
-        if d.abs() > delta {
+        if d.abs() > params.delta {
             work_complex[i] = field_fft[i] * d / (d * d + 1e-6);
         } else {
             work_complex[i] = Complex64::new(0.0, 0.0);
@@ -175,7 +139,7 @@ where
     // Simple iterative refinement for well-conditioned region
     // Use a temporary buffer for residual
     let mut residual = vec![Complex64::new(0.0, 0.0); n_total];
-    for _ in 0..lsmr_iter {
+    for _ in 0..params.lsmr_iter {
         // residual = f - D * chi
         for i in 0..n_total {
             residual[i] = field_fft[i] - work_complex[i] * d_kernel[i];
@@ -184,7 +148,7 @@ where
         // update chi for well-conditioned region
         for i in 0..n_total {
             let d = d_kernel[i];
-            if d.abs() > delta {
+            if d.abs() > params.delta {
                 work_complex[i] += residual[i] * d / (d * d + 1e-6);
             }
         }
@@ -212,7 +176,7 @@ where
     let mut f_hat: Vec<Complex64> = vec![Complex64::new(0.0, 0.0); n_total];
     for i in 0..n_total {
         if m_mask[i].abs() > 1e-20 && inv_a[i].abs() > 1e-20 {
-            f_hat[i] = work_complex[i] * (m_mask[i] / rho) * inv_a[i];
+            f_hat[i] = work_complex[i] * (m_mask[i] / params.rho) * inv_a[i];
         }
     }
 
@@ -220,24 +184,23 @@ where
     // Pre-allocate working buffers and run ADMM iterations
     // ========================================================================
 
-    let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
     let mut buf = AdmmBuffers::new(n_total);
     // Copy LSMR result into buf.x
     buf.x.copy_from_slice(&x);
 
-    let inv_rho = 1.0 / rho;
+    let inv_rho = 1.0 / params.rho;
 
-    for iter in 0..max_iter {
-        progress_callback(iter + 1, max_iter);
+    for iter in 0..params.max_iter {
+        progress(iter + 1, params.max_iter);
 
-        // RTS uses rho=1.0 in admm_step because inv_a already incorporates ρ
+        // RTS uses rho=1.0 in admm_step because inv_a already incorporates rho
         let converged = admm_step(
-            &mut buf, &mut fft_ws, &f_hat, &inv_a, 1.0, &grid, tol,
+            &mut buf, &mut fft_ws, &f_hat, &inv_a, 1.0, grid, params.tol,
             |vx, vy, vz, _| (shrink(vx, inv_rho), shrink(vy, inv_rho), shrink(vz, inv_rho)),
         );
 
         if converged {
-            progress_callback(iter + 1, iter + 1);
+            progress(iter + 1, iter + 1);
             break;
         }
     }
@@ -245,21 +208,6 @@ where
     apply_mask_zero(&mut buf.x, mask);
 
     buf.x
-}
-
-/// RTS with default parameters
-pub fn rts_default(
-    local_field: &[f64],
-    mask: &[u8],
-    nx: usize, ny: usize, nz: usize,
-    vsx: f64, vsy: f64, vsz: f64,
-) -> Vec<f64> {
-    let p = RtsParams::default();
-    rts(
-        local_field, mask, nx, ny, nz, vsx, vsy, vsz,
-        (0.0, 0.0, 1.0),
-        p.delta, p.mu, p.rho, p.tol, p.max_iter, p.lsmr_iter,
-    )
 }
 
 #[cfg(test)]
@@ -271,11 +219,10 @@ mod tests {
         let n = 8;
         let field = vec![0.0; n * n * n];
         let mask = vec![1u8; n * n * n];
+        let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
+        let params = RtsParams { delta: 0.15, mu: 1e5, rho: 10.0, tol: 1e-2, max_iter: 5, lsmr_iter: 2 };
 
-        let chi = rts(
-            &field, &mask, n, n, n, 1.0, 1.0, 1.0,
-            (0.0, 0.0, 1.0), 0.15, 1e5, 10.0, 1e-2, 5, 2
-        );
+        let chi = rts(&field, &mask, &grid, (0.0, 0.0, 1.0), &params, |_, _| {});
 
         for &val in chi.iter() {
             assert!(val.abs() < 1e-6, "Zero field should give near-zero chi");
@@ -287,11 +234,10 @@ mod tests {
         let n = 8;
         let field: Vec<f64> = (0..n*n*n).map(|i| (i as f64) * 0.001).collect();
         let mask = vec![1u8; n * n * n];
+        let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
+        let params = RtsParams { delta: 0.15, mu: 1e5, rho: 10.0, tol: 1e-2, max_iter: 5, lsmr_iter: 2 };
 
-        let chi = rts(
-            &field, &mask, n, n, n, 1.0, 1.0, 1.0,
-            (0.0, 0.0, 1.0), 0.15, 1e5, 10.0, 1e-2, 5, 2
-        );
+        let chi = rts(&field, &mask, &grid, (0.0, 0.0, 1.0), &params, |_, _| {});
 
         for (i, &val) in chi.iter().enumerate() {
             assert!(val.is_finite(), "Chi should be finite at index {}", i);
@@ -306,11 +252,10 @@ mod tests {
         // Zero out some mask values
         mask[0] = 0;
         mask[10] = 0;
+        let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
+        let params = RtsParams { delta: 0.15, mu: 1e5, rho: 10.0, tol: 1e-2, max_iter: 5, lsmr_iter: 2 };
 
-        let chi = rts(
-            &field, &mask, n, n, n, 1.0, 1.0, 1.0,
-            (0.0, 0.0, 1.0), 0.15, 1e5, 10.0, 1e-2, 5, 2
-        );
+        let chi = rts(&field, &mask, &grid, (0.0, 0.0, 1.0), &params, |_, _| {});
 
         assert_eq!(chi[0], 0.0, "Masked voxel should be zero");
         assert_eq!(chi[10], 0.0, "Masked voxel should be zero");
@@ -323,17 +268,17 @@ mod tests {
         let n = 16;
         let field: Vec<f64> = (0..n*n*n).map(|i| ((i as f64) * 0.7).sin() * 0.01).collect();
         let mask = vec![1u8; n * n * n];
+        let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
+        let params = RtsParams { delta: 0.15, mu: 1e5, rho: 10.0, tol: 1e-4, max_iter: 20, lsmr_iter: 4 };
 
         // Sequential (1 thread)
         let pool_1 = rayon::ThreadPoolBuilder::new().num_threads(1).build().unwrap();
         let chi_seq = pool_1.install(|| {
-            rts(&field, &mask, n, n, n, 1.0, 1.0, 1.0,
-                (0.0, 0.0, 1.0), 0.15, 1e5, 10.0, 1e-4, 20, 4)
+            rts(&field, &mask, &grid, (0.0, 0.0, 1.0), &params, |_, _| {})
         });
 
         // Parallel (default threads)
-        let chi_par = rts(&field, &mask, n, n, n, 1.0, 1.0, 1.0,
-            (0.0, 0.0, 1.0), 0.15, 1e5, 10.0, 1e-4, 20, 4);
+        let chi_par = rts(&field, &mask, &grid, (0.0, 0.0, 1.0), &params, |_, _| {});
 
         // Compare
         for (i, (s, p)) in chi_seq.iter().zip(chi_par.iter()).enumerate() {

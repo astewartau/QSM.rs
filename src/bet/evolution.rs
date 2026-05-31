@@ -5,6 +5,7 @@
 //!
 //! Aligned with FSL-BET2 implementation.
 
+use crate::Grid;
 use super::icosphere::create_icosphere;
 use super::mesh::{build_neighbor_matrix, compute_vertex_normals, compute_mean_edge_length_mm, self_intersection_heuristic};
 use std::collections::VecDeque;
@@ -666,18 +667,6 @@ fn evolution_pass(
     }
 }
 
-/// Run BET brain extraction
-///
-/// # Arguments
-/// * `data` - 3D magnitude image data (nx * ny * nz, Fortran order)
-/// * `nx`, `ny`, `nz` - Image dimensions
-/// * `vsx`, `vsy`, `vsz` - Voxel sizes in mm
-/// * `fractional_intensity` - Intensity threshold (0.0-1.0, smaller = larger brain)
-/// * `smoothness_factor` - Smoothness constraint (default 1.0, larger = smoother)
-/// * `gradient_threshold` - Z-gradient for threshold (-1 to 1, positive = larger at bottom)
-/// * `iterations` - Number of surface evolution iterations
-/// * `subdivisions` - Icosphere subdivision level
-///
 /// BET algorithm parameters
 #[derive(Clone, Debug)]
 pub struct BetParams {
@@ -705,21 +694,38 @@ impl Default for BetParams {
     }
 }
 
+/// Run BET brain extraction
+///
+/// # Arguments
+/// * `data` - 3D magnitude image data (nx * ny * nz, Fortran order)
+/// * `grid` - Volume grid (dimensions and voxel sizes)
+/// * `fractional_intensity` - Intensity threshold (0.0-1.0, smaller = larger brain)
+/// * `smoothness_factor` - Smoothness constraint (default 1.0, larger = smoother)
+/// * `gradient_threshold` - Z-gradient for threshold (-1 to 1, positive = larger at bottom)
+/// * `iterations` - Number of surface evolution iterations
+/// * `subdivisions` - Icosphere subdivision level
+/// * `progress` - Optional progress callback: `(iteration, total_iterations)`
+///
 /// # Returns
 /// Binary mask (1 = brain, 0 = background)
-pub fn run_bet(
+pub fn run_bet<F>(
     data: &[f64],
-    nx: usize, ny: usize, nz: usize,
-    vsx: f64, vsy: f64, vsz: f64,
+    grid: &Grid,
     fractional_intensity: f64,
     smoothness_factor: f64,
     gradient_threshold: f64,
     iterations: usize,
     subdivisions: usize,
-) -> Vec<u8> {
-    let voxel_size = [vsx, vsy, vsz];
+    mut progress: F,
+) -> Vec<u8>
+where
+    F: FnMut(usize, usize),
+{
+    let (nx, ny, nz) = grid.dims;
+    let voxel_size = [grid.vsx(), grid.vsy(), grid.vsz()];
 
     // Step 1: Estimate brain parameters
+    progress(0, iterations);
     let bp = estimate_brain_parameters(data, nx, ny, nz, &voxel_size);
 
     // Step 2: Create icosphere
@@ -752,92 +758,7 @@ pub fn run_bet(
 
     loop {
         // Run evolution pass
-        evolution_pass(
-            data, nx, ny, nz, &voxel_size, &bp,
-            &mut vertices, &faces,
-            &neighbor_matrix, &neighbor_counts,
-            bt, smoothness_factor, gradient_threshold,
-            iterations, pass,
-            &mut None,
-        );
-
-        // Check for self-intersection
-        let si_score = self_intersection_heuristic(&vertices, &initial_vertices, &faces, &voxel_size);
-        let has_self_intersection = si_score > SELF_INTERSECTION_THRESHOLD;
-
-        if has_self_intersection {
-            eprintln!("[BET] Self-intersection detected (score={:.0}, threshold={}), pass {}",
-                      si_score, SELF_INTERSECTION_THRESHOLD, pass + 1);
-        }
-
-        // Exit if no self-intersection or max passes reached
-        if !has_self_intersection || pass >= MAX_PASSES {
-            if pass > 0 {
-                eprintln!("[BET] Completed after {} recovery pass(es)", pass);
-            }
-            break;
-        }
-
-        // Reset to original mesh and try again with higher smoothing
-        vertices = initial_vertices.clone();
-        pass += 1;
-    }
-
-    // Step 4: Convert surface to binary mask
-    surface_to_mask(&vertices, &faces, nx, ny, nz, &voxel_size)
-}
-
-/// Run BET brain extraction with progress callback
-///
-/// Same as run_bet but calls progress_callback(iteration, total_iterations) periodically
-pub fn run_bet_with_progress<F>(
-    data: &[f64],
-    nx: usize, ny: usize, nz: usize,
-    vsx: f64, vsy: f64, vsz: f64,
-    fractional_intensity: f64,
-    smoothness_factor: f64,
-    gradient_threshold: f64,
-    iterations: usize,
-    subdivisions: usize,
-    mut progress_callback: F,
-) -> Vec<u8>
-where
-    F: FnMut(usize, usize),
-{
-    let voxel_size = [vsx, vsy, vsz];
-
-    // Step 1: Estimate brain parameters
-    progress_callback(0, iterations);
-    let bp = estimate_brain_parameters(data, nx, ny, nz, &voxel_size);
-
-    // Step 2: Create icosphere
-    let (unit_vertices, faces) = create_icosphere(subdivisions);
-    let n_vertices = unit_vertices.len();
-
-    // Scale and position sphere in mm coordinates (start at 50% of estimated radius)
-    let initial_radius_mm = bp.radius * 0.5;
-
-    let initial_vertices: Vec<[f64; 3]> = unit_vertices
-        .iter()
-        .map(|v| [
-            v[0] * initial_radius_mm + bp.cog_mm[0],
-            v[1] * initial_radius_mm + bp.cog_mm[1],
-            v[2] * initial_radius_mm + bp.cog_mm[2],
-        ])
-        .collect();
-
-    let (neighbor_matrix, neighbor_counts) = build_neighbor_matrix(n_vertices, &faces, 6);
-
-    // FSL power transform: bt = pow(f, 0.275)
-    let bt = fractional_intensity.powf(0.275);
-
-    // Multi-pass evolution with self-intersection recovery (like FSL-BET2)
-    let mut vertices = initial_vertices.clone();
-    let mut pass = 0;
-
-    loop {
-        // Run evolution pass
-        let mut cb: Option<&mut dyn FnMut(usize, usize)> = Some(&mut progress_callback);
+        let mut cb: Option<&mut dyn FnMut(usize, usize)> = Some(&mut progress);
         evolution_pass(
             data, nx, ny, nz, &voxel_size, &bp,
             &mut vertices, &faces,
@@ -870,7 +791,7 @@ where
     }
 
     // Final progress update
-    progress_callback(iterations, iterations);
+    progress(iterations, iterations);
 
     // Step 4: Convert surface to binary mask
     surface_to_mask(&vertices, &faces, nx, ny, nz, &voxel_size)
@@ -1276,16 +1197,17 @@ mod tests {
     fn test_run_bet_small_synthetic_volume() {
         // Create a 16x16x16 volume with a bright sphere
         let (data, nx, ny, nz) = make_sphere_volume(16, 6.0, 200.0);
+        let grid = Grid::new(nx, ny, nz, 1.0, 1.0, 1.0);
 
         let mask = run_bet(
             &data,
-            nx, ny, nz,
-            1.0, 1.0, 1.0, // voxel size
+            &grid,
             0.5,            // fractional_intensity
             1.0,            // smoothness_factor
             0.0,            // gradient_threshold
             50,             // iterations (few for speed)
             1,              // subdivisions (low for speed)
+            |_, _| {},
         );
 
         assert_eq!(mask.len(), nx * ny * nz);
@@ -1306,16 +1228,17 @@ mod tests {
     fn test_run_bet_with_gradient_threshold() {
         // Exercise the gradient threshold code path
         let (data, nx, ny, nz) = make_sphere_volume(16, 6.0, 200.0);
+        let grid = Grid::new(nx, ny, nz, 1.0, 1.0, 1.0);
 
         let mask = run_bet(
             &data,
-            nx, ny, nz,
-            1.0, 1.0, 1.0,
+            &grid,
             0.5,
             1.0,
             0.3,  // non-zero gradient threshold
             50,
             1,
+            |_, _| {},
         );
 
         assert_eq!(mask.len(), nx * ny * nz);
@@ -1328,12 +1251,12 @@ mod tests {
     fn test_run_bet_with_progress() {
         // Test the progress callback variant
         let (data, nx, ny, nz) = make_sphere_volume(16, 6.0, 200.0);
+        let grid = Grid::new(nx, ny, nz, 1.0, 1.0, 1.0);
 
         let mut progress_calls = Vec::new();
-        let mask = run_bet_with_progress(
+        let mask = run_bet(
             &data,
-            nx, ny, nz,
-            1.0, 1.0, 1.0,
+            &grid,
             0.5,
             1.0,
             0.0,
@@ -1363,10 +1286,11 @@ mod tests {
     #[test]
     fn test_run_bet_different_fractional_intensities() {
         let (data, nx, ny, nz) = make_sphere_volume(16, 6.0, 200.0);
+        let grid = Grid::new(nx, ny, nz, 1.0, 1.0, 1.0);
 
         // Higher fractional_intensity = smaller brain
-        let mask_small = run_bet(&data, nx, ny, nz, 1.0, 1.0, 1.0, 0.7, 1.0, 0.0, 50, 1);
-        let mask_large = run_bet(&data, nx, ny, nz, 1.0, 1.0, 1.0, 0.3, 1.0, 0.0, 50, 1);
+        let mask_small = run_bet(&data, &grid, 0.7, 1.0, 0.0, 50, 1, |_, _| {});
+        let mask_large = run_bet(&data, &grid, 0.3, 1.0, 0.0, 50, 1, |_, _| {});
 
         let count_small: usize = mask_small.iter().map(|&v| v as usize).sum();
         let count_large: usize = mask_large.iter().map(|&v| v as usize).sum();
@@ -1379,16 +1303,17 @@ mod tests {
     #[test]
     fn test_run_bet_anisotropic_voxels() {
         let (data, nx, ny, nz) = make_sphere_volume(16, 6.0, 200.0);
+        let grid = Grid::new(nx, ny, nz, 2.0, 2.0, 2.0);
 
         let mask = run_bet(
             &data,
-            nx, ny, nz,
-            2.0, 2.0, 2.0, // 2mm voxels
+            &grid,
             0.5,
             1.0,
             0.0,
             50,
             1,
+            |_, _| {},
         );
 
         assert_eq!(mask.len(), nx * ny * nz);

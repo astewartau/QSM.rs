@@ -8,6 +8,7 @@ mod common;
 use std::path::Path;
 use std::time::Instant;
 use common::{load_nifti_file, correlation, rmse};
+use qsm_core::Grid;
 use qsm_core::separation::chi_sep_medi;
 use qsm_core::kernels::dipole::dipole_kernel;
 use qsm_core::fft::{fft3d_real, ifft3d_real};
@@ -23,7 +24,8 @@ fn compute_local_field_hz(
     let n = nx * ny * nz;
 
     // Dipole kernel (real, in k-space)
-    let d_kernel = dipole_kernel(nx, ny, nz, vsx, vsy, vsz, bdir);
+    let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
+    let d_kernel = dipole_kernel(&grid, bdir);
 
     // Forward FFT of chi
     let mut chi_k = fft3d_real(chi, nx, ny, nz);
@@ -170,13 +172,13 @@ fn test_chisep_on_forward_phantom() {
 
     for ps in &param_sets {
         let start = Instant::now();
+        let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
         let (chi_pos_result, chi_neg_result, _chi_total_result) = chi_sep_medi(
             &local_field_hz,
             &r2prime_nii.data,
             &mag_nii.data,
             &mask,
-            nx, ny, nz,
-            vsx, vsy, vsz,
+            &grid,
             bdir,
             cf,
             ps.lambda_para,
@@ -189,6 +191,7 @@ fn test_chisep_on_forward_phantom() {
             100,
             ps.max_iter,
             ps.tol,
+            |_, _| {},
         );
         let elapsed = start.elapsed();
 

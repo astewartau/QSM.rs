@@ -1018,46 +1018,44 @@ impl TgvWorkspace {
 }
 
 /// Main TGV-QSM reconstruction
+///
+/// # Arguments
+/// * `phase` - Wrapped phase data (f32)
+/// * `mask` - Binary mask
+/// * `grid` - Volume grid (dimensions and voxel sizes)
+/// * `params` - TGV parameters
+/// * `b0_dir` - B0 field direction (f32)
+/// * `progress` - Progress callback `(iteration, total_iterations)`
 pub fn tgv_qsm(
     phase: &[f32],
     mask: &[u8],
-    nx: usize, ny: usize, nz: usize,
-    vsx: f32, vsy: f32, vsz: f32,
+    grid: &crate::Grid,
     params: &TgvParams,
     b0_dir: (f32, f32, f32),
+    progress: impl Fn(usize, usize),
 ) -> Vec<f32> {
-    tgv_qsm_with_progress(phase, mask, nx, ny, nz, vsx, vsy, vsz, params, b0_dir, |_, _| {})
-}
-
-/// TGV-QSM with progress callback (optimized version)
-pub fn tgv_qsm_with_progress<F>(
-    phase: &[f32],
-    mask: &[u8],
-    nx: usize, ny: usize, nz: usize,
-    vsx: f32, vsy: f32, vsz: f32,
-    params: &TgvParams,
-    b0_dir: (f32, f32, f32),
-    progress: F,
-) -> Vec<f32>
-where
-    F: Fn(usize, usize),
-{
-    let n_total = nx * ny * nz;
+    let (nx, ny, nz) = grid.dims;
+    let n_total = grid.n_total();
+    let vsx = grid.vsx() as f32;
+    let vsy = grid.vsy() as f32;
+    let vsz = grid.vsz() as f32;
     let res = (vsx, vsy, vsz);
 
     // Erode mask
+    let full_grid = crate::Grid::new(nx, ny, nz, vsx as f64, vsy as f64, vsz as f64);
     let mut mask_eroded = mask.to_vec();
     for _ in 0..params.erosions {
-        mask_eroded = erode_mask(&mask_eroded, nx, ny, nz, 1);
+        mask_eroded = erode_mask(&mask_eroded, &full_grid, 1);
     }
 
     // Create mask0 (one more erosion for internal computations)
-    let mask0 = erode_mask(&mask_eroded, nx, ny, nz, 1);
+    let mask0 = erode_mask(&mask_eroded, &full_grid, 1);
 
     // Find bounding box (with padding of 2 voxels)
     let bbox = BoundingBox::from_mask(&mask0, nx, ny, nz, 2);
     let (bx, by, bz) = bbox.dims();
     let b_total = bbox.total();
+    let sub_grid = crate::Grid::new(bx, by, bz, vsx as f64, vsy as f64, vsz as f64);
 
     // Extract sub-volumes for the bounding box region
     let phase_sub = extract_subvolume(phase, &bbox, nx, ny, nz);
@@ -1140,7 +1138,7 @@ where
         // Julia: p += mask0 * sigma * grad(chi) - mask * sigma * w
         // Compute unmasked gradient first
         crate::utils::gradient::fgrad_inplace_f32(
-            &mut ws.gx, &mut ws.gy, &mut ws.gz, &ws.chi_, bx, by, bz, vsx, vsy, vsz
+            &mut ws.gx, &mut ws.gy, &mut ws.gz, &ws.chi_, &sub_grid
         );
 
         for i in 0..b_total {
@@ -1163,7 +1161,7 @@ where
         // 3. Update q (symmetric gradient dual)
         crate::utils::gradient::symgrad_inplace_f32(
             &mut ws.sxx, &mut ws.sxy, &mut ws.sxz, &mut ws.syy, &mut ws.syz, &mut ws.szz,
-            &ws.wx_, &ws.wy_, &ws.wz_, bx, by, bz, vsx, vsy, vsz
+            &ws.wx_, &ws.wy_, &ws.wz_, &sub_grid
         );
 
         for i in 0..b_total {
@@ -1205,7 +1203,7 @@ where
 
         // 2. Update chi
         crate::utils::gradient::bdiv_masked_inplace_f32(
-            &mut ws.temp1, &ws.px, &ws.py, &ws.pz, &mask0_sub, bx, by, bz, vsx, vsy, vsz
+            &mut ws.temp1, &ws.px, &ws.py, &ws.pz, &mask0_sub, &sub_grid
         );
 
         for i in 0..b_total {
@@ -1231,7 +1229,7 @@ where
         crate::utils::gradient::symdiv_inplace_f32(
             &mut ws.divqx, &mut ws.divqy, &mut ws.divqz,
             &ws.sxx, &ws.sxy, &ws.sxz, &ws.syy, &ws.syz, &ws.szz,
-            bx, by, bz, vsx, vsy, vsz
+            &sub_grid
         );
 
         // Julia: w_dest = w; if mask: w_dest += tau*(p + div(mask0*q))
@@ -1321,7 +1319,8 @@ mod tests {
         let nz = 5;
 
         let mask = vec![1u8; nx * ny * nz];
-        let eroded = erode_mask(&mask, nx, ny, nz, 1);
+        let grid5 = crate::Grid::new(nx, ny, nz, 1.0, 1.0, 1.0);
+        let eroded = erode_mask(&mask, &grid5, 1);
 
         let center = 2 + 2 * nx + 2 * nx * ny;
         assert_eq!(eroded[center], 1);
@@ -1401,7 +1400,8 @@ mod tests {
             ..TgvParams::default()
         };
 
-        let result = tgv_qsm(&phase, &mask, n, n, n, 1.0, 1.0, 1.0, &params, (0.0, 0.0, 1.0));
+        let grid = crate::Grid::new(n, n, n, 1.0, 1.0, 1.0);
+        let result = tgv_qsm(&phase, &mask, &grid, &params, (0.0, 0.0, 1.0), |_, _| {});
 
         assert_eq!(result.len(), n_total);
 
@@ -1568,9 +1568,10 @@ mod tests {
             ..TgvParams::default()
         };
 
+        let grid = crate::Grid::new(n, n, n, 1.0, 1.0, 1.0);
         let progress_iters = std::cell::RefCell::new(Vec::new());
-        let result = tgv_qsm_with_progress(
-            &phase, &mask, n, n, n, 1.0, 1.0, 1.0, &params, (0.0, 0.0, 1.0),
+        let result = tgv_qsm(
+            &phase, &mask, &grid, &params, (0.0, 0.0, 1.0),
             |iter, _total| { progress_iters.borrow_mut().push(iter); }
         );
 

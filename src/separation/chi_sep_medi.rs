@@ -22,6 +22,7 @@
 //! separation toward iron and myelin mapping in the brain." NeuroImage, 240:118371.
 
 use num_complex::Complex32;
+use crate::Grid;
 use crate::fft::Fft3dWorkspaceF32;
 use crate::kernels::dipole::dipole_kernel_f32;
 use crate::inversion::medi::{
@@ -85,20 +86,22 @@ impl ChiSepWorkspace {
 /// * `r2prime` - R2' map in Hz
 /// * `magnitude` - Magnitude image for edge weighting
 /// * `mask` - Binary brain mask, 1 = brain
+/// * `grid` - Volume grid (dimensions and voxel sizes)
+/// * `bdir` - B0 field direction
 /// * `cf` - Central frequency in Hz (e.g. 123.2e6 for 3T)
 /// * `dr_pos` - Paramagnetic relaxivity in Hz/ppm (default: 114.0)
 /// * `dr_neg` - Diamagnetic relaxivity in Hz/ppm (default: 30.0)
+/// * `progress` - Progress callback: `(iteration, total_iterations)`
 ///
 /// # Returns
 /// `(chi_pos, chi_neg, chi_total)` — susceptibility maps in ppm
 #[allow(clippy::too_many_arguments)]
-pub fn chi_sep_medi(
+pub fn chi_sep_medi<F>(
     local_field: &[f64],
     r2prime: &[f64],
     magnitude: &[f64],
     mask: &[u8],
-    nx: usize, ny: usize, nz: usize,
-    vsx: f64, vsy: f64, vsz: f64,
+    grid: &Grid,
     bdir: (f64, f64, f64),
     cf: f64,
     lambda_para: f64,
@@ -111,43 +114,13 @@ pub fn chi_sep_medi(
     cg_max_iter: usize,
     max_iter: usize,
     tol: f64,
-) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
-    chi_sep_medi_with_progress(
-        local_field, r2prime, magnitude, mask,
-        nx, ny, nz, vsx, vsy, vsz, bdir, cf,
-        lambda_para, lambda_dia, lambda_cpl,
-        dr_pos, dr_neg, percentage,
-        cg_tol, cg_max_iter, max_iter, tol,
-        |_, _| {},
-    )
-}
-
-/// Chi-separation with progress callback.
-#[allow(clippy::too_many_arguments)]
-pub fn chi_sep_medi_with_progress<F>(
-    local_field: &[f64],
-    r2prime: &[f64],
-    magnitude: &[f64],
-    mask: &[u8],
-    nx: usize, ny: usize, nz: usize,
-    vsx: f64, vsy: f64, vsz: f64,
-    bdir: (f64, f64, f64),
-    cf: f64,
-    lambda_para: f64,
-    lambda_dia: f64,
-    lambda_cpl: f64,
-    dr_pos: f64,
-    dr_neg: f64,
-    percentage: f64,
-    cg_tol: f64,
-    cg_max_iter: usize,
-    max_iter: usize,
-    tol: f64,
-    mut progress_callback: F,
+    mut progress: F,
 ) -> (Vec<f64>, Vec<f64>, Vec<f64>)
 where
     F: FnMut(usize, usize),
 {
+    let (nx, ny, nz) = grid.dims;
+    let (vsx, vsy, vsz) = grid.voxel_size;
     let n = nx * ny * nz;
     let ppm_factor = (1.0e6 / cf) as f32;
 
@@ -195,7 +168,7 @@ where
     let mag_f32: Vec<f32> = magnitude.iter().map(|&v| v as f32).collect();
 
     let mut ws = ChiSepWorkspace::new(nx, ny, nz, vsx_f32, vsy_f32, vsz_f32);
-    let d_kernel = dipole_kernel_f32(nx, ny, nz, vsx_f32, vsy_f32, vsz_f32, bdir_f32);
+    let d_kernel = dipole_kernel_f32(grid, bdir_f32);
     let (mx, my, mz) = gradient_mask_f32(
         &mag_f32, mask, nx, ny, nz, vsx_f32, vsy_f32, vsz_f32, percentage as f32,
     );
@@ -219,7 +192,7 @@ where
     let eps = 1.0e-6_f32;
 
     for iter in 0..max_iter {
-        progress_callback(iter + 1, max_iter);
+        progress(iter + 1, max_iter);
 
         // --- TV reweighting ---
         fgrad_periodic_inplace_f32(&mut ws.gx, &mut ws.gy, &mut ws.gz,
@@ -552,6 +525,7 @@ fn cg_solve_chisep(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Grid;
     use crate::kernels::dipole::dipole_kernel;
     use crate::fft::{fft3d_real, ifft3d_real};
 
@@ -576,7 +550,7 @@ mod tests {
     fn test_chi_sep_medi_basic() {
         let (nx, ny, nz) = (32, 32, 32);
         let n = nx * ny * nz;
-        let (vsx, vsy, vsz) = (1.0, 1.0, 1.0);
+        let grid = Grid::new(nx, ny, nz, 1.0, 1.0, 1.0);
         let bdir = (0.0, 0.0, 1.0);
         let cf: f64 = 123.2e6; // 3T
 
@@ -604,7 +578,7 @@ mod tests {
             .zip(chi_neg_ppm.iter())
             .map(|(&p, &n)| (p + n) * hz_per_ppm)
             .collect();
-        let d = dipole_kernel(nx, ny, nz, vsx, vsy, vsz, bdir);
+        let d = dipole_kernel(&grid, bdir);
         let chi_fft = fft3d_real(&chi_total_hz, nx, ny, nz);
         let field_fft: Vec<_> = chi_fft.iter()
             .zip(d.iter())
@@ -637,10 +611,11 @@ mod tests {
 
         let (chi_pos_out, chi_neg_out, chi_total_out) = chi_sep_medi(
             &local_field, &r2prime, &magnitude, &mask,
-            nx, ny, nz, vsx, vsy, vsz, bdir, cf,
+            &grid, bdir, cf,
             1000.0, 1000.0, 100.0,
             dr_pos, dr_neg,
             0.3, 0.01, 100, 10, 0.1,
+            |_, _| {},
         );
 
         // chi+ should be non-negative, chi- non-positive

@@ -8,7 +8,8 @@ mod common;
 use std::time::Instant;
 use common::{TestData, TestResult, ChallengeMetrics};
 use qsm_core::bgremove;
-use qsm_core::bgremove::{sdf, SdfParams};
+use qsm_core::bgremove::{sdf, SdfParams, ResharpParams};
+use qsm_core::Grid;
 use qsm_core::bet;
 use qsm_core::inversion;
 use qsm_core::inversion::{tgv_qsm, TgvParams, get_default_alpha, get_default_iterations, ilsqr_simple};
@@ -84,13 +85,13 @@ fn test_bgremove_sharp() {
     // Save ground truth tissue field for figure generation
     common::save_center_slices(&data.fieldmap_local, &data.mask, data.dims, "ground_truth_local_field");
 
+    let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
     let ((result, _new_mask), elapsed) = run_timed!("SHARP", bgremove::sharp(
         &data.fieldmap,
         &data.mask,
-        nx, ny, nz,
-        vsx, vsy, vsz,
-        6.0,   // radius in mm
+        &grid,
         0.05,  // threshold
+        6.0,   // radius in mm
     ));
 
     let res = TestResult::new("SHARP", &result, &data.fieldmap_local, &data.mask, data.dims);
@@ -113,13 +114,14 @@ fn test_bgremove_vsharp() {
     // V-SHARP with multiple radii
     let radii: Vec<f64> = (1..=12).map(|r| r as f64).collect();
 
+    let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
     let ((result, _new_mask), elapsed) = run_timed!("V-SHARP", bgremove::vsharp(
         &data.fieldmap,
         &data.mask,
-        nx, ny, nz,
-        vsx, vsy, vsz,
+        &grid,
         &radii,
         0.05,  // threshold
+        |_, _| {},
     ));
 
     let res = TestResult::new("V-SHARP", &result, &data.fieldmap_local, &data.mask, data.dims);
@@ -139,16 +141,17 @@ fn test_bgremove_pdf() {
     let (nx, ny, nz) = data.dims;
     let (vsx, vsy, vsz) = data.voxel_size;
 
-    // Use explicit params for CI (pdf_default uses adaptive maxit=2626 for this volume,
+    // Use explicit params for CI (adaptive default would be maxit=2626 for this volume,
     // which converges correctly but takes ~10 minutes; cap at 100 for CI speed)
+    let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
     let (result, elapsed) = run_timed!("PDF", bgremove::pdf(
         &data.fieldmap,
         &data.mask,
-        nx, ny, nz,
-        vsx, vsy, vsz,
+        &grid,
         (0.0, 0.0, 1.0),
         1e-5,
         100,
+        |_, _| {},
     ));
 
     let res = TestResult::new("PDF", &result, &data.fieldmap_local, &data.mask, data.dims);
@@ -168,14 +171,15 @@ fn test_bgremove_ismv() {
     let (nx, ny, nz) = data.dims;
     let (vsx, vsy, vsz) = data.voxel_size;
 
+    let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
     let ((result, _new_mask), elapsed) = run_timed!("iSMV", bgremove::ismv(
         &data.fieldmap,
         &data.mask,
-        nx, ny, nz,
-        vsx, vsy, vsz,
+        &grid,
         5.0,   // radius in mm
         1e-6,  // tolerance
         50,    // max iterations
+        |_, _| {},
     ));
 
     let res = TestResult::new("iSMV", &result, &data.fieldmap_local, &data.mask, data.dims);
@@ -195,11 +199,15 @@ fn test_bgremove_lbv() {
     let (nx, ny, nz) = data.dims;
     let (vsx, vsy, vsz) = data.voxel_size;
 
-    let ((result, _new_mask), elapsed) = run_timed!("LBV", bgremove::lbv_default(
+    let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
+    let max_iter = (3 * nx.max(ny).max(nz)).max(500);
+    let ((result, _new_mask), elapsed) = run_timed!("LBV", bgremove::lbv(
         &data.fieldmap,
         &data.mask,
-        nx, ny, nz,
-        vsx, vsy, vsz,
+        &grid,
+        1e-6,
+        max_iter,
+        |_, _| {},
     ));
 
     let res = TestResult::new("LBV", &result, &data.fieldmap_local, &data.mask, data.dims);
@@ -219,15 +227,14 @@ fn test_bgremove_resharp() {
     let (nx, ny, nz) = data.dims;
     let (vsx, vsy, vsz) = data.voxel_size;
 
+    let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
+    let resharp_params = ResharpParams { radius: 6.0, tik_reg: 1e-4, tol: 1e-6, max_iter: 200 };
     let ((result, _new_mask), elapsed) = run_timed!("RESHARP", bgremove::resharp(
         &data.fieldmap,
         &data.mask,
-        nx, ny, nz,
-        vsx, vsy, vsz,
-        6.0,   // radius in mm
-        1e-4,  // Tikhonov regularization
-        1e-6,  // tolerance
-        200,   // max iterations
+        &grid,
+        &resharp_params,
+        |_, _| {},
     ));
 
     let res = TestResult::new("RESHARP", &result, &data.fieldmap_local, &data.mask, data.dims);
@@ -259,8 +266,10 @@ fn test_bgremove_lbv_hz_scale() {
     println!("[INFO] PPM->Hz scale factor: {:.2}, B0: {}T", ppm_to_hz, b0);
 
     // Run LBV on Hz-scale field
-    let ((result_hz, mask_hz), elapsed) = run_timed!("LBV-Hz", bgremove::lbv_default(
-        &fieldmap_hz, &data.mask, nx, ny, nz, vsx, vsy, vsz,
+    let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
+    let max_iter = (3 * nx.max(ny).max(nz)).max(500);
+    let ((result_hz, mask_hz), elapsed) = run_timed!("LBV-Hz", bgremove::lbv(
+        &fieldmap_hz, &data.mask, &grid, 1e-6, max_iter, |_, _| {},
     ));
 
     // Compare against Hz-scale ground truth local field
@@ -268,8 +277,8 @@ fn test_bgremove_lbv_hz_scale() {
     res.print_with_time(elapsed);
 
     // Also run ppm for comparison
-    let ((result_ppm, _), elapsed_ppm) = run_timed!("LBV-ppm", bgremove::lbv_default(
-        &data.fieldmap, &data.mask, nx, ny, nz, vsx, vsy, vsz,
+    let ((result_ppm, _), elapsed_ppm) = run_timed!("LBV-ppm", bgremove::lbv(
+        &data.fieldmap, &data.mask, &grid, 1e-6, max_iter, |_, _| {},
     ));
     let res_ppm = TestResult::new("LBV-ppm", &result_ppm, &data.fieldmap_local, &data.mask, data.dims);
     res_ppm.print_with_time(elapsed_ppm);
@@ -568,14 +577,15 @@ fn test_swi() {
 
     // Step 2: Calculate SWI with default parameters (sigma=[4,4,0], tanh, strength=4)
     println!("[INFO] Computing SWI...");
-    let swi_result = swi::calculate_swi_default(
+    let grid = qsm_core::Grid::new(nx, ny, nz, vsx, vsy, vsz);
+    let swi_result = swi::calculate_swi(
         &unwrapped, &data.mag_echoes[0], &data.mask,
-        nx, ny, nz, vsx, vsy, vsz,
+        &grid, &swi::SwiParams::default(),
     );
 
     // Step 3: Minimum intensity projection
     println!("[INFO] Computing mIP...");
-    let mip = swi::create_mip_default(&swi_result, nx, ny, nz);
+    let mip = swi::create_mip(&swi_result, &grid, swi::SwiParams::default().mip_window);
 
     let elapsed = start.elapsed();
 
@@ -707,15 +717,16 @@ fn test_bet() {
     let (nx, ny, nz) = data.dims;
     let (vsx, vsy, vsz) = data.voxel_size;
 
+    let grid = qsm_core::Grid::new(nx, ny, nz, vsx, vsy, vsz);
     let (predicted_mask, elapsed) = run_timed!("BET", bet::run_bet(
         &data.mag_echoes[0],
-        nx, ny, nz,
-        vsx, vsy, vsz,
+        &grid,
         0.5,   // fractional_intensity
         1.0,   // smoothness_factor
         0.0,   // gradient_threshold
         1000,  // iterations
         4,     // subdivisions
+        |_, _| {},
     ));
 
     let dice = common::dice_coefficient(&predicted_mask, &data.mask);
@@ -1174,16 +1185,17 @@ fn test_pipeline_lbv_tv() {
     // Step 2a: LBV — simulate WASM normalization: Hz→ppm, run algorithm, ppm→Hz
     println!("[INFO] Running LBV (with Hz→ppm normalization)...");
     let b0_ppm: Vec<f64> = b0_hz.iter().map(|&v| v * scale).collect();
+    let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
     let ((local_lbv_ppm, mask_lbv), elapsed_lbv) = run_timed!("LBV", bgremove::lbv::lbv(
-        &b0_ppm, &data.mask, nx, ny, nz, vsx, vsy, vsz,
-        1e-6, 500
+        &b0_ppm, &data.mask, &grid,
+        1e-6, 500, |_, _| {}
     ));
     let local_lbv_hz: Vec<f64> = local_lbv_ppm.iter().map(|&v| v / scale).collect();
 
     // Step 2b: V-SHARP — same normalization
     let radii: Vec<f64> = (1..=12).map(|r| r as f64).collect();
     let ((local_vsharp_ppm, mask_vsharp), elapsed_vsharp) = run_timed!("V-SHARP", bgremove::vsharp(
-        &b0_ppm, &data.mask, nx, ny, nz, vsx, vsy, vsz, &radii, 0.05
+        &b0_ppm, &data.mask, &grid, &radii, 0.05, |_, _| {}
     ));
     let local_vsharp_hz: Vec<f64> = local_vsharp_ppm.iter().map(|&v| v / scale).collect();
 
@@ -1275,34 +1287,37 @@ fn benchmark_all_algorithms() {
     println!("{:<15} {:>12} {:>10} {:>10} {:>10} {:>12}", "Method", "RMSE", "NRMSE", "Corr", "XSIM", "Time");
     println!("{}", "-".repeat(70));
 
+    let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
+
     // SHARP
     let ((result, _), elapsed) = run_timed!("SHARP", bgremove::sharp(
-        &data.fieldmap, &data.mask, nx, ny, nz, vsx, vsy, vsz, 6.0, 0.05
+        &data.fieldmap, &data.mask, &grid, 0.05, 6.0
     ));
     TestResult::new("SHARP", &result, &data.fieldmap_local, &data.mask, data.dims).print_with_time(elapsed);
 
     // V-SHARP
     let radii: Vec<f64> = (1..=12).map(|r| r as f64).collect();
     let ((result, _), elapsed) = run_timed!("V-SHARP", bgremove::vsharp(
-        &data.fieldmap, &data.mask, nx, ny, nz, vsx, vsy, vsz, &radii, 0.05
+        &data.fieldmap, &data.mask, &grid, &radii, 0.05, |_, _| {}
     ));
     TestResult::new("V-SHARP", &result, &data.fieldmap_local, &data.mask, data.dims).print_with_time(elapsed);
 
     // PDF (explicit maxit=100 for CI speed; adaptive default would be ~2626)
     let (result, elapsed) = run_timed!("PDF", bgremove::pdf(
-        &data.fieldmap, &data.mask, nx, ny, nz, vsx, vsy, vsz, data.b0_dir, 1e-5, 100
+        &data.fieldmap, &data.mask, &grid, data.b0_dir, 1e-5, 100, |_, _| {}
     ));
     TestResult::new("PDF", &result, &data.fieldmap_local, &data.mask, data.dims).print_with_time(elapsed);
 
     // iSMV
     let ((result, _), elapsed) = run_timed!("iSMV", bgremove::ismv(
-        &data.fieldmap, &data.mask, nx, ny, nz, vsx, vsy, vsz, 5.0, 1e-6, 50
+        &data.fieldmap, &data.mask, &grid, 5.0, 1e-6, 50, |_, _| {}
     ));
     TestResult::new("iSMV", &result, &data.fieldmap_local, &data.mask, data.dims).print_with_time(elapsed);
 
     // LBV (using defaults: tol=1e-6, adaptive max_iter)
-    let ((result, _), elapsed) = run_timed!("LBV", bgremove::lbv_default(
-        &data.fieldmap, &data.mask, nx, ny, nz, vsx, vsy, vsz
+    let lbv_max_iter = (3 * nx.max(ny).max(nz)).max(500);
+    let ((result, _), elapsed) = run_timed!("LBV", bgremove::lbv(
+        &data.fieldmap, &data.mask, &grid, 1e-6, lbv_max_iter, |_, _| {}
     ));
     TestResult::new("LBV", &result, &data.fieldmap_local, &data.mask, data.dims).print_with_time(elapsed);
 
@@ -1429,10 +1444,11 @@ fn test_all_combinations() {
     }
 
     let mut bfr_results: Vec<BfrResult> = Vec::new();
+    let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
 
     // SHARP
     let ((result, mask), elapsed) = run_timed!("SHARP", bgremove::sharp(
-        &data.fieldmap, &data.mask, nx, ny, nz, vsx, vsy, vsz, 6.0, 0.05
+        &data.fieldmap, &data.mask, &grid, 0.05, 6.0
     ));
     TestResult::new("SHARP", &result, &data.fieldmap_local, &data.mask, data.dims).print_with_time(elapsed);
     bfr_results.push(BfrResult { name: "SHARP".into(), local_field: result, mask, elapsed });
@@ -1440,35 +1456,37 @@ fn test_all_combinations() {
     // V-SHARP
     let radii: Vec<f64> = (1..=12).map(|r| r as f64).collect();
     let ((result, mask), elapsed) = run_timed!("V-SHARP", bgremove::vsharp(
-        &data.fieldmap, &data.mask, nx, ny, nz, vsx, vsy, vsz, &radii, 0.05
+        &data.fieldmap, &data.mask, &grid, &radii, 0.05, |_, _| {}
     ));
     TestResult::new("V-SHARP", &result, &data.fieldmap_local, &data.mask, data.dims).print_with_time(elapsed);
     bfr_results.push(BfrResult { name: "V-SHARP".into(), local_field: result, mask, elapsed });
 
     // PDF
     let (result, elapsed) = run_timed!("PDF", bgremove::pdf(
-        &data.fieldmap, &data.mask, nx, ny, nz, vsx, vsy, vsz, data.b0_dir, 1e-5, 100
+        &data.fieldmap, &data.mask, &grid, data.b0_dir, 1e-5, 100, |_, _| {}
     ));
     TestResult::new("PDF", &result, &data.fieldmap_local, &data.mask, data.dims).print_with_time(elapsed);
     bfr_results.push(BfrResult { name: "PDF".into(), local_field: result, mask: data.mask.clone(), elapsed });
 
     // iSMV
     let ((result, mask), elapsed) = run_timed!("iSMV", bgremove::ismv(
-        &data.fieldmap, &data.mask, nx, ny, nz, vsx, vsy, vsz, 5.0, 1e-6, 50
+        &data.fieldmap, &data.mask, &grid, 5.0, 1e-6, 50, |_, _| {}
     ));
     TestResult::new("iSMV", &result, &data.fieldmap_local, &data.mask, data.dims).print_with_time(elapsed);
     bfr_results.push(BfrResult { name: "iSMV".into(), local_field: result, mask, elapsed });
 
     // LBV
-    let ((result, mask), elapsed) = run_timed!("LBV", bgremove::lbv_default(
-        &data.fieldmap, &data.mask, nx, ny, nz, vsx, vsy, vsz
+    let lbv_max_iter = (3 * nx.max(ny).max(nz)).max(500);
+    let ((result, mask), elapsed) = run_timed!("LBV", bgremove::lbv(
+        &data.fieldmap, &data.mask, &grid, 1e-6, lbv_max_iter, |_, _| {}
     ));
     TestResult::new("LBV", &result, &data.fieldmap_local, &data.mask, data.dims).print_with_time(elapsed);
     bfr_results.push(BfrResult { name: "LBV".into(), local_field: result, mask, elapsed });
 
     // RESHARP
+    let resharp_params = ResharpParams { radius: 6.0, tik_reg: 1e-4, tol: 1e-6, max_iter: 200 };
     let ((result, mask), elapsed) = run_timed!("RESHARP", bgremove::resharp(
-        &data.fieldmap, &data.mask, nx, ny, nz, vsx, vsy, vsz, 6.0, 1e-4, 1e-6, 200
+        &data.fieldmap, &data.mask, &grid, &resharp_params, |_, _| {}
     ));
     TestResult::new("RESHARP", &result, &data.fieldmap_local, &data.mask, data.dims).print_with_time(elapsed);
     bfr_results.push(BfrResult { name: "RESHARP".into(), local_field: result, mask, elapsed });

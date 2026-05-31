@@ -20,9 +20,7 @@
 
 // Re-export combined algorithms from bgremove (where they belong architecturally)
 pub use crate::bgremove::iharperella::{
-    harperella, harperella_default, harperella_with_progress,
-    iharperella, iharperella_default, iharperella_with_progress,
-    iharperella_with_weights,
+    harperella, iharperella, iharperella_with_weights,
     HarperellaParams, IharperellaParams,
 };
 

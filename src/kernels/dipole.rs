@@ -8,6 +8,7 @@
 //! where B is the B0 field direction (typically [0, 0, 1]).
 
 use crate::fft::fftfreq;
+use crate::Grid;
 
 /// Generate dipole kernel in k-space
 ///
@@ -15,17 +16,17 @@ use crate::fft::fftfreq;
 /// centered at index (0, 0, 0) (not shifted).
 ///
 /// # Arguments
-/// * `nx`, `ny`, `nz` - Array dimensions
-/// * `vsx`, `vsy`, `vsz` - Voxel sizes in mm
+/// * `grid` - Volume grid (dimensions and voxel sizes)
 /// * `bdir` - B0 field direction as (bx, by, bz), default (0, 0, 1)
 ///
 /// # Returns
 /// Flattened dipole kernel array of size nx*ny*nz in C order
 pub fn dipole_kernel(
-    nx: usize, ny: usize, nz: usize,
-    vsx: f64, vsy: f64, vsz: f64,
+    grid: &Grid,
     bdir: (f64, f64, f64),
 ) -> Vec<f64> {
+    let (nx, ny, nz) = grid.dims;
+    let (vsx, vsy, vsz) = grid.voxel_size;
     let n_total = nx * ny * nz;
     let mut d = vec![0.0; n_total];
 
@@ -70,15 +71,6 @@ pub fn dipole_kernel(
     d
 }
 
-/// Generate dipole kernel with default B direction (0, 0, 1)
-pub fn dipole_kernel_default(
-    nx: usize, ny: usize, nz: usize,
-    vsx: f64, vsy: f64, vsz: f64,
-) -> Vec<f64> {
-    dipole_kernel(nx, ny, nz, vsx, vsy, vsz, (0.0, 0.0, 1.0))
-}
-
-
 // ============================================================================
 // F32 (Single Precision) Dipole Kernel Functions
 // ============================================================================
@@ -90,10 +82,11 @@ use crate::fft::fftfreq_f32;
 /// Creates the dipole kernel D(k) = 1/3 - (kz)²/|k|² (for B = [0,0,1])
 /// centered at index (0, 0, 0) (not shifted).
 pub fn dipole_kernel_f32(
-    nx: usize, ny: usize, nz: usize,
-    vsx: f32, vsy: f32, vsz: f32,
+    grid: &Grid,
     bdir: (f32, f32, f32),
 ) -> Vec<f32> {
+    let (nx, ny, nz) = grid.dims;
+    let (vsx, vsy, vsz) = (grid.vsx() as f32, grid.vsy() as f32, grid.vsz() as f32);
     let n_total = nx * ny * nz;
     let mut d = vec![0.0f32; n_total];
 
@@ -138,32 +131,28 @@ pub fn dipole_kernel_f32(
     d
 }
 
-/// Generate f32 dipole kernel with default B direction (0, 0, 1)
-pub fn dipole_kernel_default_f32(
-    nx: usize, ny: usize, nz: usize,
-    vsx: f32, vsy: f32, vsz: f32,
-) -> Vec<f32> {
-    dipole_kernel_f32(nx, ny, nz, vsx, vsy, vsz, (0.0, 0.0, 1.0))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    use crate::Grid;
+
+    fn grid(n: usize) -> Grid {
+        Grid::new(n, n, n, 1.0, 1.0, 1.0)
+    }
+
     #[test]
     fn test_dipole_kernel_dc() {
-        let d = dipole_kernel_default(4, 4, 4, 1.0, 1.0, 1.0);
-        // DC component should be 0
+        let d = dipole_kernel(&grid(4), (0.0, 0.0, 1.0));
         assert!(d[0].abs() < 1e-10, "DC component should be 0, got {}", d[0]);
     }
 
     #[test]
     fn test_dipole_kernel_range() {
-        let d = dipole_kernel_default(8, 8, 8, 1.0, 1.0, 1.0);
+        let d = dipole_kernel(&grid(8), (0.0, 0.0, 1.0));
 
-        // Dipole kernel should be in range [-2/3, 1/3]
         for (i, &val) in d.iter().enumerate() {
-            if i > 0 {  // Skip DC
+            if i > 0 {
                 assert!(val >= -2.0/3.0 - 1e-10 && val <= 1.0/3.0 + 1e-10,
                     "Dipole value {} out of range at index {}", val, i);
             }
@@ -172,9 +161,8 @@ mod tests {
 
     #[test]
     fn test_dipole_kernel_symmetry() {
-        // Dipole kernel should be symmetric
         let n = 8;
-        let d = dipole_kernel_default(n, n, n, 1.0, 1.0, 1.0);
+        let d = dipole_kernel(&grid(n), (0.0, 0.0, 1.0));
 
         // D(kx, ky, kz) should equal D(-kx, -ky, -kz)
         for i in 1..n/2 {

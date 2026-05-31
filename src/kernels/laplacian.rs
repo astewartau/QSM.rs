@@ -3,6 +3,8 @@
 //! Discrete 7-point stencil Laplacian kernel used for Laplacian-based
 //! phase unwrapping and regularization.
 
+use crate::Grid;
+
 /// Generate Laplacian kernel in image space
 ///
 /// Creates a 7-point stencil Laplacian centered at (0,0,0) for FFT compatibility.
@@ -10,17 +12,17 @@
 /// [1/dx²] at ±1 in x, [1/dy²] at ±1 in y, [1/dz²] at ±1 in z.
 ///
 /// # Arguments
-/// * `nx`, `ny`, `nz` - Array dimensions
-/// * `vsx`, `vsy`, `vsz` - Voxel sizes in mm
+/// * `grid` - Volume grid (dimensions and voxel sizes)
 /// * `negative` - If true, return negative Laplacian
 ///
 /// # Returns
 /// Flattened Laplacian kernel array of size nx*ny*nz in C order
 pub fn laplacian_kernel(
-    nx: usize, ny: usize, nz: usize,
-    vsx: f64, vsy: f64, vsz: f64,
+    grid: &Grid,
     negative: bool,
 ) -> Vec<f64> {
+    let (nx, ny, nz) = grid.dims;
+    let (vsx, vsy, vsz) = grid.voxel_size;
     let n_total = nx * ny * nz;
     let mut l = vec![0.0; n_total];
 
@@ -59,11 +61,8 @@ pub fn laplacian_kernel(
 }
 
 /// Generate negative Laplacian kernel (commonly used for gradient regularization)
-pub fn negative_laplacian_kernel(
-    nx: usize, ny: usize, nz: usize,
-    vsx: f64, vsy: f64, vsz: f64,
-) -> Vec<f64> {
-    laplacian_kernel(nx, ny, nz, vsx, vsy, vsz, true)
+pub fn negative_laplacian_kernel(grid: &Grid) -> Vec<f64> {
+    laplacian_kernel(grid, true)
 }
 
 
@@ -71,25 +70,27 @@ pub fn negative_laplacian_kernel(
 mod tests {
     use super::*;
 
+    use crate::Grid;
+
+    fn grid8() -> Grid { Grid::new(8, 8, 8, 1.0, 1.0, 1.0) }
+
     #[test]
     fn test_laplacian_kernel_sum() {
-        // Laplacian kernel should sum to 0 (for periodic BC)
-        let l = laplacian_kernel(8, 8, 8, 1.0, 1.0, 1.0, false);
+        let l = laplacian_kernel(&grid8(), false);
         let sum: f64 = l.iter().sum();
         assert!(sum.abs() < 1e-10, "Laplacian should sum to 0, got {}", sum);
     }
 
     #[test]
     fn test_laplacian_kernel_center() {
-        let l = laplacian_kernel(8, 8, 8, 1.0, 1.0, 1.0, false);
-        // With voxel size 1, center should be -6
+        let l = laplacian_kernel(&grid8(), false);
         assert!((l[0] - (-6.0)).abs() < 1e-10, "Center should be -6, got {}", l[0]);
     }
 
     #[test]
     fn test_negative_laplacian() {
-        let l_pos = laplacian_kernel(8, 8, 8, 1.0, 1.0, 1.0, false);
-        let l_neg = laplacian_kernel(8, 8, 8, 1.0, 1.0, 1.0, true);
+        let l_pos = laplacian_kernel(&grid8(), false);
+        let l_neg = laplacian_kernel(&grid8(), true);
 
         for (p, n) in l_pos.iter().zip(l_neg.iter()) {
             assert!((p + n).abs() < 1e-10, "Negative should be opposite sign");

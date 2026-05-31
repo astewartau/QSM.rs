@@ -2,6 +2,8 @@
 //!
 //! Provides functions for creating, eroding, dilating, and applying masks on 3D volumes.
 
+use crate::Grid;
+
 /// Create a binary sphere mask on a 3D volume
 ///
 /// Generates a mask where voxels within the specified radius of the center
@@ -9,17 +11,18 @@
 /// to match NIfTI convention: index = x + y*nx + z*nx*ny.
 ///
 /// # Arguments
-/// * `nx`, `ny`, `nz` - Volume dimensions
+/// * `grid` - Volume grid (dimensions and voxel sizes)
 /// * `center_x`, `center_y`, `center_z` - Sphere center in voxel coordinates
 /// * `radius` - Sphere radius in voxels
 ///
 /// # Returns
 /// Flattened binary mask of length nx*ny*nz
 pub fn create_sphere_mask(
-    nx: usize, ny: usize, nz: usize,
+    grid: &Grid,
     center_x: f64, center_y: f64, center_z: f64,
     radius: f64,
 ) -> Vec<u8> {
+    let (nx, ny, nz) = grid.dims;
     let mut mask = vec![0u8; nx * ny * nz];
     let r2 = radius * radius;
 
@@ -53,7 +56,8 @@ pub fn apply_mask_zero(data: &mut [f64], mask: &[u8]) {
 ///
 /// Each iteration removes voxels that have any 6-connected neighbor equal to 0
 /// or that sit on the volume boundary.
-pub fn erode_mask(mask: &[u8], nx: usize, ny: usize, nz: usize, iterations: usize) -> Vec<u8> {
+pub fn erode_mask(mask: &[u8], grid: &Grid, iterations: usize) -> Vec<u8> {
+    let (nx, ny, nz) = grid.dims;
     let mut current = mask.to_vec();
     for _ in 0..iterations {
         let mut eroded = current.clone();
@@ -90,7 +94,8 @@ pub fn erode_mask(mask: &[u8], nx: usize, ny: usize, nz: usize, iterations: usiz
 /// Dilate a binary mask by expanding into neighboring voxels (6-connectivity).
 ///
 /// Each iteration adds voxels that have any 6-connected neighbor equal to 1.
-pub fn dilate_mask(mask: &[u8], nx: usize, ny: usize, nz: usize, iterations: usize) -> Vec<u8> {
+pub fn dilate_mask(mask: &[u8], grid: &Grid, iterations: usize) -> Vec<u8> {
+    let (nx, ny, nz) = grid.dims;
     let mut current = mask.to_vec();
     for _ in 0..iterations {
         let mut dilated = current.clone();
@@ -122,9 +127,13 @@ pub fn dilate_mask(mask: &[u8], nx: usize, ny: usize, nz: usize, iterations: usi
 mod tests {
     use super::*;
 
+    fn grid(nx: usize, ny: usize, nz: usize) -> Grid {
+        Grid::new(nx, ny, nz, 1.0, 1.0, 1.0)
+    }
+
     #[test]
     fn test_sphere_mask_basic() {
-        let mask = create_sphere_mask(10, 10, 10, 5.0, 5.0, 5.0, 3.0);
+        let mask = create_sphere_mask(&grid(10, 10, 10), 5.0, 5.0, 5.0, 3.0);
         assert_eq!(mask.len(), 1000);
 
         // Center voxel should be inside
@@ -140,7 +149,7 @@ mod tests {
 
     #[test]
     fn test_sphere_mask_non_cubic() {
-        let mask = create_sphere_mask(20, 10, 5, 10.0, 5.0, 2.5, 2.0);
+        let mask = create_sphere_mask(&grid(20, 10, 5), 10.0, 5.0, 2.5, 2.0);
         assert_eq!(mask.len(), 1000);
 
         // Center should be inside
@@ -149,7 +158,7 @@ mod tests {
 
     #[test]
     fn test_sphere_mask_zero_radius() {
-        let mask = create_sphere_mask(5, 5, 5, 2.0, 2.0, 2.0, 0.0);
+        let mask = create_sphere_mask(&grid(5, 5, 5), 2.0, 2.0, 2.0, 0.0);
         // Only the exact center voxel (distance 0 <= 0)
         let count: usize = mask.iter().map(|&m| m as usize).sum();
         assert_eq!(count, 1);
@@ -167,7 +176,7 @@ mod tests {
     fn test_erode_mask_cube() {
         // 3x3x3 all-ones mask: erosion should remove everything (all on boundary)
         let mask = vec![1u8; 27];
-        let result = erode_mask(&mask, 3, 3, 3, 1);
+        let result = erode_mask(&mask, &grid(3, 3, 3), 1);
         assert_eq!(result.iter().filter(|&&v| v == 1).count(), 1); // only center
     }
 
@@ -176,7 +185,7 @@ mod tests {
         // Single voxel in center of 5x5x5: dilation should add 6 neighbors
         let mut mask = vec![0u8; 125];
         mask[2 + 2 * 5 + 2 * 25] = 1; // center
-        let result = dilate_mask(&mask, 5, 5, 5, 1);
+        let result = dilate_mask(&mask, &grid(5, 5, 5), 1);
         assert_eq!(result.iter().filter(|&&v| v == 1).count(), 7); // center + 6 neighbors
     }
 }

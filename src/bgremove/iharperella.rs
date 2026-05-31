@@ -2,16 +2,16 @@
 //!
 //! Both algorithms simultaneously unwrap phase and remove background field by
 //! estimating the phase Laplacian outside the brain. The background phase is
-//! harmonic inside the brain (∇²φ_bg = 0), so the wrapped Laplacian inside
+//! harmonic inside the brain (nabla^2 phi_bg = 0), so the wrapped Laplacian inside
 //! the brain contains only tissue sources.
 //!
 //! **HARPERELLA** estimates the exterior Laplacian by making the SMV of the total
 //! Laplacian uniform across the FOV (Eq [3] in the paper):
-//!   min ||S(∇²φ_E) + S(∇²φ_brain) - δ||₂
+//!   min ||S(nabla^2 phi_E) + S(nabla^2 phi_brain) - delta||_2
 //!
 //! **iHARPERELLA** instead directly minimizes the weighted resulting phase
 //! (Eq [3] in the ISMRM abstract):
-//!   min ||W · inv_lap(∇²φ_brain + ∇²φ_out)||₂
+//!   min ||W * inv_lap(nabla^2 phi_brain + nabla^2 phi_out)||_2
 //! providing more robust low-frequency background suppression.
 //!
 //! References:
@@ -23,6 +23,7 @@
 //!   Proc. ISMRM 23, p.3313.
 
 use num_complex::Complex64;
+use crate::Grid;
 use crate::fft::{fft3d, ifft3d};
 use crate::kernels::smv::smv_kernel;
 use crate::unwrap::laplacian::wrapped_laplacian_periodic;
@@ -63,52 +64,28 @@ impl Default for HarperellaParams {
 /// # Arguments
 /// * `phase` - Wrapped phase in radians (nx * ny * nz)
 /// * `mask` - Binary brain mask (nx * ny * nz), 1 = inside
-/// * `nx`, `ny`, `nz` - Array dimensions
-/// * `vsx`, `vsy`, `vsz` - Voxel sizes in mm
-/// * `radius` - SMV kernel radius in mm
-/// * `max_iter` - Maximum CG iterations
+/// * `grid` - Volume dimensions and voxel sizes
+/// * `params` - Algorithm parameters
+/// * `progress` - Progress callback (iteration, max_iter)
 ///
 /// # Returns
 /// (tissue_phase, mask) — unwrapped background-free tissue phase and brain mask
 pub fn harperella(
     phase: &[f64], mask: &[u8],
-    nx: usize, ny: usize, nz: usize,
-    vsx: f64, vsy: f64, vsz: f64,
-    radius: f64, max_iter: usize,
+    grid: &Grid,
+    params: &HarperellaParams,
+    mut progress: impl FnMut(usize, usize),
 ) -> (Vec<f64>, Vec<u8>) {
-    harperella_with_progress(phase, mask, nx, ny, nz, vsx, vsy, vsz,
-                             radius, max_iter, 1e-6, |_, _| {})
-}
-
-/// HARPERELLA with default parameters
-pub fn harperella_default(
-    phase: &[f64], mask: &[u8],
-    nx: usize, ny: usize, nz: usize,
-    vsx: f64, vsy: f64, vsz: f64,
-) -> (Vec<f64>, Vec<u8>) {
-    let p = HarperellaParams::default();
-    harperella_with_progress(phase, mask, nx, ny, nz, vsx, vsy, vsz,
-                             p.radius, p.max_iter, p.tol, |_, _| {})
-}
-
-/// HARPERELLA with progress callback
-pub fn harperella_with_progress<F>(
-    phase: &[f64], mask: &[u8],
-    nx: usize, ny: usize, nz: usize,
-    vsx: f64, vsy: f64, vsz: f64,
-    radius: f64, max_iter: usize, tol: f64,
-    mut callback: F,
-) -> (Vec<f64>, Vec<u8>)
-where F: FnMut(usize, usize),
-{
+    let (nx, ny, nz) = grid.dims;
+    let (vsx, vsy, vsz) = grid.voxel_size;
     let n_total = nx * ny * nz;
     let (lap_brain, interior_mask, exterior_mask) =
         prepare_laplacian(phase, mask, nx, ny, nz, vsx, vsy, vsz);
 
     // SMV kernel
-    let s_fft = compute_smv_fft(nx, ny, nz, vsx, vsy, vsz, radius);
+    let s_fft = compute_smv_fft(nx, ny, nz, vsx, vsy, vsz, params.radius);
 
-    // Compute δ = mean of S(∇²φ) over trustable interior I (Eq [4])
+    // Compute delta = mean of S(nabla^2 phi) over trustable interior I (Eq [4])
     let smv_lap = apply_smv(&lap_brain, &s_fft, nx, ny, nz);
     let mut delta_sum = 0.0;
     let mut delta_count = 0usize;
@@ -120,14 +97,14 @@ where F: FnMut(usize, usize),
     }
     let delta_val = if delta_count > 0 { delta_sum / delta_count as f64 } else { 0.0 };
 
-    // Solve: min ||S(∇²φ_E) + S(∇²φ_brain) - δ||₂  (Eq [3])
-    // Normal equations: ext * S(S(ext * x)) = ext * S(δ - S(lap_brain))
+    // Solve: min ||S(nabla^2 phi_E) + S(nabla^2 phi_brain) - delta||_2  (Eq [3])
+    // Normal equations: ext * S(S(ext * x)) = ext * S(delta - S(lap_brain))
     let rhs: Vec<f64> = (0..n_total).map(|i| delta_val - smv_lap[i]).collect();
     let smv_rhs = apply_smv(&rhs, &s_fft, nx, ny, nz);
     let atb: Vec<f64> = (0..n_total).map(|i| exterior_mask[i] * smv_rhs[i]).collect();
 
     let lap_ext = cg_solve_masked(
-        &atb, &exterior_mask, max_iter, tol, &mut callback,
+        &atb, &exterior_mask, params.max_iter, params.tol, &mut progress,
         |x| {
             let masked: Vec<f64> = (0..n_total).map(|i| exterior_mask[i] * x[i]).collect();
             let sx = apply_smv(&masked, &s_fft, nx, ny, nz);
@@ -156,56 +133,52 @@ where F: FnMut(usize, usize),
 /// More robust low-frequency background suppression than HARPERELLA.
 /// Estimates exterior Laplacian by directly minimizing the weighted resulting
 /// phase rather than enforcing SMV uniformity.
+///
+/// # Arguments
+/// * `phase` - Wrapped phase in radians (nx * ny * nz)
+/// * `mask` - Binary brain mask (nx * ny * nz), 1 = inside
+/// * `grid` - Volume dimensions and voxel sizes
+/// * `params` - Algorithm parameters (radius is unused in iHARPERELLA)
+/// * `progress` - Progress callback (iteration, max_iter)
+///
+/// # Returns
+/// (tissue_phase, mask)
 pub fn iharperella(
     phase: &[f64], mask: &[u8],
-    nx: usize, ny: usize, nz: usize,
-    vsx: f64, vsy: f64, vsz: f64,
-    radius: f64, max_iter: usize,
+    grid: &Grid,
+    params: &HarperellaParams,
+    progress: impl FnMut(usize, usize),
 ) -> (Vec<f64>, Vec<u8>) {
-    iharperella_with_progress(phase, mask, nx, ny, nz, vsx, vsy, vsz,
-                              radius, max_iter, 1e-6, |_, _| {})
-}
-
-/// iHARPERELLA with default parameters
-pub fn iharperella_default(
-    phase: &[f64], mask: &[u8],
-    nx: usize, ny: usize, nz: usize,
-    vsx: f64, vsy: f64, vsz: f64,
-) -> (Vec<f64>, Vec<u8>) {
-    let p = HarperellaParams::default();
-    iharperella_with_progress(phase, mask, nx, ny, nz, vsx, vsy, vsz,
-                              p.radius, p.max_iter, p.tol, |_, _| {})
-}
-
-/// iHARPERELLA with progress callback
-pub fn iharperella_with_progress<F>(
-    phase: &[f64], mask: &[u8],
-    nx: usize, ny: usize, nz: usize,
-    vsx: f64, vsy: f64, vsz: f64,
-    _radius: f64, max_iter: usize, tol: f64,
-    callback: F,
-) -> (Vec<f64>, Vec<u8>)
-where F: FnMut(usize, usize),
-{
     let w_brain: Vec<f64> = mask.iter().map(|&m| m as f64).collect();
-    iharperella_with_weights(phase, mask, nx, ny, nz, vsx, vsy, vsz,
-                             max_iter, tol, &w_brain, callback)
+    iharperella_with_weights(phase, mask, grid,
+                             params.max_iter, params.tol, &w_brain, progress)
 }
 
 /// iHARPERELLA with custom W_Brain weighting
 ///
 /// Allows specifying an arbitrary weighting function for the phase minimization.
 /// The weighting should be non-negative and defined over the full volume (nx*ny*nz).
-pub fn iharperella_with_weights<F>(
+///
+/// # Arguments
+/// * `phase` - Wrapped phase in radians (nx * ny * nz)
+/// * `mask` - Binary brain mask (nx * ny * nz), 1 = inside
+/// * `grid` - Volume dimensions and voxel sizes
+/// * `max_iter` - Maximum CG iterations
+/// * `tol` - CG convergence tolerance
+/// * `w_brain` - Weighting function for phase minimization
+/// * `progress` - Progress callback (iteration, max_iter)
+///
+/// # Returns
+/// (tissue_phase, mask)
+pub fn iharperella_with_weights(
     phase: &[f64], mask: &[u8],
-    nx: usize, ny: usize, nz: usize,
-    vsx: f64, vsy: f64, vsz: f64,
+    grid: &Grid,
     max_iter: usize, tol: f64,
     w_brain: &[f64],
-    mut callback: F,
-) -> (Vec<f64>, Vec<u8>)
-where F: FnMut(usize, usize),
-{
+    mut progress: impl FnMut(usize, usize),
+) -> (Vec<f64>, Vec<u8>) {
+    let (nx, ny, nz) = grid.dims;
+    let (vsx, vsy, vsz) = grid.voxel_size;
     let n_total = nx * ny * nz;
     let (lap_brain, _interior_mask, exterior_mask) =
         prepare_laplacian(phase, mask, nx, ny, nz, vsx, vsy, vsz);
@@ -213,17 +186,17 @@ where F: FnMut(usize, usize),
     // Pre-compute Laplacian eigenvalues for inverse Laplacian
     let lap_eig = compute_laplacian_eigenvalues(nx, ny, nz, vsx, vsy, vsz);
 
-    // Solve: min ||W · inv_lap(∇²φ_brain + ∇²φ_out · (1-M))||₂  (Eq [3])
+    // Solve: min ||W * inv_lap(nabla^2 phi_brain + nabla^2 phi_out * (1-M))||_2  (Eq [3])
     //
-    // A(x) = W · inv_lap(x · (1-M))
-    // A'(y) = (1-M) · inv_lap(W · y)    [inv_lap is self-adjoint]
-    // b = -W · inv_lap(∇²φ_brain)
+    // A(x) = W * inv_lap(x * (1-M))
+    // A'(y) = (1-M) * inv_lap(W * y)    [inv_lap is self-adjoint]
+    // b = -W * inv_lap(nabla^2 phi_brain)
     //
     // Normal equations: A'A(x) = A'(-b)
-    // (1-M) · inv_lap(W² · inv_lap((1-M) · x)) = (1-M) · inv_lap(W² · inv_lap(∇²φ_brain))
+    // (1-M) * inv_lap(W^2 * inv_lap((1-M) * x)) = (1-M) * inv_lap(W^2 * inv_lap(nabla^2 phi_brain))
 
-    // Compute -A'c = -(1-M) · inv_lap(W² · inv_lap(∇²φ_brain))
-    // The objective is min ||Ax + c||₂ where c = W · inv_lap(∇²φ_brain · M)
+    // Compute -A'c = -(1-M) * inv_lap(W^2 * inv_lap(nabla^2 phi_brain))
+    // The objective is min ||Ax + c||_2 where c = W * inv_lap(nabla^2 phi_brain * M)
     // Normal equations: A'Ax = -A'c
     let phase_from_brain = apply_inv_lap(&lap_brain, &lap_eig, nx, ny, nz);
     let w2_phase: Vec<f64> = (0..n_total).map(|i| w_brain[i] * w_brain[i] * phase_from_brain[i]).collect();
@@ -231,9 +204,9 @@ where F: FnMut(usize, usize),
     let atb: Vec<f64> = (0..n_total).map(|i| -exterior_mask[i] * atb_raw[i]).collect();
 
     let lap_ext = cg_solve_masked(
-        &atb, &exterior_mask, max_iter, tol, &mut callback,
+        &atb, &exterior_mask, max_iter, tol, &mut progress,
         |x| {
-            // A'A(x) = (1-M) · inv_lap(W² · inv_lap((1-M) · x))
+            // A'A(x) = (1-M) * inv_lap(W^2 * inv_lap((1-M) * x))
             let masked: Vec<f64> = (0..n_total).map(|i| exterior_mask[i] * x[i]).collect();
             let inv1 = apply_inv_lap(&masked, &lap_eig, nx, ny, nz);
             let w2_inv1: Vec<f64> = (0..n_total).map(|i| w_brain[i] * w_brain[i] * inv1[i]).collect();
@@ -298,7 +271,8 @@ fn compute_smv_fft(
     nx: usize, ny: usize, nz: usize,
     vsx: f64, vsy: f64, vsz: f64, radius: f64,
 ) -> Vec<f64> {
-    let s_kernel = smv_kernel(nx, ny, nz, vsx, vsy, vsz, radius);
+    let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
+    let s_kernel = smv_kernel(&grid, radius);
     let mut c: Vec<Complex64> = s_kernel.iter()
         .map(|&x| Complex64::new(x, 0.0)).collect();
     fft3d(&mut c, nx, ny, nz);
@@ -361,7 +335,7 @@ fn apply_inv_lap(f: &[f64], eig: &[f64], nx: usize, ny: usize, nz: usize) -> Vec
     c.iter().map(|v| v.re).collect()
 }
 
-/// Solve Poisson equation via FFT: ∇²u = f → u
+/// Solve Poisson equation via FFT: nabla^2 u = f -> u
 fn solve_poisson(
     f: &[f64], nx: usize, ny: usize, nz: usize,
     vsx: f64, vsy: f64, vsz: f64,
@@ -426,7 +400,9 @@ mod tests {
         let n = 16;
         let phase = vec![0.0; n * n * n];
         let mask = vec![1u8; n * n * n];
-        let (tissue, _) = harperella(&phase, &mask, n, n, n, 1.0, 1.0, 1.0, 2.0, 10);
+        let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
+        let params = HarperellaParams { radius: 2.0, max_iter: 10, tol: 1e-6 };
+        let (tissue, _) = harperella(&phase, &mask, &grid, &params, |_, _| {});
         for &val in tissue.iter() {
             assert!(val.abs() < 1e-8, "Zero phase should give zero tissue phase, got {}", val);
         }
@@ -437,7 +413,9 @@ mod tests {
         let n = 16;
         let phase: Vec<f64> = (0..n*n*n).map(|i| wrap((i as f64) * 0.1)).collect();
         let mask = vec![1u8; n * n * n];
-        let (tissue, _) = harperella(&phase, &mask, n, n, n, 1.0, 1.0, 1.0, 2.0, 10);
+        let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
+        let params = HarperellaParams { radius: 2.0, max_iter: 10, tol: 1e-6 };
+        let (tissue, _) = harperella(&phase, &mask, &grid, &params, |_, _| {});
         for (i, &val) in tissue.iter().enumerate() {
             assert!(val.is_finite(), "Tissue phase should be finite at index {}", i);
         }
@@ -448,7 +426,9 @@ mod tests {
         let n = 16;
         let phase = vec![0.0; n * n * n];
         let mask = vec![1u8; n * n * n];
-        let (tissue, _) = iharperella(&phase, &mask, n, n, n, 1.0, 1.0, 1.0, 2.0, 10);
+        let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
+        let params = HarperellaParams { radius: 2.0, max_iter: 10, tol: 1e-6 };
+        let (tissue, _) = iharperella(&phase, &mask, &grid, &params, |_, _| {});
         for &val in tissue.iter() {
             assert!(val.abs() < 1e-8, "Zero phase should give zero tissue phase, got {}", val);
         }
@@ -459,7 +439,9 @@ mod tests {
         let n = 16;
         let phase: Vec<f64> = (0..n*n*n).map(|i| wrap((i as f64) * 0.1)).collect();
         let mask = vec![1u8; n * n * n];
-        let (tissue, _) = iharperella(&phase, &mask, n, n, n, 1.0, 1.0, 1.0, 2.0, 10);
+        let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
+        let params = HarperellaParams { radius: 2.0, max_iter: 10, tol: 1e-6 };
+        let (tissue, _) = iharperella(&phase, &mask, &grid, &params, |_, _| {});
         for (i, &val) in tissue.iter().enumerate() {
             assert!(val.is_finite(), "Tissue phase should be finite at index {}", i);
         }
