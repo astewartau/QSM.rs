@@ -18,13 +18,9 @@
 //! - HARPERELLA: SMV-based exterior Laplacian estimation (Li et al., 2014)
 //! - iHARPERELLA: Phase-domain exterior estimation with improved low-freq suppression (Li et al., 2015)
 
-// Combined algorithms
-pub mod iharperella;
-
-pub use iharperella::{
-    harperella, harperella_default, harperella_with_progress,
-    iharperella, iharperella_default, iharperella_with_progress,
-    iharperella_with_weights,
+// Re-export combined algorithms from bgremove (where they belong architecturally)
+pub use crate::bgremove::iharperella::{
+    harperella, iharperella, iharperella_with_weights,
     HarperellaParams, IharperellaParams,
 };
 

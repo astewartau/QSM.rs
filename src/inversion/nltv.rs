@@ -4,7 +4,7 @@
 //! which produces sharper edges and better preserves fine details.
 //!
 //! The method solves:
-//! min_x ||Dx - f||₂² + λ Σ w_i |∇x|_i
+//! min_x ||Dx - f||_2^2 + lambda * sum w_i |grad(x)|_i
 //!
 //! where weights w_i are iteratively updated based on the current solution.
 //!
@@ -15,24 +15,10 @@
 //!
 //! Reference implementation: https://github.com/kamesy/QSM.jl
 
-use num_complex::Complex64;
-use crate::fft::Fft3dWorkspace;
-use crate::kernels::dipole::dipole_kernel;
-use crate::kernels::laplacian::laplacian_kernel;
-use crate::utils::gradient::{bdiv_inplace, fgrad_inplace};
-
-/// Weighted soft thresholding operator
-#[inline]
-fn weighted_shrink(x: f64, threshold: f64, weight: f64) -> f64 {
-    let t = threshold * weight;
-    if x > t {
-        x - t
-    } else if x < -t {
-        x + t
-    } else {
-        0.0
-    }
-}
+use crate::utils::gradient::fgrad_inplace;
+use crate::utils::{weighted_shrink, apply_mask_zero};
+use crate::Grid;
+use super::admm::{AdmmBuffers, admm_step, prepare_admm_spectral};
 
 /// NLTV algorithm parameters
 #[derive(Clone, Debug)]
@@ -66,218 +52,66 @@ impl Default for NltvParams {
 /// # Arguments
 /// * `local_field` - Local field values (nx * ny * nz)
 /// * `mask` - Binary mask (nx * ny * nz), 1 = inside ROI
-/// * `nx`, `ny`, `nz` - Array dimensions
-/// * `vsx`, `vsy`, `vsz` - Voxel sizes in mm
+/// * `grid` - Volume grid (dimensions and voxel sizes)
 /// * `bdir` - B0 field direction
-/// * `lambda` - Regularization parameter (typically 1e-3)
-/// * `mu` - Reweighting parameter for nonlinearity (typically 1.0)
-/// * `tol` - Convergence tolerance
-/// * `max_iter` - Maximum ADMM iterations
-/// * `newton_iter` - Reweighting updates (inner Newton-like iterations)
+/// * `params` - NLTV parameters
+/// * `progress` - Progress callback `(iteration, total_iterations)`
 ///
 /// # Returns
 /// Susceptibility map
 pub fn nltv(
     local_field: &[f64],
     mask: &[u8],
-    nx: usize, ny: usize, nz: usize,
-    vsx: f64, vsy: f64, vsz: f64,
+    grid: &Grid,
     bdir: (f64, f64, f64),
-    lambda: f64,
-    mu: f64,
-    tol: f64,
-    max_iter: usize,
-    newton_iter: usize,
+    params: &NltvParams,
+    mut progress: impl FnMut(usize, usize),
 ) -> Vec<f64> {
-    nltv_with_progress(
-        local_field, mask, nx, ny, nz, vsx, vsy, vsz,
-        bdir, lambda, mu, tol, max_iter, newton_iter,
-        |_, _| {} // no-op progress callback
-    )
-}
-
-/// NLTV with progress callback
-pub fn nltv_with_progress<F>(
-    local_field: &[f64],
-    mask: &[u8],
-    nx: usize, ny: usize, nz: usize,
-    vsx: f64, vsy: f64, vsz: f64,
-    bdir: (f64, f64, f64),
-    lambda: f64,
-    mu: f64,
-    tol: f64,
-    max_iter: usize,
-    newton_iter: usize,
-    mut progress_callback: F,
-) -> Vec<f64>
-where
-    F: FnMut(usize, usize),
-{
-    let n_total = nx * ny * nz;
+    let n_total = grid.n_total();
     let eps = 1e-6; // Small constant to avoid division by zero
 
-    // ========================================================================
-    // Pre-compute kernels (done once)
-    // ========================================================================
-
-    // Create FFT workspace (caches plans and scratch buffers for reuse)
-    let mut fft_ws = Fft3dWorkspace::new(nx, ny, nz);
-
-    let d_kernel = dipole_kernel(nx, ny, nz, vsx, vsy, vsz, bdir);
-    let l_kernel = laplacian_kernel(nx, ny, nz, vsx, vsy, vsz, true);
-
-    // FFT of Laplacian kernel
-    let mut l_complex: Vec<Complex64> = l_kernel.iter()
-        .map(|&x| Complex64::new(x, 0.0))
-        .collect();
-    fft_ws.fft3d(&mut l_complex);
-
     // Compute rho adaptively (for ADMM)
-    let rho = 100.0 * lambda;
+    let rho = 100.0 * params.lambda;
 
-    // Pre-compute inverse of (D^H D + ρ L)
-    let mut inv_a: Vec<f64> = vec![0.0; n_total];
-    for i in 0..n_total {
-        let a = d_kernel[i] * d_kernel[i] + rho * l_complex[i].re;
-        inv_a[i] = if a.abs() > 1e-20 { 1.0 / a } else { 0.0 };
-    }
+    // Pre-compute spectral operators
+    let (mut fft_ws, inv_a, f_hat) = prepare_admm_spectral(local_field, grid, bdir, rho);
 
-    // Pre-compute D^H * FFT(f)
-    let f_hat = &mut l_complex;
-    for i in 0..n_total {
-        f_hat[i] = Complex64::new(local_field[i], 0.0);
-    }
-    fft_ws.fft3d(f_hat);
-    for i in 0..n_total {
-        f_hat[i] = f_hat[i] * d_kernel[i] * inv_a[i];
-    }
-
-    // ========================================================================
-    // Pre-allocate working buffers
-    // ========================================================================
-
-    let mut x = vec![0.0; n_total];
-    let mut x_prev = vec![0.0; n_total];
-
-    // Dual variables
-    let mut ux = vec![0.0; n_total];
-    let mut uy = vec![0.0; n_total];
-    let mut uz = vec![0.0; n_total];
-
-    // Gradient buffers
-    let mut gx = vec![0.0; n_total];
-    let mut gy = vec![0.0; n_total];
-    let mut gz = vec![0.0; n_total];
-
-    // Divergence buffer
-    let mut div_d = vec![0.0; n_total];
-
-    // Complex FFT buffer
-    let mut work_complex = vec![Complex64::new(0.0, 0.0); n_total];
-
-    // Adaptive weights for nonlinear term
+    // Pre-allocate working buffers and run ADMM iterations
+    let mut buf = AdmmBuffers::new(n_total);
     let mut weights = vec![1.0; n_total];
 
-    let total_iter = max_iter * newton_iter;
+    let total_iter = params.max_iter * params.newton_iter;
     let mut current_iter = 0;
 
-    // ========================================================================
     // Outer loop: Newton-like reweighting
-    // ========================================================================
-    for _newton in 0..newton_iter {
-        let lambda_over_rho = lambda / rho;
+    for _newton in 0..params.newton_iter {
+        let lambda_over_rho = params.lambda / rho;
 
-        // ====================================================================
         // Inner loop: ADMM with current weights
-        // ====================================================================
-        for _iter in 0..max_iter {
+        for _iter in 0..params.max_iter {
             current_iter += 1;
-            progress_callback(current_iter, total_iter);
+            progress(current_iter, total_iter);
 
-            // Swap x and x_prev
-            std::mem::swap(&mut x, &mut x_prev);
+            let converged = admm_step(
+                &mut buf, &mut fft_ws, &f_hat, &inv_a, rho, grid, params.tol,
+                |vx, vy, vz, i| (
+                    weighted_shrink(vx, lambda_over_rho, weights[i]),
+                    weighted_shrink(vy, lambda_over_rho, weights[i]),
+                    weighted_shrink(vz, lambda_over_rho, weights[i]),
+                ),
+            );
 
-            // ================================================================
-            // x-subproblem
-            // ================================================================
-            bdiv_inplace(&mut div_d, &gx, &gy, &gz, nx, ny, nz, vsx, vsy, vsz);
-
-            for i in 0..n_total {
-                work_complex[i] = Complex64::new(div_d[i], 0.0);
-            }
-            fft_ws.fft3d(&mut work_complex);
-
-            // x_hat = f_hat - rho * FFT(div) * inv_a
-            // Note: bdiv computes positive divergence ∇·, but the adjoint ∇ᵀ = -∇·,
-            // so we subtract (see Eq. [7] in Kames et al. 2018).
-            for i in 0..n_total {
-                work_complex[i] = f_hat[i] - rho * work_complex[i] * inv_a[i];
-            }
-
-            fft_ws.ifft3d(&mut work_complex);
-            for i in 0..n_total {
-                x[i] = work_complex[i].re;
-            }
-
-            // ================================================================
-            // Convergence check
-            // ================================================================
-            let mut norm_diff_sq = 0.0;
-            let mut norm_x_sq = 0.0;
-            for i in 0..n_total {
-                let diff = x[i] - x_prev[i];
-                norm_diff_sq += diff * diff;
-                norm_x_sq += x[i] * x[i];
-            }
-
-            let rel_change = norm_diff_sq.sqrt() / (norm_x_sq.sqrt() + 1e-20);
-            if rel_change < tol {
+            if converged {
                 break;
-            }
-
-            // ================================================================
-            // z-subproblem + u-update with adaptive weights
-            // ================================================================
-            fgrad_inplace(&mut gx, &mut gy, &mut gz, &x, nx, ny, nz, vsx, vsy, vsz);
-
-            for i in 0..n_total {
-                let grad_x = gx[i];
-                let grad_y = gy[i];
-                let grad_z = gz[i];
-
-                let vx = grad_x + ux[i];
-                let vy = grad_y + uy[i];
-                let vz = grad_z + uz[i];
-
-                // Weighted soft thresholding
-                let zx_i = weighted_shrink(vx, lambda_over_rho, weights[i]);
-                let zy_i = weighted_shrink(vy, lambda_over_rho, weights[i]);
-                let zz_i = weighted_shrink(vz, lambda_over_rho, weights[i]);
-
-                // u update
-                ux[i] = vx - zx_i;
-                uy[i] = vy - zy_i;
-                uz[i] = vz - zz_i;
-
-                // Store (z - u_new) for next iteration's div
-                gx[i] = 2.0 * zx_i - vx;
-                gy[i] = 2.0 * zy_i - vy;
-                gz[i] = 2.0 * zz_i - vz;
             }
         }
 
-        // ====================================================================
-        // Update weights based on current gradient magnitude (Newton update)
-        // ====================================================================
-        fgrad_inplace(&mut gx, &mut gy, &mut gz, &x, nx, ny, nz, vsx, vsy, vsz);
+        // Update weights based on current gradient magnitude
+        fgrad_inplace(&mut buf.gx, &mut buf.gy, &mut buf.gz, &buf.x, grid);
 
         for i in 0..n_total {
-            // Gradient magnitude
-            let grad_mag = (gx[i] * gx[i] + gy[i] * gy[i] + gz[i] * gz[i]).sqrt();
-
-            // Reweighting: w = 1 / (|∇x| + eps)^(1-q) where q is close to 1 for L1
-            // Using mu to control nonlinearity: w = 1 / (|∇x| + mu*eps)
-            weights[i] = 1.0 / (grad_mag + mu * eps);
+            let grad_mag = (buf.gx[i] * buf.gx[i] + buf.gy[i] * buf.gy[i] + buf.gz[i] * buf.gz[i]).sqrt();
+            weights[i] = 1.0 / (grad_mag + params.mu * eps);
         }
 
         // Normalize weights to prevent explosion
@@ -289,48 +123,25 @@ where
         }
     }
 
-    // Apply mask
-    for i in 0..n_total {
-        if mask[i] == 0 {
-            x[i] = 0.0;
-        }
-    }
+    apply_mask_zero(&mut buf.x, mask);
 
-    x
-}
-
-/// NLTV with default parameters (matches QSM.jl nltv.jl defaults)
-pub fn nltv_default(
-    local_field: &[f64],
-    mask: &[u8],
-    nx: usize, ny: usize, nz: usize,
-    vsx: f64, vsy: f64, vsz: f64,
-) -> Vec<f64> {
-    nltv(
-        local_field, mask, nx, ny, nz, vsx, vsy, vsz,
-        (0.0, 0.0, 1.0),  // bdir
-        1e-3,             // lambda (QSM.jl default)
-        1.0,              // mu
-        1e-3,             // tol
-        250,              // max_iter
-        10                // newton_iter
-    )
+    buf.x
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::utils::weighted_shrink;
 
     #[test]
     fn test_nltv_zero_field() {
         let n = 8;
         let field = vec![0.0; n * n * n];
         let mask = vec![1u8; n * n * n];
+        let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
+        let params = NltvParams { lambda: 1e-3, mu: 1.0, tol: 1e-2, max_iter: 10, newton_iter: 2 };
 
-        let chi = nltv(
-            &field, &mask, n, n, n, 1.0, 1.0, 1.0,
-            (0.0, 0.0, 1.0), 1e-3, 1.0, 1e-2, 10, 2
-        );
+        let chi = nltv(&field, &mask, &grid, (0.0, 0.0, 1.0), &params, |_, _| {});
 
         for &val in chi.iter() {
             assert!(val.abs() < 1e-8, "Zero field should give zero chi");
@@ -342,11 +153,10 @@ mod tests {
         let n = 8;
         let field: Vec<f64> = (0..n*n*n).map(|i| (i as f64) * 0.001).collect();
         let mask = vec![1u8; n * n * n];
+        let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
+        let params = NltvParams { lambda: 1e-3, mu: 1.0, tol: 1e-2, max_iter: 10, newton_iter: 2 };
 
-        let chi = nltv(
-            &field, &mask, n, n, n, 1.0, 1.0, 1.0,
-            (0.0, 0.0, 1.0), 1e-3, 1.0, 1e-2, 10, 2
-        );
+        let chi = nltv(&field, &mask, &grid, (0.0, 0.0, 1.0), &params, |_, _| {});
 
         for (i, &val) in chi.iter().enumerate() {
             assert!(val.is_finite(), "Chi should be finite at index {}", i);

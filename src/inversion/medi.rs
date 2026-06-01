@@ -36,6 +36,7 @@ use crate::utils::simd_ops::{
     dot_product_f32, norm_squared_f32, axpy_f32, xpby_f32,
     apply_gradient_weights_f32, compute_p_weights_f32, combine_terms_f32, negate_f32,
 };
+use crate::Grid;
 // Note: Uses fgrad_periodic_inplace_f32 / bdiv_periodic_inplace_f32 (periodic BCs)
 // for the MEDI inner loop matching MATLAB's gradfp_mex / gradfp_adj_mex.
 // Uses fgrad_linext_inplace_f32 (linear extrapolation BCs) only for gradient mask
@@ -124,9 +125,11 @@ pub struct MediWorkspace {
 }
 
 impl MediWorkspace {
-    /// Create a new MEDI workspace for the given dimensions
-    pub fn new(nx: usize, ny: usize, nz: usize, vsx: f32, vsy: f32, vsz: f32) -> Self {
-        let n_total = nx * ny * nz;
+    /// Create a new MEDI workspace for the given grid
+    pub fn new(grid: &Grid) -> Self {
+        let (nx, ny, nz) = grid.dims;
+        let (vsx, vsy, vsz) = (grid.vsx() as f32, grid.vsy() as f32, grid.vsz() as f32);
+        let n_total = grid.n_total();
 
         Self {
             n_total,
@@ -343,61 +346,46 @@ fn cg_solve_medi<F>(
     }
 }
 
-/// MEDI L1 dipole inversion with full options (OPTIMIZED f32 VERSION)
+/// MEDI L1 dipole inversion (OPTIMIZED f32 VERSION)
 ///
 /// # Arguments
 /// * `local_field` - Local field/phase (RDF) in radians (nx * ny * nz)
 /// * `n_std` - Noise standard deviation map (same size as local_field)
 /// * `magnitude` - Magnitude image for gradient weighting (nx * ny * nz)
 /// * `mask` - Binary mask (nx * ny * nz), 1 = brain
-/// * `nx`, `ny`, `nz` - Array dimensions
-/// * `vsx`, `vsy`, `vsz` - Voxel sizes in mm
-/// * `lambda` - Regularization parameter (default: 7.5e-5, matching MATLAB MEDI)
-/// * `bdir` - B0 field direction (default: (0, 0, 1))
-/// * `merit` - Enable iterative merit-based outlier adjustment (default: false)
-/// * `smv` - Enable SMV preprocessing within MEDI (default: false)
-/// * `smv_radius` - SMV radius in mm (default: 5.0)
-/// * `data_weighting` - Data weighting mode: 0=uniform, 1=SNR (default: 1)
-/// * `percentage` - Fraction of voxels considered edges (default: 0.3 = 30%, matching MATLAB gpct=30)
-/// * `cg_tol` - CG solver tolerance (default: 0.01)
-/// * `cg_max_iter` - CG maximum iterations (default: 10, matching MATLAB)
-/// * `max_iter` - Maximum Gauss-Newton iterations (default: 30, matching MATLAB)
-/// * `tol` - Convergence tolerance (default: 0.1)
+/// * `grid` - Volume grid (dimensions and voxel sizes)
+/// * `bdir` - B0 field direction
+/// * `params` - MEDI parameters
+/// * `progress` - Progress callback `(current_step, total_steps)`
 ///
 /// # Returns
 /// Susceptibility map (in same units as input field)
-#[allow(clippy::too_many_arguments)]
 pub fn medi_l1(
     local_field: &[f64],
     n_std: &[f64],
     magnitude: &[f64],
     mask: &[u8],
-    nx: usize, ny: usize, nz: usize,
-    vsx: f64, vsy: f64, vsz: f64,
-    lambda: f64,
+    grid: &Grid,
     bdir: (f64, f64, f64),
-    merit: bool,
-    smv: bool,
-    smv_radius: f64,
-    data_weighting: i32,
-    percentage: f64,
-    cg_tol: f64,
-    cg_max_iter: usize,
-    max_iter: usize,
-    tol: f64,
+    params: &MediParams,
+    mut progress: impl FnMut(usize, usize),
 ) -> Vec<f64> {
-    let n_total = nx * ny * nz;
+    let (nx, ny, nz) = grid.dims;
+    let n_total = grid.n_total();
 
     // Convert to f32 for internal computation (much faster on WASM)
-    let vsx_f32 = vsx as f32;
-    let vsy_f32 = vsy as f32;
-    let vsz_f32 = vsz as f32;
-    let lambda_f32 = lambda as f32;
+    let vsx_f32 = grid.vsx() as f32;
+    let vsy_f32 = grid.vsy() as f32;
+    let vsz_f32 = grid.vsz() as f32;
+    let lambda_f32 = params.lambda as f32;
     let bdir_f32 = (bdir.0 as f32, bdir.1 as f32, bdir.2 as f32);
-    let smv_radius_f32 = smv_radius as f32;
-    let percentage_f32 = percentage as f32;
-    let cg_tol_f32 = cg_tol as f32;
-    let tol_f32 = tol as f32;
+    let smv_radius_f32 = params.smv_radius as f32;
+    let percentage_f32 = params.percentage as f32;
+    let cg_tol_f32 = params.cg_tol as f32;
+    let tol_f32 = params.tol as f32;
+    let max_iter = params.max_iter;
+    let cg_max_iter = params.cg_max_iter;
+    let data_weighting = params.data_weighting;
 
     // Convert input arrays to f32
     let local_field_f32: Vec<f32> = local_field.iter().map(|&v| v as f32).collect();
@@ -405,7 +393,7 @@ pub fn medi_l1(
     let magnitude_f32: Vec<f32> = magnitude.iter().map(|&v| v as f32).collect();
 
     // Create workspace - this allocates all buffers ONCE
-    let mut ws = MediWorkspace::new(nx, ny, nz, vsx_f32, vsy_f32, vsz_f32);
+    let mut ws = MediWorkspace::new(grid);
 
     // Working copies that may be modified by SMV preprocessing
     let mut rdf: Vec<f32> = local_field_f32.clone();
@@ -420,11 +408,11 @@ pub fn medi_l1(
     }
 
     // Generate dipole kernel
-    let mut d_kernel = dipole_kernel_f32(nx, ny, nz, vsx_f32, vsy_f32, vsz_f32, bdir_f32);
+    let mut d_kernel = dipole_kernel_f32(grid, bdir_f32);
 
     // SMV preprocessing (optional)
-    let sphere_k = if smv {
-        let sk = smv_kernel_f32(nx, ny, nz, vsx_f32, vsy_f32, vsz_f32, smv_radius_f32);
+    let sphere_k = if params.smv {
+        let sk = smv_kernel_f32(grid, smv_radius_f32);
 
         // FFT of sphere kernel for convolution
         let mut sk_fft: Vec<Complex32> = sk.iter()
@@ -501,8 +489,11 @@ pub fn medi_l1(
     // Using the same value as MATLAB (1.49e-8) is fine in f32 (representable, well above f32 eps).
     let beta = 1.49e-8_f32;
 
+    // Total progress = GN iterations * CG iterations per GN
+    let total_steps = max_iter * cg_max_iter;
+
     // Gauss-Newton iterations
-    for _iter in 0..max_iter {
+    for iter in 0..max_iter {
         // Save chi_prev for convergence check
         chi_prev.copy_from_slice(&chi);
 
@@ -530,8 +521,15 @@ pub fn medi_l1(
         // Negate for CG (solving A*dx = -b) (SIMD accelerated)
         negate_f32(&mut rhs);
 
-        // Solve A*dx = rhs using optimized CG with buffer reuse (no progress reporting)
-        cg_solve_medi(&mut ws, &w, &d_kernel, &w_gx, &w_gy, &w_gz, &vr, lambda_f32, &rhs, &mut dx, cg_tol_f32, cg_max_iter, |_, _| {});
+        // Solve A*dx = rhs using optimized CG with combined progress reporting
+        let gn_iter = iter;
+        cg_solve_medi(
+            &mut ws, &w, &d_kernel, &w_gx, &w_gy, &w_gz, &vr, lambda_f32, &rhs, &mut dx, cg_tol_f32, cg_max_iter,
+            |cg_iter, cg_total| {
+                let current = gn_iter * cg_total + cg_iter;
+                progress(current, total_steps);
+            }
+        );
 
         // Update: chi = chi + dx (SIMD accelerated)
         axpy_f32(&mut chi, 1.0, &dx);
@@ -542,7 +540,7 @@ pub fn medi_l1(
         let rel_change = norm_dx_sq.sqrt() / (norm_chi_sq.sqrt() + 1e-6);
 
         // Merit adjustment (optional)
-        if merit {
+        if params.merit {
             // Compute residual: wres = m * exp(i * D*chi) - b0
             apply_dipole_conv(&mut ws.fft_ws, &chi, &d_kernel, &mut ws.dipole_buf, &mut ws.complex_buf);
             let mut wres: Vec<Complex32> = ws.dipole_buf.iter()
@@ -631,6 +629,8 @@ pub fn medi_l1(
         }
 
         if rel_change < tol_f32 {
+            // Report completion on early convergence
+            progress(total_steps, total_steps);
             break;
         }
     }
@@ -1035,334 +1035,6 @@ pub(crate) fn bdiv_periodic_inplace_f32(
     }
 }
 
-/// MEDI L1 with progress callback (OPTIMIZED f32 VERSION)
-///
-/// Same as `medi_l1` but calls `progress_callback(iteration, max_iter)` each iteration.
-#[allow(clippy::too_many_arguments)]
-pub fn medi_l1_with_progress<F>(
-    local_field: &[f64],
-    n_std: &[f64],
-    magnitude: &[f64],
-    mask: &[u8],
-    nx: usize, ny: usize, nz: usize,
-    vsx: f64, vsy: f64, vsz: f64,
-    lambda: f64,
-    bdir: (f64, f64, f64),
-    merit: bool,
-    smv: bool,
-    smv_radius: f64,
-    data_weighting: i32,
-    percentage: f64,
-    cg_tol: f64,
-    cg_max_iter: usize,
-    max_iter: usize,
-    tol: f64,
-    mut progress_callback: F,
-) -> Vec<f64>
-where
-    F: FnMut(usize, usize),
-{
-    let n_total = nx * ny * nz;
-
-    // Convert to f32 for internal computation
-    let vsx_f32 = vsx as f32;
-    let vsy_f32 = vsy as f32;
-    let vsz_f32 = vsz as f32;
-    let lambda_f32 = lambda as f32;
-    let bdir_f32 = (bdir.0 as f32, bdir.1 as f32, bdir.2 as f32);
-    let smv_radius_f32 = smv_radius as f32;
-    let percentage_f32 = percentage as f32;
-    let cg_tol_f32 = cg_tol as f32;
-    let tol_f32 = tol as f32;
-
-    // Convert input arrays to f32
-    let local_field_f32: Vec<f32> = local_field.iter().map(|&v| v as f32).collect();
-    let n_std_f32: Vec<f32> = n_std.iter().map(|&v| v as f32).collect();
-    let magnitude_f32: Vec<f32> = magnitude.iter().map(|&v| v as f32).collect();
-
-    // Create workspace - allocates all buffers ONCE
-    let mut ws = MediWorkspace::new(nx, ny, nz, vsx_f32, vsy_f32, vsz_f32);
-
-    // Working copies that may be modified by SMV preprocessing
-    let mut rdf: Vec<f32> = local_field_f32.clone();
-    let mut work_mask: Vec<u8> = mask.to_vec();
-    let mut tempn: Vec<f32> = n_std_f32.clone();
-
-    // Apply mask to N_std
-    for i in 0..n_total {
-        if mask[i] == 0 {
-            tempn[i] = 0.0;
-        }
-    }
-
-    // Generate dipole kernel
-    let mut d_kernel = dipole_kernel_f32(nx, ny, nz, vsx_f32, vsy_f32, vsz_f32, bdir_f32);
-
-    // SMV preprocessing (optional)
-    let sphere_k = if smv {
-        let sk = smv_kernel_f32(nx, ny, nz, vsx_f32, vsy_f32, vsz_f32, smv_radius_f32);
-
-        // FFT of sphere kernel for convolution
-        let mut sk_fft: Vec<Complex32> = sk.iter()
-            .map(|&v| Complex32::new(v, 0.0))
-            .collect();
-        ws.fft_ws.fft3d(&mut sk_fft);
-
-        // Erode mask: SMV(mask) > 0.999
-        let mask_f32: Vec<f32> = work_mask.iter().map(|&m| m as f32).collect();
-        let smv_mask = apply_smv_kernel_ws(&mask_f32, &sk_fft, &mut ws);
-        for i in 0..n_total {
-            work_mask[i] = if smv_mask[i] > 0.999 { 1 } else { 0 };
-        }
-
-        // Modify dipole kernel: D = (1 - SphereK) * D
-        for i in 0..n_total {
-            d_kernel[i] *= 1.0 - sk[i];
-        }
-
-        // Modify RDF: RDF = RDF - SMV(RDF)
-        let smv_rdf = apply_smv_kernel_ws(&rdf, &sk_fft, &mut ws);
-        for i in 0..n_total {
-            rdf[i] -= smv_rdf[i];
-            if work_mask[i] == 0 {
-                rdf[i] = 0.0;
-            }
-        }
-
-        // Modify noise: tempn = sqrt(SMV(tempn^2) + tempn^2)
-        let tempn_sq: Vec<f32> = tempn.iter().map(|&t| t * t).collect();
-        let smv_tempn_sq = apply_smv_kernel_ws(&tempn_sq, &sk_fft, &mut ws);
-        for i in 0..n_total {
-            tempn[i] = (smv_tempn_sq[i] + tempn_sq[i]).sqrt();
-        }
-
-        Some(sk_fft)
-    } else {
-        None
-    };
-
-    // Compute data weighting
-    let mut m = dataterm_mask_f32(data_weighting, &tempn, &work_mask);
-
-    // b0 = m * exp(i * RDF)
-    let mut b0: Vec<Complex32> = rdf.iter()
-        .zip(m.iter())
-        .map(|(&f, &mi)| {
-            let phase = Complex32::new(0.0, f);
-            mi * phase.exp()
-        })
-        .collect();
-
-    // Compute per-direction gradient weighting masks from magnitude edges
-    // Returns (mx, my, mz) - separate masks for each gradient direction (matching MATLAB MEDI)
-    let (w_gx, w_gy, w_gz) = gradient_mask_f32(&magnitude_f32, &work_mask, nx, ny, nz, vsx_f32, vsy_f32, vsz_f32, percentage_f32);
-
-    // Fallback: if any mask is all zeros, use magnitude image (matching MATLAB)
-    let w_gx = if w_gx.iter().any(|&v| v != 0.0) { w_gx } else { magnitude_f32.clone() };
-    let w_gy = if w_gy.iter().any(|&v| v != 0.0) { w_gy } else { magnitude_f32.clone() };
-    let w_gz = if w_gz.iter().any(|&v| v != 0.0) { w_gz } else { magnitude_f32.clone() };
-
-    // Initialize susceptibility and reusable buffers
-    let mut chi = vec![0.0f32; n_total];
-    let mut dx = vec![0.0f32; n_total];
-    let mut rhs = vec![0.0f32; n_total];
-    let mut vr = vec![0.0f32; n_total];
-    let mut w: Vec<Complex32> = vec![Complex32::new(0.0, 0.0); n_total];
-    let mut chi_prev = vec![0.0f32; n_total];
-    let mut badpoint = vec![0.0f32; n_total];
-    let mut n_std_work: Vec<f32> = n_std_f32.clone();
-
-    // MATLAB: beta = sqrt(eps(class(f))) where eps for f64 ≈ 2.22e-16, so sqrt(eps) ≈ 1.49e-8.
-    // This is a regularization parameter for the P weight denominator, not a precision limit.
-    // Using the same value as MATLAB (1.49e-8) is fine in f32 (representable, well above f32 eps).
-    let beta = 1.49e-8_f32;
-
-    // Total progress = GN iterations * CG iterations per GN
-    let total_steps = max_iter * cg_max_iter;
-
-    // Gauss-Newton iterations
-    for iter in 0..max_iter {
-        chi_prev.copy_from_slice(&chi);
-
-        // Compute P = 1 / sqrt(|m * grad(chi)|^2 + beta) using per-direction masks (SIMD accelerated)
-        // MATLAB: P = 1 ./ sqrt(ux.*ux + uy.*uy + uz.*uz + beta);
-        // Uses periodic BCs matching MATLAB's grad_ (which calls gradfp_mex)
-        fgrad_periodic_inplace_f32(
-            &mut ws.gx, &mut ws.gy, &mut ws.gz,
-            &chi, nx, ny, nz, vsx_f32, vsy_f32, vsz_f32,
-        );
-
-        compute_p_weights_f32(&mut vr, &w_gx, &w_gy, &w_gz, &ws.gx, &ws.gy, &ws.gz, beta);
-
-        // Compute w = m * exp(i * D*chi)
-        apply_dipole_conv(&mut ws.fft_ws, &chi, &d_kernel, &mut ws.dipole_buf, &mut ws.complex_buf);
-        for i in 0..n_total {
-            let phase = Complex32::new(0.0, ws.dipole_buf[i]);
-            w[i] = m[i] * phase.exp();
-        }
-
-        // Compute right-hand side
-        compute_rhs_inplace(&chi, &w, &b0, &d_kernel, &w_gx, &w_gy, &w_gz, &vr, lambda_f32, &mut rhs, &mut ws);
-
-        // Negate for CG (solving A*dx = -b) (SIMD accelerated)
-        negate_f32(&mut rhs);
-
-        // Solve A*dx = rhs using optimized CG with combined progress reporting
-        // Progress = (gn_iter * cg_max_iter + cg_iter) / (max_iter * cg_max_iter)
-        let gn_iter = iter;
-        cg_solve_medi(
-            &mut ws, &w, &d_kernel, &w_gx, &w_gy, &w_gz, &vr, lambda_f32, &rhs, &mut dx, cg_tol_f32, cg_max_iter,
-            |cg_iter, cg_total| {
-                let current = gn_iter * cg_total + cg_iter;
-                progress_callback(current, total_steps);
-            }
-        );
-
-        // Update: chi = chi + dx (SIMD accelerated)
-        axpy_f32(&mut chi, 1.0, &dx);
-
-        // Check convergence (SIMD accelerated)
-        let norm_dx_sq = norm_squared_f32(&dx);
-        let norm_chi_sq = norm_squared_f32(&chi_prev);
-        let rel_change = norm_dx_sq.sqrt() / (norm_chi_sq.sqrt() + 1e-6);
-
-        // Merit adjustment (optional)
-        if merit {
-            // Compute residual: wres = m * exp(i * D*chi) - b0
-            apply_dipole_conv(&mut ws.fft_ws, &chi, &d_kernel, &mut ws.dipole_buf, &mut ws.complex_buf);
-            let mut wres: Vec<Complex32> = ws.dipole_buf.iter()
-                .zip(m.iter())
-                .zip(b0.iter())
-                .map(|((&dc, &mi), &b0i)| {
-                    let phase = Complex32::new(0.0, dc);
-                    mi * phase.exp() - b0i
-                })
-                .collect();
-
-            // Subtract mean over mask
-            let mask_count = work_mask.iter().filter(|&&m| m != 0).count() as f32;
-            if mask_count > 0.0 {
-                let mean_wres: Complex32 = wres.iter()
-                    .zip(work_mask.iter())
-                    .filter(|(_, &m)| m != 0)
-                    .map(|(w, _)| w)
-                    .sum::<Complex32>() / mask_count;
-
-                for i in 0..n_total {
-                    if work_mask[i] != 0 {
-                        wres[i] -= mean_wres;
-                    }
-                }
-            }
-
-            // Compute factor = std(abs(wres[mask])) * 6
-            let abs_wres: Vec<f32> = wres.iter()
-                .zip(work_mask.iter())
-                .filter(|(_, &m)| m != 0)
-                .map(|(w, _)| w.norm())
-                .collect();
-
-            if !abs_wres.is_empty() {
-                let mean_abs: f32 = abs_wres.iter().sum::<f32>() / abs_wres.len() as f32;
-                let var: f32 = abs_wres.iter()
-                    .map(|&v| (v - mean_abs).powi(2))
-                    .sum::<f32>() / abs_wres.len() as f32;
-                let factor = var.sqrt() * 6.0;
-
-                if factor > 1e-10 {
-                    // Normalize wres by factor
-                    let mut wres_norm: Vec<f32> = wres.iter()
-                        .map(|w| w.norm() / factor)
-                        .collect();
-
-                    // Clamp values < 1 to 1
-                    for v in wres_norm.iter_mut() {
-                        if *v < 1.0 {
-                            *v = 1.0;
-                        }
-                    }
-
-                    // Mark bad points and update noise
-                    for i in 0..n_total {
-                        if wres_norm[i] > 1.0 {
-                            badpoint[i] = 1.0;
-                        }
-                        if work_mask[i] != 0 {
-                            n_std_work[i] *= wres_norm[i].powi(2);
-                        }
-                    }
-
-                    // Recompute tempn
-                    tempn = n_std_work.clone();
-                    if let Some(ref sk_fft) = sphere_k {
-                        let tempn_sq: Vec<f32> = tempn.iter().map(|&t| t * t).collect();
-                        let smv_tempn_sq = apply_smv_kernel_ws(&tempn_sq, sk_fft, &mut ws);
-                        for i in 0..n_total {
-                            tempn[i] = (smv_tempn_sq[i] + tempn_sq[i]).sqrt();
-                        }
-                    }
-
-                    // Recompute data weighting and b0
-                    m = dataterm_mask_f32(data_weighting, &tempn, &work_mask);
-                    b0 = rdf.iter()
-                        .zip(m.iter())
-                        .map(|(&f, &mi)| {
-                            let phase = Complex32::new(0.0, f);
-                            mi * phase.exp()
-                        })
-                        .collect();
-                }
-            }
-        }
-
-        if rel_change < tol_f32 {
-            // Report completion on early convergence
-            progress_callback(total_steps, total_steps);
-            break;
-        }
-    }
-
-    // Suppress unused variable warning
-    let _ = badpoint;
-
-    // Apply mask and convert back to f64
-    chi.iter()
-        .zip(mask.iter())
-        .map(|(&c, &m)| if m == 0 { 0.0 } else { c as f64 })
-        .collect()
-}
-
-/// MEDI with default parameters (backward compatible)
-pub fn medi_l1_default(
-    local_field: &[f64],
-    mask: &[u8],
-    magnitude: &[f64],
-    nx: usize, ny: usize, nz: usize,
-    vsx: f64, vsy: f64, vsz: f64,
-) -> Vec<f64> {
-    // Create uniform noise std (no SNR weighting)
-    let n_std = vec![1.0; local_field.len()];
-
-    medi_l1(
-        local_field,
-        &n_std,
-        magnitude,
-        mask,
-        nx, ny, nz,
-        vsx, vsy, vsz,
-        7.5e-5,            // lambda (matching MATLAB default)
-        (0.0, 0.0, 1.0),   // bdir
-        false,             // merit
-        false,             // smv
-        5.0,               // smv_radius
-        1,                 // data_weighting (SNR mode)
-        0.3,               // percentage (30% edges, matching MATLAB gpct=30)
-        0.01,              // cg_tol
-        10,                // cg_max_iter (matching MATLAB default)
-        30,                // max_iter (matching MATLAB default)
-        0.1,               // tol
-    )
-}
 
 #[cfg(test)]
 mod tests {
@@ -1408,6 +1080,14 @@ mod tests {
         }
     }
 
+    fn test_medi_params() -> MediParams {
+        MediParams {
+            lambda: 1000.0, percentage: 0.9, cg_tol: 0.1,
+            cg_max_iter: 10, max_iter: 3, tol: 0.1,
+            ..MediParams::default()
+        }
+    }
+
     #[test]
     fn test_medi_zero_field() {
         let n = 8;
@@ -1415,10 +1095,11 @@ mod tests {
         let mask = vec![1u8; n * n * n];
         let mag = vec![1.0; n * n * n];
         let n_std = vec![1.0; n * n * n];
+        let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
 
         let chi = medi_l1(
-            &field, &n_std, &mag, &mask, n, n, n, 1.0, 1.0, 1.0,
-            1000.0, (0.0, 0.0, 1.0), false, false, 5.0, 1, 0.9, 0.1, 10, 3, 0.1
+            &field, &n_std, &mag, &mask, &grid,
+            (0.0, 0.0, 1.0), &test_medi_params(), |_, _| {},
         );
 
         for &val in chi.iter() {
@@ -1433,10 +1114,11 @@ mod tests {
         let mask = vec![1u8; n * n * n];
         let mag = vec![1.0; n * n * n];
         let n_std = vec![1.0; n * n * n];
+        let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
 
         let chi = medi_l1(
-            &field, &n_std, &mag, &mask, n, n, n, 1.0, 1.0, 1.0,
-            1000.0, (0.0, 0.0, 1.0), false, false, 5.0, 1, 0.9, 0.1, 10, 3, 0.1
+            &field, &n_std, &mag, &mask, &grid,
+            (0.0, 0.0, 1.0), &test_medi_params(), |_, _| {},
         );
 
         for (i, &val) in chi.iter().enumerate() {
@@ -1451,11 +1133,13 @@ mod tests {
         let mask = vec![1u8; n * n * n];
         let mag = vec![1.0; n * n * n];
         let n_std = vec![1.0; n * n * n];
+        let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
 
         // Test with SMV enabled
+        let params = MediParams { smv: true, smv_radius: 2.0, ..test_medi_params() };
         let chi = medi_l1(
-            &field, &n_std, &mag, &mask, n, n, n, 1.0, 1.0, 1.0,
-            1000.0, (0.0, 0.0, 1.0), false, true, 2.0, 1, 0.9, 0.1, 10, 3, 0.1
+            &field, &n_std, &mag, &mask, &grid,
+            (0.0, 0.0, 1.0), &params, |_, _| {},
         );
 
         for (i, &val) in chi.iter().enumerate() {
@@ -1472,10 +1156,11 @@ mod tests {
         let n_std = vec![1.0; n * n * n];
         mask[0] = 0;
         mask[10] = 0;
+        let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
 
         let chi = medi_l1(
-            &field, &n_std, &mag, &mask, n, n, n, 1.0, 1.0, 1.0,
-            1000.0, (0.0, 0.0, 1.0), false, false, 5.0, 1, 0.9, 0.1, 10, 3, 0.1
+            &field, &n_std, &mag, &mask, &grid,
+            (0.0, 0.0, 1.0), &test_medi_params(), |_, _| {},
         );
 
         assert_eq!(chi[0], 0.0, "Masked voxel should be zero");
@@ -1532,15 +1217,16 @@ mod tests {
         let cg_tol: f32 = 0.1;  // Match MATLAB tolcg default
         let cg_max_iter: usize = 10;
 
+        // Workspace
+        let debug_grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
+
         // Dipole kernel
         let d_kernel = crate::kernels::dipole::dipole_kernel_f32(
-            nx, ny, nz, vsx_f32, vsy_f32, vsz_f32, bdir,
+            &debug_grid, bdir,
         );
         save_f32_raw(&d_kernel, &format!("{}/D_rust.raw", outdir));
         eprintln!("D: min={} max={} D[0]={}", fmin(&d_kernel), fmax(&d_kernel), d_kernel[0]);
-
-        // Workspace
-        let mut ws = MediWorkspace::new(nx, ny, nz, vsx_f32, vsy_f32, vsz_f32);
+        let mut ws = MediWorkspace::new(&debug_grid);
 
         // Data weighting: uniform m = mask (matching w=ones in Octave)
         let m: Vec<f32> = mask.iter().map(|&m| if m != 0 { 1.0 } else { 0.0 }).collect();
@@ -1785,20 +1471,17 @@ mod tests {
         let mag = vec![1.0f64; n_total];
         let n_std = vec![1.0f64; n_total];
 
+        let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
+
         // Run MEDI with few Gauss-Newton iterations to exercise the main loop
+        let params = MediParams {
+            lambda: 1e-4, percentage: 0.3,
+            cg_tol: 0.01, cg_max_iter: 10, max_iter: 5, tol: 0.1,
+            ..MediParams::default()
+        };
         let chi = medi_l1(
-            &field, &n_std, &mag, &mask, n, n, n, 1.0, 1.0, 1.0,
-            1e-4,              // lambda
-            (0.0, 0.0, 1.0),   // bdir
-            false,             // merit
-            false,             // smv
-            5.0,               // smv_radius
-            1,                 // data_weighting (SNR)
-            0.3,               // percentage
-            0.01,              // cg_tol
-            10,                // cg_max_iter
-            5,                 // max_iter (enough to exercise the loop)
-            0.1,               // tol
+            &field, &n_std, &mag, &mask, &grid,
+            (0.0, 0.0, 1.0), &params, |_, _| {},
         );
 
         // Result should be finite and same size
@@ -1822,21 +1505,21 @@ mod tests {
         let mag = vec![1.0f64; n_total];
         let n_std = vec![1.0f64; n_total];
 
+        let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
+
         // Test uniform data weighting (mode 0)
+        let params_uniform = MediParams { data_weighting: 0, ..test_medi_params() };
         let chi_uniform = medi_l1(
-            &field, &n_std, &mag, &mask, n, n, n, 1.0, 1.0, 1.0,
-            1000.0, (0.0, 0.0, 1.0), false, false, 5.0,
-            0,     // uniform data weighting
-            0.9, 0.1, 10, 3, 0.1
+            &field, &n_std, &mag, &mask, &grid,
+            (0.0, 0.0, 1.0), &params_uniform, |_, _| {},
         );
 
         // Test SNR data weighting (mode 1) with varying noise
         let n_std_varying: Vec<f64> = (0..n_total).map(|i| 0.5 + (i as f64) * 0.01).collect();
+        let params_snr = MediParams { data_weighting: 1, ..test_medi_params() };
         let chi_snr = medi_l1(
-            &field, &n_std_varying, &mag, &mask, n, n, n, 1.0, 1.0, 1.0,
-            1000.0, (0.0, 0.0, 1.0), false, false, 5.0,
-            1,     // SNR data weighting
-            0.9, 0.1, 10, 3, 0.1
+            &field, &n_std_varying, &mag, &mask, &grid,
+            (0.0, 0.0, 1.0), &params_snr, |_, _| {},
         );
 
         // Both should be finite
@@ -1866,18 +1549,18 @@ mod tests {
         let mask = vec![1u8; n_total];
         let mag = vec![1.0f64; n_total];
         let n_std = vec![1.0f64; n_total];
+        let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
 
         let mut progress_calls = 0usize;
-        let chi = medi_l1_with_progress(
-            &field, &n_std, &mag, &mask, n, n, n, 1.0, 1.0, 1.0,
-            1000.0, (0.0, 0.0, 1.0), false, false, 5.0,
-            1, 0.9, 0.1, 10, 3, 0.1,
+        let chi = medi_l1(
+            &field, &n_std, &mag, &mask, &grid,
+            (0.0, 0.0, 1.0), &test_medi_params(),
             |_iter, _max| { progress_calls += 1; },
         );
 
         assert_eq!(chi.len(), n_total);
         for &val in &chi {
-            assert!(val.is_finite(), "medi_l1_with_progress output should be finite");
+            assert!(val.is_finite(), "medi_l1 with progress output should be finite");
         }
         assert!(progress_calls > 0, "progress callback should be called at least once");
     }
@@ -1910,12 +1593,16 @@ mod tests {
         let mag = vec![1.0f64; n_total];
         let n_std = vec![1.0f64; n_total];
 
+        let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
         // Test with merit=true to cover the merit adjustment code path
+        let params = MediParams {
+            lambda: 1e-4, merit: true, percentage: 0.3,
+            cg_tol: 0.01, cg_max_iter: 10, max_iter: 5, tol: 0.1,
+            ..MediParams::default()
+        };
         let chi = medi_l1(
-            &field, &n_std, &mag, &mask, n, n, n, 1.0, 1.0, 1.0,
-            1e-4, (0.0, 0.0, 1.0),
-            true,  // merit enabled
-            false, 5.0, 1, 0.3, 0.01, 10, 5, 0.1,
+            &field, &n_std, &mag, &mask, &grid,
+            (0.0, 0.0, 1.0), &params, |_, _| {},
         );
 
         assert_eq!(chi.len(), n_total);
@@ -1925,7 +1612,7 @@ mod tests {
     }
 
     #[test]
-    fn test_medi_l1_with_smv() {
+    fn test_medi_l1_with_smv_final() {
         let n = 8;
         let n_total = n * n * n;
 
@@ -1933,15 +1620,17 @@ mod tests {
         let mask = vec![1u8; n_total];
         let mag = vec![1.0f64; n_total];
         let n_std = vec![1.0f64; n_total];
+        let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
 
         // Test with smv=true to cover the SMV-weighted code path
+        let params = MediParams {
+            smv: true, smv_radius: 3.0, percentage: 0.3,
+            cg_tol: 0.01, cg_max_iter: 10, max_iter: 3, tol: 0.1,
+            ..MediParams::default()
+        };
         let chi = medi_l1(
-            &field, &n_std, &mag, &mask, n, n, n, 1.0, 1.0, 1.0,
-            1000.0, (0.0, 0.0, 1.0),
-            false,
-            true,  // smv enabled
-            3.0,   // smv_radius
-            1, 0.3, 0.01, 10, 3, 0.1,
+            &field, &n_std, &mag, &mask, &grid,
+            (0.0, 0.0, 1.0), &params, |_, _| {},
         );
 
         assert_eq!(chi.len(), n_total);

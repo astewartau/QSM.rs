@@ -13,6 +13,7 @@
 //! - MEDI: Morphology-enabled dipole inversion
 //! - TGV: Total Generalized Variation (single-step from wrapped phase)
 
+pub mod admm;
 pub mod tkd;
 pub mod tikhonov;
 pub mod tv;
@@ -22,11 +23,11 @@ pub mod medi;
 pub mod tgv;
 pub mod ilsqr;
 
-pub use tkd::*;
-pub use tikhonov::*;
-pub use tv::*;
-pub use nltv::*;
-pub use rts::*;
-pub use medi::*;
-pub use tgv::*;
-pub use ilsqr::*;
+pub use tkd::{tkd, tsvd, TkdParams};
+pub use tikhonov::{tikhonov, TikhonovParams, Regularization};
+pub use tv::{tv_admm, TvParams};
+pub use nltv::{nltv, NltvParams};
+pub use rts::{rts, RtsParams};
+pub use medi::{medi_l1, MediParams, MediWorkspace};
+pub use tgv::{tgv_qsm, TgvParams, get_default_alpha, get_default_iterations};
+pub use ilsqr::{ilsqr, ilsqr_simple, IlsqrParams, lsqr, lsqr_complex, lsmr};

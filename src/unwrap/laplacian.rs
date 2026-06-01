@@ -14,6 +14,7 @@
 use std::f64::consts::PI;
 use num_complex::Complex64;
 use crate::fft::{fft3d, ifft3d};
+use crate::Grid;
 
 /// Wrap angle to [-π, π]
 #[inline]
@@ -42,7 +43,6 @@ pub(crate) fn wrapped_laplacian_periodic(
     let dy2 = 1.0 / (vsy * vsy);
     let dz2 = 1.0 / (vsz * vsz);
 
-    // Fortran order: index = i + j*nx + k*nx*ny
     for k in 0..nz {
         let km1 = if k == 0 { nz - 1 } else { k - 1 };
         let kp1 = if k + 1 >= nz { 0 } else { k + 1 };
@@ -58,7 +58,6 @@ pub(crate) fn wrapped_laplacian_periodic(
                 let idx = i + j * nx + k * nx * ny;
                 let u_ijk = phase[idx];
 
-                // Indices for neighbors
                 let idx_im1 = im1 + j * nx + k * nx * ny;
                 let idx_ip1 = ip1 + j * nx + k * nx * ny;
                 let idx_jm1 = i + jm1 * nx + k * nx * ny;
@@ -66,9 +65,6 @@ pub(crate) fn wrapped_laplacian_periodic(
                 let idx_km1 = i + j * nx + km1 * nx * ny;
                 let idx_kp1 = i + j * nx + kp1 * nx * ny;
 
-                // Wrapped Laplacian using central differences
-                // Δu = (u[i+1] - 2*u[i] + u[i-1]) / dx²
-                // But we wrap the differences: wrap(u[i+1] - u[i]) - wrap(u[i] - u[i-1])
                 let lap_x = (wrap(phase[idx_ip1] - u_ijk) - wrap(u_ijk - phase[idx_im1])) * dx2;
                 let lap_y = (wrap(phase[idx_jp1] - u_ijk) - wrap(u_ijk - phase[idx_jm1])) * dy2;
                 let lap_z = (wrap(phase[idx_kp1] - u_ijk) - wrap(u_ijk - phase[idx_km1])) * dz2;
@@ -82,17 +78,11 @@ pub(crate) fn wrapped_laplacian_periodic(
 }
 
 /// Solve Poisson equation using FFT (periodic boundary conditions)
-///
-/// Solves: ∇²u = f
-/// In Fourier domain: λ * û = f̂, where λ are eigenvalues of discrete Laplacian
 pub(crate) fn solve_poisson_fft(
     f: &[f64],
     nx: usize, ny: usize, nz: usize,
     vsx: f64, vsy: f64, vsz: f64,
 ) -> Vec<f64> {
-    let n_total = nx * ny * nz;
-
-    // FFT of RHS
     let mut f_complex: Vec<Complex64> = f.iter()
         .map(|&x| Complex64::new(x, 0.0))
         .collect();
@@ -102,8 +92,6 @@ pub(crate) fn solve_poisson_fft(
     let idy2 = 1.0 / (vsy * vsy);
     let idz2 = 1.0 / (vsz * vsz);
 
-    // Divide by eigenvalues of discrete Laplacian
-    // λ[i,j,k] = 2*(cos(2πi/nx)-1)/dx² + 2*(cos(2πj/ny)-1)/dy² + 2*(cos(2πk/nz)-1)/dz²
     for k in 0..nz {
         let fk = if k <= nz / 2 { k as f64 / nz as f64 } else { (k as f64 - nz as f64) / nz as f64 };
         let lam_z = 2.0 * ((2.0 * PI * fk).cos() - 1.0) * idz2;
@@ -122,17 +110,13 @@ pub(crate) fn solve_poisson_fft(
                 if lam.abs() > 1e-20 {
                     f_complex[idx] /= lam;
                 } else {
-                    // DC component - set to zero (solution is unique up to a constant)
                     f_complex[idx] = Complex64::new(0.0, 0.0);
                 }
             }
         }
     }
 
-    // IFFT to get solution
     ifft3d(&mut f_complex, nx, ny, nz);
-
-    // Extract real part
     f_complex.iter().map(|c| c.re).collect()
 }
 
@@ -144,32 +128,28 @@ pub(crate) fn solve_poisson_fft(
 /// # Arguments
 /// * `phase` - Wrapped phase (nx * ny * nz)
 /// * `mask` - Binary mask (nx * ny * nz), 1 = inside ROI
-/// * `nx`, `ny`, `nz` - Array dimensions
-/// * `vsx`, `vsy`, `vsz` - Voxel sizes in mm
+/// * `grid` - Volume grid (dimensions and voxel sizes)
 ///
 /// # Returns
 /// Unwrapped phase
 pub fn laplacian_unwrap(
     phase: &[f64],
     mask: &[u8],
-    nx: usize, ny: usize, nz: usize,
-    vsx: f64, vsy: f64, vsz: f64,
+    grid: &Grid,
 ) -> Vec<f64> {
+    let (nx, ny, nz) = grid.dims;
+    let (vsx, vsy, vsz) = grid.voxel_size;
     let n_total = nx * ny * nz;
 
-    // Step 1: Compute wrapped Laplacian
     let d2u = wrapped_laplacian_periodic(phase, nx, ny, nz, vsx, vsy, vsz);
 
-    // Step 2: Apply mask to wrapped Laplacian (Dirichlet-like BCs on mask boundary)
     let d2u_masked: Vec<f64> = d2u.iter()
         .enumerate()
         .map(|(i, &val)| if mask[i] != 0 { val } else { 0.0 })
         .collect();
 
-    // Step 3: Solve Poisson equation
     let unwrapped = solve_poisson_fft(&d2u_masked, nx, ny, nz, vsx, vsy, vsz);
 
-    // Step 4: Apply mask to result
     let mut result = vec![0.0; n_total];
     for i in 0..n_total {
         if mask[i] != 0 {
@@ -184,6 +164,10 @@ pub fn laplacian_unwrap(
 mod tests {
     use super::*;
 
+    fn grid(n: usize) -> Grid {
+        Grid::new(n, n, n, 1.0, 1.0, 1.0)
+    }
+
     #[test]
     fn test_wrap() {
         assert!((wrap(0.0) - 0.0).abs() < 1e-10);
@@ -196,14 +180,12 @@ mod tests {
 
     #[test]
     fn test_laplacian_unwrap_constant() {
-        // Constant phase should stay constant (up to arbitrary offset)
         let n = 8;
         let phase = vec![1.0; n * n * n];
         let mask = vec![1u8; n * n * n];
 
-        let unwrapped = laplacian_unwrap(&phase, &mask, n, n, n, 1.0, 1.0, 1.0);
+        let unwrapped = laplacian_unwrap(&phase, &mask, &grid(n));
 
-        // Check that result is approximately constant
         let mean: f64 = unwrapped.iter().sum::<f64>() / (n * n * n) as f64;
         for &val in unwrapped.iter() {
             assert!((val - mean).abs() < 1e-6, "Constant phase should unwrap to constant");
@@ -212,29 +194,23 @@ mod tests {
 
     #[test]
     fn test_laplacian_unwrap_smooth() {
-        // Smooth phase should remain smooth after unwrapping
         let n = 16;
         let mut phase = vec![0.0; n * n * n];
         let mask = vec![1u8; n * n * n];
 
-        // Create smooth sinusoidal phase (no wraps needed)
         for k in 0..n {
             for j in 0..n {
                 for i in 0..n {
                     let idx = i + j * n + k * n * n;
-                    // Small amplitude so no wrapping occurs
                     phase[idx] = 0.5 * (2.0 * PI * i as f64 / n as f64).sin();
                 }
             }
         }
 
-        let unwrapped = laplacian_unwrap(&phase, &mask, n, n, n, 1.0, 1.0, 1.0);
+        let unwrapped = laplacian_unwrap(&phase, &mask, &grid(n));
 
-        // Check that result is finite and similar to input
-        // (since input has no wraps, output should be close)
         for (i, (&orig, &unwr)) in phase.iter().zip(unwrapped.iter()).enumerate() {
             assert!(unwr.is_finite(), "Unwrapped should be finite at {}", i);
-            // Allow some deviation due to boundary conditions
             assert!((orig - unwr).abs() < 1.0,
                 "Unwrapped should be close to original for smooth phase");
         }
@@ -246,7 +222,7 @@ mod tests {
         let phase: Vec<f64> = (0..n*n*n).map(|i| wrap((i as f64) * 0.1)).collect();
         let mask = vec![1u8; n * n * n];
 
-        let unwrapped = laplacian_unwrap(&phase, &mask, n, n, n, 1.0, 1.0, 1.0);
+        let unwrapped = laplacian_unwrap(&phase, &mask, &grid(n));
 
         for (i, &val) in unwrapped.iter().enumerate() {
             assert!(val.is_finite(), "Unwrapped phase should be finite at index {}", i);

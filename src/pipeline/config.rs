@@ -7,15 +7,15 @@
 
 use crate::bgremove::{
     IsmvParams, LbvParams, PdfParams, ResharpParams, SharpParams, SdfParams, VsharpParams,
+    HarperellaParams,
 };
 use crate::inversion::{
     IlsqrParams, MediParams, NltvParams, RtsParams, TgvParams, TikhonovParams, TkdParams, TvParams,
 };
-use crate::pipeline::HarperellaParams;
 use crate::unwrap::romeo::RomeoParams;
 use crate::utils::multi_echo::{B0WeightType, LinearFitParams};
 use crate::utils::QsmartParams;
-use crate::bet::BetParams;
+
 
 // =========================================================================
 // Selection enums
@@ -309,6 +309,17 @@ pub struct ScanMetadata {
     pub field_strength: f64,
     /// B0 direction as unit vector in voxel coordinates
     pub b0_direction: (f64, f64, f64),
+}
+
+impl ScanMetadata {
+    /// Get a Grid from this metadata's dimensions and voxel sizes.
+    #[inline]
+    pub fn grid(&self) -> crate::Grid {
+        crate::Grid {
+            dims: self.dims,
+            voxel_size: self.voxel_size,
+        }
+    }
 }
 
 /// Results from field mapping stage

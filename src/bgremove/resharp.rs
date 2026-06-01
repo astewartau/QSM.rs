@@ -14,8 +14,9 @@
 //! Magn Reson Med, 71(3):1151-1157. https://doi.org/10.1002/mrm.24765
 
 use num_complex::Complex64;
-use crate::fft::{fft3d, ifft3d};
-use crate::kernels::smv::smv_kernel;
+use crate::Grid;
+use crate::fft::{fft3d, ifft3d, fft_real_kernel};
+use crate::kernels::smv::{smv_kernel, erode_mask_smv};
 use crate::solvers::cg_solve_with_progress;
 
 /// RESHARP algorithm parameters
@@ -47,90 +48,31 @@ impl Default for ResharpParams {
 /// # Arguments
 /// * `field` - Unwrapped total field (nx * ny * nz)
 /// * `mask` - Binary mask (nx * ny * nz), 1 = inside ROI
-/// * `nx`, `ny`, `nz` - Array dimensions
-/// * `vsx`, `vsy`, `vsz` - Voxel sizes in mm
-/// * `radius` - SMV kernel radius in mm
-/// * `tik_reg` - Tikhonov regularization parameter (e.g. 1e-4)
-/// * `tol` - CG convergence tolerance (e.g. 1e-6)
-/// * `max_iter` - Maximum CG iterations (e.g. 200)
+/// * `grid` - Volume dimensions and voxel sizes
+/// * `params` - RESHARP algorithm parameters
+/// * `progress` - Progress callback (current_iteration, max_iterations)
 ///
 /// # Returns
 /// (local_field, eroded_mask)
 pub fn resharp(
     field: &[f64],
     mask: &[u8],
-    nx: usize, ny: usize, nz: usize,
-    vsx: f64, vsy: f64, vsz: f64,
-    radius: f64,
-    tik_reg: f64,
-    tol: f64,
-    max_iter: usize,
+    grid: &Grid,
+    params: &ResharpParams,
+    mut progress: impl FnMut(usize, usize),
 ) -> (Vec<f64>, Vec<u8>) {
-    resharp_with_progress(field, mask, nx, ny, nz, vsx, vsy, vsz,
-                          radius, tik_reg, tol, max_iter, |_, _| {})
-}
-
-/// RESHARP with default parameters
-pub fn resharp_default(
-    field: &[f64],
-    mask: &[u8],
-    nx: usize, ny: usize, nz: usize,
-    vsx: f64, vsy: f64, vsz: f64,
-) -> (Vec<f64>, Vec<u8>) {
-    let p = ResharpParams::default();
-    resharp(field, mask, nx, ny, nz, vsx, vsy, vsz,
-            p.radius, p.tik_reg, p.tol, p.max_iter)
-}
-
-/// RESHARP with progress callback
-///
-/// Callback receives (current_iteration, max_iterations).
-pub fn resharp_with_progress<F>(
-    field: &[f64],
-    mask: &[u8],
-    nx: usize, ny: usize, nz: usize,
-    vsx: f64, vsy: f64, vsz: f64,
-    radius: f64,
-    tik_reg: f64,
-    tol: f64,
-    max_iter: usize,
-    callback: F,
-) -> (Vec<f64>, Vec<u8>)
-where
-    F: FnMut(usize, usize),
-{
+    let (nx, ny, nz) = grid.dims;
     let n_total = nx * ny * nz;
 
-    // Generate SMV kernel (centered at origin with wraparound) and FFT
-    let s_kernel = smv_kernel(nx, ny, nz, vsx, vsy, vsz, radius);
-
-    let mut s_complex: Vec<Complex64> = s_kernel.iter()
-        .map(|&x| Complex64::new(x, 0.0))
-        .collect();
-    fft3d(&mut s_complex, nx, ny, nz);
-
-    // S_fft is real (kernel is real and symmetric)
-    let s_fft: Vec<f64> = s_complex.iter().map(|c| c.re).collect();
+    // Generate SMV kernel and FFT
+    let s_kernel = smv_kernel(grid, params.radius);
+    let s_fft = fft_real_kernel(&s_kernel, nx, ny, nz);
 
     // DKER = 1 - S (high-pass / delta-kernel) in k-space
     let dker: Vec<f64> = s_fft.iter().map(|&s| 1.0 - s).collect();
 
-    // Erode mask: convolve mask with SMV kernel, keep voxels where result ≈ 1
-    let mask_f64: Vec<f64> = mask.iter().map(|&m| m as f64).collect();
-    let mut mask_complex: Vec<Complex64> = mask_f64.iter()
-        .map(|&x| Complex64::new(x, 0.0))
-        .collect();
-    fft3d(&mut mask_complex, nx, ny, nz);
-
-    for i in 0..n_total {
-        mask_complex[i] *= s_fft[i];
-    }
-    ifft3d(&mut mask_complex, nx, ny, nz);
-
-    let delta = 1.0 - 1e-7_f64.sqrt();
-    let eroded_mask: Vec<u8> = mask_complex.iter()
-        .map(|c| if c.re > delta { 1 } else { 0 })
-        .collect();
+    // Erode mask via SMV convolution
+    let eroded_mask = erode_mask_smv(mask, &s_fft, grid, 1.0 - 1e-7_f64.sqrt());
     let eroded_mask_f64: Vec<f64> = eroded_mask.iter()
         .map(|&m| m as f64)
         .collect();
@@ -143,6 +85,7 @@ where
     let b = apply_ht_h(&dker, &eroded_mask_f64, field, nx, ny, nz);
 
     // Solve (H'H + λI)x = b via CG
+    let tik_reg = params.tik_reg;
     let x0 = vec![0.0; n_total];
     let x = cg_solve_with_progress(
         |x_vec| {
@@ -155,9 +98,9 @@ where
         },
         &b,
         &x0,
-        tol,
-        max_iter,
-        callback,
+        params.tol,
+        params.max_iter,
+        &mut progress,
     );
 
     // Apply eroded mask to result
@@ -217,8 +160,10 @@ mod tests {
         let n = 16;
         let field = vec![0.0; n * n * n];
         let mask = vec![1u8; n * n * n];
+        let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
+        let params = ResharpParams { radius: 2.0, tik_reg: 1e-4, tol: 1e-6, max_iter: 50 };
 
-        let (local, _) = resharp(&field, &mask, n, n, n, 1.0, 1.0, 1.0, 2.0, 1e-4, 1e-6, 50);
+        let (local, _) = resharp(&field, &mask, &grid, &params, |_, _| {});
 
         for &val in local.iter() {
             assert!(val.abs() < 1e-8, "Zero field should give zero local field, got {}", val);
@@ -230,8 +175,10 @@ mod tests {
         let n = 16;
         let field: Vec<f64> = (0..n*n*n).map(|i| (i as f64) * 0.01).collect();
         let mask = vec![1u8; n * n * n];
+        let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
+        let params = ResharpParams { radius: 2.0, tik_reg: 1e-4, tol: 1e-6, max_iter: 50 };
 
-        let (local, eroded) = resharp(&field, &mask, n, n, n, 1.0, 1.0, 1.0, 2.0, 1e-4, 1e-6, 50);
+        let (local, eroded) = resharp(&field, &mask, &grid, &params, |_, _| {});
 
         for (i, &val) in local.iter().enumerate() {
             assert!(val.is_finite(), "Local field should be finite at index {}", i);

@@ -3,6 +3,8 @@
 //! Forward difference gradient and backward divergence operators
 //! used in TV regularization and other algorithms.
 
+use crate::Grid;
+
 /// Forward difference gradient operator (in-place)
 ///
 /// Computes forward differences along each axis with periodic boundary conditions.
@@ -17,9 +19,10 @@
 pub fn fgrad_inplace(
     gx: &mut [f64], gy: &mut [f64], gz: &mut [f64],
     x: &[f64],
-    nx: usize, ny: usize, nz: usize,
-    vsx: f64, vsy: f64, vsz: f64,
+    grid: &Grid,
 ) {
+    let (nx, ny, nz) = grid.dims;
+    let (vsx, vsy, vsz) = grid.voxel_size;
     let hx = 1.0 / vsx;
     let hy = 1.0 / vsy;
     let hz = 1.0 / vsz;
@@ -66,9 +69,10 @@ pub fn fgrad_inplace(
 pub fn bdiv_inplace(
     div: &mut [f64],
     gx: &[f64], gy: &[f64], gz: &[f64],
-    nx: usize, ny: usize, nz: usize,
-    vsx: f64, vsy: f64, vsz: f64,
+    grid: &Grid,
 ) {
+    let (nx, ny, nz) = grid.dims;
+    let (vsx, vsy, vsz) = grid.voxel_size;
     let hx = 1.0 / vsx;
     let hy = 1.0 / vsy;
     let hz = 1.0 / vsz;
@@ -114,9 +118,10 @@ pub fn bdiv_inplace(
 /// Tuple of (gx, gy, gz) gradient components
 pub fn fgrad(
     x: &[f64],
-    nx: usize, ny: usize, nz: usize,
-    vsx: f64, vsy: f64, vsz: f64,
+    grid: &Grid,
 ) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
+    let (nx, ny, nz) = grid.dims;
+    let (vsx, vsy, vsz) = grid.voxel_size;
     let n_total = nx * ny * nz;
     let mut gx = vec![0.0; n_total];
     let mut gy = vec![0.0; n_total];
@@ -162,9 +167,10 @@ pub fn fgrad(
 /// Divergence (negative)
 pub fn bdiv(
     gx: &[f64], gy: &[f64], gz: &[f64],
-    nx: usize, ny: usize, nz: usize,
-    vsx: f64, vsy: f64, vsz: f64,
+    grid: &Grid,
 ) -> Vec<f64> {
+    let (nx, ny, nz) = grid.dims;
+    let (vsx, vsy, vsz) = grid.voxel_size;
     let n_total = nx * ny * nz;
     let mut div = vec![0.0; n_total];
 
@@ -214,9 +220,10 @@ pub fn grad_magnitude_squared(
 pub fn fgrad_inplace_f32(
     gx: &mut [f32], gy: &mut [f32], gz: &mut [f32],
     x: &[f32],
-    nx: usize, ny: usize, nz: usize,
-    vsx: f32, vsy: f32, vsz: f32,
+    grid: &Grid,
 ) {
+    let (nx, ny, nz) = grid.dims;
+    let (vsx, vsy, vsz) = (grid.vsx() as f32, grid.vsy() as f32, grid.vsz() as f32);
     let hx = 1.0 / vsx;
     let hy = 1.0 / vsy;
     let hz = 1.0 / vsz;
@@ -260,9 +267,10 @@ pub fn fgrad_inplace_f32(
 pub fn bdiv_inplace_f32(
     div: &mut [f32],
     gx: &[f32], gy: &[f32], gz: &[f32],
-    nx: usize, ny: usize, nz: usize,
-    vsx: f32, vsy: f32, vsz: f32,
+    grid: &Grid,
 ) {
+    let (nx, ny, nz) = grid.dims;
+    let (vsx, vsy, vsz) = (grid.vsx() as f32, grid.vsy() as f32, grid.vsz() as f32);
     let hx = 1.0 / vsx;
     let hy = 1.0 / vsy;
     let hz = 1.0 / vsz;
@@ -292,14 +300,13 @@ pub fn bdiv_inplace_f32(
 /// Forward difference gradient operator (allocating, f32)
 pub fn fgrad_f32(
     x: &[f32],
-    nx: usize, ny: usize, nz: usize,
-    vsx: f32, vsy: f32, vsz: f32,
+    grid: &Grid,
 ) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
-    let n_total = nx * ny * nz;
+    let n_total = grid.n_total();
     let mut gx = vec![0.0f32; n_total];
     let mut gy = vec![0.0f32; n_total];
     let mut gz = vec![0.0f32; n_total];
-    fgrad_inplace_f32(&mut gx, &mut gy, &mut gz, x, nx, ny, nz, vsx, vsy, vsz);
+    fgrad_inplace_f32(&mut gx, &mut gy, &mut gz, x, grid);
     (gx, gy, gz)
 }
 
@@ -322,9 +329,10 @@ pub fn symgrad_inplace_f32(
     sxx: &mut [f32], sxy: &mut [f32], sxz: &mut [f32],
     syy: &mut [f32], syz: &mut [f32], szz: &mut [f32],
     wx: &[f32], wy: &[f32], wz: &[f32],
-    nx: usize, ny: usize, nz: usize,
-    vsx: f32, vsy: f32, vsz: f32,
+    grid: &Grid,
 ) {
+    let (nx, ny, nz) = grid.dims;
+    let (vsx, vsy, vsz) = (grid.vsx() as f32, grid.vsy() as f32, grid.vsz() as f32);
     let hx = 1.0 / vsx;
     let hy = 1.0 / vsy;
     let hz = 1.0 / vsz;
@@ -397,9 +405,10 @@ pub fn symdiv_inplace_f32(
     divx: &mut [f32], divy: &mut [f32], divz: &mut [f32],
     sxx: &[f32], sxy: &[f32], sxz: &[f32],
     syy: &[f32], syz: &[f32], szz: &[f32],
-    nx: usize, ny: usize, nz: usize,
-    vsx: f32, vsy: f32, vsz: f32,
+    grid: &Grid,
 ) {
+    let (nx, ny, nz) = grid.dims;
+    let (vsx, vsy, vsz) = (grid.vsx() as f32, grid.vsy() as f32, grid.vsz() as f32);
     let hx = 1.0 / vsx;
     let hy = 1.0 / vsy;
     let hz = 1.0 / vsz;
@@ -452,9 +461,10 @@ pub fn fgrad_masked_inplace_f32(
     gx: &mut [f32], gy: &mut [f32], gz: &mut [f32],
     x: &[f32],
     mask: &[u8],
-    nx: usize, ny: usize, nz: usize,
-    vsx: f32, vsy: f32, vsz: f32,
+    grid: &Grid,
 ) {
+    let (nx, ny, nz) = grid.dims;
+    let (vsx, vsy, vsz) = (grid.vsx() as f32, grid.vsy() as f32, grid.vsz() as f32);
     let hx = 1.0 / vsx;
     let hy = 1.0 / vsy;
     let hz = 1.0 / vsz;
@@ -500,9 +510,10 @@ pub fn bdiv_masked_inplace_f32(
     div: &mut [f32],
     gx: &[f32], gy: &[f32], gz: &[f32],
     mask: &[u8],
-    nx: usize, ny: usize, nz: usize,
-    vsx: f32, vsy: f32, vsz: f32,
+    grid: &Grid,
 ) {
+    let (nx, ny, nz) = grid.dims;
+    let (vsx, vsy, vsz) = (grid.vsx() as f32, grid.vsy() as f32, grid.vsz() as f32);
     let hx = 1.0 / vsx;
     let hy = 1.0 / vsy;
     let hz = 1.0 / vsz;
@@ -563,8 +574,9 @@ mod tests {
         // Gradient of constant should be zero
         let n = 4;
         let x = vec![1.0; n * n * n];
+        let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
 
-        let (gx, gy, gz) = fgrad(&x, n, n, n, 1.0, 1.0, 1.0);
+        let (gx, gy, gz) = fgrad(&x, &grid);
 
         for i in 0..n*n*n {
             assert!(gx[i].abs() < 1e-10);
@@ -577,6 +589,7 @@ mod tests {
     fn test_div_grad_adjoint() {
         // Check that <grad(x), h> = <x, -div(h)> (adjoint relationship)
         let n = 4;
+        let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
         let x: Vec<f64> = (0..n*n*n).map(|i| (i as f64) * 0.1).collect();
 
         // Create an arbitrary vector field h
@@ -584,8 +597,8 @@ mod tests {
         let hy: Vec<f64> = (0..n*n*n).map(|i| ((i as f64) * 0.3).cos()).collect();
         let hz: Vec<f64> = (0..n*n*n).map(|i| ((i as f64) * 0.1).sin()).collect();
 
-        let (gx, gy, gz) = fgrad(&x, n, n, n, 1.0, 1.0, 1.0);
-        let div_h = bdiv(&hx, &hy, &hz, n, n, n, 1.0, 1.0, 1.0);
+        let (gx, gy, gz) = fgrad(&x, &grid);
+        let div_h = bdiv(&hx, &hy, &hz, &grid);
 
         // <grad(x), h> should equal <x, -div(h)>
         let lhs: f64 = gx.iter().zip(hx.iter())
@@ -610,6 +623,7 @@ mod tests {
         let ny = 3;
         let nz = 3;
         let n = nx * ny * nz;
+        let grid = Grid::new(nx, ny, nz, 1.0, 1.0, 1.0);
         let mut x = vec![0.0f32; n];
         for k in 0..nz {
             for j in 0..ny {
@@ -622,7 +636,7 @@ mod tests {
         let mut gx = vec![0.0f32; n];
         let mut gy = vec![0.0f32; n];
         let mut gz = vec![0.0f32; n];
-        fgrad_inplace_f32(&mut gx, &mut gy, &mut gz, &x, nx, ny, nz, 1.0, 1.0, 1.0);
+        fgrad_inplace_f32(&mut gx, &mut gy, &mut gz, &x, &grid);
 
         // Interior x-gradient should be 1.0
         for k in 0..nz {
@@ -655,8 +669,8 @@ mod tests {
         }
 
         // Test with non-unit voxel size
-        let vsx = 2.0f32;
-        fgrad_inplace_f32(&mut gx, &mut gy, &mut gz, &x, nx, ny, nz, vsx, 1.0, 1.0);
+        let grid2 = Grid::new(nx, ny, nz, 2.0, 1.0, 1.0);
+        fgrad_inplace_f32(&mut gx, &mut gy, &mut gz, &x, &grid2);
         for k in 0..nz {
             for j in 0..ny {
                 for i in 0..(nx - 1) {
@@ -680,6 +694,7 @@ mod tests {
         let ny = 4;
         let nz = 4;
         let n = nx * ny * nz;
+        let grid = Grid::new(nx, ny, nz, 1.0, 1.0, 1.0);
 
         let mut wx = vec![0.0f32; n];
         let wy = vec![0.0f32; n];
@@ -704,7 +719,7 @@ mod tests {
         symgrad_inplace_f32(
             &mut sxx, &mut sxy, &mut sxz, &mut syy, &mut syz, &mut szz,
             &wx, &wy, &wz,
-            nx, ny, nz, 1.0, 1.0, 1.0,
+            &grid,
         );
 
         // Check interior points (away from boundaries)
@@ -754,6 +769,7 @@ mod tests {
         let ny = 4;
         let nz = 4;
         let n = nx * ny * nz;
+        let grid = Grid::new(nx, ny, nz, 1.0, 1.0, 1.0);
 
         let sxx = vec![1.0f32; n];
         let sxy = vec![0.5f32; n];
@@ -769,7 +785,7 @@ mod tests {
         symdiv_inplace_f32(
             &mut divx, &mut divy, &mut divz,
             &sxx, &sxy, &sxz, &syy, &syz, &szz,
-            nx, ny, nz, 1.0, 1.0, 1.0,
+            &grid,
         );
 
         // For a constant tensor field, backward differences give 0 at interior points
@@ -813,6 +829,7 @@ mod tests {
         let ny = 4;
         let nz = 4;
         let n = nx * ny * nz;
+        let grid = Grid::new(nx, ny, nz, 1.0, 1.0, 1.0);
 
         // Create a mask that is 1 for the inner 2x2x2 cube
         let mut mask = vec![0u8; n];
@@ -830,7 +847,7 @@ mod tests {
         let gz = vec![1.0f32; n];
 
         let mut div = vec![0.0f32; n];
-        bdiv_masked_inplace_f32(&mut div, &gx, &gy, &gz, &mask, nx, ny, nz, 1.0, 1.0, 1.0);
+        bdiv_masked_inplace_f32(&mut div, &gx, &gy, &gz, &mask, &grid);
 
         // Outside the mask, divergence should be zero
         for k in 0..nz {
@@ -877,9 +894,7 @@ mod tests {
         let ny = 7;
         let nz = 5;
         let n = nx * ny * nz;
-        let vsx = 1.5;
-        let vsy = 0.8;
-        let vsz = 2.0;
+        let grid = Grid::new(nx, ny, nz, 1.5, 0.8, 2.0);
 
         // Create non-trivial scalar field
         let x: Vec<f64> = (0..n)
@@ -913,8 +928,8 @@ mod tests {
             })
             .collect();
 
-        let (gx, gy, gz) = fgrad(&x, nx, ny, nz, vsx, vsy, vsz);
-        let div_h = bdiv(&hx, &hy, &hz, nx, ny, nz, vsx, vsy, vsz);
+        let (gx, gy, gz) = fgrad(&x, &grid);
+        let div_h = bdiv(&hx, &hy, &hz, &grid);
 
         // <grad(x), h> = sum(gx*hx + gy*hy + gz*hz)
         let lhs: f64 = gx.iter().zip(hx.iter())
@@ -947,6 +962,7 @@ mod tests {
         let ny = 8;
         let nz = 8;
         let n = nx * ny * nz;
+        let grid = Grid::new(nx, ny, nz, 1.0, 1.0, 1.0);
 
         let mut x = vec![0.0f32; n];
         // Linear ramp in x
@@ -958,7 +974,7 @@ mod tests {
             }
         }
 
-        let (gx, gy, gz) = fgrad_f32(&x, nx, ny, nz, 1.0, 1.0, 1.0);
+        let (gx, gy, gz) = fgrad_f32(&x, &grid);
 
         assert_eq!(gx.len(), n);
         assert_eq!(gy.len(), n);
@@ -986,6 +1002,7 @@ mod tests {
         let ny = 8;
         let nz = 8;
         let n = nx * ny * nz;
+        let grid = Grid::new(nx, ny, nz, 1.0, 1.0, 1.0);
 
         let mut x = vec![0.0f32; n];
         // Linear ramp in y
@@ -1000,7 +1017,7 @@ mod tests {
         let mut gx = vec![0.0f32; n];
         let mut gy = vec![0.0f32; n];
         let mut gz = vec![0.0f32; n];
-        fgrad_inplace_f32(&mut gx, &mut gy, &mut gz, &x, nx, ny, nz, 1.0, 1.0, 1.0);
+        fgrad_inplace_f32(&mut gx, &mut gy, &mut gz, &x, &grid);
 
         // Interior y-gradient should be 1.0
         for k in 0..nz {
@@ -1037,6 +1054,7 @@ mod tests {
         let ny = 8;
         let nz = 8;
         let n = nx * ny * nz;
+        let grid = Grid::new(nx, ny, nz, 1.0, 1.0, 1.0);
 
         let mut x = vec![0.0f32; n];
         // Linear ramp in z
@@ -1051,7 +1069,7 @@ mod tests {
         let mut gx = vec![0.0f32; n];
         let mut gy = vec![0.0f32; n];
         let mut gz = vec![0.0f32; n];
-        fgrad_inplace_f32(&mut gx, &mut gy, &mut gz, &x, nx, ny, nz, 1.0, 1.0, 1.0);
+        fgrad_inplace_f32(&mut gx, &mut gy, &mut gz, &x, &grid);
 
         // Interior z-gradient should be 1.0
         for k in 0..(nz - 1) {
@@ -1075,6 +1093,7 @@ mod tests {
         let ny = 8;
         let nz = 8;
         let n = nx * ny * nz;
+        let grid = Grid::new(nx, ny, nz, 1.0, 1.0, 1.0);
 
         // Constant gradient field
         let gx = vec![1.0f32; n];
@@ -1082,7 +1101,7 @@ mod tests {
         let gz = vec![1.0f32; n];
 
         let mut div = vec![0.0f32; n];
-        bdiv_inplace_f32(&mut div, &gx, &gy, &gz, nx, ny, nz, 1.0, 1.0, 1.0);
+        bdiv_inplace_f32(&mut div, &gx, &gy, &gz, &grid);
 
         // For constant gradient, backward differences give 0 at interior (i>0,j>0,k>0)
         for k in 1..nz {
@@ -1111,6 +1130,7 @@ mod tests {
         let ny = 8;
         let nz = 8;
         let n = nx * ny * nz;
+        let grid = Grid::new(nx, ny, nz, 1.0, 1.0, 1.0);
 
         // Create a mask covering inner 6x6x6
         let mut mask = vec![0u8; n];
@@ -1137,7 +1157,7 @@ mod tests {
         let mut gz = vec![0.0f32; n];
         fgrad_masked_inplace_f32(
             &mut gx, &mut gy, &mut gz, &x, &mask,
-            nx, ny, nz, 1.0, 1.0, 1.0,
+            &grid,
         );
 
         // Outside mask should be zero
@@ -1172,6 +1192,7 @@ mod tests {
         let ny = 8;
         let nz = 8;
         let n = nx * ny * nz;
+        let grid = Grid::new(nx, ny, nz, 1.0, 1.0, 1.0);
 
         let mut mask = vec![0u8; n];
         for k in 1..7 {
@@ -1187,7 +1208,7 @@ mod tests {
         let gz = vec![1.0f32; n];
 
         let mut div = vec![0.0f32; n];
-        bdiv_masked_inplace_f32(&mut div, &gx, &gy, &gz, &mask, nx, ny, nz, 1.0, 1.0, 1.0);
+        bdiv_masked_inplace_f32(&mut div, &gx, &gy, &gz, &mask, &grid);
 
         // Outside mask should be zero
         for i in 0..n {
@@ -1204,6 +1225,7 @@ mod tests {
         let ny = 8;
         let nz = 8;
         let n = nx * ny * nz;
+        let grid = Grid::new(nx, ny, nz, 1.0, 1.0, 1.0);
 
         let mut x = vec![0.0f64; n];
         for k in 0..nz {
@@ -1217,7 +1239,7 @@ mod tests {
         let mut gx = vec![0.0f64; n];
         let mut gy = vec![0.0f64; n];
         let mut gz = vec![0.0f64; n];
-        fgrad_inplace(&mut gx, &mut gy, &mut gz, &x, nx, ny, nz, 1.0, 1.0, 1.0);
+        fgrad_inplace(&mut gx, &mut gy, &mut gz, &x, &grid);
 
         // Interior gradient in x should be 1
         for k in 0..nz {
@@ -1240,13 +1262,14 @@ mod tests {
         let ny = 8;
         let nz = 8;
         let n = nx * ny * nz;
+        let grid = Grid::new(nx, ny, nz, 1.0, 1.0, 1.0);
 
         let gx = vec![1.0f64; n];
         let gy = vec![1.0f64; n];
         let gz = vec![1.0f64; n];
 
         let mut div = vec![0.0f64; n];
-        bdiv_inplace(&mut div, &gx, &gy, &gz, nx, ny, nz, 1.0, 1.0, 1.0);
+        bdiv_inplace(&mut div, &gx, &gy, &gz, &grid);
 
         // Interior divergence of constant field should be 0
         for k in 1..nz {
@@ -1292,6 +1315,7 @@ mod tests {
         let vsx = 2.0f32;
         let vsy = 0.5f32;
         let vsz = 3.0f32;
+        let grid = Grid::new(nx, ny, nz, vsx as f64, vsy as f64, vsz as f64);
 
         // Linear ramp in each direction simultaneously
         let mut x = vec![0.0f32; n];
@@ -1306,7 +1330,7 @@ mod tests {
         let mut gx = vec![0.0f32; n];
         let mut gy = vec![0.0f32; n];
         let mut gz = vec![0.0f32; n];
-        fgrad_inplace_f32(&mut gx, &mut gy, &mut gz, &x, nx, ny, nz, vsx, vsy, vsz);
+        fgrad_inplace_f32(&mut gx, &mut gy, &mut gz, &x, &grid);
 
         // Interior x-gradient should be 1/vsx = 0.5
         for k in 0..nz {
@@ -1358,6 +1382,7 @@ mod tests {
         let ny = 4;
         let nz = 4;
         let n = nx * ny * nz;
+        let grid = Grid::new(nx, ny, nz, 1.0, 1.0, 1.0);
 
         // Zero vector field => zero symgrad
         let wx = vec![0.0f32; n];
@@ -1373,7 +1398,7 @@ mod tests {
 
         symgrad_inplace_f32(
             &mut sxx, &mut sxy, &mut sxz, &mut syy, &mut syz, &mut szz,
-            &wx, &wy, &wz, nx, ny, nz, 1.0, 1.0, 1.0,
+            &wx, &wy, &wz, &grid,
         );
 
         for i in 0..n {
@@ -1392,7 +1417,7 @@ mod tests {
 
         symgrad_inplace_f32(
             &mut sxx, &mut sxy, &mut sxz, &mut syy, &mut syz, &mut szz,
-            &wx, &wy, &wz, nx, ny, nz, 1.0, 1.0, 1.0,
+            &wx, &wy, &wz, &grid,
         );
 
         // Interior points (not at boundary) should have zero symgrad
@@ -1426,7 +1451,7 @@ mod tests {
         symdiv_inplace_f32(
             &mut divx, &mut divy, &mut divz,
             &qxx, &qxy, &qxz, &qyy, &qyz, &qzz,
-            nx, ny, nz, 1.0, 1.0, 1.0,
+            &grid,
         );
 
         for i in 0..n {
@@ -1446,6 +1471,7 @@ mod tests {
         let vsx = 2.0f32;
         let vsy = 0.5f32;
         let vsz = 1.5f32;
+        let grid = Grid::new(nx, ny, nz, vsx as f64, vsy as f64, vsz as f64);
 
         // wx = x coordinate (linear in i)
         let mut wx = vec![0.0f32; n];
@@ -1468,7 +1494,7 @@ mod tests {
 
         symgrad_inplace_f32(
             &mut sxx, &mut sxy, &mut sxz, &mut syy, &mut syz, &mut szz,
-            &wx, &wy, &wz, nx, ny, nz, vsx, vsy, vsz,
+            &wx, &wy, &wz, &grid,
         );
 
         // sxx should be dwx/dx = 1/vsx at interior

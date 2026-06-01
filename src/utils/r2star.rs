@@ -42,23 +42,22 @@ pub fn use_arlo(echo_times: &[f64], tolerance: f64) -> bool {
 ///   i.e. shape `(n_voxels, n_echoes)` in row-major order, where `n_voxels = nx*ny*nz`
 /// * `mask` - Binary brain mask `[nx*ny*nz]` (1 = process, 0 = skip)
 /// * `echo_times` - Echo times in seconds `[n_echoes]` (must be equi-spaced)
-/// * `nx`, `ny`, `nz` - Volume dimensions
+/// * `grid` - Volume grid (dimensions and voxel sizes)
 ///
 /// # Returns
 /// `(r2star_map, s0_map)` - R2* in Hz and S0 (proton density), both `[nx*ny*nz]`
 ///
 /// # Panics
 /// Panics if `echo_times.len() < 3` or echo times are not equi-spaced.
-#[allow(clippy::too_many_arguments)]
 pub fn r2star_arlo(
     magnitude: &[f64],
     mask: &[u8],
     echo_times: &[f64],
-    nx: usize, ny: usize, nz: usize,
+    grid: &crate::Grid,
 ) -> (Vec<f64>, Vec<f64>) {
     let n_echoes = echo_times.len();
     assert!(n_echoes >= 3, "ARLO requires at least 3 echo times");
-    let n_voxels = nx * ny * nz;
+    let n_voxels = grid.n_total();
     assert_eq!(magnitude.len(), n_voxels * n_echoes,
         "magnitude length must be n_voxels * n_echoes");
     assert_eq!(mask.len(), n_voxels, "mask length must be n_voxels");
@@ -174,6 +173,11 @@ fn log_linear_fit(signal: &[f64], echo_times: &[f64]) -> (f64, f64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Grid;
+
+    fn grid(nx: usize, ny: usize, nz: usize) -> Grid {
+        Grid::new(nx, ny, nz, 1.0, 1.0, 1.0)
+    }
 
     #[test]
     fn test_use_arlo_equispaced() {
@@ -207,7 +211,7 @@ mod tests {
             .map(|&t| s0_true * (-r2star_true * t).exp())
             .collect();
 
-        let (r2star_map, s0_map) = r2star_arlo(&magnitude, &mask, &te, 1, 1, 1);
+        let (r2star_map, s0_map) = r2star_arlo(&magnitude, &mask, &te, &grid(1, 1, 1));
 
         let r2star_err = (r2star_map[0] - r2star_true).abs() / r2star_true;
         let s0_err = (s0_map[0] - s0_true).abs() / s0_true;
@@ -232,7 +236,7 @@ mod tests {
         let mask = vec![0u8; 1]; // masked out
         let magnitude = vec![100.0, 80.0, 60.0];
 
-        let (r2star_map, s0_map) = r2star_arlo(&magnitude, &mask, &te, 1, 1, 1);
+        let (r2star_map, s0_map) = r2star_arlo(&magnitude, &mask, &te, &grid(1, 1, 1));
         assert_eq!(r2star_map[0], 0.0);
         assert_eq!(s0_map[0], 0.0);
     }
@@ -255,7 +259,7 @@ mod tests {
             }
         }
 
-        let (r2star_map, _s0_map) = r2star_arlo(&magnitude, &mask, &te, nx, ny, nz);
+        let (r2star_map, _s0_map) = r2star_arlo(&magnitude, &mask, &te, &grid(nx, ny, nz));
 
         for v in 0..n_voxels {
             let err = (r2star_map[v] - r2star_values[v]).abs() / r2star_values[v];

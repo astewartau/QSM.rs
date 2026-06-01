@@ -11,23 +11,11 @@
 //! Reference implementation: https://github.com/kamesy/QSM.jl
 
 use num_complex::Complex64;
+use crate::Grid;
 use crate::fft::{fft3d, ifft3d};
 use crate::kernels::dipole::dipole_kernel;
+use crate::utils::vec_norm;
 
-#[cfg(feature = "parallel")]
-use crate::par::*;
-
-/// PDF background field removal
-///
-/// # Arguments
-/// * `field` - Total field (nx * ny * nz)
-/// * `mask` - Binary mask (nx * ny * nz), 1 = brain, 0 = background
-/// * `nx`, `ny`, `nz` - Array dimensions
-/// * `vsx`, `vsy`, `vsz` - Voxel sizes in mm
-/// * `bdir` - B0 field direction
-/// * `tol` - Convergence tolerance for LSMR
-/// * `max_iter` - Maximum iterations for LSMR
-///
 /// PDF algorithm parameters
 #[derive(Clone, Debug)]
 pub struct PdfParams {
@@ -41,115 +29,33 @@ impl Default for PdfParams {
     }
 }
 
+/// PDF background field removal
+///
+/// # Arguments
+/// * `field` - Total field (nx * ny * nz)
+/// * `mask` - Binary mask (nx * ny * nz), 1 = brain, 0 = background
+/// * `grid` - Volume dimensions and voxel sizes
+/// * `bdir` - B0 field direction
+/// * `tol` - Convergence tolerance for LSMR
+/// * `max_iter` - Maximum iterations for LSMR
+/// * `progress` - Progress callback (iteration, max_iter)
+///
 /// # Returns
 /// Local field with background removed
 pub fn pdf(
     field: &[f64],
     mask: &[u8],
-    nx: usize, ny: usize, nz: usize,
-    vsx: f64, vsy: f64, vsz: f64,
+    grid: &Grid,
     bdir: (f64, f64, f64),
     tol: f64,
     max_iter: usize,
+    mut progress: impl FnMut(usize, usize),
 ) -> Vec<f64> {
-    pdf_with_progress(field, mask, nx, ny, nz, vsx, vsy, vsz, bdir, tol, max_iter, |_, _| {})
-}
-
-
-
-/// Apply A = W * D * M_bg
-fn apply_a(
-    x: &[f64],
-    bg_mask: &[f64],
-    d_kernel: &[f64],
-    brain_mask: &[f64],
-    nx: usize, ny: usize, nz: usize,
-) -> Vec<f64> {
-    let n_total = nx * ny * nz;
-
-    // Apply background mask
-    let mut temp: Vec<Complex64> = x.iter()
-        .zip(bg_mask.iter())
-        .map(|(&xi, &m)| Complex64::new(xi * m, 0.0))
-        .collect();
-
-    // FFT
-    fft3d(&mut temp, nx, ny, nz);
-
-    // Apply dipole kernel
-    for i in 0..n_total {
-        temp[i] *= d_kernel[i];
-    }
-
-    // IFFT
-    ifft3d(&mut temp, nx, ny, nz);
-
-    // Apply brain mask weights
-    temp.iter()
-        .zip(brain_mask.iter())
-        .map(|(t, &w)| t.re * w)
-        .collect()
-}
-
-/// Apply A^T = M_bg * D * W
-fn apply_at(
-    u: &[f64],
-    brain_mask: &[f64],
-    d_kernel: &[f64],
-    bg_mask: &[f64],
-    nx: usize, ny: usize, nz: usize,
-) -> Vec<f64> {
-    let n_total = nx * ny * nz;
-
-    // Apply brain mask weights
-    let mut temp: Vec<Complex64> = u.iter()
-        .zip(brain_mask.iter())
-        .map(|(&ui, &w)| Complex64::new(ui * w, 0.0))
-        .collect();
-
-    // FFT
-    fft3d(&mut temp, nx, ny, nz);
-
-    // Apply dipole kernel (D is real and symmetric)
-    for i in 0..n_total {
-        temp[i] *= d_kernel[i];
-    }
-
-    // IFFT
-    ifft3d(&mut temp, nx, ny, nz);
-
-    // Apply background mask
-    temp.iter()
-        .zip(bg_mask.iter())
-        .map(|(t, &m)| t.re * m)
-        .collect()
-}
-
-/// Vector 2-norm
-fn vec_norm(v: &[f64]) -> f64 {
-    v.iter().map(|&x| x * x).sum::<f64>().sqrt()
-}
-
-/// PDF with progress callback
-///
-/// Same as `pdf` but calls `progress_callback(iteration, max_iter)` each iteration.
-pub fn pdf_with_progress<F>(
-    field: &[f64],
-    mask: &[u8],
-    nx: usize, ny: usize, nz: usize,
-    vsx: f64, vsy: f64, vsz: f64,
-    bdir: (f64, f64, f64),
-    tol: f64,
-    max_iter: usize,
-    mut progress_callback: F,
-) -> Vec<f64>
-where
-    F: FnMut(usize, usize),
-{
+    let (nx, ny, nz) = grid.dims;
     let n_total = nx * ny * nz;
 
     // Generate dipole kernel
-    let d_kernel = dipole_kernel(nx, ny, nz, vsx, vsy, vsz, bdir);
+    let d_kernel = dipole_kernel(grid, bdir);
 
     // Create background mask (complement of brain mask)
     let bg_mask: Vec<f64> = mask.iter()
@@ -220,7 +126,7 @@ where
 
     for iter in 0..max_iter {
         // Report progress
-        progress_callback(iter + 1, max_iter);
+        progress(iter + 1, max_iter);
 
         // Bidiagonalization
         let av = apply_a(&v, &bg_mask, &d_kernel, &brain_mask, nx, ny, nz);
@@ -230,7 +136,7 @@ where
         beta = vec_norm(&u);
 
         if beta < 1e-20 {
-            progress_callback(iter + 1, iter + 1);
+            progress(iter + 1, iter + 1);
             break;
         }
 
@@ -245,7 +151,7 @@ where
         alpha = vec_norm(&v);
 
         if alpha < 1e-20 {
-            progress_callback(iter + 1, iter + 1);
+            progress(iter + 1, iter + 1);
             break;
         }
 
@@ -260,7 +166,7 @@ where
         let theta = s * alpha;
         rho_bar = -c * alpha;
         let phi = c * phi_bar;
-        phi_bar = s * phi_bar;
+        phi_bar *= s;
 
         // Update x and w
         let phi_rho = phi / rho;
@@ -287,11 +193,11 @@ where
         c_bar = rho_tmp / rho_bar_lsmr;
         s_bar = theta_new / rho_bar_lsmr;
         zeta = c_bar * zeta_bar;
-        zeta_bar = -s_bar * zeta_bar;
+        zeta_bar *= -s_bar;
 
         // Estimate ||r|| (matching Julia lsmr.jl lines 264-287, with lambda=0)
         let beta_hat = c_lsmr * beta_dd;
-        beta_dd = -s_lsmr * beta_dd;
+        beta_dd *= -s_lsmr;
 
         let theta_tilde_old = theta_tilde;
         let rho_tilde_old = (rho_d_old * rho_d_old + theta_bar * theta_bar).sqrt();
@@ -321,7 +227,7 @@ where
         let eps_r = tol + tol * norm_a * norm_x / norm_b;
 
         if test1 <= eps_r || test2 <= tol {
-            progress_callback(iter + 1, iter + 1);
+            progress(iter + 1, iter + 1);
             break;
         }
     }
@@ -351,20 +257,72 @@ where
     local_field
 }
 
-/// PDF with default parameters (adaptive max_iter matching QSM.jl: ceil(sqrt(nx*ny*nz)))
-pub fn pdf_default(
-    field: &[f64],
-    mask: &[u8],
+/// Apply A = W * D * M_bg
+fn apply_a(
+    x: &[f64],
+    bg_mask: &[f64],
+    d_kernel: &[f64],
+    brain_mask: &[f64],
     nx: usize, ny: usize, nz: usize,
-    vsx: f64, vsy: f64, vsz: f64,
 ) -> Vec<f64> {
-    let max_iter = ((nx * ny * nz) as f64).sqrt().ceil() as usize;
-    pdf(
-        field, mask, nx, ny, nz, vsx, vsy, vsz,
-        (0.0, 0.0, 1.0),  // bdir
-        1e-5,              // tol
-        max_iter           // adaptive max_iter
-    )
+    let n_total = nx * ny * nz;
+
+    // Apply background mask
+    let mut temp: Vec<Complex64> = x.iter()
+        .zip(bg_mask.iter())
+        .map(|(&xi, &m)| Complex64::new(xi * m, 0.0))
+        .collect();
+
+    // FFT
+    fft3d(&mut temp, nx, ny, nz);
+
+    // Apply dipole kernel
+    for i in 0..n_total {
+        temp[i] *= d_kernel[i];
+    }
+
+    // IFFT
+    ifft3d(&mut temp, nx, ny, nz);
+
+    // Apply brain mask weights
+    temp.iter()
+        .zip(brain_mask.iter())
+        .map(|(t, &w)| t.re * w)
+        .collect()
+}
+
+/// Apply A^T = M_bg * D * W
+fn apply_at(
+    u: &[f64],
+    brain_mask: &[f64],
+    d_kernel: &[f64],
+    bg_mask: &[f64],
+    nx: usize, ny: usize, nz: usize,
+) -> Vec<f64> {
+    let n_total = nx * ny * nz;
+
+    // Apply brain mask weights
+    let mut temp: Vec<Complex64> = u.iter()
+        .zip(brain_mask.iter())
+        .map(|(&ui, &w)| Complex64::new(ui * w, 0.0))
+        .collect();
+
+    // FFT
+    fft3d(&mut temp, nx, ny, nz);
+
+    // Apply dipole kernel (D is real and symmetric)
+    for i in 0..n_total {
+        temp[i] *= d_kernel[i];
+    }
+
+    // IFFT
+    ifft3d(&mut temp, nx, ny, nz);
+
+    // Apply background mask
+    temp.iter()
+        .zip(bg_mask.iter())
+        .map(|(t, &m)| t.re * m)
+        .collect()
 }
 
 #[cfg(test)]
@@ -376,10 +334,11 @@ mod tests {
         let n = 8;
         let field = vec![0.0; n * n * n];
         let mask = vec![1u8; n * n * n];
+        let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
 
         let local = pdf(
-            &field, &mask, n, n, n, 1.0, 1.0, 1.0,
-            (0.0, 0.0, 1.0), 1e-5, 10
+            &field, &mask, &grid,
+            (0.0, 0.0, 1.0), 1e-5, 10, |_, _| {}
         );
 
         for &val in local.iter() {
@@ -410,9 +369,10 @@ mod tests {
             }
         }
 
+        let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
         let local = pdf(
-            &field, &mask, n, n, n, 1.0, 1.0, 1.0,
-            (0.0, 0.0, 1.0), 1e-5, 20
+            &field, &mask, &grid,
+            (0.0, 0.0, 1.0), 1e-5, 20, |_, _| {}
         );
 
         for (i, &val) in local.iter().enumerate() {
@@ -427,10 +387,11 @@ mod tests {
         let mut mask = vec![1u8; n * n * n];
         mask[0] = 0;
         mask[10] = 0;
+        let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
 
         let local = pdf(
-            &field, &mask, n, n, n, 1.0, 1.0, 1.0,
-            (0.0, 0.0, 1.0), 1e-5, 10
+            &field, &mask, &grid,
+            (0.0, 0.0, 1.0), 1e-5, 10, |_, _| {}
         );
 
         assert_eq!(local[0], 0.0, "Masked voxel should be zero");
@@ -461,9 +422,10 @@ mod tests {
         }
 
         // Anisotropic voxel sizes
+        let grid = Grid::new(n, n, n, 0.5, 1.0, 2.0);
         let local = pdf(
-            &field, &mask, n, n, n, 0.5, 1.0, 2.0,
-            (0.0, 0.0, 1.0), 1e-5, 20
+            &field, &mask, &grid,
+            (0.0, 0.0, 1.0), 1e-5, 20, |_, _| {}
         );
 
         for (i, &val) in local.iter().enumerate() {
@@ -511,9 +473,10 @@ mod tests {
             }
         }
 
+        let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
         let local = pdf(
-            &field, &mask, n, n, n, 1.0, 1.0, 1.0,
-            (0.0, 0.0, 1.0), 1e-5, 30
+            &field, &mask, &grid,
+            (0.0, 0.0, 1.0), 1e-5, 30, |_, _| {}
         );
 
         // All values should be finite
@@ -574,9 +537,10 @@ mod tests {
             }
         }
 
+        let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
         let local = pdf(
-            &field, &mask, n, n, n, 1.0, 1.0, 1.0,
-            (0.0, 0.0, 1.0), 1e-4, 50
+            &field, &mask, &grid,
+            (0.0, 0.0, 1.0), 1e-4, 50, |_, _| {}
         );
 
         assert_eq!(local.len(), n * n * n);
@@ -614,15 +578,17 @@ mod tests {
             }
         }
 
+        let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
+
         // With many iterations the result should converge
         let local_many = pdf(
-            &field, &mask, n, n, n, 1.0, 1.0, 1.0,
-            (0.0, 0.0, 1.0), 1e-8, 100
+            &field, &mask, &grid,
+            (0.0, 0.0, 1.0), 1e-8, 100, |_, _| {}
         );
 
         let local_few = pdf(
-            &field, &mask, n, n, n, 1.0, 1.0, 1.0,
-            (0.0, 0.0, 1.0), 1e-8, 5
+            &field, &mask, &grid,
+            (0.0, 0.0, 1.0), 1e-8, 5, |_, _| {}
         );
 
         // Both should be finite
@@ -654,9 +620,10 @@ mod tests {
         }
 
         // Tilted B0 direction
+        let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
         let local = pdf(
-            &field, &mask, n, n, n, 1.0, 1.0, 1.0,
-            (0.1, 0.2, 0.97), 1e-5, 20
+            &field, &mask, &grid,
+            (0.1, 0.2, 0.97), 1e-5, 20, |_, _| {}
         );
 
         for &val in &local {
@@ -685,9 +652,10 @@ mod tests {
             }
         }
 
+        let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
         let mut progress_calls = Vec::new();
-        let local = pdf_with_progress(
-            &field, &mask, n, n, n, 1.0, 1.0, 1.0,
+        let local = pdf(
+            &field, &mask, &grid,
             (0.0, 0.0, 1.0), 1e-5, 20,
             |iter, max| { progress_calls.push((iter, max)); }
         );
@@ -700,43 +668,16 @@ mod tests {
     }
 
     #[test]
-    fn test_pdf_default_wrapper() {
-        let n = 8;
-        let field: Vec<f64> = (0..n * n * n).map(|i| (i as f64) * 0.001).collect();
-
-        let mut mask = vec![0u8; n * n * n];
-        let center = n / 2;
-        let radius = n / 4;
-        for z in 0..n {
-            for y in 0..n {
-                for x in 0..n {
-                    let dx = (x as i32) - (center as i32);
-                    let dy = (y as i32) - (center as i32);
-                    let dz = (z as i32) - (center as i32);
-                    if dx * dx + dy * dy + dz * dz <= (radius * radius) as i32 {
-                        mask[x + y * n + z * n * n] = 1;
-                    }
-                }
-            }
-        }
-
-        let local = pdf_default(&field, &mask, n, n, n, 1.0, 1.0, 1.0);
-        assert_eq!(local.len(), n * n * n);
-        for &val in &local {
-            assert!(val.is_finite());
-        }
-    }
-
-    #[test]
     fn test_pdf_all_mask() {
         // All voxels masked (no background) - should still work
         let n = 8;
         let field: Vec<f64> = (0..n * n * n).map(|i| (i as f64) * 0.001).collect();
         let mask = vec![1u8; n * n * n];
+        let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
 
         let local = pdf(
-            &field, &mask, n, n, n, 1.0, 1.0, 1.0,
-            (0.0, 0.0, 1.0), 1e-5, 10
+            &field, &mask, &grid,
+            (0.0, 0.0, 1.0), 1e-5, 10, |_, _| {}
         );
 
         // With all voxels as "brain", the background mask is empty

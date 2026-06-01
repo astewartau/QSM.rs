@@ -19,6 +19,7 @@
 use std::collections::HashMap;
 use std::f64::consts::PI;
 use delaunator::{triangulate, Point};
+use crate::Grid;
 
 /// Result of curvature calculation
 pub struct CurvatureResult {
@@ -319,8 +320,9 @@ pub fn calculate_curvature_proximity(
     lower_lim: f64,
     curv_constant: f64,
     sigma: f64,
-    nx: usize, ny: usize, nz: usize,
+    grid: &Grid,
 ) -> (Vec<f64>, Vec<f64>) {
+    let (nx, ny, nz) = grid.dims;
     let n_total = nx * ny * nz;
 
     // Extract surface voxels
@@ -580,7 +582,8 @@ fn dilate_mask(mask: &[u8], nx: usize, ny: usize, nz: usize, radius: i32) -> Vec
 }
 
 /// Morphological closing (dilation followed by erosion)
-pub fn morphological_close(mask: &[u8], nx: usize, ny: usize, nz: usize, radius: i32) -> Vec<u8> {
+pub fn morphological_close(mask: &[u8], grid: &Grid, radius: i32) -> Vec<u8> {
+    let (nx, ny, nz) = grid.dims;
     let dilated = dilate_mask(mask, nx, ny, nz, radius);
     erode_mask(&dilated, nx, ny, nz, radius)
 }
@@ -707,8 +710,9 @@ fn convolve_1d_direction_masked(
 /// Returns full volume with curvature values at surface voxels
 pub fn calculate_gaussian_curvature(
     mask: &[u8],
-    nx: usize, ny: usize, nz: usize,
+    grid: &Grid,
 ) -> CurvatureResult {
+    let (nx, ny, nz) = grid.dims;
     let n_total = nx * ny * nz;
 
     // Extract surface voxels
@@ -780,6 +784,10 @@ pub fn calculate_gaussian_curvature(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn grid(nx: usize, ny: usize, nz: usize) -> Grid {
+        Grid::new(nx, ny, nz, 1.0, 1.0, 1.0)
+    }
 
     #[test]
     fn test_extract_surface_basic() {
@@ -1029,7 +1037,7 @@ mod tests {
             mask[surface[0]] = 0;
         }
 
-        let closed = morphological_close(&mask, n, n, n, 1);
+        let closed = morphological_close(&mask, &grid(n, n, n), 1);
         let orig_count: usize = mask.iter().map(|&v| v as usize).sum();
         let closed_count: usize = closed.iter().map(|&v| v as usize).sum();
         // Closing should recover the gap or at least not shrink significantly
@@ -1044,7 +1052,7 @@ mod tests {
     #[test]
     fn test_morphological_close_empty() {
         let mask = vec![0u8; 27];
-        let closed = morphological_close(&mask, 3, 3, 3, 1);
+        let closed = morphological_close(&mask, &grid(3, 3, 3), 1);
         let count: usize = closed.iter().map(|&v| v as usize).sum();
         assert_eq!(count, 0, "Closing empty mask should stay empty");
     }
@@ -1271,7 +1279,7 @@ mod tests {
     fn test_calculate_gaussian_curvature_sphere() {
         let n = 12;
         let mask = make_sphere_mask(n, 4.5);
-        let result = calculate_gaussian_curvature(&mask, n, n, n);
+        let result = calculate_gaussian_curvature(&mask, &grid(n, n, n));
 
         assert_eq!(result.gaussian_curvature.len(), n * n * n);
         assert_eq!(result.mean_curvature.len(), n * n * n);
@@ -1312,7 +1320,7 @@ mod tests {
     fn test_calculate_gaussian_curvature_empty_mask() {
         let n = 5;
         let mask = vec![0u8; n * n * n];
-        let result = calculate_gaussian_curvature(&mask, n, n, n);
+        let result = calculate_gaussian_curvature(&mask, &grid(n, n, n));
         assert!(result.surface_indices.is_empty());
         assert!(result.gaussian_curvature.iter().all(|&v| v == 0.0));
         assert!(result.mean_curvature.iter().all(|&v| v == 0.0));
@@ -1322,7 +1330,7 @@ mod tests {
     fn test_calculate_gaussian_curvature_single_voxel() {
         let mut mask = vec![0u8; 125];
         mask[62] = 1; // single voxel in center of 5x5x5
-        let result = calculate_gaussian_curvature(&mask, 5, 5, 5);
+        let result = calculate_gaussian_curvature(&mask, &grid(5, 5, 5));
         // Single voxel is its own surface after erosion removes it
         // Result depends on whether erosion removes it entirely
         assert_eq!(result.gaussian_curvature.len(), 125);
@@ -1343,7 +1351,7 @@ mod tests {
         let prox1: Vec<f64> = mask.iter().map(|&v| v as f64).collect();
 
         let (prox, curv_i) = calculate_curvature_proximity(
-            &mask, &prox1, 0.6, 500.0, 1.0, n, n, n,
+            &mask, &prox1, 0.6, 500.0, 1.0, &grid(n, n, n),
         );
 
         assert_eq!(prox.len(), n_total);
@@ -1368,7 +1376,7 @@ mod tests {
         let prox1 = vec![1.0; n_total];
 
         let (prox, curv_i) = calculate_curvature_proximity(
-            &mask, &prox1, 0.6, 500.0, 1.0, n, n, n,
+            &mask, &prox1, 0.6, 500.0, 1.0, &grid(n, n, n),
         );
 
         // With empty mask, should return prox1 and all-ones curv_i
@@ -1387,7 +1395,7 @@ mod tests {
         let prox1: Vec<f64> = mask.iter().map(|&v| v as f64).collect();
 
         let (prox, _curv_i) = calculate_curvature_proximity(
-            &mask, &prox1, 0.6, 500.0, 1.0, n, n, n,
+            &mask, &prox1, 0.6, 500.0, 1.0, &grid(n, n, n),
         );
 
         // Outside mask, proximity should be 0 (due to prox1 being 0 there)
@@ -1405,10 +1413,10 @@ mod tests {
 
         // Different lower_lim and curv_constant
         let (prox_a, _) = calculate_curvature_proximity(
-            &mask, &prox1, 0.3, 100.0, 0.5, n, n, n,
+            &mask, &prox1, 0.3, 100.0, 0.5, &grid(n, n, n),
         );
         let (prox_b, _) = calculate_curvature_proximity(
-            &mask, &prox1, 0.9, 1000.0, 2.0, n, n, n,
+            &mask, &prox1, 0.9, 1000.0, 2.0, &grid(n, n, n),
         );
 
         // Both should produce finite results

@@ -12,22 +12,10 @@
 //! Reference implementation: https://github.com/kamesy/QSM.jl
 
 use num_complex::Complex64;
-use crate::fft::{fft3d, ifft3d};
-use crate::kernels::smv::smv_kernel;
+use crate::Grid;
+use crate::fft::{fft3d, ifft3d, fft_real_kernel};
+use crate::kernels::smv::{smv_kernel, erode_mask_smv};
 
-/// SHARP background field removal
-///
-/// Uses spherical mean value (SMV) filtering to remove background field.
-/// The local field is obtained by deconvolving the SMV-filtered field.
-///
-/// # Arguments
-/// * `field` - Unwrapped total field (nx * ny * nz)
-/// * `mask` - Binary mask (nx * ny * nz), 1 = inside ROI
-/// * `nx`, `ny`, `nz` - Array dimensions
-/// * `vsx`, `vsy`, `vsz` - Voxel sizes in mm
-/// * `radius` - SMV kernel radius in mm
-/// * `threshold` - High-pass filter threshold (typically 0.05)
-///
 /// SHARP algorithm parameters
 #[derive(Clone, Debug)]
 pub struct SharpParams {
@@ -46,52 +34,36 @@ impl Default for SharpParams {
     }
 }
 
+/// SHARP background field removal
+///
+/// Uses spherical mean value (SMV) filtering to remove background field.
+/// The local field is obtained by deconvolving the SMV-filtered field.
+///
+/// # Arguments
+/// * `field` - Unwrapped total field (nx * ny * nz)
+/// * `mask` - Binary mask (nx * ny * nz), 1 = inside ROI
+/// * `grid` - Volume dimensions and voxel sizes
+/// * `threshold` - High-pass filter threshold (typically 0.05)
+/// * `radius` - SMV kernel radius in mm
+///
 /// # Returns
 /// (local_field, eroded_mask)
 pub fn sharp(
     field: &[f64],
     mask: &[u8],
-    nx: usize, ny: usize, nz: usize,
-    vsx: f64, vsy: f64, vsz: f64,
-    radius: f64,
+    grid: &Grid,
     threshold: f64,
+    radius: f64,
 ) -> (Vec<f64>, Vec<u8>) {
+    let (nx, ny, nz) = grid.dims;
     let n_total = nx * ny * nz;
 
     // Generate SMV kernel and FFT it
-    let s_kernel = smv_kernel(nx, ny, nz, vsx, vsy, vsz, radius);
+    let s_kernel = smv_kernel(grid, radius);
+    let s_fft = fft_real_kernel(&s_kernel, nx, ny, nz);
 
-    // FFT of SMV kernel
-    let mut s_complex: Vec<Complex64> = s_kernel.iter()
-        .map(|&x| Complex64::new(x, 0.0))
-        .collect();
-    fft3d(&mut s_complex, nx, ny, nz);
-
-    // S is the real part of FFT(smv_kernel)
-    // 1-S is the high-pass kernel
-    let s_fft: Vec<f64> = s_complex.iter().map(|c| c.re).collect();
-
-    // Erode mask: convolve mask with SMV kernel
-    // Voxels where convolution result < 1 are near boundary
-    let mask_f64: Vec<f64> = mask.iter().map(|&m| m as f64).collect();
-    let mut mask_complex: Vec<Complex64> = mask_f64.iter()
-        .map(|&x| Complex64::new(x, 0.0))
-        .collect();
-
-    fft3d(&mut mask_complex, nx, ny, nz);
-
-    // Convolve mask with SMV kernel
-    for i in 0..n_total {
-        mask_complex[i] *= s_complex[i].re;  // S is real
-    }
-
-    ifft3d(&mut mask_complex, nx, ny, nz);
-
-    // Eroded mask: values close to 1 are fully inside
-    let delta = 1.0 - 1e-7_f64.sqrt();  // ~1 - eps
-    let eroded_mask: Vec<u8> = mask_complex.iter()
-        .map(|c| if c.re > delta { 1 } else { 0 })
-        .collect();
+    // Erode mask via SMV convolution
+    let eroded_mask = erode_mask_smv(mask, &s_fft, grid, 1.0 - 1e-7_f64.sqrt());
 
     // Apply SHARP:
     // 1. Multiply field by (1-S) in k-space (high-pass filter)
@@ -145,18 +117,6 @@ pub fn sharp(
     (local_field, eroded_mask)
 }
 
-/// SHARP with default parameters
-pub fn sharp_default(
-    field: &[f64],
-    mask: &[u8],
-    nx: usize, ny: usize, nz: usize,
-    vsx: f64, vsy: f64, vsz: f64,
-) -> (Vec<f64>, Vec<u8>) {
-    // Default radius: 18 * minimum voxel size
-    let radius = 18.0 * vsx.min(vsy).min(vsz);
-    sharp(field, mask, nx, ny, nz, vsx, vsy, vsz, radius, 0.05)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -167,9 +127,10 @@ mod tests {
         let n = 16;
         let field = vec![0.0; n * n * n];
         let mask = vec![1u8; n * n * n];
+        let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
 
         // Use small radius for small test array
-        let (local, _) = sharp(&field, &mask, n, n, n, 1.0, 1.0, 1.0, 2.0, 0.05);
+        let (local, _) = sharp(&field, &mask, &grid, 0.05, 2.0);
 
         for &val in local.iter() {
             assert!(val.abs() < 1e-8, "Zero field should give zero local field, got {}", val);
@@ -182,8 +143,9 @@ mod tests {
         let n = 16;
         let field: Vec<f64> = (0..n*n*n).map(|i| (i as f64) * 0.01).collect();
         let mask = vec![1u8; n * n * n];
+        let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
 
-        let (local, eroded) = sharp(&field, &mask, n, n, n, 1.0, 1.0, 1.0, 2.0, 0.05);
+        let (local, eroded) = sharp(&field, &mask, &grid, 0.05, 2.0);
 
         for (i, &val) in local.iter().enumerate() {
             assert!(val.is_finite(), "Local field should be finite at index {}", i);

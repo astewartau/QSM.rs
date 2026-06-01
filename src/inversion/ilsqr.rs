@@ -38,6 +38,7 @@ use crate::fft::Fft3dWorkspace;
 use crate::kernels::dipole::dipole_kernel;
 use crate::kernels::smv::smv_kernel;
 use crate::utils::gradient::{fgrad, bdiv};
+use crate::Grid;
 
 // ============================================================================
 // LSQR Solver
@@ -119,7 +120,7 @@ where
         let theta = s * alpha;
         rho_bar = -c * alpha;
         let phi = c * phi_bar;
-        phi_bar = s * phi_bar;
+        phi_bar *= s;
 
         // Update x and w
         let t1 = phi / rho;
@@ -252,7 +253,7 @@ where
         let theta = s * alpha;
         rho_bar = -c * alpha;
         let phi = c * phi_bar;
-        phi_bar = s * phi_bar;
+        phi_bar *= s;
 
         // ||x|| estimation via plane rotations (MATLAB's xxnorm approach)
         let delta = sn2 * rho;
@@ -428,7 +429,7 @@ where
         c_bar = rho_temp / rho_bar;
         s_bar = theta_new / rho_bar;
         zeta = c_bar * zeta_bar;
-        zeta_bar = -s_bar * zeta_bar;
+        zeta_bar *= -s_bar;
 
         // Update h_bar, x, h
         for i in 0..n {
@@ -1049,7 +1050,8 @@ fn fastqsm_step(
 
     // SMV kernel for smoothing (Equation 9)
     let r_smv = 3.0;
-    let h = smv_kernel(nx, ny, nz, vsx, vsy, vsz, r_smv);
+    let smv_grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
+    let h = smv_kernel(&smv_grid, r_smv);
 
     // FFT of SMV kernel — take real part to match MATLAB: real(fft3(ifftshift(h)))
     let h_complex: Vec<Complex64> = h.iter()
@@ -1176,7 +1178,8 @@ fn susceptibility_artifacts_step(
     let mic: Vec<f64> = d.iter().map(|&di| if di.abs() < thr { 1.0 } else { 0.0 }).collect();
 
     // Compute gradient of x0 (Equation 3)
-    let (dx, dy, dz) = fgrad(x0, nx, ny, nz, vsx, vsy, vsz);
+    let step3_grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
+    let (dx, dy, dz) = fgrad(x0, &step3_grid);
 
     // b = [wx .* dx; wy .* dy; wz .* dz] (concatenated)
     let bx = multiply_elementwise(&wx, &dx);
@@ -1213,7 +1216,7 @@ fn susceptibility_artifacts_step(
         let x_filtered: Vec<f64> = x_ifft.iter().map(|xi| xi.re).collect();
 
         // Compute gradient
-        let (gx, gy, gz) = fgrad(&x_filtered, nx, ny, nz, vsx, vsy, vsz);
+        let (gx, gy, gz) = fgrad(&x_filtered, &step3_grid);
 
         // Apply weights and concatenate
         let mut result = Vec::with_capacity(3 * n_total);
@@ -1239,7 +1242,7 @@ fn susceptibility_artifacts_step(
         // Adjoint of forward gradient = -div (bdiv returns +div, so negate)
         // MATLAB's gradfp_adj_mex uses h = -1/voxel_size, including the negation.
         // Rust's bdiv uses h = +1/voxel_size, so we negate here.
-        let div = bdiv(&wyx, &wyy, &wyz, nx, ny, nz, vsx, vsy, vsz);
+        let div = bdiv(&wyx, &wyy, &wyz, &step3_grid);
 
         // Apply Mic in k-space
         let div_complex: Vec<Complex64> = div.iter()
@@ -1278,41 +1281,50 @@ fn susceptibility_artifacts_step(
 /// # Arguments
 /// * `field` - Unwrapped local field/tissue phase (nx * ny * nz)
 /// * `mask` - Binary mask of region of interest
-/// * `nx`, `ny`, `nz` - Array dimensions
-/// * `vsx`, `vsy`, `vsz` - Voxel sizes in mm
+/// * `grid` - Volume grid (dimensions and voxel sizes)
 /// * `bdir` - B0 field direction (bx, by, bz)
-/// * `tol` - Stopping tolerance for LSMR solver
-/// * `maxit` - Maximum iterations for LSMR
+/// * `params` - iLSQR parameters (tol, max_iter)
+/// * `progress` - Progress callback `(step, total_steps)`
 ///
 /// # Returns
 /// Tuple of (susceptibility, streaking_artifacts, fast_qsm, initial_lsqr)
 pub fn ilsqr(
     field: &[f64],
     mask: &[u8],
-    nx: usize, ny: usize, nz: usize,
-    vsx: f64, vsy: f64, vsz: f64,
+    grid: &Grid,
     bdir: (f64, f64, f64),
-    tol: f64,
-    maxit: usize,
+    params: &IlsqrParams,
+    mut progress: impl FnMut(usize, usize),
 ) -> (Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>) {
+    let (nx, ny, nz) = grid.dims;
+    let (vsx, vsy, vsz) = grid.voxel_size;
+
     // Generate dipole kernel
-    let d = dipole_kernel(nx, ny, nz, vsx, vsy, vsz, bdir);
+    let d = dipole_kernel(grid, bdir);
 
     // Create FFT workspace
     let mut workspace = Fft3dWorkspace::new(nx, ny, nz);
 
+    progress(1, 4);
+
     // Step 1: Initial LSQR solution
     let xlsqr = lsqr_step(field, mask, &d, nx, ny, nz, vsx, vsy, vsz, &mut workspace);
 
+    progress(2, 4);
+
     // Step 2: FastQSM estimate
     let xfs = fastqsm_step(field, mask, &d, nx, ny, nz, vsx, vsy, vsz, &mut workspace);
+
+    progress(3, 4);
 
     // Step 3: Estimate streaking artifacts
     let xsa = susceptibility_artifacts_step(
         &xlsqr, &xfs, mask, &d,
         nx, ny, nz, vsx, vsy, vsz,
-        tol, maxit, &mut workspace
+        params.tol, params.max_iter, &mut workspace
     );
+
+    progress(4, 4);
 
     // Step 4: Subtract artifacts
     let chi: Vec<f64> = xlsqr.iter().zip(xsa.iter()).zip(mask.iter())
@@ -1326,61 +1338,12 @@ pub fn ilsqr(
 pub fn ilsqr_simple(
     field: &[f64],
     mask: &[u8],
-    nx: usize, ny: usize, nz: usize,
-    vsx: f64, vsy: f64, vsz: f64,
+    grid: &Grid,
     bdir: (f64, f64, f64),
-    tol: f64,
-    maxit: usize,
+    params: &IlsqrParams,
 ) -> Vec<f64> {
-    let (chi, _, _, _) = ilsqr(field, mask, nx, ny, nz, vsx, vsy, vsz, bdir, tol, maxit);
+    let (chi, _, _, _) = ilsqr(field, mask, grid, bdir, params, |_, _| {});
     chi
-}
-
-/// iLSQR with progress callback
-pub fn ilsqr_with_progress<F>(
-    field: &[f64],
-    mask: &[u8],
-    nx: usize, ny: usize, nz: usize,
-    vsx: f64, vsy: f64, vsz: f64,
-    bdir: (f64, f64, f64),
-    tol: f64,
-    maxit: usize,
-    mut progress_callback: F,
-) -> Vec<f64>
-where
-    F: FnMut(usize, usize),
-{
-    // Generate dipole kernel
-    let d = dipole_kernel(nx, ny, nz, vsx, vsy, vsz, bdir);
-
-    // Create FFT workspace
-    let mut workspace = Fft3dWorkspace::new(nx, ny, nz);
-
-    progress_callback(1, 4);
-
-    // Step 1: Initial LSQR solution
-    let xlsqr = lsqr_step(field, mask, &d, nx, ny, nz, vsx, vsy, vsz, &mut workspace);
-
-    progress_callback(2, 4);
-
-    // Step 2: FastQSM estimate
-    let xfs = fastqsm_step(field, mask, &d, nx, ny, nz, vsx, vsy, vsz, &mut workspace);
-
-    progress_callback(3, 4);
-
-    // Step 3: Estimate streaking artifacts
-    let xsa = susceptibility_artifacts_step(
-        &xlsqr, &xfs, mask, &d,
-        nx, ny, nz, vsx, vsy, vsz,
-        tol, maxit, &mut workspace
-    );
-
-    progress_callback(4, 4);
-
-    // Step 4: Subtract artifacts
-    xlsqr.iter().zip(xsa.iter()).zip(mask.iter())
-        .map(|((&xl, &xs), &m)| if m > 0 { xl - xs } else { 0.0 })
-        .collect()
 }
 
 #[cfg(test)]
@@ -1640,7 +1603,9 @@ mod tests {
         let tol = 0.1;
         let maxit = 5; // Few iterations for speed
 
-        let chi = ilsqr_simple(&field, &mask, nx, ny, nz, vsx, vsy, vsz, bdir, tol, maxit);
+        let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
+        let params = IlsqrParams { tol, max_iter: maxit };
+        let chi = ilsqr_simple(&field, &mask, &grid, bdir, &params);
 
         // Check output dimensions
         assert_eq!(chi.len(), n_total, "output size mismatch");

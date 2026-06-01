@@ -12,7 +12,8 @@
 //!
 //! Reference implementation: https://github.com/korbinian90/CLEARSWI.jl
 
-use crate::utils::gaussian_smooth_3d;
+use crate::Grid;
+use crate::utils::{gaussian_smooth_3d, apply_mask_zero};
 
 /// SWI algorithm parameters
 #[derive(Clone, Debug)]
@@ -59,7 +60,7 @@ pub enum PhaseScaling {
 /// # Arguments
 /// * `data` - Input data (e.g. unwrapped phase)
 /// * `mask` - Binary mask (1 = inside, 0 = outside)
-/// * `nx`, `ny`, `nz` - Array dimensions
+/// * `grid` - Volume grid (dimensions and voxel sizes)
 /// * `sigma` - Gaussian sigma for each dimension in voxels (e.g. [4, 4, 0])
 ///
 /// # Returns
@@ -67,12 +68,12 @@ pub enum PhaseScaling {
 pub fn highpass_filter(
     data: &[f64],
     mask: &[u8],
-    nx: usize, ny: usize, nz: usize,
+    grid: &Grid,
     sigma: [f64; 3],
 ) -> Vec<f64> {
     let nbox = 4; // masked smoothing uses nbox=4 in MriResearchTools
-    let smoothed = gaussian_smooth_3d(data, sigma, Some(mask), None, nbox, nx, ny, nz);
-    let n_total = nx * ny * nz;
+    let smoothed = gaussian_smooth_3d(data, sigma, Some(mask), None, nbox, grid);
+    let n_total = grid.n_total();
     let mut result = vec![0.0; n_total];
     for i in 0..n_total {
         if mask[i] == 1 {
@@ -191,12 +192,7 @@ pub fn create_phase_mask(
         }
     }
 
-    // Zero outside mask
-    for i in 0..n {
-        if mask[i] == 0 {
-            result[i] = 0.0;
-        }
-    }
+    apply_mask_zero(&mut result, mask);
 
     result
 }
@@ -209,32 +205,25 @@ pub fn create_phase_mask(
 /// * `phase` - Unwrapped phase (single echo or combined)
 /// * `magnitude` - Magnitude image (single echo or combined)
 /// * `mask` - Binary brain mask
-/// * `nx`, `ny`, `nz` - Array dimensions
-/// * `vsx`, `vsy`, `vsz` - Voxel sizes in mm (unused, reserved for consistency)
-/// * `hp_sigma` - High-pass filter sigma in voxels [x, y, z]
-/// * `scaling` - Phase scaling type
-/// * `strength` - Phase scaling strength
+/// * `grid` - Volume grid (dimensions and voxel sizes)
+/// * `params` - SWI algorithm parameters
 ///
 /// # Returns
 /// SWI image (magnitude × phase mask)
-#[allow(clippy::too_many_arguments)]
 pub fn calculate_swi(
     phase: &[f64],
     magnitude: &[f64],
     mask: &[u8],
-    nx: usize, ny: usize, nz: usize,
-    _vsx: f64, _vsy: f64, _vsz: f64,
-    hp_sigma: [f64; 3],
-    scaling: PhaseScaling,
-    strength: f64,
+    grid: &Grid,
+    params: &SwiParams,
 ) -> Vec<f64> {
-    let n_total = nx * ny * nz;
+    let n_total = grid.n_total();
 
     // High-pass filter phase
-    let filtered = highpass_filter(phase, mask, nx, ny, nz, hp_sigma);
+    let filtered = highpass_filter(phase, mask, grid, params.hp_sigma);
 
     // Create phase mask
-    let phase_mask = create_phase_mask(&filtered, mask, scaling, strength);
+    let phase_mask = create_phase_mask(&filtered, mask, params.scaling, params.strength);
 
     // SWI = magnitude × phase_mask
     let mut swi = vec![0.0; n_total];
@@ -245,27 +234,6 @@ pub fn calculate_swi(
     swi
 }
 
-/// Calculate SWI with default parameters
-///
-/// Defaults: sigma=[4,4,0], Tanh scaling, strength=4
-#[allow(clippy::too_many_arguments)]
-pub fn calculate_swi_default(
-    phase: &[f64],
-    magnitude: &[f64],
-    mask: &[u8],
-    nx: usize, ny: usize, nz: usize,
-    vsx: f64, vsy: f64, vsz: f64,
-) -> Vec<f64> {
-    calculate_swi(
-        phase, magnitude, mask,
-        nx, ny, nz,
-        vsx, vsy, vsz,
-        [4.0, 4.0, 0.0],
-        PhaseScaling::Tanh,
-        4.0,
-    )
-}
-
 /// Minimum intensity projection along the z-axis
 ///
 /// For each (x, y) position, takes the minimum value over a sliding window
@@ -273,7 +241,7 @@ pub fn calculate_swi_default(
 ///
 /// # Arguments
 /// * `data` - 3D volume (Fortran order)
-/// * `nx`, `ny`, `nz` - Array dimensions
+/// * `grid` - Volume grid (dimensions and voxel sizes)
 /// * `window` - Number of slices in the projection window
 ///
 /// # Returns
@@ -281,9 +249,11 @@ pub fn calculate_swi_default(
 /// Returns empty vec if `window > nz`.
 pub fn create_mip(
     data: &[f64],
-    nx: usize, ny: usize, nz: usize,
+    grid: &Grid,
     window: usize,
 ) -> Vec<f64> {
+    let (nx, ny, nz) = grid.dims;
+
     if window > nz || window == 0 {
         return vec![];
     }
@@ -309,14 +279,6 @@ pub fn create_mip(
     }
 
     mip
-}
-
-/// Minimum intensity projection with default window of 7 slices
-pub fn create_mip_default(
-    data: &[f64],
-    nx: usize, ny: usize, nz: usize,
-) -> Vec<f64> {
-    create_mip(data, nx, ny, nz, 7)
 }
 
 /// Softplus magnitude scaling for enhanced contrast
@@ -414,8 +376,9 @@ mod tests {
         let phase = vec![0.0; nn];
         let magnitude = vec![1.0; nn];
         let mask = vec![1u8; nn];
+        let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
 
-        let swi = calculate_swi_default(&phase, &magnitude, &mask, n, n, n, 1.0, 1.0, 1.0);
+        let swi = calculate_swi(&phase, &magnitude, &mask, &grid, &SwiParams::default());
 
         // With zero phase, tanh mask gives (1 + tanh(1)) / 2 ≈ 0.88
         for &v in &swi {
@@ -433,8 +396,9 @@ mod tests {
         let mut mask = vec![1u8; nn];
         mask[0] = 0;
         mask[1] = 0;
+        let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
 
-        let swi = calculate_swi_default(&phase, &magnitude, &mask, n, n, n, 1.0, 1.0, 1.0);
+        let swi = calculate_swi(&phase, &magnitude, &mask, &grid, &SwiParams::default());
 
         assert_eq!(swi[0], 0.0, "Outside mask should be 0");
         assert_eq!(swi[1], 0.0, "Outside mask should be 0");
@@ -469,8 +433,9 @@ mod tests {
         let nn = n * n * n;
         let data = vec![5.0; nn];
         let mask = vec![1u8; nn];
+        let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
 
-        let result = highpass_filter(&data, &mask, n, n, n, [2.0, 2.0, 0.0]);
+        let result = highpass_filter(&data, &mask, &grid, [2.0, 2.0, 0.0]);
 
         for &v in &result {
             assert!(v.abs() < 1.0, "High-pass of constant should be near zero, got {}", v);
@@ -481,12 +446,13 @@ mod tests {
     fn test_mip_basic() {
         // 3x3x5 volume, mIP with window=3 → 3x3x3 output
         let (nx, ny, nz) = (3, 3, 5);
+        let grid = Grid::new(nx, ny, nz, 1.0, 1.0, 1.0);
         let mut data = vec![10.0; nx * ny * nz];
         // Place a low value at slice 2
         let idx = 1 + 1 * nx + 2 * nx * ny; // (1,1,2)
         data[idx] = 1.0;
 
-        let mip = create_mip(&data, nx, ny, nz, 3);
+        let mip = create_mip(&data, &grid, 3);
         assert_eq!(mip.len(), nx * ny * 3);
 
         // The minimum at (1,1) should appear in slices that include z=2
@@ -503,7 +469,8 @@ mod tests {
 
     #[test]
     fn test_mip_window_too_large() {
-        let mip = create_mip(&[1.0; 27], 3, 3, 3, 10);
+        let grid = Grid::new(3, 3, 3, 1.0, 1.0, 1.0);
+        let mip = create_mip(&[1.0; 27], &grid, 10);
         assert!(mip.is_empty());
     }
 

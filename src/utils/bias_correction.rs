@@ -29,6 +29,7 @@ impl Default for HomogeneityParams {
 }
 
 use std::collections::VecDeque;
+use crate::Grid;
 
 /// Index into 3D array (Fortran/column-major order)
 #[inline(always)]
@@ -55,7 +56,7 @@ fn get_box_sizes(sigma: f64, n: usize) -> Vec<usize> {
     // wl = next lower odd integer
     let wl_float = wideal - (wideal + 1.0) % 2.0;
     let wl = wl_float.round() as usize;
-    let wl = if wl % 2 == 0 { wl + 1 } else { wl }; // ensure odd
+    let wl = if wl.is_multiple_of(2) { wl + 1 } else { wl }; // ensure odd
     let wu = wl + 2;
 
     // mideal = (12*sigma^2 - n*wl^2 - 4*n*wl - 3*n) / (-4*wl - 4)
@@ -82,7 +83,7 @@ fn check_box_sizes(boxsizes: &mut [Vec<usize>], dims: &[usize]) {
             // Limit to half image size
             let max_size = dims[dim] / 2;
             if *b > max_size {
-                *b = if max_size % 2 == 0 { max_size + 1 } else { max_size };
+                *b = if max_size.is_multiple_of(2) { max_size + 1 } else { max_size };
             }
         }
     }
@@ -293,8 +294,9 @@ pub fn gaussian_smooth_3d(
     mask: Option<&[u8]>,
     mut weight: Option<&mut [f64]>,
     nbox: usize,
-    nx: usize, ny: usize, nz: usize,
+    grid: &Grid,
 ) -> Vec<f64> {
+    let (nx, ny, nz) = grid.dims;
     let n_total = nx * ny * nz;
     let mut result: Vec<f64> = data.iter().map(|&v| v as f64).collect();
 
@@ -434,8 +436,9 @@ pub fn gaussian_smooth_3d_boxsizes(
     data: &[f64],
     boxsizes: &[Vec<usize>],
     nbox: usize,
-    nx: usize, ny: usize, nz: usize,
+    grid: &Grid,
 ) -> Vec<f64> {
+    let (nx, ny, nz) = grid.dims;
     let mut result = data.to_vec();
 
     // Apply box filters for each pass and dimension
@@ -555,7 +558,8 @@ fn flood_fill_component(
 /// Matches MriResearchTools.jl's fill_holes function.
 /// Fills connected components of zeros (holes) up to max_hole_size.
 /// Uses 6-connectivity for 3D.
-pub fn fill_holes(mask: &[u8], nx: usize, ny: usize, nz: usize, max_hole_size: usize) -> Vec<u8> {
+pub fn fill_holes(mask: &[u8], grid: &Grid, max_hole_size: usize) -> Vec<u8> {
+    let (nx, ny, nz) = grid.dims;
     let n_total = nx * ny * nz;
     let mut result = mask.to_vec();
     let mut visited = vec![false; n_total];
@@ -599,7 +603,8 @@ pub fn fill_holes(mask: &[u8], nx: usize, ny: usize, nz: usize, max_hole_size: u
 ///
 /// This matches MriResearchTools.jl's robustmask function, including
 /// post-processing with smoothing and hole filling.
-pub fn robust_mask(mag: &[f64], nx: usize, ny: usize, nz: usize) -> Vec<u8> {
+pub fn robust_mask(mag: &[f64], grid: &Grid) -> Vec<u8> {
+    let (nx, ny, nz) = grid.dims;
     let n_total = nx * ny * nz;
 
     // Collect valid (positive, finite) samples and sort
@@ -679,19 +684,19 @@ pub fn robust_mask(mag: &[f64], nx: usize, ny: usize, nz: usize) -> Vec<u8> {
 
     // Post-processing Step 1: Smooth with nbox=1, boxsize=5, threshold at 0.4
     let boxsizes1 = vec![vec![5], vec![5], vec![5]];
-    mask_f64 = gaussian_smooth_3d_boxsizes(&mask_f64, &boxsizes1, 1, nx, ny, nz);
+    mask_f64 = gaussian_smooth_3d_boxsizes(&mask_f64, &boxsizes1, 1, grid);
     let mut mask: Vec<u8> = mask_f64.iter()
         .map(|&v| if v > 0.4 { 1 } else { 0 })
         .collect();
 
     // Post-processing Step 2: Fill holes
     let max_hole_size = n_total / 20;
-    mask = fill_holes(&mask, nx, ny, nz, max_hole_size);
+    mask = fill_holes(&mask, grid, max_hole_size);
 
     // Post-processing Step 3: Smooth with nbox=2, boxsizes=[3,3], threshold at 0.6
     mask_f64 = mask.iter().map(|&v| v as f64).collect();
     let boxsizes2 = vec![vec![3, 3], vec![3, 3], vec![3, 3]];
-    mask_f64 = gaussian_smooth_3d_boxsizes(&mask_f64, &boxsizes2, 2, nx, ny, nz);
+    mask_f64 = gaussian_smooth_3d_boxsizes(&mask_f64, &boxsizes2, 2, grid);
     mask = mask_f64.iter()
         .map(|&v| if v > 0.6 { 1 } else { 0 })
         .collect();
@@ -717,9 +722,9 @@ fn box_segment(
     let mut vote_count = vec![0u8; n_total];
 
     // Calculate box shift (stride between box centers)
-    let box_shift_x = (nx + nbox - 1) / nbox;
-    let box_shift_y = (ny + nbox - 1) / nbox;
-    let box_shift_z = (nz + nbox - 1) / nbox;
+    let box_shift_x = nx.div_ceil(nbox);
+    let box_shift_y = ny.div_ceil(nbox);
+    let box_shift_z = nz.div_ceil(nbox);
 
     // For each box center
     let mut cz = 0;
@@ -809,9 +814,9 @@ fn fill_and_smooth(
     lowpass: &mut [f64],
     stable_mean: f64,
     sigma2: [f64; 3],
-    nx: usize, ny: usize, nz: usize,
+    grid: &Grid,
 ) {
-    let n_total = nx * ny * nz;
+    let n_total = grid.n_total();
 
     // Identify holes/outliers and create weight mask
     // lowpassweight = 1.2 - lowpassmask (so holes get 0.2, normal get 1.2)
@@ -828,7 +833,7 @@ fn fill_and_smooth(
 
     // Apply weighted smoothing
     let nbox = 3; // default for non-masked smoothing
-    let smoothed = gaussian_smooth_3d(lowpass, sigma2, None, Some(&mut weight), nbox, nx, ny, nz);
+    let smoothed = gaussian_smooth_3d(lowpass, sigma2, None, Some(&mut weight), nbox, grid);
     lowpass.copy_from_slice(&smoothed);
 }
 
@@ -842,18 +847,19 @@ fn fill_and_smooth(
 /// that can be divided out to correct the image.
 pub fn get_sensitivity(
     mag: &[f64],
-    nx: usize, ny: usize, nz: usize,
-    vx: f64, vy: f64, vz: f64,
+    grid: &Grid,
     sigma_mm: f64,
     nbox: usize,
 ) -> Vec<f64> {
+    let (nx, ny, nz) = grid.dims;
+    let (vx, vy, vz) = grid.voxel_size;
     let n_total = nx * ny * nz;
 
     // Convert mm to voxels
     let sigma = [sigma_mm / vx, sigma_mm / vy, sigma_mm / vz];
 
     // Create initial mask (with full post-processing)
-    let mask = robust_mask(mag, nx, ny, nz);
+    let mask = robust_mask(mag, grid);
 
     // Box segmentation to find tissue
     let segmentation = box_segment(mag, &mask, nbox, nx, ny, nz);
@@ -872,7 +878,7 @@ pub fn get_sensitivity(
     ];
 
     // First smoothing with tissue mask (nbox=8 for masked smoothing)
-    let mut lowpass = gaussian_smooth_3d(mag, sigma1, Some(&segmentation), None, 8, nx, ny, nz);
+    let mut lowpass = gaussian_smooth_3d(mag, sigma1, Some(&segmentation), None, 8, grid);
 
     // Calculate stable mean for filling
     let mut sum = 0.0;
@@ -886,7 +892,7 @@ pub fn get_sensitivity(
     let stable_mean = if count > 0 { sum / count as f64 } else { 1.0 };
 
     // Fill holes and apply weighted second smoothing
-    fill_and_smooth(&mut lowpass, stable_mean, sigma2, nx, ny, nz);
+    fill_and_smooth(&mut lowpass, stable_mean, sigma2, grid);
 
     lowpass
 }
@@ -906,13 +912,12 @@ pub fn get_sensitivity(
 /// Bias-corrected magnitude
 pub fn makehomogeneous(
     mag: &[f64],
-    nx: usize, ny: usize, nz: usize,
-    vx: f64, vy: f64, vz: f64,
+    grid: &Grid,
     sigma_mm: f64,
     nbox: usize,
 ) -> Vec<f64> {
-    let sensitivity = get_sensitivity(mag, nx, ny, nz, vx, vy, vz, sigma_mm, nbox);
-    let n_total = nx * ny * nz;
+    let sensitivity = get_sensitivity(mag, grid, sigma_mm, nbox);
+    let n_total = grid.n_total();
 
     let mut result = vec![0.0; n_total];
     for i in 0..n_total {
@@ -963,6 +968,10 @@ pub fn rss_combine(
 mod tests {
     use super::*;
 
+    fn grid(nx: usize, ny: usize, nz: usize) -> Grid {
+        Grid::new(nx, ny, nz, 1.0, 1.0, 1.0)
+    }
+
     #[test]
     fn test_get_box_sizes() {
         // Test box size calculation matches Julia
@@ -992,7 +1001,7 @@ mod tests {
         let mut mask = vec![1u8; 27];
         mask[13] = 0; // center voxel
 
-        let filled = fill_holes(&mask, 3, 3, 3, 5);
+        let filled = fill_holes(&mask, &grid(3, 3, 3), 5);
         assert_eq!(filled[13], 1, "Center hole should be filled");
     }
 
@@ -1000,7 +1009,7 @@ mod tests {
     fn test_robust_mask_basic() {
         // Simple test with uniform high values
         let mag = vec![100.0; 27];
-        let mask = robust_mask(&mag, 3, 3, 3);
+        let mask = robust_mask(&mag, &grid(3, 3, 3));
         // All values are the same, so all should be masked
         let masked_count: usize = mask.iter().map(|&v| v as usize).sum();
         assert!(masked_count > 0, "Should have some masked voxels");
@@ -1267,7 +1276,7 @@ mod tests {
     fn test_gaussian_smooth_3d_uniform_no_mask() {
         let n = 8;
         let data = vec![5.0; n * n * n];
-        let result = gaussian_smooth_3d(&data, [2.0, 2.0, 2.0], None, None, 3, n, n, n);
+        let result = gaussian_smooth_3d(&data, [2.0, 2.0, 2.0], None, None, 3, &grid(n, n, n));
         assert_eq!(result.len(), n * n * n);
         // Uniform data should stay nearly uniform after smoothing
         for &v in &result {
@@ -1284,7 +1293,7 @@ mod tests {
         let n = 10;
         let (mag, mask) = make_sphere_phantom(n, false);
         // Smooth with mask
-        let result = gaussian_smooth_3d(&mag, [1.5, 1.5, 1.5], Some(&mask), None, 4, n, n, n);
+        let result = gaussian_smooth_3d(&mag, [1.5, 1.5, 1.5], Some(&mask), None, 4, &grid(n, n, n));
         assert_eq!(result.len(), n * n * n);
         // Inside mask, values should still be finite
         for i in 0..result.len() {
@@ -1300,7 +1309,7 @@ mod tests {
         let data = vec![10.0; n * n * n];
         let mut weight = vec![1.0; n * n * n];
         let result = gaussian_smooth_3d(
-            &data, [1.5, 1.5, 1.5], None, Some(&mut weight), 3, n, n, n,
+            &data, [1.5, 1.5, 1.5], None, Some(&mut weight), 3, &grid(n, n, n),
         );
         assert_eq!(result.len(), n * n * n);
         for &v in &result {
@@ -1317,7 +1326,7 @@ mod tests {
         let n = 8;
         let data = vec![3.0; n * n * n];
         let boxsizes = vec![vec![3, 3], vec![3, 3], vec![3, 3]];
-        let result = gaussian_smooth_3d_boxsizes(&data, &boxsizes, 2, n, n, n);
+        let result = gaussian_smooth_3d_boxsizes(&data, &boxsizes, 2, &grid(n, n, n));
         assert_eq!(result.len(), n * n * n);
         for &v in &result {
             assert!(
@@ -1337,7 +1346,7 @@ mod tests {
         let center = n / 2 + (n / 2) * n + (n / 2) * n * n;
         data[center] = 100.0;
         let boxsizes = vec![vec![5, 5], vec![5, 5], vec![5, 5]];
-        let result = gaussian_smooth_3d_boxsizes(&data, &boxsizes, 2, n, n, n);
+        let result = gaussian_smooth_3d_boxsizes(&data, &boxsizes, 2, &grid(n, n, n));
         assert_eq!(result.len(), n_total);
         // Spike should be reduced
         assert!(
@@ -1360,7 +1369,7 @@ mod tests {
         // A hole touching the boundary should NOT be filled
         let mut mask = vec![1u8; 125]; // 5x5x5
         mask[0] = 0; // corner voxel - touches boundary
-        let filled = fill_holes(&mask, 5, 5, 5, 100);
+        let filled = fill_holes(&mask, &grid(5, 5, 5), 100);
         assert_eq!(filled[0], 0, "Boundary hole should not be filled");
     }
 
@@ -1378,7 +1387,7 @@ mod tests {
                 }
             }
         }
-        let filled = fill_holes(&mask, n, n, n, 5); // max_hole_size=5, hole is 27
+        let filled = fill_holes(&mask, &grid(n, n, n), 5); // max_hole_size=5, hole is 27
         // Hole should NOT be filled because it's too large
         let center = 3 + 3 * n + 3 * n * n;
         assert_eq!(filled[center], 0, "Large hole should not be filled");
@@ -1392,7 +1401,7 @@ mod tests {
     fn test_robust_mask_sphere() {
         let n = 12;
         let (mag, _) = make_sphere_phantom(n, false);
-        let mask = robust_mask(&mag, n, n, n);
+        let mask = robust_mask(&mag, &grid(n, n, n));
         assert_eq!(mask.len(), n * n * n);
         let masked_count: usize = mask.iter().map(|&v| v as usize).sum();
         // The sphere should produce some masked voxels
@@ -1406,7 +1415,7 @@ mod tests {
     fn test_robust_mask_empty() {
         // All zero magnitude -> empty mask
         let mag = vec![0.0; 27];
-        let mask = robust_mask(&mag, 3, 3, 3);
+        let mask = robust_mask(&mag, &grid(3, 3, 3));
         let count: usize = mask.iter().map(|&v| v as usize).sum();
         assert_eq!(count, 0, "Zero magnitude should produce empty mask");
     }
@@ -1418,7 +1427,7 @@ mod tests {
         mag[0] = f64::NAN;
         mag[10] = f64::NAN;
         mag[50] = f64::INFINITY;
-        let mask = robust_mask(&mag, 5, 5, 5);
+        let mask = robust_mask(&mag, &grid(5, 5, 5));
         assert_eq!(mask.len(), 125);
         // Should still produce a valid mask
         for &v in &mask {
@@ -1467,7 +1476,7 @@ mod tests {
         lowpass[200] = 2000.0; // outlier > 10*stable_mean
 
         let sigma2 = [2.0, 2.0, 2.0];
-        fill_and_smooth(&mut lowpass, stable_mean, sigma2, n, n, n);
+        fill_and_smooth(&mut lowpass, stable_mean, sigma2, &grid(n, n, n));
 
         // All values should be finite after fill and smooth
         for (i, &v) in lowpass.iter().enumerate() {
@@ -1482,7 +1491,7 @@ mod tests {
         let stable_mean = 50.0;
         let mut lowpass = vec![stable_mean; n_total];
         let sigma2 = [1.5, 1.5, 1.5];
-        fill_and_smooth(&mut lowpass, stable_mean, sigma2, n, n, n);
+        fill_and_smooth(&mut lowpass, stable_mean, sigma2, &grid(n, n, n));
 
         // Mean should be approximately preserved
         let mean: f64 = lowpass.iter().sum::<f64>() / n_total as f64;
@@ -1502,7 +1511,7 @@ mod tests {
     fn test_get_sensitivity_sphere() {
         let n = 12;
         let (mag, _) = make_sphere_phantom(n, true);
-        let sensitivity = get_sensitivity(&mag, n, n, n, 1.0, 1.0, 1.0, 4.0, 5);
+        let sensitivity = get_sensitivity(&mag, &grid(n, n, n), 4.0, 5);
         assert_eq!(sensitivity.len(), n * n * n);
         // Sensitivity should be finite and mostly positive in the sphere
         let center = n / 2 + (n / 2) * n + (n / 2) * n * n;
@@ -1521,7 +1530,7 @@ mod tests {
     fn test_get_sensitivity_output_size() {
         let n = 10;
         let (mag, _) = make_sphere_phantom(n, false);
-        let sensitivity = get_sensitivity(&mag, n, n, n, 1.0, 1.0, 1.0, 3.0, 3);
+        let sensitivity = get_sensitivity(&mag, &grid(n, n, n), 3.0, 3);
         assert_eq!(sensitivity.len(), n * n * n);
     }
 
@@ -1533,7 +1542,7 @@ mod tests {
     fn test_makehomogeneous_output_size_and_finite() {
         let n = 12;
         let (mag, _) = make_sphere_phantom(n, true);
-        let result = makehomogeneous(&mag, n, n, n, 1.0, 1.0, 1.0, 4.0, 5);
+        let result = makehomogeneous(&mag, &grid(n, n, n), 4.0, 5);
         assert_eq!(result.len(), n * n * n);
         // All output values should be finite
         for (i, &v) in result.iter().enumerate() {
@@ -1545,7 +1554,7 @@ mod tests {
     fn test_makehomogeneous_reduces_bias() {
         let n = 12;
         let (mag_biased, mask) = make_sphere_phantom(n, true);
-        let result = makehomogeneous(&mag_biased, n, n, n, 1.0, 1.0, 1.0, 4.0, 5);
+        let result = makehomogeneous(&mag_biased, &grid(n, n, n), 4.0, 5);
 
         // Collect values inside the sphere
         let mut original_vals = Vec::new();
@@ -1588,7 +1597,7 @@ mod tests {
     fn test_makehomogeneous_no_bias_preserves() {
         let n = 12;
         let (mag, mask) = make_sphere_phantom(n, false);
-        let result = makehomogeneous(&mag, n, n, n, 1.0, 1.0, 1.0, 4.0, 5);
+        let result = makehomogeneous(&mag, &grid(n, n, n), 4.0, 5);
 
         // With no bias, corrected values should still be positive inside sphere
         for i in 0..(n * n * n) {
@@ -1608,7 +1617,7 @@ mod tests {
         let n = 12;
         let (mag, _) = make_sphere_phantom(n, true);
         // Use anisotropic voxel sizes
-        let result = makehomogeneous(&mag, n, n, n, 0.5, 0.5, 2.0, 4.0, 5);
+        let result = makehomogeneous(&mag, &Grid::new(n, n, n, 0.5, 0.5, 2.0), 4.0, 5);
         assert_eq!(result.len(), n * n * n);
         for &v in &result {
             assert!(v.is_finite(), "All output values should be finite");
@@ -1653,7 +1662,7 @@ mod tests {
         let n = 10;
         let (mag, mask) = make_sphere_phantom(n, false);
         // nbox=4 ensures we have even passes (ibox=1,3)
-        let result = gaussian_smooth_3d(&mag, [1.5, 1.5, 1.5], Some(&mask), None, 4, n, n, n);
+        let result = gaussian_smooth_3d(&mag, [1.5, 1.5, 1.5], Some(&mask), None, 4, &grid(n, n, n));
         assert_eq!(result.len(), n * n * n);
         // Inside mask, values should still be finite
         for i in 0..result.len() {

@@ -26,10 +26,13 @@ unsafe impl Send for SendPtr {}
 unsafe impl Sync for SendPtr {}
 
 #[cfg(feature = "parallel")]
+#[allow(clippy::mut_from_ref)]
 impl SendPtr {
     fn new(data: &mut [Complex64]) -> Self {
         Self { ptr: data.as_mut_ptr() as usize, len: data.len() }
     }
+    // SAFETY: Caller must guarantee non-overlapping access patterns across threads.
+    // Each (k, i) or (j, i) pair accesses a unique strided column of the 3D array.
     unsafe fn as_slice(&self) -> &mut [Complex64] {
         std::slice::from_raw_parts_mut(self.ptr as *mut Complex64, self.len)
     }
@@ -361,11 +364,23 @@ impl Fft3dWorkspaceF32 {
 /// Transforms data in Fortran order with shape (nx, ny, nz).
 /// Matches numpy.fft.fftn behavior.
 pub fn fft3d(data: &mut [Complex64], nx: usize, ny: usize, nz: usize) {
+    #[cfg(not(feature = "parallel"))]
+    {
+        Fft3dWorkspace::new(nx, ny, nz).fft3d(data);
+    }
+    #[cfg(feature = "parallel")]
+    {
+        fft3d_parallel(data, nx, ny, nz);
+    }
+}
+
+/// Parallel FFT implementation using rayon
+#[cfg(feature = "parallel")]
+fn fft3d_parallel(data: &mut [Complex64], nx: usize, ny: usize, nz: usize) {
     let mut planner = FftPlanner::new();
 
     // Transform along x-axis (contiguous rows of length nx)
     let fft_x = planner.plan_fft(nx, FftDirection::Forward);
-    #[cfg(feature = "parallel")]
     {
         let scratch_len = fft_x.get_inplace_scratch_len();
         data.par_chunks_mut(nx).for_each(|row| {
@@ -373,22 +388,15 @@ pub fn fft3d(data: &mut [Complex64], nx: usize, ny: usize, nz: usize) {
             fft_x.process_with_scratch(row, &mut scratch);
         });
     }
-    #[cfg(not(feature = "parallel"))]
-    {
-        let mut scratch_x = vec![Complex64::new(0.0, 0.0); fft_x.get_inplace_scratch_len()];
-        for chunk in data.chunks_mut(nx) {
-            fft_x.process_with_scratch(chunk, &mut scratch_x);
-        }
-    }
 
     // Transform along y-axis (stride nx)
     let fft_y = planner.plan_fft(ny, FftDirection::Forward);
-    #[cfg(feature = "parallel")]
     {
         let scratch_len = fft_y.get_inplace_scratch_len();
         let nxy = nx * ny;
         let pairs: Vec<(usize, usize)> = (0..nz).flat_map(|k| (0..nx).map(move |i| (k, i))).collect();
         let data_send = SendPtr::new(data);
+        // SAFETY: Each (k, i) pair accesses a unique strided column — no overlap.
         pairs.par_iter().for_each(|&(k, i)| {
             let mut buffer = vec![Complex64::new(0.0, 0.0); ny];
             let mut scratch = vec![Complex64::new(0.0, 0.0); scratch_len];
@@ -400,27 +408,15 @@ pub fn fft3d(data: &mut [Complex64], nx: usize, ny: usize, nz: usize) {
             }
         });
     }
-    #[cfg(not(feature = "parallel"))]
-    {
-        let mut scratch_y = vec![Complex64::new(0.0, 0.0); fft_y.get_inplace_scratch_len()];
-        let mut buffer_y = vec![Complex64::new(0.0, 0.0); ny];
-        for k in 0..nz {
-            for i in 0..nx {
-                for j in 0..ny { buffer_y[j] = data[idx3d(i, j, k, nx, ny)]; }
-                fft_y.process_with_scratch(&mut buffer_y, &mut scratch_y);
-                for j in 0..ny { data[idx3d(i, j, k, nx, ny)] = buffer_y[j]; }
-            }
-        }
-    }
 
     // Transform along z-axis (stride nx*ny)
     let fft_z = planner.plan_fft(nz, FftDirection::Forward);
-    #[cfg(feature = "parallel")]
     {
         let scratch_len = fft_z.get_inplace_scratch_len();
         let nxy = nx * ny;
         let pairs: Vec<(usize, usize)> = (0..ny).flat_map(|j| (0..nx).map(move |i| (j, i))).collect();
         let data_send = SendPtr::new(data);
+        // SAFETY: Each (j, i) pair accesses a unique strided column — no overlap.
         pairs.par_iter().for_each(|&(j, i)| {
             let mut buffer = vec![Complex64::new(0.0, 0.0); nz];
             let mut scratch = vec![Complex64::new(0.0, 0.0); scratch_len];
@@ -432,18 +428,6 @@ pub fn fft3d(data: &mut [Complex64], nx: usize, ny: usize, nz: usize) {
             }
         });
     }
-    #[cfg(not(feature = "parallel"))]
-    {
-        let mut scratch_z = vec![Complex64::new(0.0, 0.0); fft_z.get_inplace_scratch_len()];
-        let mut buffer_z = vec![Complex64::new(0.0, 0.0); nz];
-        for j in 0..ny {
-            for i in 0..nx {
-                for k in 0..nz { buffer_z[k] = data[idx3d(i, j, k, nx, ny)]; }
-                fft_z.process_with_scratch(&mut buffer_z, &mut scratch_z);
-                for k in 0..nz { data[idx3d(i, j, k, nx, ny)] = buffer_z[k]; }
-            }
-        }
-    }
 }
 
 /// 3D IFFT (in-place, complex-to-complex)
@@ -451,12 +435,24 @@ pub fn fft3d(data: &mut [Complex64], nx: usize, ny: usize, nz: usize) {
 /// Transforms data in Fortran order with shape (nx, ny, nz).
 /// Matches numpy.fft.ifftn behavior (includes 1/N normalization).
 pub fn ifft3d(data: &mut [Complex64], nx: usize, ny: usize, nz: usize) {
+    #[cfg(not(feature = "parallel"))]
+    {
+        Fft3dWorkspace::new(nx, ny, nz).ifft3d(data);
+    }
+    #[cfg(feature = "parallel")]
+    {
+        ifft3d_parallel(data, nx, ny, nz);
+    }
+}
+
+/// Parallel IFFT implementation using rayon
+#[cfg(feature = "parallel")]
+fn ifft3d_parallel(data: &mut [Complex64], nx: usize, ny: usize, nz: usize) {
     let mut planner = FftPlanner::new();
     let n_total = (nx * ny * nz) as f64;
 
     // Transform along x-axis
     let ifft_x = planner.plan_fft(nx, FftDirection::Inverse);
-    #[cfg(feature = "parallel")]
     {
         let scratch_len = ifft_x.get_inplace_scratch_len();
         data.par_chunks_mut(nx).for_each(|row| {
@@ -464,22 +460,15 @@ pub fn ifft3d(data: &mut [Complex64], nx: usize, ny: usize, nz: usize) {
             ifft_x.process_with_scratch(row, &mut scratch);
         });
     }
-    #[cfg(not(feature = "parallel"))]
-    {
-        let mut scratch_x = vec![Complex64::new(0.0, 0.0); ifft_x.get_inplace_scratch_len()];
-        for chunk in data.chunks_mut(nx) {
-            ifft_x.process_with_scratch(chunk, &mut scratch_x);
-        }
-    }
 
     // Transform along y-axis
     let ifft_y = planner.plan_fft(ny, FftDirection::Inverse);
-    #[cfg(feature = "parallel")]
     {
         let scratch_len = ifft_y.get_inplace_scratch_len();
         let nxy = nx * ny;
         let pairs: Vec<(usize, usize)> = (0..nz).flat_map(|k| (0..nx).map(move |i| (k, i))).collect();
         let data_send = SendPtr::new(data);
+        // SAFETY: Each (k, i) pair accesses a unique strided column — no overlap.
         pairs.par_iter().for_each(|&(k, i)| {
             let mut buffer = vec![Complex64::new(0.0, 0.0); ny];
             let mut scratch = vec![Complex64::new(0.0, 0.0); scratch_len];
@@ -491,27 +480,15 @@ pub fn ifft3d(data: &mut [Complex64], nx: usize, ny: usize, nz: usize) {
             }
         });
     }
-    #[cfg(not(feature = "parallel"))]
-    {
-        let mut scratch_y = vec![Complex64::new(0.0, 0.0); ifft_y.get_inplace_scratch_len()];
-        let mut buffer_y = vec![Complex64::new(0.0, 0.0); ny];
-        for k in 0..nz {
-            for i in 0..nx {
-                for j in 0..ny { buffer_y[j] = data[idx3d(i, j, k, nx, ny)]; }
-                ifft_y.process_with_scratch(&mut buffer_y, &mut scratch_y);
-                for j in 0..ny { data[idx3d(i, j, k, nx, ny)] = buffer_y[j]; }
-            }
-        }
-    }
 
     // Transform along z-axis
     let ifft_z = planner.plan_fft(nz, FftDirection::Inverse);
-    #[cfg(feature = "parallel")]
     {
         let scratch_len = ifft_z.get_inplace_scratch_len();
         let nxy = nx * ny;
         let pairs: Vec<(usize, usize)> = (0..ny).flat_map(|j| (0..nx).map(move |i| (j, i))).collect();
         let data_send = SendPtr::new(data);
+        // SAFETY: Each (j, i) pair accesses a unique strided column — no overlap.
         pairs.par_iter().for_each(|&(j, i)| {
             let mut buffer = vec![Complex64::new(0.0, 0.0); nz];
             let mut scratch = vec![Complex64::new(0.0, 0.0); scratch_len];
@@ -523,25 +500,9 @@ pub fn ifft3d(data: &mut [Complex64], nx: usize, ny: usize, nz: usize) {
             }
         });
     }
-    #[cfg(not(feature = "parallel"))]
-    {
-        let mut scratch_z = vec![Complex64::new(0.0, 0.0); ifft_z.get_inplace_scratch_len()];
-        let mut buffer_z = vec![Complex64::new(0.0, 0.0); nz];
-        for j in 0..ny {
-            for i in 0..nx {
-                for k in 0..nz { buffer_z[k] = data[idx3d(i, j, k, nx, ny)]; }
-                ifft_z.process_with_scratch(&mut buffer_z, &mut scratch_z);
-                for k in 0..nz { data[idx3d(i, j, k, nx, ny)] = buffer_z[k]; }
-            }
-        }
-    }
 
     // Normalize
-    let n_total_f = n_total;
-    #[cfg(feature = "parallel")]
-    data.par_iter_mut().for_each(|val| { *val /= n_total_f; });
-    #[cfg(not(feature = "parallel"))]
-    for val in data.iter_mut() { *val /= n_total_f; }
+    data.par_iter_mut().for_each(|val| { *val /= n_total; });
 }
 
 /// 3D FFT of real data (real-to-complex)
@@ -565,13 +526,45 @@ pub fn ifft3d_real(data: &[Complex64], nx: usize, ny: usize, nz: usize) -> Vec<f
     complex_data.iter().map(|c| c.re).collect()
 }
 
+/// FFT a real-valued kernel, returning only real parts.
+///
+/// For symmetric kernels (dipole, SMV, Laplacian) the FFT is purely real,
+/// so only the real component is returned.
+pub fn fft_real_kernel(kernel: &[f64], nx: usize, ny: usize, nz: usize) -> Vec<f64> {
+    let mut complex: Vec<Complex64> = kernel.iter()
+        .map(|&x| Complex64::new(x, 0.0))
+        .collect();
+    fft3d(&mut complex, nx, ny, nz);
+    complex.iter().map(|c| c.re).collect()
+}
+
+/// Apply a real-valued k-space kernel to a real signal.
+///
+/// Computes Re(IFFT(FFT(x) .* kernel_fft)) where kernel_fft contains
+/// pre-computed FFT real parts of a symmetric kernel.
+pub fn apply_real_kernel(
+    x: &[f64],
+    kernel_fft: &[f64],
+    nx: usize, ny: usize, nz: usize,
+) -> Vec<f64> {
+    let mut complex: Vec<Complex64> = x.iter()
+        .map(|&v| Complex64::new(v, 0.0))
+        .collect();
+    fft3d(&mut complex, nx, ny, nz);
+    for i in 0..complex.len() {
+        complex[i] *= kernel_fft[i];
+    }
+    ifft3d(&mut complex, nx, ny, nz);
+    complex.iter().map(|c| c.re).collect()
+}
+
 /// Generate FFT frequency values for a given dimension
 /// Matches numpy.fft.fftfreq(n, d)
 pub fn fftfreq(n: usize, d: f64) -> Vec<f64> {
     let mut freq = vec![0.0; n];
     let val = 1.0 / (n as f64 * d);
 
-    if n % 2 == 0 {
+    if n.is_multiple_of(2) {
         // Even: [0, 1, ..., n/2-1, -n/2, ..., -1]
         for i in 0..n / 2 {
             freq[i] = (i as f64) * val;
@@ -584,7 +577,7 @@ pub fn fftfreq(n: usize, d: f64) -> Vec<f64> {
         for i in 0..=(n - 1) / 2 {
             freq[i] = (i as f64) * val;
         }
-        for i in (n + 1) / 2..n {
+        for i in n.div_ceil(2)..n {
             freq[i] = ((i as i64) - (n as i64)) as f64 * val;
         }
     }
@@ -597,7 +590,7 @@ pub fn fftfreq_f32(n: usize, d: f32) -> Vec<f32> {
     let mut freq = vec![0.0f32; n];
     let val = 1.0f32 / (n as f32 * d);
 
-    if n % 2 == 0 {
+    if n.is_multiple_of(2) {
         // Even: [0, 1, ..., n/2-1, -n/2, ..., -1]
         for i in 0..n / 2 {
             freq[i] = (i as f32) * val;
@@ -610,7 +603,7 @@ pub fn fftfreq_f32(n: usize, d: f32) -> Vec<f32> {
         for i in 0..=(n - 1) / 2 {
             freq[i] = (i as f32) * val;
         }
-        for i in (n + 1) / 2..n {
+        for i in n.div_ceil(2)..n {
             freq[i] = ((i as i64) - (n as i64)) as f32 * val;
         }
     }
@@ -651,9 +644,9 @@ pub fn ifftshift(data: &[f64], nx: usize, ny: usize, nz: usize) -> Vec<f64> {
     let n_total = nx * ny * nz;
     let mut out = vec![0.0; n_total];
 
-    let hx = (nx + 1) / 2;
-    let hy = (ny + 1) / 2;
-    let hz = (nz + 1) / 2;
+    let hx = nx.div_ceil(2);
+    let hy = ny.div_ceil(2);
+    let hz = nz.div_ceil(2);
 
     for k in 0..nz {
         for j in 0..ny {

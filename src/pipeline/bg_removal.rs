@@ -24,9 +24,9 @@ pub fn run_bg_removal(
     config: &BgRemovalConfig,
     progress: &mut dyn FnMut(usize, usize),
 ) -> Result<BgRemovalResult, PipelineError> {
-    let (nx, ny, nz) = metadata.dims;
+    let grid = metadata.grid();
     let (vsx, vsy, vsz) = metadata.voxel_size;
-    let n_voxels = nx * ny * nz;
+    let n_voxels = grid.n_total();
 
     if field_ppm.len() != n_voxels {
         return Err(PipelineError::DimensionMismatch {
@@ -50,66 +50,63 @@ pub fn run_bg_removal(
                 radii.push(config.vsharp.max_radius_factor * min_vox);
             }
 
-            crate::bgremove::vsharp_with_progress(
-                field_ppm, mask, nx, ny, nz, vsx, vsy, vsz,
+            crate::bgremove::vsharp(
+                field_ppm, mask, &grid,
                 &radii, config.vsharp.threshold,
                 progress,
             )
         }
         BgRemovalAlgorithm::Pdf => {
             let max_iter = (n_voxels as f64).sqrt() as usize;
-            let local = crate::bgremove::pdf_with_progress(
-                field_ppm, mask, nx, ny, nz, vsx, vsy, vsz,
+            let local = crate::bgremove::pdf(
+                field_ppm, mask, &grid,
                 (0.0, 0.0, 1.0), config.pdf.tol, max_iter,
                 progress,
             );
             (local, mask.to_vec())
         }
         BgRemovalAlgorithm::Lbv => {
+            let (nx, ny, nz) = grid.dims;
             let max_iter = (3 * nx.max(ny).max(nz)).min(500);
-            crate::bgremove::lbv_with_progress(
-                field_ppm, mask, nx, ny, nz, vsx, vsy, vsz,
+            crate::bgremove::lbv(
+                field_ppm, mask, &grid,
                 config.lbv.tol, max_iter,
                 progress,
             )
         }
         BgRemovalAlgorithm::Ismv => {
             let radius = config.ismv.radius_factor * vsx.max(vsy).max(vsz);
-            crate::bgremove::ismv_with_progress(
-                field_ppm, mask, nx, ny, nz, vsx, vsy, vsz,
+            crate::bgremove::ismv(
+                field_ppm, mask, &grid,
                 radius, config.ismv.tol, config.ismv.max_iter,
                 progress,
             )
         }
         BgRemovalAlgorithm::Sharp => {
             let radius = config.sharp.radius_factor * vsx.min(vsy).min(vsz);
-            let result = crate::bgremove::sharp(
-                field_ppm, mask, nx, ny, nz, vsx, vsy, vsz,
+            crate::bgremove::sharp(
+                field_ppm, mask, &grid,
                 config.sharp.threshold, radius,
-            );
-            result
+            )
         }
         BgRemovalAlgorithm::Resharp => {
-            crate::bgremove::resharp_with_progress(
-                field_ppm, mask, nx, ny, nz, vsx, vsy, vsz,
-                config.resharp.radius, config.resharp.tik_reg,
-                config.resharp.tol, config.resharp.max_iter,
+            crate::bgremove::resharp(
+                field_ppm, mask, &grid,
+                &config.resharp,
                 progress,
             )
         }
         BgRemovalAlgorithm::Harperella => {
-            crate::pipeline::harperella_with_progress(
-                field_ppm, mask, nx, ny, nz, vsx, vsy, vsz,
-                config.harperella.radius, config.harperella.max_iter,
-                config.harperella.tol,
+            crate::bgremove::harperella(
+                field_ppm, mask, &grid,
+                &config.harperella,
                 progress,
             )
         }
         BgRemovalAlgorithm::Iharperella => {
-            crate::pipeline::iharperella_with_progress(
-                field_ppm, mask, nx, ny, nz, vsx, vsy, vsz,
-                config.harperella.radius, config.harperella.max_iter,
-                config.harperella.tol,
+            crate::bgremove::iharperella(
+                field_ppm, mask, &grid,
+                &config.harperella,
                 progress,
             )
         }

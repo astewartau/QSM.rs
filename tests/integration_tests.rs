@@ -8,10 +8,12 @@ mod common;
 use std::time::Instant;
 use common::{TestData, TestResult, ChallengeMetrics};
 use qsm_core::bgremove;
-use qsm_core::bgremove::{sdf, SdfParams};
+use qsm_core::bgremove::{sdf, SdfParams, ResharpParams};
+use qsm_core::Grid;
 use qsm_core::bet;
 use qsm_core::inversion;
-use qsm_core::inversion::{tgv_qsm, TgvParams, get_default_alpha, get_default_iterations, ilsqr_simple};
+use qsm_core::inversion::{tgv_qsm, TgvParams, get_default_alpha, get_default_iterations, ilsqr_simple, IlsqrParams};
+use qsm_core::inversion::{TvParams, NltvParams, RtsParams, MediParams, TikhonovParams};
 use qsm_core::swi;
 use qsm_core::unwrap::{laplacian_unwrap, UnwrapMethod};
 use qsm_core::unwrap::romeo::{unwrap_romeo_multi_echo, RomeoParams};
@@ -42,15 +44,15 @@ macro_rules! run_timed {
 fn run_field_mapping(data: &common::TestData) -> Vec<f64> {
     let (nx, ny, nz) = data.dims;
     let (vsx, vsy, vsz) = data.voxel_size;
-    let n_total = nx * ny * nz;
     let n_echoes = data.phase_echoes.len();
+    let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
 
     // Step 1: Phase offset removal (uses TE ratios only — unit-agnostic)
     println!("[INFO] Phase offset removal...");
     let (corrected_phases, _offset) = phase_offset_removal(
         &data.phase_echoes, &data.mag_echoes, &data.echo_times, &data.mask,
         [10.0, 10.0, 5.0], [0, 1], UnwrapMethod::Romeo,
-        [vsx, vsy, vsz], nx, ny, nz,
+        &grid,
     );
 
     // Step 2: Multi-echo ROMEO unwrapping (uses TE ratios only — unit-agnostic)
@@ -58,14 +60,14 @@ fn run_field_mapping(data: &common::TestData) -> Vec<f64> {
     let mag_refs: Vec<&[f64]> = (0..n_echoes).map(|e| data.mag_echoes[e].as_slice()).collect();
     let unwrapped = unwrap_romeo_multi_echo(
         &corrected_phases, &mag_refs, &data.echo_times, &data.mask,
-        &RomeoParams::default(), nx, ny, nz,
+        &RomeoParams::default(), &grid,
     );
 
     // Step 3: Weighted B0 averaging (expects seconds)
     println!("[INFO] Weighted B0 estimation...");
     calculate_b0_weighted(
         &unwrapped, &data.mag_echoes, &data.echo_times, &data.mask,
-        B0WeightType::PhaseSNR, n_total,
+        B0WeightType::PhaseSNR, &grid,
     )
 }
 
@@ -84,13 +86,13 @@ fn test_bgremove_sharp() {
     // Save ground truth tissue field for figure generation
     common::save_center_slices(&data.fieldmap_local, &data.mask, data.dims, "ground_truth_local_field");
 
+    let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
     let ((result, _new_mask), elapsed) = run_timed!("SHARP", bgremove::sharp(
         &data.fieldmap,
         &data.mask,
-        nx, ny, nz,
-        vsx, vsy, vsz,
-        6.0,   // radius in mm
+        &grid,
         0.05,  // threshold
+        6.0,   // radius in mm
     ));
 
     let res = TestResult::new("SHARP", &result, &data.fieldmap_local, &data.mask, data.dims);
@@ -113,13 +115,14 @@ fn test_bgremove_vsharp() {
     // V-SHARP with multiple radii
     let radii: Vec<f64> = (1..=12).map(|r| r as f64).collect();
 
+    let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
     let ((result, _new_mask), elapsed) = run_timed!("V-SHARP", bgremove::vsharp(
         &data.fieldmap,
         &data.mask,
-        nx, ny, nz,
-        vsx, vsy, vsz,
+        &grid,
         &radii,
         0.05,  // threshold
+        |_, _| {},
     ));
 
     let res = TestResult::new("V-SHARP", &result, &data.fieldmap_local, &data.mask, data.dims);
@@ -139,16 +142,17 @@ fn test_bgremove_pdf() {
     let (nx, ny, nz) = data.dims;
     let (vsx, vsy, vsz) = data.voxel_size;
 
-    // Use explicit params for CI (pdf_default uses adaptive maxit=2626 for this volume,
+    // Use explicit params for CI (adaptive default would be maxit=2626 for this volume,
     // which converges correctly but takes ~10 minutes; cap at 100 for CI speed)
+    let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
     let (result, elapsed) = run_timed!("PDF", bgremove::pdf(
         &data.fieldmap,
         &data.mask,
-        nx, ny, nz,
-        vsx, vsy, vsz,
+        &grid,
         (0.0, 0.0, 1.0),
         1e-5,
         100,
+        |_, _| {},
     ));
 
     let res = TestResult::new("PDF", &result, &data.fieldmap_local, &data.mask, data.dims);
@@ -168,14 +172,15 @@ fn test_bgremove_ismv() {
     let (nx, ny, nz) = data.dims;
     let (vsx, vsy, vsz) = data.voxel_size;
 
+    let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
     let ((result, _new_mask), elapsed) = run_timed!("iSMV", bgremove::ismv(
         &data.fieldmap,
         &data.mask,
-        nx, ny, nz,
-        vsx, vsy, vsz,
+        &grid,
         5.0,   // radius in mm
         1e-6,  // tolerance
         50,    // max iterations
+        |_, _| {},
     ));
 
     let res = TestResult::new("iSMV", &result, &data.fieldmap_local, &data.mask, data.dims);
@@ -195,11 +200,15 @@ fn test_bgremove_lbv() {
     let (nx, ny, nz) = data.dims;
     let (vsx, vsy, vsz) = data.voxel_size;
 
-    let ((result, _new_mask), elapsed) = run_timed!("LBV", bgremove::lbv_default(
+    let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
+    let max_iter = (3 * nx.max(ny).max(nz)).max(500);
+    let ((result, _new_mask), elapsed) = run_timed!("LBV", bgremove::lbv(
         &data.fieldmap,
         &data.mask,
-        nx, ny, nz,
-        vsx, vsy, vsz,
+        &grid,
+        1e-6,
+        max_iter,
+        |_, _| {},
     ));
 
     let res = TestResult::new("LBV", &result, &data.fieldmap_local, &data.mask, data.dims);
@@ -219,15 +228,14 @@ fn test_bgremove_resharp() {
     let (nx, ny, nz) = data.dims;
     let (vsx, vsy, vsz) = data.voxel_size;
 
+    let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
+    let resharp_params = ResharpParams { radius: 6.0, tik_reg: 1e-4, tol: 1e-6, max_iter: 200 };
     let ((result, _new_mask), elapsed) = run_timed!("RESHARP", bgremove::resharp(
         &data.fieldmap,
         &data.mask,
-        nx, ny, nz,
-        vsx, vsy, vsz,
-        6.0,   // radius in mm
-        1e-4,  // Tikhonov regularization
-        1e-6,  // tolerance
-        200,   // max iterations
+        &grid,
+        &resharp_params,
+        |_, _| {},
     ));
 
     let res = TestResult::new("RESHARP", &result, &data.fieldmap_local, &data.mask, data.dims);
@@ -247,7 +255,6 @@ fn test_bgremove_lbv_hz_scale() {
     let data = TestData::load().expect("Failed to load test data");
     let (nx, ny, nz) = data.dims;
     let (vsx, vsy, vsz) = data.voxel_size;
-    let n_total = nx * ny * nz;
 
     // Convert ground truth field from ppm to Hz
     let gamma = 42.576e6_f64; // Hz/T
@@ -259,8 +266,10 @@ fn test_bgremove_lbv_hz_scale() {
     println!("[INFO] PPM->Hz scale factor: {:.2}, B0: {}T", ppm_to_hz, b0);
 
     // Run LBV on Hz-scale field
-    let ((result_hz, mask_hz), elapsed) = run_timed!("LBV-Hz", bgremove::lbv_default(
-        &fieldmap_hz, &data.mask, nx, ny, nz, vsx, vsy, vsz,
+    let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
+    let max_iter = (3 * nx.max(ny).max(nz)).max(500);
+    let ((result_hz, _mask_hz), elapsed) = run_timed!("LBV-Hz", bgremove::lbv(
+        &fieldmap_hz, &data.mask, &grid, 1e-6, max_iter, |_, _| {},
     ));
 
     // Compare against Hz-scale ground truth local field
@@ -268,8 +277,8 @@ fn test_bgremove_lbv_hz_scale() {
     res.print_with_time(elapsed);
 
     // Also run ppm for comparison
-    let ((result_ppm, _), elapsed_ppm) = run_timed!("LBV-ppm", bgremove::lbv_default(
-        &data.fieldmap, &data.mask, nx, ny, nz, vsx, vsy, vsz,
+    let ((result_ppm, _), elapsed_ppm) = run_timed!("LBV-ppm", bgremove::lbv(
+        &data.fieldmap, &data.mask, &grid, 1e-6, max_iter, |_, _| {},
     ));
     let res_ppm = TestResult::new("LBV-ppm", &result_ppm, &data.fieldmap_local, &data.mask, data.dims);
     res_ppm.print_with_time(elapsed_ppm);
@@ -299,11 +308,11 @@ fn test_inversion_tkd() {
     // Save ground truth susceptibility map for figure generation
     common::save_center_slices(&data.chi, &data.mask, data.dims, "ground_truth_chi");
 
+    let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
     let (result, elapsed) = run_timed!("TKD", inversion::tkd(
         &data.fieldmap_local,
         &data.mask,
-        nx, ny, nz,
-        vsx, vsy, vsz,
+        &grid,
         data.b0_dir,
         0.2,  // threshold
     ));
@@ -327,11 +336,11 @@ fn test_inversion_tsvd() {
     let (nx, ny, nz) = data.dims;
     let (vsx, vsy, vsz) = data.voxel_size;
 
+    let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
     let (result, elapsed) = run_timed!("TSVD", inversion::tsvd(
         &data.fieldmap_local,
         &data.mask,
-        nx, ny, nz,
-        vsx, vsy, vsz,
+        &grid,
         data.b0_dir,
         0.2,  // threshold
     ));
@@ -355,14 +364,13 @@ fn test_inversion_tikhonov() {
     let (nx, ny, nz) = data.dims;
     let (vsx, vsy, vsz) = data.voxel_size;
 
+    let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
     let (result, elapsed) = run_timed!("Tikhonov", inversion::tikhonov(
         &data.fieldmap_local,
         &data.mask,
-        nx, ny, nz,
-        vsx, vsy, vsz,
+        &grid,
         data.b0_dir,
-        1e-3,  // lambda
-        inversion::tikhonov::Regularization::Gradient,
+        &TikhonovParams { lambda: 1e-3, reg: inversion::tikhonov::Regularization::Gradient },
     ));
 
     let res = TestResult::new("Tikhonov", &result, &data.chi, &data.mask, data.dims);
@@ -384,11 +392,14 @@ fn test_inversion_tv() {
     let (nx, ny, nz) = data.dims;
     let (vsx, vsy, vsz) = data.voxel_size;
 
-    let (result, elapsed) = run_timed!("TV-ADMM", inversion::tv_admm_default(
+    let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
+    let (result, elapsed) = run_timed!("TV-ADMM", inversion::tv_admm(
         &data.fieldmap_local,
         &data.mask,
-        nx, ny, nz,
-        vsx, vsy, vsz,
+        &grid,
+        data.b0_dir,
+        &TvParams::default(),
+        |_, _| {},
     ));
 
     let res = TestResult::new("TV-ADMM", &result, &data.chi, &data.mask, data.dims);
@@ -410,18 +421,14 @@ fn test_inversion_rts() {
     let (nx, ny, nz) = data.dims;
     let (vsx, vsy, vsz) = data.voxel_size;
 
+    let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
     let (result, elapsed) = run_timed!("RTS", inversion::rts(
         &data.fieldmap_local,
         &data.mask,
-        nx, ny, nz,
-        vsx, vsy, vsz,
+        &grid,
         data.b0_dir,
-        0.15,  // delta (threshold)
-        1e5,   // mu
-        10.0,  // rho
-        1e-2,  // tolerance
-        20,    // max iterations
-        4,     // lsmr iterations
+        &RtsParams { delta: 0.15, mu: 1e5, rho: 10.0, tol: 1e-2, max_iter: 20, lsmr_iter: 4 },
+        |_, _| {},
     ));
 
     let res = TestResult::new("RTS", &result, &data.chi, &data.mask, data.dims);
@@ -447,24 +454,20 @@ fn test_inversion_medi() {
     // MEDI needs magnitude and noise std; use uniform noise std for synthetic data
     let n_std = vec![1.0; n_total];
 
+    let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
     let (result, elapsed) = run_timed!("MEDI", inversion::medi_l1(
         &data.fieldmap_local,
         &n_std,
         &data.mag_echoes[0],
         &data.mask,
-        nx, ny, nz,
-        vsx, vsy, vsz,
-        7.5e-5,            // lambda (MATLAB default)
+        &grid,
         data.b0_dir,
-        false,             // merit
-        false,             // smv
-        5.0,               // smv_radius
-        1,                 // data_weighting (SNR mode)
-        0.3,               // percentage (30% edges)
-        0.01,              // cg_tol
-        10,                // cg_max_iter
-        30,                // max_iter
-        0.1,               // tol
+        &MediParams {
+            lambda: 7.5e-5, merit: false, smv: false, smv_radius: 5.0,
+            data_weighting: 1, percentage: 0.3, cg_tol: 0.01, cg_max_iter: 10,
+            max_iter: 30, tol: 0.1,
+        },
+        |_, _| {},
     ));
 
     let res = TestResult::new("MEDI", &result, &data.chi, &data.mask, data.dims);
@@ -486,11 +489,14 @@ fn test_inversion_nltv() {
     let (nx, ny, nz) = data.dims;
     let (vsx, vsy, vsz) = data.voxel_size;
 
-    let (result, elapsed) = run_timed!("NLTV", inversion::nltv_default(
+    let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
+    let (result, elapsed) = run_timed!("NLTV", inversion::nltv(
         &data.fieldmap_local,
         &data.mask,
-        nx, ny, nz,
-        vsx, vsy, vsz,
+        &grid,
+        data.b0_dir,
+        &NltvParams::default(),
+        |_, _| {},
     ));
 
     let res = TestResult::new("NLTV", &result, &data.chi, &data.mask, data.dims);
@@ -516,10 +522,10 @@ fn test_bias_correction() {
     let (nx, ny, nz) = data.dims;
     let (vsx, vsy, vsz) = data.voxel_size;
 
+    let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
     let (result, elapsed) = run_timed!("Makehomogeneous", makehomogeneous(
         &data.mag_echoes[0],
-        nx, ny, nz,
-        vsx, vsy, vsz,
+        &grid,
         7.0,  // sigma_mm
         6,    // nbox
     ));
@@ -559,23 +565,25 @@ fn test_swi() {
 
     let start = Instant::now();
 
+    let grid = qsm_core::Grid::new(nx, ny, nz, vsx, vsy, vsz);
+
     // Step 1: Laplacian unwrap first echo phase
     println!("[INFO] Unwrapping phase (Laplacian)...");
     let unwrapped = laplacian_unwrap(
         &data.phase_echoes[0], &data.mask,
-        nx, ny, nz, vsx, vsy, vsz,
+        &grid,
     );
 
     // Step 2: Calculate SWI with default parameters (sigma=[4,4,0], tanh, strength=4)
     println!("[INFO] Computing SWI...");
-    let swi_result = swi::calculate_swi_default(
+    let swi_result = swi::calculate_swi(
         &unwrapped, &data.mag_echoes[0], &data.mask,
-        nx, ny, nz, vsx, vsy, vsz,
+        &grid, &swi::SwiParams::default(),
     );
 
     // Step 3: Minimum intensity projection
     println!("[INFO] Computing mIP...");
-    let mip = swi::create_mip_default(&swi_result, nx, ny, nz);
+    let mip = swi::create_mip(&swi_result, &grid, swi::SwiParams::default().mip_window);
 
     let elapsed = start.elapsed();
 
@@ -653,8 +661,9 @@ fn test_r2star_t2star() {
         }
     }
 
+    let grid = Grid::new(nx, ny, nz, data.voxel_size.0, data.voxel_size.1, data.voxel_size.2);
     let (r2star_map, s0_map) = r2star_arlo(
-        &magnitude_interleaved, &data.mask, &data.echo_times, nx, ny, nz,
+        &magnitude_interleaved, &data.mask, &data.echo_times, &grid,
     );
     let t2star_map = t2star_from_r2star(&r2star_map);
     let elapsed = start.elapsed();
@@ -707,15 +716,16 @@ fn test_bet() {
     let (nx, ny, nz) = data.dims;
     let (vsx, vsy, vsz) = data.voxel_size;
 
+    let grid = qsm_core::Grid::new(nx, ny, nz, vsx, vsy, vsz);
     let (predicted_mask, elapsed) = run_timed!("BET", bet::run_bet(
         &data.mag_echoes[0],
-        nx, ny, nz,
-        vsx, vsy, vsz,
+        &grid,
         0.5,   // fractional_intensity
         1.0,   // smoothness_factor
         0.0,   // gradient_threshold
         1000,  // iterations
         4,     // subdivisions
+        |_, _| {},
     ));
 
     let dice = common::dice_coefficient(&predicted_mask, &data.mask);
@@ -775,13 +785,14 @@ fn test_combined_tgv() {
     };
 
     println!("[INFO] Running TGV (from total field map)...");
+    let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
     let result_f32 = tgv_qsm(
         &phase_for_tgv,
         &data.mask,
-        nx, ny, nz,
-        vsx as f32, vsy as f32, vsz as f32,
+        &grid,
         &tgv_params,
         (data.b0_dir.0 as f32, data.b0_dir.1 as f32, data.b0_dir.2 as f32),
+        |_, _| {},
     );
 
     let elapsed = start.elapsed();
@@ -826,12 +837,13 @@ fn test_pipeline_harperella() {
 
     let wrapped_phase = wrap_fieldmap(&data.fieldmap);
 
+    let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
     let ((result, _new_mask), elapsed) = run_timed!("HARPERELLA", pipeline::harperella(
         &wrapped_phase,
         &data.mask,
-        nx, ny, nz,
-        vsx, vsy, vsz,
-        10.0, 40,
+        &grid,
+        &pipeline::HarperellaParams { radius: 10.0, max_iter: 40, tol: 1e-6 },
+        |_, _| {},
     ));
 
     let res = TestResult::new("HARPERELLA", &result, &data.fieldmap_local, &data.mask, data.dims);
@@ -853,12 +865,13 @@ fn test_pipeline_iharperella() {
 
     let wrapped_phase = wrap_fieldmap(&data.fieldmap);
 
+    let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
     let ((result, _new_mask), elapsed) = run_timed!("iHARPERELLA", pipeline::iharperella(
         &wrapped_phase,
         &data.mask,
-        nx, ny, nz,
-        vsx, vsy, vsz,
-        10.0, 40,
+        &grid,
+        &pipeline::HarperellaParams { radius: 10.0, max_iter: 40, tol: 1e-6 },
+        |_, _| {},
     ));
 
     let res = TestResult::new("iHARPERELLA", &result, &data.fieldmap_local, &data.mask, data.dims);
@@ -875,7 +888,7 @@ fn test_pipeline_iharperella() {
 fn test_pipeline_romeo_b0() {
     println!("[INFO] Loading test data...");
     let data = TestData::load().expect("Failed to load test data");
-    let (nx, ny, nz) = data.dims;
+    let (_nx, _ny, _nz) = data.dims;
 
     let start = Instant::now();
     let b0_hz = run_field_mapping(&data);
@@ -938,13 +951,14 @@ fn test_pipeline_tgv() {
     };
 
     println!("[INFO] Running TGV...");
+    let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
     let result_f32 = tgv_qsm(
         &phase_for_tgv,
         &data.mask,
-        nx, ny, nz,
-        vsx as f32, vsy as f32, vsz as f32,
+        &grid,
         &tgv_params,
         (data.b0_dir.0 as f32, data.b0_dir.1 as f32, data.b0_dir.2 as f32),
+        |_, _| {},
     );
 
     let elapsed = start.elapsed();
@@ -977,9 +991,10 @@ fn test_pipeline_qsmart() {
     // ========================================================================
     // Phase unwrapping and linear fit (matching qsmbly's computeWeightedEchoFit)
     // ========================================================================
+    let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
     println!("[INFO] Unwrapping phase echoes...");
     let unwrapped_phases: Vec<Vec<f64>> = data.phase_echoes.iter()
-        .map(|phase| laplacian_unwrap(phase, &data.mask, nx, ny, nz, vsx, vsy, vsz))
+        .map(|phase| laplacian_unwrap(phase, &data.mask, &grid))
         .collect();
 
     // Through-origin fit: slope = Σ(mag*phase*TE) / Σ(mag*TE²), tfs = slope/2π
@@ -1005,8 +1020,9 @@ fn test_pipeline_qsmart() {
     let vasc_mask = generate_vasculature_mask(
         &data.mag_echoes[0],
         &data.mask,
-        nx, ny, nz,
+        &grid,
         &VasculatureParams::default(),
+        |_, _| {},
     );
 
     // ========================================================================
@@ -1039,8 +1055,9 @@ fn test_pipeline_qsmart() {
         &field_hz,
         &weighted_mask,
         &ones_vasc,
-        nx, ny, nz,
+        &grid,
         &SdfParams::stage1(),
+        |_, _| {},
     );
 
     let mask_stage1_u8: Vec<u8> = weighted_mask.iter()
@@ -1050,11 +1067,9 @@ fn test_pipeline_qsmart() {
     let chi_stage1 = ilsqr_simple(
         &lfs_stage1,
         &mask_stage1_u8,
-        nx, ny, nz,
-        vsx, vsy, vsz,
+        &grid,
         data.b0_dir,
-        0.01,
-        50,
+        &IlsqrParams { tol: 0.01, max_iter: 50 },
     );
 
     // ========================================================================
@@ -1074,8 +1089,9 @@ fn test_pipeline_qsmart() {
         &field_hz_weighted,
         &weighted_mask,
         &vasc_mask,
-        nx, ny, nz,
+        &grid,
         &SdfParams::stage2(),
+        |_, _| {},
     );
 
     // iLSQR mask: tissue-only (weighted_mask AND vasc_only)
@@ -1087,11 +1103,9 @@ fn test_pipeline_qsmart() {
     let chi_stage2 = ilsqr_simple(
         &lfs_stage2,
         &mask_stage2_u8,
-        nx, ny, nz,
-        vsx, vsy, vsz,
+        &grid,
         data.b0_dir,
-        0.01,
-        50,
+        &IlsqrParams { tol: 0.01, max_iter: 50 },
     );
 
     // ========================================================================
@@ -1115,8 +1129,7 @@ fn test_pipeline_qsmart() {
         &lfs_stage1_ppm,
         &chi_stage1,
         &chi_stage2,
-        nx, ny, nz,
-        vsx, vsy, vsz,
+        &grid,
         data.b0_dir,
         ppm_factor,
     );
@@ -1174,33 +1187,36 @@ fn test_pipeline_lbv_tv() {
     // Step 2a: LBV — simulate WASM normalization: Hz→ppm, run algorithm, ppm→Hz
     println!("[INFO] Running LBV (with Hz→ppm normalization)...");
     let b0_ppm: Vec<f64> = b0_hz.iter().map(|&v| v * scale).collect();
+    let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
     let ((local_lbv_ppm, mask_lbv), elapsed_lbv) = run_timed!("LBV", bgremove::lbv::lbv(
-        &b0_ppm, &data.mask, nx, ny, nz, vsx, vsy, vsz,
-        1e-6, 500
+        &b0_ppm, &data.mask, &grid,
+        1e-6, 500, |_, _| {}
     ));
     let local_lbv_hz: Vec<f64> = local_lbv_ppm.iter().map(|&v| v / scale).collect();
 
     // Step 2b: V-SHARP — same normalization
     let radii: Vec<f64> = (1..=12).map(|r| r as f64).collect();
     let ((local_vsharp_ppm, mask_vsharp), elapsed_vsharp) = run_timed!("V-SHARP", bgremove::vsharp(
-        &b0_ppm, &data.mask, nx, ny, nz, vsx, vsy, vsz, &radii, 0.05
+        &b0_ppm, &data.mask, &grid, &radii, 0.05, |_, _| {}
     ));
     let local_vsharp_hz: Vec<f64> = local_vsharp_ppm.iter().map(|&v| v / scale).collect();
 
     // Step 3a: TV-ADMM on LBV — normalize Hz→ppm, run, ppm→Hz
     println!("[INFO] Running TV-ADMM on LBV result (with normalization)...");
     let local_lbv_ppm_inv: Vec<f64> = local_lbv_hz.iter().map(|&v| v * scale).collect();
-    let (chi_lbv_ppm_raw, elapsed_inv_lbv) = run_timed!("TV-ADMM(LBV)", inversion::tv_admm_default(
-        &local_lbv_ppm_inv, &mask_lbv, nx, ny, nz, vsx, vsy, vsz
+    let (chi_lbv_ppm_raw, _elapsed_inv_lbv) = run_timed!("TV-ADMM(LBV)", inversion::tv_admm(
+        &local_lbv_ppm_inv, &mask_lbv, &grid, data.b0_dir, &TvParams::default(), |_, _| {}
     ));
     let chi_lbv_hz: Vec<f64> = chi_lbv_ppm_raw.iter().map(|&v| v / scale).collect();
 
     // Step 3b: RTS on V-SHARP — normalize Hz→ppm, run, ppm→Hz
     println!("[INFO] Running RTS on V-SHARP result (with normalization)...");
     let local_vsharp_ppm_inv: Vec<f64> = local_vsharp_hz.iter().map(|&v| v * scale).collect();
-    let (chi_vsharp_ppm_raw, elapsed_inv_vs) = run_timed!("RTS(VSHARP)", inversion::rts::rts(
-        &local_vsharp_ppm_inv, &mask_vsharp, nx, ny, nz, vsx, vsy, vsz,
-        (0.0, 0.0, 1.0), 0.15, 100000.0, 10.0, 0.01, 20, 4
+    let (chi_vsharp_ppm_raw, _elapsed_inv_vs) = run_timed!("RTS(VSHARP)", inversion::rts(
+        &local_vsharp_ppm_inv, &mask_vsharp, &grid,
+        (0.0, 0.0, 1.0),
+        &RtsParams { delta: 0.15, mu: 100000.0, rho: 10.0, tol: 0.01, max_iter: 20, lsmr_iter: 4 },
+        |_, _| {},
     ));
     let chi_vsharp_hz: Vec<f64> = chi_vsharp_ppm_raw.iter().map(|&v| v / scale).collect();
 
@@ -1275,34 +1291,37 @@ fn benchmark_all_algorithms() {
     println!("{:<15} {:>12} {:>10} {:>10} {:>10} {:>12}", "Method", "RMSE", "NRMSE", "Corr", "XSIM", "Time");
     println!("{}", "-".repeat(70));
 
+    let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
+
     // SHARP
     let ((result, _), elapsed) = run_timed!("SHARP", bgremove::sharp(
-        &data.fieldmap, &data.mask, nx, ny, nz, vsx, vsy, vsz, 6.0, 0.05
+        &data.fieldmap, &data.mask, &grid, 0.05, 6.0
     ));
     TestResult::new("SHARP", &result, &data.fieldmap_local, &data.mask, data.dims).print_with_time(elapsed);
 
     // V-SHARP
     let radii: Vec<f64> = (1..=12).map(|r| r as f64).collect();
     let ((result, _), elapsed) = run_timed!("V-SHARP", bgremove::vsharp(
-        &data.fieldmap, &data.mask, nx, ny, nz, vsx, vsy, vsz, &radii, 0.05
+        &data.fieldmap, &data.mask, &grid, &radii, 0.05, |_, _| {}
     ));
     TestResult::new("V-SHARP", &result, &data.fieldmap_local, &data.mask, data.dims).print_with_time(elapsed);
 
     // PDF (explicit maxit=100 for CI speed; adaptive default would be ~2626)
     let (result, elapsed) = run_timed!("PDF", bgremove::pdf(
-        &data.fieldmap, &data.mask, nx, ny, nz, vsx, vsy, vsz, data.b0_dir, 1e-5, 100
+        &data.fieldmap, &data.mask, &grid, data.b0_dir, 1e-5, 100, |_, _| {}
     ));
     TestResult::new("PDF", &result, &data.fieldmap_local, &data.mask, data.dims).print_with_time(elapsed);
 
     // iSMV
     let ((result, _), elapsed) = run_timed!("iSMV", bgremove::ismv(
-        &data.fieldmap, &data.mask, nx, ny, nz, vsx, vsy, vsz, 5.0, 1e-6, 50
+        &data.fieldmap, &data.mask, &grid, 5.0, 1e-6, 50, |_, _| {}
     ));
     TestResult::new("iSMV", &result, &data.fieldmap_local, &data.mask, data.dims).print_with_time(elapsed);
 
     // LBV (using defaults: tol=1e-6, adaptive max_iter)
-    let ((result, _), elapsed) = run_timed!("LBV", bgremove::lbv_default(
-        &data.fieldmap, &data.mask, nx, ny, nz, vsx, vsy, vsz
+    let lbv_max_iter = (3 * nx.max(ny).max(nz)).max(500);
+    let ((result, _), elapsed) = run_timed!("LBV", bgremove::lbv(
+        &data.fieldmap, &data.mask, &grid, 1e-6, lbv_max_iter, |_, _| {}
     ));
     TestResult::new("LBV", &result, &data.fieldmap_local, &data.mask, data.dims).print_with_time(elapsed);
 
@@ -1318,37 +1337,38 @@ fn benchmark_all_algorithms() {
 
     // TKD
     let (result, elapsed) = run_timed!("TKD", inversion::tkd(
-        &data.fieldmap_local, &data.mask, nx, ny, nz, vsx, vsy, vsz, data.b0_dir, 0.2
+        &data.fieldmap_local, &data.mask, &grid, data.b0_dir, 0.2
     ));
     TestResult::new("TKD", &result, &data.chi, &data.mask, data.dims).print_with_time(elapsed);
     inversion_results.push(("TKD".to_string(), result, elapsed));
 
     // TSVD
     let (result, elapsed) = run_timed!("TSVD", inversion::tsvd(
-        &data.fieldmap_local, &data.mask, nx, ny, nz, vsx, vsy, vsz, data.b0_dir, 0.2
+        &data.fieldmap_local, &data.mask, &grid, data.b0_dir, 0.2
     ));
     TestResult::new("TSVD", &result, &data.chi, &data.mask, data.dims).print_with_time(elapsed);
     inversion_results.push(("TSVD".to_string(), result, elapsed));
 
     // Tikhonov
     let (result, elapsed) = run_timed!("Tikhonov", inversion::tikhonov(
-        &data.fieldmap_local, &data.mask, nx, ny, nz, vsx, vsy, vsz,
-        data.b0_dir, 1e-3, inversion::tikhonov::Regularization::Gradient
+        &data.fieldmap_local, &data.mask, &grid,
+        data.b0_dir, &TikhonovParams { lambda: 1e-3, reg: inversion::tikhonov::Regularization::Gradient }
     ));
     TestResult::new("Tikhonov", &result, &data.chi, &data.mask, data.dims).print_with_time(elapsed);
     inversion_results.push(("Tikhonov".to_string(), result, elapsed));
 
     // TV-ADMM (using defaults: lambda=2e-4, rho=2e-2)
-    let (result, elapsed) = run_timed!("TV-ADMM", inversion::tv_admm_default(
-        &data.fieldmap_local, &data.mask, nx, ny, nz, vsx, vsy, vsz
+    let (result, elapsed) = run_timed!("TV-ADMM", inversion::tv_admm(
+        &data.fieldmap_local, &data.mask, &grid, data.b0_dir, &TvParams::default(), |_, _| {}
     ));
     TestResult::new("TV-ADMM", &result, &data.chi, &data.mask, data.dims).print_with_time(elapsed);
     inversion_results.push(("TV-ADMM".to_string(), result, elapsed));
 
     // RTS
     let (result, elapsed) = run_timed!("RTS", inversion::rts(
-        &data.fieldmap_local, &data.mask, nx, ny, nz, vsx, vsy, vsz,
-        data.b0_dir, 0.15, 1e5, 10.0, 1e-2, 20, 4
+        &data.fieldmap_local, &data.mask, &grid,
+        data.b0_dir, &RtsParams { delta: 0.15, mu: 1e5, rho: 10.0, tol: 1e-2, max_iter: 20, lsmr_iter: 4 },
+        |_, _| {},
     ));
     TestResult::new("RTS", &result, &data.chi, &data.mask, data.dims).print_with_time(elapsed);
     inversion_results.push(("RTS".to_string(), result, elapsed));
@@ -1429,10 +1449,11 @@ fn test_all_combinations() {
     }
 
     let mut bfr_results: Vec<BfrResult> = Vec::new();
+    let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
 
     // SHARP
     let ((result, mask), elapsed) = run_timed!("SHARP", bgremove::sharp(
-        &data.fieldmap, &data.mask, nx, ny, nz, vsx, vsy, vsz, 6.0, 0.05
+        &data.fieldmap, &data.mask, &grid, 0.05, 6.0
     ));
     TestResult::new("SHARP", &result, &data.fieldmap_local, &data.mask, data.dims).print_with_time(elapsed);
     bfr_results.push(BfrResult { name: "SHARP".into(), local_field: result, mask, elapsed });
@@ -1440,35 +1461,37 @@ fn test_all_combinations() {
     // V-SHARP
     let radii: Vec<f64> = (1..=12).map(|r| r as f64).collect();
     let ((result, mask), elapsed) = run_timed!("V-SHARP", bgremove::vsharp(
-        &data.fieldmap, &data.mask, nx, ny, nz, vsx, vsy, vsz, &radii, 0.05
+        &data.fieldmap, &data.mask, &grid, &radii, 0.05, |_, _| {}
     ));
     TestResult::new("V-SHARP", &result, &data.fieldmap_local, &data.mask, data.dims).print_with_time(elapsed);
     bfr_results.push(BfrResult { name: "V-SHARP".into(), local_field: result, mask, elapsed });
 
     // PDF
     let (result, elapsed) = run_timed!("PDF", bgremove::pdf(
-        &data.fieldmap, &data.mask, nx, ny, nz, vsx, vsy, vsz, data.b0_dir, 1e-5, 100
+        &data.fieldmap, &data.mask, &grid, data.b0_dir, 1e-5, 100, |_, _| {}
     ));
     TestResult::new("PDF", &result, &data.fieldmap_local, &data.mask, data.dims).print_with_time(elapsed);
     bfr_results.push(BfrResult { name: "PDF".into(), local_field: result, mask: data.mask.clone(), elapsed });
 
     // iSMV
     let ((result, mask), elapsed) = run_timed!("iSMV", bgremove::ismv(
-        &data.fieldmap, &data.mask, nx, ny, nz, vsx, vsy, vsz, 5.0, 1e-6, 50
+        &data.fieldmap, &data.mask, &grid, 5.0, 1e-6, 50, |_, _| {}
     ));
     TestResult::new("iSMV", &result, &data.fieldmap_local, &data.mask, data.dims).print_with_time(elapsed);
     bfr_results.push(BfrResult { name: "iSMV".into(), local_field: result, mask, elapsed });
 
     // LBV
-    let ((result, mask), elapsed) = run_timed!("LBV", bgremove::lbv_default(
-        &data.fieldmap, &data.mask, nx, ny, nz, vsx, vsy, vsz
+    let lbv_max_iter = (3 * nx.max(ny).max(nz)).max(500);
+    let ((result, mask), elapsed) = run_timed!("LBV", bgremove::lbv(
+        &data.fieldmap, &data.mask, &grid, 1e-6, lbv_max_iter, |_, _| {}
     ));
     TestResult::new("LBV", &result, &data.fieldmap_local, &data.mask, data.dims).print_with_time(elapsed);
     bfr_results.push(BfrResult { name: "LBV".into(), local_field: result, mask, elapsed });
 
     // RESHARP
+    let resharp_params = ResharpParams { radius: 6.0, tik_reg: 1e-4, tol: 1e-6, max_iter: 200 };
     let ((result, mask), elapsed) = run_timed!("RESHARP", bgremove::resharp(
-        &data.fieldmap, &data.mask, nx, ny, nz, vsx, vsy, vsz, 6.0, 1e-4, 1e-6, 200
+        &data.fieldmap, &data.mask, &grid, &resharp_params, |_, _| {}
     ));
     TestResult::new("RESHARP", &result, &data.fieldmap_local, &data.mask, data.dims).print_with_time(elapsed);
     bfr_results.push(BfrResult { name: "RESHARP".into(), local_field: result, mask, elapsed });
@@ -1494,44 +1517,45 @@ fn test_all_combinations() {
 
         // TKD
         let (result, elapsed) = run_timed!("TKD", inversion::tkd(
-            &bfr.local_field, &bfr.mask, nx, ny, nz, vsx, vsy, vsz, data.b0_dir, 0.2
+            &bfr.local_field, &bfr.mask, &grid, data.b0_dir, 0.2
         ));
         let c = ChallengeMetrics::compute("TKD", &result, &data.chi, &bfr.mask, &data.segmentation, data.dims);
         emit_row(&mut csv, &bfr.name, "TKD", &c, bt, elapsed.as_secs_f64());
 
         // TSVD
         let (result, elapsed) = run_timed!("TSVD", inversion::tsvd(
-            &bfr.local_field, &bfr.mask, nx, ny, nz, vsx, vsy, vsz, data.b0_dir, 0.2
+            &bfr.local_field, &bfr.mask, &grid, data.b0_dir, 0.2
         ));
         let c = ChallengeMetrics::compute("TSVD", &result, &data.chi, &bfr.mask, &data.segmentation, data.dims);
         emit_row(&mut csv, &bfr.name, "TSVD", &c, bt, elapsed.as_secs_f64());
 
         // Tikhonov
         let (result, elapsed) = run_timed!("Tikhonov", inversion::tikhonov(
-            &bfr.local_field, &bfr.mask, nx, ny, nz, vsx, vsy, vsz,
-            data.b0_dir, 1e-3, inversion::tikhonov::Regularization::Gradient
+            &bfr.local_field, &bfr.mask, &grid,
+            data.b0_dir, &TikhonovParams { lambda: 1e-3, reg: inversion::tikhonov::Regularization::Gradient }
         ));
         let c = ChallengeMetrics::compute("Tikhonov", &result, &data.chi, &bfr.mask, &data.segmentation, data.dims);
         emit_row(&mut csv, &bfr.name, "Tikhonov", &c, bt, elapsed.as_secs_f64());
 
         // TV-ADMM
-        let (result, elapsed) = run_timed!("TV-ADMM", inversion::tv_admm_default(
-            &bfr.local_field, &bfr.mask, nx, ny, nz, vsx, vsy, vsz
+        let (result, elapsed) = run_timed!("TV-ADMM", inversion::tv_admm(
+            &bfr.local_field, &bfr.mask, &grid, data.b0_dir, &TvParams::default(), |_, _| {}
         ));
         let c = ChallengeMetrics::compute("TV-ADMM", &result, &data.chi, &bfr.mask, &data.segmentation, data.dims);
         emit_row(&mut csv, &bfr.name, "TV-ADMM", &c, bt, elapsed.as_secs_f64());
 
         // NLTV
-        let (result, elapsed) = run_timed!("NLTV", inversion::nltv_default(
-            &bfr.local_field, &bfr.mask, nx, ny, nz, vsx, vsy, vsz
+        let (result, elapsed) = run_timed!("NLTV", inversion::nltv(
+            &bfr.local_field, &bfr.mask, &grid, data.b0_dir, &NltvParams::default(), |_, _| {}
         ));
         let c = ChallengeMetrics::compute("NLTV", &result, &data.chi, &bfr.mask, &data.segmentation, data.dims);
         emit_row(&mut csv, &bfr.name, "NLTV", &c, bt, elapsed.as_secs_f64());
 
         // RTS
         let (result, elapsed) = run_timed!("RTS", inversion::rts(
-            &bfr.local_field, &bfr.mask, nx, ny, nz, vsx, vsy, vsz,
-            data.b0_dir, 0.15, 1e5, 10.0, 1e-2, 20, 4
+            &bfr.local_field, &bfr.mask, &grid,
+            data.b0_dir, &RtsParams { delta: 0.15, mu: 1e5, rho: 10.0, tol: 1e-2, max_iter: 20, lsmr_iter: 4 },
+            |_, _| {},
         ));
         let c = ChallengeMetrics::compute("RTS", &result, &data.chi, &bfr.mask, &data.segmentation, data.dims);
         emit_row(&mut csv, &bfr.name, "RTS", &c, bt, elapsed.as_secs_f64());
@@ -1540,8 +1564,13 @@ fn test_all_combinations() {
         let n_std = vec![1.0; n_total];
         let (result, elapsed) = run_timed!("MEDI", inversion::medi_l1(
             &bfr.local_field, &n_std, &data.mag_echoes[0], &bfr.mask,
-            nx, ny, nz, vsx, vsy, vsz,
-            7.5e-5, data.b0_dir, false, false, 5.0, 1, 0.3, 0.01, 10, 30, 0.1
+            &grid, data.b0_dir,
+            &MediParams {
+                lambda: 7.5e-5, merit: false, smv: false, smv_radius: 5.0,
+                data_weighting: 1, percentage: 0.3, cg_tol: 0.01, cg_max_iter: 10,
+                max_iter: 30, tol: 0.1,
+            },
+            |_, _| {},
         ));
         let c = ChallengeMetrics::compute("MEDI", &result, &data.chi, &bfr.mask, &data.segmentation, data.dims);
         emit_row(&mut csv, &bfr.name, "MEDI", &c, bt, elapsed.as_secs_f64());
@@ -1574,10 +1603,10 @@ fn test_all_combinations() {
             fieldstrength: b0, te, tol: 1e-5,
         };
         let result_f32 = tgv_qsm(
-            &phase_for_tgv, &data.mask, nx, ny, nz,
-            vsx as f32, vsy as f32, vsz as f32,
+            &phase_for_tgv, &data.mask, &grid,
             &tgv_params,
             (data.b0_dir.0 as f32, data.b0_dir.1 as f32, data.b0_dir.2 as f32),
+            |_, _| {},
         );
         let elapsed = start.elapsed();
         let result: Vec<f64> = result_f32.iter().map(|&v| v as f64).collect();
@@ -1592,7 +1621,7 @@ fn test_all_combinations() {
 
         // Phase unwrapping
         let unwrapped_phases: Vec<Vec<f64>> = data.phase_echoes.iter()
-            .map(|phase| laplacian_unwrap(phase, &data.mask, nx, ny, nz, vsx, vsy, vsz))
+            .map(|phase| laplacian_unwrap(phase, &data.mask, &grid))
             .collect();
 
         // Multi-echo linear fit
@@ -1604,8 +1633,8 @@ fn test_all_combinations() {
 
         // Vasculature mask
         let vasc_mask = generate_vasculature_mask(
-            &data.mag_echoes[0], &data.mask, nx, ny, nz,
-            &VasculatureParams::default(),
+            &data.mag_echoes[0], &data.mask, &grid,
+            &VasculatureParams::default(), |_, _| {},
         );
 
         let mask_f64: Vec<f64> = data.mask.iter().map(|&v| v as f64).collect();
@@ -1620,23 +1649,23 @@ fn test_all_combinations() {
 
         // Stage 1
         let ones_vasc: Vec<f64> = vec![1.0; n_total];
-        let lfs_stage1 = sdf(&field_hz, &weighted_mask, &ones_vasc, nx, ny, nz, &SdfParams::stage1());
+        let lfs_stage1 = sdf(&field_hz, &weighted_mask, &ones_vasc, &grid, &SdfParams::stage1(), |_, _| {});
         let mask_stage1_u8: Vec<u8> = weighted_mask.iter().map(|&v| if v > 0.1 { 1 } else { 0 }).collect();
-        let chi_stage1 = ilsqr_simple(&lfs_stage1, &mask_stage1_u8, nx, ny, nz, vsx, vsy, vsz, data.b0_dir, 0.01, 50);
+        let chi_stage1 = ilsqr_simple(&lfs_stage1, &mask_stage1_u8, &grid, data.b0_dir, &IlsqrParams { tol: 0.01, max_iter: 50 });
 
         // Stage 2
         let field_hz_weighted: Vec<f64> = field_hz.iter().zip(weighted_mask.iter()).map(|(&f, &m)| f * m).collect();
-        let lfs_stage2 = sdf(&field_hz_weighted, &weighted_mask, &vasc_mask, nx, ny, nz, &SdfParams::stage2());
+        let lfs_stage2 = sdf(&field_hz_weighted, &weighted_mask, &vasc_mask, &grid, &SdfParams::stage2(), |_, _| {});
         let mask_stage2_u8: Vec<u8> = weighted_mask.iter().zip(vasc_mask.iter())
             .map(|(&wm, &v)| if wm > 0.1 && v > 0.5 { 1 } else { 0 }).collect();
-        let chi_stage2 = ilsqr_simple(&lfs_stage2, &mask_stage2_u8, nx, ny, nz, vsx, vsy, vsz, data.b0_dir, 0.01, 50);
+        let chi_stage2 = ilsqr_simple(&lfs_stage2, &mask_stage2_u8, &grid, data.b0_dir, &IlsqrParams { tol: 0.01, max_iter: 50 });
 
         // Offset adjustment
         let removed_voxels: Vec<f64> = weighted_mask.iter().zip(vasc_mask.iter()).map(|(&wm, &v)| wm - v).collect();
         let lfs_stage1_ppm: Vec<f64> = lfs_stage1.iter().map(|&v| v * ppm_factor).collect();
         let chi_qsmart_raw = adjust_offset(
             &removed_voxels, &lfs_stage1_ppm, &chi_stage1, &chi_stage2,
-            nx, ny, nz, vsx, vsy, vsz, data.b0_dir, ppm_factor,
+            &grid, data.b0_dir, ppm_factor,
         );
         let chi_qsmart: Vec<f64> = chi_qsmart_raw.iter().enumerate()
             .map(|(i, &v)| if data.mask[i] > 0 { v * scale_to_ppm } else { 0.0 }).collect();

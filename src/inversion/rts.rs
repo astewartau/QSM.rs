@@ -15,22 +15,9 @@ use num_complex::Complex64;
 use crate::fft::Fft3dWorkspace;
 use crate::kernels::dipole::dipole_kernel;
 use crate::kernels::laplacian::laplacian_kernel;
-use crate::utils::gradient::{fgrad_inplace, bdiv_inplace};
-
-#[cfg(feature = "parallel")]
-use crate::par::*;
-
-/// Soft thresholding (shrinkage) operator
-#[inline]
-fn shrink(x: f64, threshold: f64) -> f64 {
-    if x > threshold {
-        x - threshold
-    } else if x < -threshold {
-        x + threshold
-    } else {
-        0.0
-    }
-}
+use crate::utils::{shrink, apply_mask_zero};
+use crate::Grid;
+use super::admm::{AdmmBuffers, admm_step};
 
 /// RTS algorithm parameters
 #[derive(Clone, Debug)]
@@ -62,44 +49,7 @@ impl Default for RtsParams {
     }
 }
 
-/// RTS dipole inversion (optimized)
-///
-/// # Arguments
-/// * `local_field` - Local field values (nx * ny * nz)
-/// * `mask` - Binary mask (nx * ny * nz), 1 = inside ROI
-/// * `nx`, `ny`, `nz` - Array dimensions
-/// * `vsx`, `vsy`, `vsz` - Voxel sizes in mm
-/// * `bdir` - B0 field direction
-/// * `delta` - Threshold for ill-conditioned region (typically 0.15)
-/// * `mu` - Regularization parameter for well-conditioned region (typically 1e5)
-/// * `rho` - ADMM penalty parameter (typically 10)
-/// * `tol` - Convergence tolerance
-/// * `max_iter` - Maximum ADMM iterations
-/// * `lsmr_iter` - LSMR iterations for step 1 (typically 4)
-///
-/// # Returns
-/// Susceptibility map
-pub fn rts(
-    local_field: &[f64],
-    mask: &[u8],
-    nx: usize, ny: usize, nz: usize,
-    vsx: f64, vsy: f64, vsz: f64,
-    bdir: (f64, f64, f64),
-    delta: f64,
-    mu: f64,
-    rho: f64,
-    tol: f64,
-    max_iter: usize,
-    lsmr_iter: usize,
-) -> Vec<f64> {
-    rts_with_progress(
-        local_field, mask, nx, ny, nz, vsx, vsy, vsz,
-        bdir, delta, mu, rho, tol, max_iter, lsmr_iter,
-        |_, _| {} // no-op progress callback
-    )
-}
-
-/// RTS with progress callback (optimized)
+/// RTS dipole inversion
 ///
 /// Optimized implementation with:
 /// - Pre-allocated buffers (zero allocations per iteration)
@@ -107,25 +57,26 @@ pub fn rts(
 /// - Buffer swapping instead of cloning
 /// - Fused z-subproblem and u-update
 ///
-/// Same as `rts` but calls `progress_callback(iteration, max_iter)` each iteration.
-pub fn rts_with_progress<F>(
+/// # Arguments
+/// * `local_field` - Local field values (nx * ny * nz)
+/// * `mask` - Binary mask (nx * ny * nz), 1 = inside ROI
+/// * `grid` - Volume grid (dimensions and voxel sizes)
+/// * `bdir` - B0 field direction
+/// * `params` - RTS parameters
+/// * `progress` - Progress callback `(iteration, max_iter)`
+///
+/// # Returns
+/// Susceptibility map
+pub fn rts(
     local_field: &[f64],
     mask: &[u8],
-    nx: usize, ny: usize, nz: usize,
-    vsx: f64, vsy: f64, vsz: f64,
+    grid: &Grid,
     bdir: (f64, f64, f64),
-    delta: f64,
-    mu: f64,
-    rho: f64,
-    tol: f64,
-    max_iter: usize,
-    lsmr_iter: usize,
-    mut progress_callback: F,
-) -> Vec<f64>
-where
-    F: FnMut(usize, usize),
-{
-    let n_total = nx * ny * nz;
+    params: &RtsParams,
+    mut progress: impl FnMut(usize, usize),
+) -> Vec<f64> {
+    let (nx, ny, nz) = grid.dims;
+    let n_total = grid.n_total();
 
     // ========================================================================
     // Pre-compute kernels (done once)
@@ -135,10 +86,10 @@ where
     let mut fft_ws = Fft3dWorkspace::new(nx, ny, nz);
 
     // Generate dipole kernel D
-    let d_kernel = dipole_kernel(nx, ny, nz, vsx, vsy, vsz, bdir);
+    let d_kernel = dipole_kernel(grid, bdir);
 
     // Generate negative Laplacian kernel
-    let l_kernel = laplacian_kernel(nx, ny, nz, vsx, vsy, vsz, true);
+    let l_kernel = laplacian_kernel(grid, true);
 
     // FFT of Laplacian kernel (reuse buffer for other purposes later)
     let mut work_complex: Vec<Complex64> = l_kernel.iter()
@@ -152,12 +103,12 @@ where
 
     for i in 0..n_total {
         let l_fft_i = work_complex[i].re;
-        if d_kernel[i].abs() > delta {
-            m_mask[i] = mu;
+        if d_kernel[i].abs() > params.delta {
+            m_mask[i] = params.mu;
         }
-        let a = m_mask[i] + rho * l_fft_i;
+        let a = m_mask[i] + params.rho * l_fft_i;
         if a.abs() > 1e-20 {
-            inv_a[i] = rho / a;
+            inv_a[i] = params.rho / a;
         }
     }
 
@@ -178,7 +129,7 @@ where
     // Stored in work_complex
     for i in 0..n_total {
         let d = d_kernel[i];
-        if d.abs() > delta {
+        if d.abs() > params.delta {
             work_complex[i] = field_fft[i] * d / (d * d + 1e-6);
         } else {
             work_complex[i] = Complex64::new(0.0, 0.0);
@@ -188,7 +139,7 @@ where
     // Simple iterative refinement for well-conditioned region
     // Use a temporary buffer for residual
     let mut residual = vec![Complex64::new(0.0, 0.0); n_total];
-    for _ in 0..lsmr_iter {
+    for _ in 0..params.lsmr_iter {
         // residual = f - D * chi
         for i in 0..n_total {
             residual[i] = field_fft[i] - work_complex[i] * d_kernel[i];
@@ -197,7 +148,7 @@ where
         // update chi for well-conditioned region
         for i in 0..n_total {
             let d = d_kernel[i];
-            if d.abs() > delta {
+            if d.abs() > params.delta {
                 work_complex[i] += residual[i] * d / (d * d + 1e-6);
             }
         }
@@ -225,131 +176,38 @@ where
     let mut f_hat: Vec<Complex64> = vec![Complex64::new(0.0, 0.0); n_total];
     for i in 0..n_total {
         if m_mask[i].abs() > 1e-20 && inv_a[i].abs() > 1e-20 {
-            f_hat[i] = work_complex[i] * (m_mask[i] / rho) * inv_a[i];
+            f_hat[i] = work_complex[i] * (m_mask[i] / params.rho) * inv_a[i];
         }
     }
 
     // ========================================================================
-    // Pre-allocate ALL working buffers for ADMM (zero allocations in loop)
+    // Pre-allocate working buffers and run ADMM iterations
     // ========================================================================
 
-    let mut x_prev = vec![0.0; n_total];
+    let mut buf = AdmmBuffers::new(n_total);
+    // Copy LSMR result into buf.x
+    buf.x.copy_from_slice(&x);
 
-    // Dual variables (scaled Lagrange multipliers)
-    let mut ux = vec![0.0; n_total];
-    let mut uy = vec![0.0; n_total];
-    let mut uz = vec![0.0; n_total];
+    let inv_rho = 1.0 / params.rho;
 
-    // Gradient buffers (reused for z-u computation)
-    let mut gx = vec![0.0; n_total];
-    let mut gy = vec![0.0; n_total];
-    let mut gz = vec![0.0; n_total];
+    for iter in 0..params.max_iter {
+        progress(iter + 1, params.max_iter);
 
-    // Divergence buffer
-    let mut div_v = vec![0.0; n_total];
+        // RTS uses rho=1.0 in admm_step because inv_a already incorporates rho
+        let converged = admm_step(
+            &mut buf, &mut fft_ws, &f_hat, &inv_a, 1.0, grid, params.tol,
+            |vx, vy, vz, _| (shrink(vx, inv_rho), shrink(vy, inv_rho), shrink(vz, inv_rho)),
+        );
 
-    let inv_rho = 1.0 / rho;
-
-    // ========================================================================
-    // Step 2: ADMM iterations (zero allocations per iteration)
-    // ========================================================================
-
-    for iter in 0..max_iter {
-        progress_callback(iter + 1, max_iter);
-
-        // Swap x and x_prev (no allocation)
-        std::mem::swap(&mut x, &mut x_prev);
-
-        // ====================================================================
-        // x-subproblem: (M + ρL)x = F + ρ∇ᵀ(z - u)
-        // ====================================================================
-
-        // gx/gy/gz hold (z - u) from previous iteration (or zero initially)
-        bdiv_inplace(&mut div_v, &gx, &gy, &gz, nx, ny, nz, vsx, vsy, vsz);
-
-        // Prepare FFT
-        for i in 0..n_total {
-            work_complex[i] = Complex64::new(div_v[i], 0.0);
-        }
-        fft_ws.fft3d(&mut work_complex);
-
-        // x_hat = f_hat - inv_a * div_hat
-        // Note: bdiv computes positive divergence ∇·, but the adjoint ∇ᵀ = -∇·,
-        // so we subtract (see Eq. [7] in Kames et al. 2018).
-        for i in 0..n_total {
-            work_complex[i] = f_hat[i] - work_complex[i] * inv_a[i];
-        }
-
-        // IFFT to get x
-        fft_ws.ifft3d(&mut work_complex);
-        for i in 0..n_total {
-            x[i] = work_complex[i].re;
-        }
-
-        // ====================================================================
-        // Convergence check
-        // ====================================================================
-        let mut norm_diff_sq = 0.0;
-        let mut norm_x_sq = 0.0;
-        for i in 0..n_total {
-            let diff = x[i] - x_prev[i];
-            norm_diff_sq += diff * diff;
-            norm_x_sq += x[i] * x[i];
-        }
-
-        let rel_change = norm_diff_sq.sqrt() / (norm_x_sq.sqrt() + 1e-20);
-        if rel_change < tol {
-            progress_callback(iter + 1, iter + 1);
+        if converged {
+            progress(iter + 1, iter + 1);
             break;
         }
-
-        // ====================================================================
-        // Fused: z-subproblem + u-update + prepare (z-u) for next iteration
-        // ====================================================================
-
-        fgrad_inplace(&mut gx, &mut gy, &mut gz, &x, nx, ny, nz, vsx, vsy, vsz);
-
-        // Fused z-subproblem + u-update
-        for i in 0..n_total {
-            let vx = gx[i] + ux[i];
-            let vy = gy[i] + uy[i];
-            let vz = gz[i] + uz[i];
-
-            let zx_i = shrink(vx, inv_rho);
-            let zy_i = shrink(vy, inv_rho);
-            let zz_i = shrink(vz, inv_rho);
-
-            ux[i] = vx - zx_i;
-            uy[i] = vy - zy_i;
-            uz[i] = vz - zz_i;
-
-            gx[i] = 2.0 * zx_i - vx;
-            gy[i] = 2.0 * zy_i - vy;
-            gz[i] = 2.0 * zz_i - vz;
-        }
     }
 
-    // Apply mask
-    for i in 0..n_total {
-        if mask[i] == 0 { x[i] = 0.0; }
-    }
+    apply_mask_zero(&mut buf.x, mask);
 
-    x
-}
-
-/// RTS with default parameters
-pub fn rts_default(
-    local_field: &[f64],
-    mask: &[u8],
-    nx: usize, ny: usize, nz: usize,
-    vsx: f64, vsy: f64, vsz: f64,
-) -> Vec<f64> {
-    let p = RtsParams::default();
-    rts(
-        local_field, mask, nx, ny, nz, vsx, vsy, vsz,
-        (0.0, 0.0, 1.0),
-        p.delta, p.mu, p.rho, p.tol, p.max_iter, p.lsmr_iter,
-    )
+    buf.x
 }
 
 #[cfg(test)]
@@ -361,11 +219,10 @@ mod tests {
         let n = 8;
         let field = vec![0.0; n * n * n];
         let mask = vec![1u8; n * n * n];
+        let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
+        let params = RtsParams { delta: 0.15, mu: 1e5, rho: 10.0, tol: 1e-2, max_iter: 5, lsmr_iter: 2 };
 
-        let chi = rts(
-            &field, &mask, n, n, n, 1.0, 1.0, 1.0,
-            (0.0, 0.0, 1.0), 0.15, 1e5, 10.0, 1e-2, 5, 2
-        );
+        let chi = rts(&field, &mask, &grid, (0.0, 0.0, 1.0), &params, |_, _| {});
 
         for &val in chi.iter() {
             assert!(val.abs() < 1e-6, "Zero field should give near-zero chi");
@@ -377,11 +234,10 @@ mod tests {
         let n = 8;
         let field: Vec<f64> = (0..n*n*n).map(|i| (i as f64) * 0.001).collect();
         let mask = vec![1u8; n * n * n];
+        let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
+        let params = RtsParams { delta: 0.15, mu: 1e5, rho: 10.0, tol: 1e-2, max_iter: 5, lsmr_iter: 2 };
 
-        let chi = rts(
-            &field, &mask, n, n, n, 1.0, 1.0, 1.0,
-            (0.0, 0.0, 1.0), 0.15, 1e5, 10.0, 1e-2, 5, 2
-        );
+        let chi = rts(&field, &mask, &grid, (0.0, 0.0, 1.0), &params, |_, _| {});
 
         for (i, &val) in chi.iter().enumerate() {
             assert!(val.is_finite(), "Chi should be finite at index {}", i);
@@ -396,11 +252,10 @@ mod tests {
         // Zero out some mask values
         mask[0] = 0;
         mask[10] = 0;
+        let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
+        let params = RtsParams { delta: 0.15, mu: 1e5, rho: 10.0, tol: 1e-2, max_iter: 5, lsmr_iter: 2 };
 
-        let chi = rts(
-            &field, &mask, n, n, n, 1.0, 1.0, 1.0,
-            (0.0, 0.0, 1.0), 0.15, 1e5, 10.0, 1e-2, 5, 2
-        );
+        let chi = rts(&field, &mask, &grid, (0.0, 0.0, 1.0), &params, |_, _| {});
 
         assert_eq!(chi[0], 0.0, "Masked voxel should be zero");
         assert_eq!(chi[10], 0.0, "Masked voxel should be zero");
@@ -413,17 +268,17 @@ mod tests {
         let n = 16;
         let field: Vec<f64> = (0..n*n*n).map(|i| ((i as f64) * 0.7).sin() * 0.01).collect();
         let mask = vec![1u8; n * n * n];
+        let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
+        let params = RtsParams { delta: 0.15, mu: 1e5, rho: 10.0, tol: 1e-4, max_iter: 20, lsmr_iter: 4 };
 
         // Sequential (1 thread)
         let pool_1 = rayon::ThreadPoolBuilder::new().num_threads(1).build().unwrap();
         let chi_seq = pool_1.install(|| {
-            rts(&field, &mask, n, n, n, 1.0, 1.0, 1.0,
-                (0.0, 0.0, 1.0), 0.15, 1e5, 10.0, 1e-4, 20, 4)
+            rts(&field, &mask, &grid, (0.0, 0.0, 1.0), &params, |_, _| {})
         });
 
         // Parallel (default threads)
-        let chi_par = rts(&field, &mask, n, n, n, 1.0, 1.0, 1.0,
-            (0.0, 0.0, 1.0), 0.15, 1e5, 10.0, 1e-4, 20, 4);
+        let chi_par = rts(&field, &mask, &grid, (0.0, 0.0, 1.0), &params, |_, _| {});
 
         // Compare
         for (i, (s, p)) in chi_seq.iter().zip(chi_par.iter()).enumerate() {
