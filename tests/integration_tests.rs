@@ -977,170 +977,66 @@ fn test_pipeline_tgv() {
     assert!(res.correlation > 0.5, "TGV correlation too low: {}", res.correlation);
 }
 
+/// Run the full QSMART reconstruction via `qsm_core::pipeline::run_qsmart`
+/// (the production path) with the given inner dipole inversion. Field mapping
+/// (Laplacian unwrap + multi-echo linear fit) happens here; the total field is
+/// handed to run_qsmart in ppm.
+fn run_qsmart_reconstruction(
+    data: &TestData,
+    inversion: pipeline::InversionAlgorithm,
+) -> (Vec<f64>, std::time::Duration) {
+    let (nx, ny, nz) = data.dims;
+    let (vsx, vsy, vsz) = data.voxel_size;
+    let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
+
+    let start = Instant::now();
+
+    println!("[INFO] Unwrapping phase echoes...");
+    let unwrapped_phases: Vec<Vec<f64>> = data.phase_echoes.iter()
+        .map(|phase| laplacian_unwrap(phase, &data.mask, &grid))
+        .collect();
+    println!("[INFO] Multi-echo linear fit...");
+    let fit_result = multi_echo_linear_fit(
+        &unwrapped_phases, &data.mag_echoes, &data.echo_times, &data.mask, false, 0.0,
+    );
+    let field_hz = field_to_hz(&fit_result.field);
+
+    // run_qsmart consumes the total field in ppm.
+    let scale_to_ppm = 1e6 / (42.576e6 * data.field_strength);
+    let field_ppm: Vec<f64> = field_hz.iter().map(|&v| v * scale_to_ppm).collect();
+
+    let meta = pipeline::ScanMetadata {
+        dims: data.dims,
+        voxel_size: data.voxel_size,
+        echo_times: data.echo_times.clone(),
+        field_strength: data.field_strength,
+        b0_direction: data.b0_dir,
+    };
+    let mut inv_config = pipeline::InversionConfig::default();
+    inv_config.qsmart.inversion = inversion;
+
+    println!("[INFO] QSMART reconstruction (run_qsmart)...");
+    let chi = pipeline::run_qsmart(
+        &field_ppm,
+        &data.mask,
+        Some(&data.mag_echoes[0]),
+        &meta,
+        &inv_config,
+        pipeline::QsmReference::None,
+        &mut |_, _| {},
+    )
+    .expect("run_qsmart failed");
+
+    (chi, start.elapsed())
+}
+
 #[test]
 #[ignore]
 fn test_pipeline_qsmart() {
     println!("[INFO] Loading test data...");
     let data = TestData::load().expect("Failed to load test data");
-    let (nx, ny, nz) = data.dims;
-    let (vsx, vsy, vsz) = data.voxel_size;
-    let n_total = nx * ny * nz;
-
-    let start = Instant::now();
-
-    // ========================================================================
-    // Phase unwrapping and linear fit (matching qsmbly's computeWeightedEchoFit)
-    // ========================================================================
-    let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
-    println!("[INFO] Unwrapping phase echoes...");
-    let unwrapped_phases: Vec<Vec<f64>> = data.phase_echoes.iter()
-        .map(|phase| laplacian_unwrap(phase, &data.mask, &grid))
-        .collect();
-
-    // Through-origin fit: slope = Σ(mag*phase*TE) / Σ(mag*TE²), tfs = slope/2π
-    // qsmbly uses fixed threshold 40 on box-filtered residuals for R_0;
-    // on synthetic data all voxels have low residuals, so disable R_0 here
-    println!("[INFO] Multi-echo linear fit...");
-    let fit_result = multi_echo_linear_fit(
-        &unwrapped_phases,
-        &data.mag_echoes,
-        &data.echo_times, // seconds
-        &data.mask,
-        false, // no intercept — matches qsmbly's through-origin fit
-        0.0,   // disable R_0 — synthetic data has clean fits
-    );
-
-    // Convert field from rad/s to Hz
-    let field_hz = field_to_hz(&fit_result.field);
-
-    // ========================================================================
-    // Vasculature mask generation
-    // ========================================================================
-    println!("[INFO] Generating vasculature mask...");
-    let vasc_mask = generate_vasculature_mask(
-        &data.mag_echoes[0],
-        &data.mask,
-        &grid,
-        &VasculatureParams::default(),
-        |_, _| {},
-    );
-
-    // ========================================================================
-    // Mask and unit preparation (matching qsmbly)
-    // ========================================================================
-
-    // weightedMask = mask * R_0 (with R_0 disabled, equals mask)
-    let mask_f64: Vec<f64> = data.mask.iter().map(|&v| v as f64).collect();
-    let weighted_mask: Vec<f64> = mask_f64.iter()
-        .zip(fit_result.reliability_mask.iter())
-        .map(|(&m, &r)| if m > 0.0 && r > 0 { 1.0 } else { 0.0 })
-        .collect();
-
-    // PPM factors matching qsmbly:
-    //   ppmFactor = gyro_rad * B0 / 1e6  (for adjust_offset input scaling)
-    //   scaleFactor = 1e6 / (gamma_hz * B0)  (for final Hz→ppm conversion)
-    let gyro_rad: f64 = 2.675e8; // rad/s/T
-    let ppm_factor = gyro_rad * data.field_strength / 1e6;
-    let scale_to_ppm = 1e6 / (42.576e6 * data.field_strength);
-
-    // ========================================================================
-    // Stage 1: SDF + iLSQR on whole ROI
-    // ========================================================================
-    println!("[INFO] QSMART Stage 1: SDF + iLSQR (full mask)...");
-
-    let ones_vasc: Vec<f64> = vec![1.0; n_total];
-
-    // SDF operates on Hz field with weighted mask (not ppm!)
-    let lfs_stage1 = sdf(
-        &field_hz,
-        &weighted_mask,
-        &ones_vasc,
-        &grid,
-        &SdfParams::stage1(),
-        |_, _| {},
-    );
-
-    let mask_stage1_u8: Vec<u8> = weighted_mask.iter()
-        .map(|&v| if v > 0.1 { 1 } else { 0 })
-        .collect();
-
-    let chi_stage1 = ilsqr_simple(
-        &lfs_stage1,
-        &mask_stage1_u8,
-        &grid,
-        data.b0_dir,
-        &IlsqrParams { tol: 0.01, max_iter: 50 },
-    );
-
-    // ========================================================================
-    // Stage 2: SDF + iLSQR on tissue only
-    // ========================================================================
-    println!("[INFO] QSMART Stage 2: SDF + iLSQR (tissue only)...");
-
-    // Weight field by reliability mask (zero unreliable voxels)
-    let field_hz_weighted: Vec<f64> = field_hz.iter()
-        .zip(weighted_mask.iter())
-        .map(|(&f, &m)| f * m)
-        .collect();
-
-    // SDF stage 2: weighted_mask as mask (same as stage 1),
-    // vasc_mask as vessel param (vessel exclusion via vasc_only, not mask)
-    let lfs_stage2 = sdf(
-        &field_hz_weighted,
-        &weighted_mask,
-        &vasc_mask,
-        &grid,
-        &SdfParams::stage2(),
-        |_, _| {},
-    );
-
-    // iLSQR mask: tissue-only (weighted_mask AND vasc_only)
-    let mask_stage2_u8: Vec<u8> = weighted_mask.iter()
-        .zip(vasc_mask.iter())
-        .map(|(&wm, &v)| if wm > 0.1 && v > 0.5 { 1 } else { 0 })
-        .collect();
-
-    let chi_stage2 = ilsqr_simple(
-        &lfs_stage2,
-        &mask_stage2_u8,
-        &grid,
-        data.b0_dir,
-        &IlsqrParams { tol: 0.01, max_iter: 50 },
-    );
-
-    // ========================================================================
-    // Offset adjustment and final ppm scaling
-    // ========================================================================
-    println!("[INFO] QSMART offset adjustment...");
-
-    // removed_voxels = weightedMask - vascOnly (matching qsmbly)
-    let removed_voxels: Vec<f64> = weighted_mask.iter()
-        .zip(vasc_mask.iter())
-        .map(|(&wm, &v)| wm - v)
-        .collect();
-
-    // Scale lfs_stage1 to ppm for adjust_offset (matching qsmbly)
-    let lfs_stage1_ppm: Vec<f64> = lfs_stage1.iter()
-        .map(|&v| v * ppm_factor)
-        .collect();
-
-    let chi_qsmart_raw = adjust_offset(
-        &removed_voxels,
-        &lfs_stage1_ppm,
-        &chi_stage1,
-        &chi_stage2,
-        &grid,
-        data.b0_dir,
-        ppm_factor,
-    );
-
-    // Scale to ppm: χ(ppm) = χ_raw * 1e6 / (γ_Hz * B0)
-    let chi_qsmart: Vec<f64> = chi_qsmart_raw.iter()
-        .enumerate()
-        .map(|(i, &v)| if data.mask[i] > 0 { v * scale_to_ppm } else { 0.0 })
-        .collect();
-
-    let elapsed = start.elapsed();
+    let (chi_qsmart, elapsed) =
+        run_qsmart_reconstruction(&data, pipeline::InversionAlgorithm::Ilsqr);
 
     let res = TestResult::new("QSMART", &chi_qsmart, &data.chi, &data.mask, data.dims);
     res.print_with_time(elapsed);
@@ -1153,105 +1049,15 @@ fn test_pipeline_qsmart() {
     assert!(res.correlation > 0.5, "QSMART correlation too low: {}", res.correlation);
 }
 
-/// QSMART two-stage pipeline using Tikhonov as the inner dipole inversion instead of
-/// iLSQR. Tikhonov was the best-performing standalone inversion by XSIM in CI
-/// (~0.80 vs the others). Identical structure to `test_pipeline_qsmart`, only the
-/// per-stage inversion differs — both Tikhonov and iLSQR are scale-invariant, so the
-/// surrounding Hz/ppm handling is unchanged.
+/// QSMART via run_qsmart using Tikhonov as the inner dipole inversion (the best
+/// standalone inversion by XSIM in CI). Exercises the swappable-inversion path.
 #[test]
 #[ignore]
 fn test_pipeline_qsmart_tikhonov() {
     println!("[INFO] Loading test data...");
     let data = TestData::load().expect("Failed to load test data");
-    let (nx, ny, nz) = data.dims;
-    let (vsx, vsy, vsz) = data.voxel_size;
-    let n_total = nx * ny * nz;
-
-    let start = Instant::now();
-
-    let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
-    println!("[INFO] Unwrapping phase echoes...");
-    let unwrapped_phases: Vec<Vec<f64>> = data.phase_echoes.iter()
-        .map(|phase| laplacian_unwrap(phase, &data.mask, &grid))
-        .collect();
-
-    println!("[INFO] Multi-echo linear fit...");
-    let fit_result = multi_echo_linear_fit(
-        &unwrapped_phases,
-        &data.mag_echoes,
-        &data.echo_times,
-        &data.mask,
-        false,
-        0.0,
-    );
-
-    let field_hz = field_to_hz(&fit_result.field);
-
-    println!("[INFO] Generating vasculature mask...");
-    let vasc_mask = generate_vasculature_mask(
-        &data.mag_echoes[0],
-        &data.mask,
-        &grid,
-        &VasculatureParams::default(),
-        |_, _| {},
-    );
-
-    let mask_f64: Vec<f64> = data.mask.iter().map(|&v| v as f64).collect();
-    let weighted_mask: Vec<f64> = mask_f64.iter()
-        .zip(fit_result.reliability_mask.iter())
-        .map(|(&m, &r)| if m > 0.0 && r > 0 { 1.0 } else { 0.0 })
-        .collect();
-
-    let gyro_rad: f64 = 2.675e8;
-    let ppm_factor = gyro_rad * data.field_strength / 1e6;
-    let scale_to_ppm = 1e6 / (42.576e6 * data.field_strength);
-
-    // ── Stage 1: SDF + Tikhonov on whole ROI ──
-    println!("[INFO] QSMART Stage 1: SDF + Tikhonov (full mask)...");
-    let ones_vasc: Vec<f64> = vec![1.0; n_total];
-    let lfs_stage1 = sdf(
-        &field_hz, &weighted_mask, &ones_vasc, &grid, &SdfParams::stage1(), |_, _| {},
-    );
-    let mask_stage1_u8: Vec<u8> = weighted_mask.iter()
-        .map(|&v| if v > 0.1 { 1 } else { 0 })
-        .collect();
-    let chi_stage1 = inversion::tikhonov(
-        &lfs_stage1, &mask_stage1_u8, &grid, data.b0_dir, &TikhonovParams::default(),
-    );
-
-    // ── Stage 2: SDF + Tikhonov on tissue only ──
-    println!("[INFO] QSMART Stage 2: SDF + Tikhonov (tissue only)...");
-    let field_hz_weighted: Vec<f64> = field_hz.iter()
-        .zip(weighted_mask.iter())
-        .map(|(&f, &m)| f * m)
-        .collect();
-    let lfs_stage2 = sdf(
-        &field_hz_weighted, &weighted_mask, &vasc_mask, &grid, &SdfParams::stage2(), |_, _| {},
-    );
-    let mask_stage2_u8: Vec<u8> = weighted_mask.iter()
-        .zip(vasc_mask.iter())
-        .map(|(&wm, &v)| if wm > 0.1 && v > 0.5 { 1 } else { 0 })
-        .collect();
-    let chi_stage2 = inversion::tikhonov(
-        &lfs_stage2, &mask_stage2_u8, &grid, data.b0_dir, &TikhonovParams::default(),
-    );
-
-    // ── Offset adjustment and final ppm scaling ──
-    println!("[INFO] QSMART offset adjustment...");
-    let removed_voxels: Vec<f64> = weighted_mask.iter()
-        .zip(vasc_mask.iter())
-        .map(|(&wm, &v)| wm - v)
-        .collect();
-    let lfs_stage1_ppm: Vec<f64> = lfs_stage1.iter().map(|&v| v * ppm_factor).collect();
-    let chi_qsmart_raw = adjust_offset(
-        &removed_voxels, &lfs_stage1_ppm, &chi_stage1, &chi_stage2, &grid, data.b0_dir, ppm_factor,
-    );
-    let chi_qsmart: Vec<f64> = chi_qsmart_raw.iter()
-        .enumerate()
-        .map(|(i, &v)| if data.mask[i] > 0 { v * scale_to_ppm } else { 0.0 })
-        .collect();
-
-    let elapsed = start.elapsed();
+    let (chi_qsmart, elapsed) =
+        run_qsmart_reconstruction(&data, pipeline::InversionAlgorithm::Tikhonov);
 
     let res = TestResult::new("QSMART-Tikhonov", &chi_qsmart, &data.chi, &data.mask, data.dims);
     res.print_with_time(elapsed);
