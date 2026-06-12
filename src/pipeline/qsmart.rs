@@ -11,9 +11,13 @@ use super::config::*;
 /// # Arguments
 /// * `field_ppm` - Total field in ppm (after field mapping)
 /// * `mask` - Binary brain mask
-/// * `magnitude` - Combined magnitude (for vasculature detection; uniform if None)
+/// * `magnitude` - Combined magnitude (for vasculature detection and, when the inner
+///   inversion is MEDI, edge weighting; uniform if None)
 /// * `metadata` - Scan metadata
-/// * `qsmart_params` - QSMART parameters (SDF, iLSQR, vasculature settings)
+/// * `inversion_config` - Inversion configuration. QSMART-specific settings (SDF,
+///   vasculature, iLSQR tolerance) come from `inversion_config.qsmart`; the inner
+///   dipole inversion algorithm is selected by `inversion_config.qsmart.inversion`
+///   and tuned via the matching per-algorithm field on this config.
 /// * `reference` - QSM referencing method
 /// * `progress` - Progress callback (current_step, total_steps)
 ///
@@ -24,7 +28,7 @@ pub fn run_qsmart(
     mask: &[u8],
     magnitude: Option<&[f64]>,
     metadata: &ScanMetadata,
-    qsmart_params: &crate::utils::QsmartParams,
+    inversion_config: &InversionConfig,
     reference: QsmReference,
     progress: &mut dyn FnMut(usize, usize),
 ) -> Result<Vec<f64>, PipelineError> {
@@ -32,6 +36,28 @@ pub fn run_qsmart(
     let bdir = metadata.b0_direction;
     let n_voxels = nx * ny * nz;
     let grid = metadata.grid();
+    let qsmart_params = &inversion_config.qsmart;
+
+    // QSMART runs a standard dipole inversion per stage; the two pipeline-level
+    // algorithms can't be nested here.
+    if matches!(
+        qsmart_params.inversion,
+        InversionAlgorithm::Qsmart | InversionAlgorithm::Tgv
+    ) {
+        return Err(PipelineError::InvalidConfig(
+            "QSMART inversion cannot be Qsmart or Tgv".into(),
+        ));
+    }
+
+    // Inner inversion config: same per-algorithm params as the caller, but with the
+    // QSMART-selected algorithm and iLSQR params pinned to QSMART's own fields so the
+    // default (iLSQR) path is identical to the previous hardcoded call.
+    let mut inner_config = inversion_config.clone();
+    inner_config.algorithm = qsmart_params.inversion;
+    inner_config.ilsqr = crate::inversion::IlsqrParams {
+        tol: qsmart_params.ilsqr_tol,
+        max_iter: qsmart_params.ilsqr_max_iter,
+    };
 
     // Step 1: Vasculature detection
     progress(1, 6);
@@ -65,15 +91,11 @@ pub fn run_qsmart(
         field_ppm, &w1, &vasc_mask, &grid, &sdf_params1, |_, _| {},
     );
 
-    // Step 3: iLSQR stage 1
+    // Step 3: dipole inversion stage 1 (iLSQR by default)
     progress(3, 6);
-    let ilsqr_params = crate::inversion::IlsqrParams {
-        tol: qsmart_params.ilsqr_tol,
-        max_iter: qsmart_params.ilsqr_max_iter,
-    };
-    let (_, _, _, chi1) = crate::inversion::ilsqr(
-        &lfs1, mask, &grid, bdir, &ilsqr_params, |_, _| {},
-    );
+    let chi1 = super::inversion::run_dipole_inversion(
+        &lfs1, mask, metadata, &inner_config, magnitude, &mut |_, _| {},
+    )?;
 
     // Step 4: SDF stage 2
     progress(4, 6);
@@ -89,11 +111,11 @@ pub fn run_qsmart(
         field_ppm, &w2, &vasc_mask, &grid, &sdf_params2, |_, _| {},
     );
 
-    // Step 5: iLSQR stage 2
+    // Step 5: dipole inversion stage 2 (iLSQR by default)
     progress(5, 6);
-    let (_, _, _, chi2) = crate::inversion::ilsqr(
-        &lfs2, mask, &grid, bdir, &ilsqr_params, |_, _| {},
-    );
+    let chi2 = super::inversion::run_dipole_inversion(
+        &lfs2, mask, metadata, &inner_config, magnitude, &mut |_, _| {},
+    )?;
 
     // Step 6: Combine and reference
     progress(6, 6);
@@ -122,10 +144,14 @@ mod tests {
             field_strength: 3.0,
             b0_direction: (0.0, 0.0, 1.0),
         };
-        let params = crate::utils::QsmartParams::for_field_strength(3.0);
+        let config = InversionConfig {
+            algorithm: InversionAlgorithm::Qsmart,
+            qsmart: crate::utils::QsmartParams::for_field_strength(3.0),
+            ..Default::default()
+        };
 
         let result = run_qsmart(
-            &field, &mask, None, &meta, &params, QsmReference::Mean,
+            &field, &mask, None, &meta, &config, QsmReference::Mean,
             &mut |_, _| {},
         );
         assert!(result.is_ok());
@@ -134,5 +160,64 @@ mod tests {
         for &v in &chi {
             assert!(v.is_finite(), "QSMART output must be finite");
         }
+    }
+
+    #[test]
+    fn test_run_qsmart_swappable_inversion() {
+        // QSMART with a non-default inner inversion (TKD) should run end to end.
+        let (nx, ny, nz) = (8, 8, 8);
+        let n = nx * ny * nz;
+        let field = vec![0.01; n];
+        let mask = vec![1u8; n];
+        let meta = ScanMetadata {
+            dims: (nx, ny, nz),
+            voxel_size: (1.0, 1.0, 1.0),
+            echo_times: vec![0.005],
+            field_strength: 3.0,
+            b0_direction: (0.0, 0.0, 1.0),
+        };
+        let mut qsmart = crate::utils::QsmartParams::for_field_strength(3.0);
+        qsmart.inversion = InversionAlgorithm::Tkd;
+        let config = InversionConfig {
+            algorithm: InversionAlgorithm::Qsmart,
+            qsmart,
+            ..Default::default()
+        };
+
+        let chi = run_qsmart(
+            &field, &mask, None, &meta, &config, QsmReference::Mean,
+            &mut |_, _| {},
+        )
+        .unwrap();
+        assert_eq!(chi.len(), n);
+        for &v in &chi {
+            assert!(v.is_finite(), "QSMART output must be finite");
+        }
+    }
+
+    #[test]
+    fn test_run_qsmart_rejects_nested_pipeline_inversion() {
+        let (nx, ny, nz) = (4, 4, 4);
+        let n = nx * ny * nz;
+        let meta = ScanMetadata {
+            dims: (nx, ny, nz),
+            voxel_size: (1.0, 1.0, 1.0),
+            echo_times: vec![0.005],
+            field_strength: 3.0,
+            b0_direction: (0.0, 0.0, 1.0),
+        };
+        let mut qsmart = crate::utils::QsmartParams::for_field_strength(3.0);
+        qsmart.inversion = InversionAlgorithm::Qsmart;
+        let config = InversionConfig {
+            algorithm: InversionAlgorithm::Qsmart,
+            qsmart,
+            ..Default::default()
+        };
+
+        let result = run_qsmart(
+            &vec![0.0; n], &vec![1u8; n], None, &meta, &config,
+            QsmReference::Mean, &mut |_, _| {},
+        );
+        assert!(result.is_err());
     }
 }

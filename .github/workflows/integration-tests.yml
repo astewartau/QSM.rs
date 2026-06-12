@@ -46,7 +46,7 @@ jobs:
           all_bgremove='["test_bgremove_sharp","test_bgremove_resharp","test_bgremove_vsharp","test_bgremove_pdf","test_bgremove_ismv","test_bgremove_lbv"]'
           all_inversion='["test_inversion_tkd","test_inversion_tsvd","test_inversion_tikhonov","test_inversion_tv","test_inversion_rts","test_inversion_medi","test_inversion_nltv"]'
           all_combined='["test_combined_tgv"]'
-          all_pipeline='["test_pipeline_romeo_b0","test_pipeline_tgv","test_pipeline_qsmart","test_pipeline_harperella","test_pipeline_iharperella","test_bias_correction","test_swi","test_r2star_t2star"]'
+          all_pipeline='["test_pipeline_romeo_b0","test_pipeline_tgv","test_pipeline_qsmart","test_pipeline_qsmart_tikhonov","test_pipeline_harperella","test_pipeline_iharperella","test_bias_correction","test_swi","test_r2star_t2star"]'
 
           run_unit_tests=false
 
@@ -141,13 +141,13 @@ jobs:
               src/bgremove/pdf.rs)    bgremove="$bgremove test_bgremove_pdf" ;;
               src/bgremove/ismv.rs)   bgremove="$bgremove test_bgremove_ismv" ;;
               src/bgremove/lbv.rs)    bgremove="$bgremove test_bgremove_lbv" ;;
-              src/bgremove/sdf.rs)    pipeline="$pipeline test_pipeline_qsmart" ;;
+              src/bgremove/sdf.rs)    pipeline="$pipeline test_pipeline_qsmart test_pipeline_qsmart_tikhonov" ;;
 
               # Dipole inversion
               src/inversion/mod.rs)
                 inversion="$inversion test_inversion_tkd test_inversion_tsvd test_inversion_tikhonov test_inversion_tv test_inversion_rts test_inversion_medi test_inversion_nltv" ;;
               src/inversion/tkd.rs)       inversion="$inversion test_inversion_tkd test_inversion_tsvd" ;;
-              src/inversion/tikhonov.rs)  inversion="$inversion test_inversion_tikhonov" ;;
+              src/inversion/tikhonov.rs)  inversion="$inversion test_inversion_tikhonov"; pipeline="$pipeline test_pipeline_qsmart_tikhonov" ;;
               src/inversion/tv.rs)        inversion="$inversion test_inversion_tv" ;;
               src/inversion/rts.rs)       inversion="$inversion test_inversion_rts" ;;
               src/inversion/medi.rs)      inversion="$inversion test_inversion_medi" ;;
@@ -159,16 +159,16 @@ jobs:
               src/bet/*) run_bet=true ;;
 
               # Phase unwrapping
-              src/unwrap/mod.rs)      pipeline="$pipeline test_pipeline_tgv test_pipeline_qsmart" ;;
+              src/unwrap/mod.rs)      pipeline="$pipeline test_pipeline_tgv test_pipeline_qsmart test_pipeline_qsmart_tikhonov" ;;
               src/unwrap/romeo.rs)    pipeline="$pipeline test_pipeline_romeo_b0 test_pipeline_tgv" ;;
-              src/unwrap/laplacian.rs) pipeline="$pipeline test_pipeline_qsmart test_pipeline_harperella test_pipeline_iharperella" ;;
+              src/unwrap/laplacian.rs) pipeline="$pipeline test_pipeline_qsmart test_pipeline_qsmart_tikhonov test_pipeline_harperella test_pipeline_iharperella" ;;
 
               # Pipeline (combined algorithms + shared stages)
               src/pipeline/mod.rs|src/pipeline/config.rs|src/pipeline/phase_utils.rs|src/pipeline/referencing.rs)
                 echo "Pipeline core changed: $file → all tests"
                 output_all; exit 0 ;;
               src/pipeline/field_mapping.rs)
-                pipeline="$pipeline test_pipeline_romeo_b0 test_pipeline_tgv test_pipeline_qsmart" ;;
+                pipeline="$pipeline test_pipeline_romeo_b0 test_pipeline_tgv test_pipeline_qsmart test_pipeline_qsmart_tikhonov" ;;
               src/pipeline/bg_removal.rs)
                 bgremove="$bgremove test_bgremove_sharp test_bgremove_resharp test_bgremove_vsharp test_bgremove_pdf test_bgremove_ismv test_bgremove_lbv"
                 pipeline="$pipeline test_pipeline_harperella test_pipeline_iharperella" ;;
@@ -178,16 +178,16 @@ jobs:
               src/pipeline/masking.rs)
                 pipeline="$pipeline test_pipeline_romeo_b0" ;;
               src/pipeline/qsmart.rs)
-                pipeline="$pipeline test_pipeline_qsmart" ;;
+                pipeline="$pipeline test_pipeline_qsmart test_pipeline_qsmart_tikhonov" ;;
               src/pipeline/iharperella.rs) pipeline="$pipeline test_pipeline_harperella test_pipeline_iharperella" ;;
 
               # Utils (QSMART components)
               src/utils/multi_echo.rs)
-                pipeline="$pipeline test_pipeline_romeo_b0 test_pipeline_tgv test_pipeline_qsmart" ;;
+                pipeline="$pipeline test_pipeline_romeo_b0 test_pipeline_tgv test_pipeline_qsmart test_pipeline_qsmart_tikhonov" ;;
               src/utils/vasculature.rs|src/utils/frangi.rs|src/utils/curvature.rs|src/utils/qsmart.rs)
-                pipeline="$pipeline test_pipeline_qsmart" ;;
+                pipeline="$pipeline test_pipeline_qsmart test_pipeline_qsmart_tikhonov" ;;
               src/utils/bias_correction.rs)
-                pipeline="$pipeline test_pipeline_qsmart test_bias_correction test_swi" ;;
+                pipeline="$pipeline test_pipeline_qsmart test_pipeline_qsmart_tikhonov test_bias_correction test_swi" ;;
               src/utils/r2star.rs) pipeline="$pipeline test_r2star_t2star" ;;
               src/swi.rs) pipeline="$pipeline test_swi" ;;
             esac
@@ -302,7 +302,7 @@ jobs:
 
       - name: Run ${{ matrix.test }}
         run: |
-          cargo test --release --features parallel --test integration_tests ${{ matrix.test }} -- --ignored --nocapture 2>&1 | tee test_output.txt
+          cargo test --release --features parallel --test integration_tests ${{ matrix.test }} -- --ignored --exact --nocapture 2>&1 | tee test_output.txt
 
       - name: Save metrics
         if: always()
@@ -362,7 +362,7 @@ jobs:
 
       - name: Run ${{ matrix.test }}
         run: |
-          cargo test --release --features parallel --test integration_tests ${{ matrix.test }} -- --ignored --nocapture 2>&1 | tee test_output.txt
+          cargo test --release --features parallel --test integration_tests ${{ matrix.test }} -- --ignored --exact --nocapture 2>&1 | tee test_output.txt
 
       - name: Save metrics
         if: always()
@@ -479,7 +479,7 @@ jobs:
       - name: Run ${{ matrix.test }}
         timeout-minutes: 30
         run: |
-          cargo test --release --features parallel --test integration_tests ${{ matrix.test }} -- --ignored --nocapture 2>&1 | tee test_output.txt
+          cargo test --release --features parallel --test integration_tests ${{ matrix.test }} -- --ignored --exact --nocapture 2>&1 | tee test_output.txt
 
       - name: Save metrics
         if: always()
@@ -540,7 +540,7 @@ jobs:
       - name: Run ${{ matrix.test }}
         timeout-minutes: 30
         run: |
-          cargo test --release --features parallel --test integration_tests ${{ matrix.test }} -- --ignored --nocapture 2>&1 | tee test_output.txt
+          cargo test --release --features parallel --test integration_tests ${{ matrix.test }} -- --ignored --exact --nocapture 2>&1 | tee test_output.txt
 
       - name: Save metrics
         if: always()
@@ -728,7 +728,7 @@ jobs:
               echo "$TABLE"
             }
 
-            TABLE=$(emit_chi_table "test_pipeline_" tgv qsmart) && {
+            TABLE=$(emit_chi_table "test_pipeline_" tgv qsmart qsmart_tikhonov) && {
               echo "## Full Pipeline"
               echo "*Compared against ground truth susceptibility map*"
               echo ""
@@ -921,13 +921,13 @@ jobs:
               emit_figures combined_tgv
             }
 
-            TABLE=$(emit_chi_table "test_pipeline_" tgv qsmart) && {
+            TABLE=$(emit_chi_table "test_pipeline_" tgv qsmart qsmart_tikhonov) && {
               echo "### Full Pipeline"
               echo "*Compared against ground truth susceptibility map*"
               echo ""
               echo "$TABLE"
               echo ""
-              emit_figures pipeline_tgv pipeline_qsmart
+              emit_figures pipeline_tgv pipeline_qsmart pipeline_qsmart_tikhonov
             }
 
             if [ -f "metrics/test_bias_correction.csv" ] || [ -f "metrics/test_swi.csv" ] || [ -f "metrics/test_r2star_t2star.csv" ]; then
