@@ -59,7 +59,7 @@ pub fn run_qsmart(
         max_iter: qsmart_params.ilsqr_max_iter,
     };
 
-    // Step 1: Vasculature detection
+    // Step 1: Vasculature detection (vasc_mask: 1 = tissue, 0 = vessel)
     progress(1, 6);
     let uniform_mag = vec![1.0f64; n_voxels];
     let mag = magnitude.unwrap_or(&uniform_mag);
@@ -73,11 +73,11 @@ pub fn run_qsmart(
         mag, mask, &grid, &vasc_params, |_, _| {},
     );
 
-    let mask_f64: Vec<f64> = mask.iter().map(|&m| m as f64).collect();
-    let w1 = crate::utils::compute_weighted_mask_stage1(&mask_f64, &vasc_mask);
-    let w2 = crate::utils::compute_weighted_mask_stage2(&mask_f64, &vasc_mask, &vasc_mask);
+    // No reliability map at this layer, so the QSMART weighting mask is just the brain mask.
+    let weighted_mask: Vec<f64> = mask.iter().map(|&m| m as f64).collect();
+    let ones_vasc = vec![1.0f64; n_voxels];
 
-    // Step 2: SDF stage 1
+    // Step 2: SDF stage 1 — background removal over the whole ROI (vessels included).
     progress(2, 6);
     let sdf_params1 = crate::bgremove::SdfParams {
         sigma1: qsmart_params.sdf_sigma1_stage1,
@@ -88,16 +88,17 @@ pub fn run_qsmart(
         use_curvature: true,
     };
     let lfs1 = crate::bgremove::sdf::sdf(
-        field_ppm, &w1, &vasc_mask, &grid, &sdf_params1, |_, _| {},
+        field_ppm, &weighted_mask, &ones_vasc, &grid, &sdf_params1, |_, _| {},
     );
 
-    // Step 3: dipole inversion stage 1 (iLSQR by default)
+    // Step 3: dipole inversion stage 1 over the whole ROI.
     progress(3, 6);
+    let mask_stage1: Vec<u8> = weighted_mask.iter().map(|&v| if v > 0.1 { 1 } else { 0 }).collect();
     let chi1 = super::inversion::run_dipole_inversion(
-        &lfs1, mask, metadata, &inner_config, magnitude, &mut |_, _| {},
+        &lfs1, &mask_stage1, metadata, &inner_config, magnitude, &mut |_, _| {},
     )?;
 
-    // Step 4: SDF stage 2
+    // Step 4: SDF stage 2 — tissue-only, vessel-aware (mask-zeroed field input).
     progress(4, 6);
     let sdf_params2 = crate::bgremove::SdfParams {
         sigma1: qsmart_params.sdf_sigma1_stage2,
@@ -107,22 +108,41 @@ pub fn run_qsmart(
         curv_constant: qsmart_params.sdf_curv_constant,
         use_curvature: true,
     };
+    let field_weighted: Vec<f64> = field_ppm.iter()
+        .zip(weighted_mask.iter())
+        .map(|(&f, &m)| f * m)
+        .collect();
     let lfs2 = crate::bgremove::sdf::sdf(
-        field_ppm, &w2, &vasc_mask, &grid, &sdf_params2, |_, _| {},
+        &field_weighted, &weighted_mask, &vasc_mask, &grid, &sdf_params2, |_, _| {},
     );
 
-    // Step 5: dipole inversion stage 2 (iLSQR by default)
+    // Step 5: dipole inversion stage 2 over tissue only (in-mask AND not vessel).
     progress(5, 6);
+    let mask_stage2: Vec<u8> = weighted_mask.iter()
+        .zip(vasc_mask.iter())
+        .map(|(&m, &v)| if m > 0.1 && v > 0.5 { 1 } else { 0 })
+        .collect();
     let chi2 = super::inversion::run_dipole_inversion(
-        &lfs2, mask, metadata, &inner_config, magnitude, &mut |_, _| {},
+        &lfs2, &mask_stage2, metadata, &inner_config, magnitude, &mut |_, _| {},
     )?;
 
-    // Step 6: Combine and reference
+    // Step 6: offset adjustment (combine stages) and reference.
+    // removed_voxels = vessel regions (in mask but excluded from stage 2).
+    // Everything is in ppm here, so adjust_offset's lfs rescale is the identity (ppm = 1.0).
     progress(6, 6);
-    let chi = crate::utils::adjust_offset(
-        &vasc_mask, &lfs1, &chi1, &chi2,
-        &grid, bdir, qsmart_params.ppm,
+    let removed_voxels: Vec<f64> = weighted_mask.iter()
+        .zip(vasc_mask.iter())
+        .map(|(&m, &v)| m - v)
+        .collect();
+    let mut chi = crate::utils::adjust_offset(
+        &removed_voxels, &lfs1, &chi1, &chi2, &grid, bdir, 1.0,
     );
+    // QSMART susceptibility is only defined inside the brain mask.
+    for (c, &m) in chi.iter_mut().zip(mask.iter()) {
+        if m == 0 {
+            *c = 0.0;
+        }
+    }
 
     Ok(super::referencing::apply_reference(&chi, mask, reference))
 }
