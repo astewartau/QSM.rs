@@ -14,6 +14,7 @@
 
 use crate::fft::{fft3d, ifft3d};
 use crate::kernels::dipole::dipole_kernel;
+use crate::pipeline::config::InversionAlgorithm;
 use num_complex::Complex64;
 
 /// Adjust offset between two-stage QSMART susceptibility maps
@@ -154,6 +155,8 @@ pub struct QsmartParams {
     pub ilsqr_tol: f64,
     /// iLSQR max iterations
     pub ilsqr_max_iter: usize,
+    /// Dipole inversion algorithm used for both QSMART stages
+    pub inversion: InversionAlgorithm,
     /// B0 field direction
     pub b0_dir: (f64, f64, f64),
 }
@@ -177,6 +180,7 @@ impl Default for QsmartParams {
             frangi_c: 500.0,
             ilsqr_tol: 0.01,
             ilsqr_max_iter: 50,
+            inversion: InversionAlgorithm::Ilsqr,
             b0_dir: (0.0, 0.0, 1.0),
         }
     }

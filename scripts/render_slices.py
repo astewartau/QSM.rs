@@ -42,6 +42,7 @@ NAMES = {
     "pipeline_iharperella": "iHARPERELLA",
     "pipeline_tgv": "TGV",
     "pipeline_qsmart": "QSMART",
+    "pipeline_qsmart_tikhonov": "QSMART (Tikhonov)",
     "swi": "CLEAR-SWI",
     "swi_mip": "CLEAR-SWI mIP",
     "r2star": "R2* (Hz)",
@@ -71,6 +72,7 @@ WINDOWS = {
     "pipeline_iharperella": (-0.025, 0.025),
     "pipeline_tgv": (-0.1, 0.1),
     "pipeline_qsmart": (-0.1, 0.1),
+    "pipeline_qsmart_tikhonov": (-0.1, 0.1),
     "swi": None,       # auto-range (magnitude-weighted)
     "swi_mip": None,   # auto-range (magnitude-weighted)
     "r2star": (0, 100),    # Hz
