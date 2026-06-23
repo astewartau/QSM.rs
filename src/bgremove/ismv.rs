@@ -17,6 +17,7 @@ use crate::kernels::smv::{smv_kernel, erode_mask_smv};
 use crate::utils::vec_norm;
 
 /// iSMV algorithm parameters
+#[cfg_attr(feature = "introspection", derive(serde::Serialize))]
 #[derive(Clone, Debug)]
 pub struct IsmvParams {
     /// Convergence tolerance

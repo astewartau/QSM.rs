@@ -43,6 +43,7 @@ use crate::Grid;
 // computation, matching MATLAB's gradf_mex.
 
 /// MEDI algorithm parameters
+#[cfg_attr(feature = "introspection", derive(serde::Serialize))]
 #[derive(Clone, Debug)]
 pub struct MediParams {
     /// Regularization weight

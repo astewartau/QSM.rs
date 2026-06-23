@@ -17,6 +17,7 @@ use crate::fft::{fft3d, ifft3d};
 use crate::kernels::smv::{smv_kernel, erode_mask_smv};
 
 /// V-SHARP algorithm parameters
+#[cfg_attr(feature = "introspection", derive(serde::Serialize))]
 #[derive(Clone, Debug)]
 pub struct VsharpParams {
     /// Deconvolution threshold

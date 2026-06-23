@@ -15,6 +15,7 @@
 use crate::Grid;
 
 /// LBV algorithm parameters
+#[cfg_attr(feature = "introspection", derive(serde::Serialize))]
 #[derive(Clone, Debug)]
 pub struct LbvParams {
     /// Convergence tolerance

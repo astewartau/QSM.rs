@@ -16,6 +16,7 @@ use crate::Grid;
 use crate::utils::{gaussian_smooth_3d, apply_mask_zero};
 
 /// SWI algorithm parameters
+#[cfg_attr(feature = "introspection", derive(serde::Serialize))]
 #[derive(Clone, Debug)]
 pub struct SwiParams {
     /// High-pass filter sigma in voxels [x, y, z]
@@ -40,6 +41,7 @@ impl Default for SwiParams {
 }
 
 /// Phase mask scaling type
+#[cfg_attr(feature = "introspection", derive(serde::Serialize))]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum PhaseScaling {
     /// Sigmoid weighting: `(1 + tanh(1 - x/m)) / 2`

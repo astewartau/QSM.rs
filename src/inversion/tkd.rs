@@ -18,6 +18,7 @@ use crate::utils::apply_mask_zero;
 use crate::Grid;
 
 /// TKD algorithm parameters
+#[cfg_attr(feature = "introspection", derive(serde::Serialize))]
 #[derive(Clone, Debug)]
 pub struct TkdParams {
     /// Truncation threshold (typically 0.1-0.2)

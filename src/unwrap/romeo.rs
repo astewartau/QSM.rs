@@ -62,6 +62,7 @@ impl RomeoWeightType {
 ///
 /// The default enables phase coherence, phase gradient coherence,
 /// phase linearity, and magnitude coherence (equivalent to `:romeo` in ROMEO.jl).
+#[cfg_attr(feature = "introspection", derive(serde::Serialize))]
 #[derive(Clone, Debug)]
 pub struct RomeoParams {
     // -- Weight component flags --

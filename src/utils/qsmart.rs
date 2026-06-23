@@ -127,6 +127,7 @@ pub fn adjust_offset(
 }
 
 /// Complete QSMART pipeline parameters
+#[cfg_attr(feature = "introspection", derive(serde::Serialize))]
 #[derive(Clone, Debug)]
 pub struct QsmartParams {
     /// PPM conversion factor: (gyro * field) / 1e6

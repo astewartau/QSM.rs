@@ -20,6 +20,7 @@ use crate::kernels::smv::{smv_kernel, erode_mask_smv};
 use crate::solvers::cg_solve_with_progress;
 
 /// RESHARP algorithm parameters
+#[cfg_attr(feature = "introspection", derive(serde::Serialize))]
 #[derive(Clone, Debug)]
 pub struct ResharpParams {
     /// SMV kernel radius in mm
