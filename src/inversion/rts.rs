@@ -20,6 +20,7 @@ use crate::Grid;
 use super::admm::{AdmmBuffers, admm_step};
 
 /// RTS algorithm parameters
+#[cfg_attr(feature = "introspection", derive(serde::Serialize))]
 #[derive(Clone, Debug)]
 pub struct RtsParams {
     /// Threshold for ill-conditioned region (typically 0.15)

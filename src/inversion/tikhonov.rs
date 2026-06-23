@@ -21,6 +21,7 @@ use crate::utils::apply_mask_zero;
 use crate::Grid;
 
 /// Regularization type for Tikhonov
+#[cfg_attr(feature = "introspection", derive(serde::Serialize))]
 #[derive(Clone, Copy, Debug)]
 pub enum Regularization {
     /// Identity: lambda||x||_2^2
@@ -32,6 +33,7 @@ pub enum Regularization {
 }
 
 /// Tikhonov algorithm parameters
+#[cfg_attr(feature = "introspection", derive(serde::Serialize))]
 #[derive(Clone, Debug)]
 pub struct TikhonovParams {
     /// Regularization weight

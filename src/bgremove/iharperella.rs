@@ -29,6 +29,7 @@ use crate::kernels::smv::smv_kernel;
 use crate::unwrap::laplacian::wrapped_laplacian_periodic;
 
 /// HARPERELLA / iHARPERELLA algorithm parameters
+#[cfg_attr(feature = "introspection", derive(serde::Serialize))]
 #[derive(Clone, Debug)]
 pub struct HarperellaParams {
     /// SMV kernel radius in mm (paper uses 10mm for in vivo)

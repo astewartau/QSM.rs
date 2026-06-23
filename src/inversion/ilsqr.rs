@@ -15,6 +15,7 @@
 //! 4. Artifact subtraction
 
 /// Parameters for the iLSQR algorithm.
+#[cfg_attr(feature = "introspection", derive(serde::Serialize))]
 #[derive(Clone, Debug)]
 pub struct IlsqrParams {
     /// Convergence tolerance (default: 0.01)

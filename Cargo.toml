@@ -11,6 +11,10 @@ crate-type = ["rlib"]
 default = []
 parallel = ["rayon"]
 simd = ["wide"]
+# Derives Serialize on the *Params structs (off by default — they are not
+# serde config types). Used only by downstream tests to introspect field names
+# and verify the qsmxt-config wrapper layer covers every parameter.
+introspection = ["dep:serde"]
 
 [dependencies]
 # FFT and complex number support
@@ -32,6 +36,9 @@ wide = { version = "0.7", optional = true }
 
 # 2D Delaunay triangulation for curvature calculation
 delaunator = "1.0"
+
+# Serde derive, only linked when the `introspection` feature is on (see [features]).
+serde = { version = "1", features = ["derive"], optional = true }
 
 [dev-dependencies]
 serde = { version = "1", features = ["derive"] }

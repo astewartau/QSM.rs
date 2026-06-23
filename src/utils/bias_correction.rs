@@ -11,6 +11,7 @@
 //! Reference implementation: https://github.com/korbinian90/MriResearchTools.jl
 
 /// Parameters for inhomogeneity correction (bias field removal).
+#[cfg_attr(feature = "introspection", derive(serde::Serialize))]
 #[derive(Clone, Debug)]
 pub struct HomogeneityParams {
     /// Gaussian smoothing sigma in mm (default: 7.0)

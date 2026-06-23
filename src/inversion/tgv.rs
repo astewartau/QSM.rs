@@ -32,6 +32,7 @@ use std::f32::consts::PI;
 use crate::utils::mask::erode_mask;
 
 /// TGV parameters
+#[cfg_attr(feature = "introspection", derive(serde::Serialize))]
 #[derive(Clone, Debug)]
 pub struct TgvParams {
     /// First-order TGV weight (gradient term)

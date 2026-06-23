@@ -17,6 +17,7 @@ use crate::kernels::dipole::dipole_kernel;
 use crate::utils::vec_norm;
 
 /// PDF algorithm parameters
+#[cfg_attr(feature = "introspection", derive(serde::Serialize))]
 #[derive(Clone, Debug)]
 pub struct PdfParams {
     /// Convergence tolerance

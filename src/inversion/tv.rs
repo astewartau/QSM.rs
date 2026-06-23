@@ -18,6 +18,7 @@ use crate::Grid;
 use super::admm::{AdmmBuffers, admm_step, prepare_admm_spectral};
 
 /// TV-ADMM algorithm parameters
+#[cfg_attr(feature = "introspection", derive(serde::Serialize))]
 #[derive(Clone, Debug)]
 pub struct TvParams {
     /// Regularization parameter (typically 1e-3 to 1e-4)

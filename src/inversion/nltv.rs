@@ -21,6 +21,7 @@ use crate::Grid;
 use super::admm::{AdmmBuffers, admm_step, prepare_admm_spectral};
 
 /// NLTV algorithm parameters
+#[cfg_attr(feature = "introspection", derive(serde::Serialize))]
 #[derive(Clone, Debug)]
 pub struct NltvParams {
     /// Regularization parameter

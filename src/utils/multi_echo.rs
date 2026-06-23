@@ -10,6 +10,7 @@
 //! Magnetic Resonance in Medicine, 79:2996-3006. https://doi.org/10.1002/mrm.26963
 
 /// Parameters for phase offset removal.
+#[cfg_attr(feature = "introspection", derive(serde::Serialize))]
 #[derive(Clone, Debug)]
 pub struct PhaseOffsetParams {
     /// Gaussian smoothing sigma in voxels [x, y, z] for phase offset estimation
@@ -28,6 +29,7 @@ impl Default for PhaseOffsetParams {
 pub type Mcpc3dsParams = PhaseOffsetParams;
 
 /// Parameters for multi-echo linear fit.
+#[cfg_attr(feature = "introspection", derive(serde::Serialize))]
 #[derive(Clone, Debug)]
 pub struct LinearFitParams {
     /// Estimate and remove constant phase offset

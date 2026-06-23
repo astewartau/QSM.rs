@@ -42,6 +42,7 @@ pub enum BgRemovalAlgorithm {
 }
 
 /// Dipole inversion algorithm
+#[cfg_attr(feature = "introspection", derive(serde::Serialize))]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum InversionAlgorithm {
     Tkd,
