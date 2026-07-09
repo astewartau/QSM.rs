@@ -4,6 +4,8 @@
 //! used in TV regularization and other algorithms.
 
 use crate::Grid;
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
 
 /// Forward difference gradient operator (in-place)
 ///
@@ -228,37 +230,28 @@ pub fn fgrad_inplace_f32(
     let hy = 1.0 / vsy;
     let hz = 1.0 / vsz;
 
-    for k in 0..nz {
-        let k_offset = k * nx * ny;
+    let nxy = nx * ny;
+    // One task per z-slab; gx/gy/gz slabs are disjoint, x is read-only.
+    maybe_par_chunks_mut!(gx, nxy)
+        .zip(maybe_par_chunks_mut!(gy, nxy))
+        .zip(maybe_par_chunks_mut!(gz, nxy))
+        .enumerate()
+        .for_each(|(k, ((gxs, gys), gzs))| {
+            let k_offset = k * nxy;
+            for j in 0..ny {
+                let j_offset = j * nx;
+                for i in 0..nx {
+                    let local = i + j_offset;
+                    let idx = local + k_offset;
+                    let x_val = x[idx];
 
-        for j in 0..ny {
-            let j_offset = j * nx;
-
-            for i in 0..nx {
-                let idx = i + j_offset + k_offset;
-                let x_val = x[idx];
-
-                // Forward difference with zero boundary (matching Julia)
-                gx[idx] = if i + 1 < nx {
-                    (x[idx + 1] - x_val) * hx
-                } else {
-                    0.0
-                };
-
-                gy[idx] = if j + 1 < ny {
-                    (x[i + (j + 1) * nx + k_offset] - x_val) * hy
-                } else {
-                    0.0
-                };
-
-                gz[idx] = if k + 1 < nz {
-                    (x[i + j_offset + (k + 1) * nx * ny] - x_val) * hz
-                } else {
-                    0.0
-                };
+                    // Forward difference with zero boundary (matching Julia)
+                    gxs[local] = if i + 1 < nx { (x[idx + 1] - x_val) * hx } else { 0.0 };
+                    gys[local] = if j + 1 < ny { (x[i + (j + 1) * nx + k_offset] - x_val) * hy } else { 0.0 };
+                    gzs[local] = if k + 1 < nz { (x[i + j_offset + (k + 1) * nxy] - x_val) * hz } else { 0.0 };
+                }
             }
-        }
-    }
+        });
 }
 
 /// Backward divergence operator (in-place, f32)
@@ -337,61 +330,68 @@ pub fn symgrad_inplace_f32(
     let hy = 1.0 / vsy;
     let hz = 1.0 / vsz;
 
-    for k in 0..nz {
-        let k_offset = k * nx * ny;
+    let nxy = nx * ny;
+    maybe_par_chunks_mut!(sxx, nxy)
+        .zip(maybe_par_chunks_mut!(sxy, nxy))
+        .zip(maybe_par_chunks_mut!(sxz, nxy))
+        .zip(maybe_par_chunks_mut!(syy, nxy))
+        .zip(maybe_par_chunks_mut!(syz, nxy))
+        .zip(maybe_par_chunks_mut!(szz, nxy))
+        .enumerate()
+        .for_each(|(k, (((((sxxs, sxys), sxzs), syys), syzs), szzs))| {
+            let k_offset = k * nxy;
+            for j in 0..ny {
+                let j_offset = j * nx;
+                for i in 0..nx {
+                    let local = i + j_offset;
+                    let idx = local + k_offset;
 
-        for j in 0..ny {
-            let j_offset = j * nx;
+                    let wx0 = wx[idx];
+                    let wy0 = wy[idx];
+                    let wz0 = wz[idx];
 
-            for i in 0..nx {
-                let idx = i + j_offset + k_offset;
+                    // X derivatives (zero at boundary, matching Julia)
+                    if i + 1 < nx {
+                        let idx_xp = (i + 1) + j_offset + k_offset;
+                        sxxs[local] = (wx[idx_xp] - wx0) * hx;
+                        // Contributions to off-diagonal terms
+                        let dwy_dx = (wy[idx_xp] - wy0) * hx;
+                        let dwz_dx = (wz[idx_xp] - wz0) * hx;
+                        sxys[local] = dwy_dx * 0.5;
+                        sxzs[local] = dwz_dx * 0.5;
+                    } else {
+                        sxxs[local] = 0.0;
+                        sxys[local] = 0.0;
+                        sxzs[local] = 0.0;
+                    }
 
-                let wx0 = wx[idx];
-                let wy0 = wy[idx];
-                let wz0 = wz[idx];
+                    // Y derivatives (zero at boundary)
+                    if j + 1 < ny {
+                        let idx_yp = i + (j + 1) * nx + k_offset;
+                        syys[local] = (wy[idx_yp] - wy0) * hy;
+                        let dwx_dy = (wx[idx_yp] - wx0) * hy;
+                        let dwz_dy = (wz[idx_yp] - wz0) * hy;
+                        sxys[local] += dwx_dy * 0.5;
+                        syzs[local] = dwz_dy * 0.5;
+                    } else {
+                        syys[local] = 0.0;
+                        syzs[local] = 0.0;
+                    }
 
-                // X derivatives (zero at boundary, matching Julia)
-                if i + 1 < nx {
-                    let idx_xp = (i + 1) + j_offset + k_offset;
-                    sxx[idx] = (wx[idx_xp] - wx0) * hx;
-                    // Contributions to off-diagonal terms
-                    let dwy_dx = (wy[idx_xp] - wy0) * hx;
-                    let dwz_dx = (wz[idx_xp] - wz0) * hx;
-                    sxy[idx] = dwy_dx * 0.5;
-                    sxz[idx] = dwz_dx * 0.5;
-                } else {
-                    sxx[idx] = 0.0;
-                    sxy[idx] = 0.0;
-                    sxz[idx] = 0.0;
-                }
-
-                // Y derivatives (zero at boundary)
-                if j + 1 < ny {
-                    let idx_yp = i + (j + 1) * nx + k_offset;
-                    syy[idx] = (wy[idx_yp] - wy0) * hy;
-                    let dwx_dy = (wx[idx_yp] - wx0) * hy;
-                    let dwz_dy = (wz[idx_yp] - wz0) * hy;
-                    sxy[idx] += dwx_dy * 0.5;
-                    syz[idx] = dwz_dy * 0.5;
-                } else {
-                    syy[idx] = 0.0;
-                    syz[idx] = 0.0;
-                }
-
-                // Z derivatives (zero at boundary)
-                if k + 1 < nz {
-                    let idx_zp = i + j_offset + (k + 1) * nx * ny;
-                    szz[idx] = (wz[idx_zp] - wz0) * hz;
-                    let dwx_dz = (wx[idx_zp] - wx0) * hz;
-                    let dwy_dz = (wy[idx_zp] - wy0) * hz;
-                    sxz[idx] += dwx_dz * 0.5;
-                    syz[idx] += dwy_dz * 0.5;
-                } else {
-                    szz[idx] = 0.0;
+                    // Z derivatives (zero at boundary)
+                    if k + 1 < nz {
+                        let idx_zp = i + j_offset + (k + 1) * nxy;
+                        szzs[local] = (wz[idx_zp] - wz0) * hz;
+                        let dwx_dz = (wx[idx_zp] - wx0) * hz;
+                        let dwy_dz = (wy[idx_zp] - wy0) * hz;
+                        sxzs[local] += dwx_dz * 0.5;
+                        syzs[local] += dwy_dz * 0.5;
+                    } else {
+                        szzs[local] = 0.0;
+                    }
                 }
             }
-        }
-    }
+        });
 }
 
 /// Divergence of symmetric tensor field (adjoint of symgrad)
@@ -407,51 +407,55 @@ pub fn symdiv_inplace_f32(
     syy: &[f32], syz: &[f32], szz: &[f32],
     grid: &Grid,
 ) {
-    let (nx, ny, nz) = grid.dims;
+    let (nx, ny, _nz) = grid.dims;
     let (vsx, vsy, vsz) = (grid.vsx() as f32, grid.vsy() as f32, grid.vsz() as f32);
     let hx = 1.0 / vsx;
     let hy = 1.0 / vsy;
     let hz = 1.0 / vsz;
 
-    for k in 0..nz {
-        let k_offset = k * nx * ny;
+    let nxy = nx * ny;
+    maybe_par_chunks_mut!(divx, nxy)
+        .zip(maybe_par_chunks_mut!(divy, nxy))
+        .zip(maybe_par_chunks_mut!(divz, nxy))
+        .enumerate()
+        .for_each(|(k, ((divxs, divys), divzs))| {
+            let k_offset = k * nxy;
+            for j in 0..ny {
+                let j_offset = j * nx;
+                for i in 0..nx {
+                    let local = i + j_offset;
+                    let idx = local + k_offset;
 
-        for j in 0..ny {
-            let j_offset = j * nx;
+                    // Divergence of first row of tensor: div([Sxx, Sxy, Sxz])
+                    // Using backward difference with zero at boundary
+                    let sxx_xm = if i > 0 { sxx[(i - 1) + j_offset + k_offset] } else { 0.0 };
+                    let sxy_ym = if j > 0 { sxy[i + (j - 1) * nx + k_offset] } else { 0.0 };
+                    let sxz_zm = if k > 0 { sxz[i + j_offset + (k - 1) * nxy] } else { 0.0 };
 
-            for i in 0..nx {
-                let idx = i + j_offset + k_offset;
+                    divxs[local] = (sxx[idx] - sxx_xm) * hx
+                              + (sxy[idx] - sxy_ym) * hy
+                              + (sxz[idx] - sxz_zm) * hz;
 
-                // Divergence of first row of tensor: div([Sxx, Sxy, Sxz])
-                // Using backward difference with zero at boundary
-                let sxx_xm = if i > 0 { sxx[(i - 1) + j_offset + k_offset] } else { 0.0 };
-                let sxy_ym = if j > 0 { sxy[i + (j - 1) * nx + k_offset] } else { 0.0 };
-                let sxz_zm = if k > 0 { sxz[i + j_offset + (k - 1) * nx * ny] } else { 0.0 };
+                    // Divergence of second row: div([Sxy, Syy, Syz])
+                    let sxy_xm = if i > 0 { sxy[(i - 1) + j_offset + k_offset] } else { 0.0 };
+                    let syy_ym = if j > 0 { syy[i + (j - 1) * nx + k_offset] } else { 0.0 };
+                    let syz_zm = if k > 0 { syz[i + j_offset + (k - 1) * nxy] } else { 0.0 };
 
-                divx[idx] = (sxx[idx] - sxx_xm) * hx
-                          + (sxy[idx] - sxy_ym) * hy
-                          + (sxz[idx] - sxz_zm) * hz;
+                    divys[local] = (sxy[idx] - sxy_xm) * hx
+                              + (syy[idx] - syy_ym) * hy
+                              + (syz[idx] - syz_zm) * hz;
 
-                // Divergence of second row: div([Sxy, Syy, Syz])
-                let sxy_xm = if i > 0 { sxy[(i - 1) + j_offset + k_offset] } else { 0.0 };
-                let syy_ym = if j > 0 { syy[i + (j - 1) * nx + k_offset] } else { 0.0 };
-                let syz_zm = if k > 0 { syz[i + j_offset + (k - 1) * nx * ny] } else { 0.0 };
+                    // Divergence of third row: div([Sxz, Syz, Szz])
+                    let sxz_xm = if i > 0 { sxz[(i - 1) + j_offset + k_offset] } else { 0.0 };
+                    let syz_ym = if j > 0 { syz[i + (j - 1) * nx + k_offset] } else { 0.0 };
+                    let szz_zm = if k > 0 { szz[i + j_offset + (k - 1) * nxy] } else { 0.0 };
 
-                divy[idx] = (sxy[idx] - sxy_xm) * hx
-                          + (syy[idx] - syy_ym) * hy
-                          + (syz[idx] - syz_zm) * hz;
-
-                // Divergence of third row: div([Sxz, Syz, Szz])
-                let sxz_xm = if i > 0 { sxz[(i - 1) + j_offset + k_offset] } else { 0.0 };
-                let syz_ym = if j > 0 { syz[i + (j - 1) * nx + k_offset] } else { 0.0 };
-                let szz_zm = if k > 0 { szz[i + j_offset + (k - 1) * nx * ny] } else { 0.0 };
-
-                divz[idx] = (sxz[idx] - sxz_xm) * hx
-                          + (syz[idx] - syz_ym) * hy
-                          + (szz[idx] - szz_zm) * hz;
+                    divzs[local] = (sxz[idx] - sxz_xm) * hx
+                              + (syz[idx] - syz_ym) * hy
+                              + (szz[idx] - szz_zm) * hz;
+                }
             }
-        }
-    }
+        });
 }
 
 /// Forward difference gradient operator (in-place, f32) - masked version
@@ -512,23 +516,23 @@ pub fn bdiv_masked_inplace_f32(
     mask: &[u8],
     grid: &Grid,
 ) {
-    let (nx, ny, nz) = grid.dims;
+    let (nx, ny, _nz) = grid.dims;
     let (vsx, vsy, vsz) = (grid.vsx() as f32, grid.vsy() as f32, grid.vsz() as f32);
     let hx = 1.0 / vsx;
     let hy = 1.0 / vsy;
     let hz = 1.0 / vsz;
 
-    for k in 0..nz {
-        let k_offset = k * nx * ny;
-
+    let nxy = nx * ny;
+    maybe_par_chunks_mut!(div, nxy).enumerate().for_each(|(k, div_slab)| {
+        let k_offset = k * nxy;
         for j in 0..ny {
             let j_offset = j * nx;
-
             for i in 0..nx {
-                let idx = i + j_offset + k_offset;
+                let local = i + j_offset;
+                let idx = local + k_offset;
 
                 if mask[idx] == 0 {
-                    div[idx] = 0.0;
+                    div_slab[local] = 0.0;
                     continue;
                 }
 
@@ -552,17 +556,17 @@ pub fn bdiv_masked_inplace_f32(
                 };
 
                 let gz_term = m * gz[idx] * hz - if k > 0 {
-                    let idx_zm = i + j_offset + (k - 1) * nx * ny;
+                    let idx_zm = i + j_offset + (k - 1) * nxy;
                     let m_zm = if mask[idx_zm] != 0 { 1.0 } else { 0.0 };
                     m_zm * gz[idx_zm] * hz
                 } else {
                     0.0
                 };
 
-                div[idx] = gx_term + gy_term + gz_term;
+                div_slab[local] = gx_term + gy_term + gz_term;
             }
         }
-    }
+    });
 }
 
 #[cfg(test)]
