@@ -30,6 +30,8 @@
 
 use std::f32::consts::PI;
 use crate::utils::mask::erode_mask;
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
 
 /// TGV parameters
 #[cfg_attr(feature = "introspection", derive(serde::Serialize))]
@@ -664,20 +666,23 @@ fn apply_stencil(
     mask: &[u8],
     nx: usize, ny: usize, nz: usize,
 ) {
-    for k in 0..nz {
+    let nxy = nx * ny;
+    // One rayon task per z-slab (disjoint output chunk); reads input by global index.
+    maybe_par_chunks_mut!(output, nxy).enumerate().for_each(|(k, out_slab)| {
         for j in 0..ny {
             for i in 0..nx {
-                let idx = i + j * nx + k * nx * ny;
+                let local = i + j * nx;
+                let idx = local + k * nxy;
 
                 if mask[idx] == 0 {
-                    output[idx] = 0.0;
+                    out_slab[local] = 0.0;
                     continue;
                 }
 
                 // Julia's wave_local only computes if not at boundary
                 // If at boundary, result is 0
                 if i == 0 || j == 0 || k == 0 || i + 1 >= nx || j + 1 >= ny || k + 1 >= nz {
-                    output[idx] = 0.0;
+                    out_slab[local] = 0.0;
                     continue;
                 }
 
@@ -690,16 +695,16 @@ fn apply_stencil(
                             let nj = (j as i32 + dj - 1) as usize;
                             let nk = (k as i32 + dk - 1) as usize;
 
-                            let nidx = ni + nj * nx + nk * nx * ny;
+                            let nidx = ni + nj * nx + nk * nxy;
                             sum += stencil[di as usize][dj as usize][dk as usize] * input[nidx];
                         }
                     }
                 }
 
-                output[idx] = sum;
+                out_slab[local] = sum;
             }
         }
-    }
+    });
 }
 
 /// Compute Laplacian of wrapped phase using the DEL method
@@ -777,18 +782,20 @@ fn apply_laplacian_inplace(
     let hx2 = 1.0 / (vsx * vsx);
     let hy2 = 1.0 / (vsy * vsy);
     let hz2 = 1.0 / (vsz * vsz);
+    let nxy = nx * ny;
 
-    for k in 0..nz {
-        let k_offset = k * nx * ny;
+    maybe_par_chunks_mut!(output, nxy).enumerate().for_each(|(k, out_slab)| {
+        let k_offset = k * nxy;
 
         for j in 0..ny {
             let j_offset = j * nx;
 
             for i in 0..nx {
-                let idx = i + j_offset + k_offset;
+                let local = i + j_offset;
+                let idx = local + k_offset;
 
                 if mask[idx] == 0 {
-                    output[idx] = 0.0;
+                    out_slab[local] = 0.0;
                     continue;
                 }
 
@@ -799,16 +806,16 @@ fn apply_laplacian_inplace(
                 let a_xp = if i + 1 < nx { input[(i + 1) + j_offset + k_offset] } else { a0 };
                 let a_ym = if j > 0 { input[i + (j - 1) * nx + k_offset] } else { a0 };
                 let a_yp = if j + 1 < ny { input[i + (j + 1) * nx + k_offset] } else { a0 };
-                let a_zm = if k > 0 { input[i + j_offset + (k - 1) * nx * ny] } else { a0 };
-                let a_zp = if k + 1 < nz { input[i + j_offset + (k + 1) * nx * ny] } else { a0 };
+                let a_zm = if k > 0 { input[i + j_offset + (k - 1) * nxy] } else { a0 };
+                let a_zp = if k + 1 < nz { input[i + j_offset + (k + 1) * nxy] } else { a0 };
 
                 // Laplacian: sum of second derivatives
-                output[idx] = hx2 * (a_xm - 2.0 * a0 + a_xp)
+                out_slab[local] = hx2 * (a_xm - 2.0 * a0 + a_xp)
                             + hy2 * (a_ym - 2.0 * a0 + a_yp)
                             + hz2 * (a_zm - 2.0 * a0 + a_zp);
             }
         }
-    }
+    });
 }
 
 
