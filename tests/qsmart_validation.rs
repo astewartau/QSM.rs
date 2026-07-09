@@ -24,14 +24,15 @@ use std::time::Instant;
 use common::load_nifti_file;
 use qsm_core::Grid;
 use qsm_core::bgremove::{sdf, SdfParams};
-use qsm_core::inversion::{ilsqr, ilsqr_simple, IlsqrParams};
+use qsm_core::inversion::{ilsqr, IlsqrParams};
 use qsm_core::inversion::tkd;
+use qsm_core::inversion::TkdParams;
 use qsm_core::utils::{
     calculate_curvature_proximity,
     generate_vasculature_mask, VasculatureParams,
     adjust_offset,
 };
-use qsm_core::nifti_io::save_nifti_to_file;
+use qsm_core::io::save_nifti_to_file;
 
 /// Path to the QSMART test data directory
 const QSMART_DIR: &str = "QSMART_TEST/1.7.136.6.1.1.17";
@@ -942,12 +943,13 @@ fn test_qsmart_07_ilsqr_stage1() {
     let start = Instant::now();
 
     // Use MATLAB local field as input to isolate iLSQR errors
-    let chi_stage1_rust = ilsqr_simple(
+    let (chi_stage1_rust, _, _, _) = ilsqr(
         matlab_lfs1,
         &data.mask_u8,
         &grid,
         B0_DIR,
         &IlsqrParams { tol: ILSQR_TOL, max_iter: ILSQR_MAX_ITER },
+        |_, _| {},
     );
 
     let elapsed = start.elapsed();
@@ -1001,12 +1003,13 @@ fn test_qsmart_08_ilsqr_stage2() {
 
     let start = Instant::now();
 
-    let chi_stage2_rust = ilsqr_simple(
+    let (chi_stage2_rust, _, _, _) = ilsqr(
         matlab_lfs2,
         &mask_stage2,
         &grid,
         B0_DIR,
         &IlsqrParams { tol: ILSQR_TOL, max_iter: ILSQR_MAX_ITER },
+        |_, _| {},
     );
 
     let elapsed = start.elapsed();
@@ -1206,10 +1209,11 @@ fn test_qsmart_full_pipeline() {
     println!("[INFO] Step 3: iLSQR Stage 1...");
     let step_start = Instant::now();
 
-    let chi_stage1 = ilsqr_simple(
+    let (chi_stage1, _, _, _) = ilsqr(
         &lfs_stage1, &data.mask_u8,
         &grid, B0_DIR,
         &IlsqrParams { tol: ILSQR_TOL, max_iter: ILSQR_MAX_ITER },
+        |_, _| {},
     );
     println!("[INFO] iLSQR Stage 1: {:.2?}", step_start.elapsed());
 
@@ -1242,10 +1246,11 @@ fn test_qsmart_full_pipeline() {
         .map(|(&m, &v)| if m > 0.5 && v > 0.5 { 1 } else { 0 })
         .collect();
 
-    let chi_stage2 = ilsqr_simple(
+    let (chi_stage2, _, _, _) = ilsqr(
         &lfs_stage2, &mask_stage2,
         &grid, B0_DIR,
         &IlsqrParams { tol: ILSQR_TOL, max_iter: ILSQR_MAX_ITER },
+        |_, _| {},
     );
     println!("[INFO] iLSQR Stage 2: {:.2?}", step_start.elapsed());
 
@@ -1439,7 +1444,7 @@ fn test_qsmart_07b_ilsqr_diagnostics() {
         &data.mask_u8,
         &grid,
         B0_DIR,
-        0.1, // threshold
+        &TkdParams { threshold: 0.1 },
     );
     let elapsed = start.elapsed();
     println!("\n[INFO] TKD completed in {:.2?}", elapsed);

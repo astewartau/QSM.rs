@@ -20,11 +20,14 @@ use crate::Grid;
 pub struct LbvParams {
     /// Convergence tolerance
     pub tol: f64,
+    /// Maximum iterations. `None` uses an automatic default of
+    /// `min(3 * max_dim, 500)`.
+    pub max_iter: Option<usize>,
 }
 
 impl Default for LbvParams {
     fn default() -> Self {
-        Self { tol: 1e-6 }
+        Self { tol: 1e-6, max_iter: None }
     }
 }
 
@@ -37,13 +40,31 @@ impl Default for LbvParams {
 /// * `field` - Total field (nx * ny * nz)
 /// * `mask` - Binary mask (nx * ny * nz), 1 = brain, 0 = background
 /// * `grid` - Volume dimensions and voxel sizes
-/// * `tol` - Convergence tolerance for iterative solver
-/// * `max_iter` - Maximum iterations
+/// * `params` - LBV parameters (tolerance, optional max iterations)
 /// * `progress` - Progress callback (iteration, max_iter)
 ///
 /// # Returns
 /// Tuple of (local_field, eroded_mask)
 pub fn lbv(
+    field: &[f64],
+    mask: &[u8],
+    grid: &Grid,
+    params: &LbvParams,
+    progress: impl FnMut(usize, usize),
+) -> (Vec<f64>, Vec<u8>) {
+    // Default max iterations to min(3 * max_dim, 500) when unspecified.
+    let max_iter = params.max_iter.unwrap_or_else(|| {
+        let (nx, ny, nz) = grid.dims;
+        (3 * nx.max(ny).max(nz)).min(500)
+    });
+    lbv_core(field, mask, grid, params.tol, max_iter, progress)
+}
+
+/// LBV with an explicit iteration count.
+///
+/// Internal entry point; the public [`lbv`] wrapper supplies the default
+/// iteration count from [`LbvParams`].
+pub(crate) fn lbv_core(
     field: &[f64],
     mask: &[u8],
     grid: &Grid,
@@ -196,7 +217,7 @@ mod tests {
         let mask = vec![1u8; n * n * n];
         let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
 
-        let (local, _) = lbv(&field, &mask, &grid, 1e-6, 100, |_, _| {});
+        let (local, _) = lbv_core(&field, &mask, &grid, 1e-6, 100, |_, _| {});
 
         for &val in local.iter() {
             assert!(val.abs() < 1e-10, "Zero field should give zero local field");
@@ -227,7 +248,7 @@ mod tests {
         }
 
         let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
-        let (local, eroded_mask) = lbv(&field, &mask, &grid, 1e-5, 100, |_, _| {});
+        let (local, eroded_mask) = lbv_core(&field, &mask, &grid, 1e-5, 100, |_, _| {});
 
         for (i, &val) in local.iter().enumerate() {
             assert!(val.is_finite(), "Local field should be finite at index {}", i);
@@ -276,7 +297,7 @@ mod tests {
         }
 
         let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
-        let (local, eroded_mask) = lbv(&field, &mask, &grid, 1e-6, 500, |_, _| {});
+        let (local, eroded_mask) = lbv_core(&field, &mask, &grid, 1e-6, 500, |_, _| {});
 
         // Local field should be close to zero for interior voxels
         // since the input is purely harmonic
@@ -325,7 +346,7 @@ mod tests {
 
         // Use anisotropic voxel sizes
         let grid = Grid::new(n, n, n, 0.5, 1.0, 2.0);
-        let (local, eroded_mask) = lbv(
+        let (local, eroded_mask) = lbv_core(
             &field, &mask, &grid, 1e-5, 200, |_, _| {}
         );
 
@@ -374,10 +395,10 @@ mod tests {
         let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
 
         // Tight tolerance should produce better harmonic removal
-        let (local_tight, _) = lbv(&field, &mask, &grid, 1e-8, 1000, |_, _| {});
+        let (local_tight, _) = lbv_core(&field, &mask, &grid, 1e-8, 1000, |_, _| {});
 
         // Loose tolerance
-        let (local_loose, _) = lbv(&field, &mask, &grid, 1e-2, 50, |_, _| {});
+        let (local_loose, _) = lbv_core(&field, &mask, &grid, 1e-2, 50, |_, _| {});
 
         // Compute max residual for each
         let max_tight: f64 = local_tight.iter()
@@ -430,7 +451,7 @@ mod tests {
 
         let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
         let mut progress_calls = Vec::new();
-        let (local, eroded) = lbv(
+        let (local, eroded) = lbv_core(
             &field, &mask, &grid, 1e-5, 200,
             |iter, max| { progress_calls.push((iter, max)); }
         );
@@ -476,7 +497,7 @@ mod tests {
         }
 
         let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
-        let (local, eroded_mask) = lbv(&field, &mask, &grid, 1e-6, 500, |_, _| {});
+        let (local, eroded_mask) = lbv_core(&field, &mask, &grid, 1e-6, 500, |_, _| {});
 
         // Local field should have some non-zero values (non-harmonic part remains)
         let mut has_nonzero = false;
@@ -506,7 +527,7 @@ mod tests {
         }
 
         let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
-        let (local, eroded) = lbv(&field, &mask, &grid, 1e-5, 100, |_, _| {});
+        let (local, eroded) = lbv_core(&field, &mask, &grid, 1e-5, 100, |_, _| {});
 
         for &val in &local {
             assert!(val.is_finite());
@@ -526,7 +547,7 @@ mod tests {
         let mask = vec![1u8; n * n * n]; // Full mask including edges
         let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
 
-        let (local, eroded) = lbv(&field, &mask, &grid, 1e-5, 100, |_, _| {});
+        let (local, eroded) = lbv_core(&field, &mask, &grid, 1e-5, 100, |_, _| {});
 
         for &val in &local {
             assert!(val.is_finite());

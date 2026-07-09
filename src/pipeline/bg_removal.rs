@@ -25,7 +25,6 @@ pub fn run_bg_removal(
     progress: &mut dyn FnMut(usize, usize),
 ) -> Result<BgRemovalResult, PipelineError> {
     let grid = metadata.grid();
-    let (vsx, vsy, vsz) = metadata.voxel_size;
     let n_voxels = grid.n_total();
 
     if field_ppm.len() != n_voxels {
@@ -37,56 +36,30 @@ pub fn run_bg_removal(
 
     let (local_field, eroded_mask) = match config.algorithm {
         BgRemovalAlgorithm::Vsharp => {
-            let min_vox = vsx.min(vsy).min(vsz);
-            let max_vox = vsx.max(vsy).max(vsz);
-            let mut radii = Vec::new();
-            let mut r = config.vsharp.max_radius_factor * min_vox;
-            let step = config.vsharp.min_radius_factor * max_vox;
-            while r >= step {
-                radii.push(r);
-                r -= step;
-            }
-            if radii.is_empty() {
-                radii.push(config.vsharp.max_radius_factor * min_vox);
-            }
-
             crate::bgremove::vsharp(
-                field_ppm, mask, &grid,
-                &radii, config.vsharp.threshold,
-                progress,
+                field_ppm, mask, &grid, &config.vsharp, progress,
             )
         }
         BgRemovalAlgorithm::Pdf => {
-            let max_iter = (n_voxels as f64).sqrt() as usize;
             let local = crate::bgremove::pdf(
                 field_ppm, mask, &grid,
-                (0.0, 0.0, 1.0), config.pdf.tol, max_iter,
-                progress,
+                (0.0, 0.0, 1.0), &config.pdf, progress,
             );
             (local, mask.to_vec())
         }
         BgRemovalAlgorithm::Lbv => {
-            let (nx, ny, nz) = grid.dims;
-            let max_iter = (3 * nx.max(ny).max(nz)).min(500);
             crate::bgremove::lbv(
-                field_ppm, mask, &grid,
-                config.lbv.tol, max_iter,
-                progress,
+                field_ppm, mask, &grid, &config.lbv, progress,
             )
         }
         BgRemovalAlgorithm::Ismv => {
-            let radius = config.ismv.radius_factor * vsx.max(vsy).max(vsz);
             crate::bgremove::ismv(
-                field_ppm, mask, &grid,
-                radius, config.ismv.tol, config.ismv.max_iter,
-                progress,
+                field_ppm, mask, &grid, &config.ismv, progress,
             )
         }
         BgRemovalAlgorithm::Sharp => {
-            let radius = config.sharp.radius_factor * vsx.min(vsy).min(vsz);
             crate::bgremove::sharp(
-                field_ppm, mask, &grid,
-                config.sharp.threshold, radius,
+                field_ppm, mask, &grid, &config.sharp,
             )
         }
         BgRemovalAlgorithm::Resharp => {

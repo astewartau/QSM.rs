@@ -28,6 +28,6 @@ pub use tikhonov::{tikhonov, TikhonovParams, Regularization};
 pub use tv::{tv_admm, TvParams};
 pub use nltv::{nltv, NltvParams};
 pub use rts::{rts, RtsParams};
-pub use medi::{medi_l1, MediParams, MediWorkspace};
+pub use medi::{medi, MediParams, MediWorkspace};
 pub use tgv::{tgv_qsm, TgvParams, get_default_alpha, get_default_iterations};
-pub use ilsqr::{ilsqr, ilsqr_simple, IlsqrParams, lsqr, lsqr_complex, lsmr};
+pub use ilsqr::{ilsqr, IlsqrParams};

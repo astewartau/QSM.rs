@@ -10,6 +10,7 @@ use std::time::Instant;
 use common::{load_nifti_file, correlation, rmse};
 use qsm_core::Grid;
 use qsm_core::separation::chi_sep_medi;
+use qsm_core::separation::ChiSepParams;
 use qsm_core::kernels::dipole::dipole_kernel;
 use qsm_core::fft::{fft3d_real, ifft3d_real};
 
@@ -180,17 +181,19 @@ fn test_chisep_on_forward_phantom() {
             &mask,
             &grid,
             bdir,
-            cf,
-            ps.lambda_para,
-            ps.lambda_dia,
-            ps.lambda_cpl,
-            ps.dr_pos,
-            ps.dr_neg,
-            0.3,
-            0.01,
-            100,
-            ps.max_iter,
-            ps.tol,
+            &ChiSepParams {
+                cf,
+                lambda_para: ps.lambda_para,
+                lambda_dia: ps.lambda_dia,
+                lambda_cpl: ps.lambda_cpl,
+                dr_pos: ps.dr_pos,
+                dr_neg: ps.dr_neg,
+                percentage: 0.3,
+                cg_tol: 0.01,
+                cg_max_iter: 100,
+                max_iter: ps.max_iter,
+                tol: ps.tol,
+            },
             |_, _| {},
         );
         let elapsed = start.elapsed();
@@ -208,9 +211,9 @@ fn test_chisep_on_forward_phantom() {
         if ps.name.starts_with("C") {
             let out_dir = Path::new("chisep_output");
             std::fs::create_dir_all(out_dir).expect("Failed to create output dir");
-            qsm_core::nifti_io::save_nifti_to_file(&out_dir.join("chi_pos.nii"), &chi_pos_result, dims, vs, affine).unwrap();
-            qsm_core::nifti_io::save_nifti_to_file(&out_dir.join("chi_neg.nii"), &chi_neg_result, dims, vs, affine).unwrap();
-            qsm_core::nifti_io::save_nifti_to_file(&out_dir.join("chi_total.nii"), &_chi_total_result, dims, vs, affine).unwrap();
+            qsm_core::io::save_nifti_to_file(&out_dir.join("chi_pos.nii"), &chi_pos_result, dims, vs, affine).unwrap();
+            qsm_core::io::save_nifti_to_file(&out_dir.join("chi_neg.nii"), &chi_neg_result, dims, vs, affine).unwrap();
+            qsm_core::io::save_nifti_to_file(&out_dir.join("chi_total.nii"), &_chi_total_result, dims, vs, affine).unwrap();
         }
     }
 

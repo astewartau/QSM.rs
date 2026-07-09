@@ -79,6 +79,56 @@ impl ChiSepWorkspace {
     }
 }
 
+/// Chi-separation algorithm parameters.
+///
+/// `cf`, `dr_pos`, and `dr_neg` are acquisition/tissue dependent and should be
+/// set for your scan; the remaining fields are optimization knobs with sensible
+/// defaults.
+#[cfg_attr(feature = "introspection", derive(serde::Serialize))]
+#[derive(Clone, Debug)]
+pub struct ChiSepParams {
+    /// Central frequency in Hz (e.g. 123.2e6 for 3T)
+    pub cf: f64,
+    /// Paramagnetic L1 regularization weight
+    pub lambda_para: f64,
+    /// Diamagnetic L1 regularization weight
+    pub lambda_dia: f64,
+    /// Field/R2' coupling weight
+    pub lambda_cpl: f64,
+    /// Paramagnetic relaxivity in Hz/ppm
+    pub dr_pos: f64,
+    /// Diamagnetic relaxivity in Hz/ppm
+    pub dr_neg: f64,
+    /// Edge-mask percentage for morphology weighting
+    pub percentage: f64,
+    /// Inner conjugate-gradient tolerance
+    pub cg_tol: f64,
+    /// Inner conjugate-gradient max iterations
+    pub cg_max_iter: usize,
+    /// Outer Gauss-Newton max iterations
+    pub max_iter: usize,
+    /// Outer convergence tolerance
+    pub tol: f64,
+}
+
+impl Default for ChiSepParams {
+    fn default() -> Self {
+        Self {
+            cf: 123.2e6,
+            lambda_para: 1000.0,
+            lambda_dia: 1000.0,
+            lambda_cpl: 100.0,
+            dr_pos: 114.0,
+            dr_neg: 30.0,
+            percentage: 0.3,
+            cg_tol: 0.01,
+            cg_max_iter: 100,
+            max_iter: 10,
+            tol: 0.1,
+        }
+    }
+}
+
 /// Chi-separation using MEDI-based coupled optimization.
 ///
 /// # Arguments
@@ -88,14 +138,11 @@ impl ChiSepWorkspace {
 /// * `mask` - Binary brain mask, 1 = brain
 /// * `grid` - Volume grid (dimensions and voxel sizes)
 /// * `bdir` - B0 field direction
-/// * `cf` - Central frequency in Hz (e.g. 123.2e6 for 3T)
-/// * `dr_pos` - Paramagnetic relaxivity in Hz/ppm (default: 114.0)
-/// * `dr_neg` - Diamagnetic relaxivity in Hz/ppm (default: 30.0)
+/// * `params` - Chi-separation parameters (see [`ChiSepParams`])
 /// * `progress` - Progress callback: `(iteration, total_iterations)`
 ///
 /// # Returns
 /// `(chi_pos, chi_neg, chi_total)` — susceptibility maps in ppm
-#[allow(clippy::too_many_arguments)]
 pub fn chi_sep_medi<F>(
     local_field: &[f64],
     r2prime: &[f64],
@@ -103,22 +150,23 @@ pub fn chi_sep_medi<F>(
     mask: &[u8],
     grid: &Grid,
     bdir: (f64, f64, f64),
-    cf: f64,
-    lambda_para: f64,
-    lambda_dia: f64,
-    lambda_cpl: f64,
-    dr_pos: f64,
-    dr_neg: f64,
-    percentage: f64,
-    cg_tol: f64,
-    cg_max_iter: usize,
-    max_iter: usize,
-    tol: f64,
+    params: &ChiSepParams,
     mut progress: F,
 ) -> (Vec<f64>, Vec<f64>, Vec<f64>)
 where
     F: FnMut(usize, usize),
 {
+    let cf = params.cf;
+    let lambda_para = params.lambda_para;
+    let lambda_dia = params.lambda_dia;
+    let lambda_cpl = params.lambda_cpl;
+    let dr_pos = params.dr_pos;
+    let dr_neg = params.dr_neg;
+    let percentage = params.percentage;
+    let cg_tol = params.cg_tol;
+    let cg_max_iter = params.cg_max_iter;
+    let max_iter = params.max_iter;
+    let tol = params.tol;
     let (nx, ny, nz) = grid.dims;
     let (vsx, vsy, vsz) = grid.voxel_size;
     let n = nx * ny * nz;
@@ -609,12 +657,15 @@ mod tests {
             }
         }).collect();
 
+        let params = ChiSepParams {
+            cf,
+            lambda_para: 1000.0, lambda_dia: 1000.0, lambda_cpl: 100.0,
+            dr_pos, dr_neg,
+            percentage: 0.3, cg_tol: 0.01, cg_max_iter: 100, max_iter: 10, tol: 0.1,
+        };
         let (chi_pos_out, chi_neg_out, chi_total_out) = chi_sep_medi(
             &local_field, &r2prime, &magnitude, &mask,
-            &grid, bdir, cf,
-            1000.0, 1000.0, 100.0,
-            dr_pos, dr_neg,
-            0.3, 0.01, 100, 10, 0.1,
+            &grid, bdir, &params,
             |_, _| {},
         );
 

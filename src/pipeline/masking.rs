@@ -111,15 +111,12 @@ pub fn build_mask_section(
                 let mag_data = magnitude.ok_or_else(|| {
                     PipelineError::InvalidInput("BET requires magnitude data".into())
                 })?;
-                let bet_defaults = crate::bet::BetParams::default();
+                let bet_params = crate::bet::BetParams {
+                    fractional_intensity: *fractional_intensity,
+                    ..crate::bet::BetParams::default()
+                };
                 let grid = crate::Grid::new(nx, ny, nz, vsx, vsy, vsz);
-                mask = crate::bet::run_bet(
-                    mag_data, &grid,
-                    *fractional_intensity, bet_defaults.smoothness,
-                    bet_defaults.gradient_threshold, bet_defaults.iterations,
-                    bet_defaults.subdivisions,
-                    |_, _| {},
-                );
+                mask = crate::bet::run_bet(mag_data, &grid, &bet_params, |_, _| {});
             }
             MaskOp::Erode { iterations } => {
                 mask = erode_mask(&mask, &grid, *iterations);

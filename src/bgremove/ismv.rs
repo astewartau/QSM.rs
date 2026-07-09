@@ -40,14 +40,29 @@ impl Default for IsmvParams {
 /// * `field` - Total field (nx * ny * nz)
 /// * `mask` - Binary mask (nx * ny * nz), 1 = brain, 0 = background
 /// * `grid` - Volume dimensions and voxel sizes
-/// * `radius` - SMV kernel radius in mm
-/// * `tol` - Convergence tolerance
-/// * `max_iter` - Maximum iterations
+/// * `params` - iSMV parameters (tolerance, max iterations, radius factor)
 /// * `progress` - Progress callback (iteration, max_iter)
 ///
 /// # Returns
 /// Tuple of (local field, eroded mask)
 pub fn ismv(
+    field: &[f64],
+    mask: &[u8],
+    grid: &Grid,
+    params: &IsmvParams,
+    progress: impl FnMut(usize, usize),
+) -> (Vec<f64>, Vec<u8>) {
+    let (vsx, vsy, vsz) = grid.voxel_size;
+    // SMV kernel radius in mm, derived from the factor and the largest voxel size.
+    let radius = params.radius_factor * vsx.max(vsy).max(vsz);
+    ismv_core(field, mask, grid, radius, params.tol, params.max_iter, progress)
+}
+
+/// iSMV with an explicit absolute kernel radius (mm).
+///
+/// Internal entry point; the public [`ismv`] wrapper derives the radius from
+/// [`IsmvParams`].
+pub(crate) fn ismv_core(
     field: &[f64],
     mask: &[u8],
     grid: &Grid,
@@ -174,7 +189,7 @@ mod tests {
         let mask = vec![1u8; n * n * n];
         let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
 
-        let (local, eroded) = ismv(
+        let (local, eroded) = ismv_core(
             &field, &mask, &grid,
             2.0, 1e-3, 10, |_, _| {}
         );
@@ -195,7 +210,7 @@ mod tests {
         let mask = vec![1u8; n * n * n];
         let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
 
-        let (local, _eroded) = ismv(
+        let (local, _eroded) = ismv_core(
             &field, &mask, &grid,
             2.0, 1e-3, 20, |_, _| {}
         );
@@ -233,7 +248,7 @@ mod tests {
         let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
 
         // Use small radius for less erosion
-        let (_, eroded) = ismv(
+        let (_, eroded) = ismv_core(
             &field, &mask, &grid,
             1.5, 1e-3, 50, |_, _| {}
         );
@@ -254,13 +269,13 @@ mod tests {
         let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
 
         // Run with more iterations and tight tolerance
-        let (local_many, _) = ismv(
+        let (local_many, _) = ismv_core(
             &field, &mask, &grid,
             2.0, 1e-6, 100, |_, _| {}
         );
 
         // Run with fewer iterations
-        let (local_few, _) = ismv(
+        let (local_few, _) = ismv_core(
             &field, &mask, &grid,
             2.0, 1e-6, 5, |_, _| {}
         );
@@ -293,13 +308,13 @@ mod tests {
         let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
 
         // Small radius
-        let (local_small, eroded_small) = ismv(
+        let (local_small, eroded_small) = ismv_core(
             &field, &mask, &grid,
             1.5, 1e-3, 20, |_, _| {}
         );
 
         // Larger radius
-        let (local_large, eroded_large) = ismv(
+        let (local_large, eroded_large) = ismv_core(
             &field, &mask, &grid,
             3.0, 1e-3, 20, |_, _| {}
         );
@@ -355,7 +370,7 @@ mod tests {
         }
 
         let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
-        let (local, eroded) = ismv(
+        let (local, eroded) = ismv_core(
             &field, &mask, &grid,
             2.0, 1e-3, 50, |_, _| {}
         );
@@ -385,7 +400,7 @@ mod tests {
         let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
 
         let mut progress_calls = Vec::new();
-        let (local, _) = ismv(
+        let (local, _) = ismv_core(
             &field, &mask, &grid,
             2.0, 1e-3, 20,
             |iter, max| { progress_calls.push((iter, max)); }
@@ -406,7 +421,7 @@ mod tests {
         let grid = Grid::new(n, n, n, 0.5, 1.0, 2.0);
 
         // Anisotropic voxel sizes
-        let (local, eroded) = ismv(
+        let (local, eroded) = ismv_core(
             &field, &mask, &grid,
             3.0, 1e-3, 20, |_, _| {}
         );
@@ -427,7 +442,7 @@ mod tests {
         let mask = vec![1u8; n * n * n];
         let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
 
-        let (local, _) = ismv(
+        let (local, _) = ismv_core(
             &field, &mask, &grid,
             2.0, 1e-12, 200, |_, _| {} // Very tight tolerance, many iterations allowed
         );
@@ -454,7 +469,7 @@ mod tests {
         }
 
         let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
-        let (local, eroded) = ismv(
+        let (local, eroded) = ismv_core(
             &field, &mask, &grid,
             1.5, 1e-3, 30, |_, _| {}
         );
