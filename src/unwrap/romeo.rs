@@ -18,7 +18,6 @@ use std::f64::consts::PI;
 
 use crate::region_grow::{grow_region_unwrap, grow_region_unwrap_from_visited, grow_region_unwrap_full};
 use crate::Grid;
-use crate::maybe_par_iter;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
@@ -279,81 +278,80 @@ pub fn calculate_weights_romeo_with_flags(
     let half_max_mag = 0.5 * max_mag + 1e-12;
 
     for dim in 0..3_usize {
-        for i in 0..nx {
-            for j in 0..ny {
-                for k in 0..nz {
-                    let (ni, nj, nk) = match dim {
-                        0 => (i + 1, j, k),
-                        1 => (i, j + 1, k),
-                        _ => (i, j, k + 1),
-                    };
+        // Each dim writes a disjoint n_total block; voxels within it are
+        // independent, so fan out across voxels (rayon under `parallel`).
+        let block = &mut weights[dim * n_total..(dim + 1) * n_total];
+        maybe_par_iter_mut!(block).enumerate().for_each(|(idx, w)| {
+            let i = idx % nx;
+            let j = (idx / nx) % ny;
+            let k = idx / (nx * ny);
+            let (ni, nj, nk) = match dim {
+                0 => (i + 1, j, k),
+                1 => (i, j + 1, k),
+                _ => (i, j, k + 1),
+            };
 
-                    if ni >= nx || nj >= ny || nk >= nz {
-                        continue;
-                    }
+            if ni >= nx || nj >= ny || nk >= nz {
+                return;
+            }
 
-                    let idx = idx3d(i, j, k, nx, ny);
-                    let idx_n = idx3d(ni, nj, nk, nx, ny);
+            let idx_n = idx3d(ni, nj, nk, nx, ny);
 
-                    if mask[idx] == 0 || mask[idx_n] == 0 {
-                        continue;
-                    }
+            if mask[idx] == 0 || mask[idx_n] == 0 {
+                return;
+            }
 
-                    let mut weight = 1.0_f64;
+            let mut weight = 1.0_f64;
 
-                    // 1. Phase coherence: 1 - |wrap(diff)| / π
-                    if flags[0] {
-                        let pc = 1.0 - wrap_angle(phase[idx_n] - phase[idx]).abs() / PI;
-                        weight *= 0.1 + 0.9 * pc;
-                    }
+            // 1. Phase coherence: 1 - |wrap(diff)| / π
+            if flags[0] {
+                let pc = 1.0 - wrap_angle(phase[idx_n] - phase[idx]).abs() / PI;
+                weight *= 0.1 + 0.9 * pc;
+            }
 
-                    // 2. Phase gradient coherence (multi-echo)
-                    if f_pgc {
-                        let phase2_data = phase2.unwrap();
-                        let wrapped_p1 = wrap_angle(phase[idx_n] - phase[idx]);
-                        let wrapped_p2 = wrap_angle(phase2_data[idx_n] - phase2_data[idx]);
-                        let pgc = (1.0 - (wrapped_p1 - wrapped_p2 * te_ratio).abs()).max(0.0);
-                        weight *= 0.1 + 0.9 * pgc;
-                    }
+            // 2. Phase gradient coherence (multi-echo)
+            if f_pgc {
+                let phase2_data = phase2.unwrap();
+                let wrapped_p1 = wrap_angle(phase[idx_n] - phase[idx]);
+                let wrapped_p2 = wrap_angle(phase2_data[idx_n] - phase2_data[idx]);
+                let pgc = (1.0 - (wrapped_p1 - wrapped_p2 * te_ratio).abs()).max(0.0);
+                weight *= 0.1 + 0.9 * pgc;
+            }
 
-                    // 3. Phase linearity: product of two triplet linearities
-                    if f_pl {
-                        let pl = phase_linearity_edge(phase, i, j, k, ni, nj, nk, dim, nx, ny, nz);
-                        weight *= 0.1 + 0.9 * pl;
-                    }
+            // 3. Phase linearity: product of two triplet linearities
+            if f_pl {
+                let pl = phase_linearity_edge(phase, i, j, k, ni, nj, nk, dim, nx, ny, nz);
+                weight *= 0.1 + 0.9 * pl;
+            }
 
-                    if has_mag {
-                        let m1 = mag[idx];
-                        let m2 = mag[idx_n];
-                        let small = m1.min(m2);
-                        let big = m1.max(m2);
+            if has_mag {
+                let m1 = mag[idx];
+                let m2 = mag[idx_n];
+                let small = m1.min(m2);
+                let big = m1.max(m2);
 
-                        // 4. Magnitude coherence: (min/max)²
-                        if f_mc {
-                            let mc = if big > 1e-12 { (small / big).powi(2) } else { 0.0 };
-                            weight *= 0.1 + 0.9 * mc;
-                        }
+                // 4. Magnitude coherence: (min/max)²
+                if f_mc {
+                    let mc = if big > 1e-12 { (small / big).powi(2) } else { 0.0 };
+                    weight *= 0.1 + 0.9 * mc;
+                }
 
-                        // 5. Magnitude weight: penalize low signal
-                        if f_mw {
-                            let mw = 0.5 + 0.5 * (small / half_max_mag).min(1.0);
-                            weight *= 0.1 + 0.9 * mw;
-                        }
+                // 5. Magnitude weight: penalize low signal
+                if f_mw {
+                    let mw = 0.5 + 0.5 * (small / half_max_mag).min(1.0);
+                    weight *= 0.1 + 0.9 * mw;
+                }
 
-                        // 6. Magnitude weight 2: penalize too-high signal (flow artifacts)
-                        if f_mw2 {
-                            let mw2 = 0.5 + 0.5 * (half_max_mag / big.max(1e-12)).min(1.0);
-                            weight *= 0.1 + 0.9 * mw2;
-                        }
-                    }
-
-                    // Rescale to u8: min valid = 1, best = 255, 0 = no edge
-                    let weight_u8 = rescale_weight(weight);
-                    let edge_idx = dim * n_total + idx3d(i, j, k, nx, ny);
-                    weights[edge_idx] = weight_u8;
+                // 6. Magnitude weight 2: penalize too-high signal (flow artifacts)
+                if f_mw2 {
+                    let mw2 = 0.5 + 0.5 * (half_max_mag / big.max(1e-12)).min(1.0);
+                    weight *= 0.1 + 0.9 * mw2;
                 }
             }
-        }
+
+            // Rescale to u8: min valid = 1, best = 255, 0 = no edge
+            *w = rescale_weight(weight);
+        });
     }
 
     weights
@@ -555,55 +553,55 @@ pub fn voxel_quality_romeo(
 
     let mut quality = vec![0.0_f64; n_total];
 
-    for i in 0..nx {
-        for j in 0..ny {
-            for k in 0..nz {
-                let idx = idx3d(i, j, k, nx, ny);
-                if mask[idx] == 0 {
-                    continue;
-                }
-
-                let mut sum = 0.0_f64;
-                let mut count = 0u32;
-
-                // +x edge: stored at (i, j, k) in dim=0
-                if i + 1 < nx && mask[idx3d(i + 1, j, k, nx, ny)] != 0 {
-                    sum += weights[0 * n_total + idx] as f64;
-                    count += 1;
-                }
-                // -x edge: stored at (i-1, j, k) in dim=0
-                if i > 0 && mask[idx3d(i - 1, j, k, nx, ny)] != 0 {
-                    sum += weights[0 * n_total + idx3d(i - 1, j, k, nx, ny)] as f64;
-                    count += 1;
-                }
-                // +y edge: stored at (i, j, k) in dim=1
-                if j + 1 < ny && mask[idx3d(i, j + 1, k, nx, ny)] != 0 {
-                    sum += weights[1 * n_total + idx] as f64;
-                    count += 1;
-                }
-                // -y edge: stored at (i, j-1, k) in dim=1
-                if j > 0 && mask[idx3d(i, j - 1, k, nx, ny)] != 0 {
-                    sum += weights[1 * n_total + idx3d(i, j - 1, k, nx, ny)] as f64;
-                    count += 1;
-                }
-                // +z edge: stored at (i, j, k) in dim=2
-                if k + 1 < nz && mask[idx3d(i, j, k + 1, nx, ny)] != 0 {
-                    sum += weights[2 * n_total + idx] as f64;
-                    count += 1;
-                }
-                // -z edge: stored at (i, j, k-1) in dim=2
-                if k > 0 && mask[idx3d(i, j, k - 1, nx, ny)] != 0 {
-                    sum += weights[2 * n_total + idx3d(i, j, k - 1, nx, ny)] as f64;
-                    count += 1;
-                }
-
-                if count > 0 {
-                    // Normalize from 0-255 to 0-1, then scale to 0-100
-                    quality[idx] = (sum / count as f64) / 255.0 * 100.0;
-                }
-            }
+    // Each voxel's quality is an independent read of neighbouring edge
+    // weights — fan out across voxels (rayon under the `parallel` feature).
+    maybe_par_iter_mut!(quality).enumerate().for_each(|(idx, q)| {
+        if mask[idx] == 0 {
+            return;
         }
-    }
+        let i = idx % nx;
+        let j = (idx / nx) % ny;
+        let k = idx / (nx * ny);
+
+        let mut sum = 0.0_f64;
+        let mut count = 0u32;
+
+        // +x edge: stored at (i, j, k) in dim=0
+        if i + 1 < nx && mask[idx3d(i + 1, j, k, nx, ny)] != 0 {
+            sum += weights[idx] as f64;
+            count += 1;
+        }
+        // -x edge: stored at (i-1, j, k) in dim=0
+        if i > 0 && mask[idx3d(i - 1, j, k, nx, ny)] != 0 {
+            sum += weights[idx3d(i - 1, j, k, nx, ny)] as f64;
+            count += 1;
+        }
+        // +y edge: stored at (i, j, k) in dim=1
+        if j + 1 < ny && mask[idx3d(i, j + 1, k, nx, ny)] != 0 {
+            sum += weights[n_total + idx] as f64;
+            count += 1;
+        }
+        // -y edge: stored at (i, j-1, k) in dim=1
+        if j > 0 && mask[idx3d(i, j - 1, k, nx, ny)] != 0 {
+            sum += weights[n_total + idx3d(i, j - 1, k, nx, ny)] as f64;
+            count += 1;
+        }
+        // +z edge: stored at (i, j, k) in dim=2
+        if k + 1 < nz && mask[idx3d(i, j, k + 1, nx, ny)] != 0 {
+            sum += weights[2 * n_total + idx] as f64;
+            count += 1;
+        }
+        // -z edge: stored at (i, j, k-1) in dim=2
+        if k > 0 && mask[idx3d(i, j, k - 1, nx, ny)] != 0 {
+            sum += weights[2 * n_total + idx3d(i, j, k - 1, nx, ny)] as f64;
+            count += 1;
+        }
+
+        if count > 0 {
+            // Normalize from 0-255 to 0-1, then scale to 0-100
+            *q = (sum / count as f64) / 255.0 * 100.0;
+        }
+    });
 
     quality
 }
