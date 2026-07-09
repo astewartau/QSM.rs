@@ -15,75 +15,82 @@ Add `qsm-core` to your `Cargo.toml`:
 qsm-core = { git = "https://github.com/astewartau/QSM.rs" }
 ```
 
-Enable optional multi-threaded parallelism with Rayon:
+Optional features: `parallel` (Rayon multi-threading) and `simd`:
 
 ```toml
 [dependencies]
-qsm-core = { git = "https://github.com/astewartau/QSM.rs", tag = "v0.5.0", features = ["parallel"] }
+qsm-core = { git = "https://github.com/astewartau/QSM.rs", features = ["parallel"] }
 ```
 
-### Full Pipeline Example
+There are two ways to use the crate. Both are demonstrated as runnable examples
+([`examples/pipeline_highlevel.rs`](examples/pipeline_highlevel.rs),
+[`examples/pipeline_lowlevel.rs`](examples/pipeline_lowlevel.rs)):
 
-```rust
-use std::path::Path;
-use qsm_core::nifti_io::{read_nifti_file, save_nifti_to_file};
-use qsm_core::bet::run_bet;
-use qsm_core::unwrap::laplacian::laplacian_unwrap;
-use qsm_core::bgremove::vsharp::vsharp_default;
-use qsm_core::inversion::tv::tv_admm;
-
-fn main() -> Result<(), String> {
-    // Load phase and magnitude NIfTI files
-    let phase_nii = read_nifti_file(Path::new("phase.nii.gz"))?;
-    let mag_nii = read_nifti_file(Path::new("magnitude.nii.gz"))?;
-
-    let (nx, ny, nz) = phase_nii.dims;
-    let (vsx, vsy, vsz) = phase_nii.voxel_size;
-
-    // Step 1: Brain extraction using BET
-    let mask = run_bet(
-        &mag_nii.data,
-        nx, ny, nz,
-        vsx, vsy, vsz,
-        0.5,   // fractional intensity threshold
-        1.0,   // smoothness factor
-        0.0,   // gradient threshold
-        1000,  // iterations
-        4,     // icosphere subdivisions
-    );
-
-    // Step 2: Unwrap phase using Laplacian method
-    let unwrapped = laplacian_unwrap(&phase_nii.data, &mask, nx, ny, nz, vsx, vsy, vsz);
-
-    // Step 3: Remove background fields using V-SHARP
-    let (local_field, eroded_mask) = vsharp_default(&unwrapped, &mask, nx, ny, nz, vsx, vsy, vsz);
-
-    // Step 4: Dipole inversion using Total Variation (ADMM)
-    let bdir = (0.0, 0.0, 1.0); // B0 field direction
-    let chi = tv_admm(
-        &local_field,
-        &eroded_mask,
-        nx, ny, nz,
-        vsx, vsy, vsz,
-        bdir,
-        2e-4,  // lambda (regularization)
-        2e-2,  // rho (ADMM penalty)
-        1e-3,  // tolerance
-        250,   // max iterations
-    );
-
-    // Save susceptibility map
-    save_nifti_to_file(
-        Path::new("chi.nii.gz"),
-        &chi,
-        (nx, ny, nz),
-        (vsx, vsy, vsz),
-        &phase_nii.affine,
-    )?;
-
-    Ok(())
-}
 ```
+cargo run --release --example pipeline_highlevel
+cargo run --release --example pipeline_lowlevel
+```
+
+### High-level pipeline (recommended)
+
+Describe the scan once with a `ScanMetadata`, then run the stages. The `run_*`
+functions dispatch to the configured algorithm and handle unit conversions
+internally.
+
+```rust,no_run
+use qsm_core::pipeline::{
+    ScanMetadata, FieldMappingConfig, BgRemovalConfig, InversionConfig, QsmReference,
+    run_field_mapping, run_bg_removal, run_dipole_inversion, apply_reference,
+};
+
+# fn run(phase: Vec<f64>, magnitude: Vec<f64>, mask: Vec<u8>) -> Result<(), qsm_core::pipeline::PipelineError> {
+let meta = ScanMetadata {
+    dims: (128, 128, 64),
+    voxel_size: (1.0, 1.0, 1.0),
+    echo_times: vec![0.020],        // seconds
+    field_strength: 3.0,            // Tesla
+    b0_direction: (0.0, 0.0, 1.0),
+};
+
+let phases: Vec<&[f64]> = vec![&phase];
+let mags: Vec<&[f64]> = vec![&magnitude];
+
+let field = run_field_mapping(&phases, Some(&mags), &mask, &meta,
+    &FieldMappingConfig::default(), &mut |_, _| {})?;
+let bg = run_bg_removal(&field.b0_field_ppm, &mask, &meta,
+    &BgRemovalConfig::default(), &mut |_, _| {})?;
+let chi = run_dipole_inversion(&bg.local_field_ppm, &bg.eroded_mask, &meta,
+    &InversionConfig::default(), Some(&magnitude), &mut |_, _| {})?;
+let chi = apply_reference(&chi, &bg.eroded_mask, QsmReference::Mean);
+# let _ = chi; Ok(())
+# }
+```
+
+### Low-level building blocks
+
+Call the individual algorithm functions directly when you want to wire stages
+together yourself. Each takes a `Grid`, a `*Params` struct (all implement
+`Default`), and — for iterative methods — a progress callback.
+
+```rust,no_run
+use qsm_core::{Grid, bet, unwrap, bgremove, inversion};
+use qsm_core::bet::BetParams;
+use qsm_core::bgremove::VsharpParams;
+use qsm_core::inversion::TvParams;
+
+# fn run(phase: &[f64], magnitude: &[f64]) {
+let grid = Grid::new(128, 128, 64, 1.0, 1.0, 1.0);
+let bdir = (0.0, 0.0, 1.0); // B0 direction
+
+let mask = bet::run_bet(magnitude, &grid, &BetParams::default(), |_, _| {});
+let unwrapped = unwrap::laplacian_unwrap(phase, &mask, &grid);
+let (local, eroded) = bgremove::vsharp(&unwrapped, &mask, &grid, &VsharpParams::default(), |_, _| {});
+let chi = inversion::tv_admm(&local, &eroded, &grid, bdir, &TvParams::default(), |_, _| {});
+# let _ = chi;
+# }
+```
+
+Load and save NIfTI volumes with [`qsm_core::io`](src/io.rs).
 
 ## Algorithms
 

@@ -700,28 +700,25 @@ impl Default for BetParams {
 /// # Arguments
 /// * `data` - 3D magnitude image data (nx * ny * nz, Fortran order)
 /// * `grid` - Volume grid (dimensions and voxel sizes)
-/// * `fractional_intensity` - Intensity threshold (0.0-1.0, smaller = larger brain)
-/// * `smoothness_factor` - Smoothness constraint (default 1.0, larger = smoother)
-/// * `gradient_threshold` - Z-gradient for threshold (-1 to 1, positive = larger at bottom)
-/// * `iterations` - Number of surface evolution iterations
-/// * `subdivisions` - Icosphere subdivision level
-/// * `progress` - Optional progress callback: `(iteration, total_iterations)`
+/// * `params` - BET parameters (intensity threshold, smoothness, gradient, iterations, subdivisions)
+/// * `progress` - Progress callback: `(iteration, total_iterations)`
 ///
 /// # Returns
 /// Binary mask (1 = brain, 0 = background)
 pub fn run_bet<F>(
     data: &[f64],
     grid: &Grid,
-    fractional_intensity: f64,
-    smoothness_factor: f64,
-    gradient_threshold: f64,
-    iterations: usize,
-    subdivisions: usize,
+    params: &BetParams,
     mut progress: F,
 ) -> Vec<u8>
 where
     F: FnMut(usize, usize),
 {
+    let fractional_intensity = params.fractional_intensity;
+    let smoothness_factor = params.smoothness;
+    let gradient_threshold = params.gradient_threshold;
+    let iterations = params.iterations;
+    let subdivisions = params.subdivisions;
     let (nx, ny, nz) = grid.dims;
     let voxel_size = [grid.vsx(), grid.vsy(), grid.vsz()];
 
@@ -1203,11 +1200,7 @@ mod tests {
         let mask = run_bet(
             &data,
             &grid,
-            0.5,            // fractional_intensity
-            1.0,            // smoothness_factor
-            0.0,            // gradient_threshold
-            50,             // iterations (few for speed)
-            1,              // subdivisions (low for speed)
+            &BetParams { fractional_intensity: 0.5, smoothness: 1.0, gradient_threshold: 0.0, iterations: 50, subdivisions: 1 },
             |_, _| {},
         );
 
@@ -1234,11 +1227,7 @@ mod tests {
         let mask = run_bet(
             &data,
             &grid,
-            0.5,
-            1.0,
-            0.3,  // non-zero gradient threshold
-            50,
-            1,
+            &BetParams { fractional_intensity: 0.5, smoothness: 1.0, gradient_threshold: 0.3, iterations: 50, subdivisions: 1 },
             |_, _| {},
         );
 
@@ -1258,11 +1247,7 @@ mod tests {
         let mask = run_bet(
             &data,
             &grid,
-            0.5,
-            1.0,
-            0.0,
-            50,
-            1,
+            &BetParams { fractional_intensity: 0.5, smoothness: 1.0, gradient_threshold: 0.0, iterations: 50, subdivisions: 1 },
             |current, total| {
                 progress_calls.push((current, total));
             },
@@ -1290,8 +1275,18 @@ mod tests {
         let grid = Grid::new(nx, ny, nz, 1.0, 1.0, 1.0);
 
         // Higher fractional_intensity = smaller brain
-        let mask_small = run_bet(&data, &grid, 0.7, 1.0, 0.0, 50, 1, |_, _| {});
-        let mask_large = run_bet(&data, &grid, 0.3, 1.0, 0.0, 50, 1, |_, _| {});
+        let mask_small = run_bet(
+            &data,
+            &grid,
+            &BetParams { fractional_intensity: 0.7, smoothness: 1.0, gradient_threshold: 0.0, iterations: 50, subdivisions: 1 },
+            |_, _| {},
+        );
+        let mask_large = run_bet(
+            &data,
+            &grid,
+            &BetParams { fractional_intensity: 0.3, smoothness: 1.0, gradient_threshold: 0.0, iterations: 50, subdivisions: 1 },
+            |_, _| {},
+        );
 
         let count_small: usize = mask_small.iter().map(|&v| v as usize).sum();
         let count_large: usize = mask_large.iter().map(|&v| v as usize).sum();
@@ -1309,11 +1304,7 @@ mod tests {
         let mask = run_bet(
             &data,
             &grid,
-            0.5,
-            1.0,
-            0.0,
-            50,
-            1,
+            &BetParams { fractional_intensity: 0.5, smoothness: 1.0, gradient_threshold: 0.0, iterations: 50, subdivisions: 1 },
             |_, _| {},
         );
 

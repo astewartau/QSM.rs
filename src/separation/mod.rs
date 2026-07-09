@@ -13,4 +13,4 @@
 
 pub mod chi_sep_medi;
 
-pub use chi_sep_medi::*;
+pub use chi_sep_medi::{chi_sep_medi, ChiSepParams};

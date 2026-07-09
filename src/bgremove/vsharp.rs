@@ -47,13 +47,48 @@ impl Default for VsharpParams {
 /// * `field` - Unwrapped total field (nx * ny * nz)
 /// * `mask` - Binary mask (nx * ny * nz), 1 = inside ROI
 /// * `grid` - Volume dimensions and voxel sizes
-/// * `radii` - SMV kernel radii in mm (should be sorted large to small)
-/// * `threshold` - High-pass filter threshold (typically 0.05)
+/// * `params` - V-SHARP parameters (threshold, min/max radius factors)
 /// * `progress` - Progress callback (radius_index, total_radii)
 ///
 /// # Returns
 /// (local_field, eroded_mask)
 pub fn vsharp(
+    field: &[f64],
+    mask: &[u8],
+    grid: &Grid,
+    params: &VsharpParams,
+    progress: impl FnMut(usize, usize),
+) -> (Vec<f64>, Vec<u8>) {
+    let radii = vsharp_radii(params, grid);
+    vsharp_with_radii(field, mask, grid, &radii, params.threshold, progress)
+}
+
+/// Build the descending list of SMV kernel radii (mm) from the params and grid.
+///
+/// Starts at `max_radius_factor * min_voxel` and steps down by
+/// `min_radius_factor * max_voxel`.
+fn vsharp_radii(params: &VsharpParams, grid: &Grid) -> Vec<f64> {
+    let (vsx, vsy, vsz) = grid.voxel_size;
+    let min_vox = vsx.min(vsy).min(vsz);
+    let max_vox = vsx.max(vsy).max(vsz);
+    let mut radii = Vec::new();
+    let mut r = params.max_radius_factor * min_vox;
+    let step = params.min_radius_factor * max_vox;
+    while r >= step {
+        radii.push(r);
+        r -= step;
+    }
+    if radii.is_empty() {
+        radii.push(params.max_radius_factor * min_vox);
+    }
+    radii
+}
+
+/// V-SHARP with an explicit list of SMV kernel radii (mm).
+///
+/// Internal entry point; the public [`vsharp`] wrapper derives the radii
+/// from [`VsharpParams`].
+pub(crate) fn vsharp_with_radii(
     field: &[f64],
     mask: &[u8],
     grid: &Grid,
@@ -70,7 +105,7 @@ pub fn vsharp(
     // If only one radius, use regular SHARP
     if radii.len() == 1 {
         progress(1, 1);
-        return crate::bgremove::sharp::sharp(
+        return crate::bgremove::sharp::sharp_core(
             field, mask, grid, threshold, radii[0]
         );
     }
@@ -178,7 +213,7 @@ mod tests {
         let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
 
         let radii = vec![4.0, 3.0, 2.0];
-        let (local, _) = vsharp(&field, &mask, &grid, &radii, 0.05, |_, _| {});
+        let (local, _) = vsharp_with_radii(&field, &mask, &grid, &radii, 0.05, |_, _| {});
 
         for &val in local.iter() {
             assert!(val.abs() < 1e-10);
@@ -194,10 +229,10 @@ mod tests {
 
         // V-SHARP with multiple radii
         let radii = vec![5.0, 4.0, 3.0, 2.0];
-        let (_, vsharp_mask) = vsharp(&field, &mask, &grid, &radii, 0.05, |_, _| {});
+        let (_, vsharp_mask) = vsharp_with_radii(&field, &mask, &grid, &radii, 0.05, |_, _| {});
 
         // SHARP with single large radius
-        let (_, sharp_mask) = crate::bgremove::sharp::sharp(
+        let (_, sharp_mask) = crate::bgremove::sharp::sharp_core(
             &field, &mask, &grid, 0.05, 5.0
         );
 
@@ -219,7 +254,7 @@ mod tests {
 
         // Anisotropic voxel sizes
         let radii = vec![4.0, 3.0, 2.0];
-        let (local, final_mask) = vsharp(
+        let (local, final_mask) = vsharp_with_radii(
             &field, &mask, &grid, &radii, 0.05, |_, _| {}
         );
 
@@ -242,7 +277,7 @@ mod tests {
 
         // Single radius should delegate to SHARP
         let radii = vec![3.0];
-        let (local, final_mask) = vsharp(
+        let (local, final_mask) = vsharp_with_radii(
             &field, &mask, &grid, &radii, 0.05, |_, _| {}
         );
 
@@ -252,7 +287,7 @@ mod tests {
         }
 
         // Result should match SHARP with same radius
-        let (sharp_local, sharp_mask) = crate::bgremove::sharp::sharp(
+        let (sharp_local, sharp_mask) = crate::bgremove::sharp::sharp_core(
             &field, &mask, &grid, 0.05, 3.0
         );
 
@@ -274,7 +309,7 @@ mod tests {
         let mask = vec![1u8; n * n * n];
         let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
 
-        let (local, returned_mask) = vsharp(
+        let (local, returned_mask) = vsharp_with_radii(
             &field, &mask, &grid, &[], 0.05, |_, _| {}
         );
 
@@ -317,7 +352,7 @@ mod tests {
 
         let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
         let radii = vec![6.0, 4.0, 3.0, 2.0];
-        let (local, final_mask) = vsharp(
+        let (local, final_mask) = vsharp_with_radii(
             &field, &mask, &grid, &radii, 0.05, |_, _| {}
         );
 
@@ -346,7 +381,7 @@ mod tests {
 
         let radii = vec![4.0, 3.0, 2.0];
         let mut progress_calls = Vec::new();
-        let (local, _) = vsharp(
+        let (local, _) = vsharp_with_radii(
             &field, &mask, &grid, &radii, 0.05,
             |idx, total| { progress_calls.push((idx, total)); }
         );
@@ -367,7 +402,7 @@ mod tests {
 
         let radii = vec![3.0];
         let mut progress_calls = Vec::new();
-        let (local, _) = vsharp(
+        let (local, _) = vsharp_with_radii(
             &field, &mask, &grid, &radii, 0.05,
             |idx, total| { progress_calls.push((idx, total)); }
         );
@@ -387,7 +422,7 @@ mod tests {
         let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
 
         let mut progress_calls = Vec::new();
-        let (local, returned_mask) = vsharp(
+        let (local, returned_mask) = vsharp_with_radii(
             &field, &mask, &grid, &[], 0.05,
             |idx, total| { progress_calls.push((idx, total)); }
         );
@@ -409,10 +444,10 @@ mod tests {
         let radii_sorted = vec![4.0, 3.0, 2.0];
         let radii_unsorted = vec![2.0, 4.0, 3.0];
 
-        let (local_sorted, mask_sorted) = vsharp(
+        let (local_sorted, mask_sorted) = vsharp_with_radii(
             &field, &mask, &grid, &radii_sorted, 0.05, |_, _| {}
         );
-        let (local_unsorted, mask_unsorted) = vsharp(
+        let (local_unsorted, mask_unsorted) = vsharp_with_radii(
             &field, &mask, &grid, &radii_unsorted, 0.05, |_, _| {}
         );
 

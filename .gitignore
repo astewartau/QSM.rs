@@ -4,6 +4,8 @@
 # Test data (downloaded from OSF)
 /bids/
 bids.zip
+/TEST_DATA/
+/TEST_DATA.tar
 
 # Editor
 .vscode/
@@ -20,3 +22,4 @@ bids.zip
 
 # Coverage
 coverage/
+tarpaulin-report.json

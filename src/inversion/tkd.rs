@@ -41,7 +41,7 @@ impl Default for TkdParams {
 /// * `mask` - Binary mask (1 = inside ROI, 0 = outside)
 /// * `grid` - Volume grid (dimensions and voxel sizes)
 /// * `bdir` - B0 field direction (bx, by, bz)
-/// * `threshold` - Truncation threshold (typically 0.1-0.2)
+/// * `params` - TKD parameters (truncation threshold)
 ///
 /// # Returns
 /// Susceptibility map (same size as input)
@@ -50,10 +50,11 @@ pub fn tkd(
     mask: &[u8],
     grid: &Grid,
     bdir: (f64, f64, f64),
-    threshold: f64,
+    params: &TkdParams,
 ) -> Vec<f64> {
     let (nx, ny, nz) = grid.dims;
     let n_total = grid.n_total();
+    let threshold = params.threshold;
 
     // Generate dipole kernel
     let d = dipole_kernel(grid, bdir);
@@ -106,10 +107,11 @@ pub fn tsvd(
     mask: &[u8],
     grid: &Grid,
     bdir: (f64, f64, f64),
-    threshold: f64,
+    params: &TkdParams,
 ) -> Vec<f64> {
     let (nx, ny, nz) = grid.dims;
     let n_total = grid.n_total();
+    let threshold = params.threshold;
 
     // Generate dipole kernel
     let d = dipole_kernel(grid, bdir);
@@ -162,7 +164,7 @@ mod tests {
         let mask = vec![1u8; n * n * n];
         let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
 
-        let chi = tkd(&field, &mask, &grid, (0.0, 0.0, 1.0), 0.15);
+        let chi = tkd(&field, &mask, &grid, (0.0, 0.0, 1.0), &TkdParams { threshold: 0.15 });
 
         for val in chi.iter() {
             assert!(val.abs() < 1e-10, "Zero field should give zero chi");
@@ -181,7 +183,7 @@ mod tests {
         mask[0] = 0;
         mask[1] = 0;
 
-        let chi = tkd(&field, &mask, &grid, (0.0, 0.0, 1.0), 0.15);
+        let chi = tkd(&field, &mask, &grid, (0.0, 0.0, 1.0), &TkdParams { threshold: 0.15 });
 
         assert_eq!(chi[0], 0.0, "Outside mask should be 0");
         assert_eq!(chi[1], 0.0, "Outside mask should be 0");
@@ -195,7 +197,7 @@ mod tests {
         let mask = vec![1u8; n * n * n];
         let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
 
-        let chi = tkd(&field, &mask, &grid, (0.0, 0.0, 1.0), 0.15);
+        let chi = tkd(&field, &mask, &grid, (0.0, 0.0, 1.0), &TkdParams { threshold: 0.15 });
 
         for (i, val) in chi.iter().enumerate() {
             assert!(val.is_finite(), "Chi should be finite at index {}", i);
@@ -210,8 +212,8 @@ mod tests {
         let mask = vec![1u8; n * n * n];
         let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
 
-        let chi_tkd = tkd(&field, &mask, &grid, (0.0, 0.0, 1.0), 0.15);
-        let chi_tsvd = tsvd(&field, &mask, &grid, (0.0, 0.0, 1.0), 0.15);
+        let chi_tkd = tkd(&field, &mask, &grid, (0.0, 0.0, 1.0), &TkdParams { threshold: 0.15 });
+        let chi_tsvd = tsvd(&field, &mask, &grid, (0.0, 0.0, 1.0), &TkdParams { threshold: 0.15 });
 
         // They should be different
         let diff: f64 = chi_tkd.iter().zip(chi_tsvd.iter())

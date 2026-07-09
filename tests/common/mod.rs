@@ -163,10 +163,10 @@ pub fn xsim(a: &[f64], b: &[f64], mask: &[u8], dims: (usize, usize, usize)) -> f
 }
 
 /// Load a NIfTI file from disk and return the data
-pub fn load_nifti_file(path: &str) -> Result<qsm_core::nifti_io::NiftiData, String> {
+pub fn load_nifti_file(path: &str) -> Result<qsm_core::io::NiftiData, String> {
     let bytes = fs::read(path)
         .map_err(|e| format!("Failed to read file {}: {}", path, e))?;
-    qsm_core::nifti_io::load_nifti(&bytes)
+    qsm_core::io::load_nifti(&bytes)
 }
 
 /// Test data structure holding all inputs and ground truth

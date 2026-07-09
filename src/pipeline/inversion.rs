@@ -47,12 +47,12 @@ pub fn run_dipole_inversion(
     let chi = match config.algorithm {
         InversionAlgorithm::Tkd => {
             crate::inversion::tkd(
-                local_field_ppm, mask, &grid, bdir, config.tkd.threshold,
+                local_field_ppm, mask, &grid, bdir, &config.tkd,
             )
         }
         InversionAlgorithm::Tsvd => {
             crate::inversion::tsvd(
-                local_field_ppm, mask, &grid, bdir, config.tsvd.threshold,
+                local_field_ppm, mask, &grid, bdir, &config.tsvd,
             )
         }
         InversionAlgorithm::Tikhonov => {
@@ -89,7 +89,7 @@ pub fn run_dipole_inversion(
             let mag = magnitude.unwrap_or(&uniform_mag);
             let n_std = vec![1.0f64; n_voxels];
 
-            let chi_rad = crate::inversion::medi_l1(
+            let chi_rad = crate::inversion::medi(
                 &local_field_rad, &n_std, mag, mask,
                 &grid, bdir, &config.medi, progress,
             );
@@ -98,9 +98,10 @@ pub fn run_dipole_inversion(
             chi_rad.iter().map(|&v| v * rad_to_ppm).collect()
         }
         InversionAlgorithm::Ilsqr => {
-            crate::inversion::ilsqr_simple(
-                local_field_ppm, mask, &grid, bdir, &config.ilsqr,
-            )
+            let (chi, _, _, _) = crate::inversion::ilsqr(
+                local_field_ppm, mask, &grid, bdir, &config.ilsqr, &mut *progress,
+            );
+            chi
         }
         InversionAlgorithm::Tgv | InversionAlgorithm::Qsmart => {
             return Err(PipelineError::InvalidConfig(
@@ -148,15 +149,10 @@ pub fn run_tgv(
         phases[0].to_vec()
     };
 
-    let phase_f32: Vec<f32> = phase_data.iter().map(|&v| v as f32).collect();
-
-    let chi_f32 = crate::inversion::tgv_qsm(
-        &phase_f32, mask, &grid, tgv_params,
-        (bx as f32, by as f32, bz as f32),
-        |_, _| {},
+    let chi_ppm = crate::inversion::tgv_qsm(
+        &phase_data, mask, &grid, tgv_params, (bx, by, bz), &mut *progress,
     );
 
-    let chi_ppm: Vec<f64> = chi_f32.iter().map(|&v| v as f64).collect();
     Ok(super::referencing::apply_reference(&chi_ppm, mask, reference))
 }
 

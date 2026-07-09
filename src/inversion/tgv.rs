@@ -1021,20 +1021,28 @@ impl TgvWorkspace {
 /// Main TGV-QSM reconstruction
 ///
 /// # Arguments
-/// * `phase` - Wrapped phase data (f32)
+/// * `phase` - Wrapped phase data
 /// * `mask` - Binary mask
 /// * `grid` - Volume grid (dimensions and voxel sizes)
 /// * `params` - TGV parameters
-/// * `b0_dir` - B0 field direction (f32)
+/// * `b0_dir` - B0 field direction
 /// * `progress` - Progress callback `(iteration, total_iterations)`
+///
+/// The reconstruction runs in single precision internally; inputs and
+/// outputs use `f64` to match the rest of the crate's API.
 pub fn tgv_qsm(
-    phase: &[f32],
+    phase: &[f64],
     mask: &[u8],
     grid: &crate::Grid,
     params: &TgvParams,
-    b0_dir: (f32, f32, f32),
-    progress: impl Fn(usize, usize),
-) -> Vec<f32> {
+    b0_dir: (f64, f64, f64),
+    mut progress: impl FnMut(usize, usize),
+) -> Vec<f64> {
+    // The algorithm runs in single precision; convert the f64 boundary inputs.
+    let phase_f32: Vec<f32> = phase.iter().map(|&v| v as f32).collect();
+    let phase: &[f32] = &phase_f32;
+    let b0_dir = (b0_dir.0 as f32, b0_dir.1 as f32, b0_dir.2 as f32);
+
     let (nx, ny, nz) = grid.dims;
     let n_total = grid.n_total();
     let vsx = grid.vsx() as f32;
@@ -1275,7 +1283,7 @@ pub fn tgv_qsm(
     // Insert back into full volume
     insert_subvolume(&mut result, &chi_scaled, &bbox, nx, ny, nz);
 
-    result
+    result.iter().map(|&v| v as f64).collect()
 }
 
 #[cfg(test)]
@@ -1383,13 +1391,13 @@ mod tests {
         }
 
         // Fill phase with a linear ramp (z direction) masked
-        let mut phase = vec![0.0f32; n_total];
+        let mut phase = vec![0.0f64; n_total];
         for k in 0..n {
             for j in 0..n {
                 for i in 0..n {
                     let idx = i + j * n + k * n * n;
                     if mask[idx] != 0 {
-                        phase[idx] = 0.1 * k as f32;
+                        phase[idx] = 0.1 * k as f64;
                     }
                 }
             }
@@ -1560,7 +1568,7 @@ mod tests {
             }
         }
 
-        let phase = vec![0.0f32; n_total];
+        let phase = vec![0.0f64; n_total];
 
         let params = TgvParams {
             iterations: 1000,
@@ -1579,7 +1587,7 @@ mod tests {
         assert_eq!(result.len(), n_total);
 
         // With zero phase, all output values should be very close to zero
-        let max_abs = result.iter().map(|v| v.abs()).fold(0.0f32, f32::max);
+        let max_abs = result.iter().map(|v| v.abs()).fold(0.0f64, f64::max);
         assert!(
             max_abs < 1e-3,
             "Zero-phase TGV result should be ~0, got max abs {}",

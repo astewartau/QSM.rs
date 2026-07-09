@@ -1335,18 +1335,6 @@ pub fn ilsqr(
     (chi, xsa, xfs, xlsqr)
 }
 
-/// Simplified iLSQR returning only the final susceptibility map
-pub fn ilsqr_simple(
-    field: &[f64],
-    mask: &[u8],
-    grid: &Grid,
-    bdir: (f64, f64, f64),
-    params: &IlsqrParams,
-) -> Vec<f64> {
-    let (chi, _, _, _) = ilsqr(field, mask, grid, bdir, params, |_, _| {});
-    chi
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1606,7 +1594,7 @@ mod tests {
 
         let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
         let params = IlsqrParams { tol, max_iter: maxit };
-        let chi = ilsqr_simple(&field, &mask, &grid, bdir, &params);
+        let (chi, _, _, _) = ilsqr(&field, &mask, &grid, bdir, &params, |_, _| {});
 
         // Check output dimensions
         assert_eq!(chi.len(), n_total, "output size mismatch");

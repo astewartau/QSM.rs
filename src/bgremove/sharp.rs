@@ -44,12 +44,27 @@ impl Default for SharpParams {
 /// * `field` - Unwrapped total field (nx * ny * nz)
 /// * `mask` - Binary mask (nx * ny * nz), 1 = inside ROI
 /// * `grid` - Volume dimensions and voxel sizes
-/// * `threshold` - High-pass filter threshold (typically 0.05)
-/// * `radius` - SMV kernel radius in mm
+/// * `params` - SHARP parameters (threshold, radius factor)
 ///
 /// # Returns
 /// (local_field, eroded_mask)
 pub fn sharp(
+    field: &[f64],
+    mask: &[u8],
+    grid: &Grid,
+    params: &SharpParams,
+) -> (Vec<f64>, Vec<u8>) {
+    let (vsx, vsy, vsz) = grid.voxel_size;
+    // SMV kernel radius in mm, derived from the factor and the smallest voxel size.
+    let radius = params.radius_factor * vsx.min(vsy).min(vsz);
+    sharp_core(field, mask, grid, params.threshold, radius)
+}
+
+/// SHARP with an explicit absolute kernel radius (mm).
+///
+/// Internal entry point shared with V-SHARP; the public [`sharp`] wrapper
+/// derives the radius from [`SharpParams`].
+pub(crate) fn sharp_core(
     field: &[f64],
     mask: &[u8],
     grid: &Grid,
@@ -131,7 +146,7 @@ mod tests {
         let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
 
         // Use small radius for small test array
-        let (local, _) = sharp(&field, &mask, &grid, 0.05, 2.0);
+        let (local, _) = sharp(&field, &mask, &grid, &SharpParams { threshold: 0.05, radius_factor: 2.0 });
 
         for &val in local.iter() {
             assert!(val.abs() < 1e-8, "Zero field should give zero local field, got {}", val);
@@ -146,7 +161,7 @@ mod tests {
         let mask = vec![1u8; n * n * n];
         let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
 
-        let (local, eroded) = sharp(&field, &mask, &grid, 0.05, 2.0);
+        let (local, eroded) = sharp(&field, &mask, &grid, &SharpParams { threshold: 0.05, radius_factor: 2.0 });
 
         for (i, &val) in local.iter().enumerate() {
             assert!(val.is_finite(), "Local field should be finite at index {}", i);

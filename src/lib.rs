@@ -2,25 +2,61 @@
 //!
 //! A Rust library for Quantitative Susceptibility Mapping (QSM) of the brain.
 //!
-//! QSM-Core provides a complete set of algorithms for reconstructing magnetic
-//! susceptibility maps from MRI phase data, including brain extraction, phase
-//! unwrapping, background field removal, dipole inversion, and susceptibility
-//! source separation.
+//! QSM-Core reconstructs magnetic susceptibility maps from MRI phase data:
+//! brain extraction, phase unwrapping, background field removal, dipole
+//! inversion, and susceptibility source separation.
 //!
-//! ## Pipeline Overview
+//! ## Which API should I use?
 //!
-//! A typical QSM pipeline follows these steps:
+//! The crate offers two entry points at different levels:
 //!
-//! 1. **Brain extraction** ([`bet`]) — mask the brain region from magnitude images
-//! 2. **Phase unwrapping** ([`unwrap`]) — remove 2π wraps from MRI phase data
-//! 3. **Background field removal** ([`bgremove`]) — isolate the local field from background sources
-//! 4. **Dipole inversion** ([`inversion`]) — reconstruct susceptibility from the local field
+//! - **[`pipeline`] — the high-level API.** Describe a scan with [`ScanMetadata`]
+//!   and a [`QsmPipelineConfig`], then call the `run_*` stage functions. This is
+//!   the easiest way to go from phase data to a susceptibility map and the
+//!   recommended starting point.
+//! - **Algorithm building blocks — the low-level API.** Each algorithm
+//!   ([`bgremove::vsharp()`], [`inversion::tv_admm()`], …) is a plain function taking
+//!   a [`Grid`], a `*Params` struct, and (for iterative methods) a progress
+//!   callback. Use these when you want to wire stages together yourself.
 //!
-//! Additional processing modules:
+//! ```no_run
+//! use qsm_core::{Grid, bet, unwrap, bgremove, inversion};
+//! use qsm_core::bet::BetParams;
+//! use qsm_core::bgremove::VsharpParams;
+//! use qsm_core::inversion::TvParams;
 //!
-//! - **SWI** ([`swi`]) — Susceptibility Weighted Imaging (CLEAR-SWI)
-//! - **Chi-separation** ([`separation`]) — decompose susceptibility into paramagnetic/diamagnetic components
-//! - **Multi-echo processing** ([`utils`]) — R2\*/T2\* mapping, phase combination (MCPC-3D-S), bias correction
+//! # fn run(phase: &[f64], magnitude: &[f64]) {
+//! let grid = Grid::new(128, 128, 64, 1.0, 1.0, 1.0);
+//! let bdir = (0.0, 0.0, 1.0);
+//!
+//! let mask = bet::run_bet(magnitude, &grid, &BetParams::default(), |_, _| {});
+//! let unwrapped = unwrap::laplacian_unwrap(phase, &mask, &grid);
+//! let (local, eroded) = bgremove::vsharp(&unwrapped, &mask, &grid, &VsharpParams::default(), |_, _| {});
+//! let chi = inversion::tv_admm(&local, &eroded, &grid, bdir, &TvParams::default(), |_, _| {});
+//! # let _ = chi;
+//! # }
+//! ```
+//!
+//! ## Modules
+//!
+//! **High-level pipeline**
+//! - [`pipeline`] — config-driven full reconstruction
+//!
+//! **Algorithm building blocks**
+//! - [`bet`] — brain extraction (BET)
+//! - [`unwrap`] — phase unwrapping (ROMEO, Laplacian)
+//! - [`bgremove`] — background field removal (V-SHARP, SHARP, RESHARP, PDF, iSMV, LBV, HARPERELLA)
+//! - [`inversion`] — dipole inversion (TKD, TSVD, Tikhonov, TV, NLTV, RTS, MEDI, iLSQR, TGV)
+//! - [`separation`] — paramagnetic/diamagnetic source separation (χ-separation)
+//! - [`swi`] — susceptibility weighted imaging (CLEAR-SWI)
+//! - [`fieldmap`] — multi-echo phase combination and B0 field mapping
+//! - [`r2star`] — R2\*/T2\* mapping (ARLO)
+//! - [`mask`] — mask thresholding and morphology
+//! - [`homogeneity`] — receive-field bias correction
+//!
+//! **Core types & I/O**
+//! - [`Grid`] — 3D volume descriptor shared by every algorithm
+//! - [`io`] — NIfTI read/write
 //!
 //! ## Feature Flags
 //!
@@ -41,31 +77,89 @@
 //! | Multi-echo | MCPC-3D-S, R2\*/T2\* (ARLO), bias correction |
 //! | Utilities | Frangi vesselness, surface curvature, Otsu thresholding, QSMART |
 
-// Conditional parallelism (must be first for macro visibility)
+// ============================================================================
+// Internal plumbing — public so advanced/downstream code can reach it, but
+// hidden from the documented API surface. No stability guarantees.
+// ============================================================================
 #[macro_use]
+#[doc(hidden)]
 pub mod par;
-
-// Core modules
+#[doc(hidden)]
 pub mod grid;
+#[doc(hidden)]
 pub mod fft;
+#[doc(hidden)]
 pub mod priority_queue;
+#[doc(hidden)]
 pub mod region_grow;
+#[doc(hidden)]
+pub mod kernels;
+#[doc(hidden)]
+pub mod solvers;
+#[doc(hidden)]
+pub mod utils;
 
+// ============================================================================
+// Core types
+// ============================================================================
 pub use grid::Grid;
 
-// Algorithm modules
-pub mod kernels;
+// ============================================================================
+// High-level pipeline
+// ============================================================================
+pub mod pipeline;
+
+// ============================================================================
+// Algorithm building blocks
+// ============================================================================
+pub mod bet;
 pub mod unwrap;
 pub mod bgremove;
 pub mod inversion;
 pub mod separation;
-pub mod solvers;
-pub mod pipeline;
-pub mod utils;
 pub mod swi;
 
-// I/O modules
-pub mod nifti_io;
+/// Multi-echo phase combination and B0 field mapping.
+///
+/// Building blocks for turning multi-echo wrapped phase into a B0 field map:
+/// phase-offset removal (MCPC-3D-S / ASPIRE), weighted B0 estimation, and
+/// linear multi-echo fitting.
+pub mod fieldmap {
+    pub use crate::utils::multi_echo::{
+        phase_offset_removal, calculate_b0_weighted, multi_echo_linear_fit,
+        bipolar_correction, field_to_hz,
+        PhaseOffsetParams, LinearFitParams, LinearFitResult, B0WeightType,
+    };
+}
 
-// Brain extraction
-pub mod bet;
+/// R2\*/T2\* mapping from multi-echo magnitude (ARLO).
+pub mod r2star {
+    pub use crate::utils::r2star::{
+        r2star_arlo, t2star_from_r2star, use_arlo,
+    };
+}
+
+/// Brain-mask thresholding and morphology.
+///
+/// Mask generation ([`otsu_threshold`](crate::mask::otsu_threshold)) plus
+/// morphological operations (erode/dilate/close/fill-holes) and sphere masks.
+pub mod mask {
+    pub use crate::utils::mask::{
+        create_sphere_mask, apply_mask_zero, erode_mask, dilate_mask,
+    };
+    pub use crate::utils::threshold::otsu_threshold;
+    pub use crate::utils::curvature::morphological_close;
+    pub use crate::utils::bias_correction::fill_holes;
+}
+
+/// Receive-field (B1−) bias correction for magnitude images.
+pub mod homogeneity {
+    pub use crate::utils::bias_correction::{
+        makehomogeneous, get_sensitivity, HomogeneityParams,
+    };
+}
+
+// ============================================================================
+// I/O
+// ============================================================================
+pub mod io;

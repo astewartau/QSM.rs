@@ -361,7 +361,7 @@ fn cg_solve_medi<F>(
 ///
 /// # Returns
 /// Susceptibility map (in same units as input field)
-pub fn medi_l1(
+pub fn medi(
     local_field: &[f64],
     n_std: &[f64],
     magnitude: &[f64],
@@ -1098,7 +1098,7 @@ mod tests {
         let n_std = vec![1.0; n * n * n];
         let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
 
-        let chi = medi_l1(
+        let chi = medi(
             &field, &n_std, &mag, &mask, &grid,
             (0.0, 0.0, 1.0), &test_medi_params(), |_, _| {},
         );
@@ -1117,7 +1117,7 @@ mod tests {
         let n_std = vec![1.0; n * n * n];
         let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
 
-        let chi = medi_l1(
+        let chi = medi(
             &field, &n_std, &mag, &mask, &grid,
             (0.0, 0.0, 1.0), &test_medi_params(), |_, _| {},
         );
@@ -1138,7 +1138,7 @@ mod tests {
 
         // Test with SMV enabled
         let params = MediParams { smv: true, smv_radius: 2.0, ..test_medi_params() };
-        let chi = medi_l1(
+        let chi = medi(
             &field, &n_std, &mag, &mask, &grid,
             (0.0, 0.0, 1.0), &params, |_, _| {},
         );
@@ -1159,7 +1159,7 @@ mod tests {
         mask[10] = 0;
         let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
 
-        let chi = medi_l1(
+        let chi = medi(
             &field, &n_std, &mag, &mask, &grid,
             (0.0, 0.0, 1.0), &test_medi_params(), |_, _| {},
         );
@@ -1185,7 +1185,7 @@ mod tests {
 
         // Read NIfTI
         let bytes = std::fs::read(data_path).unwrap();
-        let nifti_data = crate::nifti_io::load_nifti(&bytes).unwrap();
+        let nifti_data = crate::io::load_nifti(&bytes).unwrap();
         let (nx, ny, nz) = nifti_data.dims;
         let (vsx, vsy, vsz) = nifti_data.voxel_size;
 
@@ -1442,7 +1442,7 @@ mod tests {
     fn fnorm(data: &[f32]) -> f32 { data.iter().map(|&v| v * v).sum::<f32>().sqrt() }
 
     #[test]
-    fn test_medi_l1_small() {
+    fn test_medi_small() {
         // 8x8x8 volume with synthetic local field
         let n = 8;
         let n_total = n * n * n;
@@ -1480,7 +1480,7 @@ mod tests {
             cg_tol: 0.01, cg_max_iter: 10, max_iter: 5, tol: 0.1,
             ..MediParams::default()
         };
-        let chi = medi_l1(
+        let chi = medi(
             &field, &n_std, &mag, &mask, &grid,
             (0.0, 0.0, 1.0), &params, |_, _| {},
         );
@@ -1510,7 +1510,7 @@ mod tests {
 
         // Test uniform data weighting (mode 0)
         let params_uniform = MediParams { data_weighting: 0, ..test_medi_params() };
-        let chi_uniform = medi_l1(
+        let chi_uniform = medi(
             &field, &n_std, &mag, &mask, &grid,
             (0.0, 0.0, 1.0), &params_uniform, |_, _| {},
         );
@@ -1518,7 +1518,7 @@ mod tests {
         // Test SNR data weighting (mode 1) with varying noise
         let n_std_varying: Vec<f64> = (0..n_total).map(|i| 0.5 + (i as f64) * 0.01).collect();
         let params_snr = MediParams { data_weighting: 1, ..test_medi_params() };
-        let chi_snr = medi_l1(
+        let chi_snr = medi(
             &field, &n_std_varying, &mag, &mask, &grid,
             (0.0, 0.0, 1.0), &params_snr, |_, _| {},
         );
@@ -1542,7 +1542,7 @@ mod tests {
     }
 
     #[test]
-    fn test_medi_l1_with_progress_small() {
+    fn test_medi_with_progress_small() {
         let n = 8;
         let n_total = n * n * n;
 
@@ -1553,7 +1553,7 @@ mod tests {
         let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
 
         let mut progress_calls = 0usize;
-        let chi = medi_l1(
+        let chi = medi(
             &field, &n_std, &mag, &mask, &grid,
             (0.0, 0.0, 1.0), &test_medi_params(),
             |_iter, _max| { progress_calls += 1; },
@@ -1561,13 +1561,13 @@ mod tests {
 
         assert_eq!(chi.len(), n_total);
         for &val in &chi {
-            assert!(val.is_finite(), "medi_l1 with progress output should be finite");
+            assert!(val.is_finite(), "medi with progress output should be finite");
         }
         assert!(progress_calls > 0, "progress callback should be called at least once");
     }
 
     #[test]
-    fn test_medi_l1_with_merit() {
+    fn test_medi_with_merit() {
         let n = 8;
         let n_total = n * n * n;
 
@@ -1601,7 +1601,7 @@ mod tests {
             cg_tol: 0.01, cg_max_iter: 10, max_iter: 5, tol: 0.1,
             ..MediParams::default()
         };
-        let chi = medi_l1(
+        let chi = medi(
             &field, &n_std, &mag, &mask, &grid,
             (0.0, 0.0, 1.0), &params, |_, _| {},
         );
@@ -1613,7 +1613,7 @@ mod tests {
     }
 
     #[test]
-    fn test_medi_l1_with_smv_final() {
+    fn test_medi_with_smv_final() {
         let n = 8;
         let n_total = n * n * n;
 
@@ -1629,7 +1629,7 @@ mod tests {
             cg_tol: 0.01, cg_max_iter: 10, max_iter: 3, tol: 0.1,
             ..MediParams::default()
         };
-        let chi = medi_l1(
+        let chi = medi(
             &field, &n_std, &mag, &mask, &grid,
             (0.0, 0.0, 1.0), &params, |_, _| {},
         );

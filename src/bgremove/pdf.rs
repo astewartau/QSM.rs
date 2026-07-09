@@ -22,11 +22,14 @@ use crate::utils::vec_norm;
 pub struct PdfParams {
     /// Convergence tolerance
     pub tol: f64,
+    /// Maximum LSMR iterations. `None` uses an automatic default of
+    /// `sqrt(n_voxels)`.
+    pub max_iter: Option<usize>,
 }
 
 impl Default for PdfParams {
     fn default() -> Self {
-        Self { tol: 1e-5 }
+        Self { tol: 1e-5, max_iter: None }
     }
 }
 
@@ -37,13 +40,29 @@ impl Default for PdfParams {
 /// * `mask` - Binary mask (nx * ny * nz), 1 = brain, 0 = background
 /// * `grid` - Volume dimensions and voxel sizes
 /// * `bdir` - B0 field direction
-/// * `tol` - Convergence tolerance for LSMR
-/// * `max_iter` - Maximum iterations for LSMR
+/// * `params` - PDF parameters (tolerance, optional max iterations)
 /// * `progress` - Progress callback (iteration, max_iter)
 ///
 /// # Returns
 /// Local field with background removed
 pub fn pdf(
+    field: &[f64],
+    mask: &[u8],
+    grid: &Grid,
+    bdir: (f64, f64, f64),
+    params: &PdfParams,
+    progress: impl FnMut(usize, usize),
+) -> Vec<f64> {
+    // Default max iterations to sqrt(n_voxels) when unspecified.
+    let max_iter = params.max_iter.unwrap_or_else(|| (grid.n_total() as f64).sqrt() as usize);
+    pdf_core(field, mask, grid, bdir, params.tol, max_iter, progress)
+}
+
+/// PDF with an explicit LSMR iteration count.
+///
+/// Internal entry point; the public [`pdf`] wrapper supplies the default
+/// iteration count from [`PdfParams`].
+pub(crate) fn pdf_core(
     field: &[f64],
     mask: &[u8],
     grid: &Grid,
@@ -337,7 +356,7 @@ mod tests {
         let mask = vec![1u8; n * n * n];
         let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
 
-        let local = pdf(
+        let local = pdf_core(
             &field, &mask, &grid,
             (0.0, 0.0, 1.0), 1e-5, 10, |_, _| {}
         );
@@ -371,7 +390,7 @@ mod tests {
         }
 
         let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
-        let local = pdf(
+        let local = pdf_core(
             &field, &mask, &grid,
             (0.0, 0.0, 1.0), 1e-5, 20, |_, _| {}
         );
@@ -390,7 +409,7 @@ mod tests {
         mask[10] = 0;
         let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
 
-        let local = pdf(
+        let local = pdf_core(
             &field, &mask, &grid,
             (0.0, 0.0, 1.0), 1e-5, 10, |_, _| {}
         );
@@ -424,7 +443,7 @@ mod tests {
 
         // Anisotropic voxel sizes
         let grid = Grid::new(n, n, n, 0.5, 1.0, 2.0);
-        let local = pdf(
+        let local = pdf_core(
             &field, &mask, &grid,
             (0.0, 0.0, 1.0), 1e-5, 20, |_, _| {}
         );
@@ -475,7 +494,7 @@ mod tests {
         }
 
         let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
-        let local = pdf(
+        let local = pdf_core(
             &field, &mask, &grid,
             (0.0, 0.0, 1.0), 1e-5, 30, |_, _| {}
         );
@@ -539,7 +558,7 @@ mod tests {
         }
 
         let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
-        let local = pdf(
+        let local = pdf_core(
             &field, &mask, &grid,
             (0.0, 0.0, 1.0), 1e-4, 50, |_, _| {}
         );
@@ -582,12 +601,12 @@ mod tests {
         let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
 
         // With many iterations the result should converge
-        let local_many = pdf(
+        let local_many = pdf_core(
             &field, &mask, &grid,
             (0.0, 0.0, 1.0), 1e-8, 100, |_, _| {}
         );
 
-        let local_few = pdf(
+        let local_few = pdf_core(
             &field, &mask, &grid,
             (0.0, 0.0, 1.0), 1e-8, 5, |_, _| {}
         );
@@ -622,7 +641,7 @@ mod tests {
 
         // Tilted B0 direction
         let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
-        let local = pdf(
+        let local = pdf_core(
             &field, &mask, &grid,
             (0.1, 0.2, 0.97), 1e-5, 20, |_, _| {}
         );
@@ -655,7 +674,7 @@ mod tests {
 
         let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
         let mut progress_calls = Vec::new();
-        let local = pdf(
+        let local = pdf_core(
             &field, &mask, &grid,
             (0.0, 0.0, 1.0), 1e-5, 20,
             |iter, max| { progress_calls.push((iter, max)); }
@@ -676,7 +695,7 @@ mod tests {
         let mask = vec![1u8; n * n * n];
         let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
 
-        let local = pdf(
+        let local = pdf_core(
             &field, &mask, &grid,
             (0.0, 0.0, 1.0), 1e-5, 10, |_, _| {}
         );

@@ -18,11 +18,8 @@
 //! - HARPERELLA: SMV-based exterior Laplacian estimation (Li et al., 2014)
 //! - iHARPERELLA: Phase-domain exterior estimation with improved low-freq suppression (Li et al., 2015)
 
-// Re-export combined algorithms from bgremove (where they belong architecturally)
-pub use crate::bgremove::iharperella::{
-    harperella, iharperella, iharperella_with_weights,
-    HarperellaParams, IharperellaParams,
-};
+// HARPERELLA / iHARPERELLA live in `bgremove` (their single canonical home);
+// the pipeline uses them via `crate::bgremove::...`.
 
 // Pipeline stage modules
 pub mod config;
