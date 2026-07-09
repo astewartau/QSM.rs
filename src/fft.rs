@@ -88,8 +88,22 @@ impl Fft3dWorkspace {
         }
     }
 
-    /// In-place forward 3D FFT
+    /// In-place forward 3D FFT.
+    ///
+    /// With the `parallel` feature the transform is parallelised across the
+    /// outer axis with rayon (reusing per-thread scratch); otherwise it runs
+    /// sequentially reusing the workspace's pre-allocated scratch. Both paths
+    /// are numerically identical.
     pub fn fft3d(&mut self, data: &mut [Complex64]) {
+        #[cfg(feature = "parallel")]
+        { self.fft3d_par(data); }
+        #[cfg(not(feature = "parallel"))]
+        { self.fft3d_seq(data); }
+    }
+
+    /// Sequential forward 3D FFT (reuses pre-allocated scratch).
+    #[allow(dead_code)]
+    fn fft3d_seq(&mut self, data: &mut [Complex64]) {
         let (nx, ny, nz) = (self.nx, self.ny, self.nz);
 
         // Transform along x-axis (sequential — workspace reuses pre-allocated scratch)
@@ -127,8 +141,29 @@ impl Fft3dWorkspace {
         }
     }
 
-    /// In-place inverse 3D FFT (with normalization)
+    /// Parallel forward 3D FFT (rayon; one task per outer slab, per-thread scratch).
+    #[cfg(feature = "parallel")]
+    fn fft3d_par(&mut self, data: &mut [Complex64]) {
+        transform_3d_par(
+            data, self.nx, self.ny, self.nz,
+            &self.fft_x, &self.fft_y, &self.fft_z,
+        );
+    }
+
+    /// In-place inverse 3D FFT (with normalization).
+    ///
+    /// Parallel under the `parallel` feature, sequential otherwise; both are
+    /// numerically identical.
     pub fn ifft3d(&mut self, data: &mut [Complex64]) {
+        #[cfg(feature = "parallel")]
+        { self.ifft3d_par(data); }
+        #[cfg(not(feature = "parallel"))]
+        { self.ifft3d_seq(data); }
+    }
+
+    /// Sequential inverse 3D FFT (reuses pre-allocated scratch).
+    #[allow(dead_code)]
+    fn ifft3d_seq(&mut self, data: &mut [Complex64]) {
         let (nx, ny, nz) = (self.nx, self.ny, self.nz);
         let n_total = self.n_total as f64;
 
@@ -160,6 +195,17 @@ impl Fft3dWorkspace {
 
         // Normalize
         for val in data.iter_mut() { *val /= n_total; }
+    }
+
+    /// Parallel inverse 3D FFT (rayon; one task per outer slab, per-thread scratch).
+    #[cfg(feature = "parallel")]
+    fn ifft3d_par(&mut self, data: &mut [Complex64]) {
+        transform_3d_par(
+            data, self.nx, self.ny, self.nz,
+            &self.ifft_x, &self.ifft_y, &self.ifft_z,
+        );
+        let n_total = self.n_total as f64;
+        data.par_iter_mut().for_each(|val| { *val /= n_total; });
     }
 
     /// Apply dipole convolution in-place: out = real(ifft(D * fft(x)))
@@ -364,69 +410,71 @@ impl Fft3dWorkspaceF32 {
 /// Transforms data in Fortran order with shape (nx, ny, nz).
 /// Matches numpy.fft.fftn behavior.
 pub fn fft3d(data: &mut [Complex64], nx: usize, ny: usize, nz: usize) {
-    #[cfg(not(feature = "parallel"))]
-    {
-        Fft3dWorkspace::new(nx, ny, nz).fft3d(data);
-    }
-    #[cfg(feature = "parallel")]
-    {
-        fft3d_parallel(data, nx, ny, nz);
-    }
+    Fft3dWorkspace::new(nx, ny, nz).fft3d(data);
 }
 
-/// Parallel FFT implementation using rayon
+/// Shared parallel 3-axis transform (rayon) used by the workspace methods.
+///
+/// Applies the given per-axis FFT plans in place, with no normalization.
+/// Parallelised across the outer axis: one task per slab, reusing a single
+/// per-thread buffer+scratch across all columns in that slab (avoids the
+/// per-column allocation of a naive `par_iter` over every column).
 #[cfg(feature = "parallel")]
-fn fft3d_parallel(data: &mut [Complex64], nx: usize, ny: usize, nz: usize) {
-    let mut planner = FftPlanner::new();
+fn transform_3d_par(
+    data: &mut [Complex64],
+    nx: usize, ny: usize, nz: usize,
+    plan_x: &Arc<dyn Fft<f64>>,
+    plan_y: &Arc<dyn Fft<f64>>,
+    plan_z: &Arc<dyn Fft<f64>>,
+) {
+    let nxy = nx * ny;
 
-    // Transform along x-axis (contiguous rows of length nx)
-    let fft_x = planner.plan_fft(nx, FftDirection::Forward);
+    // x-axis: contiguous rows of length nx.
     {
-        let scratch_len = fft_x.get_inplace_scratch_len();
-        data.par_chunks_mut(nx).for_each(|row| {
-            let mut scratch = vec![Complex64::new(0.0, 0.0); scratch_len];
-            fft_x.process_with_scratch(row, &mut scratch);
-        });
+        let plan_x = plan_x.clone();
+        let slen = plan_x.get_inplace_scratch_len();
+        data.par_chunks_mut(nx).for_each_init(
+            || vec![Complex64::new(0.0, 0.0); slen],
+            |scratch, row| plan_x.process_with_scratch(row, scratch),
+        );
     }
 
-    // Transform along y-axis (stride nx)
-    let fft_y = planner.plan_fft(ny, FftDirection::Forward);
+    // y-axis: one task per z-slab (fixed k), reusing buffer+scratch across its nx columns.
     {
-        let scratch_len = fft_y.get_inplace_scratch_len();
-        let nxy = nx * ny;
-        let pairs: Vec<(usize, usize)> = (0..nz).flat_map(|k| (0..nx).map(move |i| (k, i))).collect();
+        let plan_y = plan_y.clone();
+        let slen = plan_y.get_inplace_scratch_len();
         let data_send = SendPtr::new(data);
-        // SAFETY: Each (k, i) pair accesses a unique strided column — no overlap.
-        pairs.par_iter().for_each(|&(k, i)| {
-            let mut buffer = vec![Complex64::new(0.0, 0.0); ny];
-            let mut scratch = vec![Complex64::new(0.0, 0.0); scratch_len];
-            unsafe {
-                let slice = data_send.as_slice();
-                for j in 0..ny { buffer[j] = slice[i + j * nx + k * nxy]; }
-                fft_y.process_with_scratch(&mut buffer, &mut scratch);
-                for j in 0..ny { slice[i + j * nx + k * nxy] = buffer[j]; }
-            }
-        });
+        (0..nz).into_par_iter().for_each_init(
+            || (vec![Complex64::new(0.0, 0.0); ny], vec![Complex64::new(0.0, 0.0); slen]),
+            |(buffer, scratch), k| {
+                // SAFETY: distinct k → disjoint z-slabs; distinct i → disjoint columns.
+                let slice = unsafe { data_send.as_slice() };
+                for i in 0..nx {
+                    for j in 0..ny { buffer[j] = slice[i + j * nx + k * nxy]; }
+                    plan_y.process_with_scratch(buffer, scratch);
+                    for j in 0..ny { slice[i + j * nx + k * nxy] = buffer[j]; }
+                }
+            },
+        );
     }
 
-    // Transform along z-axis (stride nx*ny)
-    let fft_z = planner.plan_fft(nz, FftDirection::Forward);
+    // z-axis: one task per fixed-j plane, reusing buffer across its nx columns.
     {
-        let scratch_len = fft_z.get_inplace_scratch_len();
-        let nxy = nx * ny;
-        let pairs: Vec<(usize, usize)> = (0..ny).flat_map(|j| (0..nx).map(move |i| (j, i))).collect();
+        let plan_z = plan_z.clone();
+        let slen = plan_z.get_inplace_scratch_len();
         let data_send = SendPtr::new(data);
-        // SAFETY: Each (j, i) pair accesses a unique strided column — no overlap.
-        pairs.par_iter().for_each(|&(j, i)| {
-            let mut buffer = vec![Complex64::new(0.0, 0.0); nz];
-            let mut scratch = vec![Complex64::new(0.0, 0.0); scratch_len];
-            unsafe {
-                let slice = data_send.as_slice();
-                for k in 0..nz { buffer[k] = slice[i + j * nx + k * nxy]; }
-                fft_z.process_with_scratch(&mut buffer, &mut scratch);
-                for k in 0..nz { slice[i + j * nx + k * nxy] = buffer[k]; }
-            }
-        });
+        (0..ny).into_par_iter().for_each_init(
+            || (vec![Complex64::new(0.0, 0.0); nz], vec![Complex64::new(0.0, 0.0); slen]),
+            |(buffer, scratch), j| {
+                // SAFETY: distinct j → disjoint (i,k) planes; distinct i → disjoint columns.
+                let slice = unsafe { data_send.as_slice() };
+                for i in 0..nx {
+                    for k in 0..nz { buffer[k] = slice[i + j * nx + k * nxy]; }
+                    plan_z.process_with_scratch(buffer, scratch);
+                    for k in 0..nz { slice[i + j * nx + k * nxy] = buffer[k]; }
+                }
+            },
+        );
     }
 }
 
@@ -435,74 +483,7 @@ fn fft3d_parallel(data: &mut [Complex64], nx: usize, ny: usize, nz: usize) {
 /// Transforms data in Fortran order with shape (nx, ny, nz).
 /// Matches numpy.fft.ifftn behavior (includes 1/N normalization).
 pub fn ifft3d(data: &mut [Complex64], nx: usize, ny: usize, nz: usize) {
-    #[cfg(not(feature = "parallel"))]
-    {
-        Fft3dWorkspace::new(nx, ny, nz).ifft3d(data);
-    }
-    #[cfg(feature = "parallel")]
-    {
-        ifft3d_parallel(data, nx, ny, nz);
-    }
-}
-
-/// Parallel IFFT implementation using rayon
-#[cfg(feature = "parallel")]
-fn ifft3d_parallel(data: &mut [Complex64], nx: usize, ny: usize, nz: usize) {
-    let mut planner = FftPlanner::new();
-    let n_total = (nx * ny * nz) as f64;
-
-    // Transform along x-axis
-    let ifft_x = planner.plan_fft(nx, FftDirection::Inverse);
-    {
-        let scratch_len = ifft_x.get_inplace_scratch_len();
-        data.par_chunks_mut(nx).for_each(|row| {
-            let mut scratch = vec![Complex64::new(0.0, 0.0); scratch_len];
-            ifft_x.process_with_scratch(row, &mut scratch);
-        });
-    }
-
-    // Transform along y-axis
-    let ifft_y = planner.plan_fft(ny, FftDirection::Inverse);
-    {
-        let scratch_len = ifft_y.get_inplace_scratch_len();
-        let nxy = nx * ny;
-        let pairs: Vec<(usize, usize)> = (0..nz).flat_map(|k| (0..nx).map(move |i| (k, i))).collect();
-        let data_send = SendPtr::new(data);
-        // SAFETY: Each (k, i) pair accesses a unique strided column — no overlap.
-        pairs.par_iter().for_each(|&(k, i)| {
-            let mut buffer = vec![Complex64::new(0.0, 0.0); ny];
-            let mut scratch = vec![Complex64::new(0.0, 0.0); scratch_len];
-            unsafe {
-                let slice = data_send.as_slice();
-                for j in 0..ny { buffer[j] = slice[i + j * nx + k * nxy]; }
-                ifft_y.process_with_scratch(&mut buffer, &mut scratch);
-                for j in 0..ny { slice[i + j * nx + k * nxy] = buffer[j]; }
-            }
-        });
-    }
-
-    // Transform along z-axis
-    let ifft_z = planner.plan_fft(nz, FftDirection::Inverse);
-    {
-        let scratch_len = ifft_z.get_inplace_scratch_len();
-        let nxy = nx * ny;
-        let pairs: Vec<(usize, usize)> = (0..ny).flat_map(|j| (0..nx).map(move |i| (j, i))).collect();
-        let data_send = SendPtr::new(data);
-        // SAFETY: Each (j, i) pair accesses a unique strided column — no overlap.
-        pairs.par_iter().for_each(|&(j, i)| {
-            let mut buffer = vec![Complex64::new(0.0, 0.0); nz];
-            let mut scratch = vec![Complex64::new(0.0, 0.0); scratch_len];
-            unsafe {
-                let slice = data_send.as_slice();
-                for k in 0..nz { buffer[k] = slice[i + j * nx + k * nxy]; }
-                ifft_z.process_with_scratch(&mut buffer, &mut scratch);
-                for k in 0..nz { slice[i + j * nx + k * nxy] = buffer[k]; }
-            }
-        });
-    }
-
-    // Normalize
-    data.par_iter_mut().for_each(|val| { *val /= n_total; });
+    Fft3dWorkspace::new(nx, ny, nz).ifft3d(data);
 }
 
 /// 3D FFT of real data (real-to-complex)
