@@ -18,6 +18,9 @@ use std::f64::consts::PI;
 
 use crate::region_grow::{grow_region_unwrap, grow_region_unwrap_from_visited, grow_region_unwrap_full};
 use crate::Grid;
+use crate::maybe_par_iter;
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
 
 /// Weight calculation scheme for ROMEO unwrapping.
 ///
@@ -753,7 +756,7 @@ pub fn unwrap_romeo(
 ///
 /// # Returns
 /// Unwrapped phase for each echo
-pub fn unwrap_romeo_multi_echo<P: AsRef<[f64]>, M: AsRef<[f64]>>(
+pub fn unwrap_romeo_multi_echo<P: AsRef<[f64]> + Sync, M: AsRef<[f64]> + Sync>(
     phases: &[P],
     mags: &[M],
     tes: &[f64],
@@ -883,7 +886,7 @@ fn unwrap_template<P: AsRef<[f64]>, M: AsRef<[f64]>>(
 /// Each echo is spatially unwrapped independently using its neighboring echo
 /// as a phase2 reference for weight calculation. Optionally corrects global
 /// 2π offsets between echoes using median wrap counting.
-fn unwrap_individual<P: AsRef<[f64]>, M: AsRef<[f64]>>(
+fn unwrap_individual<P: AsRef<[f64]> + Sync, M: AsRef<[f64]> + Sync>(
     phases: &[P],
     mags: &[M],
     tes: &[f64],
@@ -894,30 +897,34 @@ fn unwrap_individual<P: AsRef<[f64]>, M: AsRef<[f64]>>(
     let n_echoes = phases.len();
     let (seed_i, seed_j, seed_k) = find_seed_point(mask, nx, ny, nz);
 
-    let mut result: Vec<Vec<f64>> = Vec::with_capacity(n_echoes);
+    // Each echo is unwrapped independently from the same seed, so the echoes
+    // fan out across threads (under the `parallel` feature). Order is preserved
+    // by the parallel `collect`.
+    let echo_indices: Vec<usize> = (0..n_echoes).collect();
+    let mut result: Vec<Vec<f64>> = maybe_par_iter!(echo_indices)
+        .map(|&i| {
+            // Neighboring echo as phase2 reference (matching ROMEO.jl)
+            let e2 = if i == 0 { 1 } else { i - 1 };
 
-    for i in 0..n_echoes {
-        // Neighboring echo as phase2 reference (matching ROMEO.jl)
-        let e2 = if i == 0 { 1 } else { i - 1 };
+            let mag = if mags.is_empty() { &[] as &[f64] } else { mags[i].as_ref() };
+            let weights = compute_weights_from_params(
+                params,
+                phases[i].as_ref(),
+                mag,
+                Some(phases[e2].as_ref()),
+                tes[i], tes[e2],
+                mask, nx, ny, nz,
+            );
 
-        let mag = if mags.is_empty() { &[] as &[f64] } else { mags[i].as_ref() };
-        let weights = compute_weights_from_params(
-            params,
-            phases[i].as_ref(),
-            mag,
-            Some(phases[e2].as_ref()),
-            tes[i], tes[e2],
-            mask, nx, ny, nz,
-        );
-
-        let mut unwrapped = phases[i].as_ref().to_vec();
-        let mut work_mask = mask.to_vec();
-        grow_region_unwrap(
-            &mut unwrapped, &weights, &mut work_mask,
-            nx, ny, nz, seed_i, seed_j, seed_k,
-        );
-        result.push(unwrapped);
-    }
+            let mut unwrapped = phases[i].as_ref().to_vec();
+            let mut work_mask = mask.to_vec();
+            grow_region_unwrap(
+                &mut unwrapped, &weights, &mut work_mask,
+                nx, ny, nz, seed_i, seed_j, seed_k,
+            );
+            unwrapped
+        })
+        .collect();
 
     if params.correct_global {
         correct_multi_echo_wraps(&mut result, tes, mask);
