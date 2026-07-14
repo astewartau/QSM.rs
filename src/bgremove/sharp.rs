@@ -22,15 +22,15 @@ use crate::kernels::smv::{smv_kernel, erode_mask_smv};
 pub struct SharpParams {
     /// Deconvolution threshold
     pub threshold: f64,
-    /// Kernel radius factor (multiplied by min voxel size to get radius in mm; default: 18.0)
-    pub radius_factor: f64,
+    /// SMV kernel radius in mm (default: 6.0)
+    pub radius: f64,
 }
 
 impl Default for SharpParams {
     fn default() -> Self {
         Self {
             threshold: 0.05,
-            radius_factor: 18.0,
+            radius: 6.0,
         }
     }
 }
@@ -44,7 +44,7 @@ impl Default for SharpParams {
 /// * `field` - Unwrapped total field (nx * ny * nz)
 /// * `mask` - Binary mask (nx * ny * nz), 1 = inside ROI
 /// * `grid` - Volume dimensions and voxel sizes
-/// * `params` - SHARP parameters (threshold, radius factor)
+/// * `params` - SHARP parameters (threshold, radius in mm)
 ///
 /// # Returns
 /// (local_field, eroded_mask)
@@ -54,10 +54,7 @@ pub fn sharp(
     grid: &Grid,
     params: &SharpParams,
 ) -> (Vec<f64>, Vec<u8>) {
-    let (vsx, vsy, vsz) = grid.voxel_size;
-    // SMV kernel radius in mm, derived from the factor and the smallest voxel size.
-    let radius = params.radius_factor * vsx.min(vsy).min(vsz);
-    sharp_core(field, mask, grid, params.threshold, radius)
+    sharp_core(field, mask, grid, params.threshold, params.radius)
 }
 
 /// SHARP with an explicit absolute kernel radius (mm).
@@ -146,7 +143,7 @@ mod tests {
         let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
 
         // Use small radius for small test array
-        let (local, _) = sharp(&field, &mask, &grid, &SharpParams { threshold: 0.05, radius_factor: 2.0 });
+        let (local, _) = sharp(&field, &mask, &grid, &SharpParams { threshold: 0.05, radius: 2.0 });
 
         for &val in local.iter() {
             assert!(val.abs() < 1e-8, "Zero field should give zero local field, got {}", val);
@@ -161,7 +158,7 @@ mod tests {
         let mask = vec![1u8; n * n * n];
         let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
 
-        let (local, eroded) = sharp(&field, &mask, &grid, &SharpParams { threshold: 0.05, radius_factor: 2.0 });
+        let (local, eroded) = sharp(&field, &mask, &grid, &SharpParams { threshold: 0.05, radius: 2.0 });
 
         for (i, &val) in local.iter().enumerate() {
             assert!(val.is_finite(), "Local field should be finite at index {}", i);

@@ -286,7 +286,10 @@ impl TestData {
 pub struct TestResult {
     pub name: String,
     pub rmse: f64,
+    /// Range-normalized NRMSE (RMSE / range of truth within mask).
     pub nrmse: f64,
+    /// Challenge NRMSE (%): demeaned `100 * ||recon - truth|| / ||truth||`, matching QSM-CI.
+    pub nrmse_challenge: f64,
     pub correlation: f64,
     pub xsim: f64,
 }
@@ -303,25 +306,28 @@ impl TestResult {
             name: name.to_string(),
             rmse: rmse(output, ground_truth, mask),
             nrmse: nrmse(output, ground_truth, mask),
+            nrmse_challenge: nrmse_challenge(output, ground_truth, mask).0,
             correlation: correlation(output, ground_truth, mask),
             xsim: xsim(output, ground_truth, mask, dims),
         }
     }
 
     pub fn print(&self) {
-        println!("{:<15} RMSE={:.6}  NRMSE={:.4}  r={:.4}  XSIM={:.4}",
-            self.name, self.rmse, self.nrmse, self.correlation, self.xsim);
+        println!("{:<15} RMSE={:.6}  NRMSE={:.4}  NRMSE%={:.2}  r={:.4}  XSIM={:.4}",
+            self.name, self.rmse, self.nrmse, self.nrmse_challenge, self.correlation, self.xsim);
     }
 
     pub fn print_with_time(&self, elapsed: std::time::Duration) {
-        println!("{:<15} {:>12.6} {:>10.4} {:>10.4} {:>10.4} {:>10.2?}",
-            self.name, self.rmse, self.nrmse, self.correlation, self.xsim, elapsed);
+        println!("{:<15} {:>12.6} {:>10.4} {:>10.2} {:>10.4} {:>10.4} {:>10.2?}",
+            self.name, self.rmse, self.nrmse, self.nrmse_challenge, self.correlation, self.xsim, elapsed);
     }
 
-    /// Print machine-readable CSV line for CI metric collection
+    /// Print machine-readable CSV line for CI metric collection.
+    /// Fields: name, rmse, nrmse(range), nrmse_challenge(%), correlation, xsim, time.
     pub fn print_ci_metrics(&self, elapsed: std::time::Duration) {
-        println!("RESULT:{},{:.6},{:.4},{:.4},{:.4},{:.2}",
-            self.name, self.rmse, self.nrmse, self.correlation, self.xsim, elapsed.as_secs_f64());
+        println!("RESULT:{},{:.6},{:.4},{:.2},{:.4},{:.4},{:.2}",
+            self.name, self.rmse, self.nrmse, self.nrmse_challenge, self.correlation, self.xsim,
+            elapsed.as_secs_f64());
     }
 }
 

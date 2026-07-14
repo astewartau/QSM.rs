@@ -22,18 +22,18 @@ use crate::kernels::smv::{smv_kernel, erode_mask_smv};
 pub struct VsharpParams {
     /// Deconvolution threshold
     pub threshold: f64,
-    /// Maximum kernel radius in mm (as multiple of min voxel size; default: 18.0)
-    pub max_radius_factor: f64,
-    /// Minimum kernel radius in mm (as multiple of max voxel size; default: 2.0)
-    pub min_radius_factor: f64,
+    /// Maximum (starting) SMV kernel radius in mm (default: 12.0)
+    pub max_radius: f64,
+    /// Minimum SMV kernel radius in mm — also the step between successive radii (default: 1.0)
+    pub min_radius: f64,
 }
 
 impl Default for VsharpParams {
     fn default() -> Self {
         Self {
-            threshold: 0.001,
-            max_radius_factor: 18.0,
-            min_radius_factor: 2.0,
+            threshold: 0.05,
+            max_radius: 12.0,
+            min_radius: 1.0,
         }
     }
 }
@@ -47,7 +47,7 @@ impl Default for VsharpParams {
 /// * `field` - Unwrapped total field (nx * ny * nz)
 /// * `mask` - Binary mask (nx * ny * nz), 1 = inside ROI
 /// * `grid` - Volume dimensions and voxel sizes
-/// * `params` - V-SHARP parameters (threshold, min/max radius factors)
+/// * `params` - V-SHARP parameters (threshold, min/max radius in mm)
 /// * `progress` - Progress callback (radius_index, total_radii)
 ///
 /// # Returns
@@ -59,27 +59,24 @@ pub fn vsharp(
     params: &VsharpParams,
     progress: impl FnMut(usize, usize),
 ) -> (Vec<f64>, Vec<u8>) {
-    let radii = vsharp_radii(params, grid);
+    let radii = vsharp_radii(params);
     vsharp_with_radii(field, mask, grid, &radii, params.threshold, progress)
 }
 
-/// Build the descending list of SMV kernel radii (mm) from the params and grid.
+/// Build the descending list of SMV kernel radii (mm) from the params.
 ///
-/// Starts at `max_radius_factor * min_voxel` and steps down by
-/// `min_radius_factor * max_voxel`.
-fn vsharp_radii(params: &VsharpParams, grid: &Grid) -> Vec<f64> {
-    let (vsx, vsy, vsz) = grid.voxel_size;
-    let min_vox = vsx.min(vsy).min(vsz);
-    let max_vox = vsx.max(vsy).max(vsz);
+/// Starts at `max_radius` (mm) and steps down by `min_radius` (mm), which is
+/// also the smallest kernel used.
+fn vsharp_radii(params: &VsharpParams) -> Vec<f64> {
     let mut radii = Vec::new();
-    let mut r = params.max_radius_factor * min_vox;
-    let step = params.min_radius_factor * max_vox;
+    let mut r = params.max_radius;
+    let step = params.min_radius;
     while r >= step {
         radii.push(r);
         r -= step;
     }
     if radii.is_empty() {
-        radii.push(params.max_radius_factor * min_vox);
+        radii.push(params.max_radius);
     }
     radii
 }

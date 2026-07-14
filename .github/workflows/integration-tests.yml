@@ -655,17 +655,17 @@ jobs:
             done
             [ "$has_any" = false ] && return 1
 
-            echo "| Method | RMSE | NRMSE | Correlation | XSIM | Time |"
-            echo "|--------|------|-------|-------------|------|------|"
+            echo "| Method | RMSE | NRMSE (range) | NRMSE% (χ) | Correlation | XSIM | Time |"
+            echo "|--------|------|---------------|------------|-------------|------|------|"
             for test in "$@"; do
               file="metrics/${prefix}${test}.csv"
               if [ -f "$file" ]; then
                 line=$(grep "^RESULT:" "$file" | head -1 | sed 's/^RESULT://')
-                IFS=',' read -r name rmse nrmse corr xsim time <<< "$line"
+                IFS=',' read -r name rmse nrmse nrmse_ch corr xsim time <<< "$line"
                 if [ "$rmse" = "-" ]; then
-                  echo "| ${name} | :x: Failed | - | - | - | - |"
+                  echo "| ${name} | :x: Failed | - | - | - | - | - |"
                 else
-                  echo "| ${name} | ${rmse} | ${nrmse} | ${corr} | ${xsim} | $(printf '%.2fs' "$time") |"
+                  echo "| ${name} | ${rmse} | ${nrmse} | ${nrmse_ch} | ${corr} | ${xsim} | $(printf '%.2fs' "$time") |"
                 fi
               fi
             done
@@ -821,17 +821,17 @@ jobs:
             done
             [ "$has_any" = false ] && return 1
 
-            echo "| Method | RMSE | NRMSE | Correlation | XSIM | Time |"
-            echo "|--------|------|-------|-------------|------|------|"
+            echo "| Method | RMSE | NRMSE (range) | NRMSE% (χ) | Correlation | XSIM | Time |"
+            echo "|--------|------|---------------|------------|-------------|------|------|"
             for test in "$@"; do
               file="metrics/${prefix}${test}.csv"
               if [ -f "$file" ]; then
                 line=$(grep "^RESULT:" "$file" | head -1 | sed 's/^RESULT://')
-                IFS=',' read -r name rmse nrmse corr xsim time <<< "$line"
+                IFS=',' read -r name rmse nrmse nrmse_ch corr xsim time <<< "$line"
                 if [ "$rmse" = "-" ]; then
-                  echo "| ${name} | :x: Failed | - | - | - | - |"
+                  echo "| ${name} | :x: Failed | - | - | - | - | - |"
                 else
-                  echo "| ${name} | ${rmse} | ${nrmse} | ${corr} | ${xsim} | $(printf '%.2fs' "$time") |"
+                  echo "| ${name} | ${rmse} | ${nrmse} | ${nrmse_ch} | ${corr} | ${xsim} | $(printf '%.2fs' "$time") |"
                 fi
               fi
             done
