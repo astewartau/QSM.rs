@@ -3,6 +3,12 @@ name = "qsm-core"
 version = "0.0.0" # Set automatically by release workflow from git tag
 edition = "2021"
 description = "Core QSM (Quantitative Susceptibility Mapping) algorithms"
+homepage = "https://astewartau.github.io/QSM.rs/"
+repository = "https://github.com/astewartau/QSM.rs"
+documentation = "https://astewartau.github.io/QSM.rs/api/qsm_core/"
+license = "MIT"
+keywords = ["qsm", "mri", "neuroimaging", "susceptibility", "medical-imaging"]
+categories = ["science", "algorithms"]
 
 [lib]
 crate-type = ["rlib"]

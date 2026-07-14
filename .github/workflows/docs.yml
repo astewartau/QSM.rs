@@ -43,16 +43,12 @@ jobs:
           sed -i 's/^version = ".*"/version = "${{ steps.version.outputs.version }}"/' Cargo.toml
 
       - name: Build documentation
+        env:
+          # Inject the QSM family chrome (ecosystem bar, fonts, orange accent)
+          # into every rustdoc page. Only touches documented rustdoc CSS vars.
+          RUSTDOCFLAGS: "--html-in-header ${{ github.workspace }}/web/rustdoc-header.html"
         run: |
           cargo doc --no-deps --all-features --document-private-items 2>&1
-
-      - name: Create index redirect
-        run: |
-          echo '<!DOCTYPE html>
-          <html>
-          <head><meta http-equiv="refresh" content="0; url=qsm_core/index.html"></head>
-          <body><a href="qsm_core/index.html">Redirecting to qsm_core docs...</a></body>
-          </html>' > target/doc/index.html
 
       - name: Add version badge
         run: |
@@ -63,10 +59,18 @@ jobs:
               target/doc/qsm_core/index.html
           fi
 
+      - name: Assemble site
+        run: |
+          # Splash page at root, rustdoc API reference under /api/.
+          mkdir -p _site
+          cp -r web/* _site/
+          mkdir -p _site/api
+          cp -r target/doc/* _site/api/
+
       - name: Upload pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: target/doc
+          path: _site
 
   deploy:
     needs: build

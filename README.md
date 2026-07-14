@@ -4,7 +4,13 @@ A Rust library for Quantitative Susceptibility Mapping (QSM) of the brain.
 
 QSM.rs provides a complete set of algorithms for reconstructing magnetic susceptibility maps from MRI phase data, including brain extraction, phase unwrapping, background field removal, and dipole inversion.
 
-**[API Documentation](https://astewartau.github.io/QSM.rs/qsm_core/)**
+**[Website](https://astewartau.github.io/QSM.rs/)** · **[API Documentation](https://astewartau.github.io/QSM.rs/api/qsm_core/)**
+
+QSM.rs is the shared reconstruction engine behind the wider QSM ecosystem: the
+[QSMxT](https://qsmxt.github.io/QSMxT/) command-line pipeline and the
+[QSMbly](https://qsmbly.neurodesk.org/) in-browser app both call directly into this
+library, and [QSM-CI](https://qsmxt.github.io/QSM-CI/) benchmarks these methods against
+phantom ground truth. See the [ecosystem hub](https://qsmxt.github.io/) for an overview.
 
 ## Usage
 
