@@ -1,0 +1,181 @@
+/*!
+ * qsm-tokens.css — shared design language for the QSM family of sites.
+ * Canonical home: https://qsmxt.github.io/qsm-tokens.css (repo: QSMxT/qsmxt.github.io)
+ *
+ * Dark-first. Every site loads this once, then sets its own accent:
+ *
+ *   <link rel="stylesheet" href="https://qsmxt.github.io/qsm-tokens.css">
+ *   <style>:root{ --qsm-accent:#f97316; --qsm-accent-2:#fdba74; }</style>
+ *
+ * The neutral palette, type, spacing, and component classes are shared; only the
+ * two accent stops differ per tool (orange=engine, purple=pipeline, blue=browser,
+ * green=benchmark). The hub overrides --qsm-title-grad with a multi-hue gradient.
+ */
+
+:root {
+  /* neutral ink palette (dark-first) */
+  --qsm-ink: #0b0e14;
+  --qsm-surface: #141922;
+  --qsm-surface-2: #1b212c;
+  --qsm-border: #262e3a;
+  --qsm-text: #e6eaf0;
+  --qsm-muted: #9aa4b2;
+  --qsm-dim: #6b7683;
+
+  /* accent — overridden per site (default = QSMxT purple) */
+  --qsm-accent: #a855f7;
+  --qsm-accent-2: #c084fc;
+  --qsm-accent-soft: color-mix(in srgb, var(--qsm-accent) 14%, transparent);
+  --qsm-accent-ring: color-mix(in srgb, var(--qsm-accent) 34%, transparent);
+
+  /* headline gradient — hub overrides this to a rainbow */
+  --qsm-title-grad: linear-gradient(100deg, var(--qsm-accent-2), var(--qsm-accent));
+
+  /* type */
+  --qsm-font: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --qsm-font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  /* shape */
+  --qsm-radius: 12px;
+  --qsm-radius-lg: 16px;
+  --qsm-shadow: 0 10px 30px -16px rgba(0, 0, 0, .6);
+  --qsm-maxw: 72rem;
+}
+
+/* ─────────────────────────── Base ─────────────────────────── */
+
+.qsm-page {
+  margin: 0;
+  background: var(--qsm-ink);
+  color: var(--qsm-text);
+  font-family: var(--qsm-font);
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+}
+.qsm-wrap { max-width: var(--qsm-maxw); margin: 0 auto; padding: 0 1.25rem; }
+
+/* ─────────────────────────── Site nav ───────────────────────
+   Slim in-site bar that sits below the shared ecosystem bar. */
+
+.qsm-subnav {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  background: color-mix(in srgb, var(--qsm-ink) 82%, transparent);
+  backdrop-filter: saturate(140%) blur(10px);
+  border-bottom: 1px solid var(--qsm-border);
+}
+.qsm-subnav__inner {
+  max-width: var(--qsm-maxw);
+  margin: 0 auto;
+  padding: 0 1.25rem;
+  height: 56px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+.qsm-subnav__brand {
+  display: inline-flex;
+  align-items: center;
+  gap: .6rem;
+  color: var(--qsm-text);
+  text-decoration: none;
+  font-weight: 700;
+  letter-spacing: -.01em;
+  font-size: 1.05rem;
+}
+.qsm-subnav__brand img, .qsm-subnav__brand svg { display: block; width: 26px; height: 26px; border-radius: 6px; }
+.qsm-subnav__links { display: flex; align-items: center; gap: .35rem; }
+.qsm-subnav__links a {
+  display: inline-flex; align-items: center; gap: .4rem;
+  padding: .4rem .7rem; border-radius: 8px;
+  color: var(--qsm-muted); text-decoration: none; font-size: .92rem; font-weight: 500;
+  transition: color .15s, background-color .15s;
+}
+.qsm-subnav__links a:hover { color: var(--qsm-text); background: rgba(255, 255, 255, .06); }
+.qsm-subnav__links a.is-active { color: var(--qsm-accent-2); }
+
+/* ─────────────────────────── Hero ───────────────────────────
+   Centered: badge → gradient headline → lede → CTA row. */
+
+.qsm-hero { position: relative; overflow: hidden; text-align: left; padding: 5rem 0 3.75rem; }
+.qsm-hero::before {
+  content: "";
+  position: absolute; inset: 0;
+  background:
+    radial-gradient(760px 340px at 20% -12%, var(--qsm-accent-soft), transparent 60%);
+  pointer-events: none;
+}
+/* matches .qsm-wrap so the hero's left edge lines up with the content below */
+.qsm-hero__inner { position: relative; max-width: var(--qsm-maxw); margin: 0 auto; padding: 0 1.25rem; }
+
+.qsm-badge {
+  display: inline-flex; align-items: center; gap: .5rem;
+  font-size: .76rem; letter-spacing: .12em; text-transform: uppercase; font-weight: 600;
+  color: var(--qsm-accent-2); background: var(--qsm-accent-soft);
+  border: 1px solid var(--qsm-accent-ring);
+  padding: .3rem .75rem; border-radius: 999px; margin-bottom: 1.4rem;
+}
+
+.qsm-title {
+  font-size: clamp(2.3rem, 6vw, 3.7rem);
+  line-height: 1.04; font-weight: 700; letter-spacing: -.025em; margin: 0 0 1.1rem;
+}
+.qsm-title .grad {
+  background: var(--qsm-title-grad);
+  -webkit-background-clip: text; background-clip: text; color: transparent;
+}
+
+.qsm-lede { max-width: 42rem; margin: 0 0 2rem; font-size: 1.2rem; color: var(--qsm-muted); }
+.qsm-lede a { color: var(--qsm-accent-2); text-decoration: none; }
+.qsm-lede a:hover { text-decoration: underline; }
+
+.qsm-cta { display: flex; flex-wrap: wrap; gap: .75rem; justify-content: flex-start; }
+
+/* ─────────────────────────── Buttons ─────────────────────────── */
+
+.qsm-btn {
+  display: inline-flex; align-items: center; gap: .5rem;
+  padding: .7rem 1.2rem; border-radius: 10px;
+  font-weight: 600; font-size: .98rem; text-decoration: none; cursor: pointer;
+  border: 1px solid transparent;
+  transition: transform .14s ease, box-shadow .14s ease, background-color .14s, border-color .14s;
+}
+.qsm-btn:hover { transform: translateY(-1px); text-decoration: none; }
+.qsm-btn--primary {
+  color: #0b0e14;
+  background: linear-gradient(100deg, var(--qsm-accent-2), var(--qsm-accent));
+  box-shadow: 0 8px 22px -8px var(--qsm-accent-ring);
+}
+.qsm-btn--secondary { color: var(--qsm-text); background: var(--qsm-surface-2); border-color: var(--qsm-border); }
+.qsm-btn--secondary:hover { border-color: var(--qsm-accent); }
+
+/* ─────────────────────────── Cards ─────────────────────────── */
+
+.qsm-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr)); gap: 1.1rem; }
+.qsm-card {
+  display: flex; flex-direction: column;
+  background: var(--qsm-surface); border: 1px solid var(--qsm-border);
+  border-top: 3px solid var(--qsm-card-accent, var(--qsm-accent));
+  border-radius: var(--qsm-radius-lg); padding: 1.4rem 1.35rem 1.5rem;
+  color: var(--qsm-text); /* cards are <a>; don't inherit the UA link colour */
+  text-decoration: none;
+  transition: transform .16s ease, border-color .16s ease, background-color .16s ease;
+}
+.qsm-card:hover {
+  transform: translateY(-3px);
+  background: var(--qsm-surface-2);
+  border-color: var(--qsm-card-accent, var(--qsm-accent));
+  text-decoration: none;
+}
+
+/* ─────────────────────────── Section + footer ─────────────────────────── */
+
+.qsm-section { padding: 3rem 0; border-top: 1px solid var(--qsm-border); }
+.qsm-section h2 { font-size: 1.6rem; letter-spacing: -.015em; margin: 0 0 .6rem; }
+.qsm-section p { color: var(--qsm-muted); max-width: 46rem; }
+
+.qsm-footer { border-top: 1px solid var(--qsm-border); color: var(--qsm-dim); font-size: .9rem; padding: 2.2rem 0 3rem; }
+.qsm-footer a { color: var(--qsm-muted); text-decoration: none; }
+.qsm-footer a:hover { color: var(--qsm-text); }

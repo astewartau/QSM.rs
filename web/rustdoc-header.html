@@ -1,0 +1,56 @@
+<!-- Injected into every rustdoc page via RUSTDOCFLAGS="--html-in-header ...".
+     Keeps the auto-generated API docs visually part of the QSM.rs family:
+     the ecosystem bar, the Inter / JetBrains Mono fonts, and the orange accent.
+     Only overrides documented rustdoc CSS custom properties, so it degrades
+     gracefully if rustdoc's internals change. -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  /* Family fonts */
+  :root {
+    --font-family: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    --font-family-code: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+
+  /* Orange accent — light theme (and default). Only recolours links/headings;
+     leaves rustdoc's structural colours alone. */
+  :root[data-theme="light"], :root:not([data-theme]) {
+    --link-color: #ea580c;
+    --sidebar-link-color: #c2410c;
+    --mod-link-color: #ea580c;
+    --keyword-link-color: #ea580c;
+    --headings-border-bottom-color: #f0d8c6;
+    --search-input-focused-border-color: #f97316;
+  }
+  /* Orange accent — dark theme */
+  :root[data-theme="dark"] {
+    --link-color: #fb923c;
+    --sidebar-link-color: #fdba74;
+    --mod-link-color: #fb923c;
+    --keyword-link-color: #fb923c;
+  }
+
+  /* Slightly softer, more modern headings */
+  .rustdoc h1, .rustdoc h2, .rustdoc h3, .main-heading h1 {
+    letter-spacing: -0.01em;
+  }
+
+  /* ── Ecosystem bar: make room for the 34px fixed strip qsm-nav.js injects ── */
+  :root { --qsm-eco-h: 34px; }
+  .qsm-eco-bar { position: fixed; inset: 0 0 auto 0; z-index: 100; }
+  /* rustdoc's sidebar and mobile topbar are fixed at top:0 — push them down */
+  nav.sidebar { top: var(--qsm-eco-h) !important; height: calc(100vh - var(--qsm-eco-h)) !important; }
+  .mobile-topbar { top: var(--qsm-eco-h) !important; }
+  /* main content flows in <body>, so a little top padding clears the bar */
+  body.rustdoc { padding-top: var(--qsm-eco-h); }
+</style>
+<script>
+  (function () {
+    var s = document.createElement("script");
+    var local = location.hostname === "localhost" || location.hostname === "127.0.0.1";
+    s.src = local ? "/qsm-nav.js" : "https://qsmxt.github.io/qsm-nav.js";
+    s.dataset.current = "rs";
+    document.head.appendChild(s);
+  })();
+</script>

@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>QSM.rs — the Rust engine for Quantitative Susceptibility Mapping</title>
+  <meta name="description" content="QSM.rs is a Rust library implementing 40+ Quantitative Susceptibility Mapping algorithms: brain extraction, phase unwrapping, background field removal, dipole inversion, and susceptibility source separation.">
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <!-- shared design language (vendored from QSMxT/qsmxt.github.io → qsm-tokens.css) -->
+  <link rel="stylesheet" href="qsm-tokens.css">
+  <script>
+    (function () {
+      var s = document.createElement("script");
+      var local = location.hostname === "localhost" || location.hostname === "127.0.0.1";
+      s.src = local ? "/qsm-nav.js" : "https://qsmxt.github.io/qsm-nav.js";
+      s.dataset.current = "rs";
+      document.head.appendChild(s);
+    })();
+  </script>
+  <style>
+    /* QSM.rs = the engine: orange accent + a warmer ink than the neutral tokens */
+    :root {
+      --qsm-accent: #f97316;
+      --qsm-accent-2: #fdba74;
+      --qsm-ink: #0c0a09;
+      --qsm-surface: #17130f;
+      --qsm-surface-2: #211a14;
+      --qsm-border: #2c2119;
+      --qsm-text: #f5ede6;
+      --qsm-muted: #b3a498;
+    }
+    code, pre { font-family: var(--qsm-font-mono); }
+    .two-col { display: grid; grid-template-columns: 1fr; gap: 1.25rem; }
+    @media (min-width: 860px) { .two-col { grid-template-columns: 1fr 1fr; } }
+    .code-card { background: rgba(0, 0, 0, .35); border: 1px solid var(--qsm-border); border-radius: var(--qsm-radius); overflow: hidden; text-align: left; }
+    .code-head { display: flex; align-items: center; gap: .5rem; padding: .55rem .9rem; border-bottom: 1px solid var(--qsm-border); color: var(--qsm-dim); font-size: .82rem; font-family: var(--qsm-font-mono); }
+    .code-head .dot { width: 10px; height: 10px; border-radius: 50%; }
+    pre { margin: 0; padding: 1.1rem 1.2rem; overflow-x: auto; font-size: .9rem; line-height: 1.7; color: #e8ded4; }
+    pre .k { color: #fdba74; } pre .s { color: #86efac; } pre .c { color: var(--qsm-dim); } pre .f { color: #93c5fd; }
+    .algo-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr)); gap: 1rem; }
+    .algo-card { background: var(--qsm-surface); border: 1px solid var(--qsm-border); border-radius: var(--qsm-radius); padding: 1.1rem 1.2rem 1.3rem; }
+    .algo-card h3 { margin: 0 0 .2rem; font-size: 1rem; display: flex; align-items: center; gap: .5rem; }
+    .algo-card .count { color: var(--qsm-accent-2); font-size: .8rem; font-weight: 600; background: var(--qsm-accent-soft); border-radius: 999px; padding: .05rem .5rem; }
+    .algo-card .list { color: var(--qsm-muted); font-size: .9rem; margin: .5rem 0 0; }
+    .eco-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr)); gap: 1rem; }
+    .eco-card { display: block; background: var(--qsm-surface); border: 1px solid var(--qsm-border); border-left: 3px solid var(--c); border-radius: var(--qsm-radius); padding: 1.1rem 1.2rem 1.25rem; text-decoration: none; transition: transform .15s ease, background-color .15s ease; }
+    .eco-card:hover { transform: translateY(-2px); background: var(--qsm-surface-2); text-decoration: none; }
+    .eco-card .role { color: var(--c); font-size: .72rem; letter-spacing: .09em; text-transform: uppercase; font-weight: 600; }
+    .eco-card .nm { color: var(--qsm-text); font-size: 1.15rem; font-weight: 700; margin: .25rem 0 .4rem; }
+    .eco-card .ds { color: var(--qsm-muted); font-size: .9rem; margin: 0; }
+    .eco-card.xt { --c: #a855f7; } .eco-card.bly { --c: #3b82f6; } .eco-card.ci { --c: #10b981; }
+  </style>
+</head>
+<body class="qsm-page">
+  <nav class="qsm-subnav">
+    <div class="qsm-subnav__inner">
+      <a class="qsm-subnav__brand" href="./"><img src="icon.svg" alt="">QSM.rs</a>
+      <div class="qsm-subnav__links">
+        <a href="api/qsm_core/index.html">API docs</a>
+        <a href="https://github.com/astewartau/QSM.rs">GitHub</a>
+      </div>
+    </div>
+  </nav>
+
+  <header class="qsm-hero">
+    <div class="qsm-hero__inner">
+      <h1 class="qsm-title"><span class="grad">QSM.rs</span></h1>
+      <p class="qsm-lede">
+        The Rust engine for Quantitative Susceptibility Mapping. A from-scratch library implementing
+        40+ published algorithms across the full reconstruction chain — the same engine that powers
+        <a href="https://qsmxt.github.io/QSMxT/">QSMxT</a> and
+        <a href="https://qsmbly.neurodesk.org/">QSMbly</a>.
+      </p>
+      <div class="qsm-cta">
+        <a class="qsm-btn qsm-btn--primary" href="api/qsm_core/index.html">API documentation →</a>
+        <a class="qsm-btn qsm-btn--secondary" href="https://github.com/astewartau/QSM.rs">View on GitHub</a>
+      </div>
+    </div>
+  </header>
+
+  <main class="qsm-wrap">
+    <section class="qsm-section" style="border-top:none; text-align:left">
+      <h2>Get started</h2>
+      <p style="margin:0 0 2rem">Add the crate as a git dependency, then reconstruct in a few lines. There's a high-level pipeline API and a low-level building-block API — both shipped as runnable examples.</p>
+      <div class="two-col">
+        <div class="code-card">
+          <div class="code-head"><span class="dot" style="background:#f97316"></span>Cargo.toml</div>
+<pre><span class="c"># A single git dependency — no system libraries</span>
+[dependencies]
+qsm-core = { <span class="k">git</span> = <span class="s">"https://github.com/astewartau/QSM.rs"</span> }
+
+<span class="c"># optional: multi-threading and SIMD</span>
+<span class="c"># features = ["parallel", "simd"]</span></pre>
+        </div>
+        <div class="code-card">
+          <div class="code-head"><span class="dot" style="background:#fdba74"></span>high-level pipeline</div>
+<pre><span class="k">let</span> field = <span class="f">run_field_mapping</span>(&amp;phases, <span class="k">Some</span>(&amp;mags),
+    &amp;mask, &amp;meta, &amp;cfg, &amp;<span class="k">mut</span> cb)?;
+<span class="k">let</span> bg = <span class="f">run_bg_removal</span>(&amp;field.b0_field_ppm,
+    &amp;mask, &amp;meta, &amp;cfg, &amp;<span class="k">mut</span> cb)?;
+<span class="k">let</span> chi = <span class="f">run_dipole_inversion</span>(&amp;bg.local_field_ppm,
+    &amp;bg.eroded_mask, &amp;meta, &amp;cfg, mag, &amp;<span class="k">mut</span> cb)?;</pre>
+        </div>
+      </div>
+    </section>
+
+    <section class="qsm-section" style="text-align:left">
+      <h2>40+ algorithms, every stage</h2>
+      <p style="margin:0 0 2rem">A complete reconstruction toolkit. Each method is validated against a reference implementation in Julia, MATLAB, or C++ — see the README for the full citation list.</p>
+      <div class="algo-grid" style="text-align:left">
+        <div class="algo-card"><h3>Brain extraction <span class="count">1</span></h3><p class="list">BET</p></div>
+        <div class="algo-card"><h3>Phase unwrapping <span class="count">2</span></h3><p class="list">ROMEO, Laplacian</p></div>
+        <div class="algo-card"><h3>Background field removal <span class="count">8</span></h3><p class="list">V-SHARP, SHARP, RESHARP, SMV, PDF, iSMV, LBV, SDF</p></div>
+        <div class="algo-card"><h3>Unwrap + BFR combined <span class="count">2</span></h3><p class="list">HARPERELLA, iHARPERELLA</p></div>
+        <div class="algo-card"><h3>Dipole inversion <span class="count">8</span></h3><p class="list">TKD, TSVD, Tikhonov, TV, NLTV, RTS, MEDI, iLSQR</p></div>
+        <div class="algo-card"><h3>End-to-end QSM <span class="count">2</span></h3><p class="list">TGV, QSMART</p></div>
+        <div class="algo-card"><h3>Source separation <span class="count">1</span></h3><p class="list">χ-separation (paramagnetic / diamagnetic)</p></div>
+        <div class="algo-card"><h3>Multi-echo &amp; SWI <span class="count">3</span></h3><p class="list">MCPC-3D-S, R2*/T2* (ARLO), CLEAR-SWI</p></div>
+        <div class="algo-card"><h3>Preprocessing &amp; utilities <span class="count">4</span></h3><p class="list">Bias correction, Otsu, Frangi filter, surface curvature</p></div>
+      </div>
+    </section>
+
+    <section class="qsm-section" style="text-align:left">
+      <h2>Part of the QSMxT Ecosystem</h2>
+      <p style="margin:0 0 2rem">QSM.rs is the shared core. If you're not writing Rust, you probably want one of these front doors — they all call straight into this library, so results match exactly.</p>
+      <div class="eco-grid" style="text-align:left">
+        <a class="eco-card xt" href="https://qsmxt.github.io/QSMxT/">
+          <span class="role">Pipeline</span><div class="nm">QSMxT</div>
+          <p class="ds">BIDS-native command-line pipeline and TUI. Raw DICOMs to QSM maps in one binary, built for batch and cluster processing.</p>
+        </a>
+        <a class="eco-card bly" href="https://qsmbly.neurodesk.org/">
+          <span class="role">Browser app</span><div class="nm">QSMbly</div>
+          <p class="ds">This engine compiled to WebAssembly. Run the whole pipeline in your browser — no install, no data upload.</p>
+        </a>
+        <a class="eco-card ci" href="https://qsmxt.github.io/QSM-CI/">
+          <span class="role">Benchmark</span><div class="nm">QSM-CI</div>
+          <p class="ds">Open leaderboard scoring QSM reconstruction methods — in any language — against phantom ground truth.</p>
+        </a>
+      </div>
+    </section>
+  </main>
+
+  <footer class="qsm-footer qsm-wrap">
+    QSM.rs · MIT-licensed · <a href="https://github.com/astewartau/QSM.rs">github.com/astewartau/QSM.rs</a> ·
+    <a href="api/qsm_core/index.html">API docs</a> ·
+    part of the <a href="https://qsmxt.github.io/">QSMxT Ecosystem</a>
+  </footer>
+</body>
+</html>
