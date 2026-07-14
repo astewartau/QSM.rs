@@ -92,7 +92,7 @@ fn test_bgremove_sharp() {
         &data.fieldmap,
         &data.mask,
         &grid,
-        &SharpParams { threshold: 0.05, radius_factor: 6.0 / vsx.min(vsy).min(vsz) },
+        &SharpParams::default(),
     ));
 
     let res = TestResult::new("SHARP", &result, &data.fieldmap_local, &data.mask, data.dims);
@@ -117,11 +117,7 @@ fn test_bgremove_vsharp() {
         &data.fieldmap,
         &data.mask,
         &grid,
-        &VsharpParams {
-            threshold: 0.05,
-            max_radius_factor: 12.0 / vsx.min(vsy).min(vsz),
-            min_radius_factor: 1.0 / vsx.max(vsy).max(vsz),
-        },
+        &VsharpParams::default(),
         |_, _| {},
     ));
 
@@ -176,7 +172,7 @@ fn test_bgremove_ismv() {
         &data.fieldmap,
         &data.mask,
         &grid,
-        &IsmvParams { tol: 1e-6, max_iter: 50, radius_factor: 5.0 / vsx.max(vsy).max(vsz) },
+        &IsmvParams::default(),
         |_, _| {},
     ));
 
@@ -1112,11 +1108,7 @@ fn test_pipeline_lbv_tv() {
     // Step 2b: V-SHARP — same normalization
     let ((local_vsharp_ppm, mask_vsharp), elapsed_vsharp) = run_timed!("V-SHARP", bgremove::vsharp(
         &b0_ppm, &data.mask, &grid,
-        &VsharpParams {
-            threshold: 0.05,
-            max_radius_factor: 12.0 / vsx.min(vsy).min(vsz),
-            min_radius_factor: 1.0 / vsx.max(vsy).max(vsz),
-        },
+        &VsharpParams::default(),
         |_, _| {}
     ));
     let local_vsharp_hz: Vec<f64> = local_vsharp_ppm.iter().map(|&v| v / scale).collect();
@@ -1216,18 +1208,14 @@ fn benchmark_all_algorithms() {
     // SHARP
     let ((result, _), elapsed) = run_timed!("SHARP", bgremove::sharp(
         &data.fieldmap, &data.mask, &grid,
-        &SharpParams { threshold: 0.05, radius_factor: 6.0 / vsx.min(vsy).min(vsz) }
+        &SharpParams::default()
     ));
     TestResult::new("SHARP", &result, &data.fieldmap_local, &data.mask, data.dims).print_with_time(elapsed);
 
     // V-SHARP
     let ((result, _), elapsed) = run_timed!("V-SHARP", bgremove::vsharp(
         &data.fieldmap, &data.mask, &grid,
-        &VsharpParams {
-            threshold: 0.05,
-            max_radius_factor: 12.0 / vsx.min(vsy).min(vsz),
-            min_radius_factor: 1.0 / vsx.max(vsy).max(vsz),
-        },
+        &VsharpParams::default(),
         |_, _| {}
     ));
     TestResult::new("V-SHARP", &result, &data.fieldmap_local, &data.mask, data.dims).print_with_time(elapsed);
@@ -1240,7 +1228,7 @@ fn benchmark_all_algorithms() {
 
     // iSMV
     let ((result, _), elapsed) = run_timed!("iSMV", bgremove::ismv(
-        &data.fieldmap, &data.mask, &grid, &IsmvParams { tol: 1e-6, max_iter: 50, radius_factor: 5.0 / vsx.max(vsy).max(vsz) }, |_, _| {}
+        &data.fieldmap, &data.mask, &grid, &IsmvParams::default(), |_, _| {}
     ));
     TestResult::new("iSMV", &result, &data.fieldmap_local, &data.mask, data.dims).print_with_time(elapsed);
 
@@ -1380,7 +1368,7 @@ fn test_all_combinations() {
     // SHARP
     let ((result, mask), elapsed) = run_timed!("SHARP", bgremove::sharp(
         &data.fieldmap, &data.mask, &grid,
-        &SharpParams { threshold: 0.05, radius_factor: 6.0 / vsx.min(vsy).min(vsz) }
+        &SharpParams::default()
     ));
     TestResult::new("SHARP", &result, &data.fieldmap_local, &data.mask, data.dims).print_with_time(elapsed);
     bfr_results.push(BfrResult { name: "SHARP".into(), local_field: result, mask, elapsed });
@@ -1388,11 +1376,7 @@ fn test_all_combinations() {
     // V-SHARP
     let ((result, mask), elapsed) = run_timed!("V-SHARP", bgremove::vsharp(
         &data.fieldmap, &data.mask, &grid,
-        &VsharpParams {
-            threshold: 0.05,
-            max_radius_factor: 12.0 / vsx.min(vsy).min(vsz),
-            min_radius_factor: 1.0 / vsx.max(vsy).max(vsz),
-        },
+        &VsharpParams::default(),
         |_, _| {}
     ));
     TestResult::new("V-SHARP", &result, &data.fieldmap_local, &data.mask, data.dims).print_with_time(elapsed);
@@ -1407,7 +1391,7 @@ fn test_all_combinations() {
 
     // iSMV
     let ((result, mask), elapsed) = run_timed!("iSMV", bgremove::ismv(
-        &data.fieldmap, &data.mask, &grid, &IsmvParams { tol: 1e-6, max_iter: 50, radius_factor: 5.0 / vsx.max(vsy).max(vsz) }, |_, _| {}
+        &data.fieldmap, &data.mask, &grid, &IsmvParams::default(), |_, _| {}
     ));
     TestResult::new("iSMV", &result, &data.fieldmap_local, &data.mask, data.dims).print_with_time(elapsed);
     bfr_results.push(BfrResult { name: "iSMV".into(), local_field: result, mask, elapsed });

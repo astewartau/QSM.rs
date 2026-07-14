@@ -24,13 +24,13 @@ pub struct IsmvParams {
     pub tol: f64,
     /// Maximum iterations
     pub max_iter: usize,
-    /// Kernel radius factor (multiplied by max voxel size; default: 2.0)
-    pub radius_factor: f64,
+    /// SMV kernel radius in mm (default: 5.0)
+    pub radius: f64,
 }
 
 impl Default for IsmvParams {
     fn default() -> Self {
-        Self { tol: 1e-3, max_iter: 500, radius_factor: 2.0 }
+        Self { tol: 1e-6, max_iter: 50, radius: 5.0 }
     }
 }
 
@@ -40,7 +40,7 @@ impl Default for IsmvParams {
 /// * `field` - Total field (nx * ny * nz)
 /// * `mask` - Binary mask (nx * ny * nz), 1 = brain, 0 = background
 /// * `grid` - Volume dimensions and voxel sizes
-/// * `params` - iSMV parameters (tolerance, max iterations, radius factor)
+/// * `params` - iSMV parameters (tolerance, max iterations, radius in mm)
 /// * `progress` - Progress callback (iteration, max_iter)
 ///
 /// # Returns
@@ -52,10 +52,7 @@ pub fn ismv(
     params: &IsmvParams,
     progress: impl FnMut(usize, usize),
 ) -> (Vec<f64>, Vec<u8>) {
-    let (vsx, vsy, vsz) = grid.voxel_size;
-    // SMV kernel radius in mm, derived from the factor and the largest voxel size.
-    let radius = params.radius_factor * vsx.max(vsy).max(vsz);
-    ismv_core(field, mask, grid, radius, params.tol, params.max_iter, progress)
+    ismv_core(field, mask, grid, params.radius, params.tol, params.max_iter, progress)
 }
 
 /// iSMV with an explicit absolute kernel radius (mm).
