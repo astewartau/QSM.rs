@@ -44,7 +44,7 @@ jobs:
           set -e
 
           all_bgremove='["test_bgremove_sharp","test_bgremove_resharp","test_bgremove_vsharp","test_bgremove_pdf","test_bgremove_ismv","test_bgremove_lbv"]'
-          all_inversion='["test_inversion_tkd","test_inversion_tsvd","test_inversion_tikhonov","test_inversion_tv","test_inversion_rts","test_inversion_medi","test_inversion_nltv"]'
+          all_inversion='["test_inversion_tkd","test_inversion_tsvd","test_inversion_tikhonov","test_inversion_tv","test_inversion_rts","test_inversion_ilsqr","test_inversion_medi","test_inversion_nltv"]'
           all_combined='["test_combined_tgv"]'
           all_pipeline='["test_pipeline_romeo_b0","test_pipeline_tgv","test_pipeline_qsmart","test_pipeline_qsmart_tikhonov","test_pipeline_harperella","test_pipeline_iharperella","test_bias_correction","test_swi","test_r2star_t2star"]'
 
@@ -162,7 +162,7 @@ jobs:
 
               # Dipole inversion
               src/inversion/mod.rs)
-                inversion="$inversion test_inversion_tkd test_inversion_tsvd test_inversion_tikhonov test_inversion_tv test_inversion_rts test_inversion_medi test_inversion_nltv" ;;
+                inversion="$inversion test_inversion_tkd test_inversion_tsvd test_inversion_tikhonov test_inversion_tv test_inversion_rts test_inversion_ilsqr test_inversion_medi test_inversion_nltv" ;;
               src/inversion/tkd.rs)       inversion="$inversion test_inversion_tkd test_inversion_tsvd" ;;
               src/inversion/tikhonov.rs)  inversion="$inversion test_inversion_tikhonov"; pipeline="$pipeline test_pipeline_qsmart_tikhonov" ;;
               src/inversion/tv.rs)        inversion="$inversion test_inversion_tv" ;;
@@ -170,7 +170,7 @@ jobs:
               src/inversion/medi.rs)      inversion="$inversion test_inversion_medi" ;;
               src/inversion/nltv.rs)      inversion="$inversion test_inversion_nltv" ;;
               src/inversion/tgv.rs)       combined="$combined test_combined_tgv"; pipeline="$pipeline test_pipeline_tgv" ;;
-              src/inversion/ilsqr.rs)     pipeline="$pipeline test_pipeline_qsmart" ;;
+              src/inversion/ilsqr.rs)     inversion="$inversion test_inversion_ilsqr"; pipeline="$pipeline test_pipeline_qsmart" ;;
 
               # Brain extraction
               src/bet/*) run_bet=true ;;
@@ -190,7 +190,7 @@ jobs:
                 bgremove="$bgremove test_bgremove_sharp test_bgremove_resharp test_bgremove_vsharp test_bgremove_pdf test_bgremove_ismv test_bgremove_lbv"
                 pipeline="$pipeline test_pipeline_harperella test_pipeline_iharperella" ;;
               src/pipeline/inversion.rs)
-                inversion="$inversion test_inversion_tkd test_inversion_tsvd test_inversion_tikhonov test_inversion_tv test_inversion_rts test_inversion_medi test_inversion_nltv"
+                inversion="$inversion test_inversion_tkd test_inversion_tsvd test_inversion_tikhonov test_inversion_tv test_inversion_rts test_inversion_ilsqr test_inversion_medi test_inversion_nltv"
                 combined="$combined test_combined_tgv" ;;
               src/pipeline/masking.rs)
                 pipeline="$pipeline test_pipeline_romeo_b0" ;;
@@ -721,7 +721,7 @@ jobs:
               echo "$TABLE"
             }
 
-            TABLE=$(emit_chi_table "test_inversion_" tkd tsvd tikhonov tv rts medi nltv) && {
+            TABLE=$(emit_chi_table "test_inversion_" tkd tsvd tikhonov tv rts ilsqr medi nltv) && {
               echo "## Dipole Inversion"
               echo "*Compared against ground truth susceptibility map*"
               echo ""
@@ -901,7 +901,7 @@ jobs:
               emit_figures pipeline_harperella pipeline_iharperella
             }
 
-            TABLE=$(emit_chi_table "test_inversion_" tkd tsvd tikhonov tv rts medi nltv) && {
+            TABLE=$(emit_chi_table "test_inversion_" tkd tsvd tikhonov tv rts ilsqr medi nltv) && {
               echo "### Dipole Inversion"
               echo "*Compared against ground truth susceptibility map*"
               echo ""

@@ -436,6 +436,36 @@ fn test_inversion_rts() {
 
 #[test]
 #[ignore]
+fn test_inversion_ilsqr() {
+    println!("[INFO] Loading test data...");
+    let data = TestData::load().expect("Failed to load test data");
+    let (nx, ny, nz) = data.dims;
+    let (vsx, vsy, vsz) = data.voxel_size;
+
+    let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
+    // iLSQR returns (chi, xsa, xfs, xlsqr); score the final susceptibility map.
+    let (result, elapsed) = run_timed!("iLSQR", inversion::ilsqr(
+        &data.fieldmap_local,
+        &data.mask,
+        &grid,
+        data.b0_dir,
+        &IlsqrParams::default(),
+        |_, _| {},
+    ).0);
+
+    let res = TestResult::new("iLSQR", &result, &data.chi, &data.mask, data.dims);
+    res.print_with_time(elapsed);
+    let challenge = ChallengeMetrics::compute("iLSQR", &result, &data.chi, &data.mask, &data.segmentation, data.dims);
+    challenge.print();
+    challenge.print_ci_metrics(elapsed);
+    common::save_center_slices(&result, &data.mask, data.dims, "inversion_ilsqr");
+
+    assert!(res.nrmse < 0.5, "iLSQR NRMSE too high: {}", res.nrmse);
+    assert!(res.correlation > 0.7, "iLSQR correlation too low: {}", res.correlation);
+}
+
+#[test]
+#[ignore]
 fn test_inversion_medi() {
     println!("[INFO] Loading test data...");
     let data = TestData::load().expect("Failed to load test data");
