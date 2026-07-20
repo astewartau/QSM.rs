@@ -283,20 +283,35 @@ where
         norm_a2 += beta * beta + alpha * alpha;
         let norm_a = norm_a2.sqrt();
 
-        // Convergence tests (matching MATLAB's lsqr)
+        // Convergence test.
+        //
+        // The kamesy reference (QSM.m/src/inversion/ilsqr.m, Step 1 `lsqr_`)
+        // calls MATLAB's *built-in* `lsqr(afun, b, tol, maxit)`, which stops on
+        // the simple relative residual `||b - A*x|| / ||b|| <= tol`. It does NOT
+        // use the augmented Paige-Saunders test
+        // `||r||/||b|| <= btol + atol*||A||*||x||/||b||` (that belongs to
+        // `lsqrSOL`). The previous augmented test tripped at iter ~10 (relres
+        // ~0.09) because the `atol*||A||*||x||/||b||` term inflated the
+        // threshold, leaving Step 1 badly under-converged (xlsqr NRMSE ~19% vs
+        // kamesy). Matching the built-in relative-residual test lets Step 1 run
+        // to relres <= tol (~39 iters here), reproducing kamesy's xlsqr exactly
+        // (NRMSE ~0.4%).
+        //
+        // `normr = phi_bar` is the LSQR estimate of ||r||; `norm_ar`, `norm_a`,
+        // `xnorm` are retained only for the optional verbose printout.
         let test1 = normr / (bnorm + 1e-20);
         let test2 = norm_ar / ((norm_a * normr) + 1e-20);
-        let rtol = btol + atol * norm_a * xnorm / (bnorm + 1e-20);
+        let _ = (btol, xnorm);
 
         if verbose {
-            eprintln!("  LSQR iter {:>3}: ||r||/||b||={:.6e}  ||A'r||/(||A||·||r||)={:.6e}  rtol={:.6e}",
-                _iter + 1, test1, test2, rtol);
+            eprintln!("  LSQR iter {:>3}: ||r||/||b||={:.6e}  ||A'r||/(||A||·||r||)={:.6e}",
+                _iter + 1, test1, test2);
         }
 
-        if test2 <= atol || test1 <= rtol {
+        if test1 <= atol {
             if verbose {
-                eprintln!("  LSQR converged at iteration {} (test1={:.4e}, test2={:.4e})",
-                    _iter + 1, test1, test2);
+                eprintln!("  LSQR converged at iteration {} (relres={:.4e})",
+                    _iter + 1, test1);
             }
             break;
         }
@@ -1368,6 +1383,53 @@ mod tests {
         let x = vec![-2.0, 0.0, 3.0];
         let s = sign_array(&x);
         assert_eq!(s, vec![-1.0, 0.0, 1.0]);
+    }
+
+    #[test]
+    fn test_lsqr_complex_relres_stop() {
+        // Regression for the iLSQR Step-1 fix: lsqr_complex must stop on the
+        // simple relative-residual criterion `||r||/||b|| <= tol` (matching
+        // MATLAB's built-in `lsqr` that kamesy's ilsqr.m Step 1 calls), NOT the
+        // augmented Paige-Saunders `rtol = btol + atol*||A||*||x||/||b||` test,
+        // which previously tripped early and left Step 1 under-converged.
+        //
+        // Use an ill-conditioned diagonal A = diag(1, 10, 100, 1000) where the
+        // augmented test (with its ||A||*||x|| term) would stop well before the
+        // residual actually reaches tol. With the correct test, the residual
+        // must fall to <= tol.
+        let diag = vec![1.0, 10.0, 100.0, 1000.0];
+        let expected: Vec<Complex64> =
+            diag.iter().map(|&d| Complex64::new(d, 0.0)).collect();
+        let b: Vec<Complex64> = expected
+            .iter()
+            .zip(diag.iter())
+            .map(|(&xi, &di)| xi * di)
+            .collect();
+
+        let da = diag.clone();
+        let apply = move |x: &[Complex64]| -> Vec<Complex64> {
+            x.iter().zip(da.iter()).map(|(&xi, &di)| xi * di).collect()
+        };
+        let apply2 = apply.clone();
+        let tol = 1e-6;
+        let x = lsqr_complex(apply, apply2, &b, tol, 200, false);
+
+        // Residual ||A*x - b|| / ||b|| must be at or below tol.
+        let ax: Vec<Complex64> =
+            x.iter().zip(diag.iter()).map(|(&xi, &di)| xi * di).collect();
+        let r: f64 = ax
+            .iter()
+            .zip(b.iter())
+            .map(|(a, bb)| (a - bb).norm_sqr())
+            .sum::<f64>()
+            .sqrt();
+        let bn: f64 = b.iter().map(|c| c.norm_sqr()).sum::<f64>().sqrt();
+        assert!(
+            r / bn <= tol * 10.0,
+            "relres {} should reach ~tol {}; premature-stop regression",
+            r / bn,
+            tol
+        );
     }
 
     #[test]
