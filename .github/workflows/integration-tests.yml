@@ -907,7 +907,7 @@ jobs:
               echo ""
               echo "$TABLE"
               echo ""
-              emit_figures inversion_tkd inversion_tsvd inversion_tikhonov inversion_tv inversion_rts inversion_medi inversion_nltv
+              emit_figures inversion_tkd inversion_tsvd inversion_tikhonov inversion_tv inversion_rts inversion_ilsqr inversion_medi inversion_nltv
             }
 
             if [ -f "metrics/test_bet.csv" ]; then
