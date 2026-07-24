@@ -176,3 +176,37 @@ pub fn prepare_admm_spectral(
     }
     (fft_ws, inv_a, l_complex)
 }
+
+/// Pre-compute spectral operators shared by the FANSI-family nonlinear solvers
+/// (NDI, nlTV, nlTGV, L1-QSM, WH-QSM, HD-QSM).
+///
+/// Unlike [`prepare_admm_spectral`], this does not bake the data term into an RHS,
+/// because those solvers carry a separately-updated data auxiliary variable. It
+/// returns the reusable primitives instead:
+///
+/// * `Fft3dWorkspace` — reusable FFT plans (unnormalized forward `fft3d`,
+///   normalized inverse `ifft3d`, matching MATLAB `fftn`/`ifftn`).
+/// * `k_kernel` — the real k-space dipole kernel `D(k)` (same convention as the
+///   rest of the crate: continuous kernel, includes voxel-size scaling, DC = 0).
+/// * `ee2` — the real spectral Laplacian `EE2(k) = |E1|² + |E2|² + |E3|²`, i.e.
+///   the frequency response of `bdiv ∘ fgrad`. Use as the regularization term in
+///   the x-subproblem denominator so it stays consistent with real-space
+///   `fgrad_inplace`/`bdiv_inplace` (which share the same voxel-size scaling).
+///
+/// The x-subproblem denominator for these solvers is therefore
+/// `mu2 * k_kernel² + mu * ee2` (all real), matching FANSI's
+/// `mu2*abs(Kernel).^2 + mu*EE2`.
+pub fn prepare_fansi_spectral(
+    grid: &Grid,
+    bdir: (f64, f64, f64),
+) -> (Fft3dWorkspace, Vec<f64>, Vec<f64>) {
+    let mut fft_ws = Fft3dWorkspace::new(grid.nx(), grid.ny(), grid.nz());
+    let k_kernel = dipole_kernel(grid, bdir);
+    let l_kernel = laplacian_kernel(grid, true);
+    let mut l_complex: Vec<Complex64> = l_kernel.iter()
+        .map(|&x| Complex64::new(x, 0.0))
+        .collect();
+    fft_ws.fft3d(&mut l_complex);
+    let ee2: Vec<f64> = l_complex.iter().map(|c| c.re).collect();
+    (fft_ws, k_kernel, ee2)
+}

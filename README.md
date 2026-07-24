@@ -145,6 +145,11 @@ Load and save NIfTI volumes with [`qsm_core::io`](src/io.rs).
 | **RTS** | Rapid Two-Step — LSMR solve followed by TV refinement | Kames, C., Wiggermann, V., Rauscher, A. (2018). "Rapid two-step dipole inversion for susceptibility mapping with sparsity priors." *NeuroImage*, 167:276-283. [DOI](https://doi.org/10.1016/j.neuroimage.2017.11.018) |
 | **MEDI** | Morphology Enabled Dipole Inversion — L1 regularization with gradient and SNR weighting | Liu, T., et al. (2011). "Morphology enabled dipole inversion (MEDI) from a single-angle acquisition." *Magnetic Resonance in Medicine*, 66(3):777-783. [DOI](https://doi.org/10.1002/mrm.22816) |
 | **iLSQR** | Iterative LSQR with streaking artifact removal | Li, W., et al. (2015). "A method for estimating and removing streaking artifacts in quantitative susceptibility mapping." *NeuroImage*, 108:111-122. [DOI](https://doi.org/10.1016/j.neuroimage.2014.12.043) |
+| **NDI** | Nonlinear Dipole Inversion — gradient-descent solve of a nonlinear (wrapped-phase) data-fidelity term; effectively tuning-free | Polak, D., et al. (2020). "Nonlinear dipole inversion (NDI) enables robust quantitative susceptibility mapping (QSM)." *NMR in Biomedicine*, 33(12):e4271. [DOI](https://doi.org/10.1002/nbm.4271) |
+| **FANSI (nlTV / nlTGV)** | Fast Nonlinear Susceptibility Inversion — nonlinear total-variation and total-generalized-variation regularization via ADMM | Milovic, C., et al. (2018). "Fast nonlinear susceptibility inversion with variational regularization." *Magnetic Resonance in Medicine*, 80(2):814-821. [DOI](https://doi.org/10.1002/mrm.27073) |
+| **L1-QSM** | L1-norm data-fidelity QSM (PI-QSM) — robust to phase inconsistencies via an L1 fidelity term with TV regularization | Milovic, C., et al. (2022). "Comparison of parameter optimization methods for quantitative susceptibility mapping." *Magnetic Resonance in Medicine*, 87(3):1517-1531. [DOI](https://doi.org/10.1002/mrm.28957) |
+| **WH-QSM** | Weak-Harmonic QSM — jointly estimates susceptibility and a residual harmonic background field, correcting imperfect background-field removal | Milovic, C., et al. (2019). "Weak-harmonic regularization for quantitative susceptibility mapping." *Magnetic Resonance in Medicine*, 81(2):1399-1411. [DOI](https://doi.org/10.1002/mrm.27483) |
+| **HD-QSM** | Hybrid Data-fidelity QSM — two-stage linear inversion where an L1 stage produces a discrepancy map that reweights a second L2 stage | Lambert, M., et al. (2022). "Hybrid data fidelity term approach for quantitative susceptibility mapping." *Magnetic Resonance in Medicine*, 88(4):1567-1583. [DOI](https://doi.org/10.1002/mrm.29218) |
 
 ### End-to-End QSM
 
@@ -194,6 +199,8 @@ This library was developed with reference to the following open-source implement
 |------------|------------|----------|
 | [QSM.jl](https://github.com/kamesy/QSM.jl) | SHARP, V-SHARP, SMV, PDF, iSMV, LBV, Laplacian unwrap, TKD, TSVD, Tikhonov, TV, RTS, NLTV | Julia |
 | [QSM.m](https://github.com/kamesy/QSM.m) | iLSQR | MATLAB |
+| [FANSI-toolbox](https://gitlab.com/cmilovic/FANSI-toolbox) | NDI, FANSI (nlTV/nlTGV), L1-QSM, WH-QSM | MATLAB |
+| [HD-QSM](https://github.com/mglambert/HD-QSM) | HD-QSM | MATLAB |
 | [QuantitativeSusceptibilityMappingTGV.jl](https://github.com/korbinian90/QuantitativeSusceptibilityMappingTGV.jl) | TGV | Julia |
 | [MriResearchTools.jl](https://github.com/korbinian90/MriResearchTools.jl) | ROMEO, MCPC-3D-S, R2*/T2*, bias correction | Julia |
 | [MEDI_toolbox](https://github.com/huawu02/MEDI_toolbox) | MEDI | MATLAB |
