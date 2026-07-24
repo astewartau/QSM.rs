@@ -11,6 +11,7 @@ use crate::bgremove::{
 };
 use crate::inversion::{
     IlsqrParams, MediParams, NltvParams, RtsParams, TgvParams, TikhonovParams, TkdParams, TvParams,
+    NdiParams, FansiParams, L1QsmParams, WhQsmParams, HdQsmParams,
 };
 use crate::unwrap::romeo::RomeoParams;
 use crate::utils::multi_echo::{B0WeightType, LinearFitParams};
@@ -55,6 +56,18 @@ pub enum InversionAlgorithm {
     Ilsqr,
     Tgv,
     Qsmart,
+    /// Nonlinear Dipole Inversion (FANSI ndi.m).
+    Ndi,
+    /// FANSI nonlinear Total Variation (nlTV).
+    Fansi,
+    /// FANSI nonlinear Total Generalized Variation (nlTGV).
+    FansiTgv,
+    /// L1 data-fidelity QSM (FANSI nlL1TV / PI-QSM).
+    L1qsm,
+    /// Weak-Harmonic QSM (FANSI WH_nlTV).
+    Whqsm,
+    /// Hybrid two-stage L1→L2 QSM (HD-QSM).
+    Hdqsm,
 }
 
 /// B0 estimation method
@@ -243,6 +256,13 @@ pub struct InversionConfig {
     pub ilsqr: IlsqrParams,
     pub tgv: TgvParams,
     pub qsmart: QsmartParams,
+    pub ndi: NdiParams,
+    /// Shared by the `Fansi` (nlTV) and `FansiTgv` (nlTGV) algorithms; the
+    /// dispatcher sets `is_tgv` from the selected algorithm.
+    pub fansi: FansiParams,
+    pub l1qsm: L1QsmParams,
+    pub whqsm: WhQsmParams,
+    pub hdqsm: HdQsmParams,
 }
 
 impl Default for InversionConfig {
@@ -259,6 +279,11 @@ impl Default for InversionConfig {
             ilsqr: IlsqrParams::default(),
             tgv: TgvParams::default(),
             qsmart: QsmartParams::default(),
+            ndi: NdiParams::default(),
+            fansi: FansiParams::default(),
+            l1qsm: L1QsmParams::default(),
+            whqsm: WhQsmParams::default(),
+            hdqsm: HdQsmParams::default(),
         }
     }
 }
