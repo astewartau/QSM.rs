@@ -807,11 +807,16 @@ jobs:
 
       - name: Setup CML
         uses: iterative/setup-cml@v3
+        # The PR results comment is informational; the real pass/fail gate is the
+        # `tests-passed` job. Don't let a transient GitHub API rate-limit here
+        # (CML / comment posting) fail the whole run.
+        continue-on-error: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Post PR comment with results
         if: github.event_name == 'pull_request'
+        continue-on-error: true
         env:
           REPO_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           COVERAGE: ${{ needs.unit-tests.outputs.coverage }}
@@ -982,4 +987,19 @@ jobs:
               emit_figures bias_correction swi swi_mip r2star t2star
             fi
           } > report.md
-          cml comment create report.md
+          # Retry with backoff — `cml comment create` hits the GitHub API and can be
+          # throttled (rate limit shared across concurrent runs). Best-effort: the
+          # step is continue-on-error, so a persistent throttle won't fail the run.
+          for attempt in 1 2 3 4 5; do
+            if cml comment create report.md; then
+              echo "PR comment posted (attempt $attempt)."
+              break
+            fi
+            if [ "$attempt" -lt 5 ]; then
+              wait=$((attempt * 30))
+              echo "cml comment create failed (attempt $attempt); retrying in ${wait}s..."
+              sleep "$wait"
+            else
+              echo "cml comment create still failing after $attempt attempts; giving up (non-fatal)."
+            fi
+          done
