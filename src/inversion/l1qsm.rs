@@ -181,7 +181,9 @@ pub fn l1qsm(
 
         // Combine in k-space.
         for i in 0..n {
-            let num = mu1 * fdiv[i] + mu2 * k[i] * fd2[i];
+            // Minus on the gradient term: adjoint of crate `fgrad` is `-bdiv` (matches
+            // QSM.rs TV-ADMM). `+bdiv` doubles the effective regularization. See fansi.rs.
+            let num = -mu1 * fdiv[i] + mu2 * k[i] * fd2[i];
             // Guard the dipole null-space (DC/singular bins): both dipole kernel
             // and Laplacian vanish there. Zero it instead of dividing FFT
             // round-off by ~0, which would otherwise create a huge DC pedestal.

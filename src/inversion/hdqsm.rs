@@ -207,7 +207,9 @@ pub fn hdqsm(
             // (dipole kernel and Laplacian both vanish). Zero it instead of
             // dividing FFT round-off by ~0, which would create a huge DC pedestal.
             for i in 0..n {
-                let num = fdiv[i] * mu + fdt[i] * (mu2 * k[i]);
+                // Minus on the gradient term: adjoint of crate `fgrad` is `-bdiv` (matches
+                // QSM.rs TV-ADMM). `+bdiv` doubles the effective regularization. See fansi.rs.
+                let num = -fdiv[i] * mu + fdt[i] * (mu2 * k[i]);
                 cbuf[i] = if denom[i] > 1e-20 { num / denom[i] } else { Complex64::new(0.0, 0.0) };
             }
             fft_ws.ifft3d(&mut cbuf);
@@ -341,7 +343,9 @@ pub fn hdqsm(
             fft_ws.fft3d(&mut fdiv);
 
             for i in 0..n {
-                let num = fdiv[i] * mu + fdt[i] * (mu2 * k[i]);
+                // Minus on the gradient term: adjoint of crate `fgrad` is `-bdiv` (matches
+                // QSM.rs TV-ADMM). `+bdiv` doubles the effective regularization. See fansi.rs.
+                let num = -fdiv[i] * mu + fdt[i] * (mu2 * k[i]);
                 // Guard the dipole null-space (DC/singular bins) — see stage 1.
                 cbuf[i] = if denom[i] > 1e-20 { num / denom[i] } else { Complex64::new(0.0, 0.0) };
             }

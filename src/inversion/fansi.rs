@@ -190,7 +190,13 @@ fn nltv(
         fft_ws.fft3d(&mut fd2);
 
         for i in 0..n {
-            let num = mu1 * fdiv[i] + mu2 * k[i] * fd2[i];
+            // NOTE the minus on the gradient-consistency term: the adjoint of the
+            // crate's forward-difference `fgrad` is `-bdiv` (not `+bdiv`), so the
+            // spectral term mu1*sum(E_t.*F(z_d-s_d)) = -mu1*F(bdiv(z_d-s_d)).
+            // Matches QSM.rs's own TV-ADMM (`f_hat - rho*fft(bdiv...)`). Using +bdiv
+            // fails to cancel mu1*∇*∇ at the fixed point, doubling the effective
+            // regularization and damping the susceptibility amplitude.
+            let num = -mu1 * fdiv[i] + mu2 * k[i] * fd2[i];
             let den = mu2 * k[i] * k[i] + mu1 * ee2[i];
             // Guard the dipole null-space (DC and any singular bin): both the
             // dipole kernel and the Laplacian vanish there, so susceptibility is

@@ -187,7 +187,9 @@ pub fn whqsm(
 
         // numerator ./ x_denom  (k real -> K.* = k[i] * fx[i]; conj(K)=K since real)
         for i in 0..n {
-            let num = mu * cbuf[i] + k[i] * fx[i];
+            // Minus on the gradient term: adjoint of crate `fgrad` is `-bdiv` (matches
+            // QSM.rs TV-ADMM). `+bdiv` doubles the effective regularization. See fansi.rs.
+            let num = -mu * cbuf[i] + k[i] * fx[i];
             // Guard the dipole null-space (DC/singular bins): x_denom -> ~0 there
             // (both dipole kernel and Laplacian vanish). Zero it instead of
             // dividing FFT round-off by ~1e-30, which blows up and (via the
