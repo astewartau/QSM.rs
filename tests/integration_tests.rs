@@ -15,6 +15,7 @@ use qsm_core::bet::BetParams;
 use qsm_core::inversion;
 use qsm_core::inversion::{tgv_qsm, TgvParams, get_default_alpha, get_default_iterations, ilsqr, IlsqrParams, TkdParams};
 use qsm_core::inversion::{TvParams, NltvParams, RtsParams, MediParams, TikhonovParams};
+use qsm_core::inversion::{NdiParams, FansiParams, L1QsmParams, WhQsmParams, HdQsmParams};
 use qsm_core::swi;
 use qsm_core::unwrap::{laplacian_unwrap, UnwrapMethod};
 use qsm_core::unwrap::romeo::{unwrap_romeo_multi_echo, RomeoParams};
@@ -530,6 +531,166 @@ fn test_inversion_nltv() {
 
     assert!(res.nrmse < 0.5, "NLTV NRMSE too high: {}", res.nrmse);
     assert!(res.correlation > 0.7, "NLTV correlation too low: {}", res.correlation);
+}
+
+/// NDI — Nonlinear Dipole Inversion (FANSI ndi.m).
+#[test]
+#[ignore]
+fn test_inversion_ndi() {
+    println!("[INFO] Loading test data...");
+    let data = TestData::load().expect("Failed to load test data");
+    let (nx, ny, nz) = data.dims;
+    let (vsx, vsy, vsz) = data.voxel_size;
+
+    let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
+    let (result, elapsed) = run_timed!("NDI", inversion::ndi(
+        &data.fieldmap_local, &data.mask, &grid, data.b0_dir,
+        &NdiParams::default(), |_, _| {},
+    ));
+
+    let res = TestResult::new("NDI", &result, &data.chi, &data.mask, data.dims);
+    res.print_with_time(elapsed);
+    let challenge = ChallengeMetrics::compute("NDI", &result, &data.chi, &data.mask, &data.segmentation, data.dims);
+    challenge.print();
+    challenge.print_ci_metrics(elapsed);
+    common::save_center_slices(&result, &data.mask, data.dims, "inversion_ndi");
+
+    assert!(result.iter().all(|v| v.is_finite()), "NDI produced non-finite values");
+    assert!(res.correlation > 0.7, "NDI correlation too low: {}", res.correlation);
+}
+
+/// FANSI nlTV — nonlinear Total Variation dipole inversion (FANSI nlTV.m).
+#[test]
+#[ignore]
+fn test_inversion_fansi() {
+    println!("[INFO] Loading test data...");
+    let data = TestData::load().expect("Failed to load test data");
+    let (nx, ny, nz) = data.dims;
+    let (vsx, vsy, vsz) = data.voxel_size;
+
+    let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
+    let params = FansiParams { is_tgv: false, ..FansiParams::default() };
+    let (result, elapsed) = run_timed!("FANSI-nlTV", inversion::fansi(
+        &data.fieldmap_local, &data.mask, &grid, data.b0_dir, &params, |_, _| {},
+    ));
+
+    let res = TestResult::new("FANSI (nlTV)", &result, &data.chi, &data.mask, data.dims);
+    res.print_with_time(elapsed);
+    let challenge = ChallengeMetrics::compute("FANSI (nlTV)", &result, &data.chi, &data.mask, &data.segmentation, data.dims);
+    challenge.print();
+    challenge.print_ci_metrics(elapsed);
+    common::save_center_slices(&result, &data.mask, data.dims, "inversion_fansi");
+
+    assert!(result.iter().all(|v| v.is_finite()), "FANSI nlTV produced non-finite values");
+    assert!(res.correlation > 0.7, "FANSI nlTV correlation too low: {}", res.correlation);
+}
+
+/// FANSI nlTGV — nonlinear Total Generalized Variation dipole inversion (FANSI nlTGV.m).
+#[test]
+#[ignore]
+fn test_inversion_fansi_tgv() {
+    println!("[INFO] Loading test data...");
+    let data = TestData::load().expect("Failed to load test data");
+    let (nx, ny, nz) = data.dims;
+    let (vsx, vsy, vsz) = data.voxel_size;
+
+    let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
+    // nlTGV's per-iteration cost (per-voxel 4x4 Cramer solve) is high; cap
+    // iterations here to keep the CI job runtime reasonable.
+    let params = FansiParams { is_tgv: true, max_iter: 50, ..FansiParams::default() };
+    let (result, elapsed) = run_timed!("FANSI-nlTGV", inversion::fansi(
+        &data.fieldmap_local, &data.mask, &grid, data.b0_dir, &params, |_, _| {},
+    ));
+
+    let res = TestResult::new("FANSI (nlTGV)", &result, &data.chi, &data.mask, data.dims);
+    res.print_with_time(elapsed);
+    let challenge = ChallengeMetrics::compute("FANSI (nlTGV)", &result, &data.chi, &data.mask, &data.segmentation, data.dims);
+    challenge.print();
+    challenge.print_ci_metrics(elapsed);
+    common::save_center_slices(&result, &data.mask, data.dims, "inversion_fansi_tgv");
+
+    assert!(result.iter().all(|v| v.is_finite()), "FANSI nlTGV produced non-finite values");
+    assert!(res.correlation > 0.7, "FANSI nlTGV correlation too low: {}", res.correlation);
+}
+
+/// L1-QSM — nonlinear L1 data-fidelity dipole inversion (FANSI nlL1TV.m).
+#[test]
+#[ignore]
+fn test_inversion_l1qsm() {
+    println!("[INFO] Loading test data...");
+    let data = TestData::load().expect("Failed to load test data");
+    let (nx, ny, nz) = data.dims;
+    let (vsx, vsy, vsz) = data.voxel_size;
+
+    let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
+    let (result, elapsed) = run_timed!("L1-QSM", inversion::l1qsm(
+        &data.fieldmap_local, &data.mask, &grid, data.b0_dir,
+        &L1QsmParams::default(), |_, _| {},
+    ));
+
+    let res = TestResult::new("L1-QSM", &result, &data.chi, &data.mask, data.dims);
+    res.print_with_time(elapsed);
+    let challenge = ChallengeMetrics::compute("L1-QSM", &result, &data.chi, &data.mask, &data.segmentation, data.dims);
+    challenge.print();
+    challenge.print_ci_metrics(elapsed);
+    common::save_center_slices(&result, &data.mask, data.dims, "inversion_l1qsm");
+
+    assert!(result.iter().all(|v| v.is_finite()), "L1-QSM produced non-finite values");
+    assert!(res.correlation > 0.7, "L1-QSM correlation too low: {}", res.correlation);
+}
+
+/// WH-QSM — Weak-Harmonic QSM dipole inversion (FANSI WH_nlTV.m).
+#[test]
+#[ignore]
+fn test_inversion_whqsm() {
+    println!("[INFO] Loading test data...");
+    let data = TestData::load().expect("Failed to load test data");
+    let (nx, ny, nz) = data.dims;
+    let (vsx, vsy, vsz) = data.voxel_size;
+
+    let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
+    // Cap iterations for CI runtime (the default 300 is slow, ~12 min, and does
+    // not improve accuracy here since the input local field is already clean).
+    let params = WhQsmParams { max_iter: 100, ..WhQsmParams::default() };
+    let (result, elapsed) = run_timed!("WH-QSM", inversion::whqsm(
+        &data.fieldmap_local, &data.mask, &grid, data.b0_dir, &params, |_, _| {},
+    ));
+
+    let res = TestResult::new("WH-QSM", &result, &data.chi, &data.mask, data.dims);
+    res.print_with_time(elapsed);
+    let challenge = ChallengeMetrics::compute("WH-QSM", &result, &data.chi, &data.mask, &data.segmentation, data.dims);
+    challenge.print();
+    challenge.print_ci_metrics(elapsed);
+    common::save_center_slices(&result, &data.mask, data.dims, "inversion_whqsm");
+
+    assert!(result.iter().all(|v| v.is_finite()), "WH-QSM produced non-finite values");
+    assert!(res.correlation > 0.7, "WH-QSM correlation too low: {}", res.correlation);
+}
+
+/// HD-QSM — Hybrid data-fidelity two-stage dipole inversion (HDQSM.m).
+#[test]
+#[ignore]
+fn test_inversion_hdqsm() {
+    println!("[INFO] Loading test data...");
+    let data = TestData::load().expect("Failed to load test data");
+    let (nx, ny, nz) = data.dims;
+    let (vsx, vsy, vsz) = data.voxel_size;
+
+    let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
+    let (result, elapsed) = run_timed!("HD-QSM", inversion::hdqsm(
+        &data.fieldmap_local, &data.mask, &grid, data.b0_dir,
+        &HdQsmParams::default(), |_, _| {},
+    ));
+
+    let res = TestResult::new("HD-QSM", &result, &data.chi, &data.mask, data.dims);
+    res.print_with_time(elapsed);
+    let challenge = ChallengeMetrics::compute("HD-QSM", &result, &data.chi, &data.mask, &data.segmentation, data.dims);
+    challenge.print();
+    challenge.print_ci_metrics(elapsed);
+    common::save_center_slices(&result, &data.mask, data.dims, "inversion_hdqsm");
+
+    assert!(result.iter().all(|v| v.is_finite()), "HD-QSM produced non-finite values");
+    assert!(res.correlation > 0.7, "HD-QSM correlation too low: {}", res.correlation);
 }
 
 // ============================================================================

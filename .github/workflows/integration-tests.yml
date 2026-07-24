@@ -44,7 +44,7 @@ jobs:
           set -e
 
           all_bgremove='["test_bgremove_sharp","test_bgremove_resharp","test_bgremove_vsharp","test_bgremove_pdf","test_bgremove_ismv","test_bgremove_lbv"]'
-          all_inversion='["test_inversion_tkd","test_inversion_tsvd","test_inversion_tikhonov","test_inversion_tv","test_inversion_rts","test_inversion_ilsqr","test_inversion_medi","test_inversion_nltv"]'
+          all_inversion='["test_inversion_tkd","test_inversion_tsvd","test_inversion_tikhonov","test_inversion_tv","test_inversion_rts","test_inversion_ilsqr","test_inversion_medi","test_inversion_nltv","test_inversion_ndi","test_inversion_fansi","test_inversion_fansi_tgv","test_inversion_l1qsm","test_inversion_whqsm","test_inversion_hdqsm"]'
           all_combined='["test_combined_tgv"]'
           all_pipeline='["test_pipeline_romeo_b0","test_pipeline_tgv","test_pipeline_qsmart","test_pipeline_qsmart_tikhonov","test_pipeline_harperella","test_pipeline_iharperella","test_bias_correction","test_swi","test_r2star_t2star"]'
 
@@ -161,8 +161,8 @@ jobs:
               src/bgremove/sdf.rs)    pipeline="$pipeline test_pipeline_qsmart test_pipeline_qsmart_tikhonov" ;;
 
               # Dipole inversion
-              src/inversion/mod.rs)
-                inversion="$inversion test_inversion_tkd test_inversion_tsvd test_inversion_tikhonov test_inversion_tv test_inversion_rts test_inversion_ilsqr test_inversion_medi test_inversion_nltv" ;;
+              src/inversion/mod.rs|src/inversion/admm.rs)
+                inversion="$inversion test_inversion_tkd test_inversion_tsvd test_inversion_tikhonov test_inversion_tv test_inversion_rts test_inversion_ilsqr test_inversion_medi test_inversion_nltv test_inversion_ndi test_inversion_fansi test_inversion_fansi_tgv test_inversion_l1qsm test_inversion_whqsm test_inversion_hdqsm" ;;
               src/inversion/tkd.rs)       inversion="$inversion test_inversion_tkd test_inversion_tsvd" ;;
               src/inversion/tikhonov.rs)  inversion="$inversion test_inversion_tikhonov"; pipeline="$pipeline test_pipeline_qsmart_tikhonov" ;;
               src/inversion/tv.rs)        inversion="$inversion test_inversion_tv" ;;
@@ -171,6 +171,11 @@ jobs:
               src/inversion/nltv.rs)      inversion="$inversion test_inversion_nltv" ;;
               src/inversion/tgv.rs)       combined="$combined test_combined_tgv"; pipeline="$pipeline test_pipeline_tgv" ;;
               src/inversion/ilsqr.rs)     inversion="$inversion test_inversion_ilsqr"; pipeline="$pipeline test_pipeline_qsmart" ;;
+              src/inversion/ndi.rs)       inversion="$inversion test_inversion_ndi" ;;
+              src/inversion/fansi.rs)     inversion="$inversion test_inversion_fansi test_inversion_fansi_tgv" ;;
+              src/inversion/l1qsm.rs)     inversion="$inversion test_inversion_l1qsm" ;;
+              src/inversion/whqsm.rs)     inversion="$inversion test_inversion_whqsm" ;;
+              src/inversion/hdqsm.rs)     inversion="$inversion test_inversion_hdqsm" ;;
 
               # Brain extraction
               src/bet/*) run_bet=true ;;
@@ -721,7 +726,7 @@ jobs:
               echo "$TABLE"
             }
 
-            TABLE=$(emit_chi_table "test_inversion_" tkd tsvd tikhonov tv rts ilsqr medi nltv) && {
+            TABLE=$(emit_chi_table "test_inversion_" tkd tsvd tikhonov tv rts ilsqr medi nltv ndi fansi fansi_tgv l1qsm whqsm hdqsm) && {
               echo "## Dipole Inversion"
               echo "*Compared against ground truth susceptibility map*"
               echo ""
@@ -901,13 +906,13 @@ jobs:
               emit_figures pipeline_harperella pipeline_iharperella
             }
 
-            TABLE=$(emit_chi_table "test_inversion_" tkd tsvd tikhonov tv rts ilsqr medi nltv) && {
+            TABLE=$(emit_chi_table "test_inversion_" tkd tsvd tikhonov tv rts ilsqr medi nltv ndi fansi fansi_tgv l1qsm whqsm hdqsm) && {
               echo "### Dipole Inversion"
               echo "*Compared against ground truth susceptibility map*"
               echo ""
               echo "$TABLE"
               echo ""
-              emit_figures inversion_tkd inversion_tsvd inversion_tikhonov inversion_tv inversion_rts inversion_ilsqr inversion_medi inversion_nltv
+              emit_figures inversion_tkd inversion_tsvd inversion_tikhonov inversion_tv inversion_rts inversion_ilsqr inversion_medi inversion_nltv inversion_ndi inversion_fansi inversion_fansi_tgv inversion_l1qsm inversion_whqsm inversion_hdqsm
             }
 
             if [ -f "metrics/test_bet.csv" ]; then
