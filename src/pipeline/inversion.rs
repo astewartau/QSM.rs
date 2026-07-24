@@ -103,6 +103,38 @@ pub fn run_dipole_inversion(
             );
             chi
         }
+        InversionAlgorithm::Ndi => {
+            crate::inversion::ndi(
+                local_field_ppm, mask, &grid, bdir, &config.ndi, progress,
+            )
+        }
+        InversionAlgorithm::Fansi => {
+            let params = crate::inversion::FansiParams { is_tgv: false, ..config.fansi.clone() };
+            crate::inversion::fansi(
+                local_field_ppm, mask, &grid, bdir, &params, progress,
+            )
+        }
+        InversionAlgorithm::FansiTgv => {
+            let params = crate::inversion::FansiParams { is_tgv: true, ..config.fansi.clone() };
+            crate::inversion::fansi(
+                local_field_ppm, mask, &grid, bdir, &params, progress,
+            )
+        }
+        InversionAlgorithm::L1qsm => {
+            crate::inversion::l1qsm(
+                local_field_ppm, mask, &grid, bdir, &config.l1qsm, progress,
+            )
+        }
+        InversionAlgorithm::Whqsm => {
+            crate::inversion::whqsm(
+                local_field_ppm, mask, &grid, bdir, &config.whqsm, progress,
+            )
+        }
+        InversionAlgorithm::Hdqsm => {
+            crate::inversion::hdqsm(
+                local_field_ppm, mask, &grid, bdir, &config.hdqsm, progress,
+            )
+        }
         InversionAlgorithm::Tgv | InversionAlgorithm::Qsmart => {
             return Err(PipelineError::InvalidConfig(
                 format!("{:?} should use run_tgv or run_qsmart", config.algorithm),
