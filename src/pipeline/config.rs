@@ -11,7 +11,7 @@ use crate::bgremove::{
 };
 use crate::inversion::{
     IlsqrParams, MediParams, NltvParams, RtsParams, TgvParams, TikhonovParams, TkdParams, TvParams,
-    NdiParams, FansiParams, L1QsmParams, WhQsmParams, HdQsmParams,
+    NdiParams, FansiParams, L1QsmParams, WhQsmParams, HdQsmParams, TfiParams,
 };
 use crate::unwrap::romeo::RomeoParams;
 use crate::utils::multi_echo::{B0WeightType, LinearFitParams};
@@ -53,6 +53,8 @@ pub enum InversionAlgorithm {
     Rts,
     Nltv,
     Medi,
+    /// Preconditioned Total Field Inversion (single-step, total field).
+    Tfi,
     Ilsqr,
     Tgv,
     Qsmart,
@@ -253,6 +255,7 @@ pub struct InversionConfig {
     pub rts: RtsParams,
     pub nltv: NltvParams,
     pub medi: MediParams,
+    pub tfi: TfiParams,
     pub ilsqr: IlsqrParams,
     pub tgv: TgvParams,
     pub qsmart: QsmartParams,
@@ -276,6 +279,7 @@ impl Default for InversionConfig {
             rts: RtsParams::default(),
             nltv: NltvParams::default(),
             medi: MediParams::default(),
+            tfi: TfiParams::default(),
             ilsqr: IlsqrParams::default(),
             tgv: TgvParams::default(),
             qsmart: QsmartParams::default(),

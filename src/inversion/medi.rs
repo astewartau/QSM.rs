@@ -156,7 +156,7 @@ impl MediWorkspace {
 
 /// Apply dipole convolution: out = real(ifft(D * fft(x)))
 #[inline]
-fn apply_dipole_conv(
+pub(crate) fn apply_dipole_conv(
     fft_ws: &mut Fft3dWorkspaceF32,
     x: &[f32],
     d_kernel: &[f32],
@@ -167,17 +167,17 @@ fn apply_dipole_conv(
 }
 
 /// MEDI operator buffers - separate struct to allow split borrowing
-struct MediOpBuffers<'a> {
-    gx: &'a mut [f32],
-    gy: &'a mut [f32],
-    gz: &'a mut [f32],
-    reg_x: &'a mut [f32],
-    reg_y: &'a mut [f32],
-    reg_z: &'a mut [f32],
-    div_buf: &'a mut [f32],
-    dipole_buf: &'a mut [f32],
-    complex_buf: &'a mut [Complex32],
-    complex_buf2: &'a mut [Complex32],
+pub(crate) struct MediOpBuffers<'a> {
+    pub gx: &'a mut [f32],
+    pub gy: &'a mut [f32],
+    pub gz: &'a mut [f32],
+    pub reg_x: &'a mut [f32],
+    pub reg_y: &'a mut [f32],
+    pub reg_z: &'a mut [f32],
+    pub div_buf: &'a mut [f32],
+    pub dipole_buf: &'a mut [f32],
+    pub complex_buf: &'a mut [Complex32],
+    pub complex_buf2: &'a mut [Complex32],
 }
 
 /// Apply MEDI operator in-place: out = fidelity(dx) + lambda*reg(dx)
@@ -185,7 +185,7 @@ struct MediOpBuffers<'a> {
 /// Uses per-direction gradient masks (mx, my, mz) matching MATLAB MEDI
 /// SIMD-accelerated for element-wise operations
 #[inline]
-fn apply_medi_operator_core(
+pub(crate) fn apply_medi_operator_core(
     fft_ws: &mut Fft3dWorkspaceF32,
     bufs: &mut MediOpBuffers,
     n: usize,
@@ -673,7 +673,7 @@ fn apply_smv_kernel_ws(
 /// Compute RHS in-place using workspace buffers (f32)
 /// Uses per-direction gradient masks (mx, my, mz) matching MATLAB MEDI
 /// SIMD-accelerated for element-wise operations
-fn compute_rhs_inplace(
+pub(crate) fn compute_rhs_inplace(
     chi: &[f32],
     w: &[Complex32],
     b0: &[Complex32],
@@ -745,7 +745,7 @@ fn compute_rhs_inplace(
 /// * `mode` - 0 for uniform weighting, 1 for SNR weighting
 /// * `n_std` - Noise standard deviation
 /// * `mask` - Binary mask
-fn dataterm_mask_f32(mode: i32, n_std: &[f32], mask: &[u8]) -> Vec<f32> {
+pub(crate) fn dataterm_mask_f32(mode: i32, n_std: &[f32], mask: &[u8]) -> Vec<f32> {
     let n = n_std.len();
 
     if mode == 0 {
