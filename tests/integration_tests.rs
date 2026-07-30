@@ -14,7 +14,7 @@ use qsm_core::bet;
 use qsm_core::bet::BetParams;
 use qsm_core::inversion;
 use qsm_core::inversion::{tgv_qsm, TgvParams, get_default_alpha, get_default_iterations, ilsqr, IlsqrParams, TkdParams};
-use qsm_core::inversion::{TvParams, NltvParams, RtsParams, MediParams, TikhonovParams};
+use qsm_core::inversion::{TvParams, NltvParams, RtsParams, MediParams, TfiParams, TikhonovParams};
 use qsm_core::inversion::{NdiParams, FansiParams, L1QsmParams, WhQsmParams, HdQsmParams};
 use qsm_core::swi;
 use qsm_core::unwrap::{laplacian_unwrap, UnwrapMethod};
@@ -502,6 +502,42 @@ fn test_inversion_medi() {
 
     assert!(res.nrmse < 0.5, "MEDI NRMSE too high: {}", res.nrmse);
     assert!(res.correlation > 0.7, "MEDI correlation too low: {}", res.correlation);
+}
+
+/// TFI — Preconditioned Total Field Inversion (Z. Liu et al., MRM 2017).
+/// Single-step: inverts the TOTAL field (joint background removal + dipole inversion).
+#[test]
+#[ignore]
+fn test_inversion_tfi() {
+    println!("[INFO] Loading test data...");
+    let data = TestData::load().expect("Failed to load test data");
+    let (nx, ny, nz) = data.dims;
+    let (vsx, vsy, vsz) = data.voxel_size;
+    let n_total = nx * ny * nz;
+
+    let n_std = vec![1.0; n_total];
+
+    let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
+    let (result, elapsed) = run_timed!("TFI", inversion::tfi(
+        &data.fieldmap,
+        &n_std,
+        &data.mag_echoes[0],
+        &data.mask,
+        &grid,
+        data.b0_dir,
+        &TfiParams { lambda: 1e-4, precond: 3.0, ..TfiParams::default() },
+        |_, _| {},
+    ));
+
+    let res = TestResult::new("TFI", &result, &data.chi, &data.mask, data.dims);
+    res.print_with_time(elapsed);
+    let challenge = ChallengeMetrics::compute("TFI", &result, &data.chi, &data.mask, &data.segmentation, data.dims);
+    challenge.print();
+    challenge.print_ci_metrics(elapsed);
+    common::save_center_slices(&result, &data.mask, data.dims, "inversion_tfi");
+
+    assert!(result.iter().all(|v| v.is_finite()), "TFI produced non-finite values");
+    assert!(res.correlation > 0.7, "TFI correlation too low: {}", res.correlation);
 }
 
 #[test]
