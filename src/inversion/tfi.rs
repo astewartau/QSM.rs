@@ -68,7 +68,10 @@ pub struct TfiParams {
 impl Default for TfiParams {
     fn default() -> Self {
         Self {
-            lambda: 1e-3,
+            // TFI shares MEDI's L1 machinery and λ convention, so we use MEDI's default λ
+            // (7.5e-5) rather than a benchmark-fitted value. precond=30 is the standard TFI
+            // preconditioner (Liu 2017). Neither is tuned to any specific dataset.
+            lambda: 7.5e-5,
             precond: 30.0,
             merit: false,
             data_weighting: 1,
@@ -560,5 +563,72 @@ mod tests {
             b.iter().cloned().fold(f64::MIN, f64::max));
 
         assert!(corr > 0.95, "TFI correlation {:.5} below acceptance 0.95", corr);
+    }
+
+    /// Background-removal stress test on the REAL CI phantom (~/bids), which has a
+    /// genuine in-brain background field (unlike the qsm-ci dev phantom). Sweeps
+    /// `precond`/`lambda` on the TOTAL field and reports corr vs GT χ, plus a
+    /// local-field run as the ceiling. Fields are fed raw (ppm), matching how the
+    /// CI harness scores MEDI/NDI/etc.
+    /// Run: cargo test --release --lib test_tfi_background -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn test_tfi_background() {
+        let base = "/home/ashley/bids/derivatives/qsm-forward/sub-1/anat";
+        let total_path = format!("{}/sub-1_fieldmap.nii", base);
+        if !std::path::Path::new(&total_path).exists() {
+            eprintln!("Skipping: {} not found", total_path);
+            return;
+        }
+        let load = |p: &str| crate::io::load_nifti(&std::fs::read(p).unwrap()).unwrap();
+        let total_nii = load(&total_path);
+        let (nx, ny, nz) = total_nii.dims;
+        let (vsx, vsy, vsz) = total_nii.voxel_size;
+        let n = nx * ny * nz;
+        let total_field = total_nii.data;                                   // ppm
+        let local_field = load(&format!("{}/sub-1_fieldmap-local.nii", base)).data;
+        let chi_gt = load(&format!("{}/sub-1_Chimap.nii", base)).data;
+        let mask: Vec<u8> = load(&format!("{}/sub-1_mask.nii", base)).data
+            .iter().map(|&v| if v > 0.5 { 1 } else { 0 }).collect();
+
+        let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
+        let bdir = (0.0, 0.0, 1.0);
+        let n_std = vec![1.0f64; n];
+        let magnitude = vec![1.0f64; n];
+
+        let std_in = |v: &[f64]| {
+            let m: Vec<f64> = (0..n).filter(|&i| mask[i] != 0).map(|i| v[i]).collect();
+            let mean = m.iter().sum::<f64>() / m.len() as f64;
+            (m.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / m.len() as f64).sqrt()
+        };
+        eprintln!("dims {}x{}x{}  in-brain field std: total={:.5} local={:.5}",
+            nx, ny, nz, std_in(&total_field), std_in(&local_field));
+
+        let corr_in = |a: &[f64], b: &[f64]| {
+            let idx: Vec<usize> = (0..n).filter(|&i| mask[i] != 0).collect();
+            let (mut sa, mut sb) = (0.0, 0.0);
+            for &i in &idx { sa += a[i]; sb += b[i]; }
+            let (ma, mb) = (sa / idx.len() as f64, sb / idx.len() as f64);
+            let (mut num, mut da, mut db) = (0.0, 0.0, 0.0);
+            for &i in &idx {
+                num += (a[i] - ma) * (b[i] - mb);
+                da += (a[i] - ma).powi(2); db += (b[i] - mb).powi(2);
+            }
+            num / (da.sqrt() * db.sqrt())
+        };
+
+        // Ceiling: TFI on the LOCAL field (no background to remove, precond irrelevant).
+        let p_local = TfiParams { lambda: 1e-4, precond: 1.0, ..TfiParams::default() };
+        let chi_local = tfi(&local_field, &n_std, &magnitude, &mask, &grid, bdir, &p_local, |_, _| {});
+        eprintln!("TFI on LOCAL field (ceiling): corr={:.4}", corr_in(&chi_local, &chi_gt));
+
+        eprintln!("=== TFI on TOTAL field — precond × lambda sweep (corr vs GT χ, within mask) ===");
+        for &lambda in &[5e-5f64, 7.5e-5, 1e-4] {
+            for &precond in &[30.0f64] {
+                let params = TfiParams { lambda, precond, ..TfiParams::default() };
+                let chi = tfi(&total_field, &n_std, &magnitude, &mask, &grid, bdir, &params, |_, _| {});
+                eprintln!("  lambda={:>6.0e} precond={:>5}  corr={:.4}", lambda, precond, corr_in(&chi, &chi_gt));
+            }
+        }
     }
 }
