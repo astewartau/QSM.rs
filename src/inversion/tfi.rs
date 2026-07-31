@@ -181,7 +181,9 @@ fn cg_solve_tfi<F>(
 /// Preconditioned Total Field Inversion (TFI).
 ///
 /// # Arguments
-/// * `total_field` - Total field/phase (before background removal) in radians
+/// * `total_field` - Total field (before background removal) in **ppm** — same units convention as
+///   NDI and the other inversions (NOT MEDI's radians). Do not pre-scale to radians: the total field
+///   is large and would wrap in the `exp(i·field)` data term.
 /// * `n_std` - Noise standard deviation map (same size as total_field)
 /// * `magnitude` - Magnitude image for gradient weighting
 /// * `mask` - Binary brain mask (1 = brain)
@@ -431,7 +433,6 @@ mod tests {
     #[test]
     #[ignore]
     fn test_tfi_phantom() {
-        use std::f64::consts::PI;
 
         let base = "/home/ashley/repos/qsm/qsmci/qsmci/data/sim/dev";
         let field_path = format!("{}/groundtruth/totalfield.nii.gz", base);
@@ -478,22 +479,14 @@ mod tests {
         let chi_gt_ppm = chi_gt_nii.data;
 
         // params.json
-        let te1 = 0.004_f64;
-        let b0 = 3.0_f64;
         let bdir = (0.0, 0.0, 1.0);
-        let gamma_hz = 42.576e6;
-        let ppm_to_rad = 2.0 * PI * gamma_hz * b0 * te1 * 1e-6;
 
-        // total field ppm -> radians
-        let field_rad: Vec<f64> = field_ppm.iter().map(|&v| v * ppm_to_rad).collect();
-
+        // TFI takes the total field in ppm (no rad conversion — see fn docs).
         let n_std = vec![1.0f64; n_total];
         let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
 
-        // On this phantom the background outside the brain is tiny (±0.01 ppm),
-        // so a small preconditioner (2-3) is best; the literature default of 30
-        // is aimed at in-vivo data with large air susceptibility (~9 ppm) and
-        // slightly degrades the inside-brain fit here (still corr ~0.92-0.94).
+        // On this dev phantom the background outside the brain is tiny (±0.01 ppm), so a small
+        // preconditioner (2-3) is best here; the default of 30 targets in-vivo air (~9 ppm).
         let lambda = std::env::var("TFI_LAMBDA").ok()
             .and_then(|s| s.parse::<f64>().ok()).unwrap_or(1e-4);
         let precond = std::env::var("TFI_PRECOND").ok()
@@ -511,14 +504,10 @@ mod tests {
         eprintln!("params: lambda={} precond={}", lambda, precond);
 
         eprintln!("Running TFI...");
-        let chi_rad = tfi(
-            &field_rad, &n_std, &magnitude, &mask, &grid, bdir, &params,
+        let chi_ppm = tfi(
+            &field_ppm, &n_std, &magnitude, &mask, &grid, bdir, &params,
             |c, t| { if c % 200 == 0 || c == t { eprintln!("  progress {}/{}", c, t); } },
         );
-
-        // chi back to ppm
-        let rad_to_ppm = 1.0 / ppm_to_rad;
-        let chi_ppm: Vec<f64> = chi_rad.iter().map(|&v| v * rad_to_ppm).collect();
 
         // Metrics within the mask
         let idx: Vec<usize> = (0..n_total).filter(|&i| mask[i] != 0).collect();
