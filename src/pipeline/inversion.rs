@@ -98,28 +98,18 @@ pub fn run_dipole_inversion(
             chi_rad.iter().map(|&v| v * rad_to_ppm).collect()
         }
         InversionAlgorithm::Tfi => {
-            // TFI requires field in radians, not ppm. It inverts the TOTAL
-            // field over the whole FOV; `local_field_ppm` here is fed as the
-            // total field (single-step: caller supplies the pre-bgremoval field).
-            let gamma_hz = 42.576e6;
-            let te1 = metadata.echo_times.first().copied().unwrap_or(0.005);
-            let ppm_to_rad = 2.0 * PI * gamma_hz * metadata.field_strength * te1 * 1e-6;
-
-            let total_field_rad: Vec<f64> = local_field_ppm.iter()
-                .map(|&v| v * ppm_to_rad)
-                .collect();
-
+            // TFI takes the field in ppm (same convention as NDI and the other inversions —
+            // NOT MEDI's radians). It is single-step: `local_field_ppm` is fed as the TOTAL
+            // field (caller supplies the pre-background-removal field). Converting to radians
+            // here would wrap the large total field in exp(i·field) and destroy the result.
             let uniform_mag = vec![1.0f64; n_voxels];
             let mag = magnitude.unwrap_or(&uniform_mag);
             let n_std = vec![1.0f64; n_voxels];
 
-            let chi_rad = crate::inversion::tfi(
-                &total_field_rad, &n_std, mag, mask,
+            crate::inversion::tfi(
+                local_field_ppm, &n_std, mag, mask,
                 &grid, bdir, &config.tfi, progress,
-            );
-
-            let rad_to_ppm = 1.0 / ppm_to_rad;
-            chi_rad.iter().map(|&v| v * rad_to_ppm).collect()
+            )
         }
         InversionAlgorithm::Ilsqr => {
             let (chi, _, _, _) = crate::inversion::ilsqr(
