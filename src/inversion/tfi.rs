@@ -191,8 +191,9 @@ fn cg_solve_tfi<F>(
 /// * `progress` - Progress callback `(current_step, total_steps)`
 ///
 /// # Returns
-/// Susceptibility map χ over the WHOLE FOV (same units as input field). The
-/// caller masks for scoring; χ is NOT zeroed outside the brain mask here.
+/// Susceptibility map χ (same units as input field), zeroed outside the brain mask.
+/// The solve itself runs over the whole FOV (to absorb the background into out-of-brain
+/// susceptibility), but that region is unconstrained/artefacty, so only the brain is returned.
 #[allow(clippy::too_many_arguments)]
 pub fn tfi(
     total_field: &[f64],
@@ -339,11 +340,14 @@ pub fn tfi(
         }
     }
 
-    // Final χ = P ⊙ y over the whole FOV (do NOT zero outside brain).
+    // Final χ = P ⊙ y, zeroed outside the brain mask. The whole-FOV solve is only needed to
+    // absorb the background field into out-of-brain susceptibility; that region is unconstrained
+    // (artefacty), so the returned map keeps only the brain — matching MEDI/NDI/etc.
     let _ = params.merit;
     y.iter()
         .zip(precond.iter())
-        .map(|(&yi, &pi)| (pi * yi) as f64)
+        .zip(mask.iter())
+        .map(|((&yi, &pi), &m)| if m == 0 { 0.0 } else { (pi * yi) as f64 })
         .collect()
 }
 
