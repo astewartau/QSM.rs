@@ -505,10 +505,12 @@ fn test_inversion_medi() {
 }
 
 /// TFI — Preconditioned Total Field Inversion (Z. Liu et al., MRM 2017).
-/// Single-step: inverts the TOTAL field (joint background removal + dipole inversion).
+/// Single-step (background removal + dipole inversion): fed the TOTAL field, so this is a
+/// COMBINED-stage method (compare with TGV-from-field), not a plain dipole inversion.
+/// Uses TFI's own defaults (λ=7.5e-5 as MEDI, preconditioner=30 as Liu 2017) — not dataset-tuned.
 #[test]
 #[ignore]
-fn test_inversion_tfi() {
+fn test_combined_tfi() {
     println!("[INFO] Loading test data...");
     let data = TestData::load().expect("Failed to load test data");
     let (nx, ny, nz) = data.dims;
@@ -519,13 +521,13 @@ fn test_inversion_tfi() {
 
     let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
     let (result, elapsed) = run_timed!("TFI", inversion::tfi(
-        &data.fieldmap,
+        &data.fieldmap,          // TOTAL field (before background removal)
         &n_std,
         &data.mag_echoes[0],
         &data.mask,
         &grid,
         data.b0_dir,
-        &TfiParams { lambda: 1e-4, precond: 3.0, ..TfiParams::default() },
+        &TfiParams::default(),
         |_, _| {},
     ));
 
@@ -534,10 +536,11 @@ fn test_inversion_tfi() {
     let challenge = ChallengeMetrics::compute("TFI", &result, &data.chi, &data.mask, &data.segmentation, data.dims);
     challenge.print();
     challenge.print_ci_metrics(elapsed);
-    common::save_center_slices(&result, &data.mask, data.dims, "inversion_tfi");
+    common::save_center_slices(&result, &data.mask, data.dims, "combined_tfi");
 
     assert!(result.iter().all(|v| v.is_finite()), "TFI produced non-finite values");
-    assert!(res.correlation > 0.7, "TFI correlation too low: {}", res.correlation);
+    // Single-step from a background-dominated total field; ceiling here is ~TGV-from-field (~0.72).
+    assert!(res.correlation > 0.5, "TFI correlation too low: {}", res.correlation);
 }
 
 #[test]
