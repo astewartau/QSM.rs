@@ -118,8 +118,12 @@ jobs:
 
           for file in $CHANGED; do
             case "$file" in
+              # lib.rs is only module declarations + re-exports (no behaviour);
+              # unit tests (already selected for any src/ change) recompile the
+              # whole crate, so a lib.rs-only change needs no integration rerun.
+              src/lib.rs) : ;;
               # Core infrastructure → run everything
-              src/lib.rs|src/fft.rs|src/nifti_io.rs|src/region_grow.rs|src/priority_queue.rs)
+              src/fft.rs|src/nifti_io.rs|src/region_grow.rs|src/priority_queue.rs)
                 echo "Core file changed: $file → all tests"
                 output_all; exit 0 ;;
               src/kernels/*|src/solvers/*)
@@ -128,12 +132,19 @@ jobs:
               src/utils/gradient.rs|src/utils/padding.rs|src/utils/simd_ops.rs|src/utils/mod.rs)
                 echo "Core util changed: $file → all tests"
                 output_all; exit 0 ;;
-              tests/*|Cargo.toml|Cargo.lock)
-                echo "Test/build file changed: $file → all tests"
+              # Shared test helpers (or dependency/build changes) affect every
+              # test; a new standalone test file is not in the fixed integration
+              # matrix, so it only needs the unit-test build (already selected).
+              tests/common/*|Cargo.toml|Cargo.lock)
+                echo "Shared test/build file changed: $file → all tests"
                 output_all; exit 0 ;;
               .github/workflows/unit-tests.yml)
                 run_unit_tests=true ;;
-              .github/workflows/integration-tests.yml|scripts/*)
+              # Only the data-download script (which changes what data every test
+              # sees) forces a full integration rerun. The render_*.py scripts are
+              # figure-only — they change how results are drawn, not the computed
+              # metrics or pass/fail — so they should not rerun the compute.
+              .github/workflows/integration-tests.yml|scripts/download-test-data.sh)
                 echo "CI file changed: $file → all integration tests"
                 echo "run_bgremove=true" >> "$GITHUB_OUTPUT"
                 echo "bgremove_matrix=$all_bgremove" >> "$GITHUB_OUTPUT"
