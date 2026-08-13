@@ -165,13 +165,19 @@ real acquisitions live.
 
 ## 5. Open items / TODO
 
-- **MP-PCA low-SNR benchmark** result (running) — append to §3.
-- **`r2_epg` optional B1-map input** (fix B1, T2-only fit) — bias correction +
-  low-SNR robustness.
+- ~~**MP-PCA low-SNR benchmark**~~ — done, results in §3.
+- ~~**`r2_epg` optional B1-map input**~~ — done: `r2_epg(..., b1_map: Option<&[f64]>)`
+  snaps each voxel's B1 to the nearest `b1_grid` entry and restricts the search to
+  that column (T2-only fit). Unit-tested (recovers R2, snapping, wrong-B1 bias).
+- ~~**Gibbs unring perf**~~ — done, ~2.5× (128³: 1.35 s → 0.54 s), not via the
+  approximate-upsampling idea (FLOP analysis: a 50×-zero-padded IFFT costs about the
+  same as the 90 small IFFTs it replaces). Instead: (1) both shift directions share
+  one complex IFFT via Hermitian packing (`IFFT(c·(ph + i·conj(ph))) = img₊ + i·img₋`,
+  even-n Nyquist bin symmetrised — max |diff| ~4e-3 vs old, r > 0.9999999);
+  (2) `tv_min_line` de-modded (diff array + windowed sums, no `%` in the interior).
 - **QSMxT wiring**: MESE BIDS discovery (suffix `MESE`, echo required) + MESE→GRE
   reslice (QSMxT has only header-based oblique→axial reslice; extend to
   `resample_onto_grid`) + R2′/chi-sep pipeline stages, with unring/MP-PCA as opt-in
   preprocessing. No BIDS suffix exists for R2′/para/dia maps (needs `.bidsignore`).
-- **Gibbs unring perf**: FFT-bound floor (90 IFFTs/line); further speedup needs the
-  approximate upsampling variant (changes results) — deferred.
-- **Consider R2\*-direct chi-sep** (χ-sepnet-R2\*) to sidestep the R2′ subtraction.
+- **Consider R2\*-direct chi-sep** (χ-sepnet-R2\*) to sidestep the R2′ subtraction —
+  note it's a deep-learning method, so a port implies ONNX/weights infrastructure.
