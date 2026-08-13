@@ -175,6 +175,8 @@ pub struct R2EpgParams {
     /// Candidate T2 values (seconds) — the dictionary's T2 axis.
     pub t2_grid: Vec<f64>,
     /// Candidate B1 (refocusing efficiency) values — the dictionary's B1 axis.
+    /// When a B1 map is supplied to [`r2_epg`], map values are snapped to the
+    /// nearest entry of this grid (densify it for finer quantization).
     pub b1_grid: Vec<f64>,
 }
 
@@ -211,22 +213,28 @@ struct DictAtom {
     b1: f64,
 }
 
-/// Build the EPG dictionary for a given echo spacing and echo count.
-fn build_dictionary(params: &R2EpgParams, esp: f64, n_echoes: usize) -> Vec<DictAtom> {
-    let mut dict = Vec::with_capacity(params.t2_grid.len() * params.b1_grid.len());
-    for &t2 in &params.t2_grid {
-        for &b1 in &params.b1_grid {
-            let mut sig = epg_cpmg_echoes(t2, params.t1, b1, esp, n_echoes);
-            let norm: f64 = sig.iter().map(|&v| v * v).sum::<f64>().sqrt();
-            if norm > 1e-30 {
-                for v in sig.iter_mut() {
-                    *v /= norm;
+/// Build the EPG dictionary for a given echo spacing and echo count, grouped by
+/// B1: `dict[i]` holds the atoms for `params.b1_grid[i]` (over all T2 values),
+/// so a fixed-B1 search can restrict itself to a single group.
+fn build_dictionary(params: &R2EpgParams, esp: f64, n_echoes: usize) -> Vec<Vec<DictAtom>> {
+    params
+        .b1_grid
+        .iter()
+        .map(|&b1| {
+            let mut group = Vec::with_capacity(params.t2_grid.len());
+            for &t2 in &params.t2_grid {
+                let mut sig = epg_cpmg_echoes(t2, params.t1, b1, esp, n_echoes);
+                let norm: f64 = sig.iter().map(|&v| v * v).sum::<f64>().sqrt();
+                if norm > 1e-30 {
+                    for v in sig.iter_mut() {
+                        *v /= norm;
+                    }
+                    group.push(DictAtom { signal: sig, t2, b1 });
                 }
-                dict.push(DictAtom { signal: sig, t2, b1 });
             }
-        }
-    }
-    dict
+            group
+        })
+        .collect()
 }
 
 /// R2 mapping from multi-echo spin-echo magnitude via EPG dictionary matching.
@@ -238,6 +246,12 @@ fn build_dictionary(params: &R2EpgParams, esp: f64, n_echoes: usize) -> Vec<Dict
 /// that a mono-exponential fit ([`r2star_arlo`]) suffers on imperfectly-refocused
 /// (B1 < 1) data.
 ///
+/// When a per-voxel `b1_map` is supplied (e.g. from a separate B1 acquisition),
+/// the B1 dimension of the search is fixed: each voxel's B1 is snapped to the
+/// nearest `params.b1_grid` entry and only that column of the dictionary is
+/// searched (a T2-only fit). This keeps EPG's stimulated-echo bias correction
+/// while removing the free B1 parameter that overfits noise at low SNR.
+///
 /// # Arguments
 /// * `magnitude` - MESE magnitude, flattened `[v0_e0, v0_e1, ..., v1_e0, ...]`
 ///   (row-major `(n_voxels, n_echoes)`, same layout as [`r2star_arlo`])
@@ -245,20 +259,24 @@ fn build_dictionary(params: &R2EpgParams, esp: f64, n_echoes: usize) -> Vec<Dict
 /// * `echo_times` - Spin-echo times in seconds `[n_echoes]` (equi-spaced, ≥3)
 /// * `grid` - Volume grid (dimensions and voxel sizes)
 /// * `params` - Dictionary grids and assumed T1
+/// * `b1_map` - Optional known refocusing-efficiency map `[nx*ny*nz]`; `None`
+///   fits B1 per voxel over the full `b1_grid`
 ///
 /// # Returns
-/// `(r2_map, b1_map)` - R2 in Hz and the fitted B1 (refocusing efficiency), both
+/// `(r2_map, b1_map)` - R2 in Hz and the B1 (refocusing efficiency) used per
+/// voxel — fitted, or the snapped input when `b1_map` was given — both
 /// `[nx*ny*nz]`.
 ///
 /// # Panics
 /// Panics if `echo_times.len() < 3`, echo times are not equi-spaced, or the
-/// `magnitude`/`mask` lengths are inconsistent with `grid`.
+/// `magnitude`/`mask`/`b1_map` lengths are inconsistent with `grid`.
 pub fn r2_epg(
     magnitude: &[f64],
     mask: &[u8],
     echo_times: &[f64],
     grid: &crate::Grid,
     params: &R2EpgParams,
+    b1_map: Option<&[f64]>,
 ) -> (Vec<f64>, Vec<f64>) {
     let n_echoes = echo_times.len();
     assert!(n_echoes >= 3, "EPG R2 fitting requires at least 3 echoes");
@@ -269,6 +287,9 @@ pub fn r2_epg(
         "magnitude length must be n_voxels * n_echoes"
     );
     assert_eq!(mask.len(), n_voxels, "mask length must be n_voxels");
+    if let Some(b1) = b1_map {
+        assert_eq!(b1.len(), n_voxels, "b1_map length must be n_voxels");
+    }
 
     // Sort echoes by time and require (approximately) uniform spacing.
     let sort_indices: Vec<usize> = {
@@ -289,10 +310,13 @@ pub fn r2_epg(
     // (A constant offset would need a different first-interval model.)
 
     let dict = build_dictionary(params, esp, n_echoes);
-    assert!(!dict.is_empty(), "EPG dictionary is empty");
+    assert!(
+        dict.iter().any(|g| !g.is_empty()),
+        "EPG dictionary is empty"
+    );
 
-    let mut r2_map = vec![0.0_f64; n_voxels];
-    let mut b1_map = vec![0.0_f64; n_voxels];
+    let mut r2_out = vec![0.0_f64; n_voxels];
+    let mut b1_out = vec![0.0_f64; n_voxels];
 
     // Match each voxel against the dictionary (parallel over voxels).
     let mut out: Vec<(f64, f64)> = vec![(0.0, 0.0); n_voxels];
@@ -315,10 +339,27 @@ pub fn r2_epg(
                 *x /= norm;
             }
 
+            // With a known B1, restrict the search to the nearest B1 column.
+            let groups: &[Vec<DictAtom>] = match b1_map {
+                Some(b1) => {
+                    let gi = params
+                        .b1_grid
+                        .iter()
+                        .enumerate()
+                        .min_by(|(_, a), (_, b)| {
+                            (*a - b1[v]).abs().partial_cmp(&(*b - b1[v]).abs()).unwrap()
+                        })
+                        .map(|(i, _)| i)
+                        .unwrap();
+                    std::slice::from_ref(&dict[gi])
+                }
+                None => &dict,
+            };
+
             // Best match = maximum normalized dot product (cosine similarity).
             let mut best_dot = f64::NEG_INFINITY;
             let mut best = (0.0_f64, 0.0_f64);
-            for atom in &dict {
+            for atom in groups.iter().flatten() {
                 let dot: f64 = sig
                     .iter()
                     .zip(atom.signal.iter())
@@ -333,11 +374,11 @@ pub fn r2_epg(
         });
 
     for v in 0..n_voxels {
-        r2_map[v] = out[v].0;
-        b1_map[v] = out[v].1;
+        r2_out[v] = out[v].0;
+        b1_out[v] = out[v].1;
     }
 
-    (r2_map, b1_map)
+    (r2_out, b1_out)
 }
 
 /// Compute R2' = R2* − R2, clamped at zero, within the mask.
@@ -448,7 +489,7 @@ mod tests {
 
         // EPG fit (dictionary includes b1 = 0.75 and t2 near 70 ms).
         let params = R2EpgParams::default();
-        let (r2_epg_map, b1_map) = r2_epg(&mag, &mask, &te, &grid, &params);
+        let (r2_epg_map, b1_map) = r2_epg(&mag, &mask, &te, &grid, &params, None);
         let r2_epg_val = r2_epg_map[0];
         let epg_err = (r2_epg_val - r2_true).abs() / r2_true;
 
@@ -495,9 +536,94 @@ mod tests {
 
         let grid = Grid::new(1, 1, 1, 1.0, 1.0, 1.0);
         let mask = vec![1u8];
-        let (r2_epg_map, _) = r2_epg(&mag, &mask, &te, &grid, &R2EpgParams::default());
+        let (r2_epg_map, _) = r2_epg(&mag, &mask, &te, &grid, &R2EpgParams::default(), None);
         let err = (r2_epg_map[0] - r2_true).abs() / r2_true;
         assert!(err < 0.05, "EPG R2 {} vs true {}", r2_epg_map[0], r2_true);
+    }
+
+    /// With a known B1 map the fit is T2-only: R2 accuracy should match the full
+    /// (T2, B1) search and the returned B1 must be the snapped input value.
+    #[test]
+    fn test_epg_fixed_b1_map_recovers_r2() {
+        let t2_true = 0.070;
+        let r2_true = 1.0 / t2_true;
+        let t1 = 1.2;
+        let b1_true = 0.7; // on the default b1_grid (0.6 + 5*0.02)
+        let esp = 0.010;
+        let n = 10;
+        let te: Vec<f64> = (1..=n).map(|k| k as f64 * esp).collect();
+        let train = epg_cpmg_echoes(t2_true, t1, b1_true, esp, n);
+        let mag: Vec<f64> = train.iter().map(|&v| v * 850.0).collect();
+
+        let grid = Grid::new(1, 1, 1, 1.0, 1.0, 1.0);
+        let mask = vec![1u8];
+        let b1_known = vec![b1_true];
+        let (r2_map, b1_out) = r2_epg(
+            &mag,
+            &mask,
+            &te,
+            &grid,
+            &R2EpgParams::default(),
+            Some(&b1_known),
+        );
+        let err = (r2_map[0] - r2_true).abs() / r2_true;
+        assert!(
+            err < 0.06,
+            "fixed-B1 EPG R2 {:.3} Hz vs true {:.3} Hz (err {:.1}%)",
+            r2_map[0],
+            r2_true,
+            err * 100.0
+        );
+        assert!(
+            (b1_out[0] - b1_true).abs() < 1e-12,
+            "returned B1 {} should be the snapped input {}",
+            b1_out[0],
+            b1_true
+        );
+    }
+
+    /// Off-grid B1 values must snap to the nearest b1_grid entry, and a wrong
+    /// fixed B1 must actually constrain the fit (biasing R2 versus the truth) —
+    /// proving the search really is restricted to the supplied column.
+    #[test]
+    fn test_epg_fixed_b1_snaps_and_constrains() {
+        let t2_true = 0.070;
+        let r2_true = 1.0 / t2_true;
+        let t1 = 1.2;
+        let b1_true = 0.7;
+        let esp = 0.010;
+        let n = 10;
+        let te: Vec<f64> = (1..=n).map(|k| k as f64 * esp).collect();
+        let train = epg_cpmg_echoes(t2_true, t1, b1_true, esp, n);
+        let mag: Vec<f64> = train.iter().map(|&v| v * 850.0).collect();
+
+        let grid = Grid::new(1, 1, 1, 1.0, 1.0, 1.0);
+        let mask = vec![1u8];
+        let params = R2EpgParams::default();
+
+        // Off-grid input snaps to the nearest grid entry (0.695 -> 0.70).
+        let (_, b1_out) = r2_epg(&mag, &mask, &te, &grid, &params, Some(&[0.695]));
+        assert!(
+            (b1_out[0] - 0.70).abs() < 1e-12,
+            "B1 0.695 should snap to 0.70, got {}",
+            b1_out[0]
+        );
+
+        // Forcing perfect refocusing on a b1 = 0.7 train mis-reads the
+        // stimulated-echo signal as slower decay: R2 biased low vs truth.
+        let (r2_right, _) = r2_epg(&mag, &mask, &te, &grid, &params, Some(&[b1_true]));
+        let (r2_wrong, _) = r2_epg(&mag, &mask, &te, &grid, &params, Some(&[1.0]));
+        let err_right = (r2_right[0] - r2_true).abs() / r2_true;
+        let err_wrong = (r2_wrong[0] - r2_true).abs() / r2_true;
+        assert!(
+            r2_wrong[0] < r2_true && err_wrong > err_right + 0.05,
+            "wrong fixed B1 should bias R2 low: right {:.2} Hz (err {:.1}%), wrong {:.2} Hz (err {:.1}%), true {:.2} Hz",
+            r2_right[0],
+            err_right * 100.0,
+            r2_wrong[0],
+            err_wrong * 100.0,
+            r2_true
+        );
     }
 
     #[test]

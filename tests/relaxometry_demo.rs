@@ -194,7 +194,7 @@ fn test_relaxometry_demo() {
     }
 
     // --- EPG R2 vs mono-exp R2 (clean) ---
-    let (r2_epg, b1_map) = r2_epg(&se, &mask, &se_te, &grid, &R2EpgParams::default());
+    let (r2_epg, b1_map) = r2_epg(&se, &mask, &se_te, &grid, &R2EpgParams::default(), None);
     let (r2_mono, _) = r2star_arlo(&se, &mask, &se_te, &grid);
     let (r2star, _) = r2star_arlo(&gre, &mask, &gre_te, &grid);
     let rp_derived = r2prime(&r2star, &r2_epg, &mask);
