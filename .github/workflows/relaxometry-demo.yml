@@ -1,0 +1,131 @@
+name: Relaxometry Demo
+
+# Self-contained demonstration of the relaxometry toolkit (EPG R2/R2', MP-PCA
+# denoising, Gibbs unringing). Builds a small synthetic phantom in-code — no
+# external test data — runs the tools, and posts a PR comment with a metrics
+# table and before/after figures showing each tool works.
+
+on:
+  pull_request:
+    paths:
+      - "src/utils/epg.rs"
+      - "src/utils/denoise.rs"
+      - "src/utils/gibbs.rs"
+      - "src/utils/r2star.rs"
+      - "src/lib.rs"
+      - "src/utils/mod.rs"
+      - "tests/relaxometry_demo.rs"
+      - "tests/common/mod.rs"
+      - "scripts/render_slices.py"
+      - ".github/workflows/relaxometry-demo.yml"
+  workflow_dispatch:
+
+jobs:
+  demo:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-relaxdemo-${{ hashFiles('**/Cargo.lock') }}
+
+      # Runs the functional gates AND writes slices/*.bin + RELAXMETRIC lines.
+      # This step is NOT continue-on-error: a broken tool fails the check.
+      - name: Run relaxometry demo
+        run: |
+          cargo test --release --features parallel --test relaxometry_demo \
+            -- --ignored --nocapture | tee demo.log
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Render figures
+        run: |
+          if [ -n "$(ls slices/ 2>/dev/null)" ]; then
+            pip install matplotlib numpy
+            python scripts/render_slices.py slices figures
+          fi
+
+      - name: Upload figures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: relaxometry-figures
+          path: figures/
+
+      - name: Setup Node.js (canvas@2 needs prebuilt binary)
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Setup CML
+        uses: iterative/setup-cml@v3
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Post PR comment with results
+        if: github.event_name == 'pull_request'
+        continue-on-error: true
+        env:
+          REPO_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          fig() {  # emit an image only if it was rendered
+            [ -f "figures/$1.png" ] && echo "![$1](figures/$1.png)"
+          }
+          {
+            echo "## 🧪 Relaxometry toolkit demo"
+            echo ""
+            echo "Self-contained synthetic multi-echo phantom (no external data)."
+            echo "EPG R2, R2' = R2\*−R2, MP-PCA denoising, and Gibbs unringing."
+            echo ""
+            echo "### Metrics"
+            echo "| Tool | Metric | Value |"
+            echo "|---|---|---|"
+            grep '^RELAXMETRIC ' demo.log | sed 's/^RELAXMETRIC //' \
+              | while IFS='|' read -r name metric value; do
+                  echo "| ${name} | ${metric} | ${value} |"
+                done
+            echo ""
+            echo "### EPG R2 from imperfectly-refocused MESE"
+            echo "EPG recovers the true R2 (bias ≈ 0) and the refocusing B1;"
+            echo "a mono-exponential fit is biased low. Truth / EPG / mono-exp:"
+            echo ""
+            fig relax_r2_truth
+            fig relax_r2_epg
+            fig relax_r2_monoexp
+            echo ""
+            echo "### R2' = R2\* − R2 (truth vs derived)"
+            fig relax_r2prime_truth
+            fig relax_r2prime_derived
+            echo ""
+            echo "### MP-PCA denoising (noisy R2\* → denoised)"
+            fig relax_denoise_after
+            echo ""
+            echo "### Gibbs unringing (k-space-truncated R2\* map → unrung)"
+            fig relax_unring_after
+          } > report.md
+          for attempt in 1 2 3 4 5; do
+            if cml comment create report.md; then
+              echo "PR comment posted (attempt $attempt)."; break
+            fi
+            if [ "$attempt" -lt 5 ]; then
+              wait=$((attempt * 30))
+              echo "cml comment create failed (attempt $attempt); retrying in ${wait}s..."
+              sleep "$wait"
+            else
+              echo "cml comment create still failing after $attempt attempts; giving up (non-fatal)."
+            fi
+          done
