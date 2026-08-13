@@ -118,10 +118,11 @@ jobs:
 
           for file in $CHANGED; do
             case "$file" in
-              # lib.rs is only module declarations + re-exports (no behaviour);
-              # unit tests (already selected for any src/ change) recompile the
-              # whole crate, so a lib.rs-only change needs no integration rerun.
-              src/lib.rs) : ;;
+              # lib.rs and utils/mod.rs are only module declarations + re-exports
+              # (no behaviour); unit tests (already selected for any src/ change)
+              # recompile the whole crate, so a change to them alone needs no
+              # integration rerun.
+              src/lib.rs|src/utils/mod.rs) : ;;
               # Core infrastructure → run everything
               src/fft.rs|src/nifti_io.rs|src/region_grow.rs|src/priority_queue.rs)
                 echo "Core file changed: $file → all tests"
@@ -129,7 +130,9 @@ jobs:
               src/kernels/*|src/solvers/*)
                 echo "Core file changed: $file → all tests"
                 output_all; exit 0 ;;
-              src/utils/gradient.rs|src/utils/padding.rs|src/utils/simd_ops.rs|src/utils/mod.rs)
+              # ops.rs holds the shared math helpers (shrink/vec_norm/...) used
+              # across the algorithms, so a change there can affect any result.
+              src/utils/gradient.rs|src/utils/padding.rs|src/utils/simd_ops.rs|src/utils/ops.rs)
                 echo "Core util changed: $file → all tests"
                 output_all; exit 0 ;;
               # Shared test helpers (or dependency/build changes) affect every
