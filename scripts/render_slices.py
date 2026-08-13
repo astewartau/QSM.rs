@@ -53,6 +53,14 @@ NAMES = {
     "swi_mip": "CLEAR-SWI mIP",
     "r2star": "R2* (Hz)",
     "t2star": "T2* (s)",
+    # Relaxometry demo (self-contained synthetic phantom)
+    "relax_r2_truth": "R2 truth (Hz)",
+    "relax_r2_epg": "R2 — EPG (Hz)",
+    "relax_r2_monoexp": "R2 — mono-exp (Hz)",
+    "relax_r2prime_truth": "R2' truth (Hz)",
+    "relax_r2prime_derived": "R2' derived = R2*-R2 (Hz)",
+    "relax_denoise_after": "R2* — noisy vs MP-PCA denoised (Hz)",
+    "relax_unring_after": "R2* map — rung vs Gibbs-unrung (Hz)",
 }
 
 # Fixed display windows (ppm)
@@ -89,6 +97,14 @@ WINDOWS = {
     "swi_mip": None,   # auto-range (magnitude-weighted)
     "r2star": (0, 100),    # Hz
     "t2star": (0, 0.08),   # seconds (0-80 ms)
+    "relax_r2_truth": (0, 45),
+    "relax_r2_epg": (0, 45),
+    "relax_r2_monoexp": (0, 45),
+    "relax_r2prime_truth": (0, 16),
+    "relax_r2prime_derived": (0, 16),
+    # before/after pairs use auto-range
+    "relax_denoise_after": None,
+    "relax_unring_after": None,
 }
 
 
@@ -142,7 +158,7 @@ def render_figure(slices, name, slug, output_path):
         ax.axis("off")
 
     fig.suptitle(name, fontsize=14, fontweight="bold", y=1.0)
-    cb_label = "Mask" if slug == "bet" else "ppm"
+    cb_label = "Mask" if slug == "bet" else ("Hz" if slug.startswith("relax_") else "ppm")
     fig.colorbar(im, ax=axes, shrink=0.85, aspect=30, pad=0.02, label=cb_label)
     fig.savefig(output_path, dpi=120, bbox_inches="tight", facecolor="white")
     plt.close(fig)
@@ -187,6 +203,8 @@ def main():
     # Handle before/after pairs (e.g. bias_correction_before + bias_correction)
     BEFORE_AFTER = {
         "bias_correction": "bias_correction_before",
+        "relax_denoise_after": "relax_denoise_before",
+        "relax_unring_after": "relax_unring_before",
     }
 
     print(f"Rendering figures from {len(bin_files)} files...")
