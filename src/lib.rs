@@ -139,6 +139,34 @@ pub mod r2star {
     };
 }
 
+/// R2/T2 mapping from multi-echo spin-echo (EPG), and R2' = R2* − R2.
+///
+/// EPG-based fitting models imperfect refocusing (B1 < 1) so it removes the
+/// stimulated-echo bias that a mono-exponential fit suffers. [`r2prime`] combines
+/// the spin-echo R2 with a gradient-echo R2* (from [`r2star`]) for chi-separation.
+pub mod relaxometry {
+    pub use crate::utils::epg::{
+        epg_cpmg_echoes, r2_epg, r2prime, R2EpgParams,
+    };
+}
+
+/// MP-PCA denoising for multi-volume data (e.g. multi-echo magnitude).
+///
+/// Random-matrix-theory denoising (Veraart 2016) that removes noise along the
+/// volume dimension while preserving spatial edges. Applying [`mppca_denoise`]
+/// to multi-echo magnitude before R2*/R2 fitting reduces relaxation-rate
+/// variance without blurring structure.
+pub mod denoise {
+    pub use crate::utils::denoise::mppca_denoise;
+}
+
+/// Gibbs-ringing removal (Kellner 2016 subvoxel shifts) for k-space-truncated
+/// images. Complementary to [`denoise`]: unringing removes truncation ringing,
+/// MP-PCA removes random noise. Recommended before R2*/R2 fitting.
+pub mod unring {
+    pub use crate::utils::gibbs::{gibbs_unring, gibbs_unring_masked, gibbs_unring_volume};
+}
+
 /// Brain-mask thresholding and morphology.
 ///
 /// Mask generation ([`otsu_threshold`](crate::mask::otsu_threshold)) plus

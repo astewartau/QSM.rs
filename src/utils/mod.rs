@@ -24,6 +24,9 @@ pub mod threshold;
 pub mod mask;
 pub mod simd_ops;
 pub mod r2star;
+pub mod epg;
+pub mod denoise;
+pub mod gibbs;
 
 pub use gradient::*;
 pub use padding::*;
@@ -37,6 +40,9 @@ pub use threshold::*;
 pub use mask::*;
 pub use simd_ops::*;
 pub use r2star::*;
+pub use epg::*;
+pub use denoise::*;
+pub use gibbs::*;
 
 /// Soft thresholding (shrinkage) operator for L1 regularization.
 /// shrink(x, t) = sign(x) * max(|x| - t, 0)
