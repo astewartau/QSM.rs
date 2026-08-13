@@ -33,9 +33,10 @@ pub fn use_arlo(echo_times: &[f64], tolerance: f64) -> bool {
 
 /// R2* mapping using ARLO for equi-spaced echo times (≥3 echoes).
 ///
-/// For each masked voxel, computes consecutive signal ratios to estimate the
-/// mono-exponential decay rate. Falls back to log-linear fitting for voxels
-/// with unreliable ratio estimates.
+/// For each masked voxel, uses the integral-based ARLO estimator (Pei et al.
+/// 2015) — a least-squares fit exploiting `s_n - s_{n+2} = R2*·∫S dt` with a
+/// Simpson-rule integral — to estimate the mono-exponential decay rate. Falls
+/// back to log-linear fitting where the estimate is unreliable.
 ///
 /// # Arguments
 /// * `magnitude` - Multi-echo magnitude data, flattened as `[voxel0_echo0, voxel0_echo1, ..., voxel1_echo0, ...]`
@@ -91,22 +92,24 @@ pub fn r2star_arlo(
             continue;
         }
 
-        // ARLO: compute consecutive signal ratios
-        let mut alphas = Vec::new();
-        for i in 0..(n_echoes - 1) {
-            if signal[i] > 1e-10 {
-                let alpha = signal[i + 1] / signal[i];
-                if alpha > 0.0 && alpha <= 1.0 {
-                    alphas.push(alpha);
-                }
-            }
+        // ARLO (Pei et al. 2015): integral-based auto-regression on linear
+        // operations. From S'(t) = -R2*·S(t), integrating over [t_n, t_{n+2}]:
+        //   s_n - s_{n+2} = R2* · ∫_{t_n}^{t_{n+2}} S dt
+        // Estimate the integral with Simpson's rule (y_n) and the drop (x_n),
+        // then R2* = Σ x_n·y_n / Σ y_n² (least-squares fit of x = R2*·y).
+        // This has no ad-hoc ratio selection, so it does not bias on noisy data.
+        let mut num = 0.0_f64;
+        let mut den = 0.0_f64;
+        for i in 0..(n_echoes - 2) {
+            let integ = (delta_te / 3.0) * (signal[i] + 4.0 * signal[i + 1] + signal[i + 2]);
+            let diff = signal[i] - signal[i + 2];
+            num += diff * integ;
+            den += integ * integ;
         }
 
-        if alphas.len() >= 2 {
-            let alpha_mean: f64 = alphas.iter().sum::<f64>() / alphas.len() as f64;
-            let r2star_val = -alpha_mean.ln() / delta_te;
-
-            if r2star_val >= 0.0 && r2star_val <= 500.0 {
+        if den > 1e-30 {
+            let r2star_val = num / den;
+            if (0.0..=500.0).contains(&r2star_val) {
                 r2star_map[v] = r2star_val;
                 s0_map[v] = signal[0] * (r2star_val * te_sorted[0]).exp();
                 continue;
