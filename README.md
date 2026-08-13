@@ -170,12 +170,16 @@ Load and save NIfTI volumes with [`qsm_core::io`](src/io.rs).
 |-----------|-------------|-----------|
 | **MCPC-3D-S** | Multi-Channel Phase Combination (ASPIRE) — removes phase offsets across echoes | Eckstein, K., et al. (2018). "Computationally Efficient Combination of Multi-channel Phase Data From Multi-echo Acquisitions (ASPIRE)." *Magnetic Resonance in Medicine*, 79:2996-3006. [DOI](https://doi.org/10.1002/mrm.26963) |
 | **R2\*/T2\* (ARLO)** | R2* mapping from multi-echo magnitude using Auto-Regression on Linear Operations; T2* = 1/R2* | Pei, M., et al. (2015). "Algorithm for fast monoexponential fitting based on Auto-Regression on Linear Operations (ARLO) of data." *Magnetic Resonance in Medicine*, 73(2):843-850. [DOI](https://doi.org/10.1002/mrm.25137) |
+| **R2 (EPG)** | R2 mapping from multi-echo spin-echo (MESE) via Extended Phase Graph dictionary matching; models imperfect refocusing (B1 < 180°) to remove the stimulated-echo bias a mono-exponential fit suffers | Weigel, M. (2015). "Extended phase graphs: dephasing, RF pulses, and echoes — pure and simple." *Journal of Magnetic Resonance Imaging*, 41(2):266-295. [DOI](https://doi.org/10.1002/jmri.24619) |
+| **R2′ (R2\* − R2)** | Reversible transverse relaxation from paired gradient-echo (R2*) and spin-echo (R2) acquisitions — the input required by χ-separation | Yablonskiy, D.A., Haacke, E.M. (1994). "Theory of NMR signal behavior in magnetically inhomogeneous tissues: the static dephasing regime." *Magnetic Resonance in Medicine*, 32(6):749-763. [DOI](https://doi.org/10.1002/mrm.1910320610) |
 
 ### Preprocessing
 
 | Algorithm | Description | Reference |
 |-----------|-------------|-----------|
 | **Bias Correction** | Homogeneity correction for high-field MRI | Eckstein, K., Trattnig, S., Robinson, S.D. (2019). "A Simple Homogeneity Correction for Neuroimaging at 7T." *Proc. ISMRM 27th Annual Meeting*. |
+| **MP-PCA Denoising** | Marchenko–Pastur PCA denoising of multi-echo / multi-volume data; removes random noise along the volume dimension with a parameter-free (random-matrix) threshold, edge-preserving | Veraart, J., et al. (2016). "Denoising of diffusion MRI using random matrix theory." *NeuroImage*, 142:394-406. [DOI](https://doi.org/10.1016/j.neuroimage.2016.08.016) |
+| **Gibbs Unringing** | Removal of k-space truncation (Gibbs) ringing via local subvoxel shifts, generalised to full 3D | Kellner, E., et al. (2016). "Gibbs-ringing artifact removal based on local subvoxel-shifts." *Magnetic Resonance in Medicine*, 76(5):1574-1581. [DOI](https://doi.org/10.1002/mrm.26054) |
 
 ### Susceptibility Source Separation
 
