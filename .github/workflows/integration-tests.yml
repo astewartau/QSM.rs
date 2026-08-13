@@ -637,8 +637,19 @@ jobs:
 
   # Collect metrics from all parallel jobs and produce a single summary
   summary:
-    needs: [unit-tests, bgremove-tests, inversion-tests, bet-test, combined-tests, pipeline-tests]
-    if: always()
+    needs: [detect-changes, unit-tests, bgremove-tests, inversion-tests, bet-test, combined-tests, pipeline-tests]
+    # Post the results comment only when something actually ran. On changes that
+    # select no tests (e.g. docs-only), skip it instead of posting an empty
+    # "Tests passed: N/A" comment. `always()` keeps it running even if a selected
+    # test job failed (so failures are still reported).
+    if: >-
+      always() &&
+      (needs.detect-changes.outputs.run_unit_tests == 'true' ||
+      needs.detect-changes.outputs.run_bgremove == 'true' ||
+      needs.detect-changes.outputs.run_inversion == 'true' ||
+      needs.detect-changes.outputs.run_bet == 'true' ||
+      needs.detect-changes.outputs.run_combined == 'true' ||
+      needs.detect-changes.outputs.run_pipeline == 'true')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
