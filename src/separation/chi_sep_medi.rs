@@ -132,7 +132,8 @@ impl Default for ChiSepParams {
 /// Chi-separation using MEDI-based coupled optimization.
 ///
 /// # Arguments
-/// * `local_field` - Local field map in Hz
+/// * `local_field` - Local field map in ppm (same units convention as the
+///   dipole-inversion algorithms; converted to Hz internally via `params.cf`)
 /// * `r2prime` - R2' map in Hz
 /// * `magnitude` - Magnitude image for edge weighting
 /// * `mask` - Binary brain mask, 1 = brain
@@ -205,9 +206,11 @@ where
     let dr_p_use = dr_p_eff * r2_scale;
     let dr_q_use = dr_q_eff * r2_scale;
 
+    // Local field arrives in ppm (library-wide convention); the solver works in
+    // Hz internally, so convert on entry.
     let field_f32: Vec<f32> = local_field.iter()
         .zip(mask.iter())
-        .map(|(&v, &m)| if m != 0 { v as f32 } else { 0.0 })
+        .map(|(&v, &m)| if m != 0 { (v * cf * 1.0e-6) as f32 } else { 0.0 })
         .collect();
     let r2p_f32: Vec<f32> = r2prime.iter()
         .zip(mask.iter())
@@ -609,7 +612,6 @@ mod tests {
         let sphere_outer = make_sphere(nx, ny, nz, 16.0, 16.0, 16.0, 8.0);
         let brain_mask = make_sphere(nx, ny, nz, 16.0, 16.0, 16.0, 12.0);
 
-        let hz_per_ppm = cf / 1.0e6;
         let mut chi_pos_ppm = vec![0.0f64; n];
         let mut chi_neg_ppm = vec![0.0f64; n];
         for i in 0..n {
@@ -621,13 +623,13 @@ mod tests {
             }
         }
 
-        // Forward model: field_Hz = D * chi_total_Hz
-        let chi_total_hz: Vec<f64> = chi_pos_ppm.iter()
+        // Forward model: field_ppm = D * chi_total_ppm (library units convention)
+        let chi_total_ppm: Vec<f64> = chi_pos_ppm.iter()
             .zip(chi_neg_ppm.iter())
-            .map(|(&p, &n)| (p + n) * hz_per_ppm)
+            .map(|(&p, &n)| p + n)
             .collect();
         let d = dipole_kernel(&grid, bdir);
-        let chi_fft = fft3d_real(&chi_total_hz, nx, ny, nz);
+        let chi_fft = fft3d_real(&chi_total_ppm, nx, ny, nz);
         let field_fft: Vec<_> = chi_fft.iter()
             .zip(d.iter())
             .map(|(&c, &dk)| c * dk)
