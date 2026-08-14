@@ -14,13 +14,12 @@ use qsm_core::separation::ChiSepParams;
 use qsm_core::kernels::dipole::dipole_kernel;
 use qsm_core::fft::{fft3d_real, ifft3d_real};
 
-/// Compute local field (Hz) from chi map (ppm) via dipole convolution.
-fn compute_local_field_hz(
+/// Compute local field (ppm) from chi map (ppm) via dipole convolution.
+fn compute_local_field_ppm(
     chi: &[f64], mask: &[u8],
     nx: usize, ny: usize, nz: usize,
     vsx: f64, vsy: f64, vsz: f64,
     bdir: (f64, f64, f64),
-    cf: f64,
 ) -> Vec<f64> {
     let n = nx * ny * nz;
 
@@ -36,18 +35,14 @@ fn compute_local_field_hz(
         chi_k[i] *= d_kernel[i];
     }
 
-    // Inverse FFT → field in ppm
-    let field_ppm = ifft3d_real(&chi_k, nx, ny, nz);
-
-    // Convert ppm → Hz and subtract mean within mask
-    let ppm_to_hz = cf * 1e-6; // field_Hz = field_ppm * gamma * B0 = field_ppm * cf * 1e-6
-    let mut field_hz: Vec<f64> = field_ppm.iter().map(|&v| v * ppm_to_hz).collect();
+    // Inverse FFT → field in ppm, then subtract mean within mask
+    let mut field_ppm = ifft3d_real(&chi_k, nx, ny, nz);
 
     let mut sum = 0.0;
     let mut count = 0usize;
     for i in 0..n {
         if mask[i] > 0 {
-            sum += field_hz[i];
+            sum += field_ppm[i];
             count += 1;
         }
     }
@@ -55,14 +50,14 @@ fn compute_local_field_hz(
         let mean = sum / count as f64;
         for i in 0..n {
             if mask[i] > 0 {
-                field_hz[i] -= mean;
+                field_ppm[i] -= mean;
             } else {
-                field_hz[i] = 0.0;
+                field_ppm[i] = 0.0;
             }
         }
     }
 
-    field_hz
+    field_ppm
 }
 
 #[test]
@@ -114,8 +109,8 @@ fn test_chisep_on_forward_phantom() {
     // Compute local field from total chi via dipole convolution
     println!("[INFO] Computing local field via dipole convolution...");
     let start = Instant::now();
-    let local_field_hz = compute_local_field_hz(
-        &chi_nii.data, &mask, nx, ny, nz, vsx, vsy, vsz, bdir, cf,
+    let local_field_ppm = compute_local_field_ppm(
+        &chi_nii.data, &mask, nx, ny, nz, vsx, vsy, vsz, bdir,
     );
     println!("[INFO] Field computation done in {:.2?}", start.elapsed());
 
@@ -175,7 +170,7 @@ fn test_chisep_on_forward_phantom() {
         let start = Instant::now();
         let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
         let (chi_pos_result, chi_neg_result, _chi_total_result) = chi_sep_medi(
-            &local_field_hz,
+            &local_field_ppm,
             &r2prime_nii.data,
             &mag_nii.data,
             &mask,
