@@ -55,8 +55,6 @@ struct ChiSepWorkspace {
 
     complex_buf: Vec<Complex32>,
     dipole_buf: Vec<f32>,
-
-    tmp: Vec<f32>,
 }
 
 impl ChiSepWorkspace {
@@ -74,7 +72,6 @@ impl ChiSepWorkspace {
             div_buf: vec![0.0; n],
             complex_buf: vec![Complex32::new(0.0, 0.0); n],
             dipole_buf: vec![0.0; n],
-            tmp: vec![0.0; n],
         }
     }
 }
@@ -235,6 +232,10 @@ where
     let mut dx = vec![0.0f32; n2];
     let mut rhs = vec![0.0f32; n2];
     let mut chi_sum_buf = vec![0.0f32; n];
+    let mut field_residual = vec![0.0f32; n];
+    let mut r2_residual = vec![0.0f32; n];
+    // Scratch for the CG operator (avoids per-iteration buffer clones).
+    let mut stage = vec![0.0f32; n];
 
     // TV weight on (chi+ + chi-) sum — paper uses 2*lambda for sum term
     // Disabled for now (0.0) pending parameter tuning; the sum TV can over-couple components
@@ -262,23 +263,18 @@ where
             &chi_sum_buf, nx, ny, nz, vsx_f32, vsy_f32, vsz_f32);
         compute_p_weights_f32(&mut vr_sum, &mx, &my, &mz, &ws.gx, &ws.gy, &ws.gz, eps);
 
-        // --- Residuals ---
+        // --- Residuals (chi_sum_buf still holds chi_pos + chi_neg) ---
         // field_residual = field - D*(chi_pos + chi_neg)
+        ws.fft_ws.apply_dipole_inplace(&chi_sum_buf, &d_kernel, &mut ws.dipole_buf, &mut ws.complex_buf);
         for i in 0..n {
-            ws.tmp[i] = chi_pos[i] + chi_neg[i];
+            field_residual[i] = field_f32[i] - ws.dipole_buf[i];
         }
-        let chi_sum = ws.tmp.clone();
-        ws.fft_ws.apply_dipole_inplace(&chi_sum, &d_kernel, &mut ws.dipole_buf, &mut ws.complex_buf);
-        let field_residual: Vec<f32> = field_f32.iter()
-            .zip(ws.dipole_buf.iter())
-            .map(|(&f, &d)| f - d)
-            .collect();
 
         // R2' residual (normalized): r2_norm - dr_p_use * chi_pos + dr_q_use * chi_neg
         // where r2_norm = R2' / (dr_p_eff + dr_q_eff), dr_p_use = dr_p_eff / dr_sum
-        let r2_residual: Vec<f32> = (0..n).map(|i| {
-            r2p_f32[i] - dr_p_use * chi_pos[i] + dr_q_use * chi_neg[i]
-        }).collect();
+        for i in 0..n {
+            r2_residual[i] = r2p_f32[i] - dr_p_use * chi_pos[i] + dr_q_use * chi_neg[i];
+        }
 
         // --- Build gradient (MEDI convention: b_orig = gradient, then negate) ---
         //
@@ -367,7 +363,7 @@ where
             lambda_para_f32, lambda_dia_f32, lambda_sum_f32, lambda_cpl_f32,
             dr_p_use, dr_q_use,
             mask,
-            &rhs, &mut dx,
+            &rhs, &mut dx, &mut stage,
             cg_tol_f32, cg_max_iter,
         );
 
@@ -436,6 +432,7 @@ fn apply_chisep_operator(
     mask: &[u8],
     dx: &[f32],
     out: &mut [f32],
+    stage: &mut [f32],
 ) {
     let n = ws.n;
     let (nx, ny, nz) = (ws.nx, ws.ny, ws.nz);
@@ -467,13 +464,13 @@ fn apply_chisep_operator(
     }
 
     // TV for sum (d_pos + d_neg): λ_sum * bdiv(wG*Vr_sum*wG*fgrad(d_pos+d_neg))
-    // Applied equally to both components
+    // Applied equally to both components. `stage` holds the sum and stays valid
+    // through the field-fidelity term below (no clones in this CG hot path).
     for i in 0..n {
-        ws.tmp[i] = d_pos[i] + d_neg[i];
+        stage[i] = d_pos[i] + d_neg[i];
     }
-    let sum_for_tv = ws.tmp.clone();
     fgrad_periodic_inplace_f32(&mut ws.gx, &mut ws.gy, &mut ws.gz,
-        &sum_for_tv, nx, ny, nz, vsx, vsy, vsz);
+        stage, nx, ny, nz, vsx, vsy, vsz);
     apply_gradient_weights_f32(&mut ws.reg_x, &mut ws.reg_y, &mut ws.reg_z,
         mx, my, mz, vr_sum, &ws.gx, &ws.gy, &ws.gz);
     bdiv_periodic_inplace_f32(&mut ws.div_buf,
@@ -485,13 +482,9 @@ fn apply_chisep_operator(
     }
 
     // Field fidelity: λ_cpl * D²(d_pos + d_neg), SAME for both
-    for i in 0..n {
-        ws.tmp[i] = d_pos[i] + d_neg[i];
-    }
-    let sum_copy = ws.tmp.clone();
-    ws.fft_ws.apply_dipole_inplace(&sum_copy, d_kernel, &mut ws.dipole_buf, &mut ws.complex_buf);
-    let d1_copy = ws.dipole_buf.clone();
-    ws.fft_ws.apply_dipole_inplace(&d1_copy, d_kernel, &mut ws.dipole_buf, &mut ws.complex_buf);
+    ws.fft_ws.apply_dipole_inplace(stage, d_kernel, &mut ws.dipole_buf, &mut ws.complex_buf);
+    stage.copy_from_slice(&ws.dipole_buf);
+    ws.fft_ws.apply_dipole_inplace(stage, d_kernel, &mut ws.dipole_buf, &mut ws.complex_buf);
 
     for i in 0..n {
         let ff = lambda_cpl * ws.dipole_buf[i];
@@ -523,6 +516,7 @@ fn cg_solve_chisep(
     mask: &[u8],
     b: &[f32],
     x: &mut [f32],
+    stage: &mut [f32],
     tol: f32,
     max_iter: usize,
 ) {
@@ -550,7 +544,7 @@ fn cg_solve_chisep(
             lambda_para, lambda_dia, lambda_sum, lambda_cpl,
             dr_p, dr_q,
             mask,
-            &cg_p, &mut cg_ap,
+            &cg_p, &mut cg_ap, stage,
         );
 
         let pap = dot_product_f32(&cg_p, &cg_ap);
