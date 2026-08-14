@@ -177,7 +177,9 @@ fn irls_weights(ws: &mut Ws, x: &[f32], mx: &[f32], my: &[f32], mz: &[f32], vr: 
 /// χ-separation (Shin 2021, projected Gauss-Newton/CG).
 ///
 /// # Arguments
-/// * `local_field` - Local (tissue) field map in Hz `[nx*ny*nz]`
+/// * `local_field` - Local (tissue) field map in ppm `[nx*ny*nz]` (same units
+///   convention as the dipole-inversion algorithms; converted to Hz internally
+///   via `params.cf`)
 /// * `r2prime` - R2' map in Hz `[nx*ny*nz]`
 /// * `magnitude` - GRE magnitude (echo-combined) for the SNR weight and edge mask
 /// * `qsm` - Conventional QSM in ppm for initialization (use [`crate::inversion::ilsqr`]
@@ -268,10 +270,12 @@ where
     let (mmx, mmy, mmz) = gradient_mask_f32(&mag_f32, mask, nx, ny, nz, vsx, vsy, vsz, pct);
     let (mrx, mry, mrz) = gradient_mask_f32(&r2p_f32, mask, nx, ny, nz, vsx, vsy, vsz, pct);
 
+    // Local field arrives in ppm (library-wide convention); the data term works
+    // in Hz so both residuals share 1/s units under the 2π coupling.
     let field_f32: Vec<f32> = local_field
         .iter()
         .zip(mask.iter())
-        .map(|(&v, &m)| if m != 0 { v as f32 } else { 0.0 })
+        .map(|(&v, &m)| if m != 0 { (v * params.cf * 1.0e-6) as f32 } else { 0.0 })
         .collect();
 
     // --- Initialization: voxelwise 2×2 solve of
@@ -570,7 +574,6 @@ mod tests {
         let grid = Grid::new(nx, ny, nz, 1.0, 1.0, 1.0);
         let bdir = (0.0, 0.0, 1.0);
         let cf = 123.2e6_f64;
-        let hz_per_ppm = cf * 1.0e-6;
 
         let inner = make_sphere(nx, ny, nz, 16.0, 4.0);
         let outer = make_sphere(nx, ny, nz, 16.0, 8.0);
@@ -587,14 +590,11 @@ mod tests {
         }
         let chi_total_t: Vec<f64> = (0..n).map(|i| chi_pos_t[i] + chi_neg_t[i]).collect();
 
-        // field_Hz = cf_ppm * D(k) * chi_total_ppm
+        // field_ppm = D(k) * chi_total_ppm (ppm in, ppm out — library convention)
         let d = dipole_kernel(&grid, bdir);
         let cf_fft = fft3d_real(&chi_total_t, nx, ny, nz);
         let f_fft: Vec<_> = cf_fft.iter().zip(d.iter()).map(|(&c, &dk)| c * dk).collect();
-        let field_hz: Vec<f64> = ifft3d_real(&f_fft, nx, ny, nz)
-            .iter()
-            .map(|&v| v * hz_per_ppm)
-            .collect();
+        let field_ppm: Vec<f64> = ifft3d_real(&f_fft, nx, ny, nz);
 
         let dr = 137.0_f64;
         let r2prime: Vec<f64> = (0..n)
@@ -611,7 +611,7 @@ mod tests {
         };
         // Ideal conventional QSM = true chi_total (unit test isolates the separation).
         let (chi_pos, chi_neg, chi_total) = chi_sep_ilsqr(
-            &field_hz, &r2prime, &magnitude, &chi_total_t, &mask, &grid, bdir, &params, |_, _| {},
+            &field_ppm, &r2prime, &magnitude, &chi_total_t, &mask, &grid, bdir, &params, |_, _| {},
         );
 
         for i in 0..n {

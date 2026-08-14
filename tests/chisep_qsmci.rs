@@ -28,7 +28,7 @@ use qsm_core::Grid;
 use std::path::Path;
 use std::time::Instant;
 
-const GAMMA: f64 = 42.5774e6; // Hz/T, matching the QSM-CI MATLAB entries
+const GAMMA: f64 = 42.576e6; // Hz/T (proton gyromagnetic ratio, as used library-wide)
 
 fn base_dir() -> String {
     std::env::var("QSMCI_CHISEP")
@@ -172,12 +172,6 @@ fn test_chi_sep_ilsqr_qsmci() {
         t
     }, &ph.mask, ph.dims);
 
-    let local_field_hz: Vec<f64> = ph
-        .local_field_ppm
-        .iter()
-        .map(|&v| v * ph.cf * 1e-6)
-        .collect();
-
     let lambda1: f64 = std::env::var("CHISEP_LAMBDA1")
         .ok()
         .and_then(|s| s.parse().ok())
@@ -190,7 +184,7 @@ fn test_chi_sep_ilsqr_qsmci() {
     println!("[INFO] chi_sep_ilsqr  lambda1 {}", lambda1);
     let t = Instant::now();
     let (chi_pos, chi_neg, _) = chi_sep_ilsqr(
-        &local_field_hz,
+        &ph.local_field_ppm,
         &ph.r2prime,
         &ph.magnitude,
         &qsm,
@@ -232,11 +226,6 @@ fn test_chi_sep_medi_qsmci() {
     let Some(ph) = load_phantom() else { return };
     println!("[INFO] chi_sep_medi on qsmci phantom (posted MATLAB chi-sep-medi: para 0.73/0.90, dia 0.58/0.91)");
 
-    let local_field_hz: Vec<f64> = ph
-        .local_field_ppm
-        .iter()
-        .map(|&v| v * ph.cf * 1e-6)
-        .collect();
     let params = ChiSepParams {
         cf: ph.cf,
         dr_pos: 137.0,
@@ -246,7 +235,7 @@ fn test_chi_sep_medi_qsmci() {
     };
     let t = Instant::now();
     let (chi_pos, chi_neg, _) = chi_sep_medi(
-        &local_field_hz,
+        &ph.local_field_ppm,
         &ph.r2prime,
         &ph.magnitude,
         &ph.mask,
