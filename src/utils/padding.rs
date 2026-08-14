@@ -71,6 +71,49 @@ pub fn pad_to_fast_fft(
     (padded, new_nx, new_ny, new_nz)
 }
 
+/// Pad a 3D array to `new_dims`, corner-placed (data at the origin) and
+/// default-filled. Corner placement is equivalent to centring for circular
+/// (FFT) convolution: the wrap gap between data end and data start is
+/// `new_n - n` either way.
+pub fn pad3d<T: Copy + Default>(
+    data: &[T],
+    dims: (usize, usize, usize),
+    new_dims: (usize, usize, usize),
+) -> Vec<T> {
+    let (nx, ny, nz) = dims;
+    let (px, py, pz) = new_dims;
+    assert!(px >= nx && py >= ny && pz >= nz, "padded dims must not shrink");
+    let mut out = vec![T::default(); px * py * pz];
+    for k in 0..nz {
+        for j in 0..ny {
+            let src = k * nx * ny + j * nx;
+            let dst = k * px * py + j * px;
+            out[dst..dst + nx].copy_from_slice(&data[src..src + nx]);
+        }
+    }
+    out
+}
+
+/// Extract the corner-placed `dims` region from an array of `padded_dims`
+/// (inverse of [`pad3d`]).
+pub fn unpad3d<T: Copy + Default>(
+    padded: &[T],
+    padded_dims: (usize, usize, usize),
+    dims: (usize, usize, usize),
+) -> Vec<T> {
+    let (nx, ny, nz) = dims;
+    let (px, py, _pz) = padded_dims;
+    let mut out = vec![T::default(); nx * ny * nz];
+    for k in 0..nz {
+        for j in 0..ny {
+            let src = k * px * py + j * px;
+            let dst = k * nx * ny + j * nx;
+            out[dst..dst + nx].copy_from_slice(&padded[src..src + nx]);
+        }
+    }
+    out
+}
+
 /// Extract original-sized region from padded array
 pub fn unpad(
     padded: &[f64],
