@@ -29,6 +29,8 @@
 //! Reference implementation: https://github.com/huawu02/MEDI_toolbox
 
 use num_complex::Complex32;
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
 use crate::fft::Fft3dWorkspaceF32;
 use crate::kernels::dipole::dipole_kernel_f32;
 use crate::kernels::smv::smv_kernel_f32;
@@ -956,7 +958,9 @@ pub(crate) fn fgrad_linext_inplace_f32(
 /// Forward difference gradient with periodic boundary conditions (f32, in-place)
 /// Matches MATLAB's gradfp_mex used inside MEDI iterations.
 /// At boundaries, wraps around: dx(end) = (x(1) - x(end)) / h
-#[inline]
+///
+/// Parallelised one rayon task per z-slab (disjoint output chunks); `x` is only
+/// read, including across slab boundaries for the z-difference.
 pub(crate) fn fgrad_periodic_inplace_f32(
     gx: &mut [f32], gy: &mut [f32], gz: &mut [f32],
     x: &[f32],
@@ -968,36 +972,43 @@ pub(crate) fn fgrad_periodic_inplace_f32(
     let hz = 1.0 / vsz;
     let nxny = nx * ny;
 
-    for k in 0..nz {
-        let k_offset = k * nxny;
+    maybe_par_chunks_mut!(gx, nxny)
+        .zip(maybe_par_chunks_mut!(gy, nxny))
+        .zip(maybe_par_chunks_mut!(gz, nxny))
+        .enumerate()
+        .for_each(|(k, ((gx_s, gy_s), gz_s))| {
+            let k_offset = k * nxny;
 
-        for j in 0..ny {
-            let j_offset = j * nx;
+            for j in 0..ny {
+                let j_offset = j * nx;
 
-            for i in 0..nx {
-                let idx = i + j_offset + k_offset;
-                let x_val = x[idx];
+                for i in 0..nx {
+                    let local = i + j_offset;
+                    let idx = local + k_offset;
+                    let x_val = x[idx];
 
-                // x-direction: periodic wrap at i = nx-1
-                let x_next = if i + 1 < nx { x[idx + 1] } else { x[j_offset + k_offset] };
-                gx[idx] = (x_next - x_val) * hx;
+                    // x-direction: periodic wrap at i = nx-1
+                    let x_next = if i + 1 < nx { x[idx + 1] } else { x[j_offset + k_offset] };
+                    gx_s[local] = (x_next - x_val) * hx;
 
-                // y-direction: periodic wrap at j = ny-1
-                let y_next = if j + 1 < ny { x[i + (j + 1) * nx + k_offset] } else { x[i + k_offset] };
-                gy[idx] = (y_next - x_val) * hy;
+                    // y-direction: periodic wrap at j = ny-1
+                    let y_next = if j + 1 < ny { x[i + (j + 1) * nx + k_offset] } else { x[i + k_offset] };
+                    gy_s[local] = (y_next - x_val) * hy;
 
-                // z-direction: periodic wrap at k = nz-1
-                let z_next = if k + 1 < nz { x[i + j_offset + (k + 1) * nxny] } else { x[i + j_offset] };
-                gz[idx] = (z_next - x_val) * hz;
+                    // z-direction: periodic wrap at k = nz-1
+                    let z_next = if k + 1 < nz { x[i + j_offset + (k + 1) * nxny] } else { x[i + j_offset] };
+                    gz_s[local] = (z_next - x_val) * hz;
+                }
             }
-        }
-    }
+        });
 }
 
 /// Backward divergence with periodic boundary conditions (f32, in-place)
 /// Adjoint of fgrad_periodic_inplace_f32, matching MATLAB's gradfp_adj_mex.
 /// At boundaries, wraps around: at i=0, uses gx(end) instead of zero.
-#[inline]
+///
+/// Parallelised one rayon task per z-slab (disjoint output chunks); the
+/// gradient inputs are only read, including across slab boundaries.
 pub(crate) fn bdiv_periodic_inplace_f32(
     div: &mut [f32],
     gx: &[f32], gy: &[f32], gz: &[f32],
@@ -1009,14 +1020,15 @@ pub(crate) fn bdiv_periodic_inplace_f32(
     let hz = -1.0 / vsz;
     let nxny = nx * ny;
 
-    for k in 0..nz {
+    maybe_par_chunks_mut!(div, nxny).enumerate().for_each(|(k, div_s)| {
         let k_offset = k * nxny;
 
         for j in 0..ny {
             let j_offset = j * nx;
 
             for i in 0..nx {
-                let idx = i + j_offset + k_offset;
+                let local = i + j_offset;
+                let idx = local + k_offset;
 
                 // x-direction: at i=0, wrap to gx[nx-1,j,k]
                 let gx_prev = if i > 0 { gx[idx - 1] } else { gx[(nx - 1) + j_offset + k_offset] };
@@ -1030,10 +1042,10 @@ pub(crate) fn bdiv_periodic_inplace_f32(
                 let gz_prev = if k > 0 { gz[i + j_offset + (k - 1) * nxny] } else { gz[i + j_offset + (nz - 1) * nxny] };
                 let gz_term = (gz[idx] - gz_prev) * hz;
 
-                div[idx] = gx_term + gy_term + gz_term;
+                div_s[local] = gx_term + gy_term + gz_term;
             }
         }
-    }
+    });
 }
 
 
