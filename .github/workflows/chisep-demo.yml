@@ -1,0 +1,196 @@
+name: Chi-Separation Demo
+
+# Runs the chi_sep_ilsqr integration test on a QSM-CI chi-separation phantom
+# pulled from the shared OSF test-data project (y8adf — the same project the
+# QSM-CI platform scores against), then posts a PR comment with the QSM-CI
+# metrics (correlation / XSIM / NRMSE per source map) and result figures.
+#
+# The dataset zip is discovered by name (first *.zip containing "chisep") via
+# the OSF API; set the optional OSF_FILE_CHISEP secret (waterbutler id or GUID)
+# to pin a specific file instead.
+
+on:
+  pull_request:
+    paths:
+      - "src/separation/**"
+      - "src/inversion/ilsqr.rs"
+      - "src/lib.rs"
+      - "tests/chisep_qsmci.rs"
+      - "tests/common/mod.rs"
+      - "scripts/render_slices.py"
+      - ".github/workflows/chisep-demo.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  demo:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-chisepdemo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Download QSM-CI chisep phantom from OSF
+        env:
+          OSF_TOKEN: ${{ secrets.OSF_TOKEN }}
+          OSF_FILE_CHISEP: ${{ secrets.OSF_FILE_CHISEP }}
+        run: |
+          python3 - <<'EOF'
+          import json, os, sys, urllib.request
+
+          token = os.environ["OSF_TOKEN"]
+          override = os.environ.get("OSF_FILE_CHISEP", "").strip()
+
+          def api(url):
+              req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
+              with urllib.request.urlopen(req) as r:
+                  return json.load(r)
+
+          url = None
+          if override:
+              # 24-hex waterbutler id on y8adf, else an OSF GUID.
+              if len(override) == 24 and all(c in "0123456789abcdef" for c in override):
+                  url = f"https://files.osf.io/v1/resources/y8adf/providers/osfstorage/{override}"
+              else:
+                  url = f"https://osf.io/{override}/download"
+              print(f"using pinned OSF_FILE_CHISEP -> {url}")
+          else:
+              # Walk the project's osfstorage and take the first chisep zip.
+              stack = ["https://api.osf.io/v2/nodes/y8adf/files/osfstorage/?page%5Bsize%5D=100"]
+              while stack and url is None:
+                  page = stack.pop()
+                  while page:
+                      d = api(page)
+                      for f in d["data"]:
+                          a = f["attributes"]
+                          if a["kind"] == "folder":
+                              stack.append(
+                                  f["relationships"]["files"]["links"]["related"]["href"]
+                                  + "?page%5Bsize%5D=100"
+                              )
+                          elif "chisep" in a["name"].lower() and a["name"].lower().endswith(".zip"):
+                              url = f["links"]["download"]
+                              print(f"found {a['materialized_path']} ({a['size']} bytes)")
+                              break
+                      if url:
+                          break
+                      page = d["links"].get("next")
+          if not url:
+              sys.exit(
+                  "No chisep *.zip found on OSF project y8adf. "
+                  "Set the OSF_FILE_CHISEP secret to the dataset's file id or GUID."
+              )
+          with open("osf_url.txt", "w") as fh:
+              fh.write(url)
+          EOF
+          curl -fS --location-trusted -H "Authorization: Bearer ${OSF_TOKEN}" \
+            "$(cat osf_url.txt)" -o chisep.zip
+          mkdir -p qsmci-chisep
+          unzip -q chisep.zip -d qsmci-chisep
+          # Prepacked zips are flattened (inputs/ + groundtruth/ at the root),
+          # but tolerate one extra directory level.
+          if [ ! -f qsmci-chisep/inputs/localfield.nii.gz ]; then
+            inner=$(dirname "$(find qsmci-chisep -name localfield.nii.gz -path '*/inputs/*' | head -1)")
+            [ -n "$inner" ] || { echo "localfield.nii.gz not found in dataset zip"; exit 1; }
+            mv "$(dirname "$inner")" qsmci-chisep-flat
+            rm -rf qsmci-chisep && mv qsmci-chisep-flat qsmci-chisep
+          fi
+          ls qsmci-chisep/inputs qsmci-chisep/groundtruth
+
+      # Functional gate + CHISEPMETRIC lines + slices/*.bin for the figures.
+      - name: Run chi-separation on the phantom
+        run: |
+          QSMCI_CHISEP="$PWD/qsmci-chisep" \
+            cargo test --release --features parallel --test chisep_qsmci \
+            test_chi_sep_ilsqr_qsmci -- --ignored --nocapture | tee demo.log
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Render figures
+        run: |
+          if [ -n "$(ls slices/ 2>/dev/null)" ]; then
+            pip install matplotlib numpy
+            python scripts/render_slices.py slices figures
+          fi
+
+      - name: Upload figures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: chisep-figures
+          path: figures/
+
+      - name: Setup Node.js (canvas@2 needs prebuilt binary)
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Setup CML
+        uses: iterative/setup-cml@v3
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Post PR comment with results
+        if: github.event_name == 'pull_request'
+        continue-on-error: true
+        env:
+          REPO_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          fig() {
+            [ -f "figures/$1.png" ] && echo "![$1](figures/$1.png)"
+          }
+          {
+            echo "## 🧲 χ-separation on a QSM-CI phantom"
+            echo ""
+            echo "\`chi_sep_ilsqr\` (Shin 2021, iLSQR-QSM initialized) on the"
+            echo "QSM-CI chi-separation dataset pulled from OSF, scored with the"
+            echo "QSM-CI metrics. Reference points from the QSM-CI leaderboard"
+            echo "(older phantom generation): MATLAB chi-sep-ilsqr χ+ 0.86 corr /"
+            echo "0.59 xsim, χ− 0.81 / 0.48; χ-sepnet (DL) χ+ 0.94 / 0.89, χ− 0.88 / 0.72."
+            echo ""
+            echo "### Metrics"
+            echo "| Map | Metric | Value |"
+            echo "|---|---|---|"
+            grep '^CHISEPMETRIC ' demo.log | sed 's/^CHISEPMETRIC //' \
+              | while IFS='|' read -r name metric value; do
+                  echo "| ${name} | ${metric} | ${value} |"
+                done
+            echo ""
+            echo "### χ+ (paramagnetic): truth / reconstruction"
+            fig chisep_para_truth
+            fig chisep_para
+            echo ""
+            echo "### χ− (diamagnetic, magnitude): truth / reconstruction"
+            fig chisep_dia_truth
+            fig chisep_dia
+          } > report.md
+          for attempt in 1 2 3 4 5; do
+            if cml comment create report.md; then
+              echo "PR comment posted (attempt $attempt)."; break
+            fi
+            if [ "$attempt" -lt 5 ]; then
+              wait=$((attempt * 30))
+              echo "cml comment create failed (attempt $attempt); retrying in ${wait}s..."
+              sleep "$wait"
+            else
+              echo "cml comment create still failing after $attempt attempts; giving up (non-fatal)."
+            fi
+          done
