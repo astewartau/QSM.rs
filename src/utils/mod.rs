@@ -28,6 +28,7 @@ pub mod epg;
 pub mod denoise;
 pub mod gibbs;
 pub mod ops;
+pub mod distance;
 
 pub use gradient::*;
 pub use padding::*;
@@ -45,3 +46,4 @@ pub use epg::*;
 pub use denoise::*;
 pub use gibbs::*;
 pub use ops::*;
+pub use distance::*;
