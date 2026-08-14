@@ -105,6 +105,11 @@ WINDOWS = {
     # before/after pairs use auto-range
     "relax_denoise_after": None,
     "relax_unring_after": None,
+    # chi-separation source maps (ppm; chi- rendered as positive magnitude)
+    "chisep_para_truth": (0, 0.2),
+    "chisep_para": (0, 0.2),
+    "chisep_dia_truth": (0, 0.1),
+    "chisep_dia": (0, 0.1),
 }
 
 
