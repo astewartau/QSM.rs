@@ -14,7 +14,6 @@ on:
     paths:
       - "src/separation/**"
       - "src/inversion/ilsqr.rs"
-      - "src/lib.rs"
       - "tests/chisep_qsmci.rs"
       - "tests/common/mod.rs"
       - "scripts/render_slices.py"

@@ -12,7 +12,6 @@ on:
       - "src/utils/denoise.rs"
       - "src/utils/gibbs.rs"
       - "src/utils/r2star.rs"
-      - "src/lib.rs"
       - "src/utils/mod.rs"
       - "tests/relaxometry_demo.rs"
       - "tests/common/mod.rs"
