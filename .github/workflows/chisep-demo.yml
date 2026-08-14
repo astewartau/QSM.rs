@@ -157,13 +157,9 @@ jobs:
             [ -f "figures/$1.png" ] && echo "![$1](figures/$1.png)"
           }
           {
-            echo "## 🧲 χ-separation on a QSM-CI phantom"
+            echo "## 🧲 χ-separation demo"
             echo ""
-            echo "\`chi_sep_ilsqr\` (Shin 2021, iLSQR-QSM initialized) on the"
-            echo "QSM-CI chi-separation dataset pulled from OSF, scored with the"
-            echo "QSM-CI metrics. Reference points from the QSM-CI leaderboard"
-            echo "(older phantom generation): MATLAB chi-sep-ilsqr χ+ 0.86 corr /"
-            echo "0.59 xsim, χ− 0.81 / 0.48; χ-sepnet (DL) χ+ 0.94 / 0.89, χ− 0.88 / 0.72."
+            echo "\`chi_sep_ilsqr\` (Shin et al. 2021) on a simulated brain phantom: paramagnetic (χ+) and diamagnetic (χ−) source maps recovered from the local field, R2′, and magnitude, scored against the phantom ground truth."
             echo ""
             echo "### Metrics"
             echo "| Map | Metric | Value |"
