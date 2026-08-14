@@ -30,6 +30,7 @@ use crate::inversion::medi::{
     fgrad_periodic_inplace_f32,
     bdiv_periodic_inplace_f32,
 };
+use crate::utils::padding::{next_fast_fft_size, pad3d, unpad3d};
 use crate::utils::simd_ops::{
     dot_product_f32, norm_squared_f32, axpy_f32, xpby_f32,
     apply_gradient_weights_f32, compute_p_weights_f32,
@@ -141,7 +142,53 @@ impl Default for ChiSepParams {
 ///
 /// # Returns
 /// `(chi_pos, chi_neg, chi_total)` — susceptibility maps in ppm
+///
+/// Volumes whose dimensions are not FFT-friendly (2ᵃ·3ᵇ·5ᶜ) are transparently
+/// zero-padded to the next fast size for the internal FFTs and cropped back
+/// (see [`chi_sep_ilsqr`](crate::separation::chi_sep_ilsqr) for details).
 pub fn chi_sep_medi<F>(
+    local_field: &[f64],
+    r2prime: &[f64],
+    magnitude: &[f64],
+    mask: &[u8],
+    grid: &Grid,
+    bdir: (f64, f64, f64),
+    params: &ChiSepParams,
+    progress: F,
+) -> (Vec<f64>, Vec<f64>, Vec<f64>)
+where
+    F: FnMut(usize, usize),
+{
+    let dims = grid.dims;
+    let fast = (
+        next_fast_fft_size(dims.0),
+        next_fast_fft_size(dims.1),
+        next_fast_fft_size(dims.2),
+    );
+    if fast == dims {
+        return chi_sep_medi_core(local_field, r2prime, magnitude, mask, grid, bdir, params, progress);
+    }
+    let (vsx, vsy, vsz) = grid.voxel_size;
+    let pgrid = Grid::new(fast.0, fast.1, fast.2, vsx, vsy, vsz);
+    let (chi_pos, chi_neg, chi_total) = chi_sep_medi_core(
+        &pad3d(local_field, dims, fast),
+        &pad3d(r2prime, dims, fast),
+        &pad3d(magnitude, dims, fast),
+        &pad3d(mask, dims, fast),
+        &pgrid,
+        bdir,
+        params,
+        progress,
+    );
+    (
+        unpad3d(&chi_pos, fast, dims),
+        unpad3d(&chi_neg, fast, dims),
+        unpad3d(&chi_total, fast, dims),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn chi_sep_medi_core<F>(
     local_field: &[f64],
     r2prime: &[f64],
     magnitude: &[f64],

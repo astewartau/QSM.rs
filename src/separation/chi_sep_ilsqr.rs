@@ -39,6 +39,7 @@ use crate::inversion::medi::{
     bdiv_periodic_inplace_f32, fgrad_periodic_inplace_f32, gradient_mask_f32,
 };
 use crate::kernels::dipole::dipole_kernel_f32;
+use crate::utils::padding::{next_fast_fft_size, pad3d, unpad3d};
 use crate::utils::simd_ops::{
     apply_gradient_weights_f32, axpy_f32, compute_p_weights_f32, dot_product_f32, xpby_f32,
 };
@@ -190,8 +191,60 @@ fn irls_weights(ws: &mut Ws, x: &[f32], mx: &[f32], my: &[f32], mz: &[f32], vr: 
 ///
 /// # Returns
 /// `(chi_pos, chi_neg, chi_total)` in ppm; `chi_neg` is ≤ 0.
+///
+/// Volumes whose dimensions are not FFT-friendly (2ᵃ·3ᵇ·5ᶜ) are transparently
+/// zero-padded to the next fast size for the internal FFTs and cropped back —
+/// awkward prime factors (e.g. 41 in a 164×205×205 acquisition) otherwise
+/// dominate the runtime, and the padding also increases the circular-wrap
+/// margin of the dipole convolution.
 #[allow(clippy::too_many_arguments)]
 pub fn chi_sep_ilsqr<F>(
+    local_field: &[f64],
+    r2prime: &[f64],
+    magnitude: &[f64],
+    qsm: &[f64],
+    mask: &[u8],
+    grid: &Grid,
+    bdir: (f64, f64, f64),
+    params: &ChiSepIlsqrParams,
+    progress: F,
+) -> (Vec<f64>, Vec<f64>, Vec<f64>)
+where
+    F: FnMut(usize, usize),
+{
+    let dims = grid.dims;
+    let fast = (
+        next_fast_fft_size(dims.0),
+        next_fast_fft_size(dims.1),
+        next_fast_fft_size(dims.2),
+    );
+    if fast == dims {
+        return chi_sep_ilsqr_core(
+            local_field, r2prime, magnitude, qsm, mask, grid, bdir, params, progress,
+        );
+    }
+    let (vsx, vsy, vsz) = grid.voxel_size;
+    let pgrid = Grid::new(fast.0, fast.1, fast.2, vsx, vsy, vsz);
+    let (chi_pos, chi_neg, chi_total) = chi_sep_ilsqr_core(
+        &pad3d(local_field, dims, fast),
+        &pad3d(r2prime, dims, fast),
+        &pad3d(magnitude, dims, fast),
+        &pad3d(qsm, dims, fast),
+        &pad3d(mask, dims, fast),
+        &pgrid,
+        bdir,
+        params,
+        progress,
+    );
+    (
+        unpad3d(&chi_pos, fast, dims),
+        unpad3d(&chi_neg, fast, dims),
+        unpad3d(&chi_total, fast, dims),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn chi_sep_ilsqr_core<F>(
     local_field: &[f64],
     r2prime: &[f64],
     magnitude: &[f64],
@@ -675,12 +728,55 @@ mod tests {
         for _ in 0..5 {
             ws.dipole_apply(&x, &dk);
         }
-        println!("dipole_apply x5: {:?}", t.elapsed());
+        println!("dipole_apply 164x205x205 x5: {:?}", t.elapsed());
         let t = Instant::now();
         for _ in 0..5 {
             ws.tv_apply(&x, &m, &m, &m, &vr);
         }
         println!("tv_apply x5: {:?}", t.elapsed());
+
+        // Padded to the next fast sizes (2^a·3^b·5^c): 180×216×216.
+        let pgrid = Grid::new(180, 216, 216, 1.0, 1.0, 1.0);
+        let pn = 180 * 216 * 216;
+        let mut pws = Ws::new(&pgrid);
+        let px = vec![0.5_f32; pn];
+        let pdk = crate::kernels::dipole::dipole_kernel_f32(&pgrid, (0.0, 0.0, 1.0));
+        let t = Instant::now();
+        for _ in 0..5 {
+            pws.dipole_apply(&px, &pdk);
+        }
+        println!("dipole_apply 180x216x216 x5: {:?}", t.elapsed());
+    }
+
+    /// Non-FFT-friendly dims (7 → padded to 8) must exercise the pad/crop path
+    /// and still return original-size, init-consistent outputs.
+    #[test]
+    fn test_padding_path_preserves_shape_and_values() {
+        let (nx, ny, nz) = (7, 3, 3); // 7 is not 2/3/5-smooth → pads to 8×3×3
+        let n = nx * ny * nz;
+        let grid = Grid::new(nx, ny, nz, 1.0, 1.0, 1.0);
+        let dr = 137.0;
+        let qsm: Vec<f64> = (0..n).map(|i| 0.02 + 0.001 * (i % 5) as f64).collect();
+        let r2prime: Vec<f64> = qsm.iter().map(|&q| dr * q).collect(); // pure χ+
+        let field = vec![0.0_f64; n];
+        let magnitude = vec![1.0_f64; n];
+        let mask = vec![1u8; n];
+        let params = ChiSepIlsqrParams {
+            max_iter: 0,
+            ..ChiSepIlsqrParams::default()
+        };
+        let (p, q, t) = chi_sep_ilsqr(
+            &field, &r2prime, &magnitude, &qsm, &mask, &grid, (0.0, 0.0, 1.0), &params, |_, _| {},
+        );
+        assert_eq!(p.len(), n, "output must be cropped back to input size");
+        for i in 0..n {
+            assert!(
+                (p[i] - qsm[i]).abs() < 1e-6 && q[i].abs() < 1e-6,
+                "voxel {}: init through pad/crop path should be exact",
+                i
+            );
+            assert!((t[i] - p[i] - q[i]).abs() < 1e-10);
+        }
     }
 
     /// The voxelwise init must solve the 2×2 system exactly when QSM and R2'
