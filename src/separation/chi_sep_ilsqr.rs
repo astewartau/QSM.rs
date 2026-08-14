@@ -112,7 +112,6 @@ struct Ws {
     div: Vec<f32>,
     dip: Vec<f32>,
     cbuf: Vec<Complex32>,
-    sum: Vec<f32>,
 }
 
 impl Ws {
@@ -138,7 +137,6 @@ impl Ws {
             div: vec![0.0; n],
             dip: vec![0.0; n],
             cbuf: vec![Complex32::new(0.0, 0.0); n],
-            sum: vec![0.0; n],
         }
     }
 
@@ -308,28 +306,32 @@ where
     for i in 0..n {
         prev_total[i] = chi_pos[i] + chi_neg[i];
     }
+    // Scratch reused across all iterations — the loops below allocate nothing.
+    let mut total = vec![0.0_f32; n];
+    let mut stage = vec![0.0_f32; n];
+    let mut cg_r = vec![0.0_f32; n2];
+    let mut cg_p = vec![0.0_f32; n2];
+    let mut cg_ap = vec![0.0_f32; n2];
 
     for iter in 0..params.max_iter {
         progress(iter + 1, params.max_iter);
 
         // --- IRLS reweighting for the three TV terms ---
         for i in 0..n {
-            ws.sum[i] = chi_pos[i] + chi_neg[i];
+            total[i] = chi_pos[i] + chi_neg[i];
         }
-        let total = ws.sum.clone();
         irls_weights(&mut ws, &total, &mmx, &mmy, &mmz, &mut vr_tot);
         irls_weights(&mut ws, &chi_pos, &mrx, &mry, &mrz, &mut vr_pos);
         irls_weights(&mut ws, &chi_neg, &mrx, &mry, &mrz, &mut vr_neg);
 
         // --- Gradient of the cost (1/2‖·‖² convention), then b = −grad ---
         // Field residual r_f = f − cf_ppm·D(χ+ + χ−)   [Hz]
-        ws.dipole_apply(&total, &d_kernel);
-        let rf: Vec<f32> = (0..n)
-            .map(|i| field_f32[i] - cf_ppm * ws.dip[i])
-            .collect();
         // grad_field(both) = −(2π)²·cf_ppm·Dᴴ(Wf²·r_f)
-        let wrf: Vec<f32> = (0..n).map(|i| wf2[i] * rf[i]).collect();
-        ws.dipole_apply(&wrf, &d_kernel);
+        ws.dipole_apply(&total, &d_kernel);
+        for i in 0..n {
+            stage[i] = wf2[i] * (field_f32[i] - cf_ppm * ws.dip[i]);
+        }
+        ws.dipole_apply(&stage, &d_kernel);
         for i in 0..n {
             let g = -field_w * cf_ppm * ws.dip[i];
             rhs[i] = g;
@@ -355,13 +357,11 @@ where
             rhs[i] += g;
             rhs[n + i] += g;
         }
-        let chi_pos_snapshot = chi_pos.clone();
-        ws.tv_apply(&chi_pos_snapshot, &mrx, &mry, &mrz, &vr_pos);
+        ws.tv_apply(&chi_pos, &mrx, &mry, &mrz, &vr_pos);
         for i in 0..n {
             rhs[i] += lambda1 * ws.div[i];
         }
-        let chi_neg_snapshot = chi_neg.clone();
-        ws.tv_apply(&chi_neg_snapshot, &mrx, &mry, &mrz, &vr_neg);
+        ws.tv_apply(&chi_neg, &mrx, &mry, &mrz, &vr_neg);
         for i in 0..n {
             rhs[n + i] += lambda1 * ws.div[i];
         }
@@ -373,8 +373,8 @@ where
         // --- Inner CG on the Gauss-Newton system ---
         cg_solve(
             &mut ws, &d_kernel, &wf2, &wr2, &mmx, &mmy, &mmz, &mrx, &mry, &mrz, &vr_tot, &vr_pos,
-            &vr_neg, lambda1, field_w, cf_ppm, dr_p, dr_q, mask, &rhs, &mut dx,
-            params.cg_tol as f32, params.cg_max_iter,
+            &vr_neg, lambda1, field_w, cf_ppm, dr_p, dr_q, mask, &rhs, &mut dx, &mut stage,
+            &mut cg_r, &mut cg_p, &mut cg_ap, params.cg_tol as f32, params.cg_max_iter,
         );
 
         // --- Update + sign projection (violations forced to zero) ---
@@ -436,31 +436,37 @@ fn apply_operator(
     mask: &[u8],
     dx: &[f32],
     out: &mut [f32],
+    stage: &mut [f32],
 ) {
     let n = ws.n;
     let (d_pos, d_neg) = dx.split_at(n);
 
-    // Field: (2π)²·cf²·Dᴴ Wf² D applied to the sum, same for both components.
+    // Stage the sum once; the total-TV term runs first so the same scratch can
+    // then be overwritten for the weighted dipole pass (no allocations here —
+    // this is the innermost CG hot path).
     for i in 0..n {
-        ws.sum[i] = d_pos[i] + d_neg[i];
-    }
-    let dsum = ws.sum.clone();
-    ws.dipole_apply(&dsum, d_kernel);
-    let wd: Vec<f32> = (0..n).map(|i| wf2[i] * ws.dip[i]).collect();
-    ws.dipole_apply(&wd, d_kernel);
-    let scale = field_w * cf_ppm * cf_ppm;
-    for i in 0..n {
-        let f = scale * ws.dip[i];
-        out[i] = f;
-        out[n + i] = f;
+        stage[i] = d_pos[i] + d_neg[i];
     }
 
     // Total-TV (2λ1) on the sum, applied to both components.
-    ws.tv_apply(&dsum, mmx, mmy, mmz, vr_tot);
+    ws.tv_apply(stage, mmx, mmy, mmz, vr_tot);
     for i in 0..n {
         let g = 2.0 * lambda1 * ws.div[i];
-        out[i] += g;
-        out[n + i] += g;
+        out[i] = g;
+        out[n + i] = g;
+    }
+
+    // Field: (2π)²·cf²·Dᴴ Wf² D applied to the sum, same for both components.
+    ws.dipole_apply(stage, d_kernel);
+    for i in 0..n {
+        stage[i] = wf2[i] * ws.dip[i];
+    }
+    ws.dipole_apply(stage, d_kernel);
+    let scale = field_w * cf_ppm * cf_ppm;
+    for i in 0..n {
+        let f = scale * ws.dip[i];
+        out[i] += f;
+        out[n + i] += f;
     }
 
     // Component TVs (λ1) with the R2' edge mask.
@@ -508,38 +514,40 @@ fn cg_solve(
     mask: &[u8],
     b: &[f32],
     x: &mut [f32],
+    stage: &mut [f32],
+    r: &mut [f32],
+    p: &mut [f32],
+    ap: &mut [f32],
     tol: f32,
     max_iter: usize,
 ) {
-    let n2 = 2 * ws.n;
     x.fill(0.0);
-    let mut r = b.to_vec();
-    let mut p = r.clone();
-    let mut ap = vec![0.0_f32; n2];
+    r.copy_from_slice(b);
+    p.copy_from_slice(b);
 
     let b_norm = dot_product_f32(b, b).sqrt();
     if b_norm < 1e-12 {
         return;
     }
-    let mut rsold = dot_product_f32(&r, &r);
+    let mut rsold = dot_product_f32(r, r);
 
     for _ in 0..max_iter {
         apply_operator(
             ws, d_kernel, wf2, wr2, mmx, mmy, mmz, mrx, mry, mrz, vr_tot, vr_pos, vr_neg, lambda1,
-            field_w, cf_ppm, dr_p, dr_q, mask, &p, &mut ap,
+            field_w, cf_ppm, dr_p, dr_q, mask, p, ap, stage,
         );
-        let pap = dot_product_f32(&p, &ap);
+        let pap = dot_product_f32(p, ap);
         if pap.abs() < 1e-20 {
             break;
         }
         let alpha = rsold / pap;
-        axpy_f32(x, alpha, &p);
-        axpy_f32(&mut r, -alpha, &ap);
-        let rsnew = dot_product_f32(&r, &r);
+        axpy_f32(x, alpha, p);
+        axpy_f32(r, -alpha, ap);
+        let rsnew = dot_product_f32(r, r);
         if rsnew.sqrt() < tol * b_norm {
             break;
         }
-        xpby_f32(&mut p, &r, rsnew / rsold);
+        xpby_f32(p, r, rsnew / rsold);
         rsold = rsnew;
     }
 }
@@ -647,6 +655,32 @@ mod tests {
             "chi- shell mean {:.4} vs true -0.05",
             neg_shell
         );
+    }
+
+    /// Perf probe: TV stack vs dipole FFT cost at the qsmci phantom size
+    /// (164×205×205; both dims contain the prime 41, so the FFT dominates the
+    /// CG operator ~15:1 — see the perf notes in the chi-separation PR).
+    #[test]
+    #[ignore]
+    fn perf_probe() {
+        use std::time::Instant;
+        let grid = Grid::new(164, 205, 205, 1.0, 1.0, 1.0);
+        let n = 164 * 205 * 205;
+        let mut ws = Ws::new(&grid);
+        let x = vec![0.5_f32; n];
+        let m = vec![1.0_f32; n];
+        let vr = vec![1.0_f32; n];
+        let dk = crate::kernels::dipole::dipole_kernel_f32(&grid, (0.0, 0.0, 1.0));
+        let t = Instant::now();
+        for _ in 0..5 {
+            ws.dipole_apply(&x, &dk);
+        }
+        println!("dipole_apply x5: {:?}", t.elapsed());
+        let t = Instant::now();
+        for _ in 0..5 {
+            ws.tv_apply(&x, &m, &m, &m, &vr);
+        }
+        println!("tv_apply x5: {:?}", t.elapsed());
     }
 
     /// The voxelwise init must solve the 2×2 system exactly when QSM and R2'
