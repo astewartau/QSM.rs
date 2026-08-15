@@ -164,6 +164,7 @@ fn test_chi_sep_ilsqr_qsmci() {
         |_, _| {},
     );
     println!("[INFO] iLSQR QSM in {:.1?}", t.elapsed());
+    println!("CHISEPMETRIC iLSQR QSM|runtime_s|{:.1}", t.elapsed().as_secs_f64());
     score("QSM vs GT para+dia", &qsm, &{
         let mut t: Vec<f64> = ph.gt_para.iter().zip(ph.gt_dia.iter()).map(|(&p, &d)| p - d).collect();
         for (v, &m) in t.iter_mut().zip(ph.mask.iter()) {
@@ -199,6 +200,7 @@ fn test_chi_sep_ilsqr_qsmci() {
         },
     );
     println!("[INFO] chi_sep_ilsqr done in {:.1?}", t.elapsed());
+    println!("CHISEPMETRIC chi_sep_ilsqr|runtime_s|{:.1}", t.elapsed().as_secs_f64());
 
     let dia_mag: Vec<f64> = chi_neg.iter().map(|&v| -v).collect();
     println!("[RESULT] chi_sep_ilsqr (target zone: MATLAB chi-sep-ilsqr para 0.59/0.86, dia 0.48/0.81):");
@@ -249,6 +251,7 @@ fn test_chi_sep_medi_qsmci() {
         },
     );
     println!("[INFO] chi_sep_medi done in {:.1?}", t.elapsed());
+    println!("CHISEPMETRIC chi_sep_medi|runtime_s|{:.1}", t.elapsed().as_secs_f64());
 
     let dia_mag: Vec<f64> = chi_neg.iter().map(|&v| -v).collect();
     println!("[RESULT] chi_sep_medi:");
