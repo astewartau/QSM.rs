@@ -39,8 +39,14 @@ use crate::utils::special::{erfc, erfcx};
 use crate::utils::wavelet::WaveletPlan;
 use crate::Grid;
 use num_complex::Complex64;
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
 
 const EPS: f64 = 2.220446049250313e-16;
+
+/// Chunk length for the deterministic parallel reductions in the GAMP parameter
+/// estimation. Fixed size ⇒ the result is independent of the thread count.
+const PARAM_CHUNK: usize = 1 << 16;
 
 /// Parameters for the AMP-PE inversion.
 #[cfg_attr(feature = "introspection", derive(serde::Serialize))]
@@ -123,6 +129,10 @@ struct DipoleOp {
     mask_idx: Vec<usize>,
     buf: Vec<Complex64>,
     full: Vec<f64>,
+    /// Reused scatter buffer for the adjoint. Non-mask positions are only ever
+    /// written to zero (at construction) and never touched again, so the mask
+    /// scatter needs no per-call clear.
+    scatter: Vec<f64>,
 }
 
 impl DipoleOp {
@@ -136,6 +146,7 @@ impl DipoleOp {
             mask_idx,
             buf: vec![Complex64::new(0.0, 0.0); n],
             full: vec![0.0; n],
+            scatter: vec![0.0; n],
         }
     }
 
@@ -165,12 +176,13 @@ impl DipoleOp {
 
     /// Adjoint: scatter masked real vector to full volume, apply dipole (self-adjoint).
     fn adjoint_full(&mut self, y_masked: &[f64]) -> Vec<f64> {
-        let mut scattered = vec![0.0; self.n];
+        let mut scattered = std::mem::take(&mut self.scatter);
         for (k, &j) in self.mask_idx.iter().enumerate() {
             scattered[j] = y_masked[k];
         }
         let mut out = vec![0.0; self.n];
         self.apply(&scattered, &mut out);
+        self.scatter = scattered;
         out
     }
 }
@@ -415,19 +427,24 @@ fn frob_qsm_sq(cfg: &GampCfg, der_1st: &[Complex64], weight_vect: &[f64]) -> f64
 /// A_qsm forward: image -> masked complex measurement.
 fn a_qsm_mult(dip: &mut DipoleOp, x_img: &[f64], der_1st: &[Complex64], weight_vect: &[f64], mut_cst: f64) -> Vec<Complex64> {
     let field = dip.field_masked(x_img);
-    (0..field.len())
-        .map(|j| der_1st[j] * weight_vect[j] * (field[j] * mut_cst))
+    maybe_par_iter!(field)
+        .zip(maybe_par_iter!(der_1st))
+        .zip(maybe_par_iter!(weight_vect))
+        .map(|((&fj, &dj), &wj)| dj * wj * (fj * mut_cst))
         .collect()
 }
 
 /// real(A_qsm^H * s): masked complex -> full-volume real.
 fn a_qsm_multtr_real(dip: &mut DipoleOp, s: &[Complex64], der_1st: &[Complex64], weight_vect: &[f64], mut_cst: f64) -> Vec<f64> {
     // x_tmp = s .* conj(der*w); take real part; adjoint dipole; scale by mut_cst.
-    let re: Vec<f64> = (0..s.len())
-        .map(|j| (s[j] * (der_1st[j] * weight_vect[j]).conj()).re)
+    let re: Vec<f64> = maybe_par_iter!(s)
+        .zip(maybe_par_iter!(der_1st))
+        .zip(maybe_par_iter!(weight_vect))
+        .map(|((&sj, &dj), &wj)| (sj * (dj * wj).conj()).re)
         .collect();
-    let adj = dip.adjoint_full(&re);
-    adj.iter().map(|&v| v * mut_cst).collect()
+    let mut adj = dip.adjoint_full(&re);
+    maybe_par_iter_mut!(adj).for_each(|v| *v *= mut_cst);
+    adj
 }
 
 /// One GAMP call with single-Gaussian (AWGN) noise. Returns updated `tau_w_1`.
@@ -455,10 +472,17 @@ fn gamp_awgn(
         let axm = a_qsm_mult(dip, &st.x_hat_meas, der_1st, weight_vect, cfg.mut_cst);
         let p_hat_meas_1: Vec<Complex64> = (0..m).map(|j| axm[j] - tau_p_meas_1 * st.s_hat_meas[j]).collect();
 
-        // parameter estimation for tau_w_1
+        // parameter estimation for tau_w_1. `mse` is invariant across the inner
+        // sweep (p_hat_meas_1 and y are fixed), so compute it once.
+        let mse: f64 = maybe_par_chunks!(p_hat_meas_1.as_slice(), PARAM_CHUNK)
+            .zip(maybe_par_chunks!(y, PARAM_CHUNK))
+            .map(|(pc, yc)| pc.iter().zip(yc).map(|(p, yy)| (p - yy).norm_sqr()).sum::<f64>())
+            .collect::<Vec<f64>>()
+            .iter()
+            .sum::<f64>()
+            / m as f64;
+        let tau_w_new = mse + tau_p_meas_1;
         for _ in 0..cfg.max_pe_est_ite {
-            let mse: f64 = (0..m).map(|j| (p_hat_meas_1[j] - y[j]).norm_sqr()).sum::<f64>() / m as f64;
-            let tau_w_new = mse + tau_p_meas_1;
             tau_w_1 += cfg.kappa * (tau_w_new - tau_w_1);
         }
 
@@ -470,7 +494,10 @@ fn gamp_awgn(
         // tau_r_meas_1 = 1 / (frob^2/N * tau_s_meas_1)
         let tau_r_meas_1 = 1.0 / (frob_sq / n as f64 * tau_s_meas_1);
         let mtr = a_qsm_multtr_real(dip, &st.s_hat_meas, der_1st, weight_vect, cfg.mut_cst);
-        let r_hat_meas_1: Vec<f64> = (0..n).map(|i| st.x_hat_meas[i] + tau_r_meas_1 * mtr[i]).collect();
+        let r_hat_meas_1: Vec<f64> = maybe_par_iter!(st.x_hat_meas)
+            .zip(maybe_par_iter!(mtr))
+            .map(|(&x, &mv)| x + tau_r_meas_1 * mv)
+            .collect();
 
         let cvg = wavelet_block(plan, cfg, st, lambda, tau_r_meas_1, &r_hat_meas_1, wave_mask);
         if cvg < cfg.cvg_thd {
@@ -516,7 +543,10 @@ fn gamp_awgn_mix(
 
         let tau_r_meas_1 = 1.0 / (frob_sq / n as f64 * tau_s_meas_1);
         let mtr = a_qsm_multtr_real(dip, &st.s_hat_meas, der_1st, weight_vect, cfg.mut_cst);
-        let r_hat_meas_1: Vec<f64> = (0..n).map(|i| st.x_hat_meas[i] + tau_r_meas_1 * mtr[i]).collect();
+        let r_hat_meas_1: Vec<f64> = maybe_par_iter!(st.x_hat_meas)
+            .zip(maybe_par_iter!(mtr))
+            .map(|(&x, &mv)| x + tau_r_meas_1 * mv)
+            .collect();
 
         let cvg = wavelet_block(plan, cfg, st, lambda, tau_r_meas_1, &r_hat_meas_1, wave_mask);
         if cvg < cfg.cvg_thd {
@@ -538,16 +568,21 @@ fn wavelet_block(
     r_hat_meas_1: &[f64],
     wave_mask: &[bool],
 ) -> f64 {
-    let n = cfg.n;
     let tau_s_psi = 1.0 / (tau_r_meas_1 + st.tau_p_psi);
-    let s_hat_psi: Vec<f64> = (0..n).map(|i| (r_hat_meas_1[i] - st.p_hat_psi[i]) * tau_s_psi).collect();
+    let s_hat_psi: Vec<f64> = maybe_par_iter!(r_hat_meas_1)
+        .zip(maybe_par_iter!(st.p_hat_psi))
+        .map(|(&r, &p)| (r - p) * tau_s_psi)
+        .collect();
 
     // A_wav.multSqTr is identity -> tau_r_psi = 1/tau_s_psi
     let tau_r_psi = 1.0 / tau_s_psi;
     let analysis = plan.forward(&s_hat_psi); // A_wav.multTr
-    let r_hat_psi: Vec<f64> = (0..n).map(|i| st.x_hat_psi[i] + tau_r_psi * analysis[i]).collect();
+    let r_hat_psi: Vec<f64> = maybe_par_iter!(st.x_hat_psi)
+        .zip(maybe_par_iter!(analysis))
+        .map(|(&x, &a)| x + tau_r_psi * a)
+        .collect();
 
-    let abs_r: Vec<f64> = r_hat_psi.iter().map(|v| v.abs()).collect();
+    let abs_r: Vec<f64> = maybe_par_iter!(r_hat_psi).map(|v| v.abs()).collect();
     for _ in 0..cfg.max_pe_est_ite {
         *lambda = input_parameter_est(&abs_r, tau_r_psi, *lambda, cfg.kappa);
     }
@@ -558,9 +593,11 @@ fn wavelet_block(
 
     st.tau_p_psi = tau_x_hat_psi; // A_wav.multSq identity
     let synth = plan.inverse(&st.x_hat_psi); // A_wav.mult
-    for i in 0..n {
-        st.p_hat_psi[i] = synth[i] - st.tau_p_psi * s_hat_psi[i];
-    }
+    let tau_p_psi = st.tau_p_psi;
+    maybe_par_iter_mut!(st.p_hat_psi)
+        .zip(maybe_par_iter!(synth))
+        .zip(maybe_par_iter!(s_hat_psi))
+        .for_each(|((p, &sy), &sh)| *p = sy - tau_p_psi * sh);
 
     let tau_x_meas_pre = st.tau_x_meas;
     let tau_new = (st.tau_p_psi * tau_r_meas_1) / (st.tau_p_psi + tau_r_meas_1);
@@ -609,19 +646,27 @@ fn input_function(r_hat: &[f64], tau_r: f64, lambda: f64, wave_mask: &[bool]) ->
 /// EM update of the Laplace scale parameter `lambda` (single cluster).
 fn input_parameter_est(r_hat: &[f64], tau_r: f64, lambda: f64, kappa: f64) -> f64 {
     let s = (0.5 / tau_r).sqrt();
-    let mut sum1 = 0.0;
-    let mut sum2 = 0.0;
-    for &r in r_hat {
-        let arg = tau_r * lambda - r;
-        // block0 = lambda/2 * exp(0) * erfc(s*arg)   (block - block_min == 0)
-        let b0 = lambda / 2.0 * erfc(s * arg);
-        let der = (2.0 * tau_r / std::f64::consts::PI).sqrt() / erfcx(s * arg) + r - tau_r * lambda;
-        let fst = 1.0 / lambda - der;
-        let scd = -1.0 / (lambda * lambda) + (tau_r + (r - tau_r * lambda) * der) - der * der;
-        let w = b0 / (b0 + EPS);
-        sum1 += w * fst;
-        sum2 += w * scd;
-    }
+    // Deterministic parallel reduction: sequential sum within each fixed-size
+    // chunk, chunks combined in index order (thread-count independent).
+    let partials: Vec<(f64, f64)> = maybe_par_chunks!(r_hat, PARAM_CHUNK)
+        .map(|chunk| {
+            let mut s1 = 0.0;
+            let mut s2 = 0.0;
+            for &r in chunk {
+                let arg = tau_r * lambda - r;
+                // block0 = lambda/2 * exp(0) * erfc(s*arg)   (block - block_min == 0)
+                let b0 = lambda / 2.0 * erfc(s * arg);
+                let der = (2.0 * tau_r / std::f64::consts::PI).sqrt() / erfcx(s * arg) + r - tau_r * lambda;
+                let fst = 1.0 / lambda - der;
+                let scd = -1.0 / (lambda * lambda) + (tau_r + (r - tau_r * lambda) * der) - der * der;
+                let w = b0 / (b0 + EPS);
+                s1 += w * fst;
+                s2 += w * scd;
+            }
+            (s1, s2)
+        })
+        .collect();
+    let (sum1, sum2) = partials.iter().fold((0.0, 0.0), |a, p| (a.0 + p.0, a.1 + p.1));
     let lambda_new = if sum2 < 0.0 {
         lambda - sum1 / sum2
     } else if sum1 > 0.0 {
@@ -638,31 +683,39 @@ fn input_parameter_est(r_hat: &[f64], tau_r: f64, lambda: f64, kappa: f64) -> f6
 fn mix_output_function(r_hat: &[Complex64], tau_r: f64, mix: &MixState) -> (Vec<Complex64>, f64) {
     let (omega, theta, phi, gamma, psi) = (mix.omega, mix.theta, mix.phi, mix.gamma, mix.psi);
     let mut x_hat = vec![Complex64::new(0.0, 0.0); r_hat.len()];
-    let mut tau_sum = 0.0;
-    for (idx, &r) in r_hat.iter().enumerate() {
-        // component 1
-        let diff = theta - r.norm(); // |theta - r_hat| with theta real; matches abs(theta - r_hat) for theta=0
-        let e1 = (-(diff / (phi + tau_r).sqrt()).powi(2)).exp();
-        let block1 = (1.0 - gamma) * omega * (tau_r / (phi + tau_r)) * e1;
-        let mean1 = (theta * tau_r + r * phi) / (phi + tau_r);
-        let block_nmr1 = block1 * mean1;
-        // outlier component (zero mean)
-        let e2 = (-(r.norm() / (psi + tau_r).sqrt()).powi(2)).exp();
-        let block2 = gamma * (tau_r / (psi + tau_r)) * e2;
-        let mean2 = r * psi / (psi + tau_r);
-        let block_nmr2 = block2 * mean2;
+    // Per-chunk: write the x_hat slice and accumulate a partial tau sum.
+    let partials: Vec<f64> = maybe_par_chunks!(r_hat, PARAM_CHUNK)
+        .zip(maybe_par_chunks_mut!(x_hat, PARAM_CHUNK))
+        .map(|(rc, xc)| {
+            let mut tau_sum = 0.0;
+            for (&r, xh_out) in rc.iter().zip(xc.iter_mut()) {
+                // component 1
+                let diff = theta - r.norm(); // |theta - r_hat| with theta real; matches abs for theta=0
+                let e1 = (-(diff / (phi + tau_r).sqrt()).powi(2)).exp();
+                let block1 = (1.0 - gamma) * omega * (tau_r / (phi + tau_r)) * e1;
+                let mean1 = (theta * tau_r + r * phi) / (phi + tau_r);
+                let block_nmr1 = block1 * mean1;
+                // outlier component (zero mean)
+                let e2 = (-(r.norm() / (psi + tau_r).sqrt()).powi(2)).exp();
+                let block2 = gamma * (tau_r / (psi + tau_r)) * e2;
+                let mean2 = r * psi / (psi + tau_r);
+                let block_nmr2 = block2 * mean2;
 
-        let nmr = block_nmr1 + block_nmr2;
-        let dnm = block1 + block2;
-        let xh = if dnm == 0.0 { r } else { nmr / dnm };
-        x_hat[idx] = xh;
+                let nmr = block_nmr1 + block_nmr2;
+                let dnm = block1 + block2;
+                let xh = if dnm == 0.0 { r } else { nmr / dnm };
+                *xh_out = xh;
 
-        let nmr_sq1 = block1 * (phi * tau_r / (phi + tau_r) + mean1.norm_sqr());
-        let nmr_sq2 = block2 * (psi * tau_r / (psi + tau_r) + mean2.norm_sqr());
-        let nmr_sq = nmr_sq1 + nmr_sq2;
-        let tau_seq = if dnm == 0.0 { 0.0 } else { nmr_sq / dnm - xh.norm_sqr() };
-        tau_sum += tau_seq;
-    }
+                let nmr_sq1 = block1 * (phi * tau_r / (phi + tau_r) + mean1.norm_sqr());
+                let nmr_sq2 = block2 * (psi * tau_r / (psi + tau_r) + mean2.norm_sqr());
+                let nmr_sq = nmr_sq1 + nmr_sq2;
+                let tau_seq = if dnm == 0.0 { 0.0 } else { nmr_sq / dnm - xh.norm_sqr() };
+                tau_sum += tau_seq;
+            }
+            tau_sum
+        })
+        .collect();
+    let tau_sum: f64 = partials.iter().sum();
     let tau_x = (tau_sum / r_hat.len() as f64).max(1e-12);
     (x_hat, tau_x)
 }
@@ -670,21 +723,27 @@ fn mix_output_function(r_hat: &[Complex64], tau_r: f64, mix: &MixState) -> (Vec<
 /// EM update of the mixture parameters `omega`, `phi`, `psi` (theta, gamma fixed).
 fn mix_output_parameter_est(r_hat: &[Complex64], tau_r: f64, mix: &mut MixState, kappa: f64) {
     let (omega, theta, phi, gamma, psi) = (mix.omega, mix.theta, mix.phi, mix.gamma, mix.psi);
-    let mut sum_b1 = 0.0; // sum lambda_block_1
-    let mut sum_b2 = 0.0;
-    let mut sum_phi_num = 0.0; // sum block_1 * |r-theta|^2
-    let mut sum_psi_num = 0.0; // sum block_2 * |r|^2
-    for &r in r_hat {
-        let d1 = r.norm() - theta; // |r - theta| for real theta and using magnitude; theta=0
-        let t1 = (1.0 - gamma) * omega / (tau_r + phi) * (-(d1 / (tau_r + phi).sqrt()).powi(2)).exp();
-        let t2 = gamma / (tau_r + psi) * (-(r.norm() / (tau_r + psi).sqrt()).powi(2)).exp();
-        let sum = t1 + t2;
-        let (b1, b2) = if sum == 0.0 { (0.0, 1.0) } else { (t1 / sum, t2 / sum) };
-        sum_b1 += b1;
-        sum_b2 += b2;
-        sum_phi_num += b1 * d1 * d1;
-        sum_psi_num += b2 * r.norm_sqr();
-    }
+    // sums: (block_1, block_2, block_1*|r-theta|^2, block_2*|r|^2)
+    let partials: Vec<(f64, f64, f64, f64)> = maybe_par_chunks!(r_hat, PARAM_CHUNK)
+        .map(|chunk| {
+            let (mut sum_b1, mut sum_b2, mut sum_phi_num, mut sum_psi_num) = (0.0, 0.0, 0.0, 0.0);
+            for &r in chunk {
+                let d1 = r.norm() - theta; // |r - theta| for real theta and using magnitude; theta=0
+                let t1 = (1.0 - gamma) * omega / (tau_r + phi) * (-(d1 / (tau_r + phi).sqrt()).powi(2)).exp();
+                let t2 = gamma / (tau_r + psi) * (-(r.norm() / (tau_r + psi).sqrt()).powi(2)).exp();
+                let sum = t1 + t2;
+                let (b1, b2) = if sum == 0.0 { (0.0, 1.0) } else { (t1 / sum, t2 / sum) };
+                sum_b1 += b1;
+                sum_b2 += b2;
+                sum_phi_num += b1 * d1 * d1;
+                sum_psi_num += b2 * r.norm_sqr();
+            }
+            (sum_b1, sum_b2, sum_phi_num, sum_psi_num)
+        })
+        .collect();
+    let (sum_b1, sum_b2, sum_phi_num, sum_psi_num) = partials
+        .iter()
+        .fold((0.0, 0.0, 0.0, 0.0), |a, p| (a.0 + p.0, a.1 + p.1, a.2 + p.2, a.3 + p.3));
     // omega: single cluster normalizes to 1.
     let omega_new = 1.0;
     mix.omega = omega + kappa * (omega_new - omega);

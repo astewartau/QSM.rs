@@ -21,6 +21,13 @@
 //! `4*a2 + 2*a0 + a1` (a=0 low, a=1 high on that axis). Multilevel decomposition
 //! recurses on the all-low (approximation) subband. The coefficient vector is
 //! `[coarsest approximation, coarsest 7 details, ..., finest 7 details]`.
+//!
+//! Each 1D-along-axis pass is parallelized over its independent "lines" (with the
+//! `parallel` feature). Distinct lines write disjoint strided index sets of the
+//! output, so per-line raw-pointer writes are data-race free.
+
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
 
 /// Daubechies analysis low-pass filter `LoD` for the given order (1 or 2).
 fn lod_filter(order: usize) -> Vec<f64> {
@@ -85,31 +92,69 @@ fn analyze_axis(
     let mut low = vec![0.0; out_len];
     let mut high = vec![0.0; out_len];
 
-    let mut line = vec![0.0f64; n];
     let (os, _, _) = axis_geometry(out_dims, axis);
+    // Wraparound (mod n) is only needed at the low boundary, where center-nn can
+    // go negative — i.e. k < (lf-1)/2 (never for db1, only k=0 for db2). The bulk
+    // uses direct indexing, avoiding a division per tap.
+    let k_lo = ((lf - 1) / 2).min(half);
 
-    for l in 0..num_lines {
+    // Raw output pointers as usize (Send). Distinct lines `l` write disjoint
+    // index sets {obase(l) + k*os}, so the writes below never race.
+    let low_ptr = low.as_mut_ptr() as usize;
+    let high_ptr = high.as_mut_ptr() as usize;
+    let process = |l: usize, line: &mut [f64]| {
         let base = line_base(l, dims, axis);
         for (t, slot) in line.iter_mut().enumerate() {
             *slot = inp[base + t * stride];
         }
         let obase = line_base(l, out_dims, axis);
+        let lp = low_ptr as *mut f64;
+        let hp = high_ptr as *mut f64;
         for k in 0..half {
             let center = 2 * k + 1;
             let mut ca = 0.0;
             let mut cd = 0.0;
-            for nn in 0..lf {
-                // (center - nn) mod n, with center = 2k+1
-                let idx = (center as isize - nn as isize).rem_euclid(n as isize) as usize;
-                let v = line[idx];
-                ca += lod[nn] * v;
-                cd += hid[nn] * v;
+            if k < k_lo {
+                for nn in 0..lf {
+                    let idx = (center as isize - nn as isize).rem_euclid(n as isize) as usize;
+                    let v = line[idx];
+                    ca += lod[nn] * v;
+                    cd += hid[nn] * v;
+                }
+            } else {
+                for nn in 0..lf {
+                    let v = line[center - nn];
+                    ca += lod[nn] * v;
+                    cd += hid[nn] * v;
+                }
             }
-            low[obase + k * os] = ca;
-            high[obase + k * os] = cd;
+            // SAFETY: `obase + k*os` is in-bounds for `out_len` and unique to this
+            // line `l`, so no two concurrent invocations touch the same index.
+            unsafe {
+                *lp.add(obase + k * os) = ca;
+                *hp.add(obase + k * os) = cd;
+            }
         }
-    }
+    };
+    run_lines(num_lines, n, process);
     (low, high)
+}
+
+/// Run a per-line closure over `num_lines`, giving each invocation a scratch
+/// buffer of length `n`. Parallel over lines with the `parallel` feature.
+#[cfg(feature = "parallel")]
+fn run_lines(num_lines: usize, n: usize, process: impl Fn(usize, &mut [f64]) + Sync + Send) {
+    (0..num_lines)
+        .into_par_iter()
+        .for_each_init(|| vec![0.0f64; n], |line, l| process(l, line));
+}
+
+#[cfg(not(feature = "parallel"))]
+fn run_lines(num_lines: usize, n: usize, mut process: impl FnMut(usize, &mut [f64])) {
+    let mut line = vec![0.0f64; n];
+    for l in 0..num_lines {
+        process(l, &mut line);
+    }
 }
 
 /// Synthesis along one axis: the exact adjoint of `analyze_axis`. Combines
@@ -132,8 +177,12 @@ fn synthesize_axis(
     let (in_stride, num_lines, _) = axis_geometry(dims_half, axis);
     let (out_stride, _, _) = axis_geometry(out_dims, axis);
 
-    let mut line = vec![0.0f64; n];
-    for l in 0..num_lines {
+    // Wraparound is only needed for the low-boundary coefficients (mirrors
+    // `analyze_axis`); the rest scatter with direct indexing.
+    let k_lo = ((lf - 1) / 2).min(half);
+    // Distinct lines write disjoint output index sets {obase(l) + t*out_stride}.
+    let out_ptr = out.as_mut_ptr() as usize;
+    let process = |l: usize, line: &mut [f64]| {
         for slot in line.iter_mut() {
             *slot = 0.0;
         }
@@ -142,16 +191,27 @@ fn synthesize_axis(
             let ca = low[ibase + k * in_stride];
             let cd = high[ibase + k * in_stride];
             let center = 2 * k + 1;
-            for nn in 0..lf {
-                let idx = (center as isize - nn as isize).rem_euclid(n as isize) as usize;
-                line[idx] += lod[nn] * ca + hid[nn] * cd;
+            if k < k_lo {
+                for nn in 0..lf {
+                    let idx = (center as isize - nn as isize).rem_euclid(n as isize) as usize;
+                    line[idx] += lod[nn] * ca + hid[nn] * cd;
+                }
+            } else {
+                for nn in 0..lf {
+                    line[center - nn] += lod[nn] * ca + hid[nn] * cd;
+                }
             }
         }
         let obase = line_base(l, out_dims, axis);
+        let op = out_ptr as *mut f64;
         for (t, &v) in line.iter().enumerate() {
-            out[obase + t * out_stride] = v;
+            // SAFETY: `obase + t*out_stride` is in-bounds and unique to line `l`.
+            unsafe {
+                *op.add(obase + t * out_stride) = v;
+            }
         }
-    }
+    };
+    run_lines(num_lines, n, process);
     out
 }
 
