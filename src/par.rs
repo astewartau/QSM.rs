@@ -58,3 +58,25 @@ macro_rules! maybe_par_chunks_mut {
         $slice.chunks_mut($chunk_size)
     };
 }
+
+/// Parallel or sequential (immutable) chunks iterator.
+///
+/// Useful for deterministic parallel reductions: map each fixed-size chunk to a
+/// sequential partial sum, then combine the partials in index order. Because the
+/// chunk boundaries and combination order are fixed, the result is independent of
+/// the thread count (bit-for-bit reproducible).
+#[cfg(feature = "parallel")]
+#[macro_export]
+macro_rules! maybe_par_chunks {
+    ($slice:expr, $chunk_size:expr) => {
+        $slice.par_chunks($chunk_size)
+    };
+}
+
+#[cfg(not(feature = "parallel"))]
+#[macro_export]
+macro_rules! maybe_par_chunks {
+    ($slice:expr, $chunk_size:expr) => {
+        $slice.chunks($chunk_size)
+    };
+}
