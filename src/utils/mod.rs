@@ -28,6 +28,8 @@ pub mod epg;
 pub mod denoise;
 pub mod gibbs;
 pub mod ops;
+pub mod special;
+pub mod wavelet;
 
 pub use gradient::*;
 pub use padding::*;
