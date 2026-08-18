@@ -930,7 +930,7 @@ jobs:
               echo ""
               echo "$TABLE"
               echo ""
-              emit_figures bgremove_sharp bgremove_resharp bgremove_vsharp bgremove_pdf bgremove_ismv bgremove_lbv
+              emit_figures bgremove_sharp bgremove_resharp bgremove_vsharp bgremove_pdf bgremove_ismv bgremove_msmv bgremove_lbv
             }
 
             TABLE=$(emit_table "test_pipeline_" harperella iharperella) && {

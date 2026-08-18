@@ -152,8 +152,6 @@ fn test_r2star_qsm_qsmci() {
     score("R2*-QSM χ−", &dia_mag, &ph.gt_dia, &ph.mask, ph.dims);
 
     // Figures for the CI PR comment (rendered by render_slices.py).
-    save_center_slices(&ph.gt_para, &ph.mask, ph.dims, "relaxchisep_para_truth");
-    save_center_slices(&ph.gt_dia, &ph.mask, ph.dims, "relaxchisep_dia_truth");
     save_center_slices(&chi_pos, &ph.mask, ph.dims, "relaxchisep_r2starqsm_para");
     save_center_slices(&dia_mag, &ph.mask, ph.dims, "relaxchisep_r2starqsm_dia");
 
@@ -194,9 +192,7 @@ fn test_wavesep_qsmci() {
     score("WaveSep χ+", &chi_pos, &ph.gt_para, &ph.mask, ph.dims);
     score("WaveSep χ−", &dia_mag, &ph.gt_dia, &ph.mask, ph.dims);
 
-    // Figures for the CI PR comment (truth is also emitted by the R2*-QSM test).
-    save_center_slices(&ph.gt_para, &ph.mask, ph.dims, "relaxchisep_para_truth");
-    save_center_slices(&ph.gt_dia, &ph.mask, ph.dims, "relaxchisep_dia_truth");
+    // Figures for the CI PR comment (rendered by render_slices.py).
     save_center_slices(&chi_pos, &ph.mask, ph.dims, "relaxchisep_wavesep_para");
     save_center_slices(&dia_mag, &ph.mask, ph.dims, "relaxchisep_wavesep_dia");
 

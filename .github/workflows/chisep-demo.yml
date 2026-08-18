@@ -183,19 +183,15 @@ jobs:
                   echo "| ${name} | ${metric} | ${value} |"
                 done
             echo ""
-            echo "### chi_sep_ilsqr — χ+ / χ− (truth / reconstruction)"
-            fig chisep_para_truth
+            echo "### chi_sep_ilsqr — χ+ / χ−"
             fig chisep_para
-            fig chisep_dia_truth
             fig chisep_dia
             echo ""
-            echo "### R2\*-QSM & WaveSep — χ+ (truth / R2\*-QSM / WaveSep)"
-            fig relaxchisep_para_truth
+            echo "### R2\*-QSM & WaveSep — χ+ (paramagnetic)"
             fig relaxchisep_r2starqsm_para
             fig relaxchisep_wavesep_para
             echo ""
-            echo "### R2\*-QSM & WaveSep — χ− magnitude (truth / R2\*-QSM / WaveSep)"
-            fig relaxchisep_dia_truth
+            echo "### R2\*-QSM & WaveSep — χ− magnitude (diamagnetic)"
             fig relaxchisep_r2starqsm_dia
             fig relaxchisep_wavesep_dia
           } > report.md

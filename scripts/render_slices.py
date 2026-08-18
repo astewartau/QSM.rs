@@ -26,6 +26,7 @@ NAMES = {
     "bgremove_vsharp": "V-SHARP",
     "bgremove_pdf": "PDF",
     "bgremove_ismv": "iSMV",
+    "bgremove_msmv": "mSMV",
     "bgremove_lbv": "LBV",
     "inversion_tkd": "TKD",
     "inversion_tsvd": "TSVD",
@@ -62,6 +63,11 @@ NAMES = {
     "relax_r2prime_derived": "R2' derived = R2*-R2 (Hz)",
     "relax_denoise_after": "R2* — noisy vs MP-PCA denoised (Hz)",
     "relax_unring_after": "R2* map — rung vs Gibbs-unrung (Hz)",
+    # Relaxometry-based chi-separation (R2*-QSM, WaveSep)
+    "relaxchisep_r2starqsm_para": "R2*-QSM χ+",
+    "relaxchisep_wavesep_para": "WaveSep χ+",
+    "relaxchisep_r2starqsm_dia": "R2*-QSM χ− (magnitude)",
+    "relaxchisep_wavesep_dia": "WaveSep χ− (magnitude)",
 }
 
 # Fixed display windows (ppm)
@@ -71,6 +77,7 @@ WINDOWS = {
     "bgremove_vsharp": (-0.025, 0.025),
     "bgremove_pdf": (-0.025, 0.025),
     "bgremove_ismv": (-0.025, 0.025),
+    "bgremove_msmv": (-0.025, 0.025),
     "bgremove_lbv": (-0.025, 0.025),
     "inversion_tkd": (-0.1, 0.1),
     "inversion_tsvd": (-0.1, 0.1),
@@ -112,6 +119,11 @@ WINDOWS = {
     "chisep_para": (0, 0.1),
     "chisep_dia_truth": (0, 0.1),
     "chisep_dia": (0, 0.1),
+    # relaxometry-based chi-separation source maps (same ppm window as above)
+    "relaxchisep_r2starqsm_para": (0, 0.1),
+    "relaxchisep_wavesep_para": (0, 0.1),
+    "relaxchisep_r2starqsm_dia": (0, 0.1),
+    "relaxchisep_wavesep_dia": (0, 0.1),
 }
 
 
