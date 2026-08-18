@@ -28,6 +28,7 @@ pub mod fansi;
 pub mod l1qsm;
 pub mod whqsm;
 pub mod hdqsm;
+pub mod amp_pe;
 
 pub use tkd::{tkd, tsvd, TkdParams};
 pub use tikhonov::{tikhonov, TikhonovParams, Regularization};
@@ -43,3 +44,4 @@ pub use fansi::{fansi, FansiParams};
 pub use l1qsm::{l1qsm, L1QsmParams};
 pub use whqsm::{whqsm, WhQsmParams};
 pub use hdqsm::{hdqsm, HdQsmParams};
+pub use amp_pe::{amp_pe, AmpPeParams};
