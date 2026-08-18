@@ -150,6 +150,7 @@ Load and save NIfTI volumes with [`qsm_core::io`](src/io.rs).
 | **L1-QSM** | L1-norm data-fidelity QSM (PI-QSM) — robust to phase inconsistencies via an L1 fidelity term with TV regularization | Milovic, C., et al. (2022). "Comparison of parameter optimization methods for quantitative susceptibility mapping." *Magnetic Resonance in Medicine*, 87(3):1517-1531. [DOI](https://doi.org/10.1002/mrm.28957) |
 | **WH-QSM** | Weak-Harmonic QSM — jointly estimates susceptibility and a residual harmonic background field, correcting imperfect background-field removal | Milovic, C., et al. (2019). "Weak-harmonic regularization for quantitative susceptibility mapping." *Magnetic Resonance in Medicine*, 81(2):1399-1411. [DOI](https://doi.org/10.1002/mrm.27483) |
 | **HD-QSM** | Hybrid Data-fidelity QSM — two-stage linear inversion where an L1 stage produces a discrepancy map that reweights a second L2 stage | Lambert, M., et al. (2022). "Hybrid data fidelity term approach for quantitative susceptibility mapping." *Magnetic Resonance in Medicine*, 88(4):1567-1583. [DOI](https://doi.org/10.1002/mrm.29218) |
+| **AMP-PE** | Approximate Message Passing with Parameter Estimation — generalized approximate message passing over a linearized wrapped-phase model with a sparse-wavelet prior and a Gaussian-mixture noise model; regularization and noise parameters are estimated automatically | Huang, S., et al. (2023). "Approximate Message Passing with Parameter Estimation: a probabilistic Bayesian dipole inversion." *Magnetic Resonance in Medicine*, 90(4):1414-1430. [DOI](https://doi.org/10.1002/mrm.29722) |
 
 ### End-to-End QSM
 
@@ -205,6 +206,7 @@ This library was developed with reference to the following open-source implement
 | [QSM.m](https://github.com/kamesy/QSM.m) | iLSQR | MATLAB |
 | [FANSI-toolbox](https://gitlab.com/cmilovic/FANSI-toolbox) | NDI, FANSI (nlTV/nlTGV), L1-QSM, WH-QSM | MATLAB |
 | [HD-QSM](https://github.com/mglambert/HD-QSM) | HD-QSM | MATLAB |
+| [QSM_AMP_PE](https://github.com/EmoryCN2L/QSM_AMP_PE) | AMP-PE | MATLAB |
 | [QuantitativeSusceptibilityMappingTGV.jl](https://github.com/korbinian90/QuantitativeSusceptibilityMappingTGV.jl) | TGV | Julia |
 | [MriResearchTools.jl](https://github.com/korbinian90/MriResearchTools.jl) | ROMEO, MCPC-3D-S, R2*/T2*, bias correction | Julia |
 | [MEDI_toolbox](https://github.com/huawu02/MEDI_toolbox) | MEDI | MATLAB |
