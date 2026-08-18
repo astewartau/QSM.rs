@@ -6,7 +6,9 @@
 //! - V-SHARP: Variable kernel SHARP
 //! - PDF: Projection onto dipole fields
 //! - iSMV: Iterative spherical mean value
-//! - mSMV: Maximum spherical mean value (boundary shadow removal, SMV prefilter)
+//! - mSMV: Maximum spherical mean value — boundary-shadow removal. Best used as a
+//!   refinement after a primary BFR (SHARP/RESHARP/V-SHARP/PDF/LBV) via
+//!   `MsmvParams::refine()`; also runs standalone (SMV prefilter + correction).
 //! - LBV: Laplacian boundary value
 //! - SDF: Spatially Dependent Filtering (QSMART)
 //!

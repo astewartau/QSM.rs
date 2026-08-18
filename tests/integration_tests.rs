@@ -196,11 +196,13 @@ fn test_bgremove_msmv() {
 
     // mSMV needs B0 + TE for the ppm↔radian threshold conversion.
     let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
+    let te = data.echo_times.first().copied().unwrap_or(0.008);
     let params = MsmvParams {
         radius: 5.0,
         maxk: 5,
         b0: data.field_strength,
-        te: data.echo_times.first().copied().unwrap_or(0.008),
+        te,
+        prefilter: true,
     };
     let ((result, _new_mask), elapsed) = run_timed!("mSMV", bgremove::msmv(
         &data.fieldmap,
@@ -220,6 +222,87 @@ fn test_bgremove_msmv() {
     // field is least reliable, so its whole-mask correlation runs a touch lower.
     assert!(res.nrmse < 0.6, "mSMV NRMSE too high: {}", res.nrmse);
     assert!(res.correlation > 0.6, "mSMV correlation too low: {}", res.correlation);
+}
+
+/// mSMV's intended use: a boundary-shadow refinement applied *after* a primary
+/// BFR (`prefilter = false`). Runs the primary method, then mSMV on its local
+/// field, scoring the refined result against the reference local field.
+fn msmv_refine_params(data: &TestData) -> MsmvParams {
+    MsmvParams {
+        b0: data.field_strength,
+        te: data.echo_times.first().copied().unwrap_or(0.008),
+        ..MsmvParams::refine()
+    }
+}
+
+#[test]
+#[ignore]
+fn test_bgremove_vsharp_msmv() {
+    let data = TestData::load().expect("Failed to load test data");
+    let (nx, ny, nz) = data.dims;
+    let (vsx, vsy, vsz) = data.voxel_size;
+    let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
+
+    let (local, vmask) = bgremove::vsharp(&data.fieldmap, &data.mask, &grid, &VsharpParams::default(), |_, _| {});
+    let (result, elapsed) = run_timed!("V-SHARP+mSMV",
+        bgremove::msmv(&local, &vmask, &grid, &msmv_refine_params(&data), |_, _| {}).0);
+
+    let res = TestResult::new("V-SHARP+mSMV", &result, &data.fieldmap_local, &data.mask, data.dims);
+    res.print_with_time(elapsed);
+    res.print_ci_metrics(elapsed);
+    common::save_center_slices(&result, &data.mask, data.dims, "bgremove_vsharp_msmv");
+
+    assert!(res.nrmse < 0.5, "V-SHARP+mSMV NRMSE too high: {}", res.nrmse);
+    assert!(res.correlation > 0.7, "V-SHARP+mSMV correlation too low: {}", res.correlation);
+}
+
+#[test]
+#[ignore]
+fn test_bgremove_pdf_msmv() {
+    let data = TestData::load().expect("Failed to load test data");
+    let (nx, ny, nz) = data.dims;
+    let (vsx, vsy, vsz) = data.voxel_size;
+    let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
+
+    let local = bgremove::pdf(
+        &data.fieldmap, &data.mask, &grid, (0.0, 0.0, 1.0),
+        &PdfParams { tol: 1e-5, max_iter: Some(100) }, |_, _| {},
+    );
+    let (result, elapsed) = run_timed!("PDF+mSMV",
+        bgremove::msmv(&local, &data.mask, &grid, &msmv_refine_params(&data), |_, _| {}).0);
+
+    let res = TestResult::new("PDF+mSMV", &result, &data.fieldmap_local, &data.mask, data.dims);
+    res.print_with_time(elapsed);
+    res.print_ci_metrics(elapsed);
+    common::save_center_slices(&result, &data.mask, data.dims, "bgremove_pdf_msmv");
+
+    assert!(res.nrmse < 0.5, "PDF+mSMV NRMSE too high: {}", res.nrmse);
+    assert!(res.correlation > 0.7, "PDF+mSMV correlation too low: {}", res.correlation);
+}
+
+#[test]
+#[ignore]
+fn test_bgremove_lbv_msmv() {
+    let data = TestData::load().expect("Failed to load test data");
+    let (nx, ny, nz) = data.dims;
+    let (vsx, vsy, vsz) = data.voxel_size;
+    let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
+
+    let max_iter = (3 * nx.max(ny).max(nz)).max(500);
+    let (local, lmask) = bgremove::lbv(
+        &data.fieldmap, &data.mask, &grid,
+        &LbvParams { tol: 1e-6, max_iter: Some(max_iter) }, |_, _| {},
+    );
+    let (result, elapsed) = run_timed!("LBV+mSMV",
+        bgremove::msmv(&local, &lmask, &grid, &msmv_refine_params(&data), |_, _| {}).0);
+
+    let res = TestResult::new("LBV+mSMV", &result, &data.fieldmap_local, &data.mask, data.dims);
+    res.print_with_time(elapsed);
+    res.print_ci_metrics(elapsed);
+    common::save_center_slices(&result, &data.mask, data.dims, "bgremove_lbv_msmv");
+
+    assert!(res.nrmse < 0.5, "LBV+mSMV NRMSE too high: {}", res.nrmse);
+    assert!(res.correlation > 0.7, "LBV+mSMV correlation too low: {}", res.correlation);
 }
 
 #[test]
