@@ -14,7 +14,9 @@ on:
     paths:
       - "src/separation/**"
       - "src/inversion/ilsqr.rs"
+      - "src/utils/wavelet.rs"
       - "tests/chisep_qsmci.rs"
+      - "tests/chisep_relaxometry_qsmci.rs"
       - "tests/common/mod.rs"
       - "scripts/render_slices.py"
       - ".github/workflows/chisep-demo.yml"
@@ -117,6 +119,15 @@ jobs:
             cargo test --release --features parallel --test chisep_qsmci \
             test_chi_sep_ilsqr_qsmci -- --ignored --nocapture | tee demo.log
 
+      # Relaxometry-based separators (R2*-QSM, WaveSep) on the same phantom, using
+      # its provided QSM (chimap). Appends more CHISEPMETRIC lines + figures; skips
+      # cleanly if this phantom variant ships no chimap.
+      - name: Run relaxometry chi-separation on the phantom
+        run: |
+          QSMCI_CHISEP="$PWD/qsmci-chisep" \
+            cargo test --release --features parallel --test chisep_relaxometry_qsmci \
+            -- --ignored --nocapture | tee -a demo.log
+
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
@@ -159,7 +170,10 @@ jobs:
           {
             echo "## 🧲 χ-separation demo"
             echo ""
-            echo "\`chi_sep_ilsqr\` (Shin et al. 2021) on a simulated brain phantom: paramagnetic (χ+) and diamagnetic (χ−) source maps recovered from the local field, R2′, and magnitude, scored against the phantom ground truth."
+            echo "Paramagnetic (χ+) and diamagnetic (χ−) source maps on a simulated brain phantom, scored against the ground truth. Three methods:"
+            echo "- \`chi_sep_ilsqr\` (Shin et al. 2021) — field-inversion from the local field, R2′ and magnitude."
+            echo "- \`r2star_qsm\` (Dimov et al. 2022) — closed form from the provided QSM (χ_total) + R2\*."
+            echo "- \`wavesep\` (Fang et al. 2023) — wavelet-L1 from the provided QSM (χ_total) + R2′."
             echo ""
             echo "### Metrics"
             echo "| Map | Metric | Value |"
@@ -169,13 +183,21 @@ jobs:
                   echo "| ${name} | ${metric} | ${value} |"
                 done
             echo ""
-            echo "### χ+ (paramagnetic): truth / reconstruction"
+            echo "### chi_sep_ilsqr — χ+ / χ− (truth / reconstruction)"
             fig chisep_para_truth
             fig chisep_para
-            echo ""
-            echo "### χ− (diamagnetic, magnitude): truth / reconstruction"
             fig chisep_dia_truth
             fig chisep_dia
+            echo ""
+            echo "### R2\*-QSM & WaveSep — χ+ (truth / R2\*-QSM / WaveSep)"
+            fig relaxchisep_para_truth
+            fig relaxchisep_r2starqsm_para
+            fig relaxchisep_wavesep_para
+            echo ""
+            echo "### R2\*-QSM & WaveSep — χ− magnitude (truth / R2\*-QSM / WaveSep)"
+            fig relaxchisep_dia_truth
+            fig relaxchisep_r2starqsm_dia
+            fig relaxchisep_wavesep_dia
           } > report.md
           for attempt in 1 2 3 4 5; do
             if cml comment create report.md; then

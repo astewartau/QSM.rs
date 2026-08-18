@@ -1,7 +1,8 @@
-//! Separable 3D periodic Daubechies wavelet transform (db1/db2).
+//! Separable 3D periodic Daubechies wavelet transform (db1–db4).
 //!
 //! A faithful reimplementation of MATLAB's `wavedec3`/`waverec3` in **periodic
-//! (`'per'`) mode** — the sparsifying basis used by the AMP-PE QSM inversion.
+//! (`'per'`) mode** — the sparsifying basis used by the AMP-PE QSM inversion and
+//! by the WaveSep source-separation prior (db4).
 //!
 //! The transform is orthonormal, so synthesis is the exact adjoint of analysis
 //! (perfect reconstruction). Arrays are flat `Vec<f64>` in column-major
@@ -29,7 +30,10 @@
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
-/// Daubechies analysis low-pass filter `LoD` for the given order (1 or 2).
+/// Daubechies analysis low-pass filter `LoD` for the given order (1..=4).
+///
+/// Coefficients are the PyWavelets `dec_lo` arrays (same ordering as MATLAB's
+/// `wfilters`), so a plan built here matches `pywt.wavedecn` tap-for-tap.
 fn lod_filter(order: usize) -> Vec<f64> {
     match order {
         1 => {
@@ -42,8 +46,39 @@ fn lod_filter(order: usize) -> Vec<f64> {
             0.8365163037378079,
             0.48296291314453416,
         ],
-        _ => panic!("wavelet: only db1 and db2 (order 1 or 2) are supported, got {order}"),
+        3 => vec![
+            0.035226291882100656,
+            -0.08544127388224149,
+            -0.13501102001039084,
+            0.4598775021193313,
+            0.8068915093133388,
+            0.3326705529509569,
+        ],
+        4 => vec![
+            -0.010597401784997278,
+            0.032883011666982945,
+            0.030841381835986965,
+            -0.18703481171888114,
+            -0.02798376941698385,
+            0.6308807679295904,
+            0.7148465705525415,
+            0.23037781330885523,
+        ],
+        _ => panic!("wavelet: only db1..db4 (order 1..4) are supported, got {order}"),
     }
+}
+
+/// Maximum useful decomposition level for a periodic transform, matching
+/// `pywt.dwt_max_level(data_len, filter_len)`.
+///
+/// `filter_len` is the analysis filter length (`2*order` for `db{order}`).
+/// Returns `floor(log2(data_len / (filter_len - 1)))`, clamped at 0.
+pub fn dwt_max_level(data_len: usize, filter_len: usize) -> usize {
+    if filter_len <= 1 || data_len < filter_len {
+        return 0;
+    }
+    let ratio = data_len as f64 / (filter_len - 1) as f64;
+    ratio.log2().floor().max(0.0) as usize
 }
 
 /// High-pass analysis filter from the low-pass one: `HiD[k] = (-1)^(k+1) LoD[lf-1-k]`.
@@ -500,10 +535,35 @@ mod tests {
     }
 
     #[test]
+    fn perfect_reconstruction_db4() {
+        let dims = (16, 16, 32);
+        let plan = WaveletPlan::new(4, dims, 2);
+        let n = dims.0 * dims.1 * dims.2;
+        let img: Vec<f64> = (0..n).map(|i| ((i as f64) * 0.07).sin() + (i % 7) as f64).collect();
+        let coef = plan.forward(&img);
+        let rec = plan.inverse(&coef);
+        let err: f64 = img
+            .iter()
+            .zip(&rec)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0, f64::max);
+        assert!(err < 1e-9, "db4 PR err={err}");
+    }
+
+    #[test]
+    fn dwt_max_level_matches_pywt() {
+        // pywt.dwt_max_level reference values: (data_len, filter_len) -> level
+        assert_eq!(dwt_max_level(256, 8), 5); // floor(log2(256/7)) = 5
+        assert_eq!(dwt_max_level(16, 8), 1); // floor(log2(16/7)) = 1
+        assert_eq!(dwt_max_level(7, 8), 0); // data_len < filter_len
+        assert_eq!(dwt_max_level(64, 4), 4); // floor(log2(64/3)) = 4
+    }
+
+    #[test]
     fn orthonormal_norm_preserved() {
         // Orthonormal transform: ||coef|| == ||image||.
         let dims = (8, 16, 8);
-        for order in [1, 2] {
+        for order in [1, 2, 3, 4] {
             let plan = WaveletPlan::new(order, dims, 2);
             let n = dims.0 * dims.1 * dims.2;
             let img: Vec<f64> = (0..n).map(|i| ((i * 3 % 17) as f64) - 8.0).collect();
