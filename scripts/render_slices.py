@@ -40,6 +40,7 @@ NAMES = {
     "inversion_l1qsm": "L1-QSM",
     "inversion_whqsm": "WH-QSM",
     "inversion_hdqsm": "HD-QSM",
+    "inversion_amp_pe": "AMP-PE",
     "bet": "BET",
     "combined_tgv": "TGV (Combined)",
     "bias_correction": "Bias Correction",
@@ -84,6 +85,7 @@ WINDOWS = {
     "inversion_l1qsm": (-0.1, 0.1),
     "inversion_whqsm": (-0.1, 0.1),
     "inversion_hdqsm": (-0.1, 0.1),
+    "inversion_amp_pe": (-0.1, 0.1),
     "bet": (0, 1),
     "combined_tgv": (-0.1, 0.1),
     "bias_correction": (-0.1, 0.1),  # fallback; before/after rendering uses auto-range
