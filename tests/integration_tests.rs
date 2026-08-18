@@ -8,7 +8,7 @@ mod common;
 use std::time::Instant;
 use common::{TestData, TestResult, ChallengeMetrics};
 use qsm_core::bgremove;
-use qsm_core::bgremove::{sdf, SdfParams, ResharpParams, SharpParams, VsharpParams, PdfParams, IsmvParams, LbvParams};
+use qsm_core::bgremove::{sdf, SdfParams, ResharpParams, SharpParams, VsharpParams, PdfParams, IsmvParams, LbvParams, MsmvParams};
 use qsm_core::Grid;
 use qsm_core::bet;
 use qsm_core::bet::BetParams;
@@ -184,6 +184,42 @@ fn test_bgremove_ismv() {
 
     assert!(res.nrmse < 0.5, "iSMV NRMSE too high: {}", res.nrmse);
     assert!(res.correlation > 0.7, "iSMV correlation too low: {}", res.correlation);
+}
+
+#[test]
+#[ignore]
+fn test_bgremove_msmv() {
+    println!("[INFO] Loading test data...");
+    let data = TestData::load().expect("Failed to load test data");
+    let (nx, ny, nz) = data.dims;
+    let (vsx, vsy, vsz) = data.voxel_size;
+
+    // mSMV needs B0 + TE for the ppm↔radian threshold conversion.
+    let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
+    let params = MsmvParams {
+        radius: 5.0,
+        maxk: 5,
+        b0: data.field_strength,
+        te: data.echo_times.first().copied().unwrap_or(0.008),
+    };
+    let ((result, _new_mask), elapsed) = run_timed!("mSMV", bgremove::msmv(
+        &data.fieldmap,
+        &data.mask,
+        &grid,
+        &params,
+        |_, _| {},
+    ));
+
+    let res = TestResult::new("mSMV", &result, &data.fieldmap_local, &data.mask, data.dims);
+    res.print_with_time(elapsed);
+    res.print_ci_metrics(elapsed);
+    common::save_center_slices(&result, &data.mask, data.dims, "bgremove_msmv");
+
+    // Conservative floors: mSMV's prefilter is an SMV removal (cf. iSMV), but unlike
+    // the eroding methods it keeps the brain-edge voxels where the reference local
+    // field is least reliable, so its whole-mask correlation runs a touch lower.
+    assert!(res.nrmse < 0.6, "mSMV NRMSE too high: {}", res.nrmse);
+    assert!(res.correlation > 0.6, "mSMV correlation too low: {}", res.correlation);
 }
 
 #[test]

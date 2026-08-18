@@ -6,6 +6,7 @@
 //! - V-SHARP: Variable kernel SHARP
 //! - PDF: Projection onto dipole fields
 //! - iSMV: Iterative spherical mean value
+//! - mSMV: Maximum spherical mean value (boundary shadow removal, SMV prefilter)
 //! - LBV: Laplacian boundary value
 //! - SDF: Spatially Dependent Filtering (QSMART)
 //!
@@ -15,6 +16,7 @@
 //! that SHARP provides).
 
 pub mod smv;
+pub mod msmv;
 pub mod sharp;
 pub mod resharp;
 pub mod vsharp;
@@ -25,6 +27,7 @@ pub mod sdf;
 pub mod iharperella;
 
 pub use smv::smv;
+pub use msmv::{msmv, MsmvParams};
 pub use sharp::{sharp, SharpParams};
 pub use resharp::{resharp, ResharpParams};
 pub use vsharp::{vsharp, VsharpParams};
