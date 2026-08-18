@@ -208,9 +208,7 @@ fn test_chi_sep_ilsqr_qsmci() {
     score("chi- vs GT", &dia_mag, &ph.gt_dia, &ph.mask, ph.dims);
 
     // Center-slice figures for the CI PR comment (rendered by render_slices.py).
-    save_center_slices(&ph.gt_para, &ph.mask, ph.dims, "chisep_para_truth");
     save_center_slices(&chi_pos, &ph.mask, ph.dims, "chisep_para");
-    save_center_slices(&ph.gt_dia, &ph.mask, ph.dims, "chisep_dia_truth");
     save_center_slices(&dia_mag, &ph.mask, ph.dims, "chisep_dia");
 
     // Conservative gates: the CI dataset (chisep-mc, multicompartment) is harder
