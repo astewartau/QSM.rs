@@ -3,11 +3,32 @@
 //! mSMV removes the residual harmonic background field near the brain boundary —
 //! the dominant source of QSM shadow artifacts — using the maximum-value
 //! corollary of Green's theorem, and does so **without eroding the brain mask**.
-//! In the original work it is a refinement applied after a primary background
-//! removal; here (matching the QSM-CI submission) it is packaged as a
-//! self-contained total→local BFR via the upstream `prefilter=1` mode:
 //!
-//!   1. **SMV primary removal**: `RDF_s = mask·(RDF − SMV(RDF))` (radius `radius` mm).
+//! ## Two ways to use it (the `prefilter` flag)
+//! In the original work mSMV is a **refinement applied after a primary background
+//! removal**, and that is its intended use:
+//!
+//! ```ignore
+//! let (local, m) = bgremove::vsharp(&total, &mask, &grid, &VsharpParams::default(), |_,_| {});
+//! let (refined, _) = bgremove::msmv(&local, &m, &grid, &MsmvParams::refine(), |_,_| {});
+//! ```
+//!
+//! It composes with any harmonic BFR that leaves a boundary shadow —
+//! [`sharp`](super::sharp), [`resharp`](super::resharp), [`vsharp`](super::vsharp),
+//! [`pdf`](super::pdf), [`lbv`](super::lbv). (It is redundant after
+//! [`ismv`](super::ismv), which is already iterative SMV.) In this mode set
+//! [`MsmvParams::prefilter`] `= false` (via [`MsmvParams::refine`]) so mSMV does
+//! **only** the boundary correction on the already-local field.
+//!
+//! With `prefilter = true` (the default, matching the QSM-CI submission) mSMV is a
+//! self-contained total→local BFR: it first does its own SMV primary removal, then
+//! the boundary correction. Run standalone it is only as strong as one non-
+//! deconvolved SMV pass, so prefer the refinement mode above for real pipelines.
+//!
+//! The two internal steps:
+//!   1. **SMV primary removal** (only if `prefilter`): `RDF_s = mask·(RDF − SMV(RDF))`
+//!      (radius `radius` mm). When `prefilter` is false the input field is taken as
+//!      the local field directly.
 //!   2. **Boundary shadow correction**: iteratively detect boundary voxels whose
 //!      residual field exceeds an adaptive threshold `t` and strip it with a
 //!      minimum-radius SMV.
@@ -48,18 +69,33 @@ pub struct MsmvParams {
     pub b0: f64,
     /// Echo time in seconds for the ppm↔radian conversion (MEDI-representative default).
     pub te: f64,
+    /// Whether to run mSMV's own SMV primary removal before the boundary
+    /// correction. `true` (default) = self-contained total→local BFR; `false` =
+    /// refine an already-local field from a primary BFR (see [`MsmvParams::refine`]).
+    pub prefilter: bool,
 }
 
 impl Default for MsmvParams {
     fn default() -> Self {
-        Self { radius: 5.0, maxk: 5, b0: 3.0, te: 0.008 }
+        Self { radius: 5.0, maxk: 5, b0: 3.0, te: 0.008, prefilter: true }
+    }
+}
+
+impl MsmvParams {
+    /// Parameters for using mSMV as a **boundary-shadow refinement** after a
+    /// primary background-field removal (SHARP / RESHARP / V-SHARP / PDF / LBV):
+    /// `prefilter = false`, all other fields at their defaults.
+    pub fn refine() -> Self {
+        Self { prefilter: false, ..Self::default() }
     }
 }
 
 /// mSMV background field removal (SMV primary removal + boundary shadow correction).
 ///
 /// # Arguments
-/// * `field` — Unwrapped total field in **ppm** (`nx·ny·nz`, column-major).
+/// * `field` — Field in **ppm** (`nx·ny·nz`, column-major): the unwrapped total
+///   field when `params.prefilter` is `true`, or an already-local field (from a
+///   primary BFR) when `false`.
 /// * `mask` — Binary brain mask (`nx·ny·nz`, 1 = inside).
 /// * `grid` — Volume dimensions and voxel sizes.
 /// * `params` — See [`MsmvParams`].
@@ -102,9 +138,15 @@ pub fn msmv(
         })
         .collect();
 
-    // Step 1 — SMV primary removal: RDF_s = mask·(RDF − SMV(RDF)).
-    let smv_rdf = apply_real_kernel(&rdf, &sphere_fft, nx, ny, nz);
-    let mut rdf_s: Vec<f64> = (0..n).map(|i| maskf[i] * (rdf[i] - smv_rdf[i])).collect();
+    // Step 1 — SMV primary removal: RDF_s = mask·(RDF − SMV(RDF)). Skipped in
+    // refinement mode (`prefilter = false`), where the input is already a local
+    // field from a primary BFR and only the boundary correction is wanted.
+    let mut rdf_s: Vec<f64> = if params.prefilter {
+        let smv_rdf = apply_real_kernel(&rdf, &sphere_fft, nx, ny, nz);
+        (0..n).map(|i| maskf[i] * (rdf[i] - smv_rdf[i])).collect()
+    } else {
+        (0..n).map(|i| maskf[i] * rdf[i]).collect()
+    };
     let rdf_s0 = rdf_s.clone();
 
     // Shadow-detection threshold t (radians). Upstream `kernel_lim.m` grows an
@@ -191,7 +233,7 @@ mod tests {
                 }
             }
         }
-        let params = MsmvParams { radius: 4.0, maxk: 5, b0: 3.0, te: 0.008 };
+        let params = MsmvParams { radius: 4.0, maxk: 5, b0: 3.0, te: 0.008, prefilter: true };
         let (local, out_mask) = msmv(&field, &mask, &g, &params, |_, _| {});
 
         // Mask is preserved (mSMV does not erode).
@@ -230,5 +272,48 @@ mod tests {
         assert_eq!(out_mask, mask);
         // Output is zero outside the mask.
         assert!((0..n).all(|i| mask[i] != 0 || local[i] == 0.0));
+    }
+
+    /// In refinement mode (`prefilter = false`) mSMV does NOT run its own SMV
+    /// removal: on an already-clean local field (all voxels below the shadow
+    /// threshold) it returns the masked input unchanged — whereas the standalone
+    /// mode SMV-filters it and changes the interior.
+    #[test]
+    fn refine_mode_skips_primary_smv() {
+        let nn = 24;
+        let g = grid(nn);
+        let n = nn * nn * nn;
+        // Small, smooth "already-local" field (well below the radian threshold).
+        let mut field = vec![0.0f64; n];
+        let mut mask = vec![0u8; n];
+        let c = nn as f64 / 2.0;
+        for k in 0..nn {
+            for j in 0..nn {
+                for i in 0..nn {
+                    let idx = i + j * nn + k * nn * nn;
+                    let (x, y, z) = (i as f64 - c, j as f64 - c, k as f64 - c);
+                    field[idx] = 1e-4 * ((x * 0.3).sin() + (y * 0.2).cos());
+                    if (x * x + y * y + z * z).sqrt() < 8.0 {
+                        mask[idx] = 1;
+                    }
+                }
+            }
+        }
+        let p = MsmvParams { b0: 3.0, te: 0.008, ..MsmvParams::default() };
+
+        // Refinement mode: no primary SMV, field below threshold → unchanged in mask.
+        let (refined, _) = msmv(&field, &mask, &g, &MsmvParams { prefilter: false, ..p.clone() }, |_, _| {});
+        for i in 0..n {
+            let expect = if mask[i] != 0 { field[i] } else { 0.0 };
+            assert!((refined[i] - expect).abs() < 1e-12, "refine mode changed voxel {i}");
+        }
+
+        // Standalone mode: primary SMV removal actually alters the interior.
+        let (standalone, _) = msmv(&field, &mask, &g, &MsmvParams { prefilter: true, ..p }, |_, _| {});
+        let changed: f64 = (0..n)
+            .filter(|&i| mask[i] != 0)
+            .map(|i| (standalone[i] - field[i]).abs())
+            .fold(0.0, f64::max);
+        assert!(changed > 1e-9, "standalone mode should SMV-filter the field");
     }
 }
