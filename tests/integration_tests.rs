@@ -15,7 +15,7 @@ use qsm_core::bet::BetParams;
 use qsm_core::inversion;
 use qsm_core::inversion::{tgv_qsm, TgvParams, get_default_alpha, get_default_iterations, ilsqr, IlsqrParams, TkdParams};
 use qsm_core::inversion::{TvParams, NltvParams, RtsParams, MediParams, TfiParams, TikhonovParams};
-use qsm_core::inversion::{NdiParams, FansiParams, L1QsmParams, WhQsmParams, HdQsmParams};
+use qsm_core::inversion::{NdiParams, FansiParams, L1QsmParams, WhQsmParams, HdQsmParams, AmpPeParams};
 use qsm_core::swi;
 use qsm_core::unwrap::{laplacian_unwrap, UnwrapMethod};
 use qsm_core::unwrap::romeo::{unwrap_romeo_multi_echo, RomeoParams};
@@ -596,6 +596,40 @@ fn test_inversion_ndi() {
 
     assert!(result.iter().all(|v| v.is_finite()), "NDI produced non-finite values");
     assert!(res.correlation > 0.7, "NDI correlation too low: {}", res.correlation);
+}
+
+/// AMP-PE — Approximate Message Passing with Parameter Estimation (Huang 2023).
+/// GAMP + sparse-wavelet prior + Gaussian-mixture noise. Ported from
+/// EmoryCN2L/QSM_AMP_PE; verified against the MATLAB reference to ~2e-10.
+/// Uses a reduced linearization count (default is 25+25) to keep CI tractable;
+/// run without magnitude weighting, matching the other inversion tests.
+#[test]
+#[ignore]
+fn test_inversion_amp_pe() {
+    println!("[INFO] Loading test data...");
+    let data = TestData::load().expect("Failed to load test data");
+    let (nx, ny, nz) = data.dims;
+    let (vsx, vsy, vsz) = data.voxel_size;
+
+    let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
+    let params = AmpPeParams {
+        max_linearization_ite: 10,
+        b0: data.field_strength,
+        ..AmpPeParams::default()
+    };
+    let (result, elapsed) = run_timed!("AMP-PE", inversion::amp_pe(
+        &data.fieldmap_local, &data.mask, None, &grid, data.b0_dir, &params, |_, _| {},
+    ));
+
+    let res = TestResult::new("AMP-PE", &result, &data.chi, &data.mask, data.dims);
+    res.print_with_time(elapsed);
+    let challenge = ChallengeMetrics::compute("AMP-PE", &result, &data.chi, &data.mask, &data.segmentation, data.dims);
+    challenge.print();
+    challenge.print_ci_metrics(elapsed);
+    common::save_center_slices(&result, &data.mask, data.dims, "inversion_amp_pe");
+
+    assert!(result.iter().all(|v| v.is_finite()), "AMP-PE produced non-finite values");
+    assert!(res.correlation > 0.6, "AMP-PE correlation too low: {}", res.correlation);
 }
 
 /// FANSI nlTV — nonlinear Total Variation dipole inversion (FANSI nlTV.m).
