@@ -43,7 +43,7 @@ jobs:
         run: |
           set -e
 
-          all_bgremove='["test_bgremove_sharp","test_bgremove_resharp","test_bgremove_vsharp","test_bgremove_pdf","test_bgremove_ismv","test_bgremove_msmv","test_bgremove_lbv","test_bgremove_vsharp_msmv","test_bgremove_pdf_msmv","test_bgremove_lbv_msmv"]'
+          all_bgremove='["test_bgremove_sharp","test_bgremove_resharp","test_bgremove_vsharp","test_bgremove_pdf","test_bgremove_ismv","test_bgremove_lbv","test_bgremove_vsharp_msmv","test_bgremove_pdf_msmv","test_bgremove_lbv_msmv"]'
           all_inversion='["test_inversion_tkd","test_inversion_tsvd","test_inversion_tikhonov","test_inversion_tv","test_inversion_rts","test_inversion_ilsqr","test_inversion_medi","test_inversion_nltv","test_inversion_ndi","test_inversion_fansi","test_inversion_fansi_tgv","test_inversion_l1qsm","test_inversion_whqsm","test_inversion_hdqsm","test_inversion_amp_pe"]'
           all_combined='["test_combined_tgv","test_combined_tfi"]'
           all_pipeline='["test_pipeline_romeo_b0","test_pipeline_tgv","test_pipeline_qsmart","test_pipeline_qsmart_tikhonov","test_pipeline_harperella","test_pipeline_iharperella","test_bias_correction","test_swi","test_r2star_t2star"]'
@@ -163,15 +163,15 @@ jobs:
 
               # Background removal
               src/bgremove/mod.rs)
-                bgremove="$bgremove test_bgremove_sharp test_bgremove_resharp test_bgremove_vsharp test_bgremove_pdf test_bgremove_ismv test_bgremove_msmv test_bgremove_lbv test_bgremove_vsharp_msmv test_bgremove_pdf_msmv test_bgremove_lbv_msmv" ;;
+                bgremove="$bgremove test_bgremove_sharp test_bgremove_resharp test_bgremove_vsharp test_bgremove_pdf test_bgremove_ismv test_bgremove_lbv test_bgremove_vsharp_msmv test_bgremove_pdf_msmv test_bgremove_lbv_msmv" ;;
               src/bgremove/smv.rs)
-                bgremove="$bgremove test_bgremove_sharp test_bgremove_vsharp test_bgremove_ismv test_bgremove_msmv test_bgremove_vsharp_msmv" ;;
+                bgremove="$bgremove test_bgremove_sharp test_bgremove_vsharp test_bgremove_ismv test_bgremove_vsharp_msmv" ;;
               src/bgremove/sharp.rs)  bgremove="$bgremove test_bgremove_sharp" ;;
               src/bgremove/resharp.rs) bgremove="$bgremove test_bgremove_resharp" ;;
               src/bgremove/vsharp.rs) bgremove="$bgremove test_bgremove_vsharp test_bgremove_vsharp_msmv" ;;
               src/bgremove/pdf.rs)    bgremove="$bgremove test_bgremove_pdf test_bgremove_pdf_msmv" ;;
               src/bgremove/ismv.rs)   bgremove="$bgremove test_bgremove_ismv" ;;
-              src/bgremove/msmv.rs)   bgremove="$bgremove test_bgremove_msmv test_bgremove_vsharp_msmv test_bgremove_pdf_msmv test_bgremove_lbv_msmv" ;;
+              src/bgremove/msmv.rs)   bgremove="$bgremove test_bgremove_vsharp_msmv test_bgremove_pdf_msmv test_bgremove_lbv_msmv" ;;
               src/bgremove/lbv.rs)    bgremove="$bgremove test_bgremove_lbv test_bgremove_lbv_msmv" ;;
               src/bgremove/sdf.rs)    pipeline="$pipeline test_pipeline_qsmart test_pipeline_qsmart_tikhonov" ;;
 
@@ -212,7 +212,7 @@ jobs:
               src/pipeline/field_mapping.rs)
                 pipeline="$pipeline test_pipeline_romeo_b0 test_pipeline_tgv test_pipeline_qsmart test_pipeline_qsmart_tikhonov" ;;
               src/pipeline/bg_removal.rs)
-                bgremove="$bgremove test_bgremove_sharp test_bgremove_resharp test_bgremove_vsharp test_bgremove_pdf test_bgremove_ismv test_bgremove_msmv test_bgremove_lbv test_bgremove_vsharp_msmv test_bgremove_pdf_msmv test_bgremove_lbv_msmv"
+                bgremove="$bgremove test_bgremove_sharp test_bgremove_resharp test_bgremove_vsharp test_bgremove_pdf test_bgremove_ismv test_bgremove_lbv test_bgremove_vsharp_msmv test_bgremove_pdf_msmv test_bgremove_lbv_msmv"
                 pipeline="$pipeline test_pipeline_harperella test_pipeline_iharperella" ;;
               src/pipeline/inversion.rs)
                 inversion="$inversion test_inversion_tkd test_inversion_tsvd test_inversion_tikhonov test_inversion_tv test_inversion_rts test_inversion_ilsqr test_inversion_medi test_inversion_nltv"
@@ -743,7 +743,7 @@ jobs:
             echo "- **Code coverage:** ${COVERAGE:-N/A}%"
             echo ""
 
-            TABLE=$(emit_table "test_bgremove_" sharp resharp vsharp pdf ismv msmv lbv vsharp_msmv pdf_msmv lbv_msmv) && {
+            TABLE=$(emit_table "test_bgremove_" sharp resharp vsharp pdf ismv lbv vsharp_msmv pdf_msmv lbv_msmv) && {
               echo "## Background Field Removal"
               echo "*Compared against ground truth local field map*"
               echo ""
@@ -924,13 +924,13 @@ jobs:
             echo "- **Code coverage:** ${COVERAGE:-N/A}%"
             echo ""
 
-            TABLE=$(emit_table "test_bgremove_" sharp resharp vsharp pdf ismv msmv lbv vsharp_msmv pdf_msmv lbv_msmv) && {
+            TABLE=$(emit_table "test_bgremove_" sharp resharp vsharp pdf ismv lbv vsharp_msmv pdf_msmv lbv_msmv) && {
               echo "### Background Field Removal"
               echo "*Compared against ground truth local field map*"
               echo ""
               echo "$TABLE"
               echo ""
-              emit_figures bgremove_sharp bgremove_resharp bgremove_vsharp bgremove_pdf bgremove_ismv bgremove_msmv bgremove_lbv bgremove_vsharp_msmv bgremove_pdf_msmv bgremove_lbv_msmv
+              emit_figures bgremove_sharp bgremove_resharp bgremove_vsharp bgremove_pdf bgremove_ismv bgremove_lbv bgremove_vsharp_msmv bgremove_pdf_msmv bgremove_lbv_msmv
             }
 
             TABLE=$(emit_table "test_pipeline_" harperella iharperella) && {
