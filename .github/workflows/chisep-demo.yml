@@ -183,16 +183,16 @@ jobs:
                   echo "| ${name} | ${metric} | ${value} |"
                 done
             echo ""
-            echo "### chi_sep_ilsqr — χ+ / χ−"
+            echo "### chi_sep_ilsqr — χ+ / χ− magnitude"
             fig chisep_para
             fig chisep_dia
             echo ""
-            echo "### R2\*-QSM & WaveSep — χ+ (paramagnetic)"
+            echo "### R2\*-QSM — χ+ / χ− magnitude"
             fig relaxchisep_r2starqsm_para
-            fig relaxchisep_wavesep_para
-            echo ""
-            echo "### R2\*-QSM & WaveSep — χ− magnitude (diamagnetic)"
             fig relaxchisep_r2starqsm_dia
+            echo ""
+            echo "### WaveSep — χ+ / χ− magnitude"
+            fig relaxchisep_wavesep_para
             fig relaxchisep_wavesep_dia
           } > report.md
           for attempt in 1 2 3 4 5; do
