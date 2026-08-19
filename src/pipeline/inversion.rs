@@ -149,6 +149,18 @@ pub fn run_dipole_inversion(
                 local_field_ppm, mask, &grid, bdir, &config.hdqsm, progress,
             )
         }
+        InversionAlgorithm::AmpPe => {
+            // AMP-PE takes the local field in ppm (like NDI). `b0` (field strength)
+            // is a scan parameter sourced from metadata, not a user knob; magnitude,
+            // when present, is the data-fidelity weight + morphology mask.
+            let params = crate::inversion::AmpPeParams {
+                b0: metadata.field_strength,
+                ..config.amp_pe.clone()
+            };
+            crate::inversion::amp_pe(
+                local_field_ppm, mask, magnitude, &grid, bdir, &params, |i, n| progress(i, n),
+            )
+        }
         InversionAlgorithm::Tgv | InversionAlgorithm::Qsmart => {
             return Err(PipelineError::InvalidConfig(
                 format!("{:?} should use run_tgv or run_qsmart", config.algorithm),
@@ -277,6 +289,12 @@ mod tests {
     #[test]
     fn test_inversion_ilsqr() {
         let chi = make_inversion_test(InversionAlgorithm::Ilsqr);
+        assert_eq!(chi.len(), 8 * 8 * 8);
+    }
+
+    #[test]
+    fn test_inversion_amp_pe() {
+        let chi = make_inversion_test(InversionAlgorithm::AmpPe);
         assert_eq!(chi.len(), 8 * 8 * 8);
     }
 
