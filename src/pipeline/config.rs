@@ -13,6 +13,10 @@ use crate::inversion::{
     IlsqrParams, MediParams, NltvParams, RtsParams, TgvParams, TikhonovParams, TkdParams, TvParams,
     NdiParams, FansiParams, L1QsmParams, WhQsmParams, HdQsmParams, TfiParams, AmpPeParams,
 };
+use crate::separation::{
+    ChiSepIlsqrParams, ChiSepParams, DecomposeParams, HcChisepParams, R2starQsmParams,
+    WaveSepParams,
+};
 use crate::unwrap::romeo::RomeoParams;
 use crate::utils::multi_echo::{B0WeightType, LinearFitParams};
 use crate::utils::QsmartParams;
@@ -303,6 +307,54 @@ impl Default for InversionConfig {
             whqsm: WhQsmParams::default(),
             hdqsm: HdQsmParams::default(),
             amp_pe: AmpPeParams::default(),
+        }
+    }
+}
+
+/// Susceptibility source-separation algorithm (χ+ / χ−).
+#[cfg_attr(feature = "introspection", derive(serde::Serialize))]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum SeparationAlgorithm {
+    /// Shin 2021 projected-CG, QSM-initialized (local field + R2' + magnitude + QSM).
+    ChiSepIlsqr,
+    /// MEDI-based Gauss-Newton (local field + R2' + magnitude).
+    ChiSepMedi,
+    /// Closed-form from a QSM + R2* (Dimov 2022; R2* fit from magnitude if absent).
+    R2starQsm,
+    /// Wavelet-L1 proximal-gradient from a QSM + R2' (Fang 2023).
+    WaveSep,
+    /// Signal-domain per-voxel fit from a QSM + multi-echo magnitude (Chen 2021).
+    Decompose,
+    /// Hollow-cylinder fit from a QSM + R2' + multi-echo magnitude (Wharton & Bowtell).
+    HcChisep,
+}
+
+/// Configuration for the χ-separation stage.
+#[derive(Clone, Debug)]
+pub struct SeparationConfig {
+    pub algorithm: SeparationAlgorithm,
+    /// `cf` on the chi-sep params is overridden from scan metadata by the dispatcher.
+    pub chi_sep_ilsqr: ChiSepIlsqrParams,
+    pub chi_sep_medi: ChiSepParams,
+    /// `b0` overridden from scan metadata by the dispatcher.
+    pub r2star_qsm: R2starQsmParams,
+    pub wavesep: WaveSepParams,
+    /// `b0` overridden from scan metadata by the dispatcher.
+    pub decompose: DecomposeParams,
+    /// `b0` overridden from scan metadata; `se_echo_times` supplies the SE echoes.
+    pub hc_chisep: HcChisepParams,
+}
+
+impl Default for SeparationConfig {
+    fn default() -> Self {
+        Self {
+            algorithm: SeparationAlgorithm::ChiSepIlsqr,
+            chi_sep_ilsqr: ChiSepIlsqrParams::default(),
+            chi_sep_medi: ChiSepParams::default(),
+            r2star_qsm: R2starQsmParams::default(),
+            wavesep: WaveSepParams::default(),
+            decompose: DecomposeParams::default(),
+            hc_chisep: HcChisepParams::default(),
         }
     }
 }
