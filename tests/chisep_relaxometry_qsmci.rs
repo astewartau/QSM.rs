@@ -13,7 +13,8 @@
 //!     derived fibre orientation from χ_total + R2' + multi-echo magnitude.
 //!
 //! All consume the phantom's `inputs/chimap.nii.gz` (the provided QSM), matching
-//! the QSM-CI chi-separation contract.
+//! the QSM-CI chi-separation contract. The shared phantom loader and scoring live
+//! in [`common`].
 //!
 //! Run with:
 //!   QSMCI_CHISEP=/home/ashley/repos/qsm/qsmci/qsmci/data/sim/chisep \
@@ -21,147 +22,17 @@
 
 mod common;
 
-use common::{correlation, load_nifti_file, nrmse, save_center_slices, xsim};
+use common::{chisep_score, correlation, load_chisep_phantom, save_center_slices};
 use qsm_core::separation::{
     decompose, hc_chisep, r2star_qsm_from_magnitude, wavesep, DecomposeParams, HcChisepParams,
     R2starQsmParams, WaveSepParams,
 };
-use qsm_core::Grid;
-use std::path::Path;
 use std::time::Instant;
-
-fn base_dir() -> String {
-    std::env::var("QSMCI_CHISEP")
-        .unwrap_or_else(|_| "/home/ashley/repos/qsm/qsmci/qsmci/data/sim/chisep".to_string())
-}
-
-struct Phantom {
-    chi_total: Vec<f64>,       // provided QSM (ppm)
-    r2prime: Vec<f64>,         // Hz
-    mag_voxel_major: Vec<f64>, // (n_voxels, n_echoes) row-major
-    tes: Vec<f64>,             // seconds
-    se_mag_voxel_major: Option<Vec<f64>>, // (n_voxels, n_se_echoes) row-major
-    se_tes: Vec<f64>,          // seconds (empty if no SE)
-    mask: Vec<u8>,
-    gt_para: Vec<f64>,
-    gt_dia: Vec<f64>, // positive magnitude
-    grid: Grid,
-    dims: (usize, usize, usize),
-    b0: f64,
-}
-
-fn load_phantom() -> Option<Phantom> {
-    let base = base_dir();
-    let inputs = format!("{}/inputs", base);
-    let gt = format!("{}/groundtruth", base);
-    if !Path::new(&inputs).exists() {
-        println!("Skipping: phantom not found at {}", inputs);
-        return None;
-    }
-    // These methods take a provided QSM (χ_total) plus relaxometry inputs; skip
-    // cleanly if the phantom variant on hand doesn't ship all of them.
-    for req in ["chimap.nii.gz", "magnitude.nii.gz", "r2prime.nii.gz"] {
-        if !Path::new(&format!("{}/{}", inputs, req)).exists() {
-            println!("Skipping: {} not in phantom at {}", req, inputs);
-            return None;
-        }
-    }
-
-    let params: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(format!("{}/params.json", inputs)).unwrap()).unwrap();
-    let b0 = params["B0"].as_f64().expect("params.json B0");
-    let vs: Vec<f64> = params["voxel_size"]
-        .as_array()
-        .expect("voxel_size")
-        .iter()
-        .map(|v| v.as_f64().unwrap())
-        .collect();
-    let tes: Vec<f64> = params["TE"]
-        .as_array()
-        .expect("TE")
-        .iter()
-        .map(|v| v.as_f64().unwrap())
-        .collect();
-
-    let chi = load_nifti_file(&format!("{}/chimap.nii.gz", inputs)).expect("chimap");
-    let (nx, ny, nz) = chi.dims;
-    let n = nx * ny * nz;
-    let r2p = load_nifti_file(&format!("{}/r2prime.nii.gz", inputs)).expect("r2prime");
-    let mask: Vec<u8> = load_nifti_file(&format!("{}/mask.nii.gz", inputs))
-        .expect("mask")
-        .data
-        .iter()
-        .map(|&v| (v > 0.5) as u8)
-        .collect();
-
-    // Multi-echo GRE magnitude, transposed to voxel-major (v*ne + e).
-    let bytes = std::fs::read(format!("{}/magnitude.nii.gz", inputs)).expect("magnitude");
-    let (mag4, (mx, my, mz, ne), _, _) = qsm_core::io::load_nifti_4d(&bytes).expect("4D magnitude");
-    assert_eq!((mx, my, mz), (nx, ny, nz), "magnitude dims mismatch");
-    assert_eq!(ne, tes.len(), "echo count vs TE list");
-    let mut mag_voxel_major = vec![0.0_f64; n * ne];
-    for e in 0..ne {
-        for v in 0..n {
-            mag_voxel_major[v * ne + e] = mag4[e * n + v];
-        }
-    }
-
-    // Optional multi-echo spin-echo magnitude (soft MWF evidence for HC-ChiSep).
-    let se_tes: Vec<f64> = params["se_TE"]
-        .as_array()
-        .map(|a| a.iter().map(|v| v.as_f64().unwrap()).collect())
-        .unwrap_or_default();
-    let se_path = format!("{}/se_magnitude.nii.gz", inputs);
-    let se_mag_voxel_major = if !se_tes.is_empty() && Path::new(&se_path).exists() {
-        let bytes = std::fs::read(&se_path).expect("se_magnitude");
-        let (se4, (sx, sy, sz, sne), _, _) =
-            qsm_core::io::load_nifti_4d(&bytes).expect("4D se_magnitude");
-        assert_eq!((sx, sy, sz), (nx, ny, nz), "se_magnitude dims mismatch");
-        assert_eq!(sne, se_tes.len(), "SE echo count vs se_TE list");
-        let mut v = vec![0.0_f64; n * sne];
-        for e in 0..sne {
-            for i in 0..n {
-                v[i * sne + e] = se4[e * n + i];
-            }
-        }
-        Some(v)
-    } else {
-        None
-    };
-
-    let gt_para = load_nifti_file(&format!("{}/chi-para.nii.gz", gt)).expect("chi-para").data;
-    let gt_dia = load_nifti_file(&format!("{}/chi-dia.nii.gz", gt)).expect("chi-dia").data;
-
-    Some(Phantom {
-        chi_total: chi.data,
-        r2prime: r2p.data,
-        mag_voxel_major,
-        tes,
-        se_mag_voxel_major,
-        se_tes,
-        mask,
-        gt_para,
-        gt_dia,
-        grid: Grid::new(nx, ny, nz, vs[0], vs[1], vs[2]),
-        dims: (nx, ny, nz),
-        b0,
-    })
-}
-
-fn score(label: &str, recon: &[f64], truth: &[f64], mask: &[u8], dims: (usize, usize, usize)) {
-    let corr = correlation(recon, truth, mask);
-    let xs = xsim(recon, truth, mask, dims);
-    let nr = nrmse(recon, truth, mask);
-    println!("  {:14}  corr {:.4}   xsim {:.4}   nrmse {:.1}%", label, corr, xs, nr * 100.0);
-    println!("CHISEPMETRIC {}|correlation|{:.4}", label, corr);
-    println!("CHISEPMETRIC {}|xsim|{:.4}", label, xs);
-    println!("CHISEPMETRIC {}|nrmse_pct|{:.1}", label, nr * 100.0);
-}
 
 #[test]
 #[ignore] // needs the qsmci phantom; run with --release (see module docs)
 fn test_r2star_qsm_qsmci() {
-    let Some(ph) = load_phantom() else { return };
+    let Some(ph) = load_chisep_phantom() else { return };
     let (nx, ny, nz) = ph.dims;
     println!("[INFO] R2*-QSM on qsmci chisep phantom {}x{}x{}  B0 {} T", nx, ny, nz, ph.b0);
 
@@ -174,14 +45,14 @@ fn test_r2star_qsm_qsmci() {
         &ph.mask,
         &params,
     );
+    let secs = t.elapsed().as_secs_f64();
     println!("[INFO] R2*-QSM done in {:.2?}", t.elapsed());
-    println!("CHISEPMETRIC r2star_qsm|runtime_s|{:.2}", t.elapsed().as_secs_f64());
 
     // GT diamagnetic map is stored as a positive magnitude; χ− is returned signed.
     let dia_mag: Vec<f64> = chi_neg.iter().map(|&v| -v).collect();
     println!("[RESULT] r2star-qsm (closed-form from χ_total + R2*):");
-    score("R2*-QSM χ+", &chi_pos, &ph.gt_para, &ph.mask, ph.dims);
-    score("R2*-QSM χ−", &dia_mag, &ph.gt_dia, &ph.mask, ph.dims);
+    chisep_score("R2*-QSM χ+", &chi_pos, &ph.gt_para, &ph.mask, ph.dims, secs);
+    chisep_score("R2*-QSM χ−", &dia_mag, &ph.gt_dia, &ph.mask, ph.dims, secs);
 
     // Figures for the CI PR comment (rendered by render_slices.py).
     save_center_slices(&chi_pos, &ph.mask, ph.dims, "relaxchisep_r2starqsm_para");
@@ -196,7 +67,7 @@ fn test_r2star_qsm_qsmci() {
 #[test]
 #[ignore] // needs the qsmci phantom; run with --release (see module docs)
 fn test_wavesep_qsmci() {
-    let Some(ph) = load_phantom() else { return };
+    let Some(ph) = load_chisep_phantom() else { return };
     let (nx, ny, nz) = ph.dims;
     println!("[INFO] WaveSep on qsmci chisep phantom {}x{}x{}  B0 {} T", nx, ny, nz, ph.b0);
 
@@ -215,14 +86,14 @@ fn test_wavesep_qsmci() {
             }
         },
     );
+    let secs = t.elapsed().as_secs_f64();
     println!("[INFO] WaveSep done in {:.2?}", t.elapsed());
-    println!("CHISEPMETRIC wavesep|runtime_s|{:.2}", t.elapsed().as_secs_f64());
 
     // GT diamagnetic map is stored as a positive magnitude; χ− is returned signed.
     let dia_mag: Vec<f64> = chi_neg.iter().map(|&v| -v).collect();
     println!("[RESULT] wavesep (wavelet-L1 from χ_total + R2'):");
-    score("WaveSep χ+", &chi_pos, &ph.gt_para, &ph.mask, ph.dims);
-    score("WaveSep χ−", &dia_mag, &ph.gt_dia, &ph.mask, ph.dims);
+    chisep_score("WaveSep χ+", &chi_pos, &ph.gt_para, &ph.mask, ph.dims, secs);
+    chisep_score("WaveSep χ−", &dia_mag, &ph.gt_dia, &ph.mask, ph.dims, secs);
 
     // Figures for the CI PR comment (rendered by render_slices.py).
     save_center_slices(&chi_pos, &ph.mask, ph.dims, "relaxchisep_wavesep_para");
@@ -237,7 +108,7 @@ fn test_wavesep_qsmci() {
 #[test]
 #[ignore] // needs the qsmci phantom; run with --release (per-voxel fit is heavy)
 fn test_decompose_qsmci() {
-    let Some(ph) = load_phantom() else { return };
+    let Some(ph) = load_chisep_phantom() else { return };
     let (nx, ny, nz) = ph.dims;
     println!("[INFO] DECOMPOSE on qsmci chisep phantom {}x{}x{}  B0 {} T", nx, ny, nz, ph.b0);
 
@@ -255,14 +126,14 @@ fn test_decompose_qsmci() {
         &params,
         |_, _| {},
     );
+    let secs = t.elapsed().as_secs_f64();
     println!("[INFO] DECOMPOSE done in {:.2?}", t.elapsed());
-    println!("CHISEPMETRIC decompose|runtime_s|{:.2}", t.elapsed().as_secs_f64());
 
     // GT diamagnetic map is stored as a positive magnitude; χ− is returned signed.
     let dia_mag: Vec<f64> = chi_neg.iter().map(|&v| -v).collect();
     println!("[RESULT] decompose (signal-domain from χ_total + multi-echo magnitude):");
-    score("DECOMPOSE χ+", &chi_pos, &ph.gt_para, &ph.mask, ph.dims);
-    score("DECOMPOSE χ−", &dia_mag, &ph.gt_dia, &ph.mask, ph.dims);
+    chisep_score("DECOMPOSE χ+", &chi_pos, &ph.gt_para, &ph.mask, ph.dims, secs);
+    chisep_score("DECOMPOSE χ−", &dia_mag, &ph.gt_dia, &ph.mask, ph.dims, secs);
 
     save_center_slices(&chi_pos, &ph.mask, ph.dims, "relaxchisep_decompose_para");
     save_center_slices(&dia_mag, &ph.mask, ph.dims, "relaxchisep_decompose_dia");
@@ -275,7 +146,7 @@ fn test_decompose_qsmci() {
 #[test]
 #[ignore] // needs the qsmci phantom; run with --release
 fn test_hc_chisep_qsmci() {
-    let Some(ph) = load_phantom() else { return };
+    let Some(ph) = load_chisep_phantom() else { return };
     let (nx, ny, nz) = ph.dims;
     println!("[INFO] HC-ChiSep on qsmci chisep phantom {}x{}x{}  B0 {} T", nx, ny, nz, ph.b0);
 
@@ -296,14 +167,14 @@ fn test_hc_chisep_qsmci() {
         &params,
         |i, tot| println!("  stage {}/{}", i, tot),
     );
+    let secs = t.elapsed().as_secs_f64();
     println!("[INFO] HC-ChiSep done in {:.2?}", t.elapsed());
-    println!("CHISEPMETRIC hc_chisep|runtime_s|{:.2}", t.elapsed().as_secs_f64());
 
     // GT diamagnetic map is stored as a positive magnitude; χ− is returned signed.
     let dia_mag: Vec<f64> = chi_neg.iter().map(|&v| -v).collect();
     println!("[RESULT] hc_chisep (hollow-cylinder from χ_total + R2' + magnitude):");
-    score("HC-ChiSep χ+", &chi_pos, &ph.gt_para, &ph.mask, ph.dims);
-    score("HC-ChiSep χ−", &dia_mag, &ph.gt_dia, &ph.mask, ph.dims);
+    chisep_score("HC-ChiSep χ+", &chi_pos, &ph.gt_para, &ph.mask, ph.dims, secs);
+    chisep_score("HC-ChiSep χ−", &dia_mag, &ph.gt_dia, &ph.mask, ph.dims, secs);
 
     save_center_slices(&chi_pos, &ph.mask, ph.dims, "relaxchisep_hcchisep_para");
     save_center_slices(&dia_mag, &ph.mask, ph.dims, "relaxchisep_hcchisep_dia");

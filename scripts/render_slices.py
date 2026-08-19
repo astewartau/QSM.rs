@@ -62,6 +62,9 @@ NAMES = {
     "relax_r2prime_derived": "R2' derived = R2*-R2 (Hz)",
     "relax_denoise_after": "R2* — noisy vs MP-PCA denoised (Hz)",
     "relax_unring_after": "R2* map — rung vs Gibbs-unrung (Hz)",
+    # Field-based chi-separation (chi_sep_ilsqr)
+    "chisep_para": "chi_sep_ilsqr χ+",
+    "chisep_dia": "chi_sep_ilsqr χ− (magnitude)",
     # Relaxometry-based chi-separation (R2*-QSM, WaveSep, DECOMPOSE, HC-ChiSep)
     "relaxchisep_r2starqsm_para": "R2*-QSM χ+",
     "relaxchisep_wavesep_para": "WaveSep χ+",

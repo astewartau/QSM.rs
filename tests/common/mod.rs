@@ -862,3 +862,161 @@ impl ChallengeMetrics {
             self.correlation, self.xsim, elapsed.as_secs_f64());
     }
 }
+
+// ---------------------------------------------------------------------------
+// χ-separation phantom loader + scoring (shared by the chisep integration tests)
+// ---------------------------------------------------------------------------
+
+/// Proton gyromagnetic ratio in Hz/T (as used library-wide).
+const CHISEP_GAMMA_HZ_PER_T: f64 = 42.576e6;
+
+/// QSM-CI chisep phantom directory (`QSMCI_CHISEP` env, with a local default).
+pub fn chisep_base_dir() -> String {
+    std::env::var("QSMCI_CHISEP")
+        .unwrap_or_else(|_| "/home/ashley/repos/qsm/qsmci/qsmci/data/sim/chisep".to_string())
+}
+
+/// All inputs + ground truth for the QSM-CI chisep phantom, a superset covering
+/// every chisep method (field-based ilsqr/medi, and QSM-based r2star/wavesep/
+/// decompose/hc_chisep).
+pub struct ChiSepPhantom {
+    /// Local (tissue) field in ppm.
+    pub local_field_ppm: Vec<f64>,
+    /// Provided conventional QSM χ_total in ppm (`chimap.nii.gz`).
+    pub chi_total: Vec<f64>,
+    /// R2' map in Hz.
+    pub r2prime: Vec<f64>,
+    /// Root-sum-of-squares magnitude over echoes (for ilsqr/medi).
+    pub magnitude_rss: Vec<f64>,
+    /// Multi-echo GRE magnitude, voxel-major `(n_voxels, n_echoes)`.
+    pub mag_voxel_major: Vec<f64>,
+    /// GRE echo times in seconds.
+    pub tes: Vec<f64>,
+    /// Optional multi-echo spin-echo magnitude, voxel-major `(n_voxels, n_se)`.
+    pub se_mag_voxel_major: Option<Vec<f64>>,
+    /// Spin-echo echo times in seconds (empty if none).
+    pub se_tes: Vec<f64>,
+    pub mask: Vec<u8>,
+    /// Ground-truth χ+ (paramagnetic) in ppm.
+    pub gt_para: Vec<f64>,
+    /// Ground-truth χ− stored as a positive magnitude in ppm.
+    pub gt_dia: Vec<f64>,
+    pub grid: qsm_core::Grid,
+    pub dims: (usize, usize, usize),
+    pub b0: f64,
+    /// Central frequency (Hz) = γ·B0.
+    pub cf: f64,
+    pub bdir: (f64, f64, f64),
+}
+
+/// Load the QSM-CI chisep phantom, or `None` (with a message) if it's not present.
+pub fn load_chisep_phantom() -> Option<ChiSepPhantom> {
+    let base = chisep_base_dir();
+    let inputs = format!("{}/inputs", base);
+    let gt = format!("{}/groundtruth", base);
+    if !Path::new(&inputs).exists() {
+        println!("Skipping: chisep phantom not found at {}", inputs);
+        return None;
+    }
+
+    let params: serde_json::Value =
+        serde_json::from_slice(&fs::read(format!("{}/params.json", inputs)).unwrap()).unwrap();
+    let b0 = params["B0"].as_f64().expect("params.json B0");
+    let cf = CHISEP_GAMMA_HZ_PER_T * b0;
+    let arr = |k: &str| -> Vec<f64> {
+        params[k].as_array().map(|a| a.iter().map(|v| v.as_f64().unwrap()).collect()).unwrap_or_default()
+    };
+    let vs = arr("voxel_size");
+    let bd = arr("B0_dir");
+    let tes = arr("TE");
+
+    let lf = load_nifti_file(&format!("{}/localfield.nii.gz", inputs)).expect("localfield");
+    let (nx, ny, nz) = lf.dims;
+    let n = nx * ny * nz;
+    let chi = load_nifti_file(&format!("{}/chimap.nii.gz", inputs)).expect("chimap");
+    let r2p = load_nifti_file(&format!("{}/r2prime.nii.gz", inputs)).expect("r2prime");
+    let mask: Vec<u8> = load_nifti_file(&format!("{}/mask.nii.gz", inputs))
+        .expect("mask")
+        .data
+        .iter()
+        .map(|&v| (v > 0.5) as u8)
+        .collect();
+
+    // Multi-echo GRE magnitude → both RSS and voxel-major layouts.
+    let bytes = fs::read(format!("{}/magnitude.nii.gz", inputs)).expect("magnitude");
+    let (mag4, (mx, my, mz, ne), _, _) = qsm_core::io::load_nifti_4d(&bytes).expect("4D magnitude");
+    assert_eq!((mx, my, mz), (nx, ny, nz), "magnitude dims mismatch");
+    assert_eq!(ne, tes.len(), "echo count vs TE list");
+    let mut magnitude_rss = vec![0.0_f64; n];
+    let mut mag_voxel_major = vec![0.0_f64; n * ne];
+    for e in 0..ne {
+        for v in 0..n {
+            let m = mag4[e * n + v];
+            magnitude_rss[v] += m * m;
+            mag_voxel_major[v * ne + e] = m;
+        }
+    }
+    for v in magnitude_rss.iter_mut() {
+        *v = v.sqrt();
+    }
+
+    // Optional multi-echo spin-echo magnitude (soft MWF evidence for HC-ChiSep).
+    let se_tes = arr("se_TE");
+    let se_path = format!("{}/se_magnitude.nii.gz", inputs);
+    let se_mag_voxel_major = if !se_tes.is_empty() && Path::new(&se_path).exists() {
+        let bytes = fs::read(&se_path).expect("se_magnitude");
+        let (se4, (sx, sy, sz, sne), _, _) =
+            qsm_core::io::load_nifti_4d(&bytes).expect("4D se_magnitude");
+        assert_eq!((sx, sy, sz), (nx, ny, nz), "se_magnitude dims mismatch");
+        assert_eq!(sne, se_tes.len(), "SE echo count vs se_TE list");
+        let mut v = vec![0.0_f64; n * sne];
+        for e in 0..sne {
+            for i in 0..n {
+                v[i * sne + e] = se4[e * n + i];
+            }
+        }
+        Some(v)
+    } else {
+        None
+    };
+
+    let gt_para = load_nifti_file(&format!("{}/chi-para.nii.gz", gt)).expect("chi-para").data;
+    let gt_dia = load_nifti_file(&format!("{}/chi-dia.nii.gz", gt)).expect("chi-dia").data;
+
+    Some(ChiSepPhantom {
+        local_field_ppm: lf.data,
+        chi_total: chi.data,
+        r2prime: r2p.data,
+        magnitude_rss,
+        mag_voxel_major,
+        tes,
+        se_mag_voxel_major,
+        se_tes,
+        mask,
+        gt_para,
+        gt_dia,
+        grid: qsm_core::Grid::new(nx, ny, nz, vs[0], vs[1], vs[2]),
+        dims: (nx, ny, nz),
+        b0,
+        cf,
+        bdir: (bd[0], bd[1], bd[2]),
+    })
+}
+
+/// Score one source map: prints a human line plus a machine-readable
+/// `RESULT:<label>,<corr>,<xsim>,<nrmse_pct>,<time_s>` row that the integration
+/// summary tabulates with metrics as columns.
+pub fn chisep_score(
+    label: &str,
+    recon: &[f64],
+    truth: &[f64],
+    mask: &[u8],
+    dims: (usize, usize, usize),
+    time_s: f64,
+) {
+    let corr = correlation(recon, truth, mask);
+    let xs = xsim(recon, truth, mask, dims);
+    let nr = nrmse(recon, truth, mask) * 100.0;
+    println!("  {:22}  corr {:.4}   xsim {:.4}   nrmse {:.1}%", label, corr, xs, nr);
+    println!("RESULT:{},{:.4},{:.4},{:.1},{:.2}", label, corr, xs, nr, time_s);
+}
