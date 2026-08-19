@@ -919,4 +919,128 @@ mod tests {
             theta_deg
         );
     }
+
+    /// Build a synthetic phantom: voxels with `x < wm_x_max` are WM-like (hollow-
+    /// cylinder beat magnitude, diamagnetic χ_total, R2' = H+meso so the anchored
+    /// fit matches), the rest GM-like (mono-exponential magnitude, paramagnetic
+    /// χ_total, R2' = Dr+·χ). Returns `(chi_total, r2prime, mag_vm, se_mag_vm, mask)`
+    /// with magnitudes in voxel-major `(n, ne)` layout.
+    fn synth_phantom(
+        dims: (usize, usize, usize),
+        wm_x_max: usize,
+        b0: f64,
+        tes: &[f64],
+        se_tes: &[f64],
+    ) -> (Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>, Vec<u8>) {
+        let (nx, ny, nz) = dims;
+        let n = nx * ny * nz;
+        let ne = tes.len();
+        let se_e = se_tes.len();
+        let dr = 137.0 * b0 / 3.0;
+        let theta = 40.0_f64.to_radians();
+        let mwf = 0.12;
+        let meso = 6.0;
+        let h = hc_wm_r2prime(theta, mwf, tes, b0);
+        let r2star = 25.0;
+
+        let mut chi = vec![0.0_f64; n];
+        let mut r2p = vec![0.0_f64; n];
+        let mut mag = vec![0.0_f64; n * ne];
+        let mut se = vec![0.0_f64; n * se_e];
+        let mask = vec![1u8; n];
+        for k in 0..nz {
+            for j in 0..ny {
+                for i in 0..nx {
+                    let idx = (k * ny + j) * nx + i;
+                    if i < wm_x_max {
+                        chi[idx] = -0.03;
+                        r2p[idx] = h + meso;
+                        for (e, &t) in tes.iter().enumerate() {
+                            mag[idx * ne + e] = hc_wm_signal_mag(t, theta, b0, mwf, meso);
+                        }
+                        for (e, &t) in se_tes.iter().enumerate() {
+                            se[idx * se_e + e] = hc_wm_se_signal(t, mwf);
+                        }
+                    } else {
+                        chi[idx] = 0.05;
+                        r2p[idx] = dr * 0.05;
+                        for (e, &t) in tes.iter().enumerate() {
+                            mag[idx * ne + e] = (-r2star * t).exp();
+                        }
+                        for (e, &t) in se_tes.iter().enumerate() {
+                            se[idx * se_e + e] = (-r2star * t).exp();
+                        }
+                    }
+                }
+            }
+        }
+        (chi, r2p, mag, se, mask)
+    }
+
+    /// Full pipeline (with SE evidence): WM slab triggers the beat branch (stages
+    /// 3-5), GM uses the closed form; exercises Dr+ self-calibration on a >5000
+    /// paramagnetic-voxel pool.
+    #[test]
+    fn hc_chisep_end_to_end_wm_and_gm() {
+        let tes = [0.004, 0.012, 0.020, 0.028];
+        let se_tes = [0.01, 0.03, 0.05, 0.07];
+        let dims = (20, 20, 20);
+        let n = dims.0 * dims.1 * dims.2;
+        let (chi, r2p, mag, se, mask) = synth_phantom(dims, 6, 7.0, &tes, &se_tes);
+        let grid = Grid::new(dims.0, dims.1, dims.2, 1.0, 1.0, 1.0);
+        let params = HcChisepParams { b0: 7.0, se_echo_times: se_tes.to_vec(), ..Default::default() };
+
+        let mut stages = 0;
+        let (pos, neg, tot) = hc_chisep(
+            &chi, &r2p, &mag, &tes, Some(&se), &mask, &grid, &params, |i, _| stages = i,
+        );
+        assert_eq!(stages, 5, "all pipeline stages ran (beat detected)");
+
+        // Sign convention + invariant everywhere.
+        for i in 0..n {
+            assert!(pos[i] >= 0.0 && neg[i] <= 0.0, "signs at {i}");
+            assert!((tot[i] - (pos[i] + neg[i])).abs() < 1e-9, "invariant at {i}");
+        }
+        // Separation happened: paramagnetic in GM, diamagnetic in WM.
+        assert!(pos.iter().any(|&v| v > 1e-3), "some χ+ present");
+        assert!(neg.iter().any(|&v| v < -1e-3), "some χ− present (WM)");
+    }
+
+    /// All-GM phantom: no magnitude beat → `beat_frac` below threshold → the
+    /// closed-form branch is returned for every voxel.
+    #[test]
+    fn hc_chisep_no_beat_falls_back_to_closed_form() {
+        let tes = [0.004, 0.012, 0.020, 0.028];
+        let dims = (10, 10, 10);
+        let n = dims.0 * dims.1 * dims.2;
+        let (chi, r2p, mag, _se, mask) = synth_phantom(dims, 0, 7.0, &tes, &[]);
+        let grid = Grid::new(dims.0, dims.1, dims.2, 1.0, 1.0, 1.0);
+        let params = HcChisepParams { b0: 7.0, ..Default::default() };
+
+        let (pos, neg, _tot) =
+            hc_chisep(&chi, &r2p, &mag, &tes, None, &mask, &grid, &params, |_, _| {});
+        // Closed form on this phantom: χ+ = R2'/Dr+ = 0.05, χ− = 0.
+        for i in 0..n {
+            assert!((pos[i] - 0.05).abs() < 1e-6, "closed-form χ+ at {i}: {}", pos[i]);
+            assert!(neg[i].abs() < 1e-9, "closed-form χ− at {i}: {}", neg[i]);
+        }
+    }
+
+    /// Empty mask returns all zeros via the early exit.
+    #[test]
+    fn hc_chisep_empty_mask_returns_zero() {
+        let tes = [0.004, 0.012, 0.020, 0.028];
+        let dims = (6, 6, 6);
+        let n = dims.0 * dims.1 * dims.2;
+        let (chi, r2p, mag, _se, _m) = synth_phantom(dims, 0, 7.0, &tes, &[]);
+        let mask = vec![0u8; n];
+        let grid = Grid::new(dims.0, dims.1, dims.2, 1.0, 1.0, 1.0);
+        let params = HcChisepParams { b0: 7.0, ..Default::default() };
+
+        let (pos, neg, tot) =
+            hc_chisep(&chi, &r2p, &mag, &tes, None, &mask, &grid, &params, |_, _| {});
+        assert!(pos.iter().all(|&v| v == 0.0), "χ+ all zero");
+        assert!(neg.iter().all(|&v| v == 0.0), "χ− all zero");
+        assert!(tot.iter().all(|&v| v == 0.0), "χ_total all zero");
+    }
 }
