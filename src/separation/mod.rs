@@ -10,6 +10,10 @@
 //! - `chi_sep_medi`: MEDI-based Gauss-Newton optimization with coupled field + R2' constraints
 //! - `r2star_qsm`: closed-form separation from a QSM + R2* (Dimov 2022, no R2' needed)
 //! - `wavesep`: wavelet-L1 proximal-gradient separation from a QSM + R2' (Fang 2023)
+//! - `decompose`: signal-domain 3-compartment per-voxel fit from a QSM + multi-echo
+//!   magnitude (Chen 2021)
+//! - `hc_chisep`: hollow-cylinder χ-separation with signal-derived fiber orientation
+//!   from a QSM + R2' + multi-echo magnitude (Wharton & Bowtell model)
 //!
 //! # Reference
 //! Shin, H., et al. (2021). "χ-separation: Magnetic susceptibility source separation
@@ -17,10 +21,14 @@
 
 pub mod chi_sep_ilsqr;
 pub mod chi_sep_medi;
+pub mod decompose;
+pub mod hc_chisep;
 pub mod r2star_qsm;
 pub mod wavesep;
 
 pub use chi_sep_ilsqr::{chi_sep_ilsqr, ChiSepIlsqrParams};
 pub use chi_sep_medi::{chi_sep_medi, ChiSepParams};
+pub use decompose::{decompose, DecomposeParams};
+pub use hc_chisep::{hc_chisep, HcChisepParams};
 pub use r2star_qsm::{r2star_qsm, r2star_qsm_from_magnitude, R2starQsmParams};
 pub use wavesep::{wavesep, WaveSepParams};
