@@ -170,10 +170,12 @@ jobs:
           {
             echo "## 🧲 χ-separation demo"
             echo ""
-            echo "Paramagnetic (χ+) and diamagnetic (χ−) source maps on a simulated brain phantom, scored against the ground truth. Three methods:"
+            echo "Paramagnetic (χ+) and diamagnetic (χ−) source maps on a simulated brain phantom, scored against the ground truth. Methods:"
             echo "- \`chi_sep_ilsqr\` (Shin et al. 2021) — field-inversion from the local field, R2′ and magnitude."
             echo "- \`r2star_qsm\` (Dimov et al. 2022) — closed form from the provided QSM (χ_total) + R2\*."
             echo "- \`wavesep\` (Fang et al. 2023) — wavelet-L1 from the provided QSM (χ_total) + R2′."
+            echo "- \`decompose\` (Chen et al. 2021) — signal-domain per-voxel 3-compartment fit from the QSM (χ_total) + multi-echo magnitude."
+            echo "- \`hc_chisep\` (Wharton & Bowtell model) — hollow-cylinder fit with signal-derived fibre orientation from the QSM (χ_total) + R2′ + magnitude."
             echo ""
             echo "### Metrics"
             echo "| Map | Metric | Value |"
@@ -194,6 +196,14 @@ jobs:
             echo "### WaveSep — χ+ / χ− magnitude"
             fig relaxchisep_wavesep_para
             fig relaxchisep_wavesep_dia
+            echo ""
+            echo "### DECOMPOSE — χ+ / χ− magnitude"
+            fig relaxchisep_decompose_para
+            fig relaxchisep_decompose_dia
+            echo ""
+            echo "### HC-ChiSep — χ+ / χ− magnitude"
+            fig relaxchisep_hcchisep_para
+            fig relaxchisep_hcchisep_dia
           } > report.md
           for attempt in 1 2 3 4 5; do
             if cml comment create report.md; then

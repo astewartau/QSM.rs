@@ -62,11 +62,15 @@ NAMES = {
     "relax_r2prime_derived": "R2' derived = R2*-R2 (Hz)",
     "relax_denoise_after": "R2* — noisy vs MP-PCA denoised (Hz)",
     "relax_unring_after": "R2* map — rung vs Gibbs-unrung (Hz)",
-    # Relaxometry-based chi-separation (R2*-QSM, WaveSep)
+    # Relaxometry-based chi-separation (R2*-QSM, WaveSep, DECOMPOSE, HC-ChiSep)
     "relaxchisep_r2starqsm_para": "R2*-QSM χ+",
     "relaxchisep_wavesep_para": "WaveSep χ+",
     "relaxchisep_r2starqsm_dia": "R2*-QSM χ− (magnitude)",
     "relaxchisep_wavesep_dia": "WaveSep χ− (magnitude)",
+    "relaxchisep_decompose_para": "DECOMPOSE χ+",
+    "relaxchisep_decompose_dia": "DECOMPOSE χ− (magnitude)",
+    "relaxchisep_hcchisep_para": "HC-ChiSep χ+",
+    "relaxchisep_hcchisep_dia": "HC-ChiSep χ− (magnitude)",
 }
 
 # Fixed display windows (ppm)
@@ -122,6 +126,10 @@ WINDOWS = {
     "relaxchisep_wavesep_para": (0, 0.1),
     "relaxchisep_r2starqsm_dia": (0, 0.1),
     "relaxchisep_wavesep_dia": (0, 0.1),
+    "relaxchisep_decompose_para": (0, 0.1),
+    "relaxchisep_decompose_dia": (0, 0.1),
+    "relaxchisep_hcchisep_para": (0, 0.1),
+    "relaxchisep_hcchisep_dia": (0, 0.1),
 }
 
 

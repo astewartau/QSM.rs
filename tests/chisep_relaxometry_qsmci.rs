@@ -2,13 +2,17 @@
 //! scored with the QSM-CI metrics (correlation / XSIM / NRMSE per source map) so
 //! results are directly comparable to the leaderboard entries.
 //!
-//! Two methods that separate χ+ / χ− from a *provided* conventional QSM
-//! (χ_total) plus a relaxometry map, without a field-inversion of their own:
+//! Four methods that separate χ+ / χ− from a *provided* conventional QSM
+//! (χ_total) plus relaxometry / magnitude, without a field-inversion of their own:
 //!   - **R2\*-QSM** (Dimov 2022): closed form from χ_total + R2* (fit here from the
 //!     multi-echo magnitude). No R2' needed.
 //!   - **WaveSep** (Fang 2023): wavelet-L1 proximal-gradient from χ_total + R2'.
+//!   - **DECOMPOSE** (Chen 2021): signal-domain 3-compartment per-voxel fit from
+//!     χ_total + multi-echo magnitude.
+//!   - **HC-ChiSep** (Wharton & Bowtell model): hollow-cylinder fit with signal-
+//!     derived fibre orientation from χ_total + R2' + multi-echo magnitude.
 //!
-//! Both consume the phantom's `inputs/chimap.nii.gz` (the provided QSM), matching
+//! All consume the phantom's `inputs/chimap.nii.gz` (the provided QSM), matching
 //! the QSM-CI chi-separation contract.
 //!
 //! Run with:
@@ -19,7 +23,8 @@ mod common;
 
 use common::{correlation, load_nifti_file, nrmse, save_center_slices, xsim};
 use qsm_core::separation::{
-    r2star_qsm_from_magnitude, wavesep, R2starQsmParams, WaveSepParams,
+    decompose, hc_chisep, r2star_qsm_from_magnitude, wavesep, DecomposeParams, HcChisepParams,
+    R2starQsmParams, WaveSepParams,
 };
 use qsm_core::Grid;
 use std::path::Path;
@@ -35,6 +40,8 @@ struct Phantom {
     r2prime: Vec<f64>,         // Hz
     mag_voxel_major: Vec<f64>, // (n_voxels, n_echoes) row-major
     tes: Vec<f64>,             // seconds
+    se_mag_voxel_major: Option<Vec<f64>>, // (n_voxels, n_se_echoes) row-major
+    se_tes: Vec<f64>,          // seconds (empty if no SE)
     mask: Vec<u8>,
     gt_para: Vec<f64>,
     gt_dia: Vec<f64>, // positive magnitude
@@ -99,6 +106,29 @@ fn load_phantom() -> Option<Phantom> {
         }
     }
 
+    // Optional multi-echo spin-echo magnitude (soft MWF evidence for HC-ChiSep).
+    let se_tes: Vec<f64> = params["se_TE"]
+        .as_array()
+        .map(|a| a.iter().map(|v| v.as_f64().unwrap()).collect())
+        .unwrap_or_default();
+    let se_path = format!("{}/se_magnitude.nii.gz", inputs);
+    let se_mag_voxel_major = if !se_tes.is_empty() && Path::new(&se_path).exists() {
+        let bytes = std::fs::read(&se_path).expect("se_magnitude");
+        let (se4, (sx, sy, sz, sne), _, _) =
+            qsm_core::io::load_nifti_4d(&bytes).expect("4D se_magnitude");
+        assert_eq!((sx, sy, sz), (nx, ny, nz), "se_magnitude dims mismatch");
+        assert_eq!(sne, se_tes.len(), "SE echo count vs se_TE list");
+        let mut v = vec![0.0_f64; n * sne];
+        for e in 0..sne {
+            for i in 0..n {
+                v[i * sne + e] = se4[e * n + i];
+            }
+        }
+        Some(v)
+    } else {
+        None
+    };
+
     let gt_para = load_nifti_file(&format!("{}/chi-para.nii.gz", gt)).expect("chi-para").data;
     let gt_dia = load_nifti_file(&format!("{}/chi-dia.nii.gz", gt)).expect("chi-dia").data;
 
@@ -107,6 +137,8 @@ fn load_phantom() -> Option<Phantom> {
         r2prime: r2p.data,
         mag_voxel_major,
         tes,
+        se_mag_voxel_major,
+        se_tes,
         mask,
         gt_para,
         gt_dia,
@@ -200,4 +232,84 @@ fn test_wavesep_qsmci() {
     let dia_corr = correlation(&dia_mag, &ph.gt_dia, &ph.mask);
     assert!(para_corr > 0.5, "WaveSep chi+ corr {:.3} too low", para_corr);
     assert!(dia_corr > 0.4, "WaveSep chi- corr {:.3} too low", dia_corr);
+}
+
+#[test]
+#[ignore] // needs the qsmci phantom; run with --release (per-voxel fit is heavy)
+fn test_decompose_qsmci() {
+    let Some(ph) = load_phantom() else { return };
+    let (nx, ny, nz) = ph.dims;
+    println!("[INFO] DECOMPOSE on qsmci chisep phantom {}x{}x{}  B0 {} T", nx, ny, nz, ph.b0);
+
+    // Signal-domain 3-compartment per-voxel fit from the provided QSM + multi-echo
+    // magnitude. n_inner can be lowered via env for a quick smoke run.
+    let n_inner = std::env::var("DECOMPOSE_NINNER").ok().and_then(|s| s.parse().ok()).unwrap_or(10);
+    let params = DecomposeParams { b0: ph.b0, n_inner, ..DecomposeParams::default() };
+
+    let t = Instant::now();
+    let (chi_pos, chi_neg, _chi_total) = decompose(
+        &ph.chi_total,
+        &ph.mag_voxel_major,
+        &ph.tes,
+        &ph.mask,
+        &params,
+        |_, _| {},
+    );
+    println!("[INFO] DECOMPOSE done in {:.2?}", t.elapsed());
+    println!("CHISEPMETRIC decompose|runtime_s|{:.2}", t.elapsed().as_secs_f64());
+
+    // GT diamagnetic map is stored as a positive magnitude; χ− is returned signed.
+    let dia_mag: Vec<f64> = chi_neg.iter().map(|&v| -v).collect();
+    println!("[RESULT] decompose (signal-domain from χ_total + multi-echo magnitude):");
+    score("DECOMPOSE χ+", &chi_pos, &ph.gt_para, &ph.mask, ph.dims);
+    score("DECOMPOSE χ−", &dia_mag, &ph.gt_dia, &ph.mask, ph.dims);
+
+    save_center_slices(&chi_pos, &ph.mask, ph.dims, "relaxchisep_decompose_para");
+    save_center_slices(&dia_mag, &ph.mask, ph.dims, "relaxchisep_decompose_dia");
+
+    // Conservative floor: DECOMPOSE is a coarse per-voxel separator on this phantom.
+    let para_corr = correlation(&chi_pos, &ph.gt_para, &ph.mask);
+    assert!(para_corr > 0.2, "DECOMPOSE chi+ corr {:.3} too low", para_corr);
+}
+
+#[test]
+#[ignore] // needs the qsmci phantom; run with --release
+fn test_hc_chisep_qsmci() {
+    let Some(ph) = load_phantom() else { return };
+    let (nx, ny, nz) = ph.dims;
+    println!("[INFO] HC-ChiSep on qsmci chisep phantom {}x{}x{}  B0 {} T", nx, ny, nz, ph.b0);
+
+    let params = HcChisepParams {
+        b0: ph.b0,
+        se_echo_times: ph.se_tes.clone(),
+        ..HcChisepParams::default()
+    };
+    let t = Instant::now();
+    let (chi_pos, chi_neg, _chi_total) = hc_chisep(
+        &ph.chi_total,
+        &ph.r2prime,
+        &ph.mag_voxel_major,
+        &ph.tes,
+        ph.se_mag_voxel_major.as_deref(),
+        &ph.mask,
+        &ph.grid,
+        &params,
+        |i, tot| println!("  stage {}/{}", i, tot),
+    );
+    println!("[INFO] HC-ChiSep done in {:.2?}", t.elapsed());
+    println!("CHISEPMETRIC hc_chisep|runtime_s|{:.2}", t.elapsed().as_secs_f64());
+
+    // GT diamagnetic map is stored as a positive magnitude; χ− is returned signed.
+    let dia_mag: Vec<f64> = chi_neg.iter().map(|&v| -v).collect();
+    println!("[RESULT] hc_chisep (hollow-cylinder from χ_total + R2' + magnitude):");
+    score("HC-ChiSep χ+", &chi_pos, &ph.gt_para, &ph.mask, ph.dims);
+    score("HC-ChiSep χ−", &dia_mag, &ph.gt_dia, &ph.mask, ph.dims);
+
+    save_center_slices(&chi_pos, &ph.mask, ph.dims, "relaxchisep_hcchisep_para");
+    save_center_slices(&dia_mag, &ph.mask, ph.dims, "relaxchisep_hcchisep_dia");
+
+    let para_corr = correlation(&chi_pos, &ph.gt_para, &ph.mask);
+    let dia_corr = correlation(&dia_mag, &ph.gt_dia, &ph.mask);
+    assert!(para_corr > 0.4, "HC-ChiSep chi+ corr {:.3} too low", para_corr);
+    assert!(dia_corr > 0.4, "HC-ChiSep chi- corr {:.3} too low", dia_corr);
 }
