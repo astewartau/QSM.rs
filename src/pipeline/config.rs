@@ -11,7 +11,7 @@ use crate::bgremove::{
 };
 use crate::inversion::{
     IlsqrParams, MediParams, NltvParams, RtsParams, TgvParams, TikhonovParams, TkdParams, TvParams,
-    NdiParams, FansiParams, L1QsmParams, WhQsmParams, HdQsmParams, TfiParams,
+    NdiParams, FansiParams, L1QsmParams, WhQsmParams, HdQsmParams, TfiParams, AmpPeParams,
 };
 use crate::unwrap::romeo::RomeoParams;
 use crate::utils::multi_echo::{B0WeightType, LinearFitParams};
@@ -70,6 +70,8 @@ pub enum InversionAlgorithm {
     Whqsm,
     /// Hybrid two-stage L1→L2 QSM (HD-QSM).
     Hdqsm,
+    /// Approximate Message Passing with built-in Parameter Estimation (AMP-PE).
+    AmpPe,
 }
 
 /// B0 estimation method
@@ -266,6 +268,8 @@ pub struct InversionConfig {
     pub l1qsm: L1QsmParams,
     pub whqsm: WhQsmParams,
     pub hdqsm: HdQsmParams,
+    /// AMP-PE (`b0` is overridden from scan metadata by the dispatcher).
+    pub amp_pe: AmpPeParams,
 }
 
 impl Default for InversionConfig {
@@ -288,6 +292,7 @@ impl Default for InversionConfig {
             l1qsm: L1QsmParams::default(),
             whqsm: WhQsmParams::default(),
             hdqsm: HdQsmParams::default(),
+            amp_pe: AmpPeParams::default(),
         }
     }
 }
