@@ -588,4 +588,46 @@ mod tests {
             neg[0]
         );
     }
+
+    /// Multi-voxel run exercising the masked-out, all-zero, and progress paths.
+    #[test]
+    fn decompose_multivoxel_mask_and_zero_paths() {
+        let te = [0.004, 0.012, 0.020, 0.028];
+        let b0 = 7.0;
+        let ne = te.len();
+        let params = DecomposeParams { b0, n_inner: 4, chi_bound: 0.5, max_lm_iter: 20 };
+
+        // A real signal for the fitted voxels.
+        let (cp, cm, c0, chip, chim, r0) = (0.4, 0.2, 0.4, 0.06, -0.05, 22.0);
+        let sig: Vec<(f64, f64)> = te
+            .iter()
+            .map(|&t| signal_model(t, cp, cm, c0, chip, chim, r0, b0))
+            .collect();
+        let smag: Vec<f64> = sig.iter().map(|z| (z.0 * z.0 + z.1 * z.1).sqrt()).collect();
+
+        // 4 voxels: [0]=masked-out, [1]=all-zero magnitude, [2],[3]=real signal.
+        let n = 4;
+        let mut mag = vec![0.0_f64; n * ne];
+        for e in 0..ne {
+            mag[2 * ne + e] = smag[e];
+            mag[3 * ne + e] = smag[e];
+        }
+        let chi_total = vec![chip + chim; n];
+        let mask = vec![0u8, 1, 1, 1];
+
+        let mut last = (0usize, 0usize);
+        let (pos, neg, tot) =
+            decompose(&chi_total, &mag, &te, &mask, &params, |i, t| last = (i, t));
+
+        // Masked-out and all-zero voxels stay at zero.
+        assert_eq!((pos[0], neg[0], tot[0]), (0.0, 0.0, 0.0), "masked voxel");
+        assert_eq!((pos[1], neg[1], tot[1]), (0.0, 0.0, 0.0), "all-zero voxel");
+        // Fitted voxels obey the sign convention + invariant.
+        for i in [2usize, 3] {
+            assert!(pos[i] >= 0.0 && neg[i] <= 0.0, "signs at voxel {i}");
+            assert!((tot[i] - (pos[i] + neg[i])).abs() < 1e-12, "invariant at voxel {i}");
+        }
+        // Progress reported completion over the 3 masked voxels.
+        assert_eq!(last, (3, 3), "final progress");
+    }
 }
