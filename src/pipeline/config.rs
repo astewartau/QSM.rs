@@ -7,7 +7,7 @@
 
 use crate::bgremove::{
     IsmvParams, LbvParams, PdfParams, ResharpParams, SharpParams, SdfParams, VsharpParams,
-    HarperellaParams,
+    HarperellaParams, MsmvParams,
 };
 use crate::inversion::{
     IlsqrParams, MediParams, NltvParams, RtsParams, TgvParams, TikhonovParams, TkdParams, TvParams,
@@ -40,6 +40,8 @@ pub enum BgRemovalAlgorithm {
     Resharp,
     Harperella,
     Iharperella,
+    /// mSMV — self-contained SMV removal + boundary-shadow correction (Roberts 2024).
+    Msmv,
 }
 
 /// Dipole inversion algorithm
@@ -228,6 +230,12 @@ pub struct BgRemovalConfig {
     pub resharp: ResharpParams,
     pub harperella: HarperellaParams,
     pub sdf: SdfParams,
+    /// mSMV parameters (`b0`/`te` are overridden from scan metadata by the
+    /// dispatcher). Used by the `Msmv` algorithm and the `msmv_refine` post-step.
+    pub msmv: MsmvParams,
+    /// Apply mSMV boundary-shadow refinement after the primary BFR (any algorithm
+    /// except `Msmv` itself, which already includes the correction).
+    pub msmv_refine: bool,
 }
 
 impl Default for BgRemovalConfig {
@@ -242,6 +250,8 @@ impl Default for BgRemovalConfig {
             resharp: ResharpParams::default(),
             harperella: HarperellaParams::default(),
             sdf: SdfParams::default(),
+            msmv: MsmvParams::default(),
+            msmv_refine: false,
         }
     }
 }

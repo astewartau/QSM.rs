@@ -34,7 +34,14 @@ pub fn run_bg_removal(
         });
     }
 
-    let (local_field, eroded_mask) = match config.algorithm {
+    // mSMV needs the scan's field strength and echo time for its ppm↔radian cap.
+    let msmv_scan = |base: crate::bgremove::MsmvParams| crate::bgremove::MsmvParams {
+        b0: metadata.field_strength,
+        te: metadata.echo_times.first().copied().unwrap_or(base.te),
+        ..base
+    };
+
+    let (mut local_field, eroded_mask) = match config.algorithm {
         BgRemovalAlgorithm::Vsharp => {
             crate::bgremove::vsharp(
                 field_ppm, mask, &grid, &config.vsharp, progress,
@@ -83,7 +90,26 @@ pub fn run_bg_removal(
                 progress,
             )
         }
+        BgRemovalAlgorithm::Msmv => {
+            // Standalone mSMV: SMV prefilter + boundary-shadow correction.
+            let params = msmv_scan(crate::bgremove::MsmvParams {
+                prefilter: true,
+                ..config.msmv.clone()
+            });
+            crate::bgremove::msmv(field_ppm, mask, &grid, &params, progress)
+        }
     };
+
+    // Optional mSMV boundary-shadow refinement of a primary BFR's local field.
+    // (`Msmv` already includes the correction, so don't double-apply.)
+    if config.msmv_refine && config.algorithm != BgRemovalAlgorithm::Msmv {
+        let params = msmv_scan(crate::bgremove::MsmvParams {
+            prefilter: false,
+            ..config.msmv.clone()
+        });
+        let (refined, _) = crate::bgremove::msmv(&local_field, &eroded_mask, &grid, &params, |_, _| {});
+        local_field = refined;
+    }
 
     Ok(BgRemovalResult {
         local_field_ppm: local_field,
@@ -175,6 +201,41 @@ mod tests {
             echo_times: vec![0.005], field_strength: 3.0, b0_direction: (0.0, 0.0, 1.0),
         };
         let config = BgRemovalConfig { algorithm: BgRemovalAlgorithm::Ismv, ..Default::default() };
+        let r = run_bg_removal(&field, &mask, &meta, &config, &mut |_, _| {}).unwrap();
+        assert_eq!(r.local_field_ppm.len(), n);
+    }
+
+    #[test]
+    fn test_bg_removal_dispatches_msmv() {
+        let (nx, ny, nz) = (8, 8, 8);
+        let n = nx * ny * nz;
+        let field = vec![0.1; n];
+        let mask = vec![1u8; n];
+        let meta = ScanMetadata {
+            dims: (nx, ny, nz), voxel_size: (1.0, 1.0, 1.0),
+            echo_times: vec![0.005], field_strength: 3.0, b0_direction: (0.0, 0.0, 1.0),
+        };
+        let config = BgRemovalConfig { algorithm: BgRemovalAlgorithm::Msmv, ..Default::default() };
+        let r = run_bg_removal(&field, &mask, &meta, &config, &mut |_, _| {}).unwrap();
+        assert_eq!(r.local_field_ppm.len(), n);
+    }
+
+    #[test]
+    fn test_bg_removal_msmv_refine_post_step() {
+        let (nx, ny, nz) = (8, 8, 8);
+        let n = nx * ny * nz;
+        let field = vec![0.1; n];
+        let mask = vec![1u8; n];
+        let meta = ScanMetadata {
+            dims: (nx, ny, nz), voxel_size: (1.0, 1.0, 1.0),
+            echo_times: vec![0.005], field_strength: 3.0, b0_direction: (0.0, 0.0, 1.0),
+        };
+        // Primary V-SHARP + mSMV boundary-shadow refinement.
+        let config = BgRemovalConfig {
+            algorithm: BgRemovalAlgorithm::Vsharp,
+            msmv_refine: true,
+            ..Default::default()
+        };
         let r = run_bg_removal(&field, &mask, &meta, &config, &mut |_, _| {}).unwrap();
         assert_eq!(r.local_field_ppm.len(), n);
     }
