@@ -44,8 +44,6 @@ pub enum BgRemovalAlgorithm {
     Resharp,
     Harperella,
     Iharperella,
-    /// mSMV — self-contained SMV removal + boundary-shadow correction (Roberts 2024).
-    Msmv,
 }
 
 /// Dipole inversion algorithm
@@ -234,11 +232,12 @@ pub struct BgRemovalConfig {
     pub resharp: ResharpParams,
     pub harperella: HarperellaParams,
     pub sdf: SdfParams,
-    /// mSMV parameters (`b0`/`te` are overridden from scan metadata by the
-    /// dispatcher). Used by the `Msmv` algorithm and the `msmv_refine` post-step.
+    /// mSMV refinement parameters (`b0`/`te` are overridden from scan metadata by
+    /// the dispatcher). Used by the `msmv_refine` post-step.
     pub msmv: MsmvParams,
-    /// Apply mSMV boundary-shadow refinement after the primary BFR (any algorithm
-    /// except `Msmv` itself, which already includes the correction).
+    /// Apply mSMV boundary-shadow refinement after the primary BFR (Roberts 2024).
+    /// mSMV is a refinement, not a standalone primary remover, so it is exposed
+    /// only as this post-step (redundant after `Ismv`, which is already SMV-based).
     pub msmv_refine: bool,
 }
 

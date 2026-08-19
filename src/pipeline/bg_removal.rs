@@ -90,19 +90,12 @@ pub fn run_bg_removal(
                 progress,
             )
         }
-        BgRemovalAlgorithm::Msmv => {
-            // Standalone mSMV: SMV prefilter + boundary-shadow correction.
-            let params = msmv_scan(crate::bgremove::MsmvParams {
-                prefilter: true,
-                ..config.msmv.clone()
-            });
-            crate::bgremove::msmv(field_ppm, mask, &grid, &params, progress)
-        }
     };
 
-    // Optional mSMV boundary-shadow refinement of a primary BFR's local field.
-    // (`Msmv` already includes the correction, so don't double-apply.)
-    if config.msmv_refine && config.algorithm != BgRemovalAlgorithm::Msmv {
+    // Optional mSMV boundary-shadow refinement of the primary BFR's local field.
+    // mSMV is a refinement (not a standalone primary remover), so this post-step
+    // is the only way it's wired into the pipeline (Roberts 2024).
+    if config.msmv_refine {
         let params = msmv_scan(crate::bgremove::MsmvParams {
             prefilter: false,
             ..config.msmv.clone()
@@ -201,21 +194,6 @@ mod tests {
             echo_times: vec![0.005], field_strength: 3.0, b0_direction: (0.0, 0.0, 1.0),
         };
         let config = BgRemovalConfig { algorithm: BgRemovalAlgorithm::Ismv, ..Default::default() };
-        let r = run_bg_removal(&field, &mask, &meta, &config, &mut |_, _| {}).unwrap();
-        assert_eq!(r.local_field_ppm.len(), n);
-    }
-
-    #[test]
-    fn test_bg_removal_dispatches_msmv() {
-        let (nx, ny, nz) = (8, 8, 8);
-        let n = nx * ny * nz;
-        let field = vec![0.1; n];
-        let mask = vec![1u8; n];
-        let meta = ScanMetadata {
-            dims: (nx, ny, nz), voxel_size: (1.0, 1.0, 1.0),
-            echo_times: vec![0.005], field_strength: 3.0, b0_direction: (0.0, 0.0, 1.0),
-        };
-        let config = BgRemovalConfig { algorithm: BgRemovalAlgorithm::Msmv, ..Default::default() };
         let r = run_bg_removal(&field, &mask, &meta, &config, &mut |_, _| {}).unwrap();
         assert_eq!(r.local_field_ppm.len(), n);
     }
