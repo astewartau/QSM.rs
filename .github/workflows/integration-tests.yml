@@ -27,6 +27,8 @@ jobs:
       combined_matrix: ${{ steps.detect.outputs.combined_matrix }}
       run_pipeline: ${{ steps.detect.outputs.run_pipeline }}
       pipeline_matrix: ${{ steps.detect.outputs.pipeline_matrix }}
+      run_chisep: ${{ steps.detect.outputs.run_chisep }}
+      chisep_matrix: ${{ steps.detect.outputs.chisep_matrix }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -47,6 +49,8 @@ jobs:
           all_inversion='["test_inversion_tkd","test_inversion_tsvd","test_inversion_tikhonov","test_inversion_tv","test_inversion_rts","test_inversion_ilsqr","test_inversion_medi","test_inversion_nltv","test_inversion_ndi","test_inversion_fansi","test_inversion_fansi_tgv","test_inversion_l1qsm","test_inversion_whqsm","test_inversion_hdqsm","test_inversion_amp_pe"]'
           all_combined='["test_combined_tgv","test_combined_tfi"]'
           all_pipeline='["test_pipeline_romeo_b0","test_pipeline_tgv","test_pipeline_qsmart","test_pipeline_qsmart_tikhonov","test_pipeline_harperella","test_pipeline_iharperella","test_bias_correction","test_swi","test_r2star_t2star"]'
+          # χ-separation entries are whole test *binaries* (each runs several methods).
+          all_chisep='["chisep_qsmci","chisep_relaxometry_qsmci"]'
 
           run_unit_tests=false
 
@@ -61,6 +65,8 @@ jobs:
             echo "combined_matrix=$all_combined" >> "$GITHUB_OUTPUT"
             echo "run_pipeline=true" >> "$GITHUB_OUTPUT"
             echo "pipeline_matrix=$all_pipeline" >> "$GITHUB_OUTPUT"
+            echo "run_chisep=true" >> "$GITHUB_OUTPUT"
+            echo "chisep_matrix=$all_chisep" >> "$GITHUB_OUTPUT"
           }
 
           # Manual trigger: run everything
@@ -115,6 +121,7 @@ jobs:
           run_bet=false
           combined=""
           pipeline=""
+          chisep=""
 
           for file in $CHANGED; do
             case "$file" in
@@ -158,6 +165,8 @@ jobs:
                 echo "combined_matrix=$all_combined" >> "$GITHUB_OUTPUT"
                 echo "run_pipeline=true" >> "$GITHUB_OUTPUT"
                 echo "pipeline_matrix=$all_pipeline" >> "$GITHUB_OUTPUT"
+                echo "run_chisep=true" >> "$GITHUB_OUTPUT"
+                echo "chisep_matrix=$all_chisep" >> "$GITHUB_OUTPUT"
                 echo "run_unit_tests=$run_unit_tests" >> "$GITHUB_OUTPUT"
                 exit 0 ;;
 
@@ -186,15 +195,24 @@ jobs:
               src/inversion/tfi.rs)       combined="$combined test_combined_tfi" ;;
               src/inversion/nltv.rs)      inversion="$inversion test_inversion_nltv" ;;
               src/inversion/tgv.rs)       combined="$combined test_combined_tgv"; pipeline="$pipeline test_pipeline_tgv" ;;
-              src/inversion/ilsqr.rs)     inversion="$inversion test_inversion_ilsqr"; pipeline="$pipeline test_pipeline_qsmart" ;;
+              src/inversion/ilsqr.rs)     inversion="$inversion test_inversion_ilsqr"; pipeline="$pipeline test_pipeline_qsmart"; chisep="$chisep chisep_qsmci" ;;
               src/inversion/ndi.rs)       inversion="$inversion test_inversion_ndi" ;;
               src/inversion/fansi.rs)     inversion="$inversion test_inversion_fansi test_inversion_fansi_tgv" ;;
               src/inversion/l1qsm.rs)     inversion="$inversion test_inversion_l1qsm" ;;
               src/inversion/whqsm.rs)     inversion="$inversion test_inversion_whqsm" ;;
               src/inversion/hdqsm.rs)     inversion="$inversion test_inversion_hdqsm" ;;
               src/inversion/amp_pe.rs)    inversion="$inversion test_inversion_amp_pe" ;;
-              # AMP-PE's sparse-wavelet + erfc helpers are used only by it.
-              src/utils/wavelet.rs|src/utils/special.rs) inversion="$inversion test_inversion_amp_pe" ;;
+              # AMP-PE's sparse-wavelet + erfc helpers are used only by it; WaveSep
+              # also uses the wavelet transform.
+              src/utils/special.rs) inversion="$inversion test_inversion_amp_pe" ;;
+              src/utils/wavelet.rs)
+                inversion="$inversion test_inversion_amp_pe"
+                chisep="$chisep chisep_relaxometry_qsmci" ;;
+
+              # χ-separation (all methods share src/separation; both test binaries)
+              src/separation/*) chisep="$chisep chisep_qsmci chisep_relaxometry_qsmci" ;;
+              tests/chisep_qsmci.rs) chisep="$chisep chisep_qsmci" ;;
+              tests/chisep_relaxometry_qsmci.rs) chisep="$chisep chisep_relaxometry_qsmci" ;;
 
               # Brain extraction
               src/bet/*) run_bet=true ;;
@@ -249,6 +267,7 @@ jobs:
           inversion_json=$(to_json $inversion)
           combined_json=$(to_json $combined)
           pipeline_json=$(to_json $pipeline)
+          chisep_json=$(to_json $chisep)
 
           has_items() { [ "$1" != '[]' ] && echo true || echo false; }
 
@@ -262,6 +281,8 @@ jobs:
           echo "combined_matrix=$combined_json" >> "$GITHUB_OUTPUT"
           echo "run_pipeline=$(has_items "$pipeline_json")" >> "$GITHUB_OUTPUT"
           echo "pipeline_matrix=$pipeline_json" >> "$GITHUB_OUTPUT"
+          echo "run_chisep=$(has_items "$chisep_json")" >> "$GITHUB_OUTPUT"
+          echo "chisep_matrix=$chisep_json" >> "$GITHUB_OUTPUT"
 
           echo "Selected tests:"
           echo "  bgremove:  $bgremove_json"
@@ -307,6 +328,95 @@ jobs:
         with:
           name: test-data
           path: bids
+          retention-days: 1
+
+  # Download the χ-separation phantom (a different dataset from the BIDS forward
+  # data: it ships χ+/χ− ground truth, R2' and spin-echo magnitude) and publish it
+  # as its own artifact for the chisep-tests jobs.
+  setup-chisep:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.run_chisep == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Cache chisep data
+        id: cache-chisep
+        uses: actions/cache@v4
+        with:
+          path: qsmci-chisep
+          key: chisep-data-v1-y8adf
+
+      - name: Download chisep phantom from OSF
+        if: steps.cache-chisep.outputs.cache-hit != 'true'
+        env:
+          OSF_TOKEN: ${{ secrets.OSF_TOKEN }}
+          OSF_FILE_CHISEP: ${{ secrets.OSF_FILE_CHISEP }}
+        run: |
+          python3 - <<'EOF'
+          import json, os, sys, urllib.request
+
+          token = os.environ["OSF_TOKEN"]
+          override = os.environ.get("OSF_FILE_CHISEP", "").strip()
+
+          def api(url):
+              req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
+              with urllib.request.urlopen(req) as r:
+                  return json.load(r)
+
+          url = None
+          if override:
+              if len(override) == 24 and all(c in "0123456789abcdef" for c in override):
+                  url = f"https://files.osf.io/v1/resources/y8adf/providers/osfstorage/{override}"
+              else:
+                  url = f"https://osf.io/{override}/download"
+              print(f"using pinned OSF_FILE_CHISEP -> {url}")
+          else:
+              # Walk the project's osfstorage and take the first chisep zip.
+              stack = ["https://api.osf.io/v2/nodes/y8adf/files/osfstorage/?page%5Bsize%5D=100"]
+              while stack and url is None:
+                  page = stack.pop()
+                  while page:
+                      d = api(page)
+                      for f in d["data"]:
+                          a = f["attributes"]
+                          if a["kind"] == "folder":
+                              stack.append(
+                                  f["relationships"]["files"]["links"]["related"]["href"]
+                                  + "?page%5Bsize%5D=100"
+                              )
+                          elif "chisep" in a["name"].lower() and a["name"].lower().endswith(".zip"):
+                              url = f["links"]["download"]
+                              print(f"found {a['materialized_path']} ({a['size']} bytes)")
+                              break
+                      if url:
+                          break
+                      page = d["links"].get("next")
+          if not url:
+              sys.exit(
+                  "No chisep *.zip found on OSF project y8adf. "
+                  "Set the OSF_FILE_CHISEP secret to the dataset's file id or GUID."
+              )
+          with open("osf_url.txt", "w") as fh:
+              fh.write(url)
+          EOF
+          curl -fS --location-trusted -H "Authorization: Bearer ${OSF_TOKEN}" \
+            "$(cat osf_url.txt)" -o chisep.zip
+          mkdir -p qsmci-chisep
+          unzip -q chisep.zip -d qsmci-chisep
+          # Prepacked zips are flattened (inputs/ + groundtruth/ at the root),
+          # but tolerate one extra directory level.
+          if [ ! -f qsmci-chisep/inputs/localfield.nii.gz ]; then
+            inner=$(dirname "$(find qsmci-chisep -name localfield.nii.gz -path '*/inputs/*' | head -1)")
+            [ -n "$inner" ] || { echo "localfield.nii.gz not found in dataset zip"; exit 1; }
+            mv "$(dirname "$inner")" qsmci-chisep-flat
+            rm -rf qsmci-chisep && mv qsmci-chisep-flat qsmci-chisep
+          fi
+          ls qsmci-chisep/inputs qsmci-chisep/groundtruth
+
+      - name: Upload chisep data artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: chisep-data
+          path: qsmci-chisep
           retention-days: 1
 
   # Run each algorithm test as a separate parallel job
@@ -614,11 +724,76 @@ jobs:
           path: slices/
           retention-days: 1
 
+  # χ-separation: one job per test binary (each runs several methods) against the
+  # chisep phantom. Emits RESULT: rows (metrics as columns) + slices like the other
+  # families, so it flows into the same summary comment and pass/fail gate.
+  chisep-tests:
+    needs: [setup-chisep, detect-changes]
+    if: needs.detect-changes.outputs.run_chisep == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        test: ${{ fromJSON(needs.detect-changes.outputs.chisep_matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download chisep data
+        uses: actions/download-artifact@v4
+        with:
+          name: chisep-data
+          path: qsmci-chisep
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Run ${{ matrix.test }}
+        timeout-minutes: 40
+        run: |
+          QSMCI_CHISEP="$PWD/qsmci-chisep" \
+            cargo test --release --features parallel --test ${{ matrix.test }} -- --ignored --nocapture 2>&1 | tee test_output.txt
+
+      - name: Save metrics
+        if: always()
+        run: |
+          if grep -q "^RESULT:" test_output.txt 2>/dev/null; then
+            grep "^RESULT:" test_output.txt > ${{ matrix.test }}.csv
+          else
+            echo "RESULT:${{ matrix.test }},-,-,-,-" > ${{ matrix.test }}.csv
+          fi
+
+      - name: Upload metrics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: metrics-${{ matrix.test }}
+          path: ${{ matrix.test }}.csv
+          retention-days: 1
+
+      - name: Upload slices
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: slices-${{ matrix.test }}
+          path: slices/
+          retention-days: 1
+
   # Gate check for branch protection — fails if any test job fails,
   # but allows skipped jobs (no relevant changes).
   # Add "tests-passed" as a required status check in branch protection rules.
   tests-passed:
-    needs: [unit-tests, bgremove-tests, inversion-tests, bet-test, combined-tests, pipeline-tests]
+    needs: [unit-tests, bgremove-tests, inversion-tests, bet-test, combined-tests, pipeline-tests, chisep-tests]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -630,7 +805,8 @@ jobs:
             "${{ needs.inversion-tests.result }}" \
             "${{ needs.bet-test.result }}" \
             "${{ needs.combined-tests.result }}" \
-            "${{ needs.pipeline-tests.result }}"; do
+            "${{ needs.pipeline-tests.result }}" \
+            "${{ needs.chisep-tests.result }}"; do
             if [ "$result" = "failure" ] || [ "$result" = "cancelled" ]; then
               echo "Test job failed or was cancelled: $result"
               exit 1
@@ -640,7 +816,7 @@ jobs:
 
   # Collect metrics from all parallel jobs and produce a single summary
   summary:
-    needs: [detect-changes, unit-tests, bgremove-tests, inversion-tests, bet-test, combined-tests, pipeline-tests]
+    needs: [detect-changes, unit-tests, bgremove-tests, inversion-tests, bet-test, combined-tests, pipeline-tests, chisep-tests]
     # Post the results comment only when something actually ran. On changes that
     # select no tests (e.g. docs-only), skip it instead of posting an empty
     # "Tests passed: N/A" comment. `always()` keeps it running even if a selected
@@ -652,7 +828,8 @@ jobs:
       needs.detect-changes.outputs.run_inversion == 'true' ||
       needs.detect-changes.outputs.run_bet == 'true' ||
       needs.detect-changes.outputs.run_combined == 'true' ||
-      needs.detect-changes.outputs.run_pipeline == 'true')
+      needs.detect-changes.outputs.run_pipeline == 'true' ||
+      needs.detect-changes.outputs.run_chisep == 'true')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -730,6 +907,30 @@ jobs:
                   echo "| ${name} | ${nrmse} | ${dt} | ${tissue} | ${blood} | ${dgm} | ${dgm_lin} | ${calc_dev} | ${streak} | ${corr} | ${xsim} | $(printf '%.2fs' "$time") |"
                 fi
               fi
+            done
+            echo ""
+          }
+
+          # Helper: emit a χ-separation table (one row per source map, metrics as
+          # columns). RESULT format: label,corr,xsim,nrmse%,time
+          emit_chisep_table() {
+            local files=(metrics/chisep_qsmci.csv metrics/chisep_relaxometry_qsmci.csv)
+            local has_any=false
+            for f in "${files[@]}"; do [ -f "$f" ] && has_any=true; done
+            [ "$has_any" = false ] && return 1
+
+            echo "| Map | Correlation | XSIM | NRMSE% | Time |"
+            echo "|-----|-------------|------|--------|------|"
+            for f in "${files[@]}"; do
+              [ -f "$f" ] || continue
+              grep "^RESULT:" "$f" | sed 's/^RESULT://' \
+                | while IFS=',' read -r name corr xsim nrmse time; do
+                    if [ "$corr" = "-" ] || [ -z "$corr" ]; then
+                      echo "| ${name} | :x: Failed | - | - | - |"
+                    else
+                      echo "| ${name} | ${corr} | ${xsim} | ${nrmse}% | $(printf '%.2fs' "$time") |"
+                    fi
+                  done
             done
             echo ""
           }
@@ -815,6 +1016,13 @@ jobs:
               fi
               echo ""
             fi
+
+            TABLE=$(emit_chisep_table) && {
+              echo "## χ-Separation"
+              echo "*Paramagnetic (χ+) / diamagnetic (χ−) source maps vs ground truth (QSM-CI chisep phantom)*"
+              echo ""
+              echo "$TABLE"
+            }
           } >> $GITHUB_STEP_SUMMARY
 
       - name: Setup Python
@@ -901,6 +1109,30 @@ jobs:
                   echo "| ${name} | ${nrmse} | ${dt} | ${tissue} | ${blood} | ${dgm} | ${dgm_lin} | ${calc_dev} | ${streak} | ${corr} | ${xsim} | $(printf '%.2fs' "$time") |"
                 fi
               fi
+            done
+            echo ""
+          }
+
+          # Helper: emit a χ-separation table (one row per source map, metrics as
+          # columns). RESULT format: label,corr,xsim,nrmse%,time
+          emit_chisep_table() {
+            local files=(metrics/chisep_qsmci.csv metrics/chisep_relaxometry_qsmci.csv)
+            local has_any=false
+            for f in "${files[@]}"; do [ -f "$f" ] && has_any=true; done
+            [ "$has_any" = false ] && return 1
+
+            echo "| Map | Correlation | XSIM | NRMSE% | Time |"
+            echo "|-----|-------------|------|--------|------|"
+            for f in "${files[@]}"; do
+              [ -f "$f" ] || continue
+              grep "^RESULT:" "$f" | sed 's/^RESULT://' \
+                | while IFS=',' read -r name corr xsim nrmse time; do
+                    if [ "$corr" = "-" ] || [ -z "$corr" ]; then
+                      echo "| ${name} | :x: Failed | - | - | - |"
+                    else
+                      echo "| ${name} | ${corr} | ${xsim} | ${nrmse}% | $(printf '%.2fs' "$time") |"
+                    fi
+                  done
             done
             echo ""
           }
@@ -1016,6 +1248,19 @@ jobs:
               echo ""
               emit_figures bias_correction swi swi_mip r2star t2star
             fi
+
+            TABLE=$(emit_chisep_table) && {
+              echo "### χ-Separation"
+              echo "*Paramagnetic (χ+) / diamagnetic (χ−) source maps vs ground truth (QSM-CI chisep phantom)*"
+              echo ""
+              echo "$TABLE"
+              echo ""
+              emit_figures chisep_para chisep_dia \
+                relaxchisep_r2starqsm_para relaxchisep_r2starqsm_dia \
+                relaxchisep_wavesep_para relaxchisep_wavesep_dia \
+                relaxchisep_decompose_para relaxchisep_decompose_dia \
+                relaxchisep_hcchisep_para relaxchisep_hcchisep_dia
+            }
           } > report.md
           # Retry with backoff — `cml comment create` hits the GitHub API and can be
           # throttled (rate limit shared across concurrent runs). Best-effort: the
