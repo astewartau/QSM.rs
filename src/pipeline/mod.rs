@@ -29,6 +29,7 @@ pub mod masking;
 pub mod field_mapping;
 pub mod bg_removal;
 pub mod inversion;
+pub mod separation;
 pub mod qsmart;
 
 pub use config::*;
@@ -41,4 +42,5 @@ pub use masking::run_masking;
 pub use field_mapping::run_field_mapping;
 pub use bg_removal::run_bg_removal;
 pub use inversion::{run_dipole_inversion, run_tgv};
+pub use separation::{run_separation, SeparationInputs, SeparationResult};
 pub use qsmart::run_qsmart;
