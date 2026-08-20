@@ -27,6 +27,8 @@ pub mod ismv;
 pub mod lbv;
 pub mod sdf;
 pub mod iharperella;
+#[cfg(feature = "onnx")]
+pub mod bfrnet;
 
 pub use smv::smv;
 pub use msmv::{msmv, MsmvParams};
@@ -41,3 +43,5 @@ pub use iharperella::{
     harperella, iharperella, iharperella_with_weights,
     HarperellaParams, IharperellaParams,
 };
+#[cfg(feature = "onnx")]
+pub use bfrnet::bfrnet;

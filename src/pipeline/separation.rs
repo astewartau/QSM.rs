@@ -128,9 +128,45 @@ pub fn run_separation(
                 inputs.se_magnitude_multi, mask, &grid, &params, |i, k| progress(i, k),
             )
         }
+        SeparationAlgorithm::SusepNet => {
+            let r2prime = need(inputs.r2prime, "r2prime")?;
+            run_susep_net(inputs.local_field_ppm, inputs.qsm, r2prime, mask, &grid)?
+        }
     };
 
     Ok(SeparationResult { chi_pos, chi_neg, chi_total })
+}
+
+/// Source the SUSEP-Net weights and run inference (requires the `onnx` feature).
+#[cfg(feature = "onnx")]
+fn run_susep_net(
+    local_field_ppm: &[f64],
+    qsm: &[f64],
+    r2prime: &[f64],
+    mask: &[u8],
+    grid: &crate::Grid,
+) -> Result<(Vec<f64>, Vec<f64>, Vec<f64>), PipelineError> {
+    let spec = crate::models::find_model("susep-net")
+        .ok_or_else(|| PipelineError::InvalidConfig("susep-net not in model registry".into()))?;
+    let bytes = crate::models::primary_weight_bytes(spec).map_err(PipelineError::InvalidConfig)?;
+    crate::separation::susep_net(
+        local_field_ppm, qsm, r2prime, mask, grid, &bytes,
+        &crate::separation::SusepNetNorm::default(),
+    )
+    .map_err(|e| PipelineError::AlgorithmError(e.to_string()))
+}
+
+#[cfg(not(feature = "onnx"))]
+fn run_susep_net(
+    _local_field_ppm: &[f64],
+    _qsm: &[f64],
+    _r2prime: &[f64],
+    _mask: &[u8],
+    _grid: &crate::Grid,
+) -> Result<(Vec<f64>, Vec<f64>, Vec<f64>), PipelineError> {
+    Err(PipelineError::InvalidConfig(
+        "SUSEP-Net requires building qsm-core with the 'onnx' feature".into(),
+    ))
 }
 
 /// Require an optional input, or return an `InvalidInput` error naming it.

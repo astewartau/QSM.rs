@@ -90,6 +90,10 @@ pub fn run_bg_removal(
                 progress,
             )
         }
+        BgRemovalAlgorithm::Bfrnet => {
+            let local = run_bfrnet(field_ppm, mask, &grid)?;
+            (local, mask.to_vec())
+        }
     };
 
     // Optional mSMV boundary-shadow refinement of the primary BFR's local field.
@@ -108,6 +112,34 @@ pub fn run_bg_removal(
         local_field_ppm: local_field,
         eroded_mask,
     })
+}
+
+/// Source the BFRnet weights and run inference. Requires the `onnx` feature;
+/// weights come from the model registry (local `$QSM_MODEL_DIR`/cache, or the
+/// `download` feature).
+#[cfg(feature = "onnx")]
+fn run_bfrnet(
+    field_ppm: &[f64],
+    mask: &[u8],
+    grid: &crate::Grid,
+) -> Result<Vec<f64>, PipelineError> {
+    let spec = crate::models::find_model("bfrnet")
+        .ok_or_else(|| PipelineError::InvalidConfig("bfrnet not in model registry".into()))?;
+    let bytes = crate::models::primary_weight_bytes(spec)
+        .map_err(PipelineError::InvalidConfig)?;
+    crate::bgremove::bfrnet(field_ppm, mask, grid, &bytes)
+        .map_err(|e| PipelineError::AlgorithmError(e.to_string()))
+}
+
+#[cfg(not(feature = "onnx"))]
+fn run_bfrnet(
+    _field_ppm: &[f64],
+    _mask: &[u8],
+    _grid: &crate::Grid,
+) -> Result<Vec<f64>, PipelineError> {
+    Err(PipelineError::InvalidConfig(
+        "BFRnet requires building qsm-core with the 'onnx' feature".into(),
+    ))
 }
 
 #[cfg(test)]

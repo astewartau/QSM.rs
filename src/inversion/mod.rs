@@ -29,6 +29,18 @@ pub mod l1qsm;
 pub mod whqsm;
 pub mod hdqsm;
 pub mod amp_pe;
+#[cfg(feature = "onnx")]
+pub mod xqsm;
+#[cfg(feature = "onnx")]
+pub mod qsmnet;
+#[cfg(feature = "onnx")]
+pub mod autoqsm;
+#[cfg(feature = "onnx")]
+pub mod iqsm;
+#[cfg(feature = "onnx")]
+pub mod iqsm_plus;
+#[cfg(feature = "onnx")]
+pub mod nextqsm;
 
 pub use tkd::{tkd, tsvd, TkdParams};
 pub use tikhonov::{tikhonov, TikhonovParams, Regularization};
@@ -45,3 +57,15 @@ pub use l1qsm::{l1qsm, L1QsmParams};
 pub use whqsm::{whqsm, WhQsmParams};
 pub use hdqsm::{hdqsm, HdQsmParams};
 pub use amp_pe::{amp_pe, AmpPeParams};
+#[cfg(feature = "onnx")]
+pub use xqsm::xqsm;
+#[cfg(feature = "onnx")]
+pub use qsmnet::{qsmnet, QsmnetNorm};
+#[cfg(feature = "onnx")]
+pub use autoqsm::autoqsm;
+#[cfg(feature = "onnx")]
+pub use iqsm::{iqsm, iqsm_multi_echo};
+#[cfg(feature = "onnx")]
+pub use iqsm_plus::{iqsm_plus, iqsm_plus_multi_echo};
+#[cfg(feature = "onnx")]
+pub use nextqsm::{nextqsm, nextqsm_padded, NEXTQSM_LAMBDAS};
