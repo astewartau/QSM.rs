@@ -55,12 +55,12 @@ pub const MODL_STD: [f64; 2] = [0.026_074_999_943_375_587, 0.004_082_275_088_876
 const NUM_ITER: usize = 3;
 
 /// Run MoDL-QSM on a background-removed local field (ppm), column-major `(nx,ny,nz)`.
-/// `b_vec` is the B0 direction (for the dipole kernel). Returns χ33 (ppm), masked.
+/// `bdir` is the B0 direction (for the dipole kernel). Returns χ33 (ppm), masked.
 pub fn modl_qsm(
     local_field_ppm: &[f64],
     mask: &[u8],
     grid: &Grid,
-    b_vec: (f64, f64, f64),
+    bdir: (f64, f64, f64),
     prior_onnx: &[u8],
 ) -> Result<Vec<f64>, OnnxError> {
     let (nx, ny, nz) = grid.dims;
@@ -70,7 +70,7 @@ pub fn modl_qsm(
 
     let model = OnnxModel::load(prior_onnx)?;
     let maskf: Vec<f64> = mask.iter().map(|&m| m as f64).collect();
-    let dk = modl_dipole_kernel(grid, b_vec);
+    let dk = modl_dipole_kernel(grid, bdir);
 
     // y_input = alpha · A^H(phi)   (2-channel, interleaved [ch0, ch1] per voxel)
     let y_input = ah_op(local_field_ppm, &dk, grid);
@@ -117,10 +117,10 @@ pub fn modl_qsm(
 
 /// MoDL-QSM dipole kernel `D = 1/3 − (k·B̂)²/|k|²` with `k` from `fftfreq` (DC at the
 /// array corner, `D[0,0,0]=0`). Bit-identical to `test_tools.dipole_kernel`.
-pub(crate) fn modl_dipole_kernel(grid: &Grid, b_vec: (f64, f64, f64)) -> Vec<f64> {
+pub(crate) fn modl_dipole_kernel(grid: &Grid, bdir: (f64, f64, f64)) -> Vec<f64> {
     let (nx, ny, nz) = grid.dims;
     let (vx, vy, vz) = grid.voxel_size;
-    let (bx, by, bz) = b_vec;
+    let (bx, by, bz) = bdir;
     let bn = (bx * bx + by * by + bz * bz).sqrt();
     let (bx, by, bz) = (bx / bn, by / bn, bz / bn);
     let freq = |i: usize, ntot: usize, d: f64| -> f64 {

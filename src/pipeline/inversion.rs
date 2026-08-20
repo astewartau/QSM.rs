@@ -208,7 +208,7 @@ fn run_xqsm(
 /// [`InversionAlgorithm`], NeXtQSM spans BFR + dipole inversion, so it is exposed
 /// as a standalone reconstruction rather than a dipole-inversion-stage option.
 ///
-/// `total_field_ppm` and `mask` are column-major `(nx,ny,nz)`; `b_vec` is the B0
+/// `total_field_ppm` and `mask` are column-major `(nx,ny,nz)`; `bdir` is the B0
 /// direction. Requires the `onnx` feature; weights resolve local-first then via
 /// the `download` feature. Returns susceptibility (ppm), masked.
 #[cfg(feature = "onnx")]
@@ -216,7 +216,7 @@ pub fn run_nextqsm(
     total_field_ppm: &[f64],
     mask: &[u8],
     grid: &crate::Grid,
-    b_vec: (f64, f64, f64),
+    bdir: (f64, f64, f64),
 ) -> Result<Vec<f64>, PipelineError> {
     let spec = crate::models::find_model("nextqsm")
         .ok_or_else(|| PipelineError::InvalidConfig("nextqsm not in model registry".into()))?;
@@ -226,7 +226,7 @@ pub fn run_nextqsm(
             format!("nextqsm expects 2 weight files (BFR, VJP), got {}", files.len()),
         ));
     };
-    crate::inversion::nextqsm(total_field_ppm, mask, grid, b_vec, bf, vjp)
+    crate::inversion::nextqsm(total_field_ppm, mask, grid, bdir, bf, vjp)
         .map_err(|e| PipelineError::AlgorithmError(e.to_string()))
 }
 
@@ -236,7 +236,7 @@ pub fn run_nextqsm(
     _total_field_ppm: &[f64],
     _mask: &[u8],
     _grid: &crate::Grid,
-    _b_vec: (f64, f64, f64),
+    _bdir: (f64, f64, f64),
 ) -> Result<Vec<f64>, PipelineError> {
     Err(PipelineError::InvalidConfig(
         "NeXtQSM requires building qsm-core with the 'onnx' feature".into(),

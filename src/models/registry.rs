@@ -42,7 +42,7 @@ const MODELS: &[ModelSpec] = &[
                       removal (total field → local field). Fully convolutional.",
         paper: "Kames et al. / Sun group; https://github.com/sunhongfu/BFRnet",
         source: "https://github.com/sunhongfu/BFRnet",
-        license: "Author-permitted (Sun group); redistribution per project agreement",
+        license: "",
         // Hosted on OSF project erv6n (https://osf.io/erv6n). Verified: anonymous
         // download + SHA-256 match.
         files: &[WeightFile {
@@ -66,7 +66,7 @@ const MODELS: &[ModelSpec] = &[
                       inversion (local field → susceptibility).",
         paper: "Gao et al., NMR Biomed 2021; doi:10.1002/nbm.4461",
         source: "https://github.com/sunhongfu/xQSM",
-        license: "Author-permitted (Sun group)",
+        license: "",
         // Exported from xQSM_invivo.pth (v1.0-demo) with scripts/onnx-export/export_xqsm.py;
         // torch↔onnxruntime parity max|Δ| ≈ 6e-5. Hosted on OSF project erv6n.
         files: &[WeightFile {
@@ -89,7 +89,7 @@ const MODELS: &[ModelSpec] = &[
                       isotropic input; z-scored with training mean/std.",
         paper: "Yoon et al., NeuroImage 2018; doi:10.1016/j.neuroimage.2018.06.030",
         source: "https://github.com/SNU-LIST/QSMnet",
-        license: "SNU-LIST academic; author-permitted (per project agreement)",
+        license: "",
         // Clean PyTorch re-export of the TF1.14 checkpoint (tract-friendly NCDHW);
         // see scripts/onnx-export/export_qsmnet.py. Hosted on OSF project erv6n.
         files: &[WeightFile {
@@ -112,7 +112,7 @@ const MODELS: &[ModelSpec] = &[
                       a wider, more linear χ range.",
         paper: "Jung et al., NeuroImage 2020; doi:10.1016/j.neuroimage.2020.116579",
         source: "https://github.com/SNU-LIST/QSMnet",
-        license: "SNU-LIST academic; author-permitted (per project agreement)",
+        license: "",
         // Clean PyTorch re-export of the TF1.14 QSMnet+_64 checkpoint (same U-Net
         // as QSMnet, different weights + norm). Hosted on OSF project erv6n.
         files: &[WeightFile {
@@ -160,7 +160,7 @@ const MODELS: &[ModelSpec] = &[
                       in Rust (rustfft); only the learned proximal CNN is ONNX.",
         paper: "Lai et al., MICCAI 2020; doi:10.1007/978-3-030-59713-9_13",
         source: "https://github.com/Sulam-Group/LPCNN",
-        license: "Author-permitted",
+        license: "",
         files: &[WeightFile {
             name: "lpcnn.onnx",
             url: "https://osf.io/download/6a869386d8df0e691f8358ed/",
@@ -185,7 +185,7 @@ const MODELS: &[ModelSpec] = &[
                       branch for deterministic export.",
         paper: "Li et al., Med. Phys. 2025; doi:10.1002/mp.17747; arXiv:2406.12300",
         source: "https://github.com/YangGaoUQ/IR2QSM",
-        license: "Author-permitted (Gao/Sun group)",
+        license: "",
         files: &[WeightFile {
             name: "ir2qsm.onnx",
             url: "https://osf.io/download/6a8697a178c9afe009df4fcc/",
@@ -208,7 +208,7 @@ const MODELS: &[ModelSpec] = &[
                       the Rust glue does the sliding-window tiling + blend.",
         paper: "Wei et al., NeuroImage 2019; doi:10.1016/j.neuroimage.2019.116064",
         source: "https://github.com/AMRI-Lab/AutoQSM",
-        license: "Author-permitted (per project agreement)",
+        license: "",
         // Clean PyTorch re-export of the Keras V-Net (tract-friendly NCDHW);
         // see scripts/onnx-export/export_autoqsm.py. Hosted on OSF project erv6n.
         files: &[WeightFile {
@@ -234,7 +234,7 @@ const MODELS: &[ModelSpec] = &[
                       the exported graph; inputs are phase, mask, TE (s), B0 (T).",
         paper: "Gao et al., NeuroImage 2022; doi:10.1016/j.neuroimage.2022.119410",
         source: "https://github.com/sunhongfu/iQSM",
-        license: "Author-permitted (Sun group)",
+        license: "",
         files: &[WeightFile {
             name: "iqsm.onnx",
             url: "https://osf.io/download/6a8642664b84b0c1461c0a22/",
@@ -256,7 +256,7 @@ const MODELS: &[ModelSpec] = &[
                       mask, TE, B0, z_prjs (B0 dir), border.",
         paper: "Gao et al., Med Image Anal 2024; doi:10.1016/j.media.2024.103160",
         source: "https://github.com/sunhongfu/iQSM_Plus",
-        license: "Author-permitted (Sun group)",
+        license: "",
         files: &[WeightFile {
             name: "iqsm-plus.onnx",
             url: "https://osf.io/download/6a864b736621f1b55b6c579c/",
@@ -279,7 +279,7 @@ const MODELS: &[ModelSpec] = &[
                       the local field (ppm), not susceptibility.",
         paper: "Gao et al., NeuroImage 2022; doi:10.1016/j.neuroimage.2022.119410",
         source: "https://github.com/sunhongfu/iQSM",
-        license: "Author-permitted (Sun group)",
+        license: "",
         files: &[WeightFile {
             name: "iqfm.onnx",
             url: "https://osf.io/download/6a868e0fa3ff03ba60cbf576/",
@@ -337,7 +337,7 @@ const MODELS: &[ModelSpec] = &[
                       χ33 component.",
         paper: "Feng et al., NeuroImage 2021; doi:10.1016/j.neuroimage.2021.118376",
         source: "https://github.com/Ruimin-Feng/MoDL-QSM",
-        license: "Author-permitted (per project agreement)",
+        license: "",
         files: &[WeightFile {
             name: "modl-qsm.onnx",
             url: "https://osf.io/download/6a86990685b99bc066df4fae/",
@@ -360,7 +360,7 @@ const MODELS: &[ModelSpec] = &[
                       are baked into the Rust glue (SusepNetNorm).",
         paper: "Li, Gao, Sun et al., arXiv:2506.13293 (2025)",
         source: "https://github.com/YangGaoUQ/SUSEP-Net",
-        license: "Academic use; author-permitted",
+        license: "",
         files: &[WeightFile {
             name: "susep-net.onnx",
             url: "https://osf.io/download/6a8552a5329b2090036a8920/",
@@ -383,7 +383,7 @@ const MODELS: &[ModelSpec] = &[
                       are baked into the Rust glue (ChiSepNetNorm).",
         paper: "Kim et al. / SNU-LIST chi-separation toolbox",
         source: "https://github.com/SNU-LIST/chi-separation",
-        license: "SNU-LIST academic; redistributed with permission",
+        license: "",
         files: &[WeightFile {
             name: "chi-sepnet.onnx",
             url: "https://osf.io/download/6a86985039afa3b755835908/",
