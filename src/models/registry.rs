@@ -246,6 +246,29 @@ const MODELS: &[ModelSpec] = &[
         size_divisor: 16,
     },
     ModelSpec {
+        id: "iqfm",
+        name: "iQFM",
+        stage: ModelStage::PhaseToField,
+        status: WeightStatus::Available,
+        origin: Framework::PyTorch,
+        description: "The tissue-field head of the iQSM LoT-Unet: wrapped phase → \
+                      local (background-removed) field in one network (joint unwrap + \
+                      BFR). Same architecture/inputs as iQSM, `lfs` weights; output is \
+                      the local field (ppm), not susceptibility.",
+        paper: "Gao et al., NeuroImage 2022; doi:10.1016/j.neuroimage.2022.119410",
+        source: "https://github.com/sunhongfu/iQSM",
+        license: "Author-permitted (Sun group)",
+        files: &[WeightFile {
+            name: "iqfm.onnx",
+            url: "https://osf.io/download/6a868e0fa3ff03ba60cbf576/",
+            sha256: "81965f4c0981612d979977c9618847e4cb1d340efa287b8dde894bdea5bf6ac9",
+            bytes: 17_233_763,
+        }],
+        inputs: &["phase", "mask", "te", "b0", "border"],
+        outputs: &["localfield"],
+        size_divisor: 8,
+    },
+    ModelSpec {
         id: "nextqsm",
         name: "NeXtQSM",
         stage: ModelStage::SingleStep,

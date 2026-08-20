@@ -410,6 +410,60 @@ fn iqsm_matches_python_reference() {
     assert!(max_abs < 5e-3, "max abs diff too high: {max_abs}");
 }
 
+/// Parity: `inversion::iqfm` (tract; the iQSM LoT-Unet's tissue-field head, phase →
+/// local field) vs the authors' original `inference.run_iqsm(run_iqfm=True)` on
+/// echo 0 of the dev phase. Same code path as iQSM, different weights + output.
+///
+/// ```bash
+/// cargo test --release --features onnx --test models_onnx iqfm_matches -- --ignored --nocapture
+/// ```
+#[test]
+#[ignore]
+fn iqfm_matches_python_reference() {
+    use qsm_core::io::read_nifti_file;
+    use std::path::Path;
+
+    let phase = read_nifti_file(Path::new(
+        &std::env::var("IQFM_PHASE").unwrap_or("/tmp/iqfm_ref/phase_e0.nii.gz".into()),
+    ))
+    .expect("phase");
+    let mask_nii = read_nifti_file(Path::new(&std::env::var("IQFM_MASK").unwrap_or(
+        "/home/ashley/repos/qsm/qsmci/qsmci/data/sim/dev/inputs/mask.nii.gz".into(),
+    )))
+    .expect("mask");
+    let reference = read_nifti_file(Path::new(
+        &std::env::var("IQFM_REF").unwrap_or("/tmp/iqfm_ref/iQFM.nii.gz".into()),
+    ))
+    .expect("ref");
+    let onnx_bytes =
+        std::fs::read(std::env::var("IQFM_ONNX").unwrap_or("/tmp/iqfm_export/iqfm.onnx".into()))
+            .expect("onnx");
+
+    let grid = qsm_core::Grid { dims: phase.dims, voxel_size: phase.voxel_size };
+    let mask: Vec<u8> = mask_nii.data.iter().map(|&v| (v > 0.5) as u8).collect();
+
+    // Match the reference: te=0.004 s (echo 0), b0=3 T, phase_sign=-1, erode radius 3.
+    let lfs = qsm_core::inversion::iqfm(
+        &phase.data, &mask, &grid, 0.004, 3.0, -1.0, 3, &onnx_bytes,
+    )
+    .expect("iqfm");
+
+    let (mut sxx, mut syy, mut sxy, mut sx, mut sy, mut n) = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+    let mut max_abs = 0.0f64;
+    for i in 0..lfs.len() {
+        if reference.data[i] == 0.0 {
+            continue;
+        }
+        let (a, b) = (lfs[i], reference.data[i]);
+        sx += a; sy += b; sxx += a * a; syy += b * b; sxy += a * b; n += 1.0;
+        max_abs = max_abs.max((a - b).abs());
+    }
+    let corr = (sxy - sx * sy / n) / ((sxx - sx * sx / n).sqrt() * (syy - sy * sy / n).sqrt());
+    println!("iQFM vs Python: corr = {corr:.6}, max|Δ| = {max_abs:.6e} ppm, n = {n}");
+    assert!(corr > 0.999, "correlation too low: {corr}");
+    assert!(max_abs < 5e-3, "max abs diff too high: {max_abs}");
+}
+
 /// Parity: `inversion::iqsm_plus` (tract; OA-LFE, z_prjs input, brain-bbox crop)
 /// vs the authors' original `inference.run_iqsm_plus` on echo 0 of the dev phase.
 ///
