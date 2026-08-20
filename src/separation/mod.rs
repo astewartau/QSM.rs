@@ -27,6 +27,8 @@ pub mod r2star_qsm;
 pub mod wavesep;
 #[cfg(feature = "onnx")]
 pub mod susep_net;
+#[cfg(feature = "onnx")]
+pub mod chisepnet;
 
 pub use chi_sep_ilsqr::{chi_sep_ilsqr, ChiSepIlsqrParams};
 pub use chi_sep_medi::{chi_sep_medi, ChiSepParams};
@@ -36,3 +38,5 @@ pub use r2star_qsm::{r2star_qsm, r2star_qsm_from_magnitude, R2starQsmParams};
 pub use wavesep::{wavesep, WaveSepParams};
 #[cfg(feature = "onnx")]
 pub use susep_net::{susep_net, SusepNetNorm};
+#[cfg(feature = "onnx")]
+pub use chisepnet::{chisepnet, ChiSepNetNorm};

@@ -46,6 +46,10 @@ pub mod qsmgan;
 #[cfg(feature = "onnx")]
 pub mod lpcnn;
 #[cfg(feature = "onnx")]
+pub mod ir2qsm;
+#[cfg(feature = "onnx")]
+pub mod modl_qsm;
+#[cfg(feature = "onnx")]
 pub mod nextqsm;
 
 pub use tkd::{tkd, tsvd, TkdParams};
@@ -79,5 +83,9 @@ pub use iqfm::{iqfm, iqfm_multi_echo};
 pub use qsmgan::qsmgan;
 #[cfg(feature = "onnx")]
 pub use lpcnn::{lpcnn, LPCNN_ALPHA, LPCNN_GT_MEAN, LPCNN_GT_STD};
+#[cfg(feature = "onnx")]
+pub use ir2qsm::ir2qsm;
+#[cfg(feature = "onnx")]
+pub use modl_qsm::{modl_qsm, MODL_ALPHA, MODL_MEAN, MODL_STD};
 #[cfg(feature = "onnx")]
 pub use nextqsm::{nextqsm, nextqsm_padded, NEXTQSM_LAMBDAS};
