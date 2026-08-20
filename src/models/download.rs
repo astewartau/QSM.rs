@@ -137,15 +137,54 @@ fn checksum_ok(path: &PathBuf, expected: &str) -> Result<bool, DownloadError> {
     Ok(sha256_hex(&bytes) == expected)
 }
 
+/// Max HTTP attempts for a single weight file (1 initial + 4 retries).
+const MAX_ATTEMPTS: u32 = 5;
+
+/// Fetch a URL with exponential-backoff retries on transient failures.
+///
+/// Weights are hosted on OSF, which throttles bursts of anonymous downloads with a
+/// **403** (not 429) — so when many jobs fetch weights at once (e.g. the CI model matrix)
+/// individual requests fail spuriously. We retry on 403/408/425/429/5xx and transport
+/// errors with backoff (0.5s, 1s, 2s, 4s) plus URL-derived jitter so concurrent fetchers
+/// of different files desynchronise. Permanent failures (404, 401, other 4xx) fail fast.
 fn http_get(url: &str) -> Result<Vec<u8>, DownloadError> {
-    let resp = ureq::get(url)
-        .call()
-        .map_err(|e| DownloadError::Http(e.to_string()))?;
-    let mut bytes = Vec::new();
-    resp.into_reader()
-        .read_to_end(&mut bytes)
-        .map_err(|e| DownloadError::Http(e.to_string()))?;
-    Ok(bytes)
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
+        match http_get_once(url) {
+            Ok(bytes) => return Ok(bytes),
+            Err((msg, retryable)) => {
+                if !retryable || attempt >= MAX_ATTEMPTS {
+                    return Err(DownloadError::Http(format!("{msg} (after {attempt} attempt(s))")));
+                }
+                // Backoff: 0.5s · 2^(n-1), plus up to ~0.5s of URL-derived jitter.
+                let base = 500u64 << (attempt - 1);
+                let jitter = (url.bytes().map(u64::from).sum::<u64>() % 500) + u64::from(attempt) * 37;
+                std::thread::sleep(std::time::Duration::from_millis(base + jitter));
+            }
+        }
+    }
+}
+
+/// One HTTP GET. Returns `(message, retryable)` on failure.
+fn http_get_once(url: &str) -> Result<Vec<u8>, (String, bool)> {
+    match ureq::get(url).call() {
+        Ok(resp) => {
+            let mut bytes = Vec::new();
+            resp.into_reader()
+                .read_to_end(&mut bytes)
+                // A truncated body mid-stream is transient — worth retrying.
+                .map_err(|e| (e.to_string(), true))?;
+            Ok(bytes)
+        }
+        // OSF signals throttling with 403; treat the usual transient statuses as retryable.
+        Err(ureq::Error::Status(code, _)) => {
+            let retryable = matches!(code, 403 | 408 | 425 | 429 | 500 | 502 | 503 | 504);
+            Err((format!("status code {code}"), retryable))
+        }
+        // Connection resets / timeouts / DNS blips — retry.
+        Err(e @ ureq::Error::Transport(_)) => Err((e.to_string(), true)),
+    }
 }
 
 #[cfg(test)]

@@ -858,8 +858,23 @@ jobs:
         continue-on-error: true
         timeout-minutes: 40
         run: |
-          QSM_MODEL_CACHE="$PWD/.model-cache" \
-            cargo test --release --features "parallel onnx download" --test dl_models ${{ matrix.test }} -- --ignored --exact --nocapture 2>&1 | tee test_output.txt
+          set -o pipefail
+          # Weight downloads (OSF) can be throttled with spurious 403s when the DL matrix
+          # runs concurrently; qsm-core retries internally, and this loop is a second layer.
+          # The model cache persists across attempts, so a weight fetched once isn't re-downloaded.
+          for attempt in 1 2 3; do
+            echo "::group::${{ matrix.test }} attempt $attempt"
+            if QSM_MODEL_CACHE="$PWD/.model-cache" \
+              cargo test --release --features "parallel onnx download" --test dl_models ${{ matrix.test }} -- --ignored --exact --nocapture 2>&1 | tee test_output.txt; then
+              echo "::endgroup::"
+              exit 0
+            fi
+            echo "::endgroup::"
+            echo "attempt $attempt failed; backing off before retry"
+            sleep $((attempt * 20))
+          done
+          echo "all attempts failed for ${{ matrix.test }}"
+          exit 1
 
       - name: Save metrics
         if: always()
