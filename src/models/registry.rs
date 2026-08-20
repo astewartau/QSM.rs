@@ -129,14 +129,21 @@ const MODELS: &[ModelSpec] = &[
         id: "qsmgan",
         name: "QSMGAN",
         stage: ModelStage::DipoleInversion,
-        status: WeightStatus::Pending,
+        status: WeightStatus::Available,
         origin: Framework::PyTorch,
-        description: "3D U-Net generator (WGAN-GP refined) for dipole inversion. \
-                      Only the generator is used at inference.",
+        description: "3D U-Net generator (WGAN-GP refined) for dipole inversion, run \
+                      patch-wise (64³ input → 48³ output, i64o48). Only the generator is \
+                      used at inference; the sign flip, input_scale/tanh (χ=atanh/10) and \
+                      patch tiling live in the Rust glue.",
         paper: "Chen et al., NeuroImage 2020; doi:10.1016/j.neuroimage.2019.116389",
         source: "https://github.com/mmorri10/QSMGAN-LupoLab",
         license: "MIT (fork)",
-        files: &[pending_onnx("qsmgan.onnx")],
+        files: &[WeightFile {
+            name: "qsmgan.onnx",
+            url: "https://osf.io/download/6a8690fb8f5c5cc95cdf4e80/",
+            sha256: "238573a6fa8a563004fc28e63a30694289d1a1a204f3c406daba486b1122d604",
+            bytes: 10_753_955,
+        }],
         inputs: &["field"],
         outputs: &["chi"],
         size_divisor: 8,
