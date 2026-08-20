@@ -152,16 +152,22 @@ const MODELS: &[ModelSpec] = &[
         id: "lpcnn",
         name: "LPCNN",
         stage: ModelStage::DipoleInversion,
-        status: WeightStatus::Pending,
+        status: WeightStatus::Available,
         origin: Framework::PyTorch,
-        description: "Learned proximal CNN, 3 unrolled iterations. The k-space \
-                      dipole data-consistency step runs in Rust (rustfft); the \
-                      learned proximal CNN runs via ONNX.",
-        paper: "Lai et al., MICCAI 2020; doi:10.1007/978-3-030-59713-9_28",
+        description: "Learned proximal CNN, 3 unrolled iterations of proximal \
+                      gradient descent. The k-space dipole data-consistency step, the \
+                      unroll, the learned step size and the mean/std normalization run \
+                      in Rust (rustfft); only the learned proximal CNN is ONNX.",
+        paper: "Lai et al., MICCAI 2020; doi:10.1007/978-3-030-59713-9_13",
         source: "https://github.com/Sulam-Group/LPCNN",
         license: "Author-permitted",
-        files: &[pending_onnx("lpcnn-prox.onnx")],
-        inputs: &["x", "aht_b"],
+        files: &[WeightFile {
+            name: "lpcnn.onnx",
+            url: "https://osf.io/download/6a869386d8df0e691f8358ed/",
+            sha256: "831f2a161f6ab8ee7bf64cc2dd8bca532fc971d0083cf5729d6302d3ed31625d",
+            bytes: 1_790_869,
+        }],
+        inputs: &["field", "mask", "b_vec"],
         outputs: &["chi"],
         size_divisor: 8,
     },

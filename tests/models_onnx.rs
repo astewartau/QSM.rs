@@ -410,6 +410,56 @@ fn iqsm_matches_python_reference() {
     assert!(max_abs < 5e-3, "max abs diff too high: {max_abs}");
 }
 
+/// Parity: `inversion::lpcnn` (tract; 3-iter proximal-gradient unroll — FFT dipole
+/// data-consistency + normalization in Rust, prox CNN in ONNX) vs the full LPCNN
+/// model forward on the dev local field.
+///
+/// ```bash
+/// cargo test --release --features onnx --test models_onnx lpcnn_matches -- --ignored --nocapture
+/// ```
+#[test]
+#[ignore]
+fn lpcnn_matches_python_reference() {
+    use qsm_core::io::read_nifti_file;
+    use std::path::Path;
+
+    let field = read_nifti_file(Path::new(
+        &std::env::var("LPCNN_FIELD").unwrap_or("/tmp/lpcnn_ref/localfield.nii.gz".into()),
+    ))
+    .expect("field");
+    let mask_nii = read_nifti_file(Path::new(&std::env::var("LPCNN_MASK").unwrap_or(
+        "/home/ashley/repos/qsm/qsmci/qsmci/data/sim/dev/inputs/mask.nii.gz".into(),
+    )))
+    .expect("mask");
+    let reference = read_nifti_file(Path::new(
+        &std::env::var("LPCNN_REF").unwrap_or("/tmp/lpcnn_ref/chimap.nii.gz".into()),
+    ))
+    .expect("ref");
+    let onnx_bytes =
+        std::fs::read(std::env::var("LPCNN_ONNX").unwrap_or("/tmp/lpcnn_export/lpcnn.onnx".into()))
+            .expect("onnx");
+
+    let grid = qsm_core::Grid { dims: field.dims, voxel_size: field.voxel_size };
+    let mask: Vec<u8> = mask_nii.data.iter().map(|&v| (v > 0.5) as u8).collect();
+    let chi = qsm_core::inversion::lpcnn(&field.data, &mask, &grid, (0.0, 0.0, 1.0), &onnx_bytes)
+        .expect("lpcnn");
+
+    let (mut sxx, mut syy, mut sxy, mut sx, mut sy, mut n) = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+    let mut max_abs = 0.0f64;
+    for i in 0..chi.len() {
+        if mask[i] == 0 {
+            continue;
+        }
+        let (a, b) = (chi[i], reference.data[i]);
+        sx += a; sy += b; sxx += a * a; syy += b * b; sxy += a * b; n += 1.0;
+        max_abs = max_abs.max((a - b).abs());
+    }
+    let corr = (sxy - sx * sy / n) / ((sxx - sx * sx / n).sqrt() * (syy - sy * sy / n).sqrt());
+    println!("LPCNN vs Python: corr = {corr:.6}, max|Δ| = {max_abs:.6e} ppm, n = {n}");
+    assert!(corr > 0.999, "correlation too low: {corr}");
+    assert!(max_abs < 5e-3, "max abs diff too high: {max_abs}");
+}
+
 /// Parity: `inversion::qsmgan` (tract; patch-based i64o48 U-Net generator, sign
 /// flip + input_scale + atanh/10) vs the authors' `recon.py` on the dev local field.
 ///
