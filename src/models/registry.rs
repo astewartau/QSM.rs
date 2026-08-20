@@ -175,15 +175,24 @@ const MODELS: &[ModelSpec] = &[
         id: "ir2qsm",
         name: "IR2QSM",
         stage: ModelStage::DipoleInversion,
-        status: WeightStatus::Pending,
+        status: WeightStatus::Available,
         origin: Framework::PyTorch,
-        description: "Iterated U-Net with reverse concatenations, 4 fixed unrolled \
-                      iterations. Inference-time AddNoise is removed for export.",
-        paper: "Feng et al., 2024; arXiv:2406.12300",
-        source: "https://github.com/sunhongfu/deepMRI",
-        license: "Author-permitted (Sun group)",
-        files: &[pending_onnx("ir2qsm.onnx")],
-        inputs: &["field"],
+        description: "IR2U-net dipole inversion: a 3D U-net (depth 4) run for 4 \
+                      unrolled iterations with reverse concatenations and a recurrent \
+                      middle module. The whole net is ONNX; the Rust glue only does \
+                      /8 zero-pad, crop and mask (no normalization, ppm in/out). The \
+                      ungated inference-time AddNoise is pinned to its noise-free \
+                      branch for deterministic export.",
+        paper: "Li et al., Med. Phys. 2025; doi:10.1002/mp.17747; arXiv:2406.12300",
+        source: "https://github.com/YangGaoUQ/IR2QSM",
+        license: "Author-permitted (Gao/Sun group)",
+        files: &[WeightFile {
+            name: "ir2qsm.onnx",
+            url: "https://osf.io/download/6a8697a178c9afe009df4fcc/",
+            sha256: "dcaf7a26d6633900f339f94be16d580ccea6147bbf6da26eacb9a5e1acdc0c53",
+            bytes: 40_259_354,
+        }],
+        inputs: &["field", "mask"],
         outputs: &["chi"],
         size_divisor: 8,
     },
@@ -318,17 +327,26 @@ const MODELS: &[ModelSpec] = &[
         id: "modl-qsm",
         name: "MoDL-QSM",
         stage: ModelStage::DipoleInversion,
-        status: WeightStatus::Pending,
+        status: WeightStatus::Available,
         origin: Framework::TensorFlow,
-        description: "Model-based deep learning: fixed-depth unroll of a QSM \
-                      forward-model gradient descent with a learned CNN prior.",
-        paper: "Feng et al., NeuroImage 2021; doi:10.1016/j.neuroimage.2021.117876",
-        source: "https://github.com/AMRI-Lab/MoDL-QSM",
+        description: "Model-based deep learning: 3-iteration unroll of a QSM \
+                      forward-model gradient descent with a learned 2-channel CNN \
+                      prior. The k-space dipole data-consistency (A/Aᴴ), the unroll, \
+                      the learned step size and per-channel mean/std normalization run \
+                      in Rust (rustfft); only the CNN prior is ONNX. Output is the STI \
+                      χ33 component.",
+        paper: "Feng et al., NeuroImage 2021; doi:10.1016/j.neuroimage.2021.118376",
+        source: "https://github.com/Ruimin-Feng/MoDL-QSM",
         license: "Author-permitted (per project agreement)",
-        files: &[pending_onnx("modl-qsm.onnx")],
-        inputs: &["field"],
+        files: &[WeightFile {
+            name: "modl-qsm.onnx",
+            url: "https://osf.io/download/6a86990685b99bc066df4fae/",
+            sha256: "1f8da7d39eaaa4c3f0f9e67298fba5f14230e769cfd6349c81d0b74a6f800c57",
+            bytes: 1_794_143,
+        }],
+        inputs: &["field", "mask", "b_vec"],
         outputs: &["chi"],
-        size_divisor: 16,
+        size_divisor: 1,
     },
     // ---- χ-separation (χ+ / χ−) --------------------------------------------
     ModelSpec {
@@ -357,15 +375,21 @@ const MODELS: &[ModelSpec] = &[
         id: "chi-sepnet",
         name: "χ-sepnet",
         stage: ModelStage::ChiSeparation,
-        status: WeightStatus::Pending,
+        status: WeightStatus::Available,
         origin: Framework::Onnx,
-        description: "SNU-LIST χ-separation network. Already ONNX. Weights are \
-                      gated (academic Google form) and cannot be redistributed — \
-                      supply via $QSM_MODEL_DIR (bring-your-own-weights).",
+        description: "SNU-LIST χ-separation network (already ONNX): a 192×192×128 \
+                      3D U-Net mapping [QSM, local field, R2′/Dr] (z-scored) → [χ+, χ−], \
+                      run as an overlapping sliding window. Normalization constants (Dr=114) \
+                      are baked into the Rust glue (ChiSepNetNorm).",
         paper: "Kim et al. / SNU-LIST chi-separation toolbox",
         source: "https://github.com/SNU-LIST/chi-separation",
-        license: "SNU-LIST academic, gated — NOT redistributable",
-        files: &[pending_onnx("chi-sepnet.onnx"), pending_onnx("chi-sepnet-norm.json")],
+        license: "SNU-LIST academic; redistributed with permission",
+        files: &[WeightFile {
+            name: "chi-sepnet.onnx",
+            url: "https://osf.io/download/6a86985039afa3b755835908/",
+            sha256: "4f2343649cf36b4c9b371fc732da600720060bf2e76ed845578f16fe3411b3f2",
+            bytes: 90_314_172,
+        }],
         inputs: &["local_field", "qsm", "r2prime"],
         outputs: &["chi_pos", "chi_neg"],
         size_divisor: 8,
