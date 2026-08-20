@@ -235,6 +235,42 @@ pub fn weights(id: &str) -> Result<Vec<Vec<u8>>, String> {
     all_weight_bytes(spec)
 }
 
+/// Pre-fetch (download + cache) all of a model's weight files, reporting per-file
+/// progress via `on_progress(file_name, downloaded_bytes, total_bytes)`.
+///
+/// Intended for hosts (e.g. QSMxT) that want to show a download bar before running
+/// inference: call this first, then the normal `primary_weight`/`weights` path finds the
+/// cached files and does no further network I/O. Files already present (cache or
+/// `$QSM_MODEL_DIR`) are skipped silently. Unknown `id` (a non-model / classical
+/// algorithm) is a no-op — returns `Ok(())` so callers can invoke it unconditionally.
+pub fn prefetch_with_progress(
+    id: &str,
+    #[allow(unused_variables)] on_progress: &mut dyn FnMut(&str, u64, u64),
+) -> Result<(), String> {
+    let Some(spec) = find_model(id) else { return Ok(()) };
+    for file in spec.files {
+        if resolve_local(file).is_some() {
+            continue;
+        }
+        #[cfg(feature = "download")]
+        {
+            download::ensure_file_with_progress(id, file, &mut |done, total| {
+                on_progress(file.name, done, total)
+            })
+            .map_err(|e| e.to_string())?;
+        }
+        #[cfg(not(feature = "download"))]
+        {
+            return Err(format!(
+                "weights for '{id}' ('{}') are not local; build qsm-core with the 'download' \
+                 feature or set $QSM_MODEL_DIR",
+                file.name
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Resolve one weight file to its bytes (local override / cache, then download).
 fn weight_file_bytes(id: &str, file: &WeightFile) -> Result<Vec<u8>, String> {
     if let Some(path) = resolve_local(file) {
