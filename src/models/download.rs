@@ -66,11 +66,22 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
 }
 
 /// Ensure a single weight file is present locally, downloading it if needed, and
-/// return its path.
+/// return its path. See [`ensure_file_with_progress`].
+pub fn ensure_file(model_id: &str, file: &WeightFile) -> Result<PathBuf, DownloadError> {
+    ensure_file_with_progress(model_id, file, &mut |_, _| {})
+}
+
+/// Like [`ensure_file`], but reports download progress via `on_progress(downloaded,
+/// total)` (bytes). `total` is the registry-declared size ([`WeightFile::bytes`]),
+/// falling back to the response `Content-Length`. Not called on a cache hit.
 ///
 /// Resolution: `$QSM_MODEL_DIR` / cache hit (checksum-validated) → return;
 /// otherwise download from [`WeightFile::url`], verify, and cache.
-pub fn ensure_file(model_id: &str, file: &WeightFile) -> Result<PathBuf, DownloadError> {
+pub fn ensure_file_with_progress(
+    model_id: &str,
+    file: &WeightFile,
+    on_progress: &mut dyn FnMut(u64, u64),
+) -> Result<PathBuf, DownloadError> {
     // 1. Local override or a good cache entry.
     if let Some(path) = resolve_local(file) {
         if file.sha256.is_empty() || checksum_ok(&path, file.sha256)? {
@@ -87,7 +98,7 @@ pub fn ensure_file(model_id: &str, file: &WeightFile) -> Result<PathBuf, Downloa
         });
     }
 
-    let bytes = http_get(file.url)?;
+    let bytes = http_get(file.url, file.bytes, on_progress)?;
 
     // 3. Verify before trusting.
     if !file.sha256.is_empty() {
@@ -140,18 +151,25 @@ fn checksum_ok(path: &PathBuf, expected: &str) -> Result<bool, DownloadError> {
 /// Max HTTP attempts for a single weight file (1 initial + 4 retries).
 const MAX_ATTEMPTS: u32 = 5;
 
-/// Fetch a URL with exponential-backoff retries on transient failures.
+/// Fetch a URL with exponential-backoff retries, streaming the body and reporting
+/// `on_progress(downloaded, total)` as it goes (`total` from `expected_total`, else the
+/// response `Content-Length`, else 0 = unknown). Progress resets to 0 at the start of each
+/// attempt (a retried download restarts from the beginning).
 ///
 /// Weights are hosted on OSF, which throttles bursts of anonymous downloads with a
 /// **403** (not 429) — so when many jobs fetch weights at once (e.g. the CI model matrix)
 /// individual requests fail spuriously. We retry on 403/408/425/429/5xx and transport
 /// errors with backoff (0.5s, 1s, 2s, 4s) plus URL-derived jitter so concurrent fetchers
 /// of different files desynchronise. Permanent failures (404, 401, other 4xx) fail fast.
-fn http_get(url: &str) -> Result<Vec<u8>, DownloadError> {
+fn http_get(
+    url: &str,
+    expected_total: u64,
+    on_progress: &mut dyn FnMut(u64, u64),
+) -> Result<Vec<u8>, DownloadError> {
     let mut attempt = 0;
     loop {
         attempt += 1;
-        match http_get_once(url) {
+        match http_get_once(url, expected_total, on_progress) {
             Ok(bytes) => return Ok(bytes),
             Err((msg, retryable)) => {
                 if !retryable || attempt >= MAX_ATTEMPTS {
@@ -166,15 +184,35 @@ fn http_get(url: &str) -> Result<Vec<u8>, DownloadError> {
     }
 }
 
-/// One HTTP GET. Returns `(message, retryable)` on failure.
-fn http_get_once(url: &str) -> Result<Vec<u8>, (String, bool)> {
+/// One HTTP GET, streamed in chunks. Returns `(message, retryable)` on failure.
+fn http_get_once(
+    url: &str,
+    expected_total: u64,
+    on_progress: &mut dyn FnMut(u64, u64),
+) -> Result<Vec<u8>, (String, bool)> {
     match ureq::get(url).call() {
         Ok(resp) => {
-            let mut bytes = Vec::new();
-            resp.into_reader()
-                .read_to_end(&mut bytes)
-                // A truncated body mid-stream is transient — worth retrying.
-                .map_err(|e| (e.to_string(), true))?;
+            let total = if expected_total > 0 {
+                expected_total
+            } else {
+                resp.header("Content-Length").and_then(|s| s.parse().ok()).unwrap_or(0)
+            };
+            let mut reader = resp.into_reader();
+            let mut bytes: Vec<u8> = Vec::with_capacity(total as usize);
+            let mut buf = [0u8; 64 * 1024];
+            on_progress(0, total);
+            loop {
+                match reader.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        bytes.extend_from_slice(&buf[..n]);
+                        let done = bytes.len() as u64;
+                        on_progress(done, total.max(done));
+                    }
+                    // A truncated body mid-stream is transient — worth retrying.
+                    Err(e) => return Err((e.to_string(), true)),
+                }
+            }
             Ok(bytes)
         }
         // OSF signals throttling with 403; treat the usual transient statuses as retryable.
