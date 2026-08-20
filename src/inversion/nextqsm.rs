@@ -29,7 +29,7 @@ pub const NEXTQSM_LAMBDAS: [f64; 6] =
 ///
 /// * `total_field` — total field (ppm), column-major `(nx,ny,nz)`.
 /// * `mask` — binary brain mask (same layout).
-/// * `b_vec` — B0 direction; `bf_onnx`/`vjp_onnx` — the two exported graphs.
+/// * `bdir` — B0 direction; `bf_onnx`/`vjp_onnx` — the two exported graphs.
 ///
 /// The volume is zero-padded (centered) to a multiple of 64 (six pooling levels),
 /// reconstructed, and cropped back. Returns susceptibility (ppm), masked.
@@ -37,7 +37,7 @@ pub fn nextqsm(
     total_field: &[f64],
     mask: &[u8],
     grid: &Grid,
-    b_vec: (f64, f64, f64),
+    bdir: (f64, f64, f64),
     bf_onnx: &[u8],
     vjp_onnx: &[u8],
 ) -> Result<Vec<f64>, OnnxError> {
@@ -70,7 +70,7 @@ pub fn nextqsm(
         }
     }
 
-    let chi_p = nextqsm_padded(&field_p, &mask_p, &pgrid, b_vec, bf_onnx, vjp_onnx, &NEXTQSM_LAMBDAS)?;
+    let chi_p = nextqsm_padded(&field_p, &mask_p, &pgrid, bdir, bf_onnx, vjp_onnx, &NEXTQSM_LAMBDAS)?;
 
     // Crop back.
     let mut chi = vec![0.0f64; n];
@@ -91,7 +91,7 @@ pub fn nextqsm_padded(
     field: &[f64],
     mask: &[u8],
     grid: &Grid,
-    b_vec: (f64, f64, f64),
+    bdir: (f64, f64, f64),
     bf_onnx: &[u8],
     vjp_onnx: &[u8],
     lambdas: &[f64],
@@ -101,7 +101,7 @@ pub fn nextqsm_padded(
     let maskf: Vec<f64> = mask.iter().map(|&m| m as f64).collect();
 
     // fftshift(dipole kernel) in the crate's column-major layout.
-    let kernel = dipole_kernel_shifted(grid, b_vec);
+    let kernel = dipole_kernel_shifted(grid, bdir);
 
     // bf_logits = BFRnet(field·mask)·mask
     let bf = OnnxModel::load(bf_onnx)?;
@@ -145,11 +145,11 @@ pub(crate) fn dipole_forward(y: &[f64], kernel_shifted: &[f64], grid: &Grid) -> 
 }
 
 /// `fftshift(get_dipole_kernel_fourier(...))` in column-major layout.
-pub(crate) fn dipole_kernel_shifted(grid: &Grid, b_vec: (f64, f64, f64)) -> Vec<f64> {
+pub(crate) fn dipole_kernel_shifted(grid: &Grid, bdir: (f64, f64, f64)) -> Vec<f64> {
     let (nx, ny, nz) = grid.dims;
     let (vx, vy, vz) = grid.voxel_size;
     let eps = f32::EPSILON as f64;
-    let (bx, by, bz) = b_vec;
+    let (bx, by, bz) = bdir;
     let mut k = vec![0.0f64; nx * ny * nz];
     // Centered grid, then fftshift => index shift by half in each dim.
     let sh = |i: usize, nsz: usize| (i + nsz / 2) % nsz; // fftshift index

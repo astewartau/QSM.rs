@@ -25,12 +25,12 @@ pub const LPCNN_GT_STD: f64 = 0.028_365_555_003_933_052;
 const ITER_NUM: usize = 3;
 
 /// Run LPCNN on a background-removed local field (ppm), column-major `(nx,ny,nz)`.
-/// `b_vec` is the B0 direction (for the dipole kernel). Returns χ (ppm), masked.
+/// `bdir` is the B0 direction (for the dipole kernel). Returns χ (ppm), masked.
 pub fn lpcnn(
     local_field_ppm: &[f64],
     mask: &[u8],
     grid: &Grid,
-    b_vec: (f64, f64, f64),
+    bdir: (f64, f64, f64),
     gen_onnx: &[u8],
 ) -> Result<Vec<f64>, OnnxError> {
     let (nx, ny, nz) = grid.dims;
@@ -40,7 +40,7 @@ pub fn lpcnn(
 
     let model = OnnxModel::load(gen_onnx)?;
     let maskf: Vec<f64> = mask.iter().map(|&m| m as f64).collect();
-    let dk = lpcnn_dipole_kernel(grid, b_vec);
+    let dk = lpcnn_dipole_kernel(grid, bdir);
     let dipole = |v: &[f64]| dipole_apply(v, &dk, grid);
 
     // x_est = α·D(y)
@@ -72,10 +72,10 @@ pub fn lpcnn(
 
 /// LPCNN dipole kernel `D = 1/3 − (k·B̂)²/|k|²` with `k` from `fftfreq` (DC at the
 /// array corner, `D[0,0,0]=0`) — the convention the model's ortho-FFT expects.
-pub(crate) fn lpcnn_dipole_kernel(grid: &Grid, b_vec: (f64, f64, f64)) -> Vec<f64> {
+pub(crate) fn lpcnn_dipole_kernel(grid: &Grid, bdir: (f64, f64, f64)) -> Vec<f64> {
     let (nx, ny, nz) = grid.dims;
     let (vx, vy, vz) = grid.voxel_size;
-    let (bx, by, bz) = b_vec;
+    let (bx, by, bz) = bdir;
     let bn = (bx * bx + by * by + bz * bz).sqrt();
     let (bx, by, bz) = (bx / bn, by / bn, bz / bn);
     let freq = |i: usize, ntot: usize, d: f64| -> f64 {
