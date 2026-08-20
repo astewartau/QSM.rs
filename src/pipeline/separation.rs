@@ -132,6 +132,10 @@ pub fn run_separation(
             let r2prime = need(inputs.r2prime, "r2prime")?;
             run_susep_net(inputs.local_field_ppm, inputs.qsm, r2prime, mask, &grid)?
         }
+        SeparationAlgorithm::ChiSepNet => {
+            let r2prime = need(inputs.r2prime, "r2prime")?;
+            run_chi_sepnet(inputs.local_field_ppm, inputs.qsm, r2prime, mask, &grid)?
+        }
     };
 
     Ok(SeparationResult { chi_pos, chi_neg, chi_total })
@@ -166,6 +170,36 @@ fn run_susep_net(
 ) -> Result<(Vec<f64>, Vec<f64>, Vec<f64>), PipelineError> {
     Err(PipelineError::InvalidConfig(
         "SUSEP-Net requires building qsm-core with the 'onnx' feature".into(),
+    ))
+}
+
+/// Source the χ-sepnet weights and run inference (requires the `onnx` feature).
+#[cfg(feature = "onnx")]
+fn run_chi_sepnet(
+    local_field_ppm: &[f64],
+    qsm: &[f64],
+    r2prime: &[f64],
+    mask: &[u8],
+    grid: &crate::Grid,
+) -> Result<(Vec<f64>, Vec<f64>, Vec<f64>), PipelineError> {
+    let bytes = crate::models::primary_weight("chi-sepnet").map_err(PipelineError::InvalidConfig)?;
+    crate::separation::chisepnet(
+        local_field_ppm, qsm, r2prime, mask, grid, &bytes,
+        &crate::separation::ChiSepNetNorm::default(),
+    )
+    .map_err(|e| PipelineError::AlgorithmError(e.to_string()))
+}
+
+#[cfg(not(feature = "onnx"))]
+fn run_chi_sepnet(
+    _local_field_ppm: &[f64],
+    _qsm: &[f64],
+    _r2prime: &[f64],
+    _mask: &[u8],
+    _grid: &crate::Grid,
+) -> Result<(Vec<f64>, Vec<f64>, Vec<f64>), PipelineError> {
+    Err(PipelineError::InvalidConfig(
+        "χ-sepnet requires building qsm-core with the 'onnx' feature".into(),
     ))
 }
 

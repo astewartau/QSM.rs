@@ -220,6 +220,21 @@ pub fn all_weight_bytes(spec: &ModelSpec) -> Result<Vec<Vec<u8>>, String> {
     spec.files.iter().map(|f| weight_file_bytes(spec.id, f)).collect()
 }
 
+/// Convenience: resolve a model **by id** and read its primary weight file. Combines
+/// [`find_model`] + [`primary_weight_bytes`] so callers (pipeline runners, external
+/// hosts) don't repeat the lookup+fetch boilerplate. Errors if the id is unknown.
+pub fn primary_weight(id: &str) -> Result<Vec<u8>, String> {
+    let spec = find_model(id).ok_or_else(|| format!("'{id}' not in model registry"))?;
+    primary_weight_bytes(spec)
+}
+
+/// Convenience: resolve a model **by id** and read all its weight files, in registry
+/// order (for multi-file models like NeXtQSM). See [`all_weight_bytes`].
+pub fn weights(id: &str) -> Result<Vec<Vec<u8>>, String> {
+    let spec = find_model(id).ok_or_else(|| format!("'{id}' not in model registry"))?;
+    all_weight_bytes(spec)
+}
+
 /// Resolve one weight file to its bytes (local override / cache, then download).
 fn weight_file_bytes(id: &str, file: &WeightFile) -> Result<Vec<u8>, String> {
     if let Some(path) = resolve_local(file) {

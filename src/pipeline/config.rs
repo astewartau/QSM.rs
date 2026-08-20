@@ -92,6 +92,25 @@ pub enum InversionAlgorithm {
     /// `autoqsm` weights). NOTE: takes the **total** field — it does its own
     /// background removal, so the `local_field_ppm` argument should be the total field.
     Autoqsm,
+    /// QSMGAN deep-learning dipole inversion (local field → χ; `onnx` + `qsmgan` weights).
+    Qsmgan,
+    /// IR2QSM unrolled deep-learning dipole inversion (local field → χ; `onnx` + `ir2qsm` weights).
+    Ir2qsm,
+    /// LPCNN learned-proximal deep-learning dipole inversion (local field → χ; `onnx` + `lpcnn` weights).
+    Lpcnn,
+    /// MoDL-QSM model-based deep-learning dipole inversion (local field → χ33/STI component;
+    /// `onnx` + `modl-qsm` weights).
+    ModlQsm,
+    /// NeXtQSM single-step reconstruction (requires `onnx` + the two `nextqsm` weight files).
+    /// NOTE: takes the **total** field — it does its own background removal.
+    Nextqsm,
+    /// iQSM single-step reconstruction from wrapped **phase** (end-to-end: joint unwrap +
+    /// background removal + inversion). Not a dipole-inversion-stage option — use
+    /// [`super::run_iqsm`]. Rejected by `run_dipole_inversion`.
+    Iqsm,
+    /// iQSM+ single-step reconstruction from wrapped **phase** with orientation-adaptive
+    /// feature editing (uses the B0 direction). End-to-end; use [`super::run_iqsm_plus`].
+    IqsmPlus,
 }
 
 /// B0 estimation method
@@ -345,6 +364,79 @@ pub enum SeparationAlgorithm {
     /// SUSEP-Net deep-learning separation from QSM + R2' + local field (requires
     /// the `onnx` feature and the `susep-net` weights; see [`crate::models`]).
     SusepNet,
+    /// χ-sepnet (SNU-LIST) deep-learning separation from local field + QSM + R2'
+    /// (requires the `onnx` feature and the `chi-sepnet` weights; see [`crate::models`]).
+    ChiSepNet,
+}
+
+// ─── Deep-learning model-registry mapping ───
+//
+// These map each stage enum's deep-learning variants to their [`crate::models`]
+// registry id. Exhaustive matches: adding a variant forces a decision here, and the
+// `registry_models_are_pipeline_wired` test asserts every registry model of a pipeline
+// stage is claimed by some variant — so a model added to the registry but not wired
+// into an enum fails the build's tests (registry↔pipeline drift guard).
+
+impl BgRemovalAlgorithm {
+    /// Model-registry id for deep-learning variants, else `None` (classical methods).
+    pub fn dl_model_id(self) -> Option<&'static str> {
+        match self {
+            Self::Bfrnet => Some("bfrnet"),
+            Self::Vsharp | Self::Pdf | Self::Lbv | Self::Ismv | Self::Sharp
+            | Self::Resharp | Self::Harperella | Self::Iharperella => None,
+        }
+    }
+    /// Every variant, for exhaustiveness in tests/tools.
+    pub const VARIANTS: &'static [Self] = &[
+        Self::Vsharp, Self::Pdf, Self::Lbv, Self::Ismv, Self::Sharp,
+        Self::Resharp, Self::Harperella, Self::Iharperella, Self::Bfrnet,
+    ];
+}
+
+impl InversionAlgorithm {
+    /// Model-registry id for deep-learning variants, else `None` (classical methods).
+    pub fn dl_model_id(self) -> Option<&'static str> {
+        match self {
+            Self::Xqsm => Some("xqsm"),
+            Self::Qsmnet => Some("qsmnet"),
+            Self::QsmnetPlus => Some("qsmnet-plus"),
+            Self::Autoqsm => Some("autoqsm"),
+            Self::Qsmgan => Some("qsmgan"),
+            Self::Ir2qsm => Some("ir2qsm"),
+            Self::Lpcnn => Some("lpcnn"),
+            Self::ModlQsm => Some("modl-qsm"),
+            Self::Nextqsm => Some("nextqsm"),
+            Self::Iqsm => Some("iqsm"),
+            Self::IqsmPlus => Some("iqsm-plus"),
+            Self::Tkd | Self::Tsvd | Self::Tikhonov | Self::Tv | Self::Rts | Self::Nltv
+            | Self::Medi | Self::Tfi | Self::Ilsqr | Self::Tgv | Self::Qsmart | Self::Ndi
+            | Self::Fansi | Self::FansiTgv | Self::L1qsm | Self::Whqsm | Self::Hdqsm
+            | Self::AmpPe => None,
+        }
+    }
+    pub const VARIANTS: &'static [Self] = &[
+        Self::Tkd, Self::Tsvd, Self::Tikhonov, Self::Tv, Self::Rts, Self::Nltv, Self::Medi,
+        Self::Tfi, Self::Ilsqr, Self::Tgv, Self::Qsmart, Self::Ndi, Self::Fansi, Self::FansiTgv,
+        Self::L1qsm, Self::Whqsm, Self::Hdqsm, Self::AmpPe, Self::Xqsm, Self::Qsmnet,
+        Self::QsmnetPlus, Self::Autoqsm, Self::Qsmgan, Self::Ir2qsm, Self::Lpcnn, Self::ModlQsm,
+        Self::Nextqsm, Self::Iqsm, Self::IqsmPlus,
+    ];
+}
+
+impl SeparationAlgorithm {
+    /// Model-registry id for deep-learning variants, else `None` (classical methods).
+    pub fn dl_model_id(self) -> Option<&'static str> {
+        match self {
+            Self::SusepNet => Some("susep-net"),
+            Self::ChiSepNet => Some("chi-sepnet"),
+            Self::ChiSepIlsqr | Self::ChiSepMedi | Self::R2starQsm | Self::WaveSep
+            | Self::Decompose | Self::HcChisep => None,
+        }
+    }
+    pub const VARIANTS: &'static [Self] = &[
+        Self::ChiSepIlsqr, Self::ChiSepMedi, Self::R2starQsm, Self::WaveSep,
+        Self::Decompose, Self::HcChisep, Self::SusepNet, Self::ChiSepNet,
+    ];
 }
 
 /// Configuration for the χ-separation stage.
@@ -484,6 +576,29 @@ impl std::error::Error for PipelineError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::{all_models, ModelStage};
+
+    /// Registry↔pipeline drift guard: every deep-learning model whose `stage` maps to a
+    /// pipeline stage enum must be claimed by some enum variant's `dl_model_id()`. A model
+    /// added to the registry but not wired into an enum (so no pipeline consumer could
+    /// select it) fails here. `PhaseToField` (iQFM) is intentionally exempt — it's exposed
+    /// as the standalone `run_iqfm` field-preparation building block, not a stage enum.
+    #[test]
+    fn registry_models_are_pipeline_wired() {
+        let inv: Vec<&str> = InversionAlgorithm::VARIANTS.iter().filter_map(|v| v.dl_model_id()).collect();
+        let bfr: Vec<&str> = BgRemovalAlgorithm::VARIANTS.iter().filter_map(|v| v.dl_model_id()).collect();
+        let sep: Vec<&str> = SeparationAlgorithm::VARIANTS.iter().filter_map(|v| v.dl_model_id()).collect();
+        for m in all_models() {
+            let (wired, enum_name) = match m.stage {
+                ModelStage::BackgroundRemoval => (bfr.contains(&m.id), "BgRemovalAlgorithm"),
+                ModelStage::DipoleInversion | ModelStage::SingleStep => (inv.contains(&m.id), "InversionAlgorithm"),
+                ModelStage::ChiSeparation => (sep.contains(&m.id), "SeparationAlgorithm"),
+                // iQFM: standalone run_iqfm, no stage enum.
+                ModelStage::PhaseToField => continue,
+            };
+            assert!(wired, "registry model '{}' (stage {:?}) has no {} variant — wire it or add a dl_model_id mapping", m.id, m.stage, enum_name);
+        }
+    }
 
     #[test]
     fn test_default_config() {

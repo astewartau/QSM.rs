@@ -165,9 +165,21 @@ pub fn run_dipole_inversion(
         InversionAlgorithm::Qsmnet => run_qsmnet(local_field_ppm, mask, &grid, "qsmnet")?,
         InversionAlgorithm::QsmnetPlus => run_qsmnet(local_field_ppm, mask, &grid, "qsmnet-plus")?,
         InversionAlgorithm::Autoqsm => run_autoqsm(local_field_ppm, mask, &grid)?,
+        InversionAlgorithm::Qsmgan => run_qsmgan(local_field_ppm, mask, &grid)?,
+        InversionAlgorithm::Ir2qsm => run_ir2qsm(local_field_ppm, mask, &grid)?,
+        InversionAlgorithm::Lpcnn => run_lpcnn(local_field_ppm, mask, &grid, bdir)?,
+        InversionAlgorithm::ModlQsm => run_modl_qsm(local_field_ppm, mask, &grid, bdir)?,
+        // NeXtQSM is single-step (own BFR): `local_field_ppm` must be the total field.
+        InversionAlgorithm::Nextqsm => run_nextqsm(local_field_ppm, mask, &grid, bdir)?,
         InversionAlgorithm::Tgv | InversionAlgorithm::Qsmart => {
             return Err(PipelineError::InvalidConfig(
                 format!("{:?} should use run_tgv or run_qsmart", config.algorithm),
+            ));
+        }
+        // iQSM/iQSM+ reconstruct from wrapped phase (not a local field) — end-to-end.
+        InversionAlgorithm::Iqsm | InversionAlgorithm::IqsmPlus => {
+            return Err(PipelineError::InvalidConfig(
+                format!("{:?} should use run_iqsm / run_iqsm_plus (it takes wrapped phase)", config.algorithm),
             ));
         }
     };
@@ -303,6 +315,151 @@ fn run_autoqsm(
     Err(PipelineError::InvalidConfig(
         "AutoQSM requires building qsm-core with the 'onnx' feature".into(),
     ))
+}
+
+/// Source the QSMGAN generator weights and run inference (requires the `onnx` feature).
+#[cfg(feature = "onnx")]
+fn run_qsmgan(local_field_ppm: &[f64], mask: &[u8], grid: &crate::Grid) -> Result<Vec<f64>, PipelineError> {
+    let bytes = crate::models::primary_weight("qsmgan").map_err(PipelineError::InvalidConfig)?;
+    crate::inversion::qsmgan(local_field_ppm, mask, grid, &bytes)
+        .map_err(|e| PipelineError::AlgorithmError(e.to_string()))
+}
+
+/// Source the IR2QSM weights and run inference (requires the `onnx` feature).
+#[cfg(feature = "onnx")]
+fn run_ir2qsm(local_field_ppm: &[f64], mask: &[u8], grid: &crate::Grid) -> Result<Vec<f64>, PipelineError> {
+    let bytes = crate::models::primary_weight("ir2qsm").map_err(PipelineError::InvalidConfig)?;
+    crate::inversion::ir2qsm(local_field_ppm, mask, grid, &bytes)
+        .map_err(|e| PipelineError::AlgorithmError(e.to_string()))
+}
+
+/// Source the LPCNN proximal-CNN weights and run inference (requires the `onnx` feature).
+/// LPCNN's k-space data-consistency step uses the B0 direction.
+#[cfg(feature = "onnx")]
+fn run_lpcnn(local_field_ppm: &[f64], mask: &[u8], grid: &crate::Grid, bdir: (f64, f64, f64)) -> Result<Vec<f64>, PipelineError> {
+    let bytes = crate::models::primary_weight("lpcnn").map_err(PipelineError::InvalidConfig)?;
+    crate::inversion::lpcnn(local_field_ppm, mask, grid, bdir, &bytes)
+        .map_err(|e| PipelineError::AlgorithmError(e.to_string()))
+}
+
+/// Source the MoDL-QSM prior-CNN weights and run inference (requires the `onnx` feature).
+/// Output is the STI χ33 component.
+#[cfg(feature = "onnx")]
+fn run_modl_qsm(local_field_ppm: &[f64], mask: &[u8], grid: &crate::Grid, bdir: (f64, f64, f64)) -> Result<Vec<f64>, PipelineError> {
+    let bytes = crate::models::primary_weight("modl-qsm").map_err(PipelineError::InvalidConfig)?;
+    crate::inversion::modl_qsm(local_field_ppm, mask, grid, bdir, &bytes)
+        .map_err(|e| PipelineError::AlgorithmError(e.to_string()))
+}
+
+#[cfg(not(feature = "onnx"))]
+fn run_qsmgan(_f: &[f64], _m: &[u8], _g: &crate::Grid) -> Result<Vec<f64>, PipelineError> {
+    Err(PipelineError::InvalidConfig("QSMGAN requires building qsm-core with the 'onnx' feature".into()))
+}
+#[cfg(not(feature = "onnx"))]
+fn run_ir2qsm(_f: &[f64], _m: &[u8], _g: &crate::Grid) -> Result<Vec<f64>, PipelineError> {
+    Err(PipelineError::InvalidConfig("IR2QSM requires building qsm-core with the 'onnx' feature".into()))
+}
+#[cfg(not(feature = "onnx"))]
+fn run_lpcnn(_f: &[f64], _m: &[u8], _g: &crate::Grid, _b: (f64, f64, f64)) -> Result<Vec<f64>, PipelineError> {
+    Err(PipelineError::InvalidConfig("LPCNN requires building qsm-core with the 'onnx' feature".into()))
+}
+#[cfg(not(feature = "onnx"))]
+fn run_modl_qsm(_f: &[f64], _m: &[u8], _g: &crate::Grid, _b: (f64, f64, f64)) -> Result<Vec<f64>, PipelineError> {
+    Err(PipelineError::InvalidConfig("MoDL-QSM requires building qsm-core with the 'onnx' feature".into()))
+}
+
+/// The authors' fixed inference conventions for the iQSM/iQFM LoT-Unet family:
+/// phase sign `-1` and a 3-voxel mask-erosion radius. These are training-time
+/// constants, not user knobs, so the pipeline runners bake them in.
+#[cfg(feature = "onnx")]
+const IQSM_PHASE_SIGN: f64 = -1.0;
+#[cfg(feature = "onnx")]
+const IQSM_ERODED_RAD: i32 = 3;
+
+/// Run iQSM single-step reconstruction from wrapped **phase** (joint unwrap +
+/// background removal + dipole inversion). Multi-echo inputs are reconstructed
+/// per echo and magnitude·TE²-combined. Requires the `onnx` feature + `iqsm` weights.
+///
+/// `phases`/`magnitudes` are per-echo wrapped-phase / magnitude volumes (column-major);
+/// `metadata` supplies the grid, echo times, and B0. Returns susceptibility (ppm),
+/// referenced per `reference`.
+#[cfg(feature = "onnx")]
+pub fn run_iqsm(
+    phases: &[&[f64]],
+    magnitudes: &[&[f64]],
+    mask: &[u8],
+    metadata: &ScanMetadata,
+    reference: QsmReference,
+) -> Result<Vec<f64>, PipelineError> {
+    let grid = metadata.grid();
+    let bytes = crate::models::primary_weight("iqsm").map_err(PipelineError::InvalidConfig)?;
+    let chi = crate::inversion::iqsm_multi_echo(
+        phases, magnitudes, mask, &grid, &metadata.echo_times,
+        metadata.field_strength, IQSM_PHASE_SIGN, IQSM_ERODED_RAD, &bytes,
+    ).map_err(|e| PipelineError::AlgorithmError(e.to_string()))?;
+    Ok(super::referencing::apply_reference(&chi, mask, reference))
+}
+
+#[cfg(not(feature = "onnx"))]
+pub fn run_iqsm(
+    _phases: &[&[f64]], _magnitudes: &[&[f64]], _mask: &[u8],
+    _metadata: &ScanMetadata, _reference: QsmReference,
+) -> Result<Vec<f64>, PipelineError> {
+    Err(PipelineError::InvalidConfig("iQSM requires building qsm-core with the 'onnx' feature".into()))
+}
+
+/// Run iQSM+ single-step reconstruction from wrapped **phase** (orientation-adaptive
+/// variant; the B0 direction is a genuine network input). See [`run_iqsm`].
+#[cfg(feature = "onnx")]
+pub fn run_iqsm_plus(
+    phases: &[&[f64]],
+    magnitudes: &[&[f64]],
+    mask: &[u8],
+    metadata: &ScanMetadata,
+    reference: QsmReference,
+) -> Result<Vec<f64>, PipelineError> {
+    let grid = metadata.grid();
+    let bytes = crate::models::primary_weight("iqsm-plus").map_err(PipelineError::InvalidConfig)?;
+    let chi = crate::inversion::iqsm_plus_multi_echo(
+        phases, magnitudes, mask, &grid, &metadata.echo_times,
+        metadata.field_strength, metadata.b0_direction, IQSM_PHASE_SIGN, IQSM_ERODED_RAD, &bytes,
+    ).map_err(|e| PipelineError::AlgorithmError(e.to_string()))?;
+    Ok(super::referencing::apply_reference(&chi, mask, reference))
+}
+
+#[cfg(not(feature = "onnx"))]
+pub fn run_iqsm_plus(
+    _phases: &[&[f64]], _magnitudes: &[&[f64]], _mask: &[u8],
+    _metadata: &ScanMetadata, _reference: QsmReference,
+) -> Result<Vec<f64>, PipelineError> {
+    Err(PipelineError::InvalidConfig("iQSM+ requires building qsm-core with the 'onnx' feature".into()))
+}
+
+/// Run iQFM: joint unwrapping + background removal from wrapped **phase** in one
+/// network (the tissue-field head of the iQSM LoT-Unet). Returns the local
+/// (background-removed) field in ppm — feed it to any dipole inversion. This is a
+/// deep-learning replacement for the unwrap + BFR stages, not an inversion.
+/// Requires the `onnx` feature + `iqfm` weights.
+#[cfg(feature = "onnx")]
+pub fn run_iqfm(
+    phases: &[&[f64]],
+    magnitudes: &[&[f64]],
+    mask: &[u8],
+    metadata: &ScanMetadata,
+) -> Result<Vec<f64>, PipelineError> {
+    let grid = metadata.grid();
+    let bytes = crate::models::primary_weight("iqfm").map_err(PipelineError::InvalidConfig)?;
+    crate::inversion::iqfm_multi_echo(
+        phases, magnitudes, mask, &grid, &metadata.echo_times,
+        metadata.field_strength, IQSM_PHASE_SIGN, IQSM_ERODED_RAD, &bytes,
+    ).map_err(|e| PipelineError::AlgorithmError(e.to_string()))
+}
+
+#[cfg(not(feature = "onnx"))]
+pub fn run_iqfm(
+    _phases: &[&[f64]], _magnitudes: &[&[f64]], _mask: &[u8], _metadata: &ScanMetadata,
+) -> Result<Vec<f64>, PipelineError> {
+    Err(PipelineError::InvalidConfig("iQFM requires building qsm-core with the 'onnx' feature".into()))
 }
 
 /// Run TGV single-step QSM reconstruction.
