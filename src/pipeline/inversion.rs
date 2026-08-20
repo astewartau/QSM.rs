@@ -161,6 +161,10 @@ pub fn run_dipole_inversion(
                 local_field_ppm, mask, magnitude, &grid, bdir, &params, |i, n| progress(i, n),
             )
         }
+        InversionAlgorithm::Xqsm => run_xqsm(local_field_ppm, mask, &grid)?,
+        InversionAlgorithm::Qsmnet => run_qsmnet(local_field_ppm, mask, &grid, "qsmnet")?,
+        InversionAlgorithm::QsmnetPlus => run_qsmnet(local_field_ppm, mask, &grid, "qsmnet-plus")?,
+        InversionAlgorithm::Autoqsm => run_autoqsm(local_field_ppm, mask, &grid)?,
         InversionAlgorithm::Tgv | InversionAlgorithm::Qsmart => {
             return Err(PipelineError::InvalidConfig(
                 format!("{:?} should use run_tgv or run_qsmart", config.algorithm),
@@ -169,6 +173,136 @@ pub fn run_dipole_inversion(
     };
 
     Ok(chi)
+}
+
+/// Source the xQSM weights and run inference. Requires the `onnx` feature;
+/// weights come from the model registry (local `$QSM_MODEL_DIR`/cache, or the
+/// `download` feature).
+#[cfg(feature = "onnx")]
+fn run_xqsm(
+    local_field_ppm: &[f64],
+    mask: &[u8],
+    grid: &crate::Grid,
+) -> Result<Vec<f64>, PipelineError> {
+    let spec = crate::models::find_model("xqsm")
+        .ok_or_else(|| PipelineError::InvalidConfig("xqsm not in model registry".into()))?;
+    let bytes = crate::models::primary_weight_bytes(spec)
+        .map_err(PipelineError::InvalidConfig)?;
+    crate::inversion::xqsm(local_field_ppm, mask, grid, &bytes)
+        .map_err(|e| PipelineError::AlgorithmError(e.to_string()))
+}
+
+#[cfg(not(feature = "onnx"))]
+fn run_xqsm(
+    _local_field_ppm: &[f64],
+    _mask: &[u8],
+    _grid: &crate::Grid,
+) -> Result<Vec<f64>, PipelineError> {
+    Err(PipelineError::InvalidConfig(
+        "xQSM requires building qsm-core with the 'onnx' feature".into(),
+    ))
+}
+
+/// Run NeXtQSM end-to-end from the **total** field (it does its own background
+/// removal), sourcing both weight files from the registry. Unlike the entries in
+/// [`InversionAlgorithm`], NeXtQSM spans BFR + dipole inversion, so it is exposed
+/// as a standalone reconstruction rather than a dipole-inversion-stage option.
+///
+/// `total_field_ppm` and `mask` are column-major `(nx,ny,nz)`; `b_vec` is the B0
+/// direction. Requires the `onnx` feature; weights resolve local-first then via
+/// the `download` feature. Returns susceptibility (ppm), masked.
+#[cfg(feature = "onnx")]
+pub fn run_nextqsm(
+    total_field_ppm: &[f64],
+    mask: &[u8],
+    grid: &crate::Grid,
+    b_vec: (f64, f64, f64),
+) -> Result<Vec<f64>, PipelineError> {
+    let spec = crate::models::find_model("nextqsm")
+        .ok_or_else(|| PipelineError::InvalidConfig("nextqsm not in model registry".into()))?;
+    let files = crate::models::all_weight_bytes(spec).map_err(PipelineError::InvalidConfig)?;
+    let [bf, vjp] = &files[..] else {
+        return Err(PipelineError::InvalidConfig(
+            format!("nextqsm expects 2 weight files (BFR, VJP), got {}", files.len()),
+        ));
+    };
+    crate::inversion::nextqsm(total_field_ppm, mask, grid, b_vec, bf, vjp)
+        .map_err(|e| PipelineError::AlgorithmError(e.to_string()))
+}
+
+/// Stub when built without the `onnx` feature.
+#[cfg(not(feature = "onnx"))]
+pub fn run_nextqsm(
+    _total_field_ppm: &[f64],
+    _mask: &[u8],
+    _grid: &crate::Grid,
+    _b_vec: (f64, f64, f64),
+) -> Result<Vec<f64>, PipelineError> {
+    Err(PipelineError::InvalidConfig(
+        "NeXtQSM requires building qsm-core with the 'onnx' feature".into(),
+    ))
+}
+
+/// Source a QSMnet-family model's weights and run inference (requires the `onnx`
+/// feature). `model_id` selects the registry entry (`qsmnet` / `qsmnet-plus`),
+/// `norm` supplies that checkpoint's normalization constants.
+#[cfg(feature = "onnx")]
+fn run_qsmnet(
+    local_field_ppm: &[f64],
+    mask: &[u8],
+    grid: &crate::Grid,
+    model_id: &str,
+) -> Result<Vec<f64>, PipelineError> {
+    use crate::inversion::QsmnetNorm;
+    let norm = match model_id {
+        "qsmnet-plus" => QsmnetNorm::qsmnet_plus(),
+        _ => QsmnetNorm::qsmnet(),
+    };
+    let spec = crate::models::find_model(model_id).ok_or_else(|| {
+        PipelineError::InvalidConfig(format!("{model_id} not in model registry"))
+    })?;
+    let bytes = crate::models::primary_weight_bytes(spec)
+        .map_err(PipelineError::InvalidConfig)?;
+    crate::inversion::qsmnet(local_field_ppm, mask, grid, &bytes, &norm)
+        .map_err(|e| PipelineError::AlgorithmError(e.to_string()))
+}
+
+#[cfg(not(feature = "onnx"))]
+fn run_qsmnet(
+    _local_field_ppm: &[f64],
+    _mask: &[u8],
+    _grid: &crate::Grid,
+    _model_id: &str,
+) -> Result<Vec<f64>, PipelineError> {
+    Err(PipelineError::InvalidConfig(
+        "QSMnet requires building qsm-core with the 'onnx' feature".into(),
+    ))
+}
+
+/// Source the AutoQSM weights and run inference (requires the `onnx` feature).
+/// `field` is the **total** field (AutoQSM does its own background removal).
+#[cfg(feature = "onnx")]
+fn run_autoqsm(
+    field: &[f64],
+    mask: &[u8],
+    grid: &crate::Grid,
+) -> Result<Vec<f64>, PipelineError> {
+    let spec = crate::models::find_model("autoqsm")
+        .ok_or_else(|| PipelineError::InvalidConfig("autoqsm not in model registry".into()))?;
+    let bytes = crate::models::primary_weight_bytes(spec).map_err(PipelineError::InvalidConfig)?;
+    crate::inversion::autoqsm(field, mask, grid, &bytes)
+        .map_err(|e| PipelineError::AlgorithmError(e.to_string()))
+}
+
+#[cfg(not(feature = "onnx"))]
+fn run_autoqsm(
+    _field: &[f64],
+    _mask: &[u8],
+    _grid: &crate::Grid,
+) -> Result<Vec<f64>, PipelineError> {
+    Err(PipelineError::InvalidConfig(
+        "AutoQSM requires building qsm-core with the 'onnx' feature".into(),
+    ))
 }
 
 /// Run TGV single-step QSM reconstruction.

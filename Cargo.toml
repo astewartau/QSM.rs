@@ -21,6 +21,12 @@ simd = ["wide"]
 # serde config types). Used only by downstream tests to introspect field names
 # and verify the qsmxt-config wrapper layer covers every parameter.
 introspection = ["dep:serde"]
+# Native "download on use" of deep-learning model weights (HTTP + SHA-256 cache).
+# Not used by WASM hosts, which fetch weights in JavaScript instead.
+download = ["dep:ureq", "dep:sha2"]
+# ONNX inference for deep-learning models via the pure-Rust `tract` engine.
+# Byte-buffer based, so it compiles for both native and WASM targets.
+onnx = ["dep:tract-onnx"]
 
 [dependencies]
 # FFT and complex number support
@@ -45,6 +51,13 @@ delaunator = "1.0"
 
 # Serde derive, only linked when the `introspection` feature is on (see [features]).
 serde = { version = "1", features = ["derive"], optional = true }
+
+# Deep-learning model weights: HTTP download + checksum (see the `download` feature).
+ureq = { version = "2", optional = true }
+sha2 = { version = "0.10", optional = true }
+
+# ONNX inference engine, pure Rust so it also compiles to WASM (see `onnx` feature).
+tract-onnx = { version = "0.21", optional = true }
 
 [dev-dependencies]
 serde = { version = "1", features = ["derive"] }

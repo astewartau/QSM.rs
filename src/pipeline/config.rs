@@ -44,6 +44,9 @@ pub enum BgRemovalAlgorithm {
     Resharp,
     Harperella,
     Iharperella,
+    /// BFRnet deep-learning background removal (requires the `onnx` feature and
+    /// the `bfrnet` model weights; see [`crate::models`]).
+    Bfrnet,
 }
 
 /// Dipole inversion algorithm
@@ -76,6 +79,19 @@ pub enum InversionAlgorithm {
     Hdqsm,
     /// Approximate Message Passing with built-in Parameter Estimation (AMP-PE).
     AmpPe,
+    /// xQSM deep-learning dipole inversion (requires the `onnx` feature and the
+    /// `xqsm` model weights; see [`crate::models`]).
+    Xqsm,
+    /// QSMnet deep-learning dipole inversion (requires the `onnx` feature and the
+    /// `qsmnet` model weights; see [`crate::models`]).
+    Qsmnet,
+    /// QSMnet+ deep-learning dipole inversion (susceptibility-scaling augmented;
+    /// requires the `onnx` feature and the `qsmnet-plus` weights).
+    QsmnetPlus,
+    /// AutoQSM single-step reconstruction (requires the `onnx` feature and the
+    /// `autoqsm` weights). NOTE: takes the **total** field — it does its own
+    /// background removal, so the `local_field_ppm` argument should be the total field.
+    Autoqsm,
 }
 
 /// B0 estimation method
@@ -326,6 +342,9 @@ pub enum SeparationAlgorithm {
     Decompose,
     /// Hollow-cylinder fit from a QSM + R2' + multi-echo magnitude (Wharton & Bowtell).
     HcChisep,
+    /// SUSEP-Net deep-learning separation from QSM + R2' + local field (requires
+    /// the `onnx` feature and the `susep-net` weights; see [`crate::models`]).
+    SusepNet,
 }
 
 /// Configuration for the χ-separation stage.

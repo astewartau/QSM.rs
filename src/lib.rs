@@ -105,6 +105,16 @@ pub mod utils;
 pub use grid::Grid;
 
 // ============================================================================
+// Deep-learning model registry and weight management
+// ============================================================================
+/// Registry of deep-learning QSM models and their downloadable ONNX weights.
+///
+/// Query the catalog with [`models::all_models`] / [`models::find_model`]. Native
+/// hosts fetch weights on use with the `download` feature; the `onnx` feature runs
+/// them via the pure-Rust `tract` engine from a byte buffer (native and WASM).
+pub mod models;
+
+// ============================================================================
 // High-level pipeline
 // ============================================================================
 pub mod pipeline;
