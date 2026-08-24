@@ -318,6 +318,13 @@ pub struct InversionConfig {
     pub hdqsm: HdQsmParams,
     /// AMP-PE (`b0` is overridden from scan metadata by the dispatcher).
     pub amp_pe: AmpPeParams,
+    /// Overlap-tiling for the deep-learning inversions, as `(core, halo)` in voxels. `None`
+    /// (default) runs the net whole-volume; `Some` runs it patch-by-patch (bounded memory) via the
+    /// `*_tiled` variants — an approximation, mainly for memory-constrained targets (e.g. WASM).
+    /// Stored as a plain tuple so this config type stays available without the `onnx` feature;
+    /// the dispatcher converts it to a [`crate::inversion::TileConfig`]. Ignored by the
+    /// natively-patch-based nets (autoqsm/qsmgan) and by non-DL algorithms.
+    pub tile: Option<(usize, usize)>,
 }
 
 impl Default for InversionConfig {
@@ -341,6 +348,7 @@ impl Default for InversionConfig {
             whqsm: WhQsmParams::default(),
             hdqsm: HdQsmParams::default(),
             amp_pe: AmpPeParams::default(),
+            tile: None,
         }
     }
 }

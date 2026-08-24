@@ -79,3 +79,22 @@ pub fn xqsm(
     }
     Ok(chi)
 }
+
+/// Memory-bounded xQSM via overlap-tiling — the same fully-convolutional net run patch-by-
+/// patch so peak memory is bounded by one patch (for 32-bit WASM, where the whole-volume
+/// [`xqsm`] overflows the 4 GB heap on clinical-size data). Results approximate whole-volume
+/// xQSM up to tile-boundary error; see [`crate::inversion::tiled`].
+pub fn xqsm_tiled(
+    local_field_ppm: &[f64],
+    mask: &[u8],
+    grid: &Grid,
+    model_onnx: &[u8],
+    cfg: &super::tiled::TileConfig,
+    progress: impl FnMut(usize, usize),
+) -> Result<Vec<f64>, OnnxError> {
+    let model = OnnxModel::load(model_onnx)?;
+    // xQSM feeds the raw field (no normalization) and reads χ directly; pad each patch to /8.
+    super::tiled::tiled_field_inversion(
+        local_field_ppm, mask, grid, &model, 8, cfg, |v| v as f32, |o| o as f64, progress,
+    )
+}

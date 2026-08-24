@@ -114,3 +114,28 @@ pub fn qsmnet(
     }
     Ok(chi)
 }
+
+/// Memory-bounded QSMnet via overlap-tiling — the fully-convolutional U-Net run patch-by-patch
+/// (for 32-bit WASM, where whole-volume [`qsmnet`] overflows the heap on clinical data). The
+/// dataset normalization is applied per value inside the tile loop and the net's pool depth
+/// requires a `/16` patch. Approximates whole-volume up to tile-boundary error; see
+/// [`crate::inversion::tiled`].
+pub fn qsmnet_tiled(
+    local_field_ppm: &[f64],
+    mask: &[u8],
+    grid: &Grid,
+    model_onnx: &[u8],
+    norm: &QsmnetNorm,
+    cfg: &super::tiled::TileConfig,
+    progress: impl FnMut(usize, usize),
+) -> Result<Vec<f64>, OnnxError> {
+    let model = OnnxModel::load(model_onnx)?;
+    let (in_mean, inv_std, out_std, out_mean) =
+        (norm.in_mean, 1.0 / norm.in_std, norm.out_std, norm.out_mean);
+    super::tiled::tiled_field_inversion(
+        local_field_ppm, mask, grid, &model, 16, cfg,
+        move |v| ((v - in_mean) * inv_std) as f32,
+        move |o| out_std * o as f64 + out_mean,
+        progress,
+    )
+}

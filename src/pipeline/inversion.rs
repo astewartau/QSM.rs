@@ -161,16 +161,16 @@ pub fn run_dipole_inversion(
                 local_field_ppm, mask, magnitude, &grid, bdir, &params, |i, n| progress(i, n),
             )
         }
-        InversionAlgorithm::Xqsm => run_xqsm(local_field_ppm, mask, &grid)?,
-        InversionAlgorithm::Qsmnet => run_qsmnet(local_field_ppm, mask, &grid, "qsmnet")?,
-        InversionAlgorithm::QsmnetPlus => run_qsmnet(local_field_ppm, mask, &grid, "qsmnet-plus")?,
+        InversionAlgorithm::Xqsm => run_xqsm(local_field_ppm, mask, &grid, config.tile, progress)?,
+        InversionAlgorithm::Qsmnet => run_qsmnet(local_field_ppm, mask, &grid, "qsmnet", config.tile, progress)?,
+        InversionAlgorithm::QsmnetPlus => run_qsmnet(local_field_ppm, mask, &grid, "qsmnet-plus", config.tile, progress)?,
         InversionAlgorithm::Autoqsm => run_autoqsm(local_field_ppm, mask, &grid)?,
         InversionAlgorithm::Qsmgan => run_qsmgan(local_field_ppm, mask, &grid)?,
-        InversionAlgorithm::Ir2qsm => run_ir2qsm(local_field_ppm, mask, &grid)?,
-        InversionAlgorithm::Lpcnn => run_lpcnn(local_field_ppm, mask, &grid, bdir)?,
-        InversionAlgorithm::ModlQsm => run_modl_qsm(local_field_ppm, mask, &grid, bdir)?,
+        InversionAlgorithm::Ir2qsm => run_ir2qsm(local_field_ppm, mask, &grid, config.tile, progress)?,
+        InversionAlgorithm::Lpcnn => run_lpcnn(local_field_ppm, mask, &grid, bdir, config.tile, progress)?,
+        InversionAlgorithm::ModlQsm => run_modl_qsm(local_field_ppm, mask, &grid, bdir, config.tile, progress)?,
         // NeXtQSM is single-step (own BFR): `local_field_ppm` must be the total field.
-        InversionAlgorithm::Nextqsm => run_nextqsm(local_field_ppm, mask, &grid, bdir)?,
+        InversionAlgorithm::Nextqsm => run_nextqsm(local_field_ppm, mask, &grid, bdir, config.tile, progress)?,
         InversionAlgorithm::Tgv | InversionAlgorithm::Qsmart => {
             return Err(PipelineError::InvalidConfig(
                 format!("{:?} should use run_tgv or run_qsmart", config.algorithm),
@@ -195,13 +195,20 @@ fn run_xqsm(
     local_field_ppm: &[f64],
     mask: &[u8],
     grid: &crate::Grid,
+    tile: Option<(usize, usize)>,
+    progress: &mut dyn FnMut(usize, usize),
 ) -> Result<Vec<f64>, PipelineError> {
     let spec = crate::models::find_model("xqsm")
         .ok_or_else(|| PipelineError::InvalidConfig("xqsm not in model registry".into()))?;
     let bytes = crate::models::primary_weight_bytes(spec)
         .map_err(PipelineError::InvalidConfig)?;
-    crate::inversion::xqsm(local_field_ppm, mask, grid, &bytes)
-        .map_err(|e| PipelineError::AlgorithmError(e.to_string()))
+    match tile {
+        Some((core, halo)) => crate::inversion::xqsm_tiled(
+            local_field_ppm, mask, grid, &bytes, &crate::inversion::TileConfig { core, halo }, progress,
+        ),
+        None => crate::inversion::xqsm(local_field_ppm, mask, grid, &bytes),
+    }
+    .map_err(|e| PipelineError::AlgorithmError(e.to_string()))
 }
 
 #[cfg(not(feature = "onnx"))]
@@ -209,6 +216,8 @@ fn run_xqsm(
     _local_field_ppm: &[f64],
     _mask: &[u8],
     _grid: &crate::Grid,
+    _tile: Option<(usize, usize)>,
+    _progress: &mut dyn FnMut(usize, usize),
 ) -> Result<Vec<f64>, PipelineError> {
     Err(PipelineError::InvalidConfig(
         "xQSM requires building qsm-core with the 'onnx' feature".into(),
@@ -229,6 +238,8 @@ pub fn run_nextqsm(
     mask: &[u8],
     grid: &crate::Grid,
     bdir: (f64, f64, f64),
+    tile: Option<(usize, usize)>,
+    progress: &mut dyn FnMut(usize, usize),
 ) -> Result<Vec<f64>, PipelineError> {
     let spec = crate::models::find_model("nextqsm")
         .ok_or_else(|| PipelineError::InvalidConfig("nextqsm not in model registry".into()))?;
@@ -238,8 +249,13 @@ pub fn run_nextqsm(
             format!("nextqsm expects 2 weight files (BFR, VJP), got {}", files.len()),
         ));
     };
-    crate::inversion::nextqsm(total_field_ppm, mask, grid, bdir, bf, vjp)
-        .map_err(|e| PipelineError::AlgorithmError(e.to_string()))
+    match tile {
+        Some((core, halo)) => crate::inversion::nextqsm_tiled(
+            total_field_ppm, mask, grid, bdir, bf, vjp, &crate::inversion::TileConfig { core, halo }, progress,
+        ),
+        None => crate::inversion::nextqsm(total_field_ppm, mask, grid, bdir, bf, vjp),
+    }
+    .map_err(|e| PipelineError::AlgorithmError(e.to_string()))
 }
 
 /// Stub when built without the `onnx` feature.
@@ -249,6 +265,8 @@ pub fn run_nextqsm(
     _mask: &[u8],
     _grid: &crate::Grid,
     _bdir: (f64, f64, f64),
+    _tile: Option<(usize, usize)>,
+    _progress: &mut dyn FnMut(usize, usize),
 ) -> Result<Vec<f64>, PipelineError> {
     Err(PipelineError::InvalidConfig(
         "NeXtQSM requires building qsm-core with the 'onnx' feature".into(),
@@ -264,6 +282,8 @@ fn run_qsmnet(
     mask: &[u8],
     grid: &crate::Grid,
     model_id: &str,
+    tile: Option<(usize, usize)>,
+    progress: &mut dyn FnMut(usize, usize),
 ) -> Result<Vec<f64>, PipelineError> {
     use crate::inversion::QsmnetNorm;
     let norm = match model_id {
@@ -275,8 +295,13 @@ fn run_qsmnet(
     })?;
     let bytes = crate::models::primary_weight_bytes(spec)
         .map_err(PipelineError::InvalidConfig)?;
-    crate::inversion::qsmnet(local_field_ppm, mask, grid, &bytes, &norm)
-        .map_err(|e| PipelineError::AlgorithmError(e.to_string()))
+    match tile {
+        Some((core, halo)) => crate::inversion::qsmnet_tiled(
+            local_field_ppm, mask, grid, &bytes, &norm, &crate::inversion::TileConfig { core, halo }, progress,
+        ),
+        None => crate::inversion::qsmnet(local_field_ppm, mask, grid, &bytes, &norm),
+    }
+    .map_err(|e| PipelineError::AlgorithmError(e.to_string()))
 }
 
 #[cfg(not(feature = "onnx"))]
@@ -285,6 +310,8 @@ fn run_qsmnet(
     _mask: &[u8],
     _grid: &crate::Grid,
     _model_id: &str,
+    _tile: Option<(usize, usize)>,
+    _progress: &mut dyn FnMut(usize, usize),
 ) -> Result<Vec<f64>, PipelineError> {
     Err(PipelineError::InvalidConfig(
         "QSMnet requires building qsm-core with the 'onnx' feature".into(),
@@ -327,28 +354,63 @@ fn run_qsmgan(local_field_ppm: &[f64], mask: &[u8], grid: &crate::Grid) -> Resul
 
 /// Source the IR2QSM weights and run inference (requires the `onnx` feature).
 #[cfg(feature = "onnx")]
-fn run_ir2qsm(local_field_ppm: &[f64], mask: &[u8], grid: &crate::Grid) -> Result<Vec<f64>, PipelineError> {
+fn run_ir2qsm(
+    local_field_ppm: &[f64],
+    mask: &[u8],
+    grid: &crate::Grid,
+    tile: Option<(usize, usize)>,
+    progress: &mut dyn FnMut(usize, usize),
+) -> Result<Vec<f64>, PipelineError> {
     let bytes = crate::models::primary_weight("ir2qsm").map_err(PipelineError::InvalidConfig)?;
-    crate::inversion::ir2qsm(local_field_ppm, mask, grid, &bytes)
-        .map_err(|e| PipelineError::AlgorithmError(e.to_string()))
+    match tile {
+        Some((core, halo)) => crate::inversion::ir2qsm_tiled(
+            local_field_ppm, mask, grid, &bytes, &crate::inversion::TileConfig { core, halo }, progress,
+        ),
+        None => crate::inversion::ir2qsm(local_field_ppm, mask, grid, &bytes),
+    }
+    .map_err(|e| PipelineError::AlgorithmError(e.to_string()))
 }
 
 /// Source the LPCNN proximal-CNN weights and run inference (requires the `onnx` feature).
 /// LPCNN's k-space data-consistency step uses the B0 direction.
 #[cfg(feature = "onnx")]
-fn run_lpcnn(local_field_ppm: &[f64], mask: &[u8], grid: &crate::Grid, bdir: (f64, f64, f64)) -> Result<Vec<f64>, PipelineError> {
+fn run_lpcnn(
+    local_field_ppm: &[f64],
+    mask: &[u8],
+    grid: &crate::Grid,
+    bdir: (f64, f64, f64),
+    tile: Option<(usize, usize)>,
+    progress: &mut dyn FnMut(usize, usize),
+) -> Result<Vec<f64>, PipelineError> {
     let bytes = crate::models::primary_weight("lpcnn").map_err(PipelineError::InvalidConfig)?;
-    crate::inversion::lpcnn(local_field_ppm, mask, grid, bdir, &bytes)
-        .map_err(|e| PipelineError::AlgorithmError(e.to_string()))
+    match tile {
+        Some((core, halo)) => crate::inversion::lpcnn_tiled(
+            local_field_ppm, mask, grid, bdir, &bytes, &crate::inversion::TileConfig { core, halo }, progress,
+        ),
+        None => crate::inversion::lpcnn(local_field_ppm, mask, grid, bdir, &bytes),
+    }
+    .map_err(|e| PipelineError::AlgorithmError(e.to_string()))
 }
 
 /// Source the MoDL-QSM prior-CNN weights and run inference (requires the `onnx` feature).
 /// Output is the STI χ33 component.
 #[cfg(feature = "onnx")]
-fn run_modl_qsm(local_field_ppm: &[f64], mask: &[u8], grid: &crate::Grid, bdir: (f64, f64, f64)) -> Result<Vec<f64>, PipelineError> {
+fn run_modl_qsm(
+    local_field_ppm: &[f64],
+    mask: &[u8],
+    grid: &crate::Grid,
+    bdir: (f64, f64, f64),
+    tile: Option<(usize, usize)>,
+    progress: &mut dyn FnMut(usize, usize),
+) -> Result<Vec<f64>, PipelineError> {
     let bytes = crate::models::primary_weight("modl-qsm").map_err(PipelineError::InvalidConfig)?;
-    crate::inversion::modl_qsm(local_field_ppm, mask, grid, bdir, &bytes)
-        .map_err(|e| PipelineError::AlgorithmError(e.to_string()))
+    match tile {
+        Some((core, halo)) => crate::inversion::modl_qsm_tiled(
+            local_field_ppm, mask, grid, bdir, &bytes, &crate::inversion::TileConfig { core, halo }, progress,
+        ),
+        None => crate::inversion::modl_qsm(local_field_ppm, mask, grid, bdir, &bytes),
+    }
+    .map_err(|e| PipelineError::AlgorithmError(e.to_string()))
 }
 
 #[cfg(not(feature = "onnx"))]
@@ -356,15 +418,28 @@ fn run_qsmgan(_f: &[f64], _m: &[u8], _g: &crate::Grid) -> Result<Vec<f64>, Pipel
     Err(PipelineError::InvalidConfig("QSMGAN requires building qsm-core with the 'onnx' feature".into()))
 }
 #[cfg(not(feature = "onnx"))]
-fn run_ir2qsm(_f: &[f64], _m: &[u8], _g: &crate::Grid) -> Result<Vec<f64>, PipelineError> {
+fn run_ir2qsm(
+    _f: &[f64],
+    _m: &[u8],
+    _g: &crate::Grid,
+    _tile: Option<(usize, usize)>,
+    _progress: &mut dyn FnMut(usize, usize),
+) -> Result<Vec<f64>, PipelineError> {
     Err(PipelineError::InvalidConfig("IR2QSM requires building qsm-core with the 'onnx' feature".into()))
 }
 #[cfg(not(feature = "onnx"))]
-fn run_lpcnn(_f: &[f64], _m: &[u8], _g: &crate::Grid, _b: (f64, f64, f64)) -> Result<Vec<f64>, PipelineError> {
+fn run_lpcnn(
+    _f: &[f64],
+    _m: &[u8],
+    _g: &crate::Grid,
+    _b: (f64, f64, f64),
+    _tile: Option<(usize, usize)>,
+    _progress: &mut dyn FnMut(usize, usize),
+) -> Result<Vec<f64>, PipelineError> {
     Err(PipelineError::InvalidConfig("LPCNN requires building qsm-core with the 'onnx' feature".into()))
 }
 #[cfg(not(feature = "onnx"))]
-fn run_modl_qsm(_f: &[f64], _m: &[u8], _g: &crate::Grid, _b: (f64, f64, f64)) -> Result<Vec<f64>, PipelineError> {
+fn run_modl_qsm(_f: &[f64], _m: &[u8], _g: &crate::Grid, _b: (f64, f64, f64), _tile: Option<(usize, usize)>, _progress: &mut dyn FnMut(usize, usize)) -> Result<Vec<f64>, PipelineError> {
     Err(PipelineError::InvalidConfig("MoDL-QSM requires building qsm-core with the 'onnx' feature".into()))
 }
 

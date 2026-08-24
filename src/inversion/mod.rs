@@ -30,6 +30,8 @@ pub mod whqsm;
 pub mod hdqsm;
 pub mod amp_pe;
 #[cfg(feature = "onnx")]
+pub mod tiled;
+#[cfg(feature = "onnx")]
 pub mod xqsm;
 #[cfg(feature = "onnx")]
 pub mod qsmnet;
@@ -68,9 +70,13 @@ pub use whqsm::{whqsm, WhQsmParams};
 pub use hdqsm::{hdqsm, HdQsmParams};
 pub use amp_pe::{amp_pe, AmpPeParams};
 #[cfg(feature = "onnx")]
-pub use xqsm::xqsm;
+pub use tiled::{
+    tile_patch_size, tiled_field_inversion, tiled_scatter, tiled_volume_algorithm, Tile, TileConfig,
+};
 #[cfg(feature = "onnx")]
-pub use qsmnet::{qsmnet, QsmnetNorm};
+pub use xqsm::{xqsm, xqsm_tiled};
+#[cfg(feature = "onnx")]
+pub use qsmnet::{qsmnet, qsmnet_tiled, QsmnetNorm};
 #[cfg(feature = "onnx")]
 pub use autoqsm::autoqsm;
 #[cfg(feature = "onnx")]
@@ -82,10 +88,10 @@ pub use iqfm::{iqfm, iqfm_multi_echo};
 #[cfg(feature = "onnx")]
 pub use qsmgan::qsmgan;
 #[cfg(feature = "onnx")]
-pub use lpcnn::{lpcnn, LPCNN_ALPHA, LPCNN_GT_MEAN, LPCNN_GT_STD};
+pub use lpcnn::{lpcnn, lpcnn_tiled, LPCNN_ALPHA, LPCNN_GT_MEAN, LPCNN_GT_STD};
 #[cfg(feature = "onnx")]
-pub use ir2qsm::ir2qsm;
+pub use ir2qsm::{ir2qsm, ir2qsm_tiled};
 #[cfg(feature = "onnx")]
-pub use modl_qsm::{modl_qsm, MODL_ALPHA, MODL_MEAN, MODL_STD};
+pub use modl_qsm::{modl_qsm, modl_qsm_tiled, MODL_ALPHA, MODL_MEAN, MODL_STD};
 #[cfg(feature = "onnx")]
-pub use nextqsm::{nextqsm, nextqsm_padded, NEXTQSM_LAMBDAS};
+pub use nextqsm::{nextqsm, nextqsm_padded, nextqsm_tiled, NEXTQSM_LAMBDAS};

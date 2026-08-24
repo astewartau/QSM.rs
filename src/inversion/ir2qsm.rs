@@ -92,3 +92,21 @@ pub fn ir2qsm(
     }
     Ok(chi)
 }
+
+/// Memory-bounded IR2QSM via overlap-tiling — the IR2U-net run patch-by-patch (for 32-bit WASM,
+/// where whole-volume [`ir2qsm`] overflows the heap on clinical data). No normalization; the
+/// net's 3 pool levels require a `/8` patch. Approximates whole-volume up to tile-boundary
+/// error; see [`crate::inversion::tiled`].
+pub fn ir2qsm_tiled(
+    local_field_ppm: &[f64],
+    mask: &[u8],
+    grid: &Grid,
+    onnx: &[u8],
+    cfg: &super::tiled::TileConfig,
+    progress: impl FnMut(usize, usize),
+) -> Result<Vec<f64>, OnnxError> {
+    let model = OnnxModel::load(onnx)?;
+    super::tiled::tiled_field_inversion(
+        local_field_ppm, mask, grid, &model, SIZE_DIVISOR, cfg, |v| v as f32, |o| o as f64, progress,
+    )
+}

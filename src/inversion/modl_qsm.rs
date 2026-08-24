@@ -206,3 +206,23 @@ fn run_prior(model: &OnnxModel, vol: &[f64], grid: &Grid) -> Result<Vec<f64>, On
     }
     Ok(v)
 }
+
+/// Memory-bounded MoDL-QSM via whole-algorithm overlap-tiling — the full unrolled net runs on
+/// each patch sub-volume. MoDL's data-consistency step is a global k-space operation, so tiling
+/// is **strongly off-design** and approximate; prefer a whole-volume run (e.g. QSMxT). See
+/// [`crate::inversion::tiled::tiled_volume_algorithm`].
+pub fn modl_qsm_tiled(
+    local_field_ppm: &[f64],
+    mask: &[u8],
+    grid: &Grid,
+    bdir: (f64, f64, f64),
+    prior_onnx: &[u8],
+    cfg: &super::tiled::TileConfig,
+    progress: impl FnMut(usize, usize),
+) -> Result<Vec<f64>, OnnxError> {
+    super::tiled::tiled_volume_algorithm(
+        local_field_ppm, mask, grid, 1, cfg,
+        |f, m, g| modl_qsm(f, m, g, bdir, prior_onnx),
+        progress,
+    )
+}

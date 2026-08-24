@@ -130,3 +130,23 @@ fn run_gen(model: &OnnxModel, vol: &[f64], grid: &Grid) -> Result<Vec<f64>, Onnx
     }
     Ok(v)
 }
+
+/// Memory-bounded LPCNN via whole-algorithm overlap-tiling — the entire unrolled net is run on
+/// each patch sub-volume so peak memory is bounded (for the 32-bit WASM heap). LPCNN's k-space
+/// data-consistency step is global, so tiling is **strongly off-design** and approximate; for
+/// real work run whole-volume (e.g. in QSMxT). See [`crate::inversion::tiled::tiled_volume_algorithm`].
+pub fn lpcnn_tiled(
+    local_field_ppm: &[f64],
+    mask: &[u8],
+    grid: &Grid,
+    bdir: (f64, f64, f64),
+    gen_onnx: &[u8],
+    cfg: &super::tiled::TileConfig,
+    progress: impl FnMut(usize, usize),
+) -> Result<Vec<f64>, OnnxError> {
+    super::tiled::tiled_volume_algorithm(
+        local_field_ppm, mask, grid, 8, cfg,
+        |f, m, g| lpcnn(f, m, g, bdir, gen_onnx),
+        progress,
+    )
+}
