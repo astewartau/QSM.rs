@@ -129,4 +129,71 @@ impl OnnxModel {
         }
         Ok(out.swap_remove(0))
     }
+
+    /// Compile a **reusable** execution plan specialized to fixed input shapes.
+    ///
+    /// [`run`](Self::run) re-clones and re-optimizes the whole graph on *every* call — fine for
+    /// one-shot whole-volume inference, but wasteful when running many equal-shaped tensors
+    /// (e.g. every patch of a tiled inversion). Build one [`OnnxPlan`] for the patch shape and
+    /// reuse it: tract's optimizer (`into_optimized` — constant-folding conv weights, operator
+    /// fusion, plan building) then runs exactly once instead of per patch.
+    pub fn plan_for(&self, input_shapes: &[&[usize]]) -> Result<OnnxPlan, OnnxError> {
+        let mut model = self.model.clone();
+        for (i, shape) in input_shapes.iter().enumerate() {
+            model
+                .set_input_fact(i, f32::fact(*shape).into())
+                .map_err(|e| OnnxError::Shape(e.to_string()))?;
+        }
+        // Same optimize-or-fallback strategy as `run`, but paid once here, not per call.
+        let plan = match model.clone().into_optimized().and_then(|m| m.into_runnable()) {
+            Ok(p) => p,
+            Err(_) => model
+                .into_typed()
+                .and_then(|m| m.into_runnable())
+                .map_err(|e| OnnxError::Load(e.to_string()))?,
+        };
+        Ok(OnnxPlan { plan })
+    }
+}
+
+/// A compiled execution plan for fixed input shapes, built by [`OnnxModel::plan_for`]. Running
+/// it skips graph optimization, so reusing one plan across many equal-shaped inputs (tiled
+/// inference) amortizes the optimizer to a single up-front cost.
+pub struct OnnxPlan {
+    plan: TypedRunnableModel<TypedModel>,
+}
+
+impl OnnxPlan {
+    /// Run the plan with `inputs` bound to graph inputs in order (shapes must match the ones
+    /// this plan was compiled for); returns every graph output as an `f32` [`Tensor`].
+    pub fn run(&self, inputs: &[Tensor]) -> Result<Vec<Tensor>, OnnxError> {
+        let mut feeds: TVec<TValue> = tvec!();
+        for inp in inputs {
+            let t = tract_onnx::prelude::Tensor::from_shape(&inp.shape, &inp.data)
+                .map_err(|e| OnnxError::Shape(e.to_string()))?;
+            feeds.push(t.into());
+        }
+        let result = self.plan.run(feeds).map_err(|e| OnnxError::Run(e.to_string()))?;
+        result
+            .iter()
+            .map(|t| {
+                let view = t
+                    .to_array_view::<f32>()
+                    .map_err(|e| OnnxError::Run(e.to_string()))?;
+                Ok(Tensor {
+                    shape: view.shape().to_vec(),
+                    data: view.iter().copied().collect(),
+                })
+            })
+            .collect()
+    }
+
+    /// Convenience for single-input / single-output nets.
+    pub fn run_single(&self, input: &Tensor) -> Result<Tensor, OnnxError> {
+        let mut out = self.run(std::slice::from_ref(input))?;
+        if out.is_empty() {
+            return Err(OnnxError::Run("model produced no outputs".into()));
+        }
+        Ok(out.swap_remove(0))
+    }
 }

@@ -198,3 +198,25 @@ fn run_unet(model: &OnnxModel, vol: &[f64], grid: &Grid) -> Result<Vec<f64>, Onn
 fn l2(v: &[f64]) -> f64 {
     v.iter().map(|&a| a * a).sum::<f64>().sqrt()
 }
+
+/// Memory-bounded NeXtQSM via whole-algorithm overlap-tiling — the full VarNet gradient-descent
+/// loop runs on each patch sub-volume (each internally padded to /64). NeXtQSM's forward model is
+/// global, so tiling is **strongly off-design** and approximate; prefer a whole-volume run (e.g.
+/// QSMxT). See [`crate::inversion::tiled::tiled_volume_algorithm`].
+#[allow(clippy::too_many_arguments)]
+pub fn nextqsm_tiled(
+    total_field: &[f64],
+    mask: &[u8],
+    grid: &Grid,
+    bdir: (f64, f64, f64),
+    bf_onnx: &[u8],
+    vjp_onnx: &[u8],
+    cfg: &super::tiled::TileConfig,
+    progress: impl FnMut(usize, usize),
+) -> Result<Vec<f64>, OnnxError> {
+    super::tiled::tiled_volume_algorithm(
+        total_field, mask, grid, 64, cfg,
+        |f, m, g| nextqsm(f, m, g, bdir, bf_onnx, vjp_onnx),
+        progress,
+    )
+}
