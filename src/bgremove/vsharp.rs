@@ -20,7 +20,9 @@ use crate::kernels::smv::{smv_kernel, erode_mask_smv};
 #[cfg_attr(feature = "introspection", derive(serde::Serialize))]
 #[derive(Clone, Debug)]
 pub struct VsharpParams {
-    /// Deconvolution threshold
+    /// Deconvolution (TSVD) threshold: k-space frequencies where |1 - S| < threshold are dropped
+    /// rather than divided through. Higher = more regularisation, more robust to a noisy input field
+    /// (default: 0.2).
     pub threshold: f64,
     /// Maximum (starting) SMV kernel radius in mm (default: 12.0)
     pub max_radius: f64,
@@ -31,7 +33,11 @@ pub struct VsharpParams {
 impl Default for VsharpParams {
     fn default() -> Self {
         Self {
-            threshold: 0.05,
+            // 0.2 (was 0.05): the deconvolution amplifies structured error in a noisy estimated field,
+            // and real pipelines always feed V-SHARP an estimated (not ground-truth) field. A stronger
+            // regularisation is robust to that; 0.05 under-regularises and only wins on a clean field
+            // (which BFR is never run on in practice). See the PR for the benchmark.
+            threshold: 0.2,
             max_radius: 12.0,
             min_radius: 1.0,
         }
