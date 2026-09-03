@@ -73,7 +73,11 @@ pub struct MediParams {
 impl Default for MediParams {
     fn default() -> Self {
         Self {
-            lambda: 7.5e-5,
+            // Tuned for the field in RADIANS (the scale `medi` expects — the data
+            // term uses exp(i·field)). At 7T/4ms a typical local field is ~0.1 rad
+            // std; 1e-3 matches Cornell MEDI's smoothness there. A smaller λ that
+            // "looks fine" is usually a symptom of feeding a ppm-scale field.
+            lambda: 1e-3,
             merit: false,
             smv: true,
             smv_radius: 5.0,
