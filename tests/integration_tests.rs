@@ -483,21 +483,31 @@ fn test_inversion_medi() {
     // MEDI needs magnitude and noise std; use uniform noise std for synthetic data
     let n_std = vec![1.0; n_total];
 
+    // MEDI is nonlinear (data term uses exp(i·field)), so the local field must be
+    // in RADIANS. Convert the ppm fieldmap with B0 and TE exactly as the
+    // qsmxt/QSM-CI pipeline does, run MEDI, then convert χ back to ppm. Feeding the
+    // raw ppm field here (~7.5× smaller) would exercise a near-linear, trivially
+    // conditioned regime and validate the default λ at the wrong scale.
+    let gamma_hz = 42.576e6;
+    let ppm_to_rad =
+        2.0 * std::f64::consts::PI * gamma_hz * data.field_strength * data.echo_times[0] * 1e-6;
+    let field_rad: Vec<f64> = data.fieldmap_local.iter().map(|&v| v * ppm_to_rad).collect();
+
+    // Certify the SHIPPED default parameters (smv disabled to match the already
+    // background-removed local field, as the QSM-CI submission runs it).
+    let params = MediParams { smv: false, ..MediParams::default() };
     let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
-    let (result, elapsed) = run_timed!("MEDI", inversion::medi(
-        &data.fieldmap_local,
+    let (result_rad, elapsed) = run_timed!("MEDI", inversion::medi(
+        &field_rad,
         &n_std,
         &data.mag_echoes[0],
         &data.mask,
         &grid,
         data.b0_dir,
-        &MediParams {
-            lambda: 7.5e-5, merit: false, smv: false, smv_radius: 5.0,
-            data_weighting: 1, percentage: 0.3, cg_tol: 0.01, cg_max_iter: 10,
-            max_iter: 30, tol: 0.1,
-        },
+        &params,
         |_, _| {},
     ));
+    let result: Vec<f64> = result_rad.iter().map(|&v| v / ppm_to_rad).collect();
 
     let res = TestResult::new("MEDI", &result, &data.chi, &data.mask, data.dims);
     res.print_with_time(elapsed);
