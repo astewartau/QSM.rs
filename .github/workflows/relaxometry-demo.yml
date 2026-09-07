@@ -87,6 +87,9 @@ jobs:
         run: |
           fig() {  # emit an image only if it was rendered
             [ -f "figures/$1.png" ] && echo "![$1](figures/$1.png)"
+            return 0   # a missing figure must not fail the block: this is the last statement
+                       # in `{ ... } > report.md`, so returning non-zero here would abort the
+                       # step before the comment is ever posted.
           }
           {
             echo "## 🧪 Relaxometry toolkit demo"
@@ -102,23 +105,12 @@ jobs:
                   echo "| ${name} | ${metric} | ${value} |"
                 done
             echo ""
-            echo "### EPG R2 from imperfectly-refocused MESE"
-            echo "EPG recovers the true R2 (bias ≈ 0) and the refocusing B1;"
-            echo "a mono-exponential fit is biased low. Truth / EPG / mono-exp:"
+            echo "### Maps"
+            echo "EPG recovers the true R2 (bias ≈ 0) and the refocusing B1; a mono-exponential"
+            echo "fit is biased low. The denoising and unringing rows carry a difference panel:"
+            echo "before/after are near-identical by eye, and what was removed is the point."
             echo ""
-            fig relax_r2_truth
-            fig relax_r2_epg
-            fig relax_r2_monoexp
-            echo ""
-            echo "### R2' = R2\* − R2 (truth vs derived)"
-            fig relax_r2prime_truth
-            fig relax_r2prime_derived
-            echo ""
-            echo "### MP-PCA denoising (noisy R2\* → denoised)"
-            fig relax_denoise_after
-            echo ""
-            echo "### Gibbs unringing (k-space-truncated R2\* map → unrung)"
-            fig relax_unring_after
+            fig stage_relaxometry
           } > report.md
           for attempt in 1 2 3 4 5; do
             if cml comment create report.md; then

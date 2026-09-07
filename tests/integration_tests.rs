@@ -1006,9 +1006,12 @@ fn test_bet() {
     println!("BET             Dice={:.4}      {:>10.2?}", dice, elapsed);
     println!("RESULT:BET,{:.6},-,-,{:.2}", dice, elapsed.as_secs_f64());
 
-    // Save slices: result = predicted mask as f64, mask overlay = ground truth
+    // Save slices: result = predicted mask as f64, mask overlay = ground truth. The magnitude
+    // BET actually segments goes out too, so the figure can draw both mask boundaries on the
+    // image they were derived from rather than showing a binary blob on its own.
     let predicted_f64: Vec<f64> = predicted_mask.iter().map(|&v| v as f64).collect();
     common::save_center_slices(&predicted_f64, &data.mask, data.dims, "bet");
+    common::save_center_slices(&data.mag_echoes[0], &data.mask, data.dims, "bet_magnitude");
 
     assert!(dice > 0.7, "BET Dice coefficient too low: {}", dice);
 }
