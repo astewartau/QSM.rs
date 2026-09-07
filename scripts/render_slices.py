@@ -2,13 +2,24 @@
 """Render center slices from binary files produced by QSM-core integration tests.
 
 Each .bin file contains center axial, coronal, and sagittal slices of a 3D
-result volume plus corresponding mask slices. This script reads them and
-produces a 3-panel matplotlib figure per algorithm.
+result volume plus corresponding mask slices.
+
+Two kinds of output:
+
+* **Stage montages** (`stage_*.png`) — one figure per pipeline stage, laying every
+  method in that stage out as centre-axial panels on a shared window and colorbar,
+  with the ground truth first. This is what the PR comment shows: comparing ~20
+  dipole methods is only practical side by side, and it replaces the wall of ~50
+  individual figures the comment used to carry.
+* **Individual 3-panel figures** — axial/coronal/sagittal for anything NOT covered by
+  a montage (BET, SWI, R2*/T2*, before/after pairs, and so on), where there is nothing
+  to compare against and the extra views are the point.
 
 Usage:
     python render_slices.py <input_dir> <output_dir>
 """
 
+import math
 import struct
 import sys
 from pathlib import Path
@@ -74,6 +85,31 @@ NAMES = {
     "relaxchisep_decompose_dia": "DECOMPOSE χ− (magnitude)",
     "relaxchisep_hcchisep_para": "HC-ChiSep χ+",
     "relaxchisep_hcchisep_dia": "HC-ChiSep χ− (magnitude)",
+    "ground_truth_local_field": "Ground truth",
+    "ground_truth_chi": "Ground truth",
+    "chisep_para_truth": "Ground truth",
+    "chisep_dia_truth": "Ground truth",
+    "inversion_ilsqr": "iLSQR",
+    "combined_tfi": "TFI (Combined)",
+    "dl_qsmgan": "QSMGAN",
+    "dl_lpcnn": "LPCNN",
+    "dl_ir2qsm": "iR2QSM",
+    "dl_modl_qsm": "MoDL-QSM",
+    "dl_nextqsm": "NeXtQSM",
+    "dl_iqfm": "iQFM",
+    "chisep_xsepnet_para": "xSepNet χ+",
+    "chisep_xsepnet_dia": "xSepNet χ− (magnitude)",
+}
+
+# Panel labels inside a stage montage. The montage already says which stage and, for
+# χ-separation, which source a row is — so the per-panel label only needs the method.
+MONTAGE_LABELS = {
+    "chisep_para": "chi-sep iLSQR", "chisep_dia": "chi-sep iLSQR",
+    "chisep_xsepnet_para": "xSepNet", "chisep_xsepnet_dia": "xSepNet",
+    "relaxchisep_r2starqsm_para": "R2*-QSM", "relaxchisep_r2starqsm_dia": "R2*-QSM",
+    "relaxchisep_wavesep_para": "WaveSep", "relaxchisep_wavesep_dia": "WaveSep",
+    "relaxchisep_decompose_para": "DECOMPOSE", "relaxchisep_decompose_dia": "DECOMPOSE",
+    "relaxchisep_hcchisep_para": "HC-ChiSep", "relaxchisep_hcchisep_dia": "HC-ChiSep",
 }
 
 # Fixed display windows (ppm)
@@ -134,6 +170,107 @@ WINDOWS = {
     "relaxchisep_hcchisep_para": (0, 0.1),
     "relaxchisep_hcchisep_dia": (0, 0.1),
 }
+
+
+# Stage montages. Each entry: (output stem, title, colorbar unit, display window, rows).
+# A row is a list of slugs; missing slugs are dropped so a partial CI run (only some test
+# categories triggered) still produces a sensible montage of what actually ran.
+#
+# The dipole montage deliberately includes the stage-SPANNING methods (combined BFR+dipole,
+# and full pipeline). They consume different inputs, so the sub-row labels say so rather than
+# implying a like-for-like comparison with the plain dipole methods.
+MONTAGES = [
+    ("stage_bfr", "Background field removal", "ppm", (-0.025, 0.025), [
+        ["ground_truth_local_field", "bgremove_sharp", "bgremove_resharp", "bgremove_vsharp",
+         "bgremove_pdf"],
+        ["bgremove_ismv", "bgremove_lbv", "pipeline_harperella", "pipeline_iharperella"],
+    ], None),
+    ("stage_dipole", "Susceptibility maps", "ppm", (-0.1, 0.1), [
+        ["ground_truth_chi", "inversion_tkd", "inversion_tsvd", "inversion_tikhonov",
+         "inversion_tv", "inversion_rts"],
+        ["inversion_ilsqr", "inversion_medi", "inversion_nltv", "inversion_ndi",
+         "inversion_fansi", "inversion_fansi_tgv"],
+        ["inversion_l1qsm", "inversion_whqsm", "inversion_hdqsm", "inversion_amp_pe"],
+        ["dl_qsmgan", "dl_lpcnn", "dl_ir2qsm", "dl_modl_qsm", "dl_nextqsm"],
+        ["combined_tgv", "combined_tfi", "pipeline_tgv", "pipeline_qsmart",
+         "pipeline_qsmart_tikhonov"],
+    ], ["dipole inversion", "dipole inversion", "dipole inversion",
+        "deep learning", "spans (BFR+dipole / full pipeline)"]),
+    ("stage_chisep", "χ-separation", "ppm", (0, 0.1), [
+        ["chisep_para_truth", "chisep_para", "chisep_xsepnet_para",
+         "relaxchisep_r2starqsm_para", "relaxchisep_wavesep_para",
+         "relaxchisep_decompose_para", "relaxchisep_hcchisep_para"],
+        ["chisep_dia_truth", "chisep_dia", "chisep_xsepnet_dia",
+         "relaxchisep_r2starqsm_dia", "relaxchisep_wavesep_dia",
+         "relaxchisep_decompose_dia", "relaxchisep_hcchisep_dia"],
+    ], ["χ+ (para)", "χ− (dia, magnitude)"]),
+]
+
+# Every slug a montage covers; these get no individual 3-panel figure.
+MONTAGED = {slug for _, _, _, _, rows, _ in MONTAGES for row in rows for slug in row}
+
+
+def load_axial(path):
+    """Centre axial slice, masked.
+
+    The ground truth is stored unmasked — air reaches ~9 ppm and saturates the display
+    window, which would make the reference panel unreadable next to the masked method
+    panels. The mask is already in the file, so apply it and let NaN render as the
+    figure background.
+    """
+    with open(path, "rb") as f:
+        nx, ny, nz = struct.unpack("<QQQ", f.read(24))
+        axial = np.frombuffer(f.read(nx * ny * 8), dtype="<f8").reshape(ny, nx)
+        f.read(nx * nz * 8)      # coronal result
+        f.read(ny * nz * 8)      # sagittal result
+        amask = np.frombuffer(f.read(nx * ny), dtype=np.uint8).reshape(ny, nx)
+    return np.where(amask > 0, axial, np.nan)
+
+
+def render_montage(input_dir, stem, title, unit, window, rows, row_labels, output_path):
+    """One figure per stage: centre-axial panels on a shared window and colorbar."""
+    kept, kept_labels = [], []
+    for i, row in enumerate(rows):
+        present = [s for s in row if (input_dir / f"{s}.bin").exists()]
+        if present:
+            kept.append(present)
+            kept_labels.append(row_labels[i] if row_labels else None)
+    if not kept:
+        return False
+
+    ncol = max(len(r) for r in kept)
+    fig, axes = plt.subplots(len(kept), ncol, figsize=(2.0 * ncol, 2.45 * len(kept)),
+                             squeeze=False)
+    cmap = plt.get_cmap("gray").copy()
+    cmap.set_bad("#cccccc")
+    im = None
+    for ri, row in enumerate(kept):
+        for ci in range(ncol):
+            ax = axes[ri][ci]
+            ax.axis("off")
+            if ci >= len(row):
+                continue
+            slug = row[ci]
+            im = ax.imshow(load_axial(input_dir / f"{slug}.bin"), cmap=cmap,
+                           vmin=window[0], vmax=window[1], origin="lower")
+            is_truth = "truth" in slug
+            label = MONTAGE_LABELS.get(slug, NAMES.get(slug, slug))
+            ax.set_title(label, fontsize=9,
+                         fontweight="bold" if is_truth else "normal",
+                         color="#0a7d3a" if is_truth else "black")
+        # Only label a row when the group changes, so a group spanning several rows reads
+        # as one block instead of repeating its name down the side.
+        if kept_labels[ri] and (ri == 0 or kept_labels[ri] != kept_labels[ri - 1]):
+            axes[ri][0].text(-0.09, 0.5, kept_labels[ri], transform=axes[ri][0].transAxes,
+                             rotation=90, va="center", ha="center", fontsize=9.5,
+                             fontweight="bold", color="#444444")
+    fig.suptitle(f"{title} — centre axial slice", fontsize=13, fontweight="bold")
+    fig.colorbar(im, ax=axes.ravel().tolist(), shrink=0.62, aspect=34, pad=0.015, label=unit)
+    fig.savefig(output_path, dpi=110, bbox_inches="tight", facecolor="white")
+    plt.close(fig)
+    n = sum(len(r) for r in kept)
+    print(f"  Rendered {output_path} ({n} panels)")
+    return True
 
 
 def load_slices(path):
@@ -236,7 +373,17 @@ def main():
     }
 
     print(f"Rendering figures from {len(bin_files)} files...")
-    rendered = set()
+
+    # Stage montages first — these are what the PR comment embeds.
+    for stem, title, unit, window, rows, row_labels in MONTAGES:
+        render_montage(input_dir, stem, title, unit, window, rows, row_labels,
+                       output_dir / f"{stem}.png")
+
+    # Slugs covered by a montage get no individual figure: the montage replaces them,
+    # which is the whole point of consolidating. Everything else (BET, SWI, R2*/T2*,
+    # before/after pairs) still gets its 3-panel axial/coronal/sagittal figure, since
+    # there is nothing to compare it against and the extra views carry the information.
+    rendered = set(MONTAGED)
     for slug, before_slug in BEFORE_AFTER.items():
         after_file = input_dir / f"{slug}.bin"
         before_file = input_dir / f"{before_slug}.bin"

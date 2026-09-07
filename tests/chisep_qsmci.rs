@@ -80,6 +80,10 @@ fn test_chi_sep_ilsqr_qsmci() {
     chisep_score("chi_sep_ilsqr χ−", &dia_mag, &ph.gt_dia, &ph.mask, ph.dims, secs);
 
     // Center-slice figures for the CI PR comment (rendered by render_slices.py).
+    // The ground truth is saved too, so the consolidated χ-separation montage can show a
+    // reference panel alongside the methods, as the BFR and dipole montages already do.
+    save_center_slices(&ph.gt_para, &ph.mask, ph.dims, "chisep_para_truth");
+    save_center_slices(&ph.gt_dia, &ph.mask, ph.dims, "chisep_dia_truth");
     save_center_slices(&chi_pos, &ph.mask, ph.dims, "chisep_para");
     save_center_slices(&dia_mag, &ph.mask, ph.dims, "chisep_dia");
 

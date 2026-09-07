@@ -1160,7 +1160,9 @@ jobs:
           python-version: "3.x"
 
       - name: Render figures
-        continue-on-error: true
+        # Deliberately NOT continue-on-error: the PR comment's figures are now three stage
+        # montages rather than ~50 individual images, so a renderer crash would silently
+        # empty the comment instead of dropping one picture. Fail loudly instead.
         run: |
           if [ -n "$(ls slices/ 2>/dev/null)" ]; then
             pip install matplotlib numpy
@@ -1290,7 +1292,7 @@ jobs:
               echo ""
               echo "$TABLE"
               echo ""
-              emit_figures bgremove_sharp bgremove_resharp bgremove_vsharp bgremove_pdf bgremove_ismv bgremove_lbv
+              emit_figures stage_bfr
             }
 
             TABLE=$(emit_table "test_pipeline_" harperella iharperella) && {
@@ -1299,7 +1301,6 @@ jobs:
               echo ""
               echo "$TABLE"
               echo ""
-              emit_figures pipeline_harperella pipeline_iharperella
             }
 
             TABLE=$(emit_chi_table "test_inversion_" tkd tsvd tikhonov tv rts ilsqr medi nltv ndi fansi fansi_tgv l1qsm whqsm hdqsm amp_pe) && {
@@ -1308,7 +1309,7 @@ jobs:
               echo ""
               echo "$TABLE"
               echo ""
-              emit_figures inversion_tkd inversion_tsvd inversion_tikhonov inversion_tv inversion_rts inversion_ilsqr inversion_medi inversion_nltv inversion_ndi inversion_fansi inversion_fansi_tgv inversion_l1qsm inversion_whqsm inversion_hdqsm inversion_amp_pe
+              emit_figures stage_dipole
             }
 
             TABLE=$(emit_chi_table "test_dl_" qsmgan lpcnn ir2qsm modl_qsm nextqsm) && {
@@ -1317,7 +1318,6 @@ jobs:
               echo ""
               echo "$TABLE"
               echo ""
-              emit_figures dl_qsmgan dl_lpcnn dl_ir2qsm dl_modl_qsm dl_nextqsm
             }
 
             TABLE=$(emit_table "test_dl_" iqfm) && {
@@ -1360,7 +1360,6 @@ jobs:
               echo ""
               echo "$TABLE"
               echo ""
-              emit_figures combined_tgv combined_tfi
             }
 
             TABLE=$(emit_chi_table "test_pipeline_" tgv qsmart qsmart_tikhonov) && {
@@ -1369,7 +1368,6 @@ jobs:
               echo ""
               echo "$TABLE"
               echo ""
-              emit_figures pipeline_tgv pipeline_qsmart pipeline_qsmart_tikhonov
             }
 
             if [ -f "metrics/test_bias_correction.csv" ] || [ -f "metrics/test_swi.csv" ] || [ -f "metrics/test_r2star_t2star.csv" ]; then
@@ -1402,12 +1400,7 @@ jobs:
               echo ""
               echo "$TABLE"
               echo ""
-              emit_figures chisep_para chisep_dia \
-                chisep_xsepnet_para chisep_xsepnet_dia \
-                relaxchisep_r2starqsm_para relaxchisep_r2starqsm_dia \
-                relaxchisep_wavesep_para relaxchisep_wavesep_dia \
-                relaxchisep_decompose_para relaxchisep_decompose_dia \
-                relaxchisep_hcchisep_para relaxchisep_hcchisep_dia
+              emit_figures stage_chisep
             }
           } > report.md
           # Retry with backoff — `cml comment create` hits the GitHub API and can be
