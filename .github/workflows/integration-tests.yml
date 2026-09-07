@@ -1058,40 +1058,40 @@ jobs:
             echo "- **Code coverage:** ${COVERAGE:-N/A}%"
             echo ""
 
-            TABLE=$(emit_table "test_bgremove_" sharp resharp vsharp pdf ismv lbv) && {
+            if TABLE=$(emit_table "test_bgremove_" sharp resharp vsharp pdf ismv lbv); then
               echo "## Background Field Removal"
               echo "*Compared against ground truth local field map*"
               echo ""
               echo "$TABLE"
-            }
+            fi
 
-            TABLE=$(emit_table "test_pipeline_" harperella iharperella) && {
+            if TABLE=$(emit_table "test_pipeline_" harperella iharperella); then
               echo "## Combined Phase Unwrapping + Background Removal"
               echo "*Compared against ground truth local field map (input: wrapped phase)*"
               echo ""
               echo "$TABLE"
-            }
+            fi
 
-            TABLE=$(emit_chi_table "test_inversion_" tkd tsvd tikhonov tv rts ilsqr medi nltv ndi fansi fansi_tgv l1qsm whqsm hdqsm amp_pe) && {
+            if TABLE=$(emit_chi_table "test_inversion_" tkd tsvd tikhonov tv rts ilsqr medi nltv ndi fansi fansi_tgv l1qsm whqsm hdqsm amp_pe); then
               echo "## Dipole Inversion"
               echo "*Compared against ground truth susceptibility map*"
               echo ""
               echo "$TABLE"
-            }
+            fi
 
-            TABLE=$(emit_chi_table "test_dl_" qsmgan lpcnn ir2qsm modl_qsm nextqsm) && {
+            if TABLE=$(emit_chi_table "test_dl_" qsmgan lpcnn ir2qsm modl_qsm nextqsm); then
               echo "## Deep Learning — Dipole Inversion"
               echo "*Compared against ground truth susceptibility map (NeXtQSM: total field in; others: local field in)*"
               echo ""
               echo "$TABLE"
-            }
+            fi
 
-            TABLE=$(emit_table "test_dl_" iqfm) && {
+            if TABLE=$(emit_table "test_dl_" iqfm); then
               echo "## Deep Learning — Field Mapping"
               echo "*iQFM: wrapped phase → local field, vs ground truth local field*"
               echo ""
               echo "$TABLE"
-            }
+            fi
 
             if [ -f "metrics/test_bet.csv" ]; then
               echo "## Brain Extraction"
@@ -1109,19 +1109,19 @@ jobs:
               echo ""
             fi
 
-            TABLE=$(emit_chi_table "test_combined_" tgv tfi) && {
+            if TABLE=$(emit_chi_table "test_combined_" tgv tfi); then
               echo "## Combined Background Removal + Dipole Inversion"
               echo "*Compared against ground truth susceptibility map (input: total field map)*"
               echo ""
               echo "$TABLE"
-            }
+            fi
 
-            TABLE=$(emit_chi_table "test_pipeline_" tgv qsmart qsmart_tikhonov) && {
+            if TABLE=$(emit_chi_table "test_pipeline_" tgv qsmart qsmart_tikhonov); then
               echo "## Full Pipeline"
               echo "*Compared against ground truth susceptibility map*"
               echo ""
               echo "$TABLE"
-            }
+            fi
 
             if [ -f "metrics/test_bias_correction.csv" ] || [ -f "metrics/test_swi.csv" ] || [ -f "metrics/test_r2star_t2star.csv" ]; then
               echo "## Utilities"
@@ -1146,12 +1146,12 @@ jobs:
               echo ""
             fi
 
-            TABLE=$(emit_chisep_table) && {
+            if TABLE=$(emit_chisep_table); then
               echo "## χ-Separation"
               echo "*Paramagnetic (χ+) / diamagnetic (χ−) source maps vs ground truth (QSM-CI chisep phantom)*"
               echo ""
               echo "$TABLE"
-            }
+            fi
           } >> $GITHUB_STEP_SUMMARY
 
       - name: Setup Python
@@ -1286,41 +1286,41 @@ jobs:
             echo "- **Code coverage:** ${COVERAGE:-N/A}%"
             echo ""
 
-            TABLE=$(emit_table "test_bgremove_" sharp resharp vsharp pdf ismv lbv) && {
+            if TABLE=$(emit_table "test_bgremove_" sharp resharp vsharp pdf ismv lbv); then
               echo "### Background Field Removal"
               echo "*Compared against ground truth local field map*"
               echo ""
               echo "$TABLE"
               echo ""
               emit_figures stage_bfr
-            }
+            fi
 
-            TABLE=$(emit_table "test_pipeline_" harperella iharperella) && {
+            if TABLE=$(emit_table "test_pipeline_" harperella iharperella); then
               echo "### Combined Phase Unwrapping + Background Removal"
               echo "*Compared against ground truth local field map (input: wrapped phase)*"
               echo ""
               echo "$TABLE"
               echo ""
-            }
+            fi
 
-            TABLE=$(emit_chi_table "test_inversion_" tkd tsvd tikhonov tv rts ilsqr medi nltv ndi fansi fansi_tgv l1qsm whqsm hdqsm amp_pe) && {
+            if TABLE=$(emit_chi_table "test_inversion_" tkd tsvd tikhonov tv rts ilsqr medi nltv ndi fansi fansi_tgv l1qsm whqsm hdqsm amp_pe); then
               echo "### Dipole Inversion"
               echo "*Compared against ground truth susceptibility map*"
               echo ""
               echo "$TABLE"
               echo ""
               emit_figures stage_dipole
-            }
+            fi
 
-            TABLE=$(emit_chi_table "test_dl_" qsmgan lpcnn ir2qsm modl_qsm nextqsm) && {
+            if TABLE=$(emit_chi_table "test_dl_" qsmgan lpcnn ir2qsm modl_qsm nextqsm); then
               echo "### Deep Learning — Dipole Inversion"
               echo "*Compared against ground truth susceptibility map (NeXtQSM: total field in; others: local field in)*"
               echo ""
               echo "$TABLE"
               echo ""
-            }
+            fi
 
-            TABLE=$(emit_table "test_dl_" iqfm) && {
+            if TABLE=$(emit_table "test_dl_" iqfm); then
               echo "### Deep Learning — Field Mapping"
               echo "*iQFM: wrapped phase → local field, compared against ground truth local field*"
               echo ""
@@ -1328,7 +1328,7 @@ jobs:
               echo ""
               echo "_Map shown in the Local field montage above, alongside the background-field-removal methods it is scored against._"
               echo ""
-            }
+            fi
 
             if [ -f "metrics/test_bet.csv" ]; then
               echo "### Brain Extraction"
@@ -1355,21 +1355,21 @@ jobs:
               echo ""
             fi
 
-            TABLE=$(emit_chi_table "test_combined_" tgv tfi) && {
+            if TABLE=$(emit_chi_table "test_combined_" tgv tfi); then
               echo "### Combined Background Removal + Dipole Inversion"
               echo "*Compared against ground truth susceptibility map (input: total field map)*"
               echo ""
               echo "$TABLE"
               echo ""
-            }
+            fi
 
-            TABLE=$(emit_chi_table "test_pipeline_" tgv qsmart qsmart_tikhonov) && {
+            if TABLE=$(emit_chi_table "test_pipeline_" tgv qsmart qsmart_tikhonov); then
               echo "### Full Pipeline"
               echo "*Compared against ground truth susceptibility map*"
               echo ""
               echo "$TABLE"
               echo ""
-            }
+            fi
 
             if [ -f "metrics/test_bias_correction.csv" ] || [ -f "metrics/test_swi.csv" ] || [ -f "metrics/test_r2star_t2star.csv" ]; then
               echo "### Utilities"
@@ -1395,14 +1395,14 @@ jobs:
               emit_figures bias_correction stage_supplementary
             fi
 
-            TABLE=$(emit_chisep_table) && {
+            if TABLE=$(emit_chisep_table); then
               echo "### χ-Separation"
               echo "*Paramagnetic (χ+) / diamagnetic (χ−) source maps vs ground truth (QSM-CI chisep phantom)*"
               echo ""
               echo "$TABLE"
               echo ""
               emit_figures stage_chisep
-            }
+            fi
           } > report.md
           # Retry with backoff — `cml comment create` hits the GitHub API and can be
           # throttled (rate limit shared across concurrent runs). Best-effort: the
