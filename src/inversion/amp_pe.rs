@@ -281,6 +281,8 @@ pub fn amp_pe(
         p_hat_psi: vec![0.0; n],
         tau_x_hat_psi: var(&x_init_par_psi),
         tau_p_psi: var(&x_init_par_psi), // A_wav.multSq(tau_x_hat_psi) = identity
+        damp: params.damp_rate_sig,
+        damp_ceiling: params.damp_rate_sig,
     };
     let abs_psi: Vec<f64> = x_init_par_psi.iter().map(|v| v.abs()).collect();
     let mut lambda = 1.0 / (var(&abs_psi) / 2.0).sqrt();
@@ -294,7 +296,8 @@ pub fn amp_pe(
         max_pe_est_ite: params.max_pe_est_ite,
         cvg_thd: params.cvg_thd,
         kappa: params.damp_rate_par,
-        damp_rate: params.damp_rate_sig,
+        // NOTE: `damp_rate_sig` is not carried here — the damping is adaptive and lives in
+        // GampState (`damp` / `damp_ceiling`), seeded from this same parameter.
     };
 
     let total = 2 * params.max_linearization_ite;
@@ -363,6 +366,104 @@ struct GampState {
     p_hat_psi: Vec<f64>,        // image (length n)
     tau_x_hat_psi: f64,
     tau_p_psi: f64,
+    /// CURRENT damping factor for the signal updates. Starts at the configured
+    /// `damp_rate_sig` and is only ever reduced when a sweep is found to have made the
+    /// data fit worse (see the adaptive-damping note on `gamp_awgn`), then relaxed back
+    /// towards the configured value. On data where nothing diverges it never leaves the
+    /// configured value, so the iteration is bit-for-bit what it was before.
+    damp: f64,
+    /// Ceiling that `damp` may relax back up to. RATCHETS DOWN on every rejected sweep: once a
+    /// run has shown it diverges at a given damping, letting the damping climb back to that value
+    /// simply re-diverges. Without this the guard catches each blow-up but the iteration keeps
+    /// re-entering the divergent regime and the result is still unusable.
+    damp_ceiling: f64,
+}
+
+/// A restore point for backing out of a divergent GAMP sweep.
+struct GampSnapshot {
+    x_hat_meas: Vec<f64>,
+    tau_x_meas: f64,
+    s_hat_meas: Vec<Complex64>,
+    x_hat_psi: Vec<f64>,
+    p_hat_psi: Vec<f64>,
+    tau_x_hat_psi: f64,
+    tau_p_psi: f64,
+    lambda: f64,
+    mix: Option<MixState>,
+}
+
+impl GampState {
+    fn snapshot(&self, lambda: f64, mix: Option<&MixState>) -> GampSnapshot {
+        GampSnapshot {
+            x_hat_meas: self.x_hat_meas.clone(),
+            tau_x_meas: self.tau_x_meas,
+            s_hat_meas: self.s_hat_meas.clone(),
+            x_hat_psi: self.x_hat_psi.clone(),
+            p_hat_psi: self.p_hat_psi.clone(),
+            tau_x_hat_psi: self.tau_x_hat_psi,
+            tau_p_psi: self.tau_p_psi,
+            lambda,
+            mix: mix.map(|m| MixState { ..*m }),
+        }
+    }
+
+    fn restore(&mut self, snap: &GampSnapshot, lambda: &mut f64, mix: Option<&mut MixState>) {
+        self.x_hat_meas.copy_from_slice(&snap.x_hat_meas);
+        self.tau_x_meas = snap.tau_x_meas;
+        self.s_hat_meas.copy_from_slice(&snap.s_hat_meas);
+        self.x_hat_psi.copy_from_slice(&snap.x_hat_psi);
+        self.p_hat_psi.copy_from_slice(&snap.p_hat_psi);
+        self.tau_x_hat_psi = snap.tau_x_hat_psi;
+        self.tau_p_psi = snap.tau_p_psi;
+        *lambda = snap.lambda;
+        if let (Some(dst), Some(src)) = (mix, snap.mix.as_ref()) {
+            *dst = MixState { ..*src };
+        }
+    }
+}
+
+// --- Adaptive damping ---------------------------------------------------------------------
+// GAMP is only guaranteed to converge for measurement operators close to i.i.d. Gaussian. The
+// dipole operator, weighted by the magnitude and composed with the wavelet morphology prior, is
+// not, and on some in-vivo data the iteration diverges outright: the estimate grows without
+// bound until χ reaches ~1e34. The published remedy is adaptive damping (Vila, Schniter, Rangan
+// et al., "Adaptive damping and mean removal for the generalized approximate message passing
+// algorithm", ICASSP 2015): watch a cost, and when a step makes it worse, undo the step and take
+// a smaller one.
+//
+// The cost is the plain data fit ||A x_hat - y||^2/m, which `a_qsm_mult` already computes each
+// sweep. NOTE it must NOT be the `mse` used for noise-variance estimation: that one includes the
+// Onsager correction term and is an estimate of the noise level, not a descent quantity, so it
+// fluctuates on perfectly healthy runs.
+//
+// The trigger is deliberately blunt — an order of magnitude worse than the best fit seen so far,
+// or non-finite. Divergence here spans many orders of magnitude, so a loose threshold still
+// catches it, while normal GAMP non-monotonicity never comes close. That keeps this a strict
+// no-op on data that does not diverge, which is what preserves agreement with the reference
+// implementation.
+/// Cost blow-up factor (relative to the best fit so far) treated as divergence.
+const DAMP_DIVERGE_FACTOR: f64 = 2.0;
+/// Factor applied to the damping when a sweep is rejected.
+const DAMP_SHRINK: f64 = 0.5;
+/// Factor by which damping relaxes back towards the configured value after an accepted sweep.
+const DAMP_GROW: f64 = 1.1;
+/// Damping floor; below this the iteration is making no progress and we stop with the last good state.
+const DAMP_MIN: f64 = 1e-4;
+/// Cap on rejected sweeps per GAMP call, so a pathological case cannot spin.
+const MAX_BACKTRACKS: usize = 20;
+
+#[cfg(test)]
+thread_local! {
+    /// Sweeps rejected by the divergence guard, counted per thread (each test gets its own).
+    /// The guard runs in the sequential part of the GAMP loop, so this never races with rayon.
+    static GUARD_FIRINGS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Record that the divergence guard rejected a sweep. Compiled away outside tests.
+#[inline]
+fn note_guard_firing() {
+    #[cfg(test)]
+    GUARD_FIRINGS.with(|c| c.set(c.get() + 1));
 }
 
 /// Static GAMP configuration.
@@ -375,7 +476,6 @@ struct GampCfg {
     max_pe_est_ite: usize,
     cvg_thd: f64,
     kappa: f64,
-    damp_rate: f64,
 }
 
 /// Gaussian-mixture noise parameters (single component + outlier component).
@@ -465,7 +565,13 @@ fn gamp_awgn(
     let mut tau_w_1 = tau_w_1_in;
     let (m, n) = (cfg.m, cfg.n);
 
-    for _ in 0..cfg.max_pe_spar_ite {
+    let mut best_cost = f64::INFINITY;
+    let mut good: Option<GampSnapshot> = None;
+    let mut good_tau_w = tau_w_1;
+    let mut accepted = 0usize;
+    let mut backtracks = 0usize;
+
+    while accepted < cfg.max_pe_spar_ite && backtracks <= MAX_BACKTRACKS {
         // tau_p_meas_1 = frob^2/M * tau_x_meas
         let tau_p_meas_1 = frob_sq / m as f64 * st.tau_x_meas;
         // p_hat_meas_1 = A_qsm*x_hat_meas - tau_p*s
@@ -481,6 +587,31 @@ fn gamp_awgn(
             .iter()
             .sum::<f64>()
             / m as f64;
+
+        // Data fit of the state the PREVIOUS sweep produced. If it has blown up, that sweep
+        // diverged: undo it and take smaller steps from here.
+        let fit = data_fit(&axm, y, m);
+        if !fit.is_finite() || fit > best_cost * DAMP_DIVERGE_FACTOR {
+            note_guard_firing();
+            backtracks += 1;
+            if let Some(g) = good.as_ref() {
+                st.restore(g, lambda, None);
+                tau_w_1 = good_tau_w;
+            }
+            st.damp = (st.damp * DAMP_SHRINK).max(DAMP_MIN);
+            st.damp_ceiling = st.damp;
+            if st.damp <= DAMP_MIN {
+                break; // cannot damp further; keep the last good state
+            }
+            continue;
+        }
+        if fit < best_cost {
+            best_cost = fit;
+            good = Some(st.snapshot(*lambda, None));
+            good_tau_w = tau_w_1;
+        }
+        st.damp = (st.damp * DAMP_GROW).min(st.damp_ceiling);
+
         let tau_w_new = mse + tau_p_meas_1;
         for _ in 0..cfg.max_pe_est_ite {
             tau_w_1 += cfg.kappa * (tau_w_new - tau_w_1);
@@ -500,11 +631,23 @@ fn gamp_awgn(
             .collect();
 
         let cvg = wavelet_block(plan, cfg, st, lambda, tau_r_meas_1, &r_hat_meas_1, wave_mask);
+        accepted += 1;
         if cvg < cfg.cvg_thd {
             break;
         }
     }
     tau_w_1
+}
+
+/// Plain data fit `||A x - y||^2 / m`, the quantity the divergence guard watches.
+fn data_fit(axm: &[Complex64], y: &[Complex64], m: usize) -> f64 {
+    maybe_par_chunks!(axm, PARAM_CHUNK)
+        .zip(maybe_par_chunks!(y, PARAM_CHUNK))
+        .map(|(ac, yc)| ac.iter().zip(yc).map(|(a, yy)| (a - yy).norm_sqr()).sum::<f64>())
+        .collect::<Vec<f64>>()
+        .iter()
+        .sum::<f64>()
+        / m as f64
 }
 
 /// One GAMP call with Gaussian-mixture noise (final stage).
@@ -524,11 +667,37 @@ fn gamp_awgn_mix(
     let frob_sq = frob_qsm_sq(cfg, der_1st, weight_vect);
     let (m, n) = (cfg.m, cfg.n);
 
-    for _ in 0..cfg.max_pe_spar_ite {
+    let mut best_cost = f64::INFINITY;
+    let mut good: Option<GampSnapshot> = None;
+    let mut accepted = 0usize;
+    let mut backtracks = 0usize;
+
+    while accepted < cfg.max_pe_spar_ite && backtracks <= MAX_BACKTRACKS {
         let tau_p_meas_1 = frob_sq / m as f64 * st.tau_x_meas;
         let axm = a_qsm_mult(dip, &st.x_hat_meas, der_1st, weight_vect, cfg.mut_cst);
         let p_hat_meas_1: Vec<Complex64> = (0..m).map(|j| axm[j] - tau_p_meas_1 * st.s_hat_meas[j]).collect();
         let r_noise: Vec<Complex64> = (0..m).map(|j| y[j] - p_hat_meas_1[j]).collect();
+
+        // Same divergence guard as the AWGN stage.
+        let fit = data_fit(&axm, y, m);
+        if !fit.is_finite() || fit > best_cost * DAMP_DIVERGE_FACTOR {
+            note_guard_firing();
+            backtracks += 1;
+            if let Some(g) = good.as_ref() {
+                st.restore(g, lambda, Some(mix));
+            }
+            st.damp = (st.damp * DAMP_SHRINK).max(DAMP_MIN);
+            st.damp_ceiling = st.damp;
+            if st.damp <= DAMP_MIN {
+                break;
+            }
+            continue;
+        }
+        if fit < best_cost {
+            best_cost = fit;
+            good = Some(st.snapshot(*lambda, Some(mix)));
+        }
+        st.damp = (st.damp * DAMP_GROW).min(st.damp_ceiling);
 
         for _ in 0..cfg.max_pe_est_ite {
             mix_output_parameter_est(&r_noise, tau_p_meas_1, mix, cfg.kappa);
@@ -549,6 +718,7 @@ fn gamp_awgn_mix(
             .collect();
 
         let cvg = wavelet_block(plan, cfg, st, lambda, tau_r_meas_1, &r_hat_meas_1, wave_mask);
+        accepted += 1;
         if cvg < cfg.cvg_thd {
             break;
         }
@@ -568,6 +738,9 @@ fn wavelet_block(
     r_hat_meas_1: &[f64],
     wave_mask: &[bool],
 ) -> f64 {
+    // Current adaptive damping (see the adaptive-damping note above); equals the configured
+    // `damp_rate_sig` unless a divergent sweep has forced it down.
+    let damp = st.damp;
     let tau_s_psi = 1.0 / (tau_r_meas_1 + st.tau_p_psi);
     let s_hat_psi: Vec<f64> = maybe_par_iter!(r_hat_meas_1)
         .zip(maybe_par_iter!(st.p_hat_psi))
@@ -601,14 +774,14 @@ fn wavelet_block(
 
     let tau_x_meas_pre = st.tau_x_meas;
     let tau_new = (st.tau_p_psi * tau_r_meas_1) / (st.tau_p_psi + tau_r_meas_1);
-    st.tau_x_meas = tau_x_meas_pre + cfg.damp_rate * (tau_new - tau_x_meas_pre);
+    st.tau_x_meas = tau_x_meas_pre + damp * (tau_new - tau_x_meas_pre);
 
     let denom = st.tau_p_psi + tau_r_meas_1;
     let mut change_sq = 0.0;
     let mut norm_sq = 0.0;
     for ((xh, &r), &p) in st.x_hat_meas.iter_mut().zip(r_hat_meas_1).zip(&st.p_hat_psi) {
         let x_new = (st.tau_p_psi * r + tau_r_meas_1 * p) / denom;
-        let updated = *xh + cfg.damp_rate * (x_new - *xh);
+        let updated = *xh + damp * (x_new - *xh);
         let d = updated - *xh;
         change_sq += d * d;
         norm_sq += updated * updated;
@@ -923,6 +1096,54 @@ mod tests {
         let b = amp_pe(&masked, &mask, None, &grid, (0.0, 0.0, 1.0), &params, |_, _| {});
         let maxerr = a.iter().zip(&b).map(|(x, y)| (x - y).abs()).fold(0.0, f64::max);
         assert!(maxerr < 1e-9, "out-of-mask field leaked into result: maxerr={maxerr}");
+    }
+
+    /// The adaptive-damping guard must NEVER fire on well-conditioned data. That is the whole
+    /// basis for claiming this iteration still matches the MATLAB reference: the guard only
+    /// engages when the solve is diverging, so on ordinary data the arithmetic is untouched.
+    ///
+    /// This is not covered by the other tests in this module. An earlier revision of the guard
+    /// used the GAMP noise-variance estimate as its cost — a quantity that fluctuates on healthy
+    /// runs rather than descending — so it fired constantly and silently changed the answer. Every
+    /// other test here still passed while the output was ~9x too smooth.
+    #[test]
+    fn damping_guard_is_inert_on_well_conditioned_data() {
+        let n = 16;
+        let field: Vec<f64> = (0..n * n * n)
+            .map(|i| {
+                let (x, y, z) = (i % n, (i / n) % n, i / (n * n));
+                0.02 * (((x + 2 * y + 3 * z) as f64) * 0.3).sin()
+            })
+            .collect();
+        // Structured magnitude, so the wavelet morphology prior is exercised — that prior is
+        // what destabilises the solve on real data, so it must be part of the inertness check.
+        let mag: Vec<f64> = (0..n * n * n)
+            .map(|i| {
+                let (x, y) = ((i % n) as f64, ((i / n) % n) as f64);
+                100.0 + 30.0 * (x * 0.4).cos() + 20.0 * (y * 0.25).sin()
+            })
+            .collect();
+        let mut mask = vec![0u8; n * n * n];
+        for z in 4..12 {
+            for y in 4..12 {
+                for x in 4..12 {
+                    mask[x + y * n + z * n * n] = 1;
+                }
+            }
+        }
+        let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
+        let params = AmpPeParams { max_linearization_ite: 4, ..Default::default() };
+
+        GUARD_FIRINGS.with(|c| c.set(0));
+        let chi = amp_pe(&field, &mask, Some(&mag), &grid, (0.0, 0.0, 1.0), &params, |_, _| {});
+        let fired = GUARD_FIRINGS.with(|c| c.get());
+
+        assert_eq!(
+            fired, 0,
+            "divergence guard fired {fired}x on well-conditioned data — the trigger has been \
+             loosened, and every AMP-PE result will have silently changed"
+        );
+        assert!(chi.iter().all(|v| v.is_finite()));
     }
 
     #[test]
