@@ -89,7 +89,7 @@ fn test_bgremove_sharp() {
     common::save_center_slices(&data.fieldmap_local, &data.mask, data.dims, "ground_truth_local_field");
 
     let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
-    let ((result, _new_mask), elapsed) = run_timed!("SHARP", bgremove::sharp(
+    let ((result, eroded_mask), elapsed) = run_timed!("SHARP", bgremove::sharp(
         &data.fieldmap,
         &data.mask,
         &grid,
@@ -99,7 +99,8 @@ fn test_bgremove_sharp() {
     let res = TestResult::new("SHARP", &result, &data.fieldmap_local, &data.mask, data.dims);
     res.print_with_time(elapsed);
     res.print_ci_metrics(elapsed);
-    common::save_center_slices(&result, &data.mask, data.dims, "bgremove_sharp");
+    // Plot within the eroded mask the method returns, so its rim shows as "no value".
+    common::save_center_slices(&result, &eroded_mask, data.dims, "bgremove_sharp");
 
     assert!(res.nrmse < 0.5, "SHARP NRMSE too high: {}", res.nrmse);
     assert!(res.correlation > 0.7, "SHARP correlation too low: {}", res.correlation);
@@ -114,7 +115,7 @@ fn test_bgremove_vsharp() {
     let (vsx, vsy, vsz) = data.voxel_size;
 
     let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
-    let ((result, _new_mask), elapsed) = run_timed!("V-SHARP", bgremove::vsharp(
+    let ((result, eroded_mask), elapsed) = run_timed!("V-SHARP", bgremove::vsharp(
         &data.fieldmap,
         &data.mask,
         &grid,
@@ -125,7 +126,8 @@ fn test_bgremove_vsharp() {
     let res = TestResult::new("V-SHARP", &result, &data.fieldmap_local, &data.mask, data.dims);
     res.print_with_time(elapsed);
     res.print_ci_metrics(elapsed);
-    common::save_center_slices(&result, &data.mask, data.dims, "bgremove_vsharp");
+    // Plot within the eroded mask the method returns, so its rim shows as "no value".
+    common::save_center_slices(&result, &eroded_mask, data.dims, "bgremove_vsharp");
 
     assert!(res.nrmse < 0.5, "V-SHARP NRMSE too high: {}", res.nrmse);
     assert!(res.correlation > 0.7, "V-SHARP correlation too low: {}", res.correlation);
@@ -169,7 +171,7 @@ fn test_bgremove_ismv() {
     let (vsx, vsy, vsz) = data.voxel_size;
 
     let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
-    let ((result, _new_mask), elapsed) = run_timed!("iSMV", bgremove::ismv(
+    let ((result, eroded_mask), elapsed) = run_timed!("iSMV", bgremove::ismv(
         &data.fieldmap,
         &data.mask,
         &grid,
@@ -180,7 +182,8 @@ fn test_bgremove_ismv() {
     let res = TestResult::new("iSMV", &result, &data.fieldmap_local, &data.mask, data.dims);
     res.print_with_time(elapsed);
     res.print_ci_metrics(elapsed);
-    common::save_center_slices(&result, &data.mask, data.dims, "bgremove_ismv");
+    // Plot within the eroded mask the method returns, so its rim shows as "no value".
+    common::save_center_slices(&result, &eroded_mask, data.dims, "bgremove_ismv");
 
     assert!(res.nrmse < 0.5, "iSMV NRMSE too high: {}", res.nrmse);
     assert!(res.correlation > 0.7, "iSMV correlation too low: {}", res.correlation);
@@ -202,7 +205,7 @@ fn test_bgremove_lbv() {
 
     let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
     let max_iter = (3 * nx.max(ny).max(nz)).max(500);
-    let ((result, _new_mask), elapsed) = run_timed!("LBV", bgremove::lbv(
+    let ((result, eroded_mask), elapsed) = run_timed!("LBV", bgremove::lbv(
         &data.fieldmap,
         &data.mask,
         &grid,
@@ -213,7 +216,8 @@ fn test_bgremove_lbv() {
     let res = TestResult::new("LBV", &result, &data.fieldmap_local, &data.mask, data.dims);
     res.print_with_time(elapsed);
     res.print_ci_metrics(elapsed);
-    common::save_center_slices(&result, &data.mask, data.dims, "bgremove_lbv");
+    // Plot within the eroded mask the method returns, so its rim shows as "no value".
+    common::save_center_slices(&result, &eroded_mask, data.dims, "bgremove_lbv");
 
     assert!(res.nrmse < 0.5, "LBV NRMSE too high: {}", res.nrmse);
     assert!(res.correlation > 0.7, "LBV correlation too low: {}", res.correlation);
@@ -229,7 +233,7 @@ fn test_bgremove_resharp() {
 
     let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
     let resharp_params = ResharpParams { radius: 6.0, tik_reg: 1e-4, tol: 1e-6, max_iter: 200 };
-    let ((result, _new_mask), elapsed) = run_timed!("RESHARP", bgremove::resharp(
+    let ((result, eroded_mask), elapsed) = run_timed!("RESHARP", bgremove::resharp(
         &data.fieldmap,
         &data.mask,
         &grid,
@@ -240,7 +244,8 @@ fn test_bgremove_resharp() {
     let res = TestResult::new("RESHARP", &result, &data.fieldmap_local, &data.mask, data.dims);
     res.print_with_time(elapsed);
     res.print_ci_metrics(elapsed);
-    common::save_center_slices(&result, &data.mask, data.dims, "bgremove_resharp");
+    // Plot within the eroded mask the method returns, so its rim shows as "no value".
+    common::save_center_slices(&result, &eroded_mask, data.dims, "bgremove_resharp");
 
     assert!(res.nrmse < 0.5, "RESHARP NRMSE too high: {}", res.nrmse);
     assert!(res.correlation > 0.7, "RESHARP correlation too low: {}", res.correlation);
@@ -552,7 +557,7 @@ fn test_combined_tfi() {
     let challenge = ChallengeMetrics::compute("TFI", &result, &data.chi, &data.mask, &data.segmentation, data.dims);
     challenge.print();
     challenge.print_ci_metrics(elapsed);
-    common::save_center_slices(&result, &data.mask, data.dims, "combined_tfi");
+    common::save_center_slices(&result, &common::valid_support(&result, &data.mask), data.dims, "combined_tfi");
 
     assert!(result.iter().all(|v| v.is_finite()), "TFI produced non-finite values");
     // Single-step from a background-dominated total field; ceiling here is ~TGV-from-field (~0.72).
@@ -1082,7 +1087,7 @@ fn test_combined_tgv() {
     let challenge = ChallengeMetrics::compute("TGV (from field)", &result, &data.chi, &data.mask, &data.segmentation, data.dims);
     challenge.print();
     challenge.print_ci_metrics(elapsed);
-    common::save_center_slices(&result, &data.mask, data.dims, "combined_tgv");
+    common::save_center_slices(&result, &common::valid_support(&result, &data.mask), data.dims, "combined_tgv");
 
     assert!(res.nrmse < 0.8, "TGV NRMSE too high: {}", res.nrmse);
     assert!(res.correlation > 0.5, "TGV correlation too low: {}", res.correlation);
@@ -1115,7 +1120,7 @@ fn test_pipeline_harperella() {
     let wrapped_phase = wrap_fieldmap(&data.fieldmap);
 
     let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
-    let ((result, _new_mask), elapsed) = run_timed!("HARPERELLA", bgremove::harperella(
+    let ((result, eroded_mask), elapsed) = run_timed!("HARPERELLA", bgremove::harperella(
         &wrapped_phase,
         &data.mask,
         &grid,
@@ -1126,7 +1131,8 @@ fn test_pipeline_harperella() {
     let res = TestResult::new("HARPERELLA", &result, &data.fieldmap_local, &data.mask, data.dims);
     res.print_with_time(elapsed);
     res.print_ci_metrics(elapsed);
-    common::save_center_slices(&result, &data.mask, data.dims, "pipeline_harperella");
+    // Plot within the eroded mask the method returns, so its rim shows as "no value".
+    common::save_center_slices(&result, &eroded_mask, data.dims, "pipeline_harperella");
 
     assert!(res.nrmse < 0.8, "HARPERELLA NRMSE too high: {}", res.nrmse);
     assert!(res.correlation > 0.5, "HARPERELLA correlation too low: {}", res.correlation);
@@ -1143,7 +1149,7 @@ fn test_pipeline_iharperella() {
     let wrapped_phase = wrap_fieldmap(&data.fieldmap);
 
     let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
-    let ((result, _new_mask), elapsed) = run_timed!("iHARPERELLA", bgremove::iharperella(
+    let ((result, eroded_mask), elapsed) = run_timed!("iHARPERELLA", bgremove::iharperella(
         &wrapped_phase,
         &data.mask,
         &grid,
@@ -1154,7 +1160,8 @@ fn test_pipeline_iharperella() {
     let res = TestResult::new("iHARPERELLA", &result, &data.fieldmap_local, &data.mask, data.dims);
     res.print_with_time(elapsed);
     res.print_ci_metrics(elapsed);
-    common::save_center_slices(&result, &data.mask, data.dims, "pipeline_iharperella");
+    // Plot within the eroded mask the method returns, so its rim shows as "no value".
+    common::save_center_slices(&result, &eroded_mask, data.dims, "pipeline_iharperella");
 
     assert!(res.nrmse < 0.8, "iHARPERELLA NRMSE too high: {}", res.nrmse);
     assert!(res.correlation > 0.5, "iHARPERELLA correlation too low: {}", res.correlation);
@@ -1248,7 +1255,7 @@ fn test_pipeline_tgv() {
     let challenge = ChallengeMetrics::compute("TGV", &result, &data.chi, &data.mask, &data.segmentation, data.dims);
     challenge.print();
     challenge.print_ci_metrics(elapsed);
-    common::save_center_slices(&result, &data.mask, data.dims, "pipeline_tgv");
+    common::save_center_slices(&result, &common::valid_support(&result, &data.mask), data.dims, "pipeline_tgv");
 
     assert!(res.nrmse < 0.8, "TGV NRMSE too high: {}", res.nrmse);
     assert!(res.correlation > 0.5, "TGV correlation too low: {}", res.correlation);
@@ -1320,7 +1327,7 @@ fn test_pipeline_qsmart() {
     let challenge = ChallengeMetrics::compute("QSMART", &chi_qsmart, &data.chi, &data.mask, &data.segmentation, data.dims);
     challenge.print();
     challenge.print_ci_metrics(elapsed);
-    common::save_center_slices(&chi_qsmart, &data.mask, data.dims, "pipeline_qsmart");
+    common::save_center_slices(&chi_qsmart, &common::valid_support(&chi_qsmart, &data.mask), data.dims, "pipeline_qsmart");
 
     assert!(res.nrmse < 0.8, "QSMART NRMSE too high: {}", res.nrmse);
     assert!(res.correlation > 0.5, "QSMART correlation too low: {}", res.correlation);
@@ -1341,7 +1348,7 @@ fn test_pipeline_qsmart_tikhonov() {
     let challenge = ChallengeMetrics::compute("QSMART-Tikhonov", &chi_qsmart, &data.chi, &data.mask, &data.segmentation, data.dims);
     challenge.print();
     challenge.print_ci_metrics(elapsed);
-    common::save_center_slices(&chi_qsmart, &data.mask, data.dims, "pipeline_qsmart_tikhonov");
+    common::save_center_slices(&chi_qsmart, &common::valid_support(&chi_qsmart, &data.mask), data.dims, "pipeline_qsmart_tikhonov");
 
     assert!(res.nrmse < 0.8, "QSMART-Tikhonov NRMSE too high: {}", res.nrmse);
     assert!(res.correlation > 0.5, "QSMART-Tikhonov correlation too low: {}", res.correlation);

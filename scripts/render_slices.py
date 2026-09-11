@@ -183,6 +183,12 @@ WINDOWS = {
 }
 
 
+# Colour for voxels with no value (NaN: outside the mask, or eroded by the method). Deliberately a
+# hue, so it cannot be read as a level on the greyscale maps.
+NO_VALUE = "#efe2bf"
+# Full-brain outline drawn on panels whose valid region is smaller than the ground truth's.
+OUTLINE = "#c0392b"
+
 # Stage montages. Each entry: (output stem, title, colorbar unit, display window, rows).
 # A row is a list of slugs; missing slugs are dropped so a partial CI run (only some test
 # categories triggered) still produces a sensible montage of what actually ran.
@@ -360,10 +366,19 @@ def render_montage(input_dir, stem, title, unit, window, rows, row_labels, outpu
     fig, axes = plt.subplots(len(kept), ncol,
                              figsize=((2.55 if per_panel else 2.0) * ncol, fig_h),
                              squeeze=False)
+    # "No value" must not look like a value. Light grey sits on the greyscale ramp (it reads as a
+    # positive field), so greyscale panels use a hue that is on neither colormap; the diverging
+    # red/blue map can keep grey.
     gray = plt.get_cmap("gray").copy()
-    gray.set_bad("#cccccc")
+    gray.set_bad(NO_VALUE)
     diverging = plt.get_cmap("RdBu_r").copy()
     diverging.set_bad("#cccccc")
+    # Reference brain outline: the ground-truth panel's mask. Methods that erode it (SMV-family
+    # background removal, TGV, …) save only their valid region, so their panels get this outline
+    # drawn on top and the eroded rim reads as "no value inside the brain".
+    truth = next((s for r in kept for s in r if "truth" in s and not s.startswith("diff:")), None)
+    ref_mask = np.isfinite(load_axial(input_dir / f"{truth}.bin")) if truth else None
+    any_eroded = False
     im = None
     for ri, row in enumerate(kept):
         for ci in range(ncol):
@@ -381,6 +396,11 @@ def render_montage(input_dir, stem, title, unit, window, rows, row_labels, outpu
                                 if finite.size else (0.0, 1.0))
             im = ax.imshow(data, cmap=cmap, vmin=panel_window[0], vmax=panel_window[1],
                            origin="lower")
+            valid = np.isfinite(data)
+            if (ref_mask is not None and ref_mask.shape == valid.shape
+                    and not slug.startswith("diff:") and (ref_mask & ~valid).any()):
+                ax.contour(ref_mask.astype(float), levels=[0.5], colors=OUTLINE, linewidths=0.6)
+                any_eroded = True
             is_truth = "truth" in slug
             ax.set_title(label, fontsize=9,
                          fontweight="bold" if is_truth else "normal",
@@ -395,6 +415,10 @@ def render_montage(input_dir, stem, title, unit, window, rows, row_labels, outpu
                              fontweight="bold", color="#444444")
     fig.suptitle(f"{title} — centre axial slice", fontsize=13, fontweight="bold",
                  y=1.0 - 0.22 / fig_h)
+    if any_eroded:
+        fig.text(0.5, 0.0, "Sand = no value (outside the mask, or eroded away by the method). "
+                 "Outline = full brain mask, drawn where a method returned less.",
+                 ha="center", va="top", fontsize=8.5, color="#555555")
     fig.subplots_adjust(top=1.0 - title_band / fig_h)
     if not per_panel:
         fig.colorbar(im, ax=axes.ravel().tolist(), shrink=0.62, aspect=34, pad=0.015, label=unit)
