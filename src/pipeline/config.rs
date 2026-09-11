@@ -173,6 +173,9 @@ pub enum MaskOp {
     GaussianSmooth {
         sigma_mm: f64,
     },
+    /// Signal-gated erosion: peel only low-signal boundary voxels (skull-base / sinus dropout)
+    /// down to a depth cap. Needs magnitude. See [`crate::utils::signal_gated_erosion`].
+    SignalErode(crate::utils::SignalErosionParams),
 }
 
 /// A mask section: input source + generator + refinements
