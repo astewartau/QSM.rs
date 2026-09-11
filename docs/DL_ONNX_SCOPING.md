@@ -38,10 +38,21 @@ anisotropy), centred pad, Gaussian-weighted 50 %-overlap sliding window (+ optio
 linear resample of the logits back, argmax, un-crop. Pre/post-processing match nnU-Net's own
 intermediates to f32 rounding / 0 voxels on three cases (1 mm phantom; relabelled 0.9×0.9×1.2 mm +
 zeroed slabs; 0.9×0.9×4 mm separate-z) — `ref_hdbet.py`; end-to-end masks match the `hd-bet` CLI
-at Dice ≥0.99998 (9–31 voxels), ~4 min single-threaded (tract 0.21 has no multithreaded matmul
-without a rayon-version conflict). Patches down to 128×128×64 (peak ≈1.9 GB,
+at Dice ≥0.99998 (9–31 voxels); ~9 s per native patch with the `parallel` feature (23 s
+single-threaded). Patches down to 128×128×64 (peak ≈1.9 GB,
 `HdBetParams::low_memory`) match the native 192×192×96 (≈4.5 GB) at Dice ≈0.99; smaller patches fail
 because a tile wholly inside the brain is labelled background.
+
+**Multithreaded inference (tract 0.23).** With `parallel` on a native target, `OnnxModel::run` /
+`OnnxPlan::run` spread tract's matrix kernels over a shared pool (tract-linalg `multithread-mm`);
+calls from rayon workers (the tiled drivers, which already parallelise across tiles) and all WASM
+builds stay single-threaded. tract 0.21's `multithread-mm` pinned `rayon <1.11`, which conflicted
+with the crate's rayon — hence the 0.21→0.23 upgrade. Old-vs-new outputs of every model's glue on a
+128×128×96 crop of the phantom are bit-identical (IR2QSM ≤2e-7 of range), single- and
+multi-threaded; multithreading gives up to ~3× where inference (not graph optimisation) dominates.
+Trade-off: tract 0.23 enlarges an ONNX-enabled WASM module (13.0→20.2 MB raw, 1.6→2.7 MB brotli),
+and WASM hosts on `wasm32-unknown-unknown` must enable `getrandom` 0.4's `wasm_js` feature
+(previously `getrandom` 0.2 `js`).
 
 iQSM+ adds OA-LFE (B0 direction as a `z_prjs` input) and a brain-bbox-crop preprocessing. Two more
 export workarounds: the OA-LFE builds an orientation-conditioned conv kernel per channel — torch.onnx
