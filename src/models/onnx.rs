@@ -7,6 +7,10 @@
 //! (NCDHW for the volumetric nets); callers convert to/from the crate's `f64`
 //! volumes and handle model-specific normalization and padding.
 //!
+//! With the `parallel` feature on a native target, each inference spreads tract's matrix kernels
+//! over a shared thread pool (calls from rayon workers — the tiled drivers — and WASM builds stay
+//! single-threaded).
+//!
 //! ```no_run
 //! # #[cfg(feature = "onnx")] {
 //! use qsm_core::models::onnx::{OnnxModel, Tensor};
@@ -60,6 +64,30 @@ impl std::fmt::Display for OnnxError {
 
 impl std::error::Error for OnnxError {}
 
+/// Run one inference, spreading tract's matrix kernels over a shared thread pool when the
+/// `parallel` feature is on in a native build. Calls made from inside a rayon worker — the tiled
+/// drivers, which already run one tile per thread — stay single-threaded to avoid
+/// oversubscription. WASM always stays on the calling thread: tract's executor builds its own
+/// rayon pool, which cannot spawn threads there (wasm threads come from wasm-bindgen-rayon).
+fn run_threaded<R>(f: impl FnOnce() -> R) -> R {
+    #[cfg(all(feature = "parallel", not(target_family = "wasm")))]
+    {
+        use std::sync::OnceLock;
+        use tract_linalg::multithread::{multithread_tract_scope, Executor};
+        static EXECUTOR: OnceLock<Option<Executor>> = OnceLock::new();
+        if rayon::current_thread_index().is_none() {
+            let exec = EXECUTOR.get_or_init(|| {
+                let n = rayon::current_num_threads();
+                (n > 1).then(|| Executor::multithread_with_name(n, "qsm-tract"))
+            });
+            if let Some(exec) = exec {
+                return multithread_tract_scope(exec.clone(), f);
+            }
+        }
+    }
+    f()
+}
+
 /// A parsed ONNX model, ready to run at any spatial size.
 ///
 /// The graph is kept in tract's shape-inferring form and specialized to the
@@ -105,13 +133,13 @@ impl OnnxModel {
             feeds.push(t.into());
         }
 
-        let result = plan.run(feeds).map_err(|e| OnnxError::Run(e.to_string()))?;
+        let result = run_threaded(|| plan.run(feeds)).map_err(|e| OnnxError::Run(e.to_string()))?;
 
         result
             .iter()
             .map(|t| {
                 let view = t
-                    .to_array_view::<f32>()
+                    .to_plain_array_view::<f32>()
                     .map_err(|e| OnnxError::Run(e.to_string()))?;
                 Ok(Tensor {
                     shape: view.shape().to_vec(),
@@ -160,7 +188,7 @@ impl OnnxModel {
 /// it skips graph optimization, so reusing one plan across many equal-shaped inputs (tiled
 /// inference) amortizes the optimizer to a single up-front cost.
 pub struct OnnxPlan {
-    plan: TypedRunnableModel<TypedModel>,
+    plan: std::sync::Arc<TypedRunnableModel>,
 }
 
 impl OnnxPlan {
@@ -173,12 +201,12 @@ impl OnnxPlan {
                 .map_err(|e| OnnxError::Shape(e.to_string()))?;
             feeds.push(t.into());
         }
-        let result = self.plan.run(feeds).map_err(|e| OnnxError::Run(e.to_string()))?;
+        let result = run_threaded(|| self.plan.run(feeds)).map_err(|e| OnnxError::Run(e.to_string()))?;
         result
             .iter()
             .map(|t| {
                 let view = t
-                    .to_array_view::<f32>()
+                    .to_plain_array_view::<f32>()
                     .map_err(|e| OnnxError::Run(e.to_string()))?;
                 Ok(Tensor {
                     shape: view.shape().to_vec(),

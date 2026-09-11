@@ -15,7 +15,8 @@ crate-type = ["rlib"]
 
 [features]
 default = []
-parallel = ["rayon"]
+# (with `onnx`, also multithreads tract's matrix kernels — see `models::onnx`)
+parallel = ["rayon", "tract-linalg?/multithread-mm"]
 simd = ["wide"]
 # Derives Serialize on the *Params structs (off by default — they are not
 # serde config types). Used only by downstream tests to introspect field names
@@ -26,7 +27,7 @@ introspection = ["dep:serde"]
 download = ["dep:ureq", "dep:sha2"]
 # ONNX inference for deep-learning models via the pure-Rust `tract` engine.
 # Byte-buffer based, so it compiles for both native and WASM targets.
-onnx = ["dep:tract-onnx"]
+onnx = ["dep:tract-onnx", "dep:tract-linalg"]
 
 [dependencies]
 # FFT and complex number support
@@ -57,7 +58,10 @@ ureq = { version = "2", optional = true }
 sha2 = { version = "0.10", optional = true }
 
 # ONNX inference engine, pure Rust so it also compiles to WASM (see `onnx` feature).
-tract-onnx = { version = "0.21", optional = true }
+tract-onnx = { version = "0.23", optional = true }
+# tract's kernel crate, named directly only so `parallel` can switch on its multithreaded executor
+# (resolves to the same version tract-onnx uses; WASM builds without `parallel` stay single-threaded).
+tract-linalg = { version = "0.23", optional = true }
 
 [dev-dependencies]
 serde = { version = "1", features = ["derive"] }
