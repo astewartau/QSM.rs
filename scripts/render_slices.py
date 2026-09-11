@@ -98,6 +98,7 @@ NAMES = {
     "dl_modl_qsm": "MoDL-QSM",
     "dl_nextqsm": "NeXtQSM",
     "dl_iqfm": "iQFM",
+    "dl_hdbet": "HD-BET",
     "chisep_xsepnet_para": "xSepNet χ+",
     "chisep_xsepnet_dia": "xSepNet χ− (magnitude)",
 }
@@ -297,37 +298,42 @@ def load_axial_with_mask(path):
 
 
 def render_bet_overlay(input_dir, output_path):
-    """BET: both mask boundaries drawn on the magnitude BET segmented.
+    """Brain extraction: every method's mask boundary drawn with the ground truth on the magnitude.
 
     A bare binary mask says nothing about whether the boundary is in the right place. Drawing
     the predicted and ground-truth outlines together on the magnitude shows exactly where they
     agree and where they part, which is the only thing worth looking at here.
 
-    `bet.bin` already holds both masks (result = predicted, mask slice = ground truth);
-    `bet_magnitude.bin` supplies the underlying image.
+    `bet.bin` / `dl_hdbet.bin` hold each method's mask (result = predicted, mask slice = ground
+    truth); `bet_magnitude.bin` (or `dl_hdbet_magnitude.bin`) supplies the underlying image.
+    Whichever methods ran are overlaid on one figure.
     """
-    bet_file, mag_file = input_dir / "bet.bin", input_dir / "bet_magnitude.bin"
-    if not (bet_file.exists() and mag_file.exists()):
+    methods = [(label, input_dir / f"{slug}.bin", color)
+               for slug, label, color in (("bet", "BET", "#2fa8ff"), ("dl_hdbet", "HD-BET", "#e4572e"))
+               if (input_dir / f"{slug}.bin").exists()]
+    mag_file = next((f for f in (input_dir / "bet_magnitude.bin", input_dir / "dl_hdbet_magnitude.bin")
+                     if f.exists()), None)
+    if not methods or mag_file is None:
         return False
-    predicted, truth = load_axial_with_mask(bet_file)
-    magnitude, _ = load_axial_with_mask(mag_file)
-    predicted = predicted > 0.5
+    magnitude, truth = load_axial_with_mask(mag_file)
 
-    fig, ax = plt.subplots(figsize=(5.2, 5.4))
+    fig, ax = plt.subplots(figsize=(5.2, 5.6))
     finite = magnitude[np.isfinite(magnitude)]
     vmax = float(np.percentile(finite, 99)) if finite.size else 1.0
     ax.imshow(magnitude, cmap="gray", vmin=0, vmax=vmax, origin="lower")
-    ax.contour(truth.astype(float), levels=[0.5], colors="#0a7d3a", linewidths=1.6)
-    ax.contour(predicted.astype(float), levels=[0.5], colors="#e4572e", linewidths=1.2)
+    ax.contour(truth.astype(float), levels=[0.5], colors="#ffd400", linewidths=1.6)
+    handles = [Line2D([], [], color="#ffd400", lw=1.8, label="Ground truth")]
+    dices = []
+    for label, path, color in methods:
+        predicted = load_axial_with_mask(path)[0] > 0.5
+        ax.contour(predicted.astype(float), levels=[0.5], colors=color, linewidths=1.2)
+        inter = np.logical_and(predicted, truth).sum()
+        dices.append(f"{label} {2.0 * inter / max(predicted.sum() + truth.sum(), 1):.3f}")
+        handles.append(Line2D([], [], color=color, lw=1.4, label=label))
     ax.axis("off")
-
-    inter = np.logical_and(predicted, truth).sum()
-    dice = 2.0 * inter / max(predicted.sum() + truth.sum(), 1)
-    ax.legend(handles=[Line2D([], [], color="#0a7d3a", lw=1.8, label="Ground truth"),
-                       Line2D([], [], color="#e4572e", lw=1.4, label="BET")],
-              loc="lower right", fontsize=9, framealpha=0.85)
+    ax.legend(handles=handles, loc="lower right", fontsize=9, framealpha=0.85)
     ax.set_title(f"Brain extraction — centre axial slice\n"
-                 f"(this slice: Dice {dice:.3f})", fontsize=12, fontweight="bold")
+                 f"(this slice: Dice {', '.join(dices)})", fontsize=12, fontweight="bold")
     fig.savefig(output_path, dpi=120, bbox_inches="tight", facecolor="white")
     plt.close(fig)
     print(f"  Rendered {output_path} (mask overlay)")
@@ -511,7 +517,7 @@ def main():
     # there is nothing to compare it against and the extra views carry the information.
     render_bet_overlay(input_dir, output_dir / "bet.png")
 
-    rendered = set(MONTAGED) | {"bet", "bet_magnitude"}
+    rendered = set(MONTAGED) | {"bet", "bet_magnitude", "dl_hdbet", "dl_hdbet_magnitude"}
     for slug, before_slug in BEFORE_AFTER.items():
         after_file = input_dir / f"{slug}.bin"
         before_file = input_dir / f"{before_slug}.bin"

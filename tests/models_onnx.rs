@@ -934,3 +934,47 @@ fn osf_download_and_verify() {
 }
 
 
+
+/// HD-BET end-to-end parity: `bet::hd_bet` (tract + the Rust nnU-Net pipeline) vs the genuine
+/// `hd-bet` CLI (PyTorch, CPU, no TTA) on the three cases from qsm-ci's
+/// `scripts/onnx-export/reference/ref_hdbet.py`: the 1 mm qsm-forward phantom (A), the same with
+/// relabelled 0.9×0.9×1.2 mm spacing and zeroed border slabs (B: crop + cubic resampling), and
+/// every 4th slice at 0.9×0.9×4 mm (C: nnU-Net's separate-z resampling).
+///
+/// ```bash
+/// HDBET_ONNX=/path/hd-bet.onnx HDBET_REF_DIR=/path/ref \
+///   cargo test --release --features onnx --test models_onnx hdbet -- --ignored --nocapture
+/// ```
+#[test]
+#[ignore]
+fn hdbet_matches_python_reference() {
+    use qsm_core::bet::{hd_bet, HdBetParams};
+    use qsm_core::io::read_nifti_file;
+    use std::path::Path;
+
+    let onnx = std::fs::read(std::env::var("HDBET_ONNX").unwrap_or("/tmp/hdbet_export/hd-bet.onnx".into()))
+        .expect("HDBET_ONNX");
+    let dir = std::env::var("HDBET_REF_DIR").unwrap_or("/tmp/hdbet_ref".into());
+    let cases = std::env::var("HDBET_CASES").unwrap_or("A,B,C".into());
+    for case in cases.split(',') {
+        let mag = read_nifti_file(Path::new(&format!("{dir}/{case}_mag.nii.gz"))).expect("magnitude");
+        let cli = read_nifti_file(Path::new(&format!("{dir}/{case}_mask_cli.nii.gz"))).expect("CLI mask");
+        let (nx, ny, nz) = mag.dims;
+        let (vx, vy, vz) = mag.voxel_size;
+        let grid = qsm_core::Grid::new(nx, ny, nz, vx, vy, vz);
+        let t = std::time::Instant::now();
+        let mask = hd_bet(&mag.data, &grid, &onnx, &HdBetParams::default(), |_, _| {}).expect("hd_bet");
+        let (mut inter, mut a, mut b, mut diff) = (0usize, 0usize, 0usize, 0usize);
+        for (&m, &c) in mask.iter().zip(&cli.data) {
+            let (m, c) = (m != 0, c > 0.5);
+            inter += (m && c) as usize;
+            a += m as usize;
+            b += c as usize;
+            diff += (m != c) as usize;
+        }
+        let dice = 2.0 * inter as f64 / (a + b) as f64;
+        println!("case {case}: {:?} @ {:?} mm  Dice vs CLI {dice:.6}  differing voxels {diff}  ({:.1}s)",
+            mag.dims, mag.voxel_size, t.elapsed().as_secs_f64());
+        assert!(dice > 0.999, "case {case}: Dice {dice}");
+    }
+}

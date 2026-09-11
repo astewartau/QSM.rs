@@ -28,6 +28,20 @@ parity-checked against the authors' Python ONNX-Runtime output on `data/sim/dev`
 | **AutoQSM** | single-step (total field→χ) | ✅ `inversion::autoqsm` + `InversionAlgorithm::Autoqsm` | vs Keras patch-stitch | ✅ OSF `Available` |
 | **iQSM** | single-step (phase→χ) | ✅ `inversion::{iqsm,iqsm_multi_echo}` | vs original torch inference | ✅ OSF `Available` |
 | **iQSM+** | single-step (phase→χ, orientation-adaptive) | ✅ `inversion::{iqsm_plus,iqsm_plus_multi_echo}` | vs original torch inference | ✅ OSF `Available` |
+| **HD-BET** | brain extraction (magnitude→mask) | ✅ `bet::hd_bet` + `MaskOp::HdBet` | mask vs `hd-bet` CLI (see below) | ✅ HF `Available` (CC-BY-NC-4.0) |
+
+HD-BET v2 is a stock nnU-Net `PlainConvUNet` exported through nnU-Net itself (`export_hdbet.py`,
+dynamic spatial axes; only Conv/ConvTranspose/InstanceNormalization/LeakyRelu/Concat). The work is
+the **nnU-Net inference pipeline in Rust**: crop-to-non-zero, z-score, resample to 1 mm with
+`skimage.resize`-exact cubic splines (`utils::resample`, incl. nnU-Net's "separate z" rule for >3×
+anisotropy), centred pad, Gaussian-weighted 50 %-overlap sliding window (+ optional mirror TTA),
+linear resample of the logits back, argmax, un-crop. Pre/post-processing match nnU-Net's own
+intermediates to f32 rounding / 0 voxels on three cases (1 mm phantom; relabelled 0.9×0.9×1.2 mm +
+zeroed slabs; 0.9×0.9×4 mm separate-z) — `ref_hdbet.py`; end-to-end masks match the `hd-bet` CLI
+at Dice ≥0.99998 (9–31 voxels), ~4 min single-threaded (tract 0.21 has no multithreaded matmul
+without a rayon-version conflict). Patches down to 128×128×64 (peak ≈1.9 GB,
+`HdBetParams::low_memory`) match the native 192×192×96 (≈4.5 GB) at Dice ≈0.99; smaller patches fail
+because a tile wholly inside the brain is labelled background.
 
 iQSM+ adds OA-LFE (B0 direction as a `z_prjs` input) and a brain-bbox-crop preprocessing. Two more
 export workarounds: the OA-LFE builds an orientation-conditioned conv kernel per channel — torch.onnx

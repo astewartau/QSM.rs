@@ -114,3 +114,33 @@ fn test_dl_iqfm() {
     common::save_center_slices(&lfs, &data.mask, data.dims, "dl_iqfm");
     assert!(lfs.iter().all(|v| v.is_finite()), "iQFM produced non-finite values");
 }
+
+/// HD-BET brain extraction on the phantom's root-sum-of-squares magnitude, scored like BET
+/// (Dice vs the ground-truth mask) so it lands in the Brain Extraction table next to it.
+#[test]
+#[ignore]
+fn test_dl_hdbet() {
+    use qsm_core::bet::{hd_bet, HdBetParams};
+
+    let data = TestData::load().expect("test data");
+    let grid = grid_of(&data);
+    let w = weights("hd-bet");
+    let rss: Vec<f64> = (0..data.mask.len())
+        .map(|i| data.mag_echoes.iter().map(|e| e[i] * e[i]).sum::<f64>().sqrt())
+        .collect();
+    let t = Instant::now();
+    let mask = hd_bet(&rss, &grid, &w, &HdBetParams::default(), |_, _| {}).expect("hd_bet");
+    let elapsed = t.elapsed();
+
+    let dice = common::dice_coefficient(&mask, &data.mask);
+    println!("HD-BET          Dice={:.4}      {:>10.2?}", dice, elapsed);
+    println!("RESULT:HD-BET,{:.6},-,-,{:.2}", dice, elapsed.as_secs_f64());
+
+    // Same layout as test_bet: result = predicted mask, mask overlay = ground truth, plus the
+    // magnitude HD-BET segmented, so the figure can draw both boundaries on it.
+    let predicted: Vec<f64> = mask.iter().map(|&v| v as f64).collect();
+    common::save_center_slices(&predicted, &data.mask, data.dims, "dl_hdbet");
+    common::save_center_slices(&rss, &data.mask, data.dims, "dl_hdbet_magnitude");
+
+    assert!(dice > 0.9, "HD-BET Dice coefficient too low: {dice}");
+}

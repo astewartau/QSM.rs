@@ -148,10 +148,40 @@ pub fn build_mask_section(
                 })?;
                 mask = crate::utils::signal_gated_erosion(&mask, mag_data, &grid, params);
             }
+            MaskOp::HdBet(params) => {
+                let mag_data = magnitude.ok_or_else(|| {
+                    PipelineError::InvalidInput("HD-BET requires magnitude data".into())
+                })?;
+                mask = run_hd_bet(mag_data, &grid, params)?;
+            }
         }
     }
 
     Ok(mask)
+}
+
+/// Source the HD-BET weights and run it. Requires the `onnx` feature; weights come from the
+/// model registry (local `$QSM_MODEL_DIR`/cache, or the `download` feature).
+#[cfg(feature = "onnx")]
+fn run_hd_bet(
+    magnitude: &[f64],
+    grid: &crate::Grid,
+    params: &crate::bet::HdBetParams,
+) -> Result<Vec<u8>, PipelineError> {
+    let bytes = crate::models::primary_weight("hd-bet").map_err(PipelineError::InvalidConfig)?;
+    crate::bet::hd_bet(magnitude, grid, &bytes, params, |_, _| {})
+        .map_err(|e| PipelineError::AlgorithmError(e.to_string()))
+}
+
+#[cfg(not(feature = "onnx"))]
+fn run_hd_bet(
+    _magnitude: &[f64],
+    _grid: &crate::Grid,
+    _params: &crate::bet::HdBetParams,
+) -> Result<Vec<u8>, PipelineError> {
+    Err(PipelineError::InvalidConfig(
+        "HD-BET requires building qsm-core with the 'onnx' feature".into(),
+    ))
 }
 
 /// Build a mask from multiple sections, OR'd together.
@@ -377,6 +407,19 @@ mod tests {
         assert_eq!(result, plain);
         // Needs magnitude.
         assert!(run_masking(&section(MaskOp::SignalErode(params)), &[], None, &meta).is_err());
+    }
+
+    #[test]
+    fn test_masking_hd_bet_requires_magnitude() {
+        let meta = test_metadata();
+        let sections = vec![MaskSection {
+            input: MaskingInput::Magnitude,
+            generator: MaskOp::HdBet(Default::default()),
+            refinements: vec![],
+        }];
+        assert!(run_masking(&sections, &[], None, &meta).is_err());
+        #[cfg(not(feature = "onnx"))]
+        assert!(run_masking(&sections, &[], Some(&vec![1.0; 512]), &meta).is_err());
     }
 
     #[test]

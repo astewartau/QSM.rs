@@ -176,6 +176,21 @@ pub enum MaskOp {
     /// Signal-gated erosion: peel only low-signal boundary voxels (skull-base / sinus dropout)
     /// down to a depth cap. Needs magnitude. See [`crate::utils::signal_gated_erosion`].
     SignalErode(crate::utils::SignalErosionParams),
+    /// HD-BET deep-learning brain extraction from the magnitude (a generator, like `Bet`).
+    /// Requires the `onnx` feature and the `hd-bet` model weights; see [`crate::models`].
+    HdBet(crate::bet::HdBetParams),
+}
+
+impl MaskOp {
+    /// Registry id of the deep-learning model this op runs, if any.
+    pub fn dl_model_id(&self) -> Option<&'static str> {
+        match self {
+            Self::HdBet(_) => Some("hd-bet"),
+            Self::Threshold { .. } | Self::Bet { .. } | Self::Erode { .. } | Self::Dilate { .. }
+            | Self::Close { .. } | Self::FillHoles { .. } | Self::GaussianSmooth { .. }
+            | Self::SignalErode(_) => None,
+        }
+    }
 }
 
 /// A mask section: input source + generator + refinements
@@ -604,6 +619,9 @@ mod tests {
                 ModelStage::BackgroundRemoval => (bfr.contains(&m.id), "BgRemovalAlgorithm"),
                 ModelStage::DipoleInversion | ModelStage::SingleStep => (inv.contains(&m.id), "InversionAlgorithm"),
                 ModelStage::ChiSeparation => (sep.contains(&m.id), "SeparationAlgorithm"),
+                ModelStage::BrainExtraction => {
+                    (MaskOp::HdBet(Default::default()).dl_model_id() == Some(m.id), "MaskOp")
+                }
                 // iQFM: standalone run_iqfm, no stage enum.
                 ModelStage::PhaseToField => continue,
             };
