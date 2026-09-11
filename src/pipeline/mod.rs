@@ -38,7 +38,7 @@ pub use phase_utils::{
     erode_mask, dilate_mask,
 };
 pub use referencing::apply_reference;
-pub use masking::run_masking;
+pub use masking::{apply_mask_ops, build_mask_section, run_masking};
 pub use field_mapping::run_field_mapping;
 pub use bg_removal::run_bg_removal;
 pub use inversion::{run_dipole_inversion, run_tgv, run_nextqsm, run_iqsm, run_iqsm_plus, run_iqfm};

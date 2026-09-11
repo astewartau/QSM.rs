@@ -76,13 +76,47 @@ pub fn build_mask_section(
     magnitude: Option<&[f64]>,
     metadata: &ScanMetadata,
 ) -> Result<Vec<u8>, PipelineError> {
+    let n_voxels = metadata.dims.0 * metadata.dims.1 * metadata.dims.2;
+    apply_mask_ops(vec![1u8; n_voxels], &section.all_ops(), input_data, magnitude, metadata)
+}
+
+/// Apply mask operations to an existing mask, in order.
+///
+/// This is the one implementation of what every mask op *means*; [`build_mask_section`] is this
+/// function starting from an all-ones mask, and hosts that drive masking themselves (e.g. an
+/// interactive UI applying one refinement at a time) should call it rather than reimplement the
+/// operations, so a mask built step-by-step matches the one a `--mask` section would produce.
+///
+/// **Two different images.** `input_data` is what a generator looks at — thresholding may use a
+/// phase-quality map, for instance. `magnitude` is the magnitude image, and is what the ops that
+/// need real signal use: [`MaskOp::Bet`], [`MaskOp::HdBet`] and [`MaskOp::SignalErode`]. Passing
+/// the section input as `magnitude` is a bug: signal-gated erosion divides out a receive-coil bias
+/// estimate and gates on the in-mask median, which only means anything for a magnitude image.
+/// Those ops error when `magnitude` is `None`.
+///
+/// # Arguments
+/// * `mask` - Starting mask (0/1), length `nx*ny*nz`
+/// * `ops` - Operations to apply, in order
+/// * `input_data` - Image the generators threshold (may be a phase-quality map)
+/// * `magnitude` - Magnitude image, for BET / HD-BET / signal-gated erosion
+/// * `metadata` - Scan metadata (dims + voxel size)
+pub fn apply_mask_ops(
+    mask: Vec<u8>,
+    ops: &[MaskOp],
+    input_data: &[f64],
+    magnitude: Option<&[f64]>,
+    metadata: &ScanMetadata,
+) -> Result<Vec<u8>, PipelineError> {
     let (nx, ny, nz) = metadata.dims;
     let (vsx, vsy, vsz) = metadata.voxel_size;
     let grid = metadata.grid();
     let n_voxels = nx * ny * nz;
-    let mut mask = vec![1u8; n_voxels];
+    if mask.len() != n_voxels {
+        return Err(PipelineError::DimensionMismatch { expected: n_voxels, got: mask.len() });
+    }
+    let mut mask = mask;
 
-    for op in &section.all_ops() {
+    for op in ops {
         match op {
             MaskOp::Threshold { method, value } => {
                 let threshold = match method {
@@ -420,6 +454,47 @@ mod tests {
         assert!(run_masking(&sections, &[], None, &meta).is_err());
         #[cfg(not(feature = "onnx"))]
         assert!(run_masking(&sections, &[], Some(&vec![1.0; 512]), &meta).is_err());
+    }
+
+    /// Applying ops one at a time (what an interactive host does) must equal building the whole
+    /// section in one call — same implementation, so a step-by-step mask matches the `--mask`
+    /// section a host prints alongside it.
+    #[test]
+    fn test_apply_mask_ops_matches_build_mask_section() {
+        let meta = test_metadata();
+        let n = 8 * 8 * 8;
+        let input: Vec<f64> = (0..n).map(|i| ((i * 37) % 19) as f64).collect();
+        let mag: Vec<f64> = (0..n).map(|i| 50.0 + ((i * 7) % 13) as f64).collect();
+        let section = MaskSection {
+            input: MaskingInput::Magnitude,
+            generator: MaskOp::Threshold { method: MaskThresholdMethod::Fixed, value: Some(5.0) },
+            refinements: vec![
+                MaskOp::Dilate { iterations: 1 },
+                MaskOp::FillHoles { max_size: 0 },
+                MaskOp::Erode { iterations: 1 },
+                MaskOp::SignalErode(crate::utils::SignalErosionParams { min_component: 1, ..Default::default() }),
+            ],
+        };
+        let whole = build_mask_section(&section, &input, Some(&mag), &meta).unwrap();
+
+        let mut step = vec![1u8; n];
+        for op in section.all_ops() {
+            step = apply_mask_ops(step, std::slice::from_ref(&op), &input, Some(&mag), &meta).unwrap();
+        }
+        assert_eq!(step, whole);
+    }
+
+    #[test]
+    fn test_apply_mask_ops_needs_magnitude_and_matching_length() {
+        let meta = test_metadata();
+        let n = 8 * 8 * 8;
+        let input = vec![10.0; n];
+        // Signal-gated erosion gates on the magnitude, so without one it is an error rather than
+        // silently falling back to the section input.
+        let ops = [MaskOp::SignalErode(Default::default())];
+        assert!(apply_mask_ops(vec![1u8; n], &ops, &input, None, &meta).is_err());
+        // A mask of the wrong size is rejected rather than mis-indexed.
+        assert!(apply_mask_ops(vec![1u8; n - 1], &[MaskOp::Erode { iterations: 1 }], &input, Some(&input), &meta).is_err());
     }
 
     #[test]
