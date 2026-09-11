@@ -410,6 +410,15 @@ pub fn save_center_slices(
     println!("[INFO] Saved center slices to {}", path);
 }
 
+/// The part of `mask` where `result` actually holds a value (finite and non-zero).
+///
+/// Methods that erode the mask (TGV, iQFM, QSMART…) zero exactly the voxels they drop, so this is
+/// their valid region. Pass it as the slice mask so the figures show an eroded rim as "no value"
+/// rather than as a band of 0 ppm.
+pub fn valid_support(result: &[f64], mask: &[u8]) -> Vec<u8> {
+    result.iter().zip(mask).map(|(&v, &m)| (m != 0 && v.is_finite() && v != 0.0) as u8).collect()
+}
+
 /// Compute Dice coefficient between two binary masks
 pub fn dice_coefficient(predicted: &[u8], ground_truth: &[u8]) -> f64 {
     let (mut tp, mut p_sum, mut gt_sum) = (0usize, 0usize, 0usize);

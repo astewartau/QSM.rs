@@ -238,6 +238,11 @@ SUPPLEMENTARY = ("stage_supplementary", "Supplementary outputs", None, None, [
 MONTAGES.append(SUPPLEMENTARY)
 MONTAGES.append(RELAXOMETRY)
 
+# Field and susceptibility montages get the brain-mask outline (from the montage's ground-truth
+# panel) drawn on every panel, so how far each method reaches — and any eroded rim — is visible.
+OUTLINED = {"stage_bfr", "stage_dipole", "stage_chisep"}
+OUTLINE = "#d62728"
+
 # Every slug a montage covers; these get no individual 3-panel figure.
 MONTAGED = {slug for _, _, _, _, rows, _ in MONTAGES for row in rows for slug in row}
 
@@ -340,6 +345,17 @@ def render_bet_overlay(input_dir, output_path):
     return True
 
 
+def _zero_bad(cmap, window):
+    """`cmap` with "no value" (NaN: outside the mask, or eroded by the method) drawn as the colour
+    of 0 in `window` — mid grey on the symmetric field/χ maps — so the background and an eroded rim
+    read as zero rather than as a separate shade that looks like a value."""
+    lo, hi = window
+    zero = (0.0 - lo) / (hi - lo) if hi > lo else 0.0
+    out = cmap.copy()
+    out.set_bad(cmap(min(max(zero, 0.0), 1.0)))
+    return out
+
+
 def render_montage(input_dir, stem, title, unit, window, rows, row_labels, output_path):
     """One figure per stage: centre-axial panels on a shared window and colorbar."""
     kept, kept_labels = [], []
@@ -360,10 +376,13 @@ def render_montage(input_dir, stem, title, unit, window, rows, row_labels, outpu
     fig, axes = plt.subplots(len(kept), ncol,
                              figsize=((2.55 if per_panel else 2.0) * ncol, fig_h),
                              squeeze=False)
-    gray = plt.get_cmap("gray").copy()
-    gray.set_bad("#cccccc")
-    diverging = plt.get_cmap("RdBu_r").copy()
-    diverging.set_bad("#cccccc")
+    gray = plt.get_cmap("gray")
+    diverging = plt.get_cmap("RdBu_r")
+    outline = None
+    if stem in OUTLINED:
+        truth = next((c for r in kept for c in r if "truth" in c and not c.startswith("diff:")), None)
+        if truth:
+            outline = load_axial_with_mask(input_dir / f"{truth}.bin")[1]
     im = None
     for ri, row in enumerate(kept):
         for ci in range(ncol):
@@ -379,8 +398,10 @@ def render_montage(input_dir, stem, title, unit, window, rows, row_labels, outpu
                 finite = data[np.isfinite(data)]
                 panel_window = ((float(finite.min()), float(finite.max()))
                                 if finite.size else (0.0, 1.0))
-            im = ax.imshow(data, cmap=cmap, vmin=panel_window[0], vmax=panel_window[1],
-                           origin="lower")
+            im = ax.imshow(data, cmap=_zero_bad(cmap, panel_window), vmin=panel_window[0],
+                           vmax=panel_window[1], origin="lower")
+            if outline is not None and outline.shape == data.shape and not slug.startswith("diff:"):
+                ax.contour(outline.astype(float), levels=[0.5], colors=OUTLINE, linewidths=0.6)
             is_truth = "truth" in slug
             ax.set_title(label, fontsize=9,
                          fontweight="bold" if is_truth else "normal",

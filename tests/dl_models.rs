@@ -111,7 +111,7 @@ fn test_dl_iqfm() {
     let res = TestResult::new("iQFM", &lfs, &data.fieldmap_local, &data.mask, data.dims);
     res.print_with_time(t.elapsed());
     res.print_ci_metrics(t.elapsed());
-    common::save_center_slices(&lfs, &data.mask, data.dims, "dl_iqfm");
+    common::save_center_slices(&lfs, &common::valid_support(&lfs, &data.mask), data.dims, "dl_iqfm");
     assert!(lfs.iter().all(|v| v.is_finite()), "iQFM produced non-finite values");
 }
 
