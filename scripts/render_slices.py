@@ -238,6 +238,11 @@ SUPPLEMENTARY = ("stage_supplementary", "Supplementary outputs", None, None, [
 MONTAGES.append(SUPPLEMENTARY)
 MONTAGES.append(RELAXOMETRY)
 
+# Field and susceptibility montages get the brain-mask outline (from the montage's ground-truth
+# panel) drawn on every panel, so how far each method reaches — and any eroded rim — is visible.
+OUTLINED = {"stage_bfr", "stage_dipole", "stage_chisep"}
+OUTLINE = "#d62728"
+
 # Every slug a montage covers; these get no individual 3-panel figure.
 MONTAGED = {slug for _, _, _, _, rows, _ in MONTAGES for row in rows for slug in row}
 
@@ -373,6 +378,11 @@ def render_montage(input_dir, stem, title, unit, window, rows, row_labels, outpu
                              squeeze=False)
     gray = plt.get_cmap("gray")
     diverging = plt.get_cmap("RdBu_r")
+    outline = None
+    if stem in OUTLINED:
+        truth = next((c for r in kept for c in r if "truth" in c and not c.startswith("diff:")), None)
+        if truth:
+            outline = load_axial_with_mask(input_dir / f"{truth}.bin")[1]
     im = None
     for ri, row in enumerate(kept):
         for ci in range(ncol):
@@ -390,6 +400,8 @@ def render_montage(input_dir, stem, title, unit, window, rows, row_labels, outpu
                                 if finite.size else (0.0, 1.0))
             im = ax.imshow(data, cmap=_zero_bad(cmap, panel_window), vmin=panel_window[0],
                            vmax=panel_window[1], origin="lower")
+            if outline is not None and outline.shape == data.shape and not slug.startswith("diff:"):
+                ax.contour(outline.astype(float), levels=[0.5], colors=OUTLINE, linewidths=0.6)
             is_truth = "truth" in slug
             ax.set_title(label, fontsize=9,
                          fontweight="bold" if is_truth else "normal",
