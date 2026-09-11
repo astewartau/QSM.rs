@@ -393,6 +393,30 @@ const MODELS: &[ModelSpec] = &[
         outputs: &["chi_pos", "chi_neg"],
         size_divisor: 8,
     },
+    ModelSpec {
+        id: "hd-bet",
+        name: "HD-BET",
+        stage: ModelStage::BrainExtraction,
+        status: WeightStatus::Available,
+        origin: Framework::PyTorch,
+        description: "nnU-Net v2 3D U-Net brain extraction (HD-BET v2): magnitude → brain \
+                      mask, trained on 11,751 multi-sequence clinical MRIs. Runs at 1 mm \
+                      with Gaussian-weighted 96×192×192 sliding-window patches; nnU-Net's \
+                      crop/normalise/resample pipeline is in the Rust glue (bet::hd_bet). \
+                      Spatial axes are dynamic (patch dims multiples of 16×32×32).",
+        paper: "Isensee et al., Hum Brain Mapp 40(17):4952-4964 (2019); https://doi.org/10.1002/hbm.24750",
+        source: "https://github.com/MIC-DKFZ/HD-BET",
+        license: "CC-BY-NC-4.0",
+        files: &[WeightFile {
+            name: "hd-bet.onnx",
+            url: "https://huggingface.co/qsmxt/qsm-onnx-weights/resolve/main/hd-bet.onnx",
+            sha256: "f15200f9a0697cf53b151e316a0c4fe2cacfdbe2220deb36cb56184be4a227f9",
+            bytes: 123_168_028,
+        }],
+        inputs: &["image"],
+        outputs: &["logits"],
+        size_divisor: 32,
+    },
 ];
 
 #[cfg(test)]

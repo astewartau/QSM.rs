@@ -54,8 +54,8 @@ jobs:
           # χ-separation entries are whole test *binaries* (each runs several methods).
           all_chisep='["chisep_qsmci","chisep_relaxometry_qsmci","chisep_xsepnet"]'
           # Deep-learning models (in tests/dl_models.rs; weights fetched from the registry).
-          all_dl='["test_dl_qsmgan","test_dl_lpcnn","test_dl_ir2qsm","test_dl_modl_qsm","test_dl_nextqsm","test_dl_iqfm"]'
-          all_dl_names="test_dl_qsmgan test_dl_lpcnn test_dl_ir2qsm test_dl_modl_qsm test_dl_nextqsm test_dl_iqfm"
+          all_dl='["test_dl_qsmgan","test_dl_lpcnn","test_dl_ir2qsm","test_dl_modl_qsm","test_dl_nextqsm","test_dl_iqfm","test_dl_hdbet"]'
+          all_dl_names="test_dl_qsmgan test_dl_lpcnn test_dl_ir2qsm test_dl_modl_qsm test_dl_nextqsm test_dl_iqfm test_dl_hdbet"
 
           run_unit_tests=false
 
@@ -236,7 +236,8 @@ jobs:
               src/inversion/iqfm.rs)     dl="$dl test_dl_iqfm" ;;
               tests/dl_models.rs)        dl="$dl $all_dl_names" ;;
 
-              # Brain extraction
+              # Brain extraction (HD-BET is a DL model: its own test in the DL matrix)
+              src/bet/hdbet.rs|src/utils/resample.rs) dl="$dl test_dl_hdbet" ;;
               src/bet/*) run_bet=true ;;
 
               # Phase unwrapping
@@ -1093,19 +1094,22 @@ jobs:
               echo "$TABLE"
             fi
 
-            if [ -f "metrics/test_bet.csv" ]; then
+            if [ -f "metrics/test_bet.csv" ] || [ -f "metrics/test_dl_hdbet.csv" ]; then
               echo "## Brain Extraction"
               echo "*Compared against ground truth mask*"
               echo ""
               echo "| Method | Dice | Time |"
               echo "|--------|------|------|"
-              line=$(grep "^RESULT:" "metrics/test_bet.csv" | head -1 | sed 's/^RESULT://')
-              IFS=',' read -r name dice _ _ _ time <<< "$line"
-              if [ "$dice" = "-" ]; then
-                echo "| ${name} | :x: Failed | - |"
-              else
-                echo "| ${name} | ${dice} | $(printf '%.2fs' "$time") |"
-              fi
+              for f in metrics/test_bet.csv metrics/test_dl_hdbet.csv; do
+                [ -f "$f" ] || continue
+                line=$(grep "^RESULT:" "$f" | head -1 | sed 's/^RESULT://')
+                IFS=',' read -r name dice _ _ _ time <<< "$line"
+                if [ "$dice" = "-" ]; then
+                  echo "| ${name} | :x: Failed | - |"
+                else
+                  echo "| ${name} | ${dice} | $(printf '%.2fs' "$time") |"
+                fi
+              done
               echo ""
             fi
 
@@ -1330,19 +1334,22 @@ jobs:
               echo ""
             fi
 
-            if [ -f "metrics/test_bet.csv" ]; then
+            if [ -f "metrics/test_bet.csv" ] || [ -f "metrics/test_dl_hdbet.csv" ]; then
               echo "### Brain Extraction"
               echo "*Compared against ground truth mask*"
               echo ""
               echo "| Method | Dice | Time |"
               echo "|--------|------|------|"
-              line=$(grep "^RESULT:" "metrics/test_bet.csv" | head -1 | sed 's/^RESULT://')
-              IFS=',' read -r name dice _ _ _ time <<< "$line"
-              if [ "$dice" = "-" ]; then
-                echo "| ${name} | :x: Failed | - |"
-              else
-                echo "| ${name} | ${dice} | $(printf '%.2fs' "$time") |"
-              fi
+              for f in metrics/test_bet.csv metrics/test_dl_hdbet.csv; do
+                [ -f "$f" ] || continue
+                line=$(grep "^RESULT:" "$f" | head -1 | sed 's/^RESULT://')
+                IFS=',' read -r name dice _ _ _ time <<< "$line"
+                if [ "$dice" = "-" ]; then
+                  echo "| ${name} | :x: Failed | - |"
+                else
+                  echo "| ${name} | ${dice} | $(printf '%.2fs' "$time") |"
+                fi
+              done
               echo ""
               emit_figures bet
             fi

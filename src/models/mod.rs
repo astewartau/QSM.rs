@@ -61,6 +61,8 @@ pub enum ModelStage {
     SingleStep,
     /// Inputs → paramagnetic/diamagnetic susceptibility (χ+ / χ−).
     ChiSeparation,
+    /// Magnitude image → binary brain mask (brain extraction).
+    BrainExtraction,
 }
 
 /// The framework the weights were originally trained in (before ONNX export).
