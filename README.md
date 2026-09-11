@@ -105,6 +105,7 @@ Load and save NIfTI volumes with [`qsm_core::io`](src/io.rs).
 | Algorithm | Description | Reference |
 |-----------|-------------|-----------|
 | **BET** | Brain Extraction Tool — region-growing brain masking with mesh evolution | Smith, S.M. (2002). "Fast robust automated brain extraction." *Human Brain Mapping*, 17(3):143-155. [DOI](https://doi.org/10.1002/hbm.10062) |
+| **Signal-gated erosion** | Mask refinement for any mask: peels only low-signal boundary voxels (sinus / skull-base T2* dropout) down to a depth cap, after dividing out the receive-coil bias; interior dark structures are kept | QSM-CI harmonization masking (`hd-bet-qsmci`), [QSMxT/QSM-CI](https://github.com/QSMxT/QSM-CI) |
 
 ### Phase Unwrapping
 
@@ -213,6 +214,7 @@ This library was developed with reference to the following open-source implement
 | [FSL-BET2](https://github.com/Bostrix/FSL-BET2) | BET | C++ |
 | [QSMART](https://github.com/wtsyeda/QSMART) | SDF, QSMART pipeline, Frangi filter, curvature | MATLAB |
 | [CLEARSWI.jl](https://github.com/korbinian90/CLEARSWI.jl) | CLEAR-SWI | Julia |
+| [QSM-CI](https://github.com/QSMxT/QSM-CI) | Signal-gated mask erosion | Python |
 | [chi-separation](https://github.com/SNU-LIST/chi-separation) | Chi-separation | MATLAB |
 
 ## License

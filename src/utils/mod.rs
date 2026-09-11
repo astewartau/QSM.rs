@@ -3,7 +3,7 @@
 //! This module provides common utility functions:
 //! - Gradient operators (forward/backward differences)
 //! - Padding utilities
-//! - Mask operations
+//! - Mask operations (incl. signal-gated erosion)
 //! - Multi-echo field mapping (phase offset removal, B0 estimation)
 //! - Bias field correction (makehomogeneous)
 //! - Frangi vesselness filter for vessel detection
@@ -22,6 +22,7 @@ pub mod vasculature;
 pub mod qsmart;
 pub mod threshold;
 pub mod mask;
+pub mod signal_erosion;
 pub mod simd_ops;
 pub mod r2star;
 pub mod epg;
@@ -41,6 +42,7 @@ pub use vasculature::*;
 pub use qsmart::*;
 pub use threshold::*;
 pub use mask::*;
+pub use signal_erosion::{signal_gated_erosion, SignalErosionParams};
 pub use simd_ops::*;
 pub use r2star::*;
 pub use epg::*;

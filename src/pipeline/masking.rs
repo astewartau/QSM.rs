@@ -142,6 +142,12 @@ pub fn build_mask_section(
                 );
                 mask = smoothed.iter().map(|&v| if v > 0.5 { 1u8 } else { 0u8 }).collect();
             }
+            MaskOp::SignalErode(params) => {
+                let mag_data = magnitude.ok_or_else(|| {
+                    PipelineError::InvalidInput("signal-gated erosion requires magnitude data".into())
+                })?;
+                mask = crate::utils::signal_gated_erosion(&mask, mag_data, &grid, params);
+            }
         }
     }
 
@@ -352,6 +358,25 @@ mod tests {
         }];
         let result = run_masking(&sections, &[&phase1, &phase2], Some(&mag), &meta).unwrap();
         assert_eq!(result.len(), n);
+    }
+
+    #[test]
+    fn test_masking_signal_erode() {
+        let meta = test_metadata();
+        let n = 8 * 8 * 8;
+        let mag = vec![10.0; n];
+        let section = |refinement| vec![MaskSection {
+            input: MaskingInput::Magnitude,
+            generator: MaskOp::Threshold { method: MaskThresholdMethod::Fixed, value: Some(5.0) },
+            refinements: vec![refinement],
+        }];
+        let params = crate::utils::SignalErosionParams { min_component: 1, ..Default::default() };
+        let result = run_masking(&section(MaskOp::SignalErode(params.clone())), &[], Some(&mag), &meta).unwrap();
+        // Uniform signal: nothing is gated, so only the one global erosion applies.
+        let plain = run_masking(&section(MaskOp::Erode { iterations: 1 }), &[], Some(&mag), &meta).unwrap();
+        assert_eq!(result, plain);
+        // Needs magnitude.
+        assert!(run_masking(&section(MaskOp::SignalErode(params)), &[], None, &meta).is_err());
     }
 
     #[test]
