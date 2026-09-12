@@ -7,9 +7,11 @@
 //! (NCDHW for the volumetric nets); callers convert to/from the crate's `f64`
 //! volumes and handle model-specific normalization and padding.
 //!
-//! With the `parallel` feature on a native target, each inference spreads tract's matrix kernels
-//! over a shared thread pool (calls from rayon workers — the tiled drivers — and WASM builds stay
-//! single-threaded).
+//! With the `parallel` feature, each inference spreads tract's matrix kernels over a thread pool:
+//! a dedicated one natively, and rayon's global pool on WASM (the one
+//! `wasm_bindgen_rayon::init_thread_pool` sets up, which the host must have started). Calls from
+//! inside a rayon worker — the tiled drivers, which already run one tile per thread — stay on the
+//! calling thread.
 //!
 //! ```no_run
 //! # #[cfg(feature = "onnx")] {
@@ -64,28 +66,46 @@ impl std::fmt::Display for OnnxError {
 
 impl std::error::Error for OnnxError {}
 
-/// Run one inference, spreading tract's matrix kernels over a shared thread pool when the
-/// `parallel` feature is on in a native build. Calls made from inside a rayon worker — the tiled
-/// drivers, which already run one tile per thread — stay single-threaded to avoid
-/// oversubscription. WASM always stays on the calling thread: tract's executor builds its own
-/// rayon pool, which cannot spawn threads there (wasm threads come from wasm-bindgen-rayon).
+/// Run one inference with tract's matrix kernels spread over a thread pool when the `parallel`
+/// feature is on (see [`tract_executor`]). Calls made from inside a rayon worker — the tiled
+/// drivers, which already run one tile per thread — stay on the calling thread.
 fn run_threaded<R>(f: impl FnOnce() -> R) -> R {
-    #[cfg(all(feature = "parallel", not(target_family = "wasm")))]
+    #[cfg(feature = "parallel")]
     {
-        use std::sync::OnceLock;
-        use tract_linalg::multithread::{multithread_tract_scope, Executor};
-        static EXECUTOR: OnceLock<Option<Executor>> = OnceLock::new();
         if rayon::current_thread_index().is_none() {
-            let exec = EXECUTOR.get_or_init(|| {
-                let n = rayon::current_num_threads();
-                (n > 1).then(|| Executor::multithread_with_name(n, "qsm-tract"))
-            });
-            if let Some(exec) = exec {
-                return multithread_tract_scope(exec.clone(), f);
+            if let Some(exec) = tract_executor() {
+                return tract_linalg::multithread::multithread_tract_scope(exec, f);
             }
         }
     }
     f()
+}
+
+/// The executor [`run_threaded`] installs, or `None` to stay on the calling thread.
+///
+/// Native: one pool sized to rayon's, built once. WASM: rayon's **global** pool — tract cannot
+/// build its own there (`ThreadPoolBuilder::build` calls `std::thread::spawn`, unsupported on
+/// `wasm32-unknown-unknown`), so `Executor::RayonGlobal` uses the pool
+/// `wasm_bindgen_rayon::init_thread_pool` sets up. That makes the host's pool a precondition of
+/// the `parallel` feature on WASM — already true of every other rayon path in this crate.
+#[cfg(feature = "parallel")]
+fn tract_executor() -> Option<tract_linalg::multithread::Executor> {
+    use tract_linalg::multithread::Executor;
+    #[cfg(target_family = "wasm")]
+    {
+        Some(Executor::RayonGlobal)
+    }
+    #[cfg(not(target_family = "wasm"))]
+    {
+        use std::sync::OnceLock;
+        static EXECUTOR: OnceLock<Option<Executor>> = OnceLock::new();
+        EXECUTOR
+            .get_or_init(|| {
+                let n = rayon::current_num_threads();
+                (n > 1).then(|| Executor::multithread_with_name(n, "qsm-tract"))
+            })
+            .clone()
+    }
 }
 
 /// A parsed ONNX model, ready to run at any spatial size.
