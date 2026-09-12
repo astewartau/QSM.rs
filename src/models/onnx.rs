@@ -9,7 +9,8 @@
 //!
 //! With the `parallel` feature, each inference spreads tract's matrix kernels over a thread pool:
 //! a dedicated one natively, and rayon's global pool on WASM (the one
-//! `wasm_bindgen_rayon::init_thread_pool` sets up, which the host must have started). Calls from
+//! `wasm_bindgen_rayon::init_thread_pool` sets up, once the host reports it via
+//! [`onnx::set_wasm_threads_available`]). Calls from
 //! inside a rayon worker — the tiled drivers, which already run one tile per thread — stay on the
 //! calling thread.
 //!
@@ -81,19 +82,40 @@ fn run_threaded<R>(f: impl FnOnce() -> R) -> R {
     f()
 }
 
+/// Whether the WASM host has started its rayon thread pool; see [`set_wasm_threads_available`].
+#[cfg(all(feature = "parallel", target_family = "wasm"))]
+static WASM_THREADS_AVAILABLE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Tell the crate that a WASM host's rayon thread pool is up, so inference may use it.
+///
+/// On `wasm32-unknown-unknown` rayon cannot start threads by itself — the pool comes from
+/// `wasm_bindgen_rayon::init_thread_pool`, which only works on a cross-origin-isolated page. A
+/// threaded build served without isolation therefore has the `parallel` feature but **no** pool,
+/// and touching rayon's global pool there fails. So this defaults to `false`: call it with `true`
+/// once `init_thread_pool` has resolved, and inference stays on the calling thread until then.
+///
+/// Each WASM module instance has its own flag (a lazily-loaded inference bundle is separate from
+/// the main one), so call it on whichever module you initialised.
+#[cfg(all(feature = "parallel", target_family = "wasm"))]
+pub fn set_wasm_threads_available(available: bool) {
+    WASM_THREADS_AVAILABLE.store(available, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// The executor [`run_threaded`] installs, or `None` to stay on the calling thread.
 ///
 /// Native: one pool sized to rayon's, built once. WASM: rayon's **global** pool — tract cannot
 /// build its own there (`ThreadPoolBuilder::build` calls `std::thread::spawn`, unsupported on
 /// `wasm32-unknown-unknown`), so `Executor::RayonGlobal` uses the pool
-/// `wasm_bindgen_rayon::init_thread_pool` sets up. That makes the host's pool a precondition of
-/// the `parallel` feature on WASM — already true of every other rayon path in this crate.
+/// `wasm_bindgen_rayon::init_thread_pool` sets up, once the host reports it via
+/// [`set_wasm_threads_available`].
 #[cfg(feature = "parallel")]
 fn tract_executor() -> Option<tract_linalg::multithread::Executor> {
     use tract_linalg::multithread::Executor;
     #[cfg(target_family = "wasm")]
     {
-        Some(Executor::RayonGlobal)
+        WASM_THREADS_AVAILABLE
+            .load(std::sync::atomic::Ordering::Relaxed)
+            .then_some(Executor::RayonGlobal)
     }
     #[cfg(not(target_family = "wasm"))]
     {
