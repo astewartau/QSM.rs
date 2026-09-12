@@ -14,6 +14,11 @@
 //! inside a rayon worker — the tiled drivers, which already run one tile per thread — stay on the
 //! calling thread.
 //!
+//! On `wasm32` the build **must** enable SIMD128 (`-C target-feature=+simd128`): since tract
+//! 0.23, `tract-linalg` registers its matmul kernels on wasm only under that target feature, so a
+//! build without it compiles fine and then fails on the first convolution at runtime with
+//! `No matmul found`. The guard below turns that into a build error instead.
+//!
 //! ```no_run
 //! # #[cfg(feature = "onnx")] {
 //! use qsm_core::models::onnx::{OnnxModel, Tensor};
@@ -23,6 +28,13 @@
 //! # let _ = out; Ok(()) }
 //! # }
 //! ```
+
+#[cfg(all(target_arch = "wasm32", not(target_feature = "simd128")))]
+compile_error!(
+    "the `onnx` feature on wasm32 needs SIMD128: build with `-C target-feature=+simd128` \
+     (RUSTFLAGS). tract-linalg registers matmul kernels on wasm only under `simd128`, so \
+     without it every convolution fails at runtime with \"No matmul found\"."
+);
 
 use tract_onnx::prelude::*;
 
@@ -144,7 +156,7 @@ impl OnnxModel {
     pub fn load(bytes: &[u8]) -> Result<Self, OnnxError> {
         let model = tract_onnx::onnx()
             .model_for_read(&mut std::io::Cursor::new(bytes))
-            .map_err(|e| OnnxError::Load(e.to_string()))?;
+            .map_err(|e| OnnxError::Load(format!("{e:#}")))?;
         Ok(Self { model })
     }
 
@@ -155,7 +167,7 @@ impl OnnxModel {
         for (i, inp) in inputs.iter().enumerate() {
             model
                 .set_input_fact(i, f32::fact(inp.shape.as_slice()).into())
-                .map_err(|e| OnnxError::Shape(e.to_string()))?;
+                .map_err(|e| OnnxError::Shape(format!("{e:#}")))?;
         }
         // Prefer the optimized plan; if an optimization pass rejects the graph
         // (e.g. `PushSliceUp` on the backprop-as-forward graphs used by NeXtQSM),
@@ -165,24 +177,24 @@ impl OnnxModel {
             Err(_) => model
                 .into_typed()
                 .and_then(|m| m.into_runnable())
-                .map_err(|e| OnnxError::Load(e.to_string()))?,
+                .map_err(|e| OnnxError::Load(format!("{e:#}")))?,
         };
 
         let mut feeds: TVec<TValue> = tvec!();
         for inp in inputs {
             let t = tract_onnx::prelude::Tensor::from_shape(&inp.shape, &inp.data)
-                .map_err(|e| OnnxError::Shape(e.to_string()))?;
+                .map_err(|e| OnnxError::Shape(format!("{e:#}")))?;
             feeds.push(t.into());
         }
 
-        let result = run_threaded(|| plan.run(feeds)).map_err(|e| OnnxError::Run(e.to_string()))?;
+        let result = run_threaded(|| plan.run(feeds)).map_err(|e| OnnxError::Run(format!("{e:#}")))?;
 
         result
             .iter()
             .map(|t| {
                 let view = t
                     .to_plain_array_view::<f32>()
-                    .map_err(|e| OnnxError::Run(e.to_string()))?;
+                    .map_err(|e| OnnxError::Run(format!("{e:#}")))?;
                 Ok(Tensor {
                     shape: view.shape().to_vec(),
                     data: view.iter().copied().collect(),
@@ -212,7 +224,7 @@ impl OnnxModel {
         for (i, shape) in input_shapes.iter().enumerate() {
             model
                 .set_input_fact(i, f32::fact(*shape).into())
-                .map_err(|e| OnnxError::Shape(e.to_string()))?;
+                .map_err(|e| OnnxError::Shape(format!("{e:#}")))?;
         }
         // Same optimize-or-fallback strategy as `run`, but paid once here, not per call.
         let plan = match model.clone().into_optimized().and_then(|m| m.into_runnable()) {
@@ -220,7 +232,7 @@ impl OnnxModel {
             Err(_) => model
                 .into_typed()
                 .and_then(|m| m.into_runnable())
-                .map_err(|e| OnnxError::Load(e.to_string()))?,
+                .map_err(|e| OnnxError::Load(format!("{e:#}")))?,
         };
         Ok(OnnxPlan { plan })
     }
@@ -240,16 +252,16 @@ impl OnnxPlan {
         let mut feeds: TVec<TValue> = tvec!();
         for inp in inputs {
             let t = tract_onnx::prelude::Tensor::from_shape(&inp.shape, &inp.data)
-                .map_err(|e| OnnxError::Shape(e.to_string()))?;
+                .map_err(|e| OnnxError::Shape(format!("{e:#}")))?;
             feeds.push(t.into());
         }
-        let result = run_threaded(|| self.plan.run(feeds)).map_err(|e| OnnxError::Run(e.to_string()))?;
+        let result = run_threaded(|| self.plan.run(feeds)).map_err(|e| OnnxError::Run(format!("{e:#}")))?;
         result
             .iter()
             .map(|t| {
                 let view = t
                     .to_plain_array_view::<f32>()
-                    .map_err(|e| OnnxError::Run(e.to_string()))?;
+                    .map_err(|e| OnnxError::Run(format!("{e:#}")))?;
                 Ok(Tensor {
                     shape: view.shape().to_vec(),
                     data: view.iter().copied().collect(),
