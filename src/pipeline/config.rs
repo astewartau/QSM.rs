@@ -174,10 +174,16 @@ pub enum MaskOp {
         sigma_mm: f64,
     },
     /// Signal-gated erosion: peel only low-signal boundary voxels (skull-base / sinus dropout)
-    /// down to a depth cap. Needs magnitude. See [`crate::utils::signal_gated_erosion`].
+    /// down to a depth cap. See [`crate::utils::signal_gated_erosion`].
+    ///
+    /// Gates on the **magnitude** image, never on the section's input: it divides out a
+    /// receive-coil bias estimate and compares against the in-mask median, which only means
+    /// anything for magnitude. Errors if no magnitude is supplied, so a phase-quality mask input
+    /// can still be refined with it as long as the magnitude is available.
     SignalErode(crate::utils::SignalErosionParams),
-    /// HD-BET deep-learning brain extraction from the magnitude (a generator, like `Bet`).
-    /// Requires the `onnx` feature and the `hd-bet` model weights; see [`crate::models`].
+    /// HD-BET deep-learning brain extraction from the **magnitude** (a generator, like `Bet`),
+    /// whatever the section's input is. Requires the `onnx` feature and the `hd-bet` model
+    /// weights; see [`crate::models`].
     HdBet(crate::bet::HdBetParams),
 }
 
