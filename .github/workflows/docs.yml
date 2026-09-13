@@ -21,6 +21,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Tags are needed for `git describe` below, which is how a manual
+          # run works out its version. Without them it finds none.
+          fetch-depth: 0
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -31,7 +35,8 @@ jobs:
           if [ "${{ github.event_name }}" = "release" ]; then
             TAG="${GITHUB_REF_NAME}"
           else
-            TAG="$(git describe --tags --abbrev=0 2>/dev/null || echo 'dev')"
+            # Must be a version cargo can parse — it is written into Cargo.toml below.
+            TAG="$(git describe --tags --abbrev=0 2>/dev/null || echo 'v0.0.0')"
           fi
           VERSION="${TAG#v}"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
