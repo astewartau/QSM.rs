@@ -1,0 +1,9 @@
+*.aux
+*.bbl
+*.blg
+*.log
+*.out
+*.spl
+*.pdf
+*-eps-converted-to.pdf
+*.pag

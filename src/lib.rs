@@ -200,4 +200,11 @@ pub mod homogeneity {
 // ============================================================================
 // I/O
 // ============================================================================
+/// Scan geometry from the NIfTI affine: B0 direction, obliquity, and resampling to an axial grid.
+///
+/// The dipole kernel lives in the voxel grid, so an oblique acquisition must either supply the
+/// true B0 direction or be resampled to a cardinal-aligned grid. Wrapped phase has to be
+/// resampled in the complex domain — see [`geometry::resample_complex_to_axial`].
+pub mod geometry;
+
 pub mod io;
