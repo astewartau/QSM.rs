@@ -4,7 +4,9 @@
 //!
 //! - [`unwrap_romeo`] / [`unwrap_romeo_multi_echo`] — ROMEO, region growing with
 //!   quality-guided ordering ([`RomeoParams`])
-//! - [`laplacian_unwrap`] — fast FFT-based Laplacian unwrapping
+//! - [`laplacian_unwrap_neumann`] — Laplacian unwrapping (Neumann BC on the array)
+//! - [`laplacian_unwrap`] — Laplacian unwrapping **+ background field removal**
+//!   (Dirichlet BC on the ROI); see the [`laplacian`] module docs for why these differ
 
 pub mod romeo;
 pub mod laplacian;
@@ -14,11 +16,16 @@ pub use romeo::{
     calculate_weights_romeo, voxel_quality_romeo,
     RomeoParams, RomeoWeightType,
 };
-pub use laplacian::laplacian_unwrap;
+pub use laplacian::{laplacian_unwrap, laplacian_unwrap_neumann};
 
 /// Phase unwrapping method selection.
+///
+/// Note that [`UnwrapMethod::Laplacian`] selects [`laplacian_unwrap`], which also removes
+/// the harmonic background field. [`laplacian_unwrap_neumann`], which unwraps only, is not
+/// currently reachable through this enum — call it directly.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum UnwrapMethod {
     Romeo,
+    /// Laplacian unwrapping **+ harmonic background removal**; see [`laplacian_unwrap`].
     Laplacian,
 }
