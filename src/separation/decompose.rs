@@ -30,6 +30,25 @@
 //! sub-model (`pscModel`) gives χ+ and the diamagnetic sub-model (`dscModel`)
 //! gives |χ−|. χ+ is returned ≥ 0, χ− ≤ 0.
 //!
+//! **Phase unwrapping.** Every phase the fit and the reconstruction see arrives
+//! through `atan2`, on `(−π, π]`. A compartment accumulates `(2/3)·χ·γ·B0·TE`
+//! radians, so above `|χ_total| = π / ((2/3)·γ·B0·TE_max)` the late echoes fold
+//! back onto that branch — 0.09 ppm at 7 T with a 28 ms last echo, which is
+//! ordinary globus pallidus. Left folded, the alternation converges to a
+//! degenerate fixed point (χ− pinned at `chi_bound`, R2*₀ and the amplitudes at
+//! zero) and returns χ+ = 0 exactly, so the most paramagnetic structure in the
+//! volume reads as a hole. Both the stage-2/3 residuals and `recon_phase`
+//! therefore walk the echoes in order and keep each phase on the branch nearest
+//! its predecessor ([`unwrap_near`]); the synthesized data phase is known in
+//! closed form and is used unwrapped rather than round-tripped through `atan2`.
+//! The original method, published at 3 T, does not meet this limit in practice —
+//! the threshold there is ~0.2 ppm.
+//!
+//! Note that `−Σ angle / den` remains a *compressive* estimator of χ even once
+//! unwrapped: it saturates at `n_echoes·π / den`, so strong sources read low.
+//! That is a scale error, not a dropout, and it is inherent to the reference's
+//! reconstruction rather than to this port.
+//!
 //! **Output-mapping note.** The QSM-CI reference *comment* claims a para/dia
 //! output swap (χ+ = |DSC|); on the qsm-forward phantom that swap anti-correlates
 //! with the ground truth, while the physically-consistent mapping used here
@@ -149,13 +168,13 @@ pub fn decompose(
                 }
                 let ph = -(2.0 / 3.0) * chi * GAMMA * b0 * te[e];
                 ws.y[e] = (m * ph.cos(), m * ph.sin());
+                // log(y) for stages 2 & 3. `ph` is the phase we just synthesized,
+                // so keep it as it is rather than recovering a ±π-wrapped copy of
+                // it through `atan2` — see the note above `unwrap_near`.
+                ws.logy[e] = (0.5 * (m * m).max(1e-300).ln(), ph);
             }
             if all_zero {
                 return (i, 0.0, 0.0);
-            }
-            // log(y) for stages 2 & 3.
-            for e in 0..ne {
-                ws.logy[e] = clog(ws.y[e]);
             }
 
             let (cp, cm, c0, r0, chip, chim) =
@@ -251,12 +270,15 @@ fn fit_voxel(
         // Stage 2: R2*₀ against log(y).
         {
             let resid = |x: &[f64], out: &mut [f64]| {
+                let mut prev = 0.0;
                 for e in 0..ne {
                     let m = clog(signal_model(
                         te[e], c[0], c[1], c[2], chi[0], chi[1], x[0], b0,
                     ));
+                    let ang = if e == 0 { m.1 } else { unwrap_near(m.1, prev) };
+                    prev = ang;
                     out[e] = m.0 - logy[e].0;
-                    out[ne + e] = -(m.1 - logy[e].1);
+                    out[ne + e] = -(ang - logy[e].1);
                 }
             };
             let x = lm_bounded(resid, &[r0], &[0.0], &[inf], maxit, lm);
@@ -265,10 +287,13 @@ fn fit_voxel(
         // Stage 3: [χ+, χ−] against log(y).
         {
             let resid = |x: &[f64], out: &mut [f64]| {
+                let mut prev = 0.0;
                 for e in 0..ne {
                     let m = clog(signal_model(te[e], c[0], c[1], c[2], x[0], x[1], r0, b0));
+                    let ang = if e == 0 { m.1 } else { unwrap_near(m.1, prev) };
+                    prev = ang;
                     out[e] = m.0 - logy[e].0;
-                    out[ne + e] = -(m.1 - logy[e].1);
+                    out[ne + e] = -(ang - logy[e].1);
                 }
             };
             let x = lm_bounded(resid, &chi, &[0.0, -ub], &[ub, 0.0], maxit, lm);
@@ -363,12 +388,39 @@ fn clog(z: (f64, f64)) -> (f64, f64) {
     (0.5 * mag2.max(1e-300).ln(), z.1.atan2(z.0))
 }
 
-/// Reconstruct a source value: `−Σ angle(model(TE)) / den`.
+/// `2π`, the period of the phase branch cut.
+const TAU: f64 = 2.0 * PI;
+
+/// Put `ang` on the 2π-branch nearest `prev`.
+///
+/// Every phase here reaches us through `atan2`, which folds onto `(−π, π]`. That
+/// fold is not harmless: a compartment accumulates `(2/3)·χ·γ·B0·TE` radians, so
+/// at `|χ_total| > π / ((2/3)·γ·B0·TE_max)` — 0.09 ppm at 7 T with a 28 ms last
+/// echo, i.e. inside the globus pallidus — the late echoes fold back and the
+/// alternating fit chases the fold into a degenerate fixed point (χ− pinned at
+/// its bound, R2*₀ and the amplitudes driven to zero, χ+ stuck at 0). Walking the
+/// echoes in order and keeping each phase on the branch nearest its predecessor
+/// restores the monotone ramp the model assumes.
+///
+/// The first echo is left on its principal branch: it anchors the series, and at
+/// any sane `TE₁` its phase is well inside `(−π, π]` for `|χ| ≤ chi_bound`.
+#[inline]
+fn unwrap_near(ang: f64, prev: f64) -> f64 {
+    ang + ((prev - ang) / TAU).round() * TAU
+}
+
+/// Reconstruct a source value: `−Σ angle(model(TE)) / den`, with the phase
+/// unwrapped along the echo axis so a strong source is not folded back to zero
+/// (see [`unwrap_near`]).
 fn recon_phase(te: &[f64], _b0: f64, den: f64, model: impl Fn(f64) -> (f64, f64)) -> f64 {
     let mut s = 0.0;
-    for &t in te {
+    let mut prev = 0.0;
+    for (e, &t) in te.iter().enumerate() {
         let z = model(t);
-        s += z.1.atan2(z.0);
+        let raw = z.1.atan2(z.0);
+        let ang = if e == 0 { raw } else { unwrap_near(raw, prev) };
+        prev = ang;
+        s += ang;
     }
     -s / den
 }
@@ -659,6 +711,61 @@ mod tests {
             pos[0],
             neg[0]
         );
+    }
+
+    /// Regression: χ+ must survive past the phase-wrap threshold.
+    ///
+    /// A compartment accumulates `(2/3)·χ·γ·B0·TE` radians, so with `atan2`'s
+    /// `(−π, π]` fold and no unwrapping the alternating fit collapses to a
+    /// degenerate fixed point above `|χ_total| = π / ((2/3)·γ·B0·TE_max)` and
+    /// returns χ+ = 0 exactly. At the phantom's 7 T and 28 ms last echo that
+    /// threshold is 0.090 ppm — inside the globus pallidus, which consequently
+    /// reconstructed as a hole. Sweep across it and require a response that is
+    /// non-zero and increasing, not a dropout.
+    #[test]
+    fn chi_pos_survives_the_phase_wrap_threshold() {
+        let te = [0.004, 0.012, 0.020, 0.028]; // 7 T phantom sampling
+        let b0 = 7.0;
+        let params = DecomposeParams {
+            b0,
+            n_inner: 10,
+            chi_bound: 0.5,
+            max_lm_iter: 30,
+        };
+        let threshold = PI / ((2.0 / 3.0) * GAMMA * b0 * te[te.len() - 1]);
+        assert!(
+            (0.06..0.12).contains(&threshold),
+            "test assumes a threshold inside the swept range, got {threshold}"
+        );
+
+        // One voxel forward-simulated from the model, for a range of true χ+ that
+        // straddles the threshold.
+        let (cp, cm, c0, chim, r0) = (0.35, 0.25, 0.40, -0.03, 25.0);
+        let mut prev = 0.0_f64;
+        for k in 4..=13 {
+            let chip = 0.02 * k as f64;
+            let mag: Vec<f64> = te
+                .iter()
+                .map(|&t| {
+                    let z = signal_model(t, cp, cm, c0, chip, chim, r0, b0);
+                    (z.0 * z.0 + z.1 * z.1).sqrt()
+                })
+                .collect();
+            let (pos, _neg, _tot) =
+                decompose(&[chip + chim], &mag, &te, &[1u8], &params, |_, _| {});
+            assert!(
+                pos[0] > 0.0,
+                "χ+ collapsed to zero at χ+={chip} (χ_total={}, threshold {threshold:.4})",
+                chip + chim
+            );
+            assert!(
+                pos[0] > prev,
+                "χ+ must increase with the true source: {} -> {} at χ+={chip}",
+                prev,
+                pos[0]
+            );
+            prev = pos[0];
+        }
     }
 
     /// Multi-voxel run exercising the masked-out, all-zero, and progress paths.
