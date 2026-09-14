@@ -89,7 +89,7 @@ let grid = Grid::new(128, 128, 64, 1.0, 1.0, 1.0);
 let bdir = (0.0, 0.0, 1.0); // B0 direction
 
 let mask = bet::run_bet(magnitude, &grid, &BetParams::default(), |_, _| {});
-let unwrapped = unwrap::laplacian_unwrap(phase, &mask, &grid);
+let unwrapped = unwrap::laplacian_unwrap_neumann(phase, &mask, &grid);
 let (local, eroded) = bgremove::vsharp(&unwrapped, &mask, &grid, &VsharpParams::default(), |_, _| {});
 let chi = inversion::tv_admm(&local, &eroded, &grid, bdir, &TvParams::default(), |_, _| {});
 # let _ = chi;
@@ -112,7 +112,7 @@ Load and save NIfTI volumes with [`qsm_core::io`](src/io.rs).
 | Algorithm | Description | Reference |
 |-----------|-------------|-----------|
 | **ROMEO** | Region-growing with quality-guided ordering using magnitude and gradient coherence weighting | Dymerska, B., et al. (2021). "Phase unwrapping with a rapid opensource minimum spanning tree algorithm (ROMEO)." *Magnetic Resonance in Medicine*, 85(4):2294-2308. [DOI](https://doi.org/10.1002/mrm.28563) |
-| **Laplacian (Neumann)** | FFT-based Poisson solver under a Neumann boundary condition on the array — unwraps without altering the background field, so the result is a total field (`laplacian_unwrap_neumann`) | Schofield, M.A., Zhu, Y. (2003). "Fast phase unwrapping algorithm for interferometric applications." *Optics Letters*, 28(14):1194-1196. [DOI](https://doi.org/10.1364/OL.28.001194) |
+| **Laplacian (Neumann)** | FFT-based Poisson solver under a Neumann boundary condition on the array — unwraps without altering the background field, so the result is a total field (`laplacian_unwrap_neumann`). This is what `UnwrapMethod::Laplacian` selects. | Schofield, M.A., Zhu, Y. (2003). "Fast phase unwrapping algorithm for interferometric applications." *Optics Letters*, 28(14):1194-1196. [DOI](https://doi.org/10.1364/OL.28.001194) |
 
 ### Background Field Removal
 
@@ -140,6 +140,14 @@ Load and save NIfTI volumes with [`qsm_core::io`](src/io.rs).
 > background as a side effect of masking the Laplacian; pairing it with a separate
 > background-removal stage removes background twice. `laplacian_unwrap_neumann` unwraps
 > only. See the `unwrap::laplacian` module docs.
+>
+> Prefer **unwrap then remove background as two steps**. On the test data, the background
+> removal `laplacian_unwrap` performs implicitly reaches r = 0.52 against the ground-truth
+> local field, where running `bgremove::lbv` on the same field — a full Laplacian boundary
+> value solve — reaches **r = 0.91**, and V-SHARP 0.88. The combined function's Dirichlet
+> condition is approximated by zeroing ∇² outside the mask and solving with a periodic FFT,
+> which is not the ROI solve the LBV reference describes. It is kept for callers that want
+> the combination, but the pipeline uses the Neumann variant and a separate BFR stage.
 
 ### Dipole Inversion
 

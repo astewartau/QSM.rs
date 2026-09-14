@@ -23,6 +23,16 @@
 //! Pair [`laplacian_unwrap`] with a separate background-removal stage only deliberately:
 //! doing so removes background twice, by an amount that is not controlled.
 //!
+//! **Prefer unwrapping and background removal as two steps.** On the project's test data,
+//! the background removal [`laplacian_unwrap`] performs implicitly reaches r = 0.52 against
+//! the ground-truth local field, where [`crate::bgremove::lbv`] on the same field — a full
+//! Laplacian boundary value solve — reaches r = 0.91 and V-SHARP 0.88. The Dirichlet
+//! condition here is approximated by zeroing ∇² outside the mask and solving with a
+//! periodic FFT, rather than the ROI solve the LBV reference describes, and it shows.
+//! [`UnwrapMethod::Laplacian`](super::UnwrapMethod::Laplacian) therefore selects
+//! [`laplacian_unwrap_neumann`]; this function is kept for callers that specifically want
+//! the combination.
+//!
 //! # References
 //!
 //! Laplacian unwrapping:

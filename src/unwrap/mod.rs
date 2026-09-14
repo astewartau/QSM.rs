@@ -20,12 +20,13 @@ pub use laplacian::{laplacian_unwrap, laplacian_unwrap_neumann};
 
 /// Phase unwrapping method selection.
 ///
-/// Note that [`UnwrapMethod::Laplacian`] selects [`laplacian_unwrap`], which also removes
-/// the harmonic background field. [`laplacian_unwrap_neumann`], which unwraps only, is not
-/// currently reachable through this enum — call it directly.
+/// These select unwrappers only. [`laplacian_unwrap`], which unwraps *and* removes the
+/// harmonic background, is deliberately not reachable here — call it directly if that
+/// combination is what you want, and read the [`laplacian`] module docs first.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum UnwrapMethod {
     Romeo,
-    /// Laplacian unwrapping **+ harmonic background removal**; see [`laplacian_unwrap`].
+    /// Laplacian unwrapping under a Neumann boundary condition; see
+    /// [`laplacian_unwrap_neumann`]. Unwraps only — the background field is left alone.
     Laplacian,
 }
