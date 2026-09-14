@@ -205,6 +205,12 @@ pub mod homogeneity {
 /// The dipole kernel lives in the voxel grid, so an oblique acquisition must either supply the
 /// true B0 direction or be resampled to a cardinal-aligned grid. Wrapped phase has to be
 /// resampled in the complex domain — see [`geometry::resample_complex_to_axial`].
+/// Cropping reconstruction to the region that carries signal, and putting the answer back.
+///
+/// FFT-based stages cost `O(N log N)` in the whole grid, not in the brain. See [`crop`] for why
+/// the box is also rounded up to FFT-friendly sizes, and for the wrap-around caveat.
+pub mod crop;
+
 pub mod geometry;
 
 pub mod io;
