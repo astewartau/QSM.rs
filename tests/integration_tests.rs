@@ -17,7 +17,7 @@ use qsm_core::inversion::{tgv_qsm, TgvParams, get_default_alpha, get_default_ite
 use qsm_core::inversion::{TvParams, NltvParams, RtsParams, MediParams, TfiParams, TikhonovParams};
 use qsm_core::inversion::{NdiParams, FansiParams, L1QsmParams, WhQsmParams, HdQsmParams, AmpPeParams};
 use qsm_core::swi;
-use qsm_core::unwrap::{laplacian_unwrap, UnwrapMethod};
+use qsm_core::unwrap::{laplacian_unwrap, laplacian_unwrap_neumann, UnwrapMethod};
 use qsm_core::unwrap::romeo::{unwrap_romeo_multi_echo, RomeoParams};
 use qsm_core::pipeline;
 use qsm_core::utils::{
@@ -67,6 +67,39 @@ fn run_field_mapping(data: &common::TestData) -> Vec<f64> {
 
     // Step 3: Weighted B0 averaging (expects seconds)
     println!("[INFO] Weighted B0 estimation...");
+    calculate_b0_weighted(
+        &unwrapped, &data.mag_echoes, &data.echo_times, &data.mask,
+        B0WeightType::PhaseSNR, &grid,
+    )
+}
+
+/// Field mapping via Laplacian unwrapping, for either boundary condition.
+///
+/// Identical to `run_field_mapping` except for the unwrapper, so the two Laplacian
+/// variants are compared against ROMEO on equal terms. Returns B0 in Hz.
+fn run_field_mapping_laplacian(data: &common::TestData, neumann: bool) -> Vec<f64> {
+    let (nx, ny, nz) = data.dims;
+    let (vsx, vsy, vsz) = data.voxel_size;
+    let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
+
+    // Phase offset removal is unchanged: it unwraps the HIP with ROMEO and uses TE ratios.
+    let (corrected_phases, _offset) = phase_offset_removal(
+        &data.phase_echoes, &data.mag_echoes, &data.echo_times, &data.mask,
+        [10.0, 10.0, 5.0], [0, 1], UnwrapMethod::Romeo,
+        &grid,
+    );
+
+    let unwrapped: Vec<Vec<f64>> = corrected_phases
+        .iter()
+        .map(|p| {
+            if neumann {
+                laplacian_unwrap_neumann(p, &data.mask, &grid)
+            } else {
+                laplacian_unwrap(p, &data.mask, &grid)
+            }
+        })
+        .collect();
+
     calculate_b0_weighted(
         &unwrapped, &data.mag_echoes, &data.echo_times, &data.mask,
         B0WeightType::PhaseSNR, &grid,
@@ -1185,9 +1218,90 @@ fn test_pipeline_romeo_b0() {
 
     let res = TestResult::new("ROMEO+B0", &b0_ppm, &data.fieldmap, &data.mask, data.dims);
     res.print_with_time(elapsed);
+    // Emitted so the PR comment can table ROMEO against the two Laplacian variants.
+    res.print_ci_metrics(elapsed);
     common::save_center_slices(&b0_ppm, &data.mask, data.dims, "pipeline_romeo_b0");
 
     assert!(res.nrmse < 0.5, "ROMEO+B0 NRMSE too high: {}", res.nrmse);
+}
+
+/// Laplacian unwrapping under a Neumann boundary condition on the array.
+///
+/// Scored against the ground-truth **total** field, like ROMEO: this variant unwraps only,
+/// so the background field must survive.
+#[test]
+#[ignore]
+fn test_pipeline_laplacian_b0() {
+    println!("[INFO] Loading test data...");
+    let data = TestData::load().expect("Failed to load test data");
+
+    let start = Instant::now();
+    let b0_hz = run_field_mapping_laplacian(&data, true);
+    let elapsed = start.elapsed();
+
+    let gamma = 42.576e6_f64;
+    let scale = 1e6 / (gamma * data.field_strength);
+    let b0_ppm: Vec<f64> = b0_hz.iter().map(|&v| v * scale).collect();
+
+    let res = TestResult::new("Laplacian+B0", &b0_ppm, &data.fieldmap, &data.mask, data.dims);
+    res.print_with_time(elapsed);
+    res.print_ci_metrics(elapsed);
+    common::save_center_slices(&b0_ppm, &data.mask, data.dims, "pipeline_laplacian_b0");
+
+    assert!(res.nrmse < 0.5, "Laplacian+B0 NRMSE too high: {}", res.nrmse);
+    assert!(
+        res.correlation > 0.4,
+        "Laplacian+B0 should track the total field, got r = {}",
+        res.correlation
+    );
+}
+
+/// Laplacian unwrapping under a Dirichlet boundary condition on the ROI.
+///
+/// Scored against the same **total** field as the two tests above, deliberately: zeroing
+/// the Laplacian outside the mask removes the harmonic background along with the wraps, so
+/// this variant must *not* reproduce a total field. Agreement well below its Neumann
+/// counterpart is the expected result and the reason the two are categorised apart.
+///
+/// If this assertion starts failing, the background removal stopped happening — revisit the
+/// README categorisation and `unwrap::laplacian`'s module docs.
+#[test]
+#[ignore]
+fn test_pipeline_laplacian_lbv_b0() {
+    println!("[INFO] Loading test data...");
+    let data = TestData::load().expect("Failed to load test data");
+
+    let start = Instant::now();
+    let b0_hz = run_field_mapping_laplacian(&data, false);
+    let elapsed = start.elapsed();
+
+    let gamma = 42.576e6_f64;
+    let scale = 1e6 / (gamma * data.field_strength);
+    let b0_ppm: Vec<f64> = b0_hz.iter().map(|&v| v * scale).collect();
+
+    let res = TestResult::new(
+        "Laplacian+BFR+B0", &b0_ppm, &data.fieldmap, &data.mask, data.dims,
+    );
+    res.print_with_time(elapsed);
+    res.print_ci_metrics(elapsed);
+    common::save_center_slices(&b0_ppm, &data.mask, data.dims, "pipeline_laplacian_lbv_b0");
+
+    // For information: it is not a clean local field either, being background-removed by an
+    // amount that depends on the mask and field geometry.
+    let vs_local = TestResult::new(
+        "Laplacian+BFR+B0 (vs local)", &b0_ppm, &data.fieldmap_local, &data.mask, data.dims,
+    );
+    println!(
+        "[INFO] correlation vs total {:.4}, vs local {:.4}",
+        res.correlation, vs_local.correlation
+    );
+
+    assert!(
+        res.correlation < 0.4,
+        "Laplacian+BFR+B0 returned something close to a total field (r = {}); \
+         background removal appears to have stopped",
+        res.correlation
+    );
 }
 
 #[test]

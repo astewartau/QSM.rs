@@ -57,6 +57,8 @@ NAMES = {
     "combined_tgv": "TGV (Combined)",
     "bias_correction": "Bias Correction",
     "pipeline_romeo_b0": "ROMEO + B0",
+    "pipeline_laplacian_b0": "Laplacian (Neumann) + B0",
+    "pipeline_laplacian_lbv_b0": "Laplacian (Dirichlet ROI) + B0",
     "pipeline_harperella": "HARPERELLA",
     "pipeline_iharperella": "iHARPERELLA",
     "pipeline_tgv": "TGV",
@@ -146,6 +148,10 @@ WINDOWS = {
     "combined_tgv": (-0.1, 0.1),
     "bias_correction": (-0.1, 0.1),  # fallback; before/after rendering uses auto-range
     "pipeline_romeo_b0": (-0.05, 0.05),  # total field in ppm (wider range than local field)
+    # Same window as ROMEO on purpose: these three are meant to be read side by side, and
+    # the Dirichlet variant's missing background is only obvious on a shared scale.
+    "pipeline_laplacian_b0": (-0.05, 0.05),
+    "pipeline_laplacian_lbv_b0": (-0.05, 0.05),
     "pipeline_harperella": (-0.025, 0.025),
     "pipeline_iharperella": (-0.025, 0.025),
     "pipeline_tgv": (-0.1, 0.1),

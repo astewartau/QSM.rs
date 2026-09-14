@@ -50,7 +50,7 @@ jobs:
           all_bgremove='["test_bgremove_sharp","test_bgremove_resharp","test_bgremove_vsharp","test_bgremove_pdf","test_bgremove_ismv","test_bgremove_lbv"]'
           all_inversion='["test_inversion_tkd","test_inversion_tsvd","test_inversion_tikhonov","test_inversion_tv","test_inversion_rts","test_inversion_ilsqr","test_inversion_medi","test_inversion_nltv","test_inversion_ndi","test_inversion_fansi","test_inversion_fansi_tgv","test_inversion_l1qsm","test_inversion_whqsm","test_inversion_hdqsm","test_inversion_amp_pe"]'
           all_combined='["test_combined_tgv","test_combined_tfi"]'
-          all_pipeline='["test_pipeline_romeo_b0","test_pipeline_tgv","test_pipeline_qsmart","test_pipeline_qsmart_tikhonov","test_pipeline_harperella","test_pipeline_iharperella","test_bias_correction","test_swi","test_r2star_t2star"]'
+          all_pipeline='["test_pipeline_romeo_b0","test_pipeline_laplacian_b0","test_pipeline_laplacian_lbv_b0","test_pipeline_tgv","test_pipeline_qsmart","test_pipeline_qsmart_tikhonov","test_pipeline_harperella","test_pipeline_iharperella","test_bias_correction","test_swi","test_r2star_t2star"]'
           # χ-separation entries are whole test *binaries* (each runs several methods).
           all_chisep='["chisep_qsmci","chisep_relaxometry_qsmci","chisep_xsepnet"]'
           # Deep-learning models (in tests/dl_models.rs; weights fetched from the registry).
@@ -243,14 +243,14 @@ jobs:
               # Phase unwrapping
               src/unwrap/mod.rs)      pipeline="$pipeline test_pipeline_tgv test_pipeline_qsmart test_pipeline_qsmart_tikhonov" ;;
               src/unwrap/romeo.rs)    pipeline="$pipeline test_pipeline_romeo_b0 test_pipeline_tgv" ;;
-              src/unwrap/laplacian.rs) pipeline="$pipeline test_pipeline_qsmart test_pipeline_qsmart_tikhonov test_pipeline_harperella test_pipeline_iharperella" ;;
+              src/unwrap/laplacian.rs) pipeline="$pipeline test_pipeline_laplacian_b0 test_pipeline_laplacian_lbv_b0 test_pipeline_qsmart test_pipeline_qsmart_tikhonov test_pipeline_harperella test_pipeline_iharperella" ;;
 
               # Pipeline (combined algorithms + shared stages)
               src/pipeline/mod.rs|src/pipeline/config.rs|src/pipeline/phase_utils.rs|src/pipeline/referencing.rs)
                 echo "Pipeline core changed: $file → all tests"
                 output_all; exit 0 ;;
               src/pipeline/field_mapping.rs)
-                pipeline="$pipeline test_pipeline_romeo_b0 test_pipeline_tgv test_pipeline_qsmart test_pipeline_qsmart_tikhonov" ;;
+                pipeline="$pipeline test_pipeline_romeo_b0 test_pipeline_laplacian_b0 test_pipeline_laplacian_lbv_b0 test_pipeline_tgv test_pipeline_qsmart test_pipeline_qsmart_tikhonov" ;;
               src/pipeline/bg_removal.rs)
                 bgremove="$bgremove test_bgremove_sharp test_bgremove_resharp test_bgremove_vsharp test_bgremove_pdf test_bgremove_ismv test_bgremove_lbv"
                 pipeline="$pipeline test_pipeline_harperella test_pipeline_iharperella" ;;
@@ -265,7 +265,7 @@ jobs:
 
               # Utils (QSMART components)
               src/utils/multi_echo.rs)
-                pipeline="$pipeline test_pipeline_romeo_b0 test_pipeline_tgv test_pipeline_qsmart test_pipeline_qsmart_tikhonov" ;;
+                pipeline="$pipeline test_pipeline_romeo_b0 test_pipeline_laplacian_b0 test_pipeline_laplacian_lbv_b0 test_pipeline_tgv test_pipeline_qsmart test_pipeline_qsmart_tikhonov" ;;
               src/utils/vasculature.rs|src/utils/frangi.rs|src/utils/curvature.rs|src/utils/qsmart.rs)
                 pipeline="$pipeline test_pipeline_qsmart test_pipeline_qsmart_tikhonov" ;;
               src/utils/bias_correction.rs)
@@ -1354,11 +1354,21 @@ jobs:
               emit_figures bet
             fi
 
-            if [ -f "slices/pipeline_romeo_b0.bin" ]; then
+            if [ -f "slices/pipeline_romeo_b0.bin" ] \
+               || [ -f "slices/pipeline_laplacian_b0.bin" ] \
+               || [ -f "slices/pipeline_laplacian_lbv_b0.bin" ]; then
               echo "### Phase Unwrapping + B0 Estimation"
-              echo "*MCPC-3D-S + ROMEO → total field map (compared against ground truth B0)*"
+              echo "*MCPC-3D-S, then each unwrapper → field map, all compared against the same ground truth total B0.*"
               echo ""
-              emit_figures pipeline_romeo_b0
+              echo "ROMEO and Laplacian (Neumann) unwrap only, so they should track the total field."
+              echo "Laplacian (Dirichlet on ROI) also removes the harmonic background — it is categorised"
+              echo "under *Combined Phase Unwrapping + Background Removal*, and is expected to agree"
+              echo "much less well here. All three panels share one intensity window."
+              echo ""
+              if TABLE=$(emit_table "test_pipeline_" romeo_b0 laplacian_b0 laplacian_lbv_b0); then
+                echo "$TABLE"
+              fi
+              emit_figures pipeline_romeo_b0 pipeline_laplacian_b0 pipeline_laplacian_lbv_b0
               echo ""
             fi
 
