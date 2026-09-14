@@ -128,11 +128,19 @@ pub fn decompose(
     let total = voxels.len();
 
     // Per-voxel fit → (index, chi_pos, chi_neg). Embarrassingly parallel.
-    let results: Vec<(usize, f64, f64)> = maybe_par_iter!(voxels)
-        .map(|&i| {
+    //
+    // The fit allocates nothing: every buffer lives in a `Scratch` that rayon
+    // hands out once per worker thread and we reuse across voxels. This matters
+    // far beyond the usual allocator overhead — the released binaries are static
+    // musl builds, whose allocator serialises under concurrent small
+    // allocations, and the churn this loop used to produce (~10⁴ allocations per
+    // voxel) made the loop get *slower* as threads were added.
+    let results: Vec<(usize, f64, f64)> = maybe_par_map_init!(
+        voxels,
+        || Scratch::new(ne),
+        |ws: &mut Scratch, &i: &usize| {
             // Build the complex data y[e] = mag_norm · exp(-i·(2/3)·χ_total·γ·B0·TE).
             let chi = chi_total[i];
-            let mut y = vec![(0.0_f64, 0.0_f64); ne];
             let mut all_zero = true;
             for e in 0..ne {
                 let m = magnitude[i * ne + e] / gmax;
@@ -140,15 +148,18 @@ pub fn decompose(
                     all_zero = false;
                 }
                 let ph = -(2.0 / 3.0) * chi * GAMMA * b0 * te[e];
-                y[e] = (m * ph.cos(), m * ph.sin());
+                ws.y[e] = (m * ph.cos(), m * ph.sin());
             }
             if all_zero {
                 return (i, 0.0, 0.0);
             }
             // log(y) for stages 2 & 3.
-            let logy: Vec<(f64, f64)> = y.iter().map(|&z| clog(z)).collect();
+            for e in 0..ne {
+                ws.logy[e] = clog(ws.y[e]);
+            }
 
-            let (cp, cm, c0, r0, chip, chim) = fit_voxel(te, &y, &logy, b0, params);
+            let (cp, cm, c0, r0, chip, chim) =
+                fit_voxel(te, &ws.y, &ws.logy, b0, params, &mut ws.lm);
 
             // Reconstruct χ+ (from dscModel) and χ− (from pscModel), both as the
             // per-compartment phase accumulation −Σangle/den.
@@ -165,8 +176,9 @@ pub fn decompose(
             // *comment* claims the opposite ("χ+ = |DSC|"); that swap anti-
             // correlates with this GT, so we do not replicate it. See module docs.
             (i, psc.abs(), -dsc.abs())
-        })
-        .collect();
+        }
+    )
+    .collect();
 
     let mut chi_pos = vec![0.0_f64; n];
     let mut chi_neg = vec![0.0_f64; n];
@@ -180,6 +192,28 @@ pub fn decompose(
     (chi_pos, chi_neg, chi_out)
 }
 
+/// Reusable scratch for one voxel's fit. Every buffer is fully overwritten
+/// before it is read, so a `Scratch` shared across voxels (or across a rayon
+/// worker's whole share of them) cannot carry state between them.
+struct Scratch {
+    /// Complex data per echo.
+    y: Vec<(f64, f64)>,
+    /// `log(y)` per echo.
+    logy: Vec<(f64, f64)>,
+    /// Levenberg–Marquardt buffers.
+    lm: LmScratch,
+}
+
+impl Scratch {
+    fn new(ne: usize) -> Self {
+        Self {
+            y: vec![(0.0, 0.0); ne],
+            logy: vec![(0.0, 0.0); ne],
+            lm: LmScratch::new(2 * ne),
+        }
+    }
+}
+
 /// The three-stage alternating fit for a single voxel. Returns
 /// `(C+, C−, C₀, R2*₀, χ+, χ−)`.
 #[allow(clippy::too_many_arguments)]
@@ -189,6 +223,7 @@ fn fit_voxel(
     logy: &[(f64, f64)],
     b0: f64,
     params: &DecomposeParams,
+    lm: &mut LmScratch,
 ) -> (f64, f64, f64, f64, f64, f64) {
     let ne = te.len();
     // Initial values (reference).
@@ -203,52 +238,40 @@ fn fit_voxel(
     for _ in 0..params.n_inner {
         // Stage 1: amplitudes C against the linear signal y.
         {
-            let resid = |x: &[f64]| -> Vec<f64> {
-                let mut out = Vec::with_capacity(2 * ne);
-                let mut im = Vec::with_capacity(ne);
+            let resid = |x: &[f64], out: &mut [f64]| {
                 for e in 0..ne {
                     let m = signal_model(te[e], x[0], x[1], x[2], chi[0], chi[1], r0, b0);
-                    out.push(m.0 - y[e].0);
-                    im.push(-(m.1 - y[e].1));
+                    out[e] = m.0 - y[e].0;
+                    out[ne + e] = -(m.1 - y[e].1);
                 }
-                out.extend(im);
-                out
             };
-            let x = lm_bounded(&resid, &c, &[0.0, 0.0, 0.0], &[inf, inf, inf], maxit);
+            let x = lm_bounded(resid, &c, &[0.0, 0.0, 0.0], &[inf, inf, inf], maxit, lm);
             c = [x[0], x[1], x[2]];
         }
         // Stage 2: R2*₀ against log(y).
         {
-            let resid = |x: &[f64]| -> Vec<f64> {
-                let mut out = Vec::with_capacity(2 * ne);
-                let mut im = Vec::with_capacity(ne);
+            let resid = |x: &[f64], out: &mut [f64]| {
                 for e in 0..ne {
                     let m = clog(signal_model(
                         te[e], c[0], c[1], c[2], chi[0], chi[1], x[0], b0,
                     ));
-                    out.push(m.0 - logy[e].0);
-                    im.push(-(m.1 - logy[e].1));
+                    out[e] = m.0 - logy[e].0;
+                    out[ne + e] = -(m.1 - logy[e].1);
                 }
-                out.extend(im);
-                out
             };
-            let x = lm_bounded(&resid, &[r0], &[0.0], &[inf], maxit);
+            let x = lm_bounded(resid, &[r0], &[0.0], &[inf], maxit, lm);
             r0 = x[0];
         }
         // Stage 3: [χ+, χ−] against log(y).
         {
-            let resid = |x: &[f64]| -> Vec<f64> {
-                let mut out = Vec::with_capacity(2 * ne);
-                let mut im = Vec::with_capacity(ne);
+            let resid = |x: &[f64], out: &mut [f64]| {
                 for e in 0..ne {
                     let m = clog(signal_model(te[e], c[0], c[1], c[2], x[0], x[1], r0, b0));
-                    out.push(m.0 - logy[e].0);
-                    im.push(-(m.1 - logy[e].1));
+                    out[e] = m.0 - logy[e].0;
+                    out[ne + e] = -(m.1 - logy[e].1);
                 }
-                out.extend(im);
-                out
             };
-            let x = lm_bounded(&resid, &chi, &[0.0, -ub], &[ub, 0.0], maxit);
+            let x = lm_bounded(resid, &chi, &[0.0, -ub], &[ub, 0.0], maxit, lm);
             chi = [x[0], x[1]];
         }
     }
@@ -354,68 +377,105 @@ fn recon_phase(te: &[f64], _b0: f64, den: f64, model: impl Fn(f64) -> (f64, f64)
 // Bounded Levenberg–Marquardt for small (n ≤ 3) least-squares problems.
 // ---------------------------------------------------------------------------
 
+/// Largest parameter count any DECOMPOSE stage fits (stage 1: `[C+, C−, C₀]`).
+/// Keeps the LM state on the stack.
+const LM_MAX_N: usize = 3;
+
+/// Scratch buffers for [`lm_bounded`], sized once for a residual of length `m`
+/// and reused across every stage, LM iteration and voxel. Contents are always
+/// written before they are read.
+struct LmScratch {
+    /// Residual at the current `x`.
+    r: Vec<f64>,
+    /// Residual at the finite-difference probe point.
+    rp: Vec<f64>,
+    /// Residual at the trial point.
+    rn: Vec<f64>,
+    /// Jacobian, `m × LM_MAX_N`, column-major.
+    jac: Vec<f64>,
+}
+
+impl LmScratch {
+    fn new(m: usize) -> Self {
+        Self {
+            r: vec![0.0; m],
+            rp: vec![0.0; m],
+            rn: vec![0.0; m],
+            jac: vec![0.0; m * LM_MAX_N],
+        }
+    }
+}
+
 /// Minimise ‖resid(x)‖² over the box `[lb, ub]` by Levenberg–Marquardt with a
 /// forward finite-difference Jacobian and per-step projection onto the box.
 /// Sized for the 1–3 parameter DECOMPOSE stages.
-fn lm_bounded(
-    resid: &dyn Fn(&[f64]) -> Vec<f64>,
+///
+/// `resid` writes the residual for a parameter vector into the caller's buffer
+/// rather than returning a fresh one, and all other working storage is either a
+/// stack array (`n ≤ LM_MAX_N`) or a buffer in `s`, so a solve allocates
+/// nothing. Only the first `x0.len()` entries of the returned array are
+/// meaningful.
+fn lm_bounded<F>(
+    resid: F,
     x0: &[f64],
     lb: &[f64],
     ub: &[f64],
     max_iter: usize,
-) -> Vec<f64> {
+    s: &mut LmScratch,
+) -> [f64; LM_MAX_N]
+where
+    F: Fn(&[f64], &mut [f64]),
+{
     let n = x0.len();
-    let mut x: Vec<f64> = x0
-        .iter()
-        .zip(lb)
-        .zip(ub)
-        .map(|((&v, &l), &u)| v.clamp(l, u))
-        .collect();
-    let mut r = resid(&x);
-    let m = r.len();
-    let mut cost = dot(&r, &r);
+    debug_assert!(n <= LM_MAX_N);
+    let m = s.r.len();
+    let mut x = [0.0_f64; LM_MAX_N];
+    for d in 0..n {
+        x[d] = x0[d].clamp(lb[d], ub[d]);
+    }
+    resid(&x[..n], &mut s.r);
+    let mut cost = dot(&s.r, &s.r);
     let mut lambda = 1e-3;
     let ftol = 1e-10;
 
     for _ in 0..max_iter {
-        // Forward-difference Jacobian J (m×n), column-major in `jac`.
-        let mut jac = vec![0.0_f64; m * n];
+        // Forward-difference Jacobian J (m×n), column-major in `s.jac`.
         for j in 0..n {
             let h = 1e-6 * x[j].abs().max(1e-3);
-            let mut xp = x.clone();
+            let mut xp = x;
             xp[j] = (x[j] + h).clamp(lb[j], ub[j]);
             let hj = xp[j] - x[j];
             let step = if hj.abs() < 1e-30 { h } else { hj };
             if hj.abs() < 1e-30 {
                 xp[j] = x[j] + h; // allow out-of-box probe when pinned at a bound
             }
-            let rp = resid(&xp);
+            resid(&xp[..n], &mut s.rp);
             for k in 0..m {
-                jac[j * m + k] = (rp[k] - r[k]) / step;
+                s.jac[j * m + k] = (s.rp[k] - s.r[k]) / step;
             }
         }
         // Normal equations A = JᵀJ (n×n), g = Jᵀr (n).
-        let mut a = vec![0.0_f64; n * n];
-        let mut g = vec![0.0_f64; n];
+        let mut a = [0.0_f64; LM_MAX_N * LM_MAX_N];
+        let mut g = [0.0_f64; LM_MAX_N];
         for jc in 0..n {
             for jr in 0..n {
-                let mut s = 0.0;
+                let mut acc = 0.0;
                 for k in 0..m {
-                    s += jac[jr * m + k] * jac[jc * m + k];
+                    acc += s.jac[jr * m + k] * s.jac[jc * m + k];
                 }
-                a[jr * n + jc] = s;
+                a[jr * n + jc] = acc;
             }
-            let mut s = 0.0;
+            let mut acc = 0.0;
             for k in 0..m {
-                s += jac[jc * m + k] * r[k];
+                acc += s.jac[jc * m + k] * s.r[k];
             }
-            g[jc] = s;
+            g[jc] = acc;
         }
 
         // Inner loop: inflate lambda until a step decreases the cost.
         let mut improved = false;
         for _ in 0..30 {
-            let mut al = a.clone();
+            let mut al = a;
             for d in 0..n {
                 al[d * n + d] += lambda * a[d * n + d].max(1e-12);
             }
@@ -423,16 +483,16 @@ fn lm_bounded(
                 lambda *= 2.5;
                 continue;
             };
-            let mut xn = vec![0.0_f64; n];
+            let mut xn = [0.0_f64; LM_MAX_N];
             for d in 0..n {
                 xn[d] = (x[d] - dx[d]).clamp(lb[d], ub[d]);
             }
-            let rn = resid(&xn);
-            let cn = dot(&rn, &rn);
+            resid(&xn[..n], &mut s.rn);
+            let cn = dot(&s.rn, &s.rn);
             if cn < cost {
                 let rel = (cost - cn) / cost.max(1e-300);
                 x = xn;
-                r = rn;
+                s.r.copy_from_slice(&s.rn);
                 cost = cn;
                 lambda = (lambda * 0.4).max(1e-12);
                 improved = true;
@@ -459,11 +519,16 @@ fn dot(a: &[f64], b: &[f64]) -> f64 {
     a.iter().zip(b).map(|(&x, &y)| x * y).sum()
 }
 
-/// Solve `A x = b` for small `n` (≤ 3) by Gaussian elimination with partial
-/// pivoting. `a` is row-major `n×n`. Returns `None` if singular.
-fn solve_small(a: &[f64], b: &[f64], n: usize) -> Option<Vec<f64>> {
-    let mut m = a.to_vec();
-    let mut y = b.to_vec();
+/// Solve `A x = b` for small `n` (≤ `LM_MAX_N`) by Gaussian elimination with
+/// partial pivoting. `a` is row-major `n×n`. Returns `None` if singular. Only
+/// the first `n` entries of the inputs and the result are used.
+fn solve_small(
+    a: &[f64; LM_MAX_N * LM_MAX_N],
+    b: &[f64; LM_MAX_N],
+    n: usize,
+) -> Option<[f64; LM_MAX_N]> {
+    let mut m = *a;
+    let mut y = *b;
     for col in 0..n {
         // Partial pivot.
         let mut piv = col;
@@ -495,13 +560,13 @@ fn solve_small(a: &[f64], b: &[f64], n: usize) -> Option<Vec<f64>> {
             }
         }
     }
-    let mut x = vec![0.0_f64; n];
+    let mut x = [0.0_f64; LM_MAX_N];
     for col in (0..n).rev() {
-        let mut s = y[col];
+        let mut acc = y[col];
         for c in (col + 1)..n {
-            s -= m[col * n + c] * x[c];
+            acc -= m[col * n + c] * x[c];
         }
-        x[col] = s / m[col * n + col];
+        x[col] = acc / m[col * n + col];
     }
     Some(x)
 }
@@ -515,13 +580,20 @@ mod tests {
         // Fit y = m·t + c via LM on residual [m·t+c − data].
         let t = [0.0, 1.0, 2.0, 3.0];
         let data = [1.0, 3.0, 5.0, 7.0]; // m=2, c=1
-        let resid = |x: &[f64]| -> Vec<f64> {
-            t.iter()
-                .zip(data)
-                .map(|(&ti, d)| x[0] * ti + x[1] - d)
-                .collect()
+        let resid = |x: &[f64], out: &mut [f64]| {
+            for (k, (&ti, d)) in t.iter().zip(data).enumerate() {
+                out[k] = x[0] * ti + x[1] - d;
+            }
         };
-        let x = lm_bounded(&resid, &[0.0, 0.0], &[-10.0, -10.0], &[10.0, 10.0], 50);
+        let mut lm = LmScratch::new(t.len());
+        let x = lm_bounded(
+            resid,
+            &[0.0, 0.0],
+            &[-10.0, -10.0],
+            &[10.0, 10.0],
+            50,
+            &mut lm,
+        );
         assert!((x[0] - 2.0).abs() < 1e-6, "slope {}", x[0]);
         assert!((x[1] - 1.0).abs() < 1e-6, "intercept {}", x[1]);
     }
@@ -529,9 +601,9 @@ mod tests {
     #[test]
     fn solve_small_3x3() {
         // A x = b with a known solution.
-        let a = [2.0, 1.0, 1.0, 1.0, 3.0, 2.0, 1.0, 0.0, 0.0];
+        let a: [f64; 9] = [2.0, 1.0, 1.0, 1.0, 3.0, 2.0, 1.0, 0.0, 0.0];
         let x_true = [1.0, 2.0, 3.0];
-        let b = [
+        let b: [f64; 3] = [
             a[0] * x_true[0] + a[1] * x_true[1] + a[2] * x_true[2],
             a[3] * x_true[0] + a[4] * x_true[1] + a[5] * x_true[2],
             a[6] * x_true[0] + a[7] * x_true[1] + a[8] * x_true[2],

@@ -80,3 +80,29 @@ macro_rules! maybe_par_chunks {
         $slice.chunks($chunk_size)
     };
 }
+
+/// Parallel or sequential `map` with a reusable mutable state produced by
+/// `$init`.
+///
+/// Lets a hot per-item body hoist its scratch buffers out of the loop: with
+/// rayon each worker thread gets its own state and reuses it across the items
+/// it steals, and without the feature a single state is reused for the whole
+/// iteration. The per-item body must fully overwrite whatever it reads from the
+/// state, so results stay independent of the thread count.
+#[cfg(feature = "parallel")]
+#[macro_export]
+macro_rules! maybe_par_map_init {
+    ($slice:expr, $init:expr, $f:expr) => {
+        $slice.par_iter().map_init($init, $f)
+    };
+}
+
+#[cfg(not(feature = "parallel"))]
+#[macro_export]
+macro_rules! maybe_par_map_init {
+    ($slice:expr, $init:expr, $f:expr) => {{
+        let mut state = ($init)();
+        let mut f = $f;
+        $slice.iter().map(move |item| f(&mut state, item))
+    }};
+}
