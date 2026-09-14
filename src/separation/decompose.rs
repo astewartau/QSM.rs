@@ -44,10 +44,20 @@
 //! The original method, published at 3 T, does not meet this limit in practice —
 //! the threshold there is ~0.2 ppm.
 //!
-//! Note that `−Σ angle / den` remains a *compressive* estimator of χ even once
-//! unwrapped: it saturates at `n_echoes·π / den`, so strong sources read low.
-//! That is a scale error, not a dropout, and it is inherent to the reference's
-//! reconstruction rather than to this port.
+//! Unwrapping is only unambiguous while the phase step *between* echoes stays
+//! under π, so the χ search is additionally capped at
+//! `π / ((2/3)·γ·B0·ΔTE_max)` — 0.31 ppm at 7 T with 8 ms spacing, inside the
+//! 0.5 ppm default [`DecomposeParams::chi_bound`]. Past that the model matches a
+//! given χ on more than one branch, the stage-3 landscape grows spurious minima,
+//! and scattered voxels fall into them; capping the search is what removes the
+//! speckle of dropouts that unwrapping alone left in the recovered pallidum.
+//!
+//! Note that `−Σ angle / den` remains a *compressive* estimator of χ: its gain
+//! rises with χ itself (≈0.03 at white-matter χ+, ≈0.87 in the pallidum on the
+//! QSM-CI phantom), so it flattens contrast between weak sources. That is
+//! inherent to the reference's reconstruction, not to this port — the fitted
+//! compartment amplitudes set the gain, and they are only weakly identifiable
+//! from data that carries no sub-voxel compartment signature.
 //!
 //! **Output-mapping note.** The QSM-CI reference *comment* claims a para/dia
 //! output swap (χ+ = |DSC|); on the qsm-forward phantom that swap anti-correlates
@@ -250,7 +260,16 @@ fn fit_voxel(
     let mut r0 = 25.0_f64;
     let mut chi = [0.05_f64, -0.05]; // [χ+, χ−]
 
-    let ub = params.chi_bound;
+    // Cap the χ search at the largest |χ| the echo spacing can represent without
+    // aliasing. Unwrapping puts each echo's phase on the branch nearest the
+    // previous one, which is only unambiguous while the step between echoes stays
+    // under π; past that the model can match a given χ on more than one branch,
+    // the stage-3 landscape grows spurious minima, and scattered voxels fall into
+    // them. At 7 T with 8 ms spacing the limit is 0.31 ppm, well inside the 0.5
+    // ppm default — which is what left the recovered pallidum speckled with
+    // dropouts even after the phases were unwrapped.
+    let dte = te.windows(2).map(|w| w[1] - w[0]).fold(te[0], f64::max);
+    let ub = params.chi_bound.min(PI / ((2.0 / 3.0) * GAMMA * b0 * dte));
     let inf = f64::INFINITY;
     let maxit = params.max_lm_iter;
 
@@ -765,6 +784,43 @@ mod tests {
                 pos[0]
             );
             prev = pos[0];
+        }
+    }
+
+    /// Regression: no scattered dropouts across the deep-grey χ+ range.
+    ///
+    /// Unwrapping alone was not enough. The χ search ran to `chi_bound` (0.5 ppm
+    /// by default), past the 0.31 ppm that 8 ms echo spacing can represent
+    /// without the per-echo phase step exceeding π. In that aliased region the
+    /// stage-3 landscape grows spurious minima, and voxels at particular
+    /// (χ, R2*) combinations fell into them — leaving a recovered pallidum that
+    /// was bright but speckled with black. Feed single-compartment data built the
+    /// way the phantom builds it (magnitude decaying at R2* = R2 + Dr·|χ|, phase
+    /// from χ_total) and require every voxel across the band to recover.
+    #[test]
+    fn chi_pos_has_no_dropouts_across_deep_grey() {
+        let te = [0.004, 0.012, 0.020, 0.028];
+        let b0 = 7.0;
+        let params = DecomposeParams {
+            b0,
+            n_inner: 10,
+            chi_bound: 0.5,
+            max_lm_iter: 30,
+        };
+        let (dr_pos, dr_neg, r2) = (320.0_f64, 397.0_f64, 30.0_f64);
+        let chim = -0.015_f64;
+        for k in 3..=30 {
+            let chip = 0.01 * k as f64;
+            let r2s = r2 + dr_pos * chip + dr_neg * chim.abs();
+            let mag: Vec<f64> = te.iter().map(|&t| (-r2s * t).exp()).collect();
+            let (pos, _neg, _tot) =
+                decompose(&[chip + chim], &mag, &te, &[1u8], &params, |_, _| {});
+            assert!(
+                pos[0] > 0.3 * chip,
+                "dropout at χ+={chip:.2}: recovered {:.5} (gain {:.3})",
+                pos[0],
+                pos[0] / chip
+            );
         }
     }
 
