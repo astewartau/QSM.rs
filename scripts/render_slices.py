@@ -57,6 +57,10 @@ NAMES = {
     "combined_tgv": "TGV (Combined)",
     "bias_correction": "Bias Correction",
     "pipeline_romeo_b0": "ROMEO + B0",
+    "ground_truth_total_field": "Ground truth total field",
+    "unwrap_raw_romeo": "ROMEO (unwrapped)",
+    "unwrap_raw_laplacian_neumann": "Laplacian Neumann (unwrapped)",
+    "unwrap_raw_laplacian_dirichlet": "Laplacian Dirichlet ROI (unwrapped)",
     "unwrap_bfr_romeo": "ROMEO + V-SHARP",
     "unwrap_bfr_laplacian_neumann": "Laplacian (Neumann) + V-SHARP",
     "unwrap_bfr_laplacian_dirichlet": "Laplacian (Dirichlet ROI) + V-SHARP",
@@ -90,6 +94,10 @@ NAMES = {
     "relaxchisep_hcchisep_para": "HC-ChiSep χ+",
     "relaxchisep_hcchisep_dia": "HC-ChiSep χ− (magnitude)",
     "ground_truth_local_field": "Ground truth",
+    "ground_truth_total_field": "Ground truth",
+    "unwrap_raw_romeo": "ROMEO",
+    "unwrap_raw_laplacian_neumann": "Lap. Neumann",
+    "unwrap_raw_laplacian_dirichlet": "Lap. Dirichlet ROI",
     "ground_truth_chi": "Ground truth",
     "chisep_para_truth": "Ground truth",
     "chisep_dia_truth": "Ground truth",
@@ -151,6 +159,10 @@ WINDOWS = {
     "pipeline_romeo_b0": (-0.05, 0.05),  # total field in ppm (wider range than local field)
     # Local fields after background removal — same window for all three, since the point of
     # the panel is that the first two agree and the third does not.
+    "ground_truth_total_field": (-0.05, 0.05),
+    "unwrap_raw_romeo": (-0.05, 0.05),
+    "unwrap_raw_laplacian_neumann": (-0.05, 0.05),
+    "unwrap_raw_laplacian_dirichlet": (-0.05, 0.05),
     "unwrap_bfr_romeo": (-0.025, 0.025),
     "unwrap_bfr_laplacian_neumann": (-0.025, 0.025),
     "unwrap_bfr_laplacian_dirichlet": (-0.025, 0.025),
@@ -243,6 +255,15 @@ RELAXOMETRY = ("stage_relaxometry", "Relaxometry toolkit", None, None, [
 SUPPLEMENTARY = ("stage_supplementary", "Supplementary outputs", None, None, [
     ["swi", "swi_mip", "r2star", "t2star"],
 ], None)
+# The unwrappers' own output, before background removal. These differ from each other (and
+# from ground truth) by an arbitrary harmonic field, which is expected: unwrapping is only
+# defined up to one. Shown so that difference is visible rather than asserted — the
+# like-for-like comparison is the local-field table.
+MONTAGES.append(("stage_unwrap", "Unwrapped total field maps", "ppm", (-0.05, 0.05), [
+    ["ground_truth_total_field", "unwrap_raw_romeo", "unwrap_raw_laplacian_neumann",
+     "unwrap_raw_laplacian_dirichlet"],
+], None))
+
 MONTAGES.append(SUPPLEMENTARY)
 MONTAGES.append(RELAXOMETRY)
 

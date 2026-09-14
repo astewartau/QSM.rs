@@ -1376,6 +1376,12 @@ jobs:
               echo "Unwrapping + Background Removal* and is expected to score worse here."
               echo ""
               echo "$TABLE"
+              echo "Each unwrapper's own output, before any background removal — these differ from each"
+              echo "other and from ground truth by an arbitrary harmonic field, which is expected:"
+              echo ""
+              emit_figures stage_unwrap
+              echo "The same three after V-SHARP, which is the like-for-like comparison:"
+              echo ""
               emit_figures unwrap_bfr_romeo unwrap_bfr_laplacian_neumann unwrap_bfr_laplacian_dirichlet
               echo ""
             fi

@@ -1233,7 +1233,8 @@ fn test_pipeline_romeo_b0() {
 /// valid — so comparing raw total fields across unwrappers measures the arbitrary part.
 /// What has to agree is the local field after background removal, which is what feeds
 /// dipole inversion. That is what these three tests compare.
-fn unwrap_then_bfr(data: &common::TestData, unwrapper: Unwrapper) -> (Vec<f64>, Vec<u8>) {
+/// Returns (unwrapped total field in ppm, local field after V-SHARP, eroded mask).
+fn unwrap_then_bfr(data: &common::TestData, unwrapper: Unwrapper) -> (Vec<f64>, Vec<f64>, Vec<u8>) {
     let (nx, ny, nz) = data.dims;
     let (vsx, vsy, vsz) = data.voxel_size;
     let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
@@ -1248,7 +1249,10 @@ fn unwrap_then_bfr(data: &common::TestData, unwrapper: Unwrapper) -> (Vec<f64>, 
     let scale = 1e6 / (gamma * data.field_strength);
     let b0_ppm: Vec<f64> = b0_hz.iter().map(|&v| v * scale).collect();
 
-    bgremove::vsharp(&b0_ppm, &data.mask, &grid, &VsharpParams::default(), |_, _| {})
+    let (local, eroded) = bgremove::vsharp(
+        &b0_ppm, &data.mask, &grid, &VsharpParams::default(), |_, _| {},
+    );
+    (b0_ppm, local, eroded)
 }
 
 #[derive(Clone, Copy)]
@@ -1263,20 +1267,29 @@ fn run_unwrap_bfr_case(label: &str, unwrapper: Unwrapper, slug: &str) -> TestRes
     let data = TestData::load().expect("Failed to load test data");
 
     let start = Instant::now();
-    let (local, eroded_mask) = unwrap_then_bfr(&data, unwrapper);
+    let (total, local, eroded_mask) = unwrap_then_bfr(&data, unwrapper);
     let elapsed = start.elapsed();
+
+    // The unwrapper's own output, before any background removal. These differ between
+    // methods by an arbitrary harmonic field, which is exactly what the montage shows.
+    common::save_center_slices(&total, &data.mask, data.dims, &format!("unwrap_raw_{slug}"));
+    if matches!(unwrapper, Unwrapper::Romeo) {
+        common::save_center_slices(
+            &data.fieldmap, &data.mask, data.dims, "ground_truth_total_field",
+        );
+    }
 
     let res = TestResult::new(label, &local, &data.fieldmap_local, &eroded_mask, data.dims);
     res.print_with_time(elapsed);
     res.print_ci_metrics(elapsed);
-    common::save_center_slices(&local, &eroded_mask, data.dims, slug);
+    common::save_center_slices(&local, &eroded_mask, data.dims, &format!("unwrap_bfr_{slug}"));
     res
 }
 
 #[test]
 #[ignore]
 fn test_pipeline_unwrap_bfr_romeo() {
-    let res = run_unwrap_bfr_case("ROMEO + V-SHARP", Unwrapper::Romeo, "unwrap_bfr_romeo");
+    let res = run_unwrap_bfr_case("ROMEO + V-SHARP", Unwrapper::Romeo, "romeo");
     assert!(res.correlation > 0.45, "ROMEO local field correlation too low: {}", res.correlation);
 }
 
@@ -1290,7 +1303,7 @@ fn test_pipeline_unwrap_bfr_laplacian_neumann() {
     let res = run_unwrap_bfr_case(
         "Laplacian (Neumann) + V-SHARP",
         Unwrapper::LaplacianNeumann,
-        "unwrap_bfr_laplacian_neumann",
+        "laplacian_neumann",
     );
     assert!(
         res.correlation > 0.45,
@@ -1311,7 +1324,7 @@ fn test_pipeline_unwrap_bfr_laplacian_dirichlet() {
     let res = run_unwrap_bfr_case(
         "Laplacian (Dirichlet ROI) + V-SHARP",
         Unwrapper::LaplacianDirichlet,
-        "unwrap_bfr_laplacian_dirichlet",
+        "laplacian_dirichlet",
     );
     // Deliberately loose: this documents that the double removal degrades the local field
     // rather than gating on a precise value. If it ever climbs to the ~0.45 the other two
