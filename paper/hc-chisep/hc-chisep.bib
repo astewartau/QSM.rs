@@ -1,0 +1,394 @@
+%% ---------------------------------------------------------------------------
+%% HC-ChiSep manuscript bibliography
+%%
+%% Entries marked "VERIFY" carry details reconstructed from working notes and
+%% must be checked against the publisher record before submission.
+%% ---------------------------------------------------------------------------
+
+%% --- The biophysical model -------------------------------------------------
+
+@article{wharton_fiber_2012,
+	title = {Fiber orientation-dependent white matter contrast in gradient echo {MRI}},
+	volume = {109},
+	number = {45},
+	pages = {18559--18564},
+	doi = {10.1073/pnas.1211075109},
+	journal = {Proceedings of the National Academy of Sciences},
+	author = {Wharton, Samuel and Bowtell, Richard},
+	year = {2012},
+}
+
+@article{wharton_gradient_2013,
+	title = {Gradient echo based fiber orientation mapping using {R2*} and frequency difference measurements},
+	volume = {83},
+	pages = {1011--1023},
+	doi = {10.1016/j.neuroimage.2013.07.054},
+	journal = {NeuroImage},
+	author = {Wharton, Samuel and Bowtell, Richard},
+	year = {2013},
+}
+
+@article{yablonskiy_theory_1994,
+	title = {Theory of {NMR} signal behavior in magnetically inhomogeneous tissues: the static dephasing regime},
+	volume = {32},
+	number = {6},
+	pages = {749--763},
+	doi = {10.1002/mrm.1910320610},
+	journal = {Magnetic Resonance in Medicine},
+	author = {Yablonskiy, Dmitriy A. and Haacke, E. Mark},
+	year = {1994},
+}
+
+@article{sukstanskii_role_2014,
+	title = {On the role of neuronal magnetic susceptibility and structure symmetry on gradient echo {MR} signal formation},
+	volume = {71},
+	number = {1},
+	pages = {345--353},
+	doi = {10.1002/mrm.24629},
+	journal = {Magnetic Resonance in Medicine},
+	author = {Sukstanskii, Alexander L. and Yablonskiy, Dmitriy A.},
+	year = {2014},
+}
+
+@article{yablonskiy_biophysical_2014,
+	title = {Biophysical mechanisms of myelin-induced water frequency shifts},
+	volume = {71},
+	number = {6},
+	pages = {1956--1958},
+	doi = {10.1002/mrm.25214},
+	journal = {Magnetic Resonance in Medicine},
+	author = {Yablonskiy, Dmitriy A. and Sukstanskii, Alexander L.},
+	year = {2014},
+	note = {VERIFY volume/pages: working notes cite MRM 71:2059},
+}
+
+@article{nam_improved_2015,
+	title = {Improved estimation of myelin water fraction using complex model fitting},
+	volume = {116},
+	pages = {214--221},
+	doi = {10.1016/j.neuroimage.2015.03.081},
+	journal = {NeuroImage},
+	author = {Nam, Yoonho and Lee, Jongho and Hwang, Dosik and Kim, Dong-Hyun},
+	year = {2015},
+}
+
+@article{sandgaard_larmor_2024,
+	title = {The {Larmor} frequency shift of a white matter magnetic microstructure model with multiple sources},
+	journal = {NMR in Biomedicine},
+	author = {Sandgaard, Anders A. and Kiselev, Valerij G. and Shemesh, Noam and Jespersen, Sune N.},
+	year = {2024},
+	note = {VERIFY volume/pages/DOI},
+}
+
+@article{lee_sensitivity_2011,
+	title = {Sensitivity of {MRI} resonance frequency to the orientation of brain tissue microstructure},
+	volume = {108},
+	number = {13},
+	pages = {5130--5135},
+	doi = {10.1073/pnas.1014103108},
+	journal = {Proceedings of the National Academy of Sciences},
+	author = {Lee, Jongho and Shmueli, Karin and Kang, Byeong-Tak and Yao, Bing and Fukunaga, Masaki and van Gelderen, Peter and Palumbo, Sara and Bosetti, Francesca and Silva, Afonso C. and Duyn, Jeff H.},
+	year = {2011},
+	note = {VERIFY: cited in the field study for the 5--12 Hz 7 T dR2* anisotropy band},
+}
+
+@article{brown_distribution_1961,
+	title = {Distribution of fields from randomly placed dipoles: free-precession signal decay as result of magnetic grains},
+	author = {Brown, R. J. S.},
+	journal = {Physical Review},
+	year = {1961},
+	note = {VERIFY volume/pages/DOI; cited via Ridani et al.\ for the spherical static-dephasing constant},
+}
+
+%% --- Susceptibility source separation --------------------------------------
+
+@article{shin_chiseparation_2021,
+	title = {$\chi$-separation: {Magnetic} susceptibility source separation toward iron and myelin mapping in the brain},
+	volume = {240},
+	pages = {118371},
+	doi = {10.1016/j.neuroimage.2021.118371},
+	journal = {NeuroImage},
+	author = {Shin, Hyeong-Geol and Lee, Jingu and Yun, Young Hyun and Yoo, Seong Ho and Jang, Jinhee and Oh, Se-Hong and Nam, Yoonho and Jung, Sehoon and Kim, Sunhye and Fukunaga, Masaki and Kim, Woojun and Choi, Hyung Jin and Lee, Jongho},
+	year = {2021},
+}
+
+@article{kim_chisepnet_2025,
+	title = {$\chi$-sepnet: {Deep} neural network for magnetic susceptibility source separation},
+	author = {Kim, Minjun and Ji, Sooyeon and Kim, Jiye and others},
+	journal = {Human Brain Mapping},
+	year = {2025},
+	note = {TODO verify authors/volume/pages/DOI. Source of the Dr = 114 Hz/ppm COSMOS-referenced calibration.},
+}
+
+@article{chen_decompose_2021,
+	title = {{DECOMPOSE} quantitative susceptibility mapping ({QSM}) of brain: {A} multi-compartment source separation method},
+	journal = {NeuroImage},
+	author = {Chen, Jingjia and others},
+	year = {2021},
+	note = {TODO verify authors/volume/pages/DOI},
+}
+
+@inproceedings{fang_wavesep_2023,
+	title = {{WaveSep}: {A} flexible wavelet-based approach for source separation in susceptibility imaging},
+	booktitle = {Machine Learning in Clinical Neuroimaging ({MLCN}), {MICCAI} workshop},
+	series = {Lecture Notes in Computer Science},
+	doi = {10.1007/978-3-031-44858-4_6},
+	author = {Fang, Zhenghan and Shin, Hyeong-Geol and van Zijl, Peter and Li, Xu and Sulam, Jeremias},
+	year = {2023},
+}
+
+@article{dimov_r2star_2022,
+	title = {Susceptibility source separation from gradient echo data using magnitude decay modeling},
+	author = {Dimov, Alexey V. and Nguyen, Thanh D. and Spincemaille, Pascal and others},
+	journal = {Journal of Neuroimaging},
+	year = {2022},
+	note = {TODO verify authors/volume/pages/DOI},
+}
+
+@article{susepnet_TODO,
+	title = {{SUSEP-Net}: {TODO} full title},
+	author = {TODO},
+	year = {2024},
+	note = {TODO: full reference for the SUSEP-Net comparator},
+}
+
+@article{apartqsm_TODO,
+	title = {{APART-QSM}: {TODO} full title},
+	author = {TODO},
+	year = {2024},
+	note = {TODO: full reference for the APART-QSM comparator},
+}
+
+%% --- Phantom, benchmark and validation data --------------------------------
+
+@article{ridani_realistic_2026,
+	title = {A realistic in-silico brain phantom for quantifying susceptibility anisotropy-induced error in susceptibility separation},
+	doi = {10.1002/mrm.70468},
+	journal = {Magnetic Resonance in Medicine},
+	author = {Ridani, Dounia and De Leener, Benjamin and Alonso-Ortiz, Eva},
+	year = {2026},
+}
+
+@article{marques_qsm_2021,
+	title = {{QSM} reconstruction challenge 2.0: {A} realistic in silico head phantom for {MRI} data simulation and evaluation of susceptibility mapping procedures},
+	volume = {86},
+	number = {1},
+	pages = {526--542},
+	doi = {10.1002/mrm.28716},
+	journal = {Magnetic Resonance in Medicine},
+	author = {Marques, José P. and Meineke, Jakob and Milovic, Carlos and Bilgic, Berkin and Chan, Kwok-Shing and Hedouin, Renaud and van der Zwaag, Wietske and Langkammer, Christian and Schweser, Ferdinand},
+	year = {2021},
+}
+
+@misc{stewart_qsmci_2026,
+	title = {{QSM-CI}: an open benchmarking platform and leaderboard for quantitative susceptibility mapping},
+	author = {Stewart, Ashley W. and others},
+	year = {2026},
+	howpublished = {\url{https://qsmxt.github.io/QSM-CI}},
+	note = {TODO: replace with the platform's citable DOI},
+}
+
+@misc{qsmforward_2026,
+	title = {qsm-forward: forward modelling and phantom generation for quantitative susceptibility mapping},
+	author = {Stewart, Ashley W. and others},
+	year = {2026},
+	howpublished = {\url{https://github.com/astewartau/qsm-forward}},
+	note = {TODO: version/DOI at time of submission},
+}
+
+@misc{qsmrs_2026,
+	title = {{QSM.rs}: a {Rust} library for quantitative susceptibility mapping},
+	author = {Stewart, Ashley W. and others},
+	year = {2026},
+	howpublished = {\url{https://github.com/astewartau/QSM.rs}},
+	note = {TODO: version/DOI at time of submission},
+}
+
+@article{hallgren_nonhaemin_1958,
+	title = {The effect of age on the non-haemin iron in the human brain},
+	volume = {3},
+	number = {1},
+	pages = {41--51},
+	doi = {10.1111/j.1471-4159.1958.tb12607.x},
+	journal = {Journal of Neurochemistry},
+	author = {Hallgren, B. and Sourander, P.},
+	year = {1958},
+}
+
+@article{li_anisotropy_TODO,
+	title = {{TODO}: multi-orientation white matter susceptibility anisotropy measurements},
+	author = {Li, Wei and others},
+	year = {2012},
+	note = {TODO: one of the two sources Ridani et al.\ average for the WM anisotropy constants},
+}
+
+@article{sibgatulin_anisotropy_TODO,
+	title = {{TODO}: single-orientation white matter susceptibility anisotropy measurements},
+	author = {Sibgatulin, Renat and others},
+	year = {2021},
+	note = {TODO: the second source Ridani et al.\ average for the WM anisotropy constants},
+}
+
+%% --- Reused entries (verified in a previous manuscript from this group) -----
+
+@article{schweser_foundations_2016,
+	title = {Foundations of {MRI} phase imaging and processing for {Quantitative} {Susceptibility} {Mapping} ({QSM})},
+	volume = {26},
+	issn = {0939-3889},
+	url = {https://www.sciencedirect.com/science/article/pii/S0939388915001427},
+	doi = {10.1016/j.zemedi.2015.10.002},
+	language = {en},
+	number = {1},
+	urldate = {2021-12-14},
+	journal = {Zeitschrift für Medizinische Physik},
+	author = {Schweser, Ferdinand and Deistung, Andreas and Reichenbach, Jürgen R.},
+	month = mar,
+	year = {2016},
+	note = {Number: 1},
+	pages = {6--34},
+}
+
+@article{stewart_qsmxt_2022,
+	title = {{QSMxT}: {Robust} masking and artifact reduction for quantitative susceptibility mapping},
+	volume = {87},
+	copyright = {© 2021 International Society for Magnetic Resonance in Medicine},
+	issn = {1522-2594},
+	shorttitle = {{QSMxT}},
+	url = {https://onlinelibrary.wiley.com/doi/abs/10.1002/mrm.29048},
+	doi = {10.1002/mrm.29048},
+	language = {en},
+	number = {3},
+	urldate = {2023-10-30},
+	journal = {Magnetic Resonance in Medicine},
+	author = {Stewart, Ashley Wilton and Robinson, Simon Daniel and O’Brien, Kieran and Jin, Jin and Widhalm, Georg and Hangel, Gilbert and Walls, Angela and Goodwin, Jonathan and Eckstein, Korbinian and Tourell, Monique and Morgan, Catherine and Narayanan, Aswin and Barth, Markus and Bollmann, Steffen},
+	year = {2022},
+	note = {\_eprint: https://onlinelibrary.wiley.com/doi/pdf/10.1002/mrm.29048},
+	pages = {1289--1300},
+}
+
+@misc{bilgic_recommended_2023,
+	title = {Recommended {Implementation} of {Quantitative} {Susceptibility} {Mapping} for {Clinical} {Research} in {The} {Brain}: {A} {Consensus} of the {ISMRM} {Electro}-{Magnetic} {Tissue} {Properties} {Study} {Group}},
+	shorttitle = {Recommended {Implementation} of {Quantitative} {Susceptibility} {Mapping} for {Clinical} {Research} in {The} {Brain}},
+	url = {http://arxiv.org/abs/2307.02306},
+	doi = {10.48550/arXiv.2307.02306},
+	urldate = {2023-10-06},
+	publisher = {arXiv},
+	author = {Bilgic, Berkin and Costagli, Mauro and Chan, Kwok-Shing and Duyn, Jeff and Langkammer, Christian and Lee, Jongho and Li, Xu and Liu, Chunlei and Marques, José P. and Milovic, Carlos and Robinson, Simon Daniel and Schweser, Ferdinand and Shmueli, Karin and Spincemaille, Pascal and Straub, Sina and van Zijl, Peter and Wang, Yi and Group, ISMRM Electro-Magnetic Tissue Properties Study},
+	month = jul,
+	year = {2023},
+	note = {arXiv:2307.02306 [physics]},
+}
+
+@article{duyn_contributions_2017,
+	title = {Contributions to magnetic susceptibility of brain tissue},
+	volume = {30},
+	copyright = {Copyright © 2016 John Wiley \& Sons, Ltd.},
+	issn = {1099-1492},
+	url = {https://onlinelibrary.wiley.com/doi/abs/10.1002/nbm.3546},
+	doi = {10.1002/nbm.3546},
+	language = {en},
+	number = {4},
+	urldate = {2024-01-05},
+	journal = {NMR in Biomedicine},
+	author = {Duyn, Jeff H. and Schenck, John},
+	year = {2017},
+	note = {\_eprint: https://onlinelibrary.wiley.com/doi/pdf/10.1002/nbm.3546},
+	pages = {e3546},
+}
+
+@article{liu_susceptibilityweighted_2015,
+	title = {Susceptibility-weighted imaging and quantitative susceptibility mapping in the brain},
+	volume = {42},
+	copyright = {© 2014 Wiley Periodicals, Inc.},
+	issn = {1522-2586},
+	url = {https://onlinelibrary.wiley.com/doi/abs/10.1002/jmri.24768},
+	doi = {10.1002/jmri.24768},
+	language = {en},
+	number = {1},
+	urldate = {2024-01-05},
+	journal = {Journal of Magnetic Resonance Imaging},
+	author = {Liu, Chunlei and Li, Wei and Tong, Karen A. and Yeom, Kristen W. and Kuzminski, Samuel},
+	year = {2015},
+	note = {\_eprint: https://onlinelibrary.wiley.com/doi/pdf/10.1002/jmri.24768},
+	pages = {23--41},
+}
+
+@article{kiersnowski_investigating_2023,
+	title = {Investigating the effect of oblique image acquisition on the accuracy of {QSM} and a robust tilt correction method},
+	volume = {89},
+	copyright = {© 2022 The Authors. Magnetic Resonance in Medicine published by Wiley Periodicals LLC on behalf of International Society for Magnetic Resonance in Medicine.},
+	issn = {1522-2594},
+	url = {https://onlinelibrary.wiley.com/doi/abs/10.1002/mrm.29550},
+	doi = {10.1002/mrm.29550},
+	language = {en},
+	number = {5},
+	urldate = {2024-01-05},
+	journal = {Magnetic Resonance in Medicine},
+	author = {Kiersnowski, Oliver C. and Karsa, Anita and Wastling, Stephen J. and Thornton, John S. and Shmueli, Karin},
+	year = {2023},
+	note = {\_eprint: https://onlinelibrary.wiley.com/doi/pdf/10.1002/mrm.29550},
+	pages = {1791--1808},
+}
+
+@article{wisnieff_quantitative_2015,
+	title = {Quantitative susceptibility mapping ({QSM}) of white matter multiple sclerosis lesions: {Interpreting} positive susceptibility and the presence of iron},
+	volume = {74},
+	copyright = {© 2014 Wiley Periodicals, Inc.},
+	issn = {1522-2594},
+	shorttitle = {Quantitative susceptibility mapping ({QSM}) of white matter multiple sclerosis lesions},
+	url = {https://onlinelibrary.wiley.com/doi/abs/10.1002/mrm.25420},
+	doi = {10.1002/mrm.25420},
+	language = {en},
+	number = {2},
+	urldate = {2024-01-08},
+	journal = {Magnetic Resonance in Medicine},
+	author = {Wisnieff, Cynthia and Ramanan, Sriram and Olesik, John and Gauthier, Susan and Wang, Yi and Pitt, David},
+	year = {2015},
+	note = {\_eprint: https://onlinelibrary.wiley.com/doi/pdf/10.1002/mrm.25420},
+	pages = {564--570},
+}
+
+@article{haacke_quantitative_2015,
+	title = {Quantitative susceptibility mapping: current status and future directions},
+	volume = {33},
+	issn = {0730-725X},
+	shorttitle = {Quantitative susceptibility mapping},
+	url = {https://www.sciencedirect.com/science/article/pii/S0730725X14002926},
+	doi = {10.1016/j.mri.2014.09.004},
+	number = {1},
+	urldate = {2024-01-08},
+	journal = {Magnetic Resonance Imaging},
+	author = {Haacke, E. Mark and Liu, Saifeng and Buch, Sagar and Zheng, Weili and Wu, Dongmei and Ye, Yongquan},
+	month = jan,
+	year = {2015},
+	pages = {1--25},
+}
+
+@article{langkammer_quantitative_2018,
+	title = {Quantitative susceptibility mapping: {Report} from the 2016 reconstruction challenge},
+	volume = {79},
+	copyright = {© 2017 International Society for Magnetic Resonance in Medicine},
+	issn = {1522-2594},
+	shorttitle = {Quantitative susceptibility mapping},
+	url = {https://onlinelibrary.wiley.com/doi/abs/10.1002/mrm.26830},
+	doi = {10.1002/mrm.26830},
+	language = {en},
+	number = {3},
+	urldate = {2024-01-08},
+	journal = {Magnetic Resonance in Medicine},
+	author = {Langkammer, Christian and Schweser, Ferdinand and Shmueli, Karin and Kames, Christian and Li, Xu and Guo, Li and Milovic, Carlos and Kim, Jinsuh and Wei, Hongjiang and Bredies, Kristian and Buch, Sagar and Guo, Yihao and Liu, Zhe and Meineke, Jakob and Rauscher, Alexander and Marques, José P. and Bilgic, Berkin},
+	year = {2018},
+	note = {\_eprint: https://onlinelibrary.wiley.com/doi/pdf/10.1002/mrm.26830},
+	pages = {1661--1673},
+}
+
+@article{li_ilsqr_2015,
+	title = {A method for estimating and removing streaking artifacts in quantitative susceptibility mapping},
+	volume = {108},
+	issn = {1053-8119},
+	doi = {10.1016/j.neuroimage.2014.12.043},
+	journal = {NeuroImage},
+	author = {Li, Wei and Wu, Bing and Liu, Chunlei},
+	year = {2015},
+	pages = {111--122},
+}
