@@ -431,6 +431,186 @@ pub fn phase_offset_removal(
     (corrected_phases, phase_offset_smoothed)
 }
 
+/// Box-filter widths approximating a Gaussian of `sigma` (voxels) with `n` passes — the
+/// `getboxsizes` of MriResearchTools.jl (Kovesi's "fast almost-Gaussian" construction).
+/// Returns all-ones (i.e. no smoothing) when `sigma` is not positive.
+pub fn gaussian_box_sizes(sigma: f64, n: usize) -> Vec<usize> {
+    fn round_half_even(x: f64) -> f64 {
+        let r = x.round();
+        if (x - x.trunc()).abs() == 0.5 && r % 2.0 != 0.0 { r - x.signum() } else { r }
+    }
+    if !(sigma > 0.0) || n == 0 {
+        return vec![1; n];
+    }
+    let nf = n as f64;
+    let w_ideal = (12.0 * sigma * sigma / nf + 1.0).sqrt();
+    let wl = round_half_even(w_ideal - (w_ideal + 1.0) % 2.0); // next lower odd integer
+    let wu = wl + 2.0;
+    let m_ideal = (12.0 * sigma * sigma - nf * wl * wl - 4.0 * nf * wl - 3.0 * nf) / (-4.0 * wl - 4.0);
+    let m = round_half_even(m_ideal);
+    (1..=n).map(|i| if (i as f64) <= m { wl as usize } else { wu as usize }).collect()
+}
+
+/// Running-average line filter that treats `NaN` as "no data": the box only starts once it
+/// holds `boxsize` valid samples, and when it runs into `NaN` it extrapolates linearly for up
+/// to `boxsize/2` samples ("fill" mode) before waiting for data again. Positions the filter
+/// never reaches keep their input value. Port of `nanboxfilterline!` (MriResearchTools.jl);
+/// `orig` is scratch space that is resized as needed.
+pub fn nan_box_filter_line(line: &mut [f64], boxsize: usize, orig: &mut Vec<f64>) {
+    #[derive(PartialEq, Clone, Copy)]
+    enum Mode { Nan, Normal, Fill }
+    let n = line.len();
+    let r = boxsize / 2;
+    if n == 0 || boxsize < 3 {
+        return;
+    }
+    let maxfills = r;
+    orig.clear();
+    orig.resize(n + boxsize - 1, f64::NAN);
+    orig[r..r + n].copy_from_slice(line);
+
+    let mut lsum: f64 = orig[r..2 * r].iter().sum();
+    if lsum.is_nan() {
+        lsum = 0.0;
+    }
+    let (mut nfills, mut nvalids) = (0usize, 0usize);
+    let mut mode = Mode::Nan;
+    let bs = boxsize as f64;
+
+    // `i` is the 1-based output index, as in the reference; orig[k] here is orig[k+1] there.
+    for i in 1..=n {
+        if lsum.is_nan() {
+            break;
+        }
+        let lead = orig[i - 1 + 2 * r];
+        match mode {
+            Mode::Normal => {
+                if lead.is_nan() {
+                    mode = Mode::Fill;
+                }
+            }
+            Mode::Nan => {
+                if lead.is_nan() { nvalids = 0; } else { nvalids += 1; }
+                if nvalids == boxsize {
+                    mode = Mode::Normal;
+                    lsum = orig[i - 1..i + 2 * r].iter().sum();
+                    line[i - 1] = lsum / bs;
+                    continue;
+                }
+            }
+            Mode::Fill => {
+                if lead.is_nan() {
+                    nfills += 1;
+                    if nfills > maxfills {
+                        mode = Mode::Nan;
+                        nfills = 0;
+                        lsum = 0.0;
+                        nvalids = 0;
+                    }
+                } else {
+                    mode = Mode::Normal;
+                    nfills = 0;
+                }
+            }
+        }
+        match mode {
+            Mode::Normal => {
+                let trailing = if i >= 2 { orig[i - 2] } else { 0.0 };
+                lsum += orig[i - 1 + 2 * r] - trailing;
+                line[i - 1] = lsum / bs;
+            }
+            Mode::Fill => {
+                let trailing = if i >= 2 { orig[i - 2] } else { 0.0 };
+                lsum -= trailing;
+                line[i - 1] = (lsum - orig[i - 1]) / (bs - 2.0);
+                let prev = if i - 1 >= r { line[i - 1 - r] } else { line[i - 1] };
+                let extrapolated = 2.0 * line[i - 1] - prev;
+                orig[i - 1 + 2 * r] = extrapolated;
+                if i + r < n {
+                    line[i - 1 + r] = extrapolated;
+                }
+                lsum += extrapolated;
+            }
+            Mode::Nan => {}
+        }
+    }
+}
+
+/// Masked 3D smoothing by repeated NaN-aware box filtering — the `mask` branch of
+/// `gaussiansmooth3d!` in MriResearchTools.jl (4 passes per axis, alternating direction on
+/// even passes, box widths from [`gaussian_box_sizes`]). Voxels outside `mask` become `NaN`
+/// before filtering and are only given values where the filter extrapolates across the
+/// boundary; the result is written in place.
+pub fn nan_box_smooth_3d(image: &mut [f64], sigma: [f64; 3], mask: &[u8], grid: &Grid) {
+    let (nx, ny, nz) = grid.dims;
+    let dims = [nx, ny, nz];
+    let n_total = nx * ny * nz;
+    assert_eq!(image.len(), n_total);
+    assert_eq!(mask.len(), n_total);
+    const NBOX: usize = 4;
+    for i in 0..n_total {
+        if mask[i] == 0 {
+            image[i] = f64::NAN;
+        }
+    }
+    let mut boxsizes: Vec<Vec<usize>> = sigma.iter().map(|&s| gaussian_box_sizes(s, NBOX)).collect();
+    // checkboxsizes!: odd widths, no wider than half the axis
+    for d in 0..3 {
+        for b in boxsizes[d].iter_mut() {
+            if *b % 2 == 0 { *b += 1; }
+            if *b as f64 > dims[d] as f64 / 2.0 {
+                let mut v = dims[d] / 2;
+                if v % 2 == 0 { v += 1; }
+                *b = v;
+            }
+        }
+    }
+    let mut line: Vec<f64> = Vec::new();
+    let mut scratch: Vec<f64> = Vec::new();
+    for ibox in 0..NBOX {
+        for d in 0..3 {
+            let bsize = boxsizes[d][ibox];
+            let len = dims[d];
+            if len == 1 || bsize < 3 {
+                continue;
+            }
+            let reverse = ibox % 2 == 1;
+            let (stride, n_lines_a, stride_a, n_lines_b, stride_b) = match d {
+                0 => (1, ny, nx, nz, nx * ny),
+                1 => (nx, nx, 1, nz, nx * ny),
+                _ => (nx * ny, nx, 1, ny, nx),
+            };
+            line.resize(len, 0.0);
+            for b in 0..n_lines_b {
+                for a in 0..n_lines_a {
+                    let base = a * stride_a + b * stride_b;
+                    for k in 0..len {
+                        let kk = if reverse { len - 1 - k } else { k };
+                        line[k] = image[base + kk * stride];
+                    }
+                    nan_box_filter_line(&mut line, bsize, &mut scratch);
+                    for k in 0..len {
+                        let kk = if reverse { len - 1 - k } else { k };
+                        image[base + kk * stride] = line[k];
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Masked phase smoothing via the complex representation, using [`nan_box_smooth_3d`] —
+/// `gaussiansmooth3d_phase(phase, sigma; mask)` of MriResearchTools.jl. Returns `NaN` where
+/// the smoothed complex value is undefined (far outside the mask).
+pub fn nan_box_smooth_3d_phase(phase: &[f64], sigma: [f64; 3], mask: &[u8], grid: &Grid) -> Vec<f64> {
+    let n = phase.len();
+    let mut re: Vec<f64> = phase.iter().map(|p| p.cos()).collect();
+    let mut im: Vec<f64> = phase.iter().map(|p| p.sin()).collect();
+    nan_box_smooth_3d(&mut re, sigma, mask, grid);
+    nan_box_smooth_3d(&mut im, sigma, mask, grid);
+    (0..n).map(|i| im[i].atan2(re[i])).collect()
+}
+
 /// Result of MCPC-3D-S multi-coil combination ([`mcpc3ds_combine`]).
 #[derive(Debug, Clone)]
 pub struct CoilCombinationResult {
@@ -452,8 +632,9 @@ pub struct CoilCombinationResult {
 /// 1. `HIP = Σ_c |S_{1,c}| |S_{2,c}| exp(i(φ_{2,c} − φ_{1,c}))` — the coil offsets cancel in
 ///    the inter-echo phase difference, so the HIP phase is pure field evolution over ΔTE.
 /// 2. The HIP phase is unwrapped once (weighted by √|HIP|, on a robust mask of that weight).
-/// 3. Per coil, `po_c = φ_{1,c} − (TE₁/ΔTE)·unwrapped_HIP`, Gaussian-smoothed in the complex
-///    domain (`sigma`, voxels).
+/// 3. Per coil, `po_c = φ_{1,c} − (TE₁/ΔTE)·unwrapped_HIP`, smoothed in the complex domain
+///    with the same masked box-filter Gaussian approximation as MriResearchTools
+///    ([`nan_box_smooth_3d_phase`]; `sigma` in voxels, the reference default is [10, 10, 5]).
 /// 4. Per echo, `S_e = Σ_c |S_{e,c}|² exp(i(φ_{e,c} − po_c))`; output phase `arg(S_e)` and
 ///    magnitude `sqrt(|S_e|)`.
 ///
@@ -537,7 +718,11 @@ pub fn mcpc3ds_combine<P: AsRef<[f64]>, M: AsRef<[f64]>>(
         for i in 0..n {
             po[i] = if mask[i] > 0 { p1[i] - scale * unwrapped_hip[i] } else { 0.0 };
         }
-        let po_s = gaussian_smooth_3d_phase(&po, sigma, &mask, grid);
+        // Smooth as MriResearchTools does (NaN-aware box passes); NaN far outside the mask → 0.
+        let mut po_s = nan_box_smooth_3d_phase(&po, sigma, &mask, grid);
+        for v in po_s.iter_mut() {
+            if !v.is_finite() { *v = 0.0; }
+        }
         for e in 0..n_echoes {
             let (p, m) = (phases[c][e].as_ref(), mags[c][e].as_ref());
             let (re, im) = (&mut acc_re[e], &mut acc_im[e]);
@@ -2015,24 +2200,37 @@ mod tests {
     fn n_mask_min(nx: usize, ny: usize, nz: usize) -> usize { nx * ny * nz / 2 }
 
     #[test]
-    fn test_mcpc3ds_combine_single_coil_matches_phase_offset_removal() {
-        let (nx, ny, nz) = (16, 16, 8);
+    fn test_mcpc3ds_combine_single_coil_removes_offset_keeps_magnitude() {
+        let (nx, ny, nz) = (24, 24, 12);
         let tes = [0.005, 0.010];
         let g = grid(nx, ny, nz);
-        let (mut phases, mut mags, _) = synthetic_coils(nx, ny, nz, &tes);
+        let (mut phases, mut mags, field) = synthetic_coils(nx, ny, nz, &tes);
         phases.truncate(1);
         mags.truncate(1);
-        let sigma = [2.0, 2.0, 2.0];
-        let res = mcpc3ds_combine(&phases, &mags, &tes, sigma, [0, 1], UnwrapMethod::Romeo, &g);
-        let (corrected, _) = phase_offset_removal(&phases[0], &mags[0], &tes, &res.mask, sigma, [0, 1], UnwrapMethod::Romeo, &g);
+        let res = mcpc3ds_combine(&phases, &mags, &tes, [2.0, 2.0, 2.0], [0, 1], UnwrapMethod::Romeo, &g);
+        let n = nx * ny * nz;
         for e in 0..2 {
-            for i in 0..nx * ny * nz {
-                if res.mask[i] == 0 { continue; }
-                let d = wrap_to_pi(res.phases[e][i] - corrected[e][i]).abs();
-                assert!(d < 1e-9, "echo {} voxel {}: {} vs {}", e, i, res.phases[e][i], corrected[e][i]);
+            for i in 0..n {
+                // one coil: |S| is untouched, and the inter-echo phase difference is preserved
+                // exactly (a TE-independent offset cancels in it)
                 assert!((res.magnitudes[e][i] - mags[0][e][i]).abs() < 1e-9);
             }
         }
+        for i in 0..n {
+            let d_in = wrap_to_pi(phases[0][1][i] - phases[0][0][i]);
+            let d_out = wrap_to_pi(res.phases[1][i] - res.phases[0][i]);
+            assert!(wrap_to_pi(d_out - d_in).abs() < 1e-9, "voxel {}: {} vs {}", i, d_out, d_in);
+        }
+        // and the offset itself is gone: interior phase == field evolution
+        let mut checked = 0;
+        for z in 3..nz - 3 { for y in 5..ny - 5 { for x in 5..nx - 5 {
+            let i = x + y * nx + z * nx * ny;
+            if res.mask[i] == 0 { continue; }
+            let err = wrap_to_pi(res.phases[0][i] - 2.0 * PI * field[i] * tes[0]).abs();
+            assert!(err < 0.05, "voxel ({},{},{}): {}", x, y, z, err);
+            checked += 1;
+        }}}
+        assert!(checked > 100);
     }
 
     #[test]
@@ -2051,5 +2249,74 @@ mod tests {
             let expected = (2.0f64).sqrt() * mags[0][1][i];
             assert!((res.magnitudes[1][i] - expected).abs() < 1e-6);
         }
+    }
+
+    // --- nan-box smoothing (MriResearchTools port) ---
+
+    #[test]
+    fn test_gaussian_box_sizes_match_reference() {
+        // values computed from getboxsizes(sigma, 4) in MriResearchTools.jl
+        assert_eq!(gaussian_box_sizes(10.0, 4), vec![17, 17, 17, 19]);
+        assert_eq!(gaussian_box_sizes(5.0, 4), vec![7, 9, 9, 9]);
+        assert_eq!(gaussian_box_sizes(4.0, 4), vec![7, 7, 7, 7]);
+        assert_eq!(gaussian_box_sizes(0.0, 4), vec![1, 1, 1, 1]);
+        assert_eq!(gaussian_box_sizes(5.0, 3), vec![9, 9, 11]); // Julia round() ties to even: m = round(1.5) = 2
+        assert_eq!(gaussian_box_sizes(2.0, 4), vec![3, 3, 3, 5]);
+    }
+
+    #[test]
+    fn test_nan_box_filter_line_constant_with_gap() {
+        // constant segments stay constant, and the NaN gap is filled by extrapolation
+        let mut line = vec![3.0; 30];
+        for v in line.iter_mut().take(20).skip(12) { *v = f64::NAN; }
+        let mut scratch = Vec::new();
+        nan_box_filter_line(&mut line, 5, &mut scratch);
+        for (i, v) in line.iter().enumerate() {
+            if v.is_finite() {
+                assert!((v - 3.0).abs() < 1e-12, "position {} = {}", i, v);
+            }
+        }
+        // filled up to r=2 samples into the gap from the left
+        assert!(line[12].is_finite() && line[13].is_finite(), "{:?}", &line[10..16]);
+        assert!(line[16].is_nan());
+    }
+
+    #[test]
+    fn test_nan_box_filter_line_linear_ramp_interior() {
+        let n = 40;
+        let mut line: Vec<f64> = (0..n).map(|i| 0.5 * i as f64).collect();
+        let mut scratch = Vec::new();
+        nan_box_filter_line(&mut line, 7, &mut scratch);
+        // box mean of a linear ramp is the ramp itself where the box is fully inside
+        for i in 7..n - 3 {
+            assert!((line[i] - 0.5 * i as f64).abs() < 1e-9, "position {} = {}", i, line[i]);
+        }
+    }
+
+    #[test]
+    fn test_nan_box_smooth_3d_phase_constant_inside_mask() {
+        let (nx, ny, nz) = (48, 48, 24);
+        let g = grid(nx, ny, nz);
+        let n = nx * ny * nz;
+        let mut mask = vec![0u8; n];
+        for z in 8..nz - 8 { for y in 16..ny - 16 { for x in 16..nx - 16 {
+            mask[x + y * nx + z * nx * ny] = 1;
+        }}}
+        let phase = vec![1.2f64; n];
+        let out = nan_box_smooth_3d_phase(&phase, [3.0, 3.0, 2.0], &mask, &g);
+        let mut checked = 0;
+        for i in 0..n {
+            if mask[i] > 0 && out[i].is_finite() {
+                assert!((out[i] - 1.2).abs() < 1e-9, "voxel {}: {}", i, out[i]);
+                checked += 1;
+            }
+        }
+        let n_mask = mask.iter().filter(|&&m| m > 0).count();
+        assert_eq!(checked, n_mask, "every mask voxel must be defined and unchanged");
+        // fills extend at most a few box radii past the mask: the corner stays undefined
+        assert!(out[0].is_nan());
+        let outside_defined = (0..n).filter(|&i| mask[i] == 0 && out[i].is_finite()).count();
+        let outside = (0..n).filter(|&i| mask[i] == 0).count();
+        assert!(outside_defined < outside / 2, "{} of {}", outside_defined, outside);
     }
 }
