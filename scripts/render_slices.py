@@ -57,8 +57,9 @@ NAMES = {
     "combined_tgv": "TGV (Combined)",
     "bias_correction": "Bias Correction",
     "pipeline_romeo_b0": "ROMEO + B0",
-    "pipeline_laplacian_b0": "Laplacian (Neumann) + B0",
-    "pipeline_laplacian_lbv_b0": "Laplacian (Dirichlet ROI) + B0",
+    "unwrap_bfr_romeo": "ROMEO + V-SHARP",
+    "unwrap_bfr_laplacian_neumann": "Laplacian (Neumann) + V-SHARP",
+    "unwrap_bfr_laplacian_dirichlet": "Laplacian (Dirichlet ROI) + V-SHARP",
     "pipeline_harperella": "HARPERELLA",
     "pipeline_iharperella": "iHARPERELLA",
     "pipeline_tgv": "TGV",
@@ -148,10 +149,11 @@ WINDOWS = {
     "combined_tgv": (-0.1, 0.1),
     "bias_correction": (-0.1, 0.1),  # fallback; before/after rendering uses auto-range
     "pipeline_romeo_b0": (-0.05, 0.05),  # total field in ppm (wider range than local field)
-    # Same window as ROMEO on purpose: these three are meant to be read side by side, and
-    # the Dirichlet variant's missing background is only obvious on a shared scale.
-    "pipeline_laplacian_b0": (-0.05, 0.05),
-    "pipeline_laplacian_lbv_b0": (-0.05, 0.05),
+    # Local fields after background removal — same window for all three, since the point of
+    # the panel is that the first two agree and the third does not.
+    "unwrap_bfr_romeo": (-0.025, 0.025),
+    "unwrap_bfr_laplacian_neumann": (-0.025, 0.025),
+    "unwrap_bfr_laplacian_dirichlet": (-0.025, 0.025),
     "pipeline_harperella": (-0.025, 0.025),
     "pipeline_iharperella": (-0.025, 0.025),
     "pipeline_tgv": (-0.1, 0.1),

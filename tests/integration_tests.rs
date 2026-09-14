@@ -1225,81 +1225,101 @@ fn test_pipeline_romeo_b0() {
     assert!(res.nrmse < 0.5, "ROMEO+B0 NRMSE too high: {}", res.nrmse);
 }
 
-/// Laplacian unwrapping under a Neumann boundary condition on the array.
+/// Unwrap with each method, then run the same background removal, and score the **local**
+/// field against ground truth.
 ///
-/// Scored against the ground-truth **total** field, like ROMEO: this variant unwraps only,
-/// so the background field must survive.
-#[test]
-#[ignore]
-fn test_pipeline_laplacian_b0() {
-    println!("[INFO] Loading test data...");
-    let data = TestData::load().expect("Failed to load test data");
+/// Phase unwrapping is only defined up to an additive harmonic field — different seeding
+/// and global-offset choices give total field maps that look very different and are all
+/// valid — so comparing raw total fields across unwrappers measures the arbitrary part.
+/// What has to agree is the local field after background removal, which is what feeds
+/// dipole inversion. That is what these three tests compare.
+fn unwrap_then_bfr(data: &common::TestData, unwrapper: Unwrapper) -> (Vec<f64>, Vec<u8>) {
+    let (nx, ny, nz) = data.dims;
+    let (vsx, vsy, vsz) = data.voxel_size;
+    let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
 
-    let start = Instant::now();
-    let b0_hz = run_field_mapping_laplacian(&data, true);
-    let elapsed = start.elapsed();
+    let b0_hz = match unwrapper {
+        Unwrapper::Romeo => run_field_mapping(data),
+        Unwrapper::LaplacianNeumann => run_field_mapping_laplacian(data, true),
+        Unwrapper::LaplacianDirichlet => run_field_mapping_laplacian(data, false),
+    };
 
     let gamma = 42.576e6_f64;
     let scale = 1e6 / (gamma * data.field_strength);
     let b0_ppm: Vec<f64> = b0_hz.iter().map(|&v| v * scale).collect();
 
-    let res = TestResult::new("Laplacian+B0", &b0_ppm, &data.fieldmap, &data.mask, data.dims);
+    bgremove::vsharp(&b0_ppm, &data.mask, &grid, &VsharpParams::default(), |_, _| {})
+}
+
+#[derive(Clone, Copy)]
+enum Unwrapper {
+    Romeo,
+    LaplacianNeumann,
+    LaplacianDirichlet,
+}
+
+fn run_unwrap_bfr_case(label: &str, unwrapper: Unwrapper, slug: &str) -> TestResult {
+    println!("[INFO] Loading test data...");
+    let data = TestData::load().expect("Failed to load test data");
+
+    let start = Instant::now();
+    let (local, eroded_mask) = unwrap_then_bfr(&data, unwrapper);
+    let elapsed = start.elapsed();
+
+    let res = TestResult::new(label, &local, &data.fieldmap_local, &eroded_mask, data.dims);
     res.print_with_time(elapsed);
     res.print_ci_metrics(elapsed);
-    common::save_center_slices(&b0_ppm, &data.mask, data.dims, "pipeline_laplacian_b0");
+    common::save_center_slices(&local, &eroded_mask, data.dims, slug);
+    res
+}
 
-    assert!(res.nrmse < 0.5, "Laplacian+B0 NRMSE too high: {}", res.nrmse);
+#[test]
+#[ignore]
+fn test_pipeline_unwrap_bfr_romeo() {
+    let res = run_unwrap_bfr_case("ROMEO + V-SHARP", Unwrapper::Romeo, "unwrap_bfr_romeo");
+    assert!(res.correlation > 0.45, "ROMEO local field correlation too low: {}", res.correlation);
+}
+
+/// Laplacian under a Neumann boundary condition on the array: unwrapping only.
+///
+/// Must land close to ROMEO here. It produces a visibly different *total* field, which is
+/// expected and unimportant; after background removal the two should agree.
+#[test]
+#[ignore]
+fn test_pipeline_unwrap_bfr_laplacian_neumann() {
+    let res = run_unwrap_bfr_case(
+        "Laplacian (Neumann) + V-SHARP",
+        Unwrapper::LaplacianNeumann,
+        "unwrap_bfr_laplacian_neumann",
+    );
     assert!(
-        res.correlation > 0.4,
-        "Laplacian+B0 should track the total field, got r = {}",
+        res.correlation > 0.45,
+        "Laplacian (Neumann) local field correlation too low: {}",
         res.correlation
     );
 }
 
-/// Laplacian unwrapping under a Dirichlet boundary condition on the ROI.
+/// Laplacian under a Dirichlet boundary condition on the ROI: unwrapping **and** harmonic
+/// background removal.
 ///
-/// Scored against the same **total** field as the two tests above, deliberately: zeroing
-/// the Laplacian outside the mask removes the harmonic background along with the wraps, so
-/// this variant must *not* reproduce a total field. Agreement well below its Neumann
-/// counterpart is the expected result and the reason the two are categorised apart.
-///
-/// If this assertion starts failing, the background removal stopped happening — revisit the
-/// README categorisation and `unwrap::laplacian`'s module docs.
+/// Running V-SHARP after it removes background a second time, and the local field is
+/// measurably worse for it — this is the cost of treating it as interchangeable with the
+/// other two, and the reason it is categorised separately in the README.
 #[test]
 #[ignore]
-fn test_pipeline_laplacian_lbv_b0() {
-    println!("[INFO] Loading test data...");
-    let data = TestData::load().expect("Failed to load test data");
-
-    let start = Instant::now();
-    let b0_hz = run_field_mapping_laplacian(&data, false);
-    let elapsed = start.elapsed();
-
-    let gamma = 42.576e6_f64;
-    let scale = 1e6 / (gamma * data.field_strength);
-    let b0_ppm: Vec<f64> = b0_hz.iter().map(|&v| v * scale).collect();
-
-    let res = TestResult::new(
-        "Laplacian+BFR+B0", &b0_ppm, &data.fieldmap, &data.mask, data.dims,
+fn test_pipeline_unwrap_bfr_laplacian_dirichlet() {
+    let res = run_unwrap_bfr_case(
+        "Laplacian (Dirichlet ROI) + V-SHARP",
+        Unwrapper::LaplacianDirichlet,
+        "unwrap_bfr_laplacian_dirichlet",
     );
-    res.print_with_time(elapsed);
-    res.print_ci_metrics(elapsed);
-    common::save_center_slices(&b0_ppm, &data.mask, data.dims, "pipeline_laplacian_lbv_b0");
-
-    // For information: it is not a clean local field either, being background-removed by an
-    // amount that depends on the mask and field geometry.
-    let vs_local = TestResult::new(
-        "Laplacian+BFR+B0 (vs local)", &b0_ppm, &data.fieldmap_local, &data.mask, data.dims,
-    );
-    println!(
-        "[INFO] correlation vs total {:.4}, vs local {:.4}",
-        res.correlation, vs_local.correlation
-    );
-
+    // Deliberately loose: this documents that the double removal degrades the local field
+    // rather than gating on a precise value. If it ever climbs to the ~0.45 the other two
+    // reach, the background removal stopped happening — revisit the categorisation.
     assert!(
-        res.correlation < 0.4,
-        "Laplacian+BFR+B0 returned something close to a total field (r = {}); \
-         background removal appears to have stopped",
+        res.correlation < 0.40,
+        "Laplacian (Dirichlet ROI) now behaves like a plain unwrapper (r = {}); \
+         the combined categorisation may no longer hold",
         res.correlation
     );
 }
@@ -1999,3 +2019,4 @@ fn test_all_combinations() {
     println!("DONE — results written to {}", csv_path);
     println!("{}", "=".repeat(120));
 }
+
