@@ -136,9 +136,9 @@ pub mod swi;
 /// linear multi-echo fitting.
 pub mod fieldmap {
     pub use crate::utils::multi_echo::{
-        phase_offset_removal, calculate_b0_weighted, multi_echo_linear_fit,
+        phase_offset_removal, mcpc3ds_combine, calculate_b0_weighted, multi_echo_linear_fit,
         bipolar_correction, field_to_hz,
-        PhaseOffsetParams, LinearFitParams, LinearFitResult, B0WeightType,
+        PhaseOffsetParams, CoilCombinationResult, LinearFitParams, LinearFitResult, B0WeightType,
     };
 }
 

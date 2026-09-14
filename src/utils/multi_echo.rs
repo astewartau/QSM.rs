@@ -431,6 +431,138 @@ pub fn phase_offset_removal(
     (corrected_phases, phase_offset_smoothed)
 }
 
+/// Result of MCPC-3D-S multi-coil combination ([`mcpc3ds_combine`]).
+#[derive(Debug, Clone)]
+pub struct CoilCombinationResult {
+    /// Combined phase per echo, wrapped to [-π, π]
+    pub phases: Vec<Vec<f64>>,
+    /// Combined magnitude per echo: `sqrt(|Σ_c |S_c|² · exp(i(φ_c − po_c))|)`
+    pub magnitudes: Vec<Vec<f64>>,
+    /// Mask used for the phase-offset estimation (robust threshold on √|HIP|)
+    pub mask: Vec<u8>,
+}
+
+/// MCPC-3D-S multi-coil phase combination (Eckstein et al., MRM 2018), as in
+/// `MriResearchTools.jl`'s `mcpc3ds` for 5D (multi-echo, uncombined) input.
+///
+/// Each receive coil carries its own TE-independent phase offset, so uncombined channels
+/// cannot simply be summed. The algorithm estimates the offsets from the coil-summed
+/// Hermitian inner product (HIP) of two echoes and combines the channels coherently:
+///
+/// 1. `HIP = Σ_c |S_{1,c}| |S_{2,c}| exp(i(φ_{2,c} − φ_{1,c}))` — the coil offsets cancel in
+///    the inter-echo phase difference, so the HIP phase is pure field evolution over ΔTE.
+/// 2. The HIP phase is unwrapped once (weighted by √|HIP|, on a robust mask of that weight).
+/// 3. Per coil, `po_c = φ_{1,c} − (TE₁/ΔTE)·unwrapped_HIP`, Gaussian-smoothed in the complex
+///    domain (`sigma`, voxels).
+/// 4. Per echo, `S_e = Σ_c |S_{e,c}|² exp(i(φ_{e,c} − po_c))`; output phase `arg(S_e)` and
+///    magnitude `sqrt(|S_e|)`.
+///
+/// With a single coil this reduces to [`phase_offset_removal`] (with the robust HIP mask).
+///
+/// # Arguments
+/// * `phases` - Wrapped phase, coil-major: `phases[coil][echo]` (each `nx*ny*nz`)
+/// * `mags` - Magnitude, same layout as `phases`
+/// * `tes` - Echo times (any consistent unit; only the ratio `TE₁/ΔTE` is used)
+/// * `sigma` - Gaussian smoothing sigma in voxels [x, y, z] for the phase offsets
+/// * `echoes` - Which two echoes form the HIP, default `[0, 1]`
+/// * `unwrap_method` - How to unwrap the HIP phase (ROMEO or Laplacian)
+/// * `grid` - Volume grid
+///
+/// # Panics
+/// If there are no coils, the coils do not all have the same number of echoes, magnitude
+/// and phase layouts differ, or `echoes` is out of range.
+pub fn mcpc3ds_combine<P: AsRef<[f64]>, M: AsRef<[f64]>>(
+    phases: &[Vec<P>],
+    mags: &[Vec<M>],
+    tes: &[f64],
+    sigma: [f64; 3],
+    echoes: [usize; 2],
+    unwrap_method: UnwrapMethod,
+    grid: &Grid,
+) -> CoilCombinationResult {
+    let (nx, ny, nz) = grid.dims;
+    let n = nx * ny * nz;
+    let n_coils = phases.len();
+    assert!(n_coils > 0, "mcpc3ds_combine: no coils");
+    assert_eq!(mags.len(), n_coils, "mcpc3ds_combine: magnitude/phase coil count differ");
+    let n_echoes = phases[0].len();
+    assert!(n_echoes >= 2, "mcpc3ds_combine: at least two echoes are required");
+    assert_eq!(tes.len(), n_echoes, "mcpc3ds_combine: echo time count must match echoes");
+    let [e1, e2] = echoes;
+    assert!(e1 < n_echoes && e2 < n_echoes && e1 != e2, "mcpc3ds_combine: HIP echoes out of range");
+    for c in 0..n_coils {
+        assert_eq!(phases[c].len(), n_echoes, "mcpc3ds_combine: coil {} has a different echo count", c);
+        assert_eq!(mags[c].len(), n_echoes, "mcpc3ds_combine: coil {} magnitude echo count differs", c);
+        for e in 0..n_echoes {
+            assert_eq!(phases[c][e].as_ref().len(), n, "mcpc3ds_combine: coil {} echo {} phase size", c, e);
+            assert_eq!(mags[c][e].as_ref().len(), n, "mcpc3ds_combine: coil {} echo {} magnitude size", c, e);
+        }
+    }
+
+    // 1. Coil-summed Hermitian inner product between the two HIP echoes.
+    let mut hip_re = vec![0.0f64; n];
+    let mut hip_im = vec![0.0f64; n];
+    for c in 0..n_coils {
+        let (p1, p2) = (phases[c][e1].as_ref(), phases[c][e2].as_ref());
+        let (m1, m2) = (mags[c][e1].as_ref(), mags[c][e2].as_ref());
+        for i in 0..n {
+            let a = m1[i] * m2[i];
+            let d = p2[i] - p1[i];
+            hip_re[i] += a * d.cos();
+            hip_im[i] += a * d.sin();
+        }
+    }
+    let hip_phase: Vec<f64> = (0..n).map(|i| hip_im[i].atan2(hip_re[i])).collect();
+    // weight = sqrt(|HIP|)
+    let weight: Vec<f64> = (0..n).map(|i| (hip_re[i] * hip_re[i] + hip_im[i] * hip_im[i]).sqrt().sqrt()).collect();
+    drop(hip_re);
+    drop(hip_im);
+
+    // 2. Robust mask on the HIP weight, then unwrap the HIP phase once.
+    let mask = crate::utils::bias_correction::robust_mask(&weight, grid);
+    let unwrapped_hip = match unwrap_method {
+        UnwrapMethod::Romeo => unwrap_romeo(&hip_phase, &weight, None, 0.0, 0.0, &mask, &RomeoParams::default(), grid),
+        UnwrapMethod::Laplacian => laplacian_unwrap(&hip_phase, &mask, grid),
+    };
+    drop(hip_phase);
+    drop(weight);
+
+    // 3./4. Per-coil offset → smooth → accumulate the magnitude²-weighted complex sum per echo.
+    let scale = tes[e1] / (tes[e2] - tes[e1]);
+    let mut acc_re: Vec<Vec<f64>> = (0..n_echoes).map(|_| vec![0.0f64; n]).collect();
+    let mut acc_im: Vec<Vec<f64>> = (0..n_echoes).map(|_| vec![0.0f64; n]).collect();
+    let mut po = vec![0.0f64; n];
+    for c in 0..n_coils {
+        let p1 = phases[c][e1].as_ref();
+        for i in 0..n {
+            po[i] = if mask[i] > 0 { p1[i] - scale * unwrapped_hip[i] } else { 0.0 };
+        }
+        let po_s = gaussian_smooth_3d_phase(&po, sigma, &mask, grid);
+        for e in 0..n_echoes {
+            let (p, m) = (phases[c][e].as_ref(), mags[c][e].as_ref());
+            let (re, im) = (&mut acc_re[e], &mut acc_im[e]);
+            for i in 0..n {
+                let w = m[i] * m[i];
+                let ang = p[i] - po_s[i];
+                re[i] += w * ang.cos();
+                im[i] += w * ang.sin();
+            }
+        }
+    }
+    drop(po);
+    drop(unwrapped_hip);
+
+    let mut phases_out = Vec::with_capacity(n_echoes);
+    let mut mags_out = Vec::with_capacity(n_echoes);
+    for e in 0..n_echoes {
+        let (re, im) = (&acc_re[e], &acc_im[e]);
+        phases_out.push((0..n).map(|i| im[i].atan2(re[i])).collect());
+        mags_out.push((0..n).map(|i| (re[i] * re[i] + im[i] * im[i]).sqrt().sqrt()).collect());
+    }
+
+    CoilCombinationResult { phases: phases_out, magnitudes: mags_out, mask }
+}
+
 /// Calculate B0 field from unwrapped phase using weighted averaging
 ///
 /// Implements calculateB0_unwrapped from MriResearchTools.jl
@@ -1809,6 +1941,115 @@ mod tests {
         assert_eq!(b0.len(), n);
         for v in &b0 {
             assert!(v.is_finite(), "B0 with bipolar correction should be finite");
+        }
+    }
+
+    // --- mcpc3ds_combine ---
+
+    /// Two coils with distinct smooth phase offsets over a linear field: the combined phase
+    /// must be the pure field evolution 2π·f·TE_e, offsets gone.
+    fn synthetic_coils(nx: usize, ny: usize, nz: usize, tes: &[f64]) -> (Vec<Vec<Vec<f64>>>, Vec<Vec<Vec<f64>>>, Vec<f64>) {
+        let n = nx * ny * nz;
+        let offsets: Vec<Box<dyn Fn(usize, usize, usize) -> f64>> = vec![
+            Box::new(|x, _, _| 0.3 + 0.01 * x as f64),
+            Box::new(|_, y, _| -1.0 + 0.02 * y as f64),
+        ];
+        let mut field = vec![0.0; n]; // Hz
+        let mut phases = Vec::new();
+        let mut mags = Vec::new();
+        for (c, po) in offsets.iter().enumerate() {
+            let mut cp = Vec::new();
+            let mut cm = Vec::new();
+            for &te in tes {
+                let mut p = vec![0.0; n];
+                let mut m = vec![0.0; n];
+                for z in 0..nz { for y in 0..ny { for x in 0..nx {
+                    let i = x + y * nx + z * nx * ny;
+                    let f = 2.0 + 1.5 * (x as f64 / nx as f64) - 1.0 * (z as f64 / nz as f64);
+                    field[i] = f;
+                    p[i] = wrap_to_pi(2.0 * PI * f * te + po(x, y, z));
+                    m[i] = 100.0 * (1.0 + 0.3 * (if c == 0 { x as f64 / nx as f64 } else { y as f64 / ny as f64 }));
+                }}}
+                cp.push(p);
+                cm.push(m);
+            }
+            phases.push(cp);
+            mags.push(cm);
+        }
+        (phases, mags, field)
+    }
+
+    #[test]
+    fn test_mcpc3ds_combine_removes_coil_offsets() {
+        let (nx, ny, nz) = (20, 20, 10);
+        let tes = [0.005, 0.010];
+        let g = grid(nx, ny, nz);
+        let (phases, mags, field) = synthetic_coils(nx, ny, nz, &tes);
+        let res = mcpc3ds_combine(&phases, &mags, &tes, [2.0, 2.0, 2.0], [0, 1], UnwrapMethod::Romeo, &g);
+        assert_eq!(res.phases.len(), 2);
+        assert_eq!(res.magnitudes.len(), 2);
+        let n_mask = res.mask.iter().filter(|&&m| m > 0).count();
+        assert!(n_mask > n_mask_min(nx, ny, nz), "robust mask should cover the object: {}", n_mask);
+        // Interior voxels (away from the smoothing boundary): combined phase == field evolution.
+        let mut checked = 0;
+        for z in 3..nz - 3 { for y in 4..ny - 4 { for x in 4..nx - 4 {
+            let i = x + y * nx + z * nx * ny;
+            if res.mask[i] == 0 { continue; }
+            for (e, &te) in tes.iter().enumerate() {
+                let expected = wrap_to_pi(2.0 * PI * field[i] * te);
+                let err = wrap_to_pi(res.phases[e][i] - expected).abs();
+                assert!(err < 0.05, "echo {} voxel ({},{},{}): got {:.4}, expected {:.4}", e, x, y, z, res.phases[e][i], expected);
+            }
+            checked += 1;
+        }}}
+        assert!(checked > 100, "too few interior voxels checked: {}", checked);
+        // Magnitude: sqrt(|Σ m_c² e^{iθ}|) with aligned phases = sqrt(m0² + m1²) ≥ each coil.
+        for i in 0..nx * ny * nz {
+            let m0 = mags[0][0][i];
+            let m1 = mags[1][0][i];
+            let expected = (m0 * m0 + m1 * m1).sqrt();
+            assert!((res.magnitudes[0][i] - expected).abs() / expected < 0.02, "magnitude at {}: {} vs {}", i, res.magnitudes[0][i], expected);
+        }
+    }
+
+    fn n_mask_min(nx: usize, ny: usize, nz: usize) -> usize { nx * ny * nz / 2 }
+
+    #[test]
+    fn test_mcpc3ds_combine_single_coil_matches_phase_offset_removal() {
+        let (nx, ny, nz) = (16, 16, 8);
+        let tes = [0.005, 0.010];
+        let g = grid(nx, ny, nz);
+        let (mut phases, mut mags, _) = synthetic_coils(nx, ny, nz, &tes);
+        phases.truncate(1);
+        mags.truncate(1);
+        let sigma = [2.0, 2.0, 2.0];
+        let res = mcpc3ds_combine(&phases, &mags, &tes, sigma, [0, 1], UnwrapMethod::Romeo, &g);
+        let (corrected, _) = phase_offset_removal(&phases[0], &mags[0], &tes, &res.mask, sigma, [0, 1], UnwrapMethod::Romeo, &g);
+        for e in 0..2 {
+            for i in 0..nx * ny * nz {
+                if res.mask[i] == 0 { continue; }
+                let d = wrap_to_pi(res.phases[e][i] - corrected[e][i]).abs();
+                assert!(d < 1e-9, "echo {} voxel {}: {} vs {}", e, i, res.phases[e][i], corrected[e][i]);
+                assert!((res.magnitudes[e][i] - mags[0][e][i]).abs() < 1e-9);
+            }
+        }
+    }
+
+    #[test]
+    fn test_mcpc3ds_combine_identical_coils_scale_magnitude() {
+        let (nx, ny, nz) = (12, 12, 6);
+        let tes = [0.004, 0.009];
+        let g = grid(nx, ny, nz);
+        let (mut phases, mut mags, _) = synthetic_coils(nx, ny, nz, &tes);
+        phases.truncate(1);
+        mags.truncate(1);
+        let (p, m) = (phases[0].clone(), mags[0].clone());
+        phases.push(p);
+        mags.push(m);
+        let res = mcpc3ds_combine(&phases, &mags, &tes, [2.0, 2.0, 2.0], [0, 1], UnwrapMethod::Laplacian, &g);
+        for i in 0..nx * ny * nz {
+            let expected = (2.0f64).sqrt() * mags[0][1][i];
+            assert!((res.magnitudes[1][i] - expected).abs() < 1e-6);
         }
     }
 }
