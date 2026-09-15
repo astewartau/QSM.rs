@@ -16,7 +16,9 @@ pub use romeo::{
     calculate_weights_romeo, voxel_quality_romeo,
     RomeoParams, RomeoWeightType,
 };
-pub use laplacian::{laplacian_unwrap_bfr, laplacian_unwrap};
+#[allow(deprecated)]
+pub use laplacian::laplacian_unwrap_bfr;
+pub use laplacian::laplacian_unwrap;
 
 /// Phase unwrapping method selection.
 ///

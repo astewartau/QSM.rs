@@ -1314,6 +1314,7 @@ fn test_pipeline_unwrap_bfr_laplacian_neumann() {
 /// therefore does not include it.
 #[test]
 #[ignore]
+#[allow(deprecated)]
 fn test_unwrap_bfr_single_volume() {
     use std::f64::consts::PI;
     println!("[INFO] Loading test data...");
@@ -2098,6 +2099,3 @@ fn test_all_combinations() {
     println!("DONE — results written to {}", csv_path);
     println!("{}", "=".repeat(120));
 }
-
-
-

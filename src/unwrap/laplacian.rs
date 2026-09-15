@@ -11,7 +11,7 @@
 //! | Function | Boundary condition | Category |
 //! |---|---|---|
 //! | [`laplacian_unwrap`] | Neumann, on the array | Phase unwrapping |
-//! | [`laplacian_unwrap_bfr`] | ∇² masked to the ROI | Phase unwrapping **+ background field removal** |
+//! | [`laplacian_unwrap_bfr`] (deprecated) | ∇² masked to the ROI | Phase unwrapping **+ background field removal** |
 //!
 //! [`laplacian_unwrap_bfr`] zeroes ∇²φ outside the mask, which discards every field source
 //! outside the ROI. Background fields are harmonic inside the ROI, and ∇²(harmonic) = 0
@@ -60,7 +60,9 @@
 //! at r > 0.9999.
 
 use std::f64::consts::PI;
+#[cfg(test)]
 use num_complex::Complex64;
+#[cfg(test)]
 use crate::fft::{fft3d, ifft3d};
 use crate::Grid;
 
@@ -125,7 +127,11 @@ pub(crate) fn wrapped_laplacian_periodic(
     d2u
 }
 
-/// Solve Poisson equation using FFT (periodic boundary conditions)
+/// Solve Poisson equation using FFT (periodic boundary conditions).
+///
+/// Only the test-only even-extension oracle uses this now; the library solves under
+/// Neumann via [`solve_poisson_dct`].
+#[cfg(test)]
 pub(crate) fn solve_poisson_fft(
     f: &[f64],
     nx: usize, ny: usize, nz: usize,
@@ -267,6 +273,13 @@ fn solve_poisson_dirichlet_roi(
     u
 }
 
+#[deprecated(
+    since = "0.35.0",
+    note = "unwrap with `laplacian_unwrap` and then remove background with a `bgremove` \
+            method (`lbv` reproduces this; `vsharp` is more robust at long TE). That route \
+            is more accurate at every echo time measured and composes with any background \
+            removal. Kept for parity with QSM.jl's `unwrap_laplacian(solver = :mgpcg)`."
+)]
 pub fn laplacian_unwrap_bfr(
     phase: &[f64],
     mask: &[u8],
@@ -299,38 +312,151 @@ pub fn laplacian_unwrap_bfr(
     result
 }
 
-/// Laplacian phase unwrapping, **without** background field removal.
+/// Wrapped Laplacian under a Neumann boundary: at each array face the missing neighbour is
+/// the sample itself, so the wrapped difference across the face is zero. This is exactly
+/// the half-sample even extension the DCT-II assumes, so pairing it with
+/// [`solve_poisson_dct`] reproduces the even-extended periodic solve without building the
+/// 2x-per-axis extension.
+pub(crate) fn wrapped_laplacian_neumann(
+    phase: &[f64],
+    nx: usize, ny: usize, nz: usize,
+    vsx: f64, vsy: f64, vsz: f64,
+) -> Vec<f64> {
+    let n_total = nx * ny * nz;
+    let mut d2u = vec![0.0; n_total];
+    let (dx2, dy2, dz2) = (1.0 / (vsx * vsx), 1.0 / (vsy * vsy), 1.0 / (vsz * vsz));
+
+    for k in 0..nz {
+        let km1 = k.saturating_sub(1);
+        let kp1 = if k + 1 >= nz { k } else { k + 1 };
+        for j in 0..ny {
+            let jm1 = j.saturating_sub(1);
+            let jp1 = if j + 1 >= ny { j } else { j + 1 };
+            for i in 0..nx {
+                let im1 = i.saturating_sub(1);
+                let ip1 = if i + 1 >= nx { i } else { i + 1 };
+                let idx = i + j * nx + k * nx * ny;
+                let u = phase[idx];
+                let lap_x = (wrap(phase[ip1 + j * nx + k * nx * ny] - u) - wrap(u - phase[im1 + j * nx + k * nx * ny])) * dx2;
+                let lap_y = (wrap(phase[i + jp1 * nx + k * nx * ny] - u) - wrap(u - phase[i + jm1 * nx + k * nx * ny])) * dy2;
+                let lap_z = (wrap(phase[i + j * nx + kp1 * nx * ny] - u) - wrap(u - phase[i + j * nx + km1 * nx * ny])) * dz2;
+                d2u[idx] = lap_x + lap_y + lap_z;
+            }
+        }
+    }
+    d2u
+}
+
+/// Solve ∇²u = f under a Neumann boundary condition on the array, in place, via DCT-II.
 ///
-/// Solves the Poisson equation over the whole array under a Neumann (zero normal
-/// derivative) boundary condition, realised by even-extending the phase to twice the size
-/// along each axis before the FFT solve. Nothing is masked out, so field sources anywhere
-/// in the FOV are retained and the harmonic (background) component survives: the result is
-/// an unwrapped **total** field, suitable for a subsequent background-removal stage.
+/// The DCT-II of a length-N signal is the FFT of its even extension restricted to the
+/// original samples, so this is the padded periodic solve with the extension never
+/// materialised: working memory is the volume itself plus one axis-length buffer,
+/// against 8x the volume in complex doubles for the explicit extension.
 ///
-/// Use [`laplacian_unwrap_bfr`] if you want unwrapping and background removal together.
-///
-/// Because the whole array participates, this is sensitive to phase quality *outside* the
-/// ROI in a way [`laplacian_unwrap_bfr`] is not. Where the phase outside the object is noise,
-/// or wraps faster than one radian per voxel, prefer ROMEO
-/// ([`super::romeo::unwrap_romeo`]) or the masked variant.
-///
-/// # Memory
-/// The even extension allocates an 8x volume (2x per axis) for the FFT. On a 32-bit
-/// target, or a large FOV, that can dominate — [`laplacian_unwrap_bfr`] works in place.
-///
-/// # Arguments
-/// * `phase` - Wrapped phase (nx * ny * nz)
-/// * `mask` - Binary mask (nx * ny * nz); applied to the *output* only
-/// * `grid` - Volume grid (dimensions and voxel sizes)
-///
-/// # Returns
-/// Unwrapped phase, zero outside `mask`.
-///
-/// # References
-/// Schofield, M.A., Zhu, Y. (2003). "Fast phase unwrapping algorithm for interferometric
-/// applications." Optics Letters, 28(14):1194-1196.
-/// <https://doi.org/10.1364/OL.28.001194>
-pub fn laplacian_unwrap(
+/// Eigenvalues of the second difference under this basis are `2(cos(πk/N) − 1)/h²`. The DC
+/// mode is set to zero, as in the periodic solve — the result is defined up to a constant.
+pub(crate) fn solve_poisson_dct(
+    f: &[f64],
+    nx: usize, ny: usize, nz: usize,
+    vsx: f64, vsy: f64, vsz: f64,
+) -> Vec<f64> {
+    use rustdct::DctPlanner;
+    let nxy = nx * ny;
+    let mut data = f.to_vec();
+    let mut planner = DctPlanner::<f64>::new();
+
+    // Forward: DCT-II along each axis.
+    let dct2_x = planner.plan_dct2(nx);
+    let dct2_y = planner.plan_dct2(ny);
+    let dct2_z = planner.plan_dct2(nz);
+    {
+        let mut scratch = vec![0.0; dct2_x.get_scratch_len()];
+        for row in data.chunks_mut(nx) {
+            dct2_x.process_dct2_with_scratch(row, &mut scratch);
+        }
+    }
+    {
+        let mut buf = vec![0.0; ny];
+        let mut scratch = vec![0.0; dct2_y.get_scratch_len()];
+        for k in 0..nz {
+            for i in 0..nx {
+                for j in 0..ny { buf[j] = data[i + j * nx + k * nxy]; }
+                dct2_y.process_dct2_with_scratch(&mut buf, &mut scratch);
+                for j in 0..ny { data[i + j * nx + k * nxy] = buf[j]; }
+            }
+        }
+    }
+    {
+        let mut buf = vec![0.0; nz];
+        let mut scratch = vec![0.0; dct2_z.get_scratch_len()];
+        for j in 0..ny {
+            for i in 0..nx {
+                for k in 0..nz { buf[k] = data[i + j * nx + k * nxy]; }
+                dct2_z.process_dct2_with_scratch(&mut buf, &mut scratch);
+                for k in 0..nz { data[i + j * nx + k * nxy] = buf[k]; }
+            }
+        }
+    }
+
+    // Divide by the Laplacian eigenvalue of each DCT-II mode.
+    let (ix2, iy2, iz2) = (1.0 / (vsx * vsx), 1.0 / (vsy * vsy), 1.0 / (vsz * vsz));
+    let lam_x: Vec<f64> = (0..nx).map(|i| 2.0 * ((PI * i as f64 / nx as f64).cos() - 1.0) * ix2).collect();
+    let lam_y: Vec<f64> = (0..ny).map(|j| 2.0 * ((PI * j as f64 / ny as f64).cos() - 1.0) * iy2).collect();
+    let lam_z: Vec<f64> = (0..nz).map(|k| 2.0 * ((PI * k as f64 / nz as f64).cos() - 1.0) * iz2).collect();
+    for (k, &lz) in lam_z.iter().enumerate() {
+        for (j, &ly) in lam_y.iter().enumerate() {
+            let row = j * nx + k * nxy;
+            for (i, &lx) in lam_x.iter().enumerate() {
+                let lam = lx + ly + lz;
+                let idx = row + i;
+                data[idx] = if lam.abs() > 1e-20 { data[idx] / lam } else { 0.0 };
+            }
+        }
+    }
+
+    // Inverse: DCT-III along each axis. Unnormalised DCT-III∘DCT-II scales by N/2 per axis.
+    let dct3_x = planner.plan_dct3(nx);
+    let dct3_y = planner.plan_dct3(ny);
+    let dct3_z = planner.plan_dct3(nz);
+    {
+        let mut buf = vec![0.0; nz];
+        let mut scratch = vec![0.0; dct3_z.get_scratch_len()];
+        for j in 0..ny {
+            for i in 0..nx {
+                for k in 0..nz { buf[k] = data[i + j * nx + k * nxy]; }
+                dct3_z.process_dct3_with_scratch(&mut buf, &mut scratch);
+                for k in 0..nz { data[i + j * nx + k * nxy] = buf[k]; }
+            }
+        }
+    }
+    {
+        let mut buf = vec![0.0; ny];
+        let mut scratch = vec![0.0; dct3_y.get_scratch_len()];
+        for k in 0..nz {
+            for i in 0..nx {
+                for j in 0..ny { buf[j] = data[i + j * nx + k * nxy]; }
+                dct3_y.process_dct3_with_scratch(&mut buf, &mut scratch);
+                for j in 0..ny { data[i + j * nx + k * nxy] = buf[j]; }
+            }
+        }
+    }
+    {
+        let mut scratch = vec![0.0; dct3_x.get_scratch_len()];
+        for row in data.chunks_mut(nx) {
+            dct3_x.process_dct3_with_scratch(row, &mut scratch);
+        }
+    }
+    let norm = 8.0 / (nx as f64 * ny as f64 * nz as f64);
+    for v in data.iter_mut() { *v *= norm; }
+    data
+}
+
+/// The original even-extension implementation of [`laplacian_unwrap`], kept only as the
+/// oracle for the DCT solve: the DCT-II is the FFT of the even extension, so the two must
+/// agree to rounding. Not compiled into the library.
+#[cfg(test)]
+fn laplacian_unwrap_even_extended_reference(
     phase: &[f64],
     mask: &[u8],
     grid: &Grid,
@@ -373,7 +499,47 @@ pub fn laplacian_unwrap(
     result
 }
 
+/// Laplacian phase unwrapping, **without** background field removal.
+///
+/// Solves the Poisson equation over the whole array under a Neumann (zero normal
+/// derivative) boundary condition, via a DCT-II in place. Nothing is masked out, so field
+/// sources anywhere in the FOV are retained and the harmonic (background) component
+/// survives: the result is an unwrapped **total** field, suitable for a subsequent
+/// background-removal stage.
+///
+/// Use [`laplacian_unwrap_bfr`] if you want unwrapping and background removal together.
+///
+/// Because the whole array participates, this is sensitive to phase quality *outside* the
+/// ROI in a way [`laplacian_unwrap_bfr`] is not. Where the phase outside the object is noise,
+/// or wraps faster than one radian per voxel, prefer ROMEO
+/// ([`super::romeo::unwrap_romeo`]) or the masked variant.
+///
+/// # Arguments
+/// * `phase` - Wrapped phase (nx * ny * nz)
+/// * `mask` - Binary mask (nx * ny * nz); applied to the *output* only
+/// * `grid` - Volume grid (dimensions and voxel sizes)
+///
+/// # Returns
+/// Unwrapped phase, zero outside `mask`.
+///
+/// # References
+/// Schofield, M.A., Zhu, Y. (2003). "Fast phase unwrapping algorithm for interferometric
+/// applications." Optics Letters, 28(14):1194-1196.
+/// <https://doi.org/10.1364/OL.28.001194>
+pub fn laplacian_unwrap(
+    phase: &[f64],
+    mask: &[u8],
+    grid: &Grid,
+) -> Vec<f64> {
+    let (nx, ny, nz) = grid.dims;
+    let (vsx, vsy, vsz) = grid.voxel_size;
+    let d2u = wrapped_laplacian_neumann(phase, nx, ny, nz, vsx, vsy, vsz);
+    let u = solve_poisson_dct(&d2u, nx, ny, nz, vsx, vsy, vsz);
+    u.iter().zip(mask).map(|(&v, &m)| if m != 0 { v } else { 0.0 }).collect()
+}
+
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
     use super::*;
 
@@ -511,6 +677,19 @@ mod tests {
 
         let (r_ramp, _) = corr_slope(&out, &ramp, &mask);
         assert!(r_ramp.abs() < 0.05, "harmonic part should be discarded, got r = {r_ramp}");
+    }
+
+    #[test]
+    fn dct_solve_matches_the_even_extended_solve() {
+        // The DCT-II is the FFT of the even extension, so these are the same computation
+        // with and without materialising the extension. Agreement should be to rounding.
+        let n = 64;
+        let (wrapped, _, _, _, mask) = ramp_plus_blob(n);
+        let padded = laplacian_unwrap_even_extended_reference(&wrapped, &mask, &grid(n));
+        let dct = laplacian_unwrap(&wrapped, &mask, &grid(n));
+        let scale = padded.iter().fold(0.0f64, |m, &v| m.max(v.abs()));
+        let max_diff = padded.iter().zip(&dct).fold(0.0f64, |m, (&a, &b)| m.max((a - b).abs()));
+        assert!(max_diff < 1e-9 * scale, "DCT and padded solves differ: max |diff| = {max_diff} (scale {scale})");
     }
 
     #[test]
