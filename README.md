@@ -134,6 +134,22 @@ Load and save NIfTI volumes with [`qsm_core::io`](src/io.rs).
 | **HARPERELLA** | Integrated Laplacian-based phase unwrapping and background phase removal — estimates exterior Laplacian via SMV uniformity | Li, W., et al. (2014). "Integrated Laplacian-based phase unwrapping and background phase removal for quantitative susceptibility mapping." *NMR in Biomedicine*, 27(2):219-227. [DOI](https://doi.org/10.1002/nbm.3056) |
 | **iHARPERELLA** | Improved HARPERELLA — estimates exterior Laplacian by directly minimizing weighted phase for more robust low-frequency suppression | Li, W., Wu, B., Liu, C. (2015). "iHARPERELLA: an improved method for integrated 3D phase unwrapping and background phase removal." *Proc. ISMRM* 23, p.3313. |
 
+### Acquisition orientation
+
+The dipole relationship depends on which way B0 points, and the FFT that implements it lives in
+the voxel grid, so an oblique acquisition has to be handled deliberately. Each algorithm reports
+what it can do via `orientation_support()`:
+
+| | meaning | methods |
+|---|---|---|
+| `Arbitrary` | B0 direction is an explicit parameter, so oblique data reconstructs correctly on its acquired grid | every classical dipole inversion, PDF, `chi-sep` iLSQR/MEDI |
+| `NotApplicable` | never uses B0 — the SMV family is harmonic and rotation-invariant | SHARP, V-SHARP, RESHARP, iSMV, LBV, HARPERELLA, iHARPERELLA, BFRnet, and the separations that consume an existing χ map |
+| `AxialOnly` | assumes B0 along `+z` with no way to say otherwise; oblique data must be resampled first | every deep-learning inversion and separation |
+
+Getting this wrong is silent — the reconstruction completes and the values are simply wrong — so
+hosts should check `orientation_support().requires_axial()` before running an oblique dataset.
+See [`geometry`](src/geometry.rs) for the direction itself and for resampling to a cardinal grid.
+
 ### Dipole Inversion
 
 | Algorithm | Description | Reference |
