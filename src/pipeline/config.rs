@@ -33,6 +33,39 @@ pub enum UnwrappingAlgorithm {
     Laplacian,
 }
 
+/// Whether an algorithm is valid when B0 does not lie along the voxel `+z` axis.
+///
+/// The dipole relationship is direction-dependent, and the FFT that implements it lives in the
+/// voxel grid, so an oblique acquisition has to be handled deliberately. There are three cases,
+/// and the difference matters because getting it wrong is silent — the reconstruction completes
+/// and the numbers are simply wrong.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OrientationSupport {
+    /// The B0 direction is an explicit parameter — the dipole kernel is built from it — so the
+    /// method reconstructs correctly on the grid the data was acquired on, whatever its
+    /// orientation. See [`crate::geometry::b0_direction_from_affine`].
+    Arbitrary,
+    /// The method never uses B0. The SMV-family background removals rest on the spherical mean
+    /// value property of harmonic fields, which is rotation-invariant.
+    NotApplicable,
+    /// Assumes B0 along `+z` and offers no way to say otherwise. Deep-learning methods learned
+    /// the dipole relationship from axially-acquired training data, so there is no direction to
+    /// rotate; oblique data must be resampled to a cardinal grid first
+    /// ([`crate::geometry::resample_complex_to_axial`]).
+    ///
+    /// Unrolled networks with a physics data-consistency term (LPCNN, MoDL-QSM, NeXtQSM) build
+    /// that term from the true direction, so they are partly corrected — but their learned prior
+    /// is still axial, so they belong here.
+    AxialOnly,
+}
+
+impl OrientationSupport {
+    /// Whether oblique data must be resampled before this method can be trusted.
+    pub fn requires_axial(&self) -> bool {
+        matches!(self, OrientationSupport::AxialOnly)
+    }
+}
+
 /// Background field removal algorithm
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum BgRemovalAlgorithm {
@@ -401,6 +434,91 @@ pub enum SeparationAlgorithm {
     ChiSepNet,
 }
 
+impl BgRemovalAlgorithm {
+    /// How this method behaves when B0 is not along voxel `+z`.
+    ///
+    /// Only PDF projects onto dipole fields and therefore needs the direction; every other
+    /// method here is harmonic/SMV-based and is direction-independent. BFRnet is a network, but
+    /// background removal has no dipole orientation to get wrong in the way inversion does — it
+    /// separates harmonic from non-harmonic content, so it is treated as direction-independent.
+    pub fn orientation_support(&self) -> OrientationSupport {
+        match self {
+            BgRemovalAlgorithm::Pdf => OrientationSupport::Arbitrary,
+            BgRemovalAlgorithm::Vsharp
+            | BgRemovalAlgorithm::Lbv
+            | BgRemovalAlgorithm::Ismv
+            | BgRemovalAlgorithm::Sharp
+            | BgRemovalAlgorithm::Resharp
+            | BgRemovalAlgorithm::Harperella
+            | BgRemovalAlgorithm::Iharperella
+            | BgRemovalAlgorithm::Bfrnet => OrientationSupport::NotApplicable,
+        }
+    }
+}
+
+impl InversionAlgorithm {
+    /// How this method behaves when B0 is not along voxel `+z`.
+    ///
+    /// Every classical inversion builds its dipole kernel from the supplied direction, directly
+    /// or through the shared ADMM/FANSI spectral setup, so all of them handle oblique data on
+    /// the acquired grid. The deep-learning methods take no direction at all.
+    pub fn orientation_support(&self) -> OrientationSupport {
+        match self {
+            InversionAlgorithm::Tkd
+            | InversionAlgorithm::Tsvd
+            | InversionAlgorithm::Tikhonov
+            | InversionAlgorithm::Tv
+            | InversionAlgorithm::Rts
+            | InversionAlgorithm::Nltv
+            | InversionAlgorithm::Medi
+            | InversionAlgorithm::Tfi
+            | InversionAlgorithm::Ilsqr
+            | InversionAlgorithm::Tgv
+            | InversionAlgorithm::Qsmart
+            | InversionAlgorithm::Ndi
+            | InversionAlgorithm::Fansi
+            | InversionAlgorithm::FansiTgv
+            | InversionAlgorithm::L1qsm
+            | InversionAlgorithm::Whqsm
+            | InversionAlgorithm::Hdqsm
+            | InversionAlgorithm::AmpPe => OrientationSupport::Arbitrary,
+            InversionAlgorithm::Xqsm
+            | InversionAlgorithm::Qsmnet
+            | InversionAlgorithm::QsmnetPlus
+            | InversionAlgorithm::Autoqsm
+            | InversionAlgorithm::Qsmgan
+            | InversionAlgorithm::Ir2qsm
+            | InversionAlgorithm::Lpcnn
+            | InversionAlgorithm::ModlQsm
+            | InversionAlgorithm::Nextqsm
+            | InversionAlgorithm::Iqsm
+            | InversionAlgorithm::IqsmPlus => OrientationSupport::AxialOnly,
+        }
+    }
+}
+
+impl SeparationAlgorithm {
+    /// How this method behaves when B0 is not along voxel `+z`.
+    ///
+    /// The model-based separations carry the direction through their field terms. The rest
+    /// either consume an already-reconstructed χ map and R2\* (so orientation was settled
+    /// upstream) or are networks trained on axial data.
+    pub fn orientation_support(&self) -> OrientationSupport {
+        match self {
+            SeparationAlgorithm::ChiSepIlsqr | SeparationAlgorithm::ChiSepMedi => {
+                OrientationSupport::Arbitrary
+            }
+            SeparationAlgorithm::R2starQsm
+            | SeparationAlgorithm::WaveSep
+            | SeparationAlgorithm::Decompose
+            | SeparationAlgorithm::HcChisep => OrientationSupport::NotApplicable,
+            SeparationAlgorithm::SusepNet | SeparationAlgorithm::ChiSepNet => {
+                OrientationSupport::AxialOnly
+            }
+        }
+    }
+}
+
 // ─── Deep-learning model-registry mapping ───
 //
 // These map each stage enum's deep-learning variants to their [`crate::models`]
@@ -604,6 +722,72 @@ impl std::fmt::Display for PipelineError {
 }
 
 impl std::error::Error for PipelineError {}
+
+#[cfg(test)]
+mod orientation_tests {
+    use super::*;
+
+    /// Every classical inversion builds its kernel from the supplied direction, so it must claim
+    /// Arbitrary. If a new one is added without wiring bdir through, this is where it shows up.
+    #[test]
+    fn classical_inversions_take_a_direction() {
+        for a in [
+            InversionAlgorithm::Tkd, InversionAlgorithm::Tsvd, InversionAlgorithm::Tikhonov,
+            InversionAlgorithm::Tv, InversionAlgorithm::Rts, InversionAlgorithm::Nltv,
+            InversionAlgorithm::Medi, InversionAlgorithm::Tfi, InversionAlgorithm::Ilsqr,
+            InversionAlgorithm::Tgv, InversionAlgorithm::Qsmart, InversionAlgorithm::Ndi,
+            InversionAlgorithm::Fansi, InversionAlgorithm::FansiTgv, InversionAlgorithm::L1qsm,
+            InversionAlgorithm::Whqsm, InversionAlgorithm::Hdqsm, InversionAlgorithm::AmpPe,
+        ] {
+            assert_eq!(a.orientation_support(), OrientationSupport::Arbitrary, "{a:?}");
+            assert!(!a.orientation_support().requires_axial(), "{a:?}");
+        }
+    }
+
+    /// Networks have no direction input, so oblique data must be resampled for them.
+    #[test]
+    fn learned_inversions_need_axial_data() {
+        for a in [
+            InversionAlgorithm::Xqsm, InversionAlgorithm::Qsmnet, InversionAlgorithm::QsmnetPlus,
+            InversionAlgorithm::Autoqsm, InversionAlgorithm::Qsmgan, InversionAlgorithm::Ir2qsm,
+            InversionAlgorithm::Lpcnn, InversionAlgorithm::ModlQsm, InversionAlgorithm::Nextqsm,
+            InversionAlgorithm::Iqsm, InversionAlgorithm::IqsmPlus,
+        ] {
+            assert!(a.orientation_support().requires_axial(), "{a:?}");
+        }
+    }
+
+    /// SMV-family background removal is harmonic and rotation-invariant; only PDF cares.
+    #[test]
+    fn background_removal_is_direction_independent_except_pdf() {
+        assert_eq!(BgRemovalAlgorithm::Pdf.orientation_support(), OrientationSupport::Arbitrary);
+        for a in [
+            BgRemovalAlgorithm::Vsharp, BgRemovalAlgorithm::Sharp, BgRemovalAlgorithm::Resharp,
+            BgRemovalAlgorithm::Ismv, BgRemovalAlgorithm::Lbv, BgRemovalAlgorithm::Harperella,
+            BgRemovalAlgorithm::Iharperella, BgRemovalAlgorithm::Bfrnet,
+        ] {
+            assert_eq!(a.orientation_support(), OrientationSupport::NotApplicable, "{a:?}");
+            assert!(!a.orientation_support().requires_axial(), "{a:?}");
+        }
+    }
+
+    /// No background removal or separation method should ever force a resample on its own.
+    #[test]
+    fn only_learned_methods_force_a_resample() {
+        for a in [SeparationAlgorithm::ChiSepIlsqr, SeparationAlgorithm::ChiSepMedi] {
+            assert_eq!(a.orientation_support(), OrientationSupport::Arbitrary, "{a:?}");
+        }
+        for a in [SeparationAlgorithm::SusepNet, SeparationAlgorithm::ChiSepNet] {
+            assert!(a.orientation_support().requires_axial(), "{a:?}");
+        }
+        for a in [
+            SeparationAlgorithm::R2starQsm, SeparationAlgorithm::WaveSep,
+            SeparationAlgorithm::Decompose, SeparationAlgorithm::HcChisep,
+        ] {
+            assert!(!a.orientation_support().requires_axial(), "{a:?}");
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {
