@@ -30,7 +30,7 @@
 //! let bdir = (0.0, 0.0, 1.0);
 //!
 //! let mask = bet::run_bet(magnitude, &grid, &BetParams::default(), |_, _| {});
-//! let unwrapped = unwrap::laplacian_unwrap_neumann(phase, &mask, &grid);
+//! let unwrapped = unwrap::laplacian_unwrap(phase, &mask, &grid);
 //! let (local, eroded) = bgremove::vsharp(&unwrapped, &mask, &grid, &VsharpParams::default(), |_, _| {});
 //! let chi = inversion::tv_admm(&local, &eroded, &grid, bdir, &TvParams::default(), |_, _| {});
 //! # let _ = chi;

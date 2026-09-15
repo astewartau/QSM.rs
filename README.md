@@ -89,7 +89,7 @@ let grid = Grid::new(128, 128, 64, 1.0, 1.0, 1.0);
 let bdir = (0.0, 0.0, 1.0); // B0 direction
 
 let mask = bet::run_bet(magnitude, &grid, &BetParams::default(), |_, _| {});
-let unwrapped = unwrap::laplacian_unwrap_neumann(phase, &mask, &grid);
+let unwrapped = unwrap::laplacian_unwrap(phase, &mask, &grid);
 let (local, eroded) = bgremove::vsharp(&unwrapped, &mask, &grid, &VsharpParams::default(), |_, _| {});
 let chi = inversion::tv_admm(&local, &eroded, &grid, bdir, &TvParams::default(), |_, _| {});
 # let _ = chi;
@@ -112,7 +112,7 @@ Load and save NIfTI volumes with [`qsm_core::io`](src/io.rs).
 | Algorithm | Description | Reference |
 |-----------|-------------|-----------|
 | **ROMEO** | Region-growing with quality-guided ordering using magnitude and gradient coherence weighting | Dymerska, B., et al. (2021). "Phase unwrapping with a rapid opensource minimum spanning tree algorithm (ROMEO)." *Magnetic Resonance in Medicine*, 85(4):2294-2308. [DOI](https://doi.org/10.1002/mrm.28563) |
-| **Laplacian (Neumann)** | FFT-based Poisson solver under a Neumann boundary condition on the array — unwraps without altering the background field, so the result is a total field (`laplacian_unwrap_neumann`). This is what `UnwrapMethod::Laplacian` selects. | Schofield, M.A., Zhu, Y. (2003). "Fast phase unwrapping algorithm for interferometric applications." *Optics Letters*, 28(14):1194-1196. [DOI](https://doi.org/10.1364/OL.28.001194) |
+| **Laplacian** | FFT-based Poisson solver under a Neumann boundary condition on the array — unwraps without altering the background field, so the result is a total field (`laplacian_unwrap`). This is what `UnwrapMethod::Laplacian` selects. | Schofield, M.A., Zhu, Y. (2003). "Fast phase unwrapping algorithm for interferometric applications." *Optics Letters*, 28(14):1194-1196. [DOI](https://doi.org/10.1364/OL.28.001194) |
 
 ### Background Field Removal
 
@@ -133,16 +133,16 @@ Load and save NIfTI volumes with [`qsm_core::io`](src/io.rs).
 |-----------|-------------|-----------|
 | **HARPERELLA** | Integrated Laplacian-based phase unwrapping and background phase removal — estimates exterior Laplacian via SMV uniformity | Li, W., et al. (2014). "Integrated Laplacian-based phase unwrapping and background phase removal for quantitative susceptibility mapping." *NMR in Biomedicine*, 27(2):219-227. [DOI](https://doi.org/10.1002/nbm.3056) |
 | **iHARPERELLA** | Improved HARPERELLA — estimates exterior Laplacian by directly minimizing weighted phase for more robust low-frequency suppression | Li, W., Wu, B., Liu, C. (2015). "iHARPERELLA: an improved method for integrated 3D phase unwrapping and background phase removal." *Proc. ISMRM* 23, p.3313. |
-| **Laplacian (ROI-masked)** | FFT-based Poisson solver with the Laplacian zeroed outside the mask — discards sources outside the ROI, so unwrapping and harmonic background removal happen together and the result is **not** a total field (`laplacian_unwrap`) | Schofield, M.A., Zhu, Y. (2003). "Fast phase unwrapping algorithm for interferometric applications." *Optics Letters*, 28(14):1194-1196. [DOI](https://doi.org/10.1364/OL.28.001194); Zhou, D., et al. (2014). "Background field removal by solving the Laplacian boundary value problem." *NMR in Biomedicine*, 27(3):312-319. [DOI](https://doi.org/10.1002/nbm.3064) |
+| **Laplacian (ROI-masked)** | FFT-based Poisson solver with the Laplacian zeroed outside the mask — discards sources outside the ROI, so unwrapping and harmonic background removal happen together and the result is **not** a total field (`laplacian_unwrap_bfr`) | Schofield, M.A., Zhu, Y. (2003). "Fast phase unwrapping algorithm for interferometric applications." *Optics Letters*, 28(14):1194-1196. [DOI](https://doi.org/10.1364/OL.28.001194); Zhou, D., et al. (2014). "Background field removal by solving the Laplacian boundary value problem." *NMR in Biomedicine*, 27(3):312-319. [DOI](https://doi.org/10.1002/nbm.3064) |
 
 > The two Laplacian entries are the same unwrapping method under different boundary
-> conditions, and they are **not** interchangeable. `laplacian_unwrap` removes the harmonic
+> conditions, and they are **not** interchangeable. `laplacian_unwrap_bfr` removes the harmonic
 > background as a side effect of masking the Laplacian; pairing it with a separate
-> background-removal stage removes background twice. `laplacian_unwrap_neumann` unwraps
+> background-removal stage removes background twice. `laplacian_unwrap` unwraps
 > only. See the `unwrap::laplacian` module docs.
 >
 > Prefer **unwrap then remove background as two steps**. On the test data, the background
-> removal `laplacian_unwrap` performs implicitly reaches r = 0.52 against the ground-truth
+> removal `laplacian_unwrap_bfr` performs implicitly reaches r = 0.52 against the ground-truth
 > local field, where running `bgremove::lbv` on the same field — a full Laplacian boundary
 > value solve — reaches **r = 0.91**, and V-SHARP 0.88. The combined function zeroes ∇²
 > outside the mask and solves with a periodic FFT, which removes the exterior sources that

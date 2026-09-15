@@ -17,7 +17,7 @@ use qsm_core::inversion::{tgv_qsm, TgvParams, get_default_alpha, get_default_ite
 use qsm_core::inversion::{TvParams, NltvParams, RtsParams, MediParams, TfiParams, TikhonovParams};
 use qsm_core::inversion::{NdiParams, FansiParams, L1QsmParams, WhQsmParams, HdQsmParams, AmpPeParams};
 use qsm_core::swi;
-use qsm_core::unwrap::{laplacian_unwrap, laplacian_unwrap_neumann, UnwrapMethod};
+use qsm_core::unwrap::{laplacian_unwrap_bfr, laplacian_unwrap, UnwrapMethod};
 use qsm_core::unwrap::romeo::{unwrap_romeo_multi_echo, RomeoParams};
 use qsm_core::pipeline;
 use qsm_core::utils::{
@@ -93,9 +93,9 @@ fn run_field_mapping_laplacian(data: &common::TestData, neumann: bool) -> Vec<f6
         .iter()
         .map(|p| {
             if neumann {
-                laplacian_unwrap_neumann(p, &data.mask, &grid)
-            } else {
                 laplacian_unwrap(p, &data.mask, &grid)
+            } else {
+                laplacian_unwrap_bfr(p, &data.mask, &grid)
             }
         })
         .collect();
@@ -879,7 +879,7 @@ fn test_swi() {
 
     // Step 1: Laplacian unwrap first echo phase
     println!("[INFO] Unwrapping phase (Laplacian)...");
-    let unwrapped = laplacian_unwrap(
+    let unwrapped = laplacian_unwrap_bfr(
         &data.phase_echoes[0], &data.mask,
         &grid,
     );
@@ -1424,7 +1424,7 @@ fn run_qsmart_reconstruction(
 
     println!("[INFO] Unwrapping phase echoes...");
     let unwrapped_phases: Vec<Vec<f64>> = data.phase_echoes.iter()
-        .map(|phase| laplacian_unwrap(phase, &data.mask, &grid))
+        .map(|phase| laplacian_unwrap_bfr(phase, &data.mask, &grid))
         .collect();
     println!("[INFO] Multi-echo linear fit...");
     let fit_result = multi_echo_linear_fit(
@@ -1974,7 +1974,7 @@ fn test_all_combinations() {
 
         // Phase unwrapping
         let unwrapped_phases: Vec<Vec<f64>> = data.phase_echoes.iter()
-            .map(|phase| laplacian_unwrap(phase, &data.mask, &grid))
+            .map(|phase| laplacian_unwrap_bfr(phase, &data.mask, &grid))
             .collect();
 
         // Multi-echo linear fit
