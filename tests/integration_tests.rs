@@ -1215,7 +1215,6 @@ fn test_pipeline_romeo_b0() {
     res.print_with_time(elapsed);
     // Emitted so the PR comment can table ROMEO against the two Laplacian variants.
     res.print_ci_metrics(elapsed);
-    common::save_center_slices(&b0_ppm, &data.mask, data.dims, "pipeline_romeo_b0");
 
     assert!(res.nrmse < 0.5, "ROMEO+B0 NRMSE too high: {}", res.nrmse);
 }
@@ -1275,7 +1274,6 @@ fn run_unwrap_bfr_case(label: &str, unwrapper: Unwrapper, slug: &str) -> TestRes
     let res = TestResult::new(label, &local, &data.fieldmap_local, &eroded_mask, data.dims);
     res.print_with_time(elapsed);
     res.print_ci_metrics(elapsed);
-    common::save_center_slices(&local, &eroded_mask, data.dims, &format!("unwrap_bfr_{slug}"));
     res
 }
 
@@ -1395,7 +1393,6 @@ fn test_pipeline_unwrap_bfr_stage_laplacian() {
     );
     res.print_with_time(elapsed);
     res.print_ci_metrics(elapsed);
-    common::save_center_slices(&local, &eroded_mask, data.dims, "unwrap_bfr_stage_laplacian");
 
     assert!(
         res.correlation > 0.45,

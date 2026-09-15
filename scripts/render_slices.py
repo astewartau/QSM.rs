@@ -56,14 +56,10 @@ NAMES = {
     "bet": "BET",
     "combined_tgv": "TGV (Combined)",
     "bias_correction": "Bias Correction",
-    "pipeline_romeo_b0": "ROMEO + B0",
     "ground_truth_total_field": "Ground truth total field",
     "unwrap_raw_romeo": "ROMEO (unwrapped)",
     "unwrap_raw_laplacian_neumann": "Laplacian (unwrapped)",
-    "unwrap_bfr_romeo": "ROMEO + V-SHARP",
-    "unwrap_bfr_laplacian_neumann": "Laplacian + V-SHARP",
     "unwrap_bfr_single": "Laplacian + BFR (single volume) — local field",
-    "unwrap_bfr_stage_laplacian": "run_field_mapping(Laplacian) + V-SHARP",
     "pipeline_harperella": "HARPERELLA",
     "pipeline_iharperella": "iHARPERELLA",
     "pipeline_tgv": "TGV",
@@ -155,16 +151,12 @@ WINDOWS = {
     "bet": (0, 1),
     "combined_tgv": (-0.1, 0.1),
     "bias_correction": (-0.1, 0.1),  # fallback; before/after rendering uses auto-range
-    "pipeline_romeo_b0": (-0.05, 0.05),  # total field in ppm (wider range than local field)
     # Local fields after background removal — same window for all three, since the point of
     # the panel is that the first two agree and the third does not.
     "ground_truth_total_field": (-0.05, 0.05),
     "unwrap_raw_romeo": (-0.05, 0.05),
     "unwrap_raw_laplacian_neumann": (-0.05, 0.05),
-    "unwrap_bfr_romeo": (-0.025, 0.025),
-    "unwrap_bfr_laplacian_neumann": (-0.025, 0.025),
     "unwrap_bfr_single": (-0.025, 0.025),
-    "unwrap_bfr_stage_laplacian": (-0.025, 0.025),
     "pipeline_harperella": (-0.025, 0.025),
     "pipeline_iharperella": (-0.025, 0.025),
     "pipeline_tgv": (-0.1, 0.1),
