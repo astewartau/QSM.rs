@@ -50,7 +50,7 @@ pub fn run_bg_removal(
         BgRemovalAlgorithm::Pdf => {
             let local = crate::bgremove::pdf(
                 field_ppm, mask, &grid,
-                (0.0, 0.0, 1.0), &config.pdf, progress,
+                metadata.b0_direction, &config.pdf, progress,
             );
             (local, mask.to_vec())
         }
@@ -183,6 +183,60 @@ mod tests {
         let config = BgRemovalConfig { algorithm: BgRemovalAlgorithm::Pdf, ..Default::default() };
         let r = run_bg_removal(&field, &mask, &meta, &config, &mut |_, _| {}).unwrap();
         assert_eq!(r.local_field_ppm.len(), n);
+    }
+
+    /// PDF is the one background remover that builds a dipole kernel, so the
+    /// pipeline must hand it `metadata.b0_direction` rather than assuming `+z`.
+    /// Hardcoding `(0.0, 0.0, 1.0)` makes both calls below identical.
+    #[test]
+    fn test_bg_removal_pdf_uses_metadata_b0_direction() {
+        let (nx, ny, nz) = (12, 12, 12);
+        let n = nx * ny * nz;
+
+        // Interior mask with real background voxels around it, so PDF has
+        // background sources to project onto, plus a spatially varying field.
+        let mut field = vec![0.0f64; n];
+        let mut mask = vec![0u8; n];
+        for k in 0..nz {
+            for j in 0..ny {
+                for i in 0..nx {
+                    let idx = i + j * nx + k * nx * ny;
+                    let (x, y, z) = (i as f64 - 5.5, j as f64 - 5.5, k as f64 - 5.5);
+                    if x * x + y * y + z * z < 9.0 {
+                        mask[idx] = 1;
+                    }
+                    field[idx] = 0.01 * (0.3 * x + 0.5 * y - 0.7 * z + 0.02 * x * y * z);
+                }
+            }
+        }
+
+        let config = BgRemovalConfig { algorithm: BgRemovalAlgorithm::Pdf, ..Default::default() };
+        let run = |bdir: (f64, f64, f64)| {
+            let meta = ScanMetadata {
+                dims: (nx, ny, nz), voxel_size: (1.0, 1.0, 1.0),
+                echo_times: vec![0.005], field_strength: 3.0, b0_direction: bdir,
+            };
+            run_bg_removal(&field, &mask, &meta, &config, &mut |_, _| {}).unwrap().local_field_ppm
+        };
+
+        let axial = run((0.0, 0.0, 1.0));
+        // ~30 degrees off +z in the y-z plane.
+        let theta = std::f64::consts::FRAC_PI_6;
+        let oblique = run((0.0, theta.sin(), theta.cos()));
+
+        assert_eq!(axial.len(), n);
+        assert_eq!(oblique.len(), n);
+
+        let max_diff = axial
+            .iter()
+            .zip(&oblique)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f64, f64::max);
+        assert!(
+            max_diff > 1e-9,
+            "oblique B0 gave the same local field as axial (max diff {max_diff:e}); \
+             b0_direction is not reaching the PDF dipole kernel",
+        );
     }
 
     #[test]
