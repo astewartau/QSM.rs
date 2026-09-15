@@ -6,7 +6,7 @@
 //!   quality-guided ordering ([`RomeoParams`])
 //! - [`laplacian_unwrap_neumann`] — Laplacian unwrapping (Neumann BC on the array)
 //! - [`laplacian_unwrap`] — Laplacian unwrapping **+ background field removal**
-//!   (Dirichlet BC on the ROI); see the [`laplacian`] module docs for why these differ
+//!   (∇² masked to the ROI); see the [`laplacian`] module docs for why these differ
 
 pub mod romeo;
 pub mod laplacian;

@@ -133,7 +133,7 @@ Load and save NIfTI volumes with [`qsm_core::io`](src/io.rs).
 |-----------|-------------|-----------|
 | **HARPERELLA** | Integrated Laplacian-based phase unwrapping and background phase removal — estimates exterior Laplacian via SMV uniformity | Li, W., et al. (2014). "Integrated Laplacian-based phase unwrapping and background phase removal for quantitative susceptibility mapping." *NMR in Biomedicine*, 27(2):219-227. [DOI](https://doi.org/10.1002/nbm.3056) |
 | **iHARPERELLA** | Improved HARPERELLA — estimates exterior Laplacian by directly minimizing weighted phase for more robust low-frequency suppression | Li, W., Wu, B., Liu, C. (2015). "iHARPERELLA: an improved method for integrated 3D phase unwrapping and background phase removal." *Proc. ISMRM* 23, p.3313. |
-| **Laplacian (Dirichlet on ROI)** | FFT-based Poisson solver with the Laplacian zeroed outside the mask — discards sources outside the ROI, so unwrapping and harmonic background removal happen together and the result is **not** a total field (`laplacian_unwrap`) | Schofield, M.A., Zhu, Y. (2003). "Fast phase unwrapping algorithm for interferometric applications." *Optics Letters*, 28(14):1194-1196. [DOI](https://doi.org/10.1364/OL.28.001194); Zhou, D., et al. (2014). "Background field removal by solving the Laplacian boundary value problem." *NMR in Biomedicine*, 27(3):312-319. [DOI](https://doi.org/10.1002/nbm.3064) |
+| **Laplacian (ROI-masked)** | FFT-based Poisson solver with the Laplacian zeroed outside the mask — discards sources outside the ROI, so unwrapping and harmonic background removal happen together and the result is **not** a total field (`laplacian_unwrap`) | Schofield, M.A., Zhu, Y. (2003). "Fast phase unwrapping algorithm for interferometric applications." *Optics Letters*, 28(14):1194-1196. [DOI](https://doi.org/10.1364/OL.28.001194); Zhou, D., et al. (2014). "Background field removal by solving the Laplacian boundary value problem." *NMR in Biomedicine*, 27(3):312-319. [DOI](https://doi.org/10.1002/nbm.3064) |
 
 > The two Laplacian entries are the same unwrapping method under different boundary
 > conditions, and they are **not** interchangeable. `laplacian_unwrap` removes the harmonic
@@ -144,10 +144,11 @@ Load and save NIfTI volumes with [`qsm_core::io`](src/io.rs).
 > Prefer **unwrap then remove background as two steps**. On the test data, the background
 > removal `laplacian_unwrap` performs implicitly reaches r = 0.52 against the ground-truth
 > local field, where running `bgremove::lbv` on the same field — a full Laplacian boundary
-> value solve — reaches **r = 0.91**, and V-SHARP 0.88. The combined function's Dirichlet
-> condition is approximated by zeroing ∇² outside the mask and solving with a periodic FFT,
-> which is not the ROI solve the LBV reference describes. It is kept for callers that want
-> the combination, but the pipeline uses the Neumann variant and a separate BFR stage.
+> value solve — reaches **r = 0.91**, and V-SHARP 0.88. The combined function zeroes ∇²
+> outside the mask and solves with a periodic FFT, which removes the exterior sources that
+> generate the background but is not the ROI boundary-value solve the LBV reference
+> describes. It is kept for callers that want the combination, but the pipeline uses the
+> Neumann variant and a separate BFR stage.
 
 ### Dipole Inversion
 

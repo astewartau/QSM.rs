@@ -11,7 +11,7 @@
 //! | Function | Boundary condition | Category |
 //! |---|---|---|
 //! | [`laplacian_unwrap_neumann`] | Neumann, on the array | Phase unwrapping |
-//! | [`laplacian_unwrap`] | Dirichlet, on the ROI | Phase unwrapping **+ background field removal** |
+//! | [`laplacian_unwrap`] | ∇² masked to the ROI | Phase unwrapping **+ background field removal** |
 //!
 //! [`laplacian_unwrap`] zeroes ∇²φ outside the mask, which discards every field source
 //! outside the ROI. Background fields are harmonic inside the ROI, and ∇²(harmonic) = 0
@@ -26,9 +26,10 @@
 //! **Prefer unwrapping and background removal as two steps.** On the project's test data,
 //! the background removal [`laplacian_unwrap`] performs implicitly reaches r = 0.52 against
 //! the ground-truth local field, where [`crate::bgremove::lbv`] on the same field — a full
-//! Laplacian boundary value solve — reaches r = 0.91 and V-SHARP 0.88. The Dirichlet
-//! condition here is approximated by zeroing ∇² outside the mask and solving with a
-//! periodic FFT, rather than the ROI solve the LBV reference describes, and it shows.
+//! Laplacian boundary value solve — reaches r = 0.91 and V-SHARP 0.88. The background
+//! removal here works by zeroing ∇² outside the mask, which deletes the exterior sources
+//! that generate the background, rather than the ROI boundary-value solve the LBV reference
+//! describes — and it shows.
 //! [`UnwrapMethod::Laplacian`](super::UnwrapMethod::Laplacian) therefore selects
 //! [`laplacian_unwrap_neumann`]; this function is kept for callers that specifically want
 //! the combination.
@@ -162,9 +163,9 @@ pub(crate) fn solve_poisson_fft(
 
 /// Laplacian phase unwrapping **combined with background field removal**.
 ///
-/// Solves the Poisson equation with the Laplacian zeroed outside `mask`, which imposes a
-/// homogeneous Dirichlet condition on the ROI. Sources outside the ROI are discarded, so
-/// the harmonic (background) component of the field is removed along with the wraps.
+/// Solves the Poisson equation with the Laplacian zeroed outside `mask`. That discards the
+/// field sources outside the ROI, and a field generated outside the ROI is harmonic inside
+/// it — so the background component is removed along with the wraps.
 ///
 /// **The result is not a total field.** It is unwrapped *and* partially background-removed,
 /// by an amount that depends on the mask and the field geometry. Following this with a
