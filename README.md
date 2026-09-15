@@ -134,6 +134,20 @@ Load and save NIfTI volumes with [`qsm_core::io`](src/io.rs).
 | **HARPERELLA** | Integrated Laplacian-based phase unwrapping and background phase removal — estimates exterior Laplacian via SMV uniformity | Li, W., et al. (2014). "Integrated Laplacian-based phase unwrapping and background phase removal for quantitative susceptibility mapping." *NMR in Biomedicine*, 27(2):219-227. [DOI](https://doi.org/10.1002/nbm.3056) |
 | **iHARPERELLA** | Improved HARPERELLA — estimates exterior Laplacian by directly minimizing weighted phase for more robust low-frequency suppression | Li, W., Wu, B., Liu, C. (2015). "iHARPERELLA: an improved method for integrated 3D phase unwrapping and background phase removal." *Proc. ISMRM* 23, p.3313. |
 
+### Grid size and reconstruction cost
+
+FFT-based stages cost `O(N log N)` in the whole grid, not in the brain, and `rustfft` is much
+faster on sizes whose prime factors are small. [`crop`](src/crop.rs) provides both levers:
+
+- `fft_pad_box` grows each axis outward to the next 7-smooth size. Nothing is discarded and the
+  periodic boundary moves *away* from the object. An axially-resampled UK Biobank grid of
+  272×339×77 (2⁴·17, 3·113, 7·11) pads to 280×343×80 — 8% more voxels, and the transform drops
+  from 131 ms to 71 ms.
+- `crop_box_for_mask` shrinks to the mask plus a margin in millimetres, rounding each axis to a
+  friendly size. This one moves the boundary *closer*, so it changes the reconstruction: on real
+  data a crop that removed voxels shifted χ by ~0.6% of its dynamic range at the median and ~4%
+  at the 99th percentile. Validate before relying on it.
+
 ### Acquisition orientation
 
 The dipole relationship depends on which way B0 points, and the FFT that implements it lives in
