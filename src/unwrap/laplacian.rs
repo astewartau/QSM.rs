@@ -1,18 +1,68 @@
 //! Laplacian-based phase unwrapping
 //!
-//! Uses the Laplacian operator to unwrap phase without path dependence.
-//! The wrapped phase Laplacian equals the true Laplacian, so we can
-//! recover the true phase by solving a Poisson equation.
+//! The Laplacian of the wrapped phase equals the Laplacian of the true phase wherever
+//! neighbouring samples differ by less than π, so the true phase can be recovered by
+//! solving a Poisson equation. Path-independent and fast, unlike region-growing methods.
 //!
-//! Reference:
+//! This module provides **two algorithms that are not interchangeable**, because the
+//! boundary condition used to solve the Poisson equation decides whether the harmonic
+//! (background) component of the field survives:
+//!
+//! | Function | Boundary condition | Category |
+//! |---|---|---|
+//! | [`laplacian_unwrap`] | Neumann, on the array | Phase unwrapping |
+//! | [`laplacian_unwrap_bfr`] (deprecated) | ∇² masked to the ROI | Phase unwrapping **+ background field removal** |
+//!
+//! [`laplacian_unwrap_bfr`] zeroes ∇²φ outside the mask, which discards every field source
+//! outside the ROI. Background fields are harmonic inside the ROI, and ∇²(harmonic) = 0
+//! carries no information about them, so they cannot be recovered afterwards — the
+//! function returns a partially background-removed field, not a total field. That is the
+//! same combination HARPERELLA and iHARPERELLA perform, and is why it is categorised
+//! with them rather than with ROMEO.
+//!
+//! Pair [`laplacian_unwrap_bfr`] with a separate background-removal stage only deliberately:
+//! doing so removes background twice, by an amount that is not controlled.
+//!
+//! The background removal works by zeroing ∇² outside the mask — which deletes the exterior
+//! sources that generate the background, since a field produced outside the ROI is harmonic
+//! inside it — and then solving under a homogeneous Dirichlet condition on the ROI. On the
+//! project's test data it reaches r = 0.887 against the ground-truth local field, against
+//! r = 0.909 for [`crate::bgremove::lbv`] on the same field and 0.879 for V-SHARP.
+//!
+//! [`UnwrapMethod::Laplacian`](super::UnwrapMethod::Laplacian) selects [`laplacian_unwrap`],
+//! since the pipeline removes background as a later stage; reach for
+//! [`laplacian_unwrap_bfr`] when you want the two together.
+//!
+//! # References
+//!
+//! Laplacian unwrapping:
 //! Schofield, M.A., Zhu, Y. (2003). "Fast phase unwrapping algorithm for
 //! interferometric applications." Optics Letters, 28(14):1194-1196.
-//! https://doi.org/10.1364/OL.28.001194
+//! <https://doi.org/10.1364/OL.28.001194>
 //!
-//! Reference implementation: https://github.com/kamesy/QSM.jl
+//! The background-removal half of [`laplacian_unwrap_bfr`] (solving the Laplacian as a
+//! boundary value problem on the ROI):
+//! Zhou, D., Liu, T., Spincemaille, P., Wang, Y. (2014). "Background field removal by
+//! solving the Laplacian boundary value problem." NMR in Biomedicine, 27(3):312-319.
+//! <https://doi.org/10.1002/nbm.3064>
+//!
+//! Reference implementation: <https://github.com/kamesy/QSM.jl> — its `unwrap_laplacian`
+//! exposes the same split through its `solver` keyword (`:dct`/`:fft` impose the boundary
+//! condition on the array and unwrap only; `:mgpcg` imposes it on the ROI and also removes
+//! the harmonic background).
+//!
+//! Both functions here were cross-checked against it by running QSM.jl v0.5.4 on
+//! byte-identical input (a wrapped harmonic ramp plus a non-harmonic blob, 64³):
+//! [`laplacian_unwrap`] reproduces `:dct` exactly (r = 1.000000, rms difference 0.0), and
+//! [`laplacian_unwrap_bfr`] matches `:mgpcg` to r = 0.999983 — the residual being
+//! Gauss-Seidel against their multigrid-preconditioned CG on the same equation. Both
+//! implementations return the harmonic component as zero and the non-harmonic component
+//! at r > 0.9999.
 
 use std::f64::consts::PI;
+#[cfg(test)]
 use num_complex::Complex64;
+#[cfg(test)]
 use crate::fft::{fft3d, ifft3d};
 use crate::Grid;
 
@@ -77,7 +127,11 @@ pub(crate) fn wrapped_laplacian_periodic(
     d2u
 }
 
-/// Solve Poisson equation using FFT (periodic boundary conditions)
+/// Solve Poisson equation using FFT (periodic boundary conditions).
+///
+/// Only the test-only even-extension oracle uses this now; the library solves under
+/// Neumann via [`solve_poisson_dct`].
+#[cfg(test)]
 pub(crate) fn solve_poisson_fft(
     f: &[f64],
     nx: usize, ny: usize, nz: usize,
@@ -120,10 +174,36 @@ pub(crate) fn solve_poisson_fft(
     f_complex.iter().map(|c| c.re).collect()
 }
 
-/// Laplacian phase unwrapping
+/// Laplacian phase unwrapping **combined with background field removal**.
 ///
-/// Uses FFT-based Poisson solver with periodic boundary conditions.
-/// Fast and robust but may have issues at mask boundaries.
+/// Solves the Poisson equation with the Laplacian zeroed outside `mask`. That discards the
+/// field sources outside the ROI, and a field generated outside the ROI is harmonic inside
+/// it — so the background component is removed along with the wraps.
+///
+/// **The result is not a total field.** It is unwrapped *and* partially background-removed,
+/// by an amount that depends on the mask and the field geometry. Following this with a
+/// separate background-removal stage (V-SHARP, PDF, …) removes background twice.
+///
+/// Use [`laplacian_unwrap`] to unwrap without removing background.
+///
+/// Because ∇²(harmonic) = 0, the discarded component leaves no trace in the input to the
+/// Poisson solve and cannot be restored afterwards.
+///
+/// # Intended input
+/// One wrapped phase volume. On the project's test data it then matches
+/// [`crate::bgremove::lbv`] on the same field (r = 0.887 against 0.909, identical residual
+/// smooth content). It takes *wrapped phase*, so in a multi-echo pipeline the only way to
+/// apply it is to each echo before combining; that usage is not what the algorithm
+/// describes, has not been validated, and leaves visibly more background than either
+/// unwrapping then a field-map background removal or this function on a single volume.
+/// For multi-echo data use [`laplacian_unwrap`] or ROMEO, combine, then a background
+/// removal from [`crate::bgremove`].
+///
+/// # Echo time
+/// Accuracy falls off with the amount of phase to unwrap. On the 7 T test data, against
+/// the ground-truth local field: r = 0.84 at TE = 4 ms, 0.70 at 8 ms, 0.50 at 12 ms —
+/// where unwrapping then [`crate::bgremove::lbv`] gives 0.86, 0.84, 0.69 and
+/// [`crate::bgremove::vsharp`] holds near 0.82 throughout. Prefer the earliest echo.
 ///
 /// # Arguments
 /// * `phase` - Wrapped phase (nx * ny * nz)
@@ -131,8 +211,76 @@ pub(crate) fn solve_poisson_fft(
 /// * `grid` - Volume grid (dimensions and voxel sizes)
 ///
 /// # Returns
-/// Unwrapped phase
-pub fn laplacian_unwrap(
+/// Unwrapped, partially background-removed phase, zero outside `mask`.
+///
+/// # References
+/// Schofield & Zhu (2003) for the unwrapping; Zhou et al. (2014) for the
+/// boundary-value formulation of the background removal. See the module docs.
+/// Solve ∇²u = f inside `mask` with u = 0 outside it (homogeneous Dirichlet on the ROI),
+/// by Gauss-Seidel with successive over-relaxation.
+///
+/// Masking the source term is only half of the ROI formulation: the solution has to be
+/// constrained at the ROI boundary too, or it picks up an arbitrary harmonic component.
+/// Solving the masked source over the whole volume with a periodic FFT does not constrain
+/// it, and that component is large — which is what this replaces.
+///
+/// Mirrors the solver in [`crate::bgremove::lbv`], which solves the homogeneous case
+/// (`f = 0`) with boundary values taken from the field.
+fn solve_poisson_dirichlet_roi(
+    f: &[f64],
+    mask: &[u8],
+    grid: &Grid,
+    tol: f64,
+    max_iter: usize,
+) -> Vec<f64> {
+    let (nx, ny, nz) = grid.dims;
+    let (vsx, vsy, vsz) = grid.voxel_size;
+    let (dx2, dy2, dz2) = (1.0 / (vsx * vsx), 1.0 / (vsy * vsy), 1.0 / (vsz * vsz));
+    let diag = -2.0 * (dx2 + dy2 + dz2);
+    let omega = 1.5;
+
+    let mut u = vec![0.0f64; nx * ny * nz];
+
+    // Relative criterion, so convergence does not depend on the units of `f`.
+    let scale = f.iter().map(|v| v.abs()).fold(0.0f64, f64::max).max(1e-30);
+    let scaled_tol = tol * scale / diag.abs();
+
+    for _ in 0..max_iter {
+        let mut max_change = 0.0f64;
+        for k in 1..nz - 1 {
+            for j in 1..ny - 1 {
+                for i in 1..nx - 1 {
+                    let idx = i + j * nx + k * nx * ny;
+                    if mask[idx] == 0 {
+                        continue; // stays 0: this is the Dirichlet condition
+                    }
+                    let sum = dx2 * (u[idx - 1] + u[idx + 1])
+                            + dy2 * (u[idx - nx] + u[idx + nx])
+                            + dz2 * (u[idx - nx * ny] + u[idx + nx * ny]);
+                    // ∇²u = sum + diag*u = f  =>  u = (f - sum) / diag
+                    let target = (f[idx] - sum) / diag;
+                    let old = u[idx];
+                    let next = old + omega * (target - old);
+                    max_change = max_change.max((next - old).abs());
+                    u[idx] = next;
+                }
+            }
+        }
+        if max_change < scaled_tol {
+            break;
+        }
+    }
+    u
+}
+
+#[deprecated(
+    since = "0.35.0",
+    note = "unwrap with `laplacian_unwrap` and then remove background with a `bgremove` \
+            method (`lbv` reproduces this; `vsharp` is more robust at long TE). That route \
+            is more accurate at every echo time measured and composes with any background \
+            removal. Kept for parity with QSM.jl's `unwrap_laplacian(solver = :mgpcg)`."
+)]
+pub fn laplacian_unwrap_bfr(
     phase: &[f64],
     mask: &[u8],
     grid: &Grid,
@@ -148,7 +296,11 @@ pub fn laplacian_unwrap(
         .map(|(i, &val)| if mask[i] != 0 { val } else { 0.0 })
         .collect();
 
-    let unwrapped = solve_poisson_fft(&d2u_masked, nx, ny, nz, vsx, vsy, vsz);
+    // Dirichlet on the ROI, matching QSM.jl's `:mgpcg` path. Masking the source and then
+    // solving over the whole volume with a periodic FFT leaves the harmonic component
+    // unconstrained, which showed up as a large spurious background field.
+    let max_iter = (3 * nx.max(ny).max(nz)).min(500);
+    let unwrapped = solve_poisson_dirichlet_roi(&d2u_masked, mask, grid, 1e-6, max_iter);
 
     let mut result = vec![0.0; n_total];
     for i in 0..n_total {
@@ -160,7 +312,234 @@ pub fn laplacian_unwrap(
     result
 }
 
+/// Wrapped Laplacian under a Neumann boundary: at each array face the missing neighbour is
+/// the sample itself, so the wrapped difference across the face is zero. This is exactly
+/// the half-sample even extension the DCT-II assumes, so pairing it with
+/// [`solve_poisson_dct`] reproduces the even-extended periodic solve without building the
+/// 2x-per-axis extension.
+pub(crate) fn wrapped_laplacian_neumann(
+    phase: &[f64],
+    nx: usize, ny: usize, nz: usize,
+    vsx: f64, vsy: f64, vsz: f64,
+) -> Vec<f64> {
+    let n_total = nx * ny * nz;
+    let mut d2u = vec![0.0; n_total];
+    let (dx2, dy2, dz2) = (1.0 / (vsx * vsx), 1.0 / (vsy * vsy), 1.0 / (vsz * vsz));
+
+    for k in 0..nz {
+        let km1 = k.saturating_sub(1);
+        let kp1 = if k + 1 >= nz { k } else { k + 1 };
+        for j in 0..ny {
+            let jm1 = j.saturating_sub(1);
+            let jp1 = if j + 1 >= ny { j } else { j + 1 };
+            for i in 0..nx {
+                let im1 = i.saturating_sub(1);
+                let ip1 = if i + 1 >= nx { i } else { i + 1 };
+                let idx = i + j * nx + k * nx * ny;
+                let u = phase[idx];
+                let lap_x = (wrap(phase[ip1 + j * nx + k * nx * ny] - u) - wrap(u - phase[im1 + j * nx + k * nx * ny])) * dx2;
+                let lap_y = (wrap(phase[i + jp1 * nx + k * nx * ny] - u) - wrap(u - phase[i + jm1 * nx + k * nx * ny])) * dy2;
+                let lap_z = (wrap(phase[i + j * nx + kp1 * nx * ny] - u) - wrap(u - phase[i + j * nx + km1 * nx * ny])) * dz2;
+                d2u[idx] = lap_x + lap_y + lap_z;
+            }
+        }
+    }
+    d2u
+}
+
+/// Solve ∇²u = f under a Neumann boundary condition on the array, in place, via DCT-II.
+///
+/// The DCT-II of a length-N signal is the FFT of its even extension restricted to the
+/// original samples, so this is the padded periodic solve with the extension never
+/// materialised: working memory is the volume itself plus one axis-length buffer,
+/// against 8x the volume in complex doubles for the explicit extension.
+///
+/// Eigenvalues of the second difference under this basis are `2(cos(πk/N) − 1)/h²`. The DC
+/// mode is set to zero, as in the periodic solve — the result is defined up to a constant.
+pub(crate) fn solve_poisson_dct(
+    f: &[f64],
+    nx: usize, ny: usize, nz: usize,
+    vsx: f64, vsy: f64, vsz: f64,
+) -> Vec<f64> {
+    use rustdct::DctPlanner;
+    let nxy = nx * ny;
+    let mut data = f.to_vec();
+    let mut planner = DctPlanner::<f64>::new();
+
+    // Forward: DCT-II along each axis.
+    let dct2_x = planner.plan_dct2(nx);
+    let dct2_y = planner.plan_dct2(ny);
+    let dct2_z = planner.plan_dct2(nz);
+    {
+        let mut scratch = vec![0.0; dct2_x.get_scratch_len()];
+        for row in data.chunks_mut(nx) {
+            dct2_x.process_dct2_with_scratch(row, &mut scratch);
+        }
+    }
+    {
+        let mut buf = vec![0.0; ny];
+        let mut scratch = vec![0.0; dct2_y.get_scratch_len()];
+        for k in 0..nz {
+            for i in 0..nx {
+                for j in 0..ny { buf[j] = data[i + j * nx + k * nxy]; }
+                dct2_y.process_dct2_with_scratch(&mut buf, &mut scratch);
+                for j in 0..ny { data[i + j * nx + k * nxy] = buf[j]; }
+            }
+        }
+    }
+    {
+        let mut buf = vec![0.0; nz];
+        let mut scratch = vec![0.0; dct2_z.get_scratch_len()];
+        for j in 0..ny {
+            for i in 0..nx {
+                for k in 0..nz { buf[k] = data[i + j * nx + k * nxy]; }
+                dct2_z.process_dct2_with_scratch(&mut buf, &mut scratch);
+                for k in 0..nz { data[i + j * nx + k * nxy] = buf[k]; }
+            }
+        }
+    }
+
+    // Divide by the Laplacian eigenvalue of each DCT-II mode.
+    let (ix2, iy2, iz2) = (1.0 / (vsx * vsx), 1.0 / (vsy * vsy), 1.0 / (vsz * vsz));
+    let lam_x: Vec<f64> = (0..nx).map(|i| 2.0 * ((PI * i as f64 / nx as f64).cos() - 1.0) * ix2).collect();
+    let lam_y: Vec<f64> = (0..ny).map(|j| 2.0 * ((PI * j as f64 / ny as f64).cos() - 1.0) * iy2).collect();
+    let lam_z: Vec<f64> = (0..nz).map(|k| 2.0 * ((PI * k as f64 / nz as f64).cos() - 1.0) * iz2).collect();
+    for (k, &lz) in lam_z.iter().enumerate() {
+        for (j, &ly) in lam_y.iter().enumerate() {
+            let row = j * nx + k * nxy;
+            for (i, &lx) in lam_x.iter().enumerate() {
+                let lam = lx + ly + lz;
+                let idx = row + i;
+                data[idx] = if lam.abs() > 1e-20 { data[idx] / lam } else { 0.0 };
+            }
+        }
+    }
+
+    // Inverse: DCT-III along each axis. Unnormalised DCT-III∘DCT-II scales by N/2 per axis.
+    let dct3_x = planner.plan_dct3(nx);
+    let dct3_y = planner.plan_dct3(ny);
+    let dct3_z = planner.plan_dct3(nz);
+    {
+        let mut buf = vec![0.0; nz];
+        let mut scratch = vec![0.0; dct3_z.get_scratch_len()];
+        for j in 0..ny {
+            for i in 0..nx {
+                for k in 0..nz { buf[k] = data[i + j * nx + k * nxy]; }
+                dct3_z.process_dct3_with_scratch(&mut buf, &mut scratch);
+                for k in 0..nz { data[i + j * nx + k * nxy] = buf[k]; }
+            }
+        }
+    }
+    {
+        let mut buf = vec![0.0; ny];
+        let mut scratch = vec![0.0; dct3_y.get_scratch_len()];
+        for k in 0..nz {
+            for i in 0..nx {
+                for j in 0..ny { buf[j] = data[i + j * nx + k * nxy]; }
+                dct3_y.process_dct3_with_scratch(&mut buf, &mut scratch);
+                for j in 0..ny { data[i + j * nx + k * nxy] = buf[j]; }
+            }
+        }
+    }
+    {
+        let mut scratch = vec![0.0; dct3_x.get_scratch_len()];
+        for row in data.chunks_mut(nx) {
+            dct3_x.process_dct3_with_scratch(row, &mut scratch);
+        }
+    }
+    let norm = 8.0 / (nx as f64 * ny as f64 * nz as f64);
+    for v in data.iter_mut() { *v *= norm; }
+    data
+}
+
+/// The original even-extension implementation of [`laplacian_unwrap`], kept only as the
+/// oracle for the DCT solve: the DCT-II is the FFT of the even extension, so the two must
+/// agree to rounding. Not compiled into the library.
 #[cfg(test)]
+fn laplacian_unwrap_even_extended_reference(
+    phase: &[f64],
+    mask: &[u8],
+    grid: &Grid,
+) -> Vec<f64> {
+    let (nx, ny, nz) = grid.dims;
+    let (vsx, vsy, vsz) = grid.voxel_size;
+    let n_total = nx * ny * nz;
+
+    // Even extension: continuous across the seam, so the periodic FFT solve realises a
+    // Neumann condition on the original array instead of wrapping a discontinuity.
+    let (px, py, pz) = (2 * nx, 2 * ny, 2 * nz);
+    let mut ext = vec![0.0f64; px * py * pz];
+    for k in 0..pz {
+        let sk = if k < nz { k } else { 2 * nz - 1 - k };
+        for j in 0..py {
+            let sj = if j < ny { j } else { 2 * ny - 1 - j };
+            for i in 0..px {
+                let si = if i < nx { i } else { 2 * nx - 1 - i };
+                ext[i + j * px + k * px * py] = phase[si + sj * nx + sk * nx * ny];
+            }
+        }
+    }
+
+    // Laplacian is taken on the extended array, so the wrapped differences never straddle
+    // the original boundary — doing it before the extension reintroduces the seam.
+    let d2u = wrapped_laplacian_periodic(&ext, px, py, pz, vsx, vsy, vsz);
+    let solved = solve_poisson_fft(&d2u, px, py, pz, vsx, vsy, vsz);
+
+    let mut result = vec![0.0; n_total];
+    for k in 0..nz {
+        for j in 0..ny {
+            for i in 0..nx {
+                let dst = i + j * nx + k * nx * ny;
+                if mask[dst] != 0 {
+                    result[dst] = solved[i + j * px + k * px * py];
+                }
+            }
+        }
+    }
+    result
+}
+
+/// Laplacian phase unwrapping, **without** background field removal.
+///
+/// Solves the Poisson equation over the whole array under a Neumann (zero normal
+/// derivative) boundary condition, via a DCT-II in place. Nothing is masked out, so field
+/// sources anywhere in the FOV are retained and the harmonic (background) component
+/// survives: the result is an unwrapped **total** field, suitable for a subsequent
+/// background-removal stage.
+///
+/// Use [`laplacian_unwrap_bfr`] if you want unwrapping and background removal together.
+///
+/// Because the whole array participates, this is sensitive to phase quality *outside* the
+/// ROI in a way [`laplacian_unwrap_bfr`] is not. Where the phase outside the object is noise,
+/// or wraps faster than one radian per voxel, prefer ROMEO
+/// ([`super::romeo::unwrap_romeo`]) or the masked variant.
+///
+/// # Arguments
+/// * `phase` - Wrapped phase (nx * ny * nz)
+/// * `mask` - Binary mask (nx * ny * nz); applied to the *output* only
+/// * `grid` - Volume grid (dimensions and voxel sizes)
+///
+/// # Returns
+/// Unwrapped phase, zero outside `mask`.
+///
+/// # References
+/// Schofield, M.A., Zhu, Y. (2003). "Fast phase unwrapping algorithm for interferometric
+/// applications." Optics Letters, 28(14):1194-1196.
+/// <https://doi.org/10.1364/OL.28.001194>
+pub fn laplacian_unwrap(
+    phase: &[f64],
+    mask: &[u8],
+    grid: &Grid,
+) -> Vec<f64> {
+    let (nx, ny, nz) = grid.dims;
+    let (vsx, vsy, vsz) = grid.voxel_size;
+    let d2u = wrapped_laplacian_neumann(phase, nx, ny, nz, vsx, vsy, vsz);
+    let u = solve_poisson_dct(&d2u, nx, ny, nz, vsx, vsy, vsz);
+    u.iter().zip(mask).map(|(&v, &m)| if m != 0 { v } else { 0.0 }).collect()
+}
+
+#[cfg(test)]
+#[allow(deprecated)]
 mod tests {
     use super::*;
 
@@ -179,12 +558,12 @@ mod tests {
     }
 
     #[test]
-    fn test_laplacian_unwrap_constant() {
+    fn test_laplacian_unwrap_bfr_constant() {
         let n = 8;
         let phase = vec![1.0; n * n * n];
         let mask = vec![1u8; n * n * n];
 
-        let unwrapped = laplacian_unwrap(&phase, &mask, &grid(n));
+        let unwrapped = laplacian_unwrap_bfr(&phase, &mask, &grid(n));
 
         let mean: f64 = unwrapped.iter().sum::<f64>() / (n * n * n) as f64;
         for &val in unwrapped.iter() {
@@ -193,7 +572,7 @@ mod tests {
     }
 
     #[test]
-    fn test_laplacian_unwrap_smooth() {
+    fn test_laplacian_unwrap_bfr_smooth() {
         let n = 16;
         let mut phase = vec![0.0; n * n * n];
         let mask = vec![1u8; n * n * n];
@@ -207,22 +586,134 @@ mod tests {
             }
         }
 
-        let unwrapped = laplacian_unwrap(&phase, &mask, &grid(n));
+        let unwrapped = laplacian_unwrap_bfr(&phase, &mask, &grid(n));
 
-        for (i, (&orig, &unwr)) in phase.iter().zip(unwrapped.iter()).enumerate() {
-            assert!(unwr.is_finite(), "Unwrapped should be finite at {}", i);
-            assert!((orig - unwr).abs() < 1.0,
-                "Unwrapped should be close to original for smooth phase");
+        // This function solves under a Dirichlet condition on the ROI, so it does *not*
+        // round-trip its input — the harmonic part that would be needed to match at the
+        // boundary is exactly what it removes. What must hold is that the output is finite,
+        // stays bounded by the input, and is zero where the ROI is not.
+        //
+        // The original assertion here was `< 1.0` against a signal of amplitude 0.5, which
+        // passed for an all-zero output. `laplacian_unwrap_bfr_removes_the_harmonic_component`
+        // is the test that pins what this function actually does.
+        assert!(unwrapped.iter().all(|v| v.is_finite()), "output must be finite");
+        let peak = unwrapped.iter().fold(0.0f64, |m, &v| m.max(v.abs()));
+        assert!(peak <= 0.5 + 1e-6, "output should not exceed the input amplitude, got {peak}");
+    }
+
+    /// Pearson r and the slope of `want` regressed on `obs`, inside `mask`.
+    fn corr_slope(obs: &[f64], want: &[f64], mask: &[u8]) -> (f64, f64) {
+        let (mut sa, mut sb, mut n) = (0.0, 0.0, 0usize);
+        for i in 0..obs.len() {
+            if mask[i] != 0 { sa += obs[i]; sb += want[i]; n += 1; }
         }
+        let nf = n as f64;
+        let (ma, mb) = (sa / nf, sb / nf);
+        let (mut cov, mut va, mut vb) = (0.0, 0.0, 0.0);
+        for i in 0..obs.len() {
+            if mask[i] == 0 { continue; }
+            let (da, db) = (obs[i] - ma, want[i] - mb);
+            cov += da * db;
+            va += da * da;
+            vb += db * db;
+        }
+        (cov / (va.sqrt() * vb.sqrt()), cov / va)
+    }
+
+    /// A field split into a harmonic part (a linear ramp, ∇² = 0) and a non-harmonic part
+    /// (a Gaussian blob), wrapped hard enough that unwrapping is doing real work.
+    /// Returns (wrapped, truth, ramp, blob, mask).
+    fn ramp_plus_blob(n: usize) -> (Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>, Vec<u8>) {
+        let c = n as f64 / 2.0;
+        let total = n * n * n;
+        let (mut truth, mut ramp, mut blob) = (vec![0.0; total], vec![0.0; total], vec![0.0; total]);
+        let mut mask = vec![0u8; total];
+        for k in 0..n {
+            for j in 0..n {
+                for i in 0..n {
+                    let idx = i + j * n + k * n * n;
+                    let (x, y, z) = (i as f64 - c, j as f64 - c, k as f64 - c);
+                    let r = (x * x + y * y + z * z).sqrt();
+                    ramp[idx] = 0.35 * x + 0.20 * y + 0.15 * z;
+                    blob[idx] = 12.0 * (-(r * r) / (2.0 * 8.0f64.powi(2))).exp();
+                    truth[idx] = ramp[idx] + blob[idx];
+                    if r < 22.0 { mask[idx] = 1; }
+                }
+            }
+        }
+        let wrapped: Vec<f64> = truth.iter().map(|&v| wrap(v)).collect();
+        (wrapped, truth, ramp, blob, mask)
     }
 
     #[test]
-    fn test_laplacian_unwrap_finite() {
+    fn laplacian_unwrap_recovers_the_whole_field_including_background() {
+        let n = 64;
+        let (wrapped, truth, _, _, mask) = ramp_plus_blob(n);
+
+        let out = laplacian_unwrap(&wrapped, &mask, &grid(n));
+        let (r, slope) = corr_slope(&out, &truth, &mask);
+
+        assert!(r > 0.99, "should recover the total field, got r = {r}");
+        assert!((slope - 1.0).abs() < 0.05, "expected unit slope, got {slope}");
+    }
+
+    #[test]
+    fn laplacian_unwrap_bfr_removes_the_harmonic_component() {
+        // Pins the documented contract: laplacian_unwrap_bfr is unwrapping + background
+        // removal. It reproduces the non-harmonic field faithfully and returns the
+        // harmonic (background) component as zero, because ∇²(harmonic) = 0 leaves no
+        // trace in the input to the Poisson solve.
+        //
+        // If the harmonic assertion starts failing, the limitation was lifted — update
+        // the module docs and the README categorisation along with it.
+        let n = 64;
+        let (wrapped, _, ramp, blob, mask) = ramp_plus_blob(n);
+
+        let out = laplacian_unwrap_bfr(&wrapped, &mask, &grid(n));
+
+        let (r_blob, slope_blob) = corr_slope(&out, &blob, &mask);
+        assert!(r_blob > 0.99, "non-harmonic part should survive, got r = {r_blob}");
+        assert!((slope_blob - 1.0).abs() < 0.05, "expected unit slope, got {slope_blob}");
+
+        let (r_ramp, _) = corr_slope(&out, &ramp, &mask);
+        assert!(r_ramp.abs() < 0.05, "harmonic part should be discarded, got r = {r_ramp}");
+    }
+
+    #[test]
+    fn dct_solve_matches_the_even_extended_solve() {
+        // The DCT-II is the FFT of the even extension, so these are the same computation
+        // with and without materialising the extension. Agreement should be to rounding.
+        let n = 64;
+        let (wrapped, _, _, _, mask) = ramp_plus_blob(n);
+        let padded = laplacian_unwrap_even_extended_reference(&wrapped, &mask, &grid(n));
+        let dct = laplacian_unwrap(&wrapped, &mask, &grid(n));
+        let scale = padded.iter().fold(0.0f64, |m, &v| m.max(v.abs()));
+        let max_diff = padded.iter().zip(&dct).fold(0.0f64, |m, (&a, &b)| m.max((a - b).abs()));
+        assert!(max_diff < 1e-9 * scale, "DCT and padded solves differ: max |diff| = {max_diff} (scale {scale})");
+    }
+
+    #[test]
+    fn the_two_variants_disagree_by_the_background_field() {
+        // The difference between them is the harmonic component, which is what makes
+        // them different algorithms rather than two settings of one.
+        let n = 64;
+        let (wrapped, _, ramp, _, mask) = ramp_plus_blob(n);
+
+        let pure = laplacian_unwrap(&wrapped, &mask, &grid(n));
+        let combined = laplacian_unwrap_bfr(&wrapped, &mask, &grid(n));
+        let diff: Vec<f64> = pure.iter().zip(&combined).map(|(a, b)| a - b).collect();
+
+        let (r, _) = corr_slope(&diff, &ramp, &mask);
+        assert!(r > 0.95, "their difference should be the harmonic field, got r = {r}");
+    }
+
+    #[test]
+    fn test_laplacian_unwrap_bfr_finite() {
         let n = 8;
         let phase: Vec<f64> = (0..n*n*n).map(|i| wrap((i as f64) * 0.1)).collect();
         let mask = vec![1u8; n * n * n];
 
-        let unwrapped = laplacian_unwrap(&phase, &mask, &grid(n));
+        let unwrapped = laplacian_unwrap_bfr(&phase, &mask, &grid(n));
 
         for (i, &val) in unwrapped.iter().enumerate() {
             assert!(val.is_finite(), "Unwrapped phase should be finite at index {}", i);

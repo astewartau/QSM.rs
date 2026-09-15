@@ -50,7 +50,7 @@ jobs:
           all_bgremove='["test_bgremove_sharp","test_bgremove_resharp","test_bgremove_vsharp","test_bgremove_pdf","test_bgremove_ismv","test_bgremove_lbv"]'
           all_inversion='["test_inversion_tkd","test_inversion_tsvd","test_inversion_tikhonov","test_inversion_tv","test_inversion_rts","test_inversion_ilsqr","test_inversion_medi","test_inversion_nltv","test_inversion_ndi","test_inversion_fansi","test_inversion_fansi_tgv","test_inversion_l1qsm","test_inversion_whqsm","test_inversion_hdqsm","test_inversion_amp_pe"]'
           all_combined='["test_combined_tgv","test_combined_tfi"]'
-          all_pipeline='["test_pipeline_romeo_b0","test_pipeline_tgv","test_pipeline_qsmart","test_pipeline_qsmart_tikhonov","test_pipeline_harperella","test_pipeline_iharperella","test_bias_correction","test_swi","test_r2star_t2star"]'
+          all_pipeline='["test_pipeline_romeo_b0","test_pipeline_unwrap_bfr_romeo","test_pipeline_unwrap_bfr_laplacian_neumann","test_unwrap_bfr_single_volume","test_pipeline_unwrap_bfr_stage_laplacian","test_pipeline_tgv","test_pipeline_qsmart","test_pipeline_qsmart_tikhonov","test_pipeline_harperella","test_pipeline_iharperella","test_bias_correction","test_swi","test_r2star_t2star"]'
           # χ-separation entries are whole test *binaries* (each runs several methods).
           all_chisep='["chisep_qsmci","chisep_relaxometry_qsmci","chisep_xsepnet"]'
           # Deep-learning models (in tests/dl_models.rs; weights fetched from the registry).
@@ -242,15 +242,15 @@ jobs:
 
               # Phase unwrapping
               src/unwrap/mod.rs)      pipeline="$pipeline test_pipeline_tgv test_pipeline_qsmart test_pipeline_qsmart_tikhonov" ;;
-              src/unwrap/romeo.rs)    pipeline="$pipeline test_pipeline_romeo_b0 test_pipeline_tgv" ;;
-              src/unwrap/laplacian.rs) pipeline="$pipeline test_pipeline_qsmart test_pipeline_qsmart_tikhonov test_pipeline_harperella test_pipeline_iharperella" ;;
+              src/unwrap/romeo.rs)    pipeline="$pipeline test_pipeline_romeo_b0 test_pipeline_unwrap_bfr_romeo test_pipeline_tgv" ;;
+              src/unwrap/laplacian.rs) pipeline="$pipeline test_pipeline_unwrap_bfr_laplacian_neumann test_unwrap_bfr_single_volume test_pipeline_unwrap_bfr_stage_laplacian test_pipeline_qsmart test_pipeline_qsmart_tikhonov test_pipeline_harperella test_pipeline_iharperella" ;;
 
               # Pipeline (combined algorithms + shared stages)
               src/pipeline/mod.rs|src/pipeline/config.rs|src/pipeline/phase_utils.rs|src/pipeline/referencing.rs)
                 echo "Pipeline core changed: $file → all tests"
                 output_all; exit 0 ;;
               src/pipeline/field_mapping.rs)
-                pipeline="$pipeline test_pipeline_romeo_b0 test_pipeline_tgv test_pipeline_qsmart test_pipeline_qsmart_tikhonov" ;;
+                pipeline="$pipeline test_pipeline_romeo_b0 test_pipeline_unwrap_bfr_romeo test_pipeline_unwrap_bfr_laplacian_neumann test_unwrap_bfr_single_volume test_pipeline_unwrap_bfr_stage_laplacian test_pipeline_tgv test_pipeline_qsmart test_pipeline_qsmart_tikhonov" ;;
               src/pipeline/bg_removal.rs)
                 bgremove="$bgremove test_bgremove_sharp test_bgremove_resharp test_bgremove_vsharp test_bgremove_pdf test_bgremove_ismv test_bgremove_lbv"
                 pipeline="$pipeline test_pipeline_harperella test_pipeline_iharperella" ;;
@@ -265,7 +265,7 @@ jobs:
 
               # Utils (QSMART components)
               src/utils/multi_echo.rs)
-                pipeline="$pipeline test_pipeline_romeo_b0 test_pipeline_tgv test_pipeline_qsmart test_pipeline_qsmart_tikhonov" ;;
+                pipeline="$pipeline test_pipeline_romeo_b0 test_pipeline_unwrap_bfr_romeo test_pipeline_unwrap_bfr_laplacian_neumann test_unwrap_bfr_single_volume test_pipeline_unwrap_bfr_stage_laplacian test_pipeline_tgv test_pipeline_qsmart test_pipeline_qsmart_tikhonov" ;;
               src/utils/vasculature.rs|src/utils/frangi.rs|src/utils/curvature.rs|src/utils/qsmart.rs)
                 pipeline="$pipeline test_pipeline_qsmart test_pipeline_qsmart_tikhonov" ;;
               src/utils/bias_correction.rs)
@@ -1002,6 +1002,36 @@ jobs:
 
           # Helper: emit a unified metrics table for susceptibility map tests
           # RESULT format: name,nrmse%,detrend%,tissue%,blood%,dgm%,dgm_lin,calc_dev,streak,corr,xsim,time
+          # Rows only, with a tag appended to the Method name — lets one table hold methods
+          # that start from different inputs (local field / total field / wrapped phase).
+          emit_chi_rows() {
+            local tag="$1"; local prefix="$2"; shift 2
+            for test in "$@"; do
+              file="metrics/${prefix}${test}.csv"
+              [ -f "$file" ] || continue
+              line=$(grep "^RESULT:" "$file" | head -1 | sed 's/^RESULT://')
+              IFS=',' read -r name nrmse dt tissue blood dgm dgm_lin calc_dev streak corr xsim time <<< "$line"
+              if [ "$nrmse" = "-" ]; then
+                echo "| ${name}${tag} | :x: Failed | - | - | - | - | - | - | - | - | - | - |"
+              else
+                echo "| ${name}${tag} | ${nrmse} | ${dt} | ${tissue} | ${blood} | ${dgm} | ${dgm_lin} | ${calc_dev} | ${streak} | ${corr} | ${xsim} | $(printf '%.2fs' "$time") |"
+              fi
+            done
+          }
+          # Every method that produces a susceptibility map, in one table.
+          emit_chi_table_merged() {
+            local rows
+            rows=$(
+              emit_chi_rows "" "test_inversion_" tkd tsvd tikhonov tv rts ilsqr medi nltv ndi fansi fansi_tgv l1qsm whqsm hdqsm amp_pe
+              emit_chi_rows " — BFR + inversion" "test_combined_" tgv tfi
+              emit_chi_rows " — full pipeline" "test_pipeline_" tgv qsmart qsmart_tikhonov
+            )
+            [ -z "$rows" ] && return 1
+            echo "| Method | NRMSE% | Detrend% | Tissue% | Blood% | DGM% | DGM Lin | Calc Dev | Streak | Corr | XSIM | Time |"
+            echo "|--------|--------|----------|---------|--------|------|---------|----------|--------|------|------|------|"
+            echo "$rows"
+            echo ""
+          }
           emit_chi_table() {
             local prefix="$1"; shift
             local has_any=false
@@ -1073,9 +1103,11 @@ jobs:
               echo "$TABLE"
             fi
 
-            if TABLE=$(emit_chi_table "test_inversion_" tkd tsvd tikhonov tv rts ilsqr medi nltv ndi fansi fansi_tgv l1qsm whqsm hdqsm amp_pe); then
+            if TABLE=$(emit_chi_table_merged); then
               echo "## Dipole Inversion"
-              echo "*Compared against ground truth susceptibility map*"
+              echo "*Every method that produces a susceptibility map, against ground truth. Plain rows take the*"
+              echo "*local field; **— BFR + inversion** rows take the total field and remove background*"
+              echo "*themselves; **— full pipeline** rows start from wrapped phase.*"
               echo ""
               echo "$TABLE"
             fi
@@ -1111,20 +1143,6 @@ jobs:
                 fi
               done
               echo ""
-            fi
-
-            if TABLE=$(emit_chi_table "test_combined_" tgv tfi); then
-              echo "## Combined Background Removal + Dipole Inversion"
-              echo "*Compared against ground truth susceptibility map (input: total field map)*"
-              echo ""
-              echo "$TABLE"
-            fi
-
-            if TABLE=$(emit_chi_table "test_pipeline_" tgv qsmart qsmart_tikhonov); then
-              echo "## Full Pipeline"
-              echo "*Compared against ground truth susceptibility map*"
-              echo ""
-              echo "$TABLE"
             fi
 
             if [ -f "metrics/test_bias_correction.csv" ] || [ -f "metrics/test_swi.csv" ] || [ -f "metrics/test_r2star_t2star.csv" ]; then
@@ -1223,6 +1241,36 @@ jobs:
 
           # Helper: emit a unified metrics table for susceptibility map tests
           # RESULT format: name,nrmse%,detrend%,tissue%,blood%,dgm%,dgm_lin,calc_dev,streak,corr,xsim,time
+          # Rows only, with a tag appended to the Method name — lets one table hold methods
+          # that start from different inputs (local field / total field / wrapped phase).
+          emit_chi_rows() {
+            local tag="$1"; local prefix="$2"; shift 2
+            for test in "$@"; do
+              file="metrics/${prefix}${test}.csv"
+              [ -f "$file" ] || continue
+              line=$(grep "^RESULT:" "$file" | head -1 | sed 's/^RESULT://')
+              IFS=',' read -r name nrmse dt tissue blood dgm dgm_lin calc_dev streak corr xsim time <<< "$line"
+              if [ "$nrmse" = "-" ]; then
+                echo "| ${name}${tag} | :x: Failed | - | - | - | - | - | - | - | - | - | - |"
+              else
+                echo "| ${name}${tag} | ${nrmse} | ${dt} | ${tissue} | ${blood} | ${dgm} | ${dgm_lin} | ${calc_dev} | ${streak} | ${corr} | ${xsim} | $(printf '%.2fs' "$time") |"
+              fi
+            done
+          }
+          # Every method that produces a susceptibility map, in one table.
+          emit_chi_table_merged() {
+            local rows
+            rows=$(
+              emit_chi_rows "" "test_inversion_" tkd tsvd tikhonov tv rts ilsqr medi nltv ndi fansi fansi_tgv l1qsm whqsm hdqsm amp_pe
+              emit_chi_rows " — BFR + inversion" "test_combined_" tgv tfi
+              emit_chi_rows " — full pipeline" "test_pipeline_" tgv qsmart qsmart_tikhonov
+            )
+            [ -z "$rows" ] && return 1
+            echo "| Method | NRMSE% | Detrend% | Tissue% | Blood% | DGM% | DGM Lin | Calc Dev | Streak | Corr | XSIM | Time |"
+            echo "|--------|--------|----------|---------|--------|------|---------|----------|--------|------|------|------|"
+            echo "$rows"
+            echo ""
+          }
           emit_chi_table() {
             local prefix="$1"; shift
             local has_any=false
@@ -1307,9 +1355,11 @@ jobs:
               echo ""
             fi
 
-            if TABLE=$(emit_chi_table "test_inversion_" tkd tsvd tikhonov tv rts ilsqr medi nltv ndi fansi fansi_tgv l1qsm whqsm hdqsm amp_pe); then
+            if TABLE=$(emit_chi_table_merged); then
               echo "### Dipole Inversion"
-              echo "*Compared against ground truth susceptibility map*"
+              echo "*Every method that produces a susceptibility map, against ground truth. Plain rows take the*"
+              echo "*local field; **— BFR + inversion** rows take the total field and remove background*"
+              echo "*themselves; **— full pipeline** rows start from wrapped phase.*"
               echo ""
               echo "$TABLE"
               echo ""
@@ -1354,27 +1404,44 @@ jobs:
               emit_figures bet
             fi
 
-            if [ -f "slices/pipeline_romeo_b0.bin" ]; then
+            if [ -f "slices/unwrap_raw_romeo.bin" ] || [ -f "slices/unwrap_raw_laplacian_neumann.bin" ]; then
               echo "### Phase Unwrapping + B0 Estimation"
-              echo "*MCPC-3D-S + ROMEO → total field map (compared against ground truth B0)*"
+              echo "*MCPC-3D-S, then each unwrapper → total field map, beside the ground truth. These differ by an*"
+              echo "*arbitrary harmonic field, which is expected of unwrappers; the like-for-like comparison is below.*"
               echo ""
-              emit_figures pipeline_romeo_b0
-              echo ""
-            fi
-
-            if TABLE=$(emit_chi_table "test_combined_" tgv tfi); then
-              echo "### Combined Background Removal + Dipole Inversion"
-              echo "*Compared against ground truth susceptibility map (input: total field map)*"
-              echo ""
-              echo "$TABLE"
+              emit_figures stage_unwrap
               echo ""
             fi
 
-            if TABLE=$(emit_chi_table "test_pipeline_" tgv qsmart qsmart_tikhonov); then
-              echo "### Full Pipeline"
-              echo "*Compared against ground truth susceptibility map*"
+            if TABLE=$(emit_table "test_pipeline_unwrap_bfr_" romeo laplacian_neumann stage_laplacian); then
+              echo "### Unwrapper Comparison (local field, after background removal)"
+              echo "*Each unwrapper → field map → V-SHARP → local field, vs ground truth.*"
+              echo ""
+              echo "Total field maps differ between unwrappers by an arbitrary harmonic field, so they are"
+              echo "compared after background removal. ROMEO and Laplacian should land close. The last row"
+              echo "drives the shared \`run_field_mapping\` stage, and is what catches a config selecting the"
+              echo "wrong variant."
               echo ""
               echo "$TABLE"
+            fi
+
+            if [ -f "metrics/test_unwrap_bfr_single_volume.csv" ]; then
+              echo "### Combined Unwrapping + Background Removal"
+              echo "*\`laplacian_unwrap_bfr\` on one wrapped volume at the first-echo TE, vs ground truth local field.*"
+              echo ""
+              line=$(grep "^RESULT:" metrics/test_unwrap_bfr_single_volume.csv | head -1 | sed 's/^RESULT://')
+              IFS=',' read -r name rmse nrmse nrmse_ch corr xsim time <<< "$line"
+              if [ "$rmse" = "-" ]; then
+                echo "| Method | RMSE | NRMSE (range) | NRMSE% (χ) | Correlation | XSIM | Time |"
+                echo "|--------|------|---------------|------------|-------------|------|------|"
+                echo "| ${name} | :x: Failed | - | - | - | - | - |"
+              else
+                echo "| Method | RMSE | NRMSE (range) | NRMSE% (χ) | Correlation | XSIM | Time |"
+                echo "|--------|------|---------------|------------|-------------|------|------|"
+                echo "| ${name} | ${rmse} | ${nrmse} | ${nrmse_ch} | ${corr} | ${xsim} | $(printf '%.2fs' "$time") |"
+              fi
+              echo ""
+              emit_figures unwrap_bfr_single
               echo ""
             fi
 

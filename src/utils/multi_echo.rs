@@ -389,6 +389,8 @@ pub fn phase_offset_removal(
             unwrap_romeo(&hip_phase, &weight, None, 0.0, 0.0, mask, &RomeoParams::default(), grid)
         }
         UnwrapMethod::Laplacian => {
+            // The HIP is a phase *difference*; removing its harmonic component would
+            // discard part of the offset this function exists to estimate.
             laplacian_unwrap(&hip_phase, mask, grid)
         }
     };

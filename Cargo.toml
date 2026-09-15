@@ -62,6 +62,7 @@ tract-onnx = { version = "0.23", optional = true }
 # tract's kernel crate, named directly only so `parallel` can switch on its multithreaded executor
 # (resolves to the same version tract-onnx uses; WASM builds without `parallel` stay single-threaded).
 tract-linalg = { version = "0.23", optional = true }
+rustdct = "0.7.1"
 
 [dev-dependencies]
 serde = { version = "1", features = ["derive"] }
