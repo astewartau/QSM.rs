@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>QSM.rs — the Rust engine for Quantitative Susceptibility Mapping</title>
-  <meta name="description" content="QSM.rs is a Rust library implementing 40+ Quantitative Susceptibility Mapping algorithms: brain extraction, phase unwrapping, background field removal, dipole inversion, and susceptibility source separation.">
+  <meta name="description" content="QSM.rs is a Rust library implementing 50+ Quantitative Susceptibility Mapping algorithms: brain extraction, phase unwrapping, background field removal, dipole inversion, single-step reconstruction, and susceptibility source separation, including 16 deep-learning methods.">
   <link rel="icon" href="icon.svg" type="image/svg+xml">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -21,6 +21,13 @@
     })();
   </script>
   <style>
+    /* hero: text left, the open-book illustration right */
+    .hero-grid { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2.5rem; align-items: center; }
+    .hero-text { min-width: 0; }
+    .hero-art { width: clamp(240px, 30vw, 380px); }
+    .hero-art svg { width: 100%; height: auto; display: block; }
+    @media (max-width: 880px) { .hero-art { display: none; } }
+
     /* QSM.rs = the engine: orange accent + a warmer ink than the neutral tokens */
     :root {
       --qsm-accent: #f97316;
@@ -44,14 +51,8 @@
     .algo-card { background: var(--qsm-surface); border: 1px solid var(--qsm-border); border-radius: var(--qsm-radius); padding: 1.1rem 1.2rem 1.3rem; }
     .algo-card h3 { margin: 0 0 .2rem; font-size: 1rem; display: flex; align-items: center; gap: .5rem; }
     .algo-card .count { color: var(--qsm-accent-2); font-size: .8rem; font-weight: 600; background: var(--qsm-accent-soft); border-radius: 999px; padding: .05rem .5rem; }
+    .dl { font-size: .62rem; font-weight: 700; letter-spacing: .06em; vertical-align: .12em; padding: .1rem .28rem; border-radius: 4px; background: var(--qsm-surface-2); border: 1px solid var(--qsm-border); color: var(--qsm-muted); }
     .algo-card .list { color: var(--qsm-muted); font-size: .9rem; margin: .5rem 0 0; }
-    .eco-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr)); gap: 1rem; }
-    .eco-card { display: block; background: var(--qsm-surface); border: 1px solid var(--qsm-border); border-left: 3px solid var(--c); border-radius: var(--qsm-radius); padding: 1.1rem 1.2rem 1.25rem; text-decoration: none; transition: transform .15s ease, background-color .15s ease; }
-    .eco-card:hover { transform: translateY(-2px); background: var(--qsm-surface-2); text-decoration: none; }
-    .eco-card .role { color: var(--c); font-size: .72rem; letter-spacing: .09em; text-transform: uppercase; font-weight: 600; }
-    .eco-card .nm { color: var(--qsm-text); font-size: 1.15rem; font-weight: 700; margin: .25rem 0 .4rem; }
-    .eco-card .ds { color: var(--qsm-muted); font-size: .9rem; margin: 0; }
-    .eco-card.xt { --c: #a855f7; } .eco-card.bly { --c: #3b82f6; } .eco-card.ci { --c: #10b981; }
   </style>
 </head>
 <body class="qsm-page">
@@ -66,17 +67,84 @@
   </nav>
 
   <header class="qsm-hero">
-    <div class="qsm-hero__inner">
+    <div class="qsm-hero__inner hero-grid">
+      <div class="hero-text">
       <h1 class="qsm-title"><span class="grad">QSM.rs</span></h1>
       <p class="qsm-lede">
         The Rust engine for Quantitative Susceptibility Mapping. A from-scratch library implementing
-        40+ published algorithms across the full reconstruction chain — the same engine that powers
+        50+ published algorithms across the full reconstruction chain — the same engine that powers
         <a href="https://qsmxt.github.io/QSMxT/">QSMxT</a> and
         <a href="https://qsmbly.neurodesk.org/">QSMbly</a>.
       </p>
       <div class="qsm-cta">
         <a class="qsm-btn qsm-btn--primary" href="api/qsm_core/index.html">API documentation →</a>
         <a class="qsm-btn qsm-btn--secondary" href="https://github.com/astewartau/QSM.rs">View on GitHub</a>
+      </div>
+      </div>
+
+      <!-- an open book: the library. Gutter is the recess, the cover edge and page
+           block give the thickness, and the chi leaves the page on a dashed trail. -->
+      <div class="hero-art" aria-hidden="true">
+        <svg viewBox="0 0 400 310" xmlns="http://www.w3.org/2000/svg">
+          <defs>
+            <linearGradient id="bk-g" x1="0" y1="0" x2="1" y2="1">
+              <stop stop-color="#fb923c"/><stop offset="1" stop-color="#ea580c"/>
+            </linearGradient>
+            <linearGradient id="bk-tint" x1="0" y1="0" x2="0" y2="1">
+              <stop stop-color="#fb923c" stop-opacity=".18"/><stop offset="1" stop-color="#ea580c" stop-opacity=".05"/>
+            </linearGradient>
+            <linearGradient id="bk-gutL" x1="0" y1="0" x2="1" y2="0">
+              <stop stop-color="#0c0a09" stop-opacity="0"/><stop offset="1" stop-color="#0c0a09" stop-opacity=".75"/>
+            </linearGradient>
+            <linearGradient id="bk-gutR" x1="0" y1="0" x2="1" y2="0">
+              <stop stop-color="#0c0a09" stop-opacity=".75"/><stop offset="1" stop-color="#0c0a09" stop-opacity="0"/>
+            </linearGradient>
+            <radialGradient id="bk-glow" cx=".5" cy=".5" r=".5">
+              <stop stop-color="#f97316" stop-opacity=".3"/><stop offset="1" stop-color="#f97316" stop-opacity="0"/>
+            </radialGradient>
+            <radialGradient id="bk-void" cx=".5" cy=".42" r=".55">
+              <stop stop-color="#2a201a"/><stop offset=".7" stop-color="#140f0c"/><stop offset="1" stop-color="#0c0a09"/>
+            </radialGradient>
+          </defs>
+          <ellipse cx="200" cy="150" rx="215" ry="145" fill="url(#bk-glow)"/>
+          <ellipse cx="200" cy="270" rx="175" ry="14" fill="#f97316" fill-opacity=".08"/>
+          <!-- cover, seen edge-on below the pages -->
+          <polygon points="60,240 200,226 340,240 200,256" fill="#ea580c" fill-opacity=".30"
+                   stroke="url(#bk-g)" stroke-width="2.5" stroke-linejoin="round"/>
+          <!-- page block: the stack of leaves under each page -->
+          <path d="M64 236 L196 222 L196 232 L64 246 Z" fill="#ea580c" fill-opacity=".35"/>
+          <path d="M336 236 L204 222 L204 232 L336 246 Z" fill="#ea580c" fill-opacity=".35"/>
+          <!-- the two open pages -->
+          <path d="M64 236 C 108 226, 154 222, 196 222 L196 112 C 158 112, 116 116, 96 122 Z"
+                fill="url(#bk-tint)" stroke="url(#bk-g)" stroke-width="3" stroke-linejoin="round"/>
+          <path d="M336 236 C 292 226, 246 222, 204 222 L204 112 C 242 112, 284 116, 304 122 Z"
+                fill="url(#bk-tint)" stroke="url(#bk-g)" stroke-width="3" stroke-linejoin="round"/>
+          <!-- gutter: the recess -->
+          <rect x="150" y="112" width="46" height="110" fill="url(#bk-gutL)"/>
+          <rect x="204" y="112" width="46" height="110" fill="url(#bk-gutR)"/>
+          <rect x="196" y="112" width="8" height="110" fill="url(#bk-void)"/>
+          <!-- text, following each page's slant -->
+          <line x1="100" y1="138" x2="180" y2="132" stroke="#fb923c" stroke-opacity="0.32" stroke-width="2.2" stroke-linecap="round"/>
+          <line x1="100" y1="150" x2="168" y2="145" stroke="#fb923c" stroke-opacity="0.32" stroke-width="2.2" stroke-linecap="round"/>
+          <line x1="100" y1="162" x2="176" y2="156" stroke="#fb923c" stroke-opacity="0.32" stroke-width="2.2" stroke-linecap="round"/>
+          <line x1="100" y1="174" x2="148" y2="170" stroke="#fb923c" stroke-opacity="0.32" stroke-width="2.2" stroke-linecap="round"/>
+          <line x1="100" y1="186" x2="172" y2="181" stroke="#fb923c" stroke-opacity="0.32" stroke-width="2.2" stroke-linecap="round"/>
+          <line x1="100" y1="198" x2="164" y2="193" stroke="#fb923c" stroke-opacity="0.32" stroke-width="2.2" stroke-linecap="round"/>
+          <line x1="100" y1="210" x2="136" y2="207" stroke="#fb923c" stroke-opacity="0.32" stroke-width="2.2" stroke-linecap="round"/>
+          <line x1="220" y1="132" x2="296" y2="138" stroke="#fb923c" stroke-opacity="0.32" stroke-width="2.2" stroke-linecap="round"/>
+          <line x1="220" y1="144" x2="300" y2="150" stroke="#fb923c" stroke-opacity="0.32" stroke-width="2.2" stroke-linecap="round"/>
+          <line x1="220" y1="156" x2="276" y2="160" stroke="#fb923c" stroke-opacity="0.32" stroke-width="2.2" stroke-linecap="round"/>
+          <line x1="220" y1="168" x2="292" y2="173" stroke="#fb923c" stroke-opacity="0.32" stroke-width="2.2" stroke-linecap="round"/>
+          <line x1="220" y1="180" x2="264" y2="183" stroke="#fb923c" stroke-opacity="0.32" stroke-width="2.2" stroke-linecap="round"/>
+          <line x1="220" y1="192" x2="288" y2="197" stroke="#fb923c" stroke-opacity="0.32" stroke-width="2.2" stroke-linecap="round"/>
+          <line x1="220" y1="204" x2="272" y2="208" stroke="#fb923c" stroke-opacity="0.32" stroke-width="2.2" stroke-linecap="round"/>
+          <path d="M206 106 C 240 82, 282 60, 330 50" fill="none" stroke="#fb923c" stroke-opacity=".6"
+                stroke-width="2" stroke-dasharray="3 5" stroke-linecap="round"/>
+          <g transform="translate(322 8)">
+            <rect width="64" height="64" rx="16" fill="url(#bk-g)"/>
+            <g transform="matrix(0.05572,0,0,-0.05572,19.5728,38.5758)"><path d="M265 -28 252 95 498 431H406L240 203L227 332C222 375 219 441 158 441C90 441 64 356 60 303L81 296C88 339 109 361 149 361C192 361 193 314 197 282L210 164L-52 -195H40L222 57L236 -62C241 -103 246 -205 307 -205C363 -205 398 -133 402 -73L381 -66C374 -86 370 -130 319 -130C279 -130 268 -59 265 -28Z" fill="#fff"/></g>
+          </g>
+        </svg>
       </div>
     </div>
   </header>
@@ -108,39 +176,21 @@ qsm-core = { <span class="k">git</span> = <span class="s">"https://github.com/as
     </section>
 
     <section class="qsm-section" style="text-align:left">
-      <h2>40+ algorithms, every stage</h2>
-      <p style="margin:0 0 2rem">A complete reconstruction toolkit. Each method is validated against a reference implementation in Julia, MATLAB, or C++ — see the README for the full citation list.</p>
+      <h2>50+ algorithms, every stage</h2>
+      <p style="margin:0 0 2rem">A complete reconstruction toolkit. Classical methods are validated against a reference implementation in Julia, MATLAB, or C++; the 16 deep-learning methods (marked <span class="dl">DL</span>) run through ONNX and need the <code>onnx</code> feature plus downloadable weights. See the README for the full citation list.</p>
       <div class="algo-grid" style="text-align:left">
-        <div class="algo-card"><h3>Brain extraction <span class="count">1</span></h3><p class="list">BET</p></div>
+        <div class="algo-card"><h3>Brain extraction <span class="count">2</span></h3><p class="list">BET, HD-BET&nbsp;<span class="dl">DL</span></p></div>
         <div class="algo-card"><h3>Phase unwrapping <span class="count">2</span></h3><p class="list">ROMEO, Laplacian</p></div>
-        <div class="algo-card"><h3>Background field removal <span class="count">8</span></h3><p class="list">V-SHARP, SHARP, RESHARP, SMV, PDF, iSMV, LBV, SDF</p></div>
-        <div class="algo-card"><h3>Unwrap + BFR combined <span class="count">2</span></h3><p class="list">HARPERELLA, iHARPERELLA</p></div>
-        <div class="algo-card"><h3>Dipole inversion <span class="count">8</span></h3><p class="list">TKD, TSVD, Tikhonov, TV, NLTV, RTS, MEDI, iLSQR</p></div>
-        <div class="algo-card"><h3>End-to-end QSM <span class="count">2</span></h3><p class="list">TGV, QSMART</p></div>
-        <div class="algo-card"><h3>Source separation <span class="count">1</span></h3><p class="list">χ-separation (paramagnetic / diamagnetic)</p></div>
-        <div class="algo-card"><h3>Multi-echo &amp; SWI <span class="count">3</span></h3><p class="list">MCPC-3D-S, R2*/T2* (ARLO), CLEAR-SWI</p></div>
-        <div class="algo-card"><h3>Preprocessing &amp; utilities <span class="count">4</span></h3><p class="list">Bias correction, Otsu, Frangi filter, surface curvature</p></div>
+        <div class="algo-card"><h3>Background field removal <span class="count">8</span></h3><p class="list">V-SHARP, SHARP, RESHARP, PDF, iSMV, LBV, mSMV, BFRnet&nbsp;<span class="dl">DL</span></p></div>
+        <div class="algo-card"><h3>Unwrap + BFR combined <span class="count">3</span></h3><p class="list">HARPERELLA, iHARPERELLA, iQFM&nbsp;<span class="dl">DL</span></p></div>
+        <div class="algo-card"><h3>Dipole inversion <span class="count">22</span></h3><p class="list">TKD, TSVD, Tikhonov, TV, NLTV, RTS, MEDI, iLSQR, NDI, FANSI (nlTV), FANSI (nlTGV), L1-QSM, WH-QSM, HD-QSM, AMP-PE, xQSM&nbsp;<span class="dl">DL</span>, QSMnet&nbsp;<span class="dl">DL</span>, QSMnet+&nbsp;<span class="dl">DL</span>, QSMGAN&nbsp;<span class="dl">DL</span>, IR2QSM&nbsp;<span class="dl">DL</span>, LPCNN&nbsp;<span class="dl">DL</span>, MoDL-QSM&nbsp;<span class="dl">DL</span></p></div>
+        <div class="algo-card"><h3>Single-step &amp; end-to-end <span class="count">7</span></h3><p class="list">TGV, QSMART, TFI, AutoQSM&nbsp;<span class="dl">DL</span>, NeXtQSM&nbsp;<span class="dl">DL</span>, iQSM&nbsp;<span class="dl">DL</span>, iQSM+&nbsp;<span class="dl">DL</span></p></div>
+        <div class="algo-card"><h3>Source separation <span class="count">8</span></h3><p class="list">&chi;-separation (iLSQR), &chi;-separation (MEDI), R2*-QSM, WaveSep, DECOMPOSE, HC-ChiSep, SUSEP-Net&nbsp;<span class="dl">DL</span>, &chi;-sepnet&nbsp;<span class="dl">DL</span></p></div>
+        <div class="algo-card"><h3>Multi-echo &amp; SWI <span class="count">5</span></h3><p class="list">MCPC-3D-S, R2*/T2* (ARLO), R2 (EPG), R2&prime;, CLEAR-SWI</p></div>
+        <div class="algo-card"><h3>Preprocessing &amp; utilities <span class="count">6</span></h3><p class="list">Bias correction, MP-PCA denoising, Gibbs unringing, Otsu, Frangi filter, surface curvature</p></div>
       </div>
     </section>
 
-    <section class="qsm-section" style="text-align:left">
-      <h2>Part of the QSMxT Ecosystem</h2>
-      <p style="margin:0 0 2rem">If you're not writing Rust, one of these is probably what you want. They all call into this library.</p>
-      <div class="eco-grid" style="text-align:left">
-        <a class="eco-card xt" href="https://qsmxt.github.io/QSMxT/">
-          <span class="role">Pipeline</span><div class="nm">QSMxT</div>
-          <p class="ds">Command-line pipeline and TUI for BIDS datasets, built for batch and cluster processing.</p>
-        </a>
-        <a class="eco-card bly" href="https://qsmbly.neurodesk.org/">
-          <span class="role">Browser app</span><div class="nm">QSMbly</div>
-          <p class="ds">This library compiled to WebAssembly. Run QSM in your browser, with nothing to install.</p>
-        </a>
-        <a class="eco-card ci" href="https://qsmxt.github.io/QSM-CI/">
-          <span class="role">Benchmark</span><div class="nm">QSM-CI</div>
-          <p class="ds">Open leaderboard scoring QSM methods, in any language, against phantom ground truth.</p>
-        </a>
-      </div>
-    </section>
   </main>
 
   <footer class="qsm-footer qsm-wrap">
