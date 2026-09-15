@@ -60,10 +60,9 @@ NAMES = {
     "ground_truth_total_field": "Ground truth total field",
     "unwrap_raw_romeo": "ROMEO (unwrapped)",
     "unwrap_raw_laplacian_neumann": "Laplacian (unwrapped)",
-    "unwrap_raw_laplacian_dirichlet": "Laplacian + BFR (unwrapped)",
     "unwrap_bfr_romeo": "ROMEO + V-SHARP",
     "unwrap_bfr_laplacian_neumann": "Laplacian + V-SHARP",
-    "unwrap_bfr_laplacian_dirichlet": "Laplacian + BFR + V-SHARP",
+    "unwrap_bfr_single": "Laplacian + BFR (single volume) — local field",
     "unwrap_bfr_stage_laplacian": "run_field_mapping(Laplacian) + V-SHARP",
     "pipeline_harperella": "HARPERELLA",
     "pipeline_iharperella": "iHARPERELLA",
@@ -98,7 +97,6 @@ NAMES = {
     "ground_truth_total_field": "Ground truth",
     "unwrap_raw_romeo": "ROMEO",
     "unwrap_raw_laplacian_neumann": "Laplacian",
-    "unwrap_raw_laplacian_dirichlet": "Laplacian + BFR",
     "ground_truth_chi": "Ground truth",
     "chisep_para_truth": "Ground truth",
     "chisep_dia_truth": "Ground truth",
@@ -163,10 +161,9 @@ WINDOWS = {
     "ground_truth_total_field": (-0.05, 0.05),
     "unwrap_raw_romeo": (-0.05, 0.05),
     "unwrap_raw_laplacian_neumann": (-0.05, 0.05),
-    "unwrap_raw_laplacian_dirichlet": (-0.05, 0.05),
     "unwrap_bfr_romeo": (-0.025, 0.025),
     "unwrap_bfr_laplacian_neumann": (-0.025, 0.025),
-    "unwrap_bfr_laplacian_dirichlet": (-0.025, 0.025),
+    "unwrap_bfr_single": (-0.025, 0.025),
     "unwrap_bfr_stage_laplacian": (-0.025, 0.025),
     "pipeline_harperella": (-0.025, 0.025),
     "pipeline_iharperella": (-0.025, 0.025),
@@ -262,8 +259,7 @@ SUPPLEMENTARY = ("stage_supplementary", "Supplementary outputs", None, None, [
 # defined up to one. Shown so that difference is visible rather than asserted — the
 # like-for-like comparison is the local-field table.
 MONTAGES.append(("stage_unwrap", "Unwrapped total field maps", "ppm", (-0.05, 0.05), [
-    ["ground_truth_total_field", "unwrap_raw_romeo", "unwrap_raw_laplacian_neumann",
-     "unwrap_raw_laplacian_dirichlet"],
+    ["ground_truth_total_field", "unwrap_raw_romeo", "unwrap_raw_laplacian_neumann"],
 ], None))
 
 MONTAGES.append(SUPPLEMENTARY)

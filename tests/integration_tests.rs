@@ -75,9 +75,9 @@ fn run_field_mapping(data: &common::TestData) -> Vec<f64> {
 
 /// Field mapping via Laplacian unwrapping, for either boundary condition.
 ///
-/// Identical to `run_field_mapping` except for the unwrapper, so the two Laplacian
-/// variants are compared against ROMEO on equal terms. Returns B0 in Hz.
-fn run_field_mapping_laplacian(data: &common::TestData, neumann: bool) -> Vec<f64> {
+/// Identical to `run_field_mapping` except for the unwrapper, so Laplacian is compared
+/// against ROMEO on equal terms. Returns B0 in Hz.
+fn run_field_mapping_laplacian(data: &common::TestData) -> Vec<f64> {
     let (nx, ny, nz) = data.dims;
     let (vsx, vsy, vsz) = data.voxel_size;
     let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
@@ -91,13 +91,7 @@ fn run_field_mapping_laplacian(data: &common::TestData, neumann: bool) -> Vec<f6
 
     let unwrapped: Vec<Vec<f64>> = corrected_phases
         .iter()
-        .map(|p| {
-            if neumann {
-                laplacian_unwrap(p, &data.mask, &grid)
-            } else {
-                laplacian_unwrap_bfr(p, &data.mask, &grid)
-            }
-        })
+        .map(|p| laplacian_unwrap(p, &data.mask, &grid))
         .collect();
 
     calculate_b0_weighted(
@@ -1242,8 +1236,7 @@ fn unwrap_then_bfr(data: &common::TestData, unwrapper: Unwrapper) -> (Vec<f64>, 
 
     let b0_hz = match unwrapper {
         Unwrapper::Romeo => run_field_mapping(data),
-        Unwrapper::LaplacianNeumann => run_field_mapping_laplacian(data, true),
-        Unwrapper::LaplacianDirichlet => run_field_mapping_laplacian(data, false),
+        Unwrapper::LaplacianNeumann => run_field_mapping_laplacian(data),
     };
 
     let gamma = 42.576e6_f64;
@@ -1260,7 +1253,6 @@ fn unwrap_then_bfr(data: &common::TestData, unwrapper: Unwrapper) -> (Vec<f64>, 
 enum Unwrapper {
     Romeo,
     LaplacianNeumann,
-    LaplacianDirichlet,
 }
 
 fn run_unwrap_bfr_case(label: &str, unwrapper: Unwrapper, slug: &str) -> TestResult {
@@ -1313,23 +1305,47 @@ fn test_pipeline_unwrap_bfr_laplacian_neumann() {
     );
 }
 
-/// Laplacian unwrapping combined with background removal, then V-SHARP.
+/// `laplacian_unwrap_bfr` on a single wrapped phase volume, scored against the ground-truth
+/// local field, with `bgremove::lbv` on the same field as the reference.
 ///
-/// V-SHARP has little left to do, this variant having already removed the background, so it
-/// lands alongside the others rather than below them.
+/// This is the input the function is designed for. It takes wrapped phase, so in a
+/// multi-echo pipeline the only way to use it is per echo before combining — a usage that
+/// has not been validated and is not what the algorithm describes. The unwrapper comparison
+/// therefore does not include it.
 #[test]
 #[ignore]
-fn test_pipeline_unwrap_bfr_laplacian_dirichlet() {
-    let res = run_unwrap_bfr_case(
-        "Laplacian + BFR + V-SHARP",
-        Unwrapper::LaplacianDirichlet,
-        "laplacian_dirichlet",
-    );
-    assert!(
-        res.correlation > 0.45,
-        "Laplacian + BFR local field correlation too low: {}",
-        res.correlation
-    );
+fn test_unwrap_bfr_single_volume() {
+    use std::f64::consts::PI;
+    println!("[INFO] Loading test data...");
+    let data = TestData::load().expect("Failed to load test data");
+    let (nx, ny, nz) = data.dims;
+    let (vsx, vsy, vsz) = data.voxel_size;
+    let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
+
+    // Phase from the ground-truth total field at the dataset's first-echo TE, which wraps
+    // inside the brain so the unwrapping half is exercised. Laplacian-family methods degrade
+    // at long TE on 7T data — at 12 ms even plain unwrapping followed by bgremove::lbv drops
+    // to r = 0.69 — so this is not a place to be ambitious with the echo time.
+    let ppm_to_hz = 42.576e6 * data.field_strength / 1e6;
+    let te = data.echo_times[0];
+    let wrap = |x: f64| { let y = x.rem_euclid(2.0 * PI); if y > PI { y - 2.0 * PI } else { y } };
+    let phase: Vec<f64> = data.fieldmap.iter().map(|&p| wrap(2.0 * PI * p * ppm_to_hz * te)).collect();
+
+    let start = Instant::now();
+    let out = laplacian_unwrap_bfr(&phase, &data.mask, &grid);
+    let elapsed = start.elapsed();
+    let local_ppm: Vec<f64> = out.iter().map(|&v| v / (2.0 * PI * te) / ppm_to_hz).collect();
+
+    let res = TestResult::new("Laplacian + BFR (single volume)", &local_ppm, &data.fieldmap_local, &data.mask, data.dims);
+    res.print_with_time(elapsed);
+    res.print_ci_metrics(elapsed);
+    common::save_center_slices(&local_ppm, &data.mask, data.dims, "unwrap_bfr_single");
+
+    let (lbv, lbv_mask) = bgremove::lbv(&data.fieldmap, &data.mask, &grid, &LbvParams::default(), |_, _| {});
+    let reference = TestResult::new("LBV (reference)", &lbv, &data.fieldmap_local, &lbv_mask, data.dims);
+    println!("[INFO] reference bgremove::lbv on the same field: r = {:.4}", reference.correlation);
+
+    assert!(res.correlation > 0.75, "Laplacian + BFR local field correlation too low: {}", res.correlation);
 }
 
 /// Drives the shared field-mapping stage with `UnwrappingAlgorithm::Laplacian` — the path
@@ -2082,5 +2098,6 @@ fn test_all_combinations() {
     println!("DONE — results written to {}", csv_path);
     println!("{}", "=".repeat(120));
 }
+
 
 

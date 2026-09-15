@@ -183,6 +183,22 @@ pub(crate) fn solve_poisson_fft(
 /// Because ∇²(harmonic) = 0, the discarded component leaves no trace in the input to the
 /// Poisson solve and cannot be restored afterwards.
 ///
+/// # Intended input
+/// One wrapped phase volume. On the project's test data it then matches
+/// [`crate::bgremove::lbv`] on the same field (r = 0.887 against 0.909, identical residual
+/// smooth content). It takes *wrapped phase*, so in a multi-echo pipeline the only way to
+/// apply it is to each echo before combining; that usage is not what the algorithm
+/// describes, has not been validated, and leaves visibly more background than either
+/// unwrapping then a field-map background removal or this function on a single volume.
+/// For multi-echo data use [`laplacian_unwrap`] or ROMEO, combine, then a background
+/// removal from [`crate::bgremove`].
+///
+/// # Echo time
+/// Accuracy falls off with the amount of phase to unwrap. On the 7 T test data, against
+/// the ground-truth local field: r = 0.84 at TE = 4 ms, 0.70 at 8 ms, 0.50 at 12 ms —
+/// where unwrapping then [`crate::bgremove::lbv`] gives 0.86, 0.84, 0.69 and
+/// [`crate::bgremove::vsharp`] holds near 0.82 throughout. Prefer the earliest echo.
+///
 /// # Arguments
 /// * `phase` - Wrapped phase (nx * ny * nz)
 /// * `mask` - Binary mask (nx * ny * nz), 1 = inside ROI

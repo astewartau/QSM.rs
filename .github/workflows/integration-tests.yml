@@ -50,7 +50,7 @@ jobs:
           all_bgremove='["test_bgremove_sharp","test_bgremove_resharp","test_bgremove_vsharp","test_bgremove_pdf","test_bgremove_ismv","test_bgremove_lbv"]'
           all_inversion='["test_inversion_tkd","test_inversion_tsvd","test_inversion_tikhonov","test_inversion_tv","test_inversion_rts","test_inversion_ilsqr","test_inversion_medi","test_inversion_nltv","test_inversion_ndi","test_inversion_fansi","test_inversion_fansi_tgv","test_inversion_l1qsm","test_inversion_whqsm","test_inversion_hdqsm","test_inversion_amp_pe"]'
           all_combined='["test_combined_tgv","test_combined_tfi"]'
-          all_pipeline='["test_pipeline_romeo_b0","test_pipeline_unwrap_bfr_romeo","test_pipeline_unwrap_bfr_laplacian_neumann","test_pipeline_unwrap_bfr_laplacian_dirichlet","test_pipeline_unwrap_bfr_stage_laplacian","test_pipeline_tgv","test_pipeline_qsmart","test_pipeline_qsmart_tikhonov","test_pipeline_harperella","test_pipeline_iharperella","test_bias_correction","test_swi","test_r2star_t2star"]'
+          all_pipeline='["test_pipeline_romeo_b0","test_pipeline_unwrap_bfr_romeo","test_pipeline_unwrap_bfr_laplacian_neumann","test_unwrap_bfr_single_volume","test_pipeline_unwrap_bfr_stage_laplacian","test_pipeline_tgv","test_pipeline_qsmart","test_pipeline_qsmart_tikhonov","test_pipeline_harperella","test_pipeline_iharperella","test_bias_correction","test_swi","test_r2star_t2star"]'
           # χ-separation entries are whole test *binaries* (each runs several methods).
           all_chisep='["chisep_qsmci","chisep_relaxometry_qsmci","chisep_xsepnet"]'
           # Deep-learning models (in tests/dl_models.rs; weights fetched from the registry).
@@ -243,14 +243,14 @@ jobs:
               # Phase unwrapping
               src/unwrap/mod.rs)      pipeline="$pipeline test_pipeline_tgv test_pipeline_qsmart test_pipeline_qsmart_tikhonov" ;;
               src/unwrap/romeo.rs)    pipeline="$pipeline test_pipeline_romeo_b0 test_pipeline_unwrap_bfr_romeo test_pipeline_tgv" ;;
-              src/unwrap/laplacian.rs) pipeline="$pipeline test_pipeline_unwrap_bfr_laplacian_neumann test_pipeline_unwrap_bfr_laplacian_dirichlet test_pipeline_unwrap_bfr_stage_laplacian test_pipeline_qsmart test_pipeline_qsmart_tikhonov test_pipeline_harperella test_pipeline_iharperella" ;;
+              src/unwrap/laplacian.rs) pipeline="$pipeline test_pipeline_unwrap_bfr_laplacian_neumann test_unwrap_bfr_single_volume test_pipeline_unwrap_bfr_stage_laplacian test_pipeline_qsmart test_pipeline_qsmart_tikhonov test_pipeline_harperella test_pipeline_iharperella" ;;
 
               # Pipeline (combined algorithms + shared stages)
               src/pipeline/mod.rs|src/pipeline/config.rs|src/pipeline/phase_utils.rs|src/pipeline/referencing.rs)
                 echo "Pipeline core changed: $file → all tests"
                 output_all; exit 0 ;;
               src/pipeline/field_mapping.rs)
-                pipeline="$pipeline test_pipeline_romeo_b0 test_pipeline_unwrap_bfr_romeo test_pipeline_unwrap_bfr_laplacian_neumann test_pipeline_unwrap_bfr_laplacian_dirichlet test_pipeline_unwrap_bfr_stage_laplacian test_pipeline_tgv test_pipeline_qsmart test_pipeline_qsmart_tikhonov" ;;
+                pipeline="$pipeline test_pipeline_romeo_b0 test_pipeline_unwrap_bfr_romeo test_pipeline_unwrap_bfr_laplacian_neumann test_unwrap_bfr_single_volume test_pipeline_unwrap_bfr_stage_laplacian test_pipeline_tgv test_pipeline_qsmart test_pipeline_qsmart_tikhonov" ;;
               src/pipeline/bg_removal.rs)
                 bgremove="$bgremove test_bgremove_sharp test_bgremove_resharp test_bgremove_vsharp test_bgremove_pdf test_bgremove_ismv test_bgremove_lbv"
                 pipeline="$pipeline test_pipeline_harperella test_pipeline_iharperella" ;;
@@ -265,7 +265,7 @@ jobs:
 
               # Utils (QSMART components)
               src/utils/multi_echo.rs)
-                pipeline="$pipeline test_pipeline_romeo_b0 test_pipeline_unwrap_bfr_romeo test_pipeline_unwrap_bfr_laplacian_neumann test_pipeline_unwrap_bfr_laplacian_dirichlet test_pipeline_unwrap_bfr_stage_laplacian test_pipeline_tgv test_pipeline_qsmart test_pipeline_qsmart_tikhonov" ;;
+                pipeline="$pipeline test_pipeline_romeo_b0 test_pipeline_unwrap_bfr_romeo test_pipeline_unwrap_bfr_laplacian_neumann test_unwrap_bfr_single_volume test_pipeline_unwrap_bfr_stage_laplacian test_pipeline_tgv test_pipeline_qsmart test_pipeline_qsmart_tikhonov" ;;
               src/utils/vasculature.rs|src/utils/frangi.rs|src/utils/curvature.rs|src/utils/qsmart.rs)
                 pipeline="$pipeline test_pipeline_qsmart test_pipeline_qsmart_tikhonov" ;;
               src/utils/bias_correction.rs)
@@ -1362,13 +1362,12 @@ jobs:
               echo ""
             fi
 
-            if TABLE=$(emit_table "test_pipeline_unwrap_bfr_" romeo laplacian_neumann laplacian_dirichlet stage_laplacian); then
+            if TABLE=$(emit_table "test_pipeline_unwrap_bfr_" romeo laplacian_neumann stage_laplacian); then
               echo "### Unwrapper Comparison (local field, after background removal)"
               echo "*Each unwrapper → field map → V-SHARP → local field, vs ground truth.*"
               echo ""
               echo "Total field maps differ between unwrappers by an arbitrary harmonic field, so they are"
-              echo "compared after background removal. ROMEO and Laplacian should land close; Laplacian"
-              echo "(ROI-masked) removes background itself and is expected to score worse. The last row"
+              echo "compared after background removal. ROMEO and Laplacian should land close. The last row"
               echo "drives the shared \`run_field_mapping\` stage, and is what catches a config selecting the"
               echo "wrong variant."
               echo ""
@@ -1378,7 +1377,27 @@ jobs:
               emit_figures stage_unwrap
               echo "After V-SHARP:"
               echo ""
-              emit_figures unwrap_bfr_romeo unwrap_bfr_laplacian_neumann unwrap_bfr_laplacian_dirichlet unwrap_bfr_stage_laplacian
+              emit_figures unwrap_bfr_romeo unwrap_bfr_laplacian_neumann unwrap_bfr_stage_laplacian
+              echo ""
+            fi
+
+            if [ -f "metrics/test_unwrap_bfr_single_volume.csv" ]; then
+              echo "### Combined Unwrapping + Background Removal"
+              echo "*\`laplacian_unwrap_bfr\` on one wrapped volume at the first-echo TE, vs ground truth local field.*"
+              echo ""
+              line=$(grep "^RESULT:" metrics/test_unwrap_bfr_single_volume.csv | head -1 | sed 's/^RESULT://')
+              IFS=',' read -r name rmse nrmse nrmse_ch corr xsim time <<< "$line"
+              if [ "$rmse" = "-" ]; then
+                echo "| Method | RMSE | NRMSE (range) | NRMSE% (χ) | Correlation | XSIM | Time |"
+                echo "|--------|------|---------------|------------|-------------|------|------|"
+                echo "| ${name} | :x: Failed | - | - | - | - | - |"
+              else
+                echo "| Method | RMSE | NRMSE (range) | NRMSE% (χ) | Correlation | XSIM | Time |"
+                echo "|--------|------|---------------|------------|-------------|------|------|"
+                echo "| ${name} | ${rmse} | ${nrmse} | ${nrmse_ch} | ${corr} | ${xsim} | $(printf '%.2fs' "$time") |"
+              fi
+              echo ""
+              emit_figures unwrap_bfr_single
               echo ""
             fi
 
