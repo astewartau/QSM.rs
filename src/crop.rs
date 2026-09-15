@@ -8,27 +8,38 @@
 //! a UK Biobank SWI it takes the resampled grid from 4.5× the cost of the acquired grid down to
 //! parity.
 //!
-//! Two things make the difference, and the second is easy to miss:
+//! Two things make the difference, and they are worth separating because their risk differs:
 //!
-//! - **Fewer voxels.** Mask bounding box plus a margin, rather than the full field of view.
-//! - **Sizes an FFT likes.** A cropped extent of 339 has a prime factor of 113, which pushes
-//!   `rustfft` onto Bluestein's algorithm; 340 factors as 2²·5·17 and is measurably faster
-//!   despite being *larger*. [`next_fft_friendly_size`] rounds each axis up accordingly, which
-//!   costs a few thousand voxels and buys back far more.
+//! - **Fewer voxels** ([`crop_box_for_mask`]). Mask bounding box plus a margin, rather than the
+//!   full field of view. This moves the FFT's periodic boundary *closer* to the object.
+//! - **Sizes an FFT likes** ([`fft_pad_box`]). An extent with a large prime factor pushes
+//!   `rustfft` onto Bluestein's algorithm. An axially-resampled UK Biobank grid comes out
+//!   272×339×77 — that is 2⁴·17, 3·113 and 7·11, awkward on every axis, which is what resampling
+//!   to a bounding box tends to produce. Padding to 280×343×80 costs 8% more voxels and takes the
+//!   transform from 131 ms to 71 ms, a 1.85× speedup. Padding moves the boundary *further* from
+//!   the object, so unlike cropping it carries no wrap-around risk.
+//!
+//! Both are expressed as a [`CropBox`], which may sit inside the grid (cropping), extend beyond
+//! it (padding), or do both on different axes.
 //!
 //! ## This changes the numbers, not just the speed
 //!
-//! FFT-based reconstruction is periodic, so moving the boundary closer to the object brings
-//! wrap-around with it. The dipole kernel in particular has infinite support. [`margin_voxels`]
-//! takes the margin in **millimetres** so anisotropic voxels get a geometrically equal margin on
-//! every side, and callers should validate a cropped reconstruction against an uncropped one
-//! before trusting it, rather than assuming the two agree.
+//! This caveat applies to **cropping**, not to padding. FFT-based reconstruction is periodic, so
+//! moving the boundary closer to the object brings wrap-around with it, and the dipole kernel has
+//! infinite support. Measured on a UK Biobank acquisition, a crop that actually removed voxels
+//! changed χ by ~0.6% of its dynamic range at the median and ~4% at the 99th percentile.
+//! [`margin_voxels`] takes the margin in **millimetres** so anisotropic voxels get a
+//! geometrically equal margin on every side, but a caller should still validate a cropped
+//! reconstruction against an uncropped one rather than assume the two agree.
+//!
+//! [`fft_pad_box`] has no such caveat: it discards nothing and only moves the boundary outward.
 
 /// A box within a larger grid: where reconstruction actually happens.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CropBox {
-    /// Index of the box's first voxel in the full grid.
-    pub origin: (usize, usize, usize),
+    /// Index of the box's first voxel in the full grid. **May be negative**, which means the box
+    /// extends past the edge and those voxels are padding rather than data.
+    pub origin: (isize, isize, isize),
     /// Size of the box.
     pub dims: (usize, usize, usize),
     /// Size of the grid the box sits in.
@@ -39,6 +50,17 @@ impl CropBox {
     /// A box covering the whole grid — cropping is then a no-op.
     pub fn full(full_dims: (usize, usize, usize)) -> Self {
         Self { origin: (0, 0, 0), dims: full_dims, full_dims }
+    }
+
+    /// Whether any axis reaches outside the grid, i.e. whether this box pads.
+    pub fn pads(&self) -> bool {
+        let (ox, oy, oz) = self.origin;
+        let (dx, dy, dz) = self.dims;
+        let (fx, fy, fz) = self.full_dims;
+        ox < 0 || oy < 0 || oz < 0
+            || ox + dx as isize > fx as isize
+            || oy + dy as isize > fy as isize
+            || oz + dz as isize > fz as isize
     }
 
     /// Whether this box is the whole grid.
@@ -55,6 +77,8 @@ impl CropBox {
     }
 
     /// How many times fewer voxels than the full grid.
+    /// Full-grid voxels per box voxel. Above 1 the box is smaller than the grid (a net crop);
+    /// below 1 it is larger (a net pad).
     pub fn reduction(&self) -> f64 {
         if self.voxels() == 0 { 1.0 } else { self.full_voxels() as f64 / self.voxels() as f64 }
     }
@@ -126,7 +150,7 @@ pub fn crop_box_for_mask(
 ) -> CropBox {
     let (nx, ny, nz) = full_dims;
     if mask.len() != nx * ny * nz {
-        return CropBox::full(full_dims);
+        return fft_pad_box(full_dims);
     }
 
     let (mut lo, mut hi) = ([usize::MAX; 3], [0usize; 3]);
@@ -145,34 +169,54 @@ pub fn crop_box_for_mask(
         }
     }
     if !any {
-        return CropBox::full(full_dims);
+        return fft_pad_box(full_dims);
     }
 
     let margin = margin_voxels(margin_mm, voxel_size);
     let margin = [margin.0, margin.1, margin.2];
-    let full = [nx, ny, nz];
-    let (mut origin, mut dims) = ([0usize; 3], [0usize; 3]);
+    let full = [nx as isize, ny as isize, nz as isize];
+    let (mut origin, mut dims) = ([0isize; 3], [0usize; 3]);
 
     for d in 0..3 {
-        let start = lo[d].saturating_sub(margin[d]);
-        let end = (hi[d] + margin[d] + 1).min(full[d]); // exclusive
-        let wanted = next_fft_friendly_size(end - start);
-        if wanted >= full[d] {
-            // Rounding up covers the axis anyway; leave it alone rather than pay for a copy.
-            origin[d] = 0;
-            dims[d] = full[d];
-            continue;
-        }
-        // Grow symmetrically around the box, then slide back inside the grid.
+        // Wanted extent: the mask plus its margin, clipped to what actually exists.
+        let start = (lo[d] as isize - margin[d] as isize).max(0);
+        let end = ((hi[d] + margin[d] + 1) as isize).min(full[d]);
+        let wanted = next_fft_friendly_size((end - start) as usize) as isize;
+        // Centre the FFT-friendly extent on that window. It may reach outside the grid, in which
+        // case those voxels are padding — which is safe, since padding only moves the periodic
+        // boundary further from the object.
         let extra = wanted - (end - start);
-        let mut s = start.saturating_sub(extra / 2);
-        if s + wanted > full[d] {
-            s = full[d] - wanted;
+        let mut s0 = start - extra / 2;
+        // Prefer to stay inside the grid where the extent allows it.
+        if wanted <= full[d] {
+            s0 = s0.clamp(0, full[d] - wanted);
         }
-        origin[d] = s;
-        dims[d] = wanted;
+        origin[d] = s0;
+        dims[d] = wanted as usize;
     }
 
+    CropBox {
+        origin: (origin[0], origin[1], origin[2]),
+        dims: (dims[0], dims[1], dims[2]),
+        full_dims,
+    }
+}
+
+/// A box covering the whole grid, each axis grown outward to an FFT-friendly size.
+///
+/// The accuracy-neutral half of this module: no data is discarded and the periodic boundary moves
+/// *away* from the object, so the only cost is the padded voxels. Worth doing whenever an axis
+/// has an awkward length — 339 = 3·113 costs about a third more transform time than 343 = 7³
+/// despite holding fewer voxels.
+pub fn fft_pad_box(full_dims: (usize, usize, usize)) -> CropBox {
+    let full = [full_dims.0, full_dims.1, full_dims.2];
+    let (mut origin, mut dims) = ([0isize; 3], [0usize; 3]);
+    for d in 0..3 {
+        let wanted = next_fft_friendly_size(full[d]);
+        // Centre the grid in the padded extent so the object stays central.
+        origin[d] = -(((wanted - full[d]) / 2) as isize);
+        dims[d] = wanted;
+    }
     CropBox {
         origin: (origin[0], origin[1], origin[2]),
         dims: (dims[0], dims[1], dims[2]),
@@ -185,18 +229,42 @@ pub fn crop_box_for_mask(
 /// # Panics
 /// If `data` does not match the box's `full_dims`.
 pub fn crop_volume<T: Copy + Default>(data: &[T], b: &CropBox) -> Vec<T> {
-    let (nx, ny, _) = b.full_dims;
+    crop_volume_with(data, b, T::default())
+}
+
+/// Copy the box out of a full-grid volume, filling anything outside the grid with `fill`.
+///
+/// # Panics
+/// If `data` does not match the box's `full_dims`.
+pub fn crop_volume_with<T: Copy>(data: &[T], b: &CropBox, fill: T) -> Vec<T> {
+    let (nx, ny, nz) = b.full_dims;
     assert_eq!(data.len(), b.full_voxels(), "crop_volume: data does not match the full grid");
     if b.is_full() {
         return data.to_vec();
     }
     let (cx, cy, cz) = b.dims;
     let (ox, oy, oz) = b.origin;
-    let mut out = Vec::with_capacity(b.voxels());
+    let mut out = vec![fill; b.voxels()];
     for z in 0..cz {
+        let sz = oz + z as isize;
+        if sz < 0 || sz >= nz as isize {
+            continue;
+        }
         for y in 0..cy {
-            let row = (ox) + (oy + y) * nx + (oz + z) * nx * ny;
-            out.extend_from_slice(&data[row..row + cx]);
+            let sy = oy + y as isize;
+            if sy < 0 || sy >= ny as isize {
+                continue;
+            }
+            // Clip the row to the part that exists in the source.
+            let x0 = (-ox).max(0);
+            let x1 = (nx as isize - ox).min(cx as isize);
+            if x1 <= x0 {
+                continue;
+            }
+            let src = (ox + x0) as usize + sy as usize * nx + sz as usize * nx * ny;
+            let dst = x0 as usize + y * cx + z * cx * cy;
+            let len = (x1 - x0) as usize;
+            out[dst..dst + len].copy_from_slice(&data[src..src + len]);
         }
     }
     out
@@ -212,15 +280,29 @@ pub fn uncrop_volume<T: Copy>(data: &[T], b: &CropBox, fill: T) -> Vec<T> {
     if b.is_full() {
         return data.to_vec();
     }
-    let (nx, ny, _) = b.full_dims;
+    let (nx, ny, nz) = b.full_dims;
     let (cx, cy, cz) = b.dims;
     let (ox, oy, oz) = b.origin;
     let mut out = vec![fill; b.full_voxels()];
     for z in 0..cz {
+        let dz = oz + z as isize;
+        if dz < 0 || dz >= nz as isize {
+            continue; // padding: nothing in the grid to write it to
+        }
         for y in 0..cy {
-            let src = (y * cx) + z * cx * cy;
-            let dst = ox + (oy + y) * nx + (oz + z) * nx * ny;
-            out[dst..dst + cx].copy_from_slice(&data[src..src + cx]);
+            let dy = oy + y as isize;
+            if dy < 0 || dy >= ny as isize {
+                continue;
+            }
+            let x0 = (-ox).max(0);
+            let x1 = (nx as isize - ox).min(cx as isize);
+            if x1 <= x0 {
+                continue;
+            }
+            let src = x0 as usize + y * cx + z * cx * cy;
+            let dst = (ox + x0) as usize + dy as usize * nx + dz as usize * nx * ny;
+            let len = (x1 - x0) as usize;
+            out[dst..dst + len].copy_from_slice(&data[src..src + len]);
         }
     }
     out
@@ -270,13 +352,18 @@ mod tests {
         assert_eq!(margin_voxels(0.0, (1.0, 1.0, 1.0)), (0, 0, 0));
     }
 
+    /// With nothing to crop to, fall back to padding — never to discarding data.
     #[test]
-    fn empty_or_full_mask_gives_the_whole_grid() {
-        let full = (16, 16, 8);
-        assert!(crop_box_for_mask(&vec![0u8; 16 * 16 * 8], full, (1.0, 1.0, 1.0), 4.0).is_full());
-        assert!(crop_box_for_mask(&vec![1u8; 16 * 16 * 8], full, (1.0, 1.0, 1.0), 4.0).is_full());
-        // A mismatched mask is ignored rather than panicking.
-        assert!(crop_box_for_mask(&vec![1u8; 10], full, (1.0, 1.0, 1.0), 4.0).is_full());
+    fn empty_or_unusable_mask_falls_back_to_padding() {
+        let full = (16, 16, 8); // already 7-smooth, so the pad box is the grid itself
+        for mask in [vec![0u8; 16 * 16 * 8], vec![1u8; 16 * 16 * 8], vec![1u8; 10]] {
+            let b = crop_box_for_mask(&mask, full, (1.0, 1.0, 1.0), 4.0);
+            assert!(b.is_full(), "{:?}+{:?}", b.origin, b.dims);
+        }
+        // On an awkward grid the fallback pads instead of leaving it alone.
+        let awkward = (17, 16, 8);
+        let b = crop_box_for_mask(&vec![0u8; 17 * 16 * 8], awkward, (1.0, 1.0, 1.0), 4.0);
+        assert!(b.pads() && b.dims.0 == next_fft_friendly_size(17));
     }
 
     #[test]
@@ -285,13 +372,19 @@ mod tests {
         let mask = box_mask(full, (20, 24, 10), (40, 44, 20));
         let b = crop_box_for_mask(&mask, full, (1.0, 1.0, 1.0), 3.0);
         assert!(!b.is_full(), "should have cropped something");
+        let lo = [b.origin.0, b.origin.1, b.origin.2];
+        let hi = [
+            b.origin.0 + b.dims.0 as isize,
+            b.origin.1 + b.dims.1 as isize,
+            b.origin.2 + b.dims.2 as isize,
+        ];
         // Every mask voxel, and 3 mm around it, is inside the box.
-        assert!(b.origin.0 + 3 <= 20 && b.origin.1 + 3 <= 24 && b.origin.2 + 3 <= 10);
-        assert!(b.origin.0 + b.dims.0 >= 40 + 1 + 3);
-        assert!(b.origin.1 + b.dims.1 >= 44 + 1 + 3);
-        assert!(b.origin.2 + b.dims.2 >= 20 + 1 + 3);
-        // Inside the grid, and FFT-friendly.
-        assert!(b.origin.0 + b.dims.0 <= full.0 && b.origin.1 + b.dims.1 <= full.1 && b.origin.2 + b.dims.2 <= full.2);
+        for (d, (mlo, mhi)) in [(20, 40), (24, 44), (10, 20)].iter().enumerate() {
+            assert!(lo[d] <= mlo - 3, "axis {d}: box starts at {}, mask-3 at {}", lo[d], mlo - 3);
+            assert!(hi[d] >= mhi + 1 + 3, "axis {d}: box ends at {}, mask+3 at {}", hi[d], mhi + 4);
+        }
+        // This one fits inside the grid, so it should not pad.
+        assert!(!b.pads(), "box {:?}+{:?} should stay inside {:?}", b.origin, b.dims, full);
         for d in [b.dims.0, b.dims.1, b.dims.2] {
             assert_eq!(next_fft_friendly_size(d), d, "{d} should already be FFT-friendly");
         }
@@ -309,12 +402,97 @@ mod tests {
         assert!(b.voxels() < b.full_voxels());
     }
 
+    // --- padding outward ---
+
+    /// A real axially-resampled UK Biobank grid. Every axis is awkward — 272 = 2⁴·17,
+    /// 339 = 3·113, 77 = 7·11 — which is exactly what resampling to a bounding box tends to
+    /// produce, and exactly what a radix-2/3/5/7 FFT is worst at.
+    #[test]
+    fn fft_pad_box_grows_every_awkward_axis() {
+        let b = fft_pad_box((272, 339, 77));
+        assert_eq!(b.dims, (280, 343, 80), "each axis should reach the next 7-smooth size");
+        assert!(b.pads());
+        // The grid stays centred in the padded extent.
+        assert_eq!(b.origin, (-4, -2, -1));
+        // Padding costs voxels rather than saving them, and not many.
+        assert!(b.reduction() < 1.0, "{}", b.reduction());
+        let overhead = b.voxels() as f64 / b.full_voxels() as f64 - 1.0;
+        assert!(overhead < 0.10, "padding overhead {overhead:.3} should stay under 10%");
+    }
+
+    #[test]
+    fn fft_pad_box_is_a_no_op_on_a_friendly_grid() {
+        let b = fft_pad_box((256, 288, 48));
+        assert!(b.is_full(), "already 7-smooth: {:?}+{:?}", b.origin, b.dims);
+        assert!(!b.pads());
+    }
+
+    /// Padding must not lose a single voxel: out and back is the identity.
+    #[test]
+    fn pad_then_unpad_is_lossless() {
+        let full = (17, 13, 5); // every axis awkward
+        let n = full.0 * full.1 * full.2;
+        let data: Vec<f64> = (0..n).map(|i| (i as f64) * 0.5 + 1.0).collect();
+        let b = fft_pad_box(full);
+        assert!(b.pads() && b.voxels() > n);
+
+        let padded = crop_volume(&data, &b);
+        assert_eq!(padded.len(), b.voxels());
+        // The original data is in there exactly once, and the rest is the fill.
+        assert_eq!(padded.iter().filter(|v| **v != 0.0).count(), n, "all data present, nothing extra");
+
+        let back = uncrop_volume(&padded, &b, f64::NAN);
+        assert_eq!(back.len(), n);
+        for (i, (got, want)) in back.iter().zip(data.iter()).enumerate() {
+            assert_eq!(got, want, "voxel {i} changed across a pad round trip");
+        }
+    }
+
+    #[test]
+    fn pad_fill_value_is_respected() {
+        let full = (11, 4, 2);
+        let b = fft_pad_box(full);
+        assert!(b.pads());
+        let padded = crop_volume_with(&vec![7.0f64; full.0 * full.1 * full.2], &b, -1.0);
+        assert!(padded.iter().any(|v| *v == -1.0), "padding should use the fill value");
+        assert_eq!(padded.iter().filter(|v| **v == 7.0).count(), full.0 * full.1 * full.2);
+    }
+
+    /// A box that crops one axis and pads another — both at once, which is the realistic case
+    /// once a margin is applied to an awkward grid.
+    #[test]
+    fn a_box_can_crop_and_pad_at_the_same_time() {
+        let full = (64, 17, 16);
+        let mask = box_mask(full, (20, 2, 4), (40, 14, 11));
+        let b = crop_box_for_mask(&mask, full, (1.0, 1.0, 1.0), 2.0);
+        // x has room to crop; y is awkward and the mask nearly fills it, so it pads.
+        assert!(b.dims.0 < full.0, "x should crop, got {}", b.dims.0);
+        assert!(b.pads(), "y should pad: {:?}+{:?}", b.origin, b.dims);
+        for d in [b.dims.0, b.dims.1, b.dims.2] {
+            assert_eq!(next_fft_friendly_size(d), d, "{d} not FFT-friendly");
+        }
+        // Round trip still restores every voxel the box covers.
+        let n = full.0 * full.1 * full.2;
+        let data: Vec<f64> = (0..n).map(|i| i as f64).collect();
+        let back = uncrop_volume(&crop_volume(&data, &b), &b, -1.0);
+        // Wherever the box covered the grid, the value is unchanged; elsewhere it is the fill.
+        let mut restored = 0usize;
+        for (i, v) in back.iter().enumerate() {
+            if *v != -1.0 {
+                assert_eq!(*v, data[i], "voxel {i} altered by the round trip");
+                restored += 1;
+            }
+        }
+        assert!(restored > 0 && restored < n, "expected a partial cover, got {restored} of {n}");
+    }
+
     #[test]
     fn crop_then_uncrop_round_trips_inside_the_box() {
         let full = (12, 10, 6);
         let (nx, ny, _) = full;
         let data: Vec<f64> = (0..12 * 10 * 6).map(|i| i as f64).collect();
         let b = CropBox { origin: (2, 3, 1), dims: (6, 4, 3), full_dims: full };
+        assert!(!b.pads());
 
         let cropped = crop_volume(&data, &b);
         assert_eq!(cropped.len(), b.voxels());
