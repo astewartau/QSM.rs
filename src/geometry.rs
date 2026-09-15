@@ -93,6 +93,184 @@ pub fn obliquity_from_affine(affine: &[f64; 16]) -> f64 {
     (a[0] * a[0] + a[1] * a[1] + a[2] * a[2]).sqrt()
 }
 
+/// Mapping from one voxel grid to another, each described by its own affine.
+///
+/// Used for the return trip: a run reconstructed on a resampled grid still has to write its
+/// outputs where the caller's other data lives. That matters more than it sounds — a FLIRT
+/// matrix, for instance, is defined in a coordinate space derived from the image's dimensions
+/// and voxel sizes, so handing it a volume on a different grid produces a wrong registration
+/// rather than an error.
+pub struct GridMap {
+    pub dst_dims: (usize, usize, usize),
+    src_dims: (usize, usize, usize),
+    /// Voxel→world of the destination.
+    dst_affine: [f64; 16],
+    /// World→voxel of the source.
+    inv_src: [[f64; 4]; 3],
+}
+
+/// Invert the 3×3 of an affine and fold in its translation, giving world→voxel as a 3×4.
+fn world_to_voxel(affine: &[f64; 16]) -> Option<[[f64; 4]; 3]> {
+    let r = [
+        [affine[0], affine[1], affine[2]],
+        [affine[4], affine[5], affine[6]],
+        [affine[8], affine[9], affine[10]],
+    ];
+    let t = [affine[3], affine[7], affine[11]];
+    let det = r[0][0] * (r[1][1] * r[2][2] - r[1][2] * r[2][1])
+        - r[0][1] * (r[1][0] * r[2][2] - r[1][2] * r[2][0])
+        + r[0][2] * (r[1][0] * r[2][1] - r[1][1] * r[2][0]);
+    if det.abs() < 1e-12 {
+        return None;
+    }
+    let id = 1.0 / det;
+    let inv = [
+        [
+            (r[1][1] * r[2][2] - r[1][2] * r[2][1]) * id,
+            (r[0][2] * r[2][1] - r[0][1] * r[2][2]) * id,
+            (r[0][1] * r[1][2] - r[0][2] * r[1][1]) * id,
+        ],
+        [
+            (r[1][2] * r[2][0] - r[1][0] * r[2][2]) * id,
+            (r[0][0] * r[2][2] - r[0][2] * r[2][0]) * id,
+            (r[0][2] * r[1][0] - r[0][0] * r[1][2]) * id,
+        ],
+        [
+            (r[1][0] * r[2][1] - r[1][1] * r[2][0]) * id,
+            (r[0][1] * r[2][0] - r[0][0] * r[2][1]) * id,
+            (r[0][0] * r[1][1] - r[0][1] * r[1][0]) * id,
+        ],
+    ];
+    let mut out = [[0.0f64; 4]; 3];
+    for (i, row) in out.iter_mut().enumerate() {
+        row[..3].copy_from_slice(&inv[i]);
+        row[3] = -(inv[i][0] * t[0] + inv[i][1] * t[1] + inv[i][2] * t[2]);
+    }
+    Some(out)
+}
+
+impl GridMap {
+    /// Map from `src` onto `dst`. Both affines are row-major voxel→world.
+    pub fn new(
+        src_dims: (usize, usize, usize),
+        src_affine: &[f64; 16],
+        dst_dims: (usize, usize, usize),
+        dst_affine: &[f64; 16],
+    ) -> Option<Self> {
+        Some(Self {
+            dst_dims,
+            src_dims,
+            dst_affine: *dst_affine,
+            inv_src: world_to_voxel(src_affine)?,
+        })
+    }
+
+    /// Source-voxel coordinate for a destination voxel, or `None` if it falls outside the source.
+    fn source_coord(&self, i: usize, j: usize, k: usize) -> Option<(f64, f64, f64)> {
+        let (i, j, k) = (i as f64, j as f64, k as f64);
+        let a = &self.dst_affine;
+        let w = [
+            a[0] * i + a[1] * j + a[2] * k + a[3],
+            a[4] * i + a[5] * j + a[6] * k + a[7],
+            a[8] * i + a[9] * j + a[10] * k + a[11],
+        ];
+        let m = &self.inv_src;
+        let o = (
+            m[0][0] * w[0] + m[0][1] * w[1] + m[0][2] * w[2] + m[0][3],
+            m[1][0] * w[0] + m[1][1] * w[1] + m[1][2] * w[2] + m[1][3],
+            m[2][0] * w[0] + m[2][1] * w[1] + m[2][2] * w[2] + m[2][3],
+        );
+        let (nx, ny, nz) = self.src_dims;
+        let inside = o.0 >= -0.5 && o.0 <= nx as f64 - 0.5
+            && o.1 >= -0.5 && o.1 <= ny as f64 - 0.5
+            && o.2 >= -0.5 && o.2 <= nz as f64 - 0.5;
+        if inside { Some(o) } else { None }
+    }
+
+    /// Trilinearly resample continuous data onto the destination grid; 0 outside the source.
+    pub fn sample(&self, data: &[f64]) -> Vec<f64> {
+        let (nx, ny, nz) = self.src_dims;
+        let (dx, dy, dz) = self.dst_dims;
+        let mut out = vec![0.0f64; dx * dy * dz];
+        for k in 0..dz {
+            for j in 0..dy {
+                for i in 0..dx {
+                    if let Some((ox, oy, oz)) = self.source_coord(i, j, k) {
+                        out[i + j * dx + k * dx * dy] = trilinear_sample(data, nx, ny, nz, ox, oy, oz);
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// Nearest-neighbour, for labels and binary masks.
+    pub fn sample_nearest(&self, data: &[u8]) -> Vec<u8> {
+        let (nx, ny, nz) = self.src_dims;
+        let (dx, dy, dz) = self.dst_dims;
+        let mut out = vec![0u8; dx * dy * dz];
+        for k in 0..dz {
+            for j in 0..dy {
+                for i in 0..dx {
+                    if let Some((ox, oy, oz)) = self.source_coord(i, j, k) {
+                        let xi = (ox.round() as isize).clamp(0, nx as isize - 1) as usize;
+                        let yi = (oy.round() as isize).clamp(0, ny as isize - 1) as usize;
+                        let zi = (oz.round() as isize).clamp(0, nz as isize - 1) as usize;
+                        out[i + j * dx + k * dx * dy] = data[xi + yi * nx + zi * nx * ny];
+                    }
+                }
+            }
+        }
+        out
+    }
+}
+
+/// Resample continuous data (magnitude, an unwrapped field, χ) from one grid onto another.
+/// Returns `None` if the source affine is singular.
+pub fn resample_onto(
+    data: &[f64],
+    src_dims: (usize, usize, usize),
+    src_affine: &[f64; 16],
+    dst_dims: (usize, usize, usize),
+    dst_affine: &[f64; 16],
+) -> Option<Vec<f64>> {
+    Some(GridMap::new(src_dims, src_affine, dst_dims, dst_affine)?.sample(data))
+}
+
+/// Resample a binary mask from one grid onto another (nearest neighbour).
+pub fn resample_mask_onto(
+    mask: &[u8],
+    src_dims: (usize, usize, usize),
+    src_affine: &[f64; 16],
+    dst_dims: (usize, usize, usize),
+    dst_affine: &[f64; 16],
+) -> Option<Vec<u8>> {
+    Some(GridMap::new(src_dims, src_affine, dst_dims, dst_affine)?.sample_nearest(mask))
+}
+
+/// Resample magnitude and wrapped phase from one grid onto another, through the complex domain
+/// so the wraps survive. Returns `(magnitude, phase)`.
+pub fn resample_complex_onto(
+    magnitude: &[f64],
+    phase: &[f64],
+    src_dims: (usize, usize, usize),
+    src_affine: &[f64; 16],
+    dst_dims: (usize, usize, usize),
+    dst_affine: &[f64; 16],
+) -> Option<(Vec<f64>, Vec<f64>)> {
+    let n = src_dims.0 * src_dims.1 * src_dims.2;
+    assert_eq!(magnitude.len(), n, "magnitude length does not match source dimensions");
+    assert_eq!(phase.len(), n, "phase length does not match source dimensions");
+    let map = GridMap::new(src_dims, src_affine, dst_dims, dst_affine)?;
+    let real: Vec<f64> = (0..n).map(|i| magnitude[i] * phase[i].cos()).collect();
+    let imag: Vec<f64> = (0..n).map(|i| magnitude[i] * phase[i].sin()).collect();
+    let (re, im) = (map.sample(&real), map.sample(&imag));
+    Some((
+        (0..re.len()).map(|i| re[i].hypot(im[i])).collect(),
+        (0..re.len()).map(|i| im[i].atan2(re[i])).collect(),
+    ))
+}
+
 /// The cardinal-aligned grid an oblique volume resamples onto, plus the mapping back to the
 /// original voxel space. Build once with [`axial_grid_for`] and reuse for every volume that
 /// shares the geometry (magnitude, phase, mask), so they land on identical grids.
@@ -660,6 +838,125 @@ mod tests {
             v += 2.0 * PI;
         }
         v - PI
+    }
+
+    // --- GridMap: the return trip ---
+
+    #[test]
+    fn round_trip_to_axial_and_back_recovers_the_original() {
+        let (nx, ny, nz) = (20, 22, 10);
+        let n = nx * ny * nz;
+        let a = ukb_swi_affine();
+        // A smooth field, so interpolation error is the only thing being measured.
+        let data: Vec<f64> = (0..n)
+            .map(|i| {
+                let (x, y, z) = (i % nx, (i / nx) % ny, i / (nx * ny));
+                (x as f64 * 0.1).sin() + (y as f64 * 0.07).cos() + z as f64 * 0.02
+            })
+            .collect();
+
+        let grid = axial_grid_for(nx, ny, nz, &a);
+        let there = resample_to_axial(&data, nx, ny, nz, &a);
+        let back = resample_onto(&there.data, grid.dims, &grid.affine, (nx, ny, nz), &a).unwrap();
+
+        // Interior voxels come back close; edges lose data to the empty corners, as expected of
+        // two interpolations.
+        let (mut err, mut count) = (0.0f64, 0usize);
+        for z in 2..nz - 2 {
+            for y in 2..ny - 2 {
+                for x in 2..nx - 2 {
+                    let i = x + y * nx + z * nx * ny;
+                    err += (back[i] - data[i]).abs();
+                    count += 1;
+                }
+            }
+        }
+        let mean = err / count as f64;
+        assert!(mean < 0.05, "round trip lost {mean} per voxel on a smooth field");
+    }
+
+    #[test]
+    fn round_trip_puts_the_data_back_on_the_original_grid() {
+        let (nx, ny, nz) = (16, 16, 8);
+        let a = ukb_swi_affine();
+        let grid = axial_grid_for(nx, ny, nz, &a);
+        assert_ne!(grid.dims, (nx, ny, nz), "the axial grid should differ, else this proves nothing");
+        let there = vec![1.0f64; grid.dims.0 * grid.dims.1 * grid.dims.2];
+        let back = resample_onto(&there, grid.dims, &grid.affine, (nx, ny, nz), &a).unwrap();
+        assert_eq!(back.len(), nx * ny * nz, "output must be on the acquired grid");
+        // The acquired volume sits inside the axial box, so everything is covered.
+        assert!(back.iter().filter(|v| **v > 0.5).count() > (nx * ny * nz) * 9 / 10);
+    }
+
+    #[test]
+    fn identity_map_is_a_no_op() {
+        let (nx, ny, nz) = (6, 5, 4);
+        let a = identity_affine((1.0, 2.0, 3.0));
+        let data: Vec<f64> = (0..nx * ny * nz).map(|i| i as f64).collect();
+        let out = resample_onto(&data, (nx, ny, nz), &a, (nx, ny, nz), &a).unwrap();
+        for (got, want) in out.iter().zip(data.iter()) {
+            assert!((got - want).abs() < 1e-9, "{got} vs {want}");
+        }
+    }
+
+    #[test]
+    fn singular_affine_is_reported_not_panicked() {
+        let zero = [0.0f64; 16];
+        let a = identity_affine((1.0, 1.0, 1.0));
+        assert!(resample_onto(&[0.0; 8], (2, 2, 2), &zero, (2, 2, 2), &a).is_none());
+        assert!(GridMap::new((2, 2, 2), &zero, (2, 2, 2), &a).is_none());
+    }
+
+    #[test]
+    fn mask_round_trip_stays_binary() {
+        let (nx, ny, nz) = (16, 16, 8);
+        let a = ukb_swi_affine();
+        let mut mask = vec![0u8; nx * ny * nz];
+        for z in 2..nz - 2 {
+            for y in 4..ny - 4 {
+                for x in 4..nx - 4 {
+                    mask[x + y * nx + z * nx * ny] = 1;
+                }
+            }
+        }
+        let grid = axial_grid_for(nx, ny, nz, &a);
+        let there = resample_mask_to_axial(&mask, nx, ny, nz, &a);
+        let back = resample_mask_onto(&there, grid.dims, &grid.affine, (nx, ny, nz), &a).unwrap();
+        assert!(back.iter().all(|v| *v == 0 || *v == 1));
+        assert!(back.iter().filter(|v| **v == 1).count() > 100, "mask should survive the trip");
+    }
+
+    /// Phase has to come back through the complex domain too, for the same reason it went out
+    /// that way.
+    #[test]
+    fn complex_round_trip_preserves_wraps() {
+        let (nx, ny, nz) = (20, 20, 8);
+        let n = nx * ny * nz;
+        let a = ukb_swi_affine();
+        let mag = vec![100.0f64; n];
+        let pha: Vec<f64> = (0..n)
+            .map(|i| {
+                let (x, y) = (i % nx, (i / nx) % ny);
+                wrap(0.6 * x as f64 + 0.2 * y as f64)
+            })
+            .collect();
+
+        let grid = axial_grid_for(nx, ny, nz, &a);
+        let out = resample_complex_to_axial(&mag, &pha, nx, ny, nz, &a, &AxialResampleParams { noise_fill_fraction: None });
+        let (_, back) = resample_complex_onto(&out.magnitude, &out.phase, grid.dims, &grid.affine, (nx, ny, nz), &a).unwrap();
+
+        let (mut err, mut count) = (0.0f64, 0usize);
+        for z in 2..nz - 2 {
+            for y in 3..ny - 3 {
+                for x in 3..nx - 3 {
+                    let i = x + y * nx + z * nx * ny;
+                    err += wrap(back[i] - pha[i]).abs();
+                    count += 1;
+                }
+            }
+        }
+        let mean = err / count as f64;
+        assert!(mean < 0.25, "complex round trip drifted {mean} rad per voxel");
     }
 
     #[test]
