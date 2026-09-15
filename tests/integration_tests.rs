@@ -877,9 +877,10 @@ fn test_swi() {
 
     let grid = qsm_core::Grid::new(nx, ny, nz, vsx, vsy, vsz);
 
-    // Step 1: Laplacian unwrap first echo phase
+    // Step 1: Laplacian unwrap first echo phase. Plain unwrapping: SWI does its own
+    // high-pass filtering, so the background-removing variant would double up.
     println!("[INFO] Unwrapping phase (Laplacian)...");
-    let unwrapped = laplacian_unwrap_bfr(
+    let unwrapped = laplacian_unwrap(
         &data.phase_echoes[0], &data.mask,
         &grid,
     );
@@ -1301,7 +1302,7 @@ fn test_pipeline_unwrap_bfr_romeo() {
 #[ignore]
 fn test_pipeline_unwrap_bfr_laplacian_neumann() {
     let res = run_unwrap_bfr_case(
-        "Laplacian (Neumann) + V-SHARP",
+        "Laplacian + V-SHARP",
         Unwrapper::LaplacianNeumann,
         "laplacian_neumann",
     );
@@ -1322,7 +1323,7 @@ fn test_pipeline_unwrap_bfr_laplacian_neumann() {
 #[ignore]
 fn test_pipeline_unwrap_bfr_laplacian_dirichlet() {
     let res = run_unwrap_bfr_case(
-        "Laplacian (Dirichlet ROI) + V-SHARP",
+        "Laplacian (ROI-masked) + V-SHARP",
         Unwrapper::LaplacianDirichlet,
         "laplacian_dirichlet",
     );
@@ -1333,6 +1334,61 @@ fn test_pipeline_unwrap_bfr_laplacian_dirichlet() {
         res.correlation < 0.40,
         "Laplacian (Dirichlet ROI) now behaves like a plain unwrapper (r = {}); \
          the combined categorisation may no longer hold",
+        res.correlation
+    );
+}
+
+/// Drives the shared field-mapping stage with `UnwrappingAlgorithm::Laplacian` — the path
+/// `UnwrapMethod::Laplacian` actually selects, and which `qsmxt.rs` and `qsmbly` go through.
+///
+/// The three tests above call the unwrappers directly, so without this nothing exercises the
+/// wiring: a config that silently selected the wrong variant would not be caught. Scored on
+/// the local field after the same V-SHARP, so it is comparable with them.
+#[test]
+#[ignore]
+fn test_pipeline_unwrap_bfr_stage_laplacian() {
+    println!("[INFO] Loading test data...");
+    let data = TestData::load().expect("Failed to load test data");
+    let (nx, ny, nz) = data.dims;
+    let (vsx, vsy, vsz) = data.voxel_size;
+    let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
+
+    let start = Instant::now();
+
+    let meta = pipeline::ScanMetadata {
+        dims: data.dims,
+        voxel_size: data.voxel_size,
+        echo_times: data.echo_times.clone(),
+        field_strength: data.field_strength,
+        b0_direction: data.b0_dir,
+    };
+    let config = pipeline::FieldMappingConfig {
+        unwrapping_algorithm: pipeline::UnwrappingAlgorithm::Laplacian,
+        ..Default::default()
+    };
+    let phases: Vec<&[f64]> = data.phase_echoes.iter().map(|p| p.as_slice()).collect();
+    let mags: Vec<&[f64]> = data.mag_echoes.iter().map(|m| m.as_slice()).collect();
+
+    let field = pipeline::run_field_mapping(
+        &phases, Some(&mags), &data.mask, &meta, &config, &mut |_, _| {},
+    ).expect("run_field_mapping failed");
+
+    let (local, eroded_mask) = bgremove::vsharp(
+        &field.b0_field_ppm, &data.mask, &grid, &VsharpParams::default(), |_, _| {},
+    );
+    let elapsed = start.elapsed();
+
+    let res = TestResult::new(
+        "run_field_mapping(Laplacian) + V-SHARP", &local, &data.fieldmap_local,
+        &eroded_mask, data.dims,
+    );
+    res.print_with_time(elapsed);
+    res.print_ci_metrics(elapsed);
+    common::save_center_slices(&local, &eroded_mask, data.dims, "unwrap_bfr_stage_laplacian");
+
+    assert!(
+        res.correlation > 0.45,
+        "field mapping through the Laplacian path gave a poor local field: r = {}",
         res.correlation
     );
 }
@@ -1424,7 +1480,7 @@ fn run_qsmart_reconstruction(
 
     println!("[INFO] Unwrapping phase echoes...");
     let unwrapped_phases: Vec<Vec<f64>> = data.phase_echoes.iter()
-        .map(|phase| laplacian_unwrap_bfr(phase, &data.mask, &grid))
+        .map(|phase| laplacian_unwrap(phase, &data.mask, &grid))
         .collect();
     println!("[INFO] Multi-echo linear fit...");
     let fit_result = multi_echo_linear_fit(
@@ -1974,7 +2030,7 @@ fn test_all_combinations() {
 
         // Phase unwrapping
         let unwrapped_phases: Vec<Vec<f64>> = data.phase_echoes.iter()
-            .map(|phase| laplacian_unwrap_bfr(phase, &data.mask, &grid))
+            .map(|phase| laplacian_unwrap(phase, &data.mask, &grid))
             .collect();
 
         // Multi-echo linear fit
