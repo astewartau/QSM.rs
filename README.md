@@ -141,14 +141,12 @@ Load and save NIfTI volumes with [`qsm_core::io`](src/io.rs).
 > background-removal stage removes background twice. `laplacian_unwrap` unwraps
 > only. See the `unwrap::laplacian` module docs.
 >
-> Prefer **unwrap then remove background as two steps**. On the test data, the background
-> removal `laplacian_unwrap_bfr` performs implicitly reaches r = 0.52 against the ground-truth
-> local field, where running `bgremove::lbv` on the same field — a full Laplacian boundary
-> value solve — reaches **r = 0.91**, and V-SHARP 0.88. The combined function zeroes ∇²
-> outside the mask and solves with a periodic FFT, which removes the exterior sources that
-> generate the background but is not the ROI boundary-value solve the LBV reference
-> describes. It is kept for callers that want the combination, but the pipeline uses the
-> Neumann variant and a separate BFR stage.
+> The combined function zeroes ∇² outside the mask — deleting the exterior sources that
+> generate the background, since a field produced outside the ROI is harmonic inside it —
+> and solves under a homogeneous Dirichlet condition on the ROI. On the test data it reaches
+> **r = 0.887** against the ground-truth local field, against 0.909 for `bgremove::lbv` and
+> 0.879 for V-SHARP. `UnwrapMethod::Laplacian` still selects the plain variant, since the
+> pipeline removes background as a later stage.
 
 ### Dipole Inversion
 

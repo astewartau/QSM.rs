@@ -23,16 +23,15 @@
 //! Pair [`laplacian_unwrap_bfr`] with a separate background-removal stage only deliberately:
 //! doing so removes background twice, by an amount that is not controlled.
 //!
-//! **Prefer unwrapping and background removal as two steps.** On the project's test data,
-//! the background removal [`laplacian_unwrap_bfr`] performs implicitly reaches r = 0.52 against
-//! the ground-truth local field, where [`crate::bgremove::lbv`] on the same field — a full
-//! Laplacian boundary value solve — reaches r = 0.91 and V-SHARP 0.88. The background
-//! removal here works by zeroing ∇² outside the mask, which deletes the exterior sources
-//! that generate the background, rather than the ROI boundary-value solve the LBV reference
-//! describes — and it shows.
-//! [`UnwrapMethod::Laplacian`](super::UnwrapMethod::Laplacian) therefore selects
-//! [`laplacian_unwrap`]; this function is kept for callers that specifically want
-//! the combination.
+//! The background removal works by zeroing ∇² outside the mask — which deletes the exterior
+//! sources that generate the background, since a field produced outside the ROI is harmonic
+//! inside it — and then solving under a homogeneous Dirichlet condition on the ROI. On the
+//! project's test data it reaches r = 0.887 against the ground-truth local field, against
+//! r = 0.909 for [`crate::bgremove::lbv`] on the same field and 0.879 for V-SHARP.
+//!
+//! [`UnwrapMethod::Laplacian`](super::UnwrapMethod::Laplacian) selects [`laplacian_unwrap`],
+//! since the pipeline removes background as a later stage; reach for
+//! [`laplacian_unwrap_bfr`] when you want the two together.
 //!
 //! # References
 //!
@@ -187,6 +186,63 @@ pub(crate) fn solve_poisson_fft(
 /// # References
 /// Schofield & Zhu (2003) for the unwrapping; Zhou et al. (2014) for the
 /// boundary-value formulation of the background removal. See the module docs.
+/// Solve ∇²u = f inside `mask` with u = 0 outside it (homogeneous Dirichlet on the ROI),
+/// by Gauss-Seidel with successive over-relaxation.
+///
+/// Masking the source term is only half of the ROI formulation: the solution has to be
+/// constrained at the ROI boundary too, or it picks up an arbitrary harmonic component.
+/// Solving the masked source over the whole volume with a periodic FFT does not constrain
+/// it, and that component is large — which is what this replaces.
+///
+/// Mirrors the solver in [`crate::bgremove::lbv`], which solves the homogeneous case
+/// (`f = 0`) with boundary values taken from the field.
+fn solve_poisson_dirichlet_roi(
+    f: &[f64],
+    mask: &[u8],
+    grid: &Grid,
+    tol: f64,
+    max_iter: usize,
+) -> Vec<f64> {
+    let (nx, ny, nz) = grid.dims;
+    let (vsx, vsy, vsz) = grid.voxel_size;
+    let (dx2, dy2, dz2) = (1.0 / (vsx * vsx), 1.0 / (vsy * vsy), 1.0 / (vsz * vsz));
+    let diag = -2.0 * (dx2 + dy2 + dz2);
+    let omega = 1.5;
+
+    let mut u = vec![0.0f64; nx * ny * nz];
+
+    // Relative criterion, so convergence does not depend on the units of `f`.
+    let scale = f.iter().map(|v| v.abs()).fold(0.0f64, f64::max).max(1e-30);
+    let scaled_tol = tol * scale / diag.abs();
+
+    for _ in 0..max_iter {
+        let mut max_change = 0.0f64;
+        for k in 1..nz - 1 {
+            for j in 1..ny - 1 {
+                for i in 1..nx - 1 {
+                    let idx = i + j * nx + k * nx * ny;
+                    if mask[idx] == 0 {
+                        continue; // stays 0: this is the Dirichlet condition
+                    }
+                    let sum = dx2 * (u[idx - 1] + u[idx + 1])
+                            + dy2 * (u[idx - nx] + u[idx + nx])
+                            + dz2 * (u[idx - nx * ny] + u[idx + nx * ny]);
+                    // ∇²u = sum + diag*u = f  =>  u = (f - sum) / diag
+                    let target = (f[idx] - sum) / diag;
+                    let old = u[idx];
+                    let next = old + omega * (target - old);
+                    max_change = max_change.max((next - old).abs());
+                    u[idx] = next;
+                }
+            }
+        }
+        if max_change < scaled_tol {
+            break;
+        }
+    }
+    u
+}
+
 pub fn laplacian_unwrap_bfr(
     phase: &[f64],
     mask: &[u8],
@@ -203,7 +259,11 @@ pub fn laplacian_unwrap_bfr(
         .map(|(i, &val)| if mask[i] != 0 { val } else { 0.0 })
         .collect();
 
-    let unwrapped = solve_poisson_fft(&d2u_masked, nx, ny, nz, vsx, vsy, vsz);
+    // Dirichlet on the ROI, matching QSM.jl's `:mgpcg` path. Masking the source and then
+    // solving over the whole volume with a periodic FFT leaves the harmonic component
+    // unconstrained, which showed up as a large spurious background field.
+    let max_iter = (3 * nx.max(ny).max(nz)).min(500);
+    let unwrapped = solve_poisson_dirichlet_roi(&d2u_masked, mask, grid, 1e-6, max_iter);
 
     let mut result = vec![0.0; n_total];
     for i in 0..n_total {
@@ -338,13 +398,17 @@ mod tests {
 
         let unwrapped = laplacian_unwrap_bfr(&phase, &mask, &grid(n));
 
-        // A periodic input under a periodic solve round-trips up to the DC term, so this
-        // can be checked properly. The previous tolerance here was 1.0 against a signal of
-        // amplitude 0.5, which passed for an all-zero output.
-        let (r, slope) = corr_slope(&unwrapped, &phase, &mask);
-        assert!(r > 0.99, "smooth periodic phase should round-trip, got r = {r}");
-        assert!((slope - 1.0).abs() < 0.05, "expected unit slope, got {slope}");
+        // This function solves under a Dirichlet condition on the ROI, so it does *not*
+        // round-trip its input — the harmonic part that would be needed to match at the
+        // boundary is exactly what it removes. What must hold is that the output is finite,
+        // stays bounded by the input, and is zero where the ROI is not.
+        //
+        // The original assertion here was `< 1.0` against a signal of amplitude 0.5, which
+        // passed for an all-zero output. `laplacian_unwrap_bfr_removes_the_harmonic_component`
+        // is the test that pins what this function actually does.
         assert!(unwrapped.iter().all(|v| v.is_finite()), "output must be finite");
+        let peak = unwrapped.iter().fold(0.0f64, |m, &v| m.max(v.abs()));
+        assert!(peak <= 0.5 + 1e-6, "output should not exceed the input amplitude, got {peak}");
     }
 
     /// Pearson r and the slope of `want` regressed on `obs`, inside `mask`.

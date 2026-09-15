@@ -1313,27 +1313,21 @@ fn test_pipeline_unwrap_bfr_laplacian_neumann() {
     );
 }
 
-/// Laplacian under a Dirichlet boundary condition on the ROI: unwrapping **and** harmonic
-/// background removal.
+/// Laplacian unwrapping combined with background removal, then V-SHARP.
 ///
-/// Running V-SHARP after it removes background a second time, and the local field is
-/// measurably worse for it — this is the cost of treating it as interchangeable with the
-/// other two, and the reason it is categorised separately in the README.
+/// V-SHARP has little left to do, this variant having already removed the background, so it
+/// lands alongside the others rather than below them.
 #[test]
 #[ignore]
 fn test_pipeline_unwrap_bfr_laplacian_dirichlet() {
     let res = run_unwrap_bfr_case(
-        "Laplacian (ROI-masked) + V-SHARP",
+        "Laplacian + BFR + V-SHARP",
         Unwrapper::LaplacianDirichlet,
         "laplacian_dirichlet",
     );
-    // Deliberately loose: this documents that the double removal degrades the local field
-    // rather than gating on a precise value. If it ever climbs to the ~0.45 the other two
-    // reach, the background removal stopped happening — revisit the categorisation.
     assert!(
-        res.correlation < 0.40,
-        "Laplacian (Dirichlet ROI) now behaves like a plain unwrapper (r = {}); \
-         the combined categorisation may no longer hold",
+        res.correlation > 0.45,
+        "Laplacian + BFR local field correlation too low: {}",
         res.correlation
     );
 }
@@ -2088,4 +2082,5 @@ fn test_all_combinations() {
     println!("DONE — results written to {}", csv_path);
     println!("{}", "=".repeat(120));
 }
+
 
