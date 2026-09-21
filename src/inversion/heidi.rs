@@ -96,9 +96,21 @@ pub struct HeidiParams {
     /// Upstream's shipped code passes the masks through a `> 0.5` resize test that
     /// silently rounds this floor away, but its own changelog calls binarising the
     /// masks a bug ("must contain values of 0.1"), so the documented intent is the
-    /// default here. Set it to `0.0` to reproduce the shipped behaviour.
+    /// default here. Set it to `0.0` to reproduce the shipped behaviour — on the
+    /// CI phantom the two are indistinguishable (r=0.8923 vs 0.8918), since the
+    /// floor exists to damp noise in otherwise-unconstrained voxels and that
+    /// phantom is noiseless.
     pub gradient_mask_floor: f64,
     /// NESTA continuation steps on μ.
+    ///
+    /// This is the dominant quality knob, and more is not better. μ always lands
+    /// on `mu_min`, so the count controls how many levels of TV minimisation are
+    /// actually performed — past the first couple of levels μ is already far
+    /// below the field's gradient scale and the term is effectively pure TV, so
+    /// extra levels just keep flattening. On the CI phantom, at otherwise-default
+    /// settings: 4 steps → r=0.8984, 6 → r=0.9017, 8 (upstream's
+    /// `DEFAULT_TV_MAXINTITER`, kept here) → r=0.8757. Worth sweeping on your own
+    /// data before trusting the default.
     pub continuation_steps: usize,
     /// Accelerated-gradient iterations per continuation step.
     pub inner_iterations: usize,
