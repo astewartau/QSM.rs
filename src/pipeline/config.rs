@@ -12,6 +12,7 @@ use crate::bgremove::{
 use crate::inversion::{
     IlsqrParams, MediParams, NltvParams, RtsParams, TgvParams, TikhonovParams, TkdParams, TvParams,
     NdiParams, FansiParams, L1QsmParams, WhQsmParams, HdQsmParams, TfiParams, AmpPeParams,
+    LsqrQsmParams, HeidiParams,
 };
 use crate::separation::{
     ChiSepIlsqrParams, ChiSepParams, DecomposeParams, HcChisepParams, R2starQsmParams,
@@ -112,6 +113,13 @@ pub enum InversionAlgorithm {
     Hdqsm,
     /// Approximate Message Passing with built-in Parameter Estimation (AMP-PE).
     AmpPe,
+    /// Minimally regularised LSQR with residual-field and global-offset unknowns
+    /// (Schweser 2010).
+    Lsqr,
+    /// Homogeneity Enabled Incremental Dipole Inversion (Schweser 2012). Seeds
+    /// itself from [`InversionAlgorithm::Lsqr`], then fills the dipole cone under
+    /// a field-derived weighted-TV prior.
+    Heidi,
     /// xQSM deep-learning dipole inversion (requires the `onnx` feature and the
     /// `xqsm` model weights; see [`crate::models`]).
     Xqsm,
@@ -375,6 +383,11 @@ pub struct InversionConfig {
     pub hdqsm: HdQsmParams,
     /// AMP-PE (`b0` is overridden from scan metadata by the dispatcher).
     pub amp_pe: AmpPeParams,
+    /// Minimally regularised LSQR (`b0` is overridden from scan metadata by the
+    /// dispatcher). Also supplies HEIDI's seed map.
+    pub lsqr: LsqrQsmParams,
+    /// HEIDI cone filling.
+    pub heidi: HeidiParams,
     /// Overlap-tiling for the deep-learning inversions, as `(core, halo)` in voxels. `None`
     /// (default) runs the net whole-volume; `Some` runs it patch-by-patch (bounded memory) via the
     /// `*_tiled` variants — an approximation, mainly for memory-constrained targets (e.g. WASM).
@@ -405,6 +418,8 @@ impl Default for InversionConfig {
             whqsm: WhQsmParams::default(),
             hdqsm: HdQsmParams::default(),
             amp_pe: AmpPeParams::default(),
+            lsqr: LsqrQsmParams::default(),
+            heidi: HeidiParams::default(),
             tile: None,
         }
     }
@@ -481,7 +496,9 @@ impl InversionAlgorithm {
             | InversionAlgorithm::L1qsm
             | InversionAlgorithm::Whqsm
             | InversionAlgorithm::Hdqsm
-            | InversionAlgorithm::AmpPe => OrientationSupport::Arbitrary,
+            | InversionAlgorithm::AmpPe
+            | InversionAlgorithm::Lsqr
+            | InversionAlgorithm::Heidi => OrientationSupport::Arbitrary,
             InversionAlgorithm::Xqsm
             | InversionAlgorithm::Qsmnet
             | InversionAlgorithm::QsmnetPlus
@@ -561,13 +578,14 @@ impl InversionAlgorithm {
             Self::Tkd | Self::Tsvd | Self::Tikhonov | Self::Tv | Self::Rts | Self::Nltv
             | Self::Medi | Self::Tfi | Self::Ilsqr | Self::Tgv | Self::Qsmart | Self::Ndi
             | Self::Fansi | Self::FansiTgv | Self::L1qsm | Self::Whqsm | Self::Hdqsm
-            | Self::AmpPe => None,
+            | Self::AmpPe | Self::Lsqr | Self::Heidi => None,
         }
     }
     pub const VARIANTS: &'static [Self] = &[
         Self::Tkd, Self::Tsvd, Self::Tikhonov, Self::Tv, Self::Rts, Self::Nltv, Self::Medi,
         Self::Tfi, Self::Ilsqr, Self::Tgv, Self::Qsmart, Self::Ndi, Self::Fansi, Self::FansiTgv,
-        Self::L1qsm, Self::Whqsm, Self::Hdqsm, Self::AmpPe, Self::Xqsm, Self::Qsmnet,
+        Self::L1qsm, Self::Whqsm, Self::Hdqsm, Self::AmpPe, Self::Lsqr, Self::Heidi,
+        Self::Xqsm, Self::Qsmnet,
         Self::QsmnetPlus, Self::Autoqsm, Self::Qsmgan, Self::Ir2qsm, Self::Lpcnn, Self::ModlQsm,
         Self::Nextqsm, Self::Iqsm, Self::IqsmPlus,
     ];
@@ -738,6 +756,7 @@ mod orientation_tests {
             InversionAlgorithm::Tgv, InversionAlgorithm::Qsmart, InversionAlgorithm::Ndi,
             InversionAlgorithm::Fansi, InversionAlgorithm::FansiTgv, InversionAlgorithm::L1qsm,
             InversionAlgorithm::Whqsm, InversionAlgorithm::Hdqsm, InversionAlgorithm::AmpPe,
+            InversionAlgorithm::Lsqr, InversionAlgorithm::Heidi,
         ] {
             assert_eq!(a.orientation_support(), OrientationSupport::Arbitrary, "{a:?}");
             assert!(!a.orientation_support().requires_axial(), "{a:?}");

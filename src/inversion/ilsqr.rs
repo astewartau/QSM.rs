@@ -94,6 +94,12 @@ where
 
     let bnorm = beta;
 
+    // A zero right-hand side has x = 0 as its exact solution, and the plane
+    // rotation below would divide 0 by 0 and hand back NaN.
+    if bnorm == 0.0 {
+        return x;
+    }
+
     for _iter in 0..max_iter {
         // Bidiagonalization
         let mut u_new = apply_a(&v);

@@ -196,6 +196,8 @@ See [`geometry`](src/geometry.rs) for the direction itself and for resampling to
 | **WH-QSM** | Weak-Harmonic QSM — jointly estimates susceptibility and a residual harmonic background field, correcting imperfect background-field removal | Milovic, C., et al. (2019). "Weak-harmonic regularization for quantitative susceptibility mapping." *Magnetic Resonance in Medicine*, 81(2):1399-1411. [DOI](https://doi.org/10.1002/mrm.27483) |
 | **HD-QSM** | Hybrid Data-fidelity QSM — two-stage linear inversion where an L1 stage produces a discrepancy map that reweights a second L2 stage | Lambert, M., et al. (2022). "Hybrid data fidelity term approach for quantitative susceptibility mapping." *Magnetic Resonance in Medicine*, 88(4):1567-1583. [DOI](https://doi.org/10.1002/mrm.29218) |
 | **AMP-PE** | Approximate Message Passing with Parameter Estimation — generalized approximate message passing over a linearized wrapped-phase model with a sparse-wavelet prior and a Gaussian-mixture noise model; regularization and noise parameters are estimated automatically | Huang, S., et al. (2023). "Approximate Message Passing with Parameter Estimation: a probabilistic Bayesian dipole inversion." *Magnetic Resonance in Medicine*, 90(4):1414-1430. [DOI](https://doi.org/10.1002/mrm.29722) |
+| **LSQR** | Minimally regularized least-squares inversion — solves for χ jointly with a weighted residual field and a global offset, relying on LSQR's minimum-norm property rather than an explicit penalty | Schweser, F., et al. (2010). "Differentiation between diamagnetic and paramagnetic cerebral lesions based on magnetic susceptibility mapping." *Medical Physics*, 37(10):5165-5178. [DOI](https://doi.org/10.1118/1.3481505) |
+| **HEIDI** | Homogeneity Enabled Incremental Dipole Inversion — keeps the well-conditioned k-space coefficients of an LSQR map as exact constraints and recovers the ill-conditioned dipole cone under a weighted-TV prior whose per-direction weights come from the field map's own gradient and Laplacian | Schweser, F., et al. (2012). "Quantitative susceptibility mapping for investigating subtle susceptibility variations in the human brain." *NeuroImage*, 62(3):2083-2100. [DOI](https://doi.org/10.1016/j.neuroimage.2012.05.067) |
 
 ### End-to-End QSM
 
@@ -252,6 +254,7 @@ This library was developed with reference to the following open-source implement
 | [FANSI-toolbox](https://gitlab.com/cmilovic/FANSI-toolbox) | NDI, FANSI (nlTV/nlTGV), L1-QSM, WH-QSM | MATLAB |
 | [HD-QSM](https://github.com/mglambert/HD-QSM) | HD-QSM | MATLAB |
 | [QSM_AMP_PE](https://github.com/EmoryCN2L/QSM_AMP_PE) | AMP-PE | MATLAB |
+| [qsm_heidi](https://gitlab.com/R01NS114227/qsm_heidi) | LSQR, HEIDI | MATLAB |
 | [QuantitativeSusceptibilityMappingTGV.jl](https://github.com/korbinian90/QuantitativeSusceptibilityMappingTGV.jl) | TGV | Julia |
 | [MriResearchTools.jl](https://github.com/korbinian90/MriResearchTools.jl) | ROMEO, MCPC-3D-S, R2*/T2*, bias correction | Julia |
 | [MEDI_toolbox](https://github.com/huawu02/MEDI_toolbox) | MEDI | MATLAB |

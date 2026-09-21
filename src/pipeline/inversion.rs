@@ -161,6 +161,41 @@ pub fn run_dipole_inversion(
                 local_field_ppm, mask, magnitude, &grid, bdir, &params, |i, n| progress(i, n),
             )
         }
+        InversionAlgorithm::Lsqr => {
+            let params = crate::inversion::LsqrQsmParams {
+                b0: metadata.field_strength,
+                ..config.lsqr.clone()
+            };
+            crate::inversion::lsqr_qsm(
+                local_field_ppm, mask, magnitude, &grid, bdir, &params, |i, n| progress(i, n),
+            )
+        }
+        InversionAlgorithm::Heidi => {
+            // HEIDI is incremental: it keeps the well-conditioned k-space of a
+            // seed map and re-derives the rest. The seed is the minimally
+            // regularised LSQR solution, left unmasked so the cone projection
+            // does not ring off a hard mask edge.
+            let lsqr_params = crate::inversion::LsqrQsmParams {
+                b0: metadata.field_strength,
+                mask_output: false,
+                ..config.lsqr.clone()
+            };
+            let heidi_params = &config.heidi;
+
+            let lsqr_iters = lsqr_params.max_iter;
+            let heidi_iters =
+                heidi_params.continuation_steps.max(1) * heidi_params.inner_iterations;
+            let total = lsqr_iters + heidi_iters;
+
+            let chi_init = crate::inversion::lsqr_qsm(
+                local_field_ppm, mask, magnitude, &grid, bdir, &lsqr_params,
+                |i, _| progress(i, total),
+            );
+            crate::inversion::heidi(
+                local_field_ppm, mask, &chi_init, &grid, bdir, heidi_params,
+                |i, _| progress(lsqr_iters + i, total),
+            )
+        }
         InversionAlgorithm::Xqsm => run_xqsm(local_field_ppm, mask, &grid, config.tile, progress)?,
         InversionAlgorithm::Qsmnet => run_qsmnet(local_field_ppm, mask, &grid, "qsmnet", config.tile, progress)?,
         InversionAlgorithm::QsmnetPlus => run_qsmnet(local_field_ppm, mask, &grid, "qsmnet-plus", config.tile, progress)?,
@@ -662,6 +697,57 @@ mod tests {
     fn test_inversion_amp_pe() {
         let chi = make_inversion_test(InversionAlgorithm::AmpPe);
         assert_eq!(chi.len(), 8 * 8 * 8);
+    }
+
+    #[test]
+    fn test_inversion_lsqr() {
+        let chi = make_inversion_test(InversionAlgorithm::Lsqr);
+        assert_eq!(chi.len(), 8 * 8 * 8);
+        assert!(chi.iter().all(|v| v.is_finite()));
+    }
+
+    #[test]
+    fn test_inversion_heidi() {
+        let chi = make_inversion_test(InversionAlgorithm::Heidi);
+        assert_eq!(chi.len(), 8 * 8 * 8);
+        assert!(chi.iter().all(|v| v.is_finite()));
+    }
+
+    /// HEIDI runs LSQR first, so its progress must advance monotonically across
+    /// both stages and end at the combined total rather than restarting.
+    #[test]
+    fn test_heidi_progress_is_monotonic() {
+        let (nx, ny, nz) = (8, 8, 8);
+        let n = nx * ny * nz;
+        let meta = ScanMetadata {
+            dims: (nx, ny, nz), voxel_size: (1.0, 1.0, 1.0),
+            echo_times: vec![0.005], field_strength: 3.0, b0_direction: (0.0, 0.0, 1.0),
+        };
+        let config = InversionConfig {
+            algorithm: InversionAlgorithm::Heidi,
+            heidi: crate::inversion::HeidiParams {
+                continuation_steps: 2,
+                inner_iterations: 4,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let mut seen: Vec<(usize, usize)> = Vec::new();
+        run_dipole_inversion(
+            &vec![0.01; n], &vec![1u8; n], &meta, &config, None,
+            &mut |i, t| seen.push((i, t)),
+        )
+        .unwrap();
+
+        assert!(!seen.is_empty(), "no progress was reported");
+        assert!(
+            seen.windows(2).all(|w| w[0].0 <= w[1].0),
+            "progress went backwards: {seen:?}"
+        );
+        let total = seen[0].1;
+        assert!(seen.iter().all(|&(_, t)| t == total), "total changed mid-run");
+        assert!(seen.last().unwrap().0 <= total);
     }
 
     #[test]

@@ -48,7 +48,7 @@ jobs:
           set -e
 
           all_bgremove='["test_bgremove_sharp","test_bgremove_resharp","test_bgremove_vsharp","test_bgremove_pdf","test_bgremove_ismv","test_bgremove_lbv"]'
-          all_inversion='["test_inversion_tkd","test_inversion_tsvd","test_inversion_tikhonov","test_inversion_tv","test_inversion_rts","test_inversion_ilsqr","test_inversion_medi","test_inversion_nltv","test_inversion_ndi","test_inversion_fansi","test_inversion_fansi_tgv","test_inversion_l1qsm","test_inversion_whqsm","test_inversion_hdqsm","test_inversion_amp_pe"]'
+          all_inversion='["test_inversion_tkd","test_inversion_tsvd","test_inversion_tikhonov","test_inversion_tv","test_inversion_rts","test_inversion_ilsqr","test_inversion_medi","test_inversion_nltv","test_inversion_ndi","test_inversion_fansi","test_inversion_fansi_tgv","test_inversion_l1qsm","test_inversion_whqsm","test_inversion_hdqsm","test_inversion_amp_pe","test_inversion_lsqr","test_inversion_heidi"]'
           all_combined='["test_combined_tgv","test_combined_tfi"]'
           all_pipeline='["test_pipeline_romeo_b0","test_pipeline_unwrap_bfr_romeo","test_pipeline_unwrap_bfr_laplacian_neumann","test_unwrap_bfr_single_volume","test_pipeline_unwrap_bfr_stage_laplacian","test_pipeline_tgv","test_pipeline_qsmart","test_pipeline_qsmart_tikhonov","test_pipeline_harperella","test_pipeline_iharperella","test_bias_correction","test_swi","test_r2star_t2star"]'
           # χ-separation entries are whole test *binaries* (each runs several methods).
@@ -195,7 +195,7 @@ jobs:
 
               # Dipole inversion
               src/inversion/mod.rs|src/inversion/admm.rs)
-                inversion="$inversion test_inversion_tkd test_inversion_tsvd test_inversion_tikhonov test_inversion_tv test_inversion_rts test_inversion_ilsqr test_inversion_medi test_inversion_nltv test_inversion_ndi test_inversion_fansi test_inversion_fansi_tgv test_inversion_l1qsm test_inversion_whqsm test_inversion_hdqsm"
+                inversion="$inversion test_inversion_tkd test_inversion_tsvd test_inversion_tikhonov test_inversion_tv test_inversion_rts test_inversion_ilsqr test_inversion_medi test_inversion_nltv test_inversion_ndi test_inversion_fansi test_inversion_fansi_tgv test_inversion_l1qsm test_inversion_whqsm test_inversion_hdqsm test_inversion_lsqr test_inversion_heidi"
                 combined="$combined test_combined_tfi" ;;
               src/inversion/tkd.rs)       inversion="$inversion test_inversion_tkd test_inversion_tsvd" ;;
               src/inversion/tikhonov.rs)  inversion="$inversion test_inversion_tikhonov"; pipeline="$pipeline test_pipeline_qsmart_tikhonov" ;;
@@ -212,6 +212,9 @@ jobs:
               src/inversion/whqsm.rs)     inversion="$inversion test_inversion_whqsm" ;;
               src/inversion/hdqsm.rs)     inversion="$inversion test_inversion_hdqsm" ;;
               src/inversion/amp_pe.rs)    inversion="$inversion test_inversion_amp_pe" ;;
+              src/inversion/lsqr_qsm.rs)  inversion="$inversion test_inversion_lsqr test_inversion_heidi" ;;
+              src/inversion/heidi.rs)     inversion="$inversion test_inversion_heidi" ;;
+              src/utils/anisotropic_diffusion.rs) inversion="$inversion test_inversion_heidi" ;;
               # AMP-PE's sparse-wavelet + erfc helpers are used only by it; WaveSep
               # also uses the wavelet transform.
               src/utils/special.rs) inversion="$inversion test_inversion_amp_pe" ;;
@@ -1022,7 +1025,7 @@ jobs:
           emit_chi_table_merged() {
             local rows
             rows=$(
-              emit_chi_rows "" "test_inversion_" tkd tsvd tikhonov tv rts ilsqr medi nltv ndi fansi fansi_tgv l1qsm whqsm hdqsm amp_pe
+              emit_chi_rows "" "test_inversion_" tkd tsvd tikhonov tv rts ilsqr medi nltv ndi fansi fansi_tgv l1qsm whqsm hdqsm amp_pe lsqr heidi
               emit_chi_rows " — BFR + inversion" "test_combined_" tgv tfi
               emit_chi_rows " — full pipeline" "test_pipeline_" tgv qsmart qsmart_tikhonov
             )
@@ -1261,7 +1264,7 @@ jobs:
           emit_chi_table_merged() {
             local rows
             rows=$(
-              emit_chi_rows "" "test_inversion_" tkd tsvd tikhonov tv rts ilsqr medi nltv ndi fansi fansi_tgv l1qsm whqsm hdqsm amp_pe
+              emit_chi_rows "" "test_inversion_" tkd tsvd tikhonov tv rts ilsqr medi nltv ndi fansi fansi_tgv l1qsm whqsm hdqsm amp_pe lsqr heidi
               emit_chi_rows " — BFR + inversion" "test_combined_" tgv tfi
               emit_chi_rows " — full pipeline" "test_pipeline_" tgv qsmart qsmart_tikhonov
             )
