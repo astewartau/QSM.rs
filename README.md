@@ -204,6 +204,12 @@ See [`geometry`](src/geometry.rs) for the direction itself and for resampling to
 | **TGV** | Total Generalized Variation — single-step QSM from wrapped phase, combining unwrapping, background removal, and dipole inversion | Langkammer, C., et al. (2015). "Fast quantitative susceptibility mapping using 3D EPI and total generalized variation." *NeuroImage*, 111:622-630. [DOI](https://doi.org/10.1016/j.neuroimage.2015.02.041) |
 | **QSMART** | Two-stage QSM artifact reduction using SDF background removal, TKD inversion, and Frangi vesselness-based tissue/vasculature separation | Yaghmaie, N., Syeda, W., et al. (2021). "QSMART: Quantitative Susceptibility Mapping Artifact Reduction Technique." *NeuroImage*, 231:117701. [DOI](https://doi.org/10.1016/j.neuroimage.2020.117701) |
 
+### Artefact Reduction
+
+| Algorithm | Description | Reference |
+|-----------|-------------|-----------|
+| **Two-pass** | Reconstructs twice — once on a mask whose holes around strong susceptibility sources are left intact, once on the filled mask — and keeps the hole-preserving reconstruction wherever it is defined, so the streaking those sources cause stays out of the rest of the brain | Stewart, A.W., et al. (2022). "QSMxT: Robust masking and artifact reduction for quantitative susceptibility mapping." *Magnetic Resonance in Medicine*, 87(3):1289-1300. [DOI](https://doi.org/10.1002/mrm.29048) |
+
 ### SWI Processing
 
 | Algorithm | Description | Reference |

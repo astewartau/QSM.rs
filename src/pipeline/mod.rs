@@ -11,6 +11,9 @@
 //! 3. [`run_dipole_inversion`] — local field → susceptibility (ppm)
 //! 4. [`apply_reference`] — mean subtraction
 //!
+//! Two-pass artefact reduction ([`two_pass`]) runs stages 2-3 a second time against a mask whose
+//! holes are intact, then folds the two reconstructions together.
+//!
 //! For TGV, use [`run_tgv`] which combines steps 1-4 internally.
 //!
 //! ## Combined algorithms
@@ -31,6 +34,7 @@ pub mod bg_removal;
 pub mod inversion;
 pub mod separation;
 pub mod qsmart;
+pub mod two_pass;
 
 pub use config::*;
 pub use phase_utils::{
@@ -44,3 +48,4 @@ pub use bg_removal::run_bg_removal;
 pub use inversion::{run_dipole_inversion, run_tgv, run_nextqsm, run_iqsm, run_iqsm_plus, run_iqfm};
 pub use separation::{run_separation, SeparationInputs, SeparationResult};
 pub use qsmart::run_qsmart;
+pub use two_pass::{combine_two_pass, default_reliable_sections, restrict_reliable_mask};
