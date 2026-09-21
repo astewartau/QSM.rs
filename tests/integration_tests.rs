@@ -888,7 +888,14 @@ fn test_swi() {
 
     // Step 3: Minimum intensity projection
     println!("[INFO] Computing mIP...");
-    let mip = swi::create_mip(&swi_result, &grid, swi::SwiParams::default().mip_window);
+    let identity = [
+        1.0, 0.0, 0.0, 0.0,
+        0.0, 1.0, 0.0, 0.0,
+        0.0, 0.0, 1.0, 0.0,
+        0.0, 0.0, 0.0, 1.0,
+    ];
+    let mip = swi::create_mip(&swi_result, &grid, &identity, swi::SwiParams::default().mip_window)
+        .expect("MIP window fits the volume");
 
     let elapsed = start.elapsed();
 
@@ -931,7 +938,7 @@ fn test_swi() {
         let z_offset = 3; // center the mIP output
         for k in 0..nz_mip {
             for idx_xy in 0..nxy {
-                mip_full[idx_xy + (k + z_offset) * nxy] = mip[idx_xy + k * nxy];
+                mip_full[idx_xy + (k + z_offset) * nxy] = mip.data[idx_xy + k * nxy];
             }
         }
         common::save_center_slices(&mip_full, &data.mask, data.dims, "swi_mip");

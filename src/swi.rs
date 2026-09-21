@@ -236,31 +236,97 @@ pub fn calculate_swi(
     swi
 }
 
-/// Minimum intensity projection along the z-axis
+/// A minimum-intensity projection, and the geometry it actually lives on.
 ///
-/// For each (x, y) position, takes the minimum value over a sliding window
-/// of `window` slices along z.
+/// A projection is not the volume it came from: it is shorter along the slice axis, and each of
+/// its slices stands for a slab rather than a plane. Both facts travel with the data here so a
+/// caller cannot write it out under the source volume's geometry — which produces a file whose
+/// header promises more voxels than it holds, and whose slices are misplaced in world space.
+#[derive(Debug, Clone)]
+pub struct Mip {
+    /// Projection values, Fortran order, `grid.n_total()` of them.
+    pub data: Vec<f64>,
+    /// Dimensions and voxel sizes of the projection.
+    pub grid: Grid,
+    /// Row-major 4×4 voxel→world affine, with the origin at the centre of the first slab.
+    pub affine: [f64; 16],
+}
+
+/// Geometry of a sliding projection over `window` slices, without computing one.
+///
+/// Returns the projection's grid and affine. Use it to size or place a projection ahead of
+/// time — to validate a window before doing the work, or to allocate an output file.
+///
+/// The slice axis loses `window - 1` slices, since a sliding window of `window` slices has
+/// `nz - window + 1` positions. Each output slice represents the **centre** of its slab, so the
+/// origin moves `(window - 1) / 2` slices along the slice direction. That shift follows the
+/// affine's third column rather than world z, which keeps it correct for an oblique
+/// acquisition; an even window lands the origin on a half-slice offset, as the convention
+/// implies.
+///
+/// # Errors
+/// If `window` is zero, or deeper than the volume.
+pub fn mip_geometry(
+    grid: &Grid,
+    affine: &[f64; 16],
+    window: usize,
+) -> Result<(Grid, [f64; 16]), String> {
+    let (nx, ny, nz) = grid.dims;
+    if window == 0 {
+        return Err("MIP window must be at least 1 slice".to_string());
+    }
+    if window > nz {
+        return Err(format!(
+            "MIP window of {} slices is deeper than the {}-slice volume",
+            window, nz,
+        ));
+    }
+
+    let (vsx, vsy, vsz) = grid.voxel_size;
+    let mip_grid = Grid::new(nx, ny, nz - window + 1, vsx, vsy, vsz);
+
+    let mut mip_affine = *affine;
+    let slabs = (window - 1) as f64 / 2.0;
+    for row in 0..3 {
+        // Row-major 4×4: column 2 is the slice direction, column 3 the origin.
+        mip_affine[row * 4 + 3] = affine[row * 4 + 3] + affine[row * 4 + 2] * slabs;
+    }
+
+    Ok((mip_grid, mip_affine))
+}
+
+/// Minimum intensity projection along the z-axis.
+///
+/// For each (x, y) position, takes the minimum value over a sliding window of `window` slices
+/// along z. The result is `window - 1` slices shorter than `data` and sits half a slab further
+/// along the slice direction, so it comes back as a [`Mip`] carrying its own grid and affine —
+/// see [`mip_geometry`] for the convention.
 ///
 /// # Arguments
 /// * `data` - 3D volume (Fortran order)
 /// * `grid` - Volume grid (dimensions and voxel sizes)
+/// * `affine` - Row-major 4×4 voxel→world affine of `data`. Pass an identity affine if the
+///   caller has no world geometry; the projection's affine is then identity-with-origin-shift.
 /// * `window` - Number of slices in the projection window
 ///
-/// # Returns
-/// MIP volume with dimensions `nx × ny × (nz - window + 1)`.
-/// Returns empty vec if `window > nz`.
+/// # Errors
+/// If `window` is zero or deeper than the volume, or if `data` does not match `grid`.
 pub fn create_mip(
     data: &[f64],
     grid: &Grid,
+    affine: &[f64; 16],
     window: usize,
-) -> Vec<f64> {
+) -> Result<Mip, String> {
     let (nx, ny, nz) = grid.dims;
-
-    if window > nz || window == 0 {
-        return vec![];
+    if data.len() != grid.n_total() {
+        return Err(format!(
+            "MIP input is {} values but its {}x{}x{} grid has {} voxels",
+            data.len(), nx, ny, nz, grid.n_total(),
+        ));
     }
+    let (mip_grid, mip_affine) = mip_geometry(grid, affine, window)?;
 
-    let nz_out = nz - window + 1;
+    let nz_out = mip_grid.nz();
     let nxy = nx * ny;
     let mut mip = vec![0.0; nxy * nz_out];
 
@@ -280,7 +346,8 @@ pub fn create_mip(
         }
     }
 
-    mip
+    debug_assert_eq!(mip.len(), mip_grid.n_total());
+    Ok(Mip { data: mip, grid: mip_grid, affine: mip_affine })
 }
 
 /// Softplus magnitude scaling for enhanced contrast
@@ -444,6 +511,13 @@ mod tests {
         }
     }
 
+    const IDENTITY: [f64; 16] = [
+        1.0, 0.0, 0.0, 0.0,
+        0.0, 1.0, 0.0, 0.0,
+        0.0, 0.0, 1.0, 0.0,
+        0.0, 0.0, 0.0, 1.0,
+    ];
+
     #[test]
     fn test_mip_basic() {
         // 3x3x5 volume, mIP with window=3 → 3x3x3 output
@@ -454,26 +528,111 @@ mod tests {
         let idx = 1 + 1 * nx + 2 * nx * ny; // (1,1,2)
         data[idx] = 1.0;
 
-        let mip = create_mip(&data, &grid, 3);
-        assert_eq!(mip.len(), nx * ny * 3);
+        let mip = create_mip(&data, &grid, &IDENTITY, 3).unwrap();
+        assert_eq!(mip.data.len(), nx * ny * 3);
 
         // The minimum at (1,1) should appear in slices that include z=2
         // Window starting at z=0: slices 0,1,2 → includes the 1.0
         let mip_idx_0 = 1 + 1 * nx + 0 * nx * ny;
-        assert_eq!(mip[mip_idx_0], 1.0);
+        assert_eq!(mip.data[mip_idx_0], 1.0);
         // Window starting at z=1: slices 1,2,3 → includes the 1.0
         let mip_idx_1 = 1 + 1 * nx + 1 * nx * ny;
-        assert_eq!(mip[mip_idx_1], 1.0);
+        assert_eq!(mip.data[mip_idx_1], 1.0);
         // Window starting at z=2: slices 2,3,4 → includes the 1.0
         let mip_idx_2 = 1 + 1 * nx + 2 * nx * ny;
-        assert_eq!(mip[mip_idx_2], 1.0);
+        assert_eq!(mip.data[mip_idx_2], 1.0);
+    }
+
+    /// The projection must describe itself: a caller that trusts the source grid writes a file
+    /// whose header promises more voxels than it holds (QSMxT#211).
+    #[test]
+    fn test_mip_reports_its_own_dimensions() {
+        let grid = Grid::new(32, 32, 32, 1.0, 1.0, 1.0);
+        let mip = create_mip(&vec![1.0; grid.n_total()], &grid, &IDENTITY, 7).unwrap();
+        assert_eq!(mip.grid.dims, (32, 32, 26));
+        assert_eq!(mip.data.len(), mip.grid.n_total());
+        // Voxel sizes are unchanged by a projection.
+        assert_eq!(mip.grid.voxel_size, grid.voxel_size);
+    }
+
+    #[test]
+    fn test_mip_origin_moves_to_the_slab_centre() {
+        let grid = Grid::new(4, 4, 16, 1.0, 1.0, 2.0);
+        let mut affine = IDENTITY;
+        affine[10] = 2.0; // 2 mm slices
+        affine[11] = 10.0;
+        let (mip_grid, mip_affine) = mip_geometry(&grid, &affine, 7).unwrap();
+        assert_eq!(mip_grid.dims, (4, 4, 10));
+        // Three slices of 2 mm past the first slab's first slice.
+        assert_eq!(mip_affine[11], 16.0);
+        // Nothing but the origin moves.
+        assert_eq!(mip_affine[..11], affine[..11]);
+    }
+
+    #[test]
+    fn test_mip_origin_follows_an_oblique_slice_direction() {
+        // Slice direction tilted 45° in the y/z plane, 2 mm slices.
+        let s = 2.0 / 2f64.sqrt();
+        let affine = [
+            1.0, 0.0, 0.0, 0.0,
+            0.0, 1.0, s, 0.0,
+            0.0, 0.0, s, 0.0,
+            0.0, 0.0, 0.0, 1.0,
+        ];
+        let grid = Grid::new(8, 8, 20, 1.0, 1.0, 2.0);
+        let (mip_grid, mip_affine) = mip_geometry(&grid, &affine, 7).unwrap();
+        assert_eq!(mip_grid.dims, (8, 8, 14));
+        // Both y and z move: three slice steps along the tilted direction, not along world z.
+        assert!((mip_affine[7] - 3.0 * s).abs() < 1e-12, "{:?}", mip_affine);
+        assert!((mip_affine[11] - 3.0 * s).abs() < 1e-12, "{:?}", mip_affine);
+        assert_eq!(mip_affine[3], 0.0);
+    }
+
+    #[test]
+    fn test_mip_even_window_lands_on_a_half_slice() {
+        let grid = Grid::new(4, 4, 16, 1.0, 1.0, 1.0);
+        let (_, mip_affine) = mip_geometry(&grid, &IDENTITY, 4).unwrap();
+        assert_eq!(mip_affine[11], 1.5);
+    }
+
+    #[test]
+    fn test_mip_window_of_one_is_the_volume_itself() {
+        let grid = Grid::new(3, 3, 5, 1.0, 1.0, 1.0);
+        let data: Vec<f64> = (0..grid.n_total()).map(|i| i as f64).collect();
+        let mip = create_mip(&data, &grid, &IDENTITY, 1).unwrap();
+        assert_eq!(mip.grid.dims, grid.dims);
+        assert_eq!(mip.data, data);
+        assert_eq!(mip.affine, IDENTITY);
+    }
+
+    #[test]
+    fn test_mip_window_of_full_depth_leaves_one_slice() {
+        let grid = Grid::new(3, 3, 5, 1.0, 1.0, 1.0);
+        let mip = create_mip(&vec![1.0; grid.n_total()], &grid, &IDENTITY, 5).unwrap();
+        assert_eq!(mip.grid.dims, (3, 3, 1));
+        assert_eq!(mip.affine[11], 2.0);
     }
 
     #[test]
     fn test_mip_window_too_large() {
         let grid = Grid::new(3, 3, 3, 1.0, 1.0, 1.0);
-        let mip = create_mip(&[1.0; 27], &grid, 10);
-        assert!(mip.is_empty());
+        let err = create_mip(&[1.0; 27], &grid, &IDENTITY, 10).unwrap_err();
+        assert!(err.contains("deeper than the 3-slice volume"), "{}", err);
+    }
+
+    #[test]
+    fn test_mip_zero_window() {
+        let grid = Grid::new(3, 3, 3, 1.0, 1.0, 1.0);
+        let err = create_mip(&[1.0; 27], &grid, &IDENTITY, 0).unwrap_err();
+        assert!(err.contains("at least 1 slice"), "{}", err);
+    }
+
+    #[test]
+    fn test_mip_rejects_data_that_does_not_match_the_grid() {
+        let grid = Grid::new(3, 3, 3, 1.0, 1.0, 1.0);
+        let err = create_mip(&[1.0; 26], &grid, &IDENTITY, 3).unwrap_err();
+        assert!(err.contains("26 values"), "{}", err);
+        assert!(err.contains("27 voxels"), "{}", err);
     }
 
     #[test]
