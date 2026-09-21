@@ -814,6 +814,9 @@ mod tests {
                 }
                 // iQFM: standalone run_iqfm, no stage enum.
                 ModelStage::PhaseToField => continue,
+                // SynthSeg: standalone segment::synthseg, an analysis step rather than a
+                // reconstruction stage. Remove this arm if a segmentation stage is added.
+                ModelStage::Segmentation => continue,
             };
             assert!(wired, "registry model '{}' (stage {:?}) has no {} variant — wire it or add a dl_model_id mapping", m.id, m.stage, enum_name);
         }

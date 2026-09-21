@@ -151,39 +151,78 @@ fn reflect(i: isize, n: usize) -> usize {
 /// Separable Gaussian filter matching `scipy.ndimage.gaussian_filter(x, sigma)` (voxel units,
 /// `truncate=4.0`, `mode='reflect'`) on a column-major `(nx, ny, nz)` volume.
 pub(crate) fn gaussian_filter(data: &[f64], dims: (usize, usize, usize), sigma: f64) -> Vec<f64> {
-    if sigma <= 0.0 {
-        return data.to_vec();
-    }
+    gaussian_filter_anisotropic(data, dims, [sigma; 3])
+}
+
+/// 1-D Gaussian weights for `scipy.ndimage.gaussian_filter1d(sigma, truncate=4.0)`.
+fn gaussian_weights(sigma: f64) -> Vec<f64> {
     let radius = (4.0 * sigma + 0.5) as isize;
-    let mut w: Vec<f64> = (-radius..=radius).map(|x| (-0.5 * (x * x) as f64 / (sigma * sigma)).exp()).collect();
+    let mut w: Vec<f64> =
+        (-radius..=radius).map(|x| (-0.5 * (x * x) as f64 / (sigma * sigma)).exp()).collect();
     let s: f64 = w.iter().sum();
     w.iter_mut().for_each(|v| *v /= s);
+    w
+}
+
+/// [`gaussian_filter`] with a separate standard deviation per axis; an axis whose sigma is zero
+/// is left unfiltered, as `scipy.ndimage.gaussian_filter` does.
+pub(crate) fn gaussian_filter_anisotropic(
+    data: &[f64],
+    dims: (usize, usize, usize),
+    sigma: [f64; 3],
+) -> Vec<f64> {
+    if sigma.iter().all(|&s| s <= 0.0) {
+        return data.to_vec();
+    }
     let (nx, ny, nz) = dims;
     let nxy = nx * ny;
 
     // x: along contiguous rows.
-    let mut a = vec![0.0; data.len()];
-    crate::maybe_par_chunks_mut!(a, nx).enumerate().for_each(|(r, row)| {
-        let src = &data[r * nx..(r + 1) * nx];
-        for (x, out) in row.iter_mut().enumerate() {
-            *out = w.iter().enumerate().map(|(t, &wt)| wt * src[reflect(x as isize + t as isize - radius, nx)]).sum();
-        }
-    });
+    let a = if sigma[0] > 0.0 {
+        let w = gaussian_weights(sigma[0]);
+        let radius = (w.len() / 2) as isize;
+        let mut a = vec![0.0; data.len()];
+        crate::maybe_par_chunks_mut!(a, nx).enumerate().for_each(|(r, row)| {
+            let src = &data[r * nx..(r + 1) * nx];
+            for (x, out) in row.iter_mut().enumerate() {
+                *out = w
+                    .iter()
+                    .enumerate()
+                    .map(|(t, &wt)| wt * src[reflect(x as isize + t as isize - radius, nx)])
+                    .sum();
+            }
+        });
+        a
+    } else {
+        data.to_vec()
+    };
     // y: within each z-slice, weighted sum of whole rows.
-    let mut b = vec![0.0; data.len()];
-    crate::maybe_par_chunks_mut!(b, nxy).enumerate().for_each(|(z, slab)| {
-        let src = &a[z * nxy..(z + 1) * nxy];
-        for y in 0..ny {
-            let out = &mut slab[y * nx..(y + 1) * nx];
-            for (t, &wt) in w.iter().enumerate() {
-                let sy = reflect(y as isize + t as isize - radius, ny);
-                for (o, &v) in out.iter_mut().zip(&src[sy * nx..(sy + 1) * nx]) {
-                    *o += wt * v;
+    let b = if sigma[1] > 0.0 {
+        let w = gaussian_weights(sigma[1]);
+        let radius = (w.len() / 2) as isize;
+        let mut b = vec![0.0; data.len()];
+        crate::maybe_par_chunks_mut!(b, nxy).enumerate().for_each(|(z, slab)| {
+            let src = &a[z * nxy..(z + 1) * nxy];
+            for y in 0..ny {
+                let out = &mut slab[y * nx..(y + 1) * nx];
+                for (t, &wt) in w.iter().enumerate() {
+                    let sy = reflect(y as isize + t as isize - radius, ny);
+                    for (o, &v) in out.iter_mut().zip(&src[sy * nx..(sy + 1) * nx]) {
+                        *o += wt * v;
+                    }
                 }
             }
-        }
-    });
+        });
+        b
+    } else {
+        a
+    };
     // z: each output slice is a weighted sum of whole input slices.
+    if sigma[2] <= 0.0 {
+        return b;
+    }
+    let w = gaussian_weights(sigma[2]);
+    let radius = (w.len() / 2) as isize;
     let mut c = vec![0.0; data.len()];
     crate::maybe_par_chunks_mut!(c, nxy).enumerate().for_each(|(z, slab)| {
         for (t, &wt) in w.iter().enumerate() {
@@ -288,37 +327,7 @@ fn edt_1d(f: &[f64], d: &mut Vec<f64>) {
 
 /// Keep the 6-connected foreground components of at least `min(min_size, largest)` voxels.
 fn keep_large_components(mask: &[u8], dims: (usize, usize, usize), min_size: usize) -> Vec<u8> {
-    let (nx, ny, nz) = dims;
-    let nxy = nx * ny;
-    let mut label = vec![0u32; mask.len()];
-    let mut sizes = vec![0usize]; // label 0 = background
-    let mut stack = Vec::new();
-    for seed in 0..mask.len() {
-        if mask[seed] == 0 || label[seed] != 0 {
-            continue;
-        }
-        let id = sizes.len() as u32;
-        let mut size = 0;
-        label[seed] = id;
-        stack.push(seed);
-        while let Some(i) = stack.pop() {
-            size += 1;
-            let (x, y, z) = (i % nx, (i / nx) % ny, i / nxy);
-            let mut visit = |j: usize| {
-                if mask[j] != 0 && label[j] == 0 {
-                    label[j] = id;
-                    stack.push(j);
-                }
-            };
-            if x > 0 { visit(i - 1); }
-            if x + 1 < nx { visit(i + 1); }
-            if y > 0 { visit(i - nx); }
-            if y + 1 < ny { visit(i + nx); }
-            if z > 0 { visit(i - nxy); }
-            if z + 1 < nz { visit(i + nxy); }
-        }
-        sizes.push(size);
-    }
+    let (label, sizes) = crate::utils::connected::label_components(mask, dims);
     let largest = sizes.iter().copied().max().unwrap_or(0);
     let keep = min_size.min(largest);
     label.iter().map(|&l| (l != 0 && sizes[l as usize] >= keep) as u8).collect()
