@@ -16,6 +16,7 @@ use qsm_core::inversion;
 use qsm_core::inversion::{tgv_qsm, TgvParams, get_default_alpha, get_default_iterations, ilsqr, IlsqrParams, TkdParams};
 use qsm_core::inversion::{TvParams, NltvParams, RtsParams, MediParams, TfiParams, TikhonovParams};
 use qsm_core::inversion::{NdiParams, FansiParams, L1QsmParams, WhQsmParams, HdQsmParams, AmpPeParams};
+use qsm_core::inversion::{LsqrQsmParams, HeidiParams};
 use qsm_core::swi;
 use qsm_core::unwrap::{laplacian_unwrap_bfr, laplacian_unwrap, UnwrapMethod};
 use qsm_core::unwrap::romeo::{unwrap_romeo_multi_echo, RomeoParams};
@@ -786,6 +787,77 @@ fn test_inversion_whqsm() {
 
     assert!(result.iter().all(|v| v.is_finite()), "WH-QSM produced non-finite values");
     assert!(res.correlation > 0.7, "WH-QSM correlation too low: {}", res.correlation);
+}
+
+/// LSQR — minimally regularised least-squares inversion (Schweser 2010).
+/// Run without magnitude row weighting, matching the other inversion tests.
+#[test]
+#[ignore]
+fn test_inversion_lsqr() {
+    println!("[INFO] Loading test data...");
+    let data = TestData::load().expect("Failed to load test data");
+    let (nx, ny, nz) = data.dims;
+    let (vsx, vsy, vsz) = data.voxel_size;
+
+    let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
+    let params = LsqrQsmParams { b0: data.field_strength, ..Default::default() };
+    let (result, elapsed) = run_timed!("LSQR", inversion::lsqr_qsm(
+        &data.fieldmap_local, &data.mask, None, &grid, data.b0_dir,
+        &params, |_, _| {},
+    ));
+
+    let res = TestResult::new("LSQR", &result, &data.chi, &data.mask, data.dims);
+    res.print_with_time(elapsed);
+    let challenge = ChallengeMetrics::compute("LSQR", &result, &data.chi, &data.mask, &data.segmentation, data.dims);
+    challenge.print();
+    challenge.print_ci_metrics(elapsed);
+    common::save_center_slices(&result, &data.mask, data.dims, "inversion_lsqr");
+
+    assert!(result.iter().all(|v| v.is_finite()), "LSQR produced non-finite values");
+    assert!(res.correlation > 0.7, "LSQR correlation too low: {}", res.correlation);
+}
+
+/// HEIDI — homogeneity-enabled incremental dipole inversion (Schweser 2012),
+/// seeded from the LSQR map as in the published pipeline.
+#[test]
+#[ignore]
+fn test_inversion_heidi() {
+    println!("[INFO] Loading test data...");
+    let data = TestData::load().expect("Failed to load test data");
+    let (nx, ny, nz) = data.dims;
+    let (vsx, vsy, vsz) = data.voxel_size;
+
+    let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
+    let lsqr_params = LsqrQsmParams {
+        b0: data.field_strength,
+        mask_output: false,
+        ..Default::default()
+    };
+    let (chi_init, lsqr_elapsed) = run_timed!("HEIDI/LSQR seed", inversion::lsqr_qsm(
+        &data.fieldmap_local, &data.mask, None, &grid, data.b0_dir,
+        &lsqr_params, |_, _| {},
+    ));
+
+    // Reduced inner-iteration budget to keep CI tractable: the default 500 per
+    // continuation step costs thousands of FFT round trips on a whole brain, and
+    // the objective has largely settled by ~150 total iterations (corr 0.8907 at
+    // 116 iterations vs 0.8923 at 166 on this phantom).
+    let heidi_params = HeidiParams { inner_iterations: 50, ..Default::default() };
+    let (result, elapsed) = run_timed!("HEIDI", inversion::heidi(
+        &data.fieldmap_local, &data.mask, &chi_init, &grid, data.b0_dir,
+        &heidi_params, |_, _| {},
+    ));
+    let elapsed = elapsed + lsqr_elapsed;
+
+    let res = TestResult::new("HEIDI", &result, &data.chi, &data.mask, data.dims);
+    res.print_with_time(elapsed);
+    let challenge = ChallengeMetrics::compute("HEIDI", &result, &data.chi, &data.mask, &data.segmentation, data.dims);
+    challenge.print();
+    challenge.print_ci_metrics(elapsed);
+    common::save_center_slices(&result, &data.mask, data.dims, "inversion_heidi");
+
+    assert!(result.iter().all(|v| v.is_finite()), "HEIDI produced non-finite values");
+    assert!(res.correlation > 0.7, "HEIDI correlation too low: {}", res.correlation);
 }
 
 /// HD-QSM — Hybrid data-fidelity two-stage dipole inversion (HDQSM.m).
