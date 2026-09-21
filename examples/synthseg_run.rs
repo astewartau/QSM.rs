@@ -1,8 +1,10 @@
 //! Run SynthSeg on a NIfTI magnitude image and, optionally, compare against a reference
 //! segmentation (e.g. one produced by the upstream Python implementation).
 //!
-//! cargo run --release --features "parallel onnx" --example synthseg_run -- \
-//!     <image.nii[.gz]> <synthseg.onnx> <out.nii.gz> [reference.nii.gz] [--v1|--v2] [--fast]
+//! cargo run --release --features "parallel onnx download" --example synthseg_run -- \
+//!     <image.nii[.gz]> <synthseg.onnx|auto> <out.nii.gz> [reference.nii.gz] [--v1|--v2] [--fast]
+//!
+//! Passing `auto` for the model fetches and caches the registry weights (needs `download`).
 use qsm_core::io::{read_nifti_file, save_nifti_gz};
 use qsm_core::segment::{synthseg, SynthSegParams, SynthSegVersion};
 use qsm_core::Grid;
@@ -15,7 +17,18 @@ fn main() {
     let flag = |f: &str| args.iter().any(|a| a == f);
 
     let img = read_nifti_file(Path::new(positional[0])).expect("read image");
-    let onnx = std::fs::read(positional[1]).expect("read onnx");
+    let onnx = if positional[1] == "auto" {
+        #[cfg(feature = "download")]
+        {
+            let spec = qsm_core::models::find_model("synthseg").expect("registry entry");
+            println!("fetching {} weights...", spec.name);
+            qsm_core::models::download::primary_bytes(spec).expect("download weights")
+        }
+        #[cfg(not(feature = "download"))]
+        panic!("`auto` needs the `download` feature");
+    } else {
+        std::fs::read(positional[1]).expect("read onnx")
+    };
     let grid = Grid::new(
         img.dims.0, img.dims.1, img.dims.2,
         img.voxel_size.0, img.voxel_size.1, img.voxel_size.2,

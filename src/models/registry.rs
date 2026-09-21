@@ -422,7 +422,7 @@ const MODELS: &[ModelSpec] = &[
         id: "synthseg",
         name: "SynthSeg 1.0",
         stage: ModelStage::Segmentation,
-        status: WeightStatus::Pending,
+        status: WeightStatus::Available,
         origin: Framework::TensorFlow,
         description: "Contrast-agnostic whole-brain segmentation: magnitude → 32 FreeSurfer \
                       labels. A 5-level 3D U-Net (24 features, ELU, 13.2 M parameters) trained \
@@ -433,9 +433,11 @@ const MODELS: &[ModelSpec] = &[
         paper: "Billot et al., Med Image Anal 86:102789 (2023); https://doi.org/10.1016/j.media.2023.102789",
         source: "https://github.com/BBillot/SynthSeg",
         license: "Apache-2.0",
+        // Mirrored on Hugging Face (qsmxt/qsm-onnx-weights). Verified: anonymous
+        // download + SHA-256 match.
         files: &[WeightFile {
             name: "synthseg.onnx",
-            url: "",
+            url: "https://huggingface.co/qsmxt/qsm-onnx-weights/resolve/main/synthseg.onnx",
             sha256: "c2821a74e8a03d4073896b5c2e359b3ef86f9776bacd78e00da1c757aa97bbcc",
             bytes: 52_998_326,
         }],

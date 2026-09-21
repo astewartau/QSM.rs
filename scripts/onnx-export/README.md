@@ -26,7 +26,7 @@ SynthSeg 2.0's weights are not in the repository; fetch `synthseg_2.0.h5` from a
 FreeSurfer install or the UCL link in the SynthSeg README, then pass
 `--version 2.0 --weights <path>`.
 
-Verified export: `synthseg_1.0.onnx`, 52,998,326 bytes,
+Hosted as `synthseg.onnx` on `qsmxt/qsm-onnx-weights`. Verified export: 52,998,326 bytes,
 sha256 `c2821a74e8a03d4073896b5c2e359b3ef86f9776bacd78e00da1c757aa97bbcc`.
 Against the Keras graph on a real 192×256×128 input the posteriors agree to
 max |diff| 1.0e-5 and the argmax is identical at every voxel.
