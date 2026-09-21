@@ -123,6 +123,7 @@ pub mod pipeline;
 // Algorithm building blocks
 // ============================================================================
 pub mod bet;
+pub mod segment;
 pub mod unwrap;
 pub mod bgremove;
 pub mod inversion;

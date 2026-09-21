@@ -417,6 +417,51 @@ const MODELS: &[ModelSpec] = &[
         outputs: &["logits"],
         size_divisor: 32,
     },
+    // ---- Anatomical segmentation -------------------------------------------
+    ModelSpec {
+        id: "synthseg",
+        name: "SynthSeg 1.0",
+        stage: ModelStage::Segmentation,
+        status: WeightStatus::Pending,
+        origin: Framework::TensorFlow,
+        description: "Contrast-agnostic whole-brain segmentation: magnitude → 32 FreeSurfer \
+                      labels. A 5-level 3D U-Net (24 features, ELU, 13.2 M parameters) trained \
+                      only on synthetic images with randomised contrast, so it runs directly on \
+                      GRE magnitude without a T1w scan. Resample/orient/normalise, flip \
+                      averaging and the topological cleanup are in the Rust glue \
+                      (segment::synthseg). Spatial axes are dynamic (multiples of 32).",
+        paper: "Billot et al., Med Image Anal 86:102789 (2023); https://doi.org/10.1016/j.media.2023.102789",
+        source: "https://github.com/BBillot/SynthSeg",
+        license: "Apache-2.0",
+        files: &[WeightFile {
+            name: "synthseg.onnx",
+            url: "",
+            sha256: "c2821a74e8a03d4073896b5c2e359b3ef86f9776bacd78e00da1c757aa97bbcc",
+            bytes: 52_998_326,
+        }],
+        inputs: &["image"],
+        outputs: &["unet_prediction"],
+        size_divisor: 32,
+    },
+    ModelSpec {
+        id: "synthseg-2.0",
+        name: "SynthSeg 2.0",
+        stage: ModelStage::Segmentation,
+        status: WeightStatus::Pending,
+        origin: Framework::TensorFlow,
+        description: "SynthSeg 2.0: same architecture as `synthseg` with a 33-label set (adds \
+                      a general CSF class). The upstream weights are not in the SynthSeg \
+                      repository — they ship with FreeSurfer, or come from the UCL download \
+                      linked in the SynthSeg README — so they have to be fetched before \
+                      exporting. Run it with SynthSegVersion::V2.",
+        paper: "Billot et al., PNAS 120(9):e2216399120 (2023); https://doi.org/10.1073/pnas.2216399120",
+        source: "https://github.com/BBillot/SynthSeg",
+        license: "Apache-2.0",
+        files: &[pending_onnx("synthseg-2.0.onnx")],
+        inputs: &["image"],
+        outputs: &["unet_prediction"],
+        size_divisor: 32,
+    },
 ];
 
 #[cfg(test)]
