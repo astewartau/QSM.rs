@@ -1,16 +1,31 @@
-//! Susceptibility Weighted Imaging (SWI)
+//! Susceptibility Weighted Imaging (SWI) and Susceptibility Map-Weighted
+//! Imaging (SMWI)
 //!
 //! SWI enhances susceptibility contrast by combining magnitude and phase
 //! information. Phase is high-pass filtered, converted to a [0, 1] mask,
 //! and multiplied with magnitude.
 //!
-//! Reference:
+//! SMWI ([`calculate_smwi`]) builds the same kind of [0, 1] mask from a
+//! susceptibility map instead of from filtered phase, which avoids the
+//! blooming and residual-wrap artifacts a phase mask inherits from the
+//! non-local dipole field.
+//!
+//! References:
 //! Eckstein, K., et al. (2021). "Computationally efficient combination of
 //! multi-channel phase data from multi-echo acquisitions (ASPIRE)."
 //! Magnetic Resonance in Medicine, 79:2996-3006.
 //! https://doi.org/10.1002/mrm.26963
 //!
-//! Reference implementation: https://github.com/korbinian90/CLEARSWI.jl
+//! Gho, S.-M., et al. (2014). "Susceptibility map-weighted imaging (SMWI)
+//! for neuroimaging." Magnetic Resonance in Medicine, 72:337-346.
+//! https://doi.org/10.1002/mrm.24920
+//!
+//! Nam, Y., et al. (2017). "Imaging of nigrosome 1 in substantia nigra at 3T
+//! using multiecho susceptibility map-weighted imaging (SMWI)." Journal of
+//! Magnetic Resonance Imaging, 46:528-536. https://doi.org/10.1002/jmri.25553
+//!
+//! Reference implementations: https://github.com/korbinian90/CLEARSWI.jl
+//! (SWI), https://github.com/kschan0214/sepia (SMWI, `misc/swi_smwi/smwi`)
 
 use crate::Grid;
 use crate::utils::{gaussian_smooth_3d, apply_mask_zero};
@@ -385,6 +400,180 @@ pub fn softplus_scaling(
     }).collect()
 }
 
+// ---- Susceptibility Map-Weighted Imaging (SMWI) ----
+
+/// SMWI algorithm parameters
+#[cfg_attr(feature = "introspection", derive(serde::Serialize))]
+#[derive(Clone, Debug)]
+pub struct SmwiParams {
+    /// Susceptibility threshold in ppm: the |χ| at which the weighting mask
+    /// reaches zero. Must be positive; non-positive values fall back to 1 ppm.
+    pub threshold_ppm: f64,
+    /// Power the mask is raised to (contrast strength)
+    pub power: f64,
+    /// mIP window size in slices
+    pub mip_window: usize,
+}
+
+impl Default for SmwiParams {
+    fn default() -> Self {
+        Self {
+            threshold_ppm: 1.0,
+            power: 4.0,
+            mip_window: 4,
+        }
+    }
+}
+
+/// Which susceptibility sources the weighting mask suppresses
+#[cfg_attr(feature = "introspection", derive(serde::Serialize))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SmwiContrast {
+    /// Suppress paramagnetic sources (χ > 0): veins, iron, microbleeds
+    Paramagnetic,
+    /// Suppress diamagnetic sources (χ < 0): calcification, myelin
+    Diamagnetic,
+}
+
+/// Build the SMWI weighting mask from a susceptibility map
+///
+/// ```text
+/// paramagnetic: w(χ) = clamp(1 - χ/t, 0, 1)
+/// diamagnetic:  w(χ) = clamp(1 + χ/t, 0, 1)
+/// ```
+///
+/// Non-finite susceptibilities map to 0 so they cannot propagate into the
+/// weighted image or a later mIP.
+///
+/// # Arguments
+/// * `chi_ppm` - Susceptibility map in ppm
+/// * `threshold_ppm` - Susceptibility threshold in ppm (non-positive → 1 ppm)
+/// * `contrast` - Which sources to suppress
+///
+/// # Returns
+/// Weighting mask with values in [0, 1]
+pub fn susceptibility_mask(
+    chi_ppm: &[f64],
+    threshold_ppm: f64,
+    contrast: SmwiContrast,
+) -> Vec<f64> {
+    let t = if threshold_ppm > 0.0 { threshold_ppm } else { 1.0 };
+    let sign = match contrast {
+        SmwiContrast::Paramagnetic => -1.0,
+        SmwiContrast::Diamagnetic => 1.0,
+    };
+
+    chi_ppm
+        .iter()
+        .map(|&chi| {
+            if chi.is_finite() {
+                (1.0 + sign * chi / t).clamp(0.0, 1.0)
+            } else {
+                0.0
+            }
+        })
+        .collect()
+}
+
+/// Calculate SMWI from magnitude and a susceptibility map
+///
+/// Pipeline: susceptibility map → weighting mask → magnitude × mask^power.
+/// Unlike SWI, the weighting comes from χ rather than high-pass filtered
+/// phase, so it is free of the blooming and residual-wrap artifacts that the
+/// non-local dipole field introduces into a phase mask.
+///
+/// `magnitude` may hold several echoes stacked along the slowest axis
+/// (length `n_echoes × n_total`, as in `[x, y, z, echo]` Fortran order); the
+/// single χ-derived mask is then broadcast across echoes — the multi-echo
+/// SMWI of Nam et al. Use [`average_echoes`] to combine the result.
+///
+/// # Arguments
+/// * `magnitude` - Magnitude image(s), `n_total` or `n_echoes × n_total` values
+/// * `chi_ppm` - Susceptibility map in ppm (`n_total` values)
+/// * `mask` - Optional binary brain mask (1 = inside); outside is zeroed
+/// * `grid` - Volume grid (dimensions and voxel sizes)
+/// * `params` - SMWI algorithm parameters
+///
+/// # Returns
+/// `(paramagnetic, diamagnetic)` weighted images, each shaped like `magnitude`
+///
+/// # Panics
+/// If `chi_ppm` is not `n_total` long, or `magnitude` is not a non-zero
+/// multiple of `n_total`.
+pub fn calculate_smwi(
+    magnitude: &[f64],
+    chi_ppm: &[f64],
+    mask: Option<&[u8]>,
+    grid: &Grid,
+    params: &SmwiParams,
+) -> (Vec<f64>, Vec<f64>) {
+    let n_total = grid.n_total();
+    assert_eq!(
+        chi_ppm.len(),
+        n_total,
+        "SMWI: susceptibility map has {} voxels, grid has {}",
+        chi_ppm.len(),
+        n_total
+    );
+    assert!(
+        !magnitude.is_empty() && magnitude.len().is_multiple_of(n_total),
+        "SMWI: magnitude length {} is not a non-zero multiple of the {} grid voxels",
+        magnitude.len(),
+        n_total
+    );
+
+    let p_mask = susceptibility_mask(chi_ppm, params.threshold_ppm, SmwiContrast::Paramagnetic);
+    let d_mask = susceptibility_mask(chi_ppm, params.threshold_ppm, SmwiContrast::Diamagnetic);
+
+    // Weight once per voxel, then broadcast over echoes
+    let p_weight: Vec<f64> = p_mask.iter().map(|&w| w.powf(params.power)).collect();
+    let d_weight: Vec<f64> = d_mask.iter().map(|&w| w.powf(params.power)).collect();
+
+    let mut p_smwi = vec![0.0; magnitude.len()];
+    let mut d_smwi = vec![0.0; magnitude.len()];
+
+    let inside = |v: usize| mask.is_none_or(|m| m[v] != 0);
+
+    for (i, &m) in magnitude.iter().enumerate() {
+        let v = i % n_total;
+        if !inside(v) {
+            continue;
+        }
+        p_smwi[i] = m * p_weight[v];
+        d_smwi[i] = m * d_weight[v];
+    }
+
+    (p_smwi, d_smwi)
+}
+
+/// Average a multi-echo volume over its echoes
+///
+/// Input is `n_echoes × n_total` values stacked along the slowest axis;
+/// output is a single `n_total` volume. A single-echo input is returned
+/// unchanged.
+///
+/// # Panics
+/// If `data` is not a non-zero multiple of `grid.n_total()`.
+pub fn average_echoes(data: &[f64], grid: &Grid) -> Vec<f64> {
+    let n_total = grid.n_total();
+    assert!(
+        !data.is_empty() && data.len().is_multiple_of(n_total),
+        "average_echoes: length {} is not a non-zero multiple of the {} grid voxels",
+        data.len(),
+        n_total
+    );
+
+    let n_echoes = data.len() / n_total;
+    let mut out = vec![0.0; n_total];
+    for (i, &v) in data.iter().enumerate() {
+        out[i % n_total] += v;
+    }
+    for v in &mut out {
+        *v /= n_echoes as f64;
+    }
+    out
+}
+
 // ---- Helpers ----
 
 /// Get min/max of positive values within mask
@@ -656,5 +845,126 @@ mod tests {
         // Inverted rescale
         assert!((rescale(0.0, 0.0, 10.0, 1.0, 0.0) - 1.0).abs() < 1e-10);
         assert!((rescale(10.0, 0.0, 10.0, 1.0, 0.0) - 0.0).abs() < 1e-10);
+    }
+
+    // ---- SMWI ----
+
+    #[test]
+    fn test_susceptibility_mask_paramagnetic() {
+        // t = 0.5 ppm: 1 below zero, linear ramp to 0 at the threshold
+        let chi = vec![-1.0, -0.001, 0.0, 0.125, 0.25, 0.5, 0.9];
+        let w = susceptibility_mask(&chi, 0.5, SmwiContrast::Paramagnetic);
+        let expected = [1.0, 1.0, 1.0, 0.75, 0.5, 0.0, 0.0];
+        for (i, (&got, &want)) in w.iter().zip(expected.iter()).enumerate() {
+            assert!((got - want).abs() < 1e-12, "index {}: got {}, want {}", i, got, want);
+        }
+    }
+
+    #[test]
+    fn test_susceptibility_mask_diamagnetic() {
+        // Mirror image of the paramagnetic mask about χ = 0
+        let chi = vec![-0.9, -0.5, -0.25, 0.0, 0.25, 1.0];
+        let w = susceptibility_mask(&chi, 0.5, SmwiContrast::Diamagnetic);
+        let expected = [0.0, 0.0, 0.5, 1.0, 1.0, 1.0];
+        for (i, (&got, &want)) in w.iter().zip(expected.iter()).enumerate() {
+            assert!((got - want).abs() < 1e-12, "index {}: got {}, want {}", i, got, want);
+        }
+    }
+
+    #[test]
+    fn test_susceptibility_mask_edge_cases() {
+        // Non-finite χ is suppressed rather than propagated
+        let chi = vec![f64::NAN, f64::INFINITY, f64::NEG_INFINITY];
+        for contrast in &[SmwiContrast::Paramagnetic, SmwiContrast::Diamagnetic] {
+            let w = susceptibility_mask(&chi, 1.0, *contrast);
+            assert!(w.iter().all(|&v| v == 0.0), "{:?}: non-finite χ should give 0", contrast);
+        }
+
+        // Non-positive threshold falls back to 1 ppm
+        let chi = vec![0.5];
+        let fallback = susceptibility_mask(&chi, -1.0, SmwiContrast::Paramagnetic);
+        let one_ppm = susceptibility_mask(&chi, 1.0, SmwiContrast::Paramagnetic);
+        assert_eq!(fallback, one_ppm);
+    }
+
+    #[test]
+    fn test_smwi_reference_formula() {
+        // magn .* max(0, 1 - χ/t).^m, hand-computed at t = 0.2 ppm, m = 4
+        let grid = Grid::new(2, 1, 1, 1.0, 1.0, 1.0);
+        let chi = vec![0.05, -0.05];
+        let magnitude = vec![100.0, 100.0];
+        let params = SmwiParams { threshold_ppm: 0.2, power: 4.0, mip_window: 4 };
+
+        let (para, dia) = calculate_smwi(&magnitude, &chi, None, &grid, &params);
+
+        // χ = +0.05: paramagnetic weight (1 - 0.25)^4 = 0.31640625, diamagnetic 1
+        assert!((para[0] - 31.640625).abs() < 1e-9, "got {}", para[0]);
+        assert!((dia[0] - 100.0).abs() < 1e-9, "got {}", dia[0]);
+        // χ = -0.05: mirror image
+        assert!((para[1] - 100.0).abs() < 1e-9, "got {}", para[1]);
+        assert!((dia[1] - 31.640625).abs() < 1e-9, "got {}", dia[1]);
+    }
+
+    #[test]
+    fn test_smwi_multi_echo_broadcast() {
+        // One χ mask applied to every echo of a 4D magnitude
+        let grid = Grid::new(2, 2, 2, 1.0, 1.0, 1.0);
+        let n = grid.n_total();
+        let chi: Vec<f64> = (0..n).map(|i| i as f64 * 0.1).collect();
+        let magnitude: Vec<f64> = (0..3 * n).map(|i| (i + 1) as f64).collect();
+        let params = SmwiParams::default();
+
+        let (para, _dia) = calculate_smwi(&magnitude, &chi, None, &grid, &params);
+        assert_eq!(para.len(), magnitude.len());
+
+        let weight = susceptibility_mask(&chi, params.threshold_ppm, SmwiContrast::Paramagnetic);
+        for i in 0..magnitude.len() {
+            let want = magnitude[i] * weight[i % n].powf(params.power);
+            assert!((para[i] - want).abs() < 1e-12, "index {}: got {}, want {}", i, para[i], want);
+        }
+
+        // Single-echo call on the first echo must agree with the broadcast one
+        let (para1, _) = calculate_smwi(&magnitude[..n], &chi, None, &grid, &params);
+        assert_eq!(&para[..n], &para1[..]);
+    }
+
+    #[test]
+    fn test_smwi_brain_mask() {
+        let grid = Grid::new(2, 2, 2, 1.0, 1.0, 1.0);
+        let n = grid.n_total();
+        let chi = vec![0.0; n];
+        let magnitude = vec![5.0; 2 * n];
+        let mut mask = vec![1u8; n];
+        mask[0] = 0;
+
+        let (para, dia) = calculate_smwi(&magnitude, &chi, Some(&mask), &grid, &SmwiParams::default());
+
+        // Masked-out voxel is zero in every echo, χ = 0 leaves the rest untouched
+        assert_eq!(para[0], 0.0);
+        assert_eq!(para[n], 0.0);
+        assert_eq!(dia[0], 0.0);
+        assert!((para[1] - 5.0).abs() < 1e-12);
+        assert!((para[n + 1] - 5.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_average_echoes() {
+        let grid = Grid::new(2, 1, 1, 1.0, 1.0, 1.0);
+        let data = vec![1.0, 2.0, 3.0, 4.0, 8.0, 12.0];
+        let avg = average_echoes(&data, &grid);
+        assert_eq!(avg, vec![4.0, 6.0]);
+
+        // Single echo passes through
+        let single = vec![7.0, 9.0];
+        assert_eq!(average_echoes(&single, &grid), single);
+    }
+
+    #[test]
+    #[should_panic(expected = "not a non-zero multiple")]
+    fn test_smwi_rejects_ragged_magnitude() {
+        let grid = Grid::new(2, 2, 2, 1.0, 1.0, 1.0);
+        let chi = vec![0.0; grid.n_total()];
+        let magnitude = vec![1.0; grid.n_total() + 1];
+        let _ = calculate_smwi(&magnitude, &chi, None, &grid, &SmwiParams::default());
     }
 }
