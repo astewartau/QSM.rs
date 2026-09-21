@@ -263,6 +263,18 @@ pub fn save_nifti(
     let (nx, ny, nz) = dims;
     let (vsx, vsy, vsz) = voxel_size;
 
+    // The header states a matrix size and every reader trusts it, so writing a buffer that does
+    // not match produces a file that opens fine and then fails — or shows nothing — the moment
+    // something reads the voxels (QSMxT#211). A wrong length is always a caller bug; the only
+    // question is whether it surfaces here or as a damaged file someone opens later.
+    let expected = nx * ny * nz;
+    if data.len() != expected {
+        return Err(format!(
+            "cannot write a {}x{}x{} NIfTI ({} voxels) from {} values",
+            nx, ny, nz, expected, data.len(),
+        ));
+    }
+
     // Create NIfTI-1 header (348 bytes)
     let mut header = [0u8; 348];
 
@@ -440,10 +452,11 @@ pub fn save_nifti_to_file(
 ) -> Result<(), String> {
     let path_str = path.to_string_lossy();
     let bytes = if path_str.ends_with(".nii.gz") {
-        save_nifti_gz(data, dims, voxel_size, affine)?
+        save_nifti_gz(data, dims, voxel_size, affine)
     } else {
-        save_nifti(data, dims, voxel_size, affine)?
-    };
+        save_nifti(data, dims, voxel_size, affine)
+    }
+    .map_err(|e| format!("{}: {}", path.display(), e))?;
 
     std::fs::write(path, &bytes)
         .map_err(|e| format!("Failed to write file '{}': {}", path.display(), e))
@@ -472,6 +485,50 @@ mod tests {
         assert!(is_gzip(&[0x1f, 0x8b, 0x00]));
         assert!(!is_gzip(&[0x00, 0x00, 0x00]));
         assert!(!is_gzip(&[0x1f])); // Too short
+    }
+
+    /// A buffer that does not match the dimensions must never reach a file: the header would
+    /// promise voxels the file does not hold, and readers only discover that on `get_fdata()`
+    /// (QSMxT#211).
+    #[test]
+    fn test_save_nifti_rejects_a_mismatched_payload() {
+        let dims = (2, 2, 2);
+        let voxel_size = (1.0, 1.0, 1.0);
+        let affine = [
+            1.0, 0.0, 0.0, 0.0,
+            0.0, 1.0, 0.0, 0.0,
+            0.0, 0.0, 1.0, 0.0,
+            0.0, 0.0, 0.0, 1.0,
+        ];
+
+        let short = save_nifti(&vec![0.0; 6], dims, voxel_size, &affine).unwrap_err();
+        assert!(short.contains("2x2x2"), "{}", short);
+        assert!(short.contains("8 voxels"), "{}", short);
+        assert!(short.contains("6 values"), "{}", short);
+
+        assert!(save_nifti(&vec![0.0; 9], dims, voxel_size, &affine).is_err());
+        // Both the gzip and the file writers route through it.
+        assert!(save_nifti_gz(&vec![0.0; 6], dims, voxel_size, &affine).is_err());
+    }
+
+    #[test]
+    fn test_save_nifti_to_file_names_the_file_it_refused() {
+        let dir = std::env::temp_dir().join("qsm-core-mismatch-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let affine = [
+            1.0, 0.0, 0.0, 0.0,
+            0.0, 1.0, 0.0, 0.0,
+            0.0, 0.0, 1.0, 0.0,
+            0.0, 0.0, 0.0, 1.0,
+        ];
+        for name in ["bad.nii", "bad.nii.gz"] {
+            let path = dir.join(name);
+            let err = save_nifti_to_file(&path, &vec![0.0; 6], (2, 2, 2), (1.0, 1.0, 1.0), &affine)
+                .unwrap_err();
+            assert!(err.contains(name), "{}", err);
+            assert!(!path.exists(), "nothing may be written for a mismatch");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
