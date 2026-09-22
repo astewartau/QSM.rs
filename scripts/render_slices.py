@@ -134,7 +134,13 @@ MONTAGE_LABELS = {
     "relax_unring_before": "Rung", "relax_unring_after": "Unrung",
     "swi": "CLEAR-SWI", "swi_mip": "CLEAR-SWI mIP", "r2star": "R2* (Hz)", "t2star": "T2* (s)",
     "smwi_para": "SMWI para", "smwi_dia": "SMWI dia", "smwi_mip": "SMWI mIP",
-    "r2primenet_pred": "Predicted", "r2primenet_ref": "Reference", "r2primenet_diff": "Difference",
+    # Supplementary passes no row labels, so unlike the relaxometry entries above these have to
+    # name the tool and units themselves.
+    "r2primenet_pred": "R2PRIMEnet R2' (Hz)", "r2primenet_ref": "Reference R2' (Hz)",
+    "r2primenet_diff": "R2PRIMEnet \u2212 reference (Hz)",
+    # Same quantity as the scored panel, but from the synthetic phantom, which has no R2'
+    # truth to compare against - said here so the two are not read as a pair.
+    "dl_r2primenet": "R2PRIMEnet R2' \u2014 no reference (Hz)",
 }
 
 # Fixed display windows (ppm)
