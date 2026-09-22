@@ -61,6 +61,8 @@ pub enum ModelStage {
     SingleStep,
     /// Inputs → paramagnetic/diamagnetic susceptibility (χ+ / χ−).
     ChiSeparation,
+    /// R2* → R2′ (reversible relaxation), for GRE-only χ-separation.
+    R2PrimeGeneration,
     /// Magnitude image → binary brain mask (brain extraction).
     BrainExtraction,
     /// Magnitude image → anatomical label map (whole-brain segmentation).

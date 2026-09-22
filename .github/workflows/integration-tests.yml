@@ -52,10 +52,10 @@ jobs:
           all_combined='["test_combined_tgv","test_combined_tfi"]'
           all_pipeline='["test_pipeline_romeo_b0","test_pipeline_unwrap_bfr_romeo","test_pipeline_unwrap_bfr_laplacian_neumann","test_unwrap_bfr_single_volume","test_pipeline_unwrap_bfr_stage_laplacian","test_pipeline_tgv","test_pipeline_qsmart","test_pipeline_qsmart_tikhonov","test_pipeline_harperella","test_pipeline_iharperella","test_bias_correction","test_swi","test_smwi","test_r2star_t2star"]'
           # χ-separation entries are whole test *binaries* (each runs several methods).
-          all_chisep='["chisep_qsmci","chisep_relaxometry_qsmci","chisep_xsepnet"]'
+          all_chisep='["chisep_qsmci","chisep_relaxometry_qsmci","chisep_xsepnet","chisep_r2primenet"]'
           # Deep-learning models (in tests/dl_models.rs; weights fetched from the registry).
           all_dl='["test_dl_qsmgan","test_dl_lpcnn","test_dl_ir2qsm","test_dl_modl_qsm","test_dl_nextqsm","test_dl_iqfm","test_dl_hdbet"]'
-          all_dl_names="test_dl_qsmgan test_dl_lpcnn test_dl_ir2qsm test_dl_modl_qsm test_dl_nextqsm test_dl_iqfm test_dl_hdbet"
+          all_dl_names="test_dl_qsmgan test_dl_lpcnn test_dl_ir2qsm test_dl_modl_qsm test_dl_nextqsm test_dl_iqfm test_dl_hdbet test_dl_r2primenet"
 
           run_unit_tests=false
 
@@ -114,6 +114,24 @@ jobs:
             exit 0
           fi
 
+          # A change to this workflow only needs the whole suite behind it when it changes how
+          # tests are *run*. Registering one — a new `case` arm, or a name added to an `all_*`
+          # list — is picked up by the normal mapping below, so it does not: the test it registers
+          # is selected by its own source file changing. Anything else in the file (a job
+          # definition, a cargo invocation, a features list) still fans out, and so does a diff
+          # this cannot classify.
+          workflow_registration_only=false
+          if echo "$CHANGED" | grep -qx '\.github/workflows/integration-tests\.yml'; then
+            if git diff "$BASE_SHA"..."$HEAD_SHA" -- .github/workflows/integration-tests.yml \
+                 | grep -E '^[+-]' | grep -vE '^(\+\+\+|---)' \
+                 | grep -qvE '^[+-][[:space:]]*(#|all_[a-z_]+=|[A-Za-z0-9_./*|$-]+\)[[:space:]])'; then
+              echo "integration-tests.yml: changed beyond test registration → full integration suite"
+            else
+              echo "integration-tests.yml: only test registration changed → mapping as usual"
+              workflow_registration_only=true
+            fi
+          fi
+
           # Check if any Rust/CI files changed (for unit tests)
           for file in $CHANGED; do
             case "$file" in
@@ -162,7 +180,11 @@ jobs:
               # sees) forces a full integration rerun. The render_*.py scripts are
               # figure-only — they change how results are drawn, not the computed
               # metrics or pass/fail — so they should not rerun the compute.
-              .github/workflows/integration-tests.yml|scripts/download-test-data.sh)
+              .github/workflows/integration-tests.yml)
+                if [ "$workflow_registration_only" = true ]; then
+                  run_unit_tests=true
+                  continue
+                fi
                 echo "CI file changed: $file → all integration tests"
                 echo "run_bgremove=true" >> "$GITHUB_OUTPUT"
                 echo "bgremove_matrix=$all_bgremove" >> "$GITHUB_OUTPUT"
@@ -179,6 +201,10 @@ jobs:
                 echo "dl_matrix=$all_dl" >> "$GITHUB_OUTPUT"
                 echo "run_unit_tests=$run_unit_tests" >> "$GITHUB_OUTPUT"
                 exit 0 ;;
+              # Changes the data every test sees, so there is nothing to narrow it to.
+              scripts/download-test-data.sh)
+                echo "CI file changed: $file → all integration tests"
+                output_all; exit 0 ;;
 
               # Background removal
               src/bgremove/mod.rs)
@@ -224,20 +250,69 @@ jobs:
 
               # χ-separation (all methods share src/separation; both test binaries)
               src/separation/chisepnet.rs) chisep="$chisep chisep_xsepnet" ;;
+              src/utils/r2primenet.rs) chisep="$chisep chisep_r2primenet"; dl="$dl test_dl_r2primenet" ;;
+              src/utils/sliding.rs) chisep="$chisep chisep_xsepnet chisep_r2primenet" ;;
               src/separation/*) chisep="$chisep chisep_qsmci chisep_relaxometry_qsmci" ;;
               tests/chisep_qsmci.rs) chisep="$chisep chisep_qsmci" ;;
               tests/chisep_relaxometry_qsmci.rs) chisep="$chisep chisep_relaxometry_qsmci" ;;
               tests/chisep_xsepnet.rs) chisep="$chisep chisep_xsepnet" ;;
+              tests/chisep_r2primenet.rs) chisep="$chisep chisep_r2primenet" ;;
 
               # Deep-learning models (shared ONNX registry/inference + per-model glue)
-              src/models/*)  dl="$dl $all_dl_names"; chisep="$chisep chisep_xsepnet" ;;
+              # The registry is edited whenever any single model is added or re-pointed, so fanning
+              # out to every DL test on it is nearly always wasted. Map the ids whose entries
+              # actually changed instead — and fall back to the full set if any of them is one this
+              # mapping does not know, so a new model is never silently skipped.
+              src/models/registry.rs)
+                changed_ids=$(git diff "$BASE_SHA"..."$HEAD_SHA" -- src/models/registry.rs \
+                  | grep -E '^[+-]' | grep -oE 'id: "[a-z0-9-]+"' \
+                  | sed -E 's/id: "([a-z0-9-]+)"/\1/' | sort -u)
+                if [ -z "$changed_ids" ]; then
+                  echo "registry.rs: no model entry changed → no DL tests selected"
+                else
+                  for id in $changed_ids; do
+                    case "$id" in
+                      qsmgan)     dl="$dl test_dl_qsmgan" ;;
+                      lpcnn)      dl="$dl test_dl_lpcnn" ;;
+                      ir2qsm)     dl="$dl test_dl_ir2qsm" ;;
+                      modl-qsm)   dl="$dl test_dl_modl_qsm" ;;
+                      nextqsm)    dl="$dl test_dl_nextqsm" ;;
+                      iqfm)       dl="$dl test_dl_iqfm" ;;
+                      hd-bet)     dl="$dl test_dl_hdbet" ;;
+                      r2primenet) dl="$dl test_dl_r2primenet"; chisep="$chisep chisep_r2primenet" ;;
+                      chi-sepnet) chisep="$chisep chisep_xsepnet" ;;
+                      susep-net)  chisep="$chisep chisep_qsmci" ;;
+                      # No dedicated test (xqsm, qsmnet, autoqsm, iqsm, synthseg, …): cover it
+                      # with the full DL set rather than assume nothing needs running.
+                      *) echo "registry.rs: '$id' has no mapped test → all DL tests"
+                         dl="$dl $all_dl_names" ;;
+                    esac
+                  done
+                fi ;;
+              src/models/*)  dl="$dl $all_dl_names"; chisep="$chisep chisep_xsepnet chisep_r2primenet" ;;
               src/inversion/qsmgan.rs)   dl="$dl test_dl_qsmgan" ;;
               src/inversion/lpcnn.rs)    dl="$dl test_dl_lpcnn" ;;
               src/inversion/ir2qsm.rs)   dl="$dl test_dl_ir2qsm" ;;
               src/inversion/modl_qsm.rs) dl="$dl test_dl_modl_qsm" ;;
               src/inversion/nextqsm.rs)  dl="$dl test_dl_nextqsm" ;;
               src/inversion/iqfm.rs)     dl="$dl test_dl_iqfm" ;;
-              tests/dl_models.rs)        dl="$dl $all_dl_names" ;;
+              # Every DL test shares this file's helpers, so a change to one of them can break the
+              # rest — but a diff that only *adds* lines cannot, so adding a test runs just that
+              # test. Any removal or edit falls back to the full set.
+              tests/dl_models.rs)
+                if git diff "$BASE_SHA"..."$HEAD_SHA" -- tests/dl_models.rs \
+                     | grep -E '^-' | grep -qvE '^---'; then
+                  dl="$dl $all_dl_names"
+                else
+                  added=$(git diff "$BASE_SHA"..."$HEAD_SHA" -- tests/dl_models.rs \
+                    | grep -E '^\+' | grep -oE 'fn (test_dl_[a-z0-9_]+)' | sed 's/^fn //' | sort -u)
+                  if [ -n "$added" ]; then
+                    echo "dl_models.rs: additions only → $added"
+                    dl="$dl $added"
+                  else
+                    dl="$dl $all_dl_names"
+                  fi
+                fi ;;
 
               # Brain extraction (HD-BET is a DL model: its own test in the DL matrix)
               src/bet/hdbet.rs|src/utils/resample.rs) dl="$dl test_dl_hdbet" ;;
@@ -273,7 +348,10 @@ jobs:
                 pipeline="$pipeline test_pipeline_qsmart test_pipeline_qsmart_tikhonov" ;;
               src/utils/bias_correction.rs)
                 pipeline="$pipeline test_pipeline_qsmart test_pipeline_qsmart_tikhonov test_bias_correction test_swi" ;;
-              src/utils/r2star.rs) pipeline="$pipeline test_r2star_t2star" ;;
+              # R2PRIMEnet's input is an ARLO R2* fit, so its tests ride on this too.
+              src/utils/r2star.rs)
+                pipeline="$pipeline test_r2star_t2star"
+                chisep="$chisep chisep_r2primenet"; dl="$dl test_dl_r2primenet" ;;
               src/swi.rs) pipeline="$pipeline test_swi test_smwi" ;;
             esac
           done

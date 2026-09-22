@@ -28,6 +28,7 @@ parity-checked against the authors' Python ONNX-Runtime output on `data/sim/dev`
 | **AutoQSM** | single-step (total field→χ) | ✅ `inversion::autoqsm` + `InversionAlgorithm::Autoqsm` | vs Keras patch-stitch | ✅ OSF `Available` |
 | **iQSM** | single-step (phase→χ) | ✅ `inversion::{iqsm,iqsm_multi_echo}` | vs original torch inference | ✅ OSF `Available` |
 | **iQSM+** | single-step (phase→χ, orientation-adaptive) | ✅ `inversion::{iqsm_plus,iqsm_plus_multi_echo}` | vs original torch inference | ✅ OSF `Available` |
+| **R2PRIMEnet** | R2′ generation (R2*→R2′) | ✅ `relaxometry::r2primenet` | corr 1.000000, max|Δ| 2.0e-5 Hz | ✅ HF `Available` (axes re-declared dynamic) |
 | **HD-BET** | brain extraction (magnitude→mask) | ✅ `bet::hd_bet` + `MaskOp::HdBet` | mask vs `hd-bet` CLI (see below) | ✅ HF `Available` (CC-BY-NC-4.0) |
 
 HD-BET v2 is a stock nnU-Net `PlainConvUNet` exported through nnU-Net itself (`export_hdbet.py`,
@@ -99,6 +100,25 @@ Of the 18 DL methods QSM-CI carries, they split cleanly:
 |--------|-------|---------|------|--------|--------------|
 | **BFRnet** | background removal | `BFRnet.onnx` | 76 MB | already exported from MATLAB `.mat`; committed in `algorithms/bfrnet/` | author permission (Sun) |
 | **χ-sepnet** | chi-separation | `240904_xsepnet.onnx` + norm `.mat` | ~gated | SNU-LIST Google form | **gated, not redistributable** |
+| **R2PRIMEnet** | R2′ generation | `240531_R2PRIMEnet.onnx` + the same norm `.mat` | 90 MB | SNU-LIST Google form | redistribution permission obtained |
+
+R2PRIMEnet and χ-sepnet are the models whose hosted artifacts are *edited* rather than
+re-exported: the toolbox ships both with a fixed 192×192×128 input, and
+`redeclare_dynamic_axes.py` re-declares the spatial axes (bit-identical at that patch, verified
+per output) so a 32-bit WASM host can tile 128×128×64 instead — one 64-channel activation at the
+authors' patch is 1.2 GB against a 4 GB heap. SUSEP-Net already had dynamic axes but was run
+whole-volume, which has the same problem at 1 mm, so `separation::susep_net` gained an optional
+sliding window (`SusepNetParams::patch`, `None` = the authors' single pass).
+
+What the browser patch costs, measured against the published inference on the reference volume:
+
+| Model | Published inference | Browser patch | Agreement |
+|-------|--------------------|---------------|-----------|
+| R2PRIMEnet | 192×192×128 patches | 128×128×64 | corr 0.998, NRMSE 2.9% |
+| SUSEP-Net | whole volume, one pass | 128×128×64 | χ+ corr 0.9999 / 0.72%; χ− corr 0.9981 / 1.02% |
+| χ-sepnet | 192×192×128 patches | 128×128×64 | same graph family as R2PRIMEnet |
+
+All three are labelled as approximations where a host exposes them.
 
 These are the fastest wins — no export step, we just need a Rust ONNX runtime. BFRnet is fully
 unblocked (fully-convolutional, dynamic spatial dims, "186 std layers, no custom classes", matches

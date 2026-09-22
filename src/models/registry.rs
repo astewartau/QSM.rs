@@ -371,22 +371,50 @@ const MODELS: &[ModelSpec] = &[
         size_divisor: 8,
     },
     ModelSpec {
+        id: "r2primenet",
+        name: "R2PRIMEnet",
+        stage: ModelStage::R2PrimeGeneration,
+        status: WeightStatus::Available,
+        origin: Framework::Onnx,
+        description: "SNU-LIST R2*→R2′ conversion network from the χ-sepnet pipeline \
+                      (already ONNX): a fully-convolutional 3D U-Net mapping the Dr-scaled, \
+                      z-scored R2* map to R2′, run as an overlapping sliding window. Supplies \
+                      R2′ for the GRE-only condition, where no spin-echo R2 is measured. \
+                      Spatial axes re-declared dynamic (the authors ship a fixed 192×192×128 \
+                      input) so 32-bit hosts can use a smaller patch. Normalization constants \
+                      (Dr=114) are baked into the Rust glue (R2PrimeNetNorm).",
+        paper: "Kim et al., Hum Brain Mapp 2025 (doi:10.1002/hbm.70136)",
+        source: "https://github.com/SNU-LIST/chi_sepnet",
+        license: "",
+        files: &[WeightFile {
+            name: "r2primenet.onnx",
+            url: "https://huggingface.co/qsmxt/qsm-onnx-weights/resolve/main/r2primenet.onnx",
+            sha256: "44cb5e67d1c68dae87a5f532e501dc0d4bf627d91f9c8ba35a56df5ac7ec3cd0",
+            bytes: 90_307_128,
+        }],
+        inputs: &["r2star"],
+        outputs: &["r2prime"],
+        size_divisor: 16,
+    },
+    ModelSpec {
         id: "chi-sepnet",
         name: "χ-sepnet",
         stage: ModelStage::ChiSeparation,
         status: WeightStatus::Available,
         origin: Framework::Onnx,
-        description: "SNU-LIST χ-separation network (already ONNX): a 192×192×128 \
+        description: "SNU-LIST χ-separation network (already ONNX): a fully-convolutional \
                       3D U-Net mapping [QSM, local field, R2′/Dr] (z-scored) → [χ+, χ−], \
-                      run as an overlapping sliding window. Normalization constants (Dr=114) \
-                      are baked into the Rust glue (ChiSepNetNorm).",
+                      run as an overlapping sliding window. Spatial axes re-declared dynamic \
+                      (the authors ship a fixed 192×192×128 input) so 32-bit hosts can use a \
+                      smaller patch. Normalization constants (Dr=114) are baked into the Rust \
+                      glue (ChiSepNetNorm).",
         paper: "Kim et al. / SNU-LIST chi-separation toolbox",
         source: "https://github.com/SNU-LIST/chi-separation",
         license: "",
         files: &[WeightFile {
             name: "chi-sepnet.onnx",
             url: "https://huggingface.co/qsmxt/qsm-onnx-weights/resolve/main/chi-sepnet.onnx",
-            sha256: "4f2343649cf36b4c9b371fc732da600720060bf2e76ed845578f16fe3411b3f2",
+            sha256: "5b442fdfdb88f50ec9149b384dabd0d2d9adb6983947d9cfa58382b78676bed9",
             bytes: 90_314_172,
         }],
         inputs: &["local_field", "qsm", "r2prime"],

@@ -12,7 +12,7 @@
 mod common;
 
 use common::{chisep_score, load_chisep_phantom, save_center_slices};
-use qsm_core::separation::{chisepnet, ChiSepNetNorm};
+use qsm_core::separation::{chisepnet, ChiSepNetNorm, ChiSepNetParams};
 use std::time::Instant;
 
 #[test]
@@ -40,6 +40,7 @@ fn test_chisep_xsepnet() {
         &ph.grid,
         &w,
         &ChiSepNetNorm::default(),
+        &ChiSepNetParams::default(),
     )
     .expect("chisepnet");
     let secs = t.elapsed().as_secs_f64();

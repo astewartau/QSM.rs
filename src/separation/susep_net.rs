@@ -11,11 +11,36 @@
 //! outputs non-negative magnitudes; we return χ− as a signed (≤ 0) value to match
 //! the crate's separation convention `(chi_pos ≥ 0, chi_neg ≤ 0, chi_total)`.
 //!
+//! **Whole volume vs patches.** The authors run the whole volume in one forward pass, and
+//! [`SusepNetParams::patch`] defaults to that (`None`). Activations then scale with the volume,
+//! which a 32-bit host cannot afford — at 1 mm whole-brain the first conv block alone runs to
+//! several GB against a 4 GB WASM heap — so such a host passes a patch and gets an overlapping
+//! sliding window (0.75 stride, overlaps averaged) with memory bounded by the patch. Tiling a
+//! net trained on whole volumes is an **approximation**: each patch is blind to structure
+//! outside it. Patch dimensions must be multiples of 8 (three pooling levels).
+//!
 //! Weights are not bundled; the caller passes the exported `susep-net.onnx` bytes
 //! (see [`crate::models`]).
 
 use crate::grid::Grid;
 use crate::models::onnx::{OnnxModel, OnnxError, Tensor};
+use crate::utils::sliding::starts;
+
+/// Three 2× pooling levels, so every patch dimension must be a multiple of this.
+const POOL_MULTIPLE: usize = 8;
+
+/// A patch that fits a 32-bit (WASM) heap; see the module docs for what it costs.
+pub const WASM_PATCH: (usize, usize, usize) = (128, 128, 64);
+
+/// Inference parameters for [`susep_net`].
+#[cfg_attr(feature = "introspection", derive(serde::Serialize))]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SusepNetParams {
+    /// `None` (the default) runs the whole volume in one pass, as the authors do. `Some(patch)`
+    /// runs an overlapping sliding window instead — bounded memory, at the cost of each patch
+    /// seeing less context. Each dimension must be a multiple of 8.
+    pub patch: Option<(usize, usize, usize)>,
+}
 
 /// Training z-score constants for SUSEP-Net (`all_mean_std.mat`): each field is
 /// `(mean, std)`. Inputs are normalized `(x-mean)/std`; outputs de-normalized
@@ -48,6 +73,9 @@ impl Default for SusepNetNorm {
 /// * `mask` — binary brain mask (same layout).
 /// * `model_onnx` — bytes of the exported `susep-net.onnx`.
 /// * `norm` — training normalization constants.
+/// * `params` — whole volume or sliding-window patch; see [`SusepNetParams`].
+/// * `progress` — progress callback `(patches_done, patches_total)`; a whole-volume run
+///   reports a single patch.
 ///
 /// Returns `(chi_pos ≥ 0, chi_neg ≤ 0, chi_total = chi_pos + chi_neg)` in ppm,
 /// masked, in the same layout.
@@ -60,6 +88,8 @@ pub fn susep_net(
     grid: &Grid,
     model_onnx: &[u8],
     norm: &SusepNetNorm,
+    params: &SusepNetParams,
+    mut progress: impl FnMut(usize, usize),
 ) -> Result<(Vec<f64>, Vec<f64>, Vec<f64>), OnnxError> {
     let (nx, ny, nz) = grid.dims;
     let n = nx * ny * nz;
@@ -68,40 +98,98 @@ pub fn susep_net(
     }
     assert_eq!(mask.len(), n, "mask length must match grid");
 
-    // Post-pad each dim to a multiple of 8 (three 2× pools).
-    let (px, py, pz) = (nx.div_ceil(8) * 8, ny.div_ceil(8) * 8, nz.div_ceil(8) * 8);
+    // Whole-volume (the authors' default) is the degenerate case of one patch covering the
+    // padded volume, so both paths share the code below. Either way every extent is a
+    // multiple of 8, the network's three pooling levels.
+    let round_up = |v: usize| v.div_ceil(POOL_MULTIPLE) * POOL_MULTIPLE;
+    let (pd, ph, pw) = match params.patch {
+        Some((d, h, w)) => {
+            for (axis, v) in [("D", d), ("H", h), ("W", w)] {
+                assert!(
+                    v > 0 && v % POOL_MULTIPLE == 0,
+                    "patch {axis} = {v} must be a positive multiple of {POOL_MULTIPLE} \
+                     (three pooling levels)"
+                );
+            }
+            (d, h, w)
+        }
+        None => (round_up(nx), round_up(ny), round_up(nz)),
+    };
+    let (px, py, pz) = (nx.max(pd), ny.max(ph), nz.max(pw));
 
-    // z-score + mask + repack column-major (nx,ny,nz) → row-major NCDHW [1,1,px,py,pz].
-    let pack = |src: &[f64], (mean, std): (f64, f64)| -> Tensor {
+    // z-score + mask, in the padded volume's row-major NCDHW layout.
+    let plane = px * py * pz;
+    let zscore = |src: &[f64], (mean, std): (f64, f64)| -> Vec<f32> {
         let inv = 1.0 / std;
-        let mut buf = vec![0.0f32; px * py * pz];
+        let mut buf = vec![0.0f32; plane];
         for z in 0..nz {
             for y in 0..ny {
                 for x in 0..nx {
                     let i = x + nx * (y + ny * z);
                     if mask[i] != 0 {
-                        let dst = (x * py + y) * pz + z;
-                        buf[dst] = ((src[i] - mean) * inv) as f32;
+                        buf[(x * py + y) * pz + z] = ((src[i] - mean) * inv) as f32;
                     }
                 }
             }
         }
-        Tensor::new(vec![1, 1, px, py, pz], buf)
+        buf
     };
-
-    // Input order must match the exported graph: qsm, r2prime, lfs.
-    let inputs = [
-        pack(qsm, norm.qsm),
-        pack(r2prime, norm.r2prime),
-        pack(local_field_ppm, norm.lfs),
+    // Channel order must match the exported graph: qsm, r2prime, lfs.
+    let channels = [
+        zscore(qsm, norm.qsm),
+        zscore(r2prime, norm.r2prime),
+        zscore(local_field_ppm, norm.lfs),
     ];
+
     let model = OnnxModel::load(model_onnx)?;
-    let outs = model.run(&inputs)?;
-    if outs.len() < 2 {
-        return Err(OnnxError::Run(format!("expected 2 outputs, got {}", outs.len())));
+    let patch_voxels = pd * ph * pw;
+    let mut acc_pos = vec![0.0f64; plane];
+    let mut acc_neg = vec![0.0f64; plane];
+    let mut wsum = vec![0.0f64; plane];
+
+    let (sx, sy, sz) = (starts(px, pd), starts(py, ph), starts(pz, pw));
+    let total = sx.len() * sy.len() * sz.len();
+    let mut done = 0usize;
+    progress(0, total);
+    for &x0 in &sx {
+        for &y0 in &sy {
+            for &z0 in &sz {
+                let tensors: Vec<Tensor> = channels
+                    .iter()
+                    .map(|ch| {
+                        let mut buf = vec![0.0f32; patch_voxels];
+                        for i in 0..pd {
+                            for j in 0..ph {
+                                let row = ((x0 + i) * py + (y0 + j)) * pz + z0;
+                                let dst = (i * ph + j) * pw;
+                                buf[dst..dst + pw].copy_from_slice(&ch[row..row + pw]);
+                            }
+                        }
+                        Tensor::new(vec![1, 1, pd, ph, pw], buf)
+                    })
+                    .collect();
+                let outs = model.run(&tensors)?;
+                if outs.len() < 2 {
+                    return Err(OnnxError::Run(format!("expected 2 outputs, got {}", outs.len())));
+                }
+                for i in 0..pd {
+                    for j in 0..ph {
+                        for k in 0..pw {
+                            let dst = ((x0 + i) * py + (y0 + j)) * pz + (z0 + k);
+                            let src = (i * ph + j) * pw + k;
+                            acc_pos[dst] += outs[0].data[src] as f64;
+                            acc_neg[dst] += outs[1].data[src] as f64;
+                            wsum[dst] += 1.0;
+                        }
+                    }
+                }
+                done += 1;
+                progress(done, total);
+            }
+        }
     }
 
-    // De-normalize, crop, mask, unpack. χ− is a magnitude → return signed (≤ 0).
+    // Average overlaps, de-normalize, crop, mask, unpack. χ− is a magnitude → return signed.
     let mut chi_pos = vec![0.0f64; n];
     let mut chi_neg = vec![0.0f64; n];
     let mut chi_total = vec![0.0f64; n];
@@ -111,14 +199,16 @@ pub fn susep_net(
         for y in 0..ny {
             for x in 0..nx {
                 let i = x + nx * (y + ny * z);
-                if mask[i] != 0 {
-                    let src = (x * py + y) * pz + z;
-                    let pos = outs[0].data[src] as f64 * ps + pm;
-                    let neg_mag = outs[1].data[src] as f64 * ns + nm;
-                    chi_pos[i] = pos;
-                    chi_neg[i] = -neg_mag;
-                    chi_total[i] = pos - neg_mag;
+                if mask[i] == 0 {
+                    continue;
                 }
+                let src = (x * py + y) * pz + z;
+                let w = wsum[src].max(1.0);
+                let pos = (acc_pos[src] / w) * ps + pm;
+                let neg_mag = (acc_neg[src] / w) * ns + nm;
+                chi_pos[i] = pos;
+                chi_neg[i] = -neg_mag;
+                chi_total[i] = pos - neg_mag;
             }
         }
     }
