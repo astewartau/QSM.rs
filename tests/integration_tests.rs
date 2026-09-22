@@ -1952,7 +1952,7 @@ fn add_noise(fields: &mut [Vec<f64>], sigma: f64, seed: u64) {
 /// regularize, so COSMOS should beat TKD by a wide margin rather than a marginal one.
 #[test]
 #[ignore]
-fn test_inversion_cosmos() {
+fn test_multiorient_cosmos() {
     println!("[INFO] Loading test data...");
     let data = TestData::load().expect("Failed to load test data");
     let (nx, ny, nz) = data.dims;
@@ -2015,7 +2015,7 @@ fn test_inversion_cosmos() {
 /// property of the kernel geometry alone, with no reconstruction and no simulated data.
 #[test]
 #[ignore]
-fn test_cosmos_orientation_coverage() {
+fn test_multiorient_coverage() {
     let data = TestData::load().expect("Failed to load test data");
     let (nx, ny, nz) = data.dims;
     let (vsx, vsy, vsz) = data.voxel_size;
@@ -2086,7 +2086,7 @@ fn test_cosmos_orientation_coverage() {
 /// loses the magic-angle cone and has no redundancy to average noise against.
 #[test]
 #[ignore]
-fn test_cosmos_noise_robustness() {
+fn test_multiorient_noise() {
     let data = TestData::load().expect("Failed to load test data");
     let (nx, ny, nz) = data.dims;
     let (vsx, vsy, vsz) = data.voxel_size;
@@ -2147,7 +2147,7 @@ fn test_cosmos_noise_robustness() {
 /// or a transposed component would show up immediately as spurious anisotropy.
 #[test]
 #[ignore]
-fn test_sti_isotropic_phantom() {
+fn test_multiorient_sti() {
     use qsm_core::inversion::{sti, sti_forward, tensor_maps, StiParams, SusceptibilityTensor};
 
     let data = TestData::load().expect("Failed to load test data");
@@ -2182,6 +2182,10 @@ fn test_sti_isotropic_phantom() {
 
     let res = TestResult::new("STI (MMS)", &maps.mms, &chi_src, &data.mask, data.dims);
     res.print_with_time(elapsed);
+    let challenge = ChallengeMetrics::compute(
+        "STI (MMS)", &maps.mms, &chi_src, &data.mask, &data.segmentation, data.dims);
+    challenge.print();
+    challenge.print_ci_metrics(elapsed);
     common::save_center_slices(&maps.mms, &data.mask, data.dims, "sti_mms");
     common::save_center_slices(&maps.msa, &data.mask, data.dims, "sti_msa");
 
