@@ -24,6 +24,7 @@ pub mod qsmart;
 pub mod threshold;
 pub mod mask;
 pub mod connected;
+pub mod union_find;
 pub mod signal_erosion;
 pub mod resample;
 pub mod simd_ops;

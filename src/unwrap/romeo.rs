@@ -37,7 +37,12 @@ pub enum RomeoWeightType {
     Romeo4,
     /// All components including magnitude weighting.
     Romeo6,
-    /// Best-path method (Abdul-Rahman). Not yet implemented.
+    /// Best-path reliability weights (Abdul-Rahman), used in place of the ROMEO
+    /// weight components. Equivalent to setting [`RomeoParams::bestpath`].
+    ///
+    /// This is still ROMEO's region growing, just differently weighted. For the
+    /// original best-path algorithm, see
+    /// [`unwrap_bestpath`](crate::unwrap::unwrap_bestpath).
     BestPath,
 }
 

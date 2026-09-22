@@ -18,7 +18,7 @@ use qsm_core::inversion::{TvParams, NltvParams, RtsParams, MediParams, TfiParams
 use qsm_core::inversion::{NdiParams, FansiParams, L1QsmParams, WhQsmParams, HdQsmParams, AmpPeParams};
 use qsm_core::inversion::{LsqrQsmParams, HeidiParams};
 use qsm_core::swi;
-use qsm_core::unwrap::{laplacian_unwrap_bfr, laplacian_unwrap, UnwrapMethod};
+use qsm_core::unwrap::{laplacian_unwrap_bfr, laplacian_unwrap, unwrap_bestpath, BestPathParams, UnwrapMethod};
 use qsm_core::unwrap::romeo::{unwrap_romeo_multi_echo, RomeoParams};
 use qsm_core::pipeline;
 use qsm_core::utils::{
@@ -93,6 +93,36 @@ fn run_field_mapping_laplacian(data: &common::TestData) -> Vec<f64> {
     let unwrapped: Vec<Vec<f64>> = corrected_phases
         .iter()
         .map(|p| laplacian_unwrap(p, &data.mask, &grid))
+        .collect();
+
+    calculate_b0_weighted(
+        &unwrapped, &data.mag_echoes, &data.echo_times, &data.mask,
+        B0WeightType::PhaseSNR, &grid,
+    )
+}
+
+/// Field mapping via best-path (3D-SRNCP) unwrapping. Returns B0 in Hz.
+///
+/// Same shape as `run_field_mapping_laplacian`, so all three unwrappers are scored on
+/// equal terms. `correct_global` matters here in a way it does not for the others:
+/// best-path fixes each echo's phase only up to a whole number of wraps, and a per-echo
+/// constant would bias the per-voxel fit over TE. Zeroing each echo's median wrap count
+/// removes that freedom.
+fn run_field_mapping_bestpath(data: &common::TestData) -> Vec<f64> {
+    let (nx, ny, nz) = data.dims;
+    let (vsx, vsy, vsz) = data.voxel_size;
+    let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
+
+    let (corrected_phases, _offset) = phase_offset_removal(
+        &data.phase_echoes, &data.mag_echoes, &data.echo_times, &data.mask,
+        [10.0, 10.0, 5.0], [0, 1], UnwrapMethod::Romeo,
+        &grid,
+    );
+
+    let params = BestPathParams { correct_global: true, ..Default::default() };
+    let unwrapped: Vec<Vec<f64>> = corrected_phases
+        .iter()
+        .map(|p| unwrap_bestpath(p, &data.mask, &params, &grid))
         .collect();
 
     calculate_b0_weighted(
@@ -1427,6 +1457,7 @@ fn unwrap_then_bfr(data: &common::TestData, unwrapper: Unwrapper) -> (Vec<f64>, 
     let b0_hz = match unwrapper {
         Unwrapper::Romeo => run_field_mapping(data),
         Unwrapper::LaplacianNeumann => run_field_mapping_laplacian(data),
+        Unwrapper::BestPath => run_field_mapping_bestpath(data),
     };
 
     let gamma = 42.576e6_f64;
@@ -1443,6 +1474,7 @@ fn unwrap_then_bfr(data: &common::TestData, unwrapper: Unwrapper) -> (Vec<f64>, 
 enum Unwrapper {
     Romeo,
     LaplacianNeumann,
+    BestPath,
 }
 
 fn run_unwrap_bfr_case(label: &str, unwrapper: Unwrapper, slug: &str) -> TestResult {
@@ -1473,6 +1505,21 @@ fn run_unwrap_bfr_case(label: &str, unwrapper: Unwrapper, slug: &str) -> TestRes
 fn test_pipeline_unwrap_bfr_romeo() {
     let res = run_unwrap_bfr_case("ROMEO + V-SHARP", Unwrapper::Romeo, "romeo");
     assert!(res.correlation > 0.45, "ROMEO local field correlation too low: {}", res.correlation);
+}
+
+/// Best path (3D-SRNCP): the original Abdul-Rahman algorithm.
+///
+/// Expected to land close to ROMEO — both are path-following methods and neither
+/// touches the harmonic background, so after background removal they should agree.
+#[test]
+#[ignore]
+fn test_pipeline_unwrap_bfr_bestpath() {
+    let res = run_unwrap_bfr_case("Best path + V-SHARP", Unwrapper::BestPath, "bestpath");
+    assert!(
+        res.correlation > 0.45,
+        "Best-path local field correlation too low: {}",
+        res.correlation
+    );
 }
 
 /// Laplacian under a Neumann boundary condition on the array: unwrapping only.

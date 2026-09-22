@@ -51,6 +51,7 @@ use std::f64::consts::PI;
 use crate::Grid;
 use crate::unwrap::romeo::{unwrap_romeo, RomeoParams};
 use crate::unwrap::laplacian::laplacian_unwrap;
+use crate::unwrap::bestpath::{unwrap_bestpath, BestPathParams};
 use crate::unwrap::UnwrapMethod;
 
 const TWO_PI: f64 = 2.0 * PI;
@@ -393,6 +394,9 @@ pub fn phase_offset_removal(
             // discard part of the offset this function exists to estimate.
             laplacian_unwrap(&hip_phase, mask, grid)
         }
+        UnwrapMethod::BestPath => {
+            unwrap_bestpath(&hip_phase, mask, &BestPathParams::default(), grid)
+        }
     };
     drop(hip_phase);
     drop(hip_mag);
@@ -706,6 +710,7 @@ pub fn mcpc3ds_combine<P: AsRef<[f64]>, M: AsRef<[f64]>>(
     let unwrapped_hip = match unwrap_method {
         UnwrapMethod::Romeo => unwrap_romeo(&hip_phase, &weight, None, 0.0, 0.0, &mask, &RomeoParams::default(), grid),
         UnwrapMethod::Laplacian => laplacian_unwrap(&hip_phase, &mask, grid),
+        UnwrapMethod::BestPath => unwrap_bestpath(&hip_phase, &mask, &BestPathParams::default(), grid),
     };
     drop(hip_phase);
     drop(weight);
