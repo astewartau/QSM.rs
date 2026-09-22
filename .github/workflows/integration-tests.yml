@@ -126,11 +126,19 @@ jobs:
           # so registering a test there edits the body. Matching only openers made the common
           # case — adding a test name to an existing arm — fan out to the whole suite, which is
           # exactly what this check exists to avoid.
+          #
+          # The summary step counts as registration too. Giving a new method a row in a metrics
+          # table, a panel in a montage, or a mention in a caption changes how results are
+          # *reported*, never which ones are computed or whether they pass — the same reason
+          # `render_*.py` is exempt above. Adding an algorithm always touches those lines, so
+          # leaving them out made a full-suite run the norm for exactly the change this is meant
+          # to narrow. `echo` is allowed only without a redirect, so the lines that actually
+          # select tests (`echo "run_dl=true" >> "$GITHUB_OUTPUT"`) are still caught.
           workflow_registration_only=false
           if echo "$CHANGED" | grep -qx '\.github/workflows/integration-tests\.yml'; then
             if git diff "$BASE_SHA"..."$HEAD_SHA" -- .github/workflows/integration-tests.yml \
                  | grep -E '^[+-]' | grep -vE '^(\+\+\+|---)' \
-                 | grep -qvE '^[+-][[:space:]]*(#|all_[a-z_]+=|[A-Za-z0-9_./*|$-]+\)([[:space:]]|$)|[a-z_]+="\$[a-z_]+[[:space:]]|;;[[:space:]]*$)'; then
+                 | grep -qvE '^[+-][[:space:]]*(#|all_[a-z_]+=|[A-Za-z0-9_./*|$-]+\)([[:space:]]|$)|[a-z_]+="\$[a-z_]+[[:space:]]|;;[[:space:]]*$|echo[[:space:]][^>]*$|emit_figures[[:space:]]|if[[:space:]]+TABLE=\$\(emit_table[[:space:]]|if[[:space:]]+\[[[:space:]]+-f[[:space:]]+"(slices|metrics|figures)/)'; then
               echo "integration-tests.yml: changed beyond test registration → full integration suite"
             else
               echo "integration-tests.yml: only test registration changed → mapping as usual"
