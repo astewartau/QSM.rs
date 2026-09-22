@@ -299,12 +299,16 @@ MONTAGES.append(("stage_unwrap", "Unwrapped total field maps", "ppm", (-0.05, 0.
     ["ground_truth_total_field", "unwrap_raw_romeo", "unwrap_raw_laplacian_neumann"],
 ], None))
 
+MULTIORIENT = ("stage_multiorient", "Multi-orientation inversion", "ppm", (-0.1, 0.1), [
+    ["ground_truth_chi", "inversion_cosmos", "sti_mms"],
+], None)
+MONTAGES.append(MULTIORIENT)
 MONTAGES.append(SUPPLEMENTARY)
 MONTAGES.append(RELAXOMETRY)
 
 # Field and susceptibility montages get the brain-mask outline (from the montage's ground-truth
 # panel) drawn on every panel, so how far each method reaches — and any eroded rim — is visible.
-OUTLINED = {"stage_bfr", "stage_dipole", "stage_chisep"}
+OUTLINED = {"stage_bfr", "stage_dipole", "stage_chisep", "stage_multiorient"}
 OUTLINE = "#d62728"
 
 # Every slug a montage covers; these get no individual 3-panel figure.

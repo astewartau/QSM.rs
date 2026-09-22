@@ -115,16 +115,22 @@ jobs:
           fi
 
           # A change to this workflow only needs the whole suite behind it when it changes how
-          # tests are *run*. Registering one — a new `case` arm, or a name added to an `all_*`
-          # list — is picked up by the normal mapping below, so it does not: the test it registers
-          # is selected by its own source file changing. Anything else in the file (a job
-          # definition, a cargo invocation, a features list) still fans out, and so does a diff
-          # this cannot classify.
+          # tests are *run*. Registering one — a new `case` arm, a name added to an `all_*`
+          # list, or a name appended to an existing arm's body — is picked up by the normal
+          # mapping below, so it does not: the test it registers is selected by its own source
+          # file changing. Anything else in the file (a job definition, a cargo invocation, a
+          # features list) still fans out, and so does a diff this cannot classify.
+          #
+          # Arm *bodies* count, not just arm openers. Arms are routinely written across two
+          # lines, with the `case` pattern on one and `inversion="$inversion ..."` on the next,
+          # so registering a test there edits the body. Matching only openers made the common
+          # case — adding a test name to an existing arm — fan out to the whole suite, which is
+          # exactly what this check exists to avoid.
           workflow_registration_only=false
           if echo "$CHANGED" | grep -qx '\.github/workflows/integration-tests\.yml'; then
             if git diff "$BASE_SHA"..."$HEAD_SHA" -- .github/workflows/integration-tests.yml \
                  | grep -E '^[+-]' | grep -vE '^(\+\+\+|---)' \
-                 | grep -qvE '^[+-][[:space:]]*(#|all_[a-z_]+=|[A-Za-z0-9_./*|$-]+\)[[:space:]])'; then
+                 | grep -qvE '^[+-][[:space:]]*(#|all_[a-z_]+=|[A-Za-z0-9_./*|$-]+\)([[:space:]]|$)|[a-z_]+="\$[a-z_]+[[:space:]]|;;[[:space:]]*$)'; then
               echo "integration-tests.yml: changed beyond test registration → full integration suite"
             else
               echo "integration-tests.yml: only test registration changed → mapping as usual"
@@ -151,11 +157,16 @@ jobs:
 
           for file in $CHANGED; do
             case "$file" in
-              # lib.rs and utils/mod.rs are only module declarations + re-exports
-              # (no behaviour); unit tests (already selected for any src/ change)
-              # recompile the whole crate, so a change to them alone needs no
-              # integration rerun.
+              # Module roots that are only declarations + re-exports (no behaviour); unit
+              # tests (already selected for any src/ change) recompile the whole crate, so a
+              # change to them alone needs no integration rerun. Registering a new algorithm
+              # means touching its module root, so without this every such PR reran the whole
+              # category — and src/pipeline/mod.rs reran the entire suite.
+              # Verified declarations-only: no fn/struct/enum/impl in any of them. Deliberately
+              # NOT here: src/unwrap/mod.rs (defines UnwrapMethod) and src/models/mod.rs (real
+              # code), which keep their mappings.
               src/lib.rs|src/utils/mod.rs) : ;;
+              src/inversion/mod.rs|src/bgremove/mod.rs|src/pipeline/mod.rs) : ;;
               # Core infrastructure → run everything
               src/fft.rs|src/nifti_io.rs|src/region_grow.rs|src/priority_queue.rs)
                 echo "Core file changed: $file → all tests"
@@ -207,8 +218,6 @@ jobs:
                 output_all; exit 0 ;;
 
               # Background removal
-              src/bgremove/mod.rs)
-                bgremove="$bgremove test_bgremove_sharp test_bgremove_resharp test_bgremove_vsharp test_bgremove_pdf test_bgremove_ismv test_bgremove_lbv" ;;
               src/bgremove/smv.rs)
                 bgremove="$bgremove test_bgremove_sharp test_bgremove_vsharp test_bgremove_ismv" ;;
               src/bgremove/sharp.rs)  bgremove="$bgremove test_bgremove_sharp" ;;
@@ -220,7 +229,7 @@ jobs:
               src/bgremove/sdf.rs)    pipeline="$pipeline test_pipeline_qsmart test_pipeline_qsmart_tikhonov" ;;
 
               # Dipole inversion
-              src/inversion/mod.rs|src/inversion/admm.rs)
+              src/inversion/admm.rs)
                 inversion="$inversion test_inversion_tkd test_inversion_tsvd test_inversion_tikhonov test_inversion_tv test_inversion_rts test_inversion_ilsqr test_inversion_medi test_inversion_nltv test_inversion_ndi test_inversion_fansi test_inversion_fansi_tgv test_inversion_l1qsm test_inversion_whqsm test_inversion_hdqsm test_inversion_lsqr test_inversion_heidi test_multiorient_cosmos test_multiorient_sti test_multiorient_coverage test_multiorient_noise"
                 combined="$combined test_combined_tfi" ;;
               src/inversion/tkd.rs)       inversion="$inversion test_inversion_tkd test_inversion_tsvd" ;;
@@ -328,7 +337,7 @@ jobs:
               src/unwrap/laplacian.rs) pipeline="$pipeline test_pipeline_unwrap_bfr_laplacian_neumann test_unwrap_bfr_single_volume test_pipeline_unwrap_bfr_stage_laplacian test_pipeline_qsmart test_pipeline_qsmart_tikhonov test_pipeline_harperella test_pipeline_iharperella" ;;
 
               # Pipeline (combined algorithms + shared stages)
-              src/pipeline/mod.rs|src/pipeline/config.rs|src/pipeline/phase_utils.rs|src/pipeline/referencing.rs)
+              src/pipeline/config.rs|src/pipeline/phase_utils.rs|src/pipeline/referencing.rs)
                 echo "Pipeline core changed: $file → all tests"
                 output_all; exit 0 ;;
               src/pipeline/field_mapping.rs)
@@ -1477,7 +1486,14 @@ jobs:
               echo ""
               echo "$TABLE"
               echo ""
-              emit_figures stage_dipole
+              # Its own montage, next to its own table. COSMOS and STI also appear in
+              # stage_dipole above, where they sit against every other method on a shared
+              # scale; that answers "how does it compare", this answers "did it work".
+              # Not sti_msa: on this isotropic phantom the anisotropy is ~1e-17, so its
+              # figure is three blank panels with no mask outline, which reads as broken data
+              # rather than as a clean null. The test asserts the bound; visualising MSA only
+              # earns its space once there is anisotropic test data to show.
+              emit_figures stage_multiorient
             fi
 
             if TABLE=$(emit_chi_table "test_dl_" qsmgan lpcnn ir2qsm modl_qsm nextqsm); then
