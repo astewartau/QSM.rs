@@ -65,6 +65,7 @@ NAMES = {
     "ground_truth_total_field": "Ground truth total field",
     "unwrap_raw_romeo": "ROMEO (unwrapped)",
     "unwrap_raw_laplacian_neumann": "Laplacian (unwrapped)",
+    "unwrap_raw_bestpath": "Best path (unwrapped)",
     "unwrap_bfr_single": "Laplacian + BFR (single volume) — local field",
     "pipeline_harperella": "HARPERELLA",
     "pipeline_iharperella": "iHARPERELLA",
@@ -105,6 +106,7 @@ NAMES = {
     "ground_truth_total_field": "Ground truth",
     "unwrap_raw_romeo": "ROMEO",
     "unwrap_raw_laplacian_neumann": "Laplacian",
+    "unwrap_raw_bestpath": "Best path",
     "ground_truth_chi": "Ground truth",
     "chisep_para_truth": "Ground truth",
     "chisep_dia_truth": "Ground truth",
@@ -186,6 +188,7 @@ WINDOWS = {
     "ground_truth_total_field": (-0.05, 0.05),
     "unwrap_raw_romeo": (-0.05, 0.05),
     "unwrap_raw_laplacian_neumann": (-0.05, 0.05),
+    "unwrap_raw_bestpath": (-0.05, 0.05),
     "unwrap_bfr_single": (-0.025, 0.025),
     "pipeline_harperella": (-0.025, 0.025),
     "pipeline_iharperella": (-0.025, 0.025),
@@ -296,7 +299,8 @@ SUPPLEMENTARY = ("stage_supplementary", "Supplementary outputs", None, None, [
 # defined up to one. Shown so that difference is visible rather than asserted — the
 # like-for-like comparison is the local-field table.
 MONTAGES.append(("stage_unwrap", "Unwrapped total field maps", "ppm", (-0.05, 0.05), [
-    ["ground_truth_total_field", "unwrap_raw_romeo", "unwrap_raw_laplacian_neumann"],
+    ["ground_truth_total_field", "unwrap_raw_romeo", "unwrap_raw_laplacian_neumann",
+     "unwrap_raw_bestpath"],
 ], None))
 
 MULTIORIENT = ("stage_multiorient", "Multi-orientation inversion", "ppm", (-0.1, 0.1), [

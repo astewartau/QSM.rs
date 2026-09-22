@@ -1549,7 +1549,7 @@ jobs:
               echo "*Each unwrapper → field map → V-SHARP → local field, vs ground truth.*"
               echo ""
               echo "Total field maps differ between unwrappers by an arbitrary harmonic field, so they are"
-              echo "compared after background removal. ROMEO and Laplacian should land close. The last row"
+              echo "compared after background removal. ROMEO, Laplacian and best path should land close. The last row"
               echo "drives the shared \`run_field_mapping\` stage, and is what catches a config selecting the"
               echo "wrong variant."
               echo ""
