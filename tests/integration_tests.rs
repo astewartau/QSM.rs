@@ -1885,3 +1885,327 @@ fn test_all_combinations() {
     println!("DONE — results written to {}", csv_path);
     println!("{}", "=".repeat(120));
 }
+
+// ============================================================================
+// COSMOS (multi-orientation) Tests
+// ============================================================================
+
+/// Forward dipole model: the local field the given chi would produce with B0 along `bdir`.
+fn simulate_orientation(chi: &[f64], grid: &Grid, bdir: (f64, f64, f64)) -> Vec<f64> {
+    let (nx, ny, nz) = grid.dims;
+    qsm_core::fft::apply_real_kernel(
+        chi,
+        &qsm_core::kernels::dipole::dipole_kernel(grid, bdir),
+        nx, ny, nz,
+    )
+}
+
+/// `n_orient` B0 directions spread over the spherical cap out to `max_tilt_deg`, placed on a
+/// Fibonacci spiral so that both the polar angle *and* the azimuth vary across the set.
+///
+/// Spread in azimuth alone is not enough: putting every orientation at the same polar angle
+/// leaves all their kernel zero-cones at the same radius in k-space, so the whole set stays
+/// blind to the same shell of frequencies no matter how many orientations are added.
+fn orientation_set(n_orient: usize, max_tilt_deg: f64) -> Vec<(f64, f64, f64)> {
+    let cos_max = max_tilt_deg.to_radians().cos();
+    let golden = std::f64::consts::PI * (3.0 - 5.0f64.sqrt());
+    (0..n_orient)
+        .map(|t| {
+            let z = if n_orient == 1 {
+                1.0
+            } else {
+                1.0 - (1.0 - cos_max) * (t as f64) / ((n_orient - 1) as f64)
+            };
+            let r = (1.0 - z * z).max(0.0).sqrt();
+            let az = golden * t as f64;
+            (r * az.cos(), r * az.sin(), z)
+        })
+        .collect()
+}
+
+/// Deterministic pseudo-random noise, scaled to `sigma`. SplitMix64 into a Box-Muller pair;
+/// the crate avoids an RNG dependency and the test only needs repeatability.
+fn add_noise(fields: &mut [Vec<f64>], sigma: f64, seed: u64) {
+    let mut state = seed;
+    let mut next = || {
+        state = state.wrapping_add(0x9E3779B97F4A7C15);
+        let mut z = state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
+        ((z ^ (z >> 31)) >> 11) as f64 / (1u64 << 53) as f64
+    };
+    for f in fields.iter_mut() {
+        for v in f.iter_mut() {
+            let (u1, u2) = (next().max(1e-12), next());
+            *v += sigma * (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos();
+        }
+    }
+}
+
+/// COSMOS against single-orientation TKD on the same simulated data.
+///
+/// The orientations here are forward-simulated with the same dipole kernel the inversion
+/// uses, so the absolute error is optimistic — this is an inverse crime and the NRMSE should
+/// be read as a floor, not as in-vivo performance. What the test actually pins is the claim
+/// COSMOS rests on: given the *same* forward model and the *same* data, sampling several
+/// orientations removes the ill-posedness that forces single-orientation methods to
+/// regularize, so COSMOS should beat TKD by a wide margin rather than a marginal one.
+#[test]
+#[ignore]
+fn test_inversion_cosmos() {
+    println!("[INFO] Loading test data...");
+    let data = TestData::load().expect("Failed to load test data");
+    let (nx, ny, nz) = data.dims;
+    let (vsx, vsy, vsz) = data.voxel_size;
+    let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
+
+    // Sources inside the brain only, so the simulated field is a local field.
+    let mut chi_src = data.chi.clone();
+    for (v, &m) in chi_src.iter_mut().zip(data.mask.iter()) {
+        if m == 0 { *v = 0.0; }
+    }
+
+    // A well-spread set: straight along B0 plus three 60-degree tilts.
+    let bdirs = orientation_set(4, 60.0);
+    println!("[INFO] Simulating {} orientations...", bdirs.len());
+    let fields: Vec<Vec<f64>> =
+        bdirs.iter().map(|&b| simulate_orientation(&chi_src, &grid, b)).collect();
+
+    let (result, elapsed) = run_timed!("COSMOS", inversion::cosmos(
+        &fields,
+        &bdirs,
+        &data.mask,
+        &grid,
+        &inversion::CosmosParams::default(),
+    ));
+
+    let res = TestResult::new("COSMOS", &result, &chi_src, &data.mask, data.dims);
+    res.print_with_time(elapsed);
+    let challenge = ChallengeMetrics::compute("COSMOS", &result, &chi_src, &data.mask, &data.segmentation, data.dims);
+    challenge.print();
+    challenge.print_ci_metrics(elapsed);
+    common::save_center_slices(&result, &data.mask, data.dims, "inversion_cosmos");
+
+    // Single-orientation TKD on the axial field from the identical forward model.
+    let tkd = inversion::tkd(&fields[0], &data.mask, &grid, bdirs[0], &TkdParams { threshold: 0.2 });
+    let tkd_res = TestResult::new("TKD (single orientation)", &tkd, &chi_src, &data.mask, data.dims);
+    tkd_res.print();
+
+    println!(
+        "[INFO] COSMOS NRMSE {:.4} vs single-orientation TKD {:.4} ({:.1}x lower)",
+        res.nrmse, tkd_res.nrmse, tkd_res.nrmse / res.nrmse
+    );
+
+    assert!(res.nrmse < 0.05, "COSMOS NRMSE too high: {}", res.nrmse);
+    assert!(res.correlation > 0.99, "COSMOS correlation too low: {}", res.correlation);
+    assert!(
+        res.nrmse < tkd_res.nrmse / 2.0,
+        "COSMOS ({}) should comfortably beat single-orientation TKD ({})",
+        res.nrmse, tkd_res.nrmse
+    );
+}
+
+/// The mechanism COSMOS actually rests on, measured directly on the dipole kernel.
+///
+/// A single orientation's kernel is exactly zero on the magic-angle cone, so those spatial
+/// frequencies are unrecoverable and single-orientation methods must regularize them back in.
+/// Rotating the subject moves the cone, so a second orientation covers nearly all of what the
+/// first lost — two cones still intersect along curves, leaving a handful of grid points, and
+/// a third clears those too. This counts unrecoverable k-points as orientations are added: a
+/// property of the kernel geometry alone, with no reconstruction and no simulated data.
+#[test]
+#[ignore]
+fn test_cosmos_orientation_coverage() {
+    let data = TestData::load().expect("Failed to load test data");
+    let (nx, ny, nz) = data.dims;
+    let (vsx, vsy, vsz) = data.voxel_size;
+    let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
+    let n = grid.n_total();
+
+    // Number of k-points where every orientation's kernel is negligible, i.e. where no
+    // orientation in the set carries recoverable information.
+    let unrecoverable = |bdirs: &[(f64, f64, f64)]| -> usize {
+        let mut den = vec![0.0f64; n];
+        for &b in bdirs {
+            let d = qsm_core::kernels::dipole::dipole_kernel(&grid, b);
+            for i in 0..n { den[i] += d[i] * d[i]; }
+        }
+        // DC is always null (the kernel has no DC response); exclude it and count the rest.
+        den.iter().filter(|&&x| x < 1e-6).count() - 1
+    };
+
+    let tilted = orientation_set(4, 60.0);
+    let one = unrecoverable(&tilted[..1]);
+    let two = unrecoverable(&tilted[..2]);
+    let three = unrecoverable(&tilted[..3]);
+    println!("[INFO] unrecoverable k-points (of {}): 1 orientation={}, 2={}, 3={}", n, one, two, three);
+
+    assert!(
+        one > 1000,
+        "a single orientation should leave a whole magic-angle cone unrecoverable, got {}",
+        one
+    );
+    assert!(
+        two * 100 < one,
+        "a second orientation should remove almost all of the cone: {} left of {}",
+        two, one
+    );
+    assert_eq!(three, 0, "three orientations should leave nothing unrecoverable, {} left", three);
+
+    // Real in-vivo rotations are small - the twelve head orientations of the reference
+    // multi-orientation dataset (Bilgic et al. 2015) span only 0 to 25 degrees from B0,
+    // because that is as far as a head turns inside a coil. Even so, they cover k-space:
+    // a 17-degree rotation already shifts the cone well clear of where it started.
+    let invivo: Vec<(f64, f64, f64)> = vec![
+        (0.0000, 0.0000, 1.0000),
+        (0.2875, -0.0719, 0.9551),
+        (0.3369, -0.2145, 0.9168),
+        (-0.2418, -0.1126, 0.9638),
+        (-0.3668, -0.1849, 0.9117),
+        (0.0117, 0.1368, 0.9905),
+        (0.2180, 0.0500, 0.9747),
+        (-0.2603, -0.0012, 0.9655),
+        (-0.0269, -0.2392, 0.9706),
+        (0.0100, -0.3529, 0.9356),
+        (0.0850, -0.3450, 0.9348),
+        (-0.1562, -0.3988, 0.9036),
+    ];
+    assert_eq!(
+        unrecoverable(&invivo), 0,
+        "the real in-vivo orientation set should still cover k-space"
+    );
+    assert!(
+        unrecoverable(&invivo[..2]) * 100 < one,
+        "even two in-vivo orientations, 17 degrees apart, should clear almost all of the cone"
+    );
+}
+
+/// Under noise, more orientations should help - averaging plus better conditioning.
+///
+/// This is the regime where orientation count earns its scan time: a single orientation both
+/// loses the magic-angle cone and has no redundancy to average noise against.
+#[test]
+#[ignore]
+fn test_cosmos_noise_robustness() {
+    let data = TestData::load().expect("Failed to load test data");
+    let (nx, ny, nz) = data.dims;
+    let (vsx, vsy, vsz) = data.voxel_size;
+    let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
+
+    let mut chi_src = data.chi.clone();
+    for (v, &m) in chi_src.iter_mut().zip(data.mask.iter()) {
+        if m == 0 { *v = 0.0; }
+    }
+
+    let bdirs = orientation_set(4, 60.0);
+    let clean: Vec<Vec<f64>> =
+        bdirs.iter().map(|&b| simulate_orientation(&chi_src, &grid, b)).collect();
+
+    let n_in = data.mask.iter().filter(|&&m| m != 0).count() as f64;
+    let field_rms = (clean[0].iter().zip(data.mask.iter())
+        .filter(|(_, &m)| m != 0)
+        .map(|(v, _)| v * v).sum::<f64>() / n_in).sqrt();
+    let sigma = 0.05 * field_rms;
+    println!("[INFO] field RMS {:.3e} ppm, noise sigma {:.3e} ppm", field_rms, sigma);
+
+    let params = inversion::CosmosParams::default();
+    let mut noisy = clean;
+    add_noise(&mut noisy, sigma, 12345);
+
+    let mut nrmse = Vec::new();
+    for k in [1usize, 2, 4] {
+        let (chi, elapsed) = run_timed!(
+            format!("COSMOS ({} orientations, noisy)", k),
+            inversion::cosmos(&noisy[..k], &bdirs[..k], &data.mask, &grid, &params)
+        );
+        let res = TestResult::new(
+            &format!("COSMOS ({} orientations)", k), &chi, &chi_src, &data.mask, data.dims);
+        res.print_with_time(elapsed);
+        if k == 4 {
+            common::save_center_slices(&chi, &data.mask, data.dims, "inversion_cosmos_noisy");
+        }
+        nrmse.push(res.nrmse);
+    }
+
+    println!("[INFO] noisy NRMSE by orientation count: 1={:.5}, 2={:.5}, 4={:.5}",
+        nrmse[0], nrmse[1], nrmse[2]);
+
+    assert!(nrmse[1] < nrmse[0], "2 orientations ({}) should beat 1 ({})", nrmse[1], nrmse[0]);
+    assert!(nrmse[2] < nrmse[1], "4 orientations ({}) should beat 2 ({})", nrmse[2], nrmse[1]);
+}
+
+// ============================================================================
+// STI (susceptibility tensor imaging) Tests
+// ============================================================================
+
+/// STI must degenerate to scalar QSM when the truth is isotropic.
+///
+/// The phantom's ground truth is a scalar susceptibility, so the tensor that produced it is
+/// `chi I`. A correct reconstruction must therefore return MMS equal to that scalar and MSA
+/// equal to zero — recovering six components and finding that five of the six degrees of
+/// freedom are empty is a much stronger check than recovering one number would be. A sign slip
+/// or a transposed component would show up immediately as spurious anisotropy.
+#[test]
+#[ignore]
+fn test_sti_isotropic_phantom() {
+    use qsm_core::inversion::{sti, sti_forward, tensor_maps, StiParams, SusceptibilityTensor};
+
+    let data = TestData::load().expect("Failed to load test data");
+    let (nx, ny, nz) = data.dims;
+    let (vsx, vsy, vsz) = data.voxel_size;
+    let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
+    let n = grid.n_total();
+
+    let mut chi_src = data.chi.clone();
+    for (v, &m) in chi_src.iter_mut().zip(data.mask.iter()) {
+        if m == 0 { *v = 0.0; }
+    }
+
+    // chi I — the isotropic tensor behind a scalar susceptibility map.
+    let zero = vec![0.0f64; n];
+    let truth = SusceptibilityTensor {
+        components: [
+            chi_src.clone(), zero.clone(), zero.clone(),
+            chi_src.clone(), zero, chi_src.clone(),
+        ],
+    };
+
+    // Eight orientations: six is the bare minimum for six unknowns, so a little margin.
+    let bdirs = orientation_set(8, 60.0);
+    println!("[INFO] Simulating {} orientations for STI...", bdirs.len());
+    let fields = sti_forward(&truth, &bdirs, &grid);
+
+    let (tensor, elapsed) = run_timed!("STI", sti(
+        &fields, &bdirs, &data.mask, &grid, &StiParams::default()
+    ));
+    let maps = tensor_maps(&tensor, &data.mask);
+
+    let res = TestResult::new("STI (MMS)", &maps.mms, &chi_src, &data.mask, data.dims);
+    res.print_with_time(elapsed);
+    common::save_center_slices(&maps.mms, &data.mask, data.dims, "sti_mms");
+    common::save_center_slices(&maps.msa, &data.mask, data.dims, "sti_msa");
+
+    // Anisotropy must be negligible next to the susceptibility scale that produced it.
+    let n_in = data.mask.iter().filter(|&&m| m != 0).count() as f64;
+    let chi_rms = (chi_src.iter().zip(data.mask.iter())
+        .filter(|(_, &m)| m != 0)
+        .map(|(v, _)| v * v).sum::<f64>() / n_in).sqrt();
+    let msa_rms = (maps.msa.iter().zip(data.mask.iter())
+        .filter(|(_, &m)| m != 0)
+        .map(|(v, _)| v * v).sum::<f64>() / n_in).sqrt();
+    println!("[INFO] chi RMS={:.4e} ppm, spurious MSA RMS={:.4e} ppm ({:.3}% of chi)",
+        chi_rms, msa_rms, 100.0 * msa_rms / chi_rms);
+
+    // Off-diagonal components should likewise be empty.
+    for (a, name) in [(1usize, "X12"), (2, "X13"), (4, "X23")] {
+        let rms = (tensor.components[a].iter().zip(data.mask.iter())
+            .filter(|(_, &m)| m != 0)
+            .map(|(v, _)| v * v).sum::<f64>() / n_in).sqrt();
+        println!("[INFO] off-diagonal {} RMS = {:.3e} ppm ({:.4}% of chi)",
+            name, rms, 100.0 * rms / chi_rms);
+        assert!(rms < 0.02 * chi_rms, "{} should be ~zero for an isotropic truth, got {}", name, rms);
+    }
+
+    assert!(res.correlation > 0.99, "MMS should track the scalar chi, r={}", res.correlation);
+    assert!(msa_rms < 0.02 * chi_rms, "spurious anisotropy too large: {} vs chi {}", msa_rms, chi_rms);
+}
