@@ -48,7 +48,7 @@
 //! - [`bgremove`] — background field removal (V-SHARP, SHARP, RESHARP, PDF, iSMV, mSMV, LBV, HARPERELLA)
 //! - [`inversion`] — dipole inversion (TKD, TSVD, Tikhonov, TV, NLTV, RTS, MEDI, iLSQR, TGV)
 //! - [`separation`] — paramagnetic/diamagnetic source separation (χ-separation, R2\*-QSM, WaveSep)
-//! - [`swi`] — susceptibility weighted imaging (CLEAR-SWI)
+//! - [`swi`] — susceptibility weighted imaging (CLEAR-SWI, SMWI)
 //! - [`fieldmap`] — multi-echo phase combination and B0 field mapping
 //! - [`r2star`] — R2\*/T2\* mapping (ARLO)
 //! - [`mask`] — mask thresholding and morphology

@@ -1021,6 +1021,118 @@ fn test_swi() {
 }
 
 // ============================================================================
+// Susceptibility Map-Weighted Imaging (SMWI) Test
+// ============================================================================
+
+#[test]
+#[ignore]
+fn test_smwi() {
+    println!("[INFO] Loading test data...");
+    let data = TestData::load().expect("Failed to load test data");
+    let (nx, ny, nz) = data.dims;
+    let (vsx, vsy, vsz) = data.voxel_size;
+    let n_total = nx * ny * nz;
+    let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
+
+    // Step 1: a susceptibility map to weight with. SMWI is post-processing on
+    // χ, so any inversion in ppm will do — TKD is the cheapest.
+    println!("[INFO] Reconstructing χ (TKD)...");
+    let chi = inversion::tkd(
+        &data.fieldmap_local, &data.mask, &grid, data.b0_dir,
+        &TkdParams { threshold: 0.2 },
+    );
+
+    let start = Instant::now();
+
+    // Step 2: stack the echoes along the slowest axis so one χ mask is
+    // broadcast over all of them (multi-echo SMWI)
+    let n_echoes = data.mag_echoes.len();
+    let mut magnitude = Vec::with_capacity(n_echoes * n_total);
+    for echo in &data.mag_echoes {
+        magnitude.extend_from_slice(echo);
+    }
+
+    // 0.2 ppm suits this phantom's deep-grey contrast; SEPIA's 1 ppm default
+    // is aimed at much stronger sources (microbleeds, calcification).
+    let params = swi::SmwiParams { threshold_ppm: 0.2, power: 4.0, mip_window: 4 };
+    println!("[INFO] Computing SMWI ({} echoes, threshold {} ppm, power {})...",
+        n_echoes, params.threshold_ppm, params.power);
+    let (para, dia) = swi::calculate_smwi(&magnitude, &chi, Some(&data.mask), &grid, &params);
+
+    // Step 3: combine echoes, then minimum intensity projection
+    let para_avg = swi::average_echoes(&para, &grid);
+    let dia_avg = swi::average_echoes(&dia, &grid);
+    let identity = [
+        1.0, 0.0, 0.0, 0.0,
+        0.0, 1.0, 0.0, 0.0,
+        0.0, 0.0, 1.0, 0.0,
+        0.0, 0.0, 0.0, 1.0,
+    ];
+    let mip = swi::create_mip(&para_avg, &grid, &identity, params.mip_window)
+        .expect("MIP window fits the volume");
+
+    let elapsed = start.elapsed();
+
+    assert_eq!(para.len(), magnitude.len(), "SMWI should preserve the echo dimension");
+    assert_eq!(dia.len(), magnitude.len(), "SMWI should preserve the echo dimension");
+
+    // Validate: weights live in [0, 1], so SMWI is bounded by the magnitude
+    let mut attenuated = 0usize;
+    let mut mask_count = 0usize;
+    for i in 0..magnitude.len() {
+        let v = i % n_total;
+        if data.mask[v] > 0 {
+            mask_count += 1;
+            assert!(para[i].is_finite() && dia[i].is_finite(),
+                "SMWI should be finite at index {}: para {}, dia {}", i, para[i], dia[i]);
+            assert!(para[i] >= 0.0 && para[i] <= magnitude[i] + 1e-9,
+                "Paramagnetic SMWI at {} = {} outside [0, {}]", i, para[i], magnitude[i]);
+            assert!(dia[i] >= 0.0 && dia[i] <= magnitude[i] + 1e-9,
+                "Diamagnetic SMWI at {} = {} outside [0, {}]", i, dia[i], magnitude[i]);
+            if para[i] < 0.95 * magnitude[i] {
+                attenuated += 1;
+            }
+        } else {
+            assert!(para[i] == 0.0 && dia[i] == 0.0,
+                "SMWI outside mask should be 0 at index {}: para {}, dia {}", i, para[i], dia[i]);
+        }
+    }
+
+    let attenuated_frac = attenuated as f64 / mask_count as f64;
+    println!("[INFO] SMWI: {:.1}% of in-mask voxels attenuated >5% by the paramagnetic mask",
+        attenuated_frac * 100.0);
+    println!("SMWI           {:>10.2?}", elapsed);
+    println!("RESULT:SMWI,-,-,-,-,{:.2}", elapsed.as_secs_f64());
+
+    // Save center slices for visualization
+    common::save_center_slices(&para_avg, &data.mask, data.dims, "smwi_para");
+    common::save_center_slices(&dia_avg, &data.mask, data.dims, "smwi_dia");
+
+    // The projection is shallower than the volume; re-center it for slicing
+    let nz_mip = mip.grid.dims.2;
+    if nz_mip > 0 {
+        let nxy = nx * ny;
+        let mut mip_full = vec![0.0; n_total];
+        let z_offset = (params.mip_window - 1) / 2;
+        for k in 0..nz_mip {
+            for idx_xy in 0..nxy {
+                mip_full[idx_xy + (k + z_offset) * nxy] = mip.data[idx_xy + k * nxy];
+            }
+        }
+        common::save_center_slices(&mip_full, &data.mask, data.dims, "smwi_mip");
+    }
+
+    // The paramagnetic mask must actually do something on this phantom
+    assert!(attenuated_frac > 0.01,
+        "Paramagnetic SMWI barely attenuates anything: {:.2}% of voxels", attenuated_frac * 100.0);
+    // Para and dia weight opposite sources, so they must not be the same image
+    let para_dia_corr = common::correlation(&para_avg, &dia_avg, &data.mask);
+    println!("[INFO] SMWI paramagnetic vs diamagnetic correlation: {:.3}", para_dia_corr);
+    assert!(para_dia_corr < 0.999,
+        "Paramagnetic and diamagnetic SMWI should differ, correlation {:.4}", para_dia_corr);
+}
+
+// ============================================================================
 // R2* / T2* Mapping Test
 // ============================================================================
 

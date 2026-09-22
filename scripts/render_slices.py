@@ -69,6 +69,9 @@ NAMES = {
     "pipeline_qsmart_tikhonov": "QSMART (Tikhonov)",
     "swi": "CLEAR-SWI",
     "swi_mip": "CLEAR-SWI mIP",
+    "smwi_para": "SMWI (paramagnetic)",
+    "smwi_dia": "SMWI (diamagnetic)",
+    "smwi_mip": "SMWI mIP (paramagnetic)",
     "r2star": "R2* (Hz)",
     "t2star": "T2* (s)",
     # Relaxometry demo (self-contained synthetic phantom)
@@ -126,6 +129,7 @@ MONTAGE_LABELS = {
     "relax_denoise_before": "Noisy", "relax_denoise_after": "Denoised",
     "relax_unring_before": "Rung", "relax_unring_after": "Unrung",
     "swi": "CLEAR-SWI", "swi_mip": "CLEAR-SWI mIP", "r2star": "R2* (Hz)", "t2star": "T2* (s)",
+    "smwi_para": "SMWI para", "smwi_dia": "SMWI dia", "smwi_mip": "SMWI mIP",
 }
 
 # Fixed display windows (ppm)
@@ -168,6 +172,9 @@ WINDOWS = {
     "pipeline_qsmart_tikhonov": (-0.1, 0.1),
     "swi": None,       # auto-range (magnitude-weighted)
     "swi_mip": None,   # auto-range (magnitude-weighted)
+    "smwi_para": None, # auto-range (magnitude-weighted)
+    "smwi_dia": None,  # auto-range (magnitude-weighted)
+    "smwi_mip": None,  # auto-range (magnitude-weighted)
     "r2star": (0, 100),    # Hz
     "t2star": (0, 0.08),   # seconds (0-80 ms)
     "relax_r2_truth": (0, 45),
@@ -250,6 +257,7 @@ RELAXOMETRY = ("stage_relaxometry", "Relaxometry toolkit", None, None, [
 
 SUPPLEMENTARY = ("stage_supplementary", "Supplementary outputs", None, None, [
     ["swi", "swi_mip", "r2star", "t2star"],
+    ["smwi_para", "smwi_dia", "smwi_mip"],
 ], None)
 # The unwrappers' own output, before background removal. These differ from each other (and
 # from ground truth) by an arbitrary harmonic field, which is expected: unwrapping is only

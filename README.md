@@ -217,6 +217,7 @@ See [`geometry`](src/geometry.rs) for the direction itself and for resampling to
 | Algorithm | Description | Reference |
 |-----------|-------------|-----------|
 | **CLEAR-SWI** | Susceptibility Weighted Imaging — phase mask weighting with high-pass filtering and minimum intensity projection | Eckstein, K., et al. (2024). "CLEAR-SWI: Computational Efficient T2* Weighted Imaging." *Proc. ISMRM*. |
+| **SMWI** | Susceptibility Map-Weighted Imaging — magnitude weighted by a mask built from the susceptibility map rather than filtered phase, giving paramagnetic and diamagnetic contrasts free of phase blooming; one mask is broadcast over all echoes for multi-echo SMWI | Gho, S.-M., et al. (2014). "Susceptibility map-weighted imaging (SMWI) for neuroimaging." *Magnetic Resonance in Medicine*, 72:337-346. [DOI](https://doi.org/10.1002/mrm.24920) |
 
 ### Multi-Echo Processing
 
@@ -267,6 +268,7 @@ This library was developed with reference to the following open-source implement
 | [FSL-BET2](https://github.com/Bostrix/FSL-BET2) | BET | C++ |
 | [QSMART](https://github.com/wtsyeda/QSMART) | SDF, QSMART pipeline, Frangi filter, curvature | MATLAB |
 | [CLEARSWI.jl](https://github.com/korbinian90/CLEARSWI.jl) | CLEAR-SWI | Julia |
+| [SEPIA](https://github.com/kschan0214/sepia) | SMWI | MATLAB |
 | [QSM-CI](https://github.com/QSMxT/QSM-CI) | Signal-gated mask erosion | Python |
 | [chi-separation](https://github.com/SNU-LIST/chi-separation) | Chi-separation | MATLAB |
 

@@ -50,7 +50,7 @@ jobs:
           all_bgremove='["test_bgremove_sharp","test_bgremove_resharp","test_bgremove_vsharp","test_bgremove_pdf","test_bgremove_ismv","test_bgremove_lbv"]'
           all_inversion='["test_inversion_tkd","test_inversion_tsvd","test_inversion_tikhonov","test_inversion_tv","test_inversion_rts","test_inversion_ilsqr","test_inversion_medi","test_inversion_nltv","test_inversion_ndi","test_inversion_fansi","test_inversion_fansi_tgv","test_inversion_l1qsm","test_inversion_whqsm","test_inversion_hdqsm","test_inversion_amp_pe","test_inversion_lsqr","test_inversion_heidi"]'
           all_combined='["test_combined_tgv","test_combined_tfi"]'
-          all_pipeline='["test_pipeline_romeo_b0","test_pipeline_unwrap_bfr_romeo","test_pipeline_unwrap_bfr_laplacian_neumann","test_unwrap_bfr_single_volume","test_pipeline_unwrap_bfr_stage_laplacian","test_pipeline_tgv","test_pipeline_qsmart","test_pipeline_qsmart_tikhonov","test_pipeline_harperella","test_pipeline_iharperella","test_bias_correction","test_swi","test_r2star_t2star"]'
+          all_pipeline='["test_pipeline_romeo_b0","test_pipeline_unwrap_bfr_romeo","test_pipeline_unwrap_bfr_laplacian_neumann","test_unwrap_bfr_single_volume","test_pipeline_unwrap_bfr_stage_laplacian","test_pipeline_tgv","test_pipeline_qsmart","test_pipeline_qsmart_tikhonov","test_pipeline_harperella","test_pipeline_iharperella","test_bias_correction","test_swi","test_smwi","test_r2star_t2star"]'
           # χ-separation entries are whole test *binaries* (each runs several methods).
           all_chisep='["chisep_qsmci","chisep_relaxometry_qsmci","chisep_xsepnet"]'
           # Deep-learning models (in tests/dl_models.rs; weights fetched from the registry).
@@ -274,7 +274,7 @@ jobs:
               src/utils/bias_correction.rs)
                 pipeline="$pipeline test_pipeline_qsmart test_pipeline_qsmart_tikhonov test_bias_correction test_swi" ;;
               src/utils/r2star.rs) pipeline="$pipeline test_r2star_t2star" ;;
-              src/swi.rs) pipeline="$pipeline test_swi" ;;
+              src/swi.rs) pipeline="$pipeline test_swi test_smwi" ;;
             esac
           done
 
@@ -1148,7 +1148,7 @@ jobs:
               echo ""
             fi
 
-            if [ -f "metrics/test_bias_correction.csv" ] || [ -f "metrics/test_swi.csv" ] || [ -f "metrics/test_r2star_t2star.csv" ]; then
+            if [ -f "metrics/test_bias_correction.csv" ] || [ -f "metrics/test_swi.csv" ] || [ -f "metrics/test_smwi.csv" ] || [ -f "metrics/test_r2star_t2star.csv" ]; then
               echo "## Utilities"
               echo ""
               echo "| Method | Time |"
@@ -1160,6 +1160,11 @@ jobs:
               fi
               if [ -f "metrics/test_swi.csv" ]; then
                 line=$(grep "^RESULT:" "metrics/test_swi.csv" | head -1 | sed 's/^RESULT://')
+                IFS=',' read -r name _ _ _ _ time <<< "$line"
+                echo "| ${name} | $(printf '%.2fs' "$time") |"
+              fi
+              if [ -f "metrics/test_smwi.csv" ]; then
+                line=$(grep "^RESULT:" "metrics/test_smwi.csv" | head -1 | sed 's/^RESULT://')
                 IFS=',' read -r name _ _ _ _ time <<< "$line"
                 echo "| ${name} | $(printf '%.2fs' "$time") |"
               fi
@@ -1448,7 +1453,7 @@ jobs:
               echo ""
             fi
 
-            if [ -f "metrics/test_bias_correction.csv" ] || [ -f "metrics/test_swi.csv" ] || [ -f "metrics/test_r2star_t2star.csv" ]; then
+            if [ -f "metrics/test_bias_correction.csv" ] || [ -f "metrics/test_swi.csv" ] || [ -f "metrics/test_smwi.csv" ] || [ -f "metrics/test_r2star_t2star.csv" ]; then
               echo "### Utilities"
               echo ""
               echo "| Method | Time |"
@@ -1460,6 +1465,11 @@ jobs:
               fi
               if [ -f "metrics/test_swi.csv" ]; then
                 line=$(grep "^RESULT:" "metrics/test_swi.csv" | head -1 | sed 's/^RESULT://')
+                IFS=',' read -r name _ _ _ _ time <<< "$line"
+                echo "| ${name} | $(printf '%.2fs' "$time") |"
+              fi
+              if [ -f "metrics/test_smwi.csv" ]; then
+                line=$(grep "^RESULT:" "metrics/test_smwi.csv" | head -1 | sed 's/^RESULT://')
                 IFS=',' read -r name _ _ _ _ time <<< "$line"
                 echo "| ${name} | $(printf '%.2fs' "$time") |"
               fi
