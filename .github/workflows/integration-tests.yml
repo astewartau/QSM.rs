@@ -335,6 +335,8 @@ jobs:
               src/unwrap/mod.rs)      pipeline="$pipeline test_pipeline_tgv test_pipeline_qsmart test_pipeline_qsmart_tikhonov" ;;
               src/unwrap/romeo.rs)    pipeline="$pipeline test_pipeline_romeo_b0 test_pipeline_unwrap_bfr_romeo test_pipeline_tgv" ;;
               src/unwrap/bestpath.rs) pipeline="$pipeline test_pipeline_unwrap_bfr_bestpath test_pipeline_unwrap_bfr_romeo" ;;
+              # Best path is union_find's only caller today; PRELUDE will be the second.
+              src/utils/union_find.rs) pipeline="$pipeline test_pipeline_unwrap_bfr_bestpath" ;;
               src/unwrap/laplacian.rs) pipeline="$pipeline test_pipeline_unwrap_bfr_laplacian_neumann test_unwrap_bfr_single_volume test_pipeline_unwrap_bfr_stage_laplacian test_pipeline_qsmart test_pipeline_qsmart_tikhonov test_pipeline_harperella test_pipeline_iharperella" ;;
 
               # Pipeline (combined algorithms + shared stages)
