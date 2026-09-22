@@ -16,8 +16,9 @@ use qsm_core::inversion;
 use qsm_core::inversion::{tgv_qsm, TgvParams, get_default_alpha, get_default_iterations, ilsqr, IlsqrParams, TkdParams};
 use qsm_core::inversion::{TvParams, NltvParams, RtsParams, MediParams, TfiParams, TikhonovParams};
 use qsm_core::inversion::{NdiParams, FansiParams, L1QsmParams, WhQsmParams, HdQsmParams, AmpPeParams};
+use qsm_core::inversion::{LsqrQsmParams, HeidiParams};
 use qsm_core::swi;
-use qsm_core::unwrap::{laplacian_unwrap, UnwrapMethod};
+use qsm_core::unwrap::{laplacian_unwrap_bfr, laplacian_unwrap, UnwrapMethod};
 use qsm_core::unwrap::romeo::{unwrap_romeo_multi_echo, RomeoParams};
 use qsm_core::pipeline;
 use qsm_core::utils::{
@@ -67,6 +68,33 @@ fn run_field_mapping(data: &common::TestData) -> Vec<f64> {
 
     // Step 3: Weighted B0 averaging (expects seconds)
     println!("[INFO] Weighted B0 estimation...");
+    calculate_b0_weighted(
+        &unwrapped, &data.mag_echoes, &data.echo_times, &data.mask,
+        B0WeightType::PhaseSNR, &grid,
+    )
+}
+
+/// Field mapping via Laplacian unwrapping, for either boundary condition.
+///
+/// Identical to `run_field_mapping` except for the unwrapper, so Laplacian is compared
+/// against ROMEO on equal terms. Returns B0 in Hz.
+fn run_field_mapping_laplacian(data: &common::TestData) -> Vec<f64> {
+    let (nx, ny, nz) = data.dims;
+    let (vsx, vsy, vsz) = data.voxel_size;
+    let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
+
+    // Phase offset removal is unchanged: it unwraps the HIP with ROMEO and uses TE ratios.
+    let (corrected_phases, _offset) = phase_offset_removal(
+        &data.phase_echoes, &data.mag_echoes, &data.echo_times, &data.mask,
+        [10.0, 10.0, 5.0], [0, 1], UnwrapMethod::Romeo,
+        &grid,
+    );
+
+    let unwrapped: Vec<Vec<f64>> = corrected_phases
+        .iter()
+        .map(|p| laplacian_unwrap(p, &data.mask, &grid))
+        .collect();
+
     calculate_b0_weighted(
         &unwrapped, &data.mag_echoes, &data.echo_times, &data.mask,
         B0WeightType::PhaseSNR, &grid,
@@ -761,6 +789,77 @@ fn test_inversion_whqsm() {
     assert!(res.correlation > 0.7, "WH-QSM correlation too low: {}", res.correlation);
 }
 
+/// LSQR — minimally regularised least-squares inversion (Schweser 2010).
+/// Run without magnitude row weighting, matching the other inversion tests.
+#[test]
+#[ignore]
+fn test_inversion_lsqr() {
+    println!("[INFO] Loading test data...");
+    let data = TestData::load().expect("Failed to load test data");
+    let (nx, ny, nz) = data.dims;
+    let (vsx, vsy, vsz) = data.voxel_size;
+
+    let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
+    let params = LsqrQsmParams { b0: data.field_strength, ..Default::default() };
+    let (result, elapsed) = run_timed!("LSQR", inversion::lsqr_qsm(
+        &data.fieldmap_local, &data.mask, None, &grid, data.b0_dir,
+        &params, |_, _| {},
+    ));
+
+    let res = TestResult::new("LSQR", &result, &data.chi, &data.mask, data.dims);
+    res.print_with_time(elapsed);
+    let challenge = ChallengeMetrics::compute("LSQR", &result, &data.chi, &data.mask, &data.segmentation, data.dims);
+    challenge.print();
+    challenge.print_ci_metrics(elapsed);
+    common::save_center_slices(&result, &data.mask, data.dims, "inversion_lsqr");
+
+    assert!(result.iter().all(|v| v.is_finite()), "LSQR produced non-finite values");
+    assert!(res.correlation > 0.7, "LSQR correlation too low: {}", res.correlation);
+}
+
+/// HEIDI — homogeneity-enabled incremental dipole inversion (Schweser 2012),
+/// seeded from the LSQR map as in the published pipeline.
+#[test]
+#[ignore]
+fn test_inversion_heidi() {
+    println!("[INFO] Loading test data...");
+    let data = TestData::load().expect("Failed to load test data");
+    let (nx, ny, nz) = data.dims;
+    let (vsx, vsy, vsz) = data.voxel_size;
+
+    let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
+    let lsqr_params = LsqrQsmParams {
+        b0: data.field_strength,
+        mask_output: false,
+        ..Default::default()
+    };
+    let (chi_init, lsqr_elapsed) = run_timed!("HEIDI/LSQR seed", inversion::lsqr_qsm(
+        &data.fieldmap_local, &data.mask, None, &grid, data.b0_dir,
+        &lsqr_params, |_, _| {},
+    ));
+
+    // Reduced inner-iteration budget to keep CI tractable: the default 500 per
+    // continuation step costs thousands of FFT round trips on a whole brain, and
+    // the objective has largely settled by ~150 total iterations (corr 0.8907 at
+    // 116 iterations vs 0.8923 at 166 on this phantom).
+    let heidi_params = HeidiParams { inner_iterations: 50, ..Default::default() };
+    let (result, elapsed) = run_timed!("HEIDI", inversion::heidi(
+        &data.fieldmap_local, &data.mask, &chi_init, &grid, data.b0_dir,
+        &heidi_params, |_, _| {},
+    ));
+    let elapsed = elapsed + lsqr_elapsed;
+
+    let res = TestResult::new("HEIDI", &result, &data.chi, &data.mask, data.dims);
+    res.print_with_time(elapsed);
+    let challenge = ChallengeMetrics::compute("HEIDI", &result, &data.chi, &data.mask, &data.segmentation, data.dims);
+    challenge.print();
+    challenge.print_ci_metrics(elapsed);
+    common::save_center_slices(&result, &data.mask, data.dims, "inversion_heidi");
+
+    assert!(result.iter().all(|v| v.is_finite()), "HEIDI produced non-finite values");
+    assert!(res.correlation > 0.7, "HEIDI correlation too low: {}", res.correlation);
+}
+
 /// HD-QSM — Hybrid data-fidelity two-stage dipole inversion (HDQSM.m).
 #[test]
 #[ignore]
@@ -844,7 +943,8 @@ fn test_swi() {
 
     let grid = qsm_core::Grid::new(nx, ny, nz, vsx, vsy, vsz);
 
-    // Step 1: Laplacian unwrap first echo phase
+    // Step 1: Laplacian unwrap first echo phase. Plain unwrapping: SWI does its own
+    // high-pass filtering, so the background-removing variant would double up.
     println!("[INFO] Unwrapping phase (Laplacian)...");
     let unwrapped = laplacian_unwrap(
         &data.phase_echoes[0], &data.mask,
@@ -860,7 +960,14 @@ fn test_swi() {
 
     // Step 3: Minimum intensity projection
     println!("[INFO] Computing mIP...");
-    let mip = swi::create_mip(&swi_result, &grid, swi::SwiParams::default().mip_window);
+    let identity = [
+        1.0, 0.0, 0.0, 0.0,
+        0.0, 1.0, 0.0, 0.0,
+        0.0, 0.0, 1.0, 0.0,
+        0.0, 0.0, 0.0, 1.0,
+    ];
+    let mip = swi::create_mip(&swi_result, &grid, &identity, swi::SwiParams::default().mip_window)
+        .expect("MIP window fits the volume");
 
     let elapsed = start.elapsed();
 
@@ -903,7 +1010,7 @@ fn test_swi() {
         let z_offset = 3; // center the mIP output
         for k in 0..nz_mip {
             for idx_xy in 0..nxy {
-                mip_full[idx_xy + (k + z_offset) * nxy] = mip[idx_xy + k * nxy];
+                mip_full[idx_xy + (k + z_offset) * nxy] = mip.data[idx_xy + k * nxy];
             }
         }
         common::save_center_slices(&mip_full, &data.mask, data.dims, "swi_mip");
@@ -911,6 +1018,118 @@ fn test_swi() {
 
     assert!(finite_frac > 0.99, "SWI should be >99% finite within mask, got {:.1}%", finite_frac * 100.0);
     assert!(positive_frac > 0.5, "SWI should be >50% positive within mask, got {:.1}%", positive_frac * 100.0);
+}
+
+// ============================================================================
+// Susceptibility Map-Weighted Imaging (SMWI) Test
+// ============================================================================
+
+#[test]
+#[ignore]
+fn test_smwi() {
+    println!("[INFO] Loading test data...");
+    let data = TestData::load().expect("Failed to load test data");
+    let (nx, ny, nz) = data.dims;
+    let (vsx, vsy, vsz) = data.voxel_size;
+    let n_total = nx * ny * nz;
+    let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
+
+    // Step 1: a susceptibility map to weight with. SMWI is post-processing on
+    // χ, so any inversion in ppm will do — TKD is the cheapest.
+    println!("[INFO] Reconstructing χ (TKD)...");
+    let chi = inversion::tkd(
+        &data.fieldmap_local, &data.mask, &grid, data.b0_dir,
+        &TkdParams { threshold: 0.2 },
+    );
+
+    let start = Instant::now();
+
+    // Step 2: stack the echoes along the slowest axis so one χ mask is
+    // broadcast over all of them (multi-echo SMWI)
+    let n_echoes = data.mag_echoes.len();
+    let mut magnitude = Vec::with_capacity(n_echoes * n_total);
+    for echo in &data.mag_echoes {
+        magnitude.extend_from_slice(echo);
+    }
+
+    // 0.2 ppm suits this phantom's deep-grey contrast; SEPIA's 1 ppm default
+    // is aimed at much stronger sources (microbleeds, calcification).
+    let params = swi::SmwiParams { threshold_ppm: 0.2, power: 4.0, mip_window: 4 };
+    println!("[INFO] Computing SMWI ({} echoes, threshold {} ppm, power {})...",
+        n_echoes, params.threshold_ppm, params.power);
+    let (para, dia) = swi::calculate_smwi(&magnitude, &chi, Some(&data.mask), &grid, &params);
+
+    // Step 3: combine echoes, then minimum intensity projection
+    let para_avg = swi::average_echoes(&para, &grid);
+    let dia_avg = swi::average_echoes(&dia, &grid);
+    let identity = [
+        1.0, 0.0, 0.0, 0.0,
+        0.0, 1.0, 0.0, 0.0,
+        0.0, 0.0, 1.0, 0.0,
+        0.0, 0.0, 0.0, 1.0,
+    ];
+    let mip = swi::create_mip(&para_avg, &grid, &identity, params.mip_window)
+        .expect("MIP window fits the volume");
+
+    let elapsed = start.elapsed();
+
+    assert_eq!(para.len(), magnitude.len(), "SMWI should preserve the echo dimension");
+    assert_eq!(dia.len(), magnitude.len(), "SMWI should preserve the echo dimension");
+
+    // Validate: weights live in [0, 1], so SMWI is bounded by the magnitude
+    let mut attenuated = 0usize;
+    let mut mask_count = 0usize;
+    for i in 0..magnitude.len() {
+        let v = i % n_total;
+        if data.mask[v] > 0 {
+            mask_count += 1;
+            assert!(para[i].is_finite() && dia[i].is_finite(),
+                "SMWI should be finite at index {}: para {}, dia {}", i, para[i], dia[i]);
+            assert!(para[i] >= 0.0 && para[i] <= magnitude[i] + 1e-9,
+                "Paramagnetic SMWI at {} = {} outside [0, {}]", i, para[i], magnitude[i]);
+            assert!(dia[i] >= 0.0 && dia[i] <= magnitude[i] + 1e-9,
+                "Diamagnetic SMWI at {} = {} outside [0, {}]", i, dia[i], magnitude[i]);
+            if para[i] < 0.95 * magnitude[i] {
+                attenuated += 1;
+            }
+        } else {
+            assert!(para[i] == 0.0 && dia[i] == 0.0,
+                "SMWI outside mask should be 0 at index {}: para {}, dia {}", i, para[i], dia[i]);
+        }
+    }
+
+    let attenuated_frac = attenuated as f64 / mask_count as f64;
+    println!("[INFO] SMWI: {:.1}% of in-mask voxels attenuated >5% by the paramagnetic mask",
+        attenuated_frac * 100.0);
+    println!("SMWI           {:>10.2?}", elapsed);
+    println!("RESULT:SMWI,-,-,-,-,{:.2}", elapsed.as_secs_f64());
+
+    // Save center slices for visualization
+    common::save_center_slices(&para_avg, &data.mask, data.dims, "smwi_para");
+    common::save_center_slices(&dia_avg, &data.mask, data.dims, "smwi_dia");
+
+    // The projection is shallower than the volume; re-center it for slicing
+    let nz_mip = mip.grid.dims.2;
+    if nz_mip > 0 {
+        let nxy = nx * ny;
+        let mut mip_full = vec![0.0; n_total];
+        let z_offset = (params.mip_window - 1) / 2;
+        for k in 0..nz_mip {
+            for idx_xy in 0..nxy {
+                mip_full[idx_xy + (k + z_offset) * nxy] = mip.data[idx_xy + k * nxy];
+            }
+        }
+        common::save_center_slices(&mip_full, &data.mask, data.dims, "smwi_mip");
+    }
+
+    // The paramagnetic mask must actually do something on this phantom
+    assert!(attenuated_frac > 0.01,
+        "Paramagnetic SMWI barely attenuates anything: {:.2}% of voxels", attenuated_frac * 100.0);
+    // Para and dia weight opposite sources, so they must not be the same image
+    let para_dia_corr = common::correlation(&para_avg, &dia_avg, &data.mask);
+    println!("[INFO] SMWI paramagnetic vs diamagnetic correlation: {:.3}", para_dia_corr);
+    assert!(para_dia_corr < 0.999,
+        "Paramagnetic and diamagnetic SMWI should differ, correlation {:.4}", para_dia_corr);
 }
 
 // ============================================================================
@@ -1185,9 +1404,192 @@ fn test_pipeline_romeo_b0() {
 
     let res = TestResult::new("ROMEO+B0", &b0_ppm, &data.fieldmap, &data.mask, data.dims);
     res.print_with_time(elapsed);
-    common::save_center_slices(&b0_ppm, &data.mask, data.dims, "pipeline_romeo_b0");
+    // Emitted so the PR comment can table ROMEO against the two Laplacian variants.
+    res.print_ci_metrics(elapsed);
 
     assert!(res.nrmse < 0.5, "ROMEO+B0 NRMSE too high: {}", res.nrmse);
+}
+
+/// Unwrap with each method, then run the same background removal, and score the **local**
+/// field against ground truth.
+///
+/// Phase unwrapping is only defined up to an additive harmonic field — different seeding
+/// and global-offset choices give total field maps that look very different and are all
+/// valid — so comparing raw total fields across unwrappers measures the arbitrary part.
+/// What has to agree is the local field after background removal, which is what feeds
+/// dipole inversion. That is what these three tests compare.
+/// Returns (unwrapped total field in ppm, local field after V-SHARP, eroded mask).
+fn unwrap_then_bfr(data: &common::TestData, unwrapper: Unwrapper) -> (Vec<f64>, Vec<f64>, Vec<u8>) {
+    let (nx, ny, nz) = data.dims;
+    let (vsx, vsy, vsz) = data.voxel_size;
+    let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
+
+    let b0_hz = match unwrapper {
+        Unwrapper::Romeo => run_field_mapping(data),
+        Unwrapper::LaplacianNeumann => run_field_mapping_laplacian(data),
+    };
+
+    let gamma = 42.576e6_f64;
+    let scale = 1e6 / (gamma * data.field_strength);
+    let b0_ppm: Vec<f64> = b0_hz.iter().map(|&v| v * scale).collect();
+
+    let (local, eroded) = bgremove::vsharp(
+        &b0_ppm, &data.mask, &grid, &VsharpParams::default(), |_, _| {},
+    );
+    (b0_ppm, local, eroded)
+}
+
+#[derive(Clone, Copy)]
+enum Unwrapper {
+    Romeo,
+    LaplacianNeumann,
+}
+
+fn run_unwrap_bfr_case(label: &str, unwrapper: Unwrapper, slug: &str) -> TestResult {
+    println!("[INFO] Loading test data...");
+    let data = TestData::load().expect("Failed to load test data");
+
+    let start = Instant::now();
+    let (total, local, eroded_mask) = unwrap_then_bfr(&data, unwrapper);
+    let elapsed = start.elapsed();
+
+    // The unwrapper's own output, before any background removal. These differ between
+    // methods by an arbitrary harmonic field, which is exactly what the montage shows.
+    common::save_center_slices(&total, &data.mask, data.dims, &format!("unwrap_raw_{slug}"));
+    if matches!(unwrapper, Unwrapper::Romeo) {
+        common::save_center_slices(
+            &data.fieldmap, &data.mask, data.dims, "ground_truth_total_field",
+        );
+    }
+
+    let res = TestResult::new(label, &local, &data.fieldmap_local, &eroded_mask, data.dims);
+    res.print_with_time(elapsed);
+    res.print_ci_metrics(elapsed);
+    res
+}
+
+#[test]
+#[ignore]
+fn test_pipeline_unwrap_bfr_romeo() {
+    let res = run_unwrap_bfr_case("ROMEO + V-SHARP", Unwrapper::Romeo, "romeo");
+    assert!(res.correlation > 0.45, "ROMEO local field correlation too low: {}", res.correlation);
+}
+
+/// Laplacian under a Neumann boundary condition on the array: unwrapping only.
+///
+/// Must land close to ROMEO here. It produces a visibly different *total* field, which is
+/// expected and unimportant; after background removal the two should agree.
+#[test]
+#[ignore]
+fn test_pipeline_unwrap_bfr_laplacian_neumann() {
+    let res = run_unwrap_bfr_case(
+        "Laplacian + V-SHARP",
+        Unwrapper::LaplacianNeumann,
+        "laplacian_neumann",
+    );
+    assert!(
+        res.correlation > 0.45,
+        "Laplacian (Neumann) local field correlation too low: {}",
+        res.correlation
+    );
+}
+
+/// `laplacian_unwrap_bfr` on a single wrapped phase volume, scored against the ground-truth
+/// local field, with `bgremove::lbv` on the same field as the reference.
+///
+/// This is the input the function is designed for. It takes wrapped phase, so in a
+/// multi-echo pipeline the only way to use it is per echo before combining — a usage that
+/// has not been validated and is not what the algorithm describes. The unwrapper comparison
+/// therefore does not include it.
+#[test]
+#[ignore]
+#[allow(deprecated)]
+fn test_unwrap_bfr_single_volume() {
+    use std::f64::consts::PI;
+    println!("[INFO] Loading test data...");
+    let data = TestData::load().expect("Failed to load test data");
+    let (nx, ny, nz) = data.dims;
+    let (vsx, vsy, vsz) = data.voxel_size;
+    let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
+
+    // Phase from the ground-truth total field at the dataset's first-echo TE, which wraps
+    // inside the brain so the unwrapping half is exercised. Laplacian-family methods degrade
+    // at long TE on 7T data — at 12 ms even plain unwrapping followed by bgremove::lbv drops
+    // to r = 0.69 — so this is not a place to be ambitious with the echo time.
+    let ppm_to_hz = 42.576e6 * data.field_strength / 1e6;
+    let te = data.echo_times[0];
+    let wrap = |x: f64| { let y = x.rem_euclid(2.0 * PI); if y > PI { y - 2.0 * PI } else { y } };
+    let phase: Vec<f64> = data.fieldmap.iter().map(|&p| wrap(2.0 * PI * p * ppm_to_hz * te)).collect();
+
+    let start = Instant::now();
+    let out = laplacian_unwrap_bfr(&phase, &data.mask, &grid);
+    let elapsed = start.elapsed();
+    let local_ppm: Vec<f64> = out.iter().map(|&v| v / (2.0 * PI * te) / ppm_to_hz).collect();
+
+    let res = TestResult::new("Laplacian + BFR (single volume)", &local_ppm, &data.fieldmap_local, &data.mask, data.dims);
+    res.print_with_time(elapsed);
+    res.print_ci_metrics(elapsed);
+    common::save_center_slices(&local_ppm, &data.mask, data.dims, "unwrap_bfr_single");
+
+    let (lbv, lbv_mask) = bgremove::lbv(&data.fieldmap, &data.mask, &grid, &LbvParams::default(), |_, _| {});
+    let reference = TestResult::new("LBV (reference)", &lbv, &data.fieldmap_local, &lbv_mask, data.dims);
+    println!("[INFO] reference bgremove::lbv on the same field: r = {:.4}", reference.correlation);
+
+    assert!(res.correlation > 0.75, "Laplacian + BFR local field correlation too low: {}", res.correlation);
+}
+
+/// Drives the shared field-mapping stage with `UnwrappingAlgorithm::Laplacian` — the path
+/// `UnwrapMethod::Laplacian` actually selects, and which `qsmxt.rs` and `qsmbly` go through.
+///
+/// The three tests above call the unwrappers directly, so without this nothing exercises the
+/// wiring: a config that silently selected the wrong variant would not be caught. Scored on
+/// the local field after the same V-SHARP, so it is comparable with them.
+#[test]
+#[ignore]
+fn test_pipeline_unwrap_bfr_stage_laplacian() {
+    println!("[INFO] Loading test data...");
+    let data = TestData::load().expect("Failed to load test data");
+    let (nx, ny, nz) = data.dims;
+    let (vsx, vsy, vsz) = data.voxel_size;
+    let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
+
+    let start = Instant::now();
+
+    let meta = pipeline::ScanMetadata {
+        dims: data.dims,
+        voxel_size: data.voxel_size,
+        echo_times: data.echo_times.clone(),
+        field_strength: data.field_strength,
+        b0_direction: data.b0_dir,
+    };
+    let config = pipeline::FieldMappingConfig {
+        unwrapping_algorithm: pipeline::UnwrappingAlgorithm::Laplacian,
+        ..Default::default()
+    };
+    let phases: Vec<&[f64]> = data.phase_echoes.iter().map(|p| p.as_slice()).collect();
+    let mags: Vec<&[f64]> = data.mag_echoes.iter().map(|m| m.as_slice()).collect();
+
+    let field = pipeline::run_field_mapping(
+        &phases, Some(&mags), &data.mask, &meta, &config, &mut |_, _| {},
+    ).expect("run_field_mapping failed");
+
+    let (local, eroded_mask) = bgremove::vsharp(
+        &field.b0_field_ppm, &data.mask, &grid, &VsharpParams::default(), |_, _| {},
+    );
+    let elapsed = start.elapsed();
+
+    let res = TestResult::new(
+        "run_field_mapping(Laplacian) + V-SHARP", &local, &data.fieldmap_local,
+        &eroded_mask, data.dims,
+    );
+    res.print_with_time(elapsed);
+    res.print_ci_metrics(elapsed);
+
+    assert!(
+        res.correlation > 0.45,
+        "field mapping through the Laplacian path gave a poor local field: r = {}",
+        res.correlation
+    );
 }
 
 #[test]

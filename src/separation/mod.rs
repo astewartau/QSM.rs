@@ -37,6 +37,6 @@ pub use hc_chisep::{hc_chisep, HcChisepParams};
 pub use r2star_qsm::{r2star_qsm, r2star_qsm_from_magnitude, R2starQsmParams};
 pub use wavesep::{wavesep, WaveSepParams};
 #[cfg(feature = "onnx")]
-pub use susep_net::{susep_net, SusepNetNorm};
+pub use susep_net::{susep_net, SusepNetNorm, SusepNetParams};
 #[cfg(feature = "onnx")]
-pub use chisepnet::{chisepnet, ChiSepNetNorm};
+pub use chisepnet::{chisepnet, ChiSepNetNorm, ChiSepNetParams};

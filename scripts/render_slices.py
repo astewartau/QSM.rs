@@ -53,6 +53,8 @@ NAMES = {
     "inversion_whqsm": "WH-QSM",
     "inversion_hdqsm": "HD-QSM",
     "inversion_amp_pe": "AMP-PE",
+    "inversion_lsqr": "LSQR",
+    "inversion_heidi": "HEIDI",
     "inversion_cosmos": "COSMOS",
     "sti_mms": "STI (MMS)",
     "sti_msa": "STI (MSA)",
@@ -60,7 +62,10 @@ NAMES = {
     "bet": "BET",
     "combined_tgv": "TGV (Combined)",
     "bias_correction": "Bias Correction",
-    "pipeline_romeo_b0": "ROMEO + B0",
+    "ground_truth_total_field": "Ground truth total field",
+    "unwrap_raw_romeo": "ROMEO (unwrapped)",
+    "unwrap_raw_laplacian_neumann": "Laplacian (unwrapped)",
+    "unwrap_bfr_single": "Laplacian + BFR (single volume) — local field",
     "pipeline_harperella": "HARPERELLA",
     "pipeline_iharperella": "iHARPERELLA",
     "pipeline_tgv": "TGV",
@@ -68,6 +73,12 @@ NAMES = {
     "pipeline_qsmart_tikhonov": "QSMART (Tikhonov)",
     "swi": "CLEAR-SWI",
     "swi_mip": "CLEAR-SWI mIP",
+    "smwi_para": "SMWI (paramagnetic)",
+    "smwi_dia": "SMWI (diamagnetic)",
+    "smwi_mip": "SMWI mIP (paramagnetic)",
+    "r2primenet_pred": "R2PRIMEnet R2' (Hz)",
+    "r2primenet_ref": "Reference R2' (Hz)",
+    "r2primenet_diff": "R2PRIMEnet - reference (Hz)",
     "r2star": "R2* (Hz)",
     "t2star": "T2* (s)",
     # Relaxometry demo (self-contained synthetic phantom)
@@ -91,6 +102,9 @@ NAMES = {
     "relaxchisep_hcchisep_para": "HC-ChiSep χ+",
     "relaxchisep_hcchisep_dia": "HC-ChiSep χ− (magnitude)",
     "ground_truth_local_field": "Ground truth",
+    "ground_truth_total_field": "Ground truth",
+    "unwrap_raw_romeo": "ROMEO",
+    "unwrap_raw_laplacian_neumann": "Laplacian",
     "ground_truth_chi": "Ground truth",
     "chisep_para_truth": "Ground truth",
     "chisep_dia_truth": "Ground truth",
@@ -102,6 +116,7 @@ NAMES = {
     "dl_modl_qsm": "MoDL-QSM",
     "dl_nextqsm": "NeXtQSM",
     "dl_iqfm": "iQFM",
+    "dl_r2primenet": "R2PRIMEnet R2' (Hz)",
     "dl_hdbet": "HD-BET",
     "chisep_xsepnet_para": "xSepNet χ+",
     "chisep_xsepnet_dia": "xSepNet χ− (magnitude)",
@@ -122,6 +137,14 @@ MONTAGE_LABELS = {
     "relax_denoise_before": "Noisy", "relax_denoise_after": "Denoised",
     "relax_unring_before": "Rung", "relax_unring_after": "Unrung",
     "swi": "CLEAR-SWI", "swi_mip": "CLEAR-SWI mIP", "r2star": "R2* (Hz)", "t2star": "T2* (s)",
+    "smwi_para": "SMWI para", "smwi_dia": "SMWI dia", "smwi_mip": "SMWI mIP",
+    # Supplementary passes no row labels, so unlike the relaxometry entries above these have to
+    # name the tool and units themselves.
+    "r2primenet_pred": "R2PRIMEnet R2' (Hz)", "r2primenet_ref": "Reference R2' (Hz)",
+    "r2primenet_diff": "R2PRIMEnet \u2212 reference (Hz)",
+    # Same quantity as the scored panel, but from the synthetic phantom, which has no R2'
+    # truth to compare against - said here so the two are not read as a pair.
+    "dl_r2primenet": "R2PRIMEnet R2' \u2014 no reference (Hz)",
 }
 
 # Fixed display windows (ppm)
@@ -153,10 +176,17 @@ WINDOWS = {
     "inversion_whqsm": (-0.1, 0.1),
     "inversion_hdqsm": (-0.1, 0.1),
     "inversion_amp_pe": (-0.1, 0.1),
+    "inversion_lsqr": (-0.1, 0.1),
+    "inversion_heidi": (-0.1, 0.1),
     "bet": (0, 1),
     "combined_tgv": (-0.1, 0.1),
     "bias_correction": (-0.1, 0.1),  # fallback; before/after rendering uses auto-range
-    "pipeline_romeo_b0": (-0.05, 0.05),  # total field in ppm (wider range than local field)
+    # Local fields after background removal — same window for all three, since the point of
+    # the panel is that the first two agree and the third does not.
+    "ground_truth_total_field": (-0.05, 0.05),
+    "unwrap_raw_romeo": (-0.05, 0.05),
+    "unwrap_raw_laplacian_neumann": (-0.05, 0.05),
+    "unwrap_bfr_single": (-0.025, 0.025),
     "pipeline_harperella": (-0.025, 0.025),
     "pipeline_iharperella": (-0.025, 0.025),
     "pipeline_tgv": (-0.1, 0.1),
@@ -164,6 +194,15 @@ WINDOWS = {
     "pipeline_qsmart_tikhonov": (-0.1, 0.1),
     "swi": None,       # auto-range (magnitude-weighted)
     "swi_mip": None,   # auto-range (magnitude-weighted)
+    "smwi_para": None, # auto-range (magnitude-weighted)
+    "smwi_dia": None,  # auto-range (magnitude-weighted)
+    "smwi_mip": None,  # auto-range (magnitude-weighted)
+    # Prediction and reference share a window so the pair can be read against each other;
+    # the difference gets a tighter symmetric one, since that is where it is worth seeing detail.
+    "r2primenet_pred": (0, 40),
+    "r2primenet_ref": (0, 40),
+    "r2primenet_diff": (-10, 10),
+    "dl_r2primenet": (0, 40),
     "r2star": (0, 100),    # Hz
     "t2star": (0, 0.08),   # seconds (0-80 ms)
     "relax_r2_truth": (0, 45),
@@ -212,7 +251,8 @@ MONTAGES = [
          "inversion_tv", "inversion_rts"],
         ["inversion_ilsqr", "inversion_medi", "inversion_nltv", "inversion_ndi",
          "inversion_fansi", "inversion_fansi_tgv"],
-        ["inversion_l1qsm", "inversion_whqsm", "inversion_hdqsm", "inversion_amp_pe"],
+        ["inversion_l1qsm", "inversion_whqsm", "inversion_hdqsm", "inversion_amp_pe",
+         "inversion_lsqr", "inversion_heidi"],
         ["dl_qsmgan", "dl_lpcnn", "dl_ir2qsm", "dl_modl_qsm", "dl_nextqsm"],
         ["inversion_cosmos", "sti_mms"],
         ["combined_tgv", "combined_tfi", "pipeline_tgv", "pipeline_qsmart",
@@ -247,7 +287,18 @@ RELAXOMETRY = ("stage_relaxometry", "Relaxometry toolkit", None, None, [
 
 SUPPLEMENTARY = ("stage_supplementary", "Supplementary outputs", None, None, [
     ["swi", "swi_mip", "r2star", "t2star"],
+    ["smwi_para", "smwi_dia", "smwi_mip"],
+    ["r2primenet_pred", "r2primenet_ref", "r2primenet_diff"],
+    ["dl_r2primenet"],
 ], None)
+# The unwrappers' own output, before background removal. These differ from each other (and
+# from ground truth) by an arbitrary harmonic field, which is expected: unwrapping is only
+# defined up to one. Shown so that difference is visible rather than asserted — the
+# like-for-like comparison is the local-field table.
+MONTAGES.append(("stage_unwrap", "Unwrapped total field maps", "ppm", (-0.05, 0.05), [
+    ["ground_truth_total_field", "unwrap_raw_romeo", "unwrap_raw_laplacian_neumann"],
+], None))
+
 MONTAGES.append(SUPPLEMENTARY)
 MONTAGES.append(RELAXOMETRY)
 

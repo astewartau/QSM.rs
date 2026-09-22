@@ -48,7 +48,7 @@
 //! - [`bgremove`] — background field removal (V-SHARP, SHARP, RESHARP, PDF, iSMV, mSMV, LBV, HARPERELLA)
 //! - [`inversion`] — dipole inversion (TKD, TSVD, Tikhonov, TV, NLTV, RTS, MEDI, iLSQR, TGV)
 //! - [`separation`] — paramagnetic/diamagnetic source separation (χ-separation, R2\*-QSM, WaveSep)
-//! - [`swi`] — susceptibility weighted imaging (CLEAR-SWI)
+//! - [`swi`] — susceptibility weighted imaging (CLEAR-SWI, SMWI)
 //! - [`fieldmap`] — multi-echo phase combination and B0 field mapping
 //! - [`r2star`] — R2\*/T2\* mapping (ARLO)
 //! - [`mask`] — mask thresholding and morphology
@@ -123,6 +123,7 @@ pub mod pipeline;
 // Algorithm building blocks
 // ============================================================================
 pub mod bet;
+pub mod segment;
 pub mod unwrap;
 pub mod bgremove;
 pub mod inversion;
@@ -154,9 +155,18 @@ pub mod r2star {
 /// EPG-based fitting models imperfect refocusing (B1 < 1) so it removes the
 /// stimulated-echo bias that a mono-exponential fit suffers. [`r2prime`] combines
 /// the spin-echo R2 with a gradient-echo R2* (from [`r2star`]) for chi-separation.
+///
+/// With no spin-echo acquisition there is no R2 to subtract; [`r2primenet`] predicts
+/// R2' from the GRE-derived R2* with a trained network (`onnx` feature), which is what
+/// lets the R2'-consuming [`separation`] methods run on GRE-only data.
 pub mod relaxometry {
     pub use crate::utils::epg::{
         epg_cpmg_echoes, r2_epg, r2prime, R2EpgParams,
+    };
+    #[cfg(feature = "onnx")]
+    pub use crate::utils::r2primenet::{
+        r2primenet, r2primenet_from_magnitude, R2PrimeNetNorm, R2PrimeNetParams,
+        AUTHORS_PATCH, WASM_PATCH,
     };
 }
 
@@ -205,6 +215,12 @@ pub mod homogeneity {
 /// The dipole kernel lives in the voxel grid, so an oblique acquisition must either supply the
 /// true B0 direction or be resampled to a cardinal-aligned grid. Wrapped phase has to be
 /// resampled in the complex domain — see [`geometry::resample_complex_to_axial`].
+/// Cropping reconstruction to the region that carries signal, and putting the answer back.
+///
+/// FFT-based stages cost `O(N log N)` in the whole grid, not in the brain. See [`crop`] for why
+/// the box is also rounded up to FFT-friendly sizes, and for the wrap-around caveat.
+pub mod crop;
+
 pub mod geometry;
 
 pub mod io;

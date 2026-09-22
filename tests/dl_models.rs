@@ -115,6 +115,63 @@ fn test_dl_iqfm() {
     assert!(lfs.iter().all(|v| v.is_finite()), "iQFM produced non-finite values");
 }
 
+/// R2PRIMEnet on the phantom's multi-echo magnitude: fit R2* with ARLO — the route a GRE-only
+/// dataset actually takes — then predict R2′ from it.
+///
+/// This phantom has no R2′ ground truth, so the check is that the network runs and returns a
+/// physically admissible map. `chisep_r2primenet` scores it against a reference R2′.
+#[test]
+#[ignore]
+fn test_dl_r2primenet() {
+    let data = TestData::load().expect("test data");
+    let grid = grid_of(&data);
+    let w = weights("r2primenet");
+
+    let n = data.mag_echoes[0].len();
+    let ne = data.mag_echoes.len();
+    let mut mag_voxel_major = vec![0.0_f64; n * ne];
+    for (e, echo) in data.mag_echoes.iter().enumerate() {
+        for (v, &m) in echo.iter().enumerate() {
+            mag_voxel_major[v * ne + e] = m;
+        }
+    }
+    let (r2star, _t2star) =
+        qsm_core::r2star::r2star_arlo(&mag_voxel_major, &data.mask, &data.echo_times, &grid);
+
+    let t = Instant::now();
+    let r2prime = qsm_core::relaxometry::r2primenet(
+        &r2star, &data.mask, &grid, &w,
+        &qsm_core::relaxometry::R2PrimeNetNorm::default(),
+        &qsm_core::relaxometry::R2PrimeNetParams::default(),
+        |_, _| {},
+    )
+    .expect("r2primenet");
+    let elapsed = t.elapsed();
+
+    let in_mask = |v: &[f64]| -> (f64, f64) {
+        let vals: Vec<f64> = v.iter().zip(&data.mask).filter(|(_, &m)| m > 0).map(|(&x, _)| x).collect();
+        let mean = vals.iter().sum::<f64>() / vals.len().max(1) as f64;
+        (mean, vals.iter().cloned().fold(f64::MIN, f64::max))
+    };
+    let (r2s_mean, r2s_max) = in_mask(&r2star);
+    let (r2p_mean, r2p_max) = in_mask(&r2prime);
+    println!("[INFO] R2* mean {r2s_mean:.2} Hz (max {r2s_max:.2}) → R2′ mean {r2p_mean:.2} Hz (max {r2p_max:.2})");
+    println!("R2PRIMEnet     {:>10.2?}", elapsed);
+    println!("RESULT:R2PRIMEnet,-,-,-,-,{:.2}", elapsed.as_secs_f64());
+    common::save_center_slices(&r2prime, &data.mask, data.dims, "dl_r2primenet");
+
+    assert_eq!(r2prime.len(), n, "R2′ should be one value per voxel");
+    assert!(r2prime.iter().all(|v| v.is_finite()), "R2PRIMEnet produced non-finite values");
+    // R2′ is a reversible relaxation rate, and it is a *component* of R2*: negative is not
+    // physical, and exceeding R2* would mean the irreversible part were negative.
+    for (i, (&p, &m)) in r2prime.iter().zip(&data.mask).enumerate() {
+        if m > 0 {
+            assert!(p >= -1e-6, "negative R2′ {p} at voxel {i}");
+        }
+    }
+    assert!(r2p_mean > 0.0, "R2′ is uniformly zero — the network did not predict anything");
+}
+
 /// HD-BET brain extraction on the phantom's root-sum-of-squares magnitude, scored like BET
 /// (Dice vs the ground-truth mask) so it lands in the Brain Extraction table next to it.
 #[test]

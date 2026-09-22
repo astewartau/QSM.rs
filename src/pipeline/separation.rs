@@ -156,6 +156,8 @@ fn run_susep_net(
     crate::separation::susep_net(
         local_field_ppm, qsm, r2prime, mask, grid, &bytes,
         &crate::separation::SusepNetNorm::default(),
+        &crate::separation::SusepNetParams::default(),
+        |_, _| {},
     )
     .map_err(|e| PipelineError::AlgorithmError(e.to_string()))
 }
@@ -186,6 +188,7 @@ fn run_chi_sepnet(
     crate::separation::chisepnet(
         local_field_ppm, qsm, r2prime, mask, grid, &bytes,
         &crate::separation::ChiSepNetNorm::default(),
+        &crate::separation::ChiSepNetParams::default(),
     )
     .map_err(|e| PipelineError::AlgorithmError(e.to_string()))
 }

@@ -48,14 +48,14 @@ jobs:
           set -e
 
           all_bgremove='["test_bgremove_sharp","test_bgremove_resharp","test_bgremove_vsharp","test_bgremove_pdf","test_bgremove_ismv","test_bgremove_lbv"]'
-          all_inversion='["test_inversion_tkd","test_inversion_tsvd","test_inversion_tikhonov","test_inversion_tv","test_inversion_rts","test_inversion_ilsqr","test_inversion_medi","test_inversion_nltv","test_inversion_ndi","test_inversion_fansi","test_inversion_fansi_tgv","test_inversion_l1qsm","test_inversion_whqsm","test_inversion_hdqsm","test_inversion_amp_pe","test_multiorient_cosmos","test_multiorient_sti","test_multiorient_coverage","test_multiorient_noise"]'
+          all_inversion='["test_inversion_tkd","test_inversion_tsvd","test_inversion_tikhonov","test_inversion_tv","test_inversion_rts","test_inversion_ilsqr","test_inversion_medi","test_inversion_nltv","test_inversion_ndi","test_inversion_fansi","test_inversion_fansi_tgv","test_inversion_l1qsm","test_inversion_whqsm","test_inversion_hdqsm","test_inversion_amp_pe","test_inversion_lsqr","test_inversion_heidi","test_multiorient_cosmos","test_multiorient_sti","test_multiorient_coverage","test_multiorient_noise"]'
           all_combined='["test_combined_tgv","test_combined_tfi"]'
-          all_pipeline='["test_pipeline_romeo_b0","test_pipeline_tgv","test_pipeline_qsmart","test_pipeline_qsmart_tikhonov","test_pipeline_harperella","test_pipeline_iharperella","test_bias_correction","test_swi","test_r2star_t2star"]'
+          all_pipeline='["test_pipeline_romeo_b0","test_pipeline_unwrap_bfr_romeo","test_pipeline_unwrap_bfr_laplacian_neumann","test_unwrap_bfr_single_volume","test_pipeline_unwrap_bfr_stage_laplacian","test_pipeline_tgv","test_pipeline_qsmart","test_pipeline_qsmart_tikhonov","test_pipeline_harperella","test_pipeline_iharperella","test_bias_correction","test_swi","test_smwi","test_r2star_t2star"]'
           # χ-separation entries are whole test *binaries* (each runs several methods).
-          all_chisep='["chisep_qsmci","chisep_relaxometry_qsmci","chisep_xsepnet"]'
+          all_chisep='["chisep_qsmci","chisep_relaxometry_qsmci","chisep_xsepnet","chisep_r2primenet"]'
           # Deep-learning models (in tests/dl_models.rs; weights fetched from the registry).
           all_dl='["test_dl_qsmgan","test_dl_lpcnn","test_dl_ir2qsm","test_dl_modl_qsm","test_dl_nextqsm","test_dl_iqfm","test_dl_hdbet"]'
-          all_dl_names="test_dl_qsmgan test_dl_lpcnn test_dl_ir2qsm test_dl_modl_qsm test_dl_nextqsm test_dl_iqfm test_dl_hdbet"
+          all_dl_names="test_dl_qsmgan test_dl_lpcnn test_dl_ir2qsm test_dl_modl_qsm test_dl_nextqsm test_dl_iqfm test_dl_hdbet test_dl_r2primenet"
 
           run_unit_tests=false
 
@@ -114,6 +114,24 @@ jobs:
             exit 0
           fi
 
+          # A change to this workflow only needs the whole suite behind it when it changes how
+          # tests are *run*. Registering one — a new `case` arm, or a name added to an `all_*`
+          # list — is picked up by the normal mapping below, so it does not: the test it registers
+          # is selected by its own source file changing. Anything else in the file (a job
+          # definition, a cargo invocation, a features list) still fans out, and so does a diff
+          # this cannot classify.
+          workflow_registration_only=false
+          if echo "$CHANGED" | grep -qx '\.github/workflows/integration-tests\.yml'; then
+            if git diff "$BASE_SHA"..."$HEAD_SHA" -- .github/workflows/integration-tests.yml \
+                 | grep -E '^[+-]' | grep -vE '^(\+\+\+|---)' \
+                 | grep -qvE '^[+-][[:space:]]*(#|all_[a-z_]+=|[A-Za-z0-9_./*|$-]+\)[[:space:]])'; then
+              echo "integration-tests.yml: changed beyond test registration → full integration suite"
+            else
+              echo "integration-tests.yml: only test registration changed → mapping as usual"
+              workflow_registration_only=true
+            fi
+          fi
+
           # Check if any Rust/CI files changed (for unit tests)
           for file in $CHANGED; do
             case "$file" in
@@ -162,7 +180,11 @@ jobs:
               # sees) forces a full integration rerun. The render_*.py scripts are
               # figure-only — they change how results are drawn, not the computed
               # metrics or pass/fail — so they should not rerun the compute.
-              .github/workflows/integration-tests.yml|scripts/download-test-data.sh)
+              .github/workflows/integration-tests.yml)
+                if [ "$workflow_registration_only" = true ]; then
+                  run_unit_tests=true
+                  continue
+                fi
                 echo "CI file changed: $file → all integration tests"
                 echo "run_bgremove=true" >> "$GITHUB_OUTPUT"
                 echo "bgremove_matrix=$all_bgremove" >> "$GITHUB_OUTPUT"
@@ -179,6 +201,10 @@ jobs:
                 echo "dl_matrix=$all_dl" >> "$GITHUB_OUTPUT"
                 echo "run_unit_tests=$run_unit_tests" >> "$GITHUB_OUTPUT"
                 exit 0 ;;
+              # Changes the data every test sees, so there is nothing to narrow it to.
+              scripts/download-test-data.sh)
+                echo "CI file changed: $file → all integration tests"
+                output_all; exit 0 ;;
 
               # Background removal
               src/bgremove/mod.rs)
@@ -195,7 +221,7 @@ jobs:
 
               # Dipole inversion
               src/inversion/mod.rs|src/inversion/admm.rs)
-                inversion="$inversion test_inversion_tkd test_inversion_tsvd test_inversion_tikhonov test_inversion_tv test_inversion_rts test_inversion_ilsqr test_inversion_medi test_inversion_nltv test_inversion_ndi test_inversion_fansi test_inversion_fansi_tgv test_inversion_l1qsm test_inversion_whqsm test_inversion_hdqsm test_multiorient_cosmos test_multiorient_sti test_multiorient_coverage test_multiorient_noise"
+                inversion="$inversion test_inversion_tkd test_inversion_tsvd test_inversion_tikhonov test_inversion_tv test_inversion_rts test_inversion_ilsqr test_inversion_medi test_inversion_nltv test_inversion_ndi test_inversion_fansi test_inversion_fansi_tgv test_inversion_l1qsm test_inversion_whqsm test_inversion_hdqsm test_inversion_lsqr test_inversion_heidi test_multiorient_cosmos test_multiorient_sti test_multiorient_coverage test_multiorient_noise"
                 combined="$combined test_combined_tfi" ;;
               src/inversion/tkd.rs)       inversion="$inversion test_inversion_tkd test_inversion_tsvd" ;;
               src/inversion/tikhonov.rs)  inversion="$inversion test_inversion_tikhonov"; pipeline="$pipeline test_pipeline_qsmart_tikhonov" ;;
@@ -212,6 +238,9 @@ jobs:
               src/inversion/whqsm.rs)     inversion="$inversion test_inversion_whqsm" ;;
               src/inversion/hdqsm.rs)     inversion="$inversion test_inversion_hdqsm" ;;
               src/inversion/amp_pe.rs)    inversion="$inversion test_inversion_amp_pe" ;;
+              src/inversion/lsqr_qsm.rs)  inversion="$inversion test_inversion_lsqr test_inversion_heidi" ;;
+              src/inversion/heidi.rs)     inversion="$inversion test_inversion_heidi" ;;
+              src/utils/anisotropic_diffusion.rs) inversion="$inversion test_inversion_heidi" ;;
               src/inversion/cosmos.rs)    inversion="$inversion test_multiorient_cosmos test_multiorient_coverage test_multiorient_noise" ;;
               src/inversion/sti.rs)       inversion="$inversion test_multiorient_sti" ;;
               # STI derives MMS/MSA/PEV from this eigensolver.
@@ -225,20 +254,69 @@ jobs:
 
               # χ-separation (all methods share src/separation; both test binaries)
               src/separation/chisepnet.rs) chisep="$chisep chisep_xsepnet" ;;
+              src/utils/r2primenet.rs) chisep="$chisep chisep_r2primenet"; dl="$dl test_dl_r2primenet" ;;
+              src/utils/sliding.rs) chisep="$chisep chisep_xsepnet chisep_r2primenet" ;;
               src/separation/*) chisep="$chisep chisep_qsmci chisep_relaxometry_qsmci" ;;
               tests/chisep_qsmci.rs) chisep="$chisep chisep_qsmci" ;;
               tests/chisep_relaxometry_qsmci.rs) chisep="$chisep chisep_relaxometry_qsmci" ;;
               tests/chisep_xsepnet.rs) chisep="$chisep chisep_xsepnet" ;;
+              tests/chisep_r2primenet.rs) chisep="$chisep chisep_r2primenet" ;;
 
               # Deep-learning models (shared ONNX registry/inference + per-model glue)
-              src/models/*)  dl="$dl $all_dl_names"; chisep="$chisep chisep_xsepnet" ;;
+              # The registry is edited whenever any single model is added or re-pointed, so fanning
+              # out to every DL test on it is nearly always wasted. Map the ids whose entries
+              # actually changed instead — and fall back to the full set if any of them is one this
+              # mapping does not know, so a new model is never silently skipped.
+              src/models/registry.rs)
+                changed_ids=$(git diff "$BASE_SHA"..."$HEAD_SHA" -- src/models/registry.rs \
+                  | grep -E '^[+-]' | grep -oE 'id: "[a-z0-9-]+"' \
+                  | sed -E 's/id: "([a-z0-9-]+)"/\1/' | sort -u)
+                if [ -z "$changed_ids" ]; then
+                  echo "registry.rs: no model entry changed → no DL tests selected"
+                else
+                  for id in $changed_ids; do
+                    case "$id" in
+                      qsmgan)     dl="$dl test_dl_qsmgan" ;;
+                      lpcnn)      dl="$dl test_dl_lpcnn" ;;
+                      ir2qsm)     dl="$dl test_dl_ir2qsm" ;;
+                      modl-qsm)   dl="$dl test_dl_modl_qsm" ;;
+                      nextqsm)    dl="$dl test_dl_nextqsm" ;;
+                      iqfm)       dl="$dl test_dl_iqfm" ;;
+                      hd-bet)     dl="$dl test_dl_hdbet" ;;
+                      r2primenet) dl="$dl test_dl_r2primenet"; chisep="$chisep chisep_r2primenet" ;;
+                      chi-sepnet) chisep="$chisep chisep_xsepnet" ;;
+                      susep-net)  chisep="$chisep chisep_qsmci" ;;
+                      # No dedicated test (xqsm, qsmnet, autoqsm, iqsm, synthseg, …): cover it
+                      # with the full DL set rather than assume nothing needs running.
+                      *) echo "registry.rs: '$id' has no mapped test → all DL tests"
+                         dl="$dl $all_dl_names" ;;
+                    esac
+                  done
+                fi ;;
+              src/models/*)  dl="$dl $all_dl_names"; chisep="$chisep chisep_xsepnet chisep_r2primenet" ;;
               src/inversion/qsmgan.rs)   dl="$dl test_dl_qsmgan" ;;
               src/inversion/lpcnn.rs)    dl="$dl test_dl_lpcnn" ;;
               src/inversion/ir2qsm.rs)   dl="$dl test_dl_ir2qsm" ;;
               src/inversion/modl_qsm.rs) dl="$dl test_dl_modl_qsm" ;;
               src/inversion/nextqsm.rs)  dl="$dl test_dl_nextqsm" ;;
               src/inversion/iqfm.rs)     dl="$dl test_dl_iqfm" ;;
-              tests/dl_models.rs)        dl="$dl $all_dl_names" ;;
+              # Every DL test shares this file's helpers, so a change to one of them can break the
+              # rest — but a diff that only *adds* lines cannot, so adding a test runs just that
+              # test. Any removal or edit falls back to the full set.
+              tests/dl_models.rs)
+                if git diff "$BASE_SHA"..."$HEAD_SHA" -- tests/dl_models.rs \
+                     | grep -E '^-' | grep -qvE '^---'; then
+                  dl="$dl $all_dl_names"
+                else
+                  added=$(git diff "$BASE_SHA"..."$HEAD_SHA" -- tests/dl_models.rs \
+                    | grep -E '^\+' | grep -oE 'fn (test_dl_[a-z0-9_]+)' | sed 's/^fn //' | sort -u)
+                  if [ -n "$added" ]; then
+                    echo "dl_models.rs: additions only → $added"
+                    dl="$dl $added"
+                  else
+                    dl="$dl $all_dl_names"
+                  fi
+                fi ;;
 
               # Brain extraction (HD-BET is a DL model: its own test in the DL matrix)
               src/bet/hdbet.rs|src/utils/resample.rs) dl="$dl test_dl_hdbet" ;;
@@ -246,15 +324,15 @@ jobs:
 
               # Phase unwrapping
               src/unwrap/mod.rs)      pipeline="$pipeline test_pipeline_tgv test_pipeline_qsmart test_pipeline_qsmart_tikhonov" ;;
-              src/unwrap/romeo.rs)    pipeline="$pipeline test_pipeline_romeo_b0 test_pipeline_tgv" ;;
-              src/unwrap/laplacian.rs) pipeline="$pipeline test_pipeline_qsmart test_pipeline_qsmart_tikhonov test_pipeline_harperella test_pipeline_iharperella" ;;
+              src/unwrap/romeo.rs)    pipeline="$pipeline test_pipeline_romeo_b0 test_pipeline_unwrap_bfr_romeo test_pipeline_tgv" ;;
+              src/unwrap/laplacian.rs) pipeline="$pipeline test_pipeline_unwrap_bfr_laplacian_neumann test_unwrap_bfr_single_volume test_pipeline_unwrap_bfr_stage_laplacian test_pipeline_qsmart test_pipeline_qsmart_tikhonov test_pipeline_harperella test_pipeline_iharperella" ;;
 
               # Pipeline (combined algorithms + shared stages)
               src/pipeline/mod.rs|src/pipeline/config.rs|src/pipeline/phase_utils.rs|src/pipeline/referencing.rs)
                 echo "Pipeline core changed: $file → all tests"
                 output_all; exit 0 ;;
               src/pipeline/field_mapping.rs)
-                pipeline="$pipeline test_pipeline_romeo_b0 test_pipeline_tgv test_pipeline_qsmart test_pipeline_qsmart_tikhonov" ;;
+                pipeline="$pipeline test_pipeline_romeo_b0 test_pipeline_unwrap_bfr_romeo test_pipeline_unwrap_bfr_laplacian_neumann test_unwrap_bfr_single_volume test_pipeline_unwrap_bfr_stage_laplacian test_pipeline_tgv test_pipeline_qsmart test_pipeline_qsmart_tikhonov" ;;
               src/pipeline/bg_removal.rs)
                 bgremove="$bgremove test_bgremove_sharp test_bgremove_resharp test_bgremove_vsharp test_bgremove_pdf test_bgremove_ismv test_bgremove_lbv"
                 pipeline="$pipeline test_pipeline_harperella test_pipeline_iharperella" ;;
@@ -269,13 +347,16 @@ jobs:
 
               # Utils (QSMART components)
               src/utils/multi_echo.rs)
-                pipeline="$pipeline test_pipeline_romeo_b0 test_pipeline_tgv test_pipeline_qsmart test_pipeline_qsmart_tikhonov" ;;
+                pipeline="$pipeline test_pipeline_romeo_b0 test_pipeline_unwrap_bfr_romeo test_pipeline_unwrap_bfr_laplacian_neumann test_unwrap_bfr_single_volume test_pipeline_unwrap_bfr_stage_laplacian test_pipeline_tgv test_pipeline_qsmart test_pipeline_qsmart_tikhonov" ;;
               src/utils/vasculature.rs|src/utils/frangi.rs|src/utils/curvature.rs|src/utils/qsmart.rs)
                 pipeline="$pipeline test_pipeline_qsmart test_pipeline_qsmart_tikhonov" ;;
               src/utils/bias_correction.rs)
                 pipeline="$pipeline test_pipeline_qsmart test_pipeline_qsmart_tikhonov test_bias_correction test_swi" ;;
-              src/utils/r2star.rs) pipeline="$pipeline test_r2star_t2star" ;;
-              src/swi.rs) pipeline="$pipeline test_swi" ;;
+              # R2PRIMEnet's input is an ARLO R2* fit, so its tests ride on this too.
+              src/utils/r2star.rs)
+                pipeline="$pipeline test_r2star_t2star"
+                chisep="$chisep chisep_r2primenet"; dl="$dl test_dl_r2primenet" ;;
+              src/swi.rs) pipeline="$pipeline test_swi test_smwi" ;;
             esac
           done
 
@@ -1006,6 +1087,36 @@ jobs:
 
           # Helper: emit a unified metrics table for susceptibility map tests
           # RESULT format: name,nrmse%,detrend%,tissue%,blood%,dgm%,dgm_lin,calc_dev,streak,corr,xsim,time
+          # Rows only, with a tag appended to the Method name — lets one table hold methods
+          # that start from different inputs (local field / total field / wrapped phase).
+          emit_chi_rows() {
+            local tag="$1"; local prefix="$2"; shift 2
+            for test in "$@"; do
+              file="metrics/${prefix}${test}.csv"
+              [ -f "$file" ] || continue
+              line=$(grep "^RESULT:" "$file" | head -1 | sed 's/^RESULT://')
+              IFS=',' read -r name nrmse dt tissue blood dgm dgm_lin calc_dev streak corr xsim time <<< "$line"
+              if [ "$nrmse" = "-" ]; then
+                echo "| ${name}${tag} | :x: Failed | - | - | - | - | - | - | - | - | - | - |"
+              else
+                echo "| ${name}${tag} | ${nrmse} | ${dt} | ${tissue} | ${blood} | ${dgm} | ${dgm_lin} | ${calc_dev} | ${streak} | ${corr} | ${xsim} | $(printf '%.2fs' "$time") |"
+              fi
+            done
+          }
+          # Every method that produces a susceptibility map, in one table.
+          emit_chi_table_merged() {
+            local rows
+            rows=$(
+              emit_chi_rows "" "test_inversion_" tkd tsvd tikhonov tv rts ilsqr medi nltv ndi fansi fansi_tgv l1qsm whqsm hdqsm amp_pe lsqr heidi
+              emit_chi_rows " — BFR + inversion" "test_combined_" tgv tfi
+              emit_chi_rows " — full pipeline" "test_pipeline_" tgv qsmart qsmart_tikhonov
+            )
+            [ -z "$rows" ] && return 1
+            echo "| Method | NRMSE% | Detrend% | Tissue% | Blood% | DGM% | DGM Lin | Calc Dev | Streak | Corr | XSIM | Time |"
+            echo "|--------|--------|----------|---------|--------|------|---------|----------|--------|------|------|------|"
+            echo "$rows"
+            echo ""
+          }
           emit_chi_table() {
             local prefix="$1"; shift
             local has_any=false
@@ -1077,9 +1188,11 @@ jobs:
               echo "$TABLE"
             fi
 
-            if TABLE=$(emit_chi_table "test_inversion_" tkd tsvd tikhonov tv rts ilsqr medi nltv ndi fansi fansi_tgv l1qsm whqsm hdqsm amp_pe); then
+            if TABLE=$(emit_chi_table_merged); then
               echo "## Dipole Inversion"
-              echo "*Compared against ground truth susceptibility map*"
+              echo "*Every method that produces a susceptibility map, against ground truth. Plain rows take the*"
+              echo "*local field; **— BFR + inversion** rows take the total field and remove background*"
+              echo "*themselves; **— full pipeline** rows start from wrapped phase.*"
               echo ""
               echo "$TABLE"
             fi
@@ -1124,21 +1237,7 @@ jobs:
               echo ""
             fi
 
-            if TABLE=$(emit_chi_table "test_combined_" tgv tfi); then
-              echo "## Combined Background Removal + Dipole Inversion"
-              echo "*Compared against ground truth susceptibility map (input: total field map)*"
-              echo ""
-              echo "$TABLE"
-            fi
-
-            if TABLE=$(emit_chi_table "test_pipeline_" tgv qsmart qsmart_tikhonov); then
-              echo "## Full Pipeline"
-              echo "*Compared against ground truth susceptibility map*"
-              echo ""
-              echo "$TABLE"
-            fi
-
-            if [ -f "metrics/test_bias_correction.csv" ] || [ -f "metrics/test_swi.csv" ] || [ -f "metrics/test_r2star_t2star.csv" ]; then
+            if [ -f "metrics/test_bias_correction.csv" ] || [ -f "metrics/test_swi.csv" ] || [ -f "metrics/test_smwi.csv" ] || [ -f "metrics/test_r2star_t2star.csv" ]; then
               echo "## Utilities"
               echo ""
               echo "| Method | Time |"
@@ -1150,6 +1249,11 @@ jobs:
               fi
               if [ -f "metrics/test_swi.csv" ]; then
                 line=$(grep "^RESULT:" "metrics/test_swi.csv" | head -1 | sed 's/^RESULT://')
+                IFS=',' read -r name _ _ _ _ time <<< "$line"
+                echo "| ${name} | $(printf '%.2fs' "$time") |"
+              fi
+              if [ -f "metrics/test_smwi.csv" ]; then
+                line=$(grep "^RESULT:" "metrics/test_smwi.csv" | head -1 | sed 's/^RESULT://')
                 IFS=',' read -r name _ _ _ _ time <<< "$line"
                 echo "| ${name} | $(printf '%.2fs' "$time") |"
               fi
@@ -1234,6 +1338,36 @@ jobs:
 
           # Helper: emit a unified metrics table for susceptibility map tests
           # RESULT format: name,nrmse%,detrend%,tissue%,blood%,dgm%,dgm_lin,calc_dev,streak,corr,xsim,time
+          # Rows only, with a tag appended to the Method name — lets one table hold methods
+          # that start from different inputs (local field / total field / wrapped phase).
+          emit_chi_rows() {
+            local tag="$1"; local prefix="$2"; shift 2
+            for test in "$@"; do
+              file="metrics/${prefix}${test}.csv"
+              [ -f "$file" ] || continue
+              line=$(grep "^RESULT:" "$file" | head -1 | sed 's/^RESULT://')
+              IFS=',' read -r name nrmse dt tissue blood dgm dgm_lin calc_dev streak corr xsim time <<< "$line"
+              if [ "$nrmse" = "-" ]; then
+                echo "| ${name}${tag} | :x: Failed | - | - | - | - | - | - | - | - | - | - |"
+              else
+                echo "| ${name}${tag} | ${nrmse} | ${dt} | ${tissue} | ${blood} | ${dgm} | ${dgm_lin} | ${calc_dev} | ${streak} | ${corr} | ${xsim} | $(printf '%.2fs' "$time") |"
+              fi
+            done
+          }
+          # Every method that produces a susceptibility map, in one table.
+          emit_chi_table_merged() {
+            local rows
+            rows=$(
+              emit_chi_rows "" "test_inversion_" tkd tsvd tikhonov tv rts ilsqr medi nltv ndi fansi fansi_tgv l1qsm whqsm hdqsm amp_pe lsqr heidi
+              emit_chi_rows " — BFR + inversion" "test_combined_" tgv tfi
+              emit_chi_rows " — full pipeline" "test_pipeline_" tgv qsmart qsmart_tikhonov
+            )
+            [ -z "$rows" ] && return 1
+            echo "| Method | NRMSE% | Detrend% | Tissue% | Blood% | DGM% | DGM Lin | Calc Dev | Streak | Corr | XSIM | Time |"
+            echo "|--------|--------|----------|---------|--------|------|---------|----------|--------|------|------|------|"
+            echo "$rows"
+            echo ""
+          }
           emit_chi_table() {
             local prefix="$1"; shift
             local has_any=false
@@ -1326,9 +1460,11 @@ jobs:
               echo ""
             fi
 
-            if TABLE=$(emit_chi_table "test_inversion_" tkd tsvd tikhonov tv rts ilsqr medi nltv ndi fansi fansi_tgv l1qsm whqsm hdqsm amp_pe); then
+            if TABLE=$(emit_chi_table_merged); then
               echo "### Dipole Inversion"
-              echo "*Compared against ground truth susceptibility map*"
+              echo "*Every method that produces a susceptibility map, against ground truth. Plain rows take the*"
+              echo "*local field; **— BFR + inversion** rows take the total field and remove background*"
+              echo "*themselves; **— full pipeline** rows start from wrapped phase.*"
               echo ""
               echo "$TABLE"
               echo ""
@@ -1382,31 +1518,48 @@ jobs:
               emit_figures bet
             fi
 
-            if [ -f "slices/pipeline_romeo_b0.bin" ]; then
+            if [ -f "slices/unwrap_raw_romeo.bin" ] || [ -f "slices/unwrap_raw_laplacian_neumann.bin" ]; then
               echo "### Phase Unwrapping + B0 Estimation"
-              echo "*MCPC-3D-S + ROMEO → total field map (compared against ground truth B0)*"
+              echo "*MCPC-3D-S, then each unwrapper → total field map, beside the ground truth. These differ by an*"
+              echo "*arbitrary harmonic field, which is expected of unwrappers; the like-for-like comparison is below.*"
               echo ""
-              emit_figures pipeline_romeo_b0
+              emit_figures stage_unwrap
               echo ""
             fi
 
-            if TABLE=$(emit_chi_table "test_combined_" tgv tfi); then
-              echo "### Combined Background Removal + Dipole Inversion"
-              echo "*Compared against ground truth susceptibility map (input: total field map)*"
+            if TABLE=$(emit_table "test_pipeline_unwrap_bfr_" romeo laplacian_neumann stage_laplacian); then
+              echo "### Unwrapper Comparison (local field, after background removal)"
+              echo "*Each unwrapper → field map → V-SHARP → local field, vs ground truth.*"
+              echo ""
+              echo "Total field maps differ between unwrappers by an arbitrary harmonic field, so they are"
+              echo "compared after background removal. ROMEO and Laplacian should land close. The last row"
+              echo "drives the shared \`run_field_mapping\` stage, and is what catches a config selecting the"
+              echo "wrong variant."
               echo ""
               echo "$TABLE"
+            fi
+
+            if [ -f "metrics/test_unwrap_bfr_single_volume.csv" ]; then
+              echo "### Combined Unwrapping + Background Removal"
+              echo "*\`laplacian_unwrap_bfr\` on one wrapped volume at the first-echo TE, vs ground truth local field.*"
+              echo ""
+              line=$(grep "^RESULT:" metrics/test_unwrap_bfr_single_volume.csv | head -1 | sed 's/^RESULT://')
+              IFS=',' read -r name rmse nrmse nrmse_ch corr xsim time <<< "$line"
+              if [ "$rmse" = "-" ]; then
+                echo "| Method | RMSE | NRMSE (range) | NRMSE% (χ) | Correlation | XSIM | Time |"
+                echo "|--------|------|---------------|------------|-------------|------|------|"
+                echo "| ${name} | :x: Failed | - | - | - | - | - |"
+              else
+                echo "| Method | RMSE | NRMSE (range) | NRMSE% (χ) | Correlation | XSIM | Time |"
+                echo "|--------|------|---------------|------------|-------------|------|------|"
+                echo "| ${name} | ${rmse} | ${nrmse} | ${nrmse_ch} | ${corr} | ${xsim} | $(printf '%.2fs' "$time") |"
+              fi
+              echo ""
+              emit_figures unwrap_bfr_single
               echo ""
             fi
 
-            if TABLE=$(emit_chi_table "test_pipeline_" tgv qsmart qsmart_tikhonov); then
-              echo "### Full Pipeline"
-              echo "*Compared against ground truth susceptibility map*"
-              echo ""
-              echo "$TABLE"
-              echo ""
-            fi
-
-            if [ -f "metrics/test_bias_correction.csv" ] || [ -f "metrics/test_swi.csv" ] || [ -f "metrics/test_r2star_t2star.csv" ]; then
+            if [ -f "metrics/test_bias_correction.csv" ] || [ -f "metrics/test_swi.csv" ] || [ -f "metrics/test_smwi.csv" ] || [ -f "metrics/test_r2star_t2star.csv" ]; then
               echo "### Utilities"
               echo ""
               echo "| Method | Time |"
@@ -1418,6 +1571,11 @@ jobs:
               fi
               if [ -f "metrics/test_swi.csv" ]; then
                 line=$(grep "^RESULT:" "metrics/test_swi.csv" | head -1 | sed 's/^RESULT://')
+                IFS=',' read -r name _ _ _ _ time <<< "$line"
+                echo "| ${name} | $(printf '%.2fs' "$time") |"
+              fi
+              if [ -f "metrics/test_smwi.csv" ]; then
+                line=$(grep "^RESULT:" "metrics/test_smwi.csv" | head -1 | sed 's/^RESULT://')
                 IFS=',' read -r name _ _ _ _ time <<< "$line"
                 echo "| ${name} | $(printf '%.2fs' "$time") |"
               fi

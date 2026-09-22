@@ -124,6 +124,9 @@ fn field_mapping_with_offset(
     progress(2, 4);
     let unwrapped: Vec<Vec<f64>> = match config.unwrapping_algorithm {
         UnwrappingAlgorithm::Laplacian => {
+            // Neumann, not the ROI-masked variant: this stage wants unwrapping only.
+            // Background removal is a later stage, and the masked variant would remove it
+            // here first — measurably worse than doing it once, properly.
             corrected.iter()
                 .map(|p| crate::unwrap::laplacian_unwrap(p, mask, &grid))
                 .collect()
