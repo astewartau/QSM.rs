@@ -13,14 +13,43 @@
 //! network's ppm-equivalent input channel. We return χ− as a signed (≤ 0) value to
 //! match the crate's separation convention `(chi_pos ≥ 0, chi_neg ≤ 0, chi_total)`.
 //!
+//! **Patch size.** The published graph declares that patch as a fixed input shape, but it is
+//! fully convolutional (Conv/Relu/MaxPool/ConvTranspose/Concat only), so the hosted
+//! `chi-sepnet.onnx` has its spatial axes re-declared as dynamic — bit-identical at the
+//! authors' patch, and able to run smaller ones. [`ChiSepNetParams::patch`] defaults to the
+//! authors' 192×192×128; a 32-bit host (WASM) cannot afford it — one 64-channel activation at
+//! that size is 1.2 GB — and uses [`WASM_PATCH`] instead. Patch dimensions must be multiples
+//! of 16 (four pooling levels) or the skip-connection concatenations misalign.
+//!
 //! Weights are not bundled; the caller passes the exported `chi-sepnet.onnx` bytes.
 
 use crate::grid::Grid;
 use crate::models::onnx::{OnnxError, OnnxModel, Tensor};
+use crate::utils::sliding::starts;
 
-const PD: usize = 192; // patch D (=x)
-const PH: usize = 192; // patch H (=y)
-const PW: usize = 128; // patch W (=z)
+/// The authors' patch: `(D, H, W)` = `(x, y, z)`.
+pub const AUTHORS_PATCH: (usize, usize, usize) = (192, 192, 128);
+
+/// A patch that fits a 32-bit (WASM) heap; see the module docs for what it costs.
+pub const WASM_PATCH: (usize, usize, usize) = (128, 128, 64);
+
+/// Four pooling levels, so every patch dimension must be a multiple of this.
+const POOL_MULTIPLE: usize = 16;
+
+/// Inference parameters for [`chisepnet`].
+#[cfg_attr(feature = "introspection", derive(serde::Serialize))]
+#[derive(Clone, Copy, Debug)]
+pub struct ChiSepNetParams {
+    /// Sliding-window patch `(D, H, W)`; each dimension a multiple of 16. Defaults to
+    /// [`AUTHORS_PATCH`]; WASM hosts pass [`WASM_PATCH`].
+    pub patch: (usize, usize, usize),
+}
+
+impl Default for ChiSepNetParams {
+    fn default() -> Self {
+        Self { patch: AUTHORS_PATCH }
+    }
+}
 
 /// Training z-score constants for χ-sepnet (`xsepnet_train_patch_norm_factor…mat`):
 /// each field is `(mean, std)`. Inputs are normalized `(x-mean)/std`; outputs
@@ -56,9 +85,13 @@ impl Default for ChiSepNetNorm {
 /// * `mask` — binary brain mask (same layout).
 /// * `model_onnx` — bytes of the exported `chi-sepnet.onnx` (192×192×128, 3→2 chan).
 /// * `norm` — training normalization constants.
+/// * `params` — patch size; see [`ChiSepNetParams`].
 ///
 /// Returns `(chi_pos ≥ 0, chi_neg ≤ 0, chi_total = chi_pos + chi_neg)` in ppm,
 /// masked, in the same layout.
+///
+/// # Panics
+/// If a patch dimension is not a multiple of 16 (the network's four pooling levels).
 #[allow(clippy::too_many_arguments)]
 pub fn chisepnet(
     local_field_ppm: &[f64],
@@ -68,8 +101,16 @@ pub fn chisepnet(
     grid: &Grid,
     model_onnx: &[u8],
     norm: &ChiSepNetNorm,
+    params: &ChiSepNetParams,
 ) -> Result<(Vec<f64>, Vec<f64>, Vec<f64>), OnnxError> {
     let (nx, ny, nz) = grid.dims;
+    let (pd, ph, pw) = params.patch;
+    for (axis, d) in [("D", pd), ("H", ph), ("W", pw)] {
+        assert!(
+            d > 0 && d % POOL_MULTIPLE == 0,
+            "patch {axis} = {d} must be a positive multiple of {POOL_MULTIPLE} (four pooling levels)"
+        );
+    }
     let n = nx * ny * nz;
     for (name, v) in [("field", local_field_ppm), ("qsm", qsm), ("r2prime", r2prime)] {
         assert_eq!(v.len(), n, "{name} length must match grid");
@@ -77,7 +118,7 @@ pub fn chisepnet(
     assert_eq!(mask.len(), n, "mask length must match grid");
 
     // End-pad each dim up to at least the patch size (col-major padded volume).
-    let (px, py, pz) = (nx.max(PD), ny.max(PH), nz.max(PW));
+    let (px, py, pz) = (nx.max(pd), ny.max(ph), nz.max(pw));
     let mut ch = [vec![0.0f32; px * py * pz], vec![0.0f32; px * py * pz], vec![0.0f32; px * py * pz]];
     for z in 0..nz {
         for y in 0..ny {
@@ -94,49 +135,36 @@ pub fn chisepnet(
         }
     }
 
-    // Sliding-window start positions: 0, 0.75·patch, … then a final flush at size-patch.
-    let starts = |size: usize, patch: usize| -> Vec<usize> {
-        if size <= patch {
-            return vec![0];
-        }
-        let step = (patch as f64 * 0.75) as usize;
-        let mut s: Vec<usize> = (0..=size - patch).step_by(step.max(1)).collect();
-        if *s.last().unwrap() != size - patch {
-            s.push(size - patch);
-        }
-        s
-    };
-
     let model = OnnxModel::load(model_onnx)?;
-    let plane = PD * PH * PW;
+    let plane = pd * ph * pw;
     let mut acc0 = vec![0.0f64; px * py * pz];
     let mut acc1 = vec![0.0f64; px * py * pz];
     let mut wsum = vec![0.0f64; px * py * pz];
-    for &x0 in &starts(px, PD) {
-        for &y0 in &starts(py, PH) {
-            for &z0 in &starts(pz, PW) {
-                // Build the [1,3,192,192,128] NCDHW patch (D=x, H=y, W=z).
+    for &x0 in &starts(px, pd) {
+        for &y0 in &starts(py, ph) {
+            for &z0 in &starts(pz, pw) {
+                // Build the [1,3,pd,ph,pw] NCDHW patch (D=x, H=y, W=z).
                 let mut buf = vec![0.0f32; 3 * plane];
-                for i in 0..PD {
-                    for j in 0..PH {
-                        for k in 0..PW {
+                for i in 0..pd {
+                    for j in 0..ph {
+                        for k in 0..pw {
                             let p = (x0 + i) + px * ((y0 + j) + py * (z0 + k));
-                            let o = (i * PH + j) * PW + k;
+                            let o = (i * ph + j) * pw + k;
                             buf[o] = ch[0][p];
                             buf[plane + o] = ch[1][p];
                             buf[2 * plane + o] = ch[2][p];
                         }
                     }
                 }
-                let out = model.run_single(&Tensor::new(vec![1, 3, PD, PH, PW], buf))?;
+                let out = model.run_single(&Tensor::new(vec![1, 3, pd, ph, pw], buf))?;
                 if out.data.len() < 2 * plane {
                     return Err(OnnxError::Run("expected 2-channel output".into()));
                 }
-                for i in 0..PD {
-                    for j in 0..PH {
-                        for k in 0..PW {
+                for i in 0..pd {
+                    for j in 0..ph {
+                        for k in 0..pw {
                             let p = (x0 + i) + px * ((y0 + j) + py * (z0 + k));
-                            let o = (i * PH + j) * PW + k;
+                            let o = (i * ph + j) * pw + k;
                             acc0[p] += out.data[o] as f64;
                             acc1[p] += out.data[plane + o] as f64;
                             wsum[p] += 1.0;

@@ -836,6 +836,9 @@ mod tests {
                 // SynthSeg: standalone segment::synthseg, an analysis step rather than a
                 // reconstruction stage. Remove this arm if a segmentation stage is added.
                 ModelStage::Segmentation => continue,
+                // R2PRIMEnet: standalone relaxometry::r2primenet, an input-preparation step
+                // that feeds the R2'-consuming separation methods rather than a stage of its own.
+                ModelStage::R2PrimeGeneration => continue,
             };
             assert!(wired, "registry model '{}' (stage {:?}) has no {} variant — wire it or add a dl_model_id mapping", m.id, m.stage, enum_name);
         }

@@ -155,9 +155,18 @@ pub mod r2star {
 /// EPG-based fitting models imperfect refocusing (B1 < 1) so it removes the
 /// stimulated-echo bias that a mono-exponential fit suffers. [`r2prime`] combines
 /// the spin-echo R2 with a gradient-echo R2* (from [`r2star`]) for chi-separation.
+///
+/// With no spin-echo acquisition there is no R2 to subtract; [`r2primenet`] predicts
+/// R2' from the GRE-derived R2* with a trained network (`onnx` feature), which is what
+/// lets the R2'-consuming [`separation`] methods run on GRE-only data.
 pub mod relaxometry {
     pub use crate::utils::epg::{
         epg_cpmg_echoes, r2_epg, r2prime, R2EpgParams,
+    };
+    #[cfg(feature = "onnx")]
+    pub use crate::utils::r2primenet::{
+        r2primenet, r2primenet_from_magnitude, R2PrimeNetNorm, R2PrimeNetParams,
+        AUTHORS_PATCH, WASM_PATCH,
     };
 }
 

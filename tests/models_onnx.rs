@@ -290,6 +290,8 @@ fn susep_net_matches_python_reference() {
     let (chi_pos, chi_neg, _tot) = qsm_core::separation::susep_net(
         &field.data, &qsm.data, &r2p.data, &mask, &grid, &onnx_bytes,
         &qsm_core::separation::SusepNetNorm::default(),
+        &qsm_core::separation::SusepNetParams::default(),
+        |_, _| {},
     )
     .expect("susep-net");
 
@@ -443,6 +445,7 @@ fn chisepnet_matches_python_reference() {
     let (chi_pos, chi_neg, _tot) = qsm_core::separation::chisepnet(
         &field.data, &qsm.data, &r2p.data, &mask, &grid, &onnx_bytes,
         &qsm_core::separation::ChiSepNetNorm::default(),
+        &qsm_core::separation::ChiSepNetParams::default(),
     )
     .expect("chisepnet");
 
@@ -977,4 +980,184 @@ fn hdbet_matches_python_reference() {
             mag.dims, mag.voxel_size, t.elapsed().as_secs_f64());
         assert!(dice > 0.999, "case {case}: Dice {dice}");
     }
+}
+
+/// Parity: `relaxometry::r2primenet` (tract, with the column-major↔NCDHW repack and the
+/// sliding-window overlap averaging) must match the authors' ONNX-Runtime recipe on the
+/// same R2* volume. Generate the fixtures first with
+/// `scripts/onnx-export/ref_r2primenet.py`, which writes `r2star.nii.gz` (the input, so
+/// both sides see identical bytes) and `r2prime_ref.nii.gz`.
+///
+/// ```bash
+/// R2PRIMENET_ONNX=<...>/240531_R2PRIMEnet.onnx \
+///   cargo test --release --features onnx --test models_onnx r2primenet_matches -- --ignored --nocapture
+/// ```
+#[test]
+#[ignore]
+fn r2primenet_matches_python_reference() {
+    use qsm_core::io::read_nifti_file;
+    use std::path::Path;
+
+    let rd = |p: String| read_nifti_file(Path::new(&p)).expect("nii");
+    let base = std::env::var("R2PRIMENET_REF").unwrap_or("/tmp/r2primenet_ref".into());
+    let r2star = rd(format!("{base}/r2star.nii.gz"));
+    let reference = rd(format!("{base}/r2prime_ref.nii.gz"));
+    let mask_nii = rd(std::env::var("R2PRIMENET_MASK").unwrap_or(
+        "/home/ashley/repos/qsm/QSM.rs/TEST_DATA/QSM_Dat08c_Mask.nii.gz".into(),
+    ));
+    let onnx_bytes = std::fs::read(std::env::var("R2PRIMENET_ONNX").unwrap_or(
+        "/home/ashley/repos/qsm/chi-separation/Chisep_Toolbox_v1.1.3/models/240531_R2PRIMEnet.onnx"
+            .into(),
+    ))
+    .expect("onnx (set R2PRIMENET_ONNX)");
+
+    let grid = qsm_core::Grid { dims: r2star.dims, voxel_size: r2star.voxel_size };
+    let mask: Vec<u8> = mask_nii.data.iter().map(|&v| (v > 0.5) as u8).collect();
+
+    let norm = qsm_core::relaxometry::R2PrimeNetNorm::default();
+    let run = |patch: (usize, usize, usize)| {
+        let mut patches = 0usize;
+        let out = qsm_core::relaxometry::r2primenet(
+            &r2star.data,
+            &mask,
+            &grid,
+            &onnx_bytes,
+            &norm,
+            &qsm_core::relaxometry::R2PrimeNetParams { patch },
+            |done, total| {
+                if done > 0 {
+                    patches = total;
+                    println!("  patch {done}/{total}");
+                }
+            },
+        )
+        .expect("r2primenet");
+        (out, patches)
+    };
+    let (out, patches) = run(qsm_core::relaxometry::AUTHORS_PATCH);
+    assert_eq!(patches, 4, "205x164x205 should tile into 2x1x2 authors' patches");
+
+    let (mut sx, mut sy, mut sxx, mut syy, mut sxy, mut n, mut maxd) =
+        (0.0, 0.0, 0.0, 0.0, 0.0, 0.0f64, 0.0f64);
+    for i in 0..out.len() {
+        if mask[i] == 0 {
+            continue;
+        }
+        let (a, b) = (out[i], reference.data[i] as f64);
+        sx += a; sy += b; sxx += a * a; syy += b * b; sxy += a * b; n += 1.0;
+        maxd = maxd.max((a - b).abs());
+    }
+    let corr = (sxy - sx * sy / n) / ((sxx - sx * sx / n).sqrt() * (syy - sy * sy / n).sqrt());
+    println!(
+        "R2PRIMEnet vs Python: corr={corr:.6} max|Δ|={maxd:.3e} Hz, mean R2′={:.2} Hz",
+        sx / n
+    );
+    assert!(corr > 0.999999, "correlation too low: {corr}");
+    // The reference is written as f32 NIfTI, so ~1e-3 Hz of storage rounding is expected
+    // on R2′ values of tens of Hz; anything larger is a real discrepancy.
+    assert!(maxd < 5e-3, "max abs diff too high: {maxd} Hz");
+
+    // The WASM patch is an approximation of the authors' patch (the net sees less context),
+    // and this pins how much it costs — 0.998 / 2.9% when this was measured. It is the
+    // browser's only option: one 64-channel activation at the authors' patch is 1.2 GB.
+    let (small, patches) = run(qsm_core::relaxometry::WASM_PATCH);
+    assert_eq!(patches, 16, "205x164x205 should tile into 2x2x2... 16 WASM patches");
+    let (mut sx2, mut sy2, mut sxx2, mut syy2, mut sxy2, mut n2, mut num, mut den) =
+        (0.0, 0.0, 0.0, 0.0, 0.0, 0.0f64, 0.0f64, 0.0f64);
+    for i in 0..out.len() {
+        if mask[i] == 0 {
+            continue;
+        }
+        let (a, b) = (out[i], small[i]);
+        sx2 += a; sy2 += b; sxx2 += a * a; syy2 += b * b; sxy2 += a * b; n2 += 1.0;
+        num += (a - b) * (a - b); den += a * a;
+    }
+    let corr2 = (sxy2 - sx2 * sy2 / n2) / ((sxx2 - sx2 * sx2 / n2).sqrt() * (syy2 - sy2 * sy2 / n2).sqrt());
+    let nrmse = 100.0 * (num / den).sqrt();
+    println!("WASM patch vs authors' patch: corr={corr2:.4} NRMSE={nrmse:.2}%");
+    assert!(corr2 > 0.99, "small-patch correlation regressed: {corr2}");
+    assert!(nrmse < 6.0, "small-patch NRMSE regressed: {nrmse}%");
+}
+
+/// Parity: `separation::susep_net` (tract; column-major↔NCDHW repack, pad-to-8, de-normalise)
+/// must match the authors' ONNX-Runtime recipe on the same inputs, run whole-volume as they do.
+/// The second half measures what the sliding-window patch — the only option on a 32-bit host,
+/// where whole-volume activations do not fit — costs against that.
+///
+/// Generate the fixtures first with `scripts/onnx-export/ref_susep_net.py`.
+///
+/// ```bash
+/// SUSEPNET_ONNX=<...>/susep-net.onnx \
+///   cargo test --release --features onnx --test models_onnx susep_net_matches_ref -- --ignored --nocapture
+/// ```
+#[test]
+#[ignore]
+fn susep_net_matches_ref_and_tiles_closely() {
+    use qsm_core::io::read_nifti_file;
+    use std::path::Path;
+
+    let base = std::env::var("SUSEPNET_REF").unwrap_or("/tmp/susep_net_ref".into());
+    let rd = |p: String| read_nifti_file(Path::new(&p)).expect("nii");
+    let qsm = rd(format!("{base}/qsm.nii.gz"));
+    let lfs = rd(format!("{base}/lfs.nii.gz"));
+    let r2p = rd(format!("{base}/r2prime.nii.gz"));
+    let ref_pos = rd(format!("{base}/chi_pos_ref.nii.gz"));
+    let ref_neg = rd(format!("{base}/chi_neg_ref.nii.gz"));
+    let mask_nii = rd(std::env::var("SUSEPNET_MASK").unwrap_or(
+        "/home/ashley/repos/qsm/QSM.rs/TEST_DATA/QSM_Dat08c_Mask.nii.gz".into(),
+    ));
+    let onnx_bytes = std::fs::read(
+        std::env::var("SUSEPNET_ONNX").expect("set SUSEPNET_ONNX to a local susep-net.onnx"),
+    )
+    .expect("onnx");
+
+    let grid = qsm_core::Grid { dims: qsm.dims, voxel_size: qsm.voxel_size };
+    let mask: Vec<u8> = mask_nii.data.iter().map(|&v| (v > 0.5) as u8).collect();
+    let norm = qsm_core::separation::SusepNetNorm::default();
+    let run = |patch| {
+        qsm_core::separation::susep_net(
+            &lfs.data, &qsm.data, &r2p.data, &mask, &grid, &onnx_bytes, &norm,
+            &qsm_core::separation::SusepNetParams { patch },
+            |done, total| {
+                if done > 0 {
+                    println!("  patch {done}/{total}");
+                }
+            },
+        )
+        .expect("susep_net")
+    };
+
+    // Agreement on the masked brain: correlation, max |Δ|, and relative L2.
+    let stats = |a: &[f64], b: &[f64]| -> (f64, f64, f64) {
+        let (mut sx, mut sy, mut sxx, mut syy, mut sxy, mut n) = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0f64);
+        let (mut maxd, mut num, mut den) = (0.0f64, 0.0f64, 0.0f64);
+        for i in 0..a.len() {
+            if mask[i] == 0 {
+                continue;
+            }
+            sx += a[i]; sy += b[i]; sxx += a[i] * a[i]; syy += b[i] * b[i]; sxy += a[i] * b[i];
+            n += 1.0;
+            maxd = maxd.max((a[i] - b[i]).abs());
+            num += (a[i] - b[i]) * (a[i] - b[i]); den += a[i] * a[i];
+        }
+        let corr = (sxy - sx * sy / n) / ((sxx - sx * sx / n).sqrt() * (syy - sy * sy / n).sqrt());
+        (corr, maxd, 100.0 * (num / den).sqrt())
+    };
+
+    // Whole volume — must reproduce the Python reference (f32 NIfTI storage rounding aside).
+    let (pos, neg, _tot) = run(None);
+    let neg_mag: Vec<f64> = neg.iter().map(|&v| -v).collect();
+    let (cp, mp, _) = stats(&pos, &ref_pos.data);
+    let (cn, mn, _) = stats(&neg_mag, &ref_neg.data);
+    println!("SUSEP-Net whole-volume vs Python: χ+ corr={cp:.6} max|Δ|={mp:.3e} | χ− corr={cn:.6} max|Δ|={mn:.3e}");
+    assert!(cp > 0.999999 && cn > 0.999999, "correlation too low: χ+={cp} χ−={cn}");
+    assert!(mp < 5e-5 && mn < 5e-5, "max abs diff too high: χ+={mp} χ−={mn} ppm");
+
+    // Sliding window — an approximation, and this pins how much of one.
+    let (tpos, tneg, _) = run(Some(qsm_core::separation::susep_net::WASM_PATCH));
+    let tneg_mag: Vec<f64> = tneg.iter().map(|&v| -v).collect();
+    let (tcp, _, tnp) = stats(&pos, &tpos);
+    let (tcn, _, tnn) = stats(&neg_mag, &tneg_mag);
+    println!("SUSEP-Net tiled vs whole-volume: χ+ corr={tcp:.4} NRMSE={tnp:.2}% | χ− corr={tcn:.4} NRMSE={tnn:.2}%");
+    assert!(tcp > 0.95 && tcn > 0.95, "tiled correlation regressed: χ+={tcp} χ−={tcn}");
 }
