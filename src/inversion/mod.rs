@@ -12,8 +12,12 @@
 //! - RTS: Rapid two-step method
 //! - MEDI: Morphology-enabled dipole inversion
 //! - TGV: Total Generalized Variation (single-step from wrapped phase)
+//! - COSMOS: multi-orientation least squares (closed form, well-posed)
+//! - STI: susceptibility tensor imaging (multi-orientation, 6-component tensor)
 
 pub mod admm;
+pub mod cosmos;
+pub mod sti;
 pub mod tkd;
 pub mod tikhonov;
 pub mod tv;
@@ -56,6 +60,8 @@ pub mod modl_qsm;
 #[cfg(feature = "onnx")]
 pub mod nextqsm;
 
+pub use cosmos::{cosmos, cosmos_weighted, CosmosParams};
+pub use sti::{sti, sti_forward, tensor_maps, StiParams, SusceptibilityTensor, TensorMaps, N_TENSOR};
 pub use tkd::{tkd, tsvd, TkdParams};
 pub use tikhonov::{tikhonov, TikhonovParams, Regularization};
 pub use tv::{tv_admm, TvParams};

@@ -48,7 +48,7 @@ jobs:
           set -e
 
           all_bgremove='["test_bgremove_sharp","test_bgremove_resharp","test_bgremove_vsharp","test_bgremove_pdf","test_bgremove_ismv","test_bgremove_lbv"]'
-          all_inversion='["test_inversion_tkd","test_inversion_tsvd","test_inversion_tikhonov","test_inversion_tv","test_inversion_rts","test_inversion_ilsqr","test_inversion_medi","test_inversion_nltv","test_inversion_ndi","test_inversion_fansi","test_inversion_fansi_tgv","test_inversion_l1qsm","test_inversion_whqsm","test_inversion_hdqsm","test_inversion_amp_pe","test_inversion_lsqr","test_inversion_heidi"]'
+          all_inversion='["test_inversion_tkd","test_inversion_tsvd","test_inversion_tikhonov","test_inversion_tv","test_inversion_rts","test_inversion_ilsqr","test_inversion_medi","test_inversion_nltv","test_inversion_ndi","test_inversion_fansi","test_inversion_fansi_tgv","test_inversion_l1qsm","test_inversion_whqsm","test_inversion_hdqsm","test_inversion_amp_pe","test_inversion_lsqr","test_inversion_heidi","test_multiorient_cosmos","test_multiorient_sti","test_multiorient_coverage","test_multiorient_noise"]'
           all_combined='["test_combined_tgv","test_combined_tfi"]'
           all_pipeline='["test_pipeline_romeo_b0","test_pipeline_unwrap_bfr_romeo","test_pipeline_unwrap_bfr_laplacian_neumann","test_unwrap_bfr_single_volume","test_pipeline_unwrap_bfr_stage_laplacian","test_pipeline_tgv","test_pipeline_qsmart","test_pipeline_qsmart_tikhonov","test_pipeline_harperella","test_pipeline_iharperella","test_bias_correction","test_swi","test_smwi","test_r2star_t2star"]'
           # χ-separation entries are whole test *binaries* (each runs several methods).
@@ -221,7 +221,7 @@ jobs:
 
               # Dipole inversion
               src/inversion/mod.rs|src/inversion/admm.rs)
-                inversion="$inversion test_inversion_tkd test_inversion_tsvd test_inversion_tikhonov test_inversion_tv test_inversion_rts test_inversion_ilsqr test_inversion_medi test_inversion_nltv test_inversion_ndi test_inversion_fansi test_inversion_fansi_tgv test_inversion_l1qsm test_inversion_whqsm test_inversion_hdqsm test_inversion_lsqr test_inversion_heidi"
+                inversion="$inversion test_inversion_tkd test_inversion_tsvd test_inversion_tikhonov test_inversion_tv test_inversion_rts test_inversion_ilsqr test_inversion_medi test_inversion_nltv test_inversion_ndi test_inversion_fansi test_inversion_fansi_tgv test_inversion_l1qsm test_inversion_whqsm test_inversion_hdqsm test_inversion_lsqr test_inversion_heidi test_multiorient_cosmos test_multiorient_sti test_multiorient_coverage test_multiorient_noise"
                 combined="$combined test_combined_tfi" ;;
               src/inversion/tkd.rs)       inversion="$inversion test_inversion_tkd test_inversion_tsvd" ;;
               src/inversion/tikhonov.rs)  inversion="$inversion test_inversion_tikhonov"; pipeline="$pipeline test_pipeline_qsmart_tikhonov" ;;
@@ -241,6 +241,10 @@ jobs:
               src/inversion/lsqr_qsm.rs)  inversion="$inversion test_inversion_lsqr test_inversion_heidi" ;;
               src/inversion/heidi.rs)     inversion="$inversion test_inversion_heidi" ;;
               src/utils/anisotropic_diffusion.rs) inversion="$inversion test_inversion_heidi" ;;
+              src/inversion/cosmos.rs)    inversion="$inversion test_multiorient_cosmos test_multiorient_coverage test_multiorient_noise" ;;
+              src/inversion/sti.rs)       inversion="$inversion test_multiorient_sti" ;;
+              # STI derives MMS/MSA/PEV from this eigensolver.
+              src/utils/denoise.rs)       inversion="$inversion test_multiorient_sti" ;;
               # AMP-PE's sparse-wavelet + erfc helpers are used only by it; WaveSep
               # also uses the wavelet transform.
               src/utils/special.rs) inversion="$inversion test_inversion_amp_pe" ;;
@@ -1193,6 +1197,13 @@ jobs:
               echo "$TABLE"
             fi
 
+            if TABLE=$(emit_chi_table "test_multiorient_" cosmos sti); then
+              echo "## Multi-Orientation Inversion"
+              echo "*COSMOS and STI consume several orientations, so these are not like-for-like with the single-orientation methods above. Compared against ground truth susceptibility map; STI reports mean magnetic susceptibility.*"
+              echo ""
+              echo "$TABLE"
+            fi
+
             if TABLE=$(emit_chi_table "test_dl_" qsmgan lpcnn ir2qsm modl_qsm nextqsm); then
               echo "## Deep Learning — Dipole Inversion"
               echo "*Compared against ground truth susceptibility map (NeXtQSM: total field in; others: local field in)*"
@@ -1406,12 +1417,20 @@ jobs:
             echo ""
           }
 
-          # Helper: emit figures for a list of slugs
+          # Helper: emit figures for a list of slugs.
+          # Idempotent: a montage can be referenced by more than one section (stage_dipole
+          # carries the single-orientation, deep-learning and multi-orientation rows), and
+          # which sections run depends on what the change touched. Emitting once, from
+          # whichever section gets there first, means the figure still appears when only one
+          # of them ran without being repeated when several did.
+          EMITTED_FIGURES=""
           emit_figures() {
             for slug in "$@"; do
+              case " $EMITTED_FIGURES " in *" $slug "*) continue ;; esac
               if [ -f "figures/${slug}.png" ]; then
                 echo "![${slug}](figures/${slug}.png)"
                 echo ""
+                EMITTED_FIGURES="$EMITTED_FIGURES $slug"
               fi
             done
           }
@@ -1446,6 +1465,15 @@ jobs:
               echo "*Every method that produces a susceptibility map, against ground truth. Plain rows take the*"
               echo "*local field; **— BFR + inversion** rows take the total field and remove background*"
               echo "*themselves; **— full pipeline** rows start from wrapped phase.*"
+              echo ""
+              echo "$TABLE"
+              echo ""
+              emit_figures stage_dipole
+            fi
+
+            if TABLE=$(emit_chi_table "test_multiorient_" cosmos sti); then
+              echo "### Multi-Orientation Inversion"
+              echo "*COSMOS and STI consume several orientations, so these are not like-for-like with the single-orientation methods above. Compared against ground truth susceptibility map; STI reports mean magnetic susceptibility.*"
               echo ""
               echo "$TABLE"
               echo ""

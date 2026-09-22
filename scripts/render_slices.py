@@ -55,6 +55,10 @@ NAMES = {
     "inversion_amp_pe": "AMP-PE",
     "inversion_lsqr": "LSQR",
     "inversion_heidi": "HEIDI",
+    "inversion_cosmos": "COSMOS",
+    "sti_mms": "STI (MMS)",
+    "sti_msa": "STI (MSA)",
+    "inversion_cosmos_noisy": "COSMOS (noisy)",
     "bet": "BET",
     "combined_tgv": "TGV (Combined)",
     "bias_correction": "Bias Correction",
@@ -160,6 +164,13 @@ WINDOWS = {
     "inversion_nltv": (-0.1, 0.1),
     "inversion_ndi": (-0.1, 0.1),
     "inversion_fansi": (-0.1, 0.1),
+    "inversion_cosmos": (-0.1, 0.1),
+    "inversion_cosmos_noisy": (-0.1, 0.1),
+    "sti_mms": (-0.1, 0.1),
+    # MSA is an anisotropy, not a susceptibility: on an isotropic phantom it is ~1e-17, so a
+    # shared ppm window would render it as a flat field. Its own tight window shows whether
+    # anything non-zero crept in.
+    "sti_msa": (-0.002, 0.002),
     "inversion_fansi_tgv": (-0.1, 0.1),
     "inversion_l1qsm": (-0.1, 0.1),
     "inversion_whqsm": (-0.1, 0.1),
@@ -243,10 +254,12 @@ MONTAGES = [
         ["inversion_l1qsm", "inversion_whqsm", "inversion_hdqsm", "inversion_amp_pe",
          "inversion_lsqr", "inversion_heidi"],
         ["dl_qsmgan", "dl_lpcnn", "dl_ir2qsm", "dl_modl_qsm", "dl_nextqsm"],
+        ["inversion_cosmos", "sti_mms"],
         ["combined_tgv", "combined_tfi", "pipeline_tgv", "pipeline_qsmart",
          "pipeline_qsmart_tikhonov"],
     ], ["dipole inversion", "dipole inversion", "dipole inversion",
-        "deep learning", "spans (BFR+dipole / full pipeline)"]),
+        "deep learning", "multi-orientation (N orientations in)",
+        "spans (BFR+dipole / full pipeline)"]),
     ("stage_chisep", "χ-separation", "ppm", (0, 0.1), [
         ["chisep_para_truth", "chisep_para", "chisep_xsepnet_para",
          "relaxchisep_r2starqsm_para", "relaxchisep_wavesep_para",

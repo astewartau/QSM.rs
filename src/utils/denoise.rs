@@ -23,7 +23,7 @@ use rayon::prelude::*;
 /// (row-major). Returns `(eigenvalues, eigenvectors)` with eigenvalues in
 /// ASCENDING order and eigenvectors stored column-wise (`v[row*n + col]` is
 /// component `row` of eigenvector `col`).
-fn jacobi_eigh(a_in: &[f64], n: usize) -> (Vec<f64>, Vec<f64>) {
+pub(crate) fn jacobi_eigh(a_in: &[f64], n: usize) -> (Vec<f64>, Vec<f64>) {
     let mut a = a_in.to_vec();
     // v = identity (eigenvectors accumulate here)
     let mut v = vec![0.0_f64; n * n];
