@@ -72,6 +72,9 @@ NAMES = {
     "smwi_para": "SMWI (paramagnetic)",
     "smwi_dia": "SMWI (diamagnetic)",
     "smwi_mip": "SMWI mIP (paramagnetic)",
+    "r2primenet_pred": "R2PRIMEnet R2' (Hz)",
+    "r2primenet_ref": "Reference R2' (Hz)",
+    "r2primenet_diff": "R2PRIMEnet - reference (Hz)",
     "r2star": "R2* (Hz)",
     "t2star": "T2* (s)",
     # Relaxometry demo (self-contained synthetic phantom)
@@ -109,6 +112,7 @@ NAMES = {
     "dl_modl_qsm": "MoDL-QSM",
     "dl_nextqsm": "NeXtQSM",
     "dl_iqfm": "iQFM",
+    "dl_r2primenet": "R2PRIMEnet R2' (Hz)",
     "dl_hdbet": "HD-BET",
     "chisep_xsepnet_para": "xSepNet χ+",
     "chisep_xsepnet_dia": "xSepNet χ− (magnitude)",
@@ -130,6 +134,7 @@ MONTAGE_LABELS = {
     "relax_unring_before": "Rung", "relax_unring_after": "Unrung",
     "swi": "CLEAR-SWI", "swi_mip": "CLEAR-SWI mIP", "r2star": "R2* (Hz)", "t2star": "T2* (s)",
     "smwi_para": "SMWI para", "smwi_dia": "SMWI dia", "smwi_mip": "SMWI mIP",
+    "r2primenet_pred": "Predicted", "r2primenet_ref": "Reference", "r2primenet_diff": "Difference",
 }
 
 # Fixed display windows (ppm)
@@ -175,6 +180,12 @@ WINDOWS = {
     "smwi_para": None, # auto-range (magnitude-weighted)
     "smwi_dia": None,  # auto-range (magnitude-weighted)
     "smwi_mip": None,  # auto-range (magnitude-weighted)
+    # Prediction and reference share a window so the pair can be read against each other;
+    # the difference gets a tighter symmetric one, since that is where it is worth seeing detail.
+    "r2primenet_pred": (0, 40),
+    "r2primenet_ref": (0, 40),
+    "r2primenet_diff": (-10, 10),
+    "dl_r2primenet": (0, 40),
     "r2star": (0, 100),    # Hz
     "t2star": (0, 0.08),   # seconds (0-80 ms)
     "relax_r2_truth": (0, 45),
@@ -258,6 +269,8 @@ RELAXOMETRY = ("stage_relaxometry", "Relaxometry toolkit", None, None, [
 SUPPLEMENTARY = ("stage_supplementary", "Supplementary outputs", None, None, [
     ["swi", "swi_mip", "r2star", "t2star"],
     ["smwi_para", "smwi_dia", "smwi_mip"],
+    ["r2primenet_pred", "r2primenet_ref", "r2primenet_diff"],
+    ["dl_r2primenet"],
 ], None)
 # The unwrappers' own output, before background removal. These differ from each other (and
 # from ground truth) by an arbitrary harmonic field, which is expected: unwrapping is only

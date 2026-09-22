@@ -52,10 +52,10 @@ jobs:
           all_combined='["test_combined_tgv","test_combined_tfi"]'
           all_pipeline='["test_pipeline_romeo_b0","test_pipeline_unwrap_bfr_romeo","test_pipeline_unwrap_bfr_laplacian_neumann","test_unwrap_bfr_single_volume","test_pipeline_unwrap_bfr_stage_laplacian","test_pipeline_tgv","test_pipeline_qsmart","test_pipeline_qsmart_tikhonov","test_pipeline_harperella","test_pipeline_iharperella","test_bias_correction","test_swi","test_smwi","test_r2star_t2star"]'
           # χ-separation entries are whole test *binaries* (each runs several methods).
-          all_chisep='["chisep_qsmci","chisep_relaxometry_qsmci","chisep_xsepnet"]'
+          all_chisep='["chisep_qsmci","chisep_relaxometry_qsmci","chisep_xsepnet","chisep_r2primenet"]'
           # Deep-learning models (in tests/dl_models.rs; weights fetched from the registry).
           all_dl='["test_dl_qsmgan","test_dl_lpcnn","test_dl_ir2qsm","test_dl_modl_qsm","test_dl_nextqsm","test_dl_iqfm","test_dl_hdbet"]'
-          all_dl_names="test_dl_qsmgan test_dl_lpcnn test_dl_ir2qsm test_dl_modl_qsm test_dl_nextqsm test_dl_iqfm test_dl_hdbet"
+          all_dl_names="test_dl_qsmgan test_dl_lpcnn test_dl_ir2qsm test_dl_modl_qsm test_dl_nextqsm test_dl_iqfm test_dl_hdbet test_dl_r2primenet"
 
           run_unit_tests=false
 
@@ -224,13 +224,17 @@ jobs:
 
               # χ-separation (all methods share src/separation; both test binaries)
               src/separation/chisepnet.rs) chisep="$chisep chisep_xsepnet" ;;
+              src/utils/r2primenet.rs) chisep="$chisep chisep_r2primenet"; dl="$dl test_dl_r2primenet" ;;
+              src/utils/sliding.rs) chisep="$chisep chisep_xsepnet chisep_r2primenet" ;;
+              src/utils/r2star.rs) chisep="$chisep chisep_r2primenet" ;;
               src/separation/*) chisep="$chisep chisep_qsmci chisep_relaxometry_qsmci" ;;
               tests/chisep_qsmci.rs) chisep="$chisep chisep_qsmci" ;;
               tests/chisep_relaxometry_qsmci.rs) chisep="$chisep chisep_relaxometry_qsmci" ;;
               tests/chisep_xsepnet.rs) chisep="$chisep chisep_xsepnet" ;;
+              tests/chisep_r2primenet.rs) chisep="$chisep chisep_r2primenet" ;;
 
               # Deep-learning models (shared ONNX registry/inference + per-model glue)
-              src/models/*)  dl="$dl $all_dl_names"; chisep="$chisep chisep_xsepnet" ;;
+              src/models/*)  dl="$dl $all_dl_names"; chisep="$chisep chisep_xsepnet chisep_r2primenet" ;;
               src/inversion/qsmgan.rs)   dl="$dl test_dl_qsmgan" ;;
               src/inversion/lpcnn.rs)    dl="$dl test_dl_lpcnn" ;;
               src/inversion/ir2qsm.rs)   dl="$dl test_dl_ir2qsm" ;;
