@@ -105,6 +105,7 @@ Load and save NIfTI volumes with [`qsm_core::io`](src/io.rs).
 | Algorithm | Description | Reference |
 |-----------|-------------|-----------|
 | **BET** | Brain Extraction Tool — region-growing brain masking with mesh evolution | Smith, S.M. (2002). "Fast robust automated brain extraction." *Human Brain Mapping*, 17(3):143-155. [DOI](https://doi.org/10.1002/hbm.10062) |
+| **RS2-Net** | Deep-learning **rodent** (mouse, rat) brain extraction from the magnitude: a Swin-UNETR trained on 1,142 MRIs from 89 centres, run through a Rust port of its nnU-Net pipeline. Handles thick slices and the thin rodent skull, where BET leaks into muscle (`onnx` feature) | Lin, Y., Ding, Y., Chang, S., Ge, X., Sui, X., Jiang, Y. (2024). "RS2-Net: An end-to-end deep learning framework for rodent skull stripping in multi-center brain MRI." *NeuroImage*, 298:120769. [DOI](https://doi.org/10.1016/j.neuroimage.2024.120769) |
 | **Signal-gated erosion** | Mask refinement for any mask: peels only low-signal boundary voxels (sinus / skull-base T2* dropout) down to a depth cap, after dividing out the receive-coil bias; interior dark structures are kept | QSM-CI harmonization masking (`hd-bet-qsmci`), [QSMxT/QSM-CI](https://github.com/QSMxT/QSM-CI) |
 
 ### Phase Unwrapping
@@ -272,6 +273,7 @@ This library was developed with reference to the following open-source implement
 | [MriResearchTools.jl](https://github.com/korbinian90/MriResearchTools.jl) | ROMEO, MCPC-3D-S, R2*/T2*, bias correction | Julia |
 | [MEDI_toolbox](https://github.com/huawu02/MEDI_toolbox) | MEDI | MATLAB |
 | [FSL-BET2](https://github.com/Bostrix/FSL-BET2) | BET | C++ |
+| [Rodent-Skull-Stripping](https://github.com/VitoLin21/Rodent-Skull-Stripping) | RS2-Net | Python |
 | [QSMART](https://github.com/wtsyeda/QSMART) | SDF, QSMART pipeline, Frangi filter, curvature | MATLAB |
 | [CLEARSWI.jl](https://github.com/korbinian90/CLEARSWI.jl) | CLEAR-SWI | Julia |
 | [SEPIA](https://github.com/kschan0214/sepia) | SMWI | MATLAB |

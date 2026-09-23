@@ -31,6 +31,38 @@ sha256 `c2821a74e8a03d4073896b5c2e359b3ef86f9776bacd78e00da1c757aa97bbcc`.
 Against the Keras graph on a real 192×256×128 input the posteriors agree to
 max |diff| 1.0e-5 and the argmax is identical at every voxel.
 
+## RS2-Net
+
+`export_rs2net.py` builds `RSSNet` as `RS2/inference/predict.py:load_what_we_need()` does, loads
+the released `RS2_pretrained_model.pt`, and exports at opset 17 with a **fixed** `[1,1,128,96,128]`
+input — the Swin encoder computes its window padding with Python ints, which tracing bakes in, so
+the graph only runs at the traced size. 128×96×128 (nnU-Net's transposed `(y, z, x)` order) peaks at
+≈2.7 GB in tract, inside wasm32's 4 GB; the released 128×128×160 needs ≈4.5 GB.
+
+```
+git clone https://github.com/VitoLin21/Rodent-Skull-Stripping      # GPL-3.0
+curl -LO https://github.com/VitoLin21/Rodent-Skull-Stripping/releases/download/main-tag/RS2_pretrained_model.pt
+# SwinTransformer.proj_out: F.layer_norm(x, [ch]) -> [int(ch)] (ch comes from x.size(), which
+# the exporter cannot make static)
+sed -i 's/F.layer_norm(x, \[ch\])/F.layer_norm(x, [int(ch)])/' Rodent-Skull-Stripping/RS2/network/RSSNet.py
+python -m venv .venv && .venv/bin/pip install torch==2.3.0 "monai[einops]==1.3.0" onnx onnxruntime
+.venv/bin/python export_rs2net.py --rs2-dir Rodent-Skull-Stripping --weights RS2_pretrained_model.pt
+```
+
+The checkpoint was saved from a `torch.compile`d model; the script strips the `_orig_mod.` prefix
+from its keys. Environment: Python 3.10, torch 2.3.0 (CPU), onnx 1.23.
+
+To be hosted as `rs2-net.onnx` on `qsmxt/qsm-onnx-weights` (registry status `Pending` until then;
+bring-your-own via `$QSM_MODEL_DIR` works meanwhile). Verified export (reproducible — re-running
+gives identical bytes): 63,456,162 bytes, sha256
+`a120ce43b06a9f3ddecf85bf18f281cbb54c354ef15b34a6bcaaffa4e3c4a570`. Against PyTorch the logits
+agree to max |diff| 2.2e-3 with the same sign at 99.9998 % of voxels.
+
+`ref_rs2net.py` runs RS2-Net's own nnU-Net pipeline around this graph (ONNX Runtime) and writes the
+fixtures for `bet::rs2net`'s parity tests and `tests/models_onnx.rs::rs2net_matches_python_reference`
+(`RS2_REF_DIR`, `RS2NET_ONNX`). It needs RS2-Net's requirements plus `blosc2` and
+`acvl_utils==0.2.1`; set `TORCHDYNAMO_DISABLE=1`, as RS2-Net calls `torch.compile`.
+
 ## R2PRIMEnet and χ-sepnet
 
 The SNU-LIST χ-sepnet toolbox ships both networks already in ONNX — `240531_R2PRIMEnet.onnx`

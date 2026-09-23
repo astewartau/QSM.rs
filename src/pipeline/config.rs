@@ -226,6 +226,10 @@ pub enum MaskOp {
     /// whatever the section's input is. Requires the `onnx` feature and the `hd-bet` model
     /// weights; see [`crate::models`].
     HdBet(crate::bet::HdBetParams),
+    /// RS2-Net deep-learning **rodent** brain extraction from the **magnitude** (a generator,
+    /// like `HdBet`). Requires the `onnx` feature and the `rs2-net` model weights; see
+    /// [`crate::models`].
+    Rs2Net(crate::bet::Rs2NetParams),
 }
 
 impl MaskOp {
@@ -233,6 +237,7 @@ impl MaskOp {
     pub fn dl_model_id(&self) -> Option<&'static str> {
         match self {
             Self::HdBet(_) => Some("hd-bet"),
+            Self::Rs2Net(_) => Some("rs2-net"),
             Self::Threshold { .. } | Self::Bet { .. } | Self::Erode { .. } | Self::Dilate { .. }
             | Self::Close { .. } | Self::FillHoles { .. } | Self::GaussianSmooth { .. }
             | Self::SignalErode(_) => None,
@@ -829,7 +834,8 @@ mod tests {
                 ModelStage::DipoleInversion | ModelStage::SingleStep => (inv.contains(&m.id), "InversionAlgorithm"),
                 ModelStage::ChiSeparation => (sep.contains(&m.id), "SeparationAlgorithm"),
                 ModelStage::BrainExtraction => {
-                    (MaskOp::HdBet(Default::default()).dl_model_id() == Some(m.id), "MaskOp")
+                    let ops = [MaskOp::HdBet(Default::default()), MaskOp::Rs2Net(Default::default())];
+                    (ops.iter().any(|op| op.dl_model_id() == Some(m.id)), "MaskOp")
                 }
                 // iQFM: standalone run_iqfm, no stage enum.
                 ModelStage::PhaseToField => continue,
