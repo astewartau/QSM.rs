@@ -449,7 +449,7 @@ const MODELS: &[ModelSpec] = &[
         id: "rs2-net",
         name: "RS2-Net",
         stage: ModelStage::BrainExtraction,
-        status: WeightStatus::Pending,
+        status: WeightStatus::Available,
         origin: Framework::PyTorch,
         description: "Swin-UNETR rodent (mouse, rat) brain extraction, trained within nnU-Net \
                       v2 on 1,142 MRIs from 89 centres: magnitude → brain mask. Runs at \
@@ -461,11 +461,10 @@ const MODELS: &[ModelSpec] = &[
         license: "GPL-3.0",
         // Exported from the released RS2_pretrained_model.pt with
         // scripts/onnx-export/export_rs2net.py (reproducible: identical bytes on re-export);
-        // torch↔onnxruntime sign agreement 99.9998 %. Not yet on Hugging Face: once uploaded as
-        // qsmxt/qsm-onnx-weights/rs2-net.onnx, set the url and flip status to Available.
+        // torch↔onnxruntime sign agreement 99.9998 %.
         files: &[WeightFile {
             name: "rs2-net.onnx",
-            url: "",
+            url: "https://huggingface.co/qsmxt/qsm-onnx-weights/resolve/main/rs2-net.onnx",
             sha256: "a120ce43b06a9f3ddecf85bf18f281cbb54c354ef15b34a6bcaaffa4e3c4a570",
             bytes: 63_456_162,
         }],

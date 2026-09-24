@@ -30,7 +30,7 @@ parity-checked against the authors' Python ONNX-Runtime output on `data/sim/dev`
 | **iQSM+** | single-step (phase→χ, orientation-adaptive) | ✅ `inversion::{iqsm_plus,iqsm_plus_multi_echo}` | vs original torch inference | ✅ OSF `Available` |
 | **R2PRIMEnet** | R2′ generation (R2*→R2′) | ✅ `relaxometry::r2primenet` | corr 1.000000, max|Δ| 2.0e-5 Hz | ✅ HF `Available` (axes re-declared dynamic) |
 | **HD-BET** | brain extraction (magnitude→mask) | ✅ `bet::hd_bet` + `MaskOp::HdBet` | mask vs `hd-bet` CLI (see below) | ✅ HF `Available` (CC-BY-NC-4.0) |
-| **RS2-Net** | rodent brain extraction (magnitude→mask) | ✅ `bet::rs2_net` + `MaskOp::Rs2Net` | mask vs RS2-Net's pipeline, 0 voxels (see below) | `Pending` — export reproducible, hash known; not yet on HF (GPL-3.0) |
+| **RS2-Net** | rodent brain extraction (magnitude→mask) | ✅ `bet::rs2_net` + `MaskOp::Rs2Net` | mask vs RS2-Net's pipeline, 0 voxels (see below) | ✅ HF `Available` (GPL-3.0) |
 
 HD-BET v2 is a stock nnU-Net `PlainConvUNet` exported through nnU-Net itself (`export_hdbet.py`,
 dynamic spatial axes; only Conv/ConvTranspose/InstanceNormalization/LeakyRelu/Concat). The work is
