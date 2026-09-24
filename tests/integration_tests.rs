@@ -1252,6 +1252,7 @@ fn test_bet() {
             gradient_threshold: 0.0,
             iterations: 1000,
             subdivisions: 4,
+            voxel_scale: 1.0,
         },
         |_, _| {},
     ));

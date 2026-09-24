@@ -104,7 +104,7 @@ Load and save NIfTI volumes with [`qsm_core::io`](src/io.rs).
 
 | Algorithm | Description | Reference |
 |-----------|-------------|-----------|
-| **BET** | Brain Extraction Tool — region-growing brain masking with mesh evolution | Smith, S.M. (2002). "Fast robust automated brain extraction." *Human Brain Mapping*, 17(3):143-155. [DOI](https://doi.org/10.1002/hbm.10062) |
+| **BET** | Brain Extraction Tool — region-growing brain masking with mesh evolution. `voxel_scale` inflates the voxel sizes so BET's human-scale surface model can be pointed at preclinical data (10 for mouse), though `rs2_net` masks rodent brains better where its weights are available | Smith, S.M. (2002). "Fast robust automated brain extraction." *Human Brain Mapping*, 17(3):143-155. [DOI](https://doi.org/10.1002/hbm.10062) |
 | **Signal-gated erosion** | Mask refinement for any mask: peels only low-signal boundary voxels (sinus / skull-base T2* dropout) down to a depth cap, after dividing out the receive-coil bias; interior dark structures are kept | QSM-CI harmonization masking (`hd-bet-qsmci`), [QSMxT/QSM-CI](https://github.com/QSMxT/QSM-CI) |
 
 ### Phase Unwrapping
