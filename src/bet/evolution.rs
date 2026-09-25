@@ -681,6 +681,20 @@ pub struct BetParams {
     pub iterations: usize,
     /// Icosphere subdivision level
     pub subdivisions: usize,
+    /// Factor applied to the grid's voxel sizes before the surface is evolved (default 1.0 =
+    /// the acquisition's own geometry).
+    ///
+    /// BET's surface model is fixed in human-scale millimetres — a 7 mm / 3 mm intensity search
+    /// along each vertex normal, and curvature bounded between 3.33 mm and 10 mm radii — so on a
+    /// ~1 cm rodent brain those distances span the whole head and the search runs straight
+    /// through the skull. Inflating the voxel sizes so the brain reaches roughly human
+    /// dimensions is the standard preclinical workaround (`fslchpixdim` x10 before `bet`);
+    /// a scale of 10 suits mouse data.
+    ///
+    /// The mask is returned on the input index grid either way, so nothing needs scaling back.
+    /// Prefer [`super::rs2_net`] where the weights can be fetched: on an in-vivo mouse GRE it
+    /// follows the inner skull, where scaled BET still leaks into the skull base.
+    pub voxel_scale: f64,
 }
 
 impl Default for BetParams {
@@ -691,6 +705,7 @@ impl Default for BetParams {
             gradient_threshold: 0.0,
             iterations: 1000,
             subdivisions: 4,
+            voxel_scale: 1.0,
         }
     }
 }
@@ -720,7 +735,12 @@ where
     let iterations = params.iterations;
     let subdivisions = params.subdivisions;
     let (nx, ny, nz) = grid.dims;
-    let voxel_size = [grid.vsx(), grid.vsy(), grid.vsz()];
+    // Every physical distance in BET reaches the algorithm through `voxel_size` — the brain
+    // estimate, the surface evolution, the self-intersection heuristic and the rasteriser all
+    // take it from here — so scaling it here is the whole of `voxel_scale`. A non-positive
+    // scale would invert or collapse the geometry; treat it as "unscaled".
+    let scale = if params.voxel_scale > 0.0 { params.voxel_scale } else { 1.0 };
+    let voxel_size = [grid.vsx() * scale, grid.vsy() * scale, grid.vsz() * scale];
 
     // Step 1: Estimate brain parameters
     progress(0, iterations);
@@ -1200,7 +1220,7 @@ mod tests {
         let mask = run_bet(
             &data,
             &grid,
-            &BetParams { fractional_intensity: 0.5, smoothness: 1.0, gradient_threshold: 0.0, iterations: 50, subdivisions: 1 },
+            &BetParams { fractional_intensity: 0.5, smoothness: 1.0, gradient_threshold: 0.0, iterations: 50, subdivisions: 1, voxel_scale: 1.0 },
             |_, _| {},
         );
 
@@ -1218,6 +1238,49 @@ mod tests {
         assert_eq!(mask[idx(8, 8, 8)], 1, "Center of sphere should be brain");
     }
 
+    /// `voxel_scale: s` must mean exactly "run BET as if the voxels were s times larger", so
+    /// scaling the grid and scaling the parameter have to give the same mask. This is what lets
+    /// the preclinical `fslchpixdim`-style workaround be a parameter rather than a pre-pass.
+    #[test]
+    fn test_voxel_scale_matches_an_equally_scaled_grid() {
+        let (data, nx, ny, nz) = make_sphere_volume(16, 6.0, 200.0);
+        let base = BetParams {
+            fractional_intensity: 0.5, smoothness: 1.0, gradient_threshold: 0.0,
+            iterations: 50, subdivisions: 1, voxel_scale: 1.0,
+        };
+
+        // Anisotropic voxels, so a scale applied to the wrong axis would show up.
+        let scaled_grid = Grid::new(nx, ny, nz, 3.0, 4.5, 6.0);
+        let via_grid = run_bet(&data, &scaled_grid, &base, |_, _| {});
+
+        let native_grid = Grid::new(nx, ny, nz, 0.3, 0.45, 0.6);
+        let via_param = run_bet(
+            &data, &native_grid,
+            &BetParams { voxel_scale: 10.0, ..base.clone() },
+            |_, _| {},
+        );
+
+        assert_eq!(via_param, via_grid, "voxel_scale must equal scaling the grid itself");
+    }
+
+    /// A non-positive scale would invert or collapse the geometry; it falls back to unscaled
+    /// rather than producing a degenerate surface.
+    #[test]
+    fn test_non_positive_voxel_scale_is_treated_as_unscaled() {
+        let (data, nx, ny, nz) = make_sphere_volume(16, 6.0, 200.0);
+        let grid = Grid::new(nx, ny, nz, 1.0, 1.0, 1.0);
+        let base = BetParams {
+            fractional_intensity: 0.5, smoothness: 1.0, gradient_threshold: 0.0,
+            iterations: 50, subdivisions: 1, voxel_scale: 1.0,
+        };
+        let unscaled = run_bet(&data, &grid, &base, |_, _| {});
+
+        for bad in [0.0, -1.0] {
+            let mask = run_bet(&data, &grid, &BetParams { voxel_scale: bad, ..base.clone() }, |_, _| {});
+            assert_eq!(mask, unscaled, "voxel_scale {bad} should behave as 1.0");
+        }
+    }
+
     #[test]
     fn test_run_bet_with_gradient_threshold() {
         // Exercise the gradient threshold code path
@@ -1227,7 +1290,7 @@ mod tests {
         let mask = run_bet(
             &data,
             &grid,
-            &BetParams { fractional_intensity: 0.5, smoothness: 1.0, gradient_threshold: 0.3, iterations: 50, subdivisions: 1 },
+            &BetParams { fractional_intensity: 0.5, smoothness: 1.0, gradient_threshold: 0.3, iterations: 50, subdivisions: 1, voxel_scale: 1.0 },
             |_, _| {},
         );
 
@@ -1247,7 +1310,7 @@ mod tests {
         let mask = run_bet(
             &data,
             &grid,
-            &BetParams { fractional_intensity: 0.5, smoothness: 1.0, gradient_threshold: 0.0, iterations: 50, subdivisions: 1 },
+            &BetParams { fractional_intensity: 0.5, smoothness: 1.0, gradient_threshold: 0.0, iterations: 50, subdivisions: 1, voxel_scale: 1.0 },
             |current, total| {
                 progress_calls.push((current, total));
             },
@@ -1278,13 +1341,13 @@ mod tests {
         let mask_small = run_bet(
             &data,
             &grid,
-            &BetParams { fractional_intensity: 0.7, smoothness: 1.0, gradient_threshold: 0.0, iterations: 50, subdivisions: 1 },
+            &BetParams { fractional_intensity: 0.7, smoothness: 1.0, gradient_threshold: 0.0, iterations: 50, subdivisions: 1, voxel_scale: 1.0 },
             |_, _| {},
         );
         let mask_large = run_bet(
             &data,
             &grid,
-            &BetParams { fractional_intensity: 0.3, smoothness: 1.0, gradient_threshold: 0.0, iterations: 50, subdivisions: 1 },
+            &BetParams { fractional_intensity: 0.3, smoothness: 1.0, gradient_threshold: 0.0, iterations: 50, subdivisions: 1, voxel_scale: 1.0 },
             |_, _| {},
         );
 
@@ -1304,7 +1367,7 @@ mod tests {
         let mask = run_bet(
             &data,
             &grid,
-            &BetParams { fractional_intensity: 0.5, smoothness: 1.0, gradient_threshold: 0.0, iterations: 50, subdivisions: 1 },
+            &BetParams { fractional_intensity: 0.5, smoothness: 1.0, gradient_threshold: 0.0, iterations: 50, subdivisions: 1, voxel_scale: 1.0 },
             |_, _| {},
         );
 
