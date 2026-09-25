@@ -6,13 +6,19 @@
 //!   Reference implementation: https://github.com/Bostrix/FSL-BET2
 //! - **HD-BET** (`hd_bet`, `onnx` feature): nnU-Net deep-learning brain extraction; see
 //!   [`hdbet`].
+//! - **RS2-Net** (`rs2_net`, `onnx` feature): deep-learning *rodent* brain extraction (mouse,
+//!   rat); see [`rs2net`].
 
 mod icosphere;
 mod mesh;
 mod evolution;
 pub mod hdbet;
+pub mod rs2net;
 
 pub use evolution::{run_bet, BetParams};
 #[cfg(feature = "onnx")]
 pub use hdbet::hd_bet;
 pub use hdbet::HdBetParams;
+#[cfg(feature = "onnx")]
+pub use rs2net::rs2_net;
+pub use rs2net::{Rs2NetParams, RS2_NET_PATCH};

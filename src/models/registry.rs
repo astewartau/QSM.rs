@@ -445,6 +445,33 @@ const MODELS: &[ModelSpec] = &[
         outputs: &["logits"],
         size_divisor: 32,
     },
+    ModelSpec {
+        id: "rs2-net",
+        name: "RS2-Net",
+        stage: ModelStage::BrainExtraction,
+        status: WeightStatus::Available,
+        origin: Framework::PyTorch,
+        description: "Swin-UNETR rodent (mouse, rat) brain extraction, trained within nnU-Net \
+                      v2 on 1,142 MRIs from 89 centres: magnitude → brain mask. Runs at \
+                      0.25×0.2×0.16 mm with Gaussian-weighted sliding-window patches; nnU-Net's \
+                      transpose/crop/normalise/resample pipeline is in the Rust glue \
+                      (bet::rs2_net). The graph is traced at a fixed 128×96×128 patch.",
+        paper: "Lin et al., NeuroImage 298:120769 (2024); https://doi.org/10.1016/j.neuroimage.2024.120769",
+        source: "https://github.com/VitoLin21/Rodent-Skull-Stripping",
+        license: "GPL-3.0",
+        // Exported from the released RS2_pretrained_model.pt with
+        // scripts/onnx-export/export_rs2net.py (reproducible: identical bytes on re-export);
+        // torch↔onnxruntime sign agreement 99.9998 %.
+        files: &[WeightFile {
+            name: "rs2-net.onnx",
+            url: "https://huggingface.co/qsmxt/qsm-onnx-weights/resolve/main/rs2-net.onnx",
+            sha256: "a120ce43b06a9f3ddecf85bf18f281cbb54c354ef15b34a6bcaaffa4e3c4a570",
+            bytes: 63_456_162,
+        }],
+        inputs: &["input"],
+        outputs: &["logits"],
+        size_divisor: 32,
+    },
     // ---- Anatomical segmentation -------------------------------------------
     ModelSpec {
         id: "synthseg",

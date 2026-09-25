@@ -89,7 +89,7 @@ pub fn build_mask_section(
 ///
 /// **Two different images.** `input_data` is what a generator looks at — thresholding may use a
 /// phase-quality map, for instance. `magnitude` is the magnitude image, and is what the ops that
-/// need real signal use: [`MaskOp::Bet`], [`MaskOp::HdBet`] and [`MaskOp::SignalErode`]. Passing
+/// need real signal use: [`MaskOp::Bet`], [`MaskOp::HdBet`], [`MaskOp::Rs2Net`] and [`MaskOp::SignalErode`]. Passing
 /// the section input as `magnitude` is a bug: signal-gated erosion divides out a receive-coil bias
 /// estimate and gates on the in-mask median, which only means anything for a magnitude image.
 /// Those ops error when `magnitude` is `None`.
@@ -189,6 +189,12 @@ pub fn apply_mask_ops(
                 })?;
                 mask = run_hd_bet(mag_data, &grid, params)?;
             }
+            MaskOp::Rs2Net(params) => {
+                let mag_data = magnitude.ok_or_else(|| {
+                    PipelineError::InvalidInput("RS2-Net requires magnitude data".into())
+                })?;
+                mask = run_rs2_net(mag_data, &grid, params)?;
+            }
         }
     }
 
@@ -216,6 +222,30 @@ fn run_hd_bet(
 ) -> Result<Vec<u8>, PipelineError> {
     Err(PipelineError::InvalidConfig(
         "HD-BET requires building qsm-core with the 'onnx' feature".into(),
+    ))
+}
+
+/// Source the RS2-Net weights and run it. Requires the `onnx` feature; weights come from the
+/// model registry (local `$QSM_MODEL_DIR`/cache, or the `download` feature).
+#[cfg(feature = "onnx")]
+fn run_rs2_net(
+    magnitude: &[f64],
+    grid: &crate::Grid,
+    params: &crate::bet::Rs2NetParams,
+) -> Result<Vec<u8>, PipelineError> {
+    let bytes = crate::models::primary_weight("rs2-net").map_err(PipelineError::InvalidConfig)?;
+    crate::bet::rs2_net(magnitude, grid, &bytes, params, |_, _| {})
+        .map_err(|e| PipelineError::AlgorithmError(e.to_string()))
+}
+
+#[cfg(not(feature = "onnx"))]
+fn run_rs2_net(
+    _magnitude: &[f64],
+    _grid: &crate::Grid,
+    _params: &crate::bet::Rs2NetParams,
+) -> Result<Vec<u8>, PipelineError> {
+    Err(PipelineError::InvalidConfig(
+        "RS2-Net requires building qsm-core with the 'onnx' feature".into(),
     ))
 }
 
@@ -450,6 +480,19 @@ mod tests {
         let sections = vec![MaskSection {
             input: MaskingInput::Magnitude,
             generator: MaskOp::HdBet(Default::default()),
+            refinements: vec![],
+        }];
+        assert!(run_masking(&sections, &[], None, &meta).is_err());
+        #[cfg(not(feature = "onnx"))]
+        assert!(run_masking(&sections, &[], Some(&vec![1.0; 512]), &meta).is_err());
+    }
+
+    #[test]
+    fn test_masking_rs2_net_requires_magnitude() {
+        let meta = test_metadata();
+        let sections = vec![MaskSection {
+            input: MaskingInput::Magnitude,
+            generator: MaskOp::Rs2Net(Default::default()),
             refinements: vec![],
         }];
         assert!(run_masking(&sections, &[], None, &meta).is_err());

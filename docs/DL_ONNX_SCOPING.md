@@ -30,6 +30,7 @@ parity-checked against the authors' Python ONNX-Runtime output on `data/sim/dev`
 | **iQSM+** | single-step (phase→χ, orientation-adaptive) | ✅ `inversion::{iqsm_plus,iqsm_plus_multi_echo}` | vs original torch inference | ✅ OSF `Available` |
 | **R2PRIMEnet** | R2′ generation (R2*→R2′) | ✅ `relaxometry::r2primenet` | corr 1.000000, max|Δ| 2.0e-5 Hz | ✅ HF `Available` (axes re-declared dynamic) |
 | **HD-BET** | brain extraction (magnitude→mask) | ✅ `bet::hd_bet` + `MaskOp::HdBet` | mask vs `hd-bet` CLI (see below) | ✅ HF `Available` (CC-BY-NC-4.0) |
+| **RS2-Net** | rodent brain extraction (magnitude→mask) | ✅ `bet::rs2_net` + `MaskOp::Rs2Net` | mask vs RS2-Net's pipeline, 0 voxels (see below) | ✅ HF `Available` (GPL-3.0) |
 
 HD-BET v2 is a stock nnU-Net `PlainConvUNet` exported through nnU-Net itself (`export_hdbet.py`,
 dynamic spatial axes; only Conv/ConvTranspose/InstanceNormalization/LeakyRelu/Concat). The work is
@@ -43,6 +44,18 @@ at Dice ≥0.99998 (9–31 voxels); ~9 s per native patch with the `parallel` fe
 single-threaded). Patches down to 128×128×64 (peak ≈1.9 GB,
 `HdBetParams::low_memory`) match the native 192×192×96 (≈4.5 GB) at Dice ≈0.99; smaller patches fail
 because a tile wholly inside the brain is labelled background.
+
+RS2-Net (rodent brain extraction) is a Swin-UNETR trained inside nnU-Net v2, so it reuses HD-BET's
+pipeline helpers (`bet::hdbet`: crop, separate-z resampling, sliding window — generalised to any
+channel count) with its own plans: transpose `(z, y, x)`→`(y, z, x)`, 0.25×0.2×0.16 mm target,
+linear resampling, one sigmoid channel. The graph (`export_rs2net.py`) is traced at a **fixed**
+128×96×128 patch — Swin's window padding is baked in as constants — which peaks at ≈2.7 GB (the
+released 128×128×160 needs ≈4.5 GB) and agrees with it at Dice 0.987 on an in-vivo mouse GRE
+(0.17×0.20×0.8 mm). Pre/post-processing match RS2-Net's own intermediates (max|Δ| 5e-7, 0 voxels;
+`ref_rs2net.py`) and the end-to-end tract mask matches the ONNX Runtime reference at every voxel
+(56 s single-threaded). The port resamples the logits back with the *transposed* spacing, as
+upstream nnU-Net v2 does; RS2-Net's own export passes it untransposed, which on thick-slice data
+nearest-neighbours the wrong axis (Dice 0.986 between the two).
 
 **Multithreaded inference (tract 0.23).** With `parallel` on a native target, `OnnxModel::run` /
 `OnnxPlan::run` spread tract's matrix kernels over a shared pool (tract-linalg `multithread-mm`);

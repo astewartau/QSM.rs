@@ -982,6 +982,46 @@ fn hdbet_matches_python_reference() {
     }
 }
 
+/// RS2-Net end-to-end parity: `bet::rs2_net` (tract + the Rust nnU-Net pipeline) vs RS2-Net's
+/// own nnU-Net pipeline running the same exported graph under ONNX Runtime
+/// (`scripts/onnx-export/ref_rs2net.py`, which writes `mag.nii` and `ref_mask.nii.gz`), on an
+/// in-vivo mouse GRE magnitude with 0.17×0.20×0.8 mm voxels (separate-z resampling).
+///
+/// ```bash
+/// RS2NET_ONNX=/path/rs2-net.onnx RS2_REF_DIR=/path/ref \
+///   cargo test --release --features onnx --test models_onnx rs2net -- --ignored --nocapture
+/// ```
+#[test]
+#[ignore]
+fn rs2net_matches_python_reference() {
+    use qsm_core::bet::{rs2_net, Rs2NetParams};
+    use qsm_core::io::read_nifti_file;
+    use std::path::Path;
+
+    let onnx = std::fs::read(std::env::var("RS2NET_ONNX").unwrap_or("/tmp/rs2net_export/rs2-net.onnx".into()))
+        .expect("RS2NET_ONNX");
+    let dir = std::env::var("RS2_REF_DIR").unwrap_or("/tmp/rs2net_ref".into());
+    let mag = read_nifti_file(Path::new(&format!("{dir}/mag.nii"))).expect("magnitude");
+    let want = read_nifti_file(Path::new(&format!("{dir}/ref_mask.nii.gz"))).expect("reference mask");
+    let (nx, ny, nz) = mag.dims;
+    let (vx, vy, vz) = mag.voxel_size;
+    let grid = qsm_core::Grid::new(nx, ny, nz, vx, vy, vz);
+    let t = std::time::Instant::now();
+    let mask = rs2_net(&mag.data, &grid, &onnx, &Rs2NetParams::default(), |_, _| {}).expect("rs2_net");
+    let (mut inter, mut a, mut b, mut diff) = (0usize, 0usize, 0usize, 0usize);
+    for (&m, &r) in mask.iter().zip(&want.data) {
+        let (m, r) = (m != 0, r > 0.5);
+        inter += (m && r) as usize;
+        a += m as usize;
+        b += r as usize;
+        diff += (m != r) as usize;
+    }
+    let dice = 2.0 * inter as f64 / (a + b) as f64;
+    println!("{:?} @ {:?} mm  Dice vs reference {dice:.6}  differing voxels {diff}  ({:.1}s)",
+        mag.dims, mag.voxel_size, t.elapsed().as_secs_f64());
+    assert!(dice > 0.999, "Dice {dice}");
+}
+
 /// Parity: `relaxometry::r2primenet` (tract, with the column-major↔NCDHW repack and the
 /// sliding-window overlap averaging) must match the authors' ONNX-Runtime recipe on the
 /// same R2* volume. Generate the fixtures first with

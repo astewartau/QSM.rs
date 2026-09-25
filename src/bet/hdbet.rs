@@ -106,7 +106,7 @@ pub fn hd_bet(
         return Ok(vec![0; magnitude.len()]);
     };
     let model = OnnxModel::load(model_onnx)?;
-    let logits = predict_logits(&pre.data, pre.dims, &model, patch, params, progress)?;
+    let logits = predict_logits(&pre.data, pre.dims, &model, patch, 2, params.tile_step, params.mirror_tta, progress)?;
     Ok(postprocess(&logits, &pre))
 }
 
@@ -158,7 +158,7 @@ fn preprocess(magnitude: &[f64], grid: &Grid) -> Option<Preprocessed> {
 }
 
 /// Bounding box `[start, end)` of the non-zero voxels of a C-order `(z, y, x)` volume.
-fn nonzero_bbox(data: &[f64], dims: [usize; 3]) -> Option<[(usize, usize); 3]> {
+pub(super) fn nonzero_bbox(data: &[f64], dims: [usize; 3]) -> Option<[(usize, usize); 3]> {
     let mut lo = [usize::MAX; 3];
     let mut hi = [0usize; 3];
     let mut any = false;
@@ -183,7 +183,7 @@ fn nonzero_bbox(data: &[f64], dims: [usize; 3]) -> Option<[(usize, usize); 3]> {
 /// `force_separate_z = None`): a plain 3D spline resize, unless the voxels are anisotropic
 /// (max/min spacing > 3), in which case each slice is resized in-plane with `order` and the
 /// low-resolution axis with nearest-neighbour.
-fn resample_nnunet(
+pub(super) fn resample_nnunet(
     data: &[f64],
     dims: [usize; 3],
     new_dims: [usize; 3],
@@ -221,7 +221,7 @@ fn resample_nnunet(
 
 /// nnU-Net `determine_do_sep_z_and_axis(force_separate_z=None, ...)`: the low-resolution axis if
 /// either spacing is anisotropic by more than 3×, and that axis is unique.
-fn separate_z_axis(current: [f64; 3], new: [f64; 3]) -> Option<usize> {
+pub(super) fn separate_z_axis(current: [f64; 3], new: [f64; 3]) -> Option<usize> {
     let aniso = |s: [f64; 3]| {
         let (mn, mx) = s.iter().fold((f64::INFINITY, 0.0f64), |(a, b), &v| (a.min(v), b.max(v)));
         mx / mn > 3.0
@@ -271,7 +271,7 @@ fn for_each_slice(data: &mut [f64], dims: [usize; 3], axis: usize, mut f: impl F
 }
 
 /// nnU-Net `compute_steps_for_sliding_window` for one axis.
-fn window_steps(size: usize, tile: usize, step: f64) -> Vec<usize> {
+pub(super) fn window_steps(size: usize, tile: usize, step: f64) -> Vec<usize> {
     let n = ((size - tile) as f64 / (tile as f64 * step)).ceil() as usize + 1;
     if n == 1 {
         return vec![0];
@@ -282,7 +282,7 @@ fn window_steps(size: usize, tile: usize, step: f64) -> Vec<usize> {
 
 /// nnU-Net `compute_gaussian(tile, sigma_scale=1/8, value_scaling_factor=10)`: a Gaussian
 /// centred on the patch (σ = tile/8 per axis), peak 10.
-fn gaussian_importance(tile: [usize; 3]) -> Vec<f32> {
+pub(super) fn gaussian_importance(tile: [usize; 3]) -> Vec<f32> {
     let w: [Vec<f64>; 3] = std::array::from_fn(|a| {
         let (c, s) = ((tile[a] / 2) as f64, tile[a] as f64 / 8.0);
         (0..tile[a]).map(|i| (-0.5 * ((i as f64 - c) / s).powi(2)).exp()).collect()
@@ -298,14 +298,20 @@ fn gaussian_importance(tile: [usize; 3]) -> Vec<f32> {
     g
 }
 
-/// Gaussian-weighted sliding-window logits (2 channels, C-order `(z, y, x)`, shape `dims`).
+/// Gaussian-weighted sliding-window logits of an nnU-Net-style network with `channels` outputs,
+/// channel-major C-order (shape `[channels, dims...]`). `patch` must be a size the network
+/// accepts; `tile_step` is the stride as a fraction of the patch; `mirror_tta` averages over the
+/// 8 axis mirrorings. Shared with [`super::rs2net`].
 #[cfg(feature = "onnx")]
-fn predict_logits(
+#[allow(clippy::too_many_arguments)]
+pub(super) fn predict_logits(
     data: &[f32],
     dims: [usize; 3],
     model: &OnnxModel,
     patch: [usize; 3],
-    params: &HdBetParams,
+    channels: usize,
+    tile_step: f64,
+    mirror_tta: bool,
     mut progress: impl FnMut(usize, usize),
 ) -> Result<Vec<f32>, OnnxError> {
     // Pad (centred, extra voxel on the high side) to at least one patch, with zeros (= the mean
@@ -322,12 +328,12 @@ fn predict_logits(
         }
     }
 
-    let steps: [Vec<usize>; 3] = std::array::from_fn(|a| window_steps(pdims[a], patch[a], params.tile_step));
+    let steps: [Vec<usize>; 3] = std::array::from_fn(|a| window_steps(pdims[a], patch[a], tile_step));
     let gauss = gaussian_importance(patch);
     let pp: usize = patch.iter().product();
     let shape = [1, 1, patch[0], patch[1], patch[2]];
     let plan = model.plan_for(&[&shape])?;
-    let flips: &[[bool; 3]] = if params.mirror_tta {
+    let flips: &[[bool; 3]] = if mirror_tta {
         &[[false, false, false], [true, false, false], [false, true, false], [false, false, true],
           [true, true, false], [true, false, true], [false, true, true], [true, true, true]]
     } else {
@@ -336,10 +342,10 @@ fn predict_logits(
     let total = steps.iter().map(Vec::len).product::<usize>() * flips.len();
     let mut done = 0;
 
-    let mut acc = vec![0.0f32; 2 * np];
+    let mut acc = vec![0.0f32; channels * np];
     let mut weight = vec![0.0f32; np];
     let mut input = vec![0.0f32; pp];
-    let mut pred = vec![0.0f32; 2 * pp];
+    let mut pred = vec![0.0f32; channels * pp];
     for &s0 in &steps[0] {
         for &s1 in &steps[1] {
             for &s2 in &steps[2] {
@@ -350,10 +356,10 @@ fn predict_logits(
                 for flip in flips {
                     let x = flip3(&input, patch, *flip);
                     let out = plan.run_single(&Tensor::new(shape.to_vec(), x))?;
-                    if out.shape != [1, 2, patch[0], patch[1], patch[2]] {
-                        return Err(OnnxError::Run(format!("unexpected HD-BET output shape {:?}", out.shape)));
+                    if out.shape != [1, channels, patch[0], patch[1], patch[2]] {
+                        return Err(OnnxError::Run(format!("unexpected network output shape {:?}", out.shape)));
                     }
-                    for c in 0..2 {
+                    for c in 0..channels {
                         let back = flip3(&out.data[c * pp..(c + 1) * pp], patch, *flip);
                         pred[c * pp..(c + 1) * pp].iter_mut().zip(back).for_each(|(p, v)| *p += v);
                     }
@@ -365,7 +371,7 @@ fn predict_logits(
                     for k in 0..patch[2] {
                         let g = gauss[src + k];
                         weight[dst + k] += g;
-                        for c in 0..2 {
+                        for c in 0..channels {
                             acc[c * np + dst + k] += pred[c * pp + src + k] * inv * g;
                         }
                     }
@@ -376,8 +382,8 @@ fn predict_logits(
 
     // Normalise and crop the padding back off.
     let n: usize = dims.iter().product();
-    let mut logits = vec![0.0f32; 2 * n];
-    for c in 0..2 {
+    let mut logits = vec![0.0f32; channels * n];
+    for c in 0..channels {
         for z in 0..dims[0] {
             for y in 0..dims[1] {
                 let src = ((z + lo[0]) * pdims[1] + y + lo[1]) * pdims[2] + lo[2];
@@ -392,7 +398,7 @@ fn predict_logits(
 }
 
 /// Visit the rows of a patch at `origin` inside a volume: `f(volume_row_start, patch_row_start)`.
-fn for_each_patch_row(vdims: [usize; 3], patch: [usize; 3], origin: [usize; 3], mut f: impl FnMut(usize, usize)) {
+pub(super) fn for_each_patch_row(vdims: [usize; 3], patch: [usize; 3], origin: [usize; 3], mut f: impl FnMut(usize, usize)) {
     for z in 0..patch[0] {
         for y in 0..patch[1] {
             let v = ((origin[0] + z) * vdims[1] + origin[1] + y) * vdims[2] + origin[2];
@@ -402,7 +408,7 @@ fn for_each_patch_row(vdims: [usize; 3], patch: [usize; 3], origin: [usize; 3], 
 }
 
 /// Mirror a C-order patch along the flagged axes (an involution).
-fn flip3(src: &[f32], dims: [usize; 3], flip: [bool; 3]) -> Vec<f32> {
+pub(super) fn flip3(src: &[f32], dims: [usize; 3], flip: [bool; 3]) -> Vec<f32> {
     if flip == [false; 3] {
         return src.to_vec();
     }
