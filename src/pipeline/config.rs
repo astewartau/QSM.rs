@@ -198,6 +198,10 @@ pub enum MaskOp {
     },
     Bet {
         fractional_intensity: f64,
+        /// Factor applied to the voxel sizes before BET runs — see
+        /// [`BetParams::voxel_scale`](crate::bet::BetParams::voxel_scale). 1.0 is the
+        /// acquisition's own geometry; 10.0 is the usual preclinical setting for mouse data.
+        voxel_scale: f64,
     },
     Erode {
         iterations: usize,

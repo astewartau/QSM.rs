@@ -141,12 +141,13 @@ pub fn apply_mask_ops(
                     .map(|&v| if v > threshold { 1u8 } else { 0u8 })
                     .collect();
             }
-            MaskOp::Bet { fractional_intensity } => {
+            MaskOp::Bet { fractional_intensity, voxel_scale } => {
                 let mag_data = magnitude.ok_or_else(|| {
                     PipelineError::InvalidInput("BET requires magnitude data".into())
                 })?;
                 let bet_params = crate::bet::BetParams {
                     fractional_intensity: *fractional_intensity,
+                    voxel_scale: *voxel_scale,
                     ..crate::bet::BetParams::default()
                 };
                 let grid = crate::Grid::new(nx, ny, nz, vsx, vsy, vsz);
