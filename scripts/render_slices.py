@@ -40,6 +40,8 @@ NAMES = {
     "bgremove_ismv": "iSMV",
     "bgremove_lbv": "LBV",
     "inversion_tkd": "TKD",
+    "oblique_sagittal_truth": "Sagittal 1x1x4 mm oblique - ground truth",
+    "oblique_sagittal_chi": "Sagittal 1x1x4 mm oblique - reconstructed (TKD)",
     "inversion_tsvd": "TSVD",
     "inversion_tikhonov": "Tikhonov",
     "inversion_tv": "TV-ADMM",
