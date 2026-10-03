@@ -31,6 +31,7 @@ jobs:
       chisep_matrix: ${{ steps.detect.outputs.chisep_matrix }}
       run_dl: ${{ steps.detect.outputs.run_dl }}
       dl_matrix: ${{ steps.detect.outputs.dl_matrix }}
+      run_geometry: ${{ steps.detect.outputs.run_geometry }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -74,6 +75,7 @@ jobs:
             echo "chisep_matrix=$all_chisep" >> "$GITHUB_OUTPUT"
             echo "run_dl=true" >> "$GITHUB_OUTPUT"
             echo "dl_matrix=$all_dl" >> "$GITHUB_OUTPUT"
+            echo "run_geometry=true" >> "$GITHUB_OUTPUT"
           }
 
           # Manual trigger: run everything
@@ -158,6 +160,7 @@ jobs:
           bgremove=""
           inversion=""
           run_bet=false
+          run_geometry=false
           combined=""
           pipeline=""
           chisep=""
@@ -218,6 +221,7 @@ jobs:
                 echo "chisep_matrix=$all_chisep" >> "$GITHUB_OUTPUT"
                 echo "run_dl=true" >> "$GITHUB_OUTPUT"
                 echo "dl_matrix=$all_dl" >> "$GITHUB_OUTPUT"
+                echo "run_geometry=true" >> "$GITHUB_OUTPUT"
                 echo "run_unit_tests=$run_unit_tests" >> "$GITHUB_OUTPUT"
                 exit 0 ;;
               # Changes the data every test sees, so there is nothing to narrow it to.
@@ -240,7 +244,10 @@ jobs:
               src/inversion/admm.rs)
                 inversion="$inversion test_inversion_tkd test_inversion_tsvd test_inversion_tikhonov test_inversion_tv test_inversion_rts test_inversion_ilsqr test_inversion_medi test_inversion_nltv test_inversion_ndi test_inversion_fansi test_inversion_fansi_tgv test_inversion_l1qsm test_inversion_whqsm test_inversion_hdqsm test_inversion_lsqr test_inversion_heidi test_multiorient_cosmos test_multiorient_sti test_multiorient_coverage test_multiorient_noise"
                 combined="$combined test_combined_tfi" ;;
-              src/inversion/tkd.rs)       inversion="$inversion test_inversion_tkd test_inversion_tsvd" ;;
+              # oblique_sagittal inverts with TKD, so a change there moves its numbers too.
+              src/inversion/tkd.rs)
+                inversion="$inversion test_inversion_tkd test_inversion_tsvd"
+                run_geometry=true ;;
               src/inversion/tikhonov.rs)  inversion="$inversion test_inversion_tikhonov"; pipeline="$pipeline test_pipeline_qsmart_tikhonov" ;;
               src/inversion/tv.rs)        inversion="$inversion test_inversion_tv" ;;
               src/inversion/rts.rs)       inversion="$inversion test_inversion_rts" ;;
@@ -272,8 +279,11 @@ jobs:
               # χ-separation (all methods share src/separation; both test binaries)
               src/separation/chisepnet.rs) chisep="$chisep chisep_xsepnet chisep_orientation" ;;
               src/utils/r2primenet.rs) chisep="$chisep chisep_r2primenet chisep_orientation"; dl="$dl test_dl_r2primenet" ;;
-              # The axis relabelling chisep_orientation is built on.
-              src/geometry.rs) chisep="$chisep chisep_orientation" ;;
+              # The axis relabelling chisep_orientation is built on; oblique_sagittal covers the
+              # cardinal-resample pathway itself, on the anisotropic non-axial affine that is the
+              # only data exercising how axial_grid_for assigns its spacings.
+              src/geometry.rs) chisep="$chisep chisep_orientation"; run_geometry=true ;;
+              tests/oblique_sagittal.rs) run_geometry=true ;;
               src/utils/sliding.rs) chisep="$chisep chisep_xsepnet chisep_r2primenet" ;;
               src/separation/*) chisep="$chisep chisep_qsmci chisep_relaxometry_qsmci" ;;
               tests/chisep_qsmci.rs) chisep="$chisep chisep_qsmci" ;;
@@ -417,6 +427,7 @@ jobs:
           echo "chisep_matrix=$chisep_json" >> "$GITHUB_OUTPUT"
           echo "run_dl=$(has_items "$dl_json")" >> "$GITHUB_OUTPUT"
           echo "dl_matrix=$dl_json" >> "$GITHUB_OUTPUT"
+          echo "run_geometry=$run_geometry" >> "$GITHUB_OUTPUT"
 
           echo "Selected tests:"
           echo "  bgremove:  $bgremove_json"
@@ -426,6 +437,7 @@ jobs:
           echo "  pipeline:  $pipeline_json"
           echo "  chisep:    $chisep_json"
           echo "  dl:        $dl_json"
+          echo "  geometry:  $run_geometry"
 
   # Unit tests + code coverage (reusable workflow)
   unit-tests:
@@ -1013,8 +1025,51 @@ jobs:
   # Gate check for branch protection — fails if any test job fails,
   # but allows skipped jobs (no relevant changes).
   # Add "tests-passed" as a required status check in branch protection rules.
+  # Geometry: the cardinal-resample pathway on a synthetic sagittal anisotropic oblique
+  # acquisition, which no phantom in the fixed matrices has. Its own binary rather than a row in
+  # the inversion matrix because it is about the grid, not the inversion — TKD is only the vehicle.
+  geometry-tests:
+    needs: [setup, detect-changes]
+    if: needs.detect-changes.outputs.run_geometry == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download test data
+        uses: actions/download-artifact@v4
+        with:
+          name: test-data
+          path: bids
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Run oblique_sagittal
+        timeout-minutes: 30
+        run: |
+          cargo test --release --features parallel --test oblique_sagittal -- --ignored --nocapture 2>&1 | tee test_output.txt
+
+      - name: Upload slices
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: slices-oblique_sagittal
+          path: slices/
+          retention-days: 1
+
   tests-passed:
-    needs: [unit-tests, bgremove-tests, inversion-tests, bet-test, combined-tests, pipeline-tests, chisep-tests, dl-tests]
+    needs: [unit-tests, bgremove-tests, inversion-tests, bet-test, combined-tests, pipeline-tests, chisep-tests, dl-tests, geometry-tests]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -1030,7 +1085,8 @@ jobs:
             "${{ needs.bet-test.result }}" \
             "${{ needs.combined-tests.result }}" \
             "${{ needs.pipeline-tests.result }}" \
-            "${{ needs.chisep-tests.result }}"; do
+            "${{ needs.chisep-tests.result }}" \
+            "${{ needs.geometry-tests.result }}"; do
             if [ "$result" = "failure" ] || [ "$result" = "cancelled" ]; then
               echo "Test job failed or was cancelled: $result"
               exit 1
@@ -1040,7 +1096,7 @@ jobs:
 
   # Collect metrics from all parallel jobs and produce a single summary
   summary:
-    needs: [detect-changes, unit-tests, bgremove-tests, inversion-tests, bet-test, combined-tests, pipeline-tests, chisep-tests, dl-tests]
+    needs: [detect-changes, unit-tests, bgremove-tests, inversion-tests, bet-test, combined-tests, pipeline-tests, chisep-tests, dl-tests, geometry-tests]
     # Post the results comment only when something actually ran. On changes that
     # select no tests (e.g. docs-only), skip it instead of posting an empty
     # "Tests passed: N/A" comment. `always()` keeps it running even if a selected
@@ -1053,7 +1109,8 @@ jobs:
       needs.detect-changes.outputs.run_bet == 'true' ||
       needs.detect-changes.outputs.run_combined == 'true' ||
       needs.detect-changes.outputs.run_pipeline == 'true' ||
-      needs.detect-changes.outputs.run_chisep == 'true')
+      needs.detect-changes.outputs.run_chisep == 'true' ||
+      needs.detect-changes.outputs.run_geometry == 'true')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -1508,6 +1565,20 @@ jobs:
               # rather than as a clean null. The test asserts the bound; visualising MSA only
               # earns its space once there is anisotropic test data to show.
               emit_figures stage_multiorient
+            fi
+
+            if [ -f "figures/oblique_sagittal_chi.png" ]; then
+              echo "### Geometry — Sagittal Anisotropic Oblique"
+              echo "*A 1x1x4 mm sagittal stack tilted 18 deg about S-I and 12 deg about A-P,"
+              echo "synthesised from the phantom, reconstructed through the cardinal-resample"
+              echo "pathway and mapped back to its own voxel space. No fixed-matrix phantom has"
+              echo "this geometry, and it is the only shape of data that exercises how"
+              echo "axial_grid_for assigns its spacings. Pass/fail only; see the job log for the"
+              echo "correlation and S-I detail numbers. The panel labels are the renderer's"
+              echo "generic voxel-axis names; because this stack is stored sagittally, its"
+              echo "'Axial' panel is the sagittal anatomical plane.*"
+              echo ""
+              emit_figures oblique_sagittal_truth oblique_sagittal_chi
             fi
 
             if TABLE=$(emit_chi_table "test_dl_" qsmgan lpcnn ir2qsm modl_qsm nextqsm); then
