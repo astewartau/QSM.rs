@@ -13,6 +13,37 @@
 //! network's ppm-equivalent input channel. We return χ− as a signed (≤ 0) value to
 //! match the crate's separation convention `(chi_pos ≥ 0, chi_neg ≤ 0, chi_total)`.
 //!
+//! **Array orientation.** The authors ask for two things the array alone cannot express: "if you
+//! acquired data with different B0 direction from `[0, 0, 1]`, the B0 direction correction to
+//! `[0, 0, 1]` is required", and "input data with the same orientation with trained data is
+//! recommended" (SNU-LIST/chi_sepnet). Their training volumes are ordered (A-P, L-R, I-S) — an
+//! axial stack whose slice axis runs along B0. Nothing in the reference code enforces either:
+//! neither the toolbox's `Chisep_script.m`, nor the authors' `test.py`, nor the QSM-CI `recon.py`
+//! ever permutes or flips an axis, and neither does this function — it is handed a [`Grid`] (dims
+//! and voxel sizes), not an affine, so the caller owns the orientation.
+//!
+//! That turns out to cost very little. Measured on the QSM-CI χ-separation phantom (correlation
+//! against the ground-truth source maps, one 192³ pass, the volume relabelled and the result
+//! relabelled back):
+//!
+//! | array orientation | χ+ r | χ− r |
+//! |---|---|---|
+//! | RAS — what QSMxT feeds today | 0.9480 | 0.8072 |
+//! | all 8 in-plane relabellings (slice axis still along B0) | 0.9477–0.9483 | 0.8053–0.8078 |
+//! | slice axis moved to A-P (coronal-like) | 0.9471 | 0.7914 |
+//! | slice axis moved to L-R (sagittal-like) | 0.9485 | 0.7855 |
+//!
+//! The in-plane order is immaterial — the training patches were augmented with large in-plane
+//! rotations (`xsepnet_train_patch_norm_factor_inplane_largedegree_romeo_arlo`) — and even putting
+//! the slice axis across B0 costs only about 0.02 of χ− correlation and nothing of χ+. Two of the
+//! three input channels determine χ± algebraically and carry no orientation at all
+//! (χ+ + χ− = χ_total, χ+ − χ− ≈ R2′/Dr), which is most of why. The outputs are not *identical*
+//! across orientations — two in-plane orientations of the same in-vivo volume differ by ~12%
+//! NRMSE, against a ~3% floor from a pure 16-voxel translation — but neither is nearer the truth,
+//! so there is no orientation to prefer. Running on an oblique acquisition is a different
+//! question, and still wants [`resample_to_axial`](crate::geometry::resample_to_axial): a
+//! relabelling can only fix axes that are already cardinal.
+//!
 //! **Patch size.** The published graph declares that patch as a fixed input shape, but it is
 //! fully convolutional (Conv/Relu/MaxPool/ConvTranspose/Concat only), so the hosted
 //! `chi-sepnet.onnx` has its spatial axes re-declared as dynamic — bit-identical at the

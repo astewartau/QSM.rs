@@ -26,6 +26,20 @@
 //! [`r2primenet_from_magnitude`] uses [`r2star_arlo`](super::r2star::r2star_arlo). Supplying
 //! an R2* map fitted some other way is allowed but moves the input off-distribution.
 //!
+//! **Array orientation.** R2PRIMEnet shares χ-sepnet's training set and so its orientation
+//! convention: volumes ordered (A-P, L-R, I-S), slice axis along B0. As with
+//! [`chisepnet`](crate::separation::chisepnet), nothing enforces it — this function sees a
+//! [`Grid`](crate::grid::Grid), not an affine — and it matters even less here, because the
+//! mapping it learned is close to pointwise in R2*: on a 1 mm in-vivo volume every cardinal
+//! relabelling tried (in-plane quarter turn, L-R mirror, slice axis moved to A-P or to L-R)
+//! reproduced the untouched run at r ≥ 0.994 / NRMSE ≤ 6.1%, and agreement with the measured
+//! R2′ = R2* − R2 moved only from 0.892 to 0.888. Note that
+//! R2PRIMEnet is **not** covered by the pipeline's axial-only machinery
+//! ([`OrientationSupport`](crate::pipeline::config::OrientationSupport) hangs off the stage
+//! algorithm enums, and R2′ generation is an input-preparation step with no enum of its own), so
+//! a caller that resamples an oblique acquisition on account of the separation method it chose
+//! may still be running *this* network on the acquired grid.
+//!
 //! **Patch size.** The published graph declares a fixed 192×192×128 input, but it is fully
 //! convolutional (Conv/Relu/MaxPool/ConvTranspose/Concat only), so the hosted `r2primenet.onnx`
 //! has its spatial axes re-declared as dynamic — bit-identical at the authors' patch, and able

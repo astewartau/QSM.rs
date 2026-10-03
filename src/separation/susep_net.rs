@@ -11,6 +11,13 @@
 //! outputs non-negative magnitudes; we return χ− as a signed (≤ 0) value to match
 //! the crate's separation convention `(chi_pos ≥ 0, chi_neg ≤ 0, chi_total)`.
 //!
+//! **Array orientation.** SUSEP-Net is a different group's network from the χ-sepnet family and
+//! its training orientation has not been established here; the authors' `recon.py` does not
+//! reorient, and neither does this function (it is handed a [`Grid`], not an affine). Treat it as
+//! assuming the usual axial convention — slice axis along B0 — and see
+//! [`chisepnet`](crate::separation::chisepnet) for how little that turned out to be worth on the
+//! χ-sepnet side; no equivalent measurement has been made for this network.
+//!
 //! **Whole volume vs patches.** The authors run the whole volume in one forward pass, and
 //! [`SusepNetParams::patch`] defaults to that (`None`). Activations then scale with the volume,
 //! which a 32-bit host cannot afford — at 1 mm whole-brain the first conv block alone runs to

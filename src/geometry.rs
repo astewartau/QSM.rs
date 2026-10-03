@@ -19,6 +19,190 @@
 //! phase afterwards, which is well defined across wraps. Use [`resample_to_axial`] only for
 //! quantities that are already continuous (magnitude, an unwrapped field map, χ).
 
+// ------------------------------------------------------------------ axis orientation
+
+/// The anatomical direction an array axis runs *toward*.
+///
+/// The three letters of a NIfTI-style orientation code, e.g. `RAS` = axis 0 runs toward the
+/// patient's right, axis 1 anterior, axis 2 superior.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(clippy::upper_case_acronyms)]
+pub enum AxisCode {
+    /// Toward the patient's right.
+    R,
+    /// Toward the patient's left.
+    L,
+    /// Anterior.
+    A,
+    /// Posterior.
+    P,
+    /// Superior.
+    S,
+    /// Inferior.
+    I,
+}
+
+impl AxisCode {
+    /// Which world axis (0 = L-R, 1 = P-A, 2 = I-S) this code lies on.
+    const fn world_axis(self) -> usize {
+        match self {
+            AxisCode::R | AxisCode::L => 0,
+            AxisCode::A | AxisCode::P => 1,
+            AxisCode::S | AxisCode::I => 2,
+        }
+    }
+
+    /// Whether this code points along the *negative* direction of its world axis, i.e. away
+    /// from R, A or S.
+    const fn is_negative(self) -> bool {
+        matches!(self, AxisCode::L | AxisCode::P | AxisCode::I)
+    }
+}
+
+/// Which volume axis each of R, A, S runs along — lab2im's `get_ras_axes`.
+///
+/// Returns `[axis_of_R, axis_of_A, axis_of_S]`. A degenerate affine that maps two world axes
+/// onto the same volume axis is repaired by reassigning the last duplicate to whichever volume
+/// axis is otherwise unused, so the result is always a permutation.
+pub fn ras_axes(affine: &[f64; 16]) -> [usize; 3] {
+    let Some(inv) = invert_3x3([
+        [affine[0], affine[1], affine[2]],
+        [affine[4], affine[5], affine[6]],
+        [affine[8], affine[9], affine[10]],
+    ]) else {
+        return [0, 1, 2];
+    };
+    // `voxel = inv · world`, so *column* j of the inverse is world axis j expressed in volume
+    // axes; the row with the largest magnitude is the volume axis it runs along. (This is
+    // lab2im's `np.argmax(|inv|, axis=0)` — down the columns. Taking the argmax along the rows
+    // instead yields the inverse permutation, which agrees only for a diagonal affine.)
+    let mut axes = [0usize; 3];
+    for (j, a) in axes.iter_mut().enumerate() {
+        *a = (0..3).max_by(|&x, &y| inv[x][j].abs().total_cmp(&inv[y][j].abs())).unwrap();
+    }
+    // A near-degenerate affine can hand the same volume axis to two world axes; make it a
+    // permutation again by reassigning the last duplicate to whichever axis is missing.
+    for i in 0..3 {
+        if !axes.contains(&i) {
+            let mut counts = [0usize; 3];
+            for &a in &axes {
+                counts[a] += 1;
+            }
+            let dup = (0..3).max_by_key(|&v| counts[v]).unwrap();
+            if let Some(pos) = axes.iter().rposition(|&a| a == dup) {
+                axes[pos] = i;
+            }
+        }
+    }
+    axes
+}
+
+fn invert_3x3(m: [[f64; 3]; 3]) -> Option<[[f64; 3]; 3]> {
+    let det = m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1])
+        - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
+        + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]);
+    if det.abs() < 1e-12 {
+        return None;
+    }
+    let mut inv = [[0.0f64; 3]; 3];
+    for i in 0..3 {
+        for j in 0..3 {
+            let (a, b) = ((i + 1) % 3, (i + 2) % 3);
+            let (c, d) = ((j + 1) % 3, (j + 2) % 3);
+            // Transposed cofactor = adjugate.
+            inv[j][i] = (m[a][c] * m[b][d] - m[a][d] * m[b][c]) / det;
+        }
+    }
+    Some(inv)
+}
+
+/// The axis permutation and per-axis flips that take a volume into `target` orientation.
+///
+/// Returns `(perm, flip)` where target axis `i` is the source volume's axis `perm[i]`, reversed
+/// when `flip[i]`. Feed the pair to [`reorient`]; [`invert_alignment`] gives the pair that
+/// undoes it.
+///
+/// This resolves only the 48 cardinal flips and permutations, which is all a learned model
+/// needs: it says nothing about obliquity. An oblique acquisition still has to be resampled
+/// ([`resample_to_axial`]) — this picks the nearest cardinal relabelling of its axes.
+pub fn alignment_to(affine: &[f64; 16], target: [AxisCode; 3]) -> ([usize; 3], [bool; 3]) {
+    let ras = ras_axes(affine);
+    let m = [
+        [affine[0], affine[1], affine[2]],
+        [affine[4], affine[5], affine[6]],
+        [affine[8], affine[9], affine[10]],
+    ];
+    let mut perm = [0usize; 3];
+    let mut flip = [false; 3];
+    for i in 0..3 {
+        let w = target[i].world_axis();
+        perm[i] = ras[w];
+        // Row w of the direction matrix is world axis w in terms of the volume axes; its sign
+        // along the chosen volume axis says whether that axis runs with or against it.
+        flip[i] = (m[w][ras[w]] < 0.0) != target[i].is_negative();
+    }
+    (perm, flip)
+}
+
+/// The `(perm, flip)` that undoes [`alignment_to`] — pass it to [`reorient`] to get back.
+pub fn invert_alignment(perm: [usize; 3], flip: [bool; 3]) -> ([usize; 3], [bool; 3]) {
+    let mut inv_perm = [0usize; 3];
+    for i in 0..3 {
+        inv_perm[perm[i]] = i;
+    }
+    let mut inv_flip = [false; 3];
+    for j in 0..3 {
+        inv_flip[j] = flip[inv_perm[j]];
+    }
+    (inv_perm, inv_flip)
+}
+
+/// Whether a `(perm, flip)` pair leaves a volume untouched.
+pub fn alignment_is_identity(perm: [usize; 3], flip: [bool; 3]) -> bool {
+    perm == [0, 1, 2] && flip == [false; 3]
+}
+
+/// Permute and flip a column-major volume. Returns the volume and its new dimensions.
+///
+/// Output axis `i` is the input's axis `perm[i]`, reversed when `flip[i]` — the convention
+/// [`alignment_to`] returns. Pure gather, so it is exact: no interpolation, no resampling.
+pub fn reorient<T: Copy>(
+    data: &[T],
+    dims: (usize, usize, usize),
+    perm: [usize; 3],
+    flip: [bool; 3],
+) -> (Vec<T>, (usize, usize, usize)) {
+    let src = [dims.0, dims.1, dims.2];
+    assert_eq!(data.len(), src[0] * src[1] * src[2], "data length must match dims");
+    let out_dims = [src[perm[0]], src[perm[1]], src[perm[2]]];
+    let strides = [1isize, src[0] as isize, (src[0] * src[1]) as isize];
+
+    // Source offset contributed by each output axis, and its step along that axis.
+    let mut base = 0isize;
+    let mut step = [0isize; 3];
+    for i in 0..3 {
+        let s = strides[perm[i]];
+        if flip[i] {
+            base += (out_dims[i] as isize - 1) * s;
+            step[i] = -s;
+        } else {
+            step[i] = s;
+        }
+    }
+
+    let mut out = Vec::with_capacity(out_dims[0] * out_dims[1] * out_dims[2]);
+    for o2 in 0..out_dims[2] {
+        let p2 = base + step[2] * o2 as isize;
+        for o1 in 0..out_dims[1] {
+            let p1 = p2 + step[1] * o1 as isize;
+            for o0 in 0..out_dims[0] {
+                out.push(data[(p1 + step[0] * o0 as isize) as usize]);
+            }
+        }
+    }
+    (out, (out_dims[0], out_dims[1], out_dims[2]))
+}
+
 /// Voxel sizes (mm) from a row-major 4×4 affine: the norms of its three columns.
 pub fn voxel_sizes_from_affine(affine: &[f64; 16]) -> (f64, f64, f64) {
     let col = |j: usize| {
@@ -605,6 +789,105 @@ impl SplitMix64 {
 
 #[cfg(test)]
 mod tests {
+
+    use super::{alignment_is_identity, alignment_to, invert_alignment, reorient, AxisCode::*};
+
+    /// A cardinal affine whose axes carry the given codes, 1 mm isotropic.
+    fn affine_for(codes: [super::AxisCode; 3]) -> [f64; 16] {
+        let mut a = [0.0f64; 16];
+        a[15] = 1.0;
+        for (axis, c) in codes.iter().enumerate() {
+            let row = c.world_axis();
+            a[4 * row + axis] = if c.is_negative() { -1.0 } else { 1.0 };
+        }
+        a
+    }
+
+    #[test]
+    fn alignment_to_same_orientation_is_identity() {
+        for codes in [[R, A, S], [L, P, I], [P, R, S], [A, S, L]] {
+            let (perm, flip) = alignment_to(&affine_for(codes), codes);
+            assert!(alignment_is_identity(perm, flip), "{codes:?} -> {perm:?} {flip:?}");
+        }
+    }
+
+    /// The χ-sepnet family wants (P, R, S); a plain RAS volume is a 90° in-plane rotation away.
+    #[test]
+    fn ras_to_prs_is_an_in_plane_quarter_turn() {
+        let (perm, flip) = alignment_to(&affine_for([R, A, S]), [P, R, S]);
+        assert_eq!(perm, [1, 0, 2]);
+        assert_eq!(flip, [true, false, false]);
+    }
+
+    #[test]
+    fn alignment_to_handles_a_flipped_axis() {
+        // LAS (a common radiological storage order) differs from RAS only in axis 0.
+        let (perm, flip) = alignment_to(&affine_for([L, A, S]), [R, A, S]);
+        assert_eq!(perm, [0, 1, 2]);
+        assert_eq!(flip, [true, false, false]);
+    }
+
+    #[test]
+    fn reorient_moves_the_voxel_it_says_it_does() {
+        let dims = (2, 3, 4);
+        let data: Vec<f64> = (0..24).map(|v| v as f64).collect();
+        let (out, out_dims) = reorient(&data, dims, [1, 0, 2], [true, false, false]);
+        assert_eq!(out_dims, (3, 2, 4));
+        // Output (o0,o1,o2) is input (o1, dims1-1-o0, o2).
+        for o2 in 0..4 {
+            for o1 in 0..2 {
+                for o0 in 0..3 {
+                    let got = out[o0 + 3 * (o1 + 2 * o2)];
+                    let want = data[o1 + 2 * ((3 - 1 - o0) + 3 * o2)];
+                    assert_eq!(got, want, "at {o0},{o1},{o2}");
+                }
+            }
+        }
+    }
+
+    /// Every one of the 48 cardinal relabellings must round-trip exactly.
+    #[test]
+    fn reorient_then_invert_restores_the_volume() {
+        let dims = (3, 4, 5);
+        let data: Vec<f64> = (0..60).map(|v| v as f64).collect();
+        let axes = [[R, L], [A, P], [S, I]];
+        for p in [[0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]] {
+            for bits in 0..8u8 {
+                let target =
+                    [axes[p[0]][(bits & 1) as usize], axes[p[1]][((bits >> 1) & 1) as usize],
+                     axes[p[2]][((bits >> 2) & 1) as usize]];
+                let (perm, flip) = alignment_to(&affine_for([R, A, S]), target);
+                let (moved, moved_dims) = reorient(&data, dims, perm, flip);
+                let (back_perm, back_flip) = invert_alignment(perm, flip);
+                let (back, back_dims) = reorient(&moved, moved_dims, back_perm, back_flip);
+                assert_eq!(back_dims, dims, "{target:?}");
+                assert_eq!(back, data, "{target:?}");
+            }
+        }
+    }
+
+    /// Reorienting into a target and asking for the alignment of the result must be a no-op:
+    /// the moved volume really is in the target orientation.
+    #[test]
+    fn reorienting_actually_reaches_the_target() {
+        for src in [[R, A, S], [L, A, S], [P, R, S], [I, P, L]] {
+            for target in [[R, A, S], [P, R, S], [A, L, I]] {
+                let a = affine_for(src);
+                let (perm, flip) = alignment_to(&a, target);
+                // Apply the same relabelling to the affine's direction matrix and re-ask.
+                let mut moved = [0.0f64; 16];
+                moved[15] = 1.0;
+                for i in 0..3 {
+                    let sign = if flip[i] { -1.0 } else { 1.0 };
+                    for row in 0..3 {
+                        moved[4 * row + i] = sign * a[4 * row + perm[i]];
+                    }
+                }
+                let (p2, f2) = alignment_to(&moved, target);
+                assert!(alignment_is_identity(p2, f2), "{src:?} -> {target:?}: {p2:?} {f2:?}");
+            }
+        }
+    }
     use super::*;
     use std::f64::consts::PI;
 
