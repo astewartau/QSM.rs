@@ -22,9 +22,10 @@
 //! ever permutes or flips an axis, and neither does this function — it is handed a [`Grid`] (dims
 //! and voxel sizes), not an affine, so the caller owns the orientation.
 //!
-//! That turns out to cost very little. Measured on the QSM-CI χ-separation phantom (correlation
+//! That turns out to cost very little. Measured on the QSM Reconstruction Challenge 2.0 head
+//! phantom (QSM-CI's χ-separation dataset, which builds χ+/χ− on that head model): correlation
 //! against the ground-truth source maps, one 192³ pass, the volume relabelled and the result
-//! relabelled back):
+//! relabelled back.
 //!
 //! | array orientation | χ+ r | χ− r |
 //! |---|---|---|

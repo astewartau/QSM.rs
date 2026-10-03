@@ -106,7 +106,7 @@ fn chisepnet_is_insensitive_to_array_orientation() {
         let (rn, en) = agree(&neg, &ref_neg, &ph.mask);
         println!("{label}\n    χ+ r={rp:.4} NRMSE={ep:.2}%  |  χ− r={rn:.4} NRMSE={en:.2}%");
 
-        // Measured band. On this phantom the worst case (slice axis moved to L-R) lands at
+        // Measured band. On the QSM Reconstruction Challenge 2.0 head phantom the worst case (slice axis moved to L-R) lands at
         // χ+ r=0.989 / 12.1% and χ− r=0.965 / 15.3%; an in-vivo volume, whose field channel
         // carries real noise rather than a forward dipole of the χ map, is looser at ~0.977 /
         // 13% and ~0.961 / 15%. The bounds below sit outside both with room to spare — a pure
