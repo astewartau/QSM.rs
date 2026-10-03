@@ -486,7 +486,15 @@ pub fn axial_grid_for(
         [affine[8], affine[9], affine[10]],
     ];
     let t = [affine[3], affine[7], affine[11]];
-    let (vsx, vsy, vsz) = voxel_sizes_from_affine(affine);
+    // Voxel sizes come back per *voxel* axis, but this grid is laid out on the world axes, so
+    // each spacing has to move to the world axis its voxel axis actually samples. They only
+    // coincide when the acquisition is already stored R-A-S; on a sagittal or coronal stack they
+    // are a permutation apart, and pairing them off by position would put the slice pitch on the
+    // wrong axis.
+    let vs = voxel_sizes_from_affine(affine);
+    let vs = [vs.0, vs.1, vs.2];
+    let ras = ras_axes(affine);
+    let (vsx, vsy, vsz) = (vs[ras[0]], vs[ras[1]], vs[ras[2]]);
 
     // World bounding box of the source volume's eight corners.
     let mut world_min = [f64::INFINITY; 3];
@@ -801,6 +809,32 @@ mod tests {
             a[4 * row + axis] = if c.is_negative() { -1.0 } else { 1.0 };
         }
         a
+    }
+
+    /// A sagittal 0.8 x 0.8 x 3 mm acquisition: voxel axis 0 runs A-P, axis 1 S-I, axis 2 L-R.
+    /// The axial grid must carry each spacing on the world axis that voxel axis actually samples,
+    /// so world L-R gets the 3 mm slice pitch and S-I keeps 0.8 mm. Pairing them off by position
+    /// instead hands L-R 0.8 mm (inventing resolution across the slice direction) and S-I 3 mm
+    /// (throwing away most of what was acquired), and the wrong voxel sizes then propagate into
+    /// the dipole kernel.
+    #[test]
+    fn axial_grid_pairs_each_spacing_with_the_axis_it_samples() {
+        let affine = [
+            0.0, 0.0, 3.0, 0.0, // world x (R) <- voxel axis 2, 3 mm
+            0.8, 0.0, 0.0, 0.0, // world y (A) <- voxel axis 0, 0.8 mm
+            0.0, 0.8, 0.0, 0.0, // world z (S) <- voxel axis 1, 0.8 mm
+            0.0, 0.0, 0.0, 1.0,
+        ];
+        let g = super::axial_grid_for(64, 64, 20, &affine);
+        assert_eq!(g.voxel_size, (3.0, 0.8, 0.8), "spacings followed position, not geometry");
+        // ...and the dims follow from those spacings. L-R is the telling one: 20 slices at the
+        // 3 mm pitch, where pairing by position would have asked for 57 mm at 0.8 mm = 72.
+        // The in-plane axes allow a one-voxel overshoot, which is the `ceil` in `dims` meeting
+        // 50.4 / 0.8 landing just above 63 in binary floating point. Pre-existing and harmless
+        // (one zero-filled row); tightening it would move every oblique grid by a voxel.
+        assert_eq!(g.dims.0, 20, "L-R spans 20 slices at 3 mm");
+        assert!((64..=65).contains(&g.dims.1), "A-P was {}", g.dims.1);
+        assert!((64..=65).contains(&g.dims.2), "S-I was {}", g.dims.2);
     }
 
     #[test]
