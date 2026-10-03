@@ -13,21 +13,24 @@
 //! network's ppm-equivalent input channel. We return χ− as a signed (≤ 0) value to
 //! match the crate's separation convention `(chi_pos ≥ 0, chi_neg ≤ 0, chi_total)`.
 //!
-//! **Array orientation.** The authors ask for two things the array alone cannot express: "if you
-//! acquired data with different B0 direction from `[0, 0, 1]`, the B0 direction correction to
-//! `[0, 0, 1]` is required", and "input data with the same orientation with trained data is
-//! recommended" (SNU-LIST/chi_sepnet). Their training volumes are ordered (A-P, L-R, I-S) — an
-//! axial stack whose slice axis runs along B0. The authors never state that in one place: the
-//! slice direction is from their data-order figure (the `chi_sepnet` README's "Slice order",
-//! inferior to superior; it labels the in-plane axes only `x`/`y`, so it settles nothing else),
-//! and the in-plane assignment from the brain mask shipped in `Data/test_file.mat` — a dummy file,
-//! but the mask is real: axis 1 is the mirror-symmetry axis in all six COSMOS orientations (Dice
-//! 0.87-0.97 against 0.78-0.88) and axis 0 is the longest — corroborated by the authors' own axis
-//! naming in `train_data_patch.py`. The left/right *sign* stays undetermined, and the numbers
-//! below say it does not matter. Nothing in the reference code enforces either:
-//! neither the toolbox's `Chisep_script.m`, nor the authors' `test.py`, nor the QSM-CI `recon.py`
-//! ever permutes or flips an axis, and neither does this function — it is handed a [`Grid`] (dims
-//! and voxel sizes), not an affine, so the caller owns the orientation.
+//! **Array orientation.** The network takes no B0 direction, so whatever orientation the caller
+//! hands it is the one it reconstructs in. Kim et al. (Hum Brain Mapp 2025,
+//! doi:10.1002/hbm.70136) say what that should be, and the two halves are not equally strict.
+//! The training scans were acquired so that "the imaging slab was axial so that the z-axis was
+//! oriented along the B0 field", and the patches were then augmented by rotating "only … within
+//! the plane perpendicular to B0 (degree: −90° to +90°) to avoid complication from B0 orientation
+//! dependent R2* in white matter". So the slice axis carries a real requirement, while the
+//! in-plane order is deliberately covered by augmentation across the full quarter turn.
+//!
+//! The complete order is (A-P, L-R, I-S). The in-plane half of that is not in the paper: it comes
+//! from the brain mask shipped in `Data/test_file.mat` — a dummy file, but the mask is real, and
+//! axis 1 is the mirror-symmetry axis in all six COSMOS orientations (Dice 0.87-0.97 against
+//! 0.78-0.88) while axis 0 is the longest — corroborated by the authors' own axis naming in
+//! `train_data_patch.py`. The left/right *sign* stays undetermined, and the numbers below say it
+//! does not matter. Nothing in the reference code enforces any of this: neither the toolbox's
+//! `Chisep_script.m`, nor the authors' `test.py`, nor the QSM-CI `recon.py` ever permutes or flips
+//! an axis, and neither does this function — it is handed a [`Grid`] (dims and voxel sizes), not
+//! an affine, so the caller owns the orientation.
 //!
 //! That turns out to cost very little. Measured on the QSM Reconstruction Challenge 2.0 head
 //! phantom (QSM-CI's χ-separation dataset, which builds χ+/χ− on that head model): correlation
@@ -41,9 +44,9 @@
 //! | slice axis moved to A-P (coronal-like) | 0.9471 | 0.7914 |
 //! | slice axis moved to L-R (sagittal-like) | 0.9485 | 0.7855 |
 //!
-//! The in-plane order is immaterial — the training patches were augmented with large in-plane
-//! rotations (`xsepnet_train_patch_norm_factor_inplane_largedegree_romeo_arlo`) — and even putting
-//! the slice axis across B0 costs only about 0.02 of χ− correlation and nothing of χ+. Two of the
+//! which is what the ±90° in-plane augmentation predicts: the in-plane order is immaterial, and
+//! even putting the slice axis across B0 costs only about 0.02 of χ− correlation and nothing of
+//! χ+, less than the training recipe alone would lead you to expect. Two of the
 //! three input channels determine χ± algebraically and carry no orientation at all
 //! (χ+ + χ− = χ_total, χ+ − χ− ≈ R2′/Dr), which is most of why. The outputs are not *identical*
 //! across orientations — two in-plane orientations of the same in-vivo volume differ by ~12%
