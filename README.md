@@ -177,7 +177,10 @@ what it can do via `orientation_support()`:
 
 Getting this wrong is silent — the reconstruction completes and the values are simply wrong — so
 hosts should check `orientation_support().requires_axial()` before running an oblique dataset.
-See [`geometry`](src/geometry.rs) for the direction itself and for resampling to a cardinal grid.
+See [`geometry`](src/geometry.rs) for the direction itself and for resampling to a cardinal grid,
+and [`registration`](src/registration.rs) for recovering the rigid transform between two volumes —
+which is both how a multi-orientation set gets onto one common grid and where its per-orientation
+B0 directions come from, since the object rotates and B0 does not.
 
 ### Dipole Inversion
 

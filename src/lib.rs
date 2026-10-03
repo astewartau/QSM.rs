@@ -210,17 +210,26 @@ pub mod homogeneity {
 // ============================================================================
 // I/O
 // ============================================================================
-/// Scan geometry from the NIfTI affine: B0 direction, obliquity, and resampling to an axial grid.
-///
-/// The dipole kernel lives in the voxel grid, so an oblique acquisition must either supply the
-/// true B0 direction or be resampled to a cardinal-aligned grid. Wrapped phase has to be
-/// resampled in the complex domain — see [`geometry::resample_complex_to_axial`].
 /// Cropping reconstruction to the region that carries signal, and putting the answer back.
 ///
 /// FFT-based stages cost `O(N log N)` in the whole grid, not in the brain. See [`crop`] for why
 /// the box is also rounded up to FFT-friendly sizes, and for the wrap-around caveat.
 pub mod crop;
 
+/// Scan geometry from the NIfTI affine: B0 direction, obliquity, and resampling to an axial grid.
+///
+/// The dipole kernel lives in the voxel grid, so an oblique acquisition must either supply the
+/// true B0 direction or be resampled to a cardinal-aligned grid. Wrapped phase has to be
+/// resampled in the complex domain — see [`geometry::resample_complex_to_axial`].
 pub mod geometry;
+
+/// Rigid-body (6-DOF) registration between two volumes: recovering the transform that
+/// [`geometry`] can already apply.
+///
+/// Multi-orientation QSM needs two things from it — the orientations on one common grid, and
+/// the B0 direction each one contributes to that grid. The second comes out of the recovered
+/// rotation, because the object rotates and B0 does not; see
+/// [`registration::RigidTransform::b0_direction_in_fixed`].
+pub mod registration;
 
 pub mod io;

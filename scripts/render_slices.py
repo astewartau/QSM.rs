@@ -305,8 +305,12 @@ MONTAGES.append(("stage_unwrap", "Unwrapped total field maps", "ppm", (-0.05, 0.
      "unwrap_raw_bestpath"],
 ], None))
 
+# `multiorient_register` is COSMOS over orientations that were *not* pre-registered: the
+# orientations are co-registered first and their B0 directions read off the recovered rotations.
+# Next to `inversion_cosmos`, which starts from orientations already on a common grid, it shows
+# what the registration costs in interpolation blur.
 MULTIORIENT = ("stage_multiorient", "Multi-orientation inversion", "ppm", (-0.1, 0.1), [
-    ["ground_truth_chi", "inversion_cosmos", "sti_mms"],
+    ["ground_truth_chi", "inversion_cosmos", "multiorient_register", "sti_mms"],
 ], None)
 MONTAGES.append(MULTIORIENT)
 MONTAGES.append(SUPPLEMENTARY)

@@ -2663,3 +2663,222 @@ fn test_multiorient_sti() {
     assert!(res.correlation > 0.99, "MMS should track the scalar chi, r={}", res.correlation);
     assert!(msa_rms < 0.02 * chi_rms, "spurious anisotropy too large: {} vs chi {}", msa_rms, chi_rms);
 }
+
+/// The rigid 4×4 (fixed world → moving world) that rotates `bdir` onto the voxel `+z` axis,
+/// about the volume's centre.
+///
+/// Inverted, it is how a multi-orientation acquisition actually works: the subject is rotated so
+/// that B0 — which stays along world `+z` — ends up pointing along `bdir` relative to the
+/// anatomy. Shortest-arc Rodrigues rotation, so the orientation differs from the reference by a
+/// pure tilt and nothing else.
+fn warp_for_bdir(bdir: (f64, f64, f64), dims: (usize, usize, usize), affine: &[f64; 16]) -> [f64; 16] {
+    let b = {
+        let n = (bdir.0 * bdir.0 + bdir.1 * bdir.1 + bdir.2 * bdir.2).sqrt();
+        [bdir.0 / n, bdir.1 / n, bdir.2 / n]
+    };
+    // Rotate b onto (0,0,1): axis = b × z, angle = acos(b·z).
+    let axis = [b[1], -b[0], 0.0];
+    let s = (axis[0] * axis[0] + axis[1] * axis[1]).sqrt();
+    let c = b[2].clamp(-1.0, 1.0);
+    let r = if s < 1e-12 {
+        [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, c.signum()]]
+    } else {
+        let k = [axis[0] / s, axis[1] / s, 0.0];
+        let kx = [
+            [0.0, -k[2], k[1]],
+            [k[2], 0.0, -k[0]],
+            [-k[1], k[0], 0.0],
+        ];
+        let mut out = [[0.0f64; 3]; 3];
+        for i in 0..3 {
+            for j in 0..3 {
+                let kk: f64 = (0..3).map(|m| kx[i][m] * kx[m][j]).sum();
+                out[i][j] = (i == j) as u8 as f64 + s * kx[i][j] + (1.0 - c) * kk;
+            }
+        }
+        out
+    };
+    // Rotate about the volume's world centre, so the brain stays inside the field of view.
+    let ctr = [
+        (dims.0 as f64 - 1.0) * 0.5 * affine[0],
+        (dims.1 as f64 - 1.0) * 0.5 * affine[5],
+        (dims.2 as f64 - 1.0) * 0.5 * affine[10],
+    ];
+    let mut m = [0.0f64; 16];
+    for i in 0..3 {
+        m[4 * i..4 * i + 3].copy_from_slice(&r[i]);
+        m[4 * i + 3] = ctr[i] - (r[i][0] * ctr[0] + r[i][1] * ctr[1] + r[i][2] * ctr[2]);
+    }
+    m[15] = 1.0;
+    m
+}
+
+/// Row-major 4×4 product.
+fn mat4(a: &[f64; 16], b: &[f64; 16]) -> [f64; 16] {
+    let mut out = [0.0f64; 16];
+    for i in 0..4 {
+        for j in 0..4 {
+            out[4 * i + j] = (0..4).map(|k| a[4 * i + k] * b[4 * k + j]).sum();
+        }
+    }
+    out
+}
+
+/// COSMOS over orientations that are **not** already co-registered, with the B0 directions
+/// recovered from the registration itself.
+///
+/// This is the dataset shape that used to be impossible: the slab was prescribed identically for
+/// every orientation, so all three affines are byte-identical and the head rotated in voxel space
+/// instead. `b0_direction_from_affine` returns `(0,0,1)` three times, and three identical
+/// directions quietly collapse COSMOS to an unregularized single-orientation inversion.
+///
+/// The chain under test is the whole thing a pipeline has to get right:
+///
+/// 1. register each orientation's **magnitude** onto the reference's,
+/// 2. resample its field map onto the reference grid through the recovered transform,
+/// 3. read the B0 direction off the recovered *rotation*, because the object rotated and B0 did
+///    not,
+/// 4. run COSMOS.
+///
+/// Two controls make the result mean something. The recovered directions are checked against the
+/// ones the data was simulated with, which catches an inverted or transposed rotation directly.
+/// And the same COSMOS is run the way a pipeline would have had to run it without registration —
+/// unregistered fields, header directions — which must come out dramatically worse, or
+/// registration is not buying anything.
+#[test]
+#[ignore]
+fn test_multiorient_register() {
+    use qsm_core::geometry::{resample_mask_onto, resample_onto};
+    use qsm_core::registration::{register_rigid, RigidParams};
+
+    let data = TestData::load().expect("Failed to load test data");
+    let dims = data.dims;
+    let (vsx, vsy, vsz) = data.voxel_size;
+    let grid = Grid::new(dims.0, dims.1, dims.2, vsx, vsy, vsz);
+
+    // One affine for every orientation — the identically-prescribed-slab case.
+    let affine = [
+        vsx, 0.0, 0.0, 0.0, //
+        0.0, vsy, 0.0, 0.0, //
+        0.0, 0.0, vsz, 0.0, //
+        0.0, 0.0, 0.0, 1.0,
+    ];
+    assert_eq!(
+        qsm_core::geometry::b0_direction_from_affine(&affine),
+        (0.0, 0.0, 1.0),
+        "the premise of this test is that the affine cannot tell the orientations apart"
+    );
+
+    let mut chi_src = data.chi.clone();
+    for (v, &m) in chi_src.iter_mut().zip(data.mask.iter()) {
+        if m == 0 { *v = 0.0; }
+    }
+    let mag_ref = &data.mag_echoes[0];
+
+    // Three orientations tilted up to 25 degrees — a realistic in-vivo repositioning, and well
+    // short of the 60 degrees the already-registered COSMOS test can afford to assume.
+    let bdirs_true = orientation_set(3, 25.0);
+    println!("[INFO] simulating {} orientations, then un-registering them", bdirs_true.len());
+
+    let mut mags = Vec::new();
+    let mut fields_native = Vec::new();
+    let mut masks_native = Vec::new();
+    for &b in &bdirs_true {
+        // The field this orientation produces, expressed in the *reference* frame...
+        let field_ref_frame = simulate_orientation(&chi_src, &grid, b);
+        // ...then everything is warped into the orientation's own acquired frame, which is what
+        // lands on disk. Magnitude, field and mask all move together, as they must.
+        let w = mat4(&warp_for_bdir(b, dims, &affine), &affine);
+        mags.push(resample_onto(mag_ref, dims, &w, dims, &affine).unwrap());
+        fields_native.push(resample_onto(&field_ref_frame, dims, &w, dims, &affine).unwrap());
+        masks_native.push(resample_mask_onto(&data.mask, dims, &w, dims, &affine).unwrap());
+    }
+
+    // --- register, and read the directions off the rotations -------------------------------
+    let params = RigidParams::default();
+    let mut fields_common = Vec::new();
+    let mut masks_common = Vec::new();
+    let mut bdirs_recovered = Vec::new();
+    let start = Instant::now();
+    for (t, b_true) in bdirs_true.iter().enumerate() {
+        let tf = register_rigid(
+            mag_ref, dims, &affine,
+            &mags[t], dims, &affine,
+            Some(&data.mask), &params,
+        )
+        .expect("registration should run");
+        let b = tf.b0_direction_in_fixed(None);
+        let angle_err = {
+            let dot = (b.0 * b_true.0 + b.1 * b_true.1 + b.2 * b_true.2).abs().clamp(0.0, 1.0);
+            dot.acos().to_degrees()
+        };
+        println!(
+            "[INFO] orientation {t}: recovered B0 [{:>6.3} {:>6.3} {:>6.3}] vs true \
+             [{:>6.3} {:>6.3} {:>6.3}], error {angle_err:.2} deg; rotation {:.2} deg, \
+             NCC {:.4}, overlap {:.3}, {} evals",
+            b.0, b.1, b.2, b_true.0, b_true.1, b_true.2,
+            tf.rotation_magnitude_deg(), tf.ncc, tf.overlap, tf.evaluations
+        );
+        // One degree. The measured error on this phantom is ~0.01 deg, so there is ample
+        // headroom, but the bound itself is the physically meaningful one: it has to sit well
+        // inside the 3-degree separation below which a direction set counts as degenerate.
+        assert!(angle_err < 1.0, "orientation {t}: B0 direction off by {angle_err} deg");
+        assert!(tf.ncc > 0.9, "orientation {t}: registration NCC only {}", tf.ncc);
+
+        fields_common.push(tf.resample(&fields_native[t]).unwrap());
+        masks_common.push(tf.resample_mask(&masks_native[t]).unwrap());
+        bdirs_recovered.push(b);
+    }
+    println!("[INFO] registered {} orientations in {:.2?}", bdirs_true.len(), start.elapsed());
+
+    // Every orientation has to contribute at every reconstructed voxel.
+    let mut mask = data.mask.clone();
+    for m in &masks_common {
+        for (a, b) in mask.iter_mut().zip(m.iter()) {
+            *a &= *b;
+        }
+    }
+    let kept = mask.iter().filter(|&&m| m == 1).count();
+    println!(
+        "[INFO] mask intersection keeps {kept} of {} reference voxels",
+        data.mask.iter().filter(|&&m| m == 1).count()
+    );
+
+    // --- COSMOS through the registered path -------------------------------------------------
+    let cosmos_params = inversion::CosmosParams { lambda: 1e-3, ..Default::default() };
+    let (chi, elapsed) = run_timed!("COSMOS (registered)", inversion::cosmos(
+        &fields_common, &bdirs_recovered, &mask, &grid, &cosmos_params
+    ));
+    let res = TestResult::new("COSMOS (registered)", &chi, &chi_src, &mask, dims);
+    res.print_with_time(elapsed);
+    let challenge = ChallengeMetrics::compute(
+        "COSMOS (registered)", &chi, &chi_src, &mask, &data.segmentation, dims);
+    challenge.print();
+    challenge.print_ci_metrics(elapsed);
+    common::save_center_slices(&chi, &mask, dims, "multiorient_register");
+
+    // --- control: what the same data gives without registration ------------------------------
+    // Unregistered fields, header directions. This is not a strawman — it is precisely what a
+    // pipeline would be doing if it read the affines and reconstructed anyway.
+    let header_dirs = vec![(0.0, 0.0, 1.0); bdirs_true.len()];
+    let naive = inversion::cosmos(&fields_native, &header_dirs, &mask, &grid, &cosmos_params);
+    let naive_res = TestResult::new("COSMOS (no registration)", &naive, &chi_src, &mask, dims);
+    naive_res.print();
+
+    println!(
+        "[INFO] registered COSMOS: r={:.4} NRMSE={:.4}; unregistered: r={:.4} NRMSE={:.4}",
+        res.correlation, res.nrmse, naive_res.correlation, naive_res.nrmse
+    );
+
+    // Calibrated against the measured values (r = 0.971, range-normalised NRMSE = 0.0024,
+    // unregistered 0.0064), with roughly 1.5x headroom each. `res.nrmse` is RMSE over the
+    // *range* of the truth inside the mask, not the demeaned challenge percentage that
+    // `ChallengeMetrics` prints — mixing the two up is how a threshold ends up unfailable.
+    assert!(res.correlation > 0.95, "registered COSMOS correlation {}", res.correlation);
+    assert!(res.nrmse < 0.004, "registered COSMOS range-normalised NRMSE {}", res.nrmse);
+    assert!(
+        res.nrmse < naive_res.nrmse / 2.0,
+        "registration must buy something: registered NRMSE {} vs unregistered {}",
+        res.nrmse, naive_res.nrmse
+    );
+}
