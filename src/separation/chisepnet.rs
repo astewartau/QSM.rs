@@ -13,6 +13,48 @@
 //! network's ppm-equivalent input channel. We return χ− as a signed (≤ 0) value to
 //! match the crate's separation convention `(chi_pos ≥ 0, chi_neg ≤ 0, chi_total)`.
 //!
+//! **Array orientation.** The network takes no B0 direction, so whatever orientation the caller
+//! hands it is the one it reconstructs in. Kim et al. (Hum Brain Mapp 2025,
+//! doi:10.1002/hbm.70136) say what that should be, and the two halves are not equally strict.
+//! The training scans were acquired so that "the imaging slab was axial so that the z-axis was
+//! oriented along the B0 field", and the patches were then augmented by rotating "only … within
+//! the plane perpendicular to B0 (degree: −90° to +90°) to avoid complication from B0 orientation
+//! dependent R2* in white matter". So the slice axis carries a real requirement, while the
+//! in-plane order is deliberately covered by augmentation across the full quarter turn.
+//!
+//! The complete order is (A-P, L-R, I-S). The in-plane half of that is not in the paper: it comes
+//! from the brain mask shipped in `Data/test_file.mat` — a dummy file, but the mask is real, and
+//! axis 1 is the mirror-symmetry axis in all six COSMOS orientations (Dice 0.87-0.97 against
+//! 0.78-0.88) while axis 0 is the longest — corroborated by the authors' own axis naming in
+//! `train_data_patch.py`. The left/right *sign* stays undetermined, and the numbers below say it
+//! does not matter. Nothing in the reference code enforces any of this: neither the toolbox's
+//! `Chisep_script.m`, nor the authors' `test.py`, nor the QSM-CI `recon.py` ever permutes or flips
+//! an axis, and neither does this function — it is handed a [`Grid`] (dims and voxel sizes), not
+//! an affine, so the caller owns the orientation.
+//!
+//! That turns out to cost very little. Measured on the QSM Reconstruction Challenge 2.0 head
+//! phantom (QSM-CI's χ-separation dataset, which builds χ+/χ− on that head model): correlation
+//! against the ground-truth source maps, one 192³ pass, the volume relabelled and the result
+//! relabelled back.
+//!
+//! | array orientation | χ+ r | χ− r |
+//! |---|---|---|
+//! | RAS — what QSMxT feeds today | 0.9480 | 0.8072 |
+//! | all 8 in-plane relabellings (slice axis still along B0) | 0.9477–0.9483 | 0.8053–0.8078 |
+//! | slice axis moved to A-P (coronal-like) | 0.9471 | 0.7914 |
+//! | slice axis moved to L-R (sagittal-like) | 0.9485 | 0.7855 |
+//!
+//! which is what the ±90° in-plane augmentation predicts: the in-plane order is immaterial, and
+//! even putting the slice axis across B0 costs only about 0.02 of χ− correlation and nothing of
+//! χ+, less than the training recipe alone would lead you to expect. Two of the
+//! three input channels determine χ± algebraically and carry no orientation at all
+//! (χ+ + χ− = χ_total, χ+ − χ− ≈ R2′/Dr), which is most of why. The outputs are not *identical*
+//! across orientations — two in-plane orientations of the same in-vivo volume differ by ~12%
+//! NRMSE, against a ~3% floor from a pure 16-voxel translation — but neither is nearer the truth,
+//! so there is no orientation to prefer. Running on an oblique acquisition is a different
+//! question, and still wants [`resample_to_axial`](crate::geometry::resample_to_axial): a
+//! relabelling can only fix axes that are already cardinal.
+//!
 //! **Patch size.** The published graph declares that patch as a fixed input shape, but it is
 //! fully convolutional (Conv/Relu/MaxPool/ConvTranspose/Concat only), so the hosted
 //! `chi-sepnet.onnx` has its spatial axes re-declared as dynamic — bit-identical at the

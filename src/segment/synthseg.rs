@@ -37,6 +37,7 @@
 // The pre/post-processing is plain Rust; only inference needs `onnx`.
 #![cfg_attr(not(feature = "onnx"), allow(dead_code))]
 
+use crate::geometry::AxisCode;
 use crate::grid::Grid;
 #[cfg(feature = "onnx")]
 use crate::models::onnx::{OnnxError, OnnxModel, Tensor};
@@ -185,80 +186,12 @@ struct Preprocessed {
 
 // ----------------------------------------------------------------------- orientation
 
-/// Invert a 3×3 matrix given row-major; returns `None` if it is singular.
-fn invert3(m: &[[f64; 3]; 3]) -> Option<[[f64; 3]; 3]> {
-    let det = m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1])
-        - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
-        + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]);
-    if det.abs() < 1e-12 {
-        return None;
-    }
-    let mut inv = [[0.0; 3]; 3];
-    for i in 0..3 {
-        for j in 0..3 {
-            let (a, b) = ((i + 1) % 3, (i + 2) % 3);
-            let (c, d) = ((j + 1) % 3, (j + 2) % 3);
-            // Transposed cofactor = adjugate.
-            inv[j][i] = (m[a][c] * m[b][d] - m[a][d] * m[b][c]) / det;
-        }
-    }
-    Some(inv)
-}
-
-/// Which volume axis each of R, A, S runs along — lab2im's `get_ras_axes`.
-fn ras_axes(affine: &[f64; 16]) -> [usize; 3] {
-    let m = [
-        [affine[0], affine[1], affine[2]],
-        [affine[4], affine[5], affine[6]],
-        [affine[8], affine[9], affine[10]],
-    ];
-    let inv = match invert3(&m) {
-        Some(i) => i,
-        None => return [0, 1, 2],
-    };
-    let mut axes = [0usize; 3];
-    for (w, a) in axes.iter_mut().enumerate() {
-        let mut best = 0;
-        for v in 1..3 {
-            if inv[v][w].abs() > inv[best][w].abs() {
-                best = v;
-            }
-        }
-        *a = best;
-    }
-    // A degenerate affine can map two world axes onto the same volume axis; lab2im repairs that
-    // by reassigning the last duplicate to whichever axis is missing.
-    for i in 0..3 {
-        if !axes.contains(&i) {
-            let mut counts = [0usize; 3];
-            for &a in &axes {
-                counts[a] += 1;
-            }
-            let dup = (0..3).max_by_key(|&v| counts[v]).unwrap();
-            if let Some(pos) = axes.iter().rposition(|&a| a == dup) {
-                axes[pos] = i;
-            }
-        }
-    }
-    axes
-}
-
 /// The axis permutation and per-axis flips that take a volume into RAS orientation.
 ///
 /// Returns `(perm, flip)` where RAS axis `i` is the source volume's axis `perm[i]`, reversed
 /// when `flip[i]`. Equivalent to lab2im's `align_volume_to_ref(..., aff_ref=eye(4))`.
 fn ras_alignment(affine: &[f64; 16]) -> ([usize; 3], [bool; 3]) {
-    let perm = ras_axes(affine);
-    let m = [
-        [affine[0], affine[1], affine[2]],
-        [affine[4], affine[5], affine[6]],
-        [affine[8], affine[9], affine[10]],
-    ];
-    let mut flip = [false; 3];
-    for i in 0..3 {
-        flip[i] = m[i][perm[i]] < 0.0;
-    }
-    (perm, flip)
+    crate::geometry::alignment_to(affine, [AxisCode::R, AxisCode::A, AxisCode::S])
 }
 
 // ----------------------------------------------------------------------- preprocessing
