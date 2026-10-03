@@ -58,6 +58,8 @@ NAMES = {
     "inversion_lsqr": "LSQR",
     "inversion_heidi": "HEIDI",
     "inversion_cosmos": "COSMOS",
+    # COSMOS over orientations that were co-registered here rather than arriving on one grid.
+    "multiorient_register": "COSMOS (co-registered)",
     "sti_mms": "STI (MMS)",
     "sti_msa": "STI (MSA)",
     "inversion_cosmos_noisy": "COSMOS (noisy)",
@@ -128,6 +130,13 @@ NAMES = {
 
 # Panel labels inside a stage montage. The montage already says which stage and, for
 # χ-separation, which source a row is — so the per-panel label only needs the method.
+# Difference panels whose label should say what the difference is of, rather than the generic
+# "Difference (removed)" that suits a denoise/unring pair.
+DIFF_LABELS = {
+    "diff:register_reference-vs-register_misaligned": "Difference — as acquired",
+    "diff:register_reference-vs-register_aligned": "Difference — after registration",
+}
+
 MONTAGE_LABELS = {
     "chisep_para": "chi-sep iLSQR", "chisep_dia": "chi-sep iLSQR",
     "chisep_xsepnet_para": "xSepNet", "chisep_xsepnet_dia": "xSepNet",
@@ -135,6 +144,10 @@ MONTAGE_LABELS = {
     "relaxchisep_wavesep_para": "WaveSep", "relaxchisep_wavesep_dia": "WaveSep",
     "relaxchisep_decompose_para": "DECOMPOSE", "relaxchisep_decompose_dia": "DECOMPOSE",
     "relaxchisep_hcchisep_para": "HC-ChiSep", "relaxchisep_hcchisep_dia": "HC-ChiSep",
+    # Orientation co-registration: magnitude, so the units are arbitrary and normalised.
+    "register_reference": "Reference orientation",
+    "register_misaligned": "Moving — as acquired",
+    "register_aligned": "Moving — after registration",
     # Relaxometry: the row label already names the tool and units.
     "relax_r2_truth": "Truth", "relax_r2_epg": "EPG", "relax_r2_monoexp": "Mono-exp",
     "relax_r2prime_truth": "Truth", "relax_r2prime_derived": "Derived (R2* − R2)",
@@ -153,6 +166,11 @@ MONTAGE_LABELS = {
 
 # Fixed display windows (ppm)
 WINDOWS = {
+    # One scale for both registration difference panels — see the note in `_panel`. Magnitude is
+    # saved normalised so the reference's 99th percentile is 1.0, which is what lets a fixed
+    # window here mean the same thing on any dataset.
+    "diff:register_reference-vs-register_misaligned": (-0.6, 0.6),
+    "diff:register_reference-vs-register_aligned": (-0.6, 0.6),
     "bgremove_sharp": (-0.025, 0.025),
     "bgremove_resharp": (-0.025, 0.025),
     "bgremove_vsharp": (-0.025, 0.025),
@@ -169,6 +187,7 @@ WINDOWS = {
     "inversion_ndi": (-0.1, 0.1),
     "inversion_fansi": (-0.1, 0.1),
     "inversion_cosmos": (-0.1, 0.1),
+    "multiorient_register": (-0.1, 0.1),
     "inversion_cosmos_noisy": (-0.1, 0.1),
     "sti_mms": (-0.1, 0.1),
     # MSA is an anisotropy, not a susceptibility: on an isotropic phantom it is ~1e-17, so a
@@ -312,6 +331,20 @@ MONTAGES.append(("stage_unwrap", "Unwrapped total field maps", "ppm", (-0.05, 0.
 MULTIORIENT = ("stage_multiorient", "Multi-orientation inversion", "ppm", (-0.1, 0.1), [
     ["ground_truth_chi", "inversion_cosmos", "multiorient_register", "sti_mms"],
 ], None)
+# Orientation co-registration. Its own montage rather than a row in MULTIORIENT because these
+# are magnitude, not susceptibility: `window=None` gives each panel its own range and colorbar,
+# where MULTIORIENT's fixed ppm scale would render them black.
+#
+# The bottom row is the figure. Both differences share one window, so "as acquired" should be
+# bright with rotational mismatch and "after registration" near-flat. If the second panel is as
+# bright as the first, the transform went on the wrong way round — a failure that the
+# susceptibility map in MULTIORIENT shows only as mild degradation.
+REGISTRATION = ("stage_registration", "Orientation co-registration", None, None, [
+    ["register_reference", "register_misaligned", "register_aligned"],
+    ["diff:register_reference-vs-register_misaligned",
+     "diff:register_reference-vs-register_aligned"],
+], ["magnitude", "difference from the reference"])
+MONTAGES.append(REGISTRATION)
 MONTAGES.append(MULTIORIENT)
 MONTAGES.append(SUPPLEMENTARY)
 MONTAGES.append(RELAXOMETRY)
@@ -361,6 +394,12 @@ def _panel(input_dir, slug, gray, diverging):
     if slug.startswith("diff:"):
         a, b = slug[len("diff:"):].split("-vs-")
         data = load_axial(input_dir / f"{a}.bin") - load_axial(input_dir / f"{b}.bin")
+        # An explicit window wins, so that two difference panels meant to be read against each
+        # other stay on one scale. Auto-scaling each to its own percentile would stretch a
+        # near-empty residual until it looked exactly as dramatic as the mismatch it is there
+        # to be contrasted with — which is the whole content of a before/after pair.
+        if slug in WINDOWS:
+            return data, diverging, WINDOWS[slug], DIFF_LABELS.get(slug, "Difference")
         finite = np.abs(data[np.isfinite(data)])
         lim = float(np.percentile(finite, 99.5)) if finite.size else 1.0
         lim = lim if lim > 0 else 1.0

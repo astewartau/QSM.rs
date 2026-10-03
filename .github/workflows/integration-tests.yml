@@ -1285,6 +1285,35 @@ jobs:
               echo "$TABLE"
             fi
 
+            if [ -f "slices/register_aligned.bin" ] || [ -f "metrics/test_multiorient_register_capture_range.csv" ]; then
+              echo "## Orientation Co-registration"
+              echo "*Orientations that are not already on one grid are rigidly co-registered before they are*"
+              echo "*combined, and each one's B0 direction is read off the recovered rotation. The difference*"
+              echo "*panels are the check: **as acquired** should be bright with rotational mismatch and*"
+              echo "***after registration** near-flat, both on one scale. Equally bright means the transform*"
+              echo "*went on the wrong way round.*"
+              echo ""
+              if [ -f "metrics/test_multiorient_register_capture_range.csv" ]; then
+                line=$(grep "^RESULT:" "metrics/test_multiorient_register_capture_range.csv" | head -1 | sed 's/^RESULT://')
+                IFS=',' read -r name converged failed worst time <<< "$line"
+                echo "| Measure | Value |"
+                echo "|---------|-------|"
+                if [ "$converged" = "-" ]; then
+                  echo "| Capture range | :x: Failed |"
+                else
+                  echo "| Capture range (swept to 70°) | ${converged}° |"
+                  if [ "$failed" = "none" ]; then
+                    echo "| First failure | none in the swept range |"
+                  else
+                    echo "| First failure | ${failed}° |"
+                  fi
+                  echo "| Worst rotation error inside the range | ${worst}° |"
+                  echo "| Time | $(printf '%.2fs' "$time") |"
+                fi
+                echo ""
+              fi
+            fi
+
             if TABLE=$(emit_chi_table "test_multiorient_" cosmos register sti); then
               echo "## Multi-Orientation Inversion"
               echo "*COSMOS and STI consume several orientations, so these are not like-for-like with the single-orientation methods above. Compared against ground truth susceptibility map; STI reports mean magnetic susceptibility.*"
@@ -1557,6 +1586,37 @@ jobs:
               echo "$TABLE"
               echo ""
               emit_figures stage_dipole
+            fi
+
+            if [ -f "slices/register_aligned.bin" ] || [ -f "metrics/test_multiorient_register_capture_range.csv" ]; then
+              echo "### Orientation Co-registration"
+              echo "*Orientations that are not already on one grid are rigidly co-registered before they are*"
+              echo "*combined, and each one's B0 direction is read off the recovered rotation. The difference*"
+              echo "*panels are the check: **as acquired** should be bright with rotational mismatch and*"
+              echo "***after registration** near-flat, both on one scale. Equally bright means the transform*"
+              echo "*went on the wrong way round.*"
+              echo ""
+              if [ -f "metrics/test_multiorient_register_capture_range.csv" ]; then
+                line=$(grep "^RESULT:" "metrics/test_multiorient_register_capture_range.csv" | head -1 | sed 's/^RESULT://')
+                IFS=',' read -r name converged failed worst time <<< "$line"
+                echo "| Measure | Value |"
+                echo "|---------|-------|"
+                if [ "$converged" = "-" ]; then
+                  echo "| Capture range | :x: Failed |"
+                else
+                  echo "| Capture range (swept to 70°) | ${converged}° |"
+                  if [ "$failed" = "none" ]; then
+                    echo "| First failure | none in the swept range |"
+                  else
+                    echo "| First failure | ${failed}° |"
+                  fi
+                  echo "| Worst rotation error inside the range | ${worst}° |"
+                  echo "| Time | $(printf '%.2fs' "$time") |"
+                fi
+                echo ""
+              fi
+              echo ""
+              emit_figures stage_registration
             fi
 
             if TABLE=$(emit_chi_table "test_multiorient_" cosmos register sti); then

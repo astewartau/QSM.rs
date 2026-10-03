@@ -2799,6 +2799,7 @@ fn test_multiorient_register() {
     let mut fields_common = Vec::new();
     let mut masks_common = Vec::new();
     let mut bdirs_recovered = Vec::new();
+    let mut transforms = Vec::new();
     let start = Instant::now();
     for (t, b_true) in bdirs_true.iter().enumerate() {
         let tf = register_rigid(
@@ -2828,8 +2829,53 @@ fn test_multiorient_register() {
         fields_common.push(tf.resample(&fields_native[t]).unwrap());
         masks_common.push(tf.resample_mask(&masks_native[t]).unwrap());
         bdirs_recovered.push(b);
+        transforms.push(tf);
     }
     println!("[INFO] registered {} orientations in {:.2?}", bdirs_true.len(), start.elapsed());
+
+    // --- the figure: what the alignment actually did ------------------------------------------
+    // Two magnitude volumes before and after registration look nearly identical side by side;
+    // the misalignment lives entirely in the difference from the reference. So save both
+    // differences on one shared scale and let the pair carry the claim: the "as acquired" panel
+    // should be bright with rotational mismatch and the "after registration" panel near-empty.
+    // A transform applied the wrong way round makes the second as bright as the first, which is
+    // exactly the failure a susceptibility map cannot show.
+    //
+    // Scaled so the reference's 99th percentile inside the mask is 1.0, which makes the fixed
+    // difference window in render_slices.py mean the same thing on any dataset rather than
+    // depending on this phantom's arbitrary magnitude units.
+    let figure_t = (1..transforms.len())
+        .max_by(|&a, &b| {
+            transforms[a]
+                .rotation_magnitude_deg()
+                .total_cmp(&transforms[b].rotation_magnitude_deg())
+        })
+        .expect("more than one orientation");
+    let scale = {
+        let mut inside: Vec<f64> = mag_ref
+            .iter()
+            .zip(data.mask.iter())
+            .filter(|(_, &m)| m != 0)
+            .map(|(&v, _)| v)
+            .collect();
+        inside.sort_by(f64::total_cmp);
+        let p99 = inside[((inside.len() as f64 * 0.99) as usize).min(inside.len() - 1)];
+        if p99 > 0.0 { 1.0 / p99 } else { 1.0 }
+    };
+    let normalised = |v: &[f64]| -> Vec<f64> { v.iter().map(|x| x * scale).collect() };
+    let aligned_mag = transforms[figure_t].resample(&mags[figure_t]).unwrap();
+    println!(
+        "[INFO] figure from orientation {figure_t} ({:.2}° rotation)",
+        transforms[figure_t].rotation_magnitude_deg()
+    );
+    common::save_center_slices(&normalised(mag_ref), &data.mask, dims, "register_reference");
+    common::save_center_slices(
+        &normalised(&mags[figure_t]), &data.mask, dims, "register_misaligned");
+    common::save_center_slices(&normalised(&aligned_mag), &data.mask, dims, "register_aligned");
+    // The multi-orientation montage takes its mask outline and its scale reference from the
+    // ground-truth panel, and the only other test that saves it is TKD. Without this, a run
+    // triggered by a change to registration.rs alone renders a single unreferenced panel.
+    common::save_center_slices(&data.chi, &data.mask, dims, "ground_truth_chi");
 
     // Every orientation has to contribute at every reconstructed voxel.
     let mut mask = data.mask.clone();
@@ -3005,6 +3051,8 @@ fn test_multiorient_register_capture_range() {
     println!("  -------    ---------   -------   ----------   -----   -----");
     let mut worst_ok = 0.0f64;
     let mut first_failure: Option<f64> = None;
+    let mut worst_err_in_range = 0.0f64;
+    let sweep_start = Instant::now();
     for step in 1..=14 {
         let deg = 5.0 * step as f64;
         let truth = rigid_axis_angle(axis, deg, shift, dims, &affine);
@@ -3029,10 +3077,21 @@ fn test_multiorient_register_capture_range() {
         );
         if ok {
             worst_ok = worst_ok.max(deg);
+            worst_err_in_range = worst_err_in_range.max(rot_err);
         } else if first_failure.is_none() {
             first_failure = Some(deg);
         }
     }
+
+    // One row for the PR comment. The capture range is the number somebody planning a wide STI
+    // set actually needs, and it lives nowhere else — the sweep above is only in the job log.
+    println!(
+        "RESULT:Registration capture range,{:.0},{},{:.2},{:.2}",
+        worst_ok,
+        first_failure.map(|d| format!("{d:.0}")).unwrap_or_else(|| "none".into()),
+        worst_err_in_range,
+        sweep_start.elapsed().as_secs_f64()
+    );
 
     println!();
     match first_failure {
