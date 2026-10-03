@@ -17,7 +17,14 @@
 //! acquired data with different B0 direction from `[0, 0, 1]`, the B0 direction correction to
 //! `[0, 0, 1]` is required", and "input data with the same orientation with trained data is
 //! recommended" (SNU-LIST/chi_sepnet). Their training volumes are ordered (A-P, L-R, I-S) — an
-//! axial stack whose slice axis runs along B0. Nothing in the reference code enforces either:
+//! axial stack whose slice axis runs along B0. The authors never state that in one place: the
+//! slice direction is from their data-order figure (the `chi_sepnet` README's "Slice order",
+//! inferior to superior; it labels the in-plane axes only `x`/`y`, so it settles nothing else),
+//! and the in-plane assignment from the brain mask shipped in `Data/test_file.mat` — a dummy file,
+//! but the mask is real: axis 1 is the mirror-symmetry axis in all six COSMOS orientations (Dice
+//! 0.87-0.97 against 0.78-0.88) and axis 0 is the longest — corroborated by the authors' own axis
+//! naming in `train_data_patch.py`. The left/right *sign* stays undetermined, and the numbers
+//! below say it does not matter. Nothing in the reference code enforces either:
 //! neither the toolbox's `Chisep_script.m`, nor the authors' `test.py`, nor the QSM-CI `recon.py`
 //! ever permutes or flips an axis, and neither does this function — it is handed a [`Grid`] (dims
 //! and voxel sizes), not an affine, so the caller owns the orientation.
