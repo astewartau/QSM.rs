@@ -25,12 +25,14 @@ use qsm_core::geometry::{alignment_to, invert_alignment, reorient, AxisCode::*};
 use qsm_core::separation::{chisepnet, ChiSepNetNorm, ChiSepNetParams};
 use qsm_core::Grid;
 
-/// The phantom is stored RAS. Three relabellings, one per kind of move, chosen to keep the job
-/// near the other chisep tests in wall-clock: a permutation plus a flip, a flip on its own, and
-/// one that takes the slice axis off B0 entirely.
+/// The phantom is stored RAS. Two relabellings: the quarter turn that separates RAS from the
+/// training order, which is the case this test exists for, and one that takes the slice axis off
+/// B0 entirely, which is the worst the cardinal group can do. A pure mirror used to sit between
+/// them and scored within 0.001 of the quarter turn, so it earned nothing for the ~5 minutes it
+/// cost on a CI runner. The 48-way algebra is covered far more cheaply by the unit tests on
+/// [`reorient`].
 const CASES: &[(&str, [qsm_core::geometry::AxisCode; 3])] = &[
     ("PRS in-plane quarter turn", [P, R, S]),
-    ("LAS left-right mirror", [L, A, S]),
     ("SAR slice axis to L-R", [S, A, R]),
 ];
 
