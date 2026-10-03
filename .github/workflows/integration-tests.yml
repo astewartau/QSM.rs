@@ -49,7 +49,7 @@ jobs:
           set -e
 
           all_bgremove='["test_bgremove_sharp","test_bgremove_resharp","test_bgremove_vsharp","test_bgremove_pdf","test_bgremove_ismv","test_bgremove_lbv"]'
-          all_inversion='["test_inversion_tkd","test_inversion_tsvd","test_inversion_tikhonov","test_inversion_tv","test_inversion_rts","test_inversion_ilsqr","test_inversion_medi","test_inversion_nltv","test_inversion_ndi","test_inversion_fansi","test_inversion_fansi_tgv","test_inversion_l1qsm","test_inversion_whqsm","test_inversion_hdqsm","test_inversion_amp_pe","test_inversion_lsqr","test_inversion_heidi","test_multiorient_cosmos","test_multiorient_sti","test_multiorient_coverage","test_multiorient_noise","test_multiorient_register"]'
+          all_inversion='["test_inversion_tkd","test_inversion_tsvd","test_inversion_tikhonov","test_inversion_tv","test_inversion_rts","test_inversion_ilsqr","test_inversion_medi","test_inversion_nltv","test_inversion_ndi","test_inversion_fansi","test_inversion_fansi_tgv","test_inversion_l1qsm","test_inversion_whqsm","test_inversion_hdqsm","test_inversion_amp_pe","test_inversion_lsqr","test_inversion_heidi","test_multiorient_cosmos","test_multiorient_sti","test_multiorient_coverage","test_multiorient_noise","test_multiorient_register","test_multiorient_register_capture_range"]'
           all_combined='["test_combined_tgv","test_combined_tfi"]'
           all_pipeline='["test_pipeline_romeo_b0","test_pipeline_unwrap_bfr_romeo","test_pipeline_unwrap_bfr_laplacian_neumann","test_pipeline_unwrap_bfr_bestpath","test_unwrap_bfr_single_volume","test_pipeline_unwrap_bfr_stage_laplacian","test_pipeline_tgv","test_pipeline_qsmart","test_pipeline_qsmart_tikhonov","test_pipeline_harperella","test_pipeline_iharperella","test_bias_correction","test_swi","test_smwi","test_r2star_t2star"]'
           # χ-separation entries are whole test *binaries* (each runs several methods).
@@ -242,7 +242,7 @@ jobs:
 
               # Dipole inversion
               src/inversion/admm.rs)
-                inversion="$inversion test_inversion_tkd test_inversion_tsvd test_inversion_tikhonov test_inversion_tv test_inversion_rts test_inversion_ilsqr test_inversion_medi test_inversion_nltv test_inversion_ndi test_inversion_fansi test_inversion_fansi_tgv test_inversion_l1qsm test_inversion_whqsm test_inversion_hdqsm test_inversion_lsqr test_inversion_heidi test_multiorient_cosmos test_multiorient_sti test_multiorient_coverage test_multiorient_noise test_multiorient_register"
+                inversion="$inversion test_inversion_tkd test_inversion_tsvd test_inversion_tikhonov test_inversion_tv test_inversion_rts test_inversion_ilsqr test_inversion_medi test_inversion_nltv test_inversion_ndi test_inversion_fansi test_inversion_fansi_tgv test_inversion_l1qsm test_inversion_whqsm test_inversion_hdqsm test_inversion_lsqr test_inversion_heidi test_multiorient_cosmos test_multiorient_sti test_multiorient_coverage test_multiorient_noise test_multiorient_register test_multiorient_register_capture_range"
                 combined="$combined test_combined_tfi" ;;
               # oblique_sagittal inverts with TKD, so a change there moves its numbers too.
               src/inversion/tkd.rs)
@@ -291,7 +291,7 @@ jobs:
               tests/oblique_sagittal.rs) run_geometry=true ;;
               # Rigid registration: the primitive that puts un-coregistered orientations on a
               # common grid and recovers their B0 directions.
-              src/registration.rs) inversion="$inversion test_multiorient_register" ;;
+              src/registration.rs) inversion="$inversion test_multiorient_register test_multiorient_register_capture_range" ;;
               src/utils/sliding.rs) chisep="$chisep chisep_xsepnet chisep_r2primenet" ;;
               src/separation/*) chisep="$chisep chisep_qsmci chisep_relaxometry_qsmci" ;;
               tests/chisep_qsmci.rs) chisep="$chisep chisep_qsmci" ;;

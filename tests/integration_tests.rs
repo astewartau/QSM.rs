@@ -2882,3 +2882,174 @@ fn test_multiorient_register() {
         res.nrmse, naive_res.nrmse
     );
 }
+
+/// Rigid 4×4 (fixed world → moving world) rotating `deg` about `axis` through the volume centre,
+/// with a fixed translation added so no sweep point is a pure-rotation special case.
+///
+/// Rodrigues, written out: the sweep's ground truth must not come from the same code path the
+/// implementation parameterises with, or a transposed rotation would cancel on both sides.
+fn rigid_axis_angle(
+    axis: [f64; 3],
+    deg: f64,
+    shift: [f64; 3],
+    dims: (usize, usize, usize),
+    affine: &[f64; 16],
+) -> [f64; 16] {
+    let n = (axis[0] * axis[0] + axis[1] * axis[1] + axis[2] * axis[2]).sqrt();
+    let k = [axis[0] / n, axis[1] / n, axis[2] / n];
+    let (s, c) = deg.to_radians().sin_cos();
+    let kx = [
+        [0.0, -k[2], k[1]],
+        [k[2], 0.0, -k[0]],
+        [-k[1], k[0], 0.0],
+    ];
+    let mut r = [[0.0f64; 3]; 3];
+    for i in 0..3 {
+        for j in 0..3 {
+            let kk: f64 = (0..3).map(|m| kx[i][m] * kx[m][j]).sum();
+            r[i][j] = (i == j) as u8 as f64 + s * kx[i][j] + (1.0 - c) * kk;
+        }
+    }
+    let ctr = [
+        (dims.0 as f64 - 1.0) * 0.5 * affine[0],
+        (dims.1 as f64 - 1.0) * 0.5 * affine[5],
+        (dims.2 as f64 - 1.0) * 0.5 * affine[10],
+    ];
+    let mut m = [0.0f64; 16];
+    for i in 0..3 {
+        m[4 * i..4 * i + 3].copy_from_slice(&r[i]);
+        m[4 * i + 3] =
+            ctr[i] - (r[i][0] * ctr[0] + r[i][1] * ctr[1] + r[i][2] * ctr[2]) + shift[i];
+    }
+    m[15] = 1.0;
+    m
+}
+
+/// Angle between two rotations, in degrees: the rotation angle of `Aᵀ·B`.
+fn rotation_difference_deg(a: &[f64; 16], b: &[f64; 16]) -> f64 {
+    let get = |m: &[f64; 16], i: usize, j: usize| m[4 * i + j];
+    let trace: f64 = (0..3)
+        .map(|i| (0..3).map(|j| get(a, j, i) * get(b, j, i)).sum::<f64>())
+        .sum();
+    (0.5 * (trace - 1.0)).clamp(-1.0, 1.0).acos().to_degrees()
+}
+
+/// How far two orientations can be apart before the registration converges to the wrong answer.
+///
+/// `register_rigid` starts from the identity — it trusts the two affines to place the volumes in
+/// a common world — so for identically prescribed slabs the search begins with the *whole* head
+/// rotation as the error it has to find. The cost surface is not a single bowl: a brain is
+/// roughly symmetric and full of repeating structure, so `1 - NCC` falls, rises as one gyrus
+/// lines up with its neighbour, and falls again. The pyramid's job is to smooth those ripples
+/// away at the coarse levels, and that defence is finite. Past some rotation the coarsest level
+/// has a competing minimum of its own and the search walks into it, reporting convergence.
+///
+/// This measures where that happens, because the number matters: STI wants orientations spread
+/// widely over the sphere, so 40-50 degrees of repositioning is realistic, and a local minimum
+/// 15 degrees off yields a wrong B0 direction and a plausible-looking susceptibility map rather
+/// than an error.
+///
+/// Overlap is reported alongside the error so the two confounds stay distinguishable: at large
+/// angles the anatomy genuinely rotates out of the field of view, which is a property of the
+/// acquisition and not of the optimiser.
+#[test]
+#[ignore]
+fn test_multiorient_register_capture_range() {
+    use qsm_core::geometry::resample_onto;
+    use qsm_core::registration::{register_rigid, RigidParams};
+
+    let data = TestData::load().expect("Failed to load test data");
+    let dims = data.dims;
+    let (vsx, vsy, vsz) = data.voxel_size;
+    let affine = [
+        vsx, 0.0, 0.0, 0.0, //
+        0.0, vsy, 0.0, 0.0, //
+        0.0, 0.0, vsz, 0.0, //
+        0.0, 0.0, 0.0, 1.0,
+    ];
+    let fixed = &data.mag_echoes[0];
+    println!("[INFO] phantom {dims:?} at {:?} mm", data.voxel_size);
+
+    // An oblique axis, so all three rotation parameters are exercised rather than one, plus a
+    // few millimetres of translation at every point.
+    let axis = [0.35, -0.55, 0.76];
+    let shift = [2.0, -3.0, 1.5];
+
+    // Displacement of the volume centre, which is what "translation error" should mean. The
+    // translation *column* of the matrix conflates the two: rotating about a point far from the
+    // world origin puts a large value there even when nothing translated.
+    let centre = [
+        (dims.0 as f64 - 1.0) * 0.5 * affine[0],
+        (dims.1 as f64 - 1.0) * 0.5 * affine[5],
+        (dims.2 as f64 - 1.0) * 0.5 * affine[10],
+    ];
+    let centre_shift_mm = |a: &[f64; 16], b: &[f64; 16]| {
+        let apply = |m: &[f64; 16]| {
+            [0, 1, 2].map(|i| {
+                m[4 * i] * centre[0] + m[4 * i + 1] * centre[1] + m[4 * i + 2] * centre[2]
+                    + m[4 * i + 3]
+            })
+        };
+        let (pa, pb) = (apply(a), apply(b));
+        ((pa[0] - pb[0]).powi(2) + (pa[1] - pb[1]).powi(2) + (pa[2] - pb[2]).powi(2)).sqrt()
+    };
+
+    // The shipped default. This test is what sets `RigidParams::levels`: at the original 3 it
+    // converged to 40 degrees and then failed by 92, so the sweep is run against whatever the
+    // default actually is rather than against a config chosen to pass.
+    let params = RigidParams::default();
+    println!("[INFO] RigidParams::levels = {}", params.levels);
+
+    println!();
+    println!("  applied    recovered   rot err   centre err   NCC     evals");
+    println!("  -------    ---------   -------   ----------   -----   -----");
+    let mut worst_ok = 0.0f64;
+    let mut first_failure: Option<f64> = None;
+    for step in 1..=14 {
+        let deg = 5.0 * step as f64;
+        let truth = rigid_axis_angle(axis, deg, shift, dims, &affine);
+        let moving = resample_onto(fixed, dims, &mat4(&truth, &affine), dims, &affine).unwrap();
+
+        let t = register_rigid(
+            fixed, dims, &affine,
+            &moving, dims, &affine,
+            Some(&data.mask), &params,
+        )
+        .expect("registration should run");
+
+        let rot_err = rotation_difference_deg(&t.matrix, &truth);
+        let centre_err = centre_shift_mm(&t.matrix, &truth);
+        // One degree is the working bound: it has to sit well inside the 3-degree separation
+        // below which a multi-orientation direction set counts as degenerate.
+        let ok = rot_err < 1.0;
+        println!(
+            "  {:>5.0}°     {:>6.2}°    {:>5.2}°   {:>7.2} mm   {:.3}   {:>5}  {}",
+            deg, t.rotation_magnitude_deg(), rot_err, centre_err, t.ncc,
+            t.evaluations, if ok { "ok" } else { "LOST" }
+        );
+        if ok {
+            worst_ok = worst_ok.max(deg);
+        } else if first_failure.is_none() {
+            first_failure = Some(deg);
+        }
+    }
+
+    println!();
+    match first_failure {
+        None => println!("[INFO] capture range: the whole swept range, to 70°"),
+        Some(d) => println!(
+            "[INFO] capture range: converged to {worst_ok:.0}°, first failure at {d:.0}°"
+        ),
+    }
+
+    // The default converges across the whole sweep, so anything less is a regression. 60 rather
+    // than 70 leaves a little room for the last point without letting the bound slide back
+    // under the 45 degrees that a deliberately wide STI set needs — which is exactly where the
+    // original 3-level default failed.
+    assert!(
+        worst_ok >= 60.0,
+        "capture range fell to {worst_ok:.0}° (first failure at {first_failure:?}) — \
+         registration converged to a local minimum at a misalignment it used to handle. \
+         RigidParams::levels is what governs this; check it has not been lowered"
+    );
+}

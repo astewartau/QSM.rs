@@ -56,6 +56,12 @@
 //! registration tools use for 6-DOF problems. No linear-algebra crate is involved; the whole
 //! module is `f64` arrays, consistent with the rest of qsm-core.
 //!
+//! The pyramid is deep on purpose. It is what sets the **capture range** — how far apart two
+//! volumes can start and still converge — because smoothing and decimating flattens the cost
+//! surface's ripples, and the ripples are what a search walks into instead of the true minimum.
+//! See [`RigidParams::levels`] for the measured numbers; the short version is that three levels
+//! converge to 40° and five to beyond 70°, and 45° of repositioning is ordinary for STI.
+//!
 //! Work per metric evaluation is **bounded independently of volume size** by
 //! [`RigidParams::max_samples`]: each level picks the smallest integer voxel stride whose sample
 //! count fits the cap. Coarse levels therefore see smoothed, decimated data (a smooth cost
@@ -80,8 +86,29 @@ const SAMPLE_CHUNK: usize = 8192;
 #[cfg_attr(feature = "introspection", derive(serde::Serialize))]
 #[derive(Clone, Debug)]
 pub struct RigidParams {
-    /// Pyramid levels, finest included. `3` means the volume is registered at 1/4, then 1/2,
-    /// then full resolution. Levels that would shrink any axis below 8 voxels are dropped.
+    /// Pyramid levels, finest included. `5` means the volume is registered at 1/16, then 1/8,
+    /// 1/4, 1/2 and full resolution. Levels that would shrink any axis below 8 voxels are
+    /// dropped, so a small volume quietly gets fewer and nothing has to be tuned for it.
+    ///
+    /// **This is the capture range, and it is the one parameter not to lower.** The search starts
+    /// from the identity, so for identically prescribed slabs it begins with the whole head
+    /// rotation as the error to find — and `1 - NCC` is not a single bowl. A brain is roughly
+    /// symmetric and full of repeating structure, so the cost falls, rises as one gyrus lines up
+    /// with its neighbour, and falls again; past some misalignment the coarsest level has a
+    /// competing minimum of its own and the search converges into it, reporting success.
+    ///
+    /// Measured on the in-vivo-sized test phantom
+    /// (`test_multiorient_register_capture_range`), sweeping an oblique-axis rotation:
+    ///
+    /// | levels | converges up to |
+    /// |---|---|
+    /// | 3 | 40°, then fails hard — 92° out, NCC 0.19 |
+    /// | 5 | the whole swept range to 70°, to 0.01° |
+    ///
+    /// 3 was the original default and is not enough: STI wants orientations spread widely over
+    /// the sphere, so 45° of repositioning is ordinary and would have landed in the failure.
+    /// The two extra levels cost about twice the metric evaluations but very little wall clock,
+    /// because the coarse levels hold a few thousand samples each against the cap below.
     pub levels: usize,
     /// Upper bound on fixed voxels sampled per metric evaluation, per level.
     ///
@@ -124,7 +151,7 @@ pub struct RigidParams {
 impl Default for RigidParams {
     fn default() -> Self {
         Self {
-            levels: 3,
+            levels: 5,
             max_samples: 200_000,
             max_iterations: 20,
             max_evaluations: 5000,
