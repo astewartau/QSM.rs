@@ -15,47 +15,24 @@
 //!
 //! Run with:
 //!   QSMCI_CHISEP=/path/to/chisep cargo test --release --features "onnx download" \
-//!     --test dl_orientation -- --ignored --nocapture
+//!     --test chisep_orientation -- --ignored --nocapture
 #![cfg(feature = "onnx")]
 
 mod common;
 
-use common::load_chisep_phantom;
+use common::{chisep_score, correlation, load_chisep_phantom, nrmse};
 use qsm_core::geometry::{alignment_to, invert_alignment, reorient, AxisCode::*};
 use qsm_core::separation::{chisepnet, ChiSepNetNorm, ChiSepNetParams};
 use qsm_core::Grid;
 
-/// The phantom is stored RAS; these are the relabellings worth probing. The first four keep the
-/// slice axis along B0 (an in-plane quarter turn and mirrors); the last two move it off B0, which
-/// is the case the authors' "B0 direction correction" is really about.
+/// The phantom is stored RAS. Three relabellings, one per kind of move, chosen to keep the job
+/// near the other chisep tests in wall-clock: a permutation plus a flip, a flip on its own, and
+/// one that takes the slice axis off B0 entirely.
 const CASES: &[(&str, [qsm_core::geometry::AxisCode; 3])] = &[
-    ("PRS — in-plane quarter turn (the authors' training order)", [P, R, S]),
-    ("LAS — left-right mirror", [L, A, S]),
-    ("RPS — anterior-posterior mirror", [R, P, S]),
-    ("RAI — slice axis reversed (B0 sign)", [R, A, I]),
-    ("RSA — slice axis moved to A-P (coronal-like)", [R, S, A]),
-    ("SAR — slice axis moved to L-R (sagittal-like)", [S, A, R]),
+    ("PRS in-plane quarter turn", [P, R, S]),
+    ("LAS left-right mirror", [L, A, S]),
+    ("SAR slice axis to L-R", [S, A, R]),
 ];
-
-/// Pearson correlation and NRMSE (%) inside the mask.
-fn agree(a: &[f64], b: &[f64], mask: &[u8]) -> (f64, f64) {
-    let idx: Vec<usize> = (0..mask.len()).filter(|&i| mask[i] != 0).collect();
-    let n = idx.len() as f64;
-    let (ma, mb) = (
-        idx.iter().map(|&i| a[i]).sum::<f64>() / n,
-        idx.iter().map(|&i| b[i]).sum::<f64>() / n,
-    );
-    let (mut sab, mut saa, mut sbb, mut se, mut sb2) = (0.0, 0.0, 0.0, 0.0, 0.0);
-    for &i in &idx {
-        let (da, db) = (a[i] - ma, b[i] - mb);
-        sab += da * db;
-        saa += da * da;
-        sbb += db * db;
-        se += (a[i] - b[i]).powi(2);
-        sb2 += b[i] * b[i];
-    }
-    (sab / (saa * sbb).sqrt(), 100.0 * (se / sb2).sqrt())
-}
 
 /// A cardinal RAS affine for the phantom's grid — the orientation the maps are stored in.
 fn ras_affine(grid: &Grid) -> [f64; 16] {
@@ -89,6 +66,7 @@ fn chisepnet_is_insensitive_to_array_orientation() {
         run(&ph.local_field_ppm, &ph.chi_total, &ph.r2prime, &ph.mask, &ph.grid);
 
     for (label, target) in CASES {
+        let t = std::time::Instant::now();
         let (perm, flip) = alignment_to(&affine, *target);
         let (field, dims) = reorient(&ph.local_field_ppm, ph.dims, perm, flip);
         let (qsm, _) = reorient(&ph.chi_total, ph.dims, perm, flip);
@@ -102,20 +80,27 @@ fn chisepnet_is_insensitive_to_array_orientation() {
         let (pos, _) = reorient(&pos, dims, back, flip_back);
         let (neg, _) = reorient(&neg, dims, back, flip_back);
 
-        let (rp, ep) = agree(&pos, &ref_pos, &ph.mask);
-        let (rn, en) = agree(&neg, &ref_neg, &ph.mask);
-        println!("{label}\n    χ+ r={rp:.4} NRMSE={ep:.2}%  |  χ− r={rn:.4} NRMSE={en:.2}%");
+        // Scored against the untouched run rather than ground truth: the question is whether
+        // the network answers the same way, not whether it answers well.
+        let secs = t.elapsed().as_secs_f64();
+        chisep_score(&format!("{label} χ+"), &pos, &ref_pos, &ph.mask, ph.dims, secs);
+        chisep_score(&format!("{label} χ−"), &neg, &ref_neg, &ph.mask, ph.dims, secs);
+        let (rp, ep) = (correlation(&pos, &ref_pos, &ph.mask),
+                        nrmse(&pos, &ref_pos, &ph.mask) * 100.0);
+        let (rn, en) = (correlation(&neg, &ref_neg, &ph.mask),
+                        nrmse(&neg, &ref_neg, &ph.mask) * 100.0);
 
-        // Measured band. On the QSM Reconstruction Challenge 2.0 head phantom the worst case (slice axis moved to L-R) lands at
-        // χ+ r=0.989 / 12.1% and χ− r=0.965 / 15.3%; an in-vivo volume, whose field channel
-        // carries real noise rather than a forward dipole of the χ map, is looser at ~0.977 /
-        // 13% and ~0.961 / 15%. The bounds below sit outside both with room to spare — a pure
-        // 16-voxel translation already costs ~3% NRMSE, so this is not a tight invariance
-        // claim. What it catches is the network becoming genuinely orientation-bound: a
-        // transposed patch, a broken sliding window, a permuted channel order.
+        // Measured band. Note [`nrmse`] normalises by the *range* of the reference, not its
+        // norm, so these run far smaller than the relative errors in the module docs: the worst
+        // case here (slice axis to L-R) is 1.6% range-normalised against roughly 12% relative.
+        // Worst observed: χ+ r=0.989 / 1.6%, χ− r=0.965 / 1.4%. The field channel in this
+        // phantom is a forward dipole of its own χ map, so it is cleaner than real data, which
+        // moves roughly 2× further; the bounds leave headroom for that and no more. What they
+        // catch is the network becoming genuinely orientation-bound: a transposed patch, a
+        // broken sliding window, a permuted channel order.
         assert!(rp > 0.96, "{label}: χ+ correlation {rp:.4} collapsed");
         assert!(rn > 0.92, "{label}: χ− correlation {rn:.4} collapsed");
-        assert!(ep < 20.0 && en < 25.0, "{label}: NRMSE {ep:.1}% / {en:.1}% too large");
+        assert!(ep < 6.0 && en < 6.0, "{label}: NRMSE {ep:.1}% / {en:.1}% too large");
     }
 }
 
