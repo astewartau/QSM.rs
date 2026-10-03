@@ -2663,3 +2663,452 @@ fn test_multiorient_sti() {
     assert!(res.correlation > 0.99, "MMS should track the scalar chi, r={}", res.correlation);
     assert!(msa_rms < 0.02 * chi_rms, "spurious anisotropy too large: {} vs chi {}", msa_rms, chi_rms);
 }
+
+/// The rigid 4×4 (fixed world → moving world) that rotates `bdir` onto the voxel `+z` axis,
+/// about the volume's centre.
+///
+/// Inverted, it is how a multi-orientation acquisition actually works: the subject is rotated so
+/// that B0 — which stays along world `+z` — ends up pointing along `bdir` relative to the
+/// anatomy. Shortest-arc Rodrigues rotation, so the orientation differs from the reference by a
+/// pure tilt and nothing else.
+fn warp_for_bdir(bdir: (f64, f64, f64), dims: (usize, usize, usize), affine: &[f64; 16]) -> [f64; 16] {
+    let b = {
+        let n = (bdir.0 * bdir.0 + bdir.1 * bdir.1 + bdir.2 * bdir.2).sqrt();
+        [bdir.0 / n, bdir.1 / n, bdir.2 / n]
+    };
+    // Rotate b onto (0,0,1): axis = b × z, angle = acos(b·z).
+    let axis = [b[1], -b[0], 0.0];
+    let s = (axis[0] * axis[0] + axis[1] * axis[1]).sqrt();
+    let c = b[2].clamp(-1.0, 1.0);
+    let r = if s < 1e-12 {
+        [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, c.signum()]]
+    } else {
+        let k = [axis[0] / s, axis[1] / s, 0.0];
+        let kx = [
+            [0.0, -k[2], k[1]],
+            [k[2], 0.0, -k[0]],
+            [-k[1], k[0], 0.0],
+        ];
+        let mut out = [[0.0f64; 3]; 3];
+        for i in 0..3 {
+            for j in 0..3 {
+                let kk: f64 = (0..3).map(|m| kx[i][m] * kx[m][j]).sum();
+                out[i][j] = (i == j) as u8 as f64 + s * kx[i][j] + (1.0 - c) * kk;
+            }
+        }
+        out
+    };
+    // Rotate about the volume's world centre, so the brain stays inside the field of view.
+    let ctr = [
+        (dims.0 as f64 - 1.0) * 0.5 * affine[0],
+        (dims.1 as f64 - 1.0) * 0.5 * affine[5],
+        (dims.2 as f64 - 1.0) * 0.5 * affine[10],
+    ];
+    let mut m = [0.0f64; 16];
+    for i in 0..3 {
+        m[4 * i..4 * i + 3].copy_from_slice(&r[i]);
+        m[4 * i + 3] = ctr[i] - (r[i][0] * ctr[0] + r[i][1] * ctr[1] + r[i][2] * ctr[2]);
+    }
+    m[15] = 1.0;
+    m
+}
+
+/// Row-major 4×4 product.
+fn mat4(a: &[f64; 16], b: &[f64; 16]) -> [f64; 16] {
+    let mut out = [0.0f64; 16];
+    for i in 0..4 {
+        for j in 0..4 {
+            out[4 * i + j] = (0..4).map(|k| a[4 * i + k] * b[4 * k + j]).sum();
+        }
+    }
+    out
+}
+
+/// COSMOS over orientations that are **not** already co-registered, with the B0 directions
+/// recovered from the registration itself.
+///
+/// This is the dataset shape that used to be impossible: the slab was prescribed identically for
+/// every orientation, so all three affines are byte-identical and the head rotated in voxel space
+/// instead. `b0_direction_from_affine` returns `(0,0,1)` three times, and three identical
+/// directions quietly collapse COSMOS to an unregularized single-orientation inversion.
+///
+/// The chain under test is the whole thing a pipeline has to get right:
+///
+/// 1. register each orientation's **magnitude** onto the reference's,
+/// 2. resample its field map onto the reference grid through the recovered transform,
+/// 3. read the B0 direction off the recovered *rotation*, because the object rotated and B0 did
+///    not,
+/// 4. run COSMOS.
+///
+/// Two controls make the result mean something. The recovered directions are checked against the
+/// ones the data was simulated with, which catches an inverted or transposed rotation directly.
+/// And the same COSMOS is run the way a pipeline would have had to run it without registration —
+/// unregistered fields, header directions — which must come out dramatically worse, or
+/// registration is not buying anything.
+#[test]
+#[ignore]
+fn test_multiorient_register() {
+    use qsm_core::geometry::{resample_mask_onto, resample_onto};
+    use qsm_core::registration::{register_rigid, RigidParams};
+
+    let data = TestData::load().expect("Failed to load test data");
+    let dims = data.dims;
+    let (vsx, vsy, vsz) = data.voxel_size;
+    let grid = Grid::new(dims.0, dims.1, dims.2, vsx, vsy, vsz);
+
+    // One affine for every orientation — the identically-prescribed-slab case.
+    let affine = [
+        vsx, 0.0, 0.0, 0.0, //
+        0.0, vsy, 0.0, 0.0, //
+        0.0, 0.0, vsz, 0.0, //
+        0.0, 0.0, 0.0, 1.0,
+    ];
+    assert_eq!(
+        qsm_core::geometry::b0_direction_from_affine(&affine),
+        (0.0, 0.0, 1.0),
+        "the premise of this test is that the affine cannot tell the orientations apart"
+    );
+
+    let mut chi_src = data.chi.clone();
+    for (v, &m) in chi_src.iter_mut().zip(data.mask.iter()) {
+        if m == 0 { *v = 0.0; }
+    }
+    let mag_ref = &data.mag_echoes[0];
+
+    // Three orientations tilted up to 25 degrees — a realistic in-vivo repositioning, and well
+    // short of the 60 degrees the already-registered COSMOS test can afford to assume.
+    let bdirs_true = orientation_set(3, 25.0);
+    println!("[INFO] simulating {} orientations, then un-registering them", bdirs_true.len());
+
+    let mut mags = Vec::new();
+    let mut fields_native = Vec::new();
+    let mut masks_native = Vec::new();
+    for &b in &bdirs_true {
+        // The field this orientation produces, expressed in the *reference* frame...
+        let field_ref_frame = simulate_orientation(&chi_src, &grid, b);
+        // ...then everything is warped into the orientation's own acquired frame, which is what
+        // lands on disk. Magnitude, field and mask all move together, as they must.
+        let w = mat4(&warp_for_bdir(b, dims, &affine), &affine);
+        mags.push(resample_onto(mag_ref, dims, &w, dims, &affine).unwrap());
+        fields_native.push(resample_onto(&field_ref_frame, dims, &w, dims, &affine).unwrap());
+        masks_native.push(resample_mask_onto(&data.mask, dims, &w, dims, &affine).unwrap());
+    }
+
+    // --- register, and read the directions off the rotations -------------------------------
+    let params = RigidParams::default();
+    let mut fields_common = Vec::new();
+    let mut masks_common = Vec::new();
+    let mut bdirs_recovered = Vec::new();
+    let mut transforms = Vec::new();
+    let start = Instant::now();
+    for (t, b_true) in bdirs_true.iter().enumerate() {
+        let tf = register_rigid(
+            mag_ref, dims, &affine,
+            &mags[t], dims, &affine,
+            Some(&data.mask), &params,
+        )
+        .expect("registration should run");
+        let b = tf.b0_direction_in_fixed(None);
+        let angle_err = {
+            let dot = (b.0 * b_true.0 + b.1 * b_true.1 + b.2 * b_true.2).abs().clamp(0.0, 1.0);
+            dot.acos().to_degrees()
+        };
+        println!(
+            "[INFO] orientation {t}: recovered B0 [{:>6.3} {:>6.3} {:>6.3}] vs true \
+             [{:>6.3} {:>6.3} {:>6.3}], error {angle_err:.2} deg; rotation {:.2} deg, \
+             NCC {:.4}, overlap {:.3}, {} evals",
+            b.0, b.1, b.2, b_true.0, b_true.1, b_true.2,
+            tf.rotation_magnitude_deg(), tf.ncc, tf.overlap, tf.evaluations
+        );
+        // One degree. The measured error on this phantom is ~0.01 deg, so there is ample
+        // headroom, but the bound itself is the physically meaningful one: it has to sit well
+        // inside the 3-degree separation below which a direction set counts as degenerate.
+        assert!(angle_err < 1.0, "orientation {t}: B0 direction off by {angle_err} deg");
+        assert!(tf.ncc > 0.9, "orientation {t}: registration NCC only {}", tf.ncc);
+
+        fields_common.push(tf.resample(&fields_native[t]).unwrap());
+        masks_common.push(tf.resample_mask(&masks_native[t]).unwrap());
+        bdirs_recovered.push(b);
+        transforms.push(tf);
+    }
+    println!("[INFO] registered {} orientations in {:.2?}", bdirs_true.len(), start.elapsed());
+
+    // --- the figure: what the alignment actually did ------------------------------------------
+    // Two magnitude volumes before and after registration look nearly identical side by side;
+    // the misalignment lives entirely in the difference from the reference. So save both
+    // differences on one shared scale and let the pair carry the claim: the "as acquired" panel
+    // should be bright with rotational mismatch and the "after registration" panel near-empty.
+    // A transform applied the wrong way round makes the second as bright as the first, which is
+    // exactly the failure a susceptibility map cannot show.
+    //
+    // Scaled so the reference's 99th percentile inside the mask is 1.0, which makes the fixed
+    // difference window in render_slices.py mean the same thing on any dataset rather than
+    // depending on this phantom's arbitrary magnitude units.
+    let figure_t = (1..transforms.len())
+        .max_by(|&a, &b| {
+            transforms[a]
+                .rotation_magnitude_deg()
+                .total_cmp(&transforms[b].rotation_magnitude_deg())
+        })
+        .expect("more than one orientation");
+    let scale = {
+        let mut inside: Vec<f64> = mag_ref
+            .iter()
+            .zip(data.mask.iter())
+            .filter(|(_, &m)| m != 0)
+            .map(|(&v, _)| v)
+            .collect();
+        inside.sort_by(f64::total_cmp);
+        let p99 = inside[((inside.len() as f64 * 0.99) as usize).min(inside.len() - 1)];
+        if p99 > 0.0 { 1.0 / p99 } else { 1.0 }
+    };
+    let normalised = |v: &[f64]| -> Vec<f64> { v.iter().map(|x| x * scale).collect() };
+    let aligned_mag = transforms[figure_t].resample(&mags[figure_t]).unwrap();
+    println!(
+        "[INFO] figure from orientation {figure_t} ({:.2}° rotation)",
+        transforms[figure_t].rotation_magnitude_deg()
+    );
+    common::save_center_slices(&normalised(mag_ref), &data.mask, dims, "register_reference");
+    common::save_center_slices(
+        &normalised(&mags[figure_t]), &data.mask, dims, "register_misaligned");
+    common::save_center_slices(&normalised(&aligned_mag), &data.mask, dims, "register_aligned");
+    // The multi-orientation montage takes its mask outline and its scale reference from the
+    // ground-truth panel, and the only other test that saves it is TKD. Without this, a run
+    // triggered by a change to registration.rs alone renders a single unreferenced panel.
+    common::save_center_slices(&data.chi, &data.mask, dims, "ground_truth_chi");
+
+    // Every orientation has to contribute at every reconstructed voxel.
+    let mut mask = data.mask.clone();
+    for m in &masks_common {
+        for (a, b) in mask.iter_mut().zip(m.iter()) {
+            *a &= *b;
+        }
+    }
+    let kept = mask.iter().filter(|&&m| m == 1).count();
+    println!(
+        "[INFO] mask intersection keeps {kept} of {} reference voxels",
+        data.mask.iter().filter(|&&m| m == 1).count()
+    );
+
+    // --- COSMOS through the registered path -------------------------------------------------
+    let cosmos_params = inversion::CosmosParams { lambda: 1e-3, ..Default::default() };
+    let (chi, elapsed) = run_timed!("COSMOS (registered)", inversion::cosmos(
+        &fields_common, &bdirs_recovered, &mask, &grid, &cosmos_params
+    ));
+    let res = TestResult::new("COSMOS (registered)", &chi, &chi_src, &mask, dims);
+    res.print_with_time(elapsed);
+    let challenge = ChallengeMetrics::compute(
+        "COSMOS (registered)", &chi, &chi_src, &mask, &data.segmentation, dims);
+    challenge.print();
+    challenge.print_ci_metrics(elapsed);
+    common::save_center_slices(&chi, &mask, dims, "multiorient_register");
+
+    // --- control: what the same data gives without registration ------------------------------
+    // Unregistered fields, header directions. This is not a strawman — it is precisely what a
+    // pipeline would be doing if it read the affines and reconstructed anyway.
+    let header_dirs = vec![(0.0, 0.0, 1.0); bdirs_true.len()];
+    let naive = inversion::cosmos(&fields_native, &header_dirs, &mask, &grid, &cosmos_params);
+    let naive_res = TestResult::new("COSMOS (no registration)", &naive, &chi_src, &mask, dims);
+    naive_res.print();
+
+    println!(
+        "[INFO] registered COSMOS: r={:.4} NRMSE={:.4}; unregistered: r={:.4} NRMSE={:.4}",
+        res.correlation, res.nrmse, naive_res.correlation, naive_res.nrmse
+    );
+
+    // Calibrated against the measured values (r = 0.971, range-normalised NRMSE = 0.0024,
+    // unregistered 0.0064), with roughly 1.5x headroom each. `res.nrmse` is RMSE over the
+    // *range* of the truth inside the mask, not the demeaned challenge percentage that
+    // `ChallengeMetrics` prints — mixing the two up is how a threshold ends up unfailable.
+    assert!(res.correlation > 0.95, "registered COSMOS correlation {}", res.correlation);
+    assert!(res.nrmse < 0.004, "registered COSMOS range-normalised NRMSE {}", res.nrmse);
+    assert!(
+        res.nrmse < naive_res.nrmse / 2.0,
+        "registration must buy something: registered NRMSE {} vs unregistered {}",
+        res.nrmse, naive_res.nrmse
+    );
+}
+
+/// Rigid 4×4 (fixed world → moving world) rotating `deg` about `axis` through the volume centre,
+/// with a fixed translation added so no sweep point is a pure-rotation special case.
+///
+/// Rodrigues, written out: the sweep's ground truth must not come from the same code path the
+/// implementation parameterises with, or a transposed rotation would cancel on both sides.
+fn rigid_axis_angle(
+    axis: [f64; 3],
+    deg: f64,
+    shift: [f64; 3],
+    dims: (usize, usize, usize),
+    affine: &[f64; 16],
+) -> [f64; 16] {
+    let n = (axis[0] * axis[0] + axis[1] * axis[1] + axis[2] * axis[2]).sqrt();
+    let k = [axis[0] / n, axis[1] / n, axis[2] / n];
+    let (s, c) = deg.to_radians().sin_cos();
+    let kx = [
+        [0.0, -k[2], k[1]],
+        [k[2], 0.0, -k[0]],
+        [-k[1], k[0], 0.0],
+    ];
+    let mut r = [[0.0f64; 3]; 3];
+    for i in 0..3 {
+        for j in 0..3 {
+            let kk: f64 = (0..3).map(|m| kx[i][m] * kx[m][j]).sum();
+            r[i][j] = (i == j) as u8 as f64 + s * kx[i][j] + (1.0 - c) * kk;
+        }
+    }
+    let ctr = [
+        (dims.0 as f64 - 1.0) * 0.5 * affine[0],
+        (dims.1 as f64 - 1.0) * 0.5 * affine[5],
+        (dims.2 as f64 - 1.0) * 0.5 * affine[10],
+    ];
+    let mut m = [0.0f64; 16];
+    for i in 0..3 {
+        m[4 * i..4 * i + 3].copy_from_slice(&r[i]);
+        m[4 * i + 3] =
+            ctr[i] - (r[i][0] * ctr[0] + r[i][1] * ctr[1] + r[i][2] * ctr[2]) + shift[i];
+    }
+    m[15] = 1.0;
+    m
+}
+
+/// Angle between two rotations, in degrees: the rotation angle of `Aᵀ·B`.
+fn rotation_difference_deg(a: &[f64; 16], b: &[f64; 16]) -> f64 {
+    let get = |m: &[f64; 16], i: usize, j: usize| m[4 * i + j];
+    let trace: f64 = (0..3)
+        .map(|i| (0..3).map(|j| get(a, j, i) * get(b, j, i)).sum::<f64>())
+        .sum();
+    (0.5 * (trace - 1.0)).clamp(-1.0, 1.0).acos().to_degrees()
+}
+
+/// How far two orientations can be apart before the registration converges to the wrong answer.
+///
+/// `register_rigid` starts from the identity — it trusts the two affines to place the volumes in
+/// a common world — so for identically prescribed slabs the search begins with the *whole* head
+/// rotation as the error it has to find. The cost surface is not a single bowl: a brain is
+/// roughly symmetric and full of repeating structure, so `1 - NCC` falls, rises as one gyrus
+/// lines up with its neighbour, and falls again. The pyramid's job is to smooth those ripples
+/// away at the coarse levels, and that defence is finite. Past some rotation the coarsest level
+/// has a competing minimum of its own and the search walks into it, reporting convergence.
+///
+/// This measures where that happens, because the number matters: STI wants orientations spread
+/// widely over the sphere, so 40-50 degrees of repositioning is realistic, and a local minimum
+/// 15 degrees off yields a wrong B0 direction and a plausible-looking susceptibility map rather
+/// than an error.
+///
+/// Overlap is reported alongside the error so the two confounds stay distinguishable: at large
+/// angles the anatomy genuinely rotates out of the field of view, which is a property of the
+/// acquisition and not of the optimiser.
+#[test]
+#[ignore]
+fn test_multiorient_register_capture_range() {
+    use qsm_core::geometry::resample_onto;
+    use qsm_core::registration::{register_rigid, RigidParams};
+
+    let data = TestData::load().expect("Failed to load test data");
+    let dims = data.dims;
+    let (vsx, vsy, vsz) = data.voxel_size;
+    let affine = [
+        vsx, 0.0, 0.0, 0.0, //
+        0.0, vsy, 0.0, 0.0, //
+        0.0, 0.0, vsz, 0.0, //
+        0.0, 0.0, 0.0, 1.0,
+    ];
+    let fixed = &data.mag_echoes[0];
+    println!("[INFO] phantom {dims:?} at {:?} mm", data.voxel_size);
+
+    // An oblique axis, so all three rotation parameters are exercised rather than one, plus a
+    // few millimetres of translation at every point.
+    let axis = [0.35, -0.55, 0.76];
+    let shift = [2.0, -3.0, 1.5];
+
+    // Displacement of the volume centre, which is what "translation error" should mean. The
+    // translation *column* of the matrix conflates the two: rotating about a point far from the
+    // world origin puts a large value there even when nothing translated.
+    let centre = [
+        (dims.0 as f64 - 1.0) * 0.5 * affine[0],
+        (dims.1 as f64 - 1.0) * 0.5 * affine[5],
+        (dims.2 as f64 - 1.0) * 0.5 * affine[10],
+    ];
+    let centre_shift_mm = |a: &[f64; 16], b: &[f64; 16]| {
+        let apply = |m: &[f64; 16]| {
+            [0, 1, 2].map(|i| {
+                m[4 * i] * centre[0] + m[4 * i + 1] * centre[1] + m[4 * i + 2] * centre[2]
+                    + m[4 * i + 3]
+            })
+        };
+        let (pa, pb) = (apply(a), apply(b));
+        ((pa[0] - pb[0]).powi(2) + (pa[1] - pb[1]).powi(2) + (pa[2] - pb[2]).powi(2)).sqrt()
+    };
+
+    // The shipped default. This test is what sets `RigidParams::levels`: at the original 3 it
+    // converged to 40 degrees and then failed by 92, so the sweep is run against whatever the
+    // default actually is rather than against a config chosen to pass.
+    let params = RigidParams::default();
+    println!("[INFO] RigidParams::levels = {}", params.levels);
+
+    println!();
+    println!("  applied    recovered   rot err   centre err   NCC     evals");
+    println!("  -------    ---------   -------   ----------   -----   -----");
+    let mut worst_ok = 0.0f64;
+    let mut first_failure: Option<f64> = None;
+    let mut worst_err_in_range = 0.0f64;
+    let sweep_start = Instant::now();
+    for step in 1..=14 {
+        let deg = 5.0 * step as f64;
+        let truth = rigid_axis_angle(axis, deg, shift, dims, &affine);
+        let moving = resample_onto(fixed, dims, &mat4(&truth, &affine), dims, &affine).unwrap();
+
+        let t = register_rigid(
+            fixed, dims, &affine,
+            &moving, dims, &affine,
+            Some(&data.mask), &params,
+        )
+        .expect("registration should run");
+
+        let rot_err = rotation_difference_deg(&t.matrix, &truth);
+        let centre_err = centre_shift_mm(&t.matrix, &truth);
+        // One degree is the working bound: it has to sit well inside the 3-degree separation
+        // below which a multi-orientation direction set counts as degenerate.
+        let ok = rot_err < 1.0;
+        println!(
+            "  {:>5.0}°     {:>6.2}°    {:>5.2}°   {:>7.2} mm   {:.3}   {:>5}  {}",
+            deg, t.rotation_magnitude_deg(), rot_err, centre_err, t.ncc,
+            t.evaluations, if ok { "ok" } else { "LOST" }
+        );
+        if ok {
+            worst_ok = worst_ok.max(deg);
+            worst_err_in_range = worst_err_in_range.max(rot_err);
+        } else if first_failure.is_none() {
+            first_failure = Some(deg);
+        }
+    }
+
+    // One row for the PR comment. The capture range is the number somebody planning a wide STI
+    // set actually needs, and it lives nowhere else — the sweep above is only in the job log.
+    println!(
+        "RESULT:Registration capture range,{:.0},{},{:.2},{:.2}",
+        worst_ok,
+        first_failure.map(|d| format!("{d:.0}")).unwrap_or_else(|| "none".into()),
+        worst_err_in_range,
+        sweep_start.elapsed().as_secs_f64()
+    );
+
+    println!();
+    match first_failure {
+        None => println!("[INFO] capture range: the whole swept range, to 70°"),
+        Some(d) => println!(
+            "[INFO] capture range: converged to {worst_ok:.0}°, first failure at {d:.0}°"
+        ),
+    }
+
+    // The default converges across the whole sweep, so anything less is a regression. 60 rather
+    // than 70 leaves a little room for the last point without letting the bound slide back
+    // under the 45 degrees that a deliberately wide STI set needs — which is exactly where the
+    // original 3-level default failed.
+    assert!(
+        worst_ok >= 60.0,
+        "capture range fell to {worst_ok:.0}° (first failure at {first_failure:?}) — \
+         registration converged to a local minimum at a misalignment it used to handle. \
+         RigidParams::levels is what governs this; check it has not been lowered"
+    );
+}

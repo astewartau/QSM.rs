@@ -311,7 +311,7 @@ pub struct GridMap {
 }
 
 /// Invert the 3×3 of an affine and fold in its translation, giving world→voxel as a 3×4.
-fn world_to_voxel(affine: &[f64; 16]) -> Option<[[f64; 4]; 3]> {
+pub(crate) fn world_to_voxel(affine: &[f64; 16]) -> Option<[[f64; 4]; 3]> {
     let r = [
         [affine[0], affine[1], affine[2]],
         [affine[4], affine[5], affine[6]],
@@ -636,7 +636,7 @@ impl AxialGrid {
 }
 
 /// Trilinear interpolation at a fractional voxel coordinate, clamped at the edges.
-fn trilinear_sample(data: &[f64], nx: usize, ny: usize, nz: usize, x: f64, y: f64, z: f64) -> f64 {
+pub(crate) fn trilinear_sample(data: &[f64], nx: usize, ny: usize, nz: usize, x: f64, y: f64, z: f64) -> f64 {
     let x0 = (x.floor() as isize).clamp(0, nx as isize - 1) as usize;
     let y0 = (y.floor() as isize).clamp(0, ny as isize - 1) as usize;
     let z0 = (z.floor() as isize).clamp(0, nz as isize - 1) as usize;
