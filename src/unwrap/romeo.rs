@@ -615,7 +615,9 @@ pub fn voxel_quality_romeo(
 // Phase unwrapping functions
 // =========================================================================
 
-/// Find a seed point at the center of mass of the mask.
+/// Find a seed point for region growing: the centre of mass of the mask, or - when that
+/// falls outside the mask, as it does for a disconnected or concave one - the nearest
+/// voxel that is inside it.
 pub fn find_seed_point(mask: &[u8], nx: usize, ny: usize, nz: usize) -> (usize, usize, usize) {
     let mut sum_i = 0usize;
     let mut sum_j = 0usize;
@@ -640,7 +642,35 @@ pub fn find_seed_point(mask: &[u8], nx: usize, ny: usize, nz: usize) -> (usize, 
         return (nx / 2, ny / 2, nz / 2);
     }
 
-    (sum_i / count, sum_j / count, sum_k / count)
+    let (ci, cj, ck) = (sum_i / count, sum_j / count, sum_k / count);
+    if mask[idx3d(ci, cj, ck, nx, ny)] > 0 {
+        return (ci, cj, ck);
+    }
+
+    // The centre of mass of a mask that is disconnected or merely concave can fall outside
+    // it - two hemispheres, a horseshoe - and the region growers treat a seed outside the
+    // mask as nothing to do and return the input still wrapped. Fall back to the nearest
+    // voxel that is actually in the mask. For a mask whose centre of mass is inside, which
+    // is the usual case, nothing above this line changes.
+    let mut best = (ci, cj, ck);
+    let mut best_d2 = f64::INFINITY;
+    for k in 0..nz {
+        for j in 0..ny {
+            for i in 0..nx {
+                if mask[idx3d(i, j, k, nx, ny)] == 0 {
+                    continue;
+                }
+                let d2 = (i as f64 - ci as f64).powi(2)
+                    + (j as f64 - cj as f64).powi(2)
+                    + (k as f64 - ck as f64).powi(2);
+                if d2 < best_d2 {
+                    best_d2 = d2;
+                    best = (i, j, k);
+                }
+            }
+        }
+    }
+    best
 }
 
 /// Compute weights from params (dispatches BestPath vs ROMEO).
@@ -1229,6 +1259,84 @@ mod tests {
     use crate::Grid;
 
     fn grid(n: usize) -> Grid { Grid::new(n, n, n, 1.0, 1.0, 1.0) }
+
+    #[test]
+    fn find_seed_point_returns_a_voxel_inside_the_mask() {
+        // The growers treat a seed outside the mask as nothing to do and hand back the input
+        // still wrapped, so a centre of mass in a hollow is a silent total failure. Two
+        // ordinary brain-mask shapes put it there.
+        let (nx, ny, nz) = (16usize, 16usize, 4usize);
+        let at = |m: &mut Vec<u8>, i: usize, j: usize, k: usize| m[i + j * nx + k * nx * ny] = 1;
+
+        // two separated blobs: the centre of mass sits in the gap between them
+        let mut split = vec![0u8; nx * ny * nz];
+        for k in 0..nz {
+            for j in 5..11 {
+                for i in 1..5 { at(&mut split, i, j, k); }
+                for i in 11..15 { at(&mut split, i, j, k); }
+            }
+        }
+        let (i, j, k) = find_seed_point(&split, nx, ny, nz);
+        assert_eq!(split[idx3d(i, j, k, nx, ny)], 1, "seed ({i},{j},{k}) is outside the mask");
+
+        // a horseshoe: one connected component, centre of mass in the hollow
+        let mut horseshoe = vec![0u8; nx * ny * nz];
+        for k in 0..nz {
+            for j in 2..14 {
+                for i in 2..5 { at(&mut horseshoe, i, j, k); }
+                for i in 11..14 { at(&mut horseshoe, i, j, k); }
+            }
+            for i in 2..14 { at(&mut horseshoe, i, 2, k); at(&mut horseshoe, i, 3, k); }
+        }
+        let (i, j, k) = find_seed_point(&horseshoe, nx, ny, nz);
+        assert_eq!(horseshoe[idx3d(i, j, k, nx, ny)], 1, "seed ({i},{j},{k}) is outside the mask");
+
+        // a convex mask is unaffected: the seed is exactly the centre of mass
+        let mut block = vec![0u8; nx * ny * nz];
+        for k in 1..3 {
+            for j in 4..12 {
+                for i in 4..12 { at(&mut block, i, j, k); }
+            }
+        }
+        assert_eq!(find_seed_point(&block, nx, ny, nz), (7, 7, 1));
+    }
+
+    #[test]
+    fn romeo_unwraps_a_mask_whose_centre_of_mass_is_outside_it() {
+        // The behavioural consequence: before the fallback this returned the input untouched.
+        let (nx, ny, nz) = (16usize, 16usize, 2usize);
+        let mut mask = vec![0u8; nx * ny * nz];
+        for k in 0..nz {
+            for j in 5..11 {
+                for i in 1..5 { mask[i + j * nx + k * nx * ny] = 1; }
+                for i in 11..15 { mask[i + j * nx + k * nx * ny] = 1; }
+            }
+        }
+        // a ramp steep enough to wrap across each blob but not between samples
+        let mut truth = vec![0.0; nx * ny * nz];
+        for k in 0..nz {
+            for j in 0..ny {
+                for i in 0..nx {
+                    truth[i + j * nx + k * nx * ny] = 1.2 * i as f64;
+                }
+            }
+        }
+        let wrapped: Vec<f64> = truth.iter().map(|&v| wrap_angle(v)).collect();
+        assert!(
+            wrapped.iter().zip(&truth).any(|(w, t)| (w - t).abs() > 1.0),
+            "the ramp does not wrap, so this proves nothing"
+        );
+
+        let grid = Grid::new(nx, ny, nz, 1.0, 1.0, 1.0);
+        let out = unwrap_romeo(
+            &wrapped, &[], None, 0.0, 0.0, &mask, &RomeoParams::default(), &grid,
+        );
+        let changed = out.iter().zip(&wrapped)
+            .enumerate()
+            .filter(|(i, (o, w))| mask[*i] != 0 && (*o - *w).abs() > 1e-9)
+            .count();
+        assert!(changed > 0, "nothing in the mask was unwrapped - the seed landed outside it");
+    }
 
     #[test]
     fn test_wrap_angle() {

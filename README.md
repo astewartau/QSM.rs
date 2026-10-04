@@ -114,12 +114,86 @@ Load and save NIfTI volumes with [`qsm_core::io`](src/io.rs).
 |-----------|-------------|-----------|
 | **ROMEO** | Region-growing with quality-guided ordering using magnitude and gradient coherence weighting | Dymerska, B., et al. (2021). "Phase unwrapping with a rapid opensource minimum spanning tree algorithm (ROMEO)." *Magnetic Resonance in Medicine*, 85(4):2294-2308. [DOI](https://doi.org/10.1002/mrm.28563) |
 | **Laplacian** | FFT-based Poisson solver under a Neumann boundary condition on the array — unwraps without altering the background field, so the result is a total field (`laplacian_unwrap`). This is what `UnwrapMethod::Laplacian` selects. | Schofield, M.A., Zhu, Y. (2003). "Fast phase unwrapping algorithm for interferometric applications." *Optics Letters*, 28(14):1194-1196. [DOI](https://doi.org/10.1364/OL.28.001194) |
+| **Best path** | 3D-SRNCP — every edge sorted by reliability and merged in that order (`unwrap_bestpath`) | Abdul-Rahman, H., et al. (2007). "Fast and robust three-dimensional best path phase unwrapping algorithm." *Applied Optics*, 46(26):6623-6635. [DOI](https://doi.org/10.1364/AO.46.006623) |
+| **Slice-wise (2D)** | Any of the above run on each slice independently, for 2D multi-slice acquisitions whose slices carry independent receive phase offsets (`unwrap_slicewise`). For multi-echo data `unwrap_slicewise_multi_echo` additionally makes each slice's residual 2π the same across echoes, so a `linear-fit` B0 estimate cancels it along with the physical offset — see below. | — |
+
+### 2D multi-slice acquisitions
+
+Every unwrapper above reads across slice boundaries, and a 2D multi-slice acquisition excites
+each slice separately, so each one carries its own constant receive phase offset. Unwrapping
+slice by slice avoids that, at the cost of fixing each slice only up to a multiple of 2π.
+
+Multi-echo data closes that gap: the offset is echo-independent, so it sits in the intercept of
+`phi(TE) = phi0 + gamma*dB*TE` and a fit across echoes returns the field from the slope. That
+only works while the leftover 2π is echo-independent too, which is why
+`unwrap_slicewise_multi_echo` enforces it rather than leaving it to the B0 fit — the correction
+needs the *wrapped* input phase, and the unwrapper is the only stage holding both that and its
+own output. The division of labour is: this module makes each echo of a voxel differ from the
+last by its measured phase evolution and nothing else; the B0 fit discards the leftover wrap
+from the intercept, together with the physical slice offset.
+
+That correction is per voxel, not per slice, and the difference is not cosmetic. A region grower
+with no route through the slice axis has to cross every in-plane fringe head-on, and where one
+is ambiguous it leaves *part* of a slice offset by 2π. On the qsm-forward 2D phantom the wrap
+count varies within a single slice of a single echo, so a per-slice correction has nothing it
+can do — per voxel takes the fitted field from r = −0.44 to r = 0.999.
+
+The 3D unwrappers are not a safe fallback. On clean data their quality weighting defers the
+incoherent z edges, so each slice does come out a whole number of wraps from the truth — but
+*which* whole number depends on the echo, because the jump being rounded is
+`offset_step + field_step * TE`. `correct_multi_echo_wraps` cannot repair it: it corrects the
+whole volume at once and the error is per slice. Measured on the phantom's 3 mm interleaved-offset
+session, as the correlation of a `linear-fit` B0 estimate against the field the signal was
+generated from:
+
+| | no slice offsets | interleaved offsets |
+|---|---|---|
+| 3D ROMEO, template | 0.21 | −0.05 |
+| 3D ROMEO, individual | **1.00** | 0.04 |
+| **slice-wise ROMEO + consistency** | **1.00** | **1.00** |
+| slice-wise best path + consistency | 1.00 | 1.00 |
+| slice-wise Laplacian + consistency | 0.69 | 0.69 |
+
+Slice-wise costs nothing where there are no offsets and is the only thing that works where there
+are. The Laplacian trails because its Poisson solution is not a whole number of wraps from the
+truth to begin with, so the consistency pass cannot fully re-seat it; prefer ROMEO or best path.
+
+Background field removal needs the companion change, and it is worth being precise about when.
+Wherever a sphere fits, the sphere wins: 2D V-SHARP is **not** a better V-SHARP, and on a ROI
+with tissue above and below it, plain 3D V-SHARP beats both the 2D stage and the chain. What
+changes for 2D multi-slice is that the stack is prescribed over part of the head, so the tissue
+reaches the first and last slice and a sphere has nothing beyond them to average over. V-SHARP's
+variable radius does not erode those slices away — it falls back to radii small enough to fit,
+which remove much less. A disc does not care: it is the same disc on the end slices as in the
+middle.
+
+Measured on the synthetic background in `bgremove::vsharp2d` (residual RMS against a ground truth
+of zero, every source outside the ROI):
+
+| | slab coverage | enclosed ROI |
+|---|---|---|
+| 2D V-SHARP | 1.18 | 0.47 |
+| 3D V-SHARP | 1.69 | **0.14** |
+| 2D V-SHARP → 3D PDF | **0.99** | 0.24 |
+
+On slab coverage the end-slice residual is the whole story: 3D V-SHARP 4.0 against 2D's 1.6,
+while in the interior 3D is three times better. So the chain is for slab coverage and nothing
+else.
+
+A slice **gap**, where the excited slabs are thinner than the slice pitch, makes the sampled
+volume non-contiguous. The FFT dipole kernel and the SHARP family's spherical kernels are defined
+on a uniform grid, so on gapped data they compute a different convolution and the result is wrong
+rather than approximate. `Grid::require_contiguous_slices(slice_thickness, slice_axis)` is the
+check, and it needs the acquisition's `SliceThickness` — nothing in a NIfTI records it, since the
+spacing is the *pitch*. Purely in-plane work is unaffected, which is why `vsharp_2d` does not
+call it and `vsharp_2d_pdf` does.
 
 ### Background Field Removal
 
 | Algorithm | Description | Reference |
 |-----------|-------------|-----------|
 | **V-SHARP** | Variable-radius Sophisticated Harmonic Artifact Reduction for Phase data — multi-scale deconvolution for robust background removal | Wu, B., et al. (2012). "Whole brain susceptibility mapping using compressed sensing." *Magnetic Resonance in Medicine*, 67(1):137-147. [DOI](https://doi.org/10.1002/mrm.23000) |
+| **2D V-SHARP → 3D PDF** | For 2D multi-slice data. SHARP rests on the three-dimensional mean value property of harmonic functions, which a disc does not have, so V-SHARP run slice by slice removes only the in-plane background component (`vsharp_2d`). `vsharp_2d_pdf` chains 3D PDF after it to take the through-slice component the discs cannot see, and refuses a gapped acquisition rather than computing one. Worth it only on slab coverage — see the note below. | Wu et al. (2012) as above; Liu, T., et al. (2011). "A novel background field removal method for MRI using projection onto dipole fields." *NMR in Biomedicine*, 24(9):1129-1136. [DOI](https://doi.org/10.1002/nbm.1670) |
 | **SHARP** | Sophisticated Harmonic Artifact Reduction for Phase data — deconvolution-based harmonic field removal | Schweser, F., et al. (2011). "Quantitative imaging of intrinsic magnetic tissue properties using MRI signal phase." *NeuroImage*, 54(4):2789-2807. [DOI](https://doi.org/10.1016/j.neuroimage.2010.10.070) |
 | **RESHARP** | Regularized SHARP — uses Tikhonov regularization instead of TSVD truncation for more robust SMV deconvolution | Sun, H. and Wilman, A.H. (2013). "Background field removal using spherical mean value filtering and Tikhonov regularization." *Magn Reson Med*, 71(3):1151-1157. [DOI](https://doi.org/10.1002/mrm.24765) |
 | **SMV** | Simple Spherical Mean Value — subtracts the spherical mean of the field for basic background removal | Schweser, F., et al. (2011). "Quantitative imaging of intrinsic magnetic tissue properties using MRI signal phase." *NeuroImage*, 54(4):2789-2807. [DOI](https://doi.org/10.1016/j.neuroimage.2010.10.070) |
