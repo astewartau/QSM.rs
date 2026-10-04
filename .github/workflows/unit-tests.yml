@@ -35,6 +35,14 @@ jobs:
             target/
           key: ${{ runner.os }}-cargo-tarpaulin-${{ hashFiles('**/Cargo.lock') }}
 
+      # Gates on test failures. The tarpaulin step below cannot: it runs with
+      # `|| true` because tarpaulin returns non-zero of its own accord (see
+      # ed00937), and the coverage threshold is not a substitute, since a test
+      # that fails every assertion still covers the lines it ran. Runs before
+      # the tarpaulin install so a failure skips that build entirely.
+      - name: Run unit tests
+        run: cargo test --lib --features parallel
+
       - name: Install cargo-tarpaulin
         run: |
           if ! command -v cargo-tarpaulin &>/dev/null; then
