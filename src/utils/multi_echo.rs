@@ -320,24 +320,6 @@ pub fn hermitian_inner_product(
     (hip_phase, hip_mag)
 }
 
-/// MCPC-3D-S phase offset estimation for single-coil multi-echo data
-///
-/// Implements the MCPC-3D-S algorithm from MriResearchTools.jl for single-coil data.
-/// This estimates and removes the phase offset (φ₀) from each echo.
-///
-/// # Arguments
-/// * `phases` - Phase data for all echoes, shape [n_echoes][nx*ny*nz]
-/// * `mags` - Magnitude data for all echoes, shape [n_echoes][nx*ny*nz]
-/// * `tes` - Echo times in ms
-/// * `mask` - Binary mask
-/// * `sigma` - Smoothing sigma in voxels [sx, sy, sz], default [10, 10, 5]
-/// * `echoes` - Which echoes to use for HIP calculation, default [0, 1] (first two)
-/// * `nx`, `ny`, `nz` - Dimensions
-///
-/// # Returns
-/// (corrected_phases, phase_offset) where:
-/// - corrected_phases: phases with offset removed
-/// - phase_offset: estimated phase offset
 /// Remove phase offset from multi-echo phase data using HIP (Hermitian Inner Product).
 ///
 /// Estimates the spatially-varying phase offset from the phase difference between two
@@ -759,7 +741,7 @@ pub fn mcpc3ds_combine<P: AsRef<[f64]>, M: AsRef<[f64]>>(
 ///
 /// Implements calculateB0_unwrapped from MriResearchTools.jl
 ///
-/// Formula: B0 = (1000 / 2π) * Σ(phase / TE * weight) / Σ(weight)
+/// Formula: B0 = (1 / 2π) * Σ(phase / TE * weight) / Σ(weight)
 ///
 /// # Arguments
 /// * `unwrapped_phases` - Unwrapped phase for each echo [n_echoes][nx*ny*nz]
@@ -2040,10 +2022,11 @@ mod tests {
             &phases, &mags, &tes, &mask, sigma, [0, 1], UnwrapMethod::Romeo, &grid(nx, ny, nz),
         );
 
-        // Run linear fit on corrected phases (tes in seconds for fit)
-        let tes_s: Vec<f64> = tes.iter().map(|&t| t / 1000.0).collect();
+        // Run linear fit on corrected phases. `tes` is already in seconds; the
+        // /1000 that used to be here was a leftover from the millisecond era and
+        // fed the fit 5-15 microsecond echo times.
         let result = multi_echo_linear_fit(
-            &corrected, &mags, &tes_s, &mask, true, 0.0,
+            &corrected, &mags, &tes, &mask, true, 0.0,
         );
 
         assert_eq!(result.field.len(), n);
