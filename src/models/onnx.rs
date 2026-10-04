@@ -65,6 +65,10 @@ pub enum OnnxError {
     Shape(String),
     /// Failure during the forward pass.
     Run(String),
+    /// The input lies outside the domain the weights were trained on — field strength,
+    /// resolution, orientation. The graph would run and return a well-formed, wrong answer, so
+    /// this is refused rather than reported in the output.
+    Domain(String),
 }
 
 impl std::fmt::Display for OnnxError {
@@ -73,6 +77,7 @@ impl std::fmt::Display for OnnxError {
             Self::Load(m) => write!(f, "onnx load error: {m}"),
             Self::Shape(m) => write!(f, "onnx shape error: {m}"),
             Self::Run(m) => write!(f, "onnx run error: {m}"),
+            Self::Domain(m) => write!(f, "onnx domain error: {m}"),
         }
     }
 }

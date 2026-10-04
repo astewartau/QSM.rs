@@ -102,13 +102,14 @@ fn test_chi_sep_medi_qsmci() {
     let Some(ph) = load_chisep_phantom() else { return };
     println!("[INFO] chi_sep_medi on qsmci phantom (posted MATLAB chi-sep-medi: para 0.73/0.90, dia 0.58/0.91)");
 
-    let params = ChiSepParams {
-        cf: ph.cf,
-        dr_pos: 137.0,
-        dr_neg: 137.0,
-        max_iter: 30,
-        ..ChiSepParams::default()
-    };
+    // 137/137 used to be set here because the default was 114/30; it is the default now
+    // (QSM.rs#130), so this scores the shipped configuration rather than a local override.
+    let params = ChiSepParams { cf: ph.cf, max_iter: 30, ..ChiSepParams::default() };
+    assert_eq!(
+        (params.dr_pos, params.dr_neg),
+        (137.0, 137.0),
+        "this phantom's reference numbers were measured at Dr = 137 Hz/ppm"
+    );
     let t = Instant::now();
     let (chi_pos, chi_neg, _) = chi_sep_medi(
         &ph.local_field_ppm,
