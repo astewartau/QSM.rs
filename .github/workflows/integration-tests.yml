@@ -51,7 +51,7 @@ jobs:
           all_bgremove='["test_bgremove_sharp","test_bgremove_resharp","test_bgremove_vsharp","test_bgremove_pdf","test_bgremove_ismv","test_bgremove_lbv"]'
           all_inversion='["test_inversion_tkd","test_inversion_tsvd","test_inversion_tikhonov","test_inversion_tv","test_inversion_rts","test_inversion_ilsqr","test_inversion_medi","test_inversion_nltv","test_inversion_ndi","test_inversion_fansi","test_inversion_fansi_tgv","test_inversion_l1qsm","test_inversion_whqsm","test_inversion_hdqsm","test_inversion_amp_pe","test_inversion_lsqr","test_inversion_heidi","test_multiorient_cosmos","test_multiorient_sti","test_multiorient_coverage","test_multiorient_noise","test_multiorient_register","test_multiorient_register_capture_range"]'
           all_combined='["test_combined_tgv","test_combined_tfi"]'
-          all_pipeline='["test_pipeline_romeo_b0","test_pipeline_unwrap_bfr_romeo","test_pipeline_unwrap_bfr_laplacian_neumann","test_pipeline_unwrap_bfr_bestpath","test_unwrap_bfr_single_volume","test_pipeline_unwrap_bfr_stage_laplacian","test_pipeline_tgv","test_pipeline_qsmart","test_pipeline_qsmart_tikhonov","test_pipeline_harperella","test_pipeline_iharperella","test_bias_correction","test_swi","test_smwi","test_r2star_t2star"]'
+          all_pipeline='["test_pipeline_romeo_b0","test_pipeline_unwrap_bfr_romeo","test_pipeline_unwrap_bfr_laplacian_neumann","test_pipeline_unwrap_bfr_bestpath","test_unwrap_bfr_single_volume","test_pipeline_unwrap_bfr_stage_laplacian","test_pipeline_tgv","test_pipeline_qsmart","test_pipeline_qsmart_tikhonov","test_pipeline_harperella","test_pipeline_iharperella","test_bias_correction","test_swi","test_smwi","test_r2star_t2star","test_motion_correction"]'
           # χ-separation entries are whole test *binaries* (each runs several methods).
           all_chisep='["chisep_qsmci","chisep_relaxometry_qsmci","chisep_xsepnet","chisep_r2primenet","chisep_orientation"]'
           # Deep-learning models (in tests/dl_models.rs; weights fetched from the registry).
@@ -287,11 +287,17 @@ jobs:
               src/geometry.rs)
                 chisep="$chisep chisep_orientation"
                 inversion="$inversion test_multiorient_register"
+                pipeline="$pipeline test_motion_correction"
                 run_geometry=true ;;
               tests/oblique_sagittal.rs) run_geometry=true ;;
               # Rigid registration: the primitive that puts un-coregistered orientations on a
               # common grid and recovers their B0 directions.
-              src/registration.rs) inversion="$inversion test_multiorient_register test_multiorient_register_capture_range" ;;
+              src/registration.rs)
+                inversion="$inversion test_multiorient_register test_multiorient_register_capture_range"
+                pipeline="$pipeline test_motion_correction" ;;
+              # Image-domain motion correction: registration applied along a series, and the
+              # pipeline stage that puts it in front of field mapping.
+              src/motion.rs|src/pipeline/motion.rs) pipeline="$pipeline test_motion_correction" ;;
               src/utils/sliding.rs) chisep="$chisep chisep_xsepnet chisep_r2primenet" ;;
               src/separation/*) chisep="$chisep chisep_qsmci chisep_relaxometry_qsmci" ;;
               tests/chisep_qsmci.rs) chisep="$chisep chisep_qsmci" ;;
@@ -1314,6 +1320,44 @@ jobs:
               fi
             fi
 
+            if [ -f "metrics/test_motion_correction.csv" ]; then
+              echo "## Motion Correction"
+              echo "*A four-echo series in which the head drifts between echoes, registered back to the first*"
+              echo "*echo in the complex domain and re-fitted. Scored against the field map the same pipeline*"
+              echo "*produces from the same echoes with no motion — not against ground truth, which a total*"
+              echo "*field map only matches up to the harmonic field unwrapping leaves behind.*"
+              echo ""
+              recovery=$(grep "^RESULT:Motion recovery," "metrics/test_motion_correction.csv" | head -1 | sed 's/^RESULT://')
+              if [ -n "$recovery" ]; then
+                IFS=',' read -r _ rot trans bdir disp rtime <<< "$recovery"
+                echo "| Recovered motion | Worst over the series |"
+                echo "|------------------|-----------------------|"
+                echo "| Rotation error | ${rot}° |"
+                echo "| Translation error | ${trans} mm |"
+                echo "| B0 direction error | ${bdir}° |"
+                echo "| Simulated tissue displacement | ${disp} mm |"
+                echo "| Time | $(printf '%.2fs' "$rtime") |"
+                echo ""
+              fi
+              have_rows=false
+              for variant in Uncorrected Corrected; do
+                grep -q "^RESULT:${variant}," "metrics/test_motion_correction.csv" && have_rows=true
+              done
+              echo "| Field map | NRMSE (range) | Correlation | XSIM | Time |"
+              echo "|-----------|---------------|-------------|------|------|"
+              if [ "$have_rows" = true ]; then
+                for variant in Uncorrected Corrected; do
+                  line=$(grep "^RESULT:${variant}," "metrics/test_motion_correction.csv" | head -1 | sed 's/^RESULT://')
+                  [ -n "$line" ] || continue
+                  IFS=',' read -r name nrmse corr xsim mtime <<< "$line"
+                  echo "| ${name} | ${nrmse} | ${corr} | ${xsim} | $(printf '%.2fs' "$mtime") |"
+                done
+              else
+                echo "| Motion correction | :x: Failed | - | - | - |"
+              fi
+              echo ""
+            fi
+
             if TABLE=$(emit_chi_table "test_multiorient_" cosmos register sti); then
               echo "## Multi-Orientation Inversion"
               echo "*COSMOS and STI consume several orientations, so these are not like-for-like with the single-orientation methods above. Compared against ground truth susceptibility map; STI reports mean magnetic susceptibility.*"
@@ -1617,6 +1661,45 @@ jobs:
               fi
               echo ""
               emit_figures stage_registration
+            fi
+
+            if [ -f "metrics/test_motion_correction.csv" ]; then
+              echo "### Motion Correction"
+              echo "*A four-echo series in which the head drifts between echoes, registered back to the first*"
+              echo "*echo in the complex domain and re-fitted. Scored against the field map the same pipeline*"
+              echo "*produces from the same echoes with no motion — not against ground truth, which a total*"
+              echo "*field map only matches up to the harmonic field unwrapping leaves behind.*"
+              echo ""
+              recovery=$(grep "^RESULT:Motion recovery," "metrics/test_motion_correction.csv" | head -1 | sed 's/^RESULT://')
+              if [ -n "$recovery" ]; then
+                IFS=',' read -r _ rot trans bdir disp rtime <<< "$recovery"
+                echo "| Recovered motion | Worst over the series |"
+                echo "|------------------|-----------------------|"
+                echo "| Rotation error | ${rot}° |"
+                echo "| Translation error | ${trans} mm |"
+                echo "| B0 direction error | ${bdir}° |"
+                echo "| Simulated tissue displacement | ${disp} mm |"
+                echo "| Time | $(printf '%.2fs' "$rtime") |"
+                echo ""
+              fi
+              have_rows=false
+              for variant in Uncorrected Corrected; do
+                grep -q "^RESULT:${variant}," "metrics/test_motion_correction.csv" && have_rows=true
+              done
+              echo "| Field map | NRMSE (range) | Correlation | XSIM | Time |"
+              echo "|-----------|---------------|-------------|------|------|"
+              if [ "$have_rows" = true ]; then
+                for variant in Uncorrected Corrected; do
+                  line=$(grep "^RESULT:${variant}," "metrics/test_motion_correction.csv" | head -1 | sed 's/^RESULT://')
+                  [ -n "$line" ] || continue
+                  IFS=',' read -r name nrmse corr xsim mtime <<< "$line"
+                  echo "| ${name} | ${nrmse} | ${corr} | ${xsim} | $(printf '%.2fs' "$mtime") |"
+                done
+              else
+                echo "| Motion correction | :x: Failed | - | - | - |"
+              fi
+              echo ""
+              emit_figures stage_motion
             fi
 
             if TABLE=$(emit_chi_table "test_multiorient_" cosmos register sti); then

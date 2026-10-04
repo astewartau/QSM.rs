@@ -232,4 +232,14 @@ pub mod geometry;
 /// [`registration::RigidTransform::b0_direction_in_fixed`].
 pub mod registration;
 
+/// Retrospective motion correction: co-register a series of repeats, runs or echoes onto one of
+/// them, in the complex domain, and re-derive B0 for each.
+///
+/// The image-domain half of motion correction — what a library consuming reconstructed NIfTI can
+/// do, as opposed to the navigator-driven prospective methods that need raw k-space. Two things
+/// it exists to get right: wrapped phase only ever moves through the complex domain
+/// ([`motion::MotionSeries::apply_complex`]), and a series that rotated has one B0 direction per
+/// volume ([`motion::VolumeMotion::bdir`]), not one for the series.
+pub mod motion;
+
 pub mod io;
