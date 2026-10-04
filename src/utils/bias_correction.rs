@@ -38,6 +38,23 @@ fn idx3d(i: usize, j: usize, k: usize, nx: usize, ny: usize) -> usize {
     i + j * nx + k * nx * ny
 }
 
+/// Check a caller-supplied volume against the grid it is about to be indexed by.
+///
+/// Every filter here walks `0..nx*ny*nz` and indexes straight into the caller's
+/// buffer, so a volume that does not match the grid reads past its end. Refusing
+/// at the entry point names both sizes; the index panic 300 lines down does not
+/// say which input was wrong, or that the grid was the problem at all.
+#[inline]
+fn check_volume(name: &str, len: usize, grid: &Grid) -> usize {
+    let (nx, ny, nz) = grid.dims;
+    let n_total = nx * ny * nz;
+    assert_eq!(
+        len, n_total,
+        "{name} has {len} voxels but the grid is {nx}x{ny}x{nz} ({n_total} voxels)"
+    );
+    n_total
+}
+
 //=============================================================================
 // Box Filter Gaussian Approximation (matching MriResearchTools.jl)
 //=============================================================================
@@ -298,7 +315,13 @@ pub fn gaussian_smooth_3d(
     grid: &Grid,
 ) -> Vec<f64> {
     let (nx, ny, nz) = grid.dims;
-    let n_total = nx * ny * nz;
+    let n_total = check_volume("gaussian_smooth_3d: data", data.len(), grid);
+    if let Some(m) = mask {
+        check_volume("gaussian_smooth_3d: mask", m.len(), grid);
+    }
+    if let Some(w) = weight.as_deref() {
+        check_volume("gaussian_smooth_3d: weight", w.len(), grid);
+    }
     let mut result: Vec<f64> = data.iter().map(|&v| v as f64).collect();
 
     // Calculate box sizes for each dimension
@@ -440,6 +463,12 @@ pub fn gaussian_smooth_3d_boxsizes(
     grid: &Grid,
 ) -> Vec<f64> {
     let (nx, ny, nz) = grid.dims;
+    check_volume("gaussian_smooth_3d_boxsizes: data", data.len(), grid);
+    assert_eq!(
+        boxsizes.len(), 3,
+        "gaussian_smooth_3d_boxsizes: boxsizes needs one entry per axis, got {}",
+        boxsizes.len()
+    );
     let mut result = data.to_vec();
 
     // Apply box filters for each pass and dimension
@@ -561,7 +590,7 @@ fn flood_fill_component(
 /// Uses 6-connectivity for 3D.
 pub fn fill_holes(mask: &[u8], grid: &Grid, max_hole_size: usize) -> Vec<u8> {
     let (nx, ny, nz) = grid.dims;
-    let n_total = nx * ny * nz;
+    let n_total = check_volume("fill_holes: mask", mask.len(), grid);
     let mut result = mask.to_vec();
     let mut visited = vec![false; n_total];
 
@@ -605,8 +634,7 @@ pub fn fill_holes(mask: &[u8], grid: &Grid, max_hole_size: usize) -> Vec<u8> {
 /// This matches MriResearchTools.jl's robustmask function, including
 /// post-processing with smoothing and hole filling.
 pub fn robust_mask(mag: &[f64], grid: &Grid) -> Vec<u8> {
-    let (nx, ny, nz) = grid.dims;
-    let n_total = nx * ny * nz;
+    let n_total = check_volume("robust_mask: magnitude", mag.len(), grid);
 
     // Collect valid (positive, finite) samples and sort
     let mut samples: Vec<f64> = mag.iter()
@@ -854,7 +882,7 @@ pub fn get_sensitivity(
 ) -> Vec<f64> {
     let (nx, ny, nz) = grid.dims;
     let (vx, vy, vz) = grid.voxel_size;
-    let n_total = nx * ny * nz;
+    let n_total = check_volume("get_sensitivity: magnitude", mag.len(), grid);
 
     // Convert mm to voxels
     let sigma = [sigma_mm / vx, sigma_mm / vy, sigma_mm / vz];
@@ -917,8 +945,8 @@ pub fn makehomogeneous(
     sigma_mm: f64,
     nbox: usize,
 ) -> Vec<f64> {
+    let n_total = check_volume("makehomogeneous: magnitude", mag.len(), grid);
     let sensitivity = get_sensitivity(mag, grid, sigma_mm, nbox);
-    let n_total = grid.n_total();
 
     let mut result = vec![0.0; n_total];
     for i in 0..n_total {
@@ -948,6 +976,12 @@ pub fn rss_combine(
     n_echoes: usize,
     n_total: usize,
 ) -> Vec<f64> {
+    assert_eq!(
+        mags_flat.len(), n_echoes * n_total,
+        "rss_combine: magnitudes hold {} values but {n_echoes} echoes of {n_total} voxels \
+         need {}",
+        mags_flat.len(), n_echoes * n_total
+    );
     let mut result = vec![0.0; n_total];
 
     for e in 0..n_echoes {
@@ -1674,5 +1708,83 @@ mod tests {
         // At least some values should be finite
         let finite_count = result.iter().filter(|v| v.is_finite()).count();
         assert!(finite_count > 0, "Should have some finite values");
+    }
+
+    // =====================================================================
+    // Issue #70: a volume that does not match its grid must say so
+    //
+    // A run is processed on one grid and that grid indexes every other volume,
+    // so a magnitude of a different matrix size used to read past the end of
+    // the buffer inside the box filter:
+    //
+    //     bias_correction.rs:453:72: index out of bounds:
+    //     the len is 21807104 but the index is 21807104
+    //
+    // which named neither the input nor the grid. Each entry point now refuses
+    // the mismatch and reports both sizes.
+    // =====================================================================
+
+    #[test]
+    #[should_panic(expected = "makehomogeneous: magnitude has 216 voxels but the grid is 8x8x8 (512 voxels)")]
+    fn makehomogeneous_refuses_magnitude_shorter_than_grid() {
+        makehomogeneous(&vec![1.0; 6 * 6 * 6], &grid(8, 8, 8), 4.0, 5);
+    }
+
+    #[test]
+    #[should_panic(expected = "makehomogeneous: magnitude has 1000 voxels but the grid is 8x8x8 (512 voxels)")]
+    fn makehomogeneous_refuses_magnitude_longer_than_grid() {
+        // The over-long case never panicked - it silently corrected the first
+        // 512 voxels and discarded the rest, which is worse than a crash.
+        makehomogeneous(&vec![1.0; 10 * 10 * 10], &grid(8, 8, 8), 4.0, 5);
+    }
+
+    #[test]
+    #[should_panic(expected = "robust_mask: magnitude has 216 voxels but the grid is 8x8x8 (512 voxels)")]
+    fn robust_mask_refuses_magnitude_not_matching_grid() {
+        robust_mask(&vec![1.0; 6 * 6 * 6], &grid(8, 8, 8));
+    }
+
+    #[test]
+    #[should_panic(expected = "gaussian_smooth_3d_boxsizes: data has 216 voxels but the grid is 8x8x8 (512 voxels)")]
+    fn gaussian_smooth_3d_boxsizes_refuses_data_not_matching_grid() {
+        // This is the function that carried the reported panic (line 453).
+        let boxsizes = vec![vec![5], vec![5], vec![5]];
+        gaussian_smooth_3d_boxsizes(&vec![1.0; 6 * 6 * 6], &boxsizes, 1, &grid(8, 8, 8));
+    }
+
+    #[test]
+    #[should_panic(expected = "gaussian_smooth_3d: mask has 216 voxels but the grid is 8x8x8 (512 voxels)")]
+    fn gaussian_smooth_3d_refuses_mask_not_matching_grid() {
+        let data = vec![1.0; 8 * 8 * 8];
+        let mask = vec![1u8; 6 * 6 * 6];
+        gaussian_smooth_3d(&data, [1.5, 1.5, 1.5], Some(&mask), None, 3, &grid(8, 8, 8));
+    }
+
+    #[test]
+    #[should_panic(expected = "gaussian_smooth_3d: weight has 216 voxels but the grid is 8x8x8 (512 voxels)")]
+    fn gaussian_smooth_3d_refuses_weight_not_matching_grid() {
+        let data = vec![1.0; 8 * 8 * 8];
+        let mut weight = vec![1.0; 6 * 6 * 6];
+        gaussian_smooth_3d(&data, [1.5, 1.5, 1.5], None, Some(&mut weight), 3, &grid(8, 8, 8));
+    }
+
+    #[test]
+    #[should_panic(expected = "fill_holes: mask has 216 voxels but the grid is 8x8x8 (512 voxels)")]
+    fn fill_holes_refuses_mask_not_matching_grid() {
+        fill_holes(&vec![1u8; 6 * 6 * 6], &grid(8, 8, 8), 10);
+    }
+
+    #[test]
+    #[should_panic(expected = "rss_combine: magnitudes hold 600 values but 3 echoes of 216 voxels need 648")]
+    fn rss_combine_refuses_truncated_echo_stack() {
+        rss_combine(&vec![1.0; 600], 3, 6 * 6 * 6);
+    }
+
+    #[test]
+    fn makehomogeneous_accepts_a_matching_volume() {
+        // The guard must not reject the ordinary case.
+        let n = 8;
+        let out = makehomogeneous(&vec![1.0; n * n * n], &grid(n, n, n), 4.0, 5);
+        assert_eq!(out.len(), n * n * n);
     }
 }
