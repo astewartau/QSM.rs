@@ -3339,10 +3339,22 @@ fn test_motion_correction() {
         .map(|(&m, &c)| m & c)
         .collect();
     let kept = scoring_mask.iter().filter(|&&m| m != 0).count();
+    let in_brain = data.mask.iter().filter(|&&m| m != 0).count();
     println!(
-        "[INFO] scoring over {kept} of {} brain voxels (the rest is outside some echo's \
-         field of view after rotation)",
-        data.mask.iter().filter(|&&m| m != 0).count()
+        "[INFO] scoring over {kept} of {in_brain} brain voxels (the rest is outside some echo's \
+         field of view after rotation)"
+    );
+    // The scoring region depends on how far the series moved — coverage is the intersection of
+    // what every rotated echo still reaches — so it shrinks as the simulated motion grows. At
+    // the motion simulated here it is the whole brain, but nothing about this test stops someone
+    // raising that motion, and every number below would then be taken over a region small enough
+    // for the comparison to stop meaning anything, without a single assertion complaining.
+    // Bound it, so the metric cannot quietly become a small-sample statistic.
+    assert!(
+        kept > in_brain / 2,
+        "only {kept} of {in_brain} brain voxels are covered by every echo; the metrics below \
+         would be comparing small samples. Reduce the simulated motion, or score a region \
+         chosen on purpose rather than whatever survived it"
     );
 
     let (baseline, t_base) = run_timed!(
