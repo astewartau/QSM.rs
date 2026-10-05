@@ -135,6 +135,8 @@ NAMES = {
 DIFF_LABELS = {
     "diff:register_reference-vs-register_misaligned": "Difference — as acquired",
     "diff:register_reference-vs-register_aligned": "Difference — after registration",
+    "diff:motion_baseline_field-vs-motion_uncorrected_field": "Uncorrected",
+    "diff:motion_baseline_field-vs-motion_corrected_field": "After correction",
 }
 
 MONTAGE_LABELS = {
@@ -148,6 +150,11 @@ MONTAGE_LABELS = {
     "register_reference": "Reference orientation",
     "register_misaligned": "Moving — as acquired",
     "register_aligned": "Moving — after registration",
+    # Motion correction: total field maps, all four on the montage's shared ppm scale.
+    "motion_truth_field": "Ground truth field",
+    "motion_baseline_field": "No motion",
+    "motion_uncorrected_field": "Motion, uncorrected",
+    "motion_corrected_field": "Motion, corrected",
     # Relaxometry: the row label already names the tool and units.
     "relax_r2_truth": "Truth", "relax_r2_epg": "EPG", "relax_r2_monoexp": "Mono-exp",
     "relax_r2prime_truth": "Truth", "relax_r2prime_derived": "Derived (R2* − R2)",
@@ -171,6 +178,13 @@ WINDOWS = {
     # window here mean the same thing on any dataset.
     "diff:register_reference-vs-register_misaligned": (-0.6, 0.6),
     "diff:register_reference-vs-register_aligned": (-0.6, 0.6),
+    # Motion correction: the two residuals share one window, and it is deliberately the *same*
+    # window as the field maps above them, so the residual can be read directly against the
+    # field it is a residual of. Auto-scaling each to its own percentile would stretch the
+    # corrected residual until it looked as dramatic as the uncorrected one, which is the whole
+    # content of the pair.
+    "diff:motion_baseline_field-vs-motion_uncorrected_field": (-0.05, 0.05),
+    "diff:motion_baseline_field-vs-motion_corrected_field": (-0.05, 0.05),
     "bgremove_sharp": (-0.025, 0.025),
     "bgremove_resharp": (-0.025, 0.025),
     "bgremove_vsharp": (-0.025, 0.025),
@@ -344,6 +358,24 @@ REGISTRATION = ("stage_registration", "Orientation co-registration", None, None,
     ["diff:register_reference-vs-register_misaligned",
      "diff:register_reference-vs-register_aligned"],
 ], ["magnitude", "difference from the reference"])
+# Motion correction. The top row is context — four total field maps that look much alike — and
+# the bottom row is the figure: both residuals against the *no-motion* map, on one window.
+# "uncorrected" should be bright where motion moved tissue across a field gradient and
+# "after correction" near-flat. Equally bright means the transform went on the wrong way round,
+# which is a failure a susceptibility map downstream shows only as mild degradation.
+#
+# The reference is the no-motion map and not the simulated ground truth on purpose: a total field
+# map agrees with ground truth only up to the harmonic field unwrapping leaves behind, which is
+# far larger than the motion and would swamp both residual panels equally. The ground truth is
+# not shown for the same reason — on this shared window it saturates, because that harmonic
+# offset is larger than the window, and a reader would take "the ground truth looks nothing like
+# the others" for a fault in the data rather than a property of unwrapping.
+MOTION = ("stage_motion", "Motion correction", "ppm", (-0.05, 0.05), [
+    ["motion_baseline_field", "motion_uncorrected_field", "motion_corrected_field"],
+    ["diff:motion_baseline_field-vs-motion_uncorrected_field",
+     "diff:motion_baseline_field-vs-motion_corrected_field"],
+], ["total field", "residual vs the no-motion map"])
+MONTAGES.append(MOTION)
 MONTAGES.append(REGISTRATION)
 MONTAGES.append(MULTIORIENT)
 MONTAGES.append(SUPPLEMENTARY)

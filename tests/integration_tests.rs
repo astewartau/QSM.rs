@@ -3112,3 +3112,340 @@ fn test_multiorient_register_capture_range() {
          RigidParams::levels is what governs this; check it has not been lowered"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Motion correction (image-domain, registration-based)
+// ---------------------------------------------------------------------------
+
+/// Field mapping over an arbitrary echo series: offset removal → ROMEO → weighted B0 → ppm.
+///
+/// The same three stages `run_field_mapping` runs, but on phases and magnitudes handed in rather
+/// than read off `TestData`, so the identical pipeline can be run on the original echoes, on a
+/// motion-corrupted copy of them, and on the corrected copy.
+fn field_map_ppm(
+    phases: &[Vec<f64>],
+    magnitudes: &[Vec<f64>],
+    mask: &[u8],
+    data: &common::TestData,
+) -> Vec<f64> {
+    let (nx, ny, nz) = data.dims;
+    let (vsx, vsy, vsz) = data.voxel_size;
+    let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
+
+    let (corrected_phases, _offset) = phase_offset_removal(
+        phases, magnitudes, &data.echo_times, mask,
+        [10.0, 10.0, 5.0], [0, 1], UnwrapMethod::Romeo,
+        &grid,
+    );
+    let mag_refs: Vec<&[f64]> = magnitudes.iter().map(|m| m.as_slice()).collect();
+    let unwrapped = unwrap_romeo_multi_echo(
+        &corrected_phases, &mag_refs, &data.echo_times, mask,
+        &RomeoParams::default(), &grid,
+    );
+    let b0_hz = calculate_b0_weighted(
+        &unwrapped, magnitudes, &data.echo_times, mask, B0WeightType::PhaseSNR, &grid,
+    );
+    let scale = 1e6 / (42.576e6_f64 * data.field_strength);
+    b0_hz.iter().map(|&v| v * scale).collect()
+}
+
+/// Subtract the in-mask mean.
+///
+/// Unwrapping is only defined up to an additive harmonic field, so a total field map and the
+/// ground truth differ by an arbitrary offset that is nothing to do with motion. Left in, that
+/// offset dominates every difference and makes the corrected and uncorrupted maps look equally
+/// wrong. Removing the constant part is the least that has to happen for the comparison to be
+/// about motion; the residual harmonic part is common to all three maps here, because they go
+/// through the same unwrapper on the same anatomy.
+fn demean_in_mask(field: &[f64], mask: &[u8]) -> Vec<f64> {
+    let (sum, n) = field
+        .iter()
+        .zip(mask.iter())
+        .filter(|(_, &m)| m != 0)
+        .fold((0.0f64, 0usize), |(s, c), (&v, _)| (s + v, c + 1));
+    let mean = if n > 0 { sum / n as f64 } else { 0.0 };
+    field.iter().map(|&v| v - mean).collect()
+}
+
+/// Registration-based motion correction of a multi-echo series, end to end, against a known
+/// corruption.
+///
+/// The simulation is the published procedure's own setting, inverted: a four-echo GRE series in
+/// which the head drifts progressively between echoes, which is then registered back to the
+/// first echo as fixed reference — what *Effects of Motion in Ultrashort Echo Time QSM for
+/// Musculoskeletal Imaging* (2025) does, and what it reports significantly reduces streaking.
+///
+/// Three things are checked, and the third is the one that matters:
+///
+/// 1. **The transform comes back.** Each echo's known rigid corruption is recovered. The ground
+///    truth is built by `rigid_axis_angle` (Rodrigues, written out) and never by the
+///    parameterisation under test, so a transposed rotation cannot cancel on both sides.
+/// 2. **B0 follows the head.** Each echo's recovered B0 direction matches the known rotation of
+///    the declared one, computed here as the third row of the truth rotation. This is the physics
+///    that makes a rotated volume's dipole kernel different, and getting it wrong produces a
+///    plausible wrong map rather than an error.
+/// 3. **The field map gets better.** The same field-mapping pipeline is run three times — on the
+///    uncorrupted echoes, on the corrupted ones, and on the corrected ones — and scored against
+///    the ground-truth field. Corrected has to beat uncorrected by a wide margin *and* land near
+///    the uncorrupted floor, which is the only version of "it works" that cannot be satisfied by
+///    a transform that merely blurs the data.
+#[test]
+#[ignore]
+fn test_motion_correction() {
+    use qsm_core::geometry::resample_complex_onto;
+    use qsm_core::motion::{correct_motion, MotionParams, MotionReference};
+
+    let data = TestData::load().expect("Failed to load test data");
+    let dims = data.dims;
+    let (vsx, vsy, vsz) = data.voxel_size;
+    let n_echoes = data.phase_echoes.len();
+    let affine = [
+        vsx, 0.0, 0.0, 0.0, //
+        0.0, vsy, 0.0, 0.0, //
+        0.0, 0.0, vsz, 0.0, //
+        0.0, 0.0, 0.0, 1.0,
+    ];
+    println!(
+        "[INFO] phantom {dims:?} at {:?} mm, {n_echoes} echoes at {:?} s",
+        data.voxel_size, data.echo_times
+    );
+
+    // A progressive drift between echoes: echo 1 is the fixed reference and did not move, and
+    // each later echo is further out. An oblique axis so all three rotation parameters are
+    // exercised. By the last echo the head is 7.5 degrees and ~2.5 mm from where it started,
+    // which on 1 mm voxels is several voxels of tissue displacement — substantial inter-scan
+    // motion, which is the regime the UTE paper was correcting.
+    let axis = [0.25, -0.35, 1.0];
+    let motion_truth: Vec<[f64; 16]> = (0..n_echoes)
+        .map(|e| {
+            let s = e as f64;
+            rigid_axis_angle(
+                axis,
+                2.5 * s,
+                [0.8 * s, -0.6 * s, 0.3 * s],
+                dims,
+                &affine,
+            )
+        })
+        .collect();
+
+    // Corrupt: warp each echo's complex pair into where the head actually was. Magnitude and
+    // wrapped phase move together through the complex domain, because that is the only way
+    // wrapped phase can move at all — the corruption has to be as physical as the correction.
+    let mut mags_moved = Vec::with_capacity(n_echoes);
+    let mut phas_moved = Vec::with_capacity(n_echoes);
+    for e in 0..n_echoes {
+        let w = mat4(&motion_truth[e], &affine);
+        let (m, p) = resample_complex_onto(
+            &data.mag_echoes[e], &data.phase_echoes[e], dims, &w, dims, &affine,
+        )
+        .expect("warping the echo should succeed");
+        mags_moved.push(m);
+        phas_moved.push(p);
+    }
+
+    // --- correct ----------------------------------------------------------------------------
+    // Registered on magnitude, applied to the complex pair, with the B0 direction declared from
+    // the sidecar rather than re-read off the (identical) affines.
+    let params = MotionParams {
+        reference: MotionReference::First,
+        declared_b0: Some(data.b0_dir),
+        ..Default::default()
+    };
+    let (corrected, reg_elapsed) = run_timed!(
+        "motion correction",
+        correct_motion(&mags_moved, &phas_moved, dims, &affine, Some(&data.mask), &params)
+            .expect("motion correction should run")
+    );
+    let motion = &corrected.motion;
+
+    // --- 1 and 2: the transform, and the B0 direction that comes with it ---------------------
+    let mut worst_rot = 0.0f64;
+    let mut worst_trans = 0.0f64;
+    let mut worst_bdir = 0.0f64;
+    for e in 0..n_echoes {
+        let v = &motion.volumes[e];
+        let truth = &motion_truth[e];
+        let rot_err = rotation_difference_deg(truth, &v.transform.matrix);
+        let trans_err = [
+            truth[3] - v.transform.matrix[3],
+            truth[7] - v.transform.matrix[7],
+            truth[11] - v.transform.matrix[11],
+        ]
+        .iter()
+        .fold(0.0f64, |m, d| m.max(d.abs()));
+        // The object rotated and B0 did not, so in the reference frame this echo's B0 sits where
+        // the inverse rotation puts the declared direction. For a rotation matrix the inverse is
+        // the transpose, so Rᵀ·d is a row-dot: with d = (0,0,1) that is simply the third row.
+        let d = [data.b0_dir.0, data.b0_dir.1, data.b0_dir.2];
+        let want = [0usize, 1, 2].map(|i| truth[i] * d[0] + truth[4 + i] * d[1] + truth[8 + i] * d[2]);
+        let bdir_err = {
+            let dot = v.bdir.0 * want[0] + v.bdir.1 * want[1] + v.bdir.2 * want[2];
+            let n = (want[0] * want[0] + want[1] * want[1] + want[2] * want[2]).sqrt();
+            (dot / n).clamp(-1.0, 1.0).acos().to_degrees()
+        };
+        println!(
+            "[INFO] echo {}: rotation {:5.2}° recovered to {rot_err:.3}°, translation to \
+             {trans_err:.3} mm; bdir [{:>7.4} {:>7.4} {:>7.4}] vs expected \
+             [{:>7.4} {:>7.4} {:>7.4}], {bdir_err:.3}°; displacement {:.2} mm, NCC {:.4}, \
+             overlap {:.3}, {} evals",
+            e + 1,
+            v.rotation_deg,
+            v.bdir.0, v.bdir.1, v.bdir.2,
+            want[0], want[1], want[2],
+            v.max_displacement_mm,
+            v.ncc,
+            v.overlap,
+            v.transform.evaluations,
+        );
+        worst_rot = worst_rot.max(rot_err);
+        worst_trans = worst_trans.max(trans_err);
+        worst_bdir = worst_bdir.max(bdir_err);
+        assert!(!v.suspect, "echo {}: registration flagged as suspect", e + 1);
+    }
+    println!(
+        "[INFO] worst over the series: rotation {worst_rot:.3}°, translation {worst_trans:.3} mm, \
+         bdir {worst_bdir:.3}°; max tissue displacement {:.2} mm over {:.2}° of B0 spread, \
+         registered in {reg_elapsed:.2?}",
+        motion.max_displacement_mm(),
+        motion.rotation_spread_deg(),
+    );
+
+    // Measured ~0.01° / ~0.02 mm on this phantom (the same accuracy `registration` reports for
+    // its own recovery on real data), so these bounds carry two orders of headroom. They are set
+    // where they are because that is what is physically meaningful, not where the measurement
+    // happens to sit: a tenth of a degree and a tenth of a voxel are both far below anything
+    // that changes a field map.
+    assert!(worst_rot < 0.1, "worst rotation error {worst_rot}° over the series");
+    assert!(worst_trans < 0.1, "worst translation error {worst_trans} mm over the series");
+    assert!(worst_bdir < 0.1, "worst B0 direction error {worst_bdir}° over the series");
+    // The corruption has to have been large enough for any of that to mean something.
+    assert!(
+        motion.max_displacement_mm() > 3.0 * vsx,
+        "the simulated motion only displaced tissue by {:.2} mm, which is not enough to damage \
+         a field map on {vsx} mm voxels — the test would pass whatever the correction did",
+        motion.max_displacement_mm()
+    );
+
+    // --- 3: the field map ---------------------------------------------------------------------
+    // Score inside the brain, restricted to where every corrected echo actually reaches: a
+    // rotated echo cannot fill the whole reference grid, and the rest is absence of data rather
+    // than a measurement. The same mask scores all three maps, so the comparison is like for
+    // like.
+    let scoring_mask: Vec<u8> = data
+        .mask
+        .iter()
+        .zip(corrected.coverage.iter())
+        .map(|(&m, &c)| m & c)
+        .collect();
+    let kept = scoring_mask.iter().filter(|&&m| m != 0).count();
+    println!(
+        "[INFO] scoring over {kept} of {} brain voxels (the rest is outside some echo's \
+         field of view after rotation)",
+        data.mask.iter().filter(|&&m| m != 0).count()
+    );
+
+    let (baseline, t_base) = run_timed!(
+        "field map (no motion)",
+        field_map_ppm(&data.phase_echoes, &data.mag_echoes, &data.mask, &data)
+    );
+    let (uncorrected, t_unc) = run_timed!(
+        "field map (motion, uncorrected)",
+        field_map_ppm(&phas_moved, &mags_moved, &data.mask, &data)
+    );
+    let (fixed, t_cor) = run_timed!(
+        "field map (motion, corrected)",
+        field_map_ppm(&corrected.phases, &corrected.magnitudes, &data.mask, &data)
+    );
+
+    // The reference for this experiment is the **no-motion field map**, not the simulated
+    // ground truth.
+    //
+    // Scoring against `data.fieldmap` was tried first and cannot resolve this at all: a total
+    // field map agrees with the ground truth only up to the arbitrary harmonic field unwrapping
+    // leaves behind, and what is left is dominated by the large smooth background that a few
+    // millimetres of motion barely touches. Measured, all three maps scored correlation 0.693 /
+    // 0.695 / 0.693 against ground truth — the uncorrected one marginally "better" — so an
+    // assertion there would have been noise dressed as a result. Against the map the same
+    // pipeline produces from the same echoes with the motion removed, every difference *is* the
+    // motion, which is the quantity under test.
+    let reference = demean_in_mask(&baseline, &scoring_mask);
+    let uncorrected = demean_in_mask(&uncorrected, &scoring_mask);
+    let fixed = demean_in_mask(&fixed, &scoring_mask);
+    let truth = demean_in_mask(&data.fieldmap, &scoring_mask);
+
+    let res_unc = TestResult::new("Uncorrected", &uncorrected, &reference, &scoring_mask, dims);
+    let res_cor = TestResult::new("Corrected", &fixed, &reference, &scoring_mask, dims);
+    res_unc.print_with_time(t_unc);
+    res_cor.print_with_time(t_cor);
+    // Context only, and deliberately not asserted on: see the note above.
+    let res_base_truth =
+        TestResult::new("No motion vs truth", &reference, &truth, &scoring_mask, dims);
+    res_base_truth.print_with_time(t_base);
+
+    // RESULT lines for the summary comment. Its own format — this is a field map, not a
+    // susceptibility map, and the rows are one experiment rather than several methods — so the
+    // summary greps for these row names rather than going through `emit_table`. A row name must
+    // not contain a comma: the shell reads these back with `IFS=','`.
+    for (r, t) in [(&res_unc, t_unc), (&res_cor, t_cor)] {
+        println!(
+            "RESULT:{},{:.4},{:.4},{:.4},{:.2}",
+            r.name, r.nrmse, r.correlation, r.xsim, t.as_secs_f64()
+        );
+    }
+    println!(
+        "RESULT:Motion recovery,{worst_rot:.3},{worst_trans:.3},{worst_bdir:.3},{:.2},{:.2}",
+        motion.max_displacement_mm(),
+        reg_elapsed.as_secs_f64()
+    );
+
+    // --- the figure ---------------------------------------------------------------------------
+    // The field maps are nearly indistinguishable side by side; the damage lives in the
+    // difference from the no-motion map. So save both differences on one shared window and let
+    // the pair carry the claim: **uncorrected** bright with the misfit, **corrected** near-flat.
+    // A transform applied the wrong way round makes the second panel as bright as the first,
+    // which is the failure a susceptibility map downstream shows only as mild degradation.
+    common::save_center_slices(&reference, &scoring_mask, dims, "motion_baseline_field");
+    common::save_center_slices(&uncorrected, &scoring_mask, dims, "motion_uncorrected_field");
+    common::save_center_slices(&fixed, &scoring_mask, dims, "motion_corrected_field");
+
+    println!(
+        "[INFO] against the no-motion field map: uncorrected NRMSE {:.4} corr {:.4}; \
+         corrected NRMSE {:.4} corr {:.4}. (For context, the no-motion map itself scores \
+         NRMSE {:.4} corr {:.4} against the simulated ground truth, which is the unwrapper's \
+         harmonic offset and is why ground truth cannot be the reference here.)",
+        res_unc.nrmse, res_unc.correlation, res_cor.nrmse, res_cor.correlation,
+        res_base_truth.nrmse, res_base_truth.correlation,
+    );
+    // Measured: uncorrected NRMSE 0.0104 / corr 0.9781 / XSIM 0.654, corrected 0.0019 / 0.9992 /
+    // 0.965. `nrmse` is RMSE over the range of the demeaned reference inside the scoring mask —
+    // not the demeaned percentage `nrmse_challenge` prints, and mixing the two up is how a
+    // threshold ends up unable to fail.
+    assert!(
+        res_cor.nrmse < res_unc.nrmse / 2.0,
+        "correction has to buy something: corrected NRMSE {} vs uncorrected {}",
+        res_cor.nrmse, res_unc.nrmse
+    );
+    assert!(
+        res_cor.correlation > 0.99,
+        "corrected field correlation against the no-motion map {}",
+        res_cor.correlation
+    );
+    // XSIM is the structural measure and the one that moves most here, because the damage motion
+    // does is concentrated where the field has a gradient rather than spread evenly.
+    assert!(res_cor.xsim > 0.90, "corrected field XSIM {}", res_cor.xsim);
+    assert!(
+        res_unc.xsim < 0.80,
+        "the uncorrected control scored XSIM {} — the simulated motion barely damaged the field \
+         map, so nothing above is being tested",
+        res_unc.xsim
+    );
+    // And the uncorrected control is not a strawman that was always going to fail: it is the
+    // same pipeline on the same data, which is exactly what a run with no motion handling does.
+    assert!(
+        res_unc.correlation < res_cor.correlation,
+        "the uncorrected control ({}) has to be worse than the corrected result ({}), or the \
+         simulated motion did not damage anything and nothing above is being tested",
+        res_unc.correlation, res_cor.correlation
+    );
+}

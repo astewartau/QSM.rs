@@ -6,6 +6,7 @@
 //!
 //! ## Pipeline stages (typical order)
 //!
+//! 0. [`run_motion_correction`] — optional: co-register the echo series before fitting across it
 //! 1. [`run_field_mapping`] — multi-echo phase → B0 field map (ppm)
 //! 2. [`run_bg_removal`] — total field → local field (ppm)
 //! 3. [`run_dipole_inversion`] — local field → susceptibility (ppm)
@@ -29,6 +30,7 @@ pub mod config;
 pub mod phase_utils;
 pub mod referencing;
 pub mod masking;
+pub mod motion;
 pub mod field_mapping;
 pub mod bg_removal;
 pub mod inversion;
@@ -43,6 +45,7 @@ pub use phase_utils::{
 };
 pub use referencing::apply_reference;
 pub use masking::{apply_mask_ops, build_mask_section, run_masking};
+pub use motion::{run_motion_correction, MotionCorrectionConfig, MotionCorrectionResult};
 pub use field_mapping::run_field_mapping;
 pub use bg_removal::run_bg_removal;
 pub use inversion::{run_dipole_inversion, run_tgv, run_nextqsm, run_iqsm, run_iqsm_plus, run_iqfm};
