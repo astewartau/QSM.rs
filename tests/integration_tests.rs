@@ -3353,11 +3353,19 @@ fn test_motion_correction() {
     // This bound is **not** about sample size, and it would be wrong to justify it that way: at
     // half the brain the standard error of a correlation near 0.98 is about 5e-5 against the 0.02
     // gap asserted below, a margin of several hundred. It is about the region staying
-    // *representative*. Coverage erodes from the periphery inward, and the periphery is precisely
-    // where motion does its damage — displacement grows with distance from the rotation centre,
-    // which is what `max_displacement_mm` measures. A shrinking region therefore drops the part
-    // of the brain this test is about while leaving the quiet middle, and the metrics improve as
-    // the experiment gets less meaningful.
+    // *representative*. Coverage erodes from the periphery inward, and the periphery is where
+    // motion does its damage — displacement grows with distance from the rotation centre, which
+    // is what `max_displacement_mm` measures.
+    //
+    // Measured rather than argued, by splitting the brain at its median radius from the centroid
+    // so both halves hold the same number of voxels: the uncorrected field's error is **1.56x**
+    // larger in the outer half than the inner, and 1.54x at three times the motion — stable, so
+    // structural rather than a coincidence of one setting. A shrinking region therefore drops the
+    // half of the brain this test is about and keeps the quiet one, and the metrics *improve* as
+    // the experiment hollows out. That is worse than noise, which at least has no direction.
+    //
+    // (Coverage is still the whole brain at three times the simulated motion, so this guards a
+    // regime the test has not reached rather than one it is near.)
     assert!(
         kept > in_brain / 2,
         "only {kept} of {in_brain} brain voxels are covered by every echo. The surviving region \
