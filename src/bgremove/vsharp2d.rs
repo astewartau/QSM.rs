@@ -50,8 +50,8 @@
 
 use crate::bgremove::pdf::{pdf, PdfParams};
 use crate::bgremove::vsharp::{vsharp, VsharpParams};
-use crate::grid::SliceLayout;
-use crate::{Grid, SliceGapError};
+use crate::grid::{SliceGapError, SliceLayout};
+use crate::Grid;
 
 /// Parameters for [`vsharp_2d_pdf`].
 #[cfg_attr(feature = "introspection", derive(serde::Serialize))]
