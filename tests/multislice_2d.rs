@@ -412,7 +412,28 @@ fn the_consistency_pass_fixes_the_fit_and_slice_wise_fixes_the_phase() {
     assert!(three_d_before < 0.5, "3D should fail unaided: {three_d_before:.4}");
     assert!(three_d_after > 0.95, "the pass did not fix 3D: {three_d_after:.4}");
 
-    // and slice-wise is what fixes the phase, which the fit cannot see
+    // And slice-wise is what fixes the phase, which the fit cannot see. Echo 0 is the clean
+    // measurement and clean *by construction*: the pass loops `for e in 1..n_echoes` and writes
+    // only `unwrapped[e]`, so it cannot touch the first echo. No null is needed to rule the pass
+    // out here - the structure does it, and the equality below is what checks the structure
+    // still holds.
+    println!(
+        "RESULT:jumps_echo0_wrapped={} jumps_echo0_pass_only={} jumps_echo0_slicewise={}",
+        jumps(&s.phase[0]), jumps(&raw[0]), jumps(&slicewise[0])
+    );
+    assert_eq!(
+        jumps(&raw[0]), jumps(&s.phase[0]),
+        "the pass changed echo 0, which it cannot do if it only writes echoes 1.. - the \
+         structural argument this test rests on is broken"
+    );
+    assert!(
+        jumps(&slicewise[0]) * 4 < jumps(&raw[0]),
+        "slice-wise left {} in-plane jumps in echo 0 against the pass's untouched {}; that \
+         difference is attributable to the spatial unwrapping alone",
+        jumps(&slicewise[0]), jumps(&raw[0])
+    );
+
+    // The last echo has both mechanisms in play, so this comparison does need the null.
     let (pass_only, with_slicewise) = (jumps(&raw[last]), jumps(&slicewise[last]));
     assert!(
         with_slicewise < pass_only / 2,

@@ -78,13 +78,20 @@
 //! map is all you want, you do not need this module** — you need the pass, which is public and
 //! works on any unwrapper's output.
 //!
-//! **Slice-wise unwrapping fixes the phase itself.** Counting in-plane neighbour pairs that jump
-//! more than π in echo 4 of that session: 1584 in the wrapped input, 2178 after the raw phase is
-//! made echo-consistent, and 806 after slice-wise unwrapping is. The pass alone is *worse* on
-//! this measure than not unwrapping at all, because it faithfully propagates echo 0's wrap state
-//! into every later echo. Anything reading the unwrapped phase rather than its TE-slope — a
-//! single-echo field map, a non-linear B0 estimator, phase fed straight to background removal —
-//! needs the spatial unwrapping, and on 2D multi-slice data that means per slice.
+//! **Slice-wise unwrapping fixes the phase itself.** The clean way to see this is on the *first*
+//! echo, because [`enforce_inter_echo_consistency`] loops `for e in 1..n_echoes` and so provably
+//! cannot touch it — any difference there belongs to the spatial unwrapping and nothing else, with
+//! no null needed to rule the pass out. Counting in-plane neighbour pairs that jump more than π in
+//! echo 1 of that session: **1480** in the wrapped input, **1480** after the pass (identical, as
+//! the structure requires), **0** after slice-wise unwrapping.
+//!
+//! By the last echo both mechanisms are in play and the gap narrows but holds: 1584 wrapped, 2178
+//! with the pass alone, 806 with slice-wise. The pass alone is *worse* there than not unwrapping,
+//! because it propagates echo 1's wrap state faithfully into every later echo.
+//!
+//! Anything reading the unwrapped phase rather than its TE-slope — a single-echo field map, a
+//! non-linear B0 estimator, phase fed straight to background removal — needs the spatial
+//! unwrapping, and on 2D multi-slice data that means per slice.
 //!
 //! On the matched session with no offsets, slice-wise and the better 3D path both reach 0.999
 //! and the same 806 jumps, so the mode costs nothing where there is nothing to fix. Slice-wise
@@ -735,6 +742,28 @@ mod tests {
             &SliceWiseParams::default(), &grid(),
         );
 
+        // Echo 0 is the clean measurement, and it is clean *by construction* rather than by
+        // comparison: `enforce_inter_echo_consistency` loops `for e in 1..n_echoes` and writes
+        // only `unwrapped[e]`, so it can never touch the first echo. Any difference here is the
+        // spatial unwrapping's and nothing else's - no null needed to rule the pass out, because
+        // the structure already does.
+        let pass_only_first = inplane_jumps(&raw[0]);
+        let slicewise_first = inplane_jumps(&slicewise[0]);
+        assert_eq!(
+            pass_only_first,
+            inplane_jumps(&wrapped[0]),
+            "the pass changed echo 0, which it cannot do if it only writes echoes 1.. - the \
+             structural argument this assertion rests on is broken"
+        );
+        assert_eq!(slicewise_first, 0, "slice-wise left {slicewise_first} jumps in echo 0");
+        assert!(
+            pass_only_first > 0,
+            "the wrapped first echo has no in-plane jumps, so this phantom cannot tell the two \
+             apart and the module docs' claim is untested here"
+        );
+
+        // The last echo is where both mechanisms are in play, so this one does need the null:
+        // the pass propagates echo 0's wrap state forward, leaving more jumps than slice-wise.
         let last = TES.len() - 1;
         let (pass_only, with_slicewise) =
             (inplane_jumps(&raw[last]), inplane_jumps(&slicewise[last]));

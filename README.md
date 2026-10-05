@@ -147,13 +147,18 @@ whole volume at once and the error is per slice.
 **The two halves fix different things, and it is worth knowing which you need.** Measured on the
 phantom's 3 mm interleaved-offset session:
 
-| echo 4 of the offsets session | linear-fit B0 correlation | in-plane 2π jumps |
-|---|---|---|
-| wrapped input, nothing applied | −0.01 | 1584 |
-| 3D ROMEO alone | 0.04 | — |
-| 3D ROMEO + `enforce_inter_echo_consistency` | **1.00** | — |
-| raw wrapped + `enforce_inter_echo_consistency` | **1.00** | 2178 |
-| **slice-wise + `enforce_inter_echo_consistency`** | **1.00** | **806** |
+| offsets session | linear-fit B0 correlation | in-plane 2π jumps, echo 1 | echo 4 |
+|---|---|---|---|
+| wrapped input, nothing applied | −0.01 | 1480 | 1584 |
+| 3D ROMEO alone | 0.04 | — | — |
+| 3D ROMEO + `enforce_inter_echo_consistency` | **1.00** | — | — |
+| raw wrapped + `enforce_inter_echo_consistency` | **1.00** | 1480 | 2178 |
+| **slice-wise + `enforce_inter_echo_consistency`** | **1.00** | **0** | **806** |
+
+The echo-1 column is the cleanest evidence, and clean *by construction*:
+`enforce_inter_echo_consistency` only ever writes echoes 1.. (0-indexed), so it cannot touch the
+first echo, and the 1480 → 1480 identity confirms it. Any difference in that column belongs to the
+spatial unwrapping and nothing else.
 
 A fitted slope is blind to a constant per voxel, so `enforce_inter_echo_consistency` is what
 rescues a `linear-fit` B0 map — from *any* starting point, including no spatial unwrapping at all.
