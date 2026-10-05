@@ -121,9 +121,12 @@ fn fit_slope(unwrapped: &[Vec<f64>], tes: &[f64]) -> Vec<f64> {
         .collect()
 }
 
-/// Best correlation either 3D ROMEO path reaches, so the comparison is against the strongest
-/// alternative rather than whichever one happens to fail on this data.
-fn best_3d(s: &Session) -> (f64, &'static str) {
+/// Best correlation either 3D ROMEO path reaches **unaided** — that is, without
+/// `enforce_inter_echo_consistency`. The `_unaided` is the whole point: 3D ROMEO *with* the pass
+/// reaches 0.999 too, which `the_consistency_pass_fixes_the_fit_and_slice_wise_fixes_the_phase`
+/// pins. Comparing slice-wise-with-the-pass against 3D-with-the-pass on this metric would show
+/// no difference, because a fitted slope cannot see what slice-wise does.
+fn best_3d_unaided(s: &Session) -> (f64, &'static str) {
     [("template", false), ("individual", true)]
         .map(|(name, individual)| {
             let params = RomeoParams { individual, ..RomeoParams::default() };
@@ -146,20 +149,25 @@ fn slicewise_corr(s: &Session) -> f64 {
 
 #[test]
 #[ignore] // needs the qsm-forward 2D phantom; run with --release --ignored
-fn slicewise_unwrapping_beats_3d_on_slices_with_phase_offsets() {
+fn slicewise_beats_unaided_3d_on_slices_with_phase_offsets() {
+    // Named for what it compares. The 3D baseline here has no consistency pass, and that is the
+    // only reason slice-wise wins on this metric - give 3D the pass and it reaches 0.999 too.
+    // What slice-wise is actually for is the spatial continuity of the phase, which a fitted
+    // slope cannot see; that is
+    // `the_consistency_pass_fixes_the_fit_and_slice_wise_fixes_the_phase`.
     let Some(s) = load("offsets") else { return };
     println!("offsets session: {:?} at {:?} mm", s.grid.dims, s.grid.voxel_size);
 
-    let (r_3d, which) = best_3d(&s);
+    let (r_3d, which) = best_3d_unaided(&s);
     let r_2d = slicewise_corr(&s);
-    println!("RESULT:unwrap_3d_romeo_corr={r_3d:.4} ({which})");
+    println!("RESULT:unwrap_3d_unaided_corr={r_3d:.4} ({which})");
     println!("RESULT:unwrap_slicewise_romeo_corr={r_2d:.4}");
 
     assert!(r_2d > 0.95, "slice-wise B0 fit correlation only {r_2d:.4}");
     assert!(
         r_2d > r_3d + 0.02,
-        "slice-wise ({r_2d:.4}) is not better than the best 3D path ({r_3d:.4}, {which}) on \
-         data whose slices carry independent phase offsets - the only reason this mode exists"
+        "slice-wise ({r_2d:.4}) is not better than the best unaided 3D path ({r_3d:.4}, \
+         {which}) on data whose slices carry independent phase offsets"
     );
 }
 
@@ -198,6 +206,12 @@ fn slicewise_laplacian_trails_the_region_growers_but_is_not_broken() {
         "slice-wise Laplacian ({laplacian:.4}) no longer trails ROMEO ({romeo:.4}) — if that is \
          real, the \"prefer ROMEO or best path\" guidance in the module docs and README is stale"
     );
+    // This bound was set by measuring 0.6865 and backing off, and no mutation has been found
+    // that trips it: removing the Laplacian's re-anchoring leaves it passing (the consistency
+    // pass re-seats the echoes afterwards), and making the Laplacian return the wrapped input
+    // trips the *upper* bound instead, at 0.9992. So treat it as an unearned floor that would
+    // catch a gross regression, not as a pinned property - the trails-ROMEO bound above is the
+    // one with a demonstrated null.
     assert!(
         laplacian > 0.55,
         "slice-wise Laplacian has gone from trailing to broken ({laplacian:.4}); the docs quote \
@@ -211,7 +225,7 @@ fn slicewise_and_3d_agree_when_there_are_no_slice_offsets() {
     // The control: with no per-slice offsets there is nothing to fix, and the slice-wise
     // mode must not be making things worse to pass the test above.
     let Some(s) = load("thick") else { return };
-    let (r_3d, which) = best_3d(&s);
+    let (r_3d, which) = best_3d_unaided(&s);
     let r_2d = slicewise_corr(&s);
     println!("RESULT:unwrap_3d_nooffsets_corr={r_3d:.4} ({which})");
     println!("RESULT:unwrap_slicewise_nooffsets_corr={r_2d:.4}");
