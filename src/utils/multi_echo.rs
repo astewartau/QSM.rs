@@ -2949,6 +2949,24 @@ mod tests {
         assert!(outside_defined < outside / 2, "{} of {}", outside_defined, outside);
     }
     // ---------------------------------------------------------------- robust echo combination
+    //
+    // These were developed against a mutation sweep — perturb the implementation, check a test
+    // fails — which lives in a scratchpad and not in the repository, so the two things it has to
+    // guarantee are written down here for whoever rebuilds it.
+    //
+    // 1. **Every needle must match exactly once.** Two of the call sites below differ only in
+    //    indentation, so one pattern is a substring of the other and a `replace(.., 1)` patches
+    //    the same site twice while reporting two. It cost me a sweep that said "caught" and then
+    //    "not caught" for the same mutation after an unrelated test got *stronger*, which is the
+    //    only reason it was noticed.
+    // 2. **Every replacement must differ from its needle.** A no-op patches cleanly, passes the
+    //    uniqueness check, and is reported as a surviving mutation — a false alarm rather than
+    //    false reassurance, so the safe direction, but the same class of defect.
+    //
+    // Both audited over the 27 perturbations these tests were built against: 26 needles unique,
+    // one since deleted along with the code it targeted, no no-ops. The point generalises past
+    // this module — the instrument you check your instruments with has no instrument of its own,
+    // and a pass is what you were hoping for, so nobody looks at it.
 
     /// Deterministic multi-echo phantom: `phase = intercept + slope·TE` exactly, with
     /// magnitudes decaying over TE the way a real T2* does and varying over the volume.
