@@ -336,11 +336,19 @@ mod tests {
         }
     }
 
+    /// A floor, not evidence about the disc. The mean of a linear function over *any* kernel
+    /// symmetric about its centre is the centre value, so a linear ramp is removed exactly by a
+    /// disc, a sphere, a square, or a disc of a quarter the radius. Checked by perturbation:
+    /// shrinking the disc 4x and stretching it into an ellipse both leave this test passing.
+    ///
+    /// What it does pin is that the method high-passes at all, which together with
+    /// `vsharp_2d_keeps_a_local_source_it_should_not_remove` rules out the two trivial
+    /// implementations - returning the input, and returning zeros. The kernel's extent is
+    /// pinned by `the_in_plane_voxel_sizes_reach_the_kernel`, its plane by
+    /// `slice_axis_is_honoured`, and its behaviour against a real background by the slab tests,
+    /// all of which use a quadratic or a dipole field rather than a ramp.
     #[test]
-    fn vsharp_2d_removes_an_in_plane_linear_background_exactly() {
-        // A disc is symmetric, so the mean of a linear function over it is its centre value.
-        // An in-plane linear ramp therefore satisfies the disc's mean value property exactly
-        // and must come out at zero - the one case where 2D V-SHARP is not an approximation.
+    fn vsharp_2d_removes_an_in_plane_linear_background() {
         let g = grid();
         let m = mask_enclosed();
         let mut field = vec![0.0; g.n_total()];
@@ -547,6 +555,10 @@ mod tests {
         // quietly scrambled. A ramp along the fast axis of a non-square slice catches it,
         // because reading it at the wrong stride turns the ramp into a sawtooth that no disc
         // can remove.
+        //
+        // The ramp is load-bearing here for that reason and not despite being linear: it is the
+        // discontinuity the wrong stride introduces that this detects, not anything about the
+        // kernel. Smoothing the field would make the test pass under the mutation.
         let (nx, ny, nz) = (32usize, 20usize, 6usize);
         let g = Grid::new(nx, ny, nz, 1.0, 1.0, 3.0);
         let mut m = vec![0u8; nx * ny * nz];
