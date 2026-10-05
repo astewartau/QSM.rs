@@ -63,10 +63,27 @@ fn load(session: &str) -> Option<Session> {
     let root = root();
     let anat = root.join(format!("sub-1/ses-{session}/anat"));
     let deriv = root.join(format!("derivatives/qsm-forward/sub-1/ses-{session}/anat"));
-    let probe = anat.join(format!("sub-1_ses-{session}_echo-1_part-phase_MEGRE.nii"));
-    if !Path::new(&probe).exists() {
-        println!("Skipping: 2D phantom session '{session}' not found at {}", probe.display());
-        println!("  generate it with qsm_forward/examples/multislice_2d.py, or set QSM_BIDS_2D");
+    // Probe every file this loader needs, not just one image. A phantom generated without
+    // `save_shimmed_field=True` has all the images and is missing only `desc-shimmed_fieldmap`,
+    // so probing the phase alone would send a stale phantom into an unwrap panic on a derivative
+    // several lines later, with nothing saying which flag was missing.
+    let required = [
+        anat.join(format!("sub-1_ses-{session}_echo-1_part-phase_MEGRE.nii")),
+        anat.join(format!("sub-1_ses-{session}_echo-4_part-mag_MEGRE.nii")),
+        anat.join(format!("sub-1_ses-{session}_echo-1_part-phase_MEGRE.json")),
+        deriv.join(format!("sub-1_ses-{session}_mask.nii")),
+        deriv.join(format!("sub-1_ses-{session}_fieldmap.nii")),
+        deriv.join(format!("sub-1_ses-{session}_fieldmap-local.nii")),
+        // only written when generate_bids is given save_shimmed_field=True, and the only
+        // correct comparison target for anything that goes through the signal
+        deriv.join(format!("sub-1_ses-{session}_desc-shimmed_fieldmap.nii")),
+    ];
+    if let Some(missing) = required.iter().find(|p| !Path::new(p).exists()) {
+        println!("Skipping: 2D phantom session '{session}' is missing {}", missing.display());
+        println!(
+            "  regenerate with qsm_forward/examples/multislice_2d.py (which passes \
+             save_shimmed_field=True), or point QSM_BIDS_2D at a copy that has it"
+        );
         return None;
     }
 
