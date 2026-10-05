@@ -1255,7 +1255,10 @@ impl Default for RobustFitParams {
 
 /// Per-echo evidence that an echo did not fit the model the others agree on.
 ///
-/// Every field is one value per echo, in input order. These are **diagnostics**: the robust
+/// Read [`Self::voxels_examined`] before trusting a clean report: every statistic here is taken
+/// over the mask, so a mask that selects nothing yields a perfect bill of health.
+///
+/// The per-echo fields are one value per echo, in input order. These are **diagnostics**: the robust
 /// fit has already acted on the per-voxel weights these summarise, and nothing here drops an
 /// echo or changes a field map. Deciding to re-acquire, exclude an echo and refit, or accept
 /// the map is the caller's.
@@ -1297,6 +1300,15 @@ pub struct EchoQuality {
     /// ignoring the handful of voxels any echo has trouble with. Swapping this back to a median
     /// is caught by the tests, which is the cheapest way to see what it is buying.
     pub outlier_score: Vec<f64>,
+    /// How many voxels were actually examined — the size of the mask this was run over.
+    ///
+    /// Present so that "nothing was flagged" can be told apart from "nothing was looked at".
+    /// Every other field here is a statistic over the mask, so an empty mask produces a
+    /// flawless report: no echo flagged, no voxel downweighted, every score zero. That is the
+    /// shape of result a failed brain extraction upstream produces, and it is indistinguishable
+    /// from a clean series unless something says how much was weighed. Check this before
+    /// believing a clean report; `0` means the report is vacuous, not good.
+    pub voxels_examined: usize,
     /// Echoes the series' own spread of [`Self::outlier_score`] says are out of line.
     ///
     /// Empty unless the worst score exceeds the best by [`RobustFitParams::flag_ratio`]; when it
@@ -1480,6 +1492,7 @@ pub fn multi_echo_robust_fit(
                 median_weight: vec![1.0; n_echoes],
                 median_abs_residual_rad: vec![0.0; n_echoes],
                 outlier_score: vec![0.0; n_echoes],
+                voxels_examined: mask.iter().filter(|&&m| m != 0).count(),
                 flagged: Vec::new(),
             },
             robust_weights: vec![vec![1.0; n_total]; n_echoes],
@@ -1727,6 +1740,7 @@ pub fn multi_echo_robust_fit(
             median_weight,
             median_abs_residual_rad,
             outlier_score,
+            voxels_examined: mask.iter().filter(|&&m| m != 0).count(),
             flagged,
         },
         robust_weights: robust,
@@ -3339,7 +3353,43 @@ mod tests {
         );
     }
 
-    /// The documented detection floor: corruption confined to a small share of the volume is not
+    /// A mask that selects nothing must not read as a clean series.
+    ///
+    /// Every statistic here is taken over the mask, so an empty one produces a flawless report:
+    /// nothing flagged, nothing downweighted, every score zero. That is exactly what a failed
+    /// brain extraction upstream yields, and the report alone cannot tell it from good data —
+    /// a mechanism that goes quiet precisely when it can no longer speak.
+    /// [`EchoQuality::voxels_examined`] is what makes the two distinguishable, so it is checked
+    /// here rather than left to a caller who reads the docs.
+    #[test]
+    fn an_empty_mask_does_not_read_as_a_clean_series() {
+        let (phases, mags, tes, _, _) = echo_series(500, 0.02);
+        let empty = vec![0u8; 500];
+        let rob = multi_echo_robust_fit(&phases, &mags, &tes, &empty, &RobustFitParams::default());
+
+        // The report really does look perfect, which is the point.
+        assert!(rob.quality.flagged.is_empty());
+        assert!(rob.quality.outlier_score.iter().all(|&x| x == 0.0));
+        assert!(rob.quality.downweighted_fraction.iter().all(|&x| x == 0.0));
+        // And this is the only thing that says so.
+        assert_eq!(
+            rob.quality.voxels_examined, 0,
+            "an empty mask must report that nothing was examined"
+        );
+
+        // A real mask reports a real count, so the field is not vacuously zero.
+        let full = vec![1u8; 500];
+        let ok = multi_echo_robust_fit(&phases, &mags, &tes, &full, &RobustFitParams::default());
+        assert_eq!(ok.quality.voxels_examined, 500);
+
+        // The short-series fallback reports it too, rather than leaving it at zero.
+        let short = multi_echo_robust_fit(
+            &phases[..3], &mags[..3], &tes[..3], &full, &RobustFitParams::default(),
+        );
+        assert_eq!(short.quality.voxels_examined, 500);
+    }
+
+    /// The documented detection floor: corruption confined to a small share of the volume    /// The documented detection floor: corruption confined to a small share of the volume is not
     /// flagged, because the score is a high quantile over the mask.
     ///
     /// Pinned so the limitation is recorded rather than rediscovered. If this starts failing the
