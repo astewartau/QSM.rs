@@ -3382,11 +3382,23 @@ mod tests {
         let ok = multi_echo_robust_fit(&phases, &mags, &tes, &full, &RobustFitParams::default());
         assert_eq!(ok.quality.voxels_examined, 500);
 
-        // The short-series fallback reports it too, rather than leaving it at zero.
-        let short = multi_echo_robust_fit(
-            &phases[..3], &mags[..3], &tes[..3], &full, &RobustFitParams::default(),
+        // And a *partial* mask reports its population, not the volume it sits in. Without this
+        // the only thing standing between `count()` and `len()` is the empty case above, which
+        // is one assertion deep: an all-ones mask cannot tell the two apart, because for it they
+        // are the same number.
+        let mut partial = vec![0u8; 500];
+        partial[..300].fill(1);
+        let some = multi_echo_robust_fit(
+            &phases, &mags, &tes, &partial, &RobustFitParams::default(),
         );
-        assert_eq!(short.quality.voxels_examined, 500);
+        assert_eq!(some.quality.voxels_examined, 300);
+
+        // The short-series fallback reports it the same way — and on the partial mask, so this
+        // pins its population too rather than a number that happens to match the volume.
+        let short = multi_echo_robust_fit(
+            &phases[..3], &mags[..3], &tes[..3], &partial, &RobustFitParams::default(),
+        );
+        assert_eq!(short.quality.voxels_examined, 300);
     }
 
     /// The documented detection floor: corruption confined to a small share of the volume    /// The documented detection floor: corruption confined to a small share of the volume is not
