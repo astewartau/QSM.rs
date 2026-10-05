@@ -443,6 +443,27 @@ pub fn enforce_inter_echo_consistency(
 mod tests {
     use super::*;
 
+    // What gates these tests, recorded so the sweep can be reconstructed rather than
+    // re-derived. The script that ran it was scratch; the list is the part worth keeping.
+    //
+    // Each of these was applied and confirmed to fail at least one assertion below: the slice
+    // index dropping its slice offset; the slice grid keeping the volume's depth instead of 1;
+    // in-slice axes transposed; components merged under 8-connectivity; the Laplacian skipping
+    // its re-anchoring; ROMEO run once per slice instead of once per connected component;
+    // `find_seed_point` keeping a centre of mass that lies outside the mask; and five on the
+    // consistency pass - switched off, chained against echo 0 rather than the previous echo,
+    // referenced against a TE-scaled value instead of the wrapped step, truncating instead of
+    // rounding, and sign-flipped.
+    //
+    // Two nulls matter more than any of those.
+    // `the_consistency_pass_is_what_fixes_the_fit_even_without_slice_wise_unwrapping` is the
+    // null for every fit-correlation claim here: the pass alone reaches 0.999 from raw wrapped
+    // phase, so no fit-based assertion in this module may be read as evidence about the spatial
+    // unwrapping. The echo-0 identity in
+    // `slice_wise_unwrapping_is_what_makes_the_phase_spatially_continuous` is the opposite and
+    // stronger case: confound-free by construction, because the pass only ever writes echoes
+    // 1.., so nothing needs ruling out experimentally.
+
     const NX: usize = 24;
     const NY: usize = 24;
     const NZ: usize = 8;

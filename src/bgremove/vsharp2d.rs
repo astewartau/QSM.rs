@@ -216,6 +216,19 @@ pub fn vsharp_2d_pdf(
 mod tests {
     use super::*;
 
+    // What gates these tests, recorded so the sweep can be reconstructed. Each of these was
+    // applied and confirmed to fail at least one assertion below: the slice grid built with
+    // unit voxel sizes instead of the real ones; its in-plane extents swapped; `slice_axis`
+    // ignored; the chain skipping its PDF stage; the chain skipping its contiguity check; the
+    // progress total omitting the PDF stage; and empty slices processed instead of skipped
+    // (which is unobservable - that `continue` is an optimisation, see its comment).
+    //
+    // The null that matters: `vsharp_2d_removes_an_in_plane_linear_background` survives both a
+    // 4x-shrunk disc and a disc stretched into an ellipse, so it pins neither the kernel's
+    // extent nor its shape. What does: `the_in_plane_voxel_sizes_reach_the_kernel` for extent,
+    // `slice_axis_is_honoured` for plane, the slab tests for behaviour against a real
+    // background.
+
     const NX: usize = 32;
     const NY: usize = 32;
     const NZ: usize = 12;

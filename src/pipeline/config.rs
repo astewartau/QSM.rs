@@ -928,6 +928,19 @@ mod tests {
 #[cfg(test)]
 mod slice_gap_tests {
     use super::*;
+
+    // What gates the slice-gap wiring, recorded so the sweep can be reconstructed. Each of
+    // these was applied and confirmed to fail at least one assertion in this module,
+    // `slice_gap_coverage`, or the stage tests: the check removed from each of background
+    // removal, dipole inversion, chi-separation and `run_nextqsm`; the helper swallowing the
+    // refusal and returning `Ok`; the refusal downgraded to `InvalidConfig`; the tolerance
+    // widened to half the pitch; a non-positive thickness accepted; `None` refused instead of
+    // allowed; the `Option`-aware check ignoring the declared geometry; `gap()` sign-flipped;
+    // `spacing()` reading the wrong axis; `SliceGeometry::contiguous` ignoring its axis; and
+    // the pinned stage count made stale.
+    //
+    // Worth knowing: removing the *dispatcher's* check does not fail the NeXtQSM route test,
+    // because that route is defended twice. `slice_gap_coverage` is what pins both call sites.
     use crate::grid::SliceGeometry;
 
     fn meta(thickness: Option<f64>) -> ScanMetadata {
