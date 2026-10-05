@@ -186,9 +186,10 @@ on a uniform grid, so on gapped data they compute a different convolution and th
 rather than approximate. It is therefore refused, not warned about.
 
 Set `ScanMetadata::slice_geometry` from the acquisition's `SliceThickness` and every pipeline
-stage that convolves on the voxel grid will refuse a gapped volume before doing any work —
-background removal, dipole inversion, TGV, the single-step DL reconstructions, chi-separation and
-QSMART — returning `PipelineError::InvalidInput` with the thickness, pitch and gap in the message.
+stage that convolves on the voxel grid will refuse a gapped volume before doing any work — all
+nine of background removal, dipole inversion, TGV, the four single-step DL reconstructions
+(NeXtQSM, iQSM, iQSM+, iQFM), chi-separation and QSMART — returning `PipelineError::InvalidInput`
+with the thickness, pitch and gap in the message.
 The thickness has to be supplied because nothing in a NIfTI records it: the spacing is the
 *pitch*, so 3 mm slices every 3 mm and 2 mm slices every 3 mm are indistinguishable. `None` means
 the acquisition did not say, in which case nothing can be concluded and the stages run; BIDS only

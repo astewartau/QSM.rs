@@ -1071,13 +1071,13 @@ mod slice_gap_coverage {
             }
         }
         // if the scan stops finding stages the test has quietly stopped testing anything
-        // Background removal, dipole inversion, the three single-step DL reconstructions, TGV,
-        // chi-separation and QSMART: eight stages convolve on the grid and must refuse a gap.
-        // If this count drops, the source scan has stopped seeing stages rather than the stages
-        // having stopped needing the check.
+        // Background removal, dipole inversion, the four single-step DL reconstructions
+        // (NeXtQSM, iQSM, iQSM+, iQFM), TGV, chi-separation and QSMART: nine stages convolve on
+        // the grid and must refuse a gap. If this count drops, the source scan has stopped
+        // seeing stages rather than the stages having stopped needing the check.
         assert_eq!(
-            checked, 8,
-            "expected 8 checking stages, scanned {checked}; either a stage was added without \
+            checked, 9,
+            "expected 9 checking stages, scanned {checked}; either a stage was added without \
              the check and without an exemption, or the source scan has broken"
         );
     }
