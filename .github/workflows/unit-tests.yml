@@ -35,6 +35,24 @@ jobs:
             target/
           key: ${{ runner.os }}-cargo-tarpaulin-${{ hashFiles('**/Cargo.lock') }}
 
+      # Typechecks every target, including examples/ and the integration tests
+      # in tests/, which nothing else in CI compiles: integration-tests.yml
+      # builds individual `--test` targets behind a detect-changes gate, so a
+      # test file or example that stops compiling can otherwise go unnoticed.
+      # Needs the ONNX feature stack: the two model-driven examples declare
+      # `required-features = ["onnx"]`, and tests/models_onnx.rs has
+      # `download`-gated code. Not `-D warnings`; this is a compile gate.
+      - name: Check all targets compile
+        run: cargo check --all-targets --features "parallel onnx download"
+
+      # Gates on test failures. The tarpaulin step below cannot: it runs with
+      # `|| true` because tarpaulin returns non-zero of its own accord (see
+      # ed00937), and the coverage threshold is not a substitute, since a test
+      # that fails every assertion still covers the lines it ran. Runs before
+      # the tarpaulin install so a failure skips that build entirely.
+      - name: Run unit tests
+        run: cargo test --lib --features parallel
+
       - name: Install cargo-tarpaulin
         run: |
           if ! command -v cargo-tarpaulin &>/dev/null; then

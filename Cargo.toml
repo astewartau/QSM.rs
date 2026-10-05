@@ -67,3 +67,15 @@ rustdct = "0.7.1"
 [dev-dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+# Both of these drive ONNX models, so they do not build with the default feature
+# set; without this cargo tries to compile them for `--all-targets` and fails.
+# `download` is deliberately NOT required: each falls back to a local weights
+# file or $QSM_MODEL_DIR, so they stay buildable without the HTTP stack.
+[[example]]
+name = "synthseg_run"
+required-features = ["onnx"]
+
+[[example]]
+name = "xqsm_tiled_check"
+required-features = ["onnx"]

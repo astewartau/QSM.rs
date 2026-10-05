@@ -67,11 +67,27 @@ pub fn rads_to_ppm(field_rads: &[f64], field_strength: f64) -> Vec<f64> {
 }
 
 /// Root-sum-of-squares combination of multiple magnitude images.
+///
+/// Every echo must hold the same number of voxels. The combined volume inherits
+/// that size and is then indexed by the run's grid downstream (bias correction,
+/// masking), so an echo of a different matrix size would otherwise either be
+/// silently truncated or make the result the wrong size for every later stage.
+///
+/// # Panics
+/// If the echoes do not all have the same length.
 pub fn rss_combine(magnitudes: &[&[f64]]) -> Vec<f64> {
     if magnitudes.is_empty() {
         return Vec::new();
     }
     let n = magnitudes[0].len();
+    for (e, mag) in magnitudes.iter().enumerate() {
+        assert_eq!(
+            mag.len(), n,
+            "rss_combine: echo {e} has {} voxels but echo 0 has {n} \
+             (all echoes must come from the same acquisition)",
+            mag.len()
+        );
+    }
     let mut combined = vec![0.0f64; n];
     for mag in magnitudes {
         for (i, &v) in mag.iter().enumerate() {
@@ -153,6 +169,27 @@ mod tests {
     fn test_rss_combine_empty() {
         let result = rss_combine(&[]);
         assert!(result.is_empty());
+    }
+
+    // Issue #70: the combined volume inherits echo 0's size and is then indexed
+    // by the run's grid, so a mismatched echo either panicked here on an index
+    // or made every later stage read past the end of the result.
+    #[test]
+    #[should_panic(expected = "rss_combine: echo 1 has 576 voxels but echo 0 has 512")]
+    fn rss_combine_refuses_a_longer_echo() {
+        let e0 = vec![1.0; 512];
+        let e1 = vec![1.0; 576];
+        rss_combine(&[&e0, &e1]);
+    }
+
+    #[test]
+    #[should_panic(expected = "rss_combine: echo 1 has 216 voxels but echo 0 has 512")]
+    fn rss_combine_refuses_a_shorter_echo() {
+        // The short case never panicked - it silently summed only the part of
+        // the stack that echo 1 covered.
+        let e0 = vec![1.0; 512];
+        let e1 = vec![1.0; 216];
+        rss_combine(&[&e0, &e1]);
     }
 
     #[test]
