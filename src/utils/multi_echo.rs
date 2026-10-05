@@ -1415,6 +1415,14 @@ fn median_in_place(v: &mut [f64]) -> Option<f64> {
 ///
 /// # What it does not detect
 ///
+/// **Most of what follows is measured at four echoes, which is this function's own minimum.**
+/// With an intercept the model has two parameters, so four is the fewest that leaves anything to
+/// detect with, and the tests sit exactly on that boundary. More echoes improve both halves
+/// markedly — on the same corruption, going from four to six tightens the clean-series score
+/// spread from 1.88 to 1.34 (more headroom under the flagging threshold) and takes the slope
+/// correction from 9% to 28% of the plain fit's error. Read the limitations below as the
+/// four-echo case, not as the method.
+///
 /// **It reports more reliably than it repairs.** Detection and correction are separate
 /// capabilities with different sensitivities, and the gap is worth knowing about. On the phantom,
 /// a dropout over 12% of the volume is flagged (score ratio 9.8) while the field map it produces
@@ -2952,7 +2960,9 @@ mod tests {
     //
     // These were developed against a mutation sweep — perturb the implementation, check a test
     // fails — which lives in a scratchpad and not in the repository, so the two things it has to
-    // guarantee are written down here for whoever rebuilds it.
+    // guarantee are written down here for whoever rebuilds it. Both apply to any *scripted* edit
+    // of this file, not only to a mutation harness: the first of them bit a one-off insertion
+    // script two commits after it was documented here.
     //
     // 1. **Every needle must match exactly once.** Two of the call sites below differ only in
     //    indentation, so one pattern is a substring of the other and a `replace(.., 1)` patches
@@ -3417,6 +3427,101 @@ mod tests {
             &phases[..3], &mags[..3], &tes[..3], &partial, &RobustFitParams::default(),
         );
         assert_eq!(short.quality.voxels_examined, 300);
+    }
+
+    /// More echoes make this work better, and every other test here runs at the minimum.
+    ///
+    /// Four echoes is the fewest `multi_echo_robust_fit` accepts with an intercept, so every
+    /// other test in this module sits exactly on its boundary — and a reader could reasonably
+    /// take the limitations they measure for properties of the method rather than of that
+    /// boundary. They are substantially the latter. Same corruption, same TE spacing, more
+    /// echoes:
+    ///
+    /// | echoes | clean-series spread | corrupted spread | slope error vs the plain fit |
+    /// |---|---|---|---|
+    /// | 4 | 1.88 | 10.4 | −9% |
+    /// | 6 | 1.34 | 17.5 | −28% |
+    /// | 8 | 1.25 | 13.5 | −23% |
+    ///
+    /// Both halves improve: the clean spread tightens, so there is more headroom under the
+    /// flagging threshold, and the correction roughly triples once there is a spare degree of
+    /// freedom to lose.
+    #[test]
+    fn more_echoes_work_better_than_the_four_every_other_test_uses() {
+        let fit_at = |n_echo: usize| -> (f64, f64, f64, Vec<usize>) {
+            let tes: Vec<f64> = (0..n_echo).map(|e| 0.004 + 0.008 * e as f64).collect();
+            let n = 4000;
+            let mut seed = 0x1234_5678u32;
+            let mut rnd = move || {
+                seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                (seed >> 8) as f64 / ((1u32 << 24) as f64) - 0.5
+            };
+            let slope: Vec<f64> =
+                (0..n).map(|v| 60.0 + 40.0 * ((v as f64) * 0.013).sin()).collect();
+            let icpt: Vec<f64> = (0..n).map(|v| 0.3 * ((v as f64) * 0.07).cos()).collect();
+            let prof: Vec<f64> = (0..n)
+                .map(|v| 20.0 + 180.0 * (0.5 + 0.5 * ((v as f64) * 0.0031).sin()))
+                .collect();
+            let (mut ph, mut mg) = (Vec::new(), Vec::new());
+            for &te in &tes {
+                let d = (-te / 0.030_f64).exp();
+                let m: Vec<f64> = (0..n).map(|v| d * prof[v]).collect();
+                ph.push(
+                    (0..n)
+                        .map(|v| icpt[v] + slope[v] * te + 0.02 * rnd() * 100.0 / m[v])
+                        .collect::<Vec<f64>>(),
+                );
+                mg.push(m);
+            }
+            let mask = vec![1u8; n];
+            let p = RobustFitParams::default();
+            let clean = multi_echo_robust_fit(&ph, &mg, &tes, &mask, &p);
+            let spread = |q: &EchoQuality| {
+                let lo = q.outlier_score.iter().copied().fold(f64::INFINITY, f64::min);
+                q.outlier_score.iter().copied().fold(0.0f64, f64::max) / lo.max(1e-30)
+            };
+            let clean_spread = spread(&clean.quality);
+            assert!(
+                clean.quality.flagged.is_empty(),
+                "{n_echo} echoes: a clean series must not be flagged"
+            );
+
+            let bad = n_echo / 2;
+            let mut s2 = 0x9E37_79B9u32;
+            for v in 0..(n * 35 / 100) {
+                s2 = s2.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                let r = (s2 >> 8) as f64 / ((1u32 << 24) as f64) - 0.5;
+                ph[bad][v] += 0.8 * r;
+                mg[bad][v] *= 0.8;
+            }
+            let lin = multi_echo_linear_fit(&ph, &mg, &tes, &mask, true, 0.0);
+            let rob = multi_echo_robust_fit(&ph, &mg, &tes, &mask, &p);
+            let err = |f: &[f64]| -> f64 {
+                (0..n).map(|v| (f[v] - slope[v]).abs()).sum::<f64>() / n as f64
+            };
+            let gain = (err(&lin.field) - err(&rob.fit.field)) / err(&lin.field);
+            (clean_spread, spread(&rob.quality), gain, rob.quality.flagged.clone())
+        };
+
+        let (c4, d4, g4, f4) = fit_at(4);
+        let (c6, d6, g6, f6) = fit_at(6);
+        println!(
+            "4 echoes: clean spread {c4:.2}, corrupted {d4:.1}, gain {:+.0}%, flagged {f4:?}\n\
+             6 echoes: clean spread {c6:.2}, corrupted {d6:.1}, gain {:+.0}%, flagged {f6:?}",
+            100.0 * g4,
+            100.0 * g6
+        );
+        assert_eq!(f4, vec![2], "4 echoes: the corrupted one");
+        assert_eq!(f6, vec![3], "6 echoes: the corrupted one");
+        assert!(c6 < c4, "more echoes should tighten the clean spread: {c6} vs {c4}");
+        assert!(d6 > d4, "and widen the corrupted one: {d6} vs {d4}");
+        assert!(
+            g6 > 2.0 * g4,
+            "the correction should improve substantially past the four-echo boundary: \
+             {:.1}% against {:.1}%",
+            100.0 * g6,
+            100.0 * g4
+        );
     }
 
     /// The documented detection floor: corruption confined to a small share of the volume    /// The documented detection floor: corruption confined to a small share of the volume is not
