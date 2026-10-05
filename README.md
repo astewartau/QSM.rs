@@ -185,11 +185,25 @@ into a 3D volume, so there is nothing to replace here, only anisotropic voxels t
 the kernels already do through their frequency axes.
 
 A 2D V-SHARP stage chained into 3D PDF, as the EPI-QSM literature uses, was implemented and
-measured against this phantom and did not pay for itself: plain 3D V-SHARP won both the enclosed
-case and, by 0.939 to 0.907, a 16-slice slab cut so the tissue genuinely reaches its end slices.
-The one geometry where the chain won was a synthetic background with slabs thin relative to the
-kernel radius. It is not in the crate for that reason; see astewartau/QSM.rs#75, which stays open
-pending real EPI data.
+measured against this phantom and did not pay for itself. The numbers are kept here so the case
+does not have to be re-implemented to be re-litigated. Residual RMS on a synthetic background
+with every source outside the ROI, against a ground truth of zero (lower is better):
+
+| | slab coverage | enclosed ROI |
+|---|---|---|
+| 2D V-SHARP | 1.18 | 0.47 |
+| 3D V-SHARP | 1.69 | **0.14** |
+| 2D V-SHARP → 3D PDF | **0.99** | 0.24 |
+
+3D wins the enclosed ROI outright. The chain wins synthetic slab coverage, so the case was
+re-tested on the real phantom with a 16-slice slab cut so the tissue genuinely reaches its end
+slices, which is the geometry the chain exists for: **3D V-SHARP scored 0.939 against the
+chain's 0.907**. 48 mm of slab against a 24 mm kernel diameter still leaves a sphere room almost
+everywhere, and this phantom's background is gentler than the synthetic one, so the end-slice
+penalty is small.
+
+The open question is whether a real acquisition has a slab thin enough relative to a useful
+kernel radius for the disc to earn its place. See astewartau/QSM.rs#75.
 
 
 A slice **gap**, where the excited slabs are thinner than the slice pitch, makes the sampled

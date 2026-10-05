@@ -1128,6 +1128,9 @@ jobs:
         env:
           QSM_BIDS_2D: bids
         run: |
+          # Without this the step reports tee's exit status and the job cannot fail.
+          # Verified: `bash -e` on `false | tee x` exits 0, and exits 1 with pipefail set.
+          set -o pipefail
           cargo test --release --features parallel --test multislice_2d -- --ignored --nocapture 2>&1 | tee test_output.txt
           if grep -q "^Skipping: 2D phantom session" test_output.txt; then
             echo "::warning title=2D phantom missing::multislice_2d skipped - the ses-thick/ses-offsets/ses-gap sessions are not in the test-data bundle, so nothing was verified against real data here. The unit tests in src/unwrap/slicewise.rs and src/grid.rs still ran."
