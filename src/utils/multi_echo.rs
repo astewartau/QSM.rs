@@ -1415,6 +1415,13 @@ fn median_in_place(v: &mut [f64]) -> Option<f64> {
 /// linear fit carry the most leverage, so the fit follows them and their residuals shrink. An
 /// echo in the middle of the train is the easiest to catch and the first and last the hardest.
 ///
+/// **A series in which an echo carries no signal.** This wants `n_params + 2` echoes *carrying
+/// signal*, not merely present, and it cannot tell the difference: a near-dead echo scores ~0
+/// because the score is magnitude-weighted, and the remaining three points then put all their
+/// leverage on the middle echo, which gets flagged with nothing wrong with it. Drop a dead echo
+/// before believing this. `a_dead_echo_causes_a_known_false_positive` pins the behaviour and
+/// records the two fixes that do not work.
+///
 /// **Anything that is still linear in TE.** A per-echo scaling of the whole field, or a
 /// corruption that happens to look like a different slope, fits the model perfectly well and
 /// leaves no residual to find. What this detects is departure from a straight line, which is
@@ -3280,6 +3287,55 @@ mod tests {
             (rob.quality.median_abs_residual_rad[2] - 3.0).abs() < 0.3,
             "expected the rejected echo's residual to be the ~3 rad offset, got {}",
             rob.quality.median_abs_residual_rad[2]
+        );
+    }
+
+    /// A known false positive, pinned so it is recorded rather than rediscovered: a series in
+    /// which one echo carries almost no signal gets another echo flagged, on data with nothing
+    /// wrong with it.
+    ///
+    /// The cause is structural rather than a threshold being wrong. With one of four echoes
+    /// effectively absent the fit has three points and two parameters, and in a three-point
+    /// linear fit the *middle* point carries the leverage and therefore the residual — so the
+    /// middle echo scores an order of magnitude above its neighbours with no corruption
+    /// anywhere. Measured: magnitudes scaled by 1e-4 on the first echo gives scores
+    /// 0.0002 / 0.056 / 1.171 / 0.056.
+    ///
+    /// Two fixes were tried and neither works. Flooring the flagging reference at the robust
+    /// scale does not help, because the scale is well below the spread. Taking the reference
+    /// from the median rather than the minimum does not either: it suppresses this case and the
+    /// genuine 12% dropout along with it. The honest position is that this function wants
+    /// `n_params + 2` echoes *carrying signal*, not merely present, and that it cannot tell the
+    /// difference — so a series with a dead echo needs that echo dropped by the caller before
+    /// this is believed.
+    #[test]
+    fn a_dead_echo_causes_a_known_false_positive() {
+        let (phases, mut mags, tes, _, mask) = echo_series(4000, 0.02);
+        for m in mags[0].iter_mut() {
+            *m *= 1e-4;
+        }
+        let rob = multi_echo_robust_fit(&phases, &mags, &tes, &mask, &RobustFitParams::default());
+        println!(
+            "dead echo on a clean series: scores {:?} flagged {:?}",
+            rob.quality.outlier_score.iter().map(|x| format!("{x:.5}")).collect::<Vec<_>>(),
+            rob.quality.flagged
+        );
+        assert_eq!(
+            rob.quality.flagged,
+            vec![2],
+            "documented false positive. If this changes, the behaviour has moved — update the \
+             limitation in `multi_echo_robust_fit`'s docs rather than the assertion"
+        );
+        // And the series really is clean: drop the dead echo and nothing is flagged.
+        let kept: Vec<Vec<f64>> = phases[1..].to_vec();
+        let kept_mags: Vec<Vec<f64>> = mags[1..].to_vec();
+        let three = multi_echo_robust_fit(
+            &kept, &kept_mags, &tes[1..], &mask, &RobustFitParams::default(),
+        );
+        assert!(
+            three.quality.flagged.is_empty(),
+            "with the dead echo removed the same data must be clean, got {:?}",
+            three.quality.flagged
         );
     }
 
