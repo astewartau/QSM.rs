@@ -290,6 +290,11 @@ jobs:
                 pipeline="$pipeline test_motion_correction"
                 run_geometry=true ;;
               tests/oblique_sagittal.rs) run_geometry=true ;;
+              # EPI distortion correction: a 1D resample along the phase-encode axis, built on
+              # geometry.rs's interpolation. Rides in the geometry job because it is about the
+              # grid rather than about any inversion.
+              src/distortion.rs) run_geometry=true ;;
+              tests/epi_unwarp.rs) run_geometry=true ;;
               # Rigid registration: the primitive that puts un-coregistered orientations on a
               # common grid and recovers their B0 directions.
               src/registration.rs)
@@ -1074,11 +1079,16 @@ jobs:
         run: |
           cargo test --release --features parallel --test oblique_sagittal -- --ignored --nocapture 2>&1 | tee test_output.txt
 
+      - name: Run epi_unwarp
+        timeout-minutes: 30
+        run: |
+          cargo test --release --features parallel --test epi_unwarp -- --ignored --nocapture 2>&1 | tee -a test_output.txt
+
       - name: Upload slices
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: slices-oblique_sagittal
+          name: slices-geometry
           path: slices/
           retention-days: 1
 
@@ -1730,6 +1740,18 @@ jobs:
               echo "'Axial' panel is the sagittal anatomical plane.*"
               echo ""
               emit_figures oblique_sagittal_truth oblique_sagittal_chi
+            fi
+
+            if [ -f "figures/epi_unwarp_corrected.png" ]; then
+              echo "### Geometry — EPI Susceptibility Distortion Correction"
+              echo "*The phantom pushed through a simulated 20 ms echo-planar readout with its own"
+              echo "field map (peak displacement 11.6 voxels along the phase-encode axis), then"
+              echo "unwarped. Magnitude, echo 1. Pass/fail only; the job log carries the"
+              echo "correlation, NRMSE and phase numbers, and the margins by which the three"
+              echo "controls — reversed polarity, no Jacobian, and phase interpolated outside the"
+              echo "complex domain — come out worse.*"
+              echo ""
+              emit_figures epi_unwarp_truth epi_unwarp_distorted epi_unwarp_corrected
             fi
 
             if TABLE=$(emit_chi_table "test_dl_" qsmgan lpcnn ir2qsm modl_qsm nextqsm); then

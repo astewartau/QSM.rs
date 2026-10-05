@@ -184,6 +184,28 @@ B0 directions come from, since the object rotates and B0 does not. The same appl
 single acquisition once the subject moves: [`motion`](src/motion.rs) applies it along a series of
 repeats, runs or echoes, and reports one B0 direction per volume for the same reason.
 
+### EPI susceptibility distortion
+
+An echo-planar readout displaces signal by several voxels along the phase-encode axis wherever B0
+is off-resonant — worst near the sinuses and petrous bone, which is where susceptibility is
+interesting. [`distortion`](src/distortion.rs) **applies** a B0 field map to undo it, taking a
+field in Hz, rad/s, ppm or voxels plus BIDS `PhaseEncodingDirection` and `TotalReadoutTime`; it
+does not *estimate* one, so it composes with FSL `topup`, `fugue`, SDCFlows or a scanner fieldmap
+rather than competing with them, and one entry point covers all four BIDS fieldmap cases.
+
+Three things it is built around. Magnitude and wrapped phase move together through `mag·e^{iφ}`,
+never as separate scalars. Where the readout folded the phase-encode axis (`1 + ds/dx ≤ 0`) the
+signal from several locations was summed during acquisition and nothing recovers it, so it
+refuses rather than returning a plausible wrong image. And the magnitude is Jacobian-modulated by
+default, because QSM reads magnitude quantitatively — masking thresholds and multi-echo SNR
+weights both move if compression is left uncorrected.
+
+Unwarping runs **first**, before co-registration and before field mapping. The off-resonance
+itself largely travels with the head, but the phase-encode *axis* the displacement runs along is
+fixed in the scanner — so once the head rotates, the same anatomy is smeared in a different
+head-frame direction. A 10-voxel frontal displacement under a 3° rotation moves ~0.5 voxels
+perpendicular to itself, which is a non-rigid difference no 6-DOF fit can absorb.
+
 ### Dipole Inversion
 
 | Algorithm | Description | Reference |
