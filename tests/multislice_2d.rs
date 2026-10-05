@@ -163,6 +163,48 @@ fn slicewise_unwrapping_beats_3d_on_slices_with_phase_offsets() {
     );
 }
 
+/// Bounds the recommendation. The module docs and the README both say to prefer ROMEO or best
+/// path over the Laplacian for slice-wise unwrapping, and quote 0.69 against 0.999 for it. That
+/// figure had nothing asserting it, so a regression would have left a stale recommendation
+/// rather than a failing test — the Laplacian could have gone to 0.3 and the docs would still
+/// have said 0.69.
+///
+/// The ordering is the claim; the figures are colour. The Laplacian trails because its Poisson
+/// solution is not a whole number of wraps from the truth to begin with, so the per-voxel
+/// consistency pass cannot fully re-seat it — but it should still be usable, not broken, which
+/// is what the lower bound is for.
+#[test]
+#[ignore]
+fn slicewise_laplacian_trails_the_region_growers_but_is_not_broken() {
+    let Some(s) = load("offsets") else { return };
+    let corr = |method| {
+        let params = SliceWiseParams { slice_axis: SLICE_AXIS, ..SliceWiseParams::default() };
+        let u = unwrap_slicewise_multi_echo(
+            &s.phase, &s.mag, &TES, &s.mask, method, &params, &s.grid,
+        );
+        correlation(&fit_slope(&u, &TES), &s.fieldmap_signal, &s.mask)
+    };
+    let romeo = corr(UnwrapMethod::Romeo);
+    let bestpath = corr(UnwrapMethod::BestPath);
+    let laplacian = corr(UnwrapMethod::Laplacian);
+    println!("RESULT:unwrap_slicewise_romeo_offsets_corr={romeo:.4}");
+    println!("RESULT:unwrap_slicewise_bestpath_offsets_corr={bestpath:.4}");
+    println!("RESULT:unwrap_slicewise_laplacian_offsets_corr={laplacian:.4}");
+
+    assert!(romeo > 0.95, "slice-wise ROMEO: {romeo:.4}");
+    assert!(bestpath > 0.95, "slice-wise best path: {bestpath:.4}");
+    assert!(
+        laplacian < romeo - 0.1,
+        "slice-wise Laplacian ({laplacian:.4}) no longer trails ROMEO ({romeo:.4}) — if that is \
+         real, the \"prefer ROMEO or best path\" guidance in the module docs and README is stale"
+    );
+    assert!(
+        laplacian > 0.55,
+        "slice-wise Laplacian has gone from trailing to broken ({laplacian:.4}); the docs quote \
+         0.69 and describe it as usable-but-worse"
+    );
+}
+
 #[test]
 #[ignore]
 fn slicewise_and_3d_agree_when_there_are_no_slice_offsets() {
@@ -291,5 +333,77 @@ fn vsharp_2d_pdf_refuses_a_gapped_acquisition() {
     assert!(
         vsharp_2d_pdf(&s.fieldmap, &s.mask, &s.grid, (0.0, 0.0, 1.0), &as_contiguous, |_, _| {})
             .is_ok()
+    );
+}
+
+/// Which half does which job, on real data. The fit-correlation metric used by the two tests
+/// above cannot tell slice-wise unwrapping from the consistency pass, because a fitted slope is
+/// blind to a constant per voxel — both reach 0.999. This is the measure on which they come
+/// apart, and it is the one that justifies the slice-wise mode for anything reading the phase.
+#[test]
+#[ignore]
+fn the_consistency_pass_fixes_the_fit_and_slice_wise_fixes_the_phase() {
+    let Some(s) = load("offsets") else { return };
+    let (nx, ny, nz) = s.grid.dims;
+    let refs: Vec<&[f64]> = s.phase.iter().map(|p| p.as_slice()).collect();
+    let corr = |u: &[Vec<f64>]| correlation(&fit_slope(u, &TES), &s.fieldmap_signal, &s.mask);
+    let jumps = |v: &[f64]| {
+        let mut n = 0usize;
+        for k in 0..nz {
+            for j in 0..ny {
+                for i in 0..nx - 1 {
+                    let a = i + j * nx + k * nx * ny;
+                    if s.mask[a] != 0 && s.mask[a + 1] != 0
+                        && (v[a + 1] - v[a]).abs() > std::f64::consts::PI
+                    {
+                        n += 1;
+                    }
+                }
+            }
+        }
+        n
+    };
+
+    // the pass alone, applied to phase nothing has spatially unwrapped
+    let mut raw = s.phase.clone();
+    let raw_before = corr(&raw);
+    qsm_core::unwrap::enforce_inter_echo_consistency(&mut raw, &refs, &s.mask);
+    let raw_after = corr(&raw);
+
+    // the pass applied to 3D ROMEO's output, which fails unaided
+    let params = RomeoParams { individual: true, ..RomeoParams::default() };
+    let mut three_d =
+        unwrap_romeo_multi_echo(&s.phase, &s.mag, &TES, &s.mask, &params, &s.grid);
+    let three_d_before = corr(&three_d);
+    qsm_core::unwrap::enforce_inter_echo_consistency(&mut three_d, &refs, &s.mask);
+    let three_d_after = corr(&three_d);
+
+    let sw_params = SliceWiseParams { slice_axis: SLICE_AXIS, ..SliceWiseParams::default() };
+    let slicewise = unwrap_slicewise_multi_echo(
+        &s.phase, &s.mag, &TES, &s.mask, UnwrapMethod::Romeo, &sw_params, &s.grid,
+    );
+
+    let last = TES.len() - 1;
+    println!("RESULT:fit_raw_before={raw_before:.4} fit_raw_after={raw_after:.4}");
+    println!("RESULT:fit_3d_before={three_d_before:.4} fit_3d_after={three_d_after:.4}");
+    println!("RESULT:fit_slicewise={:.4}", corr(&slicewise));
+    println!(
+        "RESULT:jumps_wrapped={} jumps_pass_only={} jumps_slicewise={}",
+        jumps(&s.phase[last]), jumps(&raw[last]), jumps(&slicewise[last])
+    );
+
+    // the pass is what fixes the fit, from either starting point
+    assert!(raw_before < 0.5, "raw wrapped fit should be poor: {raw_before:.4}");
+    assert!(raw_after > 0.95, "the pass alone did not fix the fit: {raw_after:.4}");
+    assert!(three_d_before < 0.5, "3D should fail unaided: {three_d_before:.4}");
+    assert!(three_d_after > 0.95, "the pass did not fix 3D: {three_d_after:.4}");
+
+    // and slice-wise is what fixes the phase, which the fit cannot see
+    let (pass_only, with_slicewise) = (jumps(&raw[last]), jumps(&slicewise[last]));
+    assert!(
+        with_slicewise < pass_only / 2,
+        "slice-wise left {with_slicewise} in-plane 2pi jumps against the pass alone's \
+         {pass_only}; if that gap has closed, the module docs and README overstate what the \
+         slice-wise mode is for"
     );
 }

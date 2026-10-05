@@ -115,7 +115,7 @@ Load and save NIfTI volumes with [`qsm_core::io`](src/io.rs).
 | **ROMEO** | Region-growing with quality-guided ordering using magnitude and gradient coherence weighting | Dymerska, B., et al. (2021). "Phase unwrapping with a rapid opensource minimum spanning tree algorithm (ROMEO)." *Magnetic Resonance in Medicine*, 85(4):2294-2308. [DOI](https://doi.org/10.1002/mrm.28563) |
 | **Laplacian** | FFT-based Poisson solver under a Neumann boundary condition on the array — unwraps without altering the background field, so the result is a total field (`laplacian_unwrap`). This is what `UnwrapMethod::Laplacian` selects. | Schofield, M.A., Zhu, Y. (2003). "Fast phase unwrapping algorithm for interferometric applications." *Optics Letters*, 28(14):1194-1196. [DOI](https://doi.org/10.1364/OL.28.001194) |
 | **Best path** | 3D-SRNCP — every edge sorted by reliability and merged in that order (`unwrap_bestpath`) | Abdul-Rahman, H., et al. (2007). "Fast and robust three-dimensional best path phase unwrapping algorithm." *Applied Optics*, 46(26):6623-6635. [DOI](https://doi.org/10.1364/AO.46.006623) |
-| **Slice-wise (2D)** | Any of the above run on each slice independently, for 2D multi-slice acquisitions whose slices carry independent receive phase offsets (`unwrap_slicewise`). For multi-echo data `unwrap_slicewise_multi_echo` additionally makes each slice's residual 2π the same across echoes, so a `linear-fit` B0 estimate cancels it along with the physical offset — see below. | — |
+| **Slice-wise (2D)** | Any of the above run on each slice independently, for 2D multi-slice acquisitions whose slices carry independent receive phase offsets (`unwrap_slicewise`). Makes the unwrapped **phase** usable on such data; for a `linear-fit` B0 map alone, `enforce_inter_echo_consistency` is the part that matters and works on any unwrapper's output — see below. | — |
 
 ### 2D multi-slice acquisitions
 
@@ -138,25 +138,38 @@ is ambiguous it leaves *part* of a slice offset by 2π. On the qsm-forward 2D ph
 count varies within a single slice of a single echo, so a per-slice correction has nothing it
 can do — per voxel takes the fitted field from r = −0.44 to r = 0.999.
 
-The 3D unwrappers are not a safe fallback. On clean data their quality weighting defers the
-incoherent z edges, so each slice does come out a whole number of wraps from the truth — but
+The 3D unwrappers are not a safe fallback *unaided*. On clean data their quality weighting defers
+the incoherent z edges, so each slice does come out a whole number of wraps from the truth — but
 *which* whole number depends on the echo, because the jump being rounded is
 `offset_step + field_step * TE`. `correct_multi_echo_wraps` cannot repair it: it corrects the
-whole volume at once and the error is per slice. Measured on the phantom's 3 mm interleaved-offset
-session, as the correlation of a `linear-fit` B0 estimate against the field the signal was
-generated from:
+whole volume at once and the error is per slice.
 
-| | no slice offsets | interleaved offsets |
+**The two halves fix different things, and it is worth knowing which you need.** Measured on the
+phantom's 3 mm interleaved-offset session:
+
+| echo 4 of the offsets session | linear-fit B0 correlation | in-plane 2π jumps |
 |---|---|---|
-| 3D ROMEO, template | 0.21 | −0.05 |
-| 3D ROMEO, individual | **1.00** | 0.04 |
-| **slice-wise ROMEO + consistency** | **1.00** | **1.00** |
-| slice-wise best path + consistency | 1.00 | 1.00 |
-| slice-wise Laplacian + consistency | 0.69 | 0.69 |
+| wrapped input, nothing applied | −0.01 | 1584 |
+| 3D ROMEO alone | 0.04 | — |
+| 3D ROMEO + `enforce_inter_echo_consistency` | **1.00** | — |
+| raw wrapped + `enforce_inter_echo_consistency` | **1.00** | 2178 |
+| **slice-wise + `enforce_inter_echo_consistency`** | **1.00** | **806** |
 
-Slice-wise costs nothing where there are no offsets and is the only thing that works where there
-are. The Laplacian trails because its Poisson solution is not a whole number of wraps from the
-truth to begin with, so the consistency pass cannot fully re-seat it; prefer ROMEO or best path.
+A fitted slope is blind to a constant per voxel, so `enforce_inter_echo_consistency` is what
+rescues a `linear-fit` B0 map — from *any* starting point, including no spatial unwrapping at all.
+It is public and works on any unwrapper's output, so **if a linear-fit field map is all you want,
+you do not need the slice-wise mode**; you need the pass.
+
+What the slice-wise mode fixes is the phase itself. The pass propagates echo 0's wrap state
+faithfully into every later echo, so on its own it leaves *more* in-plane 2π discontinuities than
+not unwrapping at all. Anything that reads the unwrapped phase rather than its TE-slope — a
+single-echo field map, a non-linear B0 estimator, phase fed straight to background removal —
+needs the spatial unwrapping, and on 2D multi-slice data that means per slice.
+
+With no offsets, slice-wise and the better 3D path both reach 1.00 and the same 806 jumps, so the
+mode costs nothing where there is nothing to fix. Slice-wise Laplacian reaches only 0.69 on the
+fit, because its Poisson solution is not a whole number of wraps from the truth to begin with and
+the pass cannot re-seat it cleanly; prefer ROMEO or best path.
 
 Background field removal needs the companion change, and it is worth being precise about when.
 Wherever a sphere fits, the sphere wins: 2D V-SHARP is **not** a better V-SHARP, and on a ROI

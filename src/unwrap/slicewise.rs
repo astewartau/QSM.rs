@@ -21,9 +21,8 @@
 //! echo-independent, and the fit that was going to cancel it is corrupted instead.
 //! [`correct_multi_echo_wraps`](crate::unwrap::correct_multi_echo_wraps) cannot repair it,
 //! because it corrects the whole volume at once and the error is per slice. Measured on this
-//! module's test phantom, neither 3D path survives both offset patterns — the template path
-//! misreads random offsets, the individual path misreads interleaved ones — while
-//! [`unwrap_slicewise_multi_echo`] recovers the field exactly in both.
+//! module's test phantom, neither 3D path survives both offset patterns on its own — the
+//! template path misreads random offsets, the individual path misreads interleaved ones.
 //!
 //! [`unwrap_slicewise`] runs the chosen unwrapper on each slice independently, so z is never
 //! differentiated across. Each slice is handed to the same code with a grid of
@@ -62,6 +61,36 @@
 //! - this module guarantees the leftover `2*pi*k` is **the same for every echo of a slice**;
 //! - the B0 fit cancels it, together with the physical slice offset, because both are now
 //!   echo-independent.
+//!
+//! # Which half does which job
+//!
+//! Measured on the qsm-forward 2D phantom at 3 mm slices with interleaved offsets, the two
+//! halves fix different things, and it is worth being exact about which, because the obvious
+//! reading — that slice-wise unwrapping is what rescues the field map — is wrong.
+//!
+//! **The consistency pass fixes the fitted field, from any starting point.** Correlation of a
+//! linear-fit B0 estimate against the field the signal was generated from: 3D ROMEO alone
+//! reaches 0.04, and the *same* 3D output put through [`enforce_inter_echo_consistency`]
+//! reaches 0.999. So does the raw wrapped phase with no spatial unwrapping at all. A fitted
+//! slope is blind to a constant per voxel, so whatever wrap state a voxel starts in lands in
+//! the intercept and the fit discards it; all the slope needs is that consecutive echoes differ
+//! by their measured evolution, which is exactly what the pass enforces. **If a linear-fit B0
+//! map is all you want, you do not need this module** — you need the pass, which is public and
+//! works on any unwrapper's output.
+//!
+//! **Slice-wise unwrapping fixes the phase itself.** Counting in-plane neighbour pairs that jump
+//! more than π in echo 4 of that session: 1584 in the wrapped input, 2178 after the raw phase is
+//! made echo-consistent, and 806 after slice-wise unwrapping is. The pass alone is *worse* on
+//! this measure than not unwrapping at all, because it faithfully propagates echo 0's wrap state
+//! into every later echo. Anything reading the unwrapped phase rather than its TE-slope — a
+//! single-echo field map, a non-linear B0 estimator, phase fed straight to background removal —
+//! needs the spatial unwrapping, and on 2D multi-slice data that means per slice.
+//!
+//! On the matched session with no offsets, slice-wise and the better 3D path both reach 0.999
+//! and the same 806 jumps, so the mode costs nothing where there is nothing to fix. Slice-wise
+//! [`UnwrapMethod::Laplacian`] reaches only 0.69 on the fit — its Poisson solution is not a
+//! whole number of wraps from the truth to begin with, so the pass cannot re-seat it cleanly.
+//! Prefer ROMEO or best path.
 //!
 //! Single-echo data has no second measurement and so no way to close the gap. [`unwrap_slicewise`]
 //! returns each slice unwrapped and internally consistent, and the between-slice offsets
@@ -356,6 +385,15 @@ pub fn unwrap_slicewise_multi_echo<P: AsRef<[f64]>, M: AsRef<[f64]>>(
 /// component has nothing it can do. Correcting per voxel repairs those plateaus as well, and
 /// takes the fitted field from r = -0.44 to r = 0.999 against ground truth.
 ///
+/// # This is the half that fixes a linear-fit B0 map
+///
+/// Public, and deliberately not tied to slice-wise unwrapping: it repairs any unwrapper's
+/// output, including none at all. On the phantom's interleaved-offset session it takes 3D ROMEO
+/// from 0.04 to 0.999 and the raw wrapped phase from -0.01 to 0.999. What it does *not* do is
+/// make the phase spatially continuous — it propagates the first echo's wrap state faithfully
+/// into the rest, which on that session leaves more in-plane 2π jumps than not unwrapping at
+/// all. See the module docs for the division of labour.
+///
 /// # What it assumes
 ///
 /// That the true phase evolution between consecutive echoes stays inside ±π, which is the
@@ -634,8 +672,82 @@ mod tests {
         }
     }
 
+    /// Counts in-plane neighbour pairs that jump more than pi. A fitted slope cannot see this —
+    /// it is blind to a constant per voxel — so it is the measure on which slice-wise unwrapping
+    /// and the consistency pass come apart.
+    fn inplane_jumps(u: &[f64]) -> usize {
+        let mut n = 0usize;
+        for k in 0..NZ {
+            for j in 0..NY {
+                for i in 0..NX - 1 {
+                    let a = i + j * NX + k * NX * NY;
+                    if (u[a + 1] - u[a]).abs() > PI {
+                        n += 1;
+                    }
+                }
+            }
+        }
+        n
+    }
+
     #[test]
-    fn no_3d_configuration_survives_both_offset_patterns() {
+    fn the_consistency_pass_is_what_fixes_the_fit_even_without_slice_wise_unwrapping() {
+        // The correction this module's docs used to credit to slice-wise unwrapping. A slope is
+        // blind to a constant per voxel, so the fit needs only that consecutive echoes differ by
+        // their measured evolution - which the pass enforces from any starting point, including
+        // none at all. Pinned because the module docs now say so, and because it tells a caller
+        // who only wants a linear-fit B0 map that they do not need this module.
+        let Inputs { field: b, wrapped, .. } = multi_echo_inputs(true);
+        let mask = full_mask();
+        let refs: Vec<&[f64]> = wrapped.iter().map(|p| p.as_slice()).collect();
+
+        // raw wrapped phase, no spatial unwrapping whatsoever
+        let mut raw = wrapped.clone();
+        let before = max_abs_diff(&fit_slope(&raw, &TES), &b);
+        assert!(before > 50.0, "the raw wrapped fit should be badly wrong: {before}");
+        enforce_inter_echo_consistency(&mut raw, &refs, &mask);
+        let after = max_abs_diff(&fit_slope(&raw, &TES), &b);
+        assert!(after < 1e-6, "the pass alone did not fix the fit: {after}");
+
+        // and the same for 3D ROMEO's output, which fails unaided
+        use crate::unwrap::unwrap_romeo_multi_echo;
+        let params = RomeoParams { individual: true, ..RomeoParams::default() };
+        let mut u =
+            unwrap_romeo_multi_echo(&wrapped, &[] as &[Vec<f64>], &TES, &mask, &params, &grid());
+        enforce_inter_echo_consistency(&mut u, &refs, &mask);
+        let err = max_abs_diff(&fit_slope(&u, &TES), &b);
+        assert!(err < 1e-6, "the pass did not fix 3D ROMEO's output either: {err}");
+    }
+
+    #[test]
+    fn slice_wise_unwrapping_is_what_makes_the_phase_spatially_continuous() {
+        // The job the pass cannot do, and the reason this module exists for any consumer that
+        // reads the phase rather than its TE-slope. The pass propagates echo 0's wrap state
+        // faithfully into every later echo, so on its own it leaves the discontinuities there.
+        let Inputs { wrapped, .. } = multi_echo_inputs(true);
+        let mask = full_mask();
+        let refs: Vec<&[f64]> = wrapped.iter().map(|p| p.as_slice()).collect();
+
+        let mut raw = wrapped.clone();
+        enforce_inter_echo_consistency(&mut raw, &refs, &mask);
+        let slicewise = unwrap_slicewise_multi_echo(
+            &wrapped, &[] as &[Vec<f64>], &TES, &mask, UnwrapMethod::Romeo,
+            &SliceWiseParams::default(), &grid(),
+        );
+
+        let last = TES.len() - 1;
+        let (pass_only, with_slicewise) =
+            (inplane_jumps(&raw[last]), inplane_jumps(&slicewise[last]));
+        assert_eq!(with_slicewise, 0, "slice-wise left {with_slicewise} in-plane 2pi jumps");
+        assert!(
+            pass_only > 0,
+            "the consistency pass alone left no in-plane jumps either, so this phantom cannot \
+             tell the two apart and the claim in the module docs is untested here"
+        );
+    }
+
+    #[test]
+    fn no_3d_configuration_survives_both_offset_patterns_unaided() {
         // What slice-wise unwrapping is for. On clean data the 3D region growers are not
         // obviously wrong - the quality weighting defers the bad z edges, so each slice tends
         // to be entered once and picks up a whole number of wraps, which looks harmless.
@@ -670,7 +782,11 @@ mod tests {
             }
             assert!(
                 worst > 100.0,
-                "3D ROMEO (individual={individual}) handled both offset patterns                  (worst fit error {worst} rad/s) - then slice-wise unwrapping buys nothing                  and this module should not exist"
+                "3D ROMEO (individual={individual}) handled both offset patterns unaided (worst \
+                 fit error {worst} rad/s) - then there was nothing to fix. Note this is 3D \
+                 *without* the consistency pass; with it 3D is fine too, which is what \
+                 the_consistency_pass_is_what_fixes_the_fit_even_without_slice_wise_unwrapping \
+                 pins."
             );
         }
 
