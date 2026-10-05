@@ -3345,16 +3345,25 @@ fn test_motion_correction() {
          field of view after rotation)"
     );
     // The scoring region depends on how far the series moved — coverage is the intersection of
-    // what every rotated echo still reaches — so it shrinks as the simulated motion grows. At
-    // the motion simulated here it is the whole brain, but nothing about this test stops someone
-    // raising that motion, and every number below would then be taken over a region small enough
-    // for the comparison to stop meaning anything, without a single assertion complaining.
-    // Bound it, so the metric cannot quietly become a small-sample statistic.
+    // what every rotated echo still reaches — so it shrinks as the simulated motion grows. At the
+    // motion simulated here it is the whole brain, but nothing stops someone raising that motion,
+    // which is the obvious thing to do to this test, and the region would erode with no assertion
+    // complaining.
+    //
+    // This bound is **not** about sample size, and it would be wrong to justify it that way: at
+    // half the brain the standard error of a correlation near 0.98 is about 5e-5 against the 0.02
+    // gap asserted below, a margin of several hundred. It is about the region staying
+    // *representative*. Coverage erodes from the periphery inward, and the periphery is precisely
+    // where motion does its damage — displacement grows with distance from the rotation centre,
+    // which is what `max_displacement_mm` measures. A shrinking region therefore drops the part
+    // of the brain this test is about while leaving the quiet middle, and the metrics improve as
+    // the experiment gets less meaningful.
     assert!(
         kept > in_brain / 2,
-        "only {kept} of {in_brain} brain voxels are covered by every echo; the metrics below \
-         would be comparing small samples. Reduce the simulated motion, or score a region \
-         chosen on purpose rather than whatever survived it"
+        "only {kept} of {in_brain} brain voxels are covered by every echo. The surviving region \
+         is the brain's centre, which is the part motion damages least, so the numbers below \
+         would flatter the correction. Reduce the simulated motion, or score a region chosen on \
+         purpose rather than whatever survived it"
     );
 
     let (baseline, t_base) = run_timed!(
