@@ -167,6 +167,20 @@ impl SliceGeometry {
 ///
 /// Returned by [`Grid::require_contiguous_slices`]. See that method for why this is refused
 /// rather than approximated.
+///
+/// # Why a `Result` and not a panic
+///
+/// The crate uses both, and the split is by *whose* mistake it is. A length that disagrees with
+/// the grid is the caller's — `rss_combine` and the bias correction panic on it, and so do the
+/// entry points in [`crate::unwrap::slicewise`] and [`crate::bgremove::vsharp2d`] — and the only
+/// useful audience is a developer reading a backtrace. A slice gap is the *acquisition's*: the
+/// call is correct, the data simply cannot yield a right answer, and the audience is the person
+/// who scanned it. Only the second can be surfaced to a user, so only the second is a `Result`.
+///
+/// One case sits across the line and is worth naming because it looks like a precondition:
+/// a thickness that is zero, negative or not finite is refused here rather than asserted, since
+/// it arrives from a sidecar rather than from code. A host that mis-parses `SliceThickness`
+/// should be told its data is unusable, not handed a panic.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SliceGapError {
     /// Slice-to-slice pitch in mm, taken from the grid.
