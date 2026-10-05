@@ -728,8 +728,6 @@ impl ScanMetadata {
     /// rather than per algorithm, because every one of those is three-dimensional: a complete
     /// background removal needs a 3D stage to have the mean value property at all, and the
     /// dipole kernel is inherently 3D, so there is no variant for which a gap is harmless.
-    /// [`crate::bgremove::vsharp_2d`] is the exception that proves the rule, and it is not a
-    /// complete background removal — which is why it is not a [`BgRemovalAlgorithm`].
     ///
     /// Phase unwrapping deliberately does **not** call this. A gap degrades 3D unwrapping too,
     /// but the remedy there is to unwrap in plane ([`crate::unwrap::unwrap_slicewise`]) rather

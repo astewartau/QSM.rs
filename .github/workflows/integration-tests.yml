@@ -374,9 +374,9 @@ jobs:
               src/unwrap/mod.rs)      pipeline="$pipeline test_pipeline_tgv test_pipeline_qsmart test_pipeline_qsmart_tikhonov" ;;
               src/unwrap/romeo.rs)    pipeline="$pipeline test_pipeline_romeo_b0 test_pipeline_unwrap_bfr_romeo test_pipeline_tgv" ;;
               src/unwrap/bestpath.rs) pipeline="$pipeline test_pipeline_unwrap_bfr_bestpath test_pipeline_unwrap_bfr_romeo" ;;
-              # 2D multi-slice: slice-wise unwrapping and 2D V-SHARP into 3D PDF are
+              # 2D multi-slice: slice-wise unwrapping and the slice-gap refusal are
               # additive, so no existing pipeline test sees them; they have their own binary.
-              src/unwrap/slicewise.rs|src/bgremove/vsharp2d.rs|tests/multislice_2d.rs)
+              src/unwrap/slicewise.rs|tests/multislice_2d.rs)
                 run_multislice=true ;;
               # Best path is union_find's only caller today; PRELUDE will be the second.
               src/utils/union_find.rs) pipeline="$pipeline test_pipeline_unwrap_bfr_bestpath" ;;
@@ -1130,7 +1130,7 @@ jobs:
         run: |
           cargo test --release --features parallel --test multislice_2d -- --ignored --nocapture 2>&1 | tee test_output.txt
           if grep -q "^Skipping: 2D phantom session" test_output.txt; then
-            echo "::warning title=2D phantom missing::multislice_2d skipped - the ses-thick/ses-offsets/ses-gap sessions are not in the test-data bundle, so nothing was verified against real data here. The unit tests in src/unwrap/slicewise.rs and src/bgremove/vsharp2d.rs still ran."
+            echo "::warning title=2D phantom missing::multislice_2d skipped - the ses-thick/ses-offsets/ses-gap sessions are not in the test-data bundle, so nothing was verified against real data here. The unit tests in src/unwrap/slicewise.rs and src/grid.rs still ran."
           fi
 
   tests-passed:

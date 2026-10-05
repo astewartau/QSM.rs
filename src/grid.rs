@@ -108,9 +108,8 @@ impl Grid {
     /// looks like a susceptibility map. So this refuses rather than warns.
     ///
     /// In-plane work is unaffected: a gap along z does not disturb a purely in-plane kernel,
-    /// which is why [`vsharp_2d`](crate::bgremove::vsharp_2d) does not call this and
-    /// [`vsharp_2d_pdf`](crate::bgremove::vsharp_2d_pdf), whose second stage is a 3D PDF,
-    /// does.
+    /// so slice-wise unwrapping is valid on gapped data and deliberately does not call this.
+    /// Anything that convolves along the slice axis has to.
     ///
     /// # Arguments
     /// * `slice_thickness` - Excited slice thickness in mm. For a contiguous acquisition this
@@ -172,8 +171,8 @@ impl SliceGeometry {
 ///
 /// The crate uses both, and the split is by *whose* mistake it is. A length that disagrees with
 /// the grid is the caller's — `rss_combine` and the bias correction panic on it, and so do the
-/// entry points in [`crate::unwrap::slicewise`] and [`crate::bgremove::vsharp2d`] — and the only
-/// useful audience is a developer reading a backtrace. A slice gap is the *acquisition's*: the
+/// entry points in [`crate::unwrap::slicewise`] — and the only useful audience is a developer
+/// reading a backtrace. A slice gap is the *acquisition's*: the
 /// call is correct, the data simply cannot yield a right answer, and the audience is the person
 /// who scanned it. Only the second can be surfaced to a user, so only the second is a `Result`.
 ///
@@ -222,13 +221,12 @@ impl std::error::Error for SliceGapError {}
 
 /// How the slices of a volume sit inside it, for code that works one slice at a time.
 ///
-/// A 2D multi-slice acquisition is processed slice by slice, and the operations that do so
-/// — [`unwrap_slicewise`](crate::unwrap::unwrap_slicewise),
-/// [`vsharp_2d`](crate::bgremove::vsharp_2d) — all want the same two things: the strides
+/// A 2D multi-slice acquisition is processed slice by slice, and an operation that does so
+/// — [`unwrap_slicewise`](crate::unwrap::unwrap_slicewise) — wants two things: the strides
 /// that pick a slice out of the volume, and a [`Grid`] describing one slice. Collapsing the
-/// slice axis to a length of 1 rather than writing 2D variants of each kernel is what keeps
-/// those operations honest: the existing 3D code runs unmodified, its slice-axis neighbours
-/// simply fall outside the volume, and a spherical kernel becomes the disc it should be.
+/// slice axis to a length of 1 rather than writing a 2D variant of each kernel is what keeps
+/// that honest: the existing 3D code runs unmodified and its slice-axis neighbours simply
+/// fall outside the volume, so no unwrapper had to be touched to gain the mode.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct SliceLayout {
     /// In-slice dimensions, in the order the extracted buffer uses.

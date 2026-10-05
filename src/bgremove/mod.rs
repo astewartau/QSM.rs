@@ -4,9 +4,6 @@
 //! - SHARP: Sophisticated harmonic artifact reduction for phase data
 //! - RESHARP: Regularized SHARP with Tikhonov regularization
 //! - V-SHARP: Variable kernel SHARP
-//! - 2D V-SHARP → 3D PDF: for 2D multi-slice data, where a 3D spherical kernel erodes
-//!   whole slices off a thick-slice stack. In-plane discs first, then PDF for the
-//!   through-slice background a disc cannot see; see the `vsharp2d` module docs
 //! - PDF: Projection onto dipole fields
 //! - iSMV: Iterative spherical mean value
 //! - mSMV: Maximum spherical mean value — boundary-shadow removal. Best used as a
@@ -25,7 +22,6 @@ pub mod msmv;
 pub mod sharp;
 pub mod resharp;
 pub mod vsharp;
-pub mod vsharp2d;
 pub mod pdf;
 pub mod ismv;
 pub mod lbv;
@@ -39,7 +35,6 @@ pub use msmv::{msmv, MsmvParams};
 pub use sharp::{sharp, SharpParams};
 pub use resharp::{resharp, ResharpParams};
 pub use vsharp::{vsharp, VsharpParams};
-pub use vsharp2d::{vsharp_2d, vsharp_2d_pdf, Vsharp2dPdfParams};
 pub use pdf::{pdf, PdfParams};
 pub use ismv::{ismv, IsmvParams};
 pub use lbv::{lbv, LbvParams};

@@ -176,27 +176,21 @@ mode costs nothing where there is nothing to fix. Slice-wise Laplacian reaches o
 fit, because its Poisson solution is not a whole number of wraps from the truth to begin with and
 the pass cannot re-seat it cleanly; prefer ROMEO or best path.
 
-Background field removal needs the companion change, and it is worth being precise about when.
-Wherever a sphere fits, the sphere wins: 2D V-SHARP is **not** a better V-SHARP, and on a ROI
-with tissue above and below it, plain 3D V-SHARP beats both the 2D stage and the chain. What
-changes for 2D multi-slice is that the stack is prescribed over part of the head, so the tissue
-reaches the first and last slice and a sphere has nothing beyond them to average over. V-SHARP's
-variable radius does not erode those slices away — it falls back to radii small enough to fit,
-which remove much less. A disc does not care: it is the same disc on the end slices as in the
-middle.
+Background field removal stays **3D**, and so does the dipole inversion. That is not a gap in
+the implementation, it is the physics: SHARP and its variants rest on the mean value property of
+harmonic functions, which is three-dimensional, and a disc has no equivalent, so V-SHARP run
+slice by slice would remove only the in-plane component of a field that is not separable that
+way. The dipole kernel is likewise inherently 3D. A 2D multi-slice acquisition still assembles
+into a 3D volume, so there is nothing to replace here, only anisotropic voxels to handle, which
+the kernels already do through their frequency axes.
 
-Measured on the synthetic background in `bgremove::vsharp2d` (residual RMS against a ground truth
-of zero, every source outside the ROI):
+A 2D V-SHARP stage chained into 3D PDF, as the EPI-QSM literature uses, was implemented and
+measured against this phantom and did not pay for itself: plain 3D V-SHARP won both the enclosed
+case and, by 0.939 to 0.907, a 16-slice slab cut so the tissue genuinely reaches its end slices.
+The one geometry where the chain won was a synthetic background with slabs thin relative to the
+kernel radius. It is not in the crate for that reason; see astewartau/QSM.rs#75, which stays open
+pending real EPI data.
 
-| | slab coverage | enclosed ROI |
-|---|---|---|
-| 2D V-SHARP | 1.18 | 0.47 |
-| 3D V-SHARP | 1.69 | **0.14** |
-| 2D V-SHARP → 3D PDF | **0.99** | 0.24 |
-
-On slab coverage the end-slice residual is the whole story: 3D V-SHARP 4.0 against 2D's 1.6,
-while in the interior 3D is three times better. So the chain is for slab coverage and nothing
-else.
 
 A slice **gap**, where the excited slabs are thinner than the slice pitch, makes the sampled
 volume non-contiguous. The FFT dipole kernel and the SHARP family's spherical kernels are defined
@@ -222,14 +216,13 @@ cannot skip the check by omission.
 
 Below the pipeline, `Grid::require_contiguous_slices(slice_thickness, slice_axis)` is the
 primitive and `require_contiguous_slices_if_known` is the `Option`-aware form. Purely in-plane
-work is unaffected, which is why `vsharp_2d` does not call it and `vsharp_2d_pdf` does.
+work is unaffected, which is why slice-wise unwrapping does not call it.
 
 ### Background Field Removal
 
 | Algorithm | Description | Reference |
 |-----------|-------------|-----------|
 | **V-SHARP** | Variable-radius Sophisticated Harmonic Artifact Reduction for Phase data — multi-scale deconvolution for robust background removal | Wu, B., et al. (2012). "Whole brain susceptibility mapping using compressed sensing." *Magnetic Resonance in Medicine*, 67(1):137-147. [DOI](https://doi.org/10.1002/mrm.23000) |
-| **2D V-SHARP → 3D PDF** | For 2D multi-slice data. SHARP rests on the three-dimensional mean value property of harmonic functions, which a disc does not have, so V-SHARP run slice by slice removes only the in-plane background component (`vsharp_2d`). `vsharp_2d_pdf` chains 3D PDF after it to take the through-slice component the discs cannot see, and refuses a gapped acquisition rather than computing one. Worth it only on slab coverage — see the note below. | Wu et al. (2012) as above; Liu, T., et al. (2011). "A novel background field removal method for MRI using projection onto dipole fields." *NMR in Biomedicine*, 24(9):1129-1136. [DOI](https://doi.org/10.1002/nbm.1670) |
 | **SHARP** | Sophisticated Harmonic Artifact Reduction for Phase data — deconvolution-based harmonic field removal | Schweser, F., et al. (2011). "Quantitative imaging of intrinsic magnetic tissue properties using MRI signal phase." *NeuroImage*, 54(4):2789-2807. [DOI](https://doi.org/10.1016/j.neuroimage.2010.10.070) |
 | **RESHARP** | Regularized SHARP — uses Tikhonov regularization instead of TSVD truncation for more robust SMV deconvolution | Sun, H. and Wilman, A.H. (2013). "Background field removal using spherical mean value filtering and Tikhonov regularization." *Magn Reson Med*, 71(3):1151-1157. [DOI](https://doi.org/10.1002/mrm.24765) |
 | **SMV** | Simple Spherical Mean Value — subtracts the spherical mean of the field for basic background removal | Schweser, F., et al. (2011). "Quantitative imaging of intrinsic magnetic tissue properties using MRI signal phase." *NeuroImage*, 54(4):2789-2807. [DOI](https://doi.org/10.1016/j.neuroimage.2010.10.070) |
