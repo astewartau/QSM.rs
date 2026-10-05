@@ -137,6 +137,7 @@ DIFF_LABELS = {
     "diff:register_reference-vs-register_aligned": "Difference — after registration",
     "diff:motion_baseline_field-vs-motion_uncorrected_field": "Uncorrected",
     "diff:motion_baseline_field-vs-motion_corrected_field": "After correction",
+
 }
 
 MONTAGE_LABELS = {
@@ -155,6 +156,12 @@ MONTAGE_LABELS = {
     "motion_baseline_field": "No motion",
     "motion_uncorrected_field": "Motion, uncorrected",
     "motion_corrected_field": "Motion, corrected",
+    # Robust echo combination: total field maps, same shared ppm scale.
+    "echoq_reference_field": "Uncorrupted echoes",
+    "echoq_plain_field": "Corrupted, plain fit",
+    "echoq_robust_field": "Corrupted, robust fit",
+    "echoq_weight_e1": "Echo 1 weight", "echoq_weight_e2": "Echo 2 weight",
+    "echoq_weight_e3": "Echo 3 weight (corrupted)", "echoq_weight_e4": "Echo 4 weight",
     # Relaxometry: the row label already names the tool and units.
     "relax_r2_truth": "Truth", "relax_r2_epg": "EPG", "relax_r2_monoexp": "Mono-exp",
     "relax_r2prime_truth": "Truth", "relax_r2prime_derived": "Derived (R2* − R2)",
@@ -185,6 +192,16 @@ WINDOWS = {
     # content of the pair.
     "diff:motion_baseline_field-vs-motion_uncorrected_field": (-0.05, 0.05),
     "diff:motion_baseline_field-vs-motion_corrected_field": (-0.05, 0.05),
+    # Robust echo combination: the three field maps share the usual total-field window, and the
+    # per-echo weight maps get a fixed 0-1 so a panel that was never touched renders as flat
+    # white rather than being auto-stretched into looking like it was.
+    "echoq_reference_field": (-0.05, 0.05),
+    "echoq_plain_field": (-0.05, 0.05),
+    "echoq_robust_field": (-0.05, 0.05),
+    "echoq_weight_e1": (0.0, 1.0),
+    "echoq_weight_e2": (0.0, 1.0),
+    "echoq_weight_e3": (0.0, 1.0),
+    "echoq_weight_e4": (0.0, 1.0),
     "bgremove_sharp": (-0.025, 0.025),
     "bgremove_resharp": (-0.025, 0.025),
     "bgremove_vsharp": (-0.025, 0.025),
@@ -376,6 +393,21 @@ MOTION = ("stage_motion", "Motion correction", "ppm", (-0.05, 0.05), [
      "diff:motion_baseline_field-vs-motion_corrected_field"],
 ], ["total field", "residual vs the no-motion map"])
 MONTAGES.append(MOTION)
+# Motion-robust echo combination. The top row is context; the bottom row is the figure — the
+# robust weight the fit ended up giving each echo, 0 (black, discarded) to 1 (white, kept in
+# full). Echo 3 is the corrupted one, and its slab should be visibly dark where the others are
+# not. Four white panels means the loss never fired, which a susceptibility map downstream would
+# show only as added noise.
+#
+# `window=None` so each panel keeps its own scale and colourbar: the field maps are ppm and the
+# weights are a dimensionless 0-1, and forcing them onto one bar would render one row or the
+# other as a flat block. Both scales are pinned in WINDOWS rather than auto-ranged, so an
+# untouched weight map reads as white instead of being stretched to look eventful.
+ECHO_QUALITY = ("stage_echo_quality", "Motion-robust echo combination", None, None, [
+    ["echoq_reference_field", "echoq_plain_field", "echoq_robust_field"],
+    ["echoq_weight_e1", "echoq_weight_e2", "echoq_weight_e3", "echoq_weight_e4"],
+], ["total field (ppm)", "robust weight per echo"])
+MONTAGES.append(ECHO_QUALITY)
 MONTAGES.append(REGISTRATION)
 MONTAGES.append(MULTIORIENT)
 MONTAGES.append(SUPPLEMENTARY)

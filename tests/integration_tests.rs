@@ -3449,3 +3449,236 @@ fn test_motion_correction() {
         res_unc.correlation, res_cor.correlation
     );
 }
+
+// ---------------------------------------------------------------------------
+// Motion-robust echo combination
+// ---------------------------------------------------------------------------
+
+/// Robust multi-echo combination against a known, deliberately un-registrable corruption.
+///
+/// This is the other half of motion correction, and it exists for what registration cannot
+/// reach. [`test_motion_correction`] handles an echo that *moved* — a rigid displacement, which
+/// a rigid transform undoes. What is left over is an echo that is wrong in a way no transform
+/// can express: a slab of signal lost to spin history, a shot acquired mid-movement, phase that
+/// is simply not on the line the other echoes define. Registering that echo does not help; the
+/// only thing to do is notice and stop trusting it.
+///
+/// The corruption here is therefore **not** a rigid transform: a slab of the volume loses most
+/// of its magnitude and acquires a smooth phase error, applied to the complex data before any
+/// unwrapping, so the whole pipeline sees it exactly as it would see the real thing.
+///
+/// Three things are checked:
+///
+/// 1. the detector names the corrupted echo, and only it;
+/// 2. the robust fit's field map is closer to the uncorrupted one than the plain weighted fit's;
+/// 3. on the *clean* series the robust fit changes almost nothing — the cost of insurance, which
+///    matters because a pipeline would run this unconditionally.
+///
+/// As the issue records up front, there is no public motion-corrupted QSM dataset with ground
+/// truth, so this can only ever be simulated corruption. What that buys is an exactly known
+/// answer; what it cannot capture is whether real spin-history artefacts look like this.
+#[test]
+#[ignore]
+fn test_robust_echo_combination() {
+    use qsm_core::utils::{multi_echo_robust_fit, RobustFitParams};
+
+    let data = TestData::load().expect("Failed to load test data");
+    let dims = data.dims;
+    let (nx, ny, nz) = dims;
+    let (vsx, vsy, vsz) = data.voxel_size;
+    let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
+    let n_echoes = data.phase_echoes.len();
+    const BAD: usize = 2;
+
+    println!(
+        "[INFO] phantom {dims:?}, {n_echoes} echoes at {:?} s; corrupting echo {}",
+        data.echo_times,
+        BAD + 1
+    );
+
+    // --- the corruption --------------------------------------------------------------------
+    // A slab through the middle third of the *slices* loses 70% of its magnitude and gains a
+    // smooth phase error of about 1.5 rad. The brain is centred, so that is about three
+    // quarters of the in-mask voxels — the test prints the figure it actually hit. Smooth rather
+    // than random on purpose: a random
+    // scramble is destroyed by unwrapping and never reaches the fit, where a smooth error
+    // survives it and is exactly what a shot acquired at the wrong moment produces.
+    let mut mags_bad = data.mag_echoes.clone();
+    let mut phases_bad = data.phase_echoes.clone();
+    let (z0, z1) = ((nz as f64 * 0.33) as usize, (nz as f64 * 0.67) as usize);
+    let mut corrupted_voxels = 0usize;
+    for k in z0..z1 {
+        for j in 0..ny {
+            for i in 0..nx {
+                let v = i + j * nx + k * nx * ny;
+                if data.mask[v] == 0 {
+                    continue;
+                }
+                let (x, y) = (i as f64 / nx as f64, j as f64 / ny as f64);
+                let err = 1.5 * ((2.5 * x).sin() + (1.7 * y).cos()) * 0.5;
+                mags_bad[BAD][v] *= 0.3;
+                phases_bad[BAD][v] = wrap_pi(phases_bad[BAD][v] + err);
+                corrupted_voxels += 1;
+            }
+        }
+    }
+    let in_mask = data.mask.iter().filter(|&&m| m != 0).count();
+    println!(
+        "[INFO] corrupted {corrupted_voxels} of {in_mask} in-mask voxels ({:.0}%)",
+        100.0 * corrupted_voxels as f64 / in_mask as f64
+    );
+
+    // --- unwrap both series through the real pipeline ----------------------------------------
+    let unwrap = |phases: &[Vec<f64>], mags: &[Vec<f64>]| -> Vec<Vec<f64>> {
+        let (corrected, _) = phase_offset_removal(
+            phases, mags, &data.echo_times, &data.mask,
+            [10.0, 10.0, 5.0], [0, 1], UnwrapMethod::Romeo, &grid,
+        );
+        let mag_refs: Vec<&[f64]> = mags.iter().map(|m| m.as_slice()).collect();
+        unwrap_romeo_multi_echo(
+            &corrected, &mag_refs, &data.echo_times, &data.mask,
+            &RomeoParams::default(), &grid,
+        )
+    };
+    let (uw_clean, t_unwrap) = run_timed!("unwrap (clean)", unwrap(&data.phase_echoes, &data.mag_echoes));
+    let uw_bad = unwrap(&phases_bad, &mags_bad);
+    let _ = t_unwrap;
+
+    // --- the three fits -----------------------------------------------------------------------
+    let params = RobustFitParams::default();
+    // The reference every other map is scored against: the ordinary fit on the uncorrupted data.
+    let reference = multi_echo_linear_fit(
+        &uw_clean, &data.mag_echoes, &data.echo_times, &data.mask, true, 0.0,
+    );
+    let (plain, t_plain) = run_timed!(
+        "linear fit (corrupted)",
+        multi_echo_linear_fit(&uw_bad, &mags_bad, &data.echo_times, &data.mask, true, 0.0)
+    );
+    let (robust, t_robust) = run_timed!(
+        "robust fit (corrupted)",
+        multi_echo_robust_fit(&uw_bad, &mags_bad, &data.echo_times, &data.mask, &params)
+    );
+    let (clean_robust, _) = run_timed!(
+        "robust fit (clean)",
+        multi_echo_robust_fit(&uw_clean, &data.mag_echoes, &data.echo_times, &data.mask, &params)
+    );
+
+    // --- 1: detection --------------------------------------------------------------------------
+    let q = &robust.quality;
+    let best = q.outlier_score.iter().copied().fold(f64::INFINITY, f64::min);
+    println!(
+        "[INFO] corrupted series — outlier score {:?}, spread {:.1}x, downweighted {:?}, flagged {:?}",
+        q.outlier_score.iter().map(|x| format!("{x:.3}")).collect::<Vec<_>>(),
+        q.outlier_score.iter().copied().fold(0.0f64, f64::max) / best.max(1e-12),
+        q.downweighted_fraction.iter().map(|x| format!("{x:.3}")).collect::<Vec<_>>(),
+        q.flagged
+    );
+    let cq = &clean_robust.quality;
+    let cbest = cq.outlier_score.iter().copied().fold(f64::INFINITY, f64::min);
+    let clean_spread = cq.outlier_score.iter().copied().fold(0.0f64, f64::max) / cbest.max(1e-12);
+    println!(
+        "[INFO] clean series     — outlier score {:?}, spread {:.1}x, flagged {:?}",
+        cq.outlier_score.iter().map(|x| format!("{x:.3}")).collect::<Vec<_>>(),
+        clean_spread,
+        cq.flagged
+    );
+
+    assert_eq!(q.flagged, vec![BAD], "the detector must name exactly the corrupted echo");
+    assert!(
+        cq.flagged.is_empty(),
+        "the clean series must not be flagged, got {:?} — a detector that fires on good data is \
+         worse than none",
+        cq.flagged
+    );
+
+    // --- 2: the field map ----------------------------------------------------------------------
+    // Scored against the ordinary fit of the *uncorrupted* echoes: the question is how much of
+    // the corruption survives, so the no-corruption answer is the right reference. Ground truth
+    // would fold in the unwrapper's own harmonic offset, which is far larger and nothing to do
+    // with this.
+    let hz = |f: &[f64]| -> Vec<f64> { field_to_hz(f) };
+    let (r_hz, p_hz, b_hz) = (hz(&reference.field), hz(&plain.field), hz(&robust.fit.field));
+    let c_hz = hz(&clean_robust.fit.field);
+
+    let res_plain = TestResult::new("Plain fit", &p_hz, &r_hz, &data.mask, dims);
+    let res_robust = TestResult::new("Robust fit", &b_hz, &r_hz, &data.mask, dims);
+    let res_cost = TestResult::new("Robust on clean", &c_hz, &r_hz, &data.mask, dims);
+    res_plain.print_with_time(t_plain);
+    res_robust.print_with_time(t_robust);
+    res_cost.print();
+
+    for (r, t) in [(&res_plain, t_plain), (&res_robust, t_robust)] {
+        println!(
+            "RESULT:{},{:.4},{:.4},{:.4},{:.2}",
+            r.name, r.nrmse, r.correlation, r.xsim, t.as_secs_f64()
+        );
+    }
+    println!(
+        "RESULT:Robust on clean,{:.4},{:.4},{:.4},0.00",
+        res_cost.nrmse, res_cost.correlation, res_cost.xsim
+    );
+    println!(
+        "RESULT:Echo quality,{:.1},{:.1},{},{:.3}",
+        q.outlier_score.iter().copied().fold(0.0f64, f64::max) / best.max(1e-12),
+        clean_spread,
+        BAD + 1,
+        q.downweighted_fraction[BAD]
+    );
+
+    println!(
+        "[INFO] field vs the uncorrupted fit — plain NRMSE {:.4} corr {:.4}; robust {:.4} / {:.4}; \
+         robust-on-clean (the cost of insurance) {:.4} / {:.4}",
+        res_plain.nrmse, res_plain.correlation,
+        res_robust.nrmse, res_robust.correlation,
+        res_cost.nrmse, res_cost.correlation,
+    );
+    assert!(
+        res_robust.nrmse < res_plain.nrmse,
+        "the robust fit has to beat the plain one on corrupted data: {} vs {}",
+        res_robust.nrmse, res_plain.nrmse
+    );
+
+    // --- 3: the cost on clean data --------------------------------------------------------------
+    assert!(
+        res_cost.nrmse < res_robust.nrmse,
+        "running the robust fit on clean data must cost less than the corruption it protects \
+         against: {} vs {}",
+        res_cost.nrmse, res_robust.nrmse
+    );
+    assert!(
+        res_cost.correlation > 0.999,
+        "the robust fit must leave a clean series essentially alone, got correlation {}",
+        res_cost.correlation
+    );
+
+    // --- the figure -------------------------------------------------------------------------
+    // In ppm, so it shares the window every other field montage uses. The field maps look alike;
+    // the content is the pair of differences from the uncorrupted fit on one shared scale —
+    // **plain** carrying the corrupted echo's error and **robust** near-flat.
+    let scale = 1e6 / (42.576e6_f64 * data.field_strength);
+    let ppm = |v: &[f64]| -> Vec<f64> { v.iter().map(|&x| x * scale).collect() };
+    common::save_center_slices(&ppm(&r_hz), &data.mask, dims, "echoq_reference_field");
+    common::save_center_slices(&ppm(&p_hz), &data.mask, dims, "echoq_plain_field");
+    common::save_center_slices(&ppm(&b_hz), &data.mask, dims, "echoq_robust_field");
+    // The per-echo robust weights, which are the distinctive output and the only one that is
+    // actually legible as a picture. Difference maps were tried first and are the wrong
+    // visualisation here: the field error the corruption causes is ~0.005 ppm RMS against a
+    // ±0.05 ppm window, so both residual panels render as blank paper whether the loss fired or
+    // not. The weights show it directly — the corrupted echo's slab goes dark, the clean echoes
+    // stay white — and a run where nothing was downweighted gives four white panels, which is
+    // exactly the failure worth being able to see.
+    for e in 0..n_echoes {
+        common::save_center_slices(
+            &robust.robust_weights[e],
+            &data.mask,
+            dims,
+            &format!("echoq_weight_e{}", e + 1),
+        );
+    }
+}
+
+/// Wrap to (-pi, pi].
+fn wrap_pi(a: f64) -> f64 {
+    let tau = 2.0 * std::f64::consts::PI;
+    a - tau * ((a / tau) + 0.5).floor()
+}

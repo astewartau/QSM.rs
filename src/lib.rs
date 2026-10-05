@@ -140,6 +140,7 @@ pub mod fieldmap {
         phase_offset_removal, mcpc3ds_combine, calculate_b0_weighted, multi_echo_linear_fit,
         bipolar_correction, field_to_hz, nan_box_smooth_3d, nan_box_smooth_3d_phase, gaussian_box_sizes,
         PhaseOffsetParams, CoilCombinationResult, LinearFitParams, LinearFitResult, B0WeightType,
+        multi_echo_robust_fit, RobustFitParams, RobustFitResult, RobustLoss, EchoQuality,
     };
 }
 
