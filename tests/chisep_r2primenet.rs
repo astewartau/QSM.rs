@@ -38,8 +38,13 @@ fn test_chisep_r2primenet() {
     );
 
     let t = Instant::now();
-    // The guard refuses anything far from 3 T; the chisep phantom is simulated at 3 T, so a
-    // phantom regenerated at another field would fail here rather than quietly scoring badly.
+    // This phantom is simulated at 7 T and R2PRIMEnet's weights are 3 T, so the field guard
+    // refuses it unless told otherwise. The override is set rather than the test deleted
+    // because what this test covers is the inference path and the normalisation; see the band
+    // at the end for why that is all it can cover on a 7 T phantom.
+    let params = R2PrimeNetParams { ignore_field_mismatch: true, ..Default::default() };
+    println!("[INFO] phantom B0 = {} T; R2PRIMEnet is a 3 T network, so this run is \
+              off-distribution and scored only as a plumbing check", ph.b0);
     let predicted = r2primenet(
         &r2star,
         &ph.mask,
@@ -47,7 +52,7 @@ fn test_chisep_r2primenet() {
         ph.b0,
         &w,
         &R2PrimeNetNorm::default(),
-        &R2PrimeNetParams::default(),
+        &params,
         |_, _| {},
     )
     .unwrap_or_else(|e| panic!("r2primenet (phantom B0 = {} T): {e}", ph.b0));
