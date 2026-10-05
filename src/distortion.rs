@@ -613,9 +613,18 @@ impl DisplacementField {
     /// bill of health: `unwarp_complex` resamples the whole volume regardless, so a run with an
     /// empty mask returns a fully populated magnitude that was pulled straight through a fold.
     ///
-    /// Not refused here, because an all-zero mask is not unambiguously an error the way folding
-    /// is — `None` is already how you say "check everything" — and `PileUp` would be the wrong
-    /// name for it. A reviewer may reasonably overturn that.
+    /// Not refused here, and the reason is the layer rather than the ambiguity: an empty mask is
+    /// a property of the mask, not of unwarping, and unwarping is optional — it runs only when a
+    /// fieldmap exists — so a gate here would cover a subset of runs while background removal and
+    /// inversion are equally dead with one. QSM.rs#144 puts it at the masking stage, where it
+    /// gates everything downstream. A primitive that is *handed* a mask reports what it examined
+    /// and leaves the judgement upstream.
+    ///
+    /// Note also that proceeding is not the unsafe option it looks like. On the phantom at a
+    /// readout long enough to fold the brain, unwarping anyway still scores 0.944 against 0.535
+    /// for leaving the data distorted: the fold corrupts a few hundred voxels while the
+    /// correction fixes the geometry of all of them, and the folded signal was destroyed during
+    /// acquisition either way. Skipping a dependent stage as a safety measure is the wrong trade.
     pub fn check_invertible(
         &self,
         mask: Option<&[u8]>,
