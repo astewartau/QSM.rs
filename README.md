@@ -136,7 +136,9 @@ That correction is per voxel, not per slice, and the difference is not cosmetic.
 with no route through the slice axis has to cross every in-plane fringe head-on, and where one
 is ambiguous it leaves *part* of a slice offset by 2π. On the qsm-forward 2D phantom the wrap
 count varies within a single slice of a single echo, so a per-slice correction has nothing it
-can do — per voxel takes the fitted field from r = −0.44 to r = 0.999.
+can do. Measured during development, per voxel took the fitted field from r = -0.44 to
+r = 0.98 against ground truth; the per-slice variant was not kept, so that figure is a record
+of the decision rather than something the tests reproduce.
 
 The 3D unwrappers are not a safe fallback *unaided*. On clean data their quality weighting defers
 the incoherent z edges, so each slice does come out a whole number of wraps from the truth — but
@@ -149,15 +151,15 @@ phantom's 3 mm interleaved-offset session:
 
 | offsets session | linear-fit B0 correlation | in-plane 2π jumps, echo 1 | echo 4 |
 |---|---|---|---|
-| wrapped input, nothing applied | −0.01 | 1480 | 1584 |
-| 3D ROMEO alone | 0.04 | — | — |
-| 3D ROMEO + `enforce_inter_echo_consistency` | **1.00** | — | — |
-| raw wrapped + `enforce_inter_echo_consistency` | **1.00** | 1480 | 2178 |
-| **slice-wise + `enforce_inter_echo_consistency`** | **1.00** | **0** | **806** |
+| wrapped input, nothing applied | -0.01 | 1432 | 1433 |
+| 3D ROMEO alone | 0.20 | — | — |
+| 3D ROMEO + `enforce_inter_echo_consistency` | **0.983** | — | — |
+| raw wrapped + `enforce_inter_echo_consistency` | **0.983** | 1432 | 2142 |
+| **slice-wise + `enforce_inter_echo_consistency`** | **0.983** | **0** | **796** |
 
 The echo-1 column is the cleanest evidence, and clean *by construction*:
 `enforce_inter_echo_consistency` only ever writes echoes 1.. (0-indexed), so it cannot touch the
-first echo, and the 1480 → 1480 identity confirms it. Any difference in that column belongs to the
+first echo, and the 1432 → 1432 identity confirms it. Any difference in that column belongs to the
 spatial unwrapping and nothing else.
 
 A fitted slope is blind to a constant per voxel, so `enforce_inter_echo_consistency` is what
@@ -171,8 +173,9 @@ not unwrapping at all. Anything that reads the unwrapped phase rather than its T
 single-echo field map, a non-linear B0 estimator, phase fed straight to background removal —
 needs the spatial unwrapping, and on 2D multi-slice data that means per slice.
 
-With no offsets, slice-wise and the better 3D path both reach 1.00 and the same 806 jumps, so the
-mode costs nothing where there is nothing to fix. Slice-wise Laplacian reaches only 0.69 on the
+With no offsets slice-wise is still ahead, 0.983 against 3D's 0.936: 3 mm slices alone produce
+through-slice phase steps large enough to mislead a region grower, with no receive offset
+involved. Slice-wise Laplacian reaches only 0.81 on the
 fit, because its Poisson solution is not a whole number of wraps from the truth to begin with and
 the pass cannot re-seat it cleanly; prefer ROMEO or best path.
 
@@ -185,9 +188,11 @@ into a 3D volume, so there is nothing to replace here, only anisotropic voxels t
 the kernels already do through their frequency axes.
 
 A 2D V-SHARP stage chained into 3D PDF, as the EPI-QSM literature uses, was implemented and
-measured against this phantom and did not pay for itself. The numbers are kept here so the case
-does not have to be re-implemented to be re-litigated. Residual RMS on a synthetic background
-with every source outside the ROI, against a ground truth of zero (lower is better):
+measured against this phantom and removed. The numbers are kept here so the case does not have
+to be re-implemented to be re-litigated.
+
+On a synthetic background with every source outside the ROI, where the ground truth is exactly
+zero (residual RMS, lower is better):
 
 | | slab coverage | enclosed ROI |
 |---|---|---|
@@ -195,12 +200,23 @@ with every source outside the ROI, against a ground truth of zero (lower is bett
 | 3D V-SHARP | 1.69 | **0.14** |
 | 2D V-SHARP → 3D PDF | **0.99** | 0.24 |
 
-3D wins the enclosed ROI outright. The chain wins synthetic slab coverage, so the case was
-re-tested on the real phantom with a 16-slice slab cut so the tissue genuinely reaches its end
-slices, which is the geometry the chain exists for: **3D V-SHARP scored 0.939 against the
-chain's 0.907**. 48 mm of slab against a 24 mm kernel diameter still leaves a sphere room almost
-everywhere, and this phantom's background is gentler than the synthetic one, so the end-slice
-penalty is small.
+On the qsm-forward 2D phantom's `ses-thick` session, correlation against the local field
+(higher is better), using the whole head for the enclosed case and a 16-slice slab cut so the
+tissue reaches its end slices for the other:
+
+| | 48 mm slab | enclosed ROI |
+|---|---|---|
+| 2D V-SHARP | 0.9792 | **0.9597** |
+| 3D V-SHARP | **0.9820** | 0.9506 |
+| 2D V-SHARP → 3D PDF | 0.9791 | 0.8963 |
+
+**The real-phantom differences are not large enough to decide anything**, and on the enclosed
+ROI the disc edges the sphere out. What does carry is that the chain, which is the arrangement
+actually proposed for 2D data, is the worst of the three on the enclosed ROI and does not
+improve on the 2D stage alone on the slab. Together with the synthetic case, where the ground
+truth is exact and 3D wins the enclosed ROI by a factor of three, and with the theory (SHARP
+rests on a three-dimensional mean value property that a disc does not have), there was no
+demonstrated benefit to ship.
 
 The open question is whether a real acquisition has a slab thin enough relative to a useful
 kernel radius for the disc to earn its place. See astewartau/QSM.rs#75.

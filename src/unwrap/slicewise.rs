@@ -70,8 +70,8 @@
 //!
 //! **The consistency pass fixes the fitted field, from any starting point.** Correlation of a
 //! linear-fit B0 estimate against the field the signal was generated from: 3D ROMEO alone
-//! reaches 0.04, and the *same* 3D output put through [`enforce_inter_echo_consistency`]
-//! reaches 0.999. So does the raw wrapped phase with no spatial unwrapping at all. A fitted
+//! reaches 0.20, and the *same* 3D output put through [`enforce_inter_echo_consistency`]
+//! reaches 0.983. So does the raw wrapped phase with no spatial unwrapping at all. A fitted
 //! slope is blind to a constant per voxel, so whatever wrap state a voxel starts in lands in
 //! the intercept and the fit discards it; all the slope needs is that consecutive echoes differ
 //! by their measured evolution, which is exactly what the pass enforces. **If a linear-fit B0
@@ -82,20 +82,21 @@
 //! echo, because [`enforce_inter_echo_consistency`] loops `for e in 1..n_echoes` and so provably
 //! cannot touch it — any difference there belongs to the spatial unwrapping and nothing else, with
 //! no null needed to rule the pass out. Counting in-plane neighbour pairs that jump more than π in
-//! echo 1 of that session: **1480** in the wrapped input, **1480** after the pass (identical, as
+//! echo 1 of that session: **1432** in the wrapped input, **1432** after the pass (identical, as
 //! the structure requires), **0** after slice-wise unwrapping.
 //!
-//! By the last echo both mechanisms are in play and the gap narrows but holds: 1584 wrapped, 2178
-//! with the pass alone, 806 with slice-wise. The pass alone is *worse* there than not unwrapping,
+//! By the last echo both mechanisms are in play and the gap narrows but holds: 1433 wrapped, 2142
+//! with the pass alone, 796 with slice-wise. The pass alone is *worse* there than not unwrapping,
 //! because it propagates echo 1's wrap state faithfully into every later echo.
 //!
 //! Anything reading the unwrapped phase rather than its TE-slope — a single-echo field map, a
 //! non-linear B0 estimator, phase fed straight to background removal — needs the spatial
 //! unwrapping, and on 2D multi-slice data that means per slice.
 //!
-//! On the matched session with no offsets, slice-wise and the better 3D path both reach 0.999
-//! and the same 806 jumps, so the mode costs nothing where there is nothing to fix. Slice-wise
-//! [`UnwrapMethod::Laplacian`] reaches only 0.69 on the fit — its Poisson solution is not a
+//! On the matched session with no offsets slice-wise is still ahead, 0.983 against 3D's 0.936:
+//! 3 mm slices alone produce through-slice phase steps large enough to mislead a region grower,
+//! with no receive offset involved. Slice-wise
+//! [`UnwrapMethod::Laplacian`] reaches only 0.81 on the fit — its Poisson solution is not a
 //! whole number of wraps from the truth to begin with, so the pass cannot re-seat it cleanly.
 //! Prefer ROMEO or best path.
 //!
@@ -390,13 +391,14 @@ pub fn unwrap_slicewise_multi_echo<P: AsRef<[f64]>, M: AsRef<[f64]>>(
 /// of the component offset by 2π. Measured on the qsm-forward 2D phantom, the wrap count
 /// varies within a single slice of a single echo (2-3 distinct values), so a single median per
 /// component has nothing it can do. Correcting per voxel repairs those plateaus as well, and
-/// takes the fitted field from r = -0.44 to r = 0.999 against ground truth.
+/// took the fitted field from r = -0.44 to r = 0.98 against ground truth during development.
+/// The per-slice variant was not kept, so that figure records the decision rather than a test.
 ///
 /// # This is the half that fixes a linear-fit B0 map
 ///
 /// Public, and deliberately not tied to slice-wise unwrapping: it repairs any unwrapper's
 /// output, including none at all. On the phantom's interleaved-offset session it takes 3D ROMEO
-/// from 0.04 to 0.999 and the raw wrapped phase from -0.01 to 0.999. What it does *not* do is
+/// from 0.20 to 0.983 and the raw wrapped phase from -0.01 to 0.983. What it does *not* do is
 /// make the phase spatially continuous — it propagates the first echo's wrap state faithfully
 /// into the rest, which on that session leaves more in-plane 2π jumps than not unwrapping at
 /// all. See the module docs for the division of labour.
@@ -457,7 +459,7 @@ mod tests {
     //
     // Two nulls matter more than any of those.
     // `the_consistency_pass_is_what_fixes_the_fit_even_without_slice_wise_unwrapping` is the
-    // null for every fit-correlation claim here: the pass alone reaches 0.999 from raw wrapped
+    // null for every fit-correlation claim here: the pass alone reaches 0.983 from raw wrapped
     // phase, so no fit-based assertion in this module may be read as evidence about the spatial
     // unwrapping. The echo-0 identity in
     // `slice_wise_unwrapping_is_what_makes_the_phase_spatially_continuous` is the opposite and

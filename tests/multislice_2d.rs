@@ -59,21 +59,26 @@ struct Session {
 /// Load one session, or None when the phantom has not been generated.
 fn load(session: &str) -> Option<Session> {
     let root = root();
-    let anat = root.join(format!("sub-1/ses-{session}/anat"));
-    let deriv = root.join(format!("derivatives/qsm-forward/sub-1/ses-{session}/anat"));
+    // `sub-multislice`, which is what examples/multislice_2d.py writes. This has to track
+    // the generator: an earlier revision read `sub-1`, matched nothing the committed example
+    // produces, and passed locally only because the copy under QSM_BIDS_2D had been made by
+    // an ad-hoc script. Every test then skipped, and the CI job reported green.
+    let anat = root.join(format!("sub-multislice/ses-{session}/anat"));
+    let deriv =
+        root.join(format!("derivatives/qsm-forward/sub-multislice/ses-{session}/anat"));
     // Probe every file this loader needs, not just one image. A phantom generated without
     // `save_shimmed_field=True` has all the images and is missing only `desc-shimmed_fieldmap`,
     // so probing the phase alone would send a stale phantom into an unwrap panic on a derivative
     // several lines later, with nothing saying which flag was missing.
     let required = [
-        anat.join(format!("sub-1_ses-{session}_echo-1_part-phase_MEGRE.nii")),
-        anat.join(format!("sub-1_ses-{session}_echo-4_part-mag_MEGRE.nii")),
-        anat.join(format!("sub-1_ses-{session}_echo-1_part-phase_MEGRE.json")),
-        deriv.join(format!("sub-1_ses-{session}_mask.nii")),
-        deriv.join(format!("sub-1_ses-{session}_fieldmap.nii")),
+        anat.join(format!("sub-multislice_ses-{session}_echo-1_part-phase_MEGRE.nii")),
+        anat.join(format!("sub-multislice_ses-{session}_echo-4_part-mag_MEGRE.nii")),
+        anat.join(format!("sub-multislice_ses-{session}_echo-1_part-phase_MEGRE.json")),
+        deriv.join(format!("sub-multislice_ses-{session}_mask.nii")),
+        deriv.join(format!("sub-multislice_ses-{session}_fieldmap.nii")),
         // only written when generate_bids is given save_shimmed_field=True, and the only
         // correct comparison target for anything that goes through the signal
-        deriv.join(format!("sub-1_ses-{session}_desc-shimmed_fieldmap.nii")),
+        deriv.join(format!("sub-multislice_ses-{session}_desc-shimmed_fieldmap.nii")),
     ];
     if let Some(missing) = required.iter().find(|p| !Path::new(p).exists()) {
         println!("Skipping: 2D phantom session '{session}' is missing {}", missing.display());
@@ -86,19 +91,19 @@ fn load(session: &str) -> Option<Session> {
 
     let f = |p: PathBuf| load_nifti_file(p.to_str().unwrap()).unwrap();
     let phase: Vec<Vec<f64>> = (1..=4)
-        .map(|e| f(anat.join(format!("sub-1_ses-{session}_echo-{e}_part-phase_MEGRE.nii"))).data)
+        .map(|e| f(anat.join(format!("sub-multislice_ses-{session}_echo-{e}_part-phase_MEGRE.nii"))).data)
         .collect();
     let mag: Vec<Vec<f64>> = (1..=4)
-        .map(|e| f(anat.join(format!("sub-1_ses-{session}_echo-{e}_part-mag_MEGRE.nii"))).data)
+        .map(|e| f(anat.join(format!("sub-multislice_ses-{session}_echo-{e}_part-mag_MEGRE.nii"))).data)
         .collect();
-    let mask_nii = f(deriv.join(format!("sub-1_ses-{session}_mask.nii")));
+    let mask_nii = f(deriv.join(format!("sub-multislice_ses-{session}_mask.nii")));
     let (nx, ny, nz) = mask_nii.dims;
     let (vx, vy, vz) = mask_nii.voxel_size;
 
     // SliceThickness from the sidecar: the NIfTI spacing is the slice pitch, which for a
     // gapped acquisition is larger. This is the whole input to the contiguity check.
     let sidecar = std::fs::read_to_string(
-        anat.join(format!("sub-1_ses-{session}_echo-1_part-phase_MEGRE.json")),
+        anat.join(format!("sub-multislice_ses-{session}_echo-1_part-phase_MEGRE.json")),
     )
     .unwrap();
     let json: serde_json::Value = serde_json::from_str(&sidecar).unwrap();
@@ -109,8 +114,8 @@ fn load(session: &str) -> Option<Session> {
         mask: mask_nii.data.iter().map(|&m| u8::from(m > 0.5)).collect(),
         phase,
         mag,
-        fieldmap: f(deriv.join(format!("sub-1_ses-{session}_fieldmap.nii"))).data,
-        fieldmap_signal: f(deriv.join(format!("sub-1_ses-{session}_desc-shimmed_fieldmap.nii"))).data,
+        fieldmap: f(deriv.join(format!("sub-multislice_ses-{session}_fieldmap.nii"))).data,
+        fieldmap_signal: f(deriv.join(format!("sub-multislice_ses-{session}_desc-shimmed_fieldmap.nii"))).data,
         slice_thickness,
     })
 }
@@ -136,7 +141,7 @@ fn fit_slope(unwrapped: &[Vec<f64>], tes: &[f64]) -> Vec<f64> {
 
 /// Best correlation either 3D ROMEO path reaches **unaided** — that is, without
 /// `enforce_inter_echo_consistency`. The `_unaided` is the whole point: 3D ROMEO *with* the pass
-/// reaches 0.999 too, which `the_consistency_pass_fixes_the_fit_and_slice_wise_fixes_the_phase`
+/// reaches 0.983 too, which `the_consistency_pass_fixes_the_fit_and_slice_wise_fixes_the_phase`
 /// pins. Comparing slice-wise-with-the-pass against 3D-with-the-pass on this metric would show
 /// no difference, because a fitted slope cannot see what slice-wise does.
 fn best_3d_unaided(s: &Session) -> (f64, &'static str) {
@@ -164,7 +169,7 @@ fn slicewise_corr(s: &Session) -> f64 {
 #[ignore] // needs the qsm-forward 2D phantom; run with --release --ignored
 fn slicewise_beats_unaided_3d_on_slices_with_phase_offsets() {
     // Named for what it compares. The 3D baseline here has no consistency pass, and that is the
-    // only reason slice-wise wins on this metric - give 3D the pass and it reaches 0.999 too.
+    // only reason slice-wise wins on this metric - give 3D the pass and it reaches 0.983 too.
     // What slice-wise is actually for is the spatial continuity of the phase, which a fitted
     // slope cannot see; that is
     // `the_consistency_pass_fixes_the_fit_and_slice_wise_fixes_the_phase`.
@@ -185,10 +190,10 @@ fn slicewise_beats_unaided_3d_on_slices_with_phase_offsets() {
 }
 
 /// Bounds the recommendation. The module docs and the README both say to prefer ROMEO or best
-/// path over the Laplacian for slice-wise unwrapping, and quote 0.69 against 0.999 for it. That
+/// path over the Laplacian for slice-wise unwrapping, and quote 0.81 against 0.983 for it. That
 /// figure had nothing asserting it, so a regression would have left a stale recommendation
 /// rather than a failing test — the Laplacian could have gone to 0.3 and the docs would still
-/// have said 0.69.
+/// have said 0.81.
 ///
 /// The ordering is the claim; the figures are colour. The Laplacian trails because its Poisson
 /// solution is not a whole number of wraps from the truth to begin with, so the per-voxel
@@ -219,34 +224,45 @@ fn slicewise_laplacian_trails_the_region_growers_but_is_not_broken() {
         "slice-wise Laplacian ({laplacian:.4}) no longer trails ROMEO ({romeo:.4}) — if that is \
          real, the \"prefer ROMEO or best path\" guidance in the module docs and README is stale"
     );
-    // This bound was set by measuring 0.6865 and backing off, and no mutation has been found
+    // This bound was set by measuring 0.8140 and backing off, and no mutation has been found
     // that trips it: removing the Laplacian's re-anchoring leaves it passing (the consistency
     // pass re-seats the echoes afterwards), and making the Laplacian return the wrapped input
-    // trips the *upper* bound instead, at 0.9992. So treat it as an unearned floor that would
+    // trips the *upper* bound instead, at 0.9830. So treat it as an unearned floor that would
     // catch a gross regression, not as a pinned property - the trails-ROMEO bound above is the
     // one with a demonstrated null.
     assert!(
         laplacian > 0.55,
         "slice-wise Laplacian has gone from trailing to broken ({laplacian:.4}); the docs quote \
-         0.69 and describe it as usable-but-worse"
+         0.81 and describe it as usable-but-worse"
     );
 }
 
 #[test]
 #[ignore]
-fn slicewise_and_3d_agree_when_there_are_no_slice_offsets() {
-    // The control: with no per-slice offsets there is nothing to fix, and the slice-wise
-    // mode must not be making things worse to pass the test above.
+fn slicewise_does_not_lose_ground_when_there_are_no_slice_offsets() {
+    // The control: with no per-slice offsets, the slice-wise mode must not be making things
+    // worse. That is the load-bearing claim and it is the second assertion.
+    //
+    // An earlier revision also asserted `r_3d > 0.95`, on the assumption that 3D unwrapping is
+    // healthy whenever the offsets are absent. That is false on this phantom and the assumption
+    // was the thing worth losing: 3 mm slices alone produce through-slice phase steps large
+    // enough to mislead a region grower, with no receive offset involved. 3D reaches 0.9363
+    // here against slice-wise's 0.9833, so the mode is not merely harmless without offsets, it
+    // is still ahead. The lower bound below only guards against 3D collapsing far enough that
+    // the comparison stops meaning anything.
     let Some(s) = load("thick") else { return };
     let (r_3d, which) = best_3d_unaided(&s);
     let r_2d = slicewise_corr(&s);
     println!("RESULT:unwrap_3d_nooffsets_corr={r_3d:.4} ({which})");
     println!("RESULT:unwrap_slicewise_nooffsets_corr={r_2d:.4}");
-    assert!(r_3d > 0.95, "3D baseline is already broken without offsets: {r_3d:.4}");
     assert!(
-        r_2d > r_3d - 0.02,
+        r_3d > 0.8,
+        "3D has collapsed without offsets ({r_3d:.4}), so this is no longer a control"
+    );
+    assert!(
+        r_2d > r_3d,
         "slice-wise ({r_2d:.4}) lost ground against 3D ({r_3d:.4}, {which}) on data with no \
-         offsets, where there is nothing for it to fix"
+         offsets"
     );
 }
 
@@ -295,7 +311,7 @@ fn a_gapped_acquisition_is_refused_by_the_pipeline() {
 
 /// Which half does which job, on real data. The fit-correlation metric used by the two tests
 /// above cannot tell slice-wise unwrapping from the consistency pass, because a fitted slope is
-/// blind to a constant per voxel — both reach 0.999. This is the measure on which they come
+/// blind to a constant per voxel — both reach 0.983. This is the measure on which they come
 /// apart, and it is the one that justifies the slice-wise mode for anything reading the phase.
 #[test]
 #[ignore]
