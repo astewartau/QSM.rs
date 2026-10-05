@@ -115,7 +115,7 @@ Load and save NIfTI volumes with [`qsm_core::io`](src/io.rs).
 | **ROMEO** | Region-growing with quality-guided ordering using magnitude and gradient coherence weighting | Dymerska, B., et al. (2021). "Phase unwrapping with a rapid opensource minimum spanning tree algorithm (ROMEO)." *Magnetic Resonance in Medicine*, 85(4):2294-2308. [DOI](https://doi.org/10.1002/mrm.28563) |
 | **Laplacian** | FFT-based Poisson solver under a Neumann boundary condition on the array — unwraps without altering the background field, so the result is a total field (`laplacian_unwrap`). This is what `UnwrapMethod::Laplacian` selects. | Schofield, M.A., Zhu, Y. (2003). "Fast phase unwrapping algorithm for interferometric applications." *Optics Letters*, 28(14):1194-1196. [DOI](https://doi.org/10.1364/OL.28.001194) |
 | **Best path** | 3D-SRNCP — every edge sorted by reliability and merged in that order (`unwrap_bestpath`) | Abdul-Rahman, H., et al. (2007). "Fast and robust three-dimensional best path phase unwrapping algorithm." *Applied Optics*, 46(26):6623-6635. [DOI](https://doi.org/10.1364/AO.46.006623) |
-| **Slice-wise (2D)** | Any of the above run on each slice independently, for 2D multi-slice acquisitions whose slices carry independent receive phase offsets (`unwrap_slicewise`). Makes the unwrapped **phase** usable on such data; for a `linear-fit` B0 map alone, `enforce_inter_echo_consistency` is the part that matters and works on any unwrapper's output — see below. | — |
+| **Slice-wise (2D)** | Any of the above run on each slice independently, for 2D multi-slice acquisitions whose slices carry independent receive phase offsets (`unwrap_slicewise`). Also worth using on **thick slices with no offsets at all**, where 3 mm slices alone mislead a 3D region grower (0.936 against 0.983). Makes the unwrapped **phase** usable on such data; for a `linear-fit` B0 map alone, `enforce_inter_echo_consistency` is the part that matters and works on any unwrapper's output — see below. | — |
 
 ### 2D multi-slice acquisitions
 
@@ -173,11 +173,25 @@ not unwrapping at all. Anything that reads the unwrapped phase rather than its T
 single-echo field map, a non-linear B0 estimator, phase fed straight to background removal —
 needs the spatial unwrapping, and on 2D multi-slice data that means per slice.
 
-With no offsets slice-wise is still ahead, 0.983 against 3D's 0.936: 3 mm slices alone produce
-through-slice phase steps large enough to mislead a region grower, with no receive offset
-involved. Slice-wise Laplacian reaches only 0.81 on the
-fit, because its Poisson solution is not a whole number of wraps from the truth to begin with and
-the pass cannot re-seat it cleanly; prefer ROMEO or best path.
+#### Thick slices need this even without per-slice offsets
+
+The slice-wise mode was built for acquisitions whose slices carry independent receive phase
+offsets, and it turns out not to need them. On the `ses-thick` session, which has **uniform
+receive phase and differs from a 3D acquisition only in being 3 mm thick**, 3D ROMEO reaches
+0.936 against slice-wise's 0.983.
+
+3 mm slices by themselves produce through-slice phase steps large enough to mislead a region
+grower. Nothing about the receive chain is involved, so the trigger is slice thickness rather
+than 2D multi-slice acquisition as such, and the remedy is the same: do not differentiate along
+a direction the data is poorly sampled in.
+
+This was found by an assertion failing. An earlier revision of the no-offsets control required
+3D to reach 0.95, on the assumption that there is nothing to fix when the receive phase is
+uniform. That assumption is wrong, and the test now pins the ordering instead.
+
+Slice-wise Laplacian reaches only 0.81 on the fit, because its Poisson solution is not a whole
+number of wraps from the truth to begin with and the pass cannot re-seat it cleanly; prefer
+ROMEO or best path.
 
 Background field removal stays **3D**, and so does the dipole inversion. That is not a gap in
 the implementation, it is the physics: SHARP and its variants rest on the mean value property of

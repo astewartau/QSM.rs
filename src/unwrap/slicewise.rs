@@ -93,9 +93,18 @@
 //! non-linear B0 estimator, phase fed straight to background removal — needs the spatial
 //! unwrapping, and on 2D multi-slice data that means per slice.
 //!
-//! On the matched session with no offsets slice-wise is still ahead, 0.983 against 3D's 0.936:
-//! 3 mm slices alone produce through-slice phase steps large enough to mislead a region grower,
-//! with no receive offset involved. Slice-wise
+//! # Thick slices need this even without per-slice offsets
+//!
+//! This module was built for slices carrying independent receive phase offsets, and it turns out
+//! not to need them. On the matched session with **uniform receive phase**, differing from a 3D
+//! acquisition only in being 3 mm thick, 3D ROMEO reaches 0.936 against slice-wise's 0.983.
+//!
+//! 3 mm slices by themselves produce through-slice phase steps large enough to mislead a region
+//! grower, so the trigger is slice thickness rather than 2D multi-slice acquisition as such.
+//! Found by an assertion failing: the no-offsets control used to require 3D to reach 0.95, on the
+//! assumption that there is nothing to fix when the receive phase is uniform.
+//!
+//! Slice-wise
 //! [`UnwrapMethod::Laplacian`] reaches only 0.81 on the fit — its Poisson solution is not a
 //! whole number of wraps from the truth to begin with, so the pass cannot re-seat it cleanly.
 //! Prefer ROMEO or best path.
