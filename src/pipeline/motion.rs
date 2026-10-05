@@ -8,6 +8,33 @@
 //! The library half lives in [`crate::motion`]; this is the stage wrapper that speaks
 //! [`ScanMetadata`] and [`PipelineError`].
 //!
+//! # EPI distortion correction, if any, goes before this
+//!
+//! A pipeline that unwarps susceptibility-induced EPI distortion must do it **first**, on each
+//! volume in its own acquired geometry, and hand the unwarped series here.
+//!
+//! The reason is that the two corrections do not commute. The phase-encode axis an EPI
+//! displacement runs along is fixed to the gradients, not to the head, so once the head has
+//! rotated that axis points somewhere else *in head coordinates* — a few degrees of rotation
+//! tilts a ten-voxel frontal distortion by a few degrees, which is a fraction of a voxel of
+//! difference that is not rigid. Run this stage on still-distorted volumes and it is fitting a
+//! six-parameter rigid model to volumes that differ non-rigidly; it will converge, and the answer
+//! will be wrong in a way nothing downstream flags. Unwarping first leaves a residual difference
+//! that genuinely is rigid, which is the assumption the NCC optimiser is entitled to make.
+//!
+//! The honest caveat on the other side, which this stage cannot fix and an unwarping stage should
+//! record: a single distortion estimate — one field map, one reversed-PE pair — is measured at
+//! one head position, so applying it to a volume acquired after the head moved applies a stale
+//! estimate. That error is small while the motion is small, and
+//! [`MotionCorrectionResult::max_displacement_mm`] and
+//! [`MotionCorrectionResult::rotation_spread_deg`] are the numbers that say whether it still is.
+//! Resolving it properly means iterating the two stages, which nothing here does.
+//!
+//! Masks compose without either stage knowing about the other: this one intersects whatever mask
+//! it is handed with its own coverage, so an upstream stage that has already shrunk the mask to
+//! where it still has data simply passes the shrunk one in, and the result is the intersection of
+//! all of them.
+//!
 //! # What it can and cannot fix
 //!
 //! It puts every echo's anatomy back in one place, which is what lets a cross-echo fit mean
@@ -19,7 +46,7 @@
 //! the UTE work reports after correcting substantial motion, and the reason this stage reports
 //! the spread rather than quietly collapsing it. Below a degree or so it is negligible; a series
 //! with a large spread is really a multi-orientation acquisition, and
-//! [`crate::inversion::cosmos`] is the honest way to use it.
+//! [`crate::inversion::cosmos()`] is the honest way to use it.
 
 use super::config::{PipelineError, ScanMetadata};
 use crate::motion::{estimate_motion, uniform_series, MotionParams, MotionSeries};
