@@ -1082,6 +1082,10 @@ jobs:
       - name: Run epi_unwarp
         timeout-minutes: 30
         run: |
+          # Without this the step reports `tee`'s exit status, which is always 0, and a failing
+          # test is green. The sibling step above has the same defect and is being fixed
+          # centrally; this one is new on this branch, so that fix cannot reach it.
+          set -o pipefail
           cargo test --release --features parallel --test epi_unwarp -- --ignored --nocapture 2>&1 | tee -a test_output.txt
 
       - name: Upload slices

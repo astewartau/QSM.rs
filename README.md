@@ -203,8 +203,11 @@ weights both move if compression is left uncorrected.
 Unwarping runs **first**, before co-registration and before field mapping. The off-resonance
 itself largely travels with the head, but the phase-encode *axis* the displacement runs along is
 fixed in the scanner — so once the head rotates, the same anatomy is smeared in a different
-head-frame direction. A 10-voxel frontal displacement under a 3° rotation moves ~0.5 voxels
-perpendicular to itself, which is a non-rigid difference no 6-DOF fit can absorb.
+head-frame direction, which no 6-DOF fit can absorb. A 10-voxel frontal displacement moves ~0.5
+voxels perpendicular to itself under the 3° of inter-echo motion, and **~4.2 voxels under the
+±25° a COSMOS or STI acquisition uses by design** — where the induced field's *pattern* also
+changes with orientation, since the dipole kernel is B0-oriented. For multi-orientation work
+this is not a refinement.
 
 ### Dipole Inversion
 

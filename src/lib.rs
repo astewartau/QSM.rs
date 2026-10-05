@@ -235,7 +235,9 @@ pub mod geometry;
 /// mapping, so the phase QSM inverts was never distorted and what remains between two volumes
 /// acquired at different head positions really is rigid. The phase-encode axis the displacement
 /// runs along is fixed in the scanner, so when the head rotates the same anatomy is smeared in a
-/// different head-frame direction — a difference no rigid transform can absorb.
+/// different head-frame direction — a difference no rigid transform can absorb, worth half a
+/// voxel at the few degrees of inter-echo motion and several voxels at the ±25° a
+/// multi-orientation acquisition uses by design.
 pub mod distortion;
 
 /// Rigid-body (6-DOF) registration between two volumes: recovering the transform that
