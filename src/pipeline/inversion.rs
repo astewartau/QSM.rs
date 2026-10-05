@@ -33,6 +33,8 @@ pub fn run_dipole_inversion(
     magnitude: Option<&[f64]>,
     progress: &mut dyn FnMut(usize, usize),
 ) -> Result<Vec<f64>, PipelineError> {
+    // The dipole kernel is an FFT on a uniform grid, so a gapped volume is refused.
+    metadata.require_contiguous_slices()?;
     let grid = metadata.grid();
     let bdir = metadata.b0_direction;
     let n_voxels = grid.n_total();
@@ -267,6 +269,16 @@ fn run_xqsm(
 /// `total_field_ppm` and `mask` are column-major `(nx,ny,nz)`; `bdir` is the B0
 /// direction. Requires the `onnx` feature; weights resolve local-first then via
 /// the `download` feature. Returns susceptibility (ppm), masked.
+///
+/// # Slice contiguity is the caller's to check here
+///
+/// Every other stage in this module takes a [`ScanMetadata`] and refuses a volume whose slices
+/// are not contiguous ([`ScanMetadata::require_contiguous_slices`]). This one takes a bare
+/// [`Grid`](crate::Grid), which carries the slice *pitch* but not the thickness, so it has
+/// nothing to check against — and NeXtQSM is as invalid on gapped data as any other 3D method,
+/// since its unrolled data-consistency term is an FFT dipole convolution. A caller holding a
+/// `ScanMetadata` should call `require_contiguous_slices` before this. The asymmetry is in the
+/// existing signature, not deliberate.
 #[cfg(feature = "onnx")]
 pub fn run_nextqsm(
     total_field_ppm: &[f64],
@@ -501,6 +513,7 @@ pub fn run_iqsm(
     metadata: &ScanMetadata,
     reference: QsmReference,
 ) -> Result<Vec<f64>, PipelineError> {
+    metadata.require_contiguous_slices()?;
     let grid = metadata.grid();
     let bytes = crate::models::primary_weight("iqsm").map_err(PipelineError::InvalidConfig)?;
     let chi = crate::inversion::iqsm_multi_echo(
@@ -528,6 +541,7 @@ pub fn run_iqsm_plus(
     metadata: &ScanMetadata,
     reference: QsmReference,
 ) -> Result<Vec<f64>, PipelineError> {
+    metadata.require_contiguous_slices()?;
     let grid = metadata.grid();
     let bytes = crate::models::primary_weight("iqsm-plus").map_err(PipelineError::InvalidConfig)?;
     let chi = crate::inversion::iqsm_plus_multi_echo(
@@ -557,6 +571,7 @@ pub fn run_iqfm(
     mask: &[u8],
     metadata: &ScanMetadata,
 ) -> Result<Vec<f64>, PipelineError> {
+    metadata.require_contiguous_slices()?;
     let grid = metadata.grid();
     let bytes = crate::models::primary_weight("iqfm").map_err(PipelineError::InvalidConfig)?;
     crate::inversion::iqfm_multi_echo(
@@ -590,6 +605,7 @@ pub fn run_tgv(
     reference: QsmReference,
     progress: &mut dyn FnMut(usize, usize),
 ) -> Result<Vec<f64>, PipelineError> {
+    metadata.require_contiguous_slices()?;
     let grid = metadata.grid();
     let (bx, by, bz) = metadata.b0_direction;
 
@@ -619,6 +635,35 @@ pub fn run_tgv(
 mod tests {
     use super::*;
 
+    /// Calls the stage, rather than inspecting its source as the coverage test in `config.rs`
+    /// does, so the refusal is proven to happen for a real inversion.
+    #[test]
+    fn a_gapped_acquisition_is_refused_before_any_work() {
+        let (nx, ny, nz) = (8, 8, 8);
+        let n = nx * ny * nz;
+        let field = vec![0.01; n];
+        let mask = vec![1u8; n];
+        let mut meta = ScanMetadata {
+            dims: (nx, ny, nz),
+            voxel_size: (1.0, 1.0, 3.0),
+            echo_times: vec![0.005],
+            field_strength: 3.0,
+            b0_direction: (0.0, 0.0, 1.0),
+            slice_geometry: None,
+        };
+        let config = InversionConfig::default();
+
+        assert!(run_dipole_inversion(&field, &mask, &meta, &config, None, &mut |_, _| {}).is_ok());
+        meta.slice_geometry = Some(crate::grid::SliceGeometry { thickness: 3.0, axis: 2 });
+        assert!(run_dipole_inversion(&field, &mask, &meta, &config, None, &mut |_, _| {}).is_ok());
+
+        meta.slice_geometry = Some(crate::grid::SliceGeometry { thickness: 2.0, axis: 2 });
+        let err = run_dipole_inversion(&field, &mask, &meta, &config, None, &mut |_, _| {})
+            .expect_err("a gapped volume must be refused");
+        let PipelineError::InvalidInput(msg) = &err else { panic!("{err:?}") };
+        assert!(msg.contains("1.0000 mm gap"), "{msg}");
+    }
+
     #[test]
     fn test_inversion_tkd() {
         let (nx, ny, nz) = (8, 8, 8);
@@ -631,6 +676,7 @@ mod tests {
             echo_times: vec![0.005],
             field_strength: 3.0,
             b0_direction: (0.0, 0.0, 1.0),
+            slice_geometry: None,
         };
         let config = InversionConfig {
             algorithm: InversionAlgorithm::Tkd,
@@ -652,6 +698,7 @@ mod tests {
         let meta = ScanMetadata {
             dims: (nx, ny, nz), voxel_size: (1.0, 1.0, 1.0),
             echo_times: vec![0.005], field_strength: 3.0, b0_direction: (0.0, 0.0, 1.0),
+            slice_geometry: None,
         };
         let config = InversionConfig { algorithm: alg, ..Default::default() };
         run_dipole_inversion(&field, &mask, &meta, &config, None, &mut |_, _| {}).unwrap()
@@ -722,6 +769,7 @@ mod tests {
         let meta = ScanMetadata {
             dims: (nx, ny, nz), voxel_size: (1.0, 1.0, 1.0),
             echo_times: vec![0.005], field_strength: 3.0, b0_direction: (0.0, 0.0, 1.0),
+            slice_geometry: None,
         };
         let config = InversionConfig {
             algorithm: InversionAlgorithm::Heidi,
@@ -760,6 +808,7 @@ mod tests {
         let meta = ScanMetadata {
             dims: (nx, ny, nz), voxel_size: (1.0, 1.0, 1.0),
             echo_times: vec![0.005], field_strength: 3.0, b0_direction: (0.0, 0.0, 1.0),
+            slice_geometry: None,
         };
         let config = InversionConfig { algorithm: InversionAlgorithm::Medi, ..Default::default() };
         let chi = run_dipole_inversion(&field, &mask, &meta, &config, Some(&mag), &mut |_, _| {}).unwrap();
@@ -775,6 +824,7 @@ mod tests {
             echo_times: vec![0.005],
             field_strength: 3.0,
             b0_direction: (0.0, 0.0, 1.0),
+            slice_geometry: None,
         };
         let config = InversionConfig {
             algorithm: InversionAlgorithm::Tgv,

@@ -1609,6 +1609,7 @@ fn test_pipeline_unwrap_bfr_stage_laplacian() {
         echo_times: data.echo_times.clone(),
         field_strength: data.field_strength,
         b0_direction: data.b0_dir,
+        slice_geometry: None,
     };
     let config = pipeline::FieldMappingConfig {
         unwrapping_algorithm: pipeline::UnwrappingAlgorithm::Laplacian,
@@ -1745,6 +1746,7 @@ fn run_qsmart_reconstruction(
         echo_times: data.echo_times.clone(),
         field_strength: data.field_strength,
         b0_direction: data.b0_dir,
+        slice_geometry: None,
     };
     let mut inv_config = pipeline::InversionConfig::default();
     inv_config.qsmart.inversion = inversion;

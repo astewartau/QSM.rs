@@ -32,6 +32,8 @@ pub fn run_qsmart(
     reference: QsmReference,
     progress: &mut dyn FnMut(usize, usize),
 ) -> Result<Vec<f64>, PipelineError> {
+    // Refused up front rather than part-way through the two inversions below.
+    metadata.require_contiguous_slices()?;
     let (nx, ny, nz) = metadata.dims;
     let bdir = metadata.b0_direction;
     let n_voxels = nx * ny * nz;
@@ -163,6 +165,7 @@ mod tests {
             echo_times: vec![0.005],
             field_strength: 3.0,
             b0_direction: (0.0, 0.0, 1.0),
+            slice_geometry: None,
         };
         let config = InversionConfig {
             algorithm: InversionAlgorithm::Qsmart,
@@ -195,6 +198,7 @@ mod tests {
             echo_times: vec![0.005],
             field_strength: 3.0,
             b0_direction: (0.0, 0.0, 1.0),
+            slice_geometry: None,
         };
         let mut qsmart = crate::utils::QsmartParams::for_field_strength(3.0);
         qsmart.inversion = InversionAlgorithm::Tkd;
@@ -225,6 +229,7 @@ mod tests {
             echo_times: vec![0.005],
             field_strength: 3.0,
             b0_direction: (0.0, 0.0, 1.0),
+            slice_geometry: None,
         };
         let mut qsmart = crate::utils::QsmartParams::for_field_strength(3.0);
         qsmart.inversion = InversionAlgorithm::Qsmart;

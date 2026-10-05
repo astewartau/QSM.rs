@@ -183,10 +183,27 @@ else.
 A slice **gap**, where the excited slabs are thinner than the slice pitch, makes the sampled
 volume non-contiguous. The FFT dipole kernel and the SHARP family's spherical kernels are defined
 on a uniform grid, so on gapped data they compute a different convolution and the result is wrong
-rather than approximate. `Grid::require_contiguous_slices(slice_thickness, slice_axis)` is the
-check, and it needs the acquisition's `SliceThickness` — nothing in a NIfTI records it, since the
-spacing is the *pitch*. Purely in-plane work is unaffected, which is why `vsharp_2d` does not
-call it and `vsharp_2d_pdf` does.
+rather than approximate. It is therefore refused, not warned about.
+
+Set `ScanMetadata::slice_geometry` from the acquisition's `SliceThickness` and every pipeline
+stage that convolves on the voxel grid will refuse a gapped volume before doing any work —
+background removal, dipole inversion, TGV, the single-step DL reconstructions, chi-separation and
+QSMART — returning `PipelineError::InvalidInput` with the thickness, pitch and gap in the message.
+The thickness has to be supplied because nothing in a NIfTI records it: the spacing is the
+*pitch*, so 3 mm slices every 3 mm and 2 mm slices every 3 mm are indistinguishable. `None` means
+the acquisition did not say, in which case nothing can be concluded and the stages run; BIDS only
+*recommends* `SliceThickness`, so hosts that cannot read it should tell the user that this check
+could not run.
+
+Masking and field mapping are exempt, by design. Masking reads no kernel and produces no field.
+Unwrapping is degraded by a gap rather than invalidated by it, and the remedy is to unwrap in
+plane — refusing there would block the one path that handles the case. The exemptions are a list
+in `pipeline::config` that a test cross-checks against the stage sources, so a stage added later
+cannot skip the check by omission.
+
+Below the pipeline, `Grid::require_contiguous_slices(slice_thickness, slice_axis)` is the
+primitive and `require_contiguous_slices_if_known` is the `Option`-aware form. Purely in-plane
+work is unaffected, which is why `vsharp_2d` does not call it and `vsharp_2d_pdf` does.
 
 ### Background Field Removal
 

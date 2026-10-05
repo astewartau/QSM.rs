@@ -70,6 +70,28 @@ impl Grid {
         }
     }
 
+    /// Check contiguity against slice geometry the acquisition may not have recorded.
+    ///
+    /// `None` means the acquisition did not say how thick its slices are, and a gap then
+    /// **cannot be detected** — nothing in a NIfTI distinguishes 3 mm slices every 3 mm from
+    /// 2 mm slices every 3 mm, because the spacing is the *pitch*. This returns `Ok` in that
+    /// case, deliberately and in one place rather than at each call site: refusing every
+    /// acquisition that failed to record a recommended BIDS field would block the vast
+    /// majority of data, which has no gap. The missing information is in the input, not in
+    /// this crate, and the right response is for the host to say so once.
+    ///
+    /// The name says `if_known` so no call site can read as though a gap had been ruled out.
+    /// Where the thickness *is* known, this is [`Grid::require_contiguous_slices`].
+    pub fn require_contiguous_slices_if_known(
+        &self,
+        slices: Option<SliceGeometry>,
+    ) -> Result<(), SliceGapError> {
+        match slices {
+            Some(s) => self.require_contiguous_slices(s.thickness, s.axis),
+            None => Ok(()),
+        }
+    }
+
     /// Check that the volume is contiguous along the slice axis, as the FFT dipole kernel
     /// requires.
     ///
@@ -112,6 +134,31 @@ impl Grid {
             return Err(SliceGapError { pitch, thickness: slice_thickness, axis: slice_axis });
         }
         Ok(())
+    }
+}
+
+/// How a 2D multi-slice acquisition laid its slices out, when that is recorded.
+///
+/// Only the thickness is missing from a [`Grid`]: the grid's spacing along the slice axis is
+/// already the slice-to-slice *pitch*. The two together say whether the sampled volume has
+/// holes in it. Carried as a unit because a thickness without an axis says nothing.
+#[cfg_attr(feature = "introspection", derive(serde::Serialize))]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SliceGeometry {
+    /// Excited slice thickness in mm, from the acquisition's `SliceThickness`.
+    pub thickness: f64,
+    /// Axis the slices are stacked along: 0 = x, 1 = y, 2 = z.
+    pub axis: usize,
+}
+
+impl SliceGeometry {
+    /// Slice geometry for an acquisition known to be contiguous: thickness equals the grid's
+    /// spacing along `axis`.
+    ///
+    /// Only correct when the acquisition really has no gap. If it might, read `SliceThickness`
+    /// from the sidecar instead — this constructor cannot discover a gap, by construction.
+    pub fn contiguous(grid: &Grid, axis: usize) -> Self {
+        Self { thickness: grid.spacing(axis), axis }
     }
 }
 
@@ -296,6 +343,35 @@ mod tests {
         // the axis is honoured: 1 mm slices along x are contiguous on the same grid
         assert!(g.require_contiguous_slices(1.0, 0).is_ok());
         assert!(g.require_contiguous_slices(0.5, 0).is_err());
+    }
+
+    #[test]
+    fn unrecorded_slice_geometry_cannot_refuse_and_does_not_pretend_to() {
+        // Nothing in a grid distinguishes a gapped acquisition from a contiguous one, so with
+        // no thickness there is nothing to check. The name of the method is what keeps a call
+        // site from reading as though a gap had been ruled out.
+        let g = Grid::new(8, 8, 4, 1.0, 1.0, 3.0);
+        assert!(g.require_contiguous_slices_if_known(None).is_ok());
+        assert!(g
+            .require_contiguous_slices_if_known(Some(SliceGeometry { thickness: 3.0, axis: 2 }))
+            .is_ok());
+        let err = g
+            .require_contiguous_slices_if_known(Some(SliceGeometry { thickness: 2.0, axis: 2 }))
+            .unwrap_err();
+        assert_eq!(err.gap(), 1.0);
+    }
+
+    #[test]
+    fn slice_geometry_contiguous_reads_the_grid_spacing() {
+        let g = Grid::new(8, 8, 4, 1.0, 2.0, 3.0);
+        assert_eq!(SliceGeometry::contiguous(&g, 2), SliceGeometry { thickness: 3.0, axis: 2 });
+        assert_eq!(SliceGeometry::contiguous(&g, 1), SliceGeometry { thickness: 2.0, axis: 1 });
+        // and it always passes its own check, which is the point and the limitation
+        for axis in 0..3 {
+            assert!(g
+                .require_contiguous_slices_if_known(Some(SliceGeometry::contiguous(&g, axis)))
+                .is_ok());
+        }
     }
 
     #[test]
