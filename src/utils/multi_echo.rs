@@ -2939,6 +2939,16 @@ mod tests {
     /// heteroscedastic by construction, so a *clean* series looks like it has outlier echoes and
     /// the detector flags two of four.
     ///
+    /// Where this phantom is *easier* than real data, and why that is left alone: the phase here
+    /// is exactly linear in TE, which is precisely the model being fitted, so a clean series'
+    /// residuals are pure noise. Real phase is not — there is genuine curvature from
+    /// intra-voxel dephasing, flow and chemical shift — and the robust loss sees that mismatch
+    /// as outliers, which is why the clean *phantom* downweights 6-24% of voxels where this
+    /// downweights far fewer. The margin that buys is not large: injecting 0.1 rad of TE
+    /// curvature here breaks three of these tests. The realistic case is covered by
+    /// `test_robust_echo_combination` on the real phantom, and the clean-series numbers quoted
+    /// throughout these docs are that phantom's, not this one's.
+    ///
     /// Returns `(phases, mags, tes, true_slope, mask)`.
     #[allow(clippy::type_complexity)]
     fn echo_series(
