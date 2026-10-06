@@ -10,6 +10,10 @@
 //! NOTE: tiling a net trained on whole volumes is an **approximation**. Dipole inversion is a
 //! global operation, so a patch is blind to distant susceptibility sources; a larger `halo`
 //! reduces the resulting low-frequency / boundary error but does not eliminate it.
+//!
+//! Tiles run in parallel with the `parallel` feature. One patch bounds memory only if the number
+//! of *concurrent* patches is bounded too, which on a 32-bit WASM heap it has to be — see
+//! [`tile_concurrency`].
 
 use crate::grid::Grid;
 use crate::models::onnx::{OnnxError, OnnxModel, Tensor};
@@ -25,15 +29,88 @@ pub struct TileConfig {
 }
 
 impl Default for TileConfig {
-    /// 128³ cores with an 8-voxel halo → 144³ patches (~0.4 GB of f32 activations for a typical
-    /// net, comfortably within a conservative ~2 GB WASM budget). Empirically the halo barely
-    /// affects accuracy here — the tiling error is dominated by *global* low-frequency drift
-    /// (a patch can't see distant susceptibility sources), not tile-boundary seams — so this
-    /// favours the large core (few patches, ~4× less overlap compute than 64³/32) over a big
-    /// halo. On real 3 T data this matched whole-volume xQSM at r≈0.94 in ~1/4 the time.
+    /// 128³ cores with an 8-voxel halo → 144³ patches. Empirically the halo barely affects
+    /// accuracy here — the tiling error is dominated by *global* low-frequency drift (a patch
+    /// can't see distant susceptibility sources), not tile-boundary seams — so this favours the
+    /// large core (few patches, ~4× less overlap compute than 64³/32) over a big halo. On real
+    /// 3 T data this matched whole-volume xQSM at r≈0.94 in ~1/4 the time.
+    ///
+    /// Sized for **native** memory: a 144³ patch costs ~3.1 GB of live f32 activations for xQSM
+    /// (see [`ACTIVATION_BYTES_PER_PATCH_VOXEL`]), which leaves a 32-bit WASM host no room for a
+    /// second one and not much for anything else. Browser hosts pass a far smaller config —
+    /// QSMbly uses `core: 56, halo: 4` (64³ patches, ~270 MB each).
     fn default() -> Self {
         Self { core: 128, halo: 8 }
     }
+}
+
+/// Live f32 activation bytes one patch of a tiled net costs, **per patch voxel**.
+///
+/// Measured by walking the optimized `tract` plan in evaluation order and summing the outlets
+/// still live at each step (the real peak, not the sum of all intermediates). At a 64³ patch:
+/// xQSM 269.5 MB (1028 B/voxel), QSMnet 147.6 MB, NeXtQSM 134.9 MB, LPCNN 103.9 MB, IR2QSM
+/// 93.6 MB. It is linear in patch voxels — xQSM measures the same 1028 B/voxel at 144³ — so one
+/// constant covers every patch size. xQSM is both the heaviest and the usual default, so its
+/// figure is the one to budget with, rounded up for the caller-side f64 patch buffers.
+pub const ACTIVATION_BYTES_PER_PATCH_VOXEL: u64 = 1_100;
+
+/// Activation budget for all concurrent tiles on WASM — see [`tile_concurrency`].
+///
+/// A threaded WASM host has one shared 32-bit heap with a hard 4 GB ceiling and an allocator
+/// that cannot compact, and that heap also holds the model bytes, the full-volume input/output
+/// and the host's own data. 1.5 GB leaves room for all of it plus fragmentation.
+const WASM_TILE_ACTIVATION_BUDGET: u64 = 1_500_000_000;
+
+/// How many tiles [`tiled_scatter`] keeps in flight at once.
+///
+/// Natively this is just the rayon pool: memory is cheap and tile-level parallelism scales far
+/// better than `tract`'s intra-op threading. On **WASM** the limit is memory, not cores. Every
+/// concurrent tile holds its own set of activations in the single shared heap, so how much of the
+/// 4 GB ceiling a tiled run occupies is set by the pool size and the patch size together — and by
+/// nothing else, the volume included. Tiling a bigger volume adds tiles, not concurrent ones.
+///
+/// Measured in Chromium (cross-origin-isolated, 14 hardware threads), the wasm heap high-water
+/// tracked the per-patch arithmetic: at 64³ patches, 1.10 GB with a 4-thread pool — which is
+/// 4 × 269.5 MB plus the 11 MB base — and 2.6–2.8 GB with 14. Raising the core one step is what
+/// makes it dangerous: `core: 96` (104³ patches, 1.24 GB each) on a 4-thread pool peaked at
+/// **3.71 GB, 93% of the ceiling**, and that ceiling is hard — crossing it aborts the module
+/// rather than degrading. Nothing in the library noticed (astewartau/QSM.rs#89).
+///
+/// So on WASM the count is whatever fits [`WASM_TILE_ACTIVATION_BUDGET`], and never more than the
+/// pool. That bounds the heap by patch size rather than by core count: 5 tiles at 64³, and one at
+/// a time once a single patch costs more than the budget.
+pub fn tile_concurrency(cfg: &TileConfig) -> usize {
+    #[cfg(not(feature = "parallel"))]
+    {
+        let _ = cfg;
+        1
+    }
+    #[cfg(feature = "parallel")]
+    {
+        let pool = rayon::current_num_threads().max(1);
+        #[cfg(not(target_family = "wasm"))]
+        {
+            let _ = cfg;
+            pool
+        }
+        #[cfg(target_family = "wasm")]
+        {
+            pool.min(tiles_within_wasm_budget(cfg))
+        }
+    }
+}
+
+/// How many tiles of this config fit a browser's share of heap — at least one, however big the
+/// patch. [`tile_concurrency`] applies this on WASM; it is callable anywhere so a native host can
+/// tell whether a config it is about to hand a browser is feasible there.
+///
+/// Uses `core + 2·halo` rather than [`tile_patch_size`]'s divisor-rounded value: the two differ by
+/// less than one divisor step, far below the precision of a memory budget. Arithmetic is in `u64`
+/// because `p³ · bytes` overflows a 32-bit `usize` for large patches.
+pub fn tiles_within_wasm_budget(cfg: &TileConfig) -> usize {
+    let p = (cfg.core.max(1) + 2 * cfg.halo) as u64;
+    let per_tile = p.saturating_pow(3).saturating_mul(ACTIVATION_BYTES_PER_PATCH_VOXEL);
+    (WASM_TILE_ACTIVATION_BUDGET / per_tile.max(1)).max(1) as usize
 }
 
 /// A core-aligned tile: `(x0, y0, z0, cx, cy, cz)` — origin + core extent (clamped at edges).
@@ -53,9 +130,10 @@ pub fn tile_patch_size(cfg: &TileConfig, divisor: usize) -> usize {
 /// model only supplies its own per-patch logic.
 ///
 /// `run_tile(&tile)` must return the tile's **post-processed core block** — row-major
-/// `oi,oj,ok`, length `cx·cy·cz` — and be pure + `Sync` (it may run on many threads at once,
-/// each holding one patch's activations in the shared wasm heap). `progress(done, total)` is
-/// called from the driver thread only (the JS callback isn't `Sync`).
+/// `oi,oj,ok`, length `cx·cy·cz` — and be pure + `Sync`: it runs on up to
+/// [`tile_concurrency`] threads at once, each holding one patch's activations, which on WASM
+/// share a single 4 GB heap. `progress(done, total)` is called from the driver thread only (the
+/// JS callback isn't `Sync`).
 pub fn tiled_scatter(
     grid: &Grid,
     mask: &[u8],
@@ -120,12 +198,19 @@ pub fn tiled_scatter(
 
     let mut chi = vec![0.0f64; n];
 
-    // Parallel path: run tiles in batches sized to the rayon pool, then write + report progress
-    // from this (driver) thread. Falls back to sequential without the `parallel` feature.
+    // Parallel path: run tiles in batches, then write + report progress from this (driver)
+    // thread. Falls back to sequential without the `parallel` feature.
+    //
+    // The batch size IS the memory bound — see `tile_concurrency`. Batching is how concurrency
+    // gets capped: rayon has no per-call concurrency limit, and the obvious alternative (a
+    // dedicated pool of that size) cannot be built on wasm32 at all, since
+    // `ThreadPoolBuilder::build` needs `std::thread::spawn`. The cost is a barrier per batch —
+    // the next wave waits for the slowest tile of this one — which is the price of not holding
+    // more patches in the heap than fit.
     #[cfg(feature = "parallel")]
     {
         use rayon::prelude::*;
-        let batch = rayon::current_num_threads().max(1);
+        let batch = tile_concurrency(cfg);
         let mut done = 0usize;
         for chunk in tiles.chunks(batch) {
             let blocks: Vec<Vec<f64>> = chunk.par_iter().map(&run_tile).collect::<Result<_, _>>()?;
@@ -286,4 +371,59 @@ pub fn tiled_field_inversion(
     };
 
     tiled_scatter(grid, mask, cfg, run_tile, progress)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The WASM budget has to translate patch size into a tile count that actually fits a 4 GB
+    /// heap. Figures below are `(core + 2·halo)³ · ACTIVATION_BYTES_PER_PATCH_VOXEL` against
+    /// `WASM_TILE_ACTIVATION_BUDGET`, i.e. what a browser can hold at once.
+    #[test]
+    fn wasm_tile_budget_tracks_patch_footprint() {
+        // QSMbly's config: 64³ patches, ~288 MB each by the budget's reckoning (269.5 MB
+        // measured) → five fit in 1.5 GB.
+        assert_eq!(tiles_within_wasm_budget(&TileConfig { core: 56, halo: 4 }), 5);
+        // Doubling the patch edge is 8× the memory, so the count collapses fast: 32³ patches are
+        // 36 MB each (41 fit), 128³ are 2.3 GB (one, over budget on its own).
+        assert_eq!(tiles_within_wasm_budget(&TileConfig { core: 24, halo: 4 }), 41);
+        assert_eq!(tiles_within_wasm_budget(&TileConfig { core: 120, halo: 4 }), 1);
+        // A patch that alone exceeds the budget still has to be attempted, not divided by zero:
+        // 144³ is ~3.1 GB, and the crate's own native default is 192³ on top of that.
+        assert_eq!(tiles_within_wasm_budget(&TileConfig { core: 128, halo: 8 }), 1);
+        assert_eq!(tiles_within_wasm_budget(&TileConfig { core: 192, halo: 32 }), 1);
+        // Degenerate configs must not panic, divide by zero, or overflow into a wrong answer. A
+        // patch too small to matter leaves the pool as the only limit; `usize::MAX` saturates to
+        // one tile rather than wrapping to a large count.
+        assert!(tiles_within_wasm_budget(&TileConfig { core: 0, halo: 0 }) > 1);
+        assert_eq!(tiles_within_wasm_budget(&TileConfig { core: usize::MAX, halo: 0 }), 1);
+
+        // The count is monotonically non-increasing in patch size — the property the cap relies
+        // on, and the thing a wrong unit or an inverted ratio would break.
+        let mut prev = usize::MAX;
+        for core in (8..=200).step_by(8) {
+            let n = tiles_within_wasm_budget(&TileConfig { core, halo: 4 });
+            assert!(n <= prev, "count rose from {prev} to {n} at core {core}");
+            assert!(n >= 1);
+            prev = n;
+        }
+    }
+
+    /// `tile_concurrency` never exceeds the pool, and never reports zero tiles in flight.
+    #[test]
+    fn tile_concurrency_is_bounded_by_the_pool() {
+        for cfg in [
+            TileConfig { core: 56, halo: 4 },
+            TileConfig { core: 128, halo: 8 },
+            TileConfig::default(),
+        ] {
+            let n = tile_concurrency(&cfg);
+            assert!(n >= 1);
+            #[cfg(feature = "parallel")]
+            assert!(n <= rayon::current_num_threads().max(1));
+            #[cfg(not(feature = "parallel"))]
+            assert_eq!(n, 1);
+        }
+    }
 }
