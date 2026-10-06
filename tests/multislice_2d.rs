@@ -81,7 +81,10 @@ fn load(session: &str) -> Option<Session> {
         deriv.join(format!("sub-multislice_ses-{session}_desc-shimmed_fieldmap.nii")),
     ];
     if let Some(missing) = required.iter().find(|p| !Path::new(p).exists()) {
-        println!("Skipping: 2D phantom session '{session}' is missing {}", missing.display());
+        common::skip_for_missing_data(&format!(
+            "2D phantom session '{session}' is missing {}",
+            missing.display()
+        ));
         println!(
             "  regenerate with qsm_forward/examples/multislice_2d.py (which passes \
              save_shimmed_field=True), or point QSM_BIDS_2D at a copy that has it"

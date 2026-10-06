@@ -34,7 +34,7 @@ fn base_dir() -> String {
 fn amp_pe_bids_quality() {
     let base = base_dir();
     if !Path::new(&format!("{}/sub-1_fieldmap-local.nii", base)).exists() {
-        println!("Skipping: phantom not found at {}", base);
+        common::skip_for_missing_data(&format!("phantom not found at {base}"));
         return;
     }
 

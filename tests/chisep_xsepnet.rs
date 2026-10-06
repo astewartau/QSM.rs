@@ -19,7 +19,7 @@ use std::time::Instant;
 #[ignore]
 fn test_chisep_xsepnet() {
     let Some(ph) = load_chisep_phantom() else {
-        println!("Skipping: chisep phantom not found");
+        common::skip_for_missing_data("chisep phantom not found");
         return;
     };
     let (nx, ny, nz) = ph.dims;

@@ -50,7 +50,7 @@ fn ras_affine(grid: &Grid) -> [f64; 16] {
 #[ignore]
 fn chisepnet_is_insensitive_to_array_orientation() {
     let Some(ph) = load_chisep_phantom() else {
-        println!("Skipping: chisep phantom not found");
+        common::skip_for_missing_data("chisep phantom not found");
         return;
     };
     let spec = qsm_core::models::find_model("chi-sepnet").expect("chi-sepnet in registry");
