@@ -1398,7 +1398,7 @@ jobs:
               echo "*transform, so registration cannot reach it. Scored against the ordinary fit of the*"
               echo "*uncorrupted echoes. The last row is the cost of running this when nothing is wrong.*"
               echo ""
-              eq=$(grep "^RESULT:Echo quality," "metrics/test_robust_echo_combination.csv" | head -1 | sed 's/^RESULT://')
+              eq=$(awk '/^RESULT:Echo quality,/{print substr($0,8); exit}' "metrics/test_robust_echo_combination.csv")
               if [ -n "$eq" ]; then
                 IFS=',' read -r _ spread clean_spread echo_no frac <<< "$eq"
                 echo "| Detection | Value |"
@@ -1417,7 +1417,7 @@ jobs:
               echo "|-----------|---------------|-------------|------|------|"
               if [ "$have_rows" = true ]; then
                 for variant in "Plain fit" "Robust fit" "Robust on clean"; do
-                  line=$(grep "^RESULT:${variant}," "metrics/test_robust_echo_combination.csv" | head -1 | sed 's/^RESULT://')
+                  line=$(awk -v p="^RESULT:${variant}," '$0 ~ p {print substr($0,8); exit}' "metrics/test_robust_echo_combination.csv")
                   [ -n "$line" ] || continue
                   IFS=',' read -r name nrmse corr xsim rtime <<< "$line"
                   echo "| ${name} | ${nrmse} | ${corr} | ${xsim} | $(printf '%.2fs' "$rtime") |"
@@ -1780,7 +1780,7 @@ jobs:
               echo "*transform, so registration cannot reach it. Scored against the ordinary fit of the*"
               echo "*uncorrupted echoes. The last row is the cost of running this when nothing is wrong.*"
               echo ""
-              eq=$(grep "^RESULT:Echo quality," "metrics/test_robust_echo_combination.csv" | head -1 | sed 's/^RESULT://')
+              eq=$(awk '/^RESULT:Echo quality,/{print substr($0,8); exit}' "metrics/test_robust_echo_combination.csv")
               if [ -n "$eq" ]; then
                 IFS=',' read -r _ spread clean_spread echo_no frac <<< "$eq"
                 echo "| Detection | Value |"
@@ -1799,7 +1799,7 @@ jobs:
               echo "|-----------|---------------|-------------|------|------|"
               if [ "$have_rows" = true ]; then
                 for variant in "Plain fit" "Robust fit" "Robust on clean"; do
-                  line=$(grep "^RESULT:${variant}," "metrics/test_robust_echo_combination.csv" | head -1 | sed 's/^RESULT://')
+                  line=$(awk -v p="^RESULT:${variant}," '$0 ~ p {print substr($0,8); exit}' "metrics/test_robust_echo_combination.csv")
                   [ -n "$line" ] || continue
                   IFS=',' read -r name nrmse corr xsim rtime <<< "$line"
                   echo "| ${name} | ${nrmse} | ${corr} | ${xsim} | $(printf '%.2fs' "$rtime") |"
