@@ -934,7 +934,7 @@ pub fn load_chisep_phantom() -> Option<ChiSepPhantom> {
     let inputs = format!("{}/inputs", base);
     let gt = format!("{}/groundtruth", base);
     if !Path::new(&inputs).exists() {
-        println!("Skipping: chisep phantom not found at {}", inputs);
+        skip_for_missing_data(&format!("chisep phantom not found at {inputs}"));
         return None;
     }
 
@@ -1038,4 +1038,27 @@ pub fn chisep_score(
     let nr = nrmse(recon, truth, mask) * 100.0;
     println!("  {:22}  corr {:.4}   xsim {:.4}   nrmse {:.1}%", label, corr, xs, nr);
     println!("RESULT:{},{:.4},{:.4},{:.1},{:.2}", label, corr, xs, nr, time_s);
+}
+
+/// Report that a test is giving up for want of data — and refuse to give up quietly where the
+/// data is supposed to be there.
+///
+/// Locally, a missing phantom is ordinary: not every checkout has the bundle, and a skipped test
+/// is more useful than a failing one. In CI the bundle is downloaded before the tests run, so a
+/// skip there means it did not arrive — and a test that returns early prints `ok` and reports
+/// the same green tick as a test that did the work. `tests/multislice_2d.rs` passed that way for
+/// its whole life, five tests in 0.00s, while the sessions it needed were absent from the bundle.
+///
+/// `QSM_REQUIRE_TEST_DATA` is set once at workflow level in `integration-tests.yml`, so every job
+/// in that file fails rather than skips — including jobs added later, which is the point.
+pub fn skip_for_missing_data(reason: &str) {
+    if std::env::var_os("QSM_REQUIRE_TEST_DATA").is_some() {
+        panic!(
+            "test data missing while QSM_REQUIRE_TEST_DATA is set: {reason}\n\
+             CI fetches the phantom bundle before the tests run, so this means the data did not \
+             arrive, not that the test is inapplicable. Check the bundle contents and the \
+             `testdata-*` cache key."
+        );
+    }
+    println!("Skipping: {reason}");
 }

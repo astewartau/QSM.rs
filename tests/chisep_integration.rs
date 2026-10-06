@@ -68,7 +68,7 @@ fn test_chisep_on_forward_phantom() {
 
     // Check data exists
     if !Path::new(deriv).exists() {
-        println!("Skipping: forward phantom data not found at {}", deriv);
+        common::skip_for_missing_data(&format!("forward phantom data not found at {deriv}"));
         return;
     }
 
