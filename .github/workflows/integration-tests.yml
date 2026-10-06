@@ -1300,20 +1300,14 @@ jobs:
 
             if TABLE=$(emit_chi_table_merged); then
               echo "## Dipole Inversion"
-              echo "*Every method that produces a susceptibility map, against ground truth. Plain rows take the*"
-              echo "*local field; **— BFR + inversion** rows take the total field and remove background*"
-              echo "*themselves; **— full pipeline** rows start from wrapped phase.*"
+              echo "*Every method that produces a susceptibility map, against ground truth. Plain rows take the local field; **— BFR + inversion** rows take the total field and remove background themselves; **— full pipeline** rows start from wrapped phase.*"
               echo ""
               echo "$TABLE"
             fi
 
             if [ -f "slices/register_aligned.bin" ] || [ -f "metrics/test_multiorient_register_capture_range.csv" ]; then
               echo "## Orientation Co-registration"
-              echo "*Orientations that are not already on one grid are rigidly co-registered before they are*"
-              echo "*combined, and each one's B0 direction is read off the recovered rotation. The difference*"
-              echo "*panels are the check: **as acquired** should be bright with rotational mismatch and*"
-              echo "***after registration** near-flat, both on one scale. Equally bright means the transform*"
-              echo "*went on the wrong way round.*"
+              echo "*Orientations that are not already on one grid are rigidly co-registered before they are combined, and each one's B0 direction is read off the recovered rotation. The difference panels are the check: **as acquired** should be bright with rotational mismatch and **after registration** near-flat, both on one scale. Equally bright means the transform went on the wrong way round.*"
               echo ""
               if [ -f "metrics/test_multiorient_register_capture_range.csv" ]; then
                 line=$(grep "^RESULT:" "metrics/test_multiorient_register_capture_range.csv" | head -1 | sed 's/^RESULT://')
@@ -1338,10 +1332,7 @@ jobs:
 
             if [ -f "metrics/test_motion_correction.csv" ]; then
               echo "## Motion Correction"
-              echo "*A four-echo series in which the head drifts between echoes, registered back to the first*"
-              echo "*echo in the complex domain and re-fitted. Scored against the field map the same pipeline*"
-              echo "*produces from the same echoes with no motion — not against ground truth, which a total*"
-              echo "*field map only matches up to the harmonic field unwrapping leaves behind.*"
+              echo "*A four-echo series in which the head drifts between echoes, registered back to the first echo in the complex domain and re-fitted. Scored against the field map the same pipeline produces from the same echoes with no motion — not against ground truth, which a total field map only matches up to the harmonic field unwrapping leaves behind.*"
               echo ""
               recovery=$(grep "^RESULT:Motion recovery," "metrics/test_motion_correction.csv" | head -1 | sed 's/^RESULT://')
               if [ -n "$recovery" ]; then
@@ -1639,9 +1630,7 @@ jobs:
 
             if TABLE=$(emit_chi_table_merged); then
               echo "### Dipole Inversion"
-              echo "*Every method that produces a susceptibility map, against ground truth. Plain rows take the*"
-              echo "*local field; **— BFR + inversion** rows take the total field and remove background*"
-              echo "*themselves; **— full pipeline** rows start from wrapped phase.*"
+              echo "*Every method that produces a susceptibility map, against ground truth. Plain rows take the local field; **— BFR + inversion** rows take the total field and remove background themselves; **— full pipeline** rows start from wrapped phase.*"
               echo ""
               echo "$TABLE"
               echo ""
@@ -1650,11 +1639,7 @@ jobs:
 
             if [ -f "slices/register_aligned.bin" ] || [ -f "metrics/test_multiorient_register_capture_range.csv" ]; then
               echo "### Orientation Co-registration"
-              echo "*Orientations that are not already on one grid are rigidly co-registered before they are*"
-              echo "*combined, and each one's B0 direction is read off the recovered rotation. The difference*"
-              echo "*panels are the check: **as acquired** should be bright with rotational mismatch and*"
-              echo "***after registration** near-flat, both on one scale. Equally bright means the transform*"
-              echo "*went on the wrong way round.*"
+              echo "*Orientations that are not already on one grid are rigidly co-registered before they are combined, and each one's B0 direction is read off the recovered rotation. The difference panels are the check: **as acquired** should be bright with rotational mismatch and **after registration** near-flat, both on one scale. Equally bright means the transform went on the wrong way round.*"
               echo ""
               if [ -f "metrics/test_multiorient_register_capture_range.csv" ]; then
                 line=$(grep "^RESULT:" "metrics/test_multiorient_register_capture_range.csv" | head -1 | sed 's/^RESULT://')
@@ -1681,10 +1666,7 @@ jobs:
 
             if [ -f "metrics/test_motion_correction.csv" ]; then
               echo "### Motion Correction"
-              echo "*A four-echo series in which the head drifts between echoes, registered back to the first*"
-              echo "*echo in the complex domain and re-fitted. Scored against the field map the same pipeline*"
-              echo "*produces from the same echoes with no motion — not against ground truth, which a total*"
-              echo "*field map only matches up to the harmonic field unwrapping leaves behind.*"
+              echo "*A four-echo series in which the head drifts between echoes, registered back to the first echo in the complex domain and re-fitted. Scored against the field map the same pipeline produces from the same echoes with no motion — not against ground truth, which a total field map only matches up to the harmonic field unwrapping leaves behind.*"
               echo ""
               recovery=$(grep "^RESULT:Motion recovery," "metrics/test_motion_correction.csv" | head -1 | sed 's/^RESULT://')
               if [ -n "$recovery" ]; then
@@ -1736,14 +1718,7 @@ jobs:
 
             if [ -f "figures/oblique_sagittal_chi.png" ]; then
               echo "### Geometry — Sagittal Anisotropic Oblique"
-              echo "*A 1x1x4 mm sagittal stack tilted 18 deg about S-I and 12 deg about A-P,"
-              echo "synthesised from the phantom, reconstructed through the cardinal-resample"
-              echo "pathway and mapped back to its own voxel space. No fixed-matrix phantom has"
-              echo "this geometry, and it is the only shape of data that exercises how"
-              echo "axial_grid_for assigns its spacings. Pass/fail only; see the job log for the"
-              echo "correlation and S-I detail numbers. The panel labels are the renderer's"
-              echo "generic voxel-axis names; because this stack is stored sagittally, its"
-              echo "'Axial' panel is the sagittal anatomical plane.*"
+              echo "*A 1x1x4 mm sagittal stack tilted 18 deg about S-I and 12 deg about A-P, synthesised from the phantom, reconstructed through the cardinal-resample pathway and mapped back to its own voxel space. No fixed-matrix phantom has this geometry, and it is the only shape of data that exercises how axial_grid_for assigns its spacings. Pass/fail only; see the job log for the correlation and S-I detail numbers. The panel labels are the renderer's generic voxel-axis names; because this stack is stored sagittally, its 'Axial' panel is the sagittal anatomical plane.*"
               echo ""
               emit_figures oblique_sagittal_truth oblique_sagittal_chi
             fi
@@ -1788,8 +1763,7 @@ jobs:
 
             if [ -f "slices/unwrap_raw_romeo.bin" ] || [ -f "slices/unwrap_raw_laplacian_neumann.bin" ] || [ -f "slices/unwrap_raw_bestpath.bin" ]; then
               echo "### Phase Unwrapping + B0 Estimation"
-              echo "*MCPC-3D-S, then each unwrapper → total field map, beside the ground truth. These differ by an*"
-              echo "*arbitrary harmonic field, which is expected of unwrappers; the like-for-like comparison is below.*"
+              echo "*MCPC-3D-S, then each unwrapper → total field map, beside the ground truth. These differ by an arbitrary harmonic field, which is expected of unwrappers; the like-for-like comparison is below.*"
               echo ""
               emit_figures stage_unwrap
               echo ""
@@ -1799,10 +1773,7 @@ jobs:
               echo "### Unwrapper Comparison (local field, after background removal)"
               echo "*Each unwrapper → field map → V-SHARP → local field, vs ground truth.*"
               echo ""
-              echo "Total field maps differ between unwrappers by an arbitrary harmonic field, so they are"
-              echo "compared after background removal. ROMEO, Laplacian and best path should land close. The last row"
-              echo "drives the shared \`run_field_mapping\` stage, and is what catches a config selecting the"
-              echo "wrong variant."
+              echo "Total field maps differ between unwrappers by an arbitrary harmonic field, so they are compared after background removal. ROMEO, Laplacian and best path should land close. The last row drives the shared \`run_field_mapping\` stage, and is what catches a config selecting the wrong variant."
               echo ""
               echo "$TABLE"
             fi

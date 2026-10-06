@@ -7,15 +7,20 @@ name: Relaxometry Demo
 
 on:
   pull_request:
+    # Only the files that can change what this demo computes or asserts. Two paths that
+    # used to be here are deliberately gone, for the same reasons integration-tests.yml
+    # already exempts them: src/utils/mod.rs is declarations and re-exports with no
+    # behaviour of its own, and scripts/render_slices.py only draws the figures — it
+    # cannot move a metric or a pass/fail. Between them they appear in roughly half of
+    # all PRs, which is why this demo was commenting on changes that had nothing to do
+    # with relaxometry.
     paths:
       - "src/utils/epg.rs"
       - "src/utils/denoise.rs"
       - "src/utils/gibbs.rs"
       - "src/utils/r2star.rs"
-      - "src/utils/mod.rs"
       - "tests/relaxometry_demo.rs"
       - "tests/common/mod.rs"
-      - "scripts/render_slices.py"
       - ".github/workflows/relaxometry-demo.yml"
   workflow_dispatch:
 
@@ -90,17 +95,15 @@ jobs:
         run: |
           fig() {  # emit an image only if it was rendered
             [ -f "figures/$1.png" ] && echo "![$1](figures/$1.png)"
-            return 0   # a missing figure must not fail the block: this is the last statement
-                       # in `{ ... } > report.md`, so returning non-zero here would abort the
-                       # step before the comment is ever posted.
+            return 0   # a missing figure must not fail the block: a non-zero status from the
+                       # last statement in `{ ... } > report.md` would abort the step before
+                       # the comment is ever posted.
           }
           {
             echo "## 🧪 Relaxometry toolkit demo"
             echo ""
-            echo "Self-contained synthetic multi-echo phantom (no external data)."
-            echo "EPG R2, R2' = R2\*−R2, MP-PCA denoising, and Gibbs unringing."
+            echo "Self-contained synthetic multi-echo phantom (no external data): EPG R2, R2' = R2\*−R2, MP-PCA denoising, and Gibbs unringing."
             echo ""
-            echo "### Metrics"
             echo "| Tool | Metric | Value |"
             echo "|---|---|---|"
             grep '^RELAXMETRIC ' demo.log | sed 's/^RELAXMETRIC //' \
@@ -108,22 +111,21 @@ jobs:
                   echo "| ${name} | ${metric} | ${value} |"
                 done
             echo ""
-            echo "### Maps"
-            echo "EPG recovers the true R2 (bias ≈ 0) and the refocusing B1; a mono-exponential"
-            echo "fit is biased low. The denoising and unringing rows carry a difference panel:"
-            echo "before/after are near-identical by eye, and what was removed is the point."
+            # Figures collapsed: the table is what a reviewer reads, and three montages
+            # of a synthetic phantom pushed everything else in the PR off the screen.
+            echo "<details>"
+            echo "<summary>Maps and slab coverage</summary>"
+            echo ""
+            echo "EPG recovers the true R2 (bias ≈ 0) and the refocusing B1; a mono-exponential fit is biased low. The denoising and unringing rows carry a difference panel: before/after are near-identical by eye, and what was removed is the point."
             echo ""
             fig stage_relaxometry
             echo ""
-            echo "### Slab MESE coverage"
-            echo "A spin-echo companion to a 3D GRE is routinely a band of slices. R2' is"
-            echo "reported only where R2 was measured (left); subtracting over the whole brain"
-            echo "mask instead reports the tissue R2 as reversible dephasing everywhere the"
-            echo "MESE did not reach (right). The coronal and sagittal views carry this —"
-            echo "the centre axial slice is inside the slab in both."
+            echo "A spin-echo companion to a 3D GRE is routinely a band of slices. R2' is reported only where R2 was measured (left); subtracting over the whole brain mask instead reports the tissue R2 as reversible dephasing everywhere the MESE did not reach (right). The coronal and sagittal views carry this — the centre axial slice is inside the slab in both."
             echo ""
             fig relax_r2prime_slab
             fig relax_r2prime_slab_naive
+            echo ""
+            echo "</details>"
           } > report.md
           for attempt in 1 2 3 4 5; do
             if cml comment create report.md; then
