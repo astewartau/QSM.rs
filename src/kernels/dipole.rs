@@ -153,7 +153,8 @@ mod tests {
 
         for (i, &val) in d.iter().enumerate() {
             if i > 0 {
-                assert!(val >= -2.0/3.0 - 1e-10 && val <= 1.0/3.0 + 1e-10,
+                let (lo, hi) = (-2.0 / 3.0 - 1e-10, 1.0 / 3.0 + 1e-10);
+                assert!((lo..=hi).contains(&val),
                     "Dipole value {} out of range at index {}", val, i);
             }
         }

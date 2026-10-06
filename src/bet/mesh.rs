@@ -88,40 +88,6 @@ pub fn compute_vertex_normals(vertices: &[[f64; 3]], faces: &[[usize; 3]]) -> Ve
     normals
 }
 
-/// Compute mean edge length for vertices in voxel coordinates (converts to mm)
-pub fn compute_mean_edge_length(vertices: &[[f64; 3]], faces: &[[usize; 3]], voxel_size: &[f64; 3]) -> f64 {
-    let mut total_length = 0.0;
-    let mut count = 0;
-
-    for &[i0, i1, i2] in faces {
-        // Edge v0-v1
-        let dx = (vertices[i1][0] - vertices[i0][0]) * voxel_size[0];
-        let dy = (vertices[i1][1] - vertices[i0][1]) * voxel_size[1];
-        let dz = (vertices[i1][2] - vertices[i0][2]) * voxel_size[2];
-        total_length += (dx*dx + dy*dy + dz*dz).sqrt();
-
-        // Edge v1-v2
-        let dx = (vertices[i2][0] - vertices[i1][0]) * voxel_size[0];
-        let dy = (vertices[i2][1] - vertices[i1][1]) * voxel_size[1];
-        let dz = (vertices[i2][2] - vertices[i1][2]) * voxel_size[2];
-        total_length += (dx*dx + dy*dy + dz*dz).sqrt();
-
-        // Edge v2-v0
-        let dx = (vertices[i0][0] - vertices[i2][0]) * voxel_size[0];
-        let dy = (vertices[i0][1] - vertices[i2][1]) * voxel_size[1];
-        let dz = (vertices[i0][2] - vertices[i2][2]) * voxel_size[2];
-        total_length += (dx*dx + dy*dy + dz*dz).sqrt();
-
-        count += 3;
-    }
-
-    if count > 0 {
-        total_length / count as f64
-    } else {
-        1.0
-    }
-}
-
 /// Compute mean edge length for vertices already in mm coordinates
 pub fn compute_mean_edge_length_mm(vertices_mm: &[[f64; 3]], faces: &[[usize; 3]]) -> f64 {
     let mut total_length = 0.0;
@@ -320,23 +286,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_compute_mean_edge_length_voxel() {
-        // A unit cube triangle (vertices in voxel coords, voxel_size = [2, 2, 2])
-        let vertices: Vec<[f64; 3]> = vec![
-            [0.0, 0.0, 0.0],
-            [1.0, 0.0, 0.0],
-            [0.0, 1.0, 0.0],
-        ];
-        let faces = vec![[0, 1, 2]];
-        let voxel_size = [2.0, 2.0, 2.0];
-
-        let mel = compute_mean_edge_length(&vertices, &faces, &voxel_size);
-        // Edge lengths in mm: 2.0, 2.0, 2*sqrt(2) = 2.828...
-        // Mean = (2 + 2 + 2.828) / 3 = 2.276
-        assert!(mel > 2.0 && mel < 3.0, "mean edge length = {}", mel);
-        assert!(mel.is_finite());
-    }
 
     #[test]
     fn test_compute_mean_edge_length_mm_unit_triangle() {
@@ -364,15 +313,6 @@ mod tests {
         assert!((mel - 1.0).abs() < 1e-10);
     }
 
-    #[test]
-    fn test_compute_mean_edge_length_empty_faces() {
-        let vertices: Vec<[f64; 3]> = vec![[0.0, 0.0, 0.0]];
-        let faces: Vec<[usize; 3]> = vec![];
-        let voxel_size = [1.0, 1.0, 1.0];
-
-        let mel = compute_mean_edge_length(&vertices, &faces, &voxel_size);
-        assert!((mel - 1.0).abs() < 1e-10);
-    }
 
     #[test]
     fn test_compute_mean_edge_length_mm_icosphere() {
@@ -511,23 +451,4 @@ mod tests {
         assert_eq!(score, f64::MAX, "Collapsed mesh should have MAX score");
     }
 
-    #[test]
-    fn test_compute_mean_edge_length_anisotropic_voxel() {
-        // Test with anisotropic voxel sizes
-        let vertices: Vec<[f64; 3]> = vec![
-            [0.0, 0.0, 0.0],
-            [1.0, 0.0, 0.0],
-            [0.0, 0.0, 1.0],
-        ];
-        let faces = vec![[0, 1, 2]];
-        let voxel_size = [1.0, 1.0, 3.0]; // z is 3x larger
-
-        let mel = compute_mean_edge_length(&vertices, &faces, &voxel_size);
-        // Edge 0->1: (1*1, 0, 0) -> length 1.0
-        // Edge 1->2: (-1*1, 0, 1*3) -> length sqrt(1+9) = sqrt(10) = 3.162
-        // Edge 2->0: (0, 0, -1*3) -> length 3.0
-        // Mean = (1.0 + 3.162 + 3.0) / 3 = 2.387
-        let expected = (1.0 + 10.0_f64.sqrt() + 3.0) / 3.0;
-        assert!((mel - expected).abs() < 1e-6, "mel={}, expected={}", mel, expected);
-    }
 }

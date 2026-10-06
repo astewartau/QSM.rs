@@ -615,13 +615,14 @@ mod tests {
         let chi_local = tfi(&local_field, &n_std, &magnitude, &mask, &grid, bdir, &p_local, |_, _| {});
         eprintln!("TFI on LOCAL field (ceiling): corr={:.4}", corr_in(&chi_local, &chi_gt));
 
-        eprintln!("=== TFI on TOTAL field — precond × lambda sweep (corr vs GT χ, within mask) ===");
+        // Only one preconditioner value is swept, so it is a plain binding; lambda is the one
+        // that still varies. Restore the loop here if a second precond value is wanted again.
+        let precond = 30.0f64;
+        eprintln!("=== TFI on TOTAL field — lambda sweep at precond={precond} (corr vs GT χ, within mask) ===");
         for &lambda in &[5e-5f64, 7.5e-5, 1e-4] {
-            for &precond in &[30.0f64] {
-                let params = TfiParams { lambda, precond, ..TfiParams::default() };
-                let chi = tfi(&total_field, &n_std, &magnitude, &mask, &grid, bdir, &params, |_, _| {});
-                eprintln!("  lambda={:>6.0e} precond={:>5}  corr={:.4}", lambda, precond, corr_in(&chi, &chi_gt));
-            }
+            let params = TfiParams { lambda, precond, ..TfiParams::default() };
+            let chi = tfi(&total_field, &n_std, &magnitude, &mask, &grid, bdir, &params, |_, _| {});
+            eprintln!("  lambda={:>6.0e} precond={:>5}  corr={:.4}", lambda, precond, corr_in(&chi, &chi_gt));
         }
     }
 }

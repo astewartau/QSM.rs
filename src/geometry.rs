@@ -1382,7 +1382,7 @@ mod tests {
 
         // Without the fill, the empty corners stay at exactly zero.
         let off = resample_complex_to_axial(&mag, &pha, nx, ny, nz, &a, &AxialResampleParams { noise_fill_fraction: None });
-        assert!(off.phase.iter().any(|v| *v == 0.0));
+        assert!(off.phase.contains(&0.0));
         assert!(off.phase.iter().filter(|v| **v == 0.0).count() > a1.phase.iter().filter(|v| **v == 0.0).count());
     }
 

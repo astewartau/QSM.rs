@@ -42,6 +42,7 @@ use crate::grid::Grid;
 #[cfg(feature = "onnx")]
 use crate::models::onnx::{OnnxError, OnnxModel, Tensor};
 use crate::segment::labels::SynthSegVersion;
+#[cfg(feature = "onnx")]
 use crate::utils::connected::largest_component;
 use crate::utils::resample::resize;
 use crate::utils::signal_erosion::gaussian_filter_anisotropic;
@@ -197,7 +198,7 @@ fn ras_alignment(affine: &[f64; 16]) -> ([usize; 3], [bool; 3]) {
 // ----------------------------------------------------------------------- preprocessing
 
 fn round_up(n: usize, m: usize) -> usize {
-    if n % m == 0 { n } else { (n / m + 1) * m }
+    if n.is_multiple_of(m) { n } else { (n / m + 1) * m }
 }
 
 /// `np.percentile(sorted, q)` with linear interpolation between order statistics.
@@ -230,8 +231,7 @@ fn preprocess(
 
     // 1. resample to 1 mm isotropic if needed (SynthSeg's 0.05 mm tolerance).
     let vs = [grid.vsx(), grid.vsy(), grid.vsz()];
-    let needs_resample =
-        vs.iter().any(|&v| v > TARGET_RES + 0.05 || v < TARGET_RES - 0.05);
+    let needs_resample = vs.iter().any(|&v| (v - TARGET_RES).abs() > 0.05);
     let (source, source_dims_cm) = if needs_resample {
         resample_to_iso(magnitude, grid)
     } else {

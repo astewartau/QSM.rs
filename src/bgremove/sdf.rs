@@ -214,7 +214,7 @@ pub fn sdf(
                 .collect();
 
             let num = gaussian_smooth_3d_with_filter_size(&weighted_tfs, nx, ny, nz, current_alpha, filter_size);
-            let denom = gaussian_smooth_3d_with_filter_size(&mask.to_vec(), nx, ny, nz, current_alpha, filter_size);
+            let denom = gaussian_smooth_3d_with_filter_size(mask, nx, ny, nz, current_alpha, filter_size);
 
             // Divide: num / denom
             num.iter()

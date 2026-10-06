@@ -124,14 +124,14 @@ mod tests {
         // Solution: x = [1, 2, 3]
         let b = vec![2.0, 6.0, 12.0];
         let x0 = vec![0.0, 0.0, 0.0];
-        let diag = vec![2.0, 3.0, 4.0];
+        let diag = [2.0, 3.0, 4.0];
 
         let x = cg_solve(
             |v| v.iter().zip(diag.iter()).map(|(&vi, &di)| vi * di).collect(),
             &b, &x0, 1e-10, 100
         );
 
-        let expected = vec![1.0, 2.0, 3.0];
+        let expected = [1.0, 2.0, 3.0];
         for (xi, ei) in x.iter().zip(expected.iter()) {
             assert!((xi - ei).abs() < 1e-8, "Expected {}, got {}", ei, xi);
         }

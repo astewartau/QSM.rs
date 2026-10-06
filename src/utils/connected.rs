@@ -50,6 +50,10 @@ pub(crate) fn label_components(
 ///
 /// Mirrors lab2im's `get_largest_connected_component`: an all-background mask is returned
 /// unchanged, and ties go to the component encountered first in the raster scan.
+// Its only caller is SynthSeg's `postprocess`, which is `#[cfg(feature = "onnx")]`, so
+// without that feature the lib build has no user for it. Allowed only in that configuration,
+// so that it stays a genuine dead-code check whenever `onnx` is on.
+#[cfg_attr(not(feature = "onnx"), allow(dead_code))]
 pub(crate) fn largest_component(mask: &[u8], dims: (usize, usize, usize)) -> Vec<u8> {
     let (label, sizes) = label_components(mask, dims);
     if sizes.len() <= 1 {

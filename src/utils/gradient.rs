@@ -883,7 +883,7 @@ mod tests {
         // gy_term = 1*1*1 - 0 = 1
         // gz_term = 1*1*1 - 0 = 1
         // total = 3
-        let idx_111 = 1 + 1 * nx + 1 * nx * ny;
+        let idx_111 = 1 + nx + nx * ny;
         assert!(
             (div[idx_111] - 3.0).abs() < 1e-5,
             "div at boundary-of-mask (1,1,1) expected 3.0, got {}",

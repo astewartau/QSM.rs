@@ -22,8 +22,7 @@ fn main() {
         if r < 4.0 { field[idx] += 0.05; }
         mag[idx] = 100.0 + 40.0 * (dy / 16.0) + 10.0 * rnd();
     }}}
-    let mut p = AmpPeParams::default();
-    p.max_linearization_ite = 4;
+    let p = AmpPeParams { max_linearization_ite: 4, ..Default::default() };
     let chi = amp_pe(&field, &mask, Some(&mag), &grid, (0.0, 0.0, 1.0), &p, |_, _| {});
     // bitwise checksum so any numerical difference at all shows up
     let mut h = 1469598103934665603u64;

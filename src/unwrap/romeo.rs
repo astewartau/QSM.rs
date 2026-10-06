@@ -1172,7 +1172,7 @@ fn merge_regions_post(
                 }
             }
         }
-        merge_pairs.sort_by(|a, b| b.2.cmp(&a.2));
+        merge_pairs.sort_by_key(|a| std::cmp::Reverse(a.2));
 
         for &(ri, rj, count) in &merge_pairs {
             if corrected[rj] { continue; }
@@ -1453,7 +1453,7 @@ mod tests {
         let quality = voxel_quality_romeo(&phase, &mag, None, 1.0, 1.0, &mask, &grid(n));
 
         for &q in quality.iter() {
-            assert!(q >= 0.0 && q <= 100.0,
+            assert!((0.0..=100.0).contains(&q),
                     "Quality should be in [0, 100], got {}", q);
         }
     }
@@ -1686,7 +1686,7 @@ mod tests {
             vec![0.1 * te; n]
         }).collect();
 
-        let original: Vec<Vec<f64>> = phases.iter().map(|p| p.clone()).collect();
+        let original: Vec<Vec<f64>> = phases.clone();
         correct_multi_echo_wraps(&mut phases, &tes, &mask);
 
         for e in 0..3 {

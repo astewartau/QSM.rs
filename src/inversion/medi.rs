@@ -1312,7 +1312,6 @@ mod tests {
             let b_norm: f32 = norm_squared_f32(&rhs).sqrt();
 
             let mut p_copy = vec![0.0f32; n];
-            let mut prev_residual = rsold.sqrt();
 
             for cg_iter in 0..cg_max_iter {
                 let residual_before = rsold.sqrt();
@@ -1352,7 +1351,6 @@ mod tests {
                 let beta_cg = rsnew / rsold;
                 xpby_f32(&mut ws.cg_p, &ws.cg_r, beta_cg);
                 rsold = rsnew;
-                prev_residual = residual;
             }
         }
         save_f32_raw(&dx, &format!("{}/dx1_rust.raw", outdir));

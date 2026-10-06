@@ -160,7 +160,7 @@ pub fn run_dipole_inversion(
                 ..config.amp_pe.clone()
             };
             crate::inversion::amp_pe(
-                local_field_ppm, mask, magnitude, &grid, bdir, &params, |i, n| progress(i, n),
+                local_field_ppm, mask, magnitude, &grid, bdir, &params, progress,
             )
         }
         InversionAlgorithm::Lsqr => {
@@ -169,7 +169,7 @@ pub fn run_dipole_inversion(
                 ..config.lsqr.clone()
             };
             crate::inversion::lsqr_qsm(
-                local_field_ppm, mask, magnitude, &grid, bdir, &params, |i, n| progress(i, n),
+                local_field_ppm, mask, magnitude, &grid, bdir, &params, progress,
             )
         }
         InversionAlgorithm::Heidi => {

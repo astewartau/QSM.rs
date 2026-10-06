@@ -366,7 +366,7 @@ pub fn calculate_curvature_proximity(
     for (new_idx, &old_idx) in rep_indices.iter().enumerate() {
         orig_to_rep[old_idx] = new_idx;
     }
-    let rep_points: Vec<Point3D> = rep_indices.iter().map(|&i| all_points[i].clone()).collect();
+    let rep_points: Vec<Point3D> = rep_indices.iter().map(|&i| all_points[i]).collect();
 
     // Triangulate unique representatives via Qhull (same library MATLAB uses)
     let (triangles, boundary) = triangulate_surface(&rep_points);
@@ -754,7 +754,7 @@ pub fn calculate_gaussian_curvature(
     for (new_idx, &old_idx) in rep_indices.iter().enumerate() {
         orig_to_rep[old_idx] = new_idx;
     }
-    let rep_points: Vec<Point3D> = rep_indices.iter().map(|&i| all_points[i].clone()).collect();
+    let rep_points: Vec<Point3D> = rep_indices.iter().map(|&i| all_points[i]).collect();
 
     // Triangulate unique representatives via Qhull
     let (triangles, boundary) = triangulate_surface(&rep_points);

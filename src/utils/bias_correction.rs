@@ -322,7 +322,7 @@ pub fn gaussian_smooth_3d(
     if let Some(w) = weight.as_deref() {
         check_volume("gaussian_smooth_3d: weight", w.len(), grid);
     }
-    let mut result: Vec<f64> = data.iter().map(|&v| v as f64).collect();
+    let mut result: Vec<f64> = data.to_vec();
 
     // Calculate box sizes for each dimension
     let mut boxsizes: Vec<Vec<usize>> = sigma.iter()
@@ -1016,7 +1016,7 @@ mod tests {
         // All sizes should be odd and reasonable
         for &s in &sizes {
             assert!(s % 2 == 1, "Box size should be odd, got {}", s);
-            assert!(s >= 3 && s <= 11, "Box size should be in reasonable range, got {}", s);
+            assert!((3..=11).contains(&s), "Box size should be in reasonable range, got {}", s);
         }
     }
 

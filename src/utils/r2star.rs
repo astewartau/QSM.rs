@@ -206,7 +206,6 @@ mod tests {
         let r2star_true: f64 = 30.0; // Hz
         let s0_true: f64 = 1000.0;
         let te = vec![0.005, 0.010, 0.015, 0.020, 0.025];
-        let n_echoes = te.len();
 
         // Single voxel in a 1x1x1 volume
         let mask = vec![1u8];
@@ -251,7 +250,7 @@ mod tests {
         let nx = 2; let ny = 2; let nz = 1;
         let n_voxels = nx * ny * nz;
 
-        let r2star_values = vec![20.0, 40.0, 60.0, 80.0];
+        let r2star_values = [20.0, 40.0, 60.0, 80.0];
         let s0: f64 = 500.0;
 
         let mask = vec![1u8; n_voxels];

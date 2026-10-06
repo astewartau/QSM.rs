@@ -117,7 +117,7 @@ fn compute_vesselness(l1: f64, l2: f64, l3: f64, a: f64, b: f64, c2: f64, black_
     let v = exp_ra * exp_rb * exp_s;
 
     // Clamp to valid range
-    if v.is_finite() { v.max(0.0).min(1.0) } else { 0.0 }
+    if v.is_finite() { v.clamp(0.0, 1.0) } else { 0.0 }
 }
 
 /// Sort three values by absolute value
@@ -126,15 +126,17 @@ fn sort_by_abs(a: f64, b: f64, c: f64) -> (f64, f64, f64) {
     vals.sort_by(|x, y| x.0.partial_cmp(&y.0).unwrap_or(std::cmp::Ordering::Equal));
     (vals[0].1, vals[1].1, vals[2].1)
 }
+/// The six independent components of a symmetric 3x3 Hessian field, in the order
+/// `(dxx, dyy, dzz, dxy, dxz, dyz)`, one volume each.
+#[cfg(test)]
+type HessianComponents = (Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>);
 
 #[cfg(test)]
 fn compute_hessian_3d(
     data: &[f64],
     nx: usize, ny: usize, nz: usize,
     sigma: f64,
-) -> (Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>) {
-    let n_total = nx * ny * nz;
-
+) -> HessianComponents {
     // First, apply Gaussian smoothing
     let smoothed = if sigma > 0.0 {
         gaussian_smooth_3d(data, nx, ny, nz, sigma)
@@ -377,7 +379,13 @@ fn eigenvalues_3x3_cardano(a: f64, b: f64, c: f64, d: f64, e: f64, f: f64) -> (f
                     - b01 * (b01 * b22 - b12 * b02)
                     + b02 * (b01 * b12 - b11 * b02)) / 2.0;
 
-    // Clamp for numerical stability (det_b_half should be in [-1, 1])
+    // Clamp for numerical stability (det_b_half should be in [-1, 1]).
+    // Not `clamp`: the two differ on NaN, and here that difference is observable. `p` is
+    // bounded below by the `p1 < 1e-30` guard above, so a NaN can only arrive from a NaN in
+    // the input Hessian -- and then `max`/`min` yields -1.0, so `acos` still returns a finite
+    // angle, where `clamp` would propagate NaN into all three eigenvalues. Preserving the
+    // existing behaviour is deliberate; changing it is a numerical decision, not a lint fix.
+    #[allow(clippy::manual_clamp)]
     let r = det_b_half.max(-1.0).min(1.0);
     let phi = r.acos() / 3.0;
 
@@ -531,7 +539,7 @@ mod tests {
     fn test_eigenvalues_diagonal() {
         // Diagonal matrix: eigenvalues are the diagonal elements
         let (l1, l2, l3) = eigenvalues_3x3_cardano(1.0, 2.0, 3.0, 0.0, 0.0, 0.0);
-        let mut sorted = vec![l1, l2, l3];
+        let mut sorted = [l1, l2, l3];
         sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
 
         assert!((sorted[0] - 1.0).abs() < 1e-10);
@@ -618,7 +626,7 @@ mod tests {
 
         for &s in &result.scale {
             assert!(s.is_finite(), "Scale must be finite");
-            assert!(s >= 0.5 && s <= 3.0, "Scale must be in range [0.5, 3.0], got {}", s);
+            assert!((0.5..=3.0).contains(&s), "Scale must be in range [0.5, 3.0], got {}", s);
         }
     }
 
@@ -711,11 +719,11 @@ mod tests {
         // Both should produce valid output
         for &v in &result_bright.vesselness {
             assert!(v.is_finite());
-            assert!(v >= 0.0 && v <= 1.0);
+            assert!((0.0..=1.0).contains(&v));
         }
         for &v in &result_dark.vesselness {
             assert!(v.is_finite());
-            assert!(v >= 0.0 && v <= 1.0);
+            assert!((0.0..=1.0).contains(&v));
         }
 
         // Dark vessel detection should detect something in the dark tube region
@@ -765,7 +773,7 @@ mod tests {
         // All should be valid
         for &v in &result.vesselness {
             assert!(v.is_finite());
-            assert!(v >= 0.0 && v <= 1.0);
+            assert!((0.0..=1.0).contains(&v));
         }
 
         // There should be some non-zero vesselness near the tube center
@@ -943,7 +951,7 @@ mod tests {
         // Matrix: [[2, 1, 0], [1, 2, 0], [0, 0, 1]]
         // Eigenvalues: 3, 1, 1
         let (l1, l2, l3) = eigenvalues_3x3_cardano(2.0, 2.0, 1.0, 1.0, 0.0, 0.0);
-        let mut sorted = vec![l1, l2, l3];
+        let mut sorted = [l1, l2, l3];
         sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
 
         assert!((sorted[0] - 1.0).abs() < 1e-10);

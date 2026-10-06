@@ -604,7 +604,7 @@ fn lap1_axis(
 
     let stencil = if coord.wrapping_sub(a) < n_interior {
         // Interior: check mask neighbors
-        2 * (mask[l + a] as u8) + (mask[l - a] as u8)
+        2 * mask[l + a] + mask[l - a]
     } else {
         // Boundary: first → forward(2), last → backward(1)
         if coord == 0 { 2 } else if coord == n_end { 1 } else { 0 }
@@ -763,7 +763,12 @@ fn dipole_kspace_weights_ilsqr(
 
     let range = ab_max - ab_min;
 
-    // Normalize to [0, 1]
+    // Normalize to [0, 1].
+    // Not `clamp`: `max`/`min` maps a NaN weight to 0.0, which drops that voxel from the fit,
+    // whereas `clamp` would propagate NaN through the weight map. `vals` is a masked subset of
+    // `w`, so a NaN outside the mask reaches here without having tripped the `partial_cmp`
+    // unwrap above. Behaviour-preserving on purpose.
+    #[allow(clippy::manual_clamp)]
     for i in 0..len {
         if range > 1e-20 {
             w[i] = (w[i] - ab_min) / range;
@@ -1146,8 +1151,8 @@ fn fastqsm_step(
     // Equations (13-14): Linear regression to scale FastQSM
     // Solve: xtkd ≈ a * xfs + b
     // MATLAB reference uses ALL voxels (including zeros outside mask) for the regression
-    let sum_xfs: f64 = x_fs.iter().map(|&v| v).sum();
-    let sum_xtkd: f64 = x_tkd.iter().map(|&v| v).sum();
+    let sum_xfs: f64 = x_fs.iter().copied().sum();
+    let sum_xtkd: f64 = x_tkd.iter().copied().sum();
     let sum_xfs2: f64 = x_fs.iter().map(|&v| v * v).sum();
     let sum_xfs_xtkd: f64 = x_fs.iter().zip(x_tkd.iter())
         .map(|(&xf, &xt)| xf * xt)
@@ -1443,7 +1448,7 @@ mod tests {
         // Test complex LSQR on a diagonal system: A = diag(1, 2, 3), b = [1+i, 4+2i, 9+3i]
         // Expected solution: x = [1+i, 2+i, 3+i]
         let diag = vec![1.0, 2.0, 3.0];
-        let expected = vec![
+        let expected = [
             Complex64::new(1.0, 1.0),
             Complex64::new(2.0, 1.0),
             Complex64::new(3.0, 1.0),
@@ -1530,7 +1535,7 @@ mod tests {
         // All weights should be finite and in [0, 1]
         for (i, &wi) in w.iter().enumerate() {
             assert!(wi.is_finite(), "weight[{}] is not finite", i);
-            assert!(wi >= 0.0 && wi <= 1.0, "weight[{}] = {} out of [0,1]", i, wi);
+            assert!((0.0..=1.0).contains(&wi), "weight[{}] = {} out of [0,1]", i, wi);
         }
 
         // Masked-out voxels should have weight 0
@@ -1550,7 +1555,7 @@ mod tests {
 
         // All weights should be in [0, 1]
         for (i, &wi) in w.iter().enumerate() {
-            assert!(wi >= 0.0 && wi <= 1.0,
+            assert!((0.0..=1.0).contains(&wi),
                 "weight[{}] = {} out of [0,1]", i, wi);
         }
 

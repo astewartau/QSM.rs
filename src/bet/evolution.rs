@@ -13,9 +13,17 @@ use std::collections::VecDeque;
 /// Brain parameters struct (like FSL's bet_parameters)
 struct BetParameters {
     t2: f64,       // 2nd percentile (robust min)
+    // `t98` and `cog` are consumed only as intermediates -- `t98` by the `t` threshold and the
+    // `tm` intensity window, `cog` by `cog_mm` -- so the evolution path never reads the stored
+    // fields and the lib target sees them as dead. They are kept because the unit tests below
+    // assert on them directly (that `t98 >= t2`, that `tm` falls between the two, that `cog`
+    // lands on the phantom's centre), which is the only check that `estimate_brain_parameters`
+    // still matches FSL-BET2's `adjust_initial_mesh`. Dropping the fields would delete that.
+    #[allow(dead_code)]
     t98: f64,      // 98th percentile (robust max)
     t: f64,        // threshold = t2 + 0.1*(t98-t2)
     tm: f64,       // median within-brain intensity (critical for proper surface evolution)
+    #[allow(dead_code)]
     cog: [f64; 3], // center of gravity in voxel coordinates
     cog_mm: [f64; 3], // center of gravity in mm (for z-gradient)
     radius: f64,   // estimated brain radius in mm
@@ -389,13 +397,14 @@ fn surface_to_mask(
                     let nx_ = cx + dx;
                     let ny_ = cy + dy;
                     let nz_ = cz + dz;
-                    if nx_ >= 0 && nx_ < nx as isize && ny_ >= 0 && ny_ < ny as isize && nz_ >= 0 && nz_ < nz as isize {
-                        if grid[idx(nx_ as usize, ny_ as usize, nz_ as usize)] == 1 {
-                            cx = nx_;
-                            cy = ny_;
-                            cz = nz_;
-                            break 'search;
-                        }
+                    if nx_ >= 0 && nx_ < nx as isize && ny_ >= 0 && ny_ < ny as isize
+                        && nz_ >= 0 && nz_ < nz as isize
+                        && grid[idx(nx_ as usize, ny_ as usize, nz_ as usize)] == 1
+                    {
+                        cx = nx_;
+                        cy = ny_;
+                        cz = nz_;
+                        break 'search;
                     }
                 }
             }
@@ -454,11 +463,11 @@ fn fill_holes(mask: &mut [u8], nx: usize, ny: usize, nz: usize) {
     for i in 0..nx {
         for j in 0..ny {
             for k in 0..nz {
-                if i == 0 || i == nx - 1 || j == 0 || j == ny - 1 || k == 0 || k == nz - 1 {
-                    if mask[idx(i, j, k)] == 0 {
-                        exterior[idx(i, j, k)] = true;
-                        queue.push_back((i, j, k));
-                    }
+                if (i == 0 || i == nx - 1 || j == 0 || j == ny - 1 || k == 0 || k == nz - 1)
+                    && mask[idx(i, j, k)] == 0
+                {
+                    exterior[idx(i, j, k)] = true;
+                    queue.push_back((i, j, k));
                 }
             }
         }
@@ -506,7 +515,7 @@ fn evolution_pass(
     nx: usize, ny: usize, nz: usize,
     voxel_size: &[f64; 3],
     bp: &BetParameters,
-    vertices: &mut Vec<[f64; 3]>,
+    vertices: &mut [[f64; 3]],
     faces: &[[usize; 3]],
     neighbor_matrix: &[Vec<usize>],
     neighbor_counts: &[usize],

@@ -18,7 +18,7 @@ use qsm_core::inversion::{TvParams, NltvParams, RtsParams, MediParams, TfiParams
 use qsm_core::inversion::{NdiParams, FansiParams, L1QsmParams, WhQsmParams, HdQsmParams, AmpPeParams};
 use qsm_core::inversion::{LsqrQsmParams, HeidiParams};
 use qsm_core::swi;
-use qsm_core::unwrap::{laplacian_unwrap_bfr, laplacian_unwrap, unwrap_bestpath, BestPathParams, UnwrapMethod};
+use qsm_core::unwrap::{laplacian_unwrap, unwrap_bestpath, BestPathParams, UnwrapMethod};
 use qsm_core::unwrap::romeo::{unwrap_romeo_multi_echo, RomeoParams};
 use qsm_core::pipeline;
 use qsm_core::utils::{
@@ -1553,6 +1553,9 @@ fn test_pipeline_unwrap_bfr_laplacian_neumann() {
 #[ignore]
 #[allow(deprecated)]
 fn test_unwrap_bfr_single_volume() {
+    // Imported here rather than at the top of the file so the deprecation allow covers only
+    // this test, which exists to exercise that deprecated entry point.
+    use qsm_core::unwrap::laplacian_unwrap_bfr;
     use std::f64::consts::PI;
     println!("[INFO] Loading test data...");
     let data = TestData::load().expect("Failed to load test data");
