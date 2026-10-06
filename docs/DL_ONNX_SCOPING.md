@@ -160,7 +160,7 @@ weighting, mask) stays in Rust; the net is a clean tensor-in/tensor-out.
 
 | Method | Why it's out |
 |--------|--------------|
-| **DIP-UP** | test-time deep-image-prior loop (backprop per input) — ONNX is inference-only |
+| **DIP-UP** | test-time deep-image-prior loop (backprop per input) — ONNX is inference-only. Its *pretrained* CNN half does export cleanly and runs on tract; measured accuracy without the loop does not justify shipping it — see [`DIPUP_SCOPING.md`](DIPUP_SCOPING.md) |
 | **INR-QSM** | untrained SIREN, optimised per subject — no weights to export |
 | **MoDIP** | untrained deep image prior, optimised per subject — no weights to export |
 | **QSMnet**, **QSMnet+** | TensorFlow 1.14 checkpoints; tf2onnx path is brittle (contrib ops) |
@@ -170,9 +170,12 @@ weighting, mask) stays in Rust; the net is a clean tensor-in/tensor-out.
 
 Two sub-notes:
 - **DIP-UP / INR-QSM / MoDIP** are *architecturally* incompatible with ONNX — they solve an
-  optimisation problem at inference. If we ever want these, the right move is to reimplement the
-  optimisation loop natively in Rust against our existing FFT/dipole machinery (they're essentially
-  "classical iterative solver with a CNN/MLP regulariser"), **not** ONNX. Sizeable effort each.
+  optimisation problem at inference. (DIP-UP was revisited in detail for #123: the pretrained
+  wrap-count CNN *is* exportable and tract-verified, so for that model the blocker turned out to be
+  accuracy rather than architecture. See [`DIPUP_SCOPING.md`](DIPUP_SCOPING.md).) If we ever want
+  these, the right move is to reimplement the optimisation loop natively in Rust against our existing
+  FFT/dipole machinery (they're essentially "classical iterative solver with a CNN/MLP regulariser"),
+  **not** ONNX. Sizeable effort each.
 - **NeXtQSM** joins this group (assessed 2026-08-20). Its BFR is a plain U-Net, but its dipole
   inversion is a 6-step variational optimisation whose update is `x ← x − ∇ₓ(λ·E_D + E_R)` with
   `E_R = mean(|UNet(x)|)`, computed by **autodiff through the U-Net** each step. The crux —
