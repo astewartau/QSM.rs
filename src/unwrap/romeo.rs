@@ -1753,10 +1753,36 @@ mod tests {
 
         let weights = calculate_weights_bestpath(&phase, &mask, n, n, n);
 
-        // Should produce finite, valid weights
-        for &w in &weights {
-            assert!(w <= 255);
-        }
+        // The previous assertion here was `w <= 255` on a `u8`, which is true by type and so
+        // could never fail. What is actually worth pinning is that the weights respond to the
+        // phase at all, which needs two assertions pulling in opposite directions -- a bound
+        // alone is satisfied by a function that ignores its input and returns a constant.
+        //
+        // `scale(w) = clamp((1 - w/10) * 255, 1, 255)` with `w` the summed second-order phase
+        // inconsistency, so a smooth field sits near the top of the range. Note the range is
+        // *not* very discriminating: measured means are 255.0 constant, 249.8 for this
+        // gradient and 247.6 for uniform noise, so a high mean on its own says little.
+        let assigned: Vec<u8> = weights.iter().copied().filter(|&w| w > 0).collect();
+        assert!(!assigned.is_empty(), "no edge weight was assigned at all");
+        assert!(
+            assigned.iter().all(|&w| w >= 200),
+            "a smooth gradient should score near the top of the range; min was {:?}",
+            assigned.iter().min()
+        );
+
+        // A perfectly flat field has zero second-order difference everywhere, so every assigned
+        // edge scores exactly 255. This gradient wraps every `n` voxels, and that discontinuity
+        // pulls some edges below 255. A function returning a constant passes the bound above
+        // and fails here.
+        let flat = calculate_weights_bestpath(&vec![0.5f64; total], &mask, n, n, n);
+        assert!(
+            flat.iter().filter(|&&w| w > 0).all(|&w| w == 255),
+            "a constant field should score a flat 255"
+        );
+        assert!(
+            assigned.iter().any(|&w| w < 255),
+            "the gradient's wrap discontinuity should pull some edges below 255"
+        );
     }
 
     // =========================================================================

@@ -866,6 +866,13 @@ fn line_minimise(cost: &mut CostFn, p: &[f64; 6], dir: &[f64; 6]) -> ([f64; 6], 
     let f = |x: f64, c: &mut CostFn| c.cost(&at(x));
 
     // Bracket. `dir` carries the step scale, so x = 1 is one nominal step.
+    //
+    // This is the golden ratio, deliberately — it is what makes the bracket expansion and the
+    // section search below golden. clippy 1.99 added `GOLDEN_RATIO` to `approx_constant` and
+    // suggests `f64::consts::GOLDEN_RATIO`, but that constant is newer than the toolchains this
+    // crate is built with elsewhere, so the literal stays and the lint is silenced here rather
+    // than raising the MSRV for a name.
+    #[allow(clippy::approx_constant)]
     const GOLD: f64 = 1.618_033_988_749_895;
     const MAX_EXPANSIONS: usize = 24;
     let (mut ax, mut bx) = (0.0f64, 1.0f64);
