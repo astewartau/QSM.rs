@@ -660,7 +660,8 @@ mod tests {
     #[test]
     fn test_scale_f64() {
         let mut a = vec![1.0f64, 2.0, 3.0, 4.0, 5.0];
-        let alpha = 3.14f64;
+        // An arbitrary scale factor; 3.14 reads as an approximation of pi, which clippy denies.
+        let alpha = 2.5f64;
 
         let expected: Vec<f64> = a.iter().map(|x| x * alpha).collect();
         scale_f64(&mut a, alpha);
@@ -899,7 +900,8 @@ mod tests {
     fn test_scale_f32_large() {
         let n = 256;
         let mut a: Vec<f32> = (0..n).map(|i| i as f32 * 0.1).collect();
-        let alpha = 3.14f32;
+        // As in `test_scale_f64`: an arbitrary factor, not an approximation of pi.
+        let alpha = 2.5f32;
 
         let expected: Vec<f32> = a.iter().map(|&x| x * alpha).collect();
         scale_f32(&mut a, alpha);

@@ -44,6 +44,7 @@ jobs:
       run_dl: ${{ steps.detect.outputs.run_dl }}
       dl_matrix: ${{ steps.detect.outputs.dl_matrix }}
       run_geometry: ${{ steps.detect.outputs.run_geometry }}
+      run_multislice: ${{ steps.detect.outputs.run_multislice }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -88,6 +89,7 @@ jobs:
             echo "run_dl=true" >> "$GITHUB_OUTPUT"
             echo "dl_matrix=$all_dl" >> "$GITHUB_OUTPUT"
             echo "run_geometry=true" >> "$GITHUB_OUTPUT"
+            echo "run_multislice=true" >> "$GITHUB_OUTPUT"
           }
 
           # Manual trigger: run everything
@@ -173,6 +175,7 @@ jobs:
           inversion=""
           run_bet=false
           run_geometry=false
+          run_multislice=false
           combined=""
           pipeline=""
           chisep=""
@@ -191,7 +194,7 @@ jobs:
               src/lib.rs|src/utils/mod.rs) : ;;
               src/inversion/mod.rs|src/bgremove/mod.rs|src/pipeline/mod.rs) : ;;
               # Core infrastructure → run everything
-              src/fft.rs|src/nifti_io.rs|src/region_grow.rs|src/priority_queue.rs)
+              src/grid.rs|src/fft.rs|src/nifti_io.rs|src/region_grow.rs|src/priority_queue.rs)
                 echo "Core file changed: $file → all tests"
                 output_all; exit 0 ;;
               src/kernels/*|src/solvers/*)
@@ -234,6 +237,7 @@ jobs:
                 echo "run_dl=true" >> "$GITHUB_OUTPUT"
                 echo "dl_matrix=$all_dl" >> "$GITHUB_OUTPUT"
                 echo "run_geometry=true" >> "$GITHUB_OUTPUT"
+                echo "run_multislice=true" >> "$GITHUB_OUTPUT"
                 echo "run_unit_tests=$run_unit_tests" >> "$GITHUB_OUTPUT"
                 exit 0 ;;
               # Changes the data every test sees, so there is nothing to narrow it to.
@@ -384,6 +388,10 @@ jobs:
               src/unwrap/mod.rs)      pipeline="$pipeline test_pipeline_tgv test_pipeline_qsmart test_pipeline_qsmart_tikhonov" ;;
               src/unwrap/romeo.rs)    pipeline="$pipeline test_pipeline_romeo_b0 test_pipeline_unwrap_bfr_romeo test_pipeline_tgv" ;;
               src/unwrap/bestpath.rs) pipeline="$pipeline test_pipeline_unwrap_bfr_bestpath test_pipeline_unwrap_bfr_romeo" ;;
+              # 2D multi-slice: slice-wise unwrapping and the slice-gap refusal are
+              # additive, so no existing pipeline test sees them; they have their own binary.
+              src/unwrap/slicewise.rs|tests/multislice_2d.rs)
+                run_multislice=true ;;
               # Best path is union_find's only caller today; PRELUDE will be the second.
               src/utils/union_find.rs) pipeline="$pipeline test_pipeline_unwrap_bfr_bestpath" ;;
               src/unwrap/laplacian.rs) pipeline="$pipeline test_pipeline_unwrap_bfr_laplacian_neumann test_unwrap_bfr_single_volume test_pipeline_unwrap_bfr_stage_laplacian test_pipeline_qsmart test_pipeline_qsmart_tikhonov test_pipeline_harperella test_pipeline_iharperella" ;;
@@ -456,6 +464,7 @@ jobs:
           echo "run_dl=$(has_items "$dl_json")" >> "$GITHUB_OUTPUT"
           echo "dl_matrix=$dl_json" >> "$GITHUB_OUTPUT"
           echo "run_geometry=$run_geometry" >> "$GITHUB_OUTPUT"
+          echo "run_multislice=$run_multislice" >> "$GITHUB_OUTPUT"
 
           echo "Selected tests:"
           echo "  bgremove:  $bgremove_json"
@@ -466,6 +475,7 @@ jobs:
           echo "  chisep:    $chisep_json"
           echo "  dl:        $dl_json"
           echo "  geometry:  $run_geometry"
+          echo "  2d slices: $run_multislice"
 
   # Unit tests + code coverage (reusable workflow)
   unit-tests:
@@ -484,7 +494,13 @@ jobs:
         uses: actions/cache@v4
         with:
           path: bids
-          key: testdata-v1-y8adf
+          # Bump this key whenever the OSF bundle changes. It carries no content hash, so a
+          # replaced bids.zip is otherwise masked by every existing runner cache — the download
+          # is skipped, the stale bundle is served, and the tests that needed the new data skip
+          # while reporting success.
+          # v2 (2026-10-06): added the 2D multi-slice sessions ses-thick / ses-offsets / ses-gap
+          # (qsm-forward examples/multislice_2d.py), for tests/multislice_2d.rs.
+          key: testdata-v2-y8adf
 
       - name: Download test data from OSF
         if: steps.cache-testdata.outputs.cache-hit != 'true'
@@ -1114,8 +1130,52 @@ jobs:
           path: slices/
           retention-days: 1
 
+  multislice-tests:
+    needs: [setup, detect-changes]
+    if: needs.detect-changes.outputs.run_multislice == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download test data
+        uses: actions/download-artifact@v4
+        with:
+          name: test-data
+          path: bids
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      # The 2D multi-slice sessions (ses-thick / ses-offsets / ses-gap, from
+      # qsm-forward's examples/multislice_2d.py) are not yet in the phantom bundle.
+      # Until they are, each test prints why it skipped and the step says so loudly
+      # rather than reporting a silent pass.
+      - name: Run multislice_2d
+        timeout-minutes: 30
+        env:
+          QSM_BIDS_2D: bids
+        run: |
+          # Without this the step reports tee's exit status and the job cannot fail.
+          # Verified: `bash -e` on `false | tee x` exits 0, and exits 1 with pipefail set.
+          set -o pipefail
+          cargo test --release --features parallel --test multislice_2d -- --ignored --nocapture 2>&1 | tee test_output.txt
+          if grep -q "^Skipping: 2D phantom session" test_output.txt; then
+            echo "::warning title=2D phantom missing::multislice_2d skipped - the ses-thick/ses-offsets/ses-gap sessions are not in the test-data bundle, so nothing was verified against real data here. The unit tests in src/unwrap/slicewise.rs and src/grid.rs still ran."
+          fi
+
   tests-passed:
-    needs: [unit-tests, bgremove-tests, inversion-tests, bet-test, combined-tests, pipeline-tests, chisep-tests, dl-tests, geometry-tests]
+    needs: [unit-tests, bgremove-tests, inversion-tests, bet-test, combined-tests, pipeline-tests, chisep-tests, dl-tests, geometry-tests, multislice-tests]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -1132,7 +1192,8 @@ jobs:
             "${{ needs.combined-tests.result }}" \
             "${{ needs.pipeline-tests.result }}" \
             "${{ needs.chisep-tests.result }}" \
-            "${{ needs.geometry-tests.result }}"; do
+            "${{ needs.geometry-tests.result }}" \
+            "${{ needs.multislice-tests.result }}"; do
             if [ "$result" = "failure" ] || [ "$result" = "cancelled" ]; then
               echo "Test job failed or was cancelled: $result"
               exit 1
@@ -1142,7 +1203,7 @@ jobs:
 
   # Collect metrics from all parallel jobs and produce a single summary
   summary:
-    needs: [detect-changes, unit-tests, bgremove-tests, inversion-tests, bet-test, combined-tests, pipeline-tests, chisep-tests, dl-tests, geometry-tests]
+    needs: [detect-changes, unit-tests, bgremove-tests, inversion-tests, bet-test, combined-tests, pipeline-tests, chisep-tests, dl-tests, geometry-tests, multislice-tests]
     # Post the results comment only when something actually ran. On changes that
     # select no tests (e.g. docs-only), skip it instead of posting an empty
     # "Tests passed: N/A" comment. `always()` keeps it running even if a selected
@@ -1156,7 +1217,8 @@ jobs:
       needs.detect-changes.outputs.run_combined == 'true' ||
       needs.detect-changes.outputs.run_pipeline == 'true' ||
       needs.detect-changes.outputs.run_chisep == 'true' ||
-      needs.detect-changes.outputs.run_geometry == 'true')
+      needs.detect-changes.outputs.run_geometry == 'true' ||
+      needs.detect-changes.outputs.run_multislice == 'true')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

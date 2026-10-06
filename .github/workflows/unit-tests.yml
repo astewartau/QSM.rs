@@ -27,7 +27,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          components: llvm-tools-preview
+          components: llvm-tools-preview, clippy
 
       - name: Cache cargo
         uses: actions/cache@v4
@@ -57,6 +57,27 @@ jobs:
       # the tarpaulin install so a failure skips that build entirely.
       - name: Run unit tests
         run: cargo test --lib --features parallel
+
+      # Gates on clippy's deny-level lints only, not on warnings. `-D warnings` would fail
+      # immediately -- there are 328, of which `needless_range_loop` (144) and
+      # `too_many_arguments` (46) are two thirds, and in indexing-heavy numerical kernels the
+      # suggested rewrites are frequently less readable than what is there. Deciding whether to
+      # allow those two crate-wide is a separate exercise (#148); this holds the line at zero
+      # errors in the meantime.
+      #
+      # `--all-targets` matters more than the feature set here: four of the five errors this
+      # first caught were inside `#[cfg(test)]` blocks, which a plain `cargo clippy` does not
+      # lint. One was `assert!(w <= 255)` on a `u8` -- a test assertion that could not fail.
+      # Runs after the tests so a lint failure never masks a test failure.
+      #
+      # Note that this gate's strictness tracks whatever `stable` resolves to, so a Rust release
+      # can turn it red with no change to this repository. That is not hypothetical: the fifth
+      # error above appeared only on 1.99, which added `GOLDEN_RATIO` to `approx_constant` and
+      # so newly flagged a golden-section search constant that had been merged for weeks. When
+      # it happens, fix or `#[allow]` the new lint with a comment -- do not pin the toolchain,
+      # which trades a visible occasional failure for an invisible permanent one.
+      - name: Clippy
+        run: cargo clippy --all-targets --features "parallel onnx download"
 
       - name: Install cargo-tarpaulin
         run: |
