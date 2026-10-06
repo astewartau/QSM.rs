@@ -65,6 +65,7 @@ pub fn run_separation(
     config: &SeparationConfig,
     progress: &mut dyn FnMut(usize, usize),
 ) -> Result<SeparationResult, PipelineError> {
+    metadata.require_contiguous_slices()?;
     let grid = metadata.grid();
     let n = grid.n_total();
     let bdir = metadata.b0_direction;
@@ -222,6 +223,7 @@ mod tests {
             echo_times: vec![0.004, 0.012, 0.020, 0.028],
             field_strength: 3.0,
             b0_direction: (0.0, 0.0, 1.0),
+            slice_geometry: None,
         }
     }
 

@@ -23,6 +23,12 @@ permissions:
   contents: read
   pull-requests: write
 
+# See integration-tests.yml for why: without `pipefail`, `cargo test ... | tee demo.log` below
+# reports tee's status and a failing demo is green.
+defaults:
+  run:
+    shell: bash
+
 jobs:
   demo:
     runs-on: ubuntu-latest
@@ -103,7 +109,9 @@ jobs:
             echo "### Metrics"
             echo "| Tool | Metric | Value |"
             echo "|---|---|---|"
-            grep '^RELAXMETRIC ' demo.log | sed 's/^RELAXMETRIC //' \
+            # `|| true`: a demo that emitted no metrics should leave the table empty, not fail
+            # the summary step, which is what pipefail would otherwise do here.
+            { grep '^RELAXMETRIC ' demo.log || true; } | sed 's/^RELAXMETRIC //' \
               | while IFS='|' read -r name metric value; do
                   echo "| ${name} | ${metric} | ${value} |"
                 done

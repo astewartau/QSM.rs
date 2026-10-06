@@ -720,16 +720,17 @@ mod tests {
         let mip = create_mip(&data, &grid, &IDENTITY, 3).unwrap();
         assert_eq!(mip.data.len(), nx * ny * 3);
 
-        // The minimum at (1,1) should appear in slices that include z=2
-        // Window starting at z=0: slices 0,1,2 → includes the 1.0
-        let mip_idx_0 = 1 + 1 * nx + 0 * nx * ny;
-        assert_eq!(mip.data[mip_idx_0], 1.0);
-        // Window starting at z=1: slices 1,2,3 → includes the 1.0
-        let mip_idx_1 = 1 + 1 * nx + 1 * nx * ny;
-        assert_eq!(mip.data[mip_idx_1], 1.0);
-        // Window starting at z=2: slices 2,3,4 → includes the 1.0
-        let mip_idx_2 = 1 + 1 * nx + 2 * nx * ny;
-        assert_eq!(mip.data[mip_idx_2], 1.0);
+        // The minimum at (1,1) should appear in every window that includes z=2: the windows
+        // starting at z = 0, 1 and 2 cover slices 0-2, 1-3 and 2-4 respectively.
+        // (A closure rather than three `1 + 1 * nx + k * nx * ny` expressions, which kept the
+        // three lines visually parallel at the cost of a `0 *` that clippy denies.)
+        let mip_idx = |window: usize| 1 + nx + window * nx * ny;
+        for window in 0..3 {
+            assert_eq!(
+                mip.data[mip_idx(window)], 1.0,
+                "window starting at z={window} covers z=2 and must see the minimum"
+            );
+        }
     }
 
     /// The projection must describe itself: a caller that trusts the source grid writes a file

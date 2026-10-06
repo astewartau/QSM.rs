@@ -12,6 +12,18 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
 
+# Every `run:` step gets `bash --noprofile --norc -eo pipefail {0}`. Without `pipefail` a step
+# reports the exit status of the *last* command in a pipeline, so `cargo test ... | tee log`
+# reports tee's status, which is always 0, and a failing test is green. Seven steps in this file
+# had that defect and two more were added on feature branches within days of each other, each
+# copied from a neighbour -- so fixing the instances leaves the pattern that produced them.
+# Setting it here means the next step added is guarded whether or not its author thinks about it.
+#
+# Pipelines whose non-zero exits are expected are guarded individually with `|| true` and say so.
+defaults:
+  run:
+    shell: bash
+
 jobs:
   # Detect which source files changed and map to affected tests
   detect-changes:
@@ -32,6 +44,7 @@ jobs:
       run_dl: ${{ steps.detect.outputs.run_dl }}
       dl_matrix: ${{ steps.detect.outputs.dl_matrix }}
       run_geometry: ${{ steps.detect.outputs.run_geometry }}
+      run_multislice: ${{ steps.detect.outputs.run_multislice }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -76,6 +89,7 @@ jobs:
             echo "run_dl=true" >> "$GITHUB_OUTPUT"
             echo "dl_matrix=$all_dl" >> "$GITHUB_OUTPUT"
             echo "run_geometry=true" >> "$GITHUB_OUTPUT"
+            echo "run_multislice=true" >> "$GITHUB_OUTPUT"
           }
 
           # Manual trigger: run everything
@@ -161,6 +175,7 @@ jobs:
           inversion=""
           run_bet=false
           run_geometry=false
+          run_multislice=false
           combined=""
           pipeline=""
           chisep=""
@@ -179,7 +194,7 @@ jobs:
               src/lib.rs|src/utils/mod.rs) : ;;
               src/inversion/mod.rs|src/bgremove/mod.rs|src/pipeline/mod.rs) : ;;
               # Core infrastructure → run everything
-              src/fft.rs|src/nifti_io.rs|src/region_grow.rs|src/priority_queue.rs)
+              src/grid.rs|src/fft.rs|src/nifti_io.rs|src/region_grow.rs|src/priority_queue.rs)
                 echo "Core file changed: $file → all tests"
                 output_all; exit 0 ;;
               src/kernels/*|src/solvers/*)
@@ -222,6 +237,7 @@ jobs:
                 echo "run_dl=true" >> "$GITHUB_OUTPUT"
                 echo "dl_matrix=$all_dl" >> "$GITHUB_OUTPUT"
                 echo "run_geometry=true" >> "$GITHUB_OUTPUT"
+                echo "run_multislice=true" >> "$GITHUB_OUTPUT"
                 echo "run_unit_tests=$run_unit_tests" >> "$GITHUB_OUTPUT"
                 exit 0 ;;
               # Changes the data every test sees, so there is nothing to narrow it to.
@@ -312,9 +328,10 @@ jobs:
               # actually changed instead — and fall back to the full set if any of them is one this
               # mapping does not know, so a new model is never silently skipped.
               src/models/registry.rs)
+                # `|| true`: no matching lines is a normal outcome under pipefail, not a failure.
                 changed_ids=$(git diff "$BASE_SHA"..."$HEAD_SHA" -- src/models/registry.rs \
                   | grep -E '^[+-]' | grep -oE 'id: "[a-z0-9-]+"' \
-                  | sed -E 's/id: "([a-z0-9-]+)"/\1/' | sort -u)
+                  | sed -E 's/id: "([a-z0-9-]+)"/\1/' | sort -u || true)
                 if [ -z "$changed_ids" ]; then
                   echo "registry.rs: no model entry changed → no DL tests selected"
                 else
@@ -352,8 +369,9 @@ jobs:
                      | grep -E '^-' | grep -qvE '^---'; then
                   dl="$dl $all_dl_names"
                 else
+                  # `|| true`: see above.
                   added=$(git diff "$BASE_SHA"..."$HEAD_SHA" -- tests/dl_models.rs \
-                    | grep -E '^\+' | grep -oE 'fn (test_dl_[a-z0-9_]+)' | sed 's/^fn //' | sort -u)
+                    | grep -E '^\+' | grep -oE 'fn (test_dl_[a-z0-9_]+)' | sed 's/^fn //' | sort -u || true)
                   if [ -n "$added" ]; then
                     echo "dl_models.rs: additions only → $added"
                     dl="$dl $added"
@@ -370,6 +388,10 @@ jobs:
               src/unwrap/mod.rs)      pipeline="$pipeline test_pipeline_tgv test_pipeline_qsmart test_pipeline_qsmart_tikhonov" ;;
               src/unwrap/romeo.rs)    pipeline="$pipeline test_pipeline_romeo_b0 test_pipeline_unwrap_bfr_romeo test_pipeline_tgv" ;;
               src/unwrap/bestpath.rs) pipeline="$pipeline test_pipeline_unwrap_bfr_bestpath test_pipeline_unwrap_bfr_romeo" ;;
+              # 2D multi-slice: slice-wise unwrapping and the slice-gap refusal are
+              # additive, so no existing pipeline test sees them; they have their own binary.
+              src/unwrap/slicewise.rs|tests/multislice_2d.rs)
+                run_multislice=true ;;
               # Best path is union_find's only caller today; PRELUDE will be the second.
               src/utils/union_find.rs) pipeline="$pipeline test_pipeline_unwrap_bfr_bestpath" ;;
               src/unwrap/laplacian.rs) pipeline="$pipeline test_pipeline_unwrap_bfr_laplacian_neumann test_unwrap_bfr_single_volume test_pipeline_unwrap_bfr_stage_laplacian test_pipeline_qsmart test_pipeline_qsmart_tikhonov test_pipeline_harperella test_pipeline_iharperella" ;;
@@ -442,6 +464,7 @@ jobs:
           echo "run_dl=$(has_items "$dl_json")" >> "$GITHUB_OUTPUT"
           echo "dl_matrix=$dl_json" >> "$GITHUB_OUTPUT"
           echo "run_geometry=$run_geometry" >> "$GITHUB_OUTPUT"
+          echo "run_multislice=$run_multislice" >> "$GITHUB_OUTPUT"
 
           echo "Selected tests:"
           echo "  bgremove:  $bgremove_json"
@@ -452,6 +475,7 @@ jobs:
           echo "  chisep:    $chisep_json"
           echo "  dl:        $dl_json"
           echo "  geometry:  $run_geometry"
+          echo "  2d slices: $run_multislice"
 
   # Unit tests + code coverage (reusable workflow)
   unit-tests:
@@ -470,7 +494,13 @@ jobs:
         uses: actions/cache@v4
         with:
           path: bids
-          key: testdata-v1-y8adf
+          # Bump this key whenever the OSF bundle changes. It carries no content hash, so a
+          # replaced bids.zip is otherwise masked by every existing runner cache — the download
+          # is skipped, the stale bundle is served, and the tests that needed the new data skip
+          # while reporting success.
+          # v2 (2026-10-06): added the 2D multi-slice sessions ses-thick / ses-offsets / ses-gap
+          # (qsm-forward examples/multislice_2d.py), for tests/multislice_2d.rs.
+          key: testdata-v2-y8adf
 
       - name: Download test data from OSF
         if: steps.cache-testdata.outputs.cache-hit != 'true'
@@ -567,7 +597,9 @@ jobs:
           # Prepacked zips are flattened (inputs/ + groundtruth/ at the root),
           # but tolerate one extra directory level.
           if [ ! -f qsmci-chisep/inputs/localfield.nii.gz ]; then
-            inner=$(dirname "$(find qsmci-chisep -name localfield.nii.gz -path '*/inputs/*' | head -1)")
+            # `|| true`: `head -1` closing the pipe early SIGPIPEs `find` under pipefail. The
+            # emptiness check on the next line is what actually reports "not found".
+            inner=$(dirname "$(find qsmci-chisep -name localfield.nii.gz -path '*/inputs/*' | head -1 || true)")
             [ -n "$inner" ] || { echo "localfield.nii.gz not found in dataset zip"; exit 1; }
             mv "$(dirname "$inner")" qsmci-chisep-flat
             rm -rf qsmci-chisep && mv qsmci-chisep-flat qsmci-chisep
@@ -1098,8 +1130,52 @@ jobs:
           path: slices/
           retention-days: 1
 
+  multislice-tests:
+    needs: [setup, detect-changes]
+    if: needs.detect-changes.outputs.run_multislice == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download test data
+        uses: actions/download-artifact@v4
+        with:
+          name: test-data
+          path: bids
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      # The 2D multi-slice sessions (ses-thick / ses-offsets / ses-gap, from
+      # qsm-forward's examples/multislice_2d.py) are not yet in the phantom bundle.
+      # Until they are, each test prints why it skipped and the step says so loudly
+      # rather than reporting a silent pass.
+      - name: Run multislice_2d
+        timeout-minutes: 30
+        env:
+          QSM_BIDS_2D: bids
+        run: |
+          # Without this the step reports tee's exit status and the job cannot fail.
+          # Verified: `bash -e` on `false | tee x` exits 0, and exits 1 with pipefail set.
+          set -o pipefail
+          cargo test --release --features parallel --test multislice_2d -- --ignored --nocapture 2>&1 | tee test_output.txt
+          if grep -q "^Skipping: 2D phantom session" test_output.txt; then
+            echo "::warning title=2D phantom missing::multislice_2d skipped - the ses-thick/ses-offsets/ses-gap sessions are not in the test-data bundle, so nothing was verified against real data here. The unit tests in src/unwrap/slicewise.rs and src/grid.rs still ran."
+          fi
+
   tests-passed:
-    needs: [unit-tests, bgremove-tests, inversion-tests, bet-test, combined-tests, pipeline-tests, chisep-tests, dl-tests, geometry-tests]
+    needs: [unit-tests, bgremove-tests, inversion-tests, bet-test, combined-tests, pipeline-tests, chisep-tests, dl-tests, geometry-tests, multislice-tests]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -1116,7 +1192,8 @@ jobs:
             "${{ needs.combined-tests.result }}" \
             "${{ needs.pipeline-tests.result }}" \
             "${{ needs.chisep-tests.result }}" \
-            "${{ needs.geometry-tests.result }}"; do
+            "${{ needs.geometry-tests.result }}" \
+            "${{ needs.multislice-tests.result }}"; do
             if [ "$result" = "failure" ] || [ "$result" = "cancelled" ]; then
               echo "Test job failed or was cancelled: $result"
               exit 1
@@ -1126,7 +1203,7 @@ jobs:
 
   # Collect metrics from all parallel jobs and produce a single summary
   summary:
-    needs: [detect-changes, unit-tests, bgremove-tests, inversion-tests, bet-test, combined-tests, pipeline-tests, chisep-tests, dl-tests, geometry-tests]
+    needs: [detect-changes, unit-tests, bgremove-tests, inversion-tests, bet-test, combined-tests, pipeline-tests, chisep-tests, dl-tests, geometry-tests, multislice-tests]
     # Post the results comment only when something actually ran. On changes that
     # select no tests (e.g. docs-only), skip it instead of posting an empty
     # "Tests passed: N/A" comment. `always()` keeps it running even if a selected
@@ -1140,7 +1217,8 @@ jobs:
       needs.detect-changes.outputs.run_combined == 'true' ||
       needs.detect-changes.outputs.run_pipeline == 'true' ||
       needs.detect-changes.outputs.run_chisep == 'true' ||
-      needs.detect-changes.outputs.run_geometry == 'true')
+      needs.detect-changes.outputs.run_geometry == 'true' ||
+      needs.detect-changes.outputs.run_multislice == 'true')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -1183,7 +1261,7 @@ jobs:
             for test in "$@"; do
               file="metrics/${prefix}${test}.csv"
               if [ -f "$file" ]; then
-                line=$(grep "^RESULT:" "$file" | head -1 | sed 's/^RESULT://')
+                line=$(awk '/^RESULT:/{print substr($0,8); exit}' "$file")
                 IFS=',' read -r name rmse nrmse nrmse_ch corr xsim time <<< "$line"
                 if [ "$rmse" = "-" ]; then
                   echo "| ${name} | :x: Failed | - | - | - | - | - |"
@@ -1204,7 +1282,7 @@ jobs:
             for test in "$@"; do
               file="metrics/${prefix}${test}.csv"
               [ -f "$file" ] || continue
-              line=$(grep "^RESULT:" "$file" | head -1 | sed 's/^RESULT://')
+              line=$(awk '/^RESULT:/{print substr($0,8); exit}' "$file")
               IFS=',' read -r name nrmse dt tissue blood dgm dgm_lin calc_dev streak corr xsim time <<< "$line"
               if [ "$nrmse" = "-" ]; then
                 echo "| ${name}${tag} | :x: Failed | - | - | - | - | - | - | - | - | - | - |"
@@ -1240,7 +1318,7 @@ jobs:
             for test in "$@"; do
               file="metrics/${prefix}${test}.csv"
               if [ -f "$file" ]; then
-                line=$(grep "^RESULT:" "$file" | head -1 | sed 's/^RESULT://')
+                line=$(awk '/^RESULT:/{print substr($0,8); exit}' "$file")
                 IFS=',' read -r name nrmse dt tissue blood dgm dgm_lin calc_dev streak corr xsim time <<< "$line"
                 if [ "$nrmse" = "-" ]; then
                   echo "| ${name} | :x: Failed | - | - | - | - | - | - | - | - | - | - |"
@@ -1264,7 +1342,8 @@ jobs:
             echo "|-----|-------------|------|--------|------|"
             for f in "${files[@]}"; do
               [ -f "$f" ] || continue
-              grep "^RESULT:" "$f" | sed 's/^RESULT://' \
+              # `|| true`: a file with no RESULT: line renders nothing, as it does today.
+              { grep "^RESULT:" "$f" || true; } | sed 's/^RESULT://' \
                 | while IFS=',' read -r name corr xsim nrmse time; do
                     if [ "$corr" = "-" ] || [ -z "$corr" ]; then
                       echo "| ${name} | :x: Failed | - | - | - |"
@@ -1316,7 +1395,7 @@ jobs:
               echo "*went on the wrong way round.*"
               echo ""
               if [ -f "metrics/test_multiorient_register_capture_range.csv" ]; then
-                line=$(grep "^RESULT:" "metrics/test_multiorient_register_capture_range.csv" | head -1 | sed 's/^RESULT://')
+                line=$(awk '/^RESULT:/{print substr($0,8); exit}' "metrics/test_multiorient_register_capture_range.csv")
                 IFS=',' read -r name converged failed worst time <<< "$line"
                 echo "| Measure | Value |"
                 echo "|---------|-------|"
@@ -1343,7 +1422,7 @@ jobs:
               echo "*produces from the same echoes with no motion — not against ground truth, which a total*"
               echo "*field map only matches up to the harmonic field unwrapping leaves behind.*"
               echo ""
-              recovery=$(grep "^RESULT:Motion recovery," "metrics/test_motion_correction.csv" | head -1 | sed 's/^RESULT://')
+              recovery=$(awk '/^RESULT:Motion recovery,/{print substr($0,8); exit}' "metrics/test_motion_correction.csv")
               if [ -n "$recovery" ]; then
                 IFS=',' read -r _ rot trans bdir disp rtime <<< "$recovery"
                 echo "| Recovered motion | Worst over the series |"
@@ -1363,7 +1442,7 @@ jobs:
               echo "|-----------|---------------|-------------|------|------|"
               if [ "$have_rows" = true ]; then
                 for variant in Uncorrected Corrected; do
-                  line=$(grep "^RESULT:${variant}," "metrics/test_motion_correction.csv" | head -1 | sed 's/^RESULT://')
+                  line=$(awk -v p="^RESULT:${variant}," '$0 ~ p {print substr($0,8); exit}' "metrics/test_motion_correction.csv")
                   [ -n "$line" ] || continue
                   IFS=',' read -r name nrmse corr xsim mtime <<< "$line"
                   echo "| ${name} | ${nrmse} | ${corr} | ${xsim} | $(printf '%.2fs' "$mtime") |"
@@ -1403,7 +1482,7 @@ jobs:
               echo "|--------|------|------|"
               for f in metrics/test_bet.csv metrics/test_dl_hdbet.csv; do
                 [ -f "$f" ] || continue
-                line=$(grep "^RESULT:" "$f" | head -1 | sed 's/^RESULT://')
+                line=$(awk '/^RESULT:/{print substr($0,8); exit}' "$f")
                 IFS=',' read -r name dice _ _ _ time <<< "$line"
                 if [ "$dice" = "-" ]; then
                   echo "| ${name} | :x: Failed | - |"
@@ -1420,22 +1499,22 @@ jobs:
               echo "| Method | Time |"
               echo "|--------|------|"
               if [ -f "metrics/test_bias_correction.csv" ]; then
-                line=$(grep "^RESULT:" "metrics/test_bias_correction.csv" | head -1 | sed 's/^RESULT://')
+                line=$(awk '/^RESULT:/{print substr($0,8); exit}' "metrics/test_bias_correction.csv")
                 IFS=',' read -r name _ _ _ _ time <<< "$line"
                 echo "| ${name} | $(printf '%.2fs' "$time") |"
               fi
               if [ -f "metrics/test_swi.csv" ]; then
-                line=$(grep "^RESULT:" "metrics/test_swi.csv" | head -1 | sed 's/^RESULT://')
+                line=$(awk '/^RESULT:/{print substr($0,8); exit}' "metrics/test_swi.csv")
                 IFS=',' read -r name _ _ _ _ time <<< "$line"
                 echo "| ${name} | $(printf '%.2fs' "$time") |"
               fi
               if [ -f "metrics/test_smwi.csv" ]; then
-                line=$(grep "^RESULT:" "metrics/test_smwi.csv" | head -1 | sed 's/^RESULT://')
+                line=$(awk '/^RESULT:/{print substr($0,8); exit}' "metrics/test_smwi.csv")
                 IFS=',' read -r name _ _ _ _ time <<< "$line"
                 echo "| ${name} | $(printf '%.2fs' "$time") |"
               fi
               if [ -f "metrics/test_r2star_t2star.csv" ]; then
-                line=$(grep "^RESULT:" "metrics/test_r2star_t2star.csv" | head -1 | sed 's/^RESULT://')
+                line=$(awk '/^RESULT:/{print substr($0,8); exit}' "metrics/test_r2star_t2star.csv")
                 IFS=',' read -r name _ _ _ _ time <<< "$line"
                 echo "| ${name} | $(printf '%.2fs' "$time") |"
               fi
@@ -1501,7 +1580,7 @@ jobs:
             for test in "$@"; do
               file="metrics/${prefix}${test}.csv"
               if [ -f "$file" ]; then
-                line=$(grep "^RESULT:" "$file" | head -1 | sed 's/^RESULT://')
+                line=$(awk '/^RESULT:/{print substr($0,8); exit}' "$file")
                 IFS=',' read -r name rmse nrmse nrmse_ch corr xsim time <<< "$line"
                 if [ "$rmse" = "-" ]; then
                   echo "| ${name} | :x: Failed | - | - | - | - | - |"
@@ -1522,7 +1601,7 @@ jobs:
             for test in "$@"; do
               file="metrics/${prefix}${test}.csv"
               [ -f "$file" ] || continue
-              line=$(grep "^RESULT:" "$file" | head -1 | sed 's/^RESULT://')
+              line=$(awk '/^RESULT:/{print substr($0,8); exit}' "$file")
               IFS=',' read -r name nrmse dt tissue blood dgm dgm_lin calc_dev streak corr xsim time <<< "$line"
               if [ "$nrmse" = "-" ]; then
                 echo "| ${name}${tag} | :x: Failed | - | - | - | - | - | - | - | - | - | - |"
@@ -1558,7 +1637,7 @@ jobs:
             for test in "$@"; do
               file="metrics/${prefix}${test}.csv"
               if [ -f "$file" ]; then
-                line=$(grep "^RESULT:" "$file" | head -1 | sed 's/^RESULT://')
+                line=$(awk '/^RESULT:/{print substr($0,8); exit}' "$file")
                 IFS=',' read -r name nrmse dt tissue blood dgm dgm_lin calc_dev streak corr xsim time <<< "$line"
                 if [ "$nrmse" = "-" ]; then
                   echo "| ${name} | :x: Failed | - | - | - | - | - | - | - | - | - | - |"
@@ -1582,7 +1661,8 @@ jobs:
             echo "|-----|-------------|------|--------|------|"
             for f in "${files[@]}"; do
               [ -f "$f" ] || continue
-              grep "^RESULT:" "$f" | sed 's/^RESULT://' \
+              # `|| true`: a file with no RESULT: line renders nothing, as it does today.
+              { grep "^RESULT:" "$f" || true; } | sed 's/^RESULT://' \
                 | while IFS=',' read -r name corr xsim nrmse time; do
                     if [ "$corr" = "-" ] || [ -z "$corr" ]; then
                       echo "| ${name} | :x: Failed | - | - | - |"
@@ -1657,7 +1737,7 @@ jobs:
               echo "*went on the wrong way round.*"
               echo ""
               if [ -f "metrics/test_multiorient_register_capture_range.csv" ]; then
-                line=$(grep "^RESULT:" "metrics/test_multiorient_register_capture_range.csv" | head -1 | sed 's/^RESULT://')
+                line=$(awk '/^RESULT:/{print substr($0,8); exit}' "metrics/test_multiorient_register_capture_range.csv")
                 IFS=',' read -r name converged failed worst time <<< "$line"
                 echo "| Measure | Value |"
                 echo "|---------|-------|"
@@ -1686,7 +1766,7 @@ jobs:
               echo "*produces from the same echoes with no motion — not against ground truth, which a total*"
               echo "*field map only matches up to the harmonic field unwrapping leaves behind.*"
               echo ""
-              recovery=$(grep "^RESULT:Motion recovery," "metrics/test_motion_correction.csv" | head -1 | sed 's/^RESULT://')
+              recovery=$(awk '/^RESULT:Motion recovery,/{print substr($0,8); exit}' "metrics/test_motion_correction.csv")
               if [ -n "$recovery" ]; then
                 IFS=',' read -r _ rot trans bdir disp rtime <<< "$recovery"
                 echo "| Recovered motion | Worst over the series |"
@@ -1706,7 +1786,7 @@ jobs:
               echo "|-----------|---------------|-------------|------|------|"
               if [ "$have_rows" = true ]; then
                 for variant in Uncorrected Corrected; do
-                  line=$(grep "^RESULT:${variant}," "metrics/test_motion_correction.csv" | head -1 | sed 's/^RESULT://')
+                  line=$(awk -v p="^RESULT:${variant}," '$0 ~ p {print substr($0,8); exit}' "metrics/test_motion_correction.csv")
                   [ -n "$line" ] || continue
                   IFS=',' read -r name nrmse corr xsim mtime <<< "$line"
                   echo "| ${name} | ${nrmse} | ${corr} | ${xsim} | $(printf '%.2fs' "$mtime") |"
@@ -1774,7 +1854,7 @@ jobs:
               echo "|--------|------|------|"
               for f in metrics/test_bet.csv metrics/test_dl_hdbet.csv; do
                 [ -f "$f" ] || continue
-                line=$(grep "^RESULT:" "$f" | head -1 | sed 's/^RESULT://')
+                line=$(awk '/^RESULT:/{print substr($0,8); exit}' "$f")
                 IFS=',' read -r name dice _ _ _ time <<< "$line"
                 if [ "$dice" = "-" ]; then
                   echo "| ${name} | :x: Failed | - |"
@@ -1811,7 +1891,7 @@ jobs:
               echo "### Combined Unwrapping + Background Removal"
               echo "*\`laplacian_unwrap_bfr\` on one wrapped volume at the first-echo TE, vs ground truth local field.*"
               echo ""
-              line=$(grep "^RESULT:" metrics/test_unwrap_bfr_single_volume.csv | head -1 | sed 's/^RESULT://')
+              line=$(awk '/^RESULT:/{print substr($0,8); exit}' metrics/test_unwrap_bfr_single_volume.csv)
               IFS=',' read -r name rmse nrmse nrmse_ch corr xsim time <<< "$line"
               if [ "$rmse" = "-" ]; then
                 echo "| Method | RMSE | NRMSE (range) | NRMSE% (χ) | Correlation | XSIM | Time |"
@@ -1833,22 +1913,22 @@ jobs:
               echo "| Method | Time |"
               echo "|--------|------|"
               if [ -f "metrics/test_bias_correction.csv" ]; then
-                line=$(grep "^RESULT:" "metrics/test_bias_correction.csv" | head -1 | sed 's/^RESULT://')
+                line=$(awk '/^RESULT:/{print substr($0,8); exit}' "metrics/test_bias_correction.csv")
                 IFS=',' read -r name _ _ _ _ time <<< "$line"
                 echo "| ${name} | $(printf '%.2fs' "$time") |"
               fi
               if [ -f "metrics/test_swi.csv" ]; then
-                line=$(grep "^RESULT:" "metrics/test_swi.csv" | head -1 | sed 's/^RESULT://')
+                line=$(awk '/^RESULT:/{print substr($0,8); exit}' "metrics/test_swi.csv")
                 IFS=',' read -r name _ _ _ _ time <<< "$line"
                 echo "| ${name} | $(printf '%.2fs' "$time") |"
               fi
               if [ -f "metrics/test_smwi.csv" ]; then
-                line=$(grep "^RESULT:" "metrics/test_smwi.csv" | head -1 | sed 's/^RESULT://')
+                line=$(awk '/^RESULT:/{print substr($0,8); exit}' "metrics/test_smwi.csv")
                 IFS=',' read -r name _ _ _ _ time <<< "$line"
                 echo "| ${name} | $(printf '%.2fs' "$time") |"
               fi
               if [ -f "metrics/test_r2star_t2star.csv" ]; then
-                line=$(grep "^RESULT:" "metrics/test_r2star_t2star.csv" | head -1 | sed 's/^RESULT://')
+                line=$(awk '/^RESULT:/{print substr($0,8); exit}' "metrics/test_r2star_t2star.csv")
                 IFS=',' read -r name _ _ _ _ time <<< "$line"
                 echo "| ${name} | $(printf '%.2fs' "$time") |"
               fi

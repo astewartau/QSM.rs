@@ -33,6 +33,8 @@ pub fn run_dipole_inversion(
     magnitude: Option<&[f64]>,
     progress: &mut dyn FnMut(usize, usize),
 ) -> Result<Vec<f64>, PipelineError> {
+    // The dipole kernel is an FFT on a uniform grid, so a gapped volume is refused.
+    metadata.require_contiguous_slices()?;
     let grid = metadata.grid();
     let bdir = metadata.b0_direction;
     let n_voxels = grid.n_total();
@@ -205,7 +207,7 @@ pub fn run_dipole_inversion(
         InversionAlgorithm::Lpcnn => run_lpcnn(local_field_ppm, mask, &grid, bdir, config.tile, progress)?,
         InversionAlgorithm::ModlQsm => run_modl_qsm(local_field_ppm, mask, &grid, bdir, config.tile, progress)?,
         // NeXtQSM is single-step (own BFR): `local_field_ppm` must be the total field.
-        InversionAlgorithm::Nextqsm => run_nextqsm(local_field_ppm, mask, &grid, bdir, config.tile, progress)?,
+        InversionAlgorithm::Nextqsm => run_nextqsm(local_field_ppm, mask, metadata, config.tile, progress)?,
         InversionAlgorithm::Tgv | InversionAlgorithm::Qsmart => {
             return Err(PipelineError::InvalidConfig(
                 format!("{:?} should use run_tgv or run_qsmart", config.algorithm),
@@ -260,22 +262,35 @@ fn run_xqsm(
 }
 
 /// Run NeXtQSM end-to-end from the **total** field (it does its own background
-/// removal), sourcing both weight files from the registry. Unlike the entries in
-/// [`InversionAlgorithm`], NeXtQSM spans BFR + dipole inversion, so it is exposed
-/// as a standalone reconstruction rather than a dipole-inversion-stage option.
+/// removal), sourcing both weight files from the registry.
 ///
-/// `total_field_ppm` and `mask` are column-major `(nx,ny,nz)`; `bdir` is the B0
-/// direction. Requires the `onnx` feature; weights resolve local-first then via
-/// the `download` feature. Returns susceptibility (ppm), masked.
+/// NeXtQSM spans BFR + dipole inversion, so unlike the other entries in
+/// [`InversionAlgorithm`] its input is the *total* field rather than a local one. It is
+/// reachable both ways: as [`InversionAlgorithm::Nextqsm`] through
+/// [`run_dipole_inversion`], and directly here for a caller that wants it standalone.
+///
+/// `total_field_ppm` and `mask` are column-major `(nx,ny,nz)`; the grid and B0 direction come
+/// from `metadata`. Requires the `onnx` feature; weights resolve local-first then via the
+/// `download` feature. Returns susceptibility (ppm), masked.
+///
+/// Refuses a volume whose slices are not contiguous, like every other stage here: NeXtQSM's
+/// unrolled data-consistency term is an FFT dipole convolution, so a gap invalidates it as
+/// thoroughly as it does a classical inversion. See
+/// [`ScanMetadata::require_contiguous_slices`].
 #[cfg(feature = "onnx")]
 pub fn run_nextqsm(
     total_field_ppm: &[f64],
     mask: &[u8],
-    grid: &crate::Grid,
-    bdir: (f64, f64, f64),
+    metadata: &ScanMetadata,
     tile: Option<(usize, usize)>,
     progress: &mut dyn FnMut(usize, usize),
 ) -> Result<Vec<f64>, PipelineError> {
+    // Checked here rather than only in `run_dipole_inversion`, because this is also a public
+    // entry point in its own right. Reached through the dispatcher it runs twice, which costs
+    // one float comparison.
+    metadata.require_contiguous_slices()?;
+    let grid = &metadata.grid();
+    let bdir = metadata.b0_direction;
     let spec = crate::models::find_model("nextqsm")
         .ok_or_else(|| PipelineError::InvalidConfig("nextqsm not in model registry".into()))?;
     let files = crate::models::all_weight_bytes(spec).map_err(PipelineError::InvalidConfig)?;
@@ -298,8 +313,7 @@ pub fn run_nextqsm(
 pub fn run_nextqsm(
     _total_field_ppm: &[f64],
     _mask: &[u8],
-    _grid: &crate::Grid,
-    _bdir: (f64, f64, f64),
+    _metadata: &ScanMetadata,
     _tile: Option<(usize, usize)>,
     _progress: &mut dyn FnMut(usize, usize),
 ) -> Result<Vec<f64>, PipelineError> {
@@ -501,6 +515,7 @@ pub fn run_iqsm(
     metadata: &ScanMetadata,
     reference: QsmReference,
 ) -> Result<Vec<f64>, PipelineError> {
+    metadata.require_contiguous_slices()?;
     let grid = metadata.grid();
     let bytes = crate::models::primary_weight("iqsm").map_err(PipelineError::InvalidConfig)?;
     let chi = crate::inversion::iqsm_multi_echo(
@@ -528,6 +543,7 @@ pub fn run_iqsm_plus(
     metadata: &ScanMetadata,
     reference: QsmReference,
 ) -> Result<Vec<f64>, PipelineError> {
+    metadata.require_contiguous_slices()?;
     let grid = metadata.grid();
     let bytes = crate::models::primary_weight("iqsm-plus").map_err(PipelineError::InvalidConfig)?;
     let chi = crate::inversion::iqsm_plus_multi_echo(
@@ -557,6 +573,7 @@ pub fn run_iqfm(
     mask: &[u8],
     metadata: &ScanMetadata,
 ) -> Result<Vec<f64>, PipelineError> {
+    metadata.require_contiguous_slices()?;
     let grid = metadata.grid();
     let bytes = crate::models::primary_weight("iqfm").map_err(PipelineError::InvalidConfig)?;
     crate::inversion::iqfm_multi_echo(
@@ -590,6 +607,7 @@ pub fn run_tgv(
     reference: QsmReference,
     progress: &mut dyn FnMut(usize, usize),
 ) -> Result<Vec<f64>, PipelineError> {
+    metadata.require_contiguous_slices()?;
     let grid = metadata.grid();
     let (bx, by, bz) = metadata.b0_direction;
 
@@ -619,6 +637,91 @@ pub fn run_tgv(
 mod tests {
     use super::*;
 
+    /// Calls the stage, rather than inspecting its source as the coverage test in `config.rs`
+    /// does, so the refusal is proven to happen for a real inversion.
+    /// NeXtQSM is reachable both as an `InversionAlgorithm` and as a standalone entry point, so
+    /// both ways in have to refuse a gap. This covers the dispatcher route, which works in any
+    /// build; the standalone route needs the `onnx` feature, because without it `run_nextqsm`
+    /// is the stub and reporting the missing feature is more use than reporting the gap. What
+    /// guarantees the standalone route in a default build is the source-level coverage test in
+    /// `config.rs`, which reads the `onnx` body and requires the call to be there.
+    ///
+    /// Note what this does *not* pin: the NeXtQSM route is now defended twice, once in the
+    /// dispatcher and once inside `run_nextqsm`, so deleting either one on its own leaves this
+    /// test passing. Checked by perturbation — removing the dispatcher's call was caught only
+    /// by the coverage test and by the default-algorithm test below, which has no second line
+    /// of defence behind it. Both call sites are pinned by the coverage test, not by this one.
+    #[test]
+    fn nextqsm_refuses_a_gapped_acquisition_through_the_dispatcher() {
+        let (nx, ny, nz) = (8, 8, 8);
+        let n = nx * ny * nz;
+        let config = InversionConfig {
+            algorithm: InversionAlgorithm::Nextqsm,
+            ..InversionConfig::default()
+        };
+        let err = run_dipole_inversion(
+            &vec![0.01; n], &vec![1u8; n], &gapped_meta(nx, ny, nz), &config, None, &mut |_, _| {},
+        )
+        .expect_err("a gapped volume must be refused");
+        let PipelineError::InvalidInput(msg) = &err else { panic!("{err:?}") };
+        assert!(msg.contains("1.0000 mm gap"), "{msg}");
+    }
+
+    /// The standalone entry point. Needs `onnx` for the real function to exist, but still does
+    /// no I/O: the check runs before the weight registry is touched, which is the whole point
+    /// of refusing before any work.
+    #[cfg(feature = "onnx")]
+    #[test]
+    fn nextqsm_refuses_a_gapped_acquisition_standalone() {
+        let (nx, ny, nz) = (8, 8, 8);
+        let n = nx * ny * nz;
+        let err = run_nextqsm(
+            &vec![0.01; n], &vec![1u8; n], &gapped_meta(nx, ny, nz), None, &mut |_, _| {},
+        )
+        .expect_err("a gapped volume must be refused");
+        let PipelineError::InvalidInput(msg) = &err else { panic!("{err:?}") };
+        assert!(msg.contains("1.0000 mm gap"), "{msg}");
+    }
+
+    /// 3 mm pitch with 2 mm slices: a 1 mm gap.
+    fn gapped_meta(nx: usize, ny: usize, nz: usize) -> ScanMetadata {
+        ScanMetadata {
+            dims: (nx, ny, nz),
+            voxel_size: (1.0, 1.0, 3.0),
+            echo_times: vec![0.005],
+            field_strength: 3.0,
+            b0_direction: (0.0, 0.0, 1.0),
+            slice_geometry: Some(crate::grid::SliceGeometry { thickness: 2.0, axis: 2 }),
+        }
+    }
+
+    #[test]
+    fn a_gapped_acquisition_is_refused_before_any_work() {
+        let (nx, ny, nz) = (8, 8, 8);
+        let n = nx * ny * nz;
+        let field = vec![0.01; n];
+        let mask = vec![1u8; n];
+        let mut meta = ScanMetadata {
+            dims: (nx, ny, nz),
+            voxel_size: (1.0, 1.0, 3.0),
+            echo_times: vec![0.005],
+            field_strength: 3.0,
+            b0_direction: (0.0, 0.0, 1.0),
+            slice_geometry: None,
+        };
+        let config = InversionConfig::default();
+
+        assert!(run_dipole_inversion(&field, &mask, &meta, &config, None, &mut |_, _| {}).is_ok());
+        meta.slice_geometry = Some(crate::grid::SliceGeometry { thickness: 3.0, axis: 2 });
+        assert!(run_dipole_inversion(&field, &mask, &meta, &config, None, &mut |_, _| {}).is_ok());
+
+        meta.slice_geometry = Some(crate::grid::SliceGeometry { thickness: 2.0, axis: 2 });
+        let err = run_dipole_inversion(&field, &mask, &meta, &config, None, &mut |_, _| {})
+            .expect_err("a gapped volume must be refused");
+        let PipelineError::InvalidInput(msg) = &err else { panic!("{err:?}") };
+        assert!(msg.contains("1.0000 mm gap"), "{msg}");
+    }
+
     #[test]
     fn test_inversion_tkd() {
         let (nx, ny, nz) = (8, 8, 8);
@@ -631,6 +734,7 @@ mod tests {
             echo_times: vec![0.005],
             field_strength: 3.0,
             b0_direction: (0.0, 0.0, 1.0),
+            slice_geometry: None,
         };
         let config = InversionConfig {
             algorithm: InversionAlgorithm::Tkd,
@@ -652,6 +756,7 @@ mod tests {
         let meta = ScanMetadata {
             dims: (nx, ny, nz), voxel_size: (1.0, 1.0, 1.0),
             echo_times: vec![0.005], field_strength: 3.0, b0_direction: (0.0, 0.0, 1.0),
+            slice_geometry: None,
         };
         let config = InversionConfig { algorithm: alg, ..Default::default() };
         run_dipole_inversion(&field, &mask, &meta, &config, None, &mut |_, _| {}).unwrap()
@@ -722,6 +827,7 @@ mod tests {
         let meta = ScanMetadata {
             dims: (nx, ny, nz), voxel_size: (1.0, 1.0, 1.0),
             echo_times: vec![0.005], field_strength: 3.0, b0_direction: (0.0, 0.0, 1.0),
+            slice_geometry: None,
         };
         let config = InversionConfig {
             algorithm: InversionAlgorithm::Heidi,
@@ -760,6 +866,7 @@ mod tests {
         let meta = ScanMetadata {
             dims: (nx, ny, nz), voxel_size: (1.0, 1.0, 1.0),
             echo_times: vec![0.005], field_strength: 3.0, b0_direction: (0.0, 0.0, 1.0),
+            slice_geometry: None,
         };
         let config = InversionConfig { algorithm: InversionAlgorithm::Medi, ..Default::default() };
         let chi = run_dipole_inversion(&field, &mask, &meta, &config, Some(&mag), &mut |_, _| {}).unwrap();
@@ -775,6 +882,7 @@ mod tests {
             echo_times: vec![0.005],
             field_strength: 3.0,
             b0_direction: (0.0, 0.0, 1.0),
+            slice_geometry: None,
         };
         let config = InversionConfig {
             algorithm: InversionAlgorithm::Tgv,
