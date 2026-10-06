@@ -102,6 +102,10 @@ pub mod utils;
 // ============================================================================
 // Core types
 // ============================================================================
+// `SliceGapError` is deliberately not re-exported here: it is reached as
+// `qsm_core::grid::SliceGapError`, matching `models::onnx::OnnxError` and
+// `models::download::DownloadError`. Each error type stays with the concern that
+// produces it rather than accumulating at the crate root.
 pub use grid::Grid;
 
 // ============================================================================

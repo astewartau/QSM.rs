@@ -693,6 +693,22 @@ pub struct ScanMetadata {
     pub field_strength: f64,
     /// B0 direction as unit vector in voxel coordinates
     pub b0_direction: (f64, f64, f64),
+    /// Slice thickness and slice axis, when the acquisition recorded them.
+    ///
+    /// `voxel_size` along the slice axis is the slice-to-slice *pitch*; this supplies the
+    /// thickness, and the two together say whether the sampled volume has holes in it. A 2D
+    /// multi-slice acquisition often leaves a gap, and a gapped volume cannot be reconstructed
+    /// at all — the FFT dipole and spherical-mean kernels are defined on a uniform grid, so on
+    /// one with holes they compute a different convolution and produce a map that is wrong
+    /// while still looking like a susceptibility map.
+    ///
+    /// `None` means the acquisition did not say. BIDS only *recommends* `SliceThickness`, so
+    /// this is common, and a gap then cannot be detected by this crate or by anything else
+    /// reading the NIfTI alone. The stages run anyway rather than refusing the vast majority of
+    /// data that has no gap — so a host that can read the field should set it, and a host that
+    /// cannot should tell its user that this check could not run. See
+    /// [`Grid::require_contiguous_slices_if_known`](crate::Grid::require_contiguous_slices_if_known).
+    pub slice_geometry: Option<crate::grid::SliceGeometry>,
 }
 
 impl ScanMetadata {
@@ -703,6 +719,25 @@ impl ScanMetadata {
             dims: self.dims,
             voxel_size: self.voxel_size,
         }
+    }
+
+    /// Refuse an acquisition whose slices are not contiguous.
+    ///
+    /// Every stage that convolves with a kernel defined on the voxel grid calls this first —
+    /// background removal, dipole inversion, TGV, chi-separation. They call it unconditionally
+    /// rather than per algorithm, because every one of those is three-dimensional: a complete
+    /// background removal needs a 3D stage to have the mean value property at all, and the
+    /// dipole kernel is inherently 3D, so there is no variant for which a gap is harmless.
+    ///
+    /// Phase unwrapping deliberately does **not** call this. A gap degrades 3D unwrapping too,
+    /// but the remedy there is to unwrap in plane ([`crate::unwrap::unwrap_slicewise`]) rather
+    /// than to refuse, and refusing would block the one path that handles the case.
+    ///
+    /// Returns [`PipelineError::InvalidInput`] carrying the measured thickness, pitch and gap.
+    pub fn require_contiguous_slices(&self) -> Result<(), PipelineError> {
+        self.grid()
+            .require_contiguous_slices_if_known(self.slice_geometry)
+            .map_err(|e| PipelineError::InvalidInput(e.to_string()))
     }
 }
 
@@ -885,5 +920,186 @@ mod tests {
         assert!(matches!(ops[0], MaskOp::Threshold { .. }));
         assert!(matches!(ops[1], MaskOp::Erode { iterations: 1 }));
         assert!(matches!(ops[2], MaskOp::Dilate { iterations: 2 }));
+    }
+}
+
+#[cfg(test)]
+mod slice_gap_tests {
+    use super::*;
+
+    // What gates the slice-gap wiring, recorded so the sweep can be reconstructed. Each of
+    // these was applied and confirmed to fail at least one assertion in this module,
+    // `slice_gap_coverage`, or the stage tests: the check removed from each of background
+    // removal, dipole inversion, chi-separation and `run_nextqsm`; the helper swallowing the
+    // refusal and returning `Ok`; the refusal downgraded to `InvalidConfig`; the tolerance
+    // widened to half the pitch; a non-positive thickness accepted; `None` refused instead of
+    // allowed; the `Option`-aware check ignoring the declared geometry; `gap()` sign-flipped;
+    // `spacing()` reading the wrong axis; `SliceGeometry::contiguous` ignoring its axis; and
+    // the pinned stage count made stale.
+    //
+    // Worth knowing: removing the *dispatcher's* check does not fail the NeXtQSM route test,
+    // because that route is defended twice. `slice_gap_coverage` is what pins both call sites.
+    use crate::grid::SliceGeometry;
+
+    fn meta(thickness: Option<f64>) -> ScanMetadata {
+        ScanMetadata {
+            dims: (8, 8, 4),
+            voxel_size: (1.0, 1.0, 3.0),
+            echo_times: vec![0.005],
+            field_strength: 3.0,
+            b0_direction: (0.0, 0.0, 1.0),
+            slice_geometry: thickness.map(|t| SliceGeometry { thickness: t, axis: 2 }),
+        }
+    }
+
+    #[test]
+    fn a_declared_gap_is_refused_with_the_numbers_in_the_message() {
+        let err = meta(Some(2.0)).require_contiguous_slices().unwrap_err();
+        let PipelineError::InvalidInput(msg) = &err else {
+            panic!("a gap should be invalid *input*, not a config or algorithm error: {err:?}");
+        };
+        // the host has to be able to tell its user what was wrong with the data
+        assert!(msg.contains("2.0000"), "no thickness in the message: {msg}");
+        assert!(msg.contains("3.0000"), "no pitch in the message: {msg}");
+        assert!(msg.contains("1.0000"), "no gap in the message: {msg}");
+        assert!(msg.contains("not contiguous"), "no explanation in the message: {msg}");
+    }
+
+    #[test]
+    fn a_declared_contiguous_acquisition_passes() {
+        assert!(meta(Some(3.0)).require_contiguous_slices().is_ok());
+    }
+
+    #[test]
+    fn an_undeclared_acquisition_passes_because_nothing_can_be_concluded() {
+        // Not a silent skip: the thickness is genuinely absent from the input, and refusing
+        // every acquisition that omitted a recommended BIDS field would block almost all data.
+        assert!(meta(None).require_contiguous_slices().is_ok());
+    }
+
+    #[test]
+    fn the_slice_axis_is_honoured() {
+        let mut m = meta(None);
+        // 1 mm slices stacked along x on a 1 x 1 x 3 mm grid: contiguous
+        m.slice_geometry = Some(SliceGeometry { thickness: 1.0, axis: 0 });
+        assert!(m.require_contiguous_slices().is_ok());
+        m.slice_geometry = Some(SliceGeometry { thickness: 0.5, axis: 0 });
+        assert!(m.require_contiguous_slices().is_err());
+    }
+}
+
+/// Every pipeline stage that convolves on the voxel grid has to refuse a gapped volume, and a
+/// stage added later must not be able to skip that by omission. These tests read the stage
+/// sources and require each `pub fn` taking a `&ScanMetadata` to either call
+/// [`ScanMetadata::require_contiguous_slices`] or appear on an allow-list with a reason —
+/// the same spirit as the orientation tests above, which enumerate every algorithm variant so a
+/// new one cannot be added without declaring what it supports.
+#[cfg(test)]
+mod slice_gap_coverage {
+    /// Stages that legitimately do not check, and why.
+    const EXEMPT: &[(&str, &str)] = &[
+        // Unwrapping is degraded by a gap, not invalidated by it, and the remedy is
+        // unwrap::unwrap_slicewise rather than refusal. Refusing here would block the one path
+        // that handles the case.
+        ("run_field_mapping", "unwrapping: the remedy is slice-wise, not refusal"),
+        // Masking is thresholding and morphology on the voxel grid. It reads no kernel and
+        // produces no field, so a gap changes nothing about whether its output is meaningful —
+        // and the stages that consume the mask refuse the gap themselves.
+        ("run_masking", "no kernel, no field: a gap is irrelevant"),
+        ("build_mask_section", "no kernel, no field: a gap is irrelevant"),
+        ("apply_mask_ops", "no kernel, no field: a gap is irrelevant"),
+        // Registration and resampling are interpolation on the sampled grid, not a convolution
+        // with a kernel that assumes one. A gap makes the through-plane interpolation cross
+        // tissue that was never measured, which costs accuracy bounded by how smooth the field
+        // is — it does not turn the operation into a different operation. The output stays on
+        // the reference echo's grid, so `slice_geometry` still describes it, and the stages that
+        // genuinely cannot cope refuse before any kernel runs.
+        ("run_motion_correction", "interpolation, not a kernel: a gap degrades rather than invalidates"),
+    ];
+
+    const SOURCES: &[(&str, &str)] = &[
+        ("bg_removal.rs", include_str!("bg_removal.rs")),
+        ("inversion.rs", include_str!("inversion.rs")),
+        ("separation.rs", include_str!("separation.rs")),
+        ("qsmart.rs", include_str!("qsmart.rs")),
+        ("field_mapping.rs", include_str!("field_mapping.rs")),
+        ("masking.rs", include_str!("masking.rs")),
+        ("motion.rs", include_str!("motion.rs")),
+        ("two_pass.rs", include_str!("two_pass.rs")),
+        ("referencing.rs", include_str!("referencing.rs")),
+        ("phase_utils.rs", include_str!("phase_utils.rs")),
+    ];
+
+    /// Every `pub fn` in a stage source, with its signature and body, excluding test modules.
+    fn public_stage_fns(src: &str) -> Vec<(String, String)> {
+        // stop at the test module so test helpers taking metadata are not scanned
+        let code = match src.find("\nmod tests {") {
+            Some(i) => &src[..i],
+            None => src,
+        };
+        let mut out = Vec::new();
+        let mut rest = code;
+        while let Some(i) = rest.find("\npub fn ") {
+            let after = &rest[i + "\npub fn ".len()..];
+            let name: String = after.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
+            // the body runs to the next top-level `pub fn`, which is enough to see the call
+            let body_end = after.find("\npub fn ").unwrap_or(after.len());
+            out.push((name, after[..body_end].to_string()));
+            rest = &rest[i + 1..];
+        }
+        out
+    }
+
+    #[test]
+    fn every_stage_taking_scan_metadata_refuses_a_gapped_volume() {
+        let mut checked = 0usize;
+        for (file, src) in SOURCES {
+            for (name, body) in public_stage_fns(src) {
+                // The cfg(not(feature = "onnx")) stubs name it `_metadata` and return an error
+                // without touching the data, so they have nothing to check. Match on the
+                // leading delimiter: "_metadata: &ScanMetadata" contains the unprefixed string.
+                let takes_metadata = body.contains(" metadata: &ScanMetadata")
+                    || body.contains("(metadata: &ScanMetadata");
+                let returns_result = body.contains("PipelineError");
+                if !takes_metadata || !returns_result {
+                    continue;
+                }
+                if let Some((_, why)) = EXEMPT.iter().find(|(n, _)| *n == name) {
+                    assert!(
+                        !body.contains("require_contiguous_slices()"),
+                        "{file}: {name} is on the slice-gap exemption list ({why}) but calls \
+                         require_contiguous_slices anyway - remove it from EXEMPT"
+                    );
+                    continue;
+                }
+                assert!(
+                    body.contains("metadata.require_contiguous_slices()?"),
+                    "{file}: {name} takes a &ScanMetadata and returns a PipelineError but never \
+                     calls metadata.require_contiguous_slices(). Either call it, or add it to \
+                     EXEMPT with a reason a gap cannot invalidate it."
+                );
+                checked += 1;
+            }
+        }
+        // if the scan stops finding stages the test has quietly stopped testing anything
+        // Background removal, dipole inversion, the four single-step DL reconstructions
+        // (NeXtQSM, iQSM, iQSM+, iQFM), TGV, chi-separation and QSMART: nine stages convolve on
+        // the grid and must refuse a gap. If this count drops, the source scan has stopped
+        // seeing stages rather than the stages having stopped needing the check.
+        assert_eq!(
+            checked, 9,
+            "expected 9 checking stages, scanned {checked}; either a stage was added without \
+             the check and without an exemption, or the source scan has broken"
+        );
+    }
+
+    #[test]
+    fn the_exemption_list_names_stages_that_exist() {
+        for (name, _) in EXEMPT {
+            assert!(
+                SOURCES.iter().any(|(_, src)| src.contains(&format!("pub fn {name}("))),
+                "EXEMPT names {name}, which no longer exists - stale exemption"
+            );
+        }
     }
 }

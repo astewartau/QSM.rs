@@ -9,10 +9,15 @@
 //! - [`laplacian_unwrap`] — Laplacian unwrapping (Neumann BC on the array)
 //! - [`laplacian_unwrap_bfr`] — Laplacian unwrapping **+ background field removal**
 //!   (∇² masked to the ROI); see the [`laplacian`] module docs for why these differ
+//!
+//! All of the above read across slice boundaries. For a 2D multi-slice acquisition, where
+//! each slice carries its own receive phase offset, run one of them per slice with
+//! [`unwrap_slicewise`] / [`unwrap_slicewise_multi_echo`] ([`SliceWiseParams`]).
 
 pub mod romeo;
 pub mod bestpath;
 pub mod laplacian;
+pub mod slicewise;
 
 pub use romeo::{
     unwrap_romeo, unwrap_romeo_multi_echo, correct_multi_echo_wraps,
@@ -20,6 +25,10 @@ pub use romeo::{
     RomeoParams, RomeoWeightType,
 };
 pub use bestpath::{unwrap_bestpath, BestPathParams};
+pub use slicewise::{
+    unwrap_slicewise, unwrap_slicewise_multi_echo, enforce_inter_echo_consistency,
+    SliceWiseParams,
+};
 #[allow(deprecated)]
 pub use laplacian::laplacian_unwrap_bfr;
 pub use laplacian::laplacian_unwrap;

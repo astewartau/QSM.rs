@@ -24,6 +24,10 @@ pub fn run_bg_removal(
     config: &BgRemovalConfig,
     progress: &mut dyn FnMut(usize, usize),
 ) -> Result<BgRemovalResult, PipelineError> {
+    // Every background removal here convolves with a kernel defined on the voxel grid, so a
+    // volume with gaps between its slices is refused rather than approximated. See
+    // ScanMetadata::require_contiguous_slices for why this is unconditional.
+    metadata.require_contiguous_slices()?;
     let grid = metadata.grid();
     let n_voxels = grid.n_total();
 
@@ -158,6 +162,7 @@ mod tests {
             echo_times: vec![0.005],
             field_strength: 3.0,
             b0_direction: (0.0, 0.0, 1.0),
+            slice_geometry: None,
         };
 
         let result = run_bg_removal(
@@ -170,6 +175,52 @@ mod tests {
         assert_eq!(r.eroded_mask.len(), n);
     }
 
+    /// The coverage test in `config.rs` reads the stage sources; this one actually calls the
+    /// stage, so the wiring is proven end to end rather than by inspection.
+    #[test]
+    fn a_gapped_acquisition_is_refused_before_any_work() {
+        let (nx, ny, nz) = (8, 8, 8);
+        let n = nx * ny * nz;
+        let field = vec![0.1; n];
+        let mask = vec![1u8; n];
+        let mut meta = ScanMetadata {
+            dims: (nx, ny, nz),
+            voxel_size: (1.0, 1.0, 3.0),
+            echo_times: vec![0.005],
+            field_strength: 3.0,
+            b0_direction: (0.0, 0.0, 1.0),
+            slice_geometry: None,
+        };
+
+        // undeclared: nothing can be concluded, so it runs
+        assert!(run_bg_removal(&field, &mask, &meta, &BgRemovalConfig::default(), &mut |_, _| {})
+            .is_ok());
+
+        // declared contiguous: runs
+        meta.slice_geometry =
+            Some(crate::grid::SliceGeometry { thickness: 3.0, axis: 2 });
+        assert!(run_bg_removal(&field, &mask, &meta, &BgRemovalConfig::default(), &mut |_, _| {})
+            .is_ok());
+
+        // declared gapped: refused, for every algorithm the enum offers
+        meta.slice_geometry =
+            Some(crate::grid::SliceGeometry { thickness: 2.0, axis: 2 });
+        for algorithm in [
+            BgRemovalAlgorithm::Vsharp, BgRemovalAlgorithm::Pdf, BgRemovalAlgorithm::Lbv,
+            BgRemovalAlgorithm::Ismv, BgRemovalAlgorithm::Sharp, BgRemovalAlgorithm::Resharp,
+            BgRemovalAlgorithm::Harperella, BgRemovalAlgorithm::Iharperella,
+        ] {
+            let config = BgRemovalConfig { algorithm, ..BgRemovalConfig::default() };
+            match run_bg_removal(&field, &mask, &meta, &config, &mut |_, _| {}) {
+                Err(PipelineError::InvalidInput(msg)) => {
+                    assert!(msg.contains("1.0000 mm gap"), "{algorithm:?}: {msg}");
+                }
+                Err(other) => panic!("{algorithm:?} gave {other:?}, not InvalidInput"),
+                Ok(_) => panic!("{algorithm:?} accepted a gapped volume"),
+            }
+        }
+    }
+
     #[test]
     fn test_bg_removal_dispatches_pdf() {
         let (nx, ny, nz) = (8, 8, 8);
@@ -179,6 +230,7 @@ mod tests {
         let meta = ScanMetadata {
             dims: (nx, ny, nz), voxel_size: (1.0, 1.0, 1.0),
             echo_times: vec![0.005], field_strength: 3.0, b0_direction: (0.0, 0.0, 1.0),
+            slice_geometry: None,
         };
         let config = BgRemovalConfig { algorithm: BgRemovalAlgorithm::Pdf, ..Default::default() };
         let r = run_bg_removal(&field, &mask, &meta, &config, &mut |_, _| {}).unwrap();
@@ -215,6 +267,7 @@ mod tests {
             let meta = ScanMetadata {
                 dims: (nx, ny, nz), voxel_size: (1.0, 1.0, 1.0),
                 echo_times: vec![0.005], field_strength: 3.0, b0_direction: bdir,
+                slice_geometry: None,
             };
             run_bg_removal(&field, &mask, &meta, &config, &mut |_, _| {}).unwrap().local_field_ppm
         };
@@ -248,6 +301,7 @@ mod tests {
         let meta = ScanMetadata {
             dims: (nx, ny, nz), voxel_size: (1.0, 1.0, 1.0),
             echo_times: vec![0.005], field_strength: 3.0, b0_direction: (0.0, 0.0, 1.0),
+            slice_geometry: None,
         };
         let config = BgRemovalConfig { algorithm: BgRemovalAlgorithm::Lbv, ..Default::default() };
         let r = run_bg_removal(&field, &mask, &meta, &config, &mut |_, _| {}).unwrap();
@@ -263,6 +317,7 @@ mod tests {
         let meta = ScanMetadata {
             dims: (nx, ny, nz), voxel_size: (1.0, 1.0, 1.0),
             echo_times: vec![0.005], field_strength: 3.0, b0_direction: (0.0, 0.0, 1.0),
+            slice_geometry: None,
         };
         let config = BgRemovalConfig { algorithm: BgRemovalAlgorithm::Sharp, ..Default::default() };
         let r = run_bg_removal(&field, &mask, &meta, &config, &mut |_, _| {}).unwrap();
@@ -278,6 +333,7 @@ mod tests {
         let meta = ScanMetadata {
             dims: (nx, ny, nz), voxel_size: (1.0, 1.0, 1.0),
             echo_times: vec![0.005], field_strength: 3.0, b0_direction: (0.0, 0.0, 1.0),
+            slice_geometry: None,
         };
         let config = BgRemovalConfig { algorithm: BgRemovalAlgorithm::Ismv, ..Default::default() };
         let r = run_bg_removal(&field, &mask, &meta, &config, &mut |_, _| {}).unwrap();
@@ -293,6 +349,7 @@ mod tests {
         let meta = ScanMetadata {
             dims: (nx, ny, nz), voxel_size: (1.0, 1.0, 1.0),
             echo_times: vec![0.005], field_strength: 3.0, b0_direction: (0.0, 0.0, 1.0),
+            slice_geometry: None,
         };
         // Primary V-SHARP + mSMV boundary-shadow refinement.
         let config = BgRemovalConfig {
@@ -313,6 +370,7 @@ mod tests {
         let meta = ScanMetadata {
             dims: (nx, ny, nz), voxel_size: (1.0, 1.0, 1.0),
             echo_times: vec![0.005], field_strength: 3.0, b0_direction: (0.0, 0.0, 1.0),
+            slice_geometry: None,
         };
         let config = BgRemovalConfig { algorithm: BgRemovalAlgorithm::Resharp, ..Default::default() };
         let r = run_bg_removal(&field, &mask, &meta, &config, &mut |_, _| {}).unwrap();
@@ -327,6 +385,7 @@ mod tests {
             echo_times: vec![0.005],
             field_strength: 3.0,
             b0_direction: (0.0, 0.0, 1.0),
+            slice_geometry: None,
         };
         let field = vec![0.0; 32]; // wrong size, should be 64
         let mask = vec![1u8; 64];

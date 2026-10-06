@@ -114,6 +114,153 @@ Load and save NIfTI volumes with [`qsm_core::io`](src/io.rs).
 |-----------|-------------|-----------|
 | **ROMEO** | Region-growing with quality-guided ordering using magnitude and gradient coherence weighting | Dymerska, B., et al. (2021). "Phase unwrapping with a rapid opensource minimum spanning tree algorithm (ROMEO)." *Magnetic Resonance in Medicine*, 85(4):2294-2308. [DOI](https://doi.org/10.1002/mrm.28563) |
 | **Laplacian** | FFT-based Poisson solver under a Neumann boundary condition on the array — unwraps without altering the background field, so the result is a total field (`laplacian_unwrap`). This is what `UnwrapMethod::Laplacian` selects. | Schofield, M.A., Zhu, Y. (2003). "Fast phase unwrapping algorithm for interferometric applications." *Optics Letters*, 28(14):1194-1196. [DOI](https://doi.org/10.1364/OL.28.001194) |
+| **Best path** | 3D-SRNCP — every edge sorted by reliability and merged in that order (`unwrap_bestpath`) | Abdul-Rahman, H., et al. (2007). "Fast and robust three-dimensional best path phase unwrapping algorithm." *Applied Optics*, 46(26):6623-6635. [DOI](https://doi.org/10.1364/AO.46.006623) |
+| **Slice-wise (2D)** | Any of the above run on each slice independently, for 2D multi-slice acquisitions whose slices carry independent receive phase offsets (`unwrap_slicewise`). Also worth using on **thick slices with no offsets at all**, where 3 mm slices alone mislead a 3D region grower (0.936 against 0.983). Makes the unwrapped **phase** usable on such data; for a `linear-fit` B0 map alone, `enforce_inter_echo_consistency` is the part that matters and works on any unwrapper's output — see below. | — |
+
+### 2D multi-slice acquisitions
+
+Every unwrapper above reads across slice boundaries, and a 2D multi-slice acquisition excites
+each slice separately, so each one carries its own constant receive phase offset. Unwrapping
+slice by slice avoids that, at the cost of fixing each slice only up to a multiple of 2π.
+
+Multi-echo data closes that gap: the offset is echo-independent, so it sits in the intercept of
+`phi(TE) = phi0 + gamma*dB*TE` and a fit across echoes returns the field from the slope. That
+only works while the leftover 2π is echo-independent too, which is why
+`unwrap_slicewise_multi_echo` enforces it rather than leaving it to the B0 fit — the correction
+needs the *wrapped* input phase, and the unwrapper is the only stage holding both that and its
+own output. The division of labour is: this module makes each echo of a voxel differ from the
+last by its measured phase evolution and nothing else; the B0 fit discards the leftover wrap
+from the intercept, together with the physical slice offset.
+
+That correction is per voxel, not per slice, and the difference is not cosmetic. A region grower
+with no route through the slice axis has to cross every in-plane fringe head-on, and where one
+is ambiguous it leaves *part* of a slice offset by 2π. On the qsm-forward 2D phantom the wrap
+count varies within a single slice of a single echo, so a per-slice correction has nothing it
+can do. Measured during development, per voxel took the fitted field from r = -0.44 to
+r = 0.98 against ground truth; the per-slice variant was not kept, so that figure is a record
+of the decision rather than something the tests reproduce.
+
+The 3D unwrappers are not a safe fallback *unaided*. On clean data their quality weighting defers
+the incoherent z edges, so each slice does come out a whole number of wraps from the truth — but
+*which* whole number depends on the echo, because the jump being rounded is
+`offset_step + field_step * TE`. `correct_multi_echo_wraps` cannot repair it: it corrects the
+whole volume at once and the error is per slice.
+
+**The two halves fix different things, and it is worth knowing which you need.** Measured on the
+phantom's 3 mm interleaved-offset session:
+
+| offsets session | linear-fit B0 correlation | in-plane 2π jumps, echo 1 | echo 4 |
+|---|---|---|---|
+| wrapped input, nothing applied | -0.01 | 1432 | 1433 |
+| 3D ROMEO alone | 0.20 | — | — |
+| 3D ROMEO + `enforce_inter_echo_consistency` | **0.983** | — | — |
+| raw wrapped + `enforce_inter_echo_consistency` | **0.983** | 1432 | 2142 |
+| **slice-wise + `enforce_inter_echo_consistency`** | **0.983** | **0** | **796** |
+
+The echo-1 column is the cleanest evidence, and clean *by construction*:
+`enforce_inter_echo_consistency` only ever writes echoes 1.. (0-indexed), so it cannot touch the
+first echo, and the 1432 → 1432 identity confirms it. Any difference in that column belongs to the
+spatial unwrapping and nothing else.
+
+A fitted slope is blind to a constant per voxel, so `enforce_inter_echo_consistency` is what
+rescues a `linear-fit` B0 map — from *any* starting point, including no spatial unwrapping at all.
+It is public and works on any unwrapper's output, so **if a linear-fit field map is all you want,
+you do not need the slice-wise mode**; you need the pass.
+
+What the slice-wise mode fixes is the phase itself. The pass propagates echo 0's wrap state
+faithfully into every later echo, so on its own it leaves *more* in-plane 2π discontinuities than
+not unwrapping at all. Anything that reads the unwrapped phase rather than its TE-slope — a
+single-echo field map, a non-linear B0 estimator, phase fed straight to background removal —
+needs the spatial unwrapping, and on 2D multi-slice data that means per slice.
+
+#### Thick slices need this even without per-slice offsets
+
+The slice-wise mode was built for acquisitions whose slices carry independent receive phase
+offsets, and it turns out not to need them. On the `ses-thick` session, which has **uniform
+receive phase and differs from a 3D acquisition only in being 3 mm thick**, 3D ROMEO reaches
+0.936 against slice-wise's 0.983.
+
+3 mm slices by themselves produce through-slice phase steps large enough to mislead a region
+grower. Nothing about the receive chain is involved, so the trigger is slice thickness rather
+than 2D multi-slice acquisition as such, and the remedy is the same: do not differentiate along
+a direction the data is poorly sampled in.
+
+This was found by an assertion failing. An earlier revision of the no-offsets control required
+3D to reach 0.95, on the assumption that there is nothing to fix when the receive phase is
+uniform. That assumption is wrong, and the test now pins the ordering instead.
+
+Slice-wise Laplacian reaches only 0.81 on the fit, because its Poisson solution is not a whole
+number of wraps from the truth to begin with and the pass cannot re-seat it cleanly; prefer
+ROMEO or best path.
+
+Background field removal stays **3D**, and so does the dipole inversion. That is not a gap in
+the implementation, it is the physics: SHARP and its variants rest on the mean value property of
+harmonic functions, which is three-dimensional, and a disc has no equivalent, so V-SHARP run
+slice by slice would remove only the in-plane component of a field that is not separable that
+way. The dipole kernel is likewise inherently 3D. A 2D multi-slice acquisition still assembles
+into a 3D volume, so there is nothing to replace here, only anisotropic voxels to handle, which
+the kernels already do through their frequency axes.
+
+A 2D V-SHARP stage chained into 3D PDF, as the EPI-QSM literature uses, was implemented and
+measured against this phantom and removed. The numbers are kept here so the case does not have
+to be re-implemented to be re-litigated.
+
+On a synthetic background with every source outside the ROI, where the ground truth is exactly
+zero (residual RMS, lower is better):
+
+| | slab coverage | enclosed ROI |
+|---|---|---|
+| 2D V-SHARP | 1.18 | 0.47 |
+| 3D V-SHARP | 1.69 | **0.14** |
+| 2D V-SHARP → 3D PDF | **0.99** | 0.24 |
+
+On the qsm-forward 2D phantom's `ses-thick` session, correlation against the local field
+(higher is better), using the whole head for the enclosed case and a 16-slice slab cut so the
+tissue reaches its end slices for the other:
+
+| | 48 mm slab | enclosed ROI |
+|---|---|---|
+| 2D V-SHARP | 0.9792 | **0.9597** |
+| 3D V-SHARP | **0.9820** | 0.9506 |
+| 2D V-SHARP → 3D PDF | 0.9791 | 0.8963 |
+
+**The real-phantom differences are not large enough to decide anything**, and on the enclosed
+ROI the disc edges the sphere out. What does carry is that the chain, which is the arrangement
+actually proposed for 2D data, is the worst of the three on the enclosed ROI and does not
+improve on the 2D stage alone on the slab. Together with the synthetic case, where the ground
+truth is exact and 3D wins the enclosed ROI by a factor of three, and with the theory (SHARP
+rests on a three-dimensional mean value property that a disc does not have), there was no
+demonstrated benefit to ship.
+
+The open question is whether a real acquisition has a slab thin enough relative to a useful
+kernel radius for the disc to earn its place. See astewartau/QSM.rs#75.
+
+
+A slice **gap**, where the excited slabs are thinner than the slice pitch, makes the sampled
+volume non-contiguous. The FFT dipole kernel and the SHARP family's spherical kernels are defined
+on a uniform grid, so on gapped data they compute a different convolution and the result is wrong
+rather than approximate. It is therefore refused, not warned about.
+
+Set `ScanMetadata::slice_geometry` from the acquisition's `SliceThickness` and every pipeline
+stage that convolves on the voxel grid will refuse a gapped volume before doing any work — all
+nine of background removal, dipole inversion, TGV, the four single-step DL reconstructions
+(NeXtQSM, iQSM, iQSM+, iQFM), chi-separation and QSMART — returning `PipelineError::InvalidInput`
+with the thickness, pitch and gap in the message.
+The thickness has to be supplied because nothing in a NIfTI records it: the spacing is the
+*pitch*, so 3 mm slices every 3 mm and 2 mm slices every 3 mm are indistinguishable. `None` means
+the acquisition did not say, in which case nothing can be concluded and the stages run; BIDS only
+*recommends* `SliceThickness`, so hosts that cannot read it should tell the user that this check
+could not run.
+
+Masking and field mapping are exempt, by design. Masking reads no kernel and produces no field.
+Unwrapping is degraded by a gap rather than invalidated by it, and the remedy is to unwrap in
+plane — refusing there would block the one path that handles the case. The exemptions are a list
+in `pipeline::config` that a test cross-checks against the stage sources, so a stage added later
+cannot skip the check by omission.
+
+Below the pipeline, `Grid::require_contiguous_slices(slice_thickness, slice_axis)` is the
+primitive and `require_contiguous_slices_if_known` is the `Option`-aware form. Purely in-plane
+work is unaffected, which is why slice-wise unwrapping does not call it.
 
 ### Background Field Removal
 

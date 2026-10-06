@@ -43,6 +43,7 @@ fn main() {
         echo_times: vec![0.020], // seconds
         field_strength: 3.0,     // Tesla
         b0_direction: (0.0, 0.0, 1.0),
+        slice_geometry: None,
     };
 
     let phases: Vec<&[f64]> = vec![&phase];

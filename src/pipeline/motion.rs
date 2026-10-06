@@ -259,6 +259,7 @@ mod tests {
             echo_times: vec![0.004, 0.012, 0.020, 0.028],
             field_strength: 3.0,
             b0_direction: (0.0, 0.0, 1.0),
+            slice_geometry: None,
         }
     }
 
