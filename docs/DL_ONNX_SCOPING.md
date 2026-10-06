@@ -334,5 +334,3 @@ dipole, and chi-separation.
 
 **Out of scope:** DIP-UP, INR-QSM, MoDIP (per-subject optimisation → native reimplementation, not
 ONNX), QSMnet/QSMnet+/AutoQSM/MoDL-QSM/NeXtQSM (legacy TF, brittle conversion).
-</content>
-</invoke>
