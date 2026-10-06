@@ -1061,9 +1061,12 @@ fn r2primenet_matches_python_reference() {
             &r2star.data,
             &mask,
             &grid,
+            // Parity against the authors' own reference run: whatever field the reference was
+            // acquired at, this must reproduce it, so the guard is not what is under test here.
+            qsm_core::relaxometry::TRAINED_B0_T,
             &onnx_bytes,
             &norm,
-            &qsm_core::relaxometry::R2PrimeNetParams { patch },
+            &qsm_core::relaxometry::R2PrimeNetParams { patch, ..Default::default() },
             |done, total| {
                 if done > 0 {
                     patches = total;

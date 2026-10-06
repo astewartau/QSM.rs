@@ -16,7 +16,10 @@ All standalone, opt-in library functions. `cargo test` green, clippy clean.
   model (Weigel 2015). At `b1 = 1` it reduces to `exp(-TE/T2)` to <1e-6.
 - `r2_epg(magnitude, mask, echo_times, grid, &R2EpgParams) -> (r2_map, b1_map)` —
   per-voxel R2 from MESE via EPG dictionary matching over a (T2×B1) grid. Hz output.
-- `r2prime(r2star, r2, mask)` — R2\* − R2, clamped ≥0.
+- `r2prime(r2star, r2, mask, r2_coverage)` — R2\* − R2, clamped ≥0, over the region R2 was
+  measured. Returns `R2PrimeMap { r2prime, coverage }`: a MESE is often a slab, and reporting
+  `R2' = R2* - 0 = R2*` outside it overstates R2' by roughly the tissue R2 (QSM.rs#128). What to
+  do with the uncovered remainder is the caller's policy, not this function's.
 
 ### `qsm_core::denoise` — MP-PCA  (`src/utils/denoise.rs`)
 - `mppca_denoise(data, dims, n_vols, patch_radius, mask)` — Marchenko-Pastur PCA

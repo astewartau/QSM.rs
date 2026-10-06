@@ -92,6 +92,8 @@ NAMES = {
     "relax_r2_monoexp": "R2 — mono-exp (Hz)",
     "relax_r2prime_truth": "R2' truth (Hz)",
     "relax_r2prime_derived": "R2' derived = R2*-R2 (Hz)",
+    "relax_r2prime_slab": "R2' from a slab MESE (Hz)",
+    "relax_r2prime_slab_naive": "R2' subtracted over the whole mask (Hz)",
     "relax_denoise_after": "R2* — noisy vs MP-PCA denoised (Hz)",
     "relax_unring_after": "R2* map — rung vs Gibbs-unrung (Hz)",
     # Field-based chi-separation (chi_sep_ilsqr)
@@ -248,6 +250,8 @@ WINDOWS = {
     "relax_r2_monoexp": (0, 45),
     "relax_r2prime_truth": (0, 16),
     "relax_r2prime_derived": (0, 16),
+    "relax_r2prime_slab": (0, 16),
+    "relax_r2prime_slab_naive": (0, 16),
     # Before/after pairs share ONE fixed window. They used to auto-range independently, which
     # rescaled each panel and visually cancelled the change the figure exists to show.
     "relax_denoise_before": (0, 60),

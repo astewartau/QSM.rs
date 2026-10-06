@@ -36,6 +36,7 @@
 //! contrast in gradient echo MRI." PNAS 109(45):18559-18564. HC-ChiSep is the
 //! QSM-CI submission building on this biophysical model.
 
+use super::DR_SHIN_2021;
 use crate::Grid;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
@@ -88,7 +89,7 @@ pub struct HcChisepParams {
     pub b0: f64,
     /// Spin-echo echo times in **seconds** (empty = no SE evidence used).
     pub se_echo_times: Vec<f64>,
-    /// Paramagnetic relaxivity at 3 T in Hz/ppm (empirical Shin 2021: 137).
+    /// Paramagnetic relaxivity at 3 T in Hz/ppm. Defaults to [`DR_SHIN_2021`].
     pub dr_pos_3t: f64,
     /// R2' bin width (Hz) for the anchored grid search (reference default 0.25).
     pub bin_hz: f64,
@@ -99,7 +100,7 @@ impl Default for HcChisepParams {
         Self {
             b0: 7.0,
             se_echo_times: Vec::new(),
-            dr_pos_3t: 137.0,
+            dr_pos_3t: DR_SHIN_2021,
             bin_hz: 0.25,
         }
     }

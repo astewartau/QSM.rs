@@ -46,6 +46,8 @@ use crate::utils::simd_ops::{
 use crate::Grid;
 use num_complex::Complex32;
 
+use super::DR_SHIN_2021;
+
 const TWO_PI: f32 = std::f32::consts::TAU;
 
 /// Parameters for [`chi_sep_ilsqr`].
@@ -54,7 +56,7 @@ const TWO_PI: f32 = std::f32::consts::TAU;
 pub struct ChiSepIlsqrParams {
     /// Central frequency in Hz (e.g. 123.2e6 at 3T, 298.0e6 at 7T)
     pub cf: f64,
-    /// Paramagnetic relaxometric constant in Hz/ppm (Shin 2021: 137)
+    /// Paramagnetic relaxometric constant in Hz/ppm. Defaults to [`DR_SHIN_2021`].
     pub dr_pos: f64,
     /// Diamagnetic relaxometric constant in Hz/ppm (Shin 2021: same as dr_pos)
     pub dr_neg: f64,
@@ -80,8 +82,8 @@ impl Default for ChiSepIlsqrParams {
     fn default() -> Self {
         Self {
             cf: 123.2e6,
-            dr_pos: 137.0,
-            dr_neg: 137.0,
+            dr_pos: DR_SHIN_2021,
+            dr_neg: DR_SHIN_2021,
             lambda1: 1.0,
             percentage: 0.9,
             r2p_min: 1.0,

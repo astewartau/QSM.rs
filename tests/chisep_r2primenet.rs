@@ -38,16 +38,24 @@ fn test_chisep_r2primenet() {
     );
 
     let t = Instant::now();
+    // This phantom is simulated at 7 T and R2PRIMEnet's weights are 3 T, so the field guard
+    // refuses it unless told otherwise. The override is set rather than the test deleted
+    // because what this test covers is the inference path and the normalisation; see the band
+    // at the end for why that is all it can cover on a 7 T phantom.
+    let params = R2PrimeNetParams { ignore_field_mismatch: true, ..Default::default() };
+    println!("[INFO] phantom B0 = {} T; R2PRIMEnet is a 3 T network, so this run is \
+              off-distribution and scored only as a plumbing check", ph.b0);
     let predicted = r2primenet(
         &r2star,
         &ph.mask,
         &ph.grid,
+        ph.b0,
         &w,
         &R2PrimeNetNorm::default(),
-        &R2PrimeNetParams::default(),
+        &params,
         |_, _| {},
     )
-    .expect("r2primenet");
+    .unwrap_or_else(|e| panic!("r2primenet (phantom B0 = {} T): {e}", ph.b0));
     let secs = t.elapsed().as_secs_f64();
 
     assert_eq!(predicted.len(), ph.mask.len(), "R2′ should be one value per voxel");
@@ -97,5 +105,65 @@ fn test_chisep_r2primenet() {
          3 T-network-on-a-7 T-phantom run has held at (0.2532). That is a change in the \
          prediction, not an accuracy result: check the port against \
          models_onnx::r2primenet_matches_python_reference before adjusting this band."
+    );
+}
+
+/// The 3 T field-strength guard (QSM.rs#129).
+///
+/// R2PRIMEnet's weights are trained at 3 T and the network takes no field strength as an input,
+/// so 7 T R2* produces a well-formed, wrong R2′ that nothing downstream can detect. The guard
+/// refuses it. Needs neither the phantom nor the weights: it fires before anything is loaded,
+/// which is also what makes the override observable — with it set, the same call gets as far as
+/// parsing the (deliberately invalid) model bytes and fails there instead.
+#[test]
+#[ignore]
+fn test_r2primenet_field_strength_guard() {
+    use qsm_core::models::onnx::OnnxError;
+    use qsm_core::relaxometry::{B0_TOLERANCE_T, TRAINED_B0_T};
+
+    let grid = qsm_core::Grid::new(16, 16, 16, 1.0, 1.0, 1.0);
+    let n = 16 * 16 * 16;
+    let r2star = vec![30.0_f64; n];
+    let mask = vec![1_u8; n];
+    // Small enough to keep the padded volume tiny once the guard is passed.
+    let small = R2PrimeNetParams { patch: (16, 16, 16), ..Default::default() };
+    let not_a_model: &[u8] = b"not an onnx graph";
+
+    let run = |b0: f64, params: &R2PrimeNetParams| {
+        r2primenet(&r2star, &mask, &grid, b0, not_a_model, &R2PrimeNetNorm::default(), params, |_, _| {})
+    };
+
+    // 7 T is refused, and as a Domain error — not a Load error from the invalid bytes, which
+    // proves the guard ran first.
+    match run(7.0, &small) {
+        Err(OnnxError::Domain(m)) => {
+            assert!(m.contains("7"), "the message should name the field strength: {m}");
+            assert!(
+                m.contains("ignore_field_mismatch"),
+                "the message should name the override: {m}"
+            );
+        }
+        other => panic!("7 T should be refused with OnnxError::Domain, got {other:?}"),
+    }
+    assert!(matches!(run(1.5, &small), Err(OnnxError::Domain(_))), "1.5 T should be refused");
+
+    // Everything sold as "3 T" passes the guard and goes on to fail at the invalid model bytes.
+    for b0 in [TRAINED_B0_T, 2.89, TRAINED_B0_T - B0_TOLERANCE_T, TRAINED_B0_T + B0_TOLERANCE_T] {
+        assert!(
+            matches!(run(b0, &small), Err(OnnxError::Load(_))),
+            "{b0} T should pass the guard and reach the model load"
+        );
+    }
+    // Just outside the band is refused, so the tolerance is a real edge and not decoration.
+    assert!(
+        matches!(run(TRAINED_B0_T + B0_TOLERANCE_T + 0.01, &small), Err(OnnxError::Domain(_))),
+        "just outside the tolerance should be refused"
+    );
+
+    // The override lets a caller through at 7 T — again reaching the model load.
+    let forced = R2PrimeNetParams { patch: (16, 16, 16), ignore_field_mismatch: true };
+    assert!(
+        matches!(run(7.0, &forced), Err(OnnxError::Load(_))),
+        "ignore_field_mismatch should pass the guard at 7 T"
     );
 }

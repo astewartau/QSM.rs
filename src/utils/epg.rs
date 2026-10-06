@@ -381,33 +381,84 @@ pub fn r2_epg(
     (r2_out, b1_out)
 }
 
-/// Compute R2' = R2* − R2, clamped at zero, within the mask.
+/// R2' and the region over which it is a measurement.
 ///
-/// R2* (from a gradient-echo acquisition) captures reversible + irreversible
-/// dephasing; R2 (from a spin-echo acquisition) captures only the irreversible
-/// part. Their difference R2' is the reversible dephasing that chi-separation
-/// uses to constrain the paramagnetic/diamagnetic split. Noise can make R2* < R2
-/// in some voxels, so negative values are clamped to zero.
+/// The two are returned together because they cannot be recovered from one another: a zero in
+/// [`r2prime`](Self::r2prime) means either "R2* equalled R2 here" or "nothing was measured here",
+/// and only [`coverage`](Self::coverage) tells them apart.
+#[cfg_attr(feature = "introspection", derive(serde::Serialize))]
+#[derive(Clone, Debug)]
+pub struct R2PrimeMap {
+    /// R2' = R2* − R2 in Hz, clamped at zero, and zero wherever `coverage` is zero.
+    pub r2prime: Vec<f64>,
+    /// 1 where R2 was measured — and R2' is therefore a measurement — 0 elsewhere.
+    pub coverage: Vec<u8>,
+}
+
+/// Compute R2' = R2* − R2, clamped at zero, over the region where R2 was measured.
+///
+/// R2* (from a gradient-echo acquisition) captures reversible + irreversible dephasing; R2 (from a
+/// spin-echo acquisition) captures only the irreversible part. Their difference R2' is the
+/// reversible dephasing that chi-separation uses to constrain the paramagnetic/diamagnetic split.
+/// Noise can make R2* < R2 in some voxels, so negative values are clamped to zero.
+///
+/// **R2' is only defined where R2 exists.** R2 comes from a multi-echo spin-echo acquisition, and
+/// a MESE is routinely a *slab* — a band of slices rather than the whole head — because
+/// whole-brain MESE is expensive. Subtracting over the whole brain mask would then compute
+/// `R2' = R2* − 0 = R2*` outside the slab, overstating R2' by roughly the tissue R2 (~10-20 Hz in
+/// brain at 3 T) with nothing in the output to show it: the map looks plausible, and every
+/// R2'-consuming method inherits the error. So this returns the coverage alongside the map, and
+/// leaves R2' at zero outside it; what to do with the remainder — restrict the downstream outputs
+/// to it, or fill it with [`r2primenet`](super::r2primenet::r2primenet) — is a policy decision for
+/// the caller, not this function.
+///
+/// Coverage is the intersection of three things:
+/// - `mask` — where an R2' is wanted at all (the brain mask);
+/// - `r2_coverage`, when given — where the R2 acquisition reached. Only the caller knows this; it
+///   is a geometric fact about the acquisition, not something the R2 map reveals;
+/// - `r2 > 0` — a finite, positive R2. R2 = 0 means T2 = ∞, which no tissue has, so a zero is an
+///   absent measurement rather than a measured zero. This is exact for an R2 map from
+///   [`r2_epg`], which returns exactly zero outside its own fit mask; for an R2 map resampled
+///   from another grid, interpolation can leave small non-zero values just outside the acquired
+///   FOV, and only an explicit `r2_coverage` excludes those.
+///
+/// Passing `r2_coverage = None` therefore falls back to the `r2 > 0` heuristic — conservative, and
+/// right for an EPG-derived R2, but weaker than telling the function where the acquisition was.
 ///
 /// # Arguments
 /// * `r2star` - R2* map in Hz `[nx*ny*nz]`
 /// * `r2` - R2 map in Hz `[nx*ny*nz]` (co-registered to `r2star`)
 /// * `mask` - Binary brain mask `[nx*ny*nz]`
+/// * `r2_coverage` - Optional binary mask of where the R2 acquisition reached `[nx*ny*nz]`
 ///
 /// # Returns
-/// R2' map in Hz `[nx*ny*nz]`.
-pub fn r2prime(r2star: &[f64], r2: &[f64], mask: &[u8]) -> Vec<f64> {
+/// [`R2PrimeMap`]: the R2' map in Hz and the coverage it is valid over.
+pub fn r2prime(
+    r2star: &[f64],
+    r2: &[f64],
+    mask: &[u8],
+    r2_coverage: Option<&[u8]>,
+) -> R2PrimeMap {
     assert_eq!(r2star.len(), r2.len(), "r2star and r2 must be the same length");
     assert_eq!(r2star.len(), mask.len(), "mask must match map length");
-    (0..r2star.len())
-        .map(|i| {
-            if mask[i] != 0 {
-                (r2star[i] - r2[i]).max(0.0)
-            } else {
-                0.0
-            }
-        })
-        .collect()
+    if let Some(c) = r2_coverage {
+        assert_eq!(c.len(), r2star.len(), "r2_coverage must match map length");
+    }
+
+    let n = r2star.len();
+    let mut out = vec![0.0_f64; n];
+    let mut coverage = vec![0_u8; n];
+    for i in 0..n {
+        let measured = mask[i] != 0
+            && r2_coverage.is_none_or(|c| c[i] != 0)
+            && r2[i].is_finite()
+            && r2[i] > 0.0;
+        if measured {
+            coverage[i] = 1;
+            out[i] = (r2star[i] - r2[i]).max(0.0);
+        }
+    }
+    R2PrimeMap { r2prime: out, coverage }
 }
 
 #[cfg(test)]
@@ -631,10 +682,65 @@ mod tests {
         let r2star = vec![50.0, 30.0, 10.0, 0.0];
         let r2 = vec![20.0, 35.0, 10.0, 5.0];
         let mask = vec![1u8, 1, 0, 1];
-        let rp = r2prime(&r2star, &r2, &mask);
-        assert!((rp[0] - 30.0).abs() < 1e-12); // 50 - 20
-        assert!(rp[1].abs() < 1e-12); // clamp negative (30 - 35)
-        assert!(rp[2].abs() < 1e-12); // masked out
-        assert!(rp[3].abs() < 1e-12); // clamp negative (0 - 5)
+        let out = r2prime(&r2star, &r2, &mask, None);
+        assert!((out.r2prime[0] - 30.0).abs() < 1e-12); // 50 - 20
+        assert!(out.r2prime[1].abs() < 1e-12); // clamp negative (30 - 35)
+        assert!(out.r2prime[2].abs() < 1e-12); // masked out
+        assert!(out.r2prime[3].abs() < 1e-12); // clamp negative (0 - 5)
+        // Clamping to zero is still a measurement; being outside the mask is not.
+        assert_eq!(out.coverage, vec![1u8, 1, 0, 1]);
+    }
+
+    /// An explicit coverage mask must bound where R2' is reported, and the uncovered
+    /// voxels must come back as zero *and* flagged — never as R2* − 0 = R2*.
+    ///
+    /// The uncovered voxels carry a *non-zero* R2 here on purpose: that is what a slab R2 map
+    /// resampled onto the GRE grid leaves just outside its FOV, and it is the case the `r2 > 0`
+    /// heuristic cannot catch. So only the supplied mask can exclude them, and dropping the
+    /// mask from the implementation fails this test rather than slipping past it.
+    #[test]
+    fn test_r2prime_explicit_coverage_bounds_the_map() {
+        // Four in-brain voxels; the R2 acquisition reached only the first two.
+        let r2star = vec![40.0, 35.0, 30.0, 25.0];
+        let r2 = vec![15.0, 12.0, 0.4, 0.1]; // interpolation bleed outside the slab
+        let mask = vec![1u8; 4];
+        let coverage = vec![1u8, 1, 0, 0];
+
+        let out = r2prime(&r2star, &r2, &mask, Some(&coverage));
+        assert_eq!(out.coverage, coverage, "coverage should be the supplied one");
+        // Inside: R2* − R2, computed independently of the function under test.
+        assert!((out.r2prime[0] - 25.0).abs() < 1e-12);
+        assert!((out.r2prime[1] - 23.0).abs() < 1e-12);
+        // Outside: zero. Subtracting the bleed-through would have given 29.6 and 24.9 —
+        // essentially the whole of R2* reported as reversible.
+        assert_eq!(out.r2prime[2], 0.0);
+        assert_eq!(out.r2prime[3], 0.0);
+    }
+
+    /// Explicit coverage must *narrow*, not widen: a voxel the acquisition reached whose R2
+    /// came back as zero is still an absent measurement, so it stays uncovered.
+    #[test]
+    fn test_r2prime_coverage_never_admits_a_zero_r2() {
+        let r2star = vec![40.0, 40.0, 40.0];
+        let r2 = vec![15.0, 0.0, f64::NAN];
+        let mask = vec![1u8; 3];
+        // The caller claims the acquisition covered everything.
+        let out = r2prime(&r2star, &r2, &mask, Some(&[1u8, 1, 1]));
+        assert_eq!(out.coverage, vec![1u8, 0, 0], "a zero or non-finite R2 is not a measurement");
+        assert!((out.r2prime[0] - 25.0).abs() < 1e-12);
+        assert_eq!(out.r2prime[1], 0.0);
+        assert_eq!(out.r2prime[2], 0.0);
+    }
+
+    /// With no coverage mask the `r2 > 0` heuristic has to stand in for it — which is exactly
+    /// what an EPG-derived R2 supports, since [`r2_epg`] leaves un-fitted voxels at zero.
+    #[test]
+    fn test_r2prime_heuristic_coverage_without_a_mask() {
+        let r2star = vec![40.0, 35.0, 30.0];
+        let r2 = vec![15.0, 12.0, 0.0]; // third voxel never fitted
+        let mask = vec![1u8; 3];
+        let out = r2prime(&r2star, &r2, &mask, None);
+        assert_eq!(out.coverage, vec![1u8, 1, 0]);
+        assert_eq!(out.r2prime[2], 0.0, "an unfitted voxel must not report R2* as R2'");
     }
 }
