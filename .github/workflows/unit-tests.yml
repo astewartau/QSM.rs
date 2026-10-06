@@ -10,6 +10,11 @@ on:
         description: "Number of tests passed"
         value: ${{ jobs.run.outputs.tests_passed }}
 
+# See integration-tests.yml for why.
+defaults:
+  run:
+    shell: bash
+
 jobs:
   run:
     runs-on: ubuntu-latest
@@ -70,7 +75,9 @@ jobs:
             2>&1 | tee coverage/tarpaulin.log || true
 
           # Count passed tests from output (sum across all test suites)
-          PASSED=$(grep -oP '\d+(?= passed)' coverage/tarpaulin.log | awk '{s+=$1} END {print s+0}')
+          # `|| true`: tarpaulin crashing is tolerated above, and a log with no "N passed" in it
+          # must stay a zero count rather than failing this step under pipefail.
+          PASSED=$(grep -oP '\d+(?= passed)' coverage/tarpaulin.log | awk '{s+=$1} END {print s+0}' || true)
           echo "tests_passed=$PASSED" >> "$GITHUB_OUTPUT"
 
       - name: Extract coverage
