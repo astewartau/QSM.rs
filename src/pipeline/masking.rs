@@ -249,10 +249,37 @@ fn run_rs2_net(
     ))
 }
 
+/// Refuse a mask that selects no voxels.
+///
+/// A mask with nothing in it is not a degraded result, it is the absence of one: there is no
+/// brain to reconstruct, and every stage downstream of it — background removal, inversion,
+/// referencing — would run to completion on nothing and produce an empty or nonsensical map.
+/// Saying so here costs a pass over the mask and turns a cryptic failure several stages later
+/// into one that names the cause.
+///
+/// `source` says where the mask came from, and goes into the message, so phrase it as the
+/// subject of "… selected no voxels": `"the masking stage"`, or for a host validating a mask
+/// it loaded, something naming the file.
+///
+/// Hosts that read a user-supplied mask rather than generating one should call this on it too
+/// — [`run_masking`] only sees masks the pipeline builds — so that a bad hand-made mask is
+/// reported the same way as a failed brain extraction.
+pub fn require_nonempty_mask(mask: &[u8], source: &str) -> Result<(), PipelineError> {
+    if mask.iter().any(|&m| m != 0) {
+        return Ok(());
+    }
+    Err(PipelineError::EmptyMask { source: source.to_string() })
+}
+
 /// Build a mask from multiple sections, OR'd together.
 ///
 /// Each section specifies an input source, a generator (threshold/BET),
 /// and optional refinements (erode, dilate, close, fill holes, smooth).
+///
+/// Refuses an empty result, with [`PipelineError::EmptyMask`]. The check is on the combined
+/// mask, deliberately: sections are OR'd, so a section that contributes nothing is a legitimate
+/// configuration and only the union being empty means brain extraction failed. Checking each
+/// section instead would reject masks that are perfectly fine.
 ///
 /// # Arguments
 /// * `sections` - Mask section configs
@@ -272,20 +299,23 @@ pub fn run_masking(
         return Err(PipelineError::InvalidConfig("no mask sections configured".into()));
     }
 
-    if sections.len() == 1 {
+    let final_mask = if sections.len() == 1 {
         let input_data = resolve_masking_input(sections[0].input, phases, magnitude, metadata);
-        return build_mask_section(&sections[0], &input_data, magnitude, metadata);
-    }
-
-    // Multiple sections: run each, OR together
-    let mut final_mask = vec![0u8; n_voxels];
-    for section in sections {
-        let input_data = resolve_masking_input(section.input, phases, magnitude, metadata);
-        let section_mask = build_mask_section(section, &input_data, magnitude, metadata)?;
-        for j in 0..n_voxels {
-            final_mask[j] |= section_mask[j];
+        build_mask_section(&sections[0], &input_data, magnitude, metadata)?
+    } else {
+        // Multiple sections: run each, OR together
+        let mut combined = vec![0u8; n_voxels];
+        for section in sections {
+            let input_data = resolve_masking_input(section.input, phases, magnitude, metadata);
+            let section_mask = build_mask_section(section, &input_data, magnitude, metadata)?;
+            for j in 0..n_voxels {
+                combined[j] |= section_mask[j];
+            }
         }
-    }
+        combined
+    };
+
+    require_nonempty_mask(&final_mask, "the masking stage")?;
 
     Ok(final_mask)
 }
@@ -547,5 +577,93 @@ mod tests {
         let meta = test_metadata();
         let result = run_masking(&[], &[], None, &meta);
         assert!(result.is_err());
+    }
+
+    /// A threshold nothing clears stands in for a failed brain extraction: the mask comes back
+    /// with no voxels in it. That used to be returned as a success, and every later stage ran on
+    /// it and produced an empty map; now it is refused where it happened.
+    #[test]
+    fn an_empty_mask_is_refused_by_the_masking_stage() {
+        let meta = test_metadata();
+        let mag = vec![1.0; 8 * 8 * 8];
+        let sections = vec![MaskSection {
+            input: MaskingInput::Magnitude,
+            // nothing in the image is above 1000, so the mask is all zeros
+            generator: MaskOp::Threshold {
+                method: MaskThresholdMethod::Fixed,
+                value: Some(1000.0),
+            },
+            refinements: vec![],
+        }];
+
+        let err = run_masking(&sections, &[], Some(&mag), &meta).unwrap_err();
+        let PipelineError::EmptyMask { source } = &err else {
+            panic!("an empty mask should be its own error, not a generic one: {err:?}");
+        };
+        assert!(source.contains("masking"), "the source should name the stage: {source}");
+
+        // Whoever reads this in a log needs to know which stage went wrong and what to change.
+        let msg = err.to_string();
+        assert!(msg.contains("no voxels"), "no statement of what happened: {msg}");
+        assert!(msg.contains("Brain extraction"), "no likely cause: {msg}");
+        assert!(msg.contains("threshold"), "nothing to go and change: {msg}");
+    }
+
+    /// Erosion can empty a mask just as thoroughly as a bad threshold, and it is the more likely
+    /// way a real run gets here: a plausible-looking mask shrinks to nothing under a refinement.
+    #[test]
+    fn a_mask_eroded_away_to_nothing_is_refused_too() {
+        let meta = test_metadata();
+        let mag = vec![10.0; 8 * 8 * 8];
+        let sections = vec![MaskSection {
+            input: MaskingInput::Magnitude,
+            generator: MaskOp::Threshold {
+                method: MaskThresholdMethod::Fixed,
+                value: Some(0.5),
+            },
+            // an 8-voxel-wide volume cannot survive ten erosions
+            refinements: vec![MaskOp::Erode { iterations: 10 }],
+        }];
+        assert!(matches!(
+            run_masking(&sections, &[], Some(&mag), &meta),
+            Err(PipelineError::EmptyMask { .. })
+        ));
+    }
+
+    /// The case a check in the wrong place would break. Sections are OR'd, so a section that
+    /// matches nothing is a legitimate configuration — someone adding a second section for a
+    /// region this subject happens not to have. Only the union being empty is a failure.
+    #[test]
+    fn a_section_that_contributes_nothing_is_fine_as_long_as_the_union_is_not_empty() {
+        let meta = test_metadata();
+        let n = 8 * 8 * 8;
+        let mag = vec![10.0; n];
+        let threshold = |value| MaskSection {
+            input: MaskingInput::Magnitude,
+            generator: MaskOp::Threshold { method: MaskThresholdMethod::Fixed, value: Some(value) },
+            refinements: vec![],
+        };
+
+        // The high threshold matches nothing, and as the only section it is refused...
+        assert!(matches!(
+            run_masking(&[threshold(1000.0)], &[], Some(&mag), &meta),
+            Err(PipelineError::EmptyMask { .. })
+        ));
+
+        // ...but alongside a section that does match, the mask is usable and must be accepted.
+        let sections = vec![threshold(0.5), threshold(1000.0)];
+        let result = run_masking(&sections, &[], Some(&mag), &meta).unwrap();
+        let count: usize = result.iter().map(|&m| m as usize).sum();
+        assert_eq!(count, n, "the populated section's voxels should all survive the OR");
+    }
+
+    /// The gate a host reuses for a mask it loaded rather than generated.
+    #[test]
+    fn require_nonempty_mask_names_whatever_the_caller_calls_it() {
+        assert!(require_nonempty_mask(&[0, 0, 1, 0], "the masking stage").is_ok());
+        // a mask of no voxels at all, not merely all-zero, is just as empty
+        assert!(require_nonempty_mask(&[], "the masking stage").is_err());
+        let err = require_nonempty_mask(&[0u8; 8], "sub-1_mask.nii.gz").unwrap_err();
+        assert!(err.to_string().contains("sub-1_mask.nii.gz"), "{err}");
     }
 }

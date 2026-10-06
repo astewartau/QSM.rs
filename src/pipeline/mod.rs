@@ -44,7 +44,7 @@ pub use phase_utils::{
     erode_mask, dilate_mask,
 };
 pub use referencing::apply_reference;
-pub use masking::{apply_mask_ops, build_mask_section, run_masking};
+pub use masking::{apply_mask_ops, build_mask_section, require_nonempty_mask, run_masking};
 pub use motion::{run_motion_correction, MotionCorrectionConfig, MotionCorrectionResult};
 pub use field_mapping::run_field_mapping;
 pub use bg_removal::run_bg_removal;

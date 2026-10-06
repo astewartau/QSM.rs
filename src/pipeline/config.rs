@@ -768,6 +768,13 @@ pub enum PipelineError {
     AlgorithmError(String),
     /// Dimension mismatch
     DimensionMismatch { expected: usize, got: usize },
+    /// A brain mask selects no voxels at all, so there is nothing to reconstruct.
+    ///
+    /// `source` names where the mask came from, so the message can distinguish a mask the
+    /// pipeline generated from one a host loaded off disk. Build it with
+    /// [`require_nonempty_mask`](crate::pipeline::require_nonempty_mask) rather than by hand,
+    /// so every host reports the same thing.
+    EmptyMask { source: String },
 }
 
 impl std::fmt::Display for PipelineError {
@@ -779,6 +786,14 @@ impl std::fmt::Display for PipelineError {
             Self::DimensionMismatch { expected, got } => {
                 write!(f, "dimension mismatch: expected {}, got {}", expected, got)
             }
+            Self::EmptyMask { source } => write!(
+                f,
+                "empty brain mask: {} selected no voxels, so there is no brain to reconstruct \
+and every stage after it would be working on nothing. Brain extraction most likely failed, \
+so check the magnitude image the mask was built from, and whether the threshold or BET \
+settings suit its contrast",
+                source
+            ),
         }
     }
 }
