@@ -46,6 +46,9 @@ jobs:
       # This step is NOT continue-on-error: a broken tool fails the check.
       - name: Run relaxometry demo
         run: |
+          # The default shell is `bash -e`, not `-eo pipefail`, so without this the step
+          # reports tee's exit status and the gates above never actually fail the check.
+          set -o pipefail
           cargo test --release --features parallel --test relaxometry_demo \
             -- --ignored --nocapture | tee demo.log
 
@@ -111,6 +114,16 @@ jobs:
             echo "before/after are near-identical by eye, and what was removed is the point."
             echo ""
             fig stage_relaxometry
+            echo ""
+            echo "### Slab MESE coverage"
+            echo "A spin-echo companion to a 3D GRE is routinely a band of slices. R2' is"
+            echo "reported only where R2 was measured (left); subtracting over the whole brain"
+            echo "mask instead reports the tissue R2 as reversible dephasing everywhere the"
+            echo "MESE did not reach (right). The coronal and sagittal views carry this —"
+            echo "the centre axial slice is inside the slab in both."
+            echo ""
+            fig relax_r2prime_slab
+            fig relax_r2prime_slab_naive
           } > report.md
           for attempt in 1 2 3 4 5; do
             if cml comment create report.md; then
