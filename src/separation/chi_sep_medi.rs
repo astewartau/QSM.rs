@@ -23,6 +23,7 @@
 
 use num_complex::Complex32;
 use crate::Grid;
+use super::DR_SHIN_2021;
 use crate::fft::Fft3dWorkspaceF32;
 use crate::kernels::dipole::dipole_kernel_f32;
 use crate::inversion::medi::{
@@ -116,8 +117,15 @@ impl Default for ChiSepParams {
             lambda_para: 1000.0,
             lambda_dia: 1000.0,
             lambda_cpl: 100.0,
-            dr_pos: 114.0,
-            dr_neg: 30.0,
+            // Same paper, same forward model, same single-orientation QSM as `chi_sep_ilsqr`, so
+            // the same relaxivity. These read 114/30 until QSM.rs#130: 114 is the COSMOS-
+            // referenced constant ([`DR_KIM_2025_COSMOS`](super::DR_KIM_2025_COSMOS)) borrowed
+            // from the χ-sepnet networks, which this method is not, and 30 appears in no
+            // publication — neither Shin 2021 nor Kim 2025 fits the two sources separately. The
+            // integration test in `tests/chisep_qsmci.rs` already overrode both to 137, so the
+            // measured behaviour is unchanged; only the default moved to match it.
+            dr_pos: DR_SHIN_2021,
+            dr_neg: DR_SHIN_2021,
             percentage: 0.3,
             cg_tol: 0.01,
             cg_max_iter: 100,

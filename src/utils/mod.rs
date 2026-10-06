@@ -58,7 +58,7 @@ pub use epg::*;
 #[cfg(feature = "onnx")]
 pub use r2primenet::{
     r2primenet, r2primenet_from_magnitude, R2PrimeNetNorm, R2PrimeNetParams,
-    AUTHORS_PATCH, WASM_PATCH,
+    AUTHORS_PATCH, WASM_PATCH, B0_TOLERANCE_T, TRAINED_B0_T,
 };
 pub use denoise::*;
 pub use anisotropic_diffusion::{gradient_anisotropic_diffusion, AnisotropicDiffusionParams};

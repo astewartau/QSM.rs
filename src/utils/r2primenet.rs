@@ -22,6 +22,19 @@
 //! [`ChiSepNetNorm`](crate::separation::ChiSepNetNorm) uses. The network was trained at that
 //! value, so changing it feeds off-distribution inputs.
 //!
+//! **Field strength.** The published weights are trained at **3 T** ([`TRAINED_B0_T`]) and the
+//! network takes no field strength as an input. R2* scales with B0, so 7 T R2* is far outside the
+//! training distribution — and what comes back is an ordinary-looking R2' map in Hz, not a NaN or
+//! an out-of-range value, so nothing downstream can tell it apart from a good one. [`r2primenet`]
+//! therefore **refuses** outside [`B0_TOLERANCE_T`] of 3 T rather than warning: a warning this
+//! crate cannot emit (it links no logger) would be a doc comment, and a wrong R2' propagates into
+//! every R2'-consuming χ-separation method. A caller that means it can set
+//! [`R2PrimeNetParams::ignore_field_mismatch`] and treat the result as uncalibrated.
+//!
+//! The SNU-LIST group also publishes a **7 T** variant that maps 7 T R2* to *3 T-equivalent* R2',
+//! which is what χ-sepnet expects downstream. It needs its own weights in the model registry and
+//! its own validation, so it is not here yet; the guard refuses 7 T input rather than pretending.
+//!
 //! **R2\* fitting.** The training pipeline fitted R2* with ARLO, so
 //! [`r2primenet_from_magnitude`] uses [`r2star_arlo`](super::r2star::r2star_arlo). Supplying
 //! an R2* map fitted some other way is allowed but moves the input off-distribution.
@@ -70,6 +83,15 @@ pub const WASM_PATCH: (usize, usize, usize) = (128, 128, 64);
 /// Four pooling levels, so every patch dimension must be a multiple of this.
 const POOL_MULTIPLE: usize = 16;
 
+/// Field strength the published R2PRIMEnet weights were trained at, in Tesla (Kim 2025).
+pub const TRAINED_B0_T: f64 = 3.0;
+
+/// How far from [`TRAINED_B0_T`] an acquisition may sit and still be accepted, in Tesla.
+///
+/// Wide enough for everything sold as "3 T" — 2.89 T (Siemens) through 3.0 T — and narrow enough
+/// that 1.5 T and 7 T are refused.
+pub const B0_TOLERANCE_T: f64 = 0.3;
+
 /// Training z-score constants for R2PRIMEnet
 /// (`xsepnet_train_patch_norm_factor_inplane_largedegree_romeo_arlo.mat`): each field is
 /// `(mean, std)`, in `Dr`-scaled (ppm-equivalent) units. The input is normalized
@@ -92,11 +114,15 @@ pub struct R2PrimeNetParams {
     /// Sliding-window patch `(D, H, W)`; each dimension a multiple of 16. Defaults to
     /// [`AUTHORS_PATCH`]; WASM hosts pass [`WASM_PATCH`].
     pub patch: (usize, usize, usize),
+    /// Run even when the `b0_tesla` passed to [`r2primenet`] is outside [`B0_TOLERANCE_T`] of
+    /// [`TRAINED_B0_T`]. Off by default; the result is then uncalibrated, and a caller that
+    /// sets it owes its own users that caveat.
+    pub ignore_field_mismatch: bool,
 }
 
 impl Default for R2PrimeNetParams {
     fn default() -> Self {
-        Self { patch: AUTHORS_PATCH }
+        Self { patch: AUTHORS_PATCH, ignore_field_mismatch: false }
     }
 }
 
@@ -118,13 +144,22 @@ impl Default for R2PrimeNetNorm {
 /// * `r2star` — R2* map in **Hz**, column-major `(nx,ny,nz)`.
 /// * `mask` — binary brain mask (same layout).
 /// * `grid` — volume dimensions and voxel sizes.
+/// * `b0_tesla` — field strength the R2* map was acquired at, in **Tesla**. An argument rather
+///   than a [`R2PrimeNetParams`] field precisely because it must not have a default: a 3 T that
+///   nobody chose is indistinguishable from a 3 T that nobody checked, which is the whole of the
+///   failure this guards. See the module docs.
 /// * `model_onnx` — bytes of the exported `r2primenet.onnx` (1→1 chan, dynamic spatial axes).
 /// * `norm` — training normalization constants.
-/// * `params` — patch size; see [`R2PrimeNetParams`].
+/// * `params` — patch size and the field-strength override; see [`R2PrimeNetParams`].
 /// * `progress` — progress callback `(patches_done, patches_total)`.
 ///
 /// # Returns
 /// R2′ in **Hz**, clipped at zero and restricted to `mask`, in the same layout.
+///
+/// # Errors
+/// [`OnnxError::Domain`] when `b0_tesla` is more than [`B0_TOLERANCE_T`] from [`TRAINED_B0_T`]
+/// and [`R2PrimeNetParams::ignore_field_mismatch`] is not set — checked before anything is
+/// allocated or loaded.
 ///
 /// # Panics
 /// If a patch dimension is not a multiple of 16 (the network's four pooling levels).
@@ -132,11 +167,22 @@ pub fn r2primenet(
     r2star: &[f64],
     mask: &[u8],
     grid: &Grid,
+    b0_tesla: f64,
     model_onnx: &[u8],
     norm: &R2PrimeNetNorm,
     params: &R2PrimeNetParams,
     mut progress: impl FnMut(usize, usize),
 ) -> Result<Vec<f64>, OnnxError> {
+    if !params.ignore_field_mismatch && (b0_tesla - TRAINED_B0_T).abs() > B0_TOLERANCE_T {
+        return Err(OnnxError::Domain(format!(
+            "R2PRIMEnet's weights are trained at {TRAINED_B0_T} T and this R2* map is from \
+             {b0_tesla} T. R2* scales with field strength, so the input is outside the training \
+             distribution and the predicted R2' would be a well-formed wrong answer rather than a \
+             visibly bad one. Measure R2' from a spin-echo acquisition (R2' = R2* - R2), or set \
+             R2PrimeNetParams::ignore_field_mismatch to run anyway and treat the R2' as \
+             uncalibrated."
+        )));
+    }
     let (nx, ny, nz) = grid.dims;
     let n = nx * ny * nz;
     assert_eq!(r2star.len(), n, "r2star length must match grid");
@@ -235,13 +281,14 @@ pub fn r2primenet_from_magnitude(
     echo_times: &[f64],
     mask: &[u8],
     grid: &Grid,
+    b0_tesla: f64,
     model_onnx: &[u8],
     norm: &R2PrimeNetNorm,
     params: &R2PrimeNetParams,
     progress: impl FnMut(usize, usize),
 ) -> Result<(Vec<f64>, Vec<f64>), OnnxError> {
     let (r2star, _s0) = super::r2star::r2star_arlo(magnitude, mask, echo_times, grid);
-    let r2prime = r2primenet(&r2star, mask, grid, model_onnx, norm, params, progress)?;
+    let r2prime = r2primenet(&r2star, mask, grid, b0_tesla, model_onnx, norm, params, progress)?;
     Ok((r2prime, r2star))
 }
 

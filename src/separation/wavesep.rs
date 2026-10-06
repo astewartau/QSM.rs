@@ -34,6 +34,7 @@
 //!
 //! Reference implementation: https://github.com/ZhenghanFang/WaveSep
 
+use super::DR_SHIN_2021;
 use crate::utils::wavelet::{dwt_max_level, WaveletPlan};
 use crate::Grid;
 
@@ -41,7 +42,7 @@ use crate::Grid;
 #[cfg_attr(feature = "introspection", derive(serde::Serialize))]
 #[derive(Clone, Debug)]
 pub struct WaveSepParams {
-    /// Paramagnetic static-dephasing relaxivity Dr+ in Hz/ppm (phantom kernel: 137).
+    /// Paramagnetic static-dephasing relaxivity Dr+ in Hz/ppm. Defaults to [`DR_SHIN_2021`].
     pub dr_pos: f64,
     /// Diamagnetic static-dephasing relaxivity Dr− in Hz/ppm (WaveSep assumes = Dr+).
     pub dr_neg: f64,
@@ -60,8 +61,8 @@ pub struct WaveSepParams {
 impl Default for WaveSepParams {
     fn default() -> Self {
         Self {
-            dr_pos: 137.0,
-            dr_neg: 137.0,
+            dr_pos: DR_SHIN_2021,
+            dr_neg: DR_SHIN_2021,
             alpha: 0.2,
             lambda: 0.02,
             wavelet_order: 4,

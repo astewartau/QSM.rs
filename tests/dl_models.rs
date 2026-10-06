@@ -139,10 +139,18 @@ fn test_dl_r2primenet() {
         qsm_core::r2star::r2star_arlo(&mag_voxel_major, &data.mask, &data.echo_times, &grid);
 
     let t = Instant::now();
+    // This phantom is 7 T and R2PRIMEnet's weights are 3 T, so the guard would refuse it. What
+    // is under test here is the inference path — that the network runs and returns a physically
+    // admissible map — not whether the prediction is calibrated for this subject, which at 7 T it
+    // is not (see QSM.rs#129). Overridden deliberately, and the numbers printed below should be
+    // read as uncalibrated.
     let r2prime = qsm_core::relaxometry::r2primenet(
-        &r2star, &data.mask, &grid, &w,
+        &r2star, &data.mask, &grid, data.field_strength, &w,
         &qsm_core::relaxometry::R2PrimeNetNorm::default(),
-        &qsm_core::relaxometry::R2PrimeNetParams::default(),
+        &qsm_core::relaxometry::R2PrimeNetParams {
+            ignore_field_mismatch: true,
+            ..Default::default()
+        },
         |_, _| {},
     )
     .expect("r2primenet");
