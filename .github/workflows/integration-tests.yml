@@ -620,6 +620,9 @@ jobs:
 
       - name: Run ${{ matrix.test }}
         run: |
+          # The default shell is `bash -e`, not `-eo pipefail`, so without this the step
+          # reports tee's exit status and a failing test run passes.
+          set -o pipefail
           cargo test --release --features parallel --test integration_tests ${{ matrix.test }} -- --ignored --exact --nocapture 2>&1 | tee test_output.txt
 
       - name: Save metrics
@@ -680,6 +683,9 @@ jobs:
 
       - name: Run ${{ matrix.test }}
         run: |
+          # The default shell is `bash -e`, not `-eo pipefail`, so without this the step
+          # reports tee's exit status and a failing test run passes.
+          set -o pipefail
           cargo test --release --features parallel --test integration_tests ${{ matrix.test }} -- --ignored --exact --nocapture 2>&1 | tee test_output.txt
 
       - name: Save metrics
@@ -736,6 +742,8 @@ jobs:
 
       - name: Run test_bet
         run: |
+          # See the pipefail note on the bgremove job.
+          set -o pipefail
           cargo test --release --features parallel --test integration_tests test_bet -- --ignored --nocapture 2>&1 | tee test_output.txt
 
       - name: Save metrics
@@ -800,6 +808,8 @@ jobs:
         continue-on-error: ${{ contains(matrix.test, 'qsmart') }}
         timeout-minutes: 30
         run: |
+          # See the pipefail note on the bgremove job.
+          set -o pipefail
           cargo test --release --features parallel --test integration_tests ${{ matrix.test }} -- --ignored --exact --nocapture 2>&1 | tee test_output.txt
 
       - name: Save metrics
@@ -864,6 +874,8 @@ jobs:
         continue-on-error: ${{ contains(matrix.test, 'qsmart') }}
         timeout-minutes: 30
         run: |
+          # See the pipefail note on the bgremove job.
+          set -o pipefail
           cargo test --release --features parallel --test integration_tests ${{ matrix.test }} -- --ignored --exact --nocapture 2>&1 | tee test_output.txt
 
       - name: Save metrics
@@ -930,6 +942,8 @@ jobs:
         # onnx + download are needed by the χ-sepnet (deep learning) binary, which
         # fetches its weights from the registry; the classical binaries ignore them.
         run: |
+          # See the pipefail note on the bgremove job.
+          set -o pipefail
           QSMCI_CHISEP="$PWD/qsmci-chisep" QSM_MODEL_CACHE="$PWD/.model-cache" \
             cargo test --release --features "parallel onnx download" --test ${{ matrix.test }} -- --ignored --nocapture 2>&1 | tee test_output.txt
 
@@ -1077,6 +1091,8 @@ jobs:
       - name: Run oblique_sagittal
         timeout-minutes: 30
         run: |
+          # See the pipefail note on the bgremove job.
+          set -o pipefail
           cargo test --release --features parallel --test oblique_sagittal -- --ignored --nocapture 2>&1 | tee test_output.txt
 
       - name: Run epi_unwarp
