@@ -22,7 +22,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          components: llvm-tools-preview
+          components: llvm-tools-preview, clippy
 
       - name: Cache cargo
         uses: actions/cache@v4
@@ -52,6 +52,20 @@ jobs:
       # the tarpaulin install so a failure skips that build entirely.
       - name: Run unit tests
         run: cargo test --lib --features parallel
+
+      # Gates on clippy's deny-level lints only, not on warnings. `-D warnings` would fail
+      # immediately -- there are 328, of which `needless_range_loop` (144) and
+      # `too_many_arguments` (46) are two thirds, and in indexing-heavy numerical kernels the
+      # suggested rewrites are frequently less readable than what is there. Deciding whether to
+      # allow those two crate-wide is a separate exercise (#148); this holds the line at zero
+      # errors in the meantime.
+      #
+      # `--all-targets` matters more than the feature set here: all four errors this first
+      # caught were inside `#[cfg(test)]` blocks, which a plain `cargo clippy` does not lint.
+      # One of them was `assert!(w <= 255)` on a `u8` -- a test assertion that could not fail.
+      # Runs after the tests so a lint failure never masks a test failure.
+      - name: Clippy
+        run: cargo clippy --all-targets --features "parallel onnx download"
 
       - name: Install cargo-tarpaulin
         run: |
