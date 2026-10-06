@@ -183,8 +183,8 @@ mod tests {
         // check the closed form inverts them exactly.
         let params = R2starQsmParams { b0: 3.0, r_const_3t: 274.0 };
         let r = params.r_const_3t; // B0 = 3 -> r = 274
-        let chi_pos = vec![0.10, 0.05, 0.00, 0.20];
-        let chi_neg_mag = vec![0.02, 0.10, 0.15, 0.00]; // |χ−|
+        let chi_pos = [0.10, 0.05, 0.00, 0.20];
+        let chi_neg_mag = [0.02, 0.10, 0.15, 0.00]; // |χ−|
         let n = chi_pos.len();
         let chi_total: Vec<f64> = (0..n).map(|i| chi_pos[i] - chi_neg_mag[i]).collect();
         let r2star: Vec<f64> = (0..n).map(|i| r * (chi_pos[i] + chi_neg_mag[i])).collect();

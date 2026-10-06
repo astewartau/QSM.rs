@@ -543,7 +543,7 @@ mod tests {
     #[test]
     fn test_negate() {
         let mut a = vec![1.0f32, -2.0, 3.0, -4.0, 5.0];
-        let expected = vec![-1.0f32, 2.0, -3.0, 4.0, -5.0];
+        let expected = [-1.0f32, 2.0, -3.0, 4.0, -5.0];
 
         negate_f32(&mut a);
 
@@ -621,7 +621,7 @@ mod tests {
     #[test]
     fn test_negate_f64() {
         let mut a = vec![1.0f64, -2.0, 3.0, -4.0, 5.0];
-        let expected = vec![-1.0f64, 2.0, -3.0, 4.0, -5.0];
+        let expected = [-1.0f64, 2.0, -3.0, 4.0, -5.0];
 
         negate_f64(&mut a);
 

@@ -714,7 +714,7 @@ mod tests {
         let grid = Grid::new(nx, ny, nz, 1.0, 1.0, 1.0);
         let mut data = vec![10.0; nx * ny * nz];
         // Place a low value at slice 2
-        let idx = 1 + 1 * nx + 2 * nx * ny; // (1,1,2)
+        let idx = 1 + nx + 2 * nx * ny; // (x, y, z) = (1, 1, 2)
         data[idx] = 1.0;
 
         let mip = create_mip(&data, &grid, &IDENTITY, 3).unwrap();

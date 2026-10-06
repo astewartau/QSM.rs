@@ -97,7 +97,7 @@ pub fn susep_net(
     norm: &SusepNetNorm,
     params: &SusepNetParams,
     mut progress: impl FnMut(usize, usize),
-) -> Result<(Vec<f64>, Vec<f64>, Vec<f64>), OnnxError> {
+) -> Result<super::ChiSepMaps, OnnxError> {
     let (nx, ny, nz) = grid.dims;
     let n = nx * ny * nz;
     for (name, v) in [("field", local_field_ppm), ("qsm", qsm), ("r2prime", r2prime)] {

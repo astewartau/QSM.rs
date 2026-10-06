@@ -163,7 +163,7 @@ pub fn hc_chisep(
 
     let n_stages = 5;
     let mut stage = 0usize;
-    let mut tick = |s: &mut usize, p: &mut dyn FnMut(usize, usize)| {
+    let tick = |s: &mut usize, p: &mut dyn FnMut(usize, usize)| {
         *s += 1;
         p(*s, n_stages);
     };
@@ -920,6 +920,9 @@ mod tests {
             theta_deg
         );
     }
+    /// `(chi_total, r2prime, mag_vm, se_mag_vm, mask)`, magnitudes voxel-major `(n, ne)`.
+    type SynthPhantom = (Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>, Vec<u8>);
+
 
     /// Build a synthetic phantom: voxels with `x < wm_x_max` are WM-like (hollow-
     /// cylinder beat magnitude, diamagnetic χ_total, R2' = H+meso so the anchored
@@ -932,7 +935,7 @@ mod tests {
         b0: f64,
         tes: &[f64],
         se_tes: &[f64],
-    ) -> (Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>, Vec<u8>) {
+    ) -> SynthPhantom {
         let (nx, ny, nz) = dims;
         let n = nx * ny * nz;
         let ne = tes.len();

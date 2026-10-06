@@ -50,6 +50,12 @@ pub const DR_SHIN_2021: f64 = 137.0;
 /// relaxivity does, and tying them together would invite exactly that edit.
 pub const DR_KIM_2025_COSMOS: f64 = 114.0;
 
+/// The three maps every separation method returns, in the crate's standard order:
+/// `(chi_pos, chi_neg, chi_total)` in ppm, where `chi_pos >= 0`, `chi_neg <= 0`, and
+/// `chi_total` is their sum. Named because the bare triple is otherwise indistinguishable
+/// from any other three volumes at a call site.
+pub type ChiSepMaps = (Vec<f64>, Vec<f64>, Vec<f64>);
+
 pub mod chi_sep_ilsqr;
 pub mod chi_sep_medi;
 pub mod decompose;

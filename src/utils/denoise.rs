@@ -221,9 +221,7 @@ pub fn mppca_denoise(
         // Keep components with eigenvalue >= tau; ncomps (noise) = count below.
         // Reconstruct the centre row: mean + Σ_{kept k} (xc·w_k) w_k.
         let xc = &x[center_row * n..center_row * n + n];
-        for t in 0..n {
-            slot[t] = mean[t];
-        }
+        slot[..n].copy_from_slice(&mean[..n]);
         for k in 0..n {
             if d[k] < tau {
                 continue; // noise component

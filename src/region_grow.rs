@@ -318,7 +318,7 @@ pub fn grow_region_unwrap_full(
             }
         }
     }
-    seed_candidates.sort_unstable_by(|a, b| b.0.cmp(&a.0));
+    seed_candidates.sort_unstable_by_key(|a| std::cmp::Reverse(a.0));
     let mut seed_cursor = 0;
 
     // Add first seed

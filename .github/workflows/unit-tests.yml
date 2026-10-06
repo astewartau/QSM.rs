@@ -58,26 +58,33 @@ jobs:
       - name: Run unit tests
         run: cargo test --lib --features parallel
 
-      # Gates on clippy's deny-level lints only, not on warnings. `-D warnings` would fail
-      # immediately -- there are 328, of which `needless_range_loop` (144) and
-      # `too_many_arguments` (46) are two thirds, and in indexing-heavy numerical kernels the
-      # suggested rewrites are frequently less readable than what is there. Deciding whether to
-      # allow those two crate-wide is a separate exercise (#148); this holds the line at zero
-      # errors in the meantime.
+      # Gates on `-D warnings`, so every clippy and rustc lint is a build failure, not a
+      # line of scrollback nobody reads. The crate-wide exceptions are two lints that were
+      # judged wrong for this code rather than fixed; they live in `[lints.clippy]` in
+      # `Cargo.toml` with the reasoning next to them, and that is the only place they should
+      # be added. Everything else is expected to be fixed, and a local `#[allow]` needs a
+      # comment saying why -- an undocumented allow is worse than a warning, because it
+      # looks settled.
       #
-      # `--all-targets` matters more than the feature set here: four of the five errors this
-      # first caught were inside `#[cfg(test)]` blocks, which a plain `cargo clippy` does not
-      # lint. One was `assert!(w <= 255)` on a `u8` -- a test assertion that could not fail.
-      # Runs after the tests so a lint failure never masks a test failure.
+      # `--all-targets` matters as much as the lint level: the `#[cfg(test)]` blocks and the
+      # integration tests under `tests/` are where the findings were. A plain `cargo clippy`
+      # lints none of them, and `--lib` alone passed on day one while missing every one of
+      # the five errors that existed when this gate was first added.
       #
-      # Note that this gate's strictness tracks whatever `stable` resolves to, so a Rust release
-      # can turn it red with no change to this repository. That is not hypothetical: the fifth
-      # error above appeared only on 1.99, which added `GOLDEN_RATIO` to `approx_constant` and
-      # so newly flagged a golden-section search constant that had been merged for weeks. When
-      # it happens, fix or `#[allow]` the new lint with a comment -- do not pin the toolchain,
-      # which trades a visible occasional failure for an invisible permanent one.
+      # Why the level was tightened from deny-only to `-D warnings` (#148): the vacuous
+      # assertion that motivated the gate, `assert!(w <= 255)` on a `u8`, is
+      # `absurd_extreme_comparisons` and deny-level. Its close sibling `assert!(true)` is
+      # `assertions_on_constants` and only warn-level, so the deny-only gate exits 0 on it.
+      # Both are tests that cannot fail; only this level catches both. Measured, not assumed.
+      #
+      # Note that this gate's strictness tracks whatever `stable` resolves to, so a Rust
+      # release can turn it red with no change to this repository. That is not hypothetical:
+      # clippy 1.99 added `GOLDEN_RATIO` to `approx_constant` and so newly flagged a
+      # golden-section search constant that had been merged for weeks. When it happens, fix
+      # or `#[allow]` the new lint with a comment -- do not pin the toolchain, which trades a
+      # visible occasional failure for an invisible permanent one.
       - name: Clippy
-        run: cargo clippy --all-targets --features "parallel onnx download"
+        run: cargo clippy --all-targets --features "parallel onnx download" -- -D warnings
 
       - name: Install cargo-tarpaulin
         run: |

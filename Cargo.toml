@@ -29,6 +29,35 @@ download = ["dep:ureq", "dep:sha2"]
 # Byte-buffer based, so it compiles for both native and WASM targets.
 onnx = ["dep:tract-onnx", "dep:tract-linalg"]
 
+# Lint configuration for the clippy gate in `.github/workflows/unit-tests.yml`, which runs
+# `--all-targets -D warnings`. A `[lints]` table is used rather than crate-level `#![allow]`
+# attributes because it covers every target in the package -- the integration tests under
+# `tests/` are separate crates, and would otherwise each need their own copy.
+#
+# Both allows below are deliberate and were weighed in #148 against the alternative of
+# rewriting the ~190 sites they cover. Anything outside these two is expected to be fixed
+# rather than allowed, and a new `#[allow]` anywhere in the tree should carry a comment
+# saying why.
+[lints.clippy]
+# 144 occurrences. The lint assumes an index exists only to reach an element, so iterating
+# the slice directly would say the same thing more clearly. That does not hold in indexing
+# heavy numerical code, where the index is usually itself a quantity in the maths:
+#   - `fft.rs::fftfreq` computes `freq[i] = (i as f64) * val`, so `i` is the frequency,
+#     not merely where the frequency goes.
+#   - `kernels/dipole.rs` walks `nx`/`ny`/`nz` reading three separate axis arrays and
+#     writing one flat Fortran-order buffer, so no single slice is "the" iteration target.
+#   - `inversion/tgv.rs` reads `stencil_positions[p]` and `stencil_positions[25 - p]` in the
+#     same body, which an iterator cannot express without reintroducing the index.
+# Rewriting these makes the correspondence to the published algorithms harder to check,
+# which is the property that matters most in this crate.
+needless_range_loop = "allow"
+# 46 occurrences, 36 of which were examined and accepted during the API refactor that moved
+# these signatures to `&Grid` and `&*Params` structs. The remainder are the same shape: the
+# numerical kernels take the parameters the algorithms are defined in terms of. The lint's
+# threshold of 7 is not meaningful for them, and grouping arguments further purely to satisfy
+# it would add indirection without making any caller clearer.
+too_many_arguments = "allow"
+
 [dependencies]
 # FFT and complex number support
 rustfft = "6.2"

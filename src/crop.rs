@@ -337,7 +337,7 @@ mod tests {
             assert!(s >= n);
             let mut m = s;
             for p in [2, 3, 5, 7] {
-                while m % p == 0 {
+                while m.is_multiple_of(p) {
                     m /= p;
                 }
             }

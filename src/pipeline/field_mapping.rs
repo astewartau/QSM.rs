@@ -48,7 +48,7 @@ pub fn run_field_mapping(
                 got: p.len(),
             });
         }
-        if let Some(ref mags) = magnitudes {
+        if let Some(mags) = magnitudes {
             if i < mags.len() && mags[i].len() != n_voxels {
                 return Err(PipelineError::DimensionMismatch {
                     expected: n_voxels,
@@ -188,7 +188,7 @@ fn field_mapping_direct(
     for e in 0..n_echoes {
         let uw = unwrap_single(
             phases[e], mag_slices.first().copied().unwrap_or(&[]),
-            mask, &config, nx, ny, nz, vsx, vsy, vsz,
+            mask, config, nx, ny, nz, vsx, vsy, vsz,
             if e + 1 < n_echoes { Some(phases[e + 1]) } else { None },
             tes[e],
             if e + 1 < n_echoes { tes[e + 1] } else { 0.0 },

@@ -90,6 +90,11 @@ pub enum B0WeightType {
 }
 
 impl B0WeightType {
+    // Not `FromStr`: that trait returns `Result`, and this is deliberately infallible --
+    // an unrecognised name falls back to `PhaseSNR` so a stale config string degrades to the
+    // default weighting instead of failing the run. Renaming it would be a breaking change
+    // for the downstream config layers that call it.
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Self {
         match s.to_lowercase().as_str() {
             "phase_snr" | "phasesnr" => B0WeightType::PhaseSNR,
@@ -427,6 +432,9 @@ pub fn gaussian_box_sizes(sigma: f64, n: usize) -> Vec<usize> {
         let r = x.round();
         if (x - x.trunc()).abs() == 0.5 && r % 2.0 != 0.0 { r - x.signum() } else { r }
     }
+    // `!(sigma > 0.0)` rather than `sigma <= 0.0` so that a NaN sigma also takes the early
+    // return; the two are not equivalent on NaN, which is the whole point of the spelling.
+    #[allow(clippy::neg_cmp_op_on_partial_ord)]
     if !(sigma > 0.0) || n == 0 {
         return vec![1; n];
     }
@@ -511,7 +519,7 @@ pub fn nan_box_filter_line(line: &mut [f64], boxsize: usize, orig: &mut Vec<f64>
                 let trailing = if i >= 2 { orig[i - 2] } else { 0.0 };
                 lsum -= trailing;
                 line[i - 1] = (lsum - orig[i - 1]) / (bs - 2.0);
-                let prev = if i - 1 >= r { line[i - 1 - r] } else { line[i - 1] };
+                let prev = if i > r { line[i - 1 - r] } else { line[i - 1] };
                 let extrapolated = 2.0 * line[i - 1] - prev;
                 orig[i - 1 + 2 * r] = extrapolated;
                 if i + r < n {
@@ -2499,7 +2507,8 @@ mod tests {
         // Corrected phases should be in [-pi, pi] since wrap_to_pi is applied
         for cp in &corrected {
             for &v in cp {
-                assert!(v >= -PI - 1e-10 && v <= PI + 1e-10,
+                let (lo, hi) = (-PI - 1e-10, PI + 1e-10);
+                assert!((lo..=hi).contains(&v),
                     "corrected phase should be in [-pi, pi], got {}", v);
             }
         }
@@ -2618,10 +2627,10 @@ mod tests {
 
         // Large positive and negative values
         let v3 = wrap_to_pi(100.0 * PI);
-        assert!(v3 >= -PI && v3 <= PI, "should be in [-pi, pi], got {}", v3);
+        assert!((-PI..=PI).contains(&v3), "should be in [-pi, pi], got {}", v3);
 
         let v4 = wrap_to_pi(-100.0 * PI);
-        assert!(v4 >= -PI && v4 <= PI, "should be in [-pi, pi], got {}", v4);
+        assert!((-PI..=PI).contains(&v4), "should be in [-pi, pi], got {}", v4);
     }
 
     // =========================================================================
@@ -2696,7 +2705,6 @@ mod tests {
     #[test]
     fn test_bipolar_correction_3_echoes() {
         let (nx, ny, nz) = (8, 8, 8);
-        let n = nx * ny * nz;
         let tes = [0.005, 0.010, 0.015];
         let (phases, mags, mask) = make_synthetic_multi_echo(nx, ny, nz, &tes);
 
@@ -2719,11 +2727,10 @@ mod tests {
     fn test_bipolar_correction_2_echoes_noop() {
         // With only 2 echoes, bipolar correction should be a no-op
         let (nx, ny, nz) = (8, 8, 8);
-        let n = nx * ny * nz;
         let tes = [0.005, 0.010];
         let (phases, mags, mask) = make_synthetic_multi_echo(nx, ny, nz, &tes);
 
-        let original: Vec<Vec<f64>> = phases.iter().map(|p| p.clone()).collect();
+        let original: Vec<Vec<f64>> = phases.clone();
         let mut phases_mut = phases;
         bipolar_correction(
             &mut phases_mut, &mags, &tes, &mask,
@@ -2767,12 +2774,18 @@ mod tests {
     }
 
     // --- mcpc3ds_combine ---
+    /// `(phases, magnitudes, echo_times)`, each coil a `Vec` of per-echo volumes.
+    type SyntheticCoils = (Vec<Vec<Vec<f64>>>, Vec<Vec<Vec<f64>>>, Vec<f64>);
+
+    /// A per-coil phase offset as a function of voxel coordinates.
+    type OffsetFn = Box<dyn Fn(usize, usize, usize) -> f64>;
+
 
     /// Two coils with distinct smooth phase offsets over a linear field: the combined phase
     /// must be the pure field evolution 2π·f·TE_e, offsets gone.
-    fn synthetic_coils(nx: usize, ny: usize, nz: usize, tes: &[f64]) -> (Vec<Vec<Vec<f64>>>, Vec<Vec<Vec<f64>>>, Vec<f64>) {
+    fn synthetic_coils(nx: usize, ny: usize, nz: usize, tes: &[f64]) -> SyntheticCoils {
         let n = nx * ny * nz;
-        let offsets: Vec<Box<dyn Fn(usize, usize, usize) -> f64>> = vec![
+        let offsets: Vec<OffsetFn> = vec![
             Box::new(|x, _, _| 0.3 + 0.01 * x as f64),
             Box::new(|_, y, _| -1.0 + 0.02 * y as f64),
         ];

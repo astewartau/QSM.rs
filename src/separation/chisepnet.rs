@@ -144,7 +144,7 @@ pub fn chisepnet(
     model_onnx: &[u8],
     norm: &ChiSepNetNorm,
     params: &ChiSepNetParams,
-) -> Result<(Vec<f64>, Vec<f64>, Vec<f64>), OnnxError> {
+) -> Result<super::ChiSepMaps, OnnxError> {
     let (nx, ny, nz) = grid.dims;
     let (pd, ph, pw) = params.patch;
     for (axis, d) in [("D", pd), ("H", ph), ("W", pw)] {

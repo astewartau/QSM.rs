@@ -84,7 +84,7 @@ pub fn run_separation(
             let params = ChiSepIlsqrParams { cf, ..config.chi_sep_ilsqr.clone() };
             crate::separation::chi_sep_ilsqr(
                 inputs.local_field_ppm, r2prime, magnitude, inputs.qsm, mask,
-                &grid, bdir, &params, |i, k| progress(i, k),
+                &grid, bdir, &params, progress,
             )
         }
         SeparationAlgorithm::ChiSepMedi => {
@@ -93,7 +93,7 @@ pub fn run_separation(
             let params = ChiSepParams { cf, ..config.chi_sep_medi.clone() };
             crate::separation::chi_sep_medi(
                 inputs.local_field_ppm, r2prime, magnitude, mask,
-                &grid, bdir, &params, |i, k| progress(i, k),
+                &grid, bdir, &params, progress,
             )
         }
         SeparationAlgorithm::R2starQsm => {
@@ -110,14 +110,14 @@ pub fn run_separation(
         SeparationAlgorithm::WaveSep => {
             let r2prime = need(inputs.r2prime, "r2prime")?;
             crate::separation::wavesep(
-                inputs.qsm, r2prime, mask, &grid, &config.wavesep, |i, k| progress(i, k),
+                inputs.qsm, r2prime, mask, &grid, &config.wavesep, progress,
             )
         }
         SeparationAlgorithm::Decompose => {
             let magnitude = need(inputs.magnitude_multi, "magnitude_multi")?;
             let params = DecomposeParams { b0, ..config.decompose.clone() };
             crate::separation::decompose(
-                inputs.qsm, magnitude, &metadata.echo_times, mask, &params, |i, k| progress(i, k),
+                inputs.qsm, magnitude, &metadata.echo_times, mask, &params, progress,
             )
         }
         SeparationAlgorithm::HcChisep => {
@@ -126,7 +126,7 @@ pub fn run_separation(
             let params = HcChisepParams { b0, ..config.hc_chisep.clone() };
             crate::separation::hc_chisep(
                 inputs.qsm, r2prime, magnitude, &metadata.echo_times,
-                inputs.se_magnitude_multi, mask, &grid, &params, |i, k| progress(i, k),
+                inputs.se_magnitude_multi, mask, &grid, &params, progress,
             )
         }
         SeparationAlgorithm::SusepNet => {
@@ -150,7 +150,7 @@ fn run_susep_net(
     r2prime: &[f64],
     mask: &[u8],
     grid: &crate::Grid,
-) -> Result<(Vec<f64>, Vec<f64>, Vec<f64>), PipelineError> {
+) -> Result<crate::separation::ChiSepMaps, PipelineError> {
     let spec = crate::models::find_model("susep-net")
         .ok_or_else(|| PipelineError::InvalidConfig("susep-net not in model registry".into()))?;
     let bytes = crate::models::primary_weight_bytes(spec).map_err(PipelineError::InvalidConfig)?;
@@ -170,7 +170,7 @@ fn run_susep_net(
     _r2prime: &[f64],
     _mask: &[u8],
     _grid: &crate::Grid,
-) -> Result<(Vec<f64>, Vec<f64>, Vec<f64>), PipelineError> {
+) -> Result<crate::separation::ChiSepMaps, PipelineError> {
     Err(PipelineError::InvalidConfig(
         "SUSEP-Net requires building qsm-core with the 'onnx' feature".into(),
     ))
@@ -184,7 +184,7 @@ fn run_chi_sepnet(
     r2prime: &[f64],
     mask: &[u8],
     grid: &crate::Grid,
-) -> Result<(Vec<f64>, Vec<f64>, Vec<f64>), PipelineError> {
+) -> Result<crate::separation::ChiSepMaps, PipelineError> {
     let bytes = crate::models::primary_weight("chi-sepnet").map_err(PipelineError::InvalidConfig)?;
     crate::separation::chisepnet(
         local_field_ppm, qsm, r2prime, mask, grid, &bytes,
@@ -201,7 +201,7 @@ fn run_chi_sepnet(
     _r2prime: &[f64],
     _mask: &[u8],
     _grid: &crate::Grid,
-) -> Result<(Vec<f64>, Vec<f64>, Vec<f64>), PipelineError> {
+) -> Result<crate::separation::ChiSepMaps, PipelineError> {
     Err(PipelineError::InvalidConfig(
         "χ-sepnet requires building qsm-core with the 'onnx' feature".into(),
     ))

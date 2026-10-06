@@ -1,5 +1,15 @@
 //! Common test utilities for QSM-core integration tests
 
+// Cargo compiles this module separately into each of the 13 integration test binaries under
+// `tests/`, and each binary only calls the handful of helpers its own tests need. Every other
+// helper is unreachable *in that binary* and so reported as dead, even though it is used
+// elsewhere: `save_center_slices` has 91 call sites across `tests/` and is still flagged.
+// The warnings are an artifact of how the module is compiled, not a finding about the code --
+// every item here was checked against the rest of `tests/` and against this file's own
+// metrics structs, and none is genuinely unused. Allowed at module scope because there is no
+// per-binary granularity to be had.
+#![allow(dead_code)]
+
 use std::fs;
 use std::path::Path;
 use serde::Deserialize;
@@ -802,7 +812,7 @@ impl ChallengeMetrics {
 
         // Tissue mask: Thalamus (7), WM (8), GM (9)
         let tissue_mask: Vec<u8> = mask.iter().zip(segmentation)
-            .map(|(&m, &s)| if m > 0 && s >= 7 && s <= 9 { 1 } else { 0 })
+            .map(|(&m, &s)| if m > 0 && (7..=9).contains(&s) { 1 } else { 0 })
             .collect();
         let (_, nrmse_tissue) = nrmse_challenge(output, ground_truth, &tissue_mask);
 
@@ -815,7 +825,7 @@ impl ChallengeMetrics {
 
         // DGM mask: labels 1–6
         let dgm_mask: Vec<u8> = mask.iter().zip(segmentation)
-            .map(|(&m, &s)| if m > 0 && s >= 1 && s <= 6 { 1 } else { 0 })
+            .map(|(&m, &s)| if m > 0 && (1..=6).contains(&s) { 1 } else { 0 })
             .collect();
         let (_, nrmse_dgm) = nrmse_challenge(output, ground_truth, &dgm_mask);
 

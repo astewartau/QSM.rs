@@ -619,11 +619,14 @@ mod tests {
         }
         (cov / (va.sqrt() * vb.sqrt()), cov / va)
     }
+    /// `(wrapped, truth, ramp, blob, mask)`.
+    type RampPlusBlob = (Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>, Vec<u8>);
+
 
     /// A field split into a harmonic part (a linear ramp, ∇² = 0) and a non-harmonic part
     /// (a Gaussian blob), wrapped hard enough that unwrapping is doing real work.
     /// Returns (wrapped, truth, ramp, blob, mask).
-    fn ramp_plus_blob(n: usize) -> (Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>, Vec<u8>) {
+    fn ramp_plus_blob(n: usize) -> RampPlusBlob {
         let c = n as f64 / 2.0;
         let total = n * n * n;
         let (mut truth, mut ramp, mut blob) = (vec![0.0; total], vec![0.0; total], vec![0.0; total]);

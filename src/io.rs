@@ -157,8 +157,11 @@ pub fn load_nifti(bytes: &[u8]) -> Result<NiftiData, String> {
     })
 }
 
+/// A loaded 4D volume: `(data, (nx, ny, nz, nt), (vsx, vsy, vsz), affine)`.
+pub type Nifti4d = (Vec<f64>, (usize, usize, usize, usize), (f64, f64, f64), [f64; 16]);
+
 /// Load a 4D NIfTI file from bytes (for multi-echo data)
-pub fn load_nifti_4d(bytes: &[u8]) -> Result<(Vec<f64>, (usize, usize, usize, usize), (f64, f64, f64), [f64; 16]), String> {
+pub fn load_nifti_4d(bytes: &[u8]) -> Result<Nifti4d, String> {
     let obj: InMemNiftiObject = if is_gzip(bytes) {
         let cursor = Cursor::new(bytes);
         let decoder = GzDecoder::new(cursor);
@@ -700,14 +703,14 @@ mod tests {
             0.0, 0.0, 0.0, 1.0,
         ];
 
-        let short = save_nifti(&vec![0.0; 6], dims, voxel_size, &affine).unwrap_err();
+        let short = save_nifti(&[0.0; 6], dims, voxel_size, &affine).unwrap_err();
         assert!(short.contains("2x2x2"), "{}", short);
         assert!(short.contains("8 voxels"), "{}", short);
         assert!(short.contains("6 values"), "{}", short);
 
-        assert!(save_nifti(&vec![0.0; 9], dims, voxel_size, &affine).is_err());
+        assert!(save_nifti(&[0.0; 9], dims, voxel_size, &affine).is_err());
         // Both the gzip and the file writers route through it.
-        assert!(save_nifti_gz(&vec![0.0; 6], dims, voxel_size, &affine).is_err());
+        assert!(save_nifti_gz(&[0.0; 6], dims, voxel_size, &affine).is_err());
     }
 
     #[test]
@@ -722,7 +725,7 @@ mod tests {
         ];
         for name in ["bad.nii", "bad.nii.gz"] {
             let path = dir.join(name);
-            let err = save_nifti_to_file(&path, &vec![0.0; 6], (2, 2, 2), (1.0, 1.0, 1.0), &affine)
+            let err = save_nifti_to_file(&path, &[0.0; 6], (2, 2, 2), (1.0, 1.0, 1.0), &affine)
                 .unwrap_err();
             assert!(err.contains(name), "{}", err);
             assert!(!path.exists(), "nothing may be written for a mismatch");
@@ -915,11 +918,13 @@ mod tests {
     #[test]
     fn test_affine_sform() {
         // Test with sform_code > 0
-        let mut header = NiftiHeader::default();
-        header.sform_code = 1;
-        header.srow_x = [1.0, 0.0, 0.0, 10.0];
-        header.srow_y = [0.0, 2.0, 0.0, 20.0];
-        header.srow_z = [0.0, 0.0, 3.0, 30.0];
+        let header = NiftiHeader {
+            sform_code: 1,
+            srow_x: [1.0, 0.0, 0.0, 10.0],
+            srow_y: [0.0, 2.0, 0.0, 20.0],
+            srow_z: [0.0, 0.0, 3.0, 30.0],
+            ..Default::default()
+        };
 
         let affine = get_affine(&header);
         assert_eq!(affine[0], 1.0);
@@ -980,7 +985,7 @@ mod tests {
     /// beside it. Both transforms now describe the same geometry.
     #[test]
     fn qform_agrees_with_sform_on_an_oblique_affine() {
-        let bytes = save_nifti(&vec![0.0; 24], (2, 3, 4), ISSUE_240_VOXEL, &ISSUE_240_AFFINE).unwrap();
+        let bytes = save_nifti(&[0.0; 24], (2, 3, 4), ISSUE_240_VOXEL, &ISSUE_240_AFFINE).unwrap();
         let (qcode, qto) = read_qform(&bytes);
         let (scode, sto) = read_sform(&bytes);
         assert_eq!((qcode, scode), (1, 1), "both transforms should be advertised");
@@ -1004,7 +1009,7 @@ mod tests {
                 0.0, 0.0, 0.0, 1.0,
             ]),
         ] {
-            let bytes = save_nifti(&vec![0.0; 24], (2, 3, 4), voxel, &affine).unwrap();
+            let bytes = save_nifti(&[0.0; 24], (2, 3, 4), voxel, &affine).unwrap();
             let qfac = f32::from_le_bytes(bytes[76..80].try_into().unwrap());
             assert_eq!(qfac, -1.0, "{label}: pixdim[0] should flag the reflection");
             let (code, qto) = read_qform(&bytes);
@@ -1035,7 +1040,7 @@ mod tests {
             [1.0, 0.3, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0],
         ] {
             let vs = voxel_sizes(&affine);
-            let bytes = save_nifti(&vec![0.0; 24], (2, 3, 4), vs, &affine).unwrap();
+            let bytes = save_nifti(&[0.0; 24], (2, 3, 4), vs, &affine).unwrap();
             let qfac = f32::from_le_bytes(bytes[76..80].try_into().unwrap());
             assert!(qfac == 1.0 || qfac == -1.0, "pixdim[0] = {qfac}");
         }
@@ -1048,13 +1053,16 @@ mod tests {
         };
         (n(0), n(1), n(2))
     }
+    /// A labelled geometry case: `(description, voxel size, 4x4 affine)`.
+    type AffineCase = (&'static str, (f64, f64, f64), [f64; 16]);
+
 
     /// A qform cannot express shear, and a qform that silently disagrees with the sform is the
     /// bug this whole thing is about. So an affine no quaternion reproduces is written with
     /// `qform_code = 0`, which is spec-legal and sends readers to the sform.
     #[test]
     fn an_affine_no_quaternion_describes_gets_no_qform() {
-        let cases: [(&str, (f64, f64, f64), [f64; 16]); 3] = [
+        let cases: [AffineCase; 3] = [
             ("sheared", (1.0, 1.0, 1.0), [
                 1.0, 0.3, 0.0, 0.0,
                 0.0, 1.0, 0.0, 0.0,
@@ -1077,7 +1085,7 @@ mod tests {
             ]),
         ];
         for (label, voxel, affine) in cases {
-            let bytes = save_nifti(&vec![0.0; 24], (2, 3, 4), voxel, &affine).unwrap();
+            let bytes = save_nifti(&[0.0; 24], (2, 3, 4), voxel, &affine).unwrap();
             assert_eq!(read_qform(&bytes).0, 0, "{label}: should advertise no qform");
             assert_eq!(read_sform(&bytes).0, 1, "{label}: the sform still carries the geometry");
             // The quaternion fields stay zero, so nothing is left for a reader to misinterpret.
@@ -1089,7 +1097,7 @@ mod tests {
     /// whichever one a reader is left with.
     #[test]
     fn qform_and_sform_round_trip_to_the_same_affine() {
-        let affines: [(&str, (f64, f64, f64), [f64; 16]); 4] = [
+        let affines: [AffineCase; 4] = [
             ("axial anisotropic", (1.0, 1.0, 2.0), [
                 1.0, 0.0, 0.0, -10.0,
                 0.0, 1.0, 0.0, -20.0,
@@ -1112,7 +1120,7 @@ mod tests {
             ]),
         ];
         for (label, voxel, affine) in affines {
-            let bytes = save_nifti(&vec![0.0; 24], (2, 3, 4), voxel, &affine).unwrap();
+            let bytes = save_nifti(&[0.0; 24], (2, 3, 4), voxel, &affine).unwrap();
             let (qcode, qto) = read_qform(&bytes);
             let (scode, sto) = read_sform(&bytes);
             assert_eq!((qcode, scode), (1, 1), "{label}");
@@ -1139,16 +1147,18 @@ mod tests {
         let voxel = (0.8, 0.8, 3.0);
         let q = qform_for(&affine, voxel).expect("a cardinal permutation has a quaternion");
 
-        let mut header = NiftiHeader::default();
-        header.sform_code = 0;
-        header.qform_code = 1;
-        header.quatern_b = q.quatern[0] as f32;
-        header.quatern_c = q.quatern[1] as f32;
-        header.quatern_d = q.quatern[2] as f32;
-        header.quatern_x = q.offset[0] as f32;
-        header.quatern_y = q.offset[1] as f32;
-        header.quatern_z = q.offset[2] as f32;
-        header.pixdim = [q.qfac as f32, 0.8, 0.8, 3.0, 1.0, 1.0, 1.0, 1.0];
+        let mut header = NiftiHeader {
+            sform_code: 0,
+            qform_code: 1,
+            quatern_b: q.quatern[0] as f32,
+            quatern_c: q.quatern[1] as f32,
+            quatern_d: q.quatern[2] as f32,
+            quatern_x: q.offset[0] as f32,
+            quatern_y: q.offset[1] as f32,
+            quatern_z: q.offset[2] as f32,
+            pixdim: [q.qfac as f32, 0.8, 0.8, 3.0, 1.0, 1.0, 1.0, 1.0],
+            ..Default::default()
+        };
 
         let got = get_affine(&header);
         assert!(max_abs_diff(&got, &affine) < 1e-4, "{got:?}");

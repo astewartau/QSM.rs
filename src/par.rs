@@ -102,7 +102,7 @@ macro_rules! maybe_par_map_init {
 macro_rules! maybe_par_map_init {
     ($slice:expr, $init:expr, $f:expr) => {{
         let mut state = ($init)();
-        let mut f = $f;
+        let f = $f;
         $slice.iter().map(move |item| f(&mut state, item))
     }};
 }

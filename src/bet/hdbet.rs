@@ -514,7 +514,7 @@ mod tests {
         assert!(header.contains("'<f4'") && header.contains("'fortran_order': False"), "{header}");
         let shape_str = header.split("'shape': (").nth(1).unwrap().split(')').next().unwrap();
         let shape: Vec<usize> = shape_str.split(',').filter_map(|s| s.trim().parse().ok()).collect();
-        let data = b[off + hlen..].chunks_exact(4).map(|c| f32::from_le_bytes(c.try_into().unwrap())).collect();
+        let data = b[off + hlen..].as_chunks::<4>().0.iter().map(|c| f32::from_le_bytes(*c)).collect();
         (shape, data)
     }
 

@@ -81,7 +81,7 @@ fn apply_dipole(
     }
     fft_ws.fft3d(buf);
     for i in 0..x.len() {
-        buf[i] = buf[i] * k[i];
+        buf[i] *= k[i];
     }
     fft_ws.ifft3d(buf);
     for i in 0..x.len() {
