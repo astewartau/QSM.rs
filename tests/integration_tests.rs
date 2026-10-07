@@ -18,7 +18,9 @@ use qsm_core::inversion::{TvParams, NltvParams, RtsParams, MediParams, TfiParams
 use qsm_core::inversion::{NdiParams, FansiParams, L1QsmParams, WhQsmParams, HdQsmParams, AmpPeParams};
 use qsm_core::inversion::{LsqrQsmParams, HeidiParams};
 use qsm_core::swi;
-use qsm_core::unwrap::{laplacian_unwrap, unwrap_bestpath, BestPathParams, UnwrapMethod};
+use qsm_core::unwrap::{
+    laplacian_unwrap, unwrap_bestpath, unwrap_prelude, BestPathParams, PreludeParams, UnwrapMethod,
+};
 use qsm_core::unwrap::romeo::{unwrap_romeo_multi_echo, RomeoParams};
 use qsm_core::pipeline;
 use qsm_core::utils::{
@@ -123,6 +125,35 @@ fn run_field_mapping_bestpath(data: &common::TestData) -> Vec<f64> {
     let unwrapped: Vec<Vec<f64>> = corrected_phases
         .iter()
         .map(|p| unwrap_bestpath(p, &data.mask, &params, &grid))
+        .collect();
+
+    calculate_b0_weighted(
+        &unwrapped, &data.mag_echoes, &data.echo_times, &data.mask,
+        B0WeightType::PhaseSNR, &grid,
+    )
+}
+
+/// Field mapping via PRELUDE unwrapping. Returns B0 in Hz.
+///
+/// Same shape as `run_field_mapping_bestpath`, including `correct_global`, which
+/// matters here for the same reason: PRELUDE fixes each echo's phase only up to a
+/// whole number of turns per connected set of regions, and a per-echo constant would
+/// bias the per-voxel fit over TE.
+fn run_field_mapping_prelude(data: &common::TestData) -> Vec<f64> {
+    let (nx, ny, nz) = data.dims;
+    let (vsx, vsy, vsz) = data.voxel_size;
+    let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
+
+    let (corrected_phases, _offset) = phase_offset_removal(
+        &data.phase_echoes, &data.mag_echoes, &data.echo_times, &data.mask,
+        [10.0, 10.0, 5.0], [0, 1], UnwrapMethod::Romeo,
+        &grid,
+    );
+
+    let params = PreludeParams { correct_global: true, ..Default::default() };
+    let unwrapped: Vec<Vec<f64>> = corrected_phases
+        .iter()
+        .map(|p| unwrap_prelude(p, &data.mask, &grid, &params))
         .collect();
 
     calculate_b0_weighted(
@@ -1459,6 +1490,7 @@ fn unwrap_then_bfr(data: &common::TestData, unwrapper: Unwrapper) -> (Vec<f64>, 
         Unwrapper::Romeo => run_field_mapping(data),
         Unwrapper::LaplacianNeumann => run_field_mapping_laplacian(data),
         Unwrapper::BestPath => run_field_mapping_bestpath(data),
+        Unwrapper::Prelude => run_field_mapping_prelude(data),
     };
 
     let gamma = 42.576e6_f64;
@@ -1476,6 +1508,7 @@ enum Unwrapper {
     Romeo,
     LaplacianNeumann,
     BestPath,
+    Prelude,
 }
 
 fn run_unwrap_bfr_case(label: &str, unwrapper: Unwrapper, slug: &str) -> TestResult {
@@ -1519,6 +1552,24 @@ fn test_pipeline_unwrap_bfr_bestpath() {
     assert!(
         res.correlation > 0.45,
         "Best-path local field correlation too low: {}",
+        res.correlation
+    );
+}
+
+/// PRELUDE (Jenkinson): best-pair-first region merging.
+///
+/// The reference unwrapper the literature benchmarks against, so what this test is for
+/// is the comparison itself — PRELUDE, ROMEO and best path all leave the harmonic
+/// background alone, so after the same background removal their local fields should
+/// land together. They do: correlations of 0.615, 0.592 and 0.602 on this phantom,
+/// which is a tighter spread than any of them is from ground truth.
+#[test]
+#[ignore]
+fn test_pipeline_unwrap_bfr_prelude() {
+    let res = run_unwrap_bfr_case("PRELUDE + V-SHARP", Unwrapper::Prelude, "prelude");
+    assert!(
+        res.correlation > 0.45,
+        "PRELUDE local field correlation too low: {}",
         res.correlation
     );
 }

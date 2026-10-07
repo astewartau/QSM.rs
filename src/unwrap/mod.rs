@@ -6,6 +6,8 @@
 //!   quality-guided ordering ([`RomeoParams`])
 //! - [`unwrap_bestpath`] — best path (3D-SRNCP), globally sorted edge merging
 //!   ([`BestPathParams`])
+//! - [`unwrap_prelude`] — PRELUDE, best-pair-first region merging ([`PreludeParams`]);
+//!   the literature's reference unwrapper, kept as a baseline rather than a default
 //! - [`laplacian_unwrap`] — Laplacian unwrapping (Neumann BC on the array)
 //! - [`laplacian_unwrap_bfr`] — Laplacian unwrapping **+ background field removal**
 //!   (∇² masked to the ROI); see the [`laplacian`] module docs for why these differ
@@ -17,6 +19,7 @@
 pub mod romeo;
 pub mod bestpath;
 pub mod laplacian;
+pub mod prelude;
 pub mod slicewise;
 
 pub use romeo::{
@@ -25,6 +28,7 @@ pub use romeo::{
     RomeoParams, RomeoWeightType,
 };
 pub use bestpath::{unwrap_bestpath, BestPathParams};
+pub use prelude::{unwrap_prelude, PreludeParams};
 pub use slicewise::{
     unwrap_slicewise, unwrap_slicewise_multi_echo, enforce_inter_echo_consistency,
     SliceWiseParams,
@@ -48,4 +52,7 @@ pub enum UnwrapMethod {
     /// algorithm, not ROMEO run with best-path weights — for that, set
     /// [`RomeoParams::bestpath`].
     BestPath,
+    /// PRELUDE (Jenkinson); see [`unwrap_prelude`]. The unwrapper the literature
+    /// benchmarks against, kept so those comparisons can be read against this crate.
+    Prelude,
 }

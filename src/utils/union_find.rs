@@ -65,8 +65,9 @@ impl UnionFind {
     }
 
     /// Number of elements in the set containing `i`.
-    // Part of the DSU surface rather than a current caller's need: best-path
-    // unwrapping never asks for set sizes, PRELUDE's region merging will.
+    // Part of the DSU surface rather than a current caller's need. Neither
+    // best-path nor PRELUDE asks for set sizes -- both let `union_with_delta`
+    // weigh the trees for them -- so the only callers are this module's tests.
     #[allow(dead_code)]
     pub(crate) fn set_size(&mut self, i: usize) -> usize {
         let (root, _) = self.find(i);

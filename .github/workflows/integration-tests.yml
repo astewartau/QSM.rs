@@ -71,7 +71,7 @@ jobs:
           all_bgremove='["test_bgremove_sharp","test_bgremove_resharp","test_bgremove_vsharp","test_bgremove_pdf","test_bgremove_ismv","test_bgremove_lbv"]'
           all_inversion='["test_inversion_tkd","test_inversion_tsvd","test_inversion_tikhonov","test_inversion_tv","test_inversion_rts","test_inversion_ilsqr","test_inversion_medi","test_inversion_nltv","test_inversion_ndi","test_inversion_fansi","test_inversion_fansi_tgv","test_inversion_l1qsm","test_inversion_whqsm","test_inversion_hdqsm","test_inversion_amp_pe","test_inversion_lsqr","test_inversion_heidi","test_multiorient_cosmos","test_multiorient_sti","test_multiorient_coverage","test_multiorient_noise","test_multiorient_register","test_multiorient_register_capture_range"]'
           all_combined='["test_combined_tgv","test_combined_tfi"]'
-          all_pipeline='["test_pipeline_romeo_b0","test_pipeline_unwrap_bfr_romeo","test_pipeline_unwrap_bfr_laplacian_neumann","test_pipeline_unwrap_bfr_bestpath","test_unwrap_bfr_single_volume","test_pipeline_unwrap_bfr_stage_laplacian","test_pipeline_tgv","test_pipeline_qsmart","test_pipeline_qsmart_tikhonov","test_pipeline_harperella","test_pipeline_iharperella","test_bias_correction","test_swi","test_smwi","test_r2star_t2star","test_motion_correction","test_robust_echo_combination"]'
+          all_pipeline='["test_pipeline_romeo_b0","test_pipeline_unwrap_bfr_romeo","test_pipeline_unwrap_bfr_laplacian_neumann","test_pipeline_unwrap_bfr_bestpath","test_pipeline_unwrap_bfr_prelude","test_unwrap_bfr_single_volume","test_pipeline_unwrap_bfr_stage_laplacian","test_pipeline_tgv","test_pipeline_qsmart","test_pipeline_qsmart_tikhonov","test_pipeline_harperella","test_pipeline_iharperella","test_bias_correction","test_swi","test_smwi","test_r2star_t2star","test_motion_correction","test_robust_echo_combination"]'
           # χ-separation entries are whole test *binaries* (each runs several methods).
           all_chisep='["chisep_qsmci","chisep_relaxometry_qsmci","chisep_xsepnet","chisep_r2primenet","chisep_orientation"]'
           # Deep-learning models (in tests/dl_models.rs; weights fetched from the registry).
@@ -395,12 +395,13 @@ jobs:
               src/unwrap/mod.rs)      pipeline="$pipeline test_pipeline_tgv test_pipeline_qsmart test_pipeline_qsmart_tikhonov" ;;
               src/unwrap/romeo.rs)    pipeline="$pipeline test_pipeline_romeo_b0 test_pipeline_unwrap_bfr_romeo test_pipeline_tgv" ;;
               src/unwrap/bestpath.rs) pipeline="$pipeline test_pipeline_unwrap_bfr_bestpath test_pipeline_unwrap_bfr_romeo" ;;
+              src/unwrap/prelude.rs)  pipeline="$pipeline test_pipeline_unwrap_bfr_prelude test_pipeline_unwrap_bfr_romeo" ;;
               # 2D multi-slice: slice-wise unwrapping and the slice-gap refusal are
               # additive, so no existing pipeline test sees them; they have their own binary.
               src/unwrap/slicewise.rs|tests/multislice_2d.rs)
                 run_multislice=true ;;
-              # Best path is union_find's only caller today; PRELUDE will be the second.
-              src/utils/union_find.rs) pipeline="$pipeline test_pipeline_unwrap_bfr_bestpath" ;;
+              # Best path and PRELUDE are union_find's only callers.
+              src/utils/union_find.rs) pipeline="$pipeline test_pipeline_unwrap_bfr_bestpath test_pipeline_unwrap_bfr_prelude" ;;
               src/unwrap/laplacian.rs) pipeline="$pipeline test_pipeline_unwrap_bfr_laplacian_neumann test_unwrap_bfr_single_volume test_pipeline_unwrap_bfr_stage_laplacian test_pipeline_qsmart test_pipeline_qsmart_tikhonov test_pipeline_harperella test_pipeline_iharperella" ;;
 
               # Pipeline (combined algorithms + shared stages)
@@ -408,7 +409,7 @@ jobs:
                 echo "Pipeline core changed: $file → all tests"
                 output_all; exit 0 ;;
               src/pipeline/field_mapping.rs)
-                pipeline="$pipeline test_pipeline_romeo_b0 test_pipeline_unwrap_bfr_romeo test_pipeline_unwrap_bfr_laplacian_neumann test_pipeline_unwrap_bfr_bestpath test_unwrap_bfr_single_volume test_pipeline_unwrap_bfr_stage_laplacian test_pipeline_tgv test_pipeline_qsmart test_pipeline_qsmart_tikhonov" ;;
+                pipeline="$pipeline test_pipeline_romeo_b0 test_pipeline_unwrap_bfr_romeo test_pipeline_unwrap_bfr_laplacian_neumann test_pipeline_unwrap_bfr_bestpath test_pipeline_unwrap_bfr_prelude test_unwrap_bfr_single_volume test_pipeline_unwrap_bfr_stage_laplacian test_pipeline_tgv test_pipeline_qsmart test_pipeline_qsmart_tikhonov" ;;
               src/pipeline/bg_removal.rs)
                 bgremove="$bgremove test_bgremove_sharp test_bgremove_resharp test_bgremove_vsharp test_bgremove_pdf test_bgremove_ismv test_bgremove_lbv"
                 pipeline="$pipeline test_pipeline_harperella test_pipeline_iharperella" ;;
@@ -423,7 +424,7 @@ jobs:
 
               # Utils (QSMART components)
               src/utils/multi_echo.rs)
-                pipeline="$pipeline test_pipeline_romeo_b0 test_pipeline_unwrap_bfr_romeo test_pipeline_unwrap_bfr_laplacian_neumann test_pipeline_unwrap_bfr_bestpath test_unwrap_bfr_single_volume test_pipeline_unwrap_bfr_stage_laplacian test_pipeline_tgv test_pipeline_qsmart test_pipeline_qsmart_tikhonov test_robust_echo_combination" ;;
+                pipeline="$pipeline test_pipeline_romeo_b0 test_pipeline_unwrap_bfr_romeo test_pipeline_unwrap_bfr_laplacian_neumann test_pipeline_unwrap_bfr_bestpath test_pipeline_unwrap_bfr_prelude test_unwrap_bfr_single_volume test_pipeline_unwrap_bfr_stage_laplacian test_pipeline_tgv test_pipeline_qsmart test_pipeline_qsmart_tikhonov test_robust_echo_combination" ;;
               src/utils/vasculature.rs|src/utils/frangi.rs|src/utils/curvature.rs|src/utils/qsmart.rs)
                 pipeline="$pipeline test_pipeline_qsmart test_pipeline_qsmart_tikhonov" ;;
               src/utils/bias_correction.rs)
@@ -1920,7 +1921,7 @@ jobs:
               emit_figures bet
             fi
 
-            if [ -f "slices/unwrap_raw_romeo.bin" ] || [ -f "slices/unwrap_raw_laplacian_neumann.bin" ] || [ -f "slices/unwrap_raw_bestpath.bin" ]; then
+            if [ -f "slices/unwrap_raw_romeo.bin" ] || [ -f "slices/unwrap_raw_laplacian_neumann.bin" ] || [ -f "slices/unwrap_raw_bestpath.bin" ] || [ -f "slices/unwrap_raw_prelude.bin" ]; then
               echo "### Phase Unwrapping + B0 Estimation"
               echo "*MCPC-3D-S, then each unwrapper → total field map, beside the ground truth. These differ by an arbitrary harmonic field, which is expected of unwrappers; the like-for-like comparison is below.*"
               echo ""
@@ -1928,11 +1929,11 @@ jobs:
               echo ""
             fi
 
-            if TABLE=$(emit_table "test_pipeline_unwrap_bfr_" romeo laplacian_neumann bestpath stage_laplacian); then
+            if TABLE=$(emit_table "test_pipeline_unwrap_bfr_" romeo laplacian_neumann bestpath prelude stage_laplacian); then
               echo "### Unwrapper Comparison (local field, after background removal)"
               echo "*Each unwrapper → field map → V-SHARP → local field, vs ground truth.*"
               echo ""
-              echo "Total field maps differ between unwrappers by an arbitrary harmonic field, so they are compared after background removal. ROMEO, Laplacian and best path should land close. The last row drives the shared \`run_field_mapping\` stage, and is what catches a config selecting the wrong variant."
+              echo "Total field maps differ between unwrappers by an arbitrary harmonic field, so they are compared after background removal. ROMEO, Laplacian, best path and PRELUDE should land close. The last row drives the shared \`run_field_mapping\` stage, and is what catches a config selecting the wrong variant."
               echo ""
               echo "$TABLE"
             fi

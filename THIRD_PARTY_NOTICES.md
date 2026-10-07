@@ -53,3 +53,24 @@ IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
 ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 POSSIBILITY OF SUCH DAMAGE.
 ```
+
+---
+
+## Not consulted: FSL — `prelude.cc`
+
+`src/unwrap/prelude.rs` implements PRELUDE, whose reference implementation ships with
+FSL. **That source was not read or consulted**, and this crate carries nothing derived
+from it. The module was written from the published algorithm alone:
+
+- M. Jenkinson, "A Fast, Automated, N-Dimensional Phase Unwrapping Algorithm", FMRIB
+  Technical Report TR01MJ1 (2001).
+  <https://www.fmrib.ox.ac.uk/datasets/techrep/tr01mj1/tr01mj1.pdf>
+- M. Jenkinson, "Fast, automated, N-dimensional phase-unwrapping algorithm",
+  *Magnetic Resonance in Medicine* 49(1) (2003) 193–197.
+  <https://doi.org/10.1002/mrm.10354>
+
+The report specifies the algorithm completely, including its data-structure choices, so
+nothing had to be reverse-engineered. This entry is here because the omission is
+deliberate rather than an oversight: the FSL licence permits non-commercial use only
+and extends to "the Software or any derivative of it", which is incompatible with this
+crate's MIT licence. Anyone extending `prelude.rs` should work from the report too.

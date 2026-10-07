@@ -52,6 +52,7 @@ use crate::Grid;
 use crate::unwrap::romeo::{unwrap_romeo, RomeoParams};
 use crate::unwrap::laplacian::laplacian_unwrap;
 use crate::unwrap::bestpath::{unwrap_bestpath, BestPathParams};
+use crate::unwrap::prelude::{unwrap_prelude, PreludeParams};
 use crate::unwrap::UnwrapMethod;
 
 const TWO_PI: f64 = 2.0 * PI;
@@ -384,6 +385,9 @@ pub fn phase_offset_removal(
         UnwrapMethod::BestPath => {
             unwrap_bestpath(&hip_phase, mask, &BestPathParams::default(), grid)
         }
+        UnwrapMethod::Prelude => {
+            unwrap_prelude(&hip_phase, mask, grid, &PreludeParams::default())
+        }
     };
     drop(hip_phase);
     drop(hip_mag);
@@ -701,6 +705,7 @@ pub fn mcpc3ds_combine<P: AsRef<[f64]>, M: AsRef<[f64]>>(
         UnwrapMethod::Romeo => unwrap_romeo(&hip_phase, &weight, None, 0.0, 0.0, &mask, &RomeoParams::default(), grid),
         UnwrapMethod::Laplacian => laplacian_unwrap(&hip_phase, &mask, grid),
         UnwrapMethod::BestPath => unwrap_bestpath(&hip_phase, &mask, &BestPathParams::default(), grid),
+        UnwrapMethod::Prelude => unwrap_prelude(&hip_phase, &mask, grid, &PreludeParams::default()),
     };
     drop(hip_phase);
     drop(weight);
