@@ -4,19 +4,20 @@ Compiled 2026-10-07 against DIP-UP @ `bae8a90` and the QSM.rs 7 T simulation pha
 
 **Verdict: export works, accuracy does not. Not shipped.** Both pretrained networks export to ONNX
 cleanly and `tract` reproduces PyTorch exactly (corr 1.00000000, zero wrap-class disagreement), so
-the engineering path is proven and cheap. But on this repo's own phantom the pretrained network
-**without** the test-time Deep Image Prior loop reaches a total-field correlation of **0.24**
-(PhaseNet3D) / **0.11** (PHU-NET3D) against **0.68** for ROMEO and best-path, which are already in
-the crate, run 40–300× faster, and need no 15 GB forward pass. Measuring the DIP loop shows it does **not**
-account for that gap. So no `UnwrapMethod` variant was added, no registry entry, and no weights were
-uploaded.
+the engineering path is proven and cheap. But carried through the full chain on this repo's own
+phantom, the pretrained network **without** the test-time Deep Image Prior loop yields a
+susceptibility map correlating **0.023** (PhaseNet3D) / **0.018** (PHU-NET3D) with ground truth,
+against **0.44–0.50** for the three classical unwrappers already in the crate, which run 40–300×
+faster and need no 15 GB forward pass. Measuring the DIP loop shows it does **not** account for that
+gap. So no `UnwrapMethod` variant was added, no registry entry, and no weights were uploaded.
 
 This supersedes the one-line DIP-UP row in [`DL_ONNX_SCOPING.md`](DL_ONNX_SCOPING.md) (Bucket C),
 which called the method architecturally incompatible with ONNX. That is right about the *method* and
 wrong about its *pretrained half*: the CNN exports fine. The blocker is accuracy, not architecture.
 
 Everything below is reproducible with `qsmci/scripts/onnx-export/reference/ref_dipup.py` plus
-`dipup_baseline.rs` and `dipup_tract_parity.rs` beside it. Conversion details, hashes and the
+`dipup_baseline.rs`, `dipup_downstream.rs`, `dipup_tract_parity.rs` and `dipup_figure.py` beside it
+(the `.rs` files copy into `examples/`). Conversion details, hashes and the
 upstream-divergence notes live in that directory's
 [`PROVENANCE.md`](../../qsmci/scripts/onnx-export/PROVENANCE.md). None of this is a CI gate (#140).
 
@@ -116,8 +117,13 @@ cannot serve as a wrap-count reference; its 46–70% agreement reflects that, no
 The 9 classes are adequate: 100% / 99.97% / 99.78% / 99.08% of in-mask voxels need an `n` inside
 `[−5, +3]`. Representability is not the problem.
 
-The number that matters is not raw accuracy — the reference is mostly zero, so "predict no wraps
-anywhere" already scores well, and any accuracy figure has to be read against it. Full volume, best
+Read this section with §4.5 in mind: wrap-count agreement is a *diagnostic*, not a quality score.
+An unwrapper can disagree with ROMEO everywhere and still be excellent, provided the disagreement is
+a smooth harmonic field — Laplacian unwrapping does exactly that. What the numbers below are good
+for is characterising *how* the CNNs differ, not deciding whether they are acceptable.
+
+With that caveat: the number that matters is not raw accuracy — the reference is mostly zero, so
+"predict no wraps anywhere" already scores well, and any accuracy figure has to be read against it. Full volume, best
 global integer shift granted (it comes out 0 everywhere). `n≠0` columns are accuracy restricted to
 the voxels that actually need unwrapping:
 
@@ -149,7 +155,7 @@ Each decided by measurement, so the numbers above are not an artefact of a bad g
   identity all land within ~2 pp of each other, and **ablating the channel to zeros costs only
   ~1.5–6 pp**. Note QSM-CI's wrapper uses a kernel that is not the one the repo ships.
 
-### 4.4 The deliverable metric: total field after the echo fit
+### 4.4 Total field after the echo fit — a weak metric, shown for completeness
 
 Per-echo unwrap → per-voxel linear fit over TE → ppm, scored against the phantom ground-truth field
 map. Identical echo-fit maths for every row, so this is a like-for-like comparison.
@@ -163,11 +169,47 @@ map. Identical echo-fit maths for every row, so this is a like-for-like comparis
 | pretrained **PHU-NET3D**, no DIP | 0.10774 | 1.1812 |
 | *no unwrapping at all* | 0.02833 | 1.0439 |
 
-Both networks land far below all three classical unwrappers, and their NRMSE is no better than doing
-nothing. (The absolute ceiling of 0.68 is low because this simple echo fit does not remove the
-phantom's receive offset and shim field; that limit applies equally to every row.)
+Both networks land far below all three classical unwrappers. But **this table should not be used to
+decide anything**, for two reasons. The 0.68 ceiling is low because this simple echo fit leaves the
+phantom's receive offset and shim field in, so the metric is dominated by something unwrapping is
+not responsible for. More fundamentally, unwrapping has no unique correct answer: two unwrappings
+differing by a *harmonic* field produce the **same** local field once background-field removal has
+run, so penalising that difference here is meaningless. §4.5 does the comparison properly.
 
-### 4.5 Cost
+### 4.5 The comparison that actually decides it — carry each unwrapper through to χ
+
+Same per-echo unwrapped phase → linear fit over TE → **V-SHARP** → **RTS**, scored against ground
+truth at each stage (local field and χ on V-SHARP's eroded mask, which is what a real pipeline
+carries forward):
+
+| unwrapper | total field | local field (V-SHARP) | **χ (RTS)** |
+|---|---|---|---|
+| | corr / NRMSE | corr / NRMSE | corr / NRMSE |
+| ROMEO | 0.6811 / 0.7324 | 0.4824 / 1.0141 | 0.4448 / 0.9945 |
+| best path | 0.6782 / 0.7351 | 0.4608 / 1.0537 | 0.4293 / 1.0201 |
+| **Laplacian** | 0.5411 / 0.8417 | **0.5190** / 0.9229 | **0.4980** / 0.9019 |
+| PhaseNet3D | 0.2386 / 1.0301 | 0.0309 / 6.2230 | **0.0231** / 5.7363 |
+| PHU-NET3D | 0.1077 / 1.1812 | 0.0340 / 9.4512 | **0.0178** / 8.8575 |
+
+**The Laplacian row is the proof that §4.2 and §4.4 are the wrong yardsticks.** Laplacian unwrapping
+disagrees with ROMEO's wrap count at **53.6%** of voxels and comes *last* on total field (0.541) —
+yet it comes **first** on χ (0.498, ahead of ROMEO's 0.445). Its disagreement with ROMEO is a smooth,
+large-scale, harmonic field, so V-SHARP deletes it and nothing reaches the susceptibility map. A
+wrap-count or total-field score cannot distinguish that from a real error, and would have ranked
+Laplacian last.
+
+**The CNNs fail the opposite way, and background-field removal makes it worse rather than better.**
+Their χ correlation collapses to 0.02 and NRMSE rises to 6–9×. Their wrap errors are *scattered*:
+measured as the fraction of in-mask voxels where the wrap error changes between neighbours, they sit
+at 20–26% against a 33–36% error rate — i.e. mostly small, speckled clusters rather than a few large
+regions. Each is a 2π discontinuity, which is high-spatial-frequency and non-harmonic, so SMV
+filtering cannot remove it and the dipole inversion amplifies it. Visually the unwrapped phase is
+blocky and the residual fringe pattern is still present, and the resulting χ maps are blown out.
+
+So the conclusion survives the correct test — but it rests on χ, not on phase correlation, and the
+reason is the *character* of the error (scattered 2π steps) rather than its magnitude.
+
+### 4.6 Cost
 
 | | ROMEO / best path / Laplacian | pretrained CNN (whole volume, CPU) |
 |---|---|---|
@@ -194,8 +236,8 @@ unwrapping falls 18 pp. That is what the losses ask for — masked TV penalises 
 the unwrapped phase, and a constant count field minimises it. PhaseNet3D does genuinely improve on
 the n≠0 voxels (+6.4 pp), but its aggregate stays ~21 pp *below* the trivial baseline.
 
-Either way the movement is single-to-double-digit percentage points, against a gap from 0.24 to 0.68
-in field correlation. **The missing loop does not explain the shortfall.** Caveats, stated plainly:
+Either way the movement is single-to-double-digit percentage points in wrap-count agreement, against
+a gap in χ correlation from 0.02 to 0.44. **The missing loop does not explain the shortfall.** Caveats, stated plainly:
 this is 100 iterations rather than the repo's 2000, on a patch rather than the whole volume, on
 out-of-distribution 7 T data. The learning-rate schedule is self-limiting (by iteration 100 the rate
 is already down to 3.5e-7 and both curves are flattening), so more iterations would not change the
