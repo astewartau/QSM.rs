@@ -402,7 +402,10 @@ fn sort_edges(edges: &mut [Edge]) {
 
 /// Subtract the median wrap count over the mask, so the result stays centred near
 /// the input range. Mirrors ROMEO's `correct_global_offset`.
-fn correct_global_offset(phase: &mut [f64], mask: &[u8]) {
+///
+/// Shared with [`unwrap_prelude`](super::unwrap_prelude), which has the same freedom
+/// in its output and resolves it the same way.
+pub(super) fn correct_global_offset(phase: &mut [f64], mask: &[u8]) {
     let mut wraps: Vec<f64> = phase
         .iter()
         .enumerate()

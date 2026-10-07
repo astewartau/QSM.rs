@@ -44,7 +44,7 @@
 //!
 //! **Algorithm building blocks**
 //! - [`bet`] — brain extraction (BET)
-//! - [`unwrap`] — phase unwrapping (ROMEO, Laplacian)
+//! - [`unwrap`] — phase unwrapping (ROMEO, Laplacian, best path, PRELUDE)
 //! - [`bgremove`] — background field removal (V-SHARP, SHARP, RESHARP, PDF, iSMV, mSMV, LBV, HARPERELLA)
 //! - [`inversion`] — dipole inversion (TKD, TSVD, Tikhonov, TV, NLTV, RTS, MEDI, iLSQR, TGV)
 //! - [`separation`] — paramagnetic/diamagnetic source separation (χ-separation, R2\*-QSM, WaveSep)
@@ -68,7 +68,7 @@
 //! | Stage | Methods |
 //! |-------|---------|
 //! | Brain extraction | BET |
-//! | Phase unwrapping | ROMEO, Laplacian |
+//! | Phase unwrapping | ROMEO, Laplacian, best path (3D-SRNCP), PRELUDE |
 //! | Background removal | V-SHARP, SHARP, RESHARP, PDF, iSMV, LBV, SDF |
 //! | Dipole inversion | TKD, TSVD, Tikhonov, TV-ADMM, NLTV, RTS, MEDI, TGV, iLSQR |
 //! | Combined unwrap+BFR | HARPERELLA, iHARPERELLA |

@@ -356,7 +356,7 @@ SUPPLEMENTARY = ("stage_supplementary", "Supplementary outputs", None, None, [
 # like-for-like comparison is the local-field table.
 MONTAGES.append(("stage_unwrap", "Unwrapped total field maps", "ppm", (-0.05, 0.05), [
     ["ground_truth_total_field", "unwrap_raw_romeo", "unwrap_raw_laplacian_neumann",
-     "unwrap_raw_bestpath"],
+     "unwrap_raw_bestpath", "unwrap_raw_prelude"],
 ], None))
 
 # `multiorient_register` is COSMOS over orientations that were *not* pre-registered: the
