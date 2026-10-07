@@ -198,6 +198,17 @@ large-scale, harmonic field, so V-SHARP deletes it and nothing reaches the susce
 wrap-count or total-field score cannot distinguish that from a real error, and would have ranked
 Laplacian last.
 
+![the whole chain](figures/dipup_chain.png)
+
+![why phase-domain scoring misleads](figures/dipup_error_character.png)
+
+The difference is not blockiness but *continuity*. Measured as the mean absolute fractional part
+of `(unwrapped − unwrapped_ROMEO)/2π` over the mask at echo 4: **Laplacian 0.2505** — a smooth,
+continuously varying field — against **0.0000** for PhaseNet3D, PHU-NET3D and best path, whose
+differences are *exactly* integer multiples of 2π and therefore genuinely discontinuous. (Plotting
+the *rounded* wrap-count difference hides this: rounding a smooth field makes it look piecewise
+constant too.)
+
 **The CNNs fail the opposite way, and background-field removal makes it worse rather than better.**
 Their χ correlation collapses to 0.02 and NRMSE rises to 6–9×. Their wrap errors are *scattered*:
 measured as the fraction of in-mask voxels where the wrap error changes between neighbours, they sit
