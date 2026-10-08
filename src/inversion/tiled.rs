@@ -69,12 +69,14 @@ const WASM_TILE_ACTIVATION_BUDGET: u64 = 1_500_000_000;
 /// 4 GB ceiling a tiled run occupies is set by the pool size and the patch size together — and by
 /// nothing else, the volume included. Tiling a bigger volume adds tiles, not concurrent ones.
 ///
-/// Measured in Chromium (cross-origin-isolated, 14 hardware threads), the wasm heap high-water
-/// tracked the per-patch arithmetic: at 64³ patches, 1.10 GB with a 4-thread pool — which is
-/// 4 × 269.5 MB plus the 11 MB base — and 2.6–2.8 GB with 14. Raising the core one step is what
-/// makes it dangerous: `core: 96` (104³ patches, 1.24 GB each) on a 4-thread pool peaked at
-/// **3.71 GB, 93% of the ceiling**, and that ceiling is hard — crossing it aborts the module
-/// rather than degrading. Nothing in the library noticed (astewartau/QSM.rs#89).
+/// Measured in Chromium (cross-origin-isolated) before this cap existed, the wasm heap high-water
+/// tracked the per-patch arithmetic: at 64³ patches, 1.1–1.4 GB with a 4-thread pool — 4 ×
+/// 269.5 MB plus a ~11 MB base and allocator slack — and 2.6–3.4 GB with 14. Raising the core one
+/// step is what makes it dangerous: `core: 96` (104³ patches, 1.24 GB each) on a 4-thread pool
+/// peaked at **4.24 GB, 98.7% of the ceiling**. It did not abort there. It finished one
+/// inference and then stopped making progress, never completing a second within 30 minutes —
+/// a stall with no error, which is harder to diagnose than a crash. Nothing in the library
+/// noticed (astewartau/QSM.rs#89).
 ///
 /// So on WASM the count is whatever fits [`WASM_TILE_ACTIVATION_BUDGET`], and never more than the
 /// pool. That bounds the heap by patch size rather than by core count: 5 tiles at 64³, and one at
