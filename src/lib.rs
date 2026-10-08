@@ -231,6 +231,23 @@ pub mod crop;
 /// resampled in the complex domain — see [`geometry::resample_complex_to_axial`].
 pub mod geometry;
 
+/// EPI susceptibility distortion correction: applying a B0 field map to unwarp echo-planar data.
+///
+/// An echo-planar readout displaces signal by several voxels along the phase-encode axis
+/// wherever B0 is off-resonance, which is worst in exactly the regions QSM is usually measuring.
+/// This applies a field map that already exists — from any of the four BIDS fieldmap cases, or
+/// from `topup` — rather than estimating one; see the module docs for why that division of
+/// labour, and for the pile-up condition under which the distortion is not invertible at all.
+///
+/// It is the first thing a pipeline does, ahead of co-registration ([`registration`]) and field
+/// mapping, so the phase QSM inverts was never distorted and what remains between two volumes
+/// acquired at different head positions really is rigid. The phase-encode axis the displacement
+/// runs along is fixed in the scanner, so when the head rotates the same anatomy is smeared in a
+/// different head-frame direction — a difference no rigid transform can absorb, worth half a
+/// voxel at the few degrees of inter-echo motion and several voxels at the ±25° a
+/// multi-orientation acquisition uses by design.
+pub mod distortion;
+
 /// Rigid-body (6-DOF) registration between two volumes: recovering the transform that
 /// [`geometry`] can already apply.
 ///
