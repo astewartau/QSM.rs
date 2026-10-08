@@ -4,6 +4,8 @@
 //! - SHARP: Sophisticated harmonic artifact reduction for phase data
 //! - RESHARP: Regularized SHARP with Tikhonov regularization
 //! - V-SHARP: Variable kernel SHARP
+//! - V-SHARP (STI Suite): STI Suite 3.0's V-SHARP, as used by the UK Biobank pipeline — no
+//!   deconvolution, background estimated on a 1 mm grid (see `vsharp_sti`)
 //! - PDF: Projection onto dipole fields
 //! - iSMV: Iterative spherical mean value
 //! - mSMV: Maximum spherical mean value — boundary-shadow removal. Best used as a
@@ -22,6 +24,7 @@ pub mod msmv;
 pub mod sharp;
 pub mod resharp;
 pub mod vsharp;
+pub mod vsharp_sti;
 pub mod pdf;
 pub mod ismv;
 pub mod lbv;
@@ -35,6 +38,7 @@ pub use msmv::{msmv, MsmvParams};
 pub use sharp::{sharp, SharpParams};
 pub use resharp::{resharp, ResharpParams};
 pub use vsharp::{vsharp, VsharpParams};
+pub use vsharp_sti::{vsharp_sti, VsharpStiParams};
 pub use pdf::{pdf, PdfParams};
 pub use ismv::{ismv, IsmvParams};
 pub use lbv::{lbv, LbvParams};

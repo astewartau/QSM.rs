@@ -8,7 +8,7 @@ mod common;
 use std::time::Instant;
 use common::{TestData, TestResult, ChallengeMetrics};
 use qsm_core::bgremove;
-use qsm_core::bgremove::{sdf, SdfParams, ResharpParams, SharpParams, VsharpParams, PdfParams, IsmvParams, LbvParams};
+use qsm_core::bgremove::{sdf, SdfParams, ResharpParams, SharpParams, VsharpParams, VsharpStiParams, PdfParams, IsmvParams, LbvParams};
 use qsm_core::Grid;
 use qsm_core::bet;
 use qsm_core::bet::BetParams;
@@ -220,6 +220,32 @@ fn test_bgremove_vsharp() {
 
     assert!(res.nrmse < 0.5, "V-SHARP NRMSE too high: {}", res.nrmse);
     assert!(res.correlation > 0.7, "V-SHARP correlation too low: {}", res.correlation);
+}
+
+#[test]
+#[ignore]
+fn test_bgremove_vsharp_sti() {
+    println!("[INFO] Loading test data...");
+    let data = TestData::load().expect("Failed to load test data");
+    let (nx, ny, nz) = data.dims;
+    let (vsx, vsy, vsz) = data.voxel_size;
+
+    let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
+    let ((result, eroded_mask), elapsed) = run_timed!("V-SHARP (STI)", bgremove::vsharp_sti(
+        &data.fieldmap,
+        &data.mask,
+        &grid,
+        &VsharpStiParams::default(),
+        |_, _| {},
+    ));
+
+    let res = TestResult::new("V-SHARP (STI)", &result, &data.fieldmap_local, &data.mask, data.dims);
+    res.print_with_time(elapsed);
+    res.print_ci_metrics(elapsed);
+    common::save_center_slices(&result, &eroded_mask, data.dims, "bgremove_vsharp_sti");
+
+    assert!(res.nrmse < 0.5, "V-SHARP (STI) NRMSE too high: {}", res.nrmse);
+    assert!(res.correlation > 0.7, "V-SHARP (STI) correlation too low: {}", res.correlation);
 }
 
 #[test]
@@ -2177,6 +2203,15 @@ fn test_all_combinations() {
     ));
     TestResult::new("V-SHARP", &result, &data.fieldmap_local, &data.mask, data.dims).print_with_time(elapsed);
     bfr_results.push(BfrResult { name: "V-SHARP".into(), local_field: result, mask, elapsed });
+
+    // V-SHARP as in STI Suite 3.0 (UK Biobank)
+    let ((result, mask), elapsed) = run_timed!("V-SHARP (STI)", bgremove::vsharp_sti(
+        &data.fieldmap, &data.mask, &grid,
+        &VsharpStiParams::default(),
+        |_, _| {}
+    ));
+    TestResult::new("V-SHARP (STI)", &result, &data.fieldmap_local, &data.mask, data.dims).print_with_time(elapsed);
+    bfr_results.push(BfrResult { name: "V-SHARP (STI)".into(), local_field: result, mask, elapsed });
 
     // PDF
     let (result, elapsed) = run_timed!("PDF", bgremove::pdf(
