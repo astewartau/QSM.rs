@@ -13,7 +13,7 @@
 //! - SDF: Spatially Dependent Filtering (QSMART)
 //!
 //! Note: The `smv` module provides simple spherical mean value filtering,
-//! used internally by SHARP, V-SHARP, and iSMV. It is not recommended as
+//! used internally by SHARP and iSMV. It is not recommended as
 //! a standalone background removal method (it lacks the deconvolution step
 //! that SHARP provides).
 

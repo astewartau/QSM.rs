@@ -1561,7 +1561,7 @@ fn test_pipeline_unwrap_bfr_bestpath() {
 /// The reference unwrapper the literature benchmarks against, so what this test is for
 /// is the comparison itself — PRELUDE, ROMEO and best path all leave the harmonic
 /// background alone, so after the same background removal their local fields should
-/// land together. They do: correlations of 0.615, 0.592 and 0.602 on this phantom,
+/// land together. They do: correlations of 0.616, 0.589 and 0.600 on this phantom,
 /// which is a tighter spread than any of them is from ground truth.
 #[test]
 #[ignore]
