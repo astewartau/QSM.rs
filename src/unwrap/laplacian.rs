@@ -33,6 +33,12 @@
 //! since the pipeline removes background as a later stage; reach for
 //! [`laplacian_unwrap_bfr`] when you want the two together.
 //!
+//! STI Suite's Laplacian unwrapping (spectral sin/cos ∇², zero-padded periodic solve) is a
+//! third, separate discretisation: [`super::laplacian_sti`]. It gives nearly the same local
+//! field after background removal, but its zero-padded boundary adds a harmonic error to the
+//! *total* field wherever the phase at the array edge is not zero, which this module's
+//! Neumann solve avoids — so it is offered alongside rather than as the default.
+//!
 //! # References
 //!
 //! Laplacian unwrapping:
