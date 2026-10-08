@@ -61,6 +61,60 @@ pub const ACTIVATION_BYTES_PER_PATCH_VOXEL: u64 = 1_100;
 /// and the host's own data. 1.5 GB leaves room for all of it plus fragmentation.
 const WASM_TILE_ACTIVATION_BUDGET: u64 = 1_500_000_000;
 
+/// Largest activation footprint a single patch may have on WASM, running alone.
+///
+/// [`tile_concurrency`] can bring the patches in flight down to one but not below, so a patch
+/// bigger than this cannot run in a browser at all. The rest of the 4 GB heap is not free: a 104³
+/// xQSM patch (1.24 GB by [`ACTIVATION_BYTES_PER_PATCH_VOXEL`]) running alone peaked at 1.74 GB,
+/// so about 0.5 GB goes to the model, the volumes, the host and fragmentation. 2.5 GB keeps one
+/// patch well clear of the 4.24 GB at which a run stalled (#89). It allows patches up to 131³ —
+/// `core: 120, halo: 4` (128³) runs; the native 144³ default does not.
+pub const WASM_MAX_PATCH_ACTIVATION_BYTES: u64 = 2_500_000_000;
+
+/// Activation bytes one cubic patch of this edge costs. `u64`, because `p³ · bytes` overflows a
+/// 32-bit `usize` for large patches.
+fn patch_activation_bytes(patch_edge: usize) -> u64 {
+    (patch_edge as u64).saturating_pow(3).saturating_mul(ACTIVATION_BYTES_PER_PATCH_VOXEL)
+}
+
+/// Largest patch edge that fits [`WASM_MAX_PATCH_ACTIVATION_BYTES`]: 131 voxels.
+pub fn max_wasm_patch_edge() -> usize {
+    let mut p = 1usize;
+    while patch_activation_bytes(p + 1) <= WASM_MAX_PATCH_ACTIVATION_BYTES {
+        p += 1;
+    }
+    p
+}
+
+/// Refuse a tile config whose patch is too big for a WASM heap even on its own.
+///
+/// Running such a patch does not fail cleanly. Near the ceiling the module stops making progress
+/// without an error (#89), so it is refused up front with the largest core that would fit.
+/// `divisor` is the net's size divisor, which [`tile_patch_size`] rounds the patch up to (pass 1
+/// when there is none). The tiled drivers call this on WASM before building a plan; it is callable
+/// anywhere, so a native host can check a config before handing it to a browser.
+///
+/// The footprint is [`ACTIVATION_BYTES_PER_PATCH_VOXEL`], xQSM's figure, for every net, so a
+/// lighter net is refused somewhat before it would really run out — the same conservative
+/// reckoning [`tile_concurrency`] uses.
+pub fn check_wasm_patch_fits(cfg: &TileConfig, divisor: usize) -> Result<(), OnnxError> {
+    let p = tile_patch_size(cfg, divisor);
+    if patch_activation_bytes(p) <= WASM_MAX_PATCH_ACTIVATION_BYTES {
+        return Ok(());
+    }
+    let d = divisor.max(1);
+    let max_edge = max_wasm_patch_edge() / d * d;
+    let advice = match max_edge.checked_sub(2 * cfg.halo) {
+        Some(core) if core > 0 => format!("at halo {} the largest core that fits is {core}", cfg.halo),
+        _ => format!("halo {} alone leaves no room for a core; reduce the halo", cfg.halo),
+    };
+    Err(OnnxError::Memory(format!(
+        "a {p}³ tile patch needs about {:.1} GB of activations, more than a browser's 4 GB WASM \
+         heap can hold even one tile at a time (patches up to {max_edge}³ fit); {advice}",
+        patch_activation_bytes(p) as f64 / 1e9,
+    )))
+}
+
 /// How many tiles [`tiled_scatter`] keeps in flight at once.
 ///
 /// Natively this is just the rayon pool: memory is cheap and tile-level parallelism scales far
@@ -110,8 +164,7 @@ pub fn tile_concurrency(cfg: &TileConfig) -> usize {
 /// less than one divisor step, far below the precision of a memory budget. Arithmetic is in `u64`
 /// because `p³ · bytes` overflows a 32-bit `usize` for large patches.
 pub fn tiles_within_wasm_budget(cfg: &TileConfig) -> usize {
-    let p = (cfg.core.max(1) + 2 * cfg.halo) as u64;
-    let per_tile = p.saturating_pow(3).saturating_mul(ACTIVATION_BYTES_PER_PATCH_VOXEL);
+    let per_tile = patch_activation_bytes(cfg.core.max(1).saturating_add(2 * cfg.halo));
     (WASM_TILE_ACTIVATION_BUDGET / per_tile.max(1)).max(1) as usize
 }
 
@@ -146,6 +199,9 @@ pub fn tiled_scatter(
     let (nx, ny, nz) = grid.dims;
     let n = nx * ny * nz;
     assert_eq!(mask.len(), n, "mask length must match grid");
+    // Direct callers have no size divisor; the drivers above already checked the rounded patch.
+    #[cfg(target_family = "wasm")]
+    check_wasm_patch_fits(cfg, 1)?;
     let core = cfg.core.max(1);
 
     // Does the core block at (x0,y0,z0) cover any mask voxel?
@@ -255,6 +311,8 @@ pub fn tiled_volume_algorithm(
     assert_eq!(field.len(), nx * ny * nz, "field length must match grid");
     let halo = cfg.halo;
     let (nxi, nyi, nzi) = (nx as i64, ny as i64, nz as i64);
+    #[cfg(target_family = "wasm")]
+    check_wasm_patch_fits(cfg, divisor)?;
     let p = tile_patch_size(cfg, divisor);
     let (vsx, vsy, vsz) = grid.voxel_size;
     let inside = move |x: i64, y: i64, z: i64| x >= 0 && x < nxi && y >= 0 && y < nyi && z >= 0 && z < nzi;
@@ -335,6 +393,8 @@ pub fn tiled_field_inversion(
     };
 
     // One fixed patch shape for the whole run → the graph is optimized once and reused.
+    #[cfg(target_family = "wasm")]
+    check_wasm_patch_fits(cfg, divisor)?;
     let p = tile_patch_size(cfg, divisor);
     let plan = model.plan_for(&[&[1, 1, p, p, p]])?;
 
@@ -409,6 +469,36 @@ mod tests {
             assert!(n <= prev, "count rose from {prev} to {n} at core {core}");
             assert!(n >= 1);
             prev = n;
+        }
+    }
+
+    /// A patch that cannot fit a WASM heap even alone is refused with the largest core that would,
+    /// and everything a browser actually runs is let through.
+    #[test]
+    fn wasm_refuses_a_patch_too_big_to_run_alone() {
+        assert_eq!(max_wasm_patch_edge(), 131);
+        // QSMbly's default, and the largest whole-divisor patch under the limit for xQSM (/8).
+        assert!(check_wasm_patch_fits(&TileConfig { core: 56, halo: 4 }, 8).is_ok());
+        assert!(check_wasm_patch_fits(&TileConfig { core: 120, halo: 4 }, 8).is_ok());
+        // One voxel more rounds up to a 136³ patch, which does not fit.
+        assert!(check_wasm_patch_fits(&TileConfig { core: 121, halo: 4 }, 8).is_err());
+        // Without a divisor, 131³ fits and 132³ does not.
+        assert!(check_wasm_patch_fits(&TileConfig { core: 123, halo: 4 }, 1).is_ok());
+        assert!(check_wasm_patch_fits(&TileConfig { core: 124, halo: 4 }, 1).is_err());
+
+        // The crate's native default (144³) is refused, naming the core that would fit at its halo:
+        // 128 (131 rounded down to /8) less 2 × 8.
+        match check_wasm_patch_fits(&TileConfig::default(), 8) {
+            Err(OnnxError::Memory(m)) => {
+                assert!(m.contains("144³"), "{m}");
+                assert!(m.contains("largest core that fits is 112"), "{m}");
+            }
+            other => panic!("expected a memory error, got {other:?}"),
+        }
+        // A halo that leaves no room for any core says so, rather than suggesting core 0.
+        match check_wasm_patch_fits(&TileConfig { core: 8, halo: 64 }, 8) {
+            Err(OnnxError::Memory(m)) => assert!(m.contains("reduce the halo"), "{m}"),
+            other => panic!("expected a memory error, got {other:?}"),
         }
     }
 
