@@ -2,7 +2,7 @@
 //!
 //! Dispatcher that calls the appropriate background removal algorithm
 //! based on configuration, including algorithm-specific parameter defaults
-//! (V-SHARP radii computation, LBV max_iter, iSMV radius).
+//! (LBV max_iter, iSMV radius).
 
 use super::config::*;
 

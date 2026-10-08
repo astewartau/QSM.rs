@@ -3,7 +3,8 @@
 //! This module provides methods to separate local from background field:
 //! - SHARP: Sophisticated harmonic artifact reduction for phase data
 //! - RESHARP: Regularized SHARP with Tikhonov regularization
-//! - V-SHARP: Variable kernel SHARP
+//! - V-SHARP: Variable kernel SHARP, as implemented in STI Suite 3.0 (the UK Biobank
+//!   pipeline's BFR): background estimated on a 1 mm grid, no deconvolution by default
 //! - PDF: Projection onto dipole fields
 //! - iSMV: Iterative spherical mean value
 //! - mSMV: Maximum spherical mean value — boundary-shadow removal. Best used as a
@@ -13,7 +14,7 @@
 //! - SDF: Spatially Dependent Filtering (QSMART)
 //!
 //! Note: The `smv` module provides simple spherical mean value filtering,
-//! used internally by SHARP, V-SHARP, and iSMV. It is not recommended as
+//! used internally by SHARP and iSMV. It is not recommended as
 //! a standalone background removal method (it lacks the deconvolution step
 //! that SHARP provides).
 

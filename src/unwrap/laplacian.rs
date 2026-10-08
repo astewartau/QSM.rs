@@ -27,7 +27,8 @@
 //! sources that generate the background, since a field produced outside the ROI is harmonic
 //! inside it — and then solving under a homogeneous Dirichlet condition on the ROI. On the
 //! project's test data it reaches r = 0.887 against the ground-truth local field, against
-//! r = 0.909 for [`crate::bgremove::lbv`] on the same field and 0.879 for V-SHARP.
+//! r = 0.909 for [`crate::bgremove::lbv`] on the same field and 0.879 for the Wu 2012 V-SHARP
+//! that [`crate::bgremove::vsharp()`] implemented up to v0.38.
 //!
 //! [`UnwrapMethod::Laplacian`](super::UnwrapMethod::Laplacian) selects [`laplacian_unwrap`],
 //! since the pipeline removes background as a later stage; reach for
@@ -203,7 +204,8 @@ pub(crate) fn solve_poisson_fft(
 /// Accuracy falls off with the amount of phase to unwrap. On the 7 T test data, against
 /// the ground-truth local field: r = 0.84 at TE = 4 ms, 0.70 at 8 ms, 0.50 at 12 ms —
 /// where unwrapping then [`crate::bgremove::lbv`] gives 0.86, 0.84, 0.69 and
-/// [`crate::bgremove::vsharp`] holds near 0.82 throughout. Prefer the earliest echo.
+/// V-SHARP (the Wu 2012 version of v0.38 and earlier) holds near 0.82 throughout. Prefer the
+/// earliest echo.
 ///
 /// # Arguments
 /// * `phase` - Wrapped phase (nx * ny * nz)
