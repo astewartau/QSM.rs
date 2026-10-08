@@ -81,7 +81,9 @@ pub use hdqsm::{hdqsm, HdQsmParams};
 pub use amp_pe::{amp_pe, AmpPeParams};
 #[cfg(feature = "onnx")]
 pub use tiled::{
-    tile_patch_size, tiled_field_inversion, tiled_scatter, tiled_volume_algorithm, Tile, TileConfig,
+    check_wasm_patch_fits, max_wasm_patch_edge, tile_concurrency, tile_patch_size,
+    tiled_field_inversion, tiled_scatter, tiled_volume_algorithm, tiles_within_wasm_budget, Tile,
+    TileConfig, ACTIVATION_BYTES_PER_PATCH_VOXEL, WASM_MAX_PATCH_ACTIVATION_BYTES,
 };
 #[cfg(feature = "onnx")]
 pub use xqsm::{xqsm, xqsm_tiled};

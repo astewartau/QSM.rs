@@ -69,6 +69,9 @@ pub enum OnnxError {
     /// resolution, orientation. The graph would run and return a well-formed, wrong answer, so
     /// this is refused rather than reported in the output.
     Domain(String),
+    /// The configuration needs more memory than the host can provide, e.g. a tile patch too big
+    /// for a 32-bit WASM heap. Refused up front, because running it stalls rather than failing.
+    Memory(String),
 }
 
 impl std::fmt::Display for OnnxError {
@@ -78,6 +81,7 @@ impl std::fmt::Display for OnnxError {
             Self::Shape(m) => write!(f, "onnx shape error: {m}"),
             Self::Run(m) => write!(f, "onnx run error: {m}"),
             Self::Domain(m) => write!(f, "onnx domain error: {m}"),
+            Self::Memory(m) => write!(f, "onnx memory error: {m}"),
         }
     }
 }
