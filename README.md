@@ -114,6 +114,7 @@ Load and save NIfTI volumes with [`qsm_core::io`](src/io.rs).
 |-----------|-------------|-----------|
 | **ROMEO** | Region-growing with quality-guided ordering using magnitude and gradient coherence weighting | Dymerska, B., et al. (2021). "Phase unwrapping with a rapid opensource minimum spanning tree algorithm (ROMEO)." *Magnetic Resonance in Medicine*, 85(4):2294-2308. [DOI](https://doi.org/10.1002/mrm.28563) |
 | **Laplacian** | FFT-based Poisson solver under a Neumann boundary condition on the array — unwraps without altering the background field, so the result is a total field (`laplacian_unwrap`). This is what `UnwrapMethod::Laplacian` selects. | Schofield, M.A., Zhu, Y. (2003). "Fast phase unwrapping algorithm for interferometric applications." *Optics Letters*, 28(14):1194-1196. [DOI](https://doi.org/10.1364/OL.28.001194) |
+| **Laplacian (STI Suite)** | STI Suite 3.0's `MRPhaseUnwrap`, reproduced to rounding: spectral sin/cos Laplacian and an FFT Poisson solve on the zero-padded phase (`laplacian_unwrap_sti`). `laplacian_unwrap_sti_multi_echo` adds the per-echo unwrap + weighted echo average field map STI-based pipelines use (`TE·exp(−TE/T2*)` weights, among others). Same local field as the Neumann solve after background removal; the total field carries a harmonic error from the zero padding. | Li, W., Wu, B., Liu, C. (2011). *NeuroImage*, 55(4):1645-1656. [DOI](https://doi.org/10.1016/j.neuroimage.2010.11.088) |
 
 ### Background Field Removal
 
