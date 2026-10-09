@@ -88,9 +88,41 @@ pub enum B0WeightType {
     TEs,
     /// Magnitude only
     Mag,
+    /// Modelled mono-exponential decay with an assumed tissue T2* (seconds), as used by
+    /// STI Suite and the UK Biobank pipeline: those average the unwrapped *phases* with
+    /// `Wₑ = TEₑ·exp(−TEₑ/T2*)` and divide by the equally weighted mean echo time,
+    /// `f = Σ Wₑ φₑ / Σ Wₑ TEₑ`. In the `φ/TE` form used for every weight type here
+    /// (`f = Σ wₑ (φₑ/TEₑ) / Σ wₑ`) that is `wₑ = TEₑ²·exp(−TEₑ/T2*)`: [`Self::PhaseVar`]
+    /// with a modelled rather than a measured magnitude. It does not read the magnitude, so
+    /// the relative echo weights are the same in every voxel.
+    T2Star {
+        /// Assumed T2* in seconds (same unit as the echo times); must be positive.
+        t2star_s: f64,
+    },
 }
 
 impl B0WeightType {
+    /// T2* assumed by [`B0WeightType::T2Star`] when none is given: 40 ms, UK Biobank's value.
+    pub const DEFAULT_T2STAR_S: f64 = 0.040;
+
+    /// [`B0WeightType::T2Star`] with [`Self::DEFAULT_T2STAR_S`].
+    pub fn t2star_default() -> Self {
+        B0WeightType::T2Star { t2star_s: Self::DEFAULT_T2STAR_S }
+    }
+
+    /// Per-echo weight in the `φ/TE` form, `B0 = Σ w (φ/TE) / Σ w`.
+    #[inline]
+    pub fn weight(self, te: f64, mag: f64) -> f64 {
+        match self {
+            B0WeightType::PhaseSNR => mag * te,
+            B0WeightType::PhaseVar => mag * mag * te * te,
+            B0WeightType::Average => 1.0,
+            B0WeightType::TEs => te,
+            B0WeightType::Mag => mag,
+            B0WeightType::T2Star { t2star_s } => te * te * (-te / t2star_s).exp(),
+        }
+    }
+
     // Not `FromStr`: that trait returns `Result`, and this is deliberately infallible --
     // an unrecognised name falls back to `PhaseSNR` so a stale config string degrades to the
     // default weighting instead of failing the run. Renaming it would be a breaking change
@@ -103,6 +135,7 @@ impl B0WeightType {
             "average" | "uniform" => B0WeightType::Average,
             "tes" | "te" => B0WeightType::TEs,
             "mag" | "magnitude" => B0WeightType::Mag,
+            "t2star" | "t2_star" | "t2*" => B0WeightType::t2star_default(),
             _ => B0WeightType::PhaseSNR, // default
         }
     }
@@ -796,13 +829,7 @@ pub fn calculate_b0_weighted(
             let mag_val = mags[e].as_ref()[i];
             let phase_over_te = unwrapped_phases[e].as_ref()[i] / te;
 
-            let w = match weight_type {
-                B0WeightType::PhaseSNR => mag_val * te,
-                B0WeightType::PhaseVar => mag_val * mag_val * te * te,
-                B0WeightType::Average => 1.0,
-                B0WeightType::TEs => te,
-                B0WeightType::Mag => mag_val,
-            };
+            let w = weight_type.weight(te, mag_val);
 
             weighted_sum += phase_over_te * w;
             weight_sum += w;
@@ -1891,6 +1918,8 @@ mod tests {
         assert_eq!(B0WeightType::from_str("te"), B0WeightType::TEs);
         assert_eq!(B0WeightType::from_str("mag"), B0WeightType::Mag);
         assert_eq!(B0WeightType::from_str("magnitude"), B0WeightType::Mag);
+        assert_eq!(B0WeightType::from_str("t2star"), B0WeightType::T2Star { t2star_s: 0.040 });
+        assert_eq!(B0WeightType::from_str("T2Star"), B0WeightType::t2star_default());
         // Unknown string should default to PhaseSNR
         assert_eq!(B0WeightType::from_str("unknown"), B0WeightType::PhaseSNR);
     }
