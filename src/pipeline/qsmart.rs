@@ -59,6 +59,7 @@ pub fn run_qsmart(
     inner_config.ilsqr = crate::inversion::IlsqrParams {
         tol: qsmart_params.ilsqr_tol,
         max_iter: qsmart_params.ilsqr_max_iter,
+        precision: crate::inversion::IlsqrPrecision::Double,
     };
     // QSMART keeps the QSM.m formulation of iLSQR it was validated with; the default
     // `inversion::ilsqr` (STI Suite's algorithm) is a different method.

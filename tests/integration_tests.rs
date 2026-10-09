@@ -2363,14 +2363,14 @@ fn test_all_combinations() {
         let ones_vasc: Vec<f64> = vec![1.0; n_total];
         let lfs_stage1 = sdf(&field_hz, &weighted_mask, &ones_vasc, &grid, &SdfParams::stage1(), |_, _| {});
         let mask_stage1_u8: Vec<u8> = weighted_mask.iter().map(|&v| if v > 0.1 { 1 } else { 0 }).collect();
-        let (chi_stage1, _, _, _) = ilsqr_qsmm(&lfs_stage1, &mask_stage1_u8, &grid, data.b0_dir, &IlsqrParams { tol: 0.01, max_iter: 50 }, |_, _| {});
+        let (chi_stage1, _, _, _) = ilsqr_qsmm(&lfs_stage1, &mask_stage1_u8, &grid, data.b0_dir, &IlsqrParams::qsmm(), |_, _| {});
 
         // Stage 2
         let field_hz_weighted: Vec<f64> = field_hz.iter().zip(weighted_mask.iter()).map(|(&f, &m)| f * m).collect();
         let lfs_stage2 = sdf(&field_hz_weighted, &weighted_mask, &vasc_mask, &grid, &SdfParams::stage2(), |_, _| {});
         let mask_stage2_u8: Vec<u8> = weighted_mask.iter().zip(vasc_mask.iter())
             .map(|(&wm, &v)| if wm > 0.1 && v > 0.5 { 1 } else { 0 }).collect();
-        let (chi_stage2, _, _, _) = ilsqr_qsmm(&lfs_stage2, &mask_stage2_u8, &grid, data.b0_dir, &IlsqrParams { tol: 0.01, max_iter: 50 }, |_, _| {});
+        let (chi_stage2, _, _, _) = ilsqr_qsmm(&lfs_stage2, &mask_stage2_u8, &grid, data.b0_dir, &IlsqrParams::qsmm(), |_, _| {});
 
         // Offset adjustment
         let removed_voxels: Vec<f64> = weighted_mask.iter().zip(vasc_mask.iter()).map(|(&wm, &v)| wm - v).collect();

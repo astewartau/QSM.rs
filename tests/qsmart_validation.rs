@@ -948,7 +948,7 @@ fn test_qsmart_07_ilsqr_stage1() {
         &data.mask_u8,
         &grid,
         B0_DIR,
-        &IlsqrParams { tol: ILSQR_TOL, max_iter: ILSQR_MAX_ITER },
+        &IlsqrParams { tol: ILSQR_TOL, max_iter: ILSQR_MAX_ITER, ..IlsqrParams::default() },
         |_, _| {},
     );
 
@@ -1008,7 +1008,7 @@ fn test_qsmart_08_ilsqr_stage2() {
         &mask_stage2,
         &grid,
         B0_DIR,
-        &IlsqrParams { tol: ILSQR_TOL, max_iter: ILSQR_MAX_ITER },
+        &IlsqrParams { tol: ILSQR_TOL, max_iter: ILSQR_MAX_ITER, ..IlsqrParams::default() },
         |_, _| {},
     );
 
@@ -1212,7 +1212,7 @@ fn test_qsmart_full_pipeline() {
     let (chi_stage1, _, _, _) = ilsqr_qsmm(
         &lfs_stage1, &data.mask_u8,
         &grid, B0_DIR,
-        &IlsqrParams { tol: ILSQR_TOL, max_iter: ILSQR_MAX_ITER },
+        &IlsqrParams { tol: ILSQR_TOL, max_iter: ILSQR_MAX_ITER, ..IlsqrParams::default() },
         |_, _| {},
     );
     println!("[INFO] iLSQR Stage 1: {:.2?}", step_start.elapsed());
@@ -1249,7 +1249,7 @@ fn test_qsmart_full_pipeline() {
     let (chi_stage2, _, _, _) = ilsqr_qsmm(
         &lfs_stage2, &mask_stage2,
         &grid, B0_DIR,
-        &IlsqrParams { tol: ILSQR_TOL, max_iter: ILSQR_MAX_ITER },
+        &IlsqrParams { tol: ILSQR_TOL, max_iter: ILSQR_MAX_ITER, ..IlsqrParams::default() },
         |_, _| {},
     );
     println!("[INFO] iLSQR Stage 2: {:.2?}", step_start.elapsed());
@@ -1418,7 +1418,7 @@ fn test_qsmart_07b_ilsqr_diagnostics() {
         &data.mask_u8,
         &grid,
         B0_DIR,
-        &IlsqrParams { tol: ILSQR_TOL, max_iter: ILSQR_MAX_ITER },
+        &IlsqrParams { tol: ILSQR_TOL, max_iter: ILSQR_MAX_ITER, ..IlsqrParams::default() },
         |_, _| {},
     );
     let elapsed = start.elapsed();

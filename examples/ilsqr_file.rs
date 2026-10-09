@@ -8,7 +8,8 @@
 //! Prints the time per stage, the FFT count and how both LSQR solves ended. With
 //! `ILSQR_RAW=<path>` it also writes χ and the initial solution (ppm, f64, little-endian, χ
 //! first) for bit-level comparisons, since the NIfTI output may be single precision.
-use qsm_core::inversion::{ilsqr_with_padding_traced, IlsqrParams, IlsqrTrace, STI_PAD_MM};
+//! `ILSQR_PRECISION=single` runs the LSQR solves in single precision.
+use qsm_core::inversion::{ilsqr_with_padding_traced, IlsqrParams, IlsqrPrecision, IlsqrTrace, STI_PAD_MM};
 use qsm_core::io::{read_nifti_file, save_nifti_to_file};
 use qsm_core::Grid;
 use std::path::Path;
@@ -28,10 +29,15 @@ fn main() {
     let mask: Vec<u8> = m.data.iter().map(|&v| (v > 0.5) as u8).collect();
     let t = std::time::Instant::now();
     let mut tr = IlsqrTrace::default();
-    let (chi, _, _, x0) = ilsqr_with_padding_traced(&f.data, &mask, &grid, h, &IlsqrParams::default(), [pad; 3], |_, _| {}, &mut tr);
+    let precision = match std::env::var("ILSQR_PRECISION").as_deref() {
+        Ok("single") => IlsqrPrecision::Single,
+        _ => IlsqrPrecision::Double,
+    };
+    let params = IlsqrParams { precision, ..IlsqrParams::default() };
+    let (chi, _, _, x0) = ilsqr_with_padding_traced(&f.data, &mask, &grid, h, &params, [pad; 3], |_, _| {}, &mut tr);
     let to_ppm = 1.0 / (2.0 * std::f64::consts::PI * 42.575 * b0 * te * 1e-3);
     let chi: Vec<f64> = chi.iter().map(|v| v * to_ppm).collect();
-    eprintln!("ilsqr: {:?} vs {:?} (padded {:?}), {:.2}s", f.dims, f.voxel_size, tr.dims, t.elapsed().as_secs_f64());
+    eprintln!("ilsqr ({:?}): {:?} vs {:?} (padded {:?}), {:.2}s", precision, f.dims, f.voxel_size, tr.dims, t.elapsed().as_secs_f64());
     for (name, s, nf, tf) in &tr.stages {
         eprintln!("  {:>7.3}s  {:<34} ({} FFTs, {:.3}s)", s, name, nf, tf);
     }
