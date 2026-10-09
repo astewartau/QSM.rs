@@ -1862,7 +1862,8 @@ pub fn ilsqr_with_padding_traced(
     type Box3 = [std::ops::Range<usize>; 3];
     let fft_in = |a: &mut [Complex64], b: &Box3| { let t = std::time::Instant::now(); ws.borrow_mut().fft3d_supported(a, b); tally(t) };
     let ifft_on = |a: &mut [Complex64], b: &Box3| { let t = std::time::Instant::now(); ws.borrow_mut().ifft3d_region(a, b); tally(t) };
-    // the mask and its forward-difference neighbours lie in the crop box grown by one
+    // the mask lies in the crop box; its forward-difference neighbours in the box grown by one
+    let crop_box: Box3 = [0, 1, 2].map(|d| pd[d]..pd[d] + c[d]);
     let crop_box1: Box3 = [0, 1, 2].map(|d| pd[d]..(pd[d] + c[d] + 1).min(n[d]));
     stage(trace, "crop/pad, dipole kernel, plans");
     let mut p_k: Vec<Complex64> = crate::maybe_par_iter!(p).map(|&v| Complex64::new(v, 0.0)).collect();
@@ -1897,25 +1898,30 @@ pub fn ilsqr_with_padding_traced(
     });
     stage(trace, "Laplacian weights (incl. F phi)");
 
-    // 3. initial solution: LSQR on D W D χ = D W φ (D W D is self-adjoint)
-    let dconv = |a: &mut [Complex64]| {
-        fft(a);
-        crate::maybe_par_iter_mut!(a).zip(crate::maybe_par_iter!(dk)).for_each(|(z, &dv)| *z *= dv);
-        ifft(a);
-    };
-    let apply1 = |x: &[Complex64], t: &mut [Complex64]| {
-        t.copy_from_slice(x);
-        dconv(t);
+    // 3. initial solution: LSQR on D W D χ = D W φ, with D = F⁻¹ diag(dk) F. Solved in k-space,
+    //    for x̃ = F χ: with the unitary U = F/√N, D W D = U* (dk·U W U*·dk) U, so the LSQR
+    //    iterates for (U A U*, U b) are U times those for (A, b) and the norms are equal (exact
+    //    arithmetic). The √N factors cancel in dk·F W F⁻¹·dk, and taking F b = √N·U b as the
+    //    right-hand side (LSQR is linear in b and its stopping tests are scale-free) leaves
+    //    χ = F⁻¹ x̃. That is 2 FFTs per operator call instead of 4; rounding differs only at
+    //    the level of the transforms' own rounding.
+    let apply1 = |v: &[Complex64], t: &mut [Complex64]| {
+        crate::maybe_par_iter_mut!(t).zip(crate::maybe_par_iter!(v)).zip(crate::maybe_par_iter!(dk))
+            .for_each(|((tv, &z), &dv)| *tv = z * dv);
+        ifft_on(t, &crop_box); // W = 0 outside the mask
         crate::maybe_par_iter_mut!(t).zip(crate::maybe_par_iter!(w)).for_each(|(z, &wv)| *z *= wv);
-        dconv(t);
+        fft_in(t, &crop_box);
+        crate::maybe_par_iter_mut!(t).zip(crate::maybe_par_iter!(dk)).for_each(|(z, &dv)| *z *= dv);
     };
     let mut b1: Vec<Complex64> = crate::maybe_par_iter!(p).zip(crate::maybe_par_iter!(w))
         .map(|(&pv, &wv)| Complex64::new(pv * wv, 0.0)).collect();
-    dconv(&mut b1[..]);
+    fft(&mut b1[..]);
+    crate::maybe_par_iter_mut!(b1).zip(crate::maybe_par_iter!(dk)).for_each(|(z, &dv)| *z *= dv);
     let dense = dense_parts(nt);
-    let (x1, out1) = lsqr_matlab_into(apply1, apply1, b1, (&dense, &dense), 0.01, params.max_iter);
+    let (mut x1, out1) = lsqr_matlab_into(apply1, apply1, b1, (&dense, &dense), 0.01, params.max_iter);
     drop(dense);
     trace.solves.push(out1);
+    ifft(&mut x1[..]);
     let x1r: Vec<f64> = x1.iter().map(|z| z.re).collect();
     drop(x1);
     stage(trace, "solve 1 (initial LSQR)");
