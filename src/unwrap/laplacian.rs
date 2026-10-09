@@ -4,72 +4,78 @@
 //! neighbouring samples differ by less than π, so the true phase can be recovered by
 //! solving a Poisson equation. Path-independent and fast, unlike region-growing methods.
 //!
-//! This module provides **two algorithms that are not interchangeable**, because the
-//! boundary condition used to solve the Poisson equation decides whether the harmonic
-//! (background) component of the field survives:
+//! [`laplacian_unwrap`] unwraps only; the harmonic (background) component survives and the
+//! result is a total field. It has two solvers, named as in QSM.jl's `unwrap_laplacian`:
 //!
-//! | Function | Boundary condition | Category |
-//! |---|---|---|
-//! | [`laplacian_unwrap`] | Neumann, on the array | Phase unwrapping |
-//! | [`laplacian_unwrap_bfr`] (deprecated) | ∇² masked to the ROI | Phase unwrapping **+ background field removal** |
+//! | [`LaplacianSolver`] | ∇²φ estimate | Poisson solve | Reference |
+//! |---|---|---|---|
+//! | [`Dct`](LaplacianSolver::Dct) (default) | finite differences of wrapped neighbour differences | DCT, Neumann boundary on the array | Ghiglia & Romero (1994); QSM.jl `:dct` |
+//! | [`Fft { pad }`](LaplacianSolver::Fft) | `cos φ·∇²(sin φ) − sin φ·∇²(cos φ)`, spectral ∇² (`|k|²`) | FFT, periodic, on the volume zero-padded by `pad` | Schofield & Zhu (2003); STI Suite 3.0 `MRPhaseUnwrap` |
 //!
-//! [`laplacian_unwrap_bfr`] zeroes ∇²φ outside the mask, which discards every field source
-//! outside the ROI. Background fields are harmonic inside the ROI, and ∇²(harmonic) = 0
-//! carries no information about them, so they cannot be recovered afterwards — the
-//! function returns a partially background-removed field, not a total field. That is the
-//! same combination HARPERELLA and iHARPERELLA perform, and is why it is categorised
-//! with them rather than with ROMEO.
+//! `Dct` is unweighted least-squares unwrapping: the Poisson equation for the wrapped phase
+//! differences, solved under a Neumann condition with a DCT (Ghiglia & Romero 1994). It
+//! reproduces QSM.jl's `:dct` solver exactly (QSM.jl v0.5.4 on byte-identical input: r =
+//! 1.000000, rms difference 0.0).
 //!
-//! Pair [`laplacian_unwrap_bfr`] with a separate background-removal stage only deliberately:
-//! doing so removes background twice, by an amount that is not controlled.
+//! `Fft` is the literal Schofield & Zhu method: the Laplacian of the true phase from the sin/cos
+//! identity with spectral derivatives, then an FFT Poisson solve. It reproduces STI Suite 3.0's
+//! `MRPhaseUnwrap(phase, 'voxelsize', vs, 'padsize', pad)`, which is this algorithm, to
+//! ≈1e-14 rad inside the mask (pad 64; in-vivo 3 T data and synthetic volumes at several voxel
+//! sizes). Steps: zero-pad by `pad` per side (an odd padded dimension gets one more zero plane at
+//! its end); `K = |k|²` on the padded FFT grid, `k_d = m / (M_d·h_d)`, no 4π² factor;
+//! `L = cos φ·F⁻¹[K·F(sin φ)] − sin φ·F⁻¹[K·F(cos φ)]`; `φ_u = F⁻¹[F(L)/K]` with DC → 0; crop.
 //!
-//! The background removal works by zeroing ∇² outside the mask — which deletes the exterior
-//! sources that generate the background, since a field produced outside the ROI is harmonic
-//! inside it — and then solving under a homogeneous Dirichlet condition on the ROI. On the
-//! project's test data it reaches r = 0.887 against the ground-truth local field, against
-//! r = 0.909 for [`crate::bgremove::lbv`] on the same field and 0.879 for V-SHARP.
+//! The two give nearly the same local field after background removal (simulated head: NRMSE
+//! 79.5 % for `Fft` against 81.3 % for `Dct`; on a 150-subject in-vivo test-retest cohort the
+//! same iron-region ICC, 0.924 against 0.925). They differ in the total field: zero padding puts
+//! a step wherever the phase at the array edge is not zero, which `Fft` turns into a harmonic
+//! error that `Dct` does not have. Hence `Dct` is the default.
 //!
-//! [`UnwrapMethod::Laplacian`](super::UnwrapMethod::Laplacian) selects [`laplacian_unwrap`],
-//! since the pipeline removes background as a later stage; reach for
-//! [`laplacian_unwrap_bfr`] when you want the two together.
+//! [`laplacian_unwrap_multi_echo`] unwraps each echo and averages the unwrapped phases with
+//! per-echo weights ([`EchoWeighting`], e.g. `TE·exp(−TE/T2*)`) and a matching weighted echo
+//! time: the field map STI Suite-based pipelines build (with `Fft { pad: [64; 3] }` and
+//! T2\* = 40 ms, UK Biobank's).
 //!
-//! STI Suite's Laplacian unwrapping (spectral sin/cos ∇², zero-padded periodic solve) is a
-//! third, separate discretisation: [`super::laplacian_sti`]. It gives nearly the same local
-//! field after background removal, but its zero-padded boundary adds a harmonic error to the
-//! *total* field wherever the phase at the array edge is not zero, which this module's
-//! Neumann solve avoids — so it is offered alongside rather than as the default.
+//! [`laplacian_unwrap_bfr`] (deprecated) is a different algorithm: finite-difference ∇² masked
+//! to the ROI and solved under a Dirichlet condition on it. Zeroing ∇²φ outside the mask
+//! discards every field source outside the ROI. Background fields are harmonic inside the ROI,
+//! and ∇²(harmonic) = 0 carries no information about them, so they cannot be recovered
+//! afterwards — the function returns a partially background-removed field, not a total field.
+//! That is the same combination HARPERELLA and iHARPERELLA perform, and is why it is
+//! categorised with them rather than with ROMEO. Pair it with a separate background-removal
+//! stage only deliberately: doing so removes background twice, by an amount that is not
+//! controlled. On the project's test data it reaches r = 0.887 against the ground-truth local
+//! field, against r = 0.909 for [`crate::bgremove::lbv`] on the same field and 0.879 for V-SHARP,
+//! and it matches QSM.jl's `:mgpcg` to r = 0.999983 (Gauss-Seidel against
+//! multigrid-preconditioned CG on the same equation).
+//!
+//! [`UnwrapMethod::Laplacian`](super::UnwrapMethod::Laplacian) selects [`laplacian_unwrap`] with
+//! [`LaplacianSolver::Dct`], since the pipeline removes background as a later stage.
 //!
 //! # References
 //!
-//! Laplacian unwrapping:
-//! Schofield, M.A., Zhu, Y. (2003). "Fast phase unwrapping algorithm for
-//! interferometric applications." Optics Letters, 28(14):1194-1196.
-//! <https://doi.org/10.1364/OL.28.001194>
+//! Ghiglia, D.C., Romero, L.A. (1994). "Robust two-dimensional weighted and unweighted phase
+//! unwrapping that uses fast transforms and iterative methods." Journal of the Optical Society
+//! of America A, 11(1):107-117. <https://doi.org/10.1364/JOSAA.11.000107>
 //!
-//! The background-removal half of [`laplacian_unwrap_bfr`] (solving the Laplacian as a
-//! boundary value problem on the ROI):
+//! Schofield, M.A., Zhu, Y. (2003). "Fast phase unwrapping algorithm for interferometric
+//! applications." Optics Letters, 28(14):1194-1196. <https://doi.org/10.1364/OL.28.001194>
+//!
+//! Li, W., Wu, B., Liu, C. (2011). "Quantitative susceptibility mapping of human brain reflects
+//! spatial variation in tissue composition." NeuroImage, 55(4):1645-1656 (STI Suite's use of
+//! the Schofield & Zhu method). <https://doi.org/10.1016/j.neuroimage.2010.11.088>
+//!
 //! Zhou, D., Liu, T., Spincemaille, P., Wang, Y. (2014). "Background field removal by
-//! solving the Laplacian boundary value problem." NMR in Biomedicine, 27(3):312-319.
-//! <https://doi.org/10.1002/nbm.3064>
+//! solving the Laplacian boundary value problem." NMR in Biomedicine, 27(3):312-319 (the
+//! boundary-value half of [`laplacian_unwrap_bfr`]). <https://doi.org/10.1002/nbm.3064>
 //!
-//! Reference implementation: <https://github.com/kamesy/QSM.jl> — its `unwrap_laplacian`
-//! exposes the same split through its `solver` keyword (`:dct`/`:fft` impose the boundary
-//! condition on the array and unwrap only; `:mgpcg` imposes it on the ROI and also removes
-//! the harmonic background).
-//!
-//! Both functions here were cross-checked against it by running QSM.jl v0.5.4 on
-//! byte-identical input (a wrapped harmonic ramp plus a non-harmonic blob, 64³):
-//! [`laplacian_unwrap`] reproduces `:dct` exactly (r = 1.000000, rms difference 0.0), and
-//! [`laplacian_unwrap_bfr`] matches `:mgpcg` to r = 0.999983 — the residual being
-//! Gauss-Seidel against their multigrid-preconditioned CG on the same equation. Both
-//! implementations return the harmonic component as zero and the non-harmonic component
-//! at r > 0.9999.
+//! Reference implementation: <https://github.com/kamesy/QSM.jl> (`unwrap_laplacian`).
 
 use std::f64::consts::PI;
-#[cfg(test)]
 use num_complex::Complex64;
 #[cfg(test)]
 use crate::fft::{fft3d, ifft3d};
+use crate::fft::{fftfreq, Fft3dWorkspace};
 use crate::Grid;
 
 /// Wrap angle to [-π, π]
@@ -458,7 +464,7 @@ pub(crate) fn solve_poisson_dct(
     data
 }
 
-/// The original even-extension implementation of [`laplacian_unwrap`], kept only as the
+/// The original even-extension implementation of [`laplacian_unwrap`] (`Dct`), kept only as the
 /// oracle for the DCT solve: the DCT-II is the FFT of the even extension, so the two must
 /// agree to rounding. Not compiled into the library.
 #[cfg(test)]
@@ -505,43 +511,276 @@ fn laplacian_unwrap_even_extended_reference(
     result
 }
 
+/// Poisson solver for [`laplacian_unwrap`] (names as in QSM.jl's `unwrap_laplacian`).
+#[cfg_attr(feature = "introspection", derive(serde::Serialize))]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LaplacianSolver {
+    /// Unweighted least squares (Ghiglia & Romero 1994): finite differences of wrapped
+    /// neighbour differences, Poisson solve under a Neumann condition via DCT. Matches QSM.jl
+    /// `:dct`. The default.
+    #[default]
+    Dct,
+    /// Schofield & Zhu (2003): ∇²φ from the sin/cos identity with spectral derivatives, FFT
+    /// Poisson solve on the volume zero-padded by `pad` voxels per side. Reproduces STI Suite
+    /// 3.0's `MRPhaseUnwrap` with `padsize = pad` (its default is 12; UK Biobank uses 64).
+    Fft {
+        /// Zero-padding added to both sides of each axis, in voxels.
+        pad: [usize; 3],
+    },
+}
+
+impl LaplacianSolver {
+    /// [`LaplacianSolver::Fft`] with STI Suite's default padding, 12 voxels per side.
+    pub const FFT_DEFAULT_PAD: LaplacianSolver = LaplacianSolver::Fft { pad: [12, 12, 12] };
+}
+
 /// Laplacian phase unwrapping, **without** background field removal.
 ///
-/// Solves the Poisson equation over the whole array under a Neumann (zero normal
-/// derivative) boundary condition, via a DCT-II in place. Nothing is masked out, so field
-/// sources anywhere in the FOV are retained and the harmonic (background) component
-/// survives: the result is an unwrapped **total** field, suitable for a subsequent
-/// background-removal stage.
+/// Solves the Poisson equation over the whole array with the chosen [`LaplacianSolver`] (see
+/// the [module docs](self) for both). Nothing is masked out of the input, so field sources
+/// anywhere in the FOV are retained and the harmonic (background) component survives: the
+/// result is an unwrapped **total** field, suitable for a subsequent background-removal stage.
+/// (With [`LaplacianSolver::Fft`] the total field carries a harmonic error from the zero
+/// padding wherever the phase at the array edge is not zero; the local field is unaffected.)
 ///
 /// Use [`laplacian_unwrap_bfr`] if you want unwrapping and background removal together.
 ///
 /// Because the whole array participates, this is sensitive to phase quality *outside* the
-/// ROI in a way [`laplacian_unwrap_bfr`] is not. Where the phase outside the object is noise,
-/// or wraps faster than one radian per voxel, prefer ROMEO
+/// ROI. STI Suite-based pipelines zero the phase outside the brain first (`mask · φ`), which
+/// [`laplacian_unwrap_multi_echo`] does; otherwise, where the phase outside the object is
+/// noise, or wraps faster than one radian per voxel, prefer ROMEO
 /// ([`super::romeo::unwrap_romeo`]) or the masked variant.
 ///
 /// # Arguments
 /// * `phase` - Wrapped phase (nx * ny * nz)
 /// * `mask` - Binary mask (nx * ny * nz); applied to the *output* only
 /// * `grid` - Volume grid (dimensions and voxel sizes)
+/// * `solver` - [`LaplacianSolver::Dct`] (default) or [`LaplacianSolver::Fft`]
 ///
 /// # Returns
 /// Unwrapped phase, zero outside `mask`.
 ///
 /// # References
-/// Schofield, M.A., Zhu, Y. (2003). "Fast phase unwrapping algorithm for interferometric
-/// applications." Optics Letters, 28(14):1194-1196.
-/// <https://doi.org/10.1364/OL.28.001194>
+/// Ghiglia & Romero (1994) for `Dct`; Schofield & Zhu (2003) for `Fft`. See the module docs.
 pub fn laplacian_unwrap(
     phase: &[f64],
     mask: &[u8],
     grid: &Grid,
+    solver: LaplacianSolver,
 ) -> Vec<f64> {
     let (nx, ny, nz) = grid.dims;
     let (vsx, vsy, vsz) = grid.voxel_size;
-    let d2u = wrapped_laplacian_neumann(phase, nx, ny, nz, vsx, vsy, vsz);
-    let u = solve_poisson_dct(&d2u, nx, ny, nz, vsx, vsy, vsz);
+    let u = match solver {
+        LaplacianSolver::Dct => {
+            let d2u = wrapped_laplacian_neumann(phase, nx, ny, nz, vsx, vsy, vsz);
+            solve_poisson_dct(&d2u, nx, ny, nz, vsx, vsy, vsz)
+        }
+        LaplacianSolver::Fft { pad } => laplacian_unwrap_fft_padded(phase, grid, pad),
+    };
     u.iter().zip(mask).map(|(&v, &m)| if m != 0 { v } else { 0.0 }).collect()
+}
+
+/// Schofield & Zhu sin/cos unwrapping on the zero-padded volume (STI Suite's `MRPhaseUnwrap`).
+/// Returns the whole volume, unmasked.
+fn laplacian_unwrap_fft_padded(phase: &[f64], grid: &Grid, pad: [usize; 3]) -> Vec<f64> {
+    let (nx, ny, nz) = grid.dims;
+    let (vsx, vsy, vsz) = grid.voxel_size;
+    assert_eq!(phase.len(), nx * ny * nz, "phase length does not match grid");
+    let [px, py, pz] = pad;
+    let even = |n: usize| n + (n % 2);
+    let (mx, my, mz) = (even(nx + 2 * px), even(ny + 2 * py), even(nz + 2 * pz));
+    let mxy = mx * my;
+
+    let k2 = |n: usize, h: f64| -> Vec<f64> { fftfreq(n, h).into_iter().map(|f| f * f).collect() };
+    let (kx, ky, kz) = (k2(mx, vsx), k2(my, vsy), k2(mz, vsz));
+    // Padded phase as (sin φ, cos φ); outside the input φ = 0.
+    let sincos = |i: usize, j: usize, k: usize| -> (f64, f64) {
+        match (i.checked_sub(px), j.checked_sub(py), k.checked_sub(pz)) {
+            (Some(i), Some(j), Some(k)) if i < nx && j < ny && k < nz => phase[i + j * nx + k * nx * ny].sin_cos(),
+            _ => (0.0, 1.0),
+        }
+    };
+
+    let mut ws = Fft3dWorkspace::new(mx, my, mz);
+    let mut buf = vec![Complex64::new(0.0, 0.0); mxy * mz];
+
+    // K is real and even in k, so F⁻¹[K·F(x)] is real for real x: transform sin φ + i·cos φ
+    // once and read F⁻¹[K·F(sin φ)] and F⁻¹[K·F(cos φ)] off the real and imaginary parts.
+    for k in 0..mz {
+        for j in 0..my {
+            for i in 0..mx {
+                let (s, c) = sincos(i, j, k);
+                buf[i + j * mx + k * mxy] = Complex64::new(s, c);
+            }
+        }
+    }
+    ws.fft3d(&mut buf);
+    apply_k2(&mut buf, &kx, &ky, &kz, false);
+    ws.ifft3d(&mut buf);
+
+    // L = cos φ · F⁻¹[K F sin φ] − sin φ · F⁻¹[K F cos φ]  (= −∇²φ / 4π²)
+    for k in 0..mz {
+        for j in 0..my {
+            for i in 0..mx {
+                let idx = i + j * mx + k * mxy;
+                let (s, c) = sincos(i, j, k);
+                let v = buf[idx];
+                buf[idx] = Complex64::new(c * v.re - s * v.im, 0.0);
+            }
+        }
+    }
+
+    // Poisson inverse: φ = F⁻¹[F(L) / K], DC → 0.
+    ws.fft3d(&mut buf);
+    apply_k2(&mut buf, &kx, &ky, &kz, true);
+    ws.ifft3d(&mut buf);
+
+    let mut out = vec![0.0; nx * ny * nz];
+    for k in 0..nz {
+        for j in 0..ny {
+            for i in 0..nx {
+                out[i + j * nx + k * nx * ny] = buf[(i + px) + (j + py) * mx + (k + pz) * mxy].re;
+            }
+        }
+    }
+    out
+}
+
+/// Multiply (or, with `invert`, divide) a spectrum by `K = kx² + ky² + kz²`; DC → 0 on divide.
+fn apply_k2(buf: &mut [Complex64], kx: &[f64], ky: &[f64], kz: &[f64], invert: bool) {
+    let (mx, my) = (kx.len(), ky.len());
+    let plane = |(k, slab): (usize, &mut [Complex64])| {
+        for j in 0..my {
+            let kyz = ky[j] + kz[k];
+            for (v, &kxi) in slab[j * mx..(j + 1) * mx].iter_mut().zip(kx) {
+                let kk = kxi + kyz;
+                if invert {
+                    *v = if kk == 0.0 { Complex64::new(0.0, 0.0) } else { *v / kk };
+                } else {
+                    *v *= kk;
+                }
+            }
+        }
+    };
+    #[cfg(feature = "parallel")]
+    {
+        use rayon::prelude::*;
+        buf.par_chunks_mut(mx * my).enumerate().for_each(plane);
+    }
+    #[cfg(not(feature = "parallel"))]
+    buf.chunks_mut(mx * my).enumerate().for_each(plane);
+}
+
+/// How echoes are weighted in [`laplacian_unwrap_multi_echo`]. One weight per echo; echo
+/// times and `t2star` in the same unit.
+#[derive(Clone, Debug, PartialEq)]
+pub enum EchoWeighting {
+    /// `w = TE · exp(−TE / T2*)`: the phase-SNR-optimal weight for a single-exponential decay
+    /// with the given T2\*. UK Biobank uses T2\* = 40 ms.
+    T2Star { t2star: f64 },
+    /// `w = TE`.
+    EchoTime,
+    /// `w = 1`.
+    Uniform,
+    /// Explicit per-echo weights.
+    Custom(Vec<f64>),
+}
+
+impl EchoWeighting {
+    /// `TE · exp(−TE / 40 ms)` (UK Biobank's weighting), for echo times in seconds.
+    pub fn t2star_40ms() -> Self {
+        EchoWeighting::T2Star { t2star: 0.040 }
+    }
+
+    /// Per-echo weights for the given echo times.
+    pub fn weights(&self, tes: &[f64]) -> Vec<f64> {
+        match self {
+            EchoWeighting::T2Star { t2star } => tes.iter().map(|&te| te * (-te / t2star).exp()).collect(),
+            EchoWeighting::EchoTime => tes.to_vec(),
+            EchoWeighting::Uniform => vec![1.0; tes.len()],
+            EchoWeighting::Custom(w) => {
+                assert_eq!(w.len(), tes.len(), "one custom weight per echo");
+                w.clone()
+            }
+        }
+    }
+}
+
+/// Result of [`laplacian_unwrap_multi_echo`].
+#[derive(Clone, Debug)]
+pub struct EchoAverage {
+    /// `Σ wᵢ φᵢ / Σ wᵢ`: weighted mean of the unwrapped echo phases (radians), zero outside the mask.
+    pub phase: Vec<f64>,
+    /// `Σ wᵢ TEᵢ / Σ wᵢ`: the echo time `phase` corresponds to (unit of the input TEs).
+    pub te_eff: f64,
+    /// The per-echo weights used.
+    pub weights: Vec<f64>,
+}
+
+impl EchoAverage {
+    /// Field in rad per unit of TE (rad/s for TEs in seconds): `phase / te_eff`.
+    pub fn field_rad(&self) -> Vec<f64> {
+        self.phase.iter().map(|&p| p / self.te_eff).collect()
+    }
+
+    /// Field in Hz, for TEs in seconds: `phase / (2π · te_eff)`.
+    pub fn field_hz(&self) -> Vec<f64> {
+        let s = 1.0 / (std::f64::consts::TAU * self.te_eff);
+        self.phase.iter().map(|&p| p * s).collect()
+    }
+}
+
+/// Multi-echo field map from per-echo Laplacian unwrapping and a weighted echo average.
+///
+/// Each echo is zeroed outside `mask`, unwrapped on its own with [`laplacian_unwrap`] and the
+/// given solver, and the unwrapped phases are averaged:
+/// `phase = Σ wᵢ φᵢ / Σ wᵢ`, `te_eff = Σ wᵢ TEᵢ / Σ wᵢ`, field = `phase / te_eff`
+/// (equivalently, a mean of `φᵢ / TEᵢ` weighted by `wᵢ·TEᵢ`).
+///
+/// With `LaplacianSolver::Fft { pad: [64; 3] }` and [`EchoWeighting::t2star_40ms`] this is the
+/// field map of STI Suite-based pipelines such as UK Biobank's (`MRPhaseUnwrap(mask .* phase)`
+/// per echo, then the T2\*-weighted mean), to ≈1e-14 rad inside the mask.
+///
+/// The phases should be free of a per-echo phase offset (e.g. coil-combined with MCPC-3D-S);
+/// any offset left in passes through scaled by `1 / te_eff`.
+///
+/// # Arguments
+/// * `phases` - Wrapped phase per echo (radians)
+/// * `tes` - Echo times (any unit; the field is per that unit)
+/// * `mask` - Binary mask: applied to each echo before unwrapping and to the output
+/// * `grid` - Volume grid
+/// * `solver` - Poisson solver for each echo
+/// * `weighting` - Echo weights
+pub fn laplacian_unwrap_multi_echo<P: AsRef<[f64]>>(
+    phases: &[P],
+    tes: &[f64],
+    mask: &[u8],
+    grid: &Grid,
+    solver: LaplacianSolver,
+    weighting: &EchoWeighting,
+) -> EchoAverage {
+    assert!(!phases.is_empty(), "no echoes");
+    assert_eq!(phases.len(), tes.len(), "one echo time per echo");
+    let n = grid.n_total();
+    assert_eq!(mask.len(), n, "mask length does not match grid");
+    let weights = weighting.weights(tes);
+    let wsum: f64 = weights.iter().sum();
+    assert!(wsum.abs() > 0.0 && wsum.is_finite(), "echo weights sum to {wsum}");
+    let te_eff = weights.iter().zip(tes).map(|(w, t)| w * t).sum::<f64>() / wsum;
+
+    let mut phase = vec![0.0; n];
+    for (p, &w) in phases.iter().zip(&weights) {
+        let p = p.as_ref();
+        assert_eq!(p.len(), n, "phase length does not match grid");
+        let masked: Vec<f64> = p.iter().zip(mask).map(|(&v, &b)| if b != 0 { v } else { 0.0 }).collect();
+        for (acc, v) in phase.iter_mut().zip(laplacian_unwrap(&masked, mask, grid, solver)) {
+            *acc += w * v;
+        }
+    }
+    for v in phase.iter_mut() {
+        *v /= wsum;
+    }
+    EchoAverage { phase, te_eff, weights }
 }
 
 #[cfg(test)]
@@ -659,7 +898,7 @@ mod tests {
         let n = 64;
         let (wrapped, truth, _, _, mask) = ramp_plus_blob(n);
 
-        let out = laplacian_unwrap(&wrapped, &mask, &grid(n));
+        let out = laplacian_unwrap(&wrapped, &mask, &grid(n), LaplacianSolver::Dct);
         let (r, slope) = corr_slope(&out, &truth, &mask);
 
         assert!(r > 0.99, "should recover the total field, got r = {r}");
@@ -695,7 +934,7 @@ mod tests {
         let n = 64;
         let (wrapped, _, _, _, mask) = ramp_plus_blob(n);
         let padded = laplacian_unwrap_even_extended_reference(&wrapped, &mask, &grid(n));
-        let dct = laplacian_unwrap(&wrapped, &mask, &grid(n));
+        let dct = laplacian_unwrap(&wrapped, &mask, &grid(n), LaplacianSolver::Dct);
         let scale = padded.iter().fold(0.0f64, |m, &v| m.max(v.abs()));
         let max_diff = padded.iter().zip(&dct).fold(0.0f64, |m, (&a, &b)| m.max((a - b).abs()));
         assert!(max_diff < 1e-9 * scale, "DCT and padded solves differ: max |diff| = {max_diff} (scale {scale})");
@@ -708,7 +947,7 @@ mod tests {
         let n = 64;
         let (wrapped, _, ramp, _, mask) = ramp_plus_blob(n);
 
-        let pure = laplacian_unwrap(&wrapped, &mask, &grid(n));
+        let pure = laplacian_unwrap(&wrapped, &mask, &grid(n), LaplacianSolver::Dct);
         let combined = laplacian_unwrap_bfr(&wrapped, &mask, &grid(n));
         let diff: Vec<f64> = pure.iter().zip(&combined).map(|(a, b)| a - b).collect();
 
@@ -727,5 +966,208 @@ mod tests {
         for (i, &val) in unwrapped.iter().enumerate() {
             assert!(val.is_finite(), "Unwrapped phase should be finite at index {}", i);
         }
+    }
+
+    // ---- LaplacianSolver::Fft (Schofield & Zhu; STI Suite's MRPhaseUnwrap) and multi-echo ----
+
+    /// `Fft` unwrap of the whole volume (all-ones mask, so nothing is zeroed).
+    fn fft(p: &[f64], grid: &Grid, pad: [usize; 3]) -> Vec<f64> {
+        laplacian_unwrap(p, &vec![1u8; p.len()], grid, LaplacianSolver::Fft { pad })
+    }
+
+    #[test]
+    fn dct_is_the_default_solver() {
+        assert_eq!(LaplacianSolver::default(), LaplacianSolver::Dct);
+    }
+
+    /// The 8×8×6 test volume used for the STI golden values (0-based indices here,
+    /// 1-based `i+1` etc. in the MATLAB that produced them).
+    fn sti_golden_input() -> (Vec<f64>, Grid) {
+        let (nx, ny, nz) = (8, 8, 6);
+        let mut p = vec![0.0; nx * ny * nz];
+        for k in 0..nz {
+            for j in 0..ny {
+                for i in 0..nx {
+                    let (a, b, c) = ((i + 1) as f64, (j + 1) as f64, (k + 1) as f64);
+                    let t = 2.1 * (0.7 * a).sin() + 1.3 * (0.4 * b * c).cos() + 0.9 * a - 0.6 * c + 0.05 * a * b;
+                    p[i + j * nx + k * nx * ny] = t.sin().atan2(t.cos());
+                }
+            }
+        }
+        (p, Grid::new(nx, ny, nz, 1.0, 1.0, 2.0))
+    }
+
+    #[test]
+    fn fft_matches_sti_golden_values() {
+        // STI Suite 3.0 MRPhaseUnwrap(phi, 'voxelsize', [1 1 2], 'padsize', [2 3 1]) in STI Suite 3.0
+        // (R2023b, the values in STI_GOLDEN).
+        let (p, grid) = sti_golden_input();
+        let u = fft(&p, &grid, [2, 3, 1]);
+        let sum: f64 = u.iter().sum();
+        let sumsq: f64 = u.iter().map(|v| v * v).sum();
+        assert!((sum - STI_GOLDEN.0).abs() < 1e-9, "sum {sum} vs STI {}", STI_GOLDEN.0);
+        assert!((sumsq - STI_GOLDEN.1).abs() < 1e-9, "sum sq {sumsq} vs STI {}", STI_GOLDEN.1);
+        for &(idx, want) in STI_GOLDEN.2 {
+            assert!((u[idx] - want).abs() < 1e-12, "voxel {idx}: {} vs STI {want}", u[idx]);
+        }
+    }
+
+    /// (sum, sum of squares, [(0-based linear index, value)]) of STI's output on golden_input().
+    #[allow(clippy::type_complexity, clippy::excessive_precision)]
+    const STI_GOLDEN: (f64, f64, &[(usize, f64)]) = (
+        -47.110605048249184,
+        278.05516319999214,
+        &[
+            (0, 0.035944170373255008), (1, 0.54603271528608766), (8, -0.12289609617968449),
+            (64, 0.17121148831819896), (99, -0.58598953742943161), (199, 0.35334342671042662),
+            (332, -0.18693470845945748), (383, 1.1196905106581743),
+        ],
+    );
+
+    #[test]
+    fn fft_invariant_to_two_pi_jumps() {
+        // Only sin φ and cos φ enter, so adding 2π anywhere changes nothing.
+        let (p, grid) = sti_golden_input();
+        let jumped: Vec<f64> = p.iter().enumerate()
+            .map(|(i, &v)| v + 2.0 * PI * ((i * 7919) % 5) as f64 - 4.0 * PI)
+            .collect();
+        let a = fft(&p, &grid, [12; 3]);
+        let b = fft(&jumped, &grid, [12; 3]);
+        let d = a.iter().zip(&b).fold(0.0f64, |m, (x, y)| m.max((x - y).abs()));
+        assert!(d < 1e-12, "max |diff| {d}");
+    }
+
+    /// Smooth blob, wrapped many times, inside a box of zeros.
+    fn wrapped_blob_vs(n: (usize, usize, usize), vs: (f64, f64, f64)) -> (Vec<f64>, Vec<f64>, Grid) {
+        let grid = Grid::new(n.0, n.1, n.2, vs.0, vs.1, vs.2);
+        let c = (n.0 as f64 / 2.0 * vs.0, n.1 as f64 / 2.0 * vs.1, n.2 as f64 / 2.0 * vs.2);
+        let mut truth = vec![0.0; grid.n_total()];
+        for k in 0..n.2 {
+            for j in 0..n.1 {
+                for i in 0..n.0 {
+                    let (x, y, z) = (i as f64 * vs.0 - c.0, j as f64 * vs.1 - c.1, k as f64 * vs.2 - c.2);
+                    truth[i + j * n.0 + k * n.0 * n.1] = 20.0 * (-(x * x + y * y + z * z) / (2.0 * 9.0f64.powi(2))).exp();
+                }
+            }
+        }
+        let wrapped = truth.iter().map(|&v| wrap(v)).collect();
+        (wrapped, truth, grid)
+    }
+
+    fn max_dev_after_mean(a: &[f64], b: &[f64]) -> f64 {
+        let n = a.len() as f64;
+        let off = a.iter().zip(b).map(|(x, y)| x - y).sum::<f64>() / n;
+        a.iter().zip(b).fold(0.0f64, |m, (x, y)| m.max((x - y - off).abs()))
+    }
+
+    #[test]
+    fn fft_unwraps_a_smooth_field() {
+        // Peak 20 rad (≈ 3 wraps), decays to ~0 at the edge: the periodic, zero-padded solve
+        // should return it up to a constant. Steepest change ≈ 1.35 rad/mm, so at most ~1.6 rad
+        // per voxel here; the sin/cos identity degrades well before π per voxel (at 2 mm,
+        // 2.7 rad/voxel, the error is ~0.2 rad).
+        for vs in [(1.0, 1.0, 1.0), (0.8, 0.8, 1.2), (1.2, 0.9, 1.0)] {
+            let (wrapped, truth, grid) = wrapped_blob_vs((64, 64, 48), vs);
+            let u = fft(&wrapped, &grid, [12; 3]);
+            let d = max_dev_after_mean(&u, &truth);
+            assert!(d < 0.05, "voxel size {vs:?}: max deviation {d} rad");
+        }
+    }
+
+    #[test]
+    fn fft_odd_dimensions_keep_the_input_size() {
+        let (wrapped, truth, grid) = wrapped_blob_vs((61, 63, 47), (1.0, 1.0, 1.0));
+        for pad in [[0, 0, 0], [3, 4, 5]] {
+            let u = fft(&wrapped, &grid, pad);
+            assert_eq!(u.len(), grid.n_total());
+            assert!(max_dev_after_mean(&u, &truth) < 0.05);
+        }
+    }
+
+    #[test]
+    fn fft_dc_of_the_padded_box_is_zero() {
+        // The Poisson solve zeroes the mean over the padded box, not over the input.
+        let (wrapped, _, grid) = wrapped_blob_vs((32, 32, 24), (1.0, 1.0, 1.0));
+        let u = fft(&wrapped, &grid, [0, 0, 0]);
+        let mean = u.iter().sum::<f64>() / u.len() as f64;
+        assert!(mean.abs() < 1e-12, "mean {mean}");
+    }
+
+    #[test]
+    fn fft_zero_padding_costs_total_field_fidelity() {
+        // A harmonic ramp that is far from zero at the array faces: the zero padding puts a
+        // step there, and the periodic solve turns it into a harmonic error inside. The Neumann
+        // solve has no such step. This is the documented reason `Fft` is not the
+        // default; if it starts passing the other way, update the module docs.
+        let n = 48;
+        let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
+        let c = n as f64 / 2.0;
+        let mut truth = vec![0.0; n * n * n];
+        for k in 0..n { for j in 0..n { for i in 0..n {
+            let (x, y, z) = (i as f64 - c, j as f64 - c, k as f64 - c);
+            truth[i + j * n + k * n * n] = 0.35 * x + 0.2 * y + 0.15 * z
+                + 12.0 * (-(x * x + y * y + z * z) / 128.0).exp();
+        }}}
+        let wrapped: Vec<f64> = truth.iter().map(|&v| wrap(v)).collect();
+        let mask = vec![1u8; truth.len()];
+        let r = |u: &[f64]| {
+            let m = |v: &[f64]| v.iter().sum::<f64>() / v.len() as f64;
+            let (mu, mt) = (m(u), m(&truth));
+            let (mut cov, mut vu, mut vt) = (0.0, 0.0, 0.0);
+            for (a, b) in u.iter().zip(&truth) { cov += (a - mu) * (b - mt); vu += (a - mu).powi(2); vt += (b - mt).powi(2); }
+            cov / (vu * vt).sqrt()
+        };
+        let sti = fft(&wrapped, &grid, [12; 3]);
+        let neumann = laplacian_unwrap(&wrapped, &mask, &grid, LaplacianSolver::Dct);
+        assert!(r(&neumann) > 0.99, "Neumann r = {}", r(&neumann));
+        assert!(r(&sti) < 0.9, "STI r = {}", r(&sti));
+    }
+
+    #[test]
+    fn t2star_weights_and_effective_te() {
+        let tes = [9.42e-3, 19.7e-3];
+        let w = EchoWeighting::t2star_40ms().weights(&tes);
+        assert!((w[0] - 9.42e-3 * (-9.42f64 / 40.0).exp()).abs() < 1e-15);
+        assert!((w[1] - 19.7e-3 * (-19.7f64 / 40.0).exp()).abs() < 1e-15);
+        // te_eff for UK Biobank's echoes: 15.772350 ms (from the MATLAB run)
+        let te_eff = (w[0] * tes[0] + w[1] * tes[1]) / (w[0] + w[1]);
+        assert!((te_eff - 15.772350e-3).abs() < 1e-9, "{te_eff}");
+        assert_eq!(EchoWeighting::Uniform.weights(&tes), vec![1.0, 1.0]);
+        assert_eq!(EchoWeighting::EchoTime.weights(&tes), tes.to_vec());
+    }
+
+    #[test]
+    fn multi_echo_average_recovers_the_frequency() {
+        // Phase linear in TE (no offset): every weighting gives the same field.
+        let (_, truth, grid) = wrapped_blob_vs((64, 64, 48), (1.0, 1.0, 1.0));
+        let tes = [0.004, 0.009, 0.014];
+        // truth is the phase at the last echo, TE = 14 ms
+        let phases: Vec<Vec<f64>> = tes.iter()
+            .map(|&te| truth.iter().map(|&v| wrap(v * te / 0.014)).collect())
+            .collect();
+        let reference: Vec<f64> = truth.iter().map(|&v| v / 0.014).collect();
+        for wt in [EchoWeighting::t2star_40ms(), EchoWeighting::Uniform, EchoWeighting::EchoTime,
+                   EchoWeighting::Custom(vec![1.0, 2.0, 3.0])] {
+            let ones = vec![1u8; grid.n_total()];
+            let avg = laplacian_unwrap_multi_echo(&phases, &tes, &ones, &grid, LaplacianSolver::FFT_DEFAULT_PAD, &wt);
+            let f = avg.field_rad();
+            let d = max_dev_after_mean(&f, &reference) * 0.014;
+            assert!(d < 0.05, "{wt:?}: max deviation {d} rad at 14 ms");
+            let hz = avg.field_hz();
+            assert!((hz[100] * std::f64::consts::TAU - f[100]).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn multi_echo_mask_is_applied_to_input_and_output() {
+        let (wrapped, _, grid) = wrapped_blob_vs((32, 32, 24), (1.0, 1.0, 1.0));
+        let mask: Vec<u8> = (0..grid.n_total()).map(|i| (i % 3 != 0) as u8).collect();
+        let masked: Vec<f64> = wrapped.iter().zip(&mask).map(|(&v, &m)| v * m as f64).collect();
+        let solver = LaplacianSolver::Fft { pad: [4, 4, 4] };
+        let a = laplacian_unwrap_multi_echo(&[&wrapped], &[1.0], &mask, &grid, solver, &EchoWeighting::Uniform);
+        let b = laplacian_unwrap(&masked, &mask, &grid, solver);
+        assert_eq!(a.te_eff, 1.0);
+        let d = a.phase.iter().zip(&b).fold(0.0f64, |m, (x, y)| m.max((x - y).abs()));
+        assert!(d < 1e-14, "{d}");
     }
 }

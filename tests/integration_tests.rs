@@ -19,7 +19,7 @@ use qsm_core::inversion::{NdiParams, FansiParams, L1QsmParams, WhQsmParams, HdQs
 use qsm_core::inversion::{LsqrQsmParams, HeidiParams};
 use qsm_core::swi;
 use qsm_core::unwrap::{
-    laplacian_unwrap, unwrap_bestpath, unwrap_prelude, BestPathParams, PreludeParams, UnwrapMethod,
+    laplacian_unwrap, LaplacianSolver, unwrap_bestpath, unwrap_prelude, BestPathParams, PreludeParams, UnwrapMethod,
 };
 use qsm_core::unwrap::romeo::{unwrap_romeo_multi_echo, RomeoParams};
 use qsm_core::pipeline;
@@ -94,7 +94,7 @@ fn run_field_mapping_laplacian(data: &common::TestData) -> Vec<f64> {
 
     let unwrapped: Vec<Vec<f64>> = corrected_phases
         .iter()
-        .map(|p| laplacian_unwrap(p, &data.mask, &grid))
+        .map(|p| laplacian_unwrap(p, &data.mask, &grid, LaplacianSolver::Dct))
         .collect();
 
     calculate_b0_weighted(
@@ -1009,7 +1009,7 @@ fn test_swi() {
     println!("[INFO] Unwrapping phase (Laplacian)...");
     let unwrapped = laplacian_unwrap(
         &data.phase_echoes[0], &data.mask,
-        &grid,
+        &grid, LaplacianSolver::Dct,
     );
 
     // Step 2: Calculate SWI with default parameters (sigma=[4,4,0], tanh, strength=4)
@@ -1782,7 +1782,7 @@ fn run_qsmart_reconstruction(
 
     println!("[INFO] Unwrapping phase echoes...");
     let unwrapped_phases: Vec<Vec<f64>> = data.phase_echoes.iter()
-        .map(|phase| laplacian_unwrap(phase, &data.mask, &grid))
+        .map(|phase| laplacian_unwrap(phase, &data.mask, &grid, LaplacianSolver::Dct))
         .collect();
     println!("[INFO] Multi-echo linear fit...");
     let fit_result = multi_echo_linear_fit(
@@ -2333,7 +2333,7 @@ fn test_all_combinations() {
 
         // Phase unwrapping
         let unwrapped_phases: Vec<Vec<f64>> = data.phase_echoes.iter()
-            .map(|phase| laplacian_unwrap(phase, &data.mask, &grid))
+            .map(|phase| laplacian_unwrap(phase, &data.mask, &grid, LaplacianSolver::Dct))
             .collect();
 
         // Multi-echo linear fit

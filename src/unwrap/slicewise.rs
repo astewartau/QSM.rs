@@ -123,7 +123,7 @@
 use std::f64::consts::PI;
 
 use crate::Grid;
-use super::laplacian::{laplacian_unwrap, wrap};
+use super::laplacian::{laplacian_unwrap, wrap, LaplacianSolver};
 use super::{
     unwrap_bestpath, unwrap_prelude, unwrap_romeo, BestPathParams, PreludeParams, RomeoParams,
     UnwrapMethod,
@@ -311,7 +311,7 @@ pub fn unwrap_slicewise(
             UnwrapMethod::BestPath => unwrap_bestpath(&p, &k, &params.bestpath, &layout.grid),
             UnwrapMethod::Prelude => unwrap_prelude(&p, &k, &layout.grid, &params.prelude),
             UnwrapMethod::Laplacian => {
-                let mut u = laplacian_unwrap(&p, &k, &layout.grid);
+                let mut u = laplacian_unwrap(&p, &k, &layout.grid, LaplacianSolver::Dct);
                 let (labels, n_components) = label_components(&k, layout.d0, layout.d1);
                 reanchor_to_wrapped(&mut u, &p, &labels, n_components);
                 // the solve wrote zeros outside the mask; keep them zero after re-anchoring

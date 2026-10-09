@@ -8,13 +8,13 @@
 //!   ([`BestPathParams`])
 //! - [`unwrap_prelude`] — PRELUDE, best-pair-first region merging ([`PreludeParams`]);
 //!   the literature's reference unwrapper, kept as a baseline rather than a default
-//! - [`laplacian_unwrap`] — Laplacian unwrapping (Neumann BC on the array)
+//! - [`laplacian_unwrap`] — Laplacian unwrapping, with a [`LaplacianSolver`]: `Dct` (default;
+//!   unweighted least squares, Neumann BC on the array) or `Fft { pad }` (Schofield & Zhu sin/cos
+//!   method on the zero-padded volume, which reproduces STI Suite 3.0's `MRPhaseUnwrap`)
+//! - [`laplacian_unwrap_multi_echo`] — per-echo Laplacian unwrap + weighted echo average
+//!   ([`EchoWeighting`], e.g. `TE·exp(−TE/T2*)`)
 //! - [`laplacian_unwrap_bfr`] — Laplacian unwrapping **+ background field removal**
 //!   (∇² masked to the ROI); see the [`laplacian`] module docs for why these differ
-//! - [`laplacian_unwrap_sti`] — Laplacian unwrapping as STI Suite 3.0 computes it (spectral
-//!   sin/cos Laplacian, zero-padded periodic solve), and
-//!   [`laplacian_unwrap_sti_multi_echo`] for the per-echo unwrap + weighted echo average
-//!   field map built on it; see the [`laplacian_sti`] module docs
 //!
 //! All of the above read across slice boundaries. For a 2D multi-slice acquisition, where
 //! each slice carries its own receive phase offset, run one of them per slice with
@@ -23,7 +23,6 @@
 pub mod romeo;
 pub mod bestpath;
 pub mod laplacian;
-pub mod laplacian_sti;
 pub mod prelude;
 pub mod slicewise;
 
@@ -40,10 +39,8 @@ pub use slicewise::{
 };
 #[allow(deprecated)]
 pub use laplacian::laplacian_unwrap_bfr;
-pub use laplacian::laplacian_unwrap;
-pub use laplacian_sti::{
-    laplacian_unwrap_sti, laplacian_unwrap_sti_multi_echo, EchoAverage, EchoWeighting,
-    LaplacianStiParams,
+pub use laplacian::{
+    laplacian_unwrap, laplacian_unwrap_multi_echo, EchoAverage, EchoWeighting, LaplacianSolver,
 };
 
 /// Phase unwrapping method selection.
@@ -54,9 +51,9 @@ pub use laplacian_sti::{
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum UnwrapMethod {
     Romeo,
-    /// Laplacian unwrapping under a Neumann boundary condition; see
-    /// [`laplacian_unwrap`]. Unwraps only — the background field is left alone.
-    /// STI Suite's formulation is [`laplacian_unwrap_sti`] (not selectable here).
+    /// Laplacian unwrapping with [`LaplacianSolver::Dct`] (Neumann boundary on the array); see
+    /// [`laplacian_unwrap`]. Unwraps only — the background field is left alone. Call
+    /// [`laplacian_unwrap`] directly for [`LaplacianSolver::Fft`].
     Laplacian,
     /// Best path (3D-SRNCP); see [`unwrap_bestpath`]. The original Abdul-Rahman
     /// algorithm, not ROMEO run with best-path weights — for that, set

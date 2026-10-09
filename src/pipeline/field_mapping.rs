@@ -137,7 +137,7 @@ fn field_mapping_with_offset(
             // Background removal is a later stage, and the masked variant would remove it
             // here first — measurably worse than doing it once, properly.
             corrected.iter()
-                .map(|p| crate::unwrap::laplacian_unwrap(p, mask, &grid))
+                .map(|p| crate::unwrap::laplacian_unwrap(p, mask, &grid, crate::unwrap::LaplacianSolver::Dct))
                 .collect()
         }
         UnwrappingAlgorithm::Romeo => {
@@ -357,7 +357,7 @@ fn unwrap_single(
     let grid = crate::Grid::new(nx, ny, nz, vsx, vsy, vsz);
     match config.unwrapping_algorithm {
         UnwrappingAlgorithm::Laplacian => {
-            crate::unwrap::laplacian_unwrap(phase, mask, &grid)
+            crate::unwrap::laplacian_unwrap(phase, mask, &grid, crate::unwrap::LaplacianSolver::Dct)
         }
         UnwrappingAlgorithm::Romeo => {
             crate::unwrap::unwrap_romeo(
