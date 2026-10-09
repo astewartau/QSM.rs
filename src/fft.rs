@@ -144,10 +144,58 @@ impl Fft3dWorkspace {
     /// Parallel forward 3D FFT (rayon; one task per outer slab, per-thread scratch).
     #[cfg(feature = "parallel")]
     fn fft3d_par(&mut self, data: &mut [Complex64]) {
+        let full = [0..self.nx, 0..self.ny, 0..self.nz];
         transform_3d_par(
             data, self.nx, self.ny, self.nz,
             &self.fft_x, &self.fft_y, &self.fft_z,
+            None, &full, &[full.clone(), full.clone()],
         );
+    }
+
+    /// Forward 3D FFT of `data` that is zero outside the box `support` (half-open index
+    /// ranges per axis). The 1-D transforms whose input is entirely zero are skipped (the
+    /// x pass outside the box's (y, z) extent, the y pass outside its z extent), so the result
+    /// equals [`Self::fft3d`]'s up to the sign of zeros. Sequential builds run the full transform.
+    pub fn fft3d_supported(&mut self, data: &mut [Complex64], support: &[std::ops::Range<usize>; 3]) {
+        #[cfg(feature = "parallel")]
+        {
+            let full = [0..self.nx, 0..self.ny, 0..self.nz];
+            let x = [0..self.nx, support[1].clone(), support[2].clone()];
+            let y = [0..self.nx, 0..self.ny, support[2].clone()];
+            transform_3d_par(
+                data, self.nx, self.ny, self.nz,
+                &self.fft_x, &self.fft_y, &self.fft_z,
+                None, &x, &[y, full],
+            );
+        }
+        #[cfg(not(feature = "parallel"))]
+        {
+            let _ = support;
+            self.fft3d_seq(data);
+        }
+    }
+
+    /// Inverse 3D FFT (with normalization) of which only the box `needed` (half-open index
+    /// ranges per axis) is used: the y and z passes skip the columns that do not reach the box,
+    /// so the output is [`Self::ifft3d`]'s inside the box and unspecified (finite) outside it.
+    /// Sequential builds run the full transform.
+    pub fn ifft3d_region(&mut self, data: &mut [Complex64], needed: &[std::ops::Range<usize>; 3]) {
+        #[cfg(feature = "parallel")]
+        {
+            let full = [0..self.nx, 0..self.ny, 0..self.nz];
+            let y = [needed[0].clone(), 0..self.ny, 0..self.nz];
+            let z = [needed[0].clone(), needed[1].clone(), 0..self.nz];
+            transform_3d_par(
+                data, self.nx, self.ny, self.nz,
+                &self.ifft_x, &self.ifft_y, &self.ifft_z,
+                Some(self.n_total as f64), &full, &[y, z],
+            );
+        }
+        #[cfg(not(feature = "parallel"))]
+        {
+            let _ = needed;
+            self.ifft3d_seq(data);
+        }
     }
 
     /// In-place inverse 3D FFT (with normalization).
@@ -200,12 +248,12 @@ impl Fft3dWorkspace {
     /// Parallel inverse 3D FFT (rayon; one task per outer slab, per-thread scratch).
     #[cfg(feature = "parallel")]
     fn ifft3d_par(&mut self, data: &mut [Complex64]) {
+        let full = [0..self.nx, 0..self.ny, 0..self.nz];
         transform_3d_par(
             data, self.nx, self.ny, self.nz,
             &self.ifft_x, &self.ifft_y, &self.ifft_z,
+            Some(self.n_total as f64), &full, &[full.clone(), full.clone()],
         );
-        let n_total = self.n_total as f64;
-        data.par_iter_mut().for_each(|val| { *val /= n_total; });
     }
 
     /// Apply dipole convolution in-place: out = real(ifft(D * fft(x)))
@@ -413,65 +461,110 @@ pub fn fft3d(data: &mut [Complex64], nx: usize, ny: usize, nz: usize) {
     Fft3dWorkspace::new(nx, ny, nz).fft3d(data);
 }
 
+/// Columns gathered per strided (y/z) transform in [`transform_3d_par`]: adjacent x
+/// positions, so each gather/scatter touches `COL_BLOCK` contiguous elements (whole cache
+/// lines) instead of one, and rustfft runs the block as one batch of `COL_BLOCK` transforms.
+#[cfg(feature = "parallel")]
+const COL_BLOCK: usize = 16;
+
 /// Shared parallel 3-axis transform (rayon) used by the workspace methods.
 ///
-/// Applies the given per-axis FFT plans in place, with no normalization.
-/// Parallelised across the outer axis: one task per slab, reusing a single
-/// per-thread buffer+scratch across all columns in that slab (avoids the
-/// per-column allocation of a naive `par_iter` over every column).
+/// Applies the given per-axis FFT plans in place, then divides by `scale` if given (the
+/// inverse transform's 1/N, folded into the last pass's write-back). Each 1-D transform is the
+/// same rustfft call on the same data as a column-by-column loop, so the result does not
+/// depend on the blocking or the thread count (bitwise).
+/// - x: runs of contiguous rows, one rustfft batch per task;
+/// - y and z: one task per (plane, block of [`COL_BLOCK`] adjacent x columns), gathered into
+///   a per-thread buffer, transformed as one batch and scattered back.
+///
+/// Each pass transforms only the lines through the box it is given (`x`: rows with (j, k) in
+/// the box; `yz[0]`: y columns with (i, k) in it; `yz[1]`: z columns with (i, j) in it), for
+/// the pruned transforms; full boxes give the plain transform.
 #[cfg(feature = "parallel")]
+#[allow(clippy::too_many_arguments)]
 fn transform_3d_par(
     data: &mut [Complex64],
     nx: usize, ny: usize, nz: usize,
     plan_x: &Arc<dyn Fft<f64>>,
     plan_y: &Arc<dyn Fft<f64>>,
     plan_z: &Arc<dyn Fft<f64>>,
+    scale: Option<f64>,
+    x: &[std::ops::Range<usize>; 3],
+    yz: &[[std::ops::Range<usize>; 3]; 2],
 ) {
     let nxy = nx * ny;
+    let zero = Complex64::new(0.0, 0.0);
 
-    // x-axis: contiguous rows of length nx.
+    // x-axis: contiguous rows of length nx, ~64 KiB of rows per task.
     {
-        let plan_x = plan_x.clone();
         let slen = plan_x.get_inplace_scratch_len();
-        data.par_chunks_mut(nx).for_each_init(
-            || vec![Complex64::new(0.0, 0.0); slen],
-            |scratch, row| plan_x.process_with_scratch(row, scratch),
-        );
+        if x[1].len() == ny && x[2].len() == nz {
+            let rows = (4096 / nx.max(1)).clamp(1, ny * nz);
+            data.par_chunks_mut(nx * rows).for_each_init(
+                || vec![zero; slen],
+                |scratch, run| plan_x.process_with_scratch(run, scratch),
+            );
+        } else if !x[1].is_empty() {
+            let (j0, j1) = (x[1].start, x[1].end);
+            data.par_chunks_mut(nxy).enumerate().filter(|(k, _)| x[2].contains(k)).for_each_init(
+                || vec![zero; slen],
+                |scratch, (_, plane)| plan_x.process_with_scratch(&mut plane[j0 * nx..j1 * nx], scratch),
+            );
+        }
     }
 
-    // y-axis: one task per z-slab (fixed k), reusing buffer+scratch across its nx columns.
+    // y-axis: task (k, block) transforms columns i0..i0+w of z-slab k (i0 within yz[0][0]).
     {
-        let plan_y = plan_y.clone();
+        let [ir, _, kr] = &yz[0];
+        let nb = ir.len().div_ceil(COL_BLOCK);
         let slen = plan_y.get_inplace_scratch_len();
         let data_send = SendPtr::new(data);
-        (0..nz).into_par_iter().for_each_init(
-            || (vec![Complex64::new(0.0, 0.0); ny], vec![Complex64::new(0.0, 0.0); slen]),
-            |(buffer, scratch), k| {
-                // SAFETY: distinct k → disjoint z-slabs; distinct i → disjoint columns.
+        (0..kr.len() * nb).into_par_iter().for_each_init(
+            || (vec![zero; COL_BLOCK * ny], vec![zero; slen]),
+            |(buffer, scratch), t| {
+                let (k, i0) = (kr.start + t / nb, ir.start + (t % nb) * COL_BLOCK);
+                let w = COL_BLOCK.min(ir.end - i0);
+                // SAFETY: distinct (k, block) → disjoint sets of (i, k) columns.
                 let slice = unsafe { data_send.as_slice() };
-                for i in 0..nx {
-                    for j in 0..ny { buffer[j] = slice[i + j * nx + k * nxy]; }
-                    plan_y.process_with_scratch(buffer, scratch);
-                    for j in 0..ny { slice[i + j * nx + k * nxy] = buffer[j]; }
+                let buf = &mut buffer[..w * ny];
+                for j in 0..ny {
+                    let src = &slice[i0 + j * nx + k * nxy..][..w];
+                    for (b, &v) in src.iter().enumerate() { buf[b * ny + j] = v; }
+                }
+                plan_y.process_with_scratch(buf, scratch);
+                for j in 0..ny {
+                    let dst = &mut slice[i0 + j * nx + k * nxy..][..w];
+                    for (b, d) in dst.iter_mut().enumerate() { *d = buf[b * ny + j]; }
                 }
             },
         );
     }
 
-    // z-axis: one task per fixed-j plane, reusing buffer across its nx columns.
+    // z-axis: task (j, block) transforms columns i0..i0+w of xz-plane j (within yz[1]).
     {
-        let plan_z = plan_z.clone();
+        let [ir, jr, _] = &yz[1];
+        let nb = ir.len().div_ceil(COL_BLOCK);
         let slen = plan_z.get_inplace_scratch_len();
         let data_send = SendPtr::new(data);
-        (0..ny).into_par_iter().for_each_init(
-            || (vec![Complex64::new(0.0, 0.0); nz], vec![Complex64::new(0.0, 0.0); slen]),
-            |(buffer, scratch), j| {
-                // SAFETY: distinct j → disjoint (i,k) planes; distinct i → disjoint columns.
+        (0..jr.len() * nb).into_par_iter().for_each_init(
+            || (vec![zero; COL_BLOCK * nz], vec![zero; slen]),
+            |(buffer, scratch), t| {
+                let (j, i0) = (jr.start + t / nb, ir.start + (t % nb) * COL_BLOCK);
+                let w = COL_BLOCK.min(ir.end - i0);
+                // SAFETY: distinct (j, block) → disjoint sets of (i, j) columns.
                 let slice = unsafe { data_send.as_slice() };
-                for i in 0..nx {
-                    for k in 0..nz { buffer[k] = slice[i + j * nx + k * nxy]; }
-                    plan_z.process_with_scratch(buffer, scratch);
-                    for k in 0..nz { slice[i + j * nx + k * nxy] = buffer[k]; }
+                let buf = &mut buffer[..w * nz];
+                for k in 0..nz {
+                    let src = &slice[i0 + j * nx + k * nxy..][..w];
+                    for (b, &v) in src.iter().enumerate() { buf[b * nz + k] = v; }
+                }
+                plan_z.process_with_scratch(buf, scratch);
+                for k in 0..nz {
+                    let dst = &mut slice[i0 + j * nx + k * nxy..][..w];
+                    match scale {
+                        Some(s) => for (b, d) in dst.iter_mut().enumerate() { *d = buf[b * nz + k] / s; },
+                        None => for (b, d) in dst.iter_mut().enumerate() { *d = buf[b * nz + k]; },
+                    }
                 }
             },
         );
@@ -875,6 +968,51 @@ mod tests {
                 "FFT mismatch at {}: seq={} par={}", i, s, p
             );
         }
+    }
+
+    /// The blocked parallel transforms (batched columns, 1/N folded into the last pass) are
+    /// bitwise identical to the plain column-by-column sequential ones, on sizes that leave a
+    /// partial column block and a single-row x pass.
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn test_workspace_parallel_bitwise_equals_sequential() {
+        for &(nx, ny, nz) in &[(44, 50, 12), (33, 7, 5), (1, 9, 6), (20, 1, 3), (352, 4, 6)] {
+            let input: Vec<Complex64> = (0..nx * ny * nz)
+                .map(|i| Complex64::new((i as f64 * 0.37).sin(), (i as f64 * 0.71).cos()))
+                .collect();
+            let mut ws = super::Fft3dWorkspace::new(nx, ny, nz);
+            let (mut a, mut b) = (input.clone(), input.clone());
+            ws.fft3d_seq(&mut a);
+            ws.fft3d_par(&mut b);
+            assert_eq!(a, b, "fft {:?}", (nx, ny, nz));
+            ws.ifft3d_seq(&mut a);
+            ws.ifft3d_par(&mut b);
+            assert_eq!(a, b, "ifft {:?}", (nx, ny, nz));
+        }
+    }
+
+    /// The pruned transforms equal the full ones: forward on data that is zero outside the
+    /// box (everywhere), inverse inside the box.
+    #[test]
+    fn test_pruned_transforms_match_full() {
+        let (nx, ny, nz) = (40, 18, 12);
+        let bx = [5..37, 3..11, 2..9];
+        let inbox = |l: usize| bx[0].contains(&(l % nx)) && bx[1].contains(&((l / nx) % ny)) && bx[2].contains(&(l / (nx * ny)));
+        let input: Vec<Complex64> = (0..nx * ny * nz)
+            .map(|l| if inbox(l) { Complex64::new((l as f64 * 0.37).sin(), (l as f64 * 0.71).cos()) } else { Complex64::new(0.0, 0.0) })
+            .collect();
+        let mut ws = super::Fft3dWorkspace::new(nx, ny, nz);
+        let (mut a, mut b) = (input.clone(), input.clone());
+        ws.fft3d(&mut a);
+        ws.fft3d_supported(&mut b, &bx);
+        assert_eq!(a, b);
+        let (mut a2, mut b2) = (a.clone(), a);
+        ws.ifft3d(&mut a2);
+        ws.ifft3d_region(&mut b2, &bx);
+        for l in (0..nx * ny * nz).filter(|&l| inbox(l)) {
+            assert_eq!(a2[l], b2[l]);
+        }
+        assert!(b2.iter().all(|z| z.re.is_finite() && z.im.is_finite()));
     }
 
     /// Verify parallel workspace IFFT matches sequential.
