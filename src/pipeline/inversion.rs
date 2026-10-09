@@ -749,6 +749,10 @@ mod tests {
     }
 
     fn make_inversion_test(alg: InversionAlgorithm) -> Vec<f64> {
+        make_inversion_test_with(InversionConfig { algorithm: alg, ..Default::default() })
+    }
+
+    fn make_inversion_test_with(config: InversionConfig) -> Vec<f64> {
         let (nx, ny, nz) = (8, 8, 8);
         let n = nx * ny * nz;
         let field = vec![0.01; n];
@@ -758,7 +762,6 @@ mod tests {
             echo_times: vec![0.005], field_strength: 3.0, b0_direction: (0.0, 0.0, 1.0),
             slice_geometry: None,
         };
-        let config = InversionConfig { algorithm: alg, ..Default::default() };
         run_dipole_inversion(&field, &mask, &meta, &config, None, &mut |_, _| {}).unwrap()
     }
 
@@ -794,7 +797,10 @@ mod tests {
 
     #[test]
     fn test_inversion_ilsqr() {
-        let chi = make_inversion_test(InversionAlgorithm::Ilsqr);
+        // iLSQR pads by 64 mm as STI does, so this 8^3 volume is solved on a 144^3 grid: keep
+        // the LSQR solves short.
+        let ilsqr = crate::inversion::IlsqrParams { max_iter: 3, ..Default::default() };
+        let chi = make_inversion_test_with(InversionConfig { algorithm: InversionAlgorithm::Ilsqr, ilsqr, ..Default::default() });
         assert_eq!(chi.len(), 8 * 8 * 8);
     }
 

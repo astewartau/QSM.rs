@@ -1,40 +1,88 @@
-//! iLSQR: Iterative LSQR for QSM with streaking artifact removal
+//! iLSQR: LSQR dipole inversion with streaking-artefact removal
 //!
-//! Reference:
+//! [`ilsqr`] implements **STI Suite 3.0's `QSM_iLSQR`** (Li et al. 2015), as called with
+//! `QSM_iLSQR(phase, mask, 'TE', TE, 'B0', B0, 'H', H, 'padsize', [64 64 64], 'voxelsize', vs)`.
+//! STI Suite ships as protected P-code, so the algorithm was recovered by black-box probing
+//! (call tracing, capturing the operators and right-hand sides it hands to MATLAB's `lsqr`, and
+//! fitting every stage until a MATLAB re-implementation reproduced STI to its own
+//! single-precision noise floor):
+//!
+//! 1. Crop field and mask to the mask's bounding box (odd extents grown by one voxel to make
+//!    them even), then zero-pad each axis to the next multiple of 16 strictly above
+//!    `crop + 2·pad_mm/voxel_size` (default `pad_mm` = 64). Everything below runs on that grid.
+//! 2. **Laplacian weights** `W`: `L = |F⁻¹(k²·F φ)|` with `k²` in (cycles/mm)² and the DC term
+//!    set to 10⁶ (STI's value, which adds `10⁶·mean(φ)` to every voxel, so the `|·|` decides
+//!    which tail of the Laplacian is down-weighted). Ranked inside the mask:
+//!    `W = 1` below the 60th percentile, falling linearly to `0.2` at the 99.9th, `0` outside.
+//!    The field itself is not re-masked.
+//! 3. **Initial solution**: LSQR on `D W D χ = D W φ` (`D` = dipole convolution), tolerance
+//!    0.01, at most `max_iter` iterations (MATLAB `lsqr` stopping rules).
+//! 4. **FastQSM** prior: `sign(D)·Fφ`, blended where `|D|` is small with a copy smoothed *in
+//!    k-space* by a closed radius-3 ball, masked, blended again, rescaled to a TKD (threshold
+//!    1/8) solution by least squares inside the mask.
+//! 5. **Gradient weights** `G_d` (`d` = x, y, z): forward differences of the FastQSM map (no
+//!    voxel-size scaling), pooled over the three axes inside the mask; `G = 1` below the 50th
+//!    percentile of `|∇|`, `0` above the 70th, linear between.
+//! 6. **Streaking artefacts**: LSQR for `y` in `min ‖G ∇ F⁻¹(M_ic y) − G ∇(M·Re χ₁)‖` with
+//!    `M_ic = |D| < 0.1` (the ill-conditioned cone), tolerance `tol` (default 1e-3), at most
+//!    `max_iter` iterations; artefact `χ_sa = Re F⁻¹(M_ic y)`.
+//! 7. `χ = (Re χ₁ − χ_sa) · mask`, cropped back to the input grid.
+//!
+//! Percentiles are STI's: the sorted value at 1-based index `round(p·N)`, not interpolated.
+//! The field may be in any linear unit (rad, Hz, ppm); `χ` comes out in the unit the field
+//! would have for χ = 1 (QSM.rs passes ppm, so χ is in ppm).
+//!
+//! [`ilsqr_qsmm`] keeps the earlier formulation (the QSM.m port used by QSM.rs ≤ v0.38: no
+//! padding, LSMR for the artefacts, other weights); QSMART still uses it.
+//!
+//! References:
 //! Li, W., Wang, N., Yu, F., Han, H., Cao, W., Romero, R., Tantiwongkosi, B.,
 //! Duong, T.Q., Liu, C. (2015). "A method for estimating and removing streaking
 //! artifacts in quantitative susceptibility mapping."
-//! NeuroImage, 108:111-122. https://doi.org/10.1016/j.neuroimage.2014.12.043
+//! NeuroImage, 108:111-122. <https://doi.org/10.1016/j.neuroimage.2014.12.043>
 //!
-//! Reference implementation: https://github.com/kamesy/QSM.m
+//! Paige, C.C., Saunders, M.A. (1982). "LSQR: An algorithm for sparse linear equations and
+//! sparse least squares." ACM Trans. Math. Softw. 8(1):43-71.
 //!
-//! The algorithm consists of 4 steps:
-//! 1. Initial LSQR solution with Laplacian-based weights
-//! 2. FastQSM estimate using sign(D) approximation
-//! 3. Streaking artifact estimation using LSMR
-//! 4. Artifact subtraction
+//! [`ilsqr_qsmm`] reference implementation: <https://github.com/kamesy/QSM.m>
 
 /// Parameters for the iLSQR algorithm.
+///
+/// [`ilsqr`] (STI Suite) defaults: `tol = 1e-3`, `max_iter = 100`. The initial LSQR solve
+/// always uses STI's tolerance of 0.01. For [`ilsqr_qsmm`] use [`IlsqrParams::qsmm`]
+/// (`tol = 0.01`, `max_iter = 50`, the defaults of QSM.rs ≤ v0.38).
 #[cfg_attr(feature = "introspection", derive(serde::Serialize))]
 #[derive(Clone, Debug)]
 pub struct IlsqrParams {
-    /// Convergence tolerance (default: 0.01)
+    /// Tolerance of the streaking-artefact solve (default: 1e-3)
     pub tol: f64,
-    /// Maximum iterations (default: 50)
+    /// Maximum iterations of each LSQR solve (default: 100)
     pub max_iter: usize,
 }
 
 impl Default for IlsqrParams {
     fn default() -> Self {
         Self {
-            tol: 0.01,
-            max_iter: 50,
+            tol: 1e-3,
+            max_iter: 100,
         }
     }
 }
 
+impl IlsqrParams {
+    /// Defaults of the QSM.m formulation, [`ilsqr_qsmm`] (QSM.rs ≤ v0.38 `ilsqr`).
+    pub fn qsmm() -> Self {
+        Self { tol: 0.01, max_iter: 50 }
+    }
+}
+
+/// Zero padding STI's `QSM_iLSQR` is given by UK Biobank and in STI Suite's examples, in mm.
+pub const STI_PAD_MM: f64 = 64.0;
+
 use std::cell::RefCell;
 use num_complex::Complex64;
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
 use crate::fft::Fft3dWorkspace;
 use crate::kernels::dipole::dipole_kernel;
 use crate::kernels::smv::smv_kernel;
@@ -1300,10 +1348,13 @@ fn susceptibility_artifacts_step(
 }
 
 // ============================================================================
-// Main iLSQR Algorithm
+// iLSQR, QSM.m formulation (QSM.rs <= v0.38 default)
 // ============================================================================
 
-/// iLSQR: A method for estimating and removing streaking artifacts in QSM
+/// iLSQR in the QSM.m formulation (QSM.rs ≤ v0.38 `ilsqr`)
+///
+/// Kept for QSMART and for comparisons; [`ilsqr`] is STI Suite's algorithm. Use
+/// [`IlsqrParams::qsmm`] for this function's original defaults.
 ///
 /// # Arguments
 /// * `field` - Unwrapped local field/tissue phase (nx * ny * nz)
@@ -1315,7 +1366,7 @@ fn susceptibility_artifacts_step(
 ///
 /// # Returns
 /// Tuple of (susceptibility, streaking_artifacts, fast_qsm, initial_lsqr)
-pub fn ilsqr(
+pub fn ilsqr_qsmm(
     field: &[f64],
     mask: &[u8],
     grid: &Grid,
@@ -1359,6 +1410,534 @@ pub fn ilsqr(
         .collect();
 
     (chi, xsa, xfs, xlsqr)
+}
+
+// ============================================================================
+// STI Suite 3.0 QSM_iLSQR (default `ilsqr`)
+// ============================================================================
+
+/// How an [`lsqr_matlab`] solve ended (MATLAB `lsqr` flags).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LsqrOutcome {
+    /// 0 converged, 1 hit `max_iter`, 3 stagnated, 4 breakdown (a scalar became zero or non-finite)
+    pub flag: u8,
+    /// Iterations whose update is included in the returned solution
+    pub iter: usize,
+    /// ‖b − A x‖ / ‖b‖ (LSQR's running estimate)
+    pub relres: f64,
+}
+
+fn cnorm(x: &[Complex64]) -> f64 {
+    // fixed chunking, so the sum does not depend on the thread count
+    const CH: usize = 1 << 16;
+    let parts: Vec<f64> = crate::maybe_par_chunks!(x, CH)
+        .map(|c| c.iter().map(|v| v.norm_sqr()).sum::<f64>())
+        .collect();
+    parts.iter().sum::<f64>().sqrt()
+}
+
+/// LSQR (Paige & Saunders 1982) with MATLAB `lsqr`'s stopping rules, zero initial guess, no
+/// preconditioner: stops when `‖r‖ ≤ tol·‖b‖` or `‖Aᴴr‖ / (‖A‖_F·‖r‖) ≤ tol` (both tested on
+/// the previous iterate, before it is updated), after three stagnant steps, or on breakdown.
+/// `apply_a` computes `A x`, `apply_ah` computes `Aᴴ u`.
+pub fn lsqr_matlab<F, G>(
+    mut apply_a: F,
+    mut apply_ah: G,
+    b: &[Complex64],
+    tol: f64,
+    max_iter: usize,
+) -> (Vec<Complex64>, LsqrOutcome)
+where
+    F: FnMut(&[Complex64]) -> Vec<Complex64>,
+    G: FnMut(&[Complex64]) -> Vec<Complex64>,
+{
+    let n2b = cnorm(b);
+    let tolb = tol * n2b;
+    let mut u = b.to_vec();
+    let mut beta = n2b;
+    let mut normr = beta;
+    if beta != 0.0 {
+        crate::maybe_par_iter_mut!(u).for_each(|z| *z /= beta);
+    }
+    let (mut c, mut s) = (1.0f64, 0.0f64);
+    let mut phibar = beta;
+    let mut v = apply_ah(&u);
+    let n = v.len();
+    let mut x = vec![Complex64::new(0.0, 0.0); n];
+    let mut alpha = cnorm(&v);
+    if alpha != 0.0 {
+        crate::maybe_par_iter_mut!(v).for_each(|z| *z /= alpha);
+    }
+    let mut normar = alpha * beta;
+    let relres = |nr: f64| if n2b > 0.0 { nr / n2b } else { 0.0 };
+    if normar == 0.0 {
+        return (x, LsqrOutcome { flag: 0, iter: 0, relres: relres(normr) });
+    }
+    let mut d = vec![Complex64::new(0.0, 0.0); n];
+    let mut norma = 0.0f64;
+    let mut stag = 0usize;
+    let mut flag = 1u8;
+    let mut iter = max_iter;
+    for ii in 1..=max_iter {
+        let mut un = apply_a(&v);
+        crate::maybe_par_iter_mut!(un).zip(crate::maybe_par_iter!(u)).for_each(|(a, &b)| *a -= alpha * b);
+        beta = cnorm(&un);
+        if beta != 0.0 {
+            crate::maybe_par_iter_mut!(un).for_each(|z| *z /= beta);
+        }
+        u = un;
+        norma = (norma * norma + alpha * alpha + beta * beta).sqrt();
+        let thet = -s * alpha;
+        let rhot = c * alpha;
+        let rho = (rhot * rhot + beta * beta).sqrt();
+        c = rhot / rho;
+        s = -beta / rho;
+        let phi = c * phibar;
+        if phi == 0.0 {
+            stag = 1;
+        }
+        phibar *= s;
+        crate::maybe_par_iter_mut!(d).zip(crate::maybe_par_iter!(v)).for_each(|(di, &vi)| *di = (vi - thet * *di) / rho);
+        if phi.abs() * cnorm(&d) < f64::EPSILON * cnorm(&x) {
+            stag += 1;
+        } else {
+            stag = 0;
+        }
+        if normar / (norma * normr) <= tol || normr <= tolb {
+            flag = 0;
+            iter = ii - 1;
+            break;
+        }
+        if stag >= 3 {
+            flag = 3;
+            iter = ii - 1;
+            break;
+        }
+        if !phi.is_finite() || rho == 0.0 || !rho.is_finite() {
+            flag = 4;
+            iter = ii - 1;
+            break;
+        }
+        crate::maybe_par_iter_mut!(x).zip(crate::maybe_par_iter!(d)).for_each(|(xi, &di)| *xi += phi * di);
+        normr *= s.abs();
+        let mut vt = apply_ah(&u);
+        crate::maybe_par_iter_mut!(vt).zip(crate::maybe_par_iter!(v)).for_each(|(a, &b)| *a -= beta * b);
+        v = vt;
+        alpha = cnorm(&v);
+        if (alpha == 0.0 || !alpha.is_finite()) && ii < max_iter {
+            flag = 4;
+            iter = ii;
+            break;
+        }
+        if alpha != 0.0 {
+            crate::maybe_par_iter_mut!(v).for_each(|z| *z /= alpha);
+        }
+        normar = alpha * (s * phi).abs();
+    }
+    if flag == 1 && (normar / (norma * normr) <= tol || normr <= tolb) {
+        flag = 0;
+    }
+    (x, LsqrOutcome { flag, iter, relres: relres(normr) })
+}
+
+/// Sorted value at 1-based index `round(p·N)` (STI's percentile; `p` in [0, 1]).
+fn sti_percentile(sorted: &[f64], p: f64) -> f64 {
+    let n = sorted.len();
+    let i = (p * n as f64).round() as usize;
+    sorted[i.clamp(1, n) - 1]
+}
+
+fn sort_f64(v: &mut [f64]) {
+    v.sort_unstable_by(|a, b| a.total_cmp(b));
+}
+
+/// STI's `MaskBoundingBox`: tight bounding box (0-based, inclusive); an odd extent grows by one
+/// voxel at the high end, or at the low end when the high end is the array edge (and shrinks
+/// by one at the high end when both ends are edges).
+fn sti_bounding_box(mask: &[u8], dims: (usize, usize, usize)) -> Option<([usize; 3], [usize; 3])> {
+    let (nx, ny, nz) = dims;
+    let n = [nx, ny, nz];
+    let mut lo = n;
+    let mut hi = [0usize; 3];
+    let mut any = false;
+    for k in 0..nz {
+        for j in 0..ny {
+            for i in 0..nx {
+                if mask[i + j * nx + k * nx * ny] != 0 {
+                    any = true;
+                    for (d, c) in [i, j, k].into_iter().enumerate() {
+                        lo[d] = lo[d].min(c);
+                        hi[d] = hi[d].max(c);
+                    }
+                }
+            }
+        }
+    }
+    if !any {
+        return None;
+    }
+    for d in 0..3 {
+        if (hi[d] - lo[d] + 1) % 2 == 1 {
+            if hi[d] + 1 < n[d] {
+                hi[d] += 1;
+            } else if lo[d] > 0 {
+                lo[d] -= 1;
+            } else {
+                hi[d] -= 1;
+            }
+        }
+    }
+    Some((lo, hi))
+}
+
+/// STI's padded grid: per axis the next multiple of 16 strictly above `c + 2·pad_mm/vs`.
+fn sti_padded_dims(c: [usize; 3], vs: [f64; 3], pad_mm: [f64; 3]) -> [usize; 3] {
+    [0, 1, 2].map(|d| 16 * ((c[d] as f64 + 2.0 * pad_mm[d] / vs[d] + 1.0) / 16.0).ceil() as usize)
+}
+
+/// Circular forward difference along `axis` (no voxel-size scaling), as STI's iLSQR uses.
+fn fd_c(u: &[Complex64], n: [usize; 3], axis: usize, out: &mut [Complex64]) {
+    let stride = [1, n[0], n[0] * n[1]][axis];
+    let len = n[axis];
+    crate::maybe_par_iter_mut!(out).enumerate().for_each(|(l, o)| {
+        let c = (l / stride) % len;
+        let next = if c + 1 == len { l - (len - 1) * stride } else { l + stride };
+        *o = u[next] - u[l];
+    });
+}
+
+/// Adjoint of [`fd_c`]: `out[l] += q[l − e] − q[l]` (circular).
+fn fd_c_adj_add(q: &[Complex64], n: [usize; 3], axis: usize, out: &mut [Complex64]) {
+    let stride = [1, n[0], n[0] * n[1]][axis];
+    let len = n[axis];
+    crate::maybe_par_iter_mut!(out).enumerate().for_each(|(l, o)| {
+        let c = (l / stride) % len;
+        let prev = if c == 0 { l + (len - 1) * stride } else { l - stride };
+        *o += q[prev] - q[l];
+    });
+}
+
+/// iLSQR as in STI Suite 3.0 (`QSM_iLSQR`), with STI's 64 mm padding.
+///
+/// See the module docs for the algorithm. `field` is the local field (any linear unit; QSM.rs
+/// passes ppm), `bdir` the B0 direction in voxel axes (normalised here).
+///
+/// # Returns
+/// `(chi, streaking_artifacts, fast_qsm, initial_lsqr)` on the input grid, all masked.
+/// `initial_lsqr` is STI's second output (the step-3 LSQR solution).
+pub fn ilsqr(
+    field: &[f64],
+    mask: &[u8],
+    grid: &Grid,
+    bdir: (f64, f64, f64),
+    params: &IlsqrParams,
+    progress: impl FnMut(usize, usize),
+) -> (Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>) {
+    ilsqr_with_padding(field, mask, grid, bdir, params, [STI_PAD_MM; 3], progress)
+}
+
+/// [`ilsqr`] with an explicit STI `padsize` (mm per axis; STI's `'padsize'` argument).
+pub fn ilsqr_with_padding(
+    field: &[f64],
+    mask: &[u8],
+    grid: &Grid,
+    bdir: (f64, f64, f64),
+    params: &IlsqrParams,
+    pad_mm: [f64; 3],
+    mut progress: impl FnMut(usize, usize),
+) -> (Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>) {
+    let (nx, ny, nz) = grid.dims;
+    let n_in = nx * ny * nz;
+    let vs = [grid.voxel_size.0, grid.voxel_size.1, grid.voxel_size.2];
+    let zeros = || vec![0.0; n_in];
+    let Some((lo, hi)) = sti_bounding_box(mask, grid.dims) else {
+        return (zeros(), zeros(), zeros(), zeros());
+    };
+    progress(1, 4);
+
+    // 1. crop to the (even) bounding box and pad to the next multiple of 16 above c + 2 pad/vs
+    let c = [0, 1, 2].map(|d| hi[d] - lo[d] + 1);
+    let n = sti_padded_dims(c, vs, pad_mm);
+    let pd = [0, 1, 2].map(|d| (n[d] - c[d]) / 2);
+    let nt = n[0] * n[1] * n[2];
+    let mut p = vec![0.0; nt];
+    let mut m = vec![0.0; nt];
+    for k in 0..c[2] {
+        for j in 0..c[1] {
+            for i in 0..c[0] {
+                let src = (i + lo[0]) + (j + lo[1]) * nx + (k + lo[2]) * nx * ny;
+                let dst = (i + pd[0]) + (j + pd[1]) * n[0] + (k + pd[2]) * n[0] * n[1];
+                p[dst] = field[src];
+                m[dst] = if mask[src] != 0 { 1.0 } else { 0.0 };
+            }
+        }
+    }
+    let inside: Vec<usize> = (0..nt).filter(|&l| m[l] > 0.0).collect();
+    let pgrid = Grid::new(n[0], n[1], n[2], vs[0], vs[1], vs[2]);
+    let dk = dipole_kernel(&pgrid, bdir);
+    let ws = RefCell::new(Fft3dWorkspace::new(n[0], n[1], n[2]));
+    let fft = |a: &mut [Complex64]| ws.borrow_mut().fft3d(a);
+    let ifft = |a: &mut [Complex64]| ws.borrow_mut().ifft3d(a);
+    let cplx = |a: &[f64]| -> Vec<Complex64> { a.iter().map(|&v| Complex64::new(v, 0.0)).collect() };
+    let mut p_k = cplx(&p);
+    fft(&mut p_k[..]);
+
+    // 2. Laplacian weights: |F⁻¹(k² F φ)| with STI's 1e6 at DC, ranked in the mask
+    let kx = crate::fft::fftfreq(n[0], vs[0]);
+    let ky = crate::fft::fftfreq(n[1], vs[1]);
+    let kz = crate::fft::fftfreq(n[2], vs[2]);
+    let mut lap: Vec<Complex64> = p_k.clone();
+    crate::maybe_par_iter_mut!(lap).enumerate().for_each(|(l, z)| {
+        let (i, j, k) = (l % n[0], (l / n[0]) % n[1], l / (n[0] * n[1]));
+        let k2 = if l == 0 { 1e6 } else { kx[i] * kx[i] + ky[j] * ky[j] + kz[k] * kz[k] };
+        *z *= k2;
+    });
+    ifft(&mut lap[..]);
+    let lap_abs: Vec<f64> = lap.iter().map(|z| z.re.abs()).collect();
+    drop(lap);
+    let mut ranked: Vec<f64> = inside.iter().map(|&l| lap_abs[l]).collect();
+    sort_f64(&mut ranked);
+    let (t60, t999) = (sti_percentile(&ranked, 0.6), sti_percentile(&ranked, 0.999));
+    let w: Vec<f64> = (0..nt)
+        .map(|l| {
+            if m[l] == 0.0 {
+                0.0
+            } else if t999 > t60 {
+                (1.0 - 0.8 * (lap_abs[l] - t60) / (t999 - t60)).clamp(0.2, 1.0)
+            } else if lap_abs[l] <= t60 {
+                1.0
+            } else {
+                0.2
+            }
+        })
+        .collect();
+    drop(lap_abs);
+
+    // 3. initial solution: LSQR on D W D χ = D W φ (D W D is self-adjoint)
+    let dconv = |a: &mut [Complex64]| {
+        fft(a);
+        crate::maybe_par_iter_mut!(a).zip(crate::maybe_par_iter!(dk)).for_each(|(z, &dv)| *z *= dv);
+        ifft(a);
+    };
+    let apply1 = |x: &[Complex64]| -> Vec<Complex64> {
+        let mut t = x.to_vec();
+        dconv(&mut t[..]);
+        crate::maybe_par_iter_mut!(t).zip(crate::maybe_par_iter!(w)).for_each(|(z, &wv)| *z *= wv);
+        dconv(&mut t[..]);
+        t
+    };
+    let mut b1: Vec<Complex64> = p.iter().zip(&w).map(|(&pv, &wv)| Complex64::new(pv * wv, 0.0)).collect();
+    dconv(&mut b1[..]);
+    let (x1, _) = lsqr_matlab(apply1, apply1, &b1, 0.01, params.max_iter);
+    drop(b1);
+    let x1r: Vec<f64> = x1.iter().map(|z| z.re).collect();
+    drop(x1);
+    progress(2, 4);
+
+    // 4. FastQSM prior (sign(D) inverse blended with a k-space-smoothed copy where |D| is small)
+    let xfs = sti_fastqsm(&p_k, &m, &inside, &dk, n, &fft, &ifft);
+    drop(p_k);
+    progress(3, 4);
+
+    // 5. gradient weights from the FastQSM map, pooled over the three axes in the mask
+    let xfs_c = cplx(&xfs);
+    let mut gw: Vec<Vec<f64>> = Vec::with_capacity(3);
+    let mut g = vec![Complex64::new(0.0, 0.0); nt];
+    let mut pool = Vec::with_capacity(3 * inside.len());
+    let mut gabs: Vec<Vec<f64>> = Vec::with_capacity(3);
+    for axis in 0..3 {
+        fd_c(&xfs_c, n, axis, &mut g);
+        let a: Vec<f64> = g.iter().map(|z| z.re.abs()).collect();
+        pool.extend(inside.iter().map(|&l| a[l]));
+        gabs.push(a);
+    }
+    drop(xfs_c);
+    sort_f64(&mut pool);
+    let (t50, t70) = (sti_percentile(&pool, 0.5), sti_percentile(&pool, 0.7));
+    for a in &gabs {
+        gw.push(
+            (0..nt)
+                .map(|l| {
+                    if m[l] == 0.0 {
+                        0.0
+                    } else if t70 > t50 {
+                        ((t70 - a[l]) / (t70 - t50)).clamp(0.0, 1.0)
+                    } else if a[l] <= t50 {
+                        1.0
+                    } else {
+                        0.0
+                    }
+                })
+                .collect(),
+        );
+    }
+    drop(gabs);
+
+    // 6. streaking artefacts: k-space unknown restricted to the cone |D| < 0.1
+    let mic: Vec<f64> = dk.iter().map(|&dv| if dv.abs() < 0.1 { 1.0 } else { 0.0 }).collect();
+    let sq = (nt as f64).sqrt();
+    let apply2 = |y: &[Complex64]| -> Vec<Complex64> {
+        let mut t: Vec<Complex64> = y.iter().zip(&mic).map(|(&z, &mv)| z * mv).collect();
+        ifft(&mut t[..]);
+        crate::maybe_par_iter_mut!(t).for_each(|z| *z *= sq);
+        let mut out = vec![Complex64::new(0.0, 0.0); 3 * nt];
+        for (axis, chunk) in out.chunks_mut(nt).enumerate() {
+            fd_c(&t, n, axis, chunk);
+            crate::maybe_par_iter_mut!(chunk).zip(crate::maybe_par_iter!(gw[axis])).for_each(|(z, &gv)| *z *= gv);
+        }
+        out
+    };
+    let apply2h = |r: &[Complex64]| -> Vec<Complex64> {
+        let mut acc = vec![Complex64::new(0.0, 0.0); nt];
+        let mut q = vec![Complex64::new(0.0, 0.0); nt];
+        for axis in 0..3 {
+            let ra = &r[axis * nt..(axis + 1) * nt];
+            crate::maybe_par_iter_mut!(q).zip(crate::maybe_par_iter!(ra)).zip(crate::maybe_par_iter!(gw[axis]))
+                .for_each(|((qv, &rv), &gv)| *qv = rv * gv);
+            fd_c_adj_add(&q, n, axis, &mut acc);
+        }
+        fft(&mut acc[..]);
+        crate::maybe_par_iter_mut!(acc).zip(crate::maybe_par_iter!(mic)).for_each(|(z, &mv)| *z *= mv / sq);
+        acc
+    };
+    let x1m: Vec<Complex64> = x1r.iter().zip(&m).map(|(&xv, &mv)| Complex64::new(xv * mv, 0.0)).collect();
+    let mut b2 = vec![Complex64::new(0.0, 0.0); 3 * nt];
+    for (axis, chunk) in b2.chunks_mut(nt).enumerate() {
+        fd_c(&x1m, n, axis, chunk);
+        crate::maybe_par_iter_mut!(chunk).zip(crate::maybe_par_iter!(gw[axis])).for_each(|(z, &gv)| *z *= gv);
+    }
+    drop(x1m);
+    progress(4, 4);
+    let (y, _) = lsqr_matlab(apply2, apply2h, &b2, params.tol, params.max_iter);
+    drop(b2);
+    let mut xsa: Vec<Complex64> = y.iter().zip(&mic).map(|(&z, &mv)| z * mv).collect();
+    drop(y);
+    ifft(&mut xsa[..]);
+
+    // 7. subtract, mask, crop back
+    let mut chi = zeros();
+    let mut sa = zeros();
+    let mut fs = zeros();
+    let mut x0 = zeros();
+    for k in 0..c[2] {
+        for j in 0..c[1] {
+            for i in 0..c[0] {
+                let dst = (i + lo[0]) + (j + lo[1]) * nx + (k + lo[2]) * nx * ny;
+                let src = (i + pd[0]) + (j + pd[1]) * n[0] + (k + pd[2]) * n[0] * n[1];
+                if m[src] > 0.0 {
+                    let a = xsa[src].re * sq;
+                    chi[dst] = x1r[src] - a;
+                    sa[dst] = a;
+                    fs[dst] = xfs[src];
+                    x0[dst] = x1r[src];
+                }
+            }
+        }
+    }
+    (chi, sa, fs, x0)
+}
+
+/// STI's `FastQSM` on the padded grid, given `F φ` (unshifted k-space). Returns the masked
+/// estimate, rescaled to the TKD (threshold 1/8) solution by least squares inside the mask.
+fn sti_fastqsm(
+    p_k: &[Complex64],
+    m: &[f64],
+    inside: &[usize],
+    dk: &[f64],
+    n: [usize; 3],
+    fft: &dyn Fn(&mut [Complex64]),
+    ifft: &dyn Fn(&mut [Complex64]),
+) -> Vec<f64> {
+    let nt = p_k.len();
+    // kernel: ball3D(3) (centre excluded) / its count, closed along the 2nd axis with [1 1 1]
+    // (out-of-array = −∞ for the dilation, +∞ for the erosion), not renormalised
+    let r = 3i64;
+    let s = 7usize;
+    let mut ball = vec![0.0f64; s * s * s];
+    let mut cnt = 0.0;
+    for (l, bv) in ball.iter_mut().enumerate() {
+        let (i, j, k) = ((l % s) as i64 - r, ((l / s) % s) as i64 - r, (l / (s * s)) as i64 - r);
+        let d2 = (i * i + j * j + k * k) as f64;
+        if d2 > 0.0 && d2 <= (r as f64 + 1.0 / 6.0).powi(2) {
+            *bv = 1.0;
+            cnt += 1.0;
+        }
+    }
+    ball.iter_mut().for_each(|v| *v /= cnt);
+    let line = |a: &[f64], dil: bool| -> Vec<f64> {
+        let mut o = vec![0.0; a.len()];
+        for (l, ov) in o.iter_mut().enumerate() {
+            let j = (l / s) % s;
+            let mut v = a[l];
+            for jj in [j.wrapping_sub(1), j + 1] {
+                if jj < s {
+                    let q = a[l - j * s + jj * s];
+                    v = if dil { v.max(q) } else { v.min(q) };
+                }
+            }
+            *ov = v;
+        }
+        o
+    };
+    let closed = line(&line(&ball, true), false);
+    // STI smooths the k-space of the *centred* image (fftnc: origin at the array centre); on
+    // the k-space of the uncentred image that is the same convolution with the kernel
+    // modulated by (−1)^(i+j+k) (all padded dimensions are even).
+    let mut kern = vec![Complex64::new(0.0, 0.0); nt];
+    for (l, &bv) in closed.iter().enumerate() {
+        if bv != 0.0 {
+            let off = [(l % s) as i64 - r, ((l / s) % s) as i64 - r, (l / (s * s)) as i64 - r];
+            let idx = [0, 1, 2].map(|d| off[d].rem_euclid(n[d] as i64) as usize);
+            let sign = if (off[0] + off[1] + off[2]).rem_euclid(2) == 0 { 1.0 } else { -1.0 };
+            kern[idx[0] + idx[1] * n[0] + idx[2] * n[0] * n[1]] = Complex64::new(sign * bv, 0.0);
+        }
+    }
+    fft(&mut kern[..]);
+    let kh: Vec<f64> = kern.iter().map(|z| z.re).collect();
+    drop(kern);
+    // k-space blending weights from |D|^0.001, ranked over the whole grid (1st..30th pct)
+    let z: Vec<f64> = dk.iter().map(|&dv| dv.abs().powf(0.001)).collect();
+    let mut zs = z.clone();
+    sort_f64(&mut zs);
+    let (zlo, zhi) = (sti_percentile(&zs, 0.01), sti_percentile(&zs, 0.3));
+    drop(zs);
+    let wf: Vec<f64> = z.iter().map(|&v| if zhi > zlo { ((v - zlo) / (zhi - zlo)).clamp(0.0, 1.0) } else { 1.0 }).collect();
+    drop(z);
+    // blend X with its k-space smoothing (a convolution over k-space indices)
+    let blend = |x: &mut [Complex64]| {
+        let mut sm = x.to_vec();
+        fft(&mut sm[..]);
+        crate::maybe_par_iter_mut!(sm).zip(crate::maybe_par_iter!(kh)).for_each(|(v, &h)| *v *= h);
+        ifft(&mut sm[..]);
+        crate::maybe_par_iter_mut!(x).zip(crate::maybe_par_iter!(sm)).zip(crate::maybe_par_iter!(wf))
+            .for_each(|((xv, &sv), &w)| *xv = *xv * w + sv * (1.0 - w));
+    };
+    let mut x: Vec<Complex64> = p_k.iter().zip(dk).map(|(&pv, &dv)| pv * sign0(dv)).collect();
+    blend(&mut x[..]);
+    ifft(&mut x[..]);
+    crate::maybe_par_iter_mut!(x).zip(crate::maybe_par_iter!(m)).for_each(|(v, &mv)| *v *= mv);
+    fft(&mut x[..]);
+    blend(&mut x[..]);
+    ifft(&mut x[..]);
+    let mut xfs: Vec<f64> = x.iter().zip(m).map(|(v, &mv)| v.re * mv).collect();
+    // TKD: 1/D clamped to ±8 (D = 0 → +8)
+    let mut t: Vec<Complex64> = p_k.iter().zip(dk).map(|(&pv, &dv)| {
+        let r = 1.0 / dv;
+        pv * if r.abs() > 8.0 { 8.0f64.copysign(r) } else { r }
+    }).collect();
+    ifft(&mut t[..]);
+    let (mut sxy, mut sxx) = (0.0, 0.0);
+    for &l in inside {
+        sxy += xfs[l] * t[l].re;
+        sxx += xfs[l] * xfs[l];
+    }
+    let a = if sxx > 0.0 { sxy / sxx } else { 1.0 };
+    xfs.iter_mut().for_each(|v| *v *= a);
+    xfs
+}
+
+fn sign0(v: f64) -> f64 {
+    if v > 0.0 { 1.0 } else if v < 0.0 { -1.0 } else { 0.0 }
 }
 
 #[cfg(test)]
@@ -1667,7 +2246,7 @@ mod tests {
 
         let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
         let params = IlsqrParams { tol, max_iter: maxit };
-        let (chi, _, _, _) = ilsqr(&field, &mask, &grid, bdir, &params, |_, _| {});
+        let (chi, _, _, _) = ilsqr_qsmm(&field, &mask, &grid, bdir, &params, |_, _| {});
 
         // Check output dimensions
         assert_eq!(chi.len(), n_total, "output size mismatch");
@@ -1691,4 +2270,211 @@ mod tests {
             .sum();
         assert!(inside_sum > 0.0, "chi should not be all zeros inside the mask");
     }
+    // ---------------- STI Suite iLSQR ----------------
+
+    fn c64(re: f64, im: f64) -> Complex64 { Complex64::new(re, im) }
+
+    type Op = Box<dyn Fn(&[Complex64]) -> Vec<Complex64>>;
+
+    /// Dense column-major matrix-vector products (A x, Aᴴ y) for the LSQR tests.
+    fn dense(a: Vec<Complex64>, m: usize, n: usize) -> (Op, Op) {
+        let a2 = a.clone();
+        let fwd = move |x: &[Complex64]| (0..m).map(|i| (0..n).map(|j| a[i + j * m] * x[j]).sum()).collect();
+        let adj = move |y: &[Complex64]| (0..n).map(|j| (0..m).map(|i| a2[i + j * m].conj() * y[i]).sum()).collect();
+        (Box::new(fwd), Box::new(adj))
+    }
+
+    #[test]
+    fn test_lsqr_matlab_matches_matlab_lsqr() {
+        // Reference values from MATLAB R2023b `[x,flag,relres,iter] = lsqr(A, b, tol, maxit)`.
+        // Inconsistent 3x2 system: stops on the normal-equations test after 2 iterations.
+        let a: Vec<Complex64> = [1.0, 3.0, 5.0, 2.0, 4.0, 6.0].iter().map(|&v| c64(v, 0.0)).collect();
+        let (f, g) = dense(a, 3, 2);
+        let b = [c64(1.0, 0.0), c64(2.0, 0.0), c64(4.0, 0.0)];
+        let (x, o) = lsqr_matlab(f, g, &b, 1e-8, 10);
+        assert_eq!((o.flag, o.iter), (0, 2));
+        assert!((o.relres - 0.0890870806374748).abs() < 1e-12);
+        assert!((x[0].re - 0.666666666666665).abs() < 1e-12 && (x[1].re - 0.083333333333331).abs() < 1e-12);
+
+        // Ill-conditioned diagonal, iteration cap reached: x after exactly 5 iterations.
+        let d: Vec<f64> = (0..8).map(|i| 10f64.powf(-3.0 * i as f64 / 7.0)).collect(); // logspace(0, -3, 8)
+        let mut a = vec![c64(0.0, 0.0); 64];
+        for i in 0..8 { a[i + 8 * i] = c64(d[i], 0.0); }
+        let (f, g) = dense(a, 8, 8);
+        let b = vec![c64(1.0, 0.0); 8];
+        let (x, o) = lsqr_matlab(f, g, &b, 1e-10, 5);
+        assert_eq!((o.flag, o.iter), (1, 5));
+        assert!((o.relres - 0.573674508817809).abs() < 1e-12);
+        let want = [0.999999943834766, 2.68269578689076, 7.1969177940897, 19.2460743622976,
+                    59.9361124086567, 25.5070666956926, 9.67511787758301, 3.61516968204123];
+        // (x(1) moves by ~1e-9 for a 1-ulp change in A here, so x is only checked to 1e-6)
+        for (xi, wi) in x.iter().zip(want) { assert!((xi.re - wi).abs() < 1e-6 * wi, "{} vs {}", xi.re, wi); }
+
+        // Complex 3x2 system.
+        let a = vec![c64(1.0, 0.0), c64(2.0, 0.0), c64(0.0, 0.5), c64(0.0, 1.0), c64(-1.0, 0.0), c64(3.0, 0.0)];
+        let (f, g) = dense(a, 3, 2);
+        let b = [c64(1.0, 0.0), c64(0.0, 1.0), c64(2.0, 0.0)];
+        let (x, o) = lsqr_matlab(f, g, &b, 1e-12, 20);
+        assert_eq!((o.flag, o.iter), (0, 2));
+        assert!((o.relres - 0.449991346403468).abs() < 1e-12);
+        assert!((x[0] - c64(0.448598130841121, 0.186915887850467)).norm() < 1e-12);
+        assert!((x[1] - c64(0.635514018691589, -0.168224299065421)).norm() < 1e-12);
+    }
+
+    #[test]
+    fn test_lsqr_matlab_zero_rhs() {
+        let (x, o) = lsqr_matlab(|v: &[Complex64]| v.to_vec(), |v: &[Complex64]| v.to_vec(), &[c64(0.0, 0.0); 4], 1e-6, 10);
+        assert_eq!((o.flag, o.iter), (0, 0));
+        assert!(x.iter().all(|z| z.norm() == 0.0));
+    }
+
+    #[test]
+    fn test_sti_bounding_box() {
+        // STI MaskBoundingBox outputs (1-based) from probing, here 0-based.
+        type Case = ((usize, usize, usize), [usize; 3], [usize; 3], [[usize; 2]; 3]);
+        let cases: [Case; 5] = [
+            ((20, 20, 20), [4, 5, 6], [10, 11, 12], [[4, 11], [5, 12], [6, 13]]),
+            ((20, 20, 20), [1, 1, 1], [5, 6, 7], [[1, 6], [1, 6], [1, 8]]),
+            ((20, 20, 20), [14, 15, 16], [20, 20, 20], [[13, 20], [15, 20], [15, 20]]),
+            ((21, 21, 21), [1, 2, 3], [21, 21, 21], [[1, 20], [2, 21], [2, 21]]),
+            ((20, 20, 20), [7, 7, 7], [7, 8, 7], [[7, 8], [7, 8], [7, 8]]),
+        ];
+        for (dims, lo1, hi1, want) in cases {
+            let mut m = vec![0u8; dims.0 * dims.1 * dims.2];
+            for k in lo1[2] - 1..hi1[2] { for j in lo1[1] - 1..hi1[1] { for i in lo1[0] - 1..hi1[0] {
+                m[i + j * dims.0 + k * dims.0 * dims.1] = 1;
+            } } }
+            let (lo, hi) = sti_bounding_box(&m, dims).unwrap();
+            for d in 0..3 { assert_eq!([lo[d] + 1, hi[d] + 1], want[d], "dims {:?} box {:?}..{:?}", dims, lo1, hi1); }
+        }
+        assert!(sti_bounding_box(&[0u8; 8], (2, 2, 2)).is_none());
+    }
+
+    #[test]
+    fn test_sti_padded_dims() {
+        // (crop, voxel size, padsize) -> STI's padded size, from probing QSM_iLSQR
+        type Case = ([usize; 3], [f64; 3], [f64; 3], [usize; 3]);
+        let cases: [Case; 6] = [
+            ([32, 30, 8], [0.8, 0.8, 3.0], [64.0; 3], [208, 192, 64]),
+            ([48, 44, 12], [0.8, 0.8, 3.0], [0.0; 3], [64, 48, 16]),
+            ([32, 34, 32], [1.3; 3], [10.0; 3], [64, 64, 64]),
+            ([32, 30, 18], [1.3, 0.7, 1.1], [10.0, 3.0, 7.0], [64, 48, 32]),
+            ([40, 42, 10], [1.05, 2.2, 3.3], [20.0; 3], [80, 64, 32]),
+            ([46, 42, 10], [0.5, 0.5, 2.0], [64.0; 3], [304, 304, 80]),
+        ];
+        for (c, vs, pad, want) in cases { assert_eq!(sti_padded_dims(c, vs, pad), want); }
+    }
+
+    #[test]
+    fn test_sti_percentile_is_rounded_index() {
+        let v: Vec<f64> = (1..=10).map(|i| i as f64).collect();
+        assert_eq!(sti_percentile(&v, 0.25), 3.0); // round(2.5) = 3, no interpolation
+        assert_eq!(sti_percentile(&v, 0.999), 10.0);
+        assert_eq!(sti_percentile(&v, 0.0), 1.0);
+    }
+
+    #[test]
+    fn test_fd_adjoint() {
+        let n = [5, 4, 3];
+        let nt = 60;
+        let u: Vec<Complex64> = (0..nt).map(|i| c64((i as f64 * 0.37).sin(), (i as f64 * 0.11).cos())).collect();
+        let q: Vec<Complex64> = (0..nt).map(|i| c64((i as f64 * 0.23).cos(), (i as f64 * 0.71).sin())).collect();
+        for axis in 0..3 {
+            let mut g = vec![c64(0.0, 0.0); nt];
+            fd_c(&u, n, axis, &mut g);
+            let mut h = vec![c64(0.0, 0.0); nt];
+            fd_c_adj_add(&q, n, axis, &mut h);
+            let lhs: Complex64 = g.iter().zip(&q).map(|(a, b)| a.conj() * b).sum();
+            let rhs: Complex64 = u.iter().zip(&h).map(|(a, b)| a.conj() * b).sum();
+            assert!((lhs - rhs).norm() < 1e-12, "axis {}", axis);
+        }
+    }
+
+    /// Sphere of susceptibility forward-modelled through the dipole kernel on a 2x grid.
+    fn sphere_phantom(n: usize, vs: (f64, f64, f64), bdir: (f64, f64, f64)) -> (Vec<f64>, Vec<u8>, Vec<f64>) {
+        let nt = n * n * n;
+        let c = (n as f64 - 1.0) / 2.0;
+        let mut chi = vec![0.0; nt];
+        let mut mask = vec![0u8; nt];
+        for k in 0..n { for j in 0..n { for i in 0..n {
+            let (x, y, z) = (i as f64 - c, j as f64 - c, k as f64 - c);
+            let r2 = x * x + y * y + z * z;
+            let l = i + j * n + k * n * n;
+            if r2 < (0.4 * n as f64).powi(2) { mask[l] = 1; }
+            if (x - 2.0).powi(2) + y * y + z * z < 9.0 { chi[l] = 0.1; }
+            if (x + 3.0).powi(2) + (y - 1.0).powi(2) + z * z < 4.0 { chi[l] = -0.05; }
+        } } }
+        let m2 = 2 * n;
+        let g2 = Grid::new(m2, m2, m2, vs.0, vs.1, vs.2);
+        let d = dipole_kernel(&g2, bdir);
+        let mut big = vec![Complex64::new(0.0, 0.0); m2 * m2 * m2];
+        for k in 0..n { for j in 0..n { for i in 0..n { big[i + j * m2 + k * m2 * m2].re = chi[i + j * n + k * n * n]; } } }
+        let mut ws = Fft3dWorkspace::new(m2, m2, m2);
+        ws.fft3d(&mut big);
+        for (z, &dv) in big.iter_mut().zip(&d) { *z *= dv; }
+        ws.ifft3d(&mut big);
+        let mut field = vec![0.0; nt];
+        for k in 0..n { for j in 0..n { for i in 0..n {
+            let l = i + j * n + k * n * n;
+            if mask[l] != 0 { field[l] = big[i + j * m2 + k * m2 * m2].re; }
+        } } }
+        (field, mask, chi)
+    }
+
+    fn corr_in(a: &[f64], b: &[f64], m: &[u8]) -> f64 {
+        let idx: Vec<usize> = (0..a.len()).filter(|&i| m[i] != 0).collect();
+        let n = idx.len() as f64;
+        let (ma, mb) = (idx.iter().map(|&i| a[i]).sum::<f64>() / n, idx.iter().map(|&i| b[i]).sum::<f64>() / n);
+        let (mut sab, mut saa, mut sbb) = (0.0, 0.0, 0.0);
+        for &i in &idx { sab += (a[i] - ma) * (b[i] - mb); saa += (a[i] - ma).powi(2); sbb += (b[i] - mb).powi(2); }
+        sab / (saa * sbb).sqrt()
+    }
+
+    #[test]
+    fn test_ilsqr_sti_recovers_spheres() {
+        let n = 16;
+        let bdir = (0.1, -0.2, 0.95f64.sqrt());
+        let (field, mask, chi) = sphere_phantom(n, (1.0, 1.0, 1.0), bdir);
+        let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
+        let mut steps = Vec::new();
+        let params = IlsqrParams { max_iter: 40, ..IlsqrParams::default() };
+        let (x, xsa, xfs, x1) = ilsqr_with_padding(&field, &mask, &grid, bdir, &params, [4.0; 3], |s, t| steps.push((s, t)));
+        assert_eq!(steps, vec![(1, 4), (2, 4), (3, 4), (4, 4)]);
+        for v in [&x, &xsa, &xfs, &x1] {
+            assert!(v.iter().all(|z| z.is_finite()));
+            assert!(v.iter().zip(&mask).all(|(&z, &m)| m != 0 || z == 0.0), "output must be masked");
+        }
+        let (r, r1) = (corr_in(&x, &chi, &mask), corr_in(&x1, &chi, &mask));
+        println!("corr with truth: chi {:.4}, initial LSQR {:.4}", r, r1);
+        assert!(r > 0.9 && r1 > 0.8, "corr with truth {} / {}", r, r1);
+        // chi = initial LSQR minus artefacts
+        for i in 0..x.len() { assert!((x[i] - (x1[i] - xsa[i])).abs() < 1e-12); }
+        // linear in the field (up to LSQR rounding: the artefact solve runs 100 unconverged steps)
+        let f2: Vec<f64> = field.iter().map(|v| 3.0 * v).collect();
+        let (y, _, _, _) = ilsqr_with_padding(&f2, &mask, &grid, bdir, &params, [4.0; 3], |_, _| {});
+        let x3: Vec<f64> = x.iter().map(|v| 3.0 * v).collect();
+        let worst = y.iter().zip(&x3).map(|(a, b)| (a - b).abs()).fold(0.0, f64::max);
+        println!("scaling: max|chi(3f) - 3 chi(f)| = {:.2e}", worst);
+        assert!(corr_in(&y, &x3, &mask) > 0.9999 && worst < 0.01 * 0.3, "not linear: {}", worst);
+    }
+
+    #[test]
+    fn test_ilsqr_sti_empty_mask_and_zero_field() {
+        let grid = Grid::new(8, 8, 8, 1.0, 1.0, 1.0);
+        let (x, _, _, _) = ilsqr(&[1.0; 512], &[0u8; 512], &grid, (0.0, 0.0, 1.0), &IlsqrParams::default(), |_, _| {});
+        assert!(x.iter().all(|&v| v == 0.0));
+        let mut mask = vec![0u8; 512];
+        for k in 2..6 { for j in 2..6 { for i in 2..6 { mask[i + 8 * j + 64 * k] = 1; } } }
+        let (x, _, _, _) = ilsqr_with_padding(&[0.0; 512], &mask, &grid, (0.0, 0.0, 1.0), &IlsqrParams::default(), [4.0; 3], |_, _| {});
+        assert!(x.iter().all(|&v| v == 0.0));
+    }
+
+    #[test]
+    fn test_ilsqr_params_defaults() {
+        let p = IlsqrParams::default();
+        assert_eq!((p.tol, p.max_iter), (1e-3, 100));
+        let q = IlsqrParams::qsmm();
+        assert_eq!((q.tol, q.max_iter), (0.01, 50));
+    }
+
 }

@@ -60,6 +60,19 @@ pub fn run_qsmart(
         tol: qsmart_params.ilsqr_tol,
         max_iter: qsmart_params.ilsqr_max_iter,
     };
+    // QSMART keeps the QSM.m formulation of iLSQR it was validated with; the default
+    // `inversion::ilsqr` (STI Suite's algorithm) is a different method.
+    let invert = |lfs: &[f64], m: &[u8]| -> Result<Vec<f64>, PipelineError> {
+        if matches!(inner_config.algorithm, InversionAlgorithm::Ilsqr) {
+            metadata.require_contiguous_slices()?;
+            let (chi, _, _, _) = crate::inversion::ilsqr_qsmm(
+                lfs, m, &grid, metadata.b0_direction, &inner_config.ilsqr, |_, _| {},
+            );
+            Ok(chi)
+        } else {
+            super::inversion::run_dipole_inversion(lfs, m, metadata, &inner_config, magnitude, &mut |_, _| {})
+        }
+    };
 
     // Step 1: Vasculature detection (vasc_mask: 1 = tissue, 0 = vessel)
     progress(1, 6);
@@ -96,9 +109,7 @@ pub fn run_qsmart(
     // Step 3: dipole inversion stage 1 over the whole ROI.
     progress(3, 6);
     let mask_stage1: Vec<u8> = weighted_mask.iter().map(|&v| if v > 0.1 { 1 } else { 0 }).collect();
-    let chi1 = super::inversion::run_dipole_inversion(
-        &lfs1, &mask_stage1, metadata, &inner_config, magnitude, &mut |_, _| {},
-    )?;
+    let chi1 = invert(&lfs1, &mask_stage1)?;
 
     // Step 4: SDF stage 2 — tissue-only, vessel-aware (mask-zeroed field input).
     progress(4, 6);
@@ -124,9 +135,7 @@ pub fn run_qsmart(
         .zip(vasc_mask.iter())
         .map(|(&m, &v)| if m > 0.1 && v > 0.5 { 1 } else { 0 })
         .collect();
-    let chi2 = super::inversion::run_dipole_inversion(
-        &lfs2, &mask_stage2, metadata, &inner_config, magnitude, &mut |_, _| {},
-    )?;
+    let chi2 = invert(&lfs2, &mask_stage2)?;
 
     // Step 6: offset adjustment (combine stages) and reference.
     // removed_voxels = vessel regions (in mask but excluded from stage 2).
