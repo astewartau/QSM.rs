@@ -43,7 +43,7 @@ fn main() {
     let mask = bet::run_bet(&magnitude, &grid, &bet_params, |_, _| {});
 
     // 2. Phase unwrapping (Laplacian: fast, closed-form, no progress callback)
-    let unwrapped = unwrap::laplacian_unwrap(&phase, &mask, &grid);
+    let unwrapped = unwrap::laplacian_unwrap(&phase, &mask, &grid, unwrap::LaplacianSolver::Dct);
 
     // 3. Background field removal (V-SHARP)
     let (local_field, eroded_mask) =

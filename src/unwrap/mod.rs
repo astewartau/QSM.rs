@@ -6,18 +6,17 @@
 //!   quality-guided ordering ([`RomeoParams`])
 //! - [`unwrap_bestpath`] — best path (3D-SRNCP), globally sorted edge merging
 //!   ([`BestPathParams`])
-//! - [`laplacian_unwrap`] — Laplacian unwrapping (Neumann BC on the array)
+//! - [`laplacian_unwrap`] — Laplacian unwrapping, with a [`LaplacianSolver`]: `Dct` (default;
+//!   unweighted least squares, Neumann BC on the array) or `Fft { pad }` (Schofield & Zhu sin/cos
+//!   method on the zero-padded volume, which reproduces STI Suite 3.0's `MRPhaseUnwrap`)
+//! - [`laplacian_unwrap_multi_echo`] — per-echo Laplacian unwrap + weighted echo average
+//!   ([`EchoWeighting`], e.g. `TE·exp(−TE/T2*)`)
 //! - [`laplacian_unwrap_bfr`] — Laplacian unwrapping **+ background field removal**
 //!   (∇² masked to the ROI); see the [`laplacian`] module docs for why these differ
-//! - [`laplacian_unwrap_sti`] — Laplacian unwrapping as STI Suite 3.0 computes it (spectral
-//!   sin/cos Laplacian, zero-padded periodic solve), and
-//!   [`laplacian_unwrap_sti_multi_echo`] for the per-echo unwrap + weighted echo average
-//!   field map built on it; see the [`laplacian_sti`] module docs
 
 pub mod romeo;
 pub mod bestpath;
 pub mod laplacian;
-pub mod laplacian_sti;
 
 pub use romeo::{
     unwrap_romeo, unwrap_romeo_multi_echo, correct_multi_echo_wraps,
@@ -27,10 +26,8 @@ pub use romeo::{
 pub use bestpath::{unwrap_bestpath, BestPathParams};
 #[allow(deprecated)]
 pub use laplacian::laplacian_unwrap_bfr;
-pub use laplacian::laplacian_unwrap;
-pub use laplacian_sti::{
-    laplacian_unwrap_sti, laplacian_unwrap_sti_multi_echo, EchoAverage, EchoWeighting,
-    LaplacianStiParams,
+pub use laplacian::{
+    laplacian_unwrap, laplacian_unwrap_multi_echo, EchoAverage, EchoWeighting, LaplacianSolver,
 };
 
 /// Phase unwrapping method selection.
@@ -42,8 +39,8 @@ pub use laplacian_sti::{
 pub enum UnwrapMethod {
     Romeo,
     /// Laplacian unwrapping under a Neumann boundary condition; see
-    /// [`laplacian_unwrap`]. Unwraps only — the background field is left alone.
-    /// STI Suite's formulation is [`laplacian_unwrap_sti`] (not selectable here).
+    /// [`laplacian_unwrap`] with [`LaplacianSolver::Dct`]. Unwraps only — the background field
+    /// is left alone. Call [`laplacian_unwrap`] directly for [`LaplacianSolver::Fft`].
     Laplacian,
     /// Best path (3D-SRNCP); see [`unwrap_bestpath`]. The original Abdul-Rahman
     /// algorithm, not ROMEO run with best-path weights — for that, set
