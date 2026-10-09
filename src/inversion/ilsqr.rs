@@ -1427,13 +1427,73 @@ pub struct LsqrOutcome {
     pub relres: f64,
 }
 
-fn cnorm(x: &[Complex64]) -> f64 {
-    // fixed chunking, so the sum does not depend on the thread count
-    const CH: usize = 1 << 16;
-    let parts: Vec<f64> = crate::maybe_par_chunks!(x, CH)
-        .map(|c| c.iter().map(|v| v.norm_sqr()).sum::<f64>())
+/// Chunk length of the LSQR norms: fixed, so every sum is independent of the thread count.
+const NORM_CHUNK: usize = 1 << 16;
+
+/// How an LSQR vector is split for its norms: lengths of consecutive parts, each summed
+/// sequentially, the partial sums then added in order.
+///
+/// A vector stored densely uses [`dense_parts`] (`NORM_CHUNK`-long parts). A
+/// vector stored *compactly*, as only the entries at a sorted list of positions in a longer
+/// vector that is exactly zero elsewhere, uses [`compact_parts`]: one part per `NORM_CHUNK`
+/// of the long vector. Adding the omitted zeros changes no partial sum, so the norm of the
+/// compact vector equals the dense norm of the long one.
+fn dense_parts(len: usize) -> Vec<usize> {
+    (0..len.div_ceil(NORM_CHUNK)).map(|c| NORM_CHUNK.min(len - c * NORM_CHUNK)).collect()
+}
+
+/// See [`dense_parts`]. `pos` are the (strictly increasing) positions in the long vector.
+fn compact_parts(pos: impl Iterator<Item = usize>) -> Vec<usize> {
+    let mut parts: Vec<usize> = Vec::new();
+    let mut last = usize::MAX;
+    for g in pos {
+        let c = g / NORM_CHUNK;
+        if c == last {
+            *parts.last_mut().unwrap() += 1;
+        } else {
+            parts.push(1);
+            last = c;
+        }
+    }
+    parts
+}
+
+fn split_parts<'a>(mut x: &'a [Complex64], parts: &[usize]) -> Vec<&'a [Complex64]> {
+    parts.iter().map(|&len| { let (a, b) = x.split_at(len); x = b; a }).collect()
+}
+
+fn split_parts_mut<'a>(mut x: &'a mut [Complex64], parts: &[usize]) -> Vec<&'a mut [Complex64]> {
+    parts.iter().map(|&len| { let (a, b) = std::mem::take(&mut x).split_at_mut(len); x = b; a }).collect()
+}
+
+fn cnorm_parts(x: &[Complex64], parts: &[usize]) -> f64 {
+    let xs = split_parts(x, parts);
+    let sums: Vec<f64> = crate::maybe_par_iter!(xs).map(|c| c.iter().map(|v| v.norm_sqr()).sum::<f64>()).collect();
+    sums.iter().sum::<f64>().sqrt()
+}
+
+/// `f` applied elementwise to `y` (paired with `x`), then [`cnorm_parts`]`(y)`, in one pass:
+/// the same values as the two passes, part by part.
+fn update_and_norm(
+    y: &mut [Complex64],
+    x: &[Complex64],
+    parts: &[usize],
+    f: impl Fn(&mut Complex64, Complex64) + Sync + Send,
+) -> f64 {
+    let mut ys = split_parts_mut(y, parts);
+    let xs = split_parts(x, parts);
+    let sums: Vec<f64> = crate::maybe_par_iter_mut!(ys)
+        .zip(crate::maybe_par_iter!(xs))
+        .map(|(yc, xc)| {
+            yc.iter_mut().zip(xc.iter()).for_each(|(a, &b)| f(a, b));
+            yc.iter().map(|v| v.norm_sqr()).sum::<f64>()
+        })
         .collect();
-    parts.iter().sum::<f64>().sqrt()
+    sums.iter().sum::<f64>().sqrt()
+}
+
+fn div_inplace(x: &mut [Complex64], s: f64) {
+    crate::maybe_par_iter_mut!(x).for_each(|z| *z /= s);
 }
 
 /// LSQR (Paige & Saunders 1982) with MATLAB `lsqr`'s stopping rules, zero initial guess, no
@@ -1451,41 +1511,75 @@ where
     F: FnMut(&[Complex64]) -> Vec<Complex64>,
     G: FnMut(&[Complex64]) -> Vec<Complex64>,
 {
-    let n2b = cnorm(b);
+    let nx = apply_ah(b).len();
+    lsqr_matlab_into(
+        |v, out| out.copy_from_slice(&apply_a(v)),
+        |u, out| out.copy_from_slice(&apply_ah(u)),
+        b.to_vec(),
+        (&dense_parts(b.len()), &dense_parts(nx)),
+        tol,
+        max_iter,
+    )
+}
+
+/// [`lsqr_matlab`] with operators that write into a caller-owned buffer (`out` holds stale
+/// data on entry and must be overwritten), taking `b` by value as LSQR's first `u`, so a solve
+/// allocates its six vectors once. `parts` = (range parts, domain parts): how the norms of `u`
+/// and `v` vectors are split (see [`dense_parts`]); the domain parts also give the length of
+/// the unknown. Performs exactly the same floating-point operations as the textbook loop (the
+/// norms of updated vectors are fused into the update passes, with the same parts).
+fn lsqr_matlab_into<F, G>(
+    mut apply_a: F,
+    mut apply_ah: G,
+    b: Vec<Complex64>,
+    parts: (&[usize], &[usize]),
+    tol: f64,
+    max_iter: usize,
+) -> (Vec<Complex64>, LsqrOutcome)
+where
+    F: FnMut(&[Complex64], &mut [Complex64]),
+    G: FnMut(&[Complex64], &mut [Complex64]),
+{
+    let zero = Complex64::new(0.0, 0.0);
+    let (up, vp) = parts;
+    let nx: usize = vp.iter().sum();
+    let n2b = cnorm_parts(&b, up);
     let tolb = tol * n2b;
-    let mut u = b.to_vec();
+    let mut u = b;
     let mut beta = n2b;
     let mut normr = beta;
     if beta != 0.0 {
-        crate::maybe_par_iter_mut!(u).for_each(|z| *z /= beta);
+        div_inplace(&mut u, beta);
     }
     let (mut c, mut s) = (1.0f64, 0.0f64);
     let mut phibar = beta;
-    let mut v = apply_ah(&u);
-    let n = v.len();
-    let mut x = vec![Complex64::new(0.0, 0.0); n];
-    let mut alpha = cnorm(&v);
+    let mut v = vec![zero; nx];
+    apply_ah(&u, &mut v);
+    let mut x = vec![zero; nx];
+    let mut alpha = cnorm_parts(&v, vp);
     if alpha != 0.0 {
-        crate::maybe_par_iter_mut!(v).for_each(|z| *z /= alpha);
+        div_inplace(&mut v, alpha);
     }
     let mut normar = alpha * beta;
     let relres = |nr: f64| if n2b > 0.0 { nr / n2b } else { 0.0 };
     if normar == 0.0 {
         return (x, LsqrOutcome { flag: 0, iter: 0, relres: relres(normr) });
     }
-    let mut d = vec![Complex64::new(0.0, 0.0); n];
+    let mut un = vec![zero; u.len()];
+    let mut vt = vec![zero; nx];
+    let mut d = vec![zero; nx];
+    let mut normx = 0.0f64; // cnorm(x), kept up to date by the x update
     let mut norma = 0.0f64;
     let mut stag = 0usize;
     let mut flag = 1u8;
     let mut iter = max_iter;
     for ii in 1..=max_iter {
-        let mut un = apply_a(&v);
-        crate::maybe_par_iter_mut!(un).zip(crate::maybe_par_iter!(u)).for_each(|(a, &b)| *a -= alpha * b);
-        beta = cnorm(&un);
+        apply_a(&v, &mut un);
+        beta = update_and_norm(&mut un, &u, up, |a, b| *a -= alpha * b);
         if beta != 0.0 {
-            crate::maybe_par_iter_mut!(un).for_each(|z| *z /= beta);
+            div_inplace(&mut un, beta);
         }
-        u = un;
+        std::mem::swap(&mut u, &mut un);
         norma = (norma * norma + alpha * alpha + beta * beta).sqrt();
         let thet = -s * alpha;
         let rhot = c * alpha;
@@ -1497,8 +1591,8 @@ where
             stag = 1;
         }
         phibar *= s;
-        crate::maybe_par_iter_mut!(d).zip(crate::maybe_par_iter!(v)).for_each(|(di, &vi)| *di = (vi - thet * *di) / rho);
-        if phi.abs() * cnorm(&d) < f64::EPSILON * cnorm(&x) {
+        let normd = update_and_norm(&mut d, &v, vp, |di, vi| *di = (vi - thet * *di) / rho);
+        if phi.abs() * normd < f64::EPSILON * normx {
             stag += 1;
         } else {
             stag = 0;
@@ -1518,19 +1612,18 @@ where
             iter = ii - 1;
             break;
         }
-        crate::maybe_par_iter_mut!(x).zip(crate::maybe_par_iter!(d)).for_each(|(xi, &di)| *xi += phi * di);
+        normx = update_and_norm(&mut x, &d, vp, |xi, di| *xi += phi * di);
         normr *= s.abs();
-        let mut vt = apply_ah(&u);
-        crate::maybe_par_iter_mut!(vt).zip(crate::maybe_par_iter!(v)).for_each(|(a, &b)| *a -= beta * b);
-        v = vt;
-        alpha = cnorm(&v);
+        apply_ah(&u, &mut vt);
+        alpha = update_and_norm(&mut vt, &v, vp, |a, b| *a -= beta * b);
+        std::mem::swap(&mut v, &mut vt);
         if (alpha == 0.0 || !alpha.is_finite()) && ii < max_iter {
             flag = 4;
             iter = ii;
             break;
         }
         if alpha != 0.0 {
-            crate::maybe_par_iter_mut!(v).for_each(|z| *z /= alpha);
+            div_inplace(&mut v, alpha);
         }
         normar = alpha * (s * phi).abs();
     }
@@ -1540,15 +1633,25 @@ where
     (x, LsqrOutcome { flag, iter, relres: relres(normr) })
 }
 
-/// Sorted value at 1-based index `round(p·N)` (STI's percentile; `p` in [0, 1]).
-fn sti_percentile(sorted: &[f64], p: f64) -> f64 {
-    let n = sorted.len();
-    let i = (p * n as f64).round() as usize;
-    sorted[i.clamp(1, n) - 1]
+/// 0-based index of STI's percentile: the sorted value at 1-based index `round(p·N)`.
+fn sti_percentile_index(n: usize, p: f64) -> usize {
+    ((p * n as f64).round() as usize).clamp(1, n) - 1
 }
 
-fn sort_f64(v: &mut [f64]) {
-    v.sort_unstable_by(|a, b| a.total_cmp(b));
+/// Sorted value at 1-based index `round(p·N)` (STI's percentile; `p` in [0, 1]).
+#[cfg(test)]
+fn sti_percentile(sorted: &[f64], p: f64) -> f64 {
+    sorted[sti_percentile_index(sorted.len(), p)]
+}
+
+/// STI's percentiles `p_lo ≤ p_hi` of `v` (which is reordered), by selection instead of a full
+/// sort: the k-th element in `total_cmp` order is unique, so this is exactly the sorted lookup.
+fn sti_percentiles(v: &mut [f64], p_lo: f64, p_hi: f64) -> (f64, f64) {
+    let (il, ih) = (sti_percentile_index(v.len(), p_lo), sti_percentile_index(v.len(), p_hi));
+    debug_assert!(il <= ih);
+    let hi = *v.select_nth_unstable_by(ih, |a, b| a.total_cmp(b)).1;
+    let lo = if il == ih { hi } else { *v[..ih].select_nth_unstable_by(il, |a, b| a.total_cmp(b)).1 };
+    (lo, hi)
 }
 
 /// STI's `MaskBoundingBox`: tight bounding box (0-based, inclusive); an odd extent grows by one
@@ -1595,25 +1698,56 @@ fn sti_padded_dims(c: [usize; 3], vs: [f64; 3], pad_mm: [f64; 3]) -> [usize; 3] 
     [0, 1, 2].map(|d| 16 * ((c[d] as f64 + 2.0 * pad_mm[d] / vs[d] + 1.0) / 16.0).ceil() as usize)
 }
 
-/// Circular forward difference along `axis` (no voxel-size scaling), as STI's iLSQR uses.
-fn fd_c(u: &[Complex64], n: [usize; 3], axis: usize, out: &mut [Complex64]) {
-    let stride = [1, n[0], n[0] * n[1]][axis];
-    let len = n[axis];
-    crate::maybe_par_iter_mut!(out).enumerate().for_each(|(l, o)| {
-        let c = (l / stride) % len;
-        let next = if c + 1 == len { l - (len - 1) * stride } else { l + stride };
-        *o = u[next] - u[l];
-    });
+/// Sentinel of the compact-index maps in the artefact solve.
+const NONE: u32 = u32::MAX;
+
+/// Circular neighbour `l + e_axis` on the grid `n`.
+#[inline]
+fn circ_next(l: usize, axis: usize, n: [usize; 3]) -> usize {
+    let step = [1, n[0], n[0] * n[1]][axis];
+    if (l / step) % n[axis] + 1 == n[axis] { l - (n[axis] - 1) * step } else { l + step }
 }
 
-/// Adjoint of [`fd_c`]: `out[l] += q[l − e] − q[l]` (circular).
-fn fd_c_adj_add(q: &[Complex64], n: [usize; 3], axis: usize, out: &mut [Complex64]) {
-    let stride = [1, n[0], n[0] * n[1]][axis];
-    let len = n[axis];
-    crate::maybe_par_iter_mut!(out).enumerate().for_each(|(l, o)| {
-        let c = (l / stride) % len;
-        let prev = if c == 0 { l + (len - 1) * stride } else { l - stride };
-        *o += q[prev] - q[l];
+/// Weighted circular forward differences (no voxel-size scaling), as STI's iLSQR uses, at the
+/// mask voxels only: `r[a·nm + i] = gw[a][i] · (val(l + e_a) − val(l))` with `l = inside[i]`,
+/// `nm = inside.len()`, `gw` the weights compacted to the mask.
+fn grad_masked(val: &(dyn Fn(usize) -> Complex64 + Sync), inside: &[usize], gw: &[Vec<f64>], n: [usize; 3], r: &mut [Complex64]) {
+    let nm = inside.len();
+    for (a, ra) in r.chunks_mut(nm).enumerate() {
+        let g = &gw[a];
+        crate::maybe_par_iter_mut!(ra).enumerate().for_each(|(i, o)| {
+            let l = inside[i];
+            *o = (val(circ_next(l, a, n)) - val(l)) * g[i];
+        });
+    }
+}
+
+/// Adjoint of [`grad_masked`] onto the whole grid: `acc[l] = Σ_a (q_a[l − e_a] − q_a[l])`,
+/// summed in axis order from zero, with `q_a = gw[a]·r_a` on the mask and zero elsewhere
+/// (`mask_of[l]` = position of `l` in `inside`, or [`NONE`]).
+fn grad_masked_adj(r: &[Complex64], mask_of: &[u32], gw: &[Vec<f64>], n: [usize; 3], acc: &mut [Complex64]) {
+    let (nxy, nt) = (n[0] * n[1], n[0] * n[1] * n[2]);
+    let nm = r.len() / 3;
+    let zero = Complex64::new(0.0, 0.0);
+    let q = |a: usize, l: usize| match mask_of[l] {
+        NONE => zero,
+        i => r[a * nm + i as usize] * gw[a][i as usize],
+    };
+    crate::maybe_par_chunks_mut!(acc, nxy).enumerate().for_each(|(k, pa)| {
+        let uz = if k == 0 { nt } else { 0 }; // circular: l − e_z = l + uz − nxy
+        for j in 0..n[1] {
+            let uy = if j == 0 { nxy } else { 0 };
+            let row = k * nxy + j * n[0];
+            for i in 0..n[0] {
+                let l = row + i;
+                let xp = if i == 0 { l + n[0] - 1 } else { l - 1 };
+                let mut o = zero;
+                o += q(0, xp) - q(0, l);
+                o += q(1, l + uy - n[0]) - q(1, l);
+                o += q(2, l + uz - nxy) - q(2, l);
+                pa[j * n[0] + i] = o;
+            }
+        }
     });
 }
 
@@ -1644,8 +1778,48 @@ pub fn ilsqr_with_padding(
     bdir: (f64, f64, f64),
     params: &IlsqrParams,
     pad_mm: [f64; 3],
-    mut progress: impl FnMut(usize, usize),
+    progress: impl FnMut(usize, usize),
 ) -> (Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>) {
+    ilsqr_with_padding_traced(field, mask, grid, bdir, params, pad_mm, progress, &mut IlsqrTrace::default())
+}
+
+/// Where an [`ilsqr_with_padding_traced`] run spent its time, and how its two LSQR solves ended.
+#[doc(hidden)]
+#[derive(Clone, Debug, Default)]
+pub struct IlsqrTrace {
+    /// Padded grid
+    pub dims: [usize; 3],
+    /// (stage, wall seconds, 3-D FFTs, FFT wall seconds) in execution order
+    pub stages: Vec<(&'static str, f64, usize, f64)>,
+    /// Initial solve and artefact solve
+    pub solves: Vec<LsqrOutcome>,
+    /// 3-D FFTs (forward + inverse) on the padded grid, and their total wall time
+    pub n_fft: usize,
+    pub fft_secs: f64,
+}
+
+/// [`ilsqr_with_padding`], also filling an [`IlsqrTrace`] (for benchmarks and parity checks).
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
+pub fn ilsqr_with_padding_traced(
+    field: &[f64],
+    mask: &[u8],
+    grid: &Grid,
+    bdir: (f64, f64, f64),
+    params: &IlsqrParams,
+    pad_mm: [f64; 3],
+    mut progress: impl FnMut(usize, usize),
+    trace: &mut IlsqrTrace,
+) -> (Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>) {
+    *trace = IlsqrTrace::default();
+    let fft_n = std::cell::Cell::new(0usize);
+    let fft_t = std::cell::Cell::new(0.0f64);
+    let mut t_stage = (std::time::Instant::now(), 0usize, 0.0f64);
+    let mut stage = |trace: &mut IlsqrTrace, name: &'static str| {
+        let (n, t) = (fft_n.get(), fft_t.get());
+        trace.stages.push((name, t_stage.0.elapsed().as_secs_f64(), n - t_stage.1, t - t_stage.2));
+        t_stage = (std::time::Instant::now(), n, t);
+    };
     let (nx, ny, nz) = grid.dims;
     let n_in = nx * ny * nz;
     let vs = [grid.voxel_size.0, grid.voxel_size.1, grid.voxel_size.2];
@@ -1675,11 +1849,23 @@ pub fn ilsqr_with_padding(
     let inside: Vec<usize> = (0..nt).filter(|&l| m[l] > 0.0).collect();
     let pgrid = Grid::new(n[0], n[1], n[2], vs[0], vs[1], vs[2]);
     let dk = dipole_kernel(&pgrid, bdir);
+    trace.dims = n;
     let ws = RefCell::new(Fft3dWorkspace::new(n[0], n[1], n[2]));
-    let fft = |a: &mut [Complex64]| ws.borrow_mut().fft3d(a);
-    let ifft = |a: &mut [Complex64]| ws.borrow_mut().ifft3d(a);
-    let cplx = |a: &[f64]| -> Vec<Complex64> { a.iter().map(|&v| Complex64::new(v, 0.0)).collect() };
-    let mut p_k = cplx(&p);
+    let tally = |t: std::time::Instant| {
+        fft_n.set(fft_n.get() + 1);
+        fft_t.set(fft_t.get() + t.elapsed().as_secs_f64());
+    };
+    let fft = |a: &mut [Complex64]| { let t = std::time::Instant::now(); ws.borrow_mut().fft3d(a); tally(t) };
+    let ifft = |a: &mut [Complex64]| { let t = std::time::Instant::now(); ws.borrow_mut().ifft3d(a); tally(t) };
+    // pruned transforms for the LSQR operators: image-space data that is zero outside a box
+    // (forward), or of which only a box is used (inverse); see Fft3dWorkspace::fft3d_supported
+    type Box3 = [std::ops::Range<usize>; 3];
+    let fft_in = |a: &mut [Complex64], b: &Box3| { let t = std::time::Instant::now(); ws.borrow_mut().fft3d_supported(a, b); tally(t) };
+    let ifft_on = |a: &mut [Complex64], b: &Box3| { let t = std::time::Instant::now(); ws.borrow_mut().ifft3d_region(a, b); tally(t) };
+    // the mask and its forward-difference neighbours lie in the crop box grown by one
+    let crop_box1: Box3 = [0, 1, 2].map(|d| pd[d]..(pd[d] + c[d] + 1).min(n[d]));
+    stage(trace, "crop/pad, dipole kernel, plans");
+    let mut p_k: Vec<Complex64> = crate::maybe_par_iter!(p).map(|&v| Complex64::new(v, 0.0)).collect();
     fft(&mut p_k[..]);
 
     // 2. Laplacian weights: |F⁻¹(k² F φ)| with STI's 1e6 at DC, ranked in the mask
@@ -1693,25 +1879,23 @@ pub fn ilsqr_with_padding(
         *z *= k2;
     });
     ifft(&mut lap[..]);
-    let lap_abs: Vec<f64> = lap.iter().map(|z| z.re.abs()).collect();
+    let mut w: Vec<f64> = crate::maybe_par_iter!(lap).map(|z| z.re.abs()).collect(); // |L|, then W
     drop(lap);
-    let mut ranked: Vec<f64> = inside.iter().map(|&l| lap_abs[l]).collect();
-    sort_f64(&mut ranked);
-    let (t60, t999) = (sti_percentile(&ranked, 0.6), sti_percentile(&ranked, 0.999));
-    let w: Vec<f64> = (0..nt)
-        .map(|l| {
-            if m[l] == 0.0 {
-                0.0
-            } else if t999 > t60 {
-                (1.0 - 0.8 * (lap_abs[l] - t60) / (t999 - t60)).clamp(0.2, 1.0)
-            } else if lap_abs[l] <= t60 {
-                1.0
-            } else {
-                0.2
-            }
-        })
-        .collect();
-    drop(lap_abs);
+    let mut ranked: Vec<f64> = inside.iter().map(|&l| w[l]).collect();
+    let (t60, t999) = sti_percentiles(&mut ranked, 0.6, 0.999);
+    drop(ranked);
+    crate::maybe_par_iter_mut!(w).zip(crate::maybe_par_iter!(m)).for_each(|(v, &mv)| {
+        *v = if mv == 0.0 {
+            0.0
+        } else if t999 > t60 {
+            (1.0 - 0.8 * (*v - t60) / (t999 - t60)).clamp(0.2, 1.0)
+        } else if *v <= t60 {
+            1.0
+        } else {
+            0.2
+        };
+    });
+    stage(trace, "Laplacian weights (incl. F phi)");
 
     // 3. initial solution: LSQR on D W D χ = D W φ (D W D is self-adjoint)
     let dconv = |a: &mut [Complex64]| {
@@ -1719,98 +1903,106 @@ pub fn ilsqr_with_padding(
         crate::maybe_par_iter_mut!(a).zip(crate::maybe_par_iter!(dk)).for_each(|(z, &dv)| *z *= dv);
         ifft(a);
     };
-    let apply1 = |x: &[Complex64]| -> Vec<Complex64> {
-        let mut t = x.to_vec();
-        dconv(&mut t[..]);
+    let apply1 = |x: &[Complex64], t: &mut [Complex64]| {
+        t.copy_from_slice(x);
+        dconv(t);
         crate::maybe_par_iter_mut!(t).zip(crate::maybe_par_iter!(w)).for_each(|(z, &wv)| *z *= wv);
-        dconv(&mut t[..]);
-        t
+        dconv(t);
     };
-    let mut b1: Vec<Complex64> = p.iter().zip(&w).map(|(&pv, &wv)| Complex64::new(pv * wv, 0.0)).collect();
+    let mut b1: Vec<Complex64> = crate::maybe_par_iter!(p).zip(crate::maybe_par_iter!(w))
+        .map(|(&pv, &wv)| Complex64::new(pv * wv, 0.0)).collect();
     dconv(&mut b1[..]);
-    let (x1, _) = lsqr_matlab(apply1, apply1, &b1, 0.01, params.max_iter);
-    drop(b1);
+    let dense = dense_parts(nt);
+    let (x1, out1) = lsqr_matlab_into(apply1, apply1, b1, (&dense, &dense), 0.01, params.max_iter);
+    drop(dense);
+    trace.solves.push(out1);
     let x1r: Vec<f64> = x1.iter().map(|z| z.re).collect();
     drop(x1);
+    stage(trace, "solve 1 (initial LSQR)");
     progress(2, 4);
 
     // 4. FastQSM prior (sign(D) inverse blended with a k-space-smoothed copy where |D| is small)
     let xfs = sti_fastqsm(&p_k, &m, &inside, &dk, n, &fft, &ifft);
     drop(p_k);
+    stage(trace, "FastQSM");
     progress(3, 4);
 
     // 5. gradient weights from the FastQSM map, pooled over the three axes in the mask
-    let xfs_c = cplx(&xfs);
-    let mut gw: Vec<Vec<f64>> = Vec::with_capacity(3);
-    let mut g = vec![Complex64::new(0.0, 0.0); nt];
+    let mut gw: Vec<Vec<f64>> = (0..3).map(|_| vec![0.0; nt]).collect();
     let mut pool = Vec::with_capacity(3 * inside.len());
-    let mut gabs: Vec<Vec<f64>> = Vec::with_capacity(3);
-    for axis in 0..3 {
-        fd_c(&xfs_c, n, axis, &mut g);
-        let a: Vec<f64> = g.iter().map(|z| z.re.abs()).collect();
+    for (axis, a) in gw.iter_mut().enumerate() {
+        // |∇_axis xfs| (circular forward difference), held in gw[axis] until the weights replace it
+        let xfs = &xfs;
+        crate::maybe_par_iter_mut!(a).enumerate().for_each(|(l, o)| *o = (xfs[circ_next(l, axis, n)] - xfs[l]).abs());
         pool.extend(inside.iter().map(|&l| a[l]));
-        gabs.push(a);
     }
-    drop(xfs_c);
-    sort_f64(&mut pool);
-    let (t50, t70) = (sti_percentile(&pool, 0.5), sti_percentile(&pool, 0.7));
-    for a in &gabs {
-        gw.push(
-            (0..nt)
-                .map(|l| {
-                    if m[l] == 0.0 {
-                        0.0
-                    } else if t70 > t50 {
-                        ((t70 - a[l]) / (t70 - t50)).clamp(0.0, 1.0)
-                    } else if a[l] <= t50 {
-                        1.0
-                    } else {
-                        0.0
-                    }
-                })
-                .collect(),
-        );
+    let (t50, t70) = sti_percentiles(&mut pool, 0.5, 0.7);
+    drop(pool);
+    for a in gw.iter_mut() {
+        crate::maybe_par_iter_mut!(a).zip(crate::maybe_par_iter!(m)).for_each(|(g, &mv)| {
+            *g = if mv == 0.0 {
+                0.0
+            } else if t70 > t50 {
+                ((t70 - *g) / (t70 - t50)).clamp(0.0, 1.0)
+            } else if *g <= t50 {
+                1.0
+            } else {
+                0.0
+            };
+        });
     }
-    drop(gabs);
 
-    // 6. streaking artefacts: k-space unknown restricted to the cone |D| < 0.1
-    let mic: Vec<f64> = dk.iter().map(|&dv| if dv.abs() < 0.1 { 1.0 } else { 0.0 }).collect();
+    // 6. streaking artefacts: k-space unknown restricted to the cone |D| < 0.1.
+    //    A y = G ∇ (√N F⁻¹(M_ic y)), Aᴴ r = M_ic F(∇ᴴ(G r)) / √N. Every vector LSQR forms in
+    //    the domain is exactly zero off the cone, and every one in the range is exactly zero
+    //    off the mask (G = 0 there), so both are stored compactly: the unknown on the cone
+    //    positions, the residual on the mask positions of each axis. With norms split as for
+    //    the dense vectors (`compact_parts`) the iterates have the same values as a dense solve.
     let sq = (nt as f64).sqrt();
-    let apply2 = |y: &[Complex64]| -> Vec<Complex64> {
-        let mut t: Vec<Complex64> = y.iter().zip(&mic).map(|(&z, &mv)| z * mv).collect();
-        ifft(&mut t[..]);
-        crate::maybe_par_iter_mut!(t).for_each(|z| *z *= sq);
-        let mut out = vec![Complex64::new(0.0, 0.0); 3 * nt];
-        for (axis, chunk) in out.chunks_mut(nt).enumerate() {
-            fd_c(&t, n, axis, chunk);
-            crate::maybe_par_iter_mut!(chunk).zip(crate::maybe_par_iter!(gw[axis])).for_each(|(z, &gv)| *z *= gv);
+    let cone: Vec<usize> = (0..nt).filter(|&l| dk[l].abs() < 0.1).collect();
+    let nm = inside.len();
+    assert!(nt < NONE as usize, "grid too large for 32-bit voxel indices");
+    let index_of = |list: &[usize]| {
+        let mut map = vec![NONE; nt];
+        for (i, &l) in list.iter().enumerate() {
+            map[l] = i as u32;
         }
-        out
+        map
     };
-    let apply2h = |r: &[Complex64]| -> Vec<Complex64> {
-        let mut acc = vec![Complex64::new(0.0, 0.0); nt];
-        let mut q = vec![Complex64::new(0.0, 0.0); nt];
-        for axis in 0..3 {
-            let ra = &r[axis * nt..(axis + 1) * nt];
-            crate::maybe_par_iter_mut!(q).zip(crate::maybe_par_iter!(ra)).zip(crate::maybe_par_iter!(gw[axis]))
-                .for_each(|((qv, &rv), &gv)| *qv = rv * gv);
-            fd_c_adj_add(&q, n, axis, &mut acc);
-        }
-        fft(&mut acc[..]);
-        crate::maybe_par_iter_mut!(acc).zip(crate::maybe_par_iter!(mic)).for_each(|(z, &mv)| *z *= mv / sq);
-        acc
+    let cone_of = index_of(&cone);
+    let mask_of = index_of(&inside);
+    let gwc: Vec<Vec<f64>> = gw.iter().map(|g| inside.iter().map(|&l| g[l]).collect()).collect();
+    drop(gw);
+    let u_parts = compact_parts((0..3).flat_map(|a| inside.iter().map(move |&l| a * nt + l)));
+    let v_parts = compact_parts(cone.iter().copied());
+    let zero = Complex64::new(0.0, 0.0);
+    let t_cell = RefCell::new(vec![zero; nt]);
+    let apply2 = |y: &[Complex64], out: &mut [Complex64]| {
+        let mut t = t_cell.borrow_mut();
+        crate::maybe_par_iter_mut!(t).zip(crate::maybe_par_iter!(cone_of))
+            .for_each(|(tv, &ci)| *tv = if ci == NONE { zero } else { y[ci as usize] });
+        ifft_on(&mut t[..], &crop_box1); // read on the mask and its +e_a neighbours only
+        let t = &t[..];
+        grad_masked(&|l| t[l] * sq, &inside, &gwc, n, out);
     };
-    let x1m: Vec<Complex64> = x1r.iter().zip(&m).map(|(&xv, &mv)| Complex64::new(xv * mv, 0.0)).collect();
-    let mut b2 = vec![Complex64::new(0.0, 0.0); 3 * nt];
-    for (axis, chunk) in b2.chunks_mut(nt).enumerate() {
-        fd_c(&x1m, n, axis, chunk);
-        crate::maybe_par_iter_mut!(chunk).zip(crate::maybe_par_iter!(gw[axis])).for_each(|(z, &gv)| *z *= gv);
-    }
-    drop(x1m);
+    let apply2h = |r: &[Complex64], out: &mut [Complex64]| {
+        let mut acc = t_cell.borrow_mut();
+        grad_masked_adj(r, &mask_of, &gwc, n, &mut acc);
+        fft_in(&mut acc[..], &crop_box1); // zero outside the mask and its +e_a neighbours
+        let acc = &acc[..];
+        crate::maybe_par_iter_mut!(out).zip(crate::maybe_par_iter!(cone)).for_each(|(o, &l)| *o = acc[l] * (1.0 / sq));
+    };
+    let mut b2 = vec![zero; 3 * nm];
+    grad_masked(&|l| Complex64::new(x1r[l] * m[l], 0.0), &inside, &gwc, n, &mut b2);
+    stage(trace, "gradient weights + rhs 2");
     progress(4, 4);
-    let (y, _) = lsqr_matlab(apply2, apply2h, &b2, params.tol, params.max_iter);
-    drop(b2);
-    let mut xsa: Vec<Complex64> = y.iter().zip(&mic).map(|(&z, &mv)| z * mv).collect();
+    let (y, out2) = lsqr_matlab_into(apply2, apply2h, b2, (&u_parts, &v_parts), params.tol, params.max_iter);
+    trace.solves.push(out2);
+    drop(t_cell);
+    let mut xsa = vec![zero; nt];
+    for (&l, &z) in cone.iter().zip(&y) {
+        xsa[l] = z;
+    }
     drop(y);
     ifft(&mut xsa[..]);
 
@@ -1834,6 +2026,9 @@ pub fn ilsqr_with_padding(
             }
         }
     }
+    stage(trace, "solve 2 (artefact LSQR) + output");
+    trace.n_fft = fft_n.get();
+    trace.fft_secs = fft_t.get();
     (chi, sa, fs, x0)
 }
 
@@ -1896,13 +2091,11 @@ fn sti_fastqsm(
     let kh: Vec<f64> = kern.iter().map(|z| z.re).collect();
     drop(kern);
     // k-space blending weights from |D|^0.001, ranked over the whole grid (1st..30th pct)
-    let z: Vec<f64> = dk.iter().map(|&dv| dv.abs().powf(0.001)).collect();
-    let mut zs = z.clone();
-    sort_f64(&mut zs);
-    let (zlo, zhi) = (sti_percentile(&zs, 0.01), sti_percentile(&zs, 0.3));
+    let mut wf: Vec<f64> = crate::maybe_par_iter!(dk).map(|&dv| dv.abs().powf(0.001)).collect();
+    let mut zs = wf.clone();
+    let (zlo, zhi) = sti_percentiles(&mut zs, 0.01, 0.3);
     drop(zs);
-    let wf: Vec<f64> = z.iter().map(|&v| if zhi > zlo { ((v - zlo) / (zhi - zlo)).clamp(0.0, 1.0) } else { 1.0 }).collect();
-    drop(z);
+    crate::maybe_par_iter_mut!(wf).for_each(|v| *v = if zhi > zlo { ((*v - zlo) / (zhi - zlo)).clamp(0.0, 1.0) } else { 1.0 });
     // blend X with its k-space smoothing (a convolution over k-space indices)
     let blend = |x: &mut [Complex64]| {
         let mut sm = x.to_vec();
@@ -1912,16 +2105,17 @@ fn sti_fastqsm(
         crate::maybe_par_iter_mut!(x).zip(crate::maybe_par_iter!(sm)).zip(crate::maybe_par_iter!(wf))
             .for_each(|((xv, &sv), &w)| *xv = *xv * w + sv * (1.0 - w));
     };
-    let mut x: Vec<Complex64> = p_k.iter().zip(dk).map(|(&pv, &dv)| pv * sign0(dv)).collect();
+    let mut x: Vec<Complex64> = crate::maybe_par_iter!(p_k).zip(crate::maybe_par_iter!(dk)).map(|(&pv, &dv)| pv * sign0(dv)).collect();
     blend(&mut x[..]);
     ifft(&mut x[..]);
     crate::maybe_par_iter_mut!(x).zip(crate::maybe_par_iter!(m)).for_each(|(v, &mv)| *v *= mv);
     fft(&mut x[..]);
     blend(&mut x[..]);
     ifft(&mut x[..]);
-    let mut xfs: Vec<f64> = x.iter().zip(m).map(|(v, &mv)| v.re * mv).collect();
+    let mut xfs: Vec<f64> = crate::maybe_par_iter!(x).zip(crate::maybe_par_iter!(m)).map(|(v, &mv)| v.re * mv).collect();
+    drop(x);
     // TKD: 1/D clamped to ±8 (D = 0 → +8)
-    let mut t: Vec<Complex64> = p_k.iter().zip(dk).map(|(&pv, &dv)| {
+    let mut t: Vec<Complex64> = crate::maybe_par_iter!(p_k).zip(crate::maybe_par_iter!(dk)).map(|(&pv, &dv)| {
         let r = 1.0 / dv;
         pv * if r.abs() > 8.0 { 8.0f64.copysign(r) } else { r }
     }).collect();
@@ -1932,7 +2126,7 @@ fn sti_fastqsm(
         sxx += xfs[l] * xfs[l];
     }
     let a = if sxx > 0.0 { sxy / sxx } else { 1.0 };
-    xfs.iter_mut().for_each(|v| *v *= a);
+    crate::maybe_par_iter_mut!(xfs).for_each(|v| *v *= a);
     xfs
 }
 
@@ -2373,21 +2567,54 @@ mod tests {
         assert_eq!(sti_percentile(&v, 0.0), 1.0);
     }
 
+    /// `grad_masked` is the weighted circular forward difference on the mask voxels, and
+    /// `grad_masked_adj` its adjoint.
     #[test]
-    fn test_fd_adjoint() {
-        let n = [5, 4, 3];
-        let nt = 60;
+    fn test_grad_masked_and_adjoint() {
+        let n = [6, 5, 4];
+        let nt = 120;
+        let inside: Vec<usize> = (0..nt).filter(|&l| (l * 7) % 5 != 0).collect();
+        let nm = inside.len();
+        let mut mask_of = vec![NONE; nt];
+        for (i, &l) in inside.iter().enumerate() { mask_of[l] = i as u32; }
         let u: Vec<Complex64> = (0..nt).map(|i| c64((i as f64 * 0.37).sin(), (i as f64 * 0.11).cos())).collect();
-        let q: Vec<Complex64> = (0..nt).map(|i| c64((i as f64 * 0.23).cos(), (i as f64 * 0.71).sin())).collect();
-        for axis in 0..3 {
-            let mut g = vec![c64(0.0, 0.0); nt];
-            fd_c(&u, n, axis, &mut g);
-            let mut h = vec![c64(0.0, 0.0); nt];
-            fd_c_adj_add(&q, n, axis, &mut h);
-            let lhs: Complex64 = g.iter().zip(&q).map(|(a, b)| a.conj() * b).sum();
-            let rhs: Complex64 = u.iter().zip(&h).map(|(a, b)| a.conj() * b).sum();
-            assert!((lhs - rhs).norm() < 1e-12, "axis {}", axis);
+        let r: Vec<Complex64> = (0..3 * nm).map(|i| c64((i as f64 * 0.23).cos(), (i as f64 * 0.71).sin())).collect();
+        let gw: Vec<Vec<f64>> = (0..3).map(|a| (0..nm).map(|i| ((i * 7 + a * 3) % 11) as f64 / 10.0).collect()).collect();
+        let mut g = vec![c64(0.0, 0.0); 3 * nm];
+        grad_masked(&|l| u[l], &inside, &gw, n, &mut g);
+        for a in 0..3 {
+            let (s, len) = ([1, 6, 30][a], n[a]);
+            for (i, &l) in inside.iter().enumerate() {
+                let c = (l / s) % len;
+                let nb = if c + 1 == len { l - (len - 1) * s } else { l + s };
+                assert_eq!(g[a * nm + i], (u[nb] - u[l]) * gw[a][i]);
+            }
         }
+        let mut h = vec![c64(9.0, 9.0); nt];
+        grad_masked_adj(&r, &mask_of, &gw, n, &mut h);
+        let lhs: Complex64 = g.iter().zip(&r).map(|(a, b)| a.conj() * b).sum();
+        let rhs: Complex64 = u.iter().zip(&h).map(|(a, b)| a.conj() * b).sum();
+        assert!((lhs - rhs).norm() < 1e-12);
+    }
+
+    /// LSQR on vectors stored compactly (`compact_parts`) gives exactly the iterates of the
+    /// dense solve whose vectors are zero off the support.
+    #[test]
+    fn test_lsqr_compact_equals_dense() {
+        let nt = 3 * NORM_CHUNK + 1234;
+        let supp: Vec<usize> = (0..nt).filter(|&l| (l / 1000) % 3 != 1 && l % 7 != 3).collect();
+        let w: Vec<f64> = (0..nt).map(|l| 0.5 + ((l * 13) % 17) as f64 / 7.0).collect();
+        let b: Vec<Complex64> = (0..nt).map(|l| if supp.binary_search(&l).is_ok() { c64((l as f64 * 0.01).sin(), (l as f64 * 0.003).cos()) } else { c64(0.0, 0.0) }).collect();
+        // diagonal operator restricted to the support
+        let dense = |v: &[Complex64]| -> Vec<Complex64> { v.iter().zip(&w).map(|(&z, &wv)| z * wv).collect() };
+        let (xd, od) = lsqr_matlab(dense, dense, &b, 1e-14, 15);
+        let wc: Vec<f64> = supp.iter().map(|&l| w[l]).collect();
+        let bc: Vec<Complex64> = supp.iter().map(|&l| b[l]).collect();
+        let parts = compact_parts(supp.iter().copied());
+        let op = |v: &[Complex64], out: &mut [Complex64]| out.iter_mut().zip(v).zip(&wc).for_each(|((o, &z), &wv)| *o = z * wv);
+        let (xc, oc) = lsqr_matlab_into(op, op, bc, (&parts, &parts), 1e-14, 15);
+        assert_eq!(od, oc);
+        for (i, &l) in supp.iter().enumerate() { assert_eq!(xd[l], xc[i]); }
     }
 
     /// Sphere of susceptibility forward-modelled through the dipole kernel on a 2x grid.
