@@ -31,10 +31,11 @@
 //! a step wherever the phase at the array edge is not zero, which `Fft` turns into a harmonic
 //! error that `Dct` does not have. Hence `Dct` is the default.
 //!
-//! [`laplacian_unwrap_multi_echo`] unwraps each echo and averages the unwrapped phases with
-//! per-echo weights ([`EchoWeighting`], e.g. `TE·exp(−TE/T2*)`) and a matching weighted echo
-//! time: the field map STI Suite-based pipelines build (with `Fft { pad: [64; 3] }` and
-//! T2\* = 40 ms, UK Biobank's).
+//! Multi-echo field maps are built by [`crate::pipeline::run_field_mapping`], whose
+//! `laplacian_solver` setting selects the solver: each echo is masked, unwrapped and combined
+//! with the configured [`B0WeightType`](crate::utils::B0WeightType). UK Biobank's field map is
+//! `Fft { pad: [64; 3] }` with [`B0WeightType::AssumedDecay`](crate::utils::B0WeightType::AssumedDecay)
+//! at 40 ms.
 //!
 //! [`laplacian_unwrap_bfr`] (deprecated) is a different algorithm: finite-difference ∇² masked
 //! to the ROI and solved under a Dirichlet condition on it. Zeroing ∇²φ outside the mask
@@ -547,7 +548,8 @@ impl LaplacianSolver {
 ///
 /// Because the whole array participates, this is sensitive to phase quality *outside* the
 /// ROI. STI Suite-based pipelines zero the phase outside the brain first (`mask · φ`), which
-/// [`laplacian_unwrap_multi_echo`] does; otherwise, where the phase outside the object is
+/// [`run_field_mapping`](crate::pipeline::run_field_mapping) does on its multi-echo Laplacian
+/// path; otherwise, where the phase outside the object is
 /// noise, or wraps faster than one radian per voxel, prefer ROMEO
 /// ([`super::romeo::unwrap_romeo`]) or the masked variant.
 ///
@@ -669,118 +671,6 @@ fn apply_k2(buf: &mut [Complex64], kx: &[f64], ky: &[f64], kz: &[f64], invert: b
     }
     #[cfg(not(feature = "parallel"))]
     buf.chunks_mut(mx * my).enumerate().for_each(plane);
-}
-
-/// How echoes are weighted in [`laplacian_unwrap_multi_echo`]. One weight per echo; echo
-/// times and `t2star` in the same unit.
-#[derive(Clone, Debug, PartialEq)]
-pub enum EchoWeighting {
-    /// `w = TE · exp(−TE / T2*)`: the phase-SNR-optimal weight for a single-exponential decay
-    /// with the given T2\*. UK Biobank uses T2\* = 40 ms.
-    T2Star { t2star: f64 },
-    /// `w = TE`.
-    EchoTime,
-    /// `w = 1`.
-    Uniform,
-    /// Explicit per-echo weights.
-    Custom(Vec<f64>),
-}
-
-impl EchoWeighting {
-    /// `TE · exp(−TE / 40 ms)` (UK Biobank's weighting), for echo times in seconds.
-    pub fn t2star_40ms() -> Self {
-        EchoWeighting::T2Star { t2star: 0.040 }
-    }
-
-    /// Per-echo weights for the given echo times.
-    pub fn weights(&self, tes: &[f64]) -> Vec<f64> {
-        match self {
-            EchoWeighting::T2Star { t2star } => tes.iter().map(|&te| te * (-te / t2star).exp()).collect(),
-            EchoWeighting::EchoTime => tes.to_vec(),
-            EchoWeighting::Uniform => vec![1.0; tes.len()],
-            EchoWeighting::Custom(w) => {
-                assert_eq!(w.len(), tes.len(), "one custom weight per echo");
-                w.clone()
-            }
-        }
-    }
-}
-
-/// Result of [`laplacian_unwrap_multi_echo`].
-#[derive(Clone, Debug)]
-pub struct EchoAverage {
-    /// `Σ wᵢ φᵢ / Σ wᵢ`: weighted mean of the unwrapped echo phases (radians), zero outside the mask.
-    pub phase: Vec<f64>,
-    /// `Σ wᵢ TEᵢ / Σ wᵢ`: the echo time `phase` corresponds to (unit of the input TEs).
-    pub te_eff: f64,
-    /// The per-echo weights used.
-    pub weights: Vec<f64>,
-}
-
-impl EchoAverage {
-    /// Field in rad per unit of TE (rad/s for TEs in seconds): `phase / te_eff`.
-    pub fn field_rad(&self) -> Vec<f64> {
-        self.phase.iter().map(|&p| p / self.te_eff).collect()
-    }
-
-    /// Field in Hz, for TEs in seconds: `phase / (2π · te_eff)`.
-    pub fn field_hz(&self) -> Vec<f64> {
-        let s = 1.0 / (std::f64::consts::TAU * self.te_eff);
-        self.phase.iter().map(|&p| p * s).collect()
-    }
-}
-
-/// Multi-echo field map from per-echo Laplacian unwrapping and a weighted echo average.
-///
-/// Each echo is zeroed outside `mask`, unwrapped on its own with [`laplacian_unwrap`] and the
-/// given solver, and the unwrapped phases are averaged:
-/// `phase = Σ wᵢ φᵢ / Σ wᵢ`, `te_eff = Σ wᵢ TEᵢ / Σ wᵢ`, field = `phase / te_eff`
-/// (equivalently, a mean of `φᵢ / TEᵢ` weighted by `wᵢ·TEᵢ`).
-///
-/// With `LaplacianSolver::Fft { pad: [64; 3] }` and [`EchoWeighting::t2star_40ms`] this is the
-/// field map of STI Suite-based pipelines such as UK Biobank's (`MRPhaseUnwrap(mask .* phase)`
-/// per echo, then the T2\*-weighted mean), to ≈1e-14 rad inside the mask.
-///
-/// The phases should be free of a per-echo phase offset (e.g. coil-combined with MCPC-3D-S);
-/// any offset left in passes through scaled by `1 / te_eff`.
-///
-/// # Arguments
-/// * `phases` - Wrapped phase per echo (radians)
-/// * `tes` - Echo times (any unit; the field is per that unit)
-/// * `mask` - Binary mask: applied to each echo before unwrapping and to the output
-/// * `grid` - Volume grid
-/// * `solver` - Poisson solver for each echo
-/// * `weighting` - Echo weights
-pub fn laplacian_unwrap_multi_echo<P: AsRef<[f64]>>(
-    phases: &[P],
-    tes: &[f64],
-    mask: &[u8],
-    grid: &Grid,
-    solver: LaplacianSolver,
-    weighting: &EchoWeighting,
-) -> EchoAverage {
-    assert!(!phases.is_empty(), "no echoes");
-    assert_eq!(phases.len(), tes.len(), "one echo time per echo");
-    let n = grid.n_total();
-    assert_eq!(mask.len(), n, "mask length does not match grid");
-    let weights = weighting.weights(tes);
-    let wsum: f64 = weights.iter().sum();
-    assert!(wsum.abs() > 0.0 && wsum.is_finite(), "echo weights sum to {wsum}");
-    let te_eff = weights.iter().zip(tes).map(|(w, t)| w * t).sum::<f64>() / wsum;
-
-    let mut phase = vec![0.0; n];
-    for (p, &w) in phases.iter().zip(&weights) {
-        let p = p.as_ref();
-        assert_eq!(p.len(), n, "phase length does not match grid");
-        let masked: Vec<f64> = p.iter().zip(mask).map(|(&v, &b)| if b != 0 { v } else { 0.0 }).collect();
-        for (acc, v) in phase.iter_mut().zip(laplacian_unwrap(&masked, mask, grid, solver)) {
-            *acc += w * v;
-        }
-    }
-    for v in phase.iter_mut() {
-        *v /= wsum;
-    }
-    EchoAverage { phase, te_eff, weights }
 }
 
 #[cfg(test)]
@@ -1121,53 +1011,5 @@ mod tests {
         let neumann = laplacian_unwrap(&wrapped, &mask, &grid, LaplacianSolver::Dct);
         assert!(r(&neumann) > 0.99, "Neumann r = {}", r(&neumann));
         assert!(r(&sti) < 0.9, "STI r = {}", r(&sti));
-    }
-
-    #[test]
-    fn t2star_weights_and_effective_te() {
-        let tes = [9.42e-3, 19.7e-3];
-        let w = EchoWeighting::t2star_40ms().weights(&tes);
-        assert!((w[0] - 9.42e-3 * (-9.42f64 / 40.0).exp()).abs() < 1e-15);
-        assert!((w[1] - 19.7e-3 * (-19.7f64 / 40.0).exp()).abs() < 1e-15);
-        // te_eff for UK Biobank's echoes: 15.772350 ms (from the MATLAB run)
-        let te_eff = (w[0] * tes[0] + w[1] * tes[1]) / (w[0] + w[1]);
-        assert!((te_eff - 15.772350e-3).abs() < 1e-9, "{te_eff}");
-        assert_eq!(EchoWeighting::Uniform.weights(&tes), vec![1.0, 1.0]);
-        assert_eq!(EchoWeighting::EchoTime.weights(&tes), tes.to_vec());
-    }
-
-    #[test]
-    fn multi_echo_average_recovers_the_frequency() {
-        // Phase linear in TE (no offset): every weighting gives the same field.
-        let (_, truth, grid) = wrapped_blob_vs((64, 64, 48), (1.0, 1.0, 1.0));
-        let tes = [0.004, 0.009, 0.014];
-        // truth is the phase at the last echo, TE = 14 ms
-        let phases: Vec<Vec<f64>> = tes.iter()
-            .map(|&te| truth.iter().map(|&v| wrap(v * te / 0.014)).collect())
-            .collect();
-        let reference: Vec<f64> = truth.iter().map(|&v| v / 0.014).collect();
-        for wt in [EchoWeighting::t2star_40ms(), EchoWeighting::Uniform, EchoWeighting::EchoTime,
-                   EchoWeighting::Custom(vec![1.0, 2.0, 3.0])] {
-            let ones = vec![1u8; grid.n_total()];
-            let avg = laplacian_unwrap_multi_echo(&phases, &tes, &ones, &grid, LaplacianSolver::FFT_DEFAULT_PAD, &wt);
-            let f = avg.field_rad();
-            let d = max_dev_after_mean(&f, &reference) * 0.014;
-            assert!(d < 0.05, "{wt:?}: max deviation {d} rad at 14 ms");
-            let hz = avg.field_hz();
-            assert!((hz[100] * std::f64::consts::TAU - f[100]).abs() < 1e-9);
-        }
-    }
-
-    #[test]
-    fn multi_echo_mask_is_applied_to_input_and_output() {
-        let (wrapped, _, grid) = wrapped_blob_vs((32, 32, 24), (1.0, 1.0, 1.0));
-        let mask: Vec<u8> = (0..grid.n_total()).map(|i| (i % 3 != 0) as u8).collect();
-        let masked: Vec<f64> = wrapped.iter().zip(&mask).map(|(&v, &m)| v * m as f64).collect();
-        let solver = LaplacianSolver::Fft { pad: [4, 4, 4] };
-        let a = laplacian_unwrap_multi_echo(&[&wrapped], &[1.0], &mask, &grid, solver, &EchoWeighting::Uniform);
-        let b = laplacian_unwrap(&masked, &mask, &grid, solver);
-        assert_eq!(a.te_eff, 1.0);
-        let d = a.phase.iter().zip(&b).fold(0.0f64, |m, (x, y)| m.max((x - y).abs()));
-        assert!(d < 1e-14, "{d}");
     }
 }

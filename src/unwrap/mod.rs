@@ -11,8 +11,6 @@
 //! - [`laplacian_unwrap`] — Laplacian unwrapping, with a [`LaplacianSolver`]: `Dct` (default;
 //!   unweighted least squares, Neumann BC on the array) or `Fft { pad }` (Schofield & Zhu sin/cos
 //!   method on the zero-padded volume, which reproduces STI Suite 3.0's `MRPhaseUnwrap`)
-//! - [`laplacian_unwrap_multi_echo`] — per-echo Laplacian unwrap + weighted echo average
-//!   ([`EchoWeighting`], e.g. `TE·exp(−TE/T2*)`)
 //! - [`laplacian_unwrap_bfr`] — Laplacian unwrapping **+ background field removal**
 //!   (∇² masked to the ROI); see the [`laplacian`] module docs for why these differ
 //!
@@ -39,9 +37,7 @@ pub use slicewise::{
 };
 #[allow(deprecated)]
 pub use laplacian::laplacian_unwrap_bfr;
-pub use laplacian::{
-    laplacian_unwrap, laplacian_unwrap_multi_echo, EchoAverage, EchoWeighting, LaplacianSolver,
-};
+pub use laplacian::{laplacian_unwrap, LaplacianSolver};
 
 /// Phase unwrapping method selection.
 ///

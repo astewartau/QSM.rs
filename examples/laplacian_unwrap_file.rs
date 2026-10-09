@@ -3,20 +3,24 @@
 //! ```text
 //! cargo run --release --features parallel --example laplacian_unwrap_file -- \
 //!     --out out/sub-1 [--solver dct|fft] [--pad 12] [--te 0.00942,0.0197] [--mask mask.nii.gz] \
-//!     [--weighting t2star|te|uniform] [--t2star 0.040] [--vs 0.8,0.8,3] \
-//!     echo1_phase.nii.gz [echo2_phase.nii.gz ...]
+//!     [--b0-weight-type phase_snr|assumed-decay|tes|...] [--assumed-t2star 0.040] [--b0 3.0] \
+//!     [--vs 0.8,0.8,3] echo1_phase.nii.gz [echo2_phase.nii.gz ...]
 //! ```
 //!
 //! Each echo is zeroed outside the mask (if one is given), unwrapped, and zeroed outside the
-//! mask again; written as `<out>_echo-<n>_unwrapped.nii.gz`. With `--te`, also writes
-//! `<out>_phase-avg.nii.gz` (weighted mean of the unwrapped phases, rad) and
-//! `<out>_fieldmap-hz.nii.gz` (`phase-avg / (2π · TE_eff)`), and prints TE_eff.
-//! `--solver fft --pad 64 --weighting t2star --t2star 0.040` reproduces STI Suite 3.0's
-//! `MRPhaseUnwrap` per echo and UK Biobank's T2*-weighted echo average. `--vs` overrides the
-//! voxel size read from the header (e.g. with the affine's column norms, as MATLAB computes it).
+//! mask again; written as `<out>_echo-<n>_unwrapped.nii.gz`. With `--te` and two or more echoes,
+//! also runs [`run_field_mapping`] with Laplacian unwrapping, the same solver and the given
+//! `--b0-weight-type` (default `phase_snr`; magnitude is not read, so magnitude-based weights
+//! see uniform magnitude) and writes `<out>_fieldmap-ppm.nii.gz`.
+//! `--solver fft --pad 64 --b0-weight-type assumed-decay --assumed-t2star 0.040` reproduces STI
+//! Suite 3.0's `MRPhaseUnwrap` per echo and UK Biobank's echo combination (up to a global
+//! constant in the field map). `--vs` overrides the voxel size read from the header (e.g. with
+//! the affine's column norms, as MATLAB computes it).
 
 use qsm_core::io::{read_nifti_file, save_nifti_to_file};
-use qsm_core::unwrap::{laplacian_unwrap, laplacian_unwrap_multi_echo, EchoWeighting, LaplacianSolver};
+use qsm_core::pipeline::{run_field_mapping, FieldMappingConfig, ScanMetadata, UnwrappingAlgorithm};
+use qsm_core::unwrap::{laplacian_unwrap, LaplacianSolver};
+use qsm_core::utils::B0WeightType;
 use qsm_core::Grid;
 use std::path::Path;
 
@@ -27,7 +31,8 @@ fn list(s: &str) -> Vec<f64> {
 fn main() {
     let mut args = std::env::args().skip(1);
     let (mut out, mut mask_path, mut tes, mut vs) = (None, None, None, None);
-    let (mut solver, mut pad, mut weighting, mut t2star) = (String::from("dct"), 12usize, String::from("t2star"), 0.040f64);
+    let (mut solver, mut pad, mut weighting, mut t2star, mut b0) =
+        (String::from("dct"), 12usize, String::from("phase_snr"), B0WeightType::DEFAULT_ASSUMED_T2STAR_S, 3.0f64);
     let mut inputs = Vec::new();
     while let Some(a) = args.next() {
         let mut val = || args.next().unwrap_or_else(|| panic!("{a} needs a value"));
@@ -38,8 +43,9 @@ fn main() {
             "--vs" => vs = Some(list(&val())),
             "--solver" => solver = val(),
             "--pad" => pad = val().parse().expect("pad"),
-            "--weighting" => weighting = val(),
-            "--t2star" => t2star = val().parse().expect("t2star"),
+            "--b0-weight-type" => weighting = val(),
+            "--assumed-t2star" => t2star = val().parse().expect("assumed T2* (s)"),
+            "--b0" => b0 = val().parse().expect("field strength (T)"),
             _ => inputs.push(a),
         }
     }
@@ -70,18 +76,30 @@ fn main() {
         let input: Vec<f64> = ph.data.iter().zip(&mask).map(|(&x, &b)| if b != 0 { x } else { 0.0 }).collect();
         save(&format!("echo-{}_unwrapped", e + 1), &laplacian_unwrap(&input, &mask, &grid, solver));
     }
-    if let Some(tes) = tes {
-        let w = match weighting.as_str() {
-            "t2star" => EchoWeighting::T2Star { t2star },
-            "te" => EchoWeighting::EchoTime,
-            "uniform" => EchoWeighting::Uniform,
-            other => panic!("unknown weighting {other}"),
+    if let Some(tes) = tes.filter(|_| echoes.len() > 1) {
+        let b0_weight_type = match B0WeightType::from_str(&weighting) {
+            B0WeightType::AssumedDecay { .. } => B0WeightType::AssumedDecay { t2star_s: t2star },
+            w => w,
+        };
+        let config = FieldMappingConfig {
+            unwrapping_algorithm: UnwrappingAlgorithm::Laplacian,
+            laplacian_solver: solver,
+            b0_weight_type,
+            ..Default::default()
+        };
+        let meta = ScanMetadata {
+            dims: grid.dims,
+            voxel_size: grid.voxel_size,
+            echo_times: tes,
+            field_strength: b0,
+            b0_direction: (0.0, 0.0, 1.0),
+            slice_geometry: None,
         };
         let phases: Vec<&[f64]> = echoes.iter().map(|n| n.data.as_slice()).collect();
-        let avg = laplacian_unwrap_multi_echo(&phases, &tes, &mask, &grid, solver, &w);
-        println!("weights {:?}  TE_eff {}", avg.weights, avg.te_eff);
-        save("phase-avg", &avg.phase);
-        save("fieldmap-hz", &avg.field_hz());
+        let field = run_field_mapping(&phases, None, &mask, &meta, &config, &mut |_, _| {})
+            .expect("field mapping");
+        println!("B0 weighting {b0_weight_type:?}");
+        save("fieldmap-ppm", &field.b0_field_ppm);
     }
     println!("grid {:?} voxel size {:?} solver {solver:?}: {:.1} s", grid.dims, grid.voxel_size, t.elapsed().as_secs_f64());
 }
