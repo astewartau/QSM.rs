@@ -4,6 +4,16 @@
 //! to preserve more brain tissue at edges while still
 //! removing background fields.
 //!
+//! Each voxel takes the SMV high-pass `φ − S_r∗φ` of the largest radius `r`
+//! whose ball fits inside the mask. By default that high-passed field is then
+//! deconvolved by the largest kernel, `1/(1 − Ŝ)` with TSVD at `threshold`
+//! (Wu et al. 2012; QSM.jl). With [`VsharpParams::deconvolve`] off the
+//! high-passed field is returned as is, which is what STI Suite's `V_SHARP`
+//! does. The deconvolution restores low spatial frequencies; on real data those
+//! are dominated by residual background and field-map error, so turning it off
+//! gives a more reproducible local field at the cost of attenuating genuinely
+//! low-frequency tissue contrast.
+//!
 //! Reference:
 //! Wu, B., Li, W., Guidon, A., Liu, C. (2012).
 //! "Whole brain susceptibility mapping using compressed sensing."
@@ -22,12 +32,20 @@ use crate::kernels::smv::{smv_kernel, erode_mask_smv};
 pub struct VsharpParams {
     /// Deconvolution (TSVD) threshold: k-space frequencies where |1 - S| < threshold are dropped
     /// rather than divided through. Higher = more regularisation, more robust to a noisy input field
-    /// (default: 0.2).
+    /// (default: 0.2). Only used when [`deconvolve`](Self::deconvolve) is true.
     pub threshold: f64,
     /// Maximum (starting) SMV kernel radius in mm (default: 12.0)
     pub max_radius: f64,
     /// Minimum SMV kernel radius in mm — also the step between successive radii (default: 1.0)
     pub min_radius: f64,
+    /// Deconvolve the SMV high-passed field by the largest kernel, `1/(1 − Ŝ)` with TSVD at
+    /// [`threshold`](Self::threshold) (default: true, Wu et al. 2012 / QSM.jl). When false,
+    /// return the high-passed field `φ − S_r∗φ` itself, each voxel with the largest radius
+    /// whose ball fits in the mask (as STI Suite's `V_SHARP` does). The deconvolution restores
+    /// low spatial frequencies that `1 − Ŝ` attenuated; on real data those are dominated by
+    /// residual background and field-map error, so `false` is the more reproducible choice
+    /// there, while `true` recovers more low-frequency tissue contrast on a clean field.
+    pub deconvolve: bool,
 }
 
 impl Default for VsharpParams {
@@ -40,6 +58,7 @@ impl Default for VsharpParams {
             threshold: 0.2,
             max_radius: 12.0,
             min_radius: 1.0,
+            deconvolve: true,
         }
     }
 }
@@ -47,13 +66,14 @@ impl Default for VsharpParams {
 /// V-SHARP background field removal
 ///
 /// Uses multiple SMV kernel radii, starting from largest and decreasing.
-/// At each voxel, uses the smallest radius that doesn't touch the boundary.
+/// At each voxel, uses the largest radius whose ball fits inside the mask,
+/// then (if `params.deconvolve`) deconvolves by the largest kernel.
 ///
 /// # Arguments
 /// * `field` - Unwrapped total field (nx * ny * nz)
 /// * `mask` - Binary mask (nx * ny * nz), 1 = inside ROI
 /// * `grid` - Volume dimensions and voxel sizes
-/// * `params` - V-SHARP parameters (threshold, min/max radius in mm)
+/// * `params` - V-SHARP parameters (min/max radius in mm, deconvolution on/off and its threshold)
 /// * `progress` - Progress callback (radius_index, total_radii)
 ///
 /// # Returns
@@ -66,7 +86,8 @@ pub fn vsharp(
     progress: impl FnMut(usize, usize),
 ) -> (Vec<f64>, Vec<u8>) {
     let radii = vsharp_radii(params);
-    vsharp_with_radii(field, mask, grid, &radii, params.threshold, progress)
+    let deconvolve = params.deconvolve.then_some(params.threshold);
+    vsharp_with_radii(field, mask, grid, &radii, deconvolve, progress)
 }
 
 /// Build the descending list of SMV kernel radii (mm) from the params.
@@ -90,13 +111,14 @@ fn vsharp_radii(params: &VsharpParams) -> Vec<f64> {
 /// V-SHARP with an explicit list of SMV kernel radii (mm).
 ///
 /// Internal entry point; the public [`vsharp`] wrapper derives the radii
-/// from [`VsharpParams`].
+/// from [`VsharpParams`]. `deconvolve` is the TSVD threshold of the final
+/// deconvolution, or `None` to return the SMV high-passed field undeconvolved.
 pub(crate) fn vsharp_with_radii(
     field: &[f64],
     mask: &[u8],
     grid: &Grid,
     radii: &[f64],
-    threshold: f64,
+    deconvolve: Option<f64>,
     mut progress: impl FnMut(usize, usize),
 ) -> (Vec<f64>, Vec<u8>) {
     let (nx, ny, nz) = grid.dims;
@@ -105,8 +127,8 @@ pub(crate) fn vsharp_with_radii(
         return (vec![0.0; nx * ny * nz], mask.to_vec());
     }
 
-    // If only one radius, use regular SHARP
-    if radii.len() == 1 {
+    // If only one radius and deconvolving, this is regular SHARP
+    if let (1, Some(threshold)) = (radii.len(), deconvolve) {
         progress(1, 1);
         return crate::bgremove::sharp::sharp_core(
             field, mask, grid, threshold, radii[0]
@@ -150,7 +172,7 @@ pub(crate) fn vsharp_with_radii(
         let s_fft: Vec<f64> = s_complex.iter().map(|c| c.re).collect();
 
         // Store inverse of first (largest) kernel
-        if inverse_kernel.is_none() {
+        if let (0, Some(threshold)) = (idx, deconvolve) {
             inverse_kernel = Some(s_fft.iter().map(|&s| {
                 let one_minus_s = 1.0 - s;
                 if one_minus_s.abs() < threshold {
@@ -182,7 +204,7 @@ pub(crate) fn vsharp_with_radii(
         }
     }
 
-    // Deconvolution
+    // Deconvolution (only built when `deconvolve` is set)
     if let Some(inv_kernel) = inverse_kernel {
         let mut local_complex: Vec<Complex64> = local_field.iter()
             .map(|&x| Complex64::new(x, 0.0))
@@ -216,7 +238,7 @@ mod tests {
         let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
 
         let radii = vec![4.0, 3.0, 2.0];
-        let (local, _) = vsharp_with_radii(&field, &mask, &grid, &radii, 0.05, |_, _| {});
+        let (local, _) = vsharp_with_radii(&field, &mask, &grid, &radii, Some(0.05), |_, _| {});
 
         for &val in local.iter() {
             assert!(val.abs() < 1e-10);
@@ -232,7 +254,7 @@ mod tests {
 
         // V-SHARP with multiple radii
         let radii = vec![5.0, 4.0, 3.0, 2.0];
-        let (_, vsharp_mask) = vsharp_with_radii(&field, &mask, &grid, &radii, 0.05, |_, _| {});
+        let (_, vsharp_mask) = vsharp_with_radii(&field, &mask, &grid, &radii, Some(0.05), |_, _| {});
 
         // SHARP with single large radius
         let (_, sharp_mask) = crate::bgremove::sharp::sharp_core(
@@ -258,7 +280,7 @@ mod tests {
         // Anisotropic voxel sizes
         let radii = vec![4.0, 3.0, 2.0];
         let (local, final_mask) = vsharp_with_radii(
-            &field, &mask, &grid, &radii, 0.05, |_, _| {}
+            &field, &mask, &grid, &radii, Some(0.05), |_, _| {}
         );
 
         // All values should be finite
@@ -281,7 +303,7 @@ mod tests {
         // Single radius should delegate to SHARP
         let radii = vec![3.0];
         let (local, final_mask) = vsharp_with_radii(
-            &field, &mask, &grid, &radii, 0.05, |_, _| {}
+            &field, &mask, &grid, &radii, Some(0.05), |_, _| {}
         );
 
         // All values should be finite
@@ -313,7 +335,7 @@ mod tests {
         let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
 
         let (local, returned_mask) = vsharp_with_radii(
-            &field, &mask, &grid, &[], 0.05, |_, _| {}
+            &field, &mask, &grid, &[], Some(0.05), |_, _| {}
         );
 
         for &val in &local {
@@ -356,7 +378,7 @@ mod tests {
         let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
         let radii = vec![6.0, 4.0, 3.0, 2.0];
         let (local, final_mask) = vsharp_with_radii(
-            &field, &mask, &grid, &radii, 0.05, |_, _| {}
+            &field, &mask, &grid, &radii, Some(0.05), |_, _| {}
         );
 
         assert_eq!(local.len(), n * n * n);
@@ -385,7 +407,7 @@ mod tests {
         let radii = vec![4.0, 3.0, 2.0];
         let mut progress_calls = Vec::new();
         let (local, _) = vsharp_with_radii(
-            &field, &mask, &grid, &radii, 0.05,
+            &field, &mask, &grid, &radii, Some(0.05),
             |idx, total| { progress_calls.push((idx, total)); }
         );
 
@@ -406,7 +428,7 @@ mod tests {
         let radii = vec![3.0];
         let mut progress_calls = Vec::new();
         let (local, _) = vsharp_with_radii(
-            &field, &mask, &grid, &radii, 0.05,
+            &field, &mask, &grid, &radii, Some(0.05),
             |idx, total| { progress_calls.push((idx, total)); }
         );
 
@@ -426,7 +448,7 @@ mod tests {
 
         let mut progress_calls = Vec::new();
         let (local, returned_mask) = vsharp_with_radii(
-            &field, &mask, &grid, &[], 0.05,
+            &field, &mask, &grid, &[], Some(0.05),
             |idx, total| { progress_calls.push((idx, total)); }
         );
 
@@ -448,10 +470,10 @@ mod tests {
         let radii_unsorted = vec![2.0, 4.0, 3.0];
 
         let (local_sorted, mask_sorted) = vsharp_with_radii(
-            &field, &mask, &grid, &radii_sorted, 0.05, |_, _| {}
+            &field, &mask, &grid, &radii_sorted, Some(0.05), |_, _| {}
         );
         let (local_unsorted, mask_unsorted) = vsharp_with_radii(
-            &field, &mask, &grid, &radii_unsorted, 0.05, |_, _| {}
+            &field, &mask, &grid, &radii_unsorted, Some(0.05), |_, _| {}
         );
 
         // Results should be the same regardless of input order
@@ -463,5 +485,97 @@ mod tests {
                 i
             );
         }
+    }
+
+    /// Spherical mask of radius `rad` voxels centred in an `n`³ volume, and a smooth
+    /// non-harmonic field over it.
+    fn sphere_case(n: usize, rad: f64) -> (Vec<f64>, Vec<u8>) {
+        let c = n as f64 / 2.0;
+        let mut field = vec![0.0; n * n * n];
+        let mut mask = vec![0u8; n * n * n];
+        for z in 0..n {
+            for y in 0..n {
+                for x in 0..n {
+                    let (dx, dy, dz) = (x as f64 - c, y as f64 - c, z as f64 - c);
+                    let i = x + y * n + z * n * n;
+                    field[i] = 0.01 * dz + 0.002 * (dx * dx - dy * dy) + (0.3 * dx).sin() * 0.05;
+                    mask[i] = (dx * dx + dy * dy + dz * dz <= rad * rad) as u8;
+                }
+            }
+        }
+        (field, mask)
+    }
+
+    #[test]
+    fn test_vsharp_default_deconvolves() {
+        assert!(VsharpParams::default().deconvolve);
+    }
+
+    #[test]
+    fn test_vsharp_no_deconvolve_is_smv_highpass() {
+        // Without deconvolution each voxel is φ − S_r∗φ for the largest radius r whose
+        // ball fits the mask; check against that computed directly, radius by radius.
+        let n = 20;
+        let (field, mask) = sphere_case(n, 8.0);
+        let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
+        let radii = [4.0, 3.0, 2.0];
+        let (local, out_mask) = vsharp_with_radii(&field, &mask, &grid, &radii, None, |_, _| {});
+
+        let delta = 1.0 - 1e-7_f64.sqrt();
+        let mut expected = vec![0.0; n * n * n];
+        let mut expected_mask = vec![0u8; n * n * n];
+        for &r in &radii {
+            let mut s: Vec<Complex64> = smv_kernel(&grid, r).iter().map(|&x| Complex64::new(x, 0.0)).collect();
+            fft3d(&mut s, n, n, n);
+            let s_fft: Vec<f64> = s.iter().map(|c| c.re).collect();
+            let fits = erode_mask_smv(&mask, &s_fft, &grid, delta);
+            let mut sf: Vec<Complex64> = field.iter().map(|&x| Complex64::new(x, 0.0)).collect();
+            fft3d(&mut sf, n, n, n);
+            for i in 0..sf.len() { sf[i] *= s_fft[i]; }
+            ifft3d(&mut sf, n, n, n);
+            for i in 0..n * n * n {
+                if fits[i] == 1 && expected_mask[i] == 0 {
+                    expected[i] = field[i] - sf[i].re;
+                    expected_mask[i] = 1;
+                }
+            }
+        }
+        assert_eq!(out_mask, expected_mask);
+        assert!(out_mask.contains(&1));
+        for i in 0..n * n * n {
+            assert!((local[i] - expected[i]).abs() < 1e-12, "voxel {i}: {} vs {}", local[i], expected[i]);
+        }
+    }
+
+    #[test]
+    fn test_vsharp_deconvolve_flag() {
+        let n = 20;
+        let (field, mask) = sphere_case(n, 8.0);
+        let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
+        let base = VsharpParams { max_radius: 4.0, min_radius: 1.0, ..Default::default() };
+        let (dec, dec_mask) = vsharp(&field, &mask, &grid, &base, |_, _| {});
+        let off = VsharpParams { deconvolve: false, ..base.clone() };
+        let (hp, hp_mask) = vsharp(&field, &mask, &grid, &off, |_, _| {});
+        // Same voxels either way; the deconvolution changes the values.
+        assert_eq!(dec_mask, hp_mask);
+        assert!(dec.iter().zip(&hp).any(|(a, b)| (a - b).abs() > 1e-6));
+        // The threshold only applies to the deconvolution.
+        let (hp2, _) = vsharp(&field, &mask, &grid, &VsharpParams { threshold: 0.9, ..off }, |_, _| {});
+        assert_eq!(hp, hp2);
+        for i in 0..n * n * n {
+            if hp_mask[i] == 0 { assert_eq!(hp[i], 0.0); }
+        }
+    }
+
+    #[test]
+    fn test_vsharp_no_deconvolve_single_radius() {
+        // One radius without deconvolution is the plain SMV high-pass, not SHARP.
+        let n = 20;
+        let (field, mask) = sphere_case(n, 8.0);
+        let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
+        let (hp, hp_mask) = vsharp_with_radii(&field, &mask, &grid, &[3.0], None, |_, _| {});
+        let (sh, sh_mask) = crate::bgremove::sharp::sharp_core(&field, &mask, &grid, 0.05, 3.0);
+        assert_eq!(hp_mask, sh_mask);
+        assert!(hp.iter().zip(&sh).any(|(a, b)| (a - b).abs() > 1e-6));
     }
 }
