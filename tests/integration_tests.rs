@@ -222,6 +222,35 @@ fn test_bgremove_vsharp() {
     assert!(res.correlation > 0.7, "V-SHARP correlation too low: {}", res.correlation);
 }
 
+/// V-SHARP with `deconvolve: false`: the SMV high-passed field φ − S_r∗φ (largest fitting
+/// ball per voxel), as STI Suite's V_SHARP returns it.
+#[test]
+#[ignore]
+fn test_bgremove_vsharp_no_deconvolve() {
+    println!("[INFO] Loading test data...");
+    let data = TestData::load().expect("Failed to load test data");
+    let (nx, ny, nz) = data.dims;
+    let (vsx, vsy, vsz) = data.voxel_size;
+
+    let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
+    let params = VsharpParams { deconvolve: false, ..VsharpParams::default() };
+    let ((result, eroded_mask), elapsed) = run_timed!("V-SHARP (no deconvolution)", bgremove::vsharp(
+        &data.fieldmap,
+        &data.mask,
+        &grid,
+        &params,
+        |_, _| {},
+    ));
+
+    let res = TestResult::new("V-SHARP (no deconv.)", &result, &data.fieldmap_local, &data.mask, data.dims);
+    res.print_with_time(elapsed);
+    res.print_ci_metrics(elapsed);
+    common::save_center_slices(&result, &eroded_mask, data.dims, "bgremove_vsharp_no_deconvolve");
+
+    assert!(res.nrmse < 0.8, "V-SHARP (no deconvolution) NRMSE too high: {}", res.nrmse);
+    assert!(res.correlation > 0.7, "V-SHARP (no deconvolution) correlation too low: {}", res.correlation);
+}
+
 #[test]
 #[ignore]
 fn test_bgremove_pdf() {
