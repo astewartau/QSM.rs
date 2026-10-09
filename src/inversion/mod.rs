@@ -70,7 +70,7 @@ pub use rts::{rts, RtsParams};
 pub use medi::{medi, MediParams, MediWorkspace};
 pub use tfi::{tfi, TfiParams};
 pub use tgv::{tgv_qsm, TgvParams, get_default_alpha, get_default_iterations};
-pub use ilsqr::{ilsqr, IlsqrParams};
+pub use ilsqr::{ilsqr, ilsqr_qsmm, ilsqr_with_padding, IlsqrParams, STI_PAD_MM};
 pub use lsqr_qsm::{lsqr_qsm, LsqrQsmParams, RESIDUAL_WEIGHTING_PER_TESLA};
 pub use heidi::{heidi, homogeneity_masks, HeidiParams, HomogeneityMasks};
 pub use ndi::{ndi, NdiParams};
