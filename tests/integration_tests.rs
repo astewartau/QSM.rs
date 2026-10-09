@@ -13,7 +13,7 @@ use qsm_core::Grid;
 use qsm_core::bet;
 use qsm_core::bet::BetParams;
 use qsm_core::inversion;
-use qsm_core::inversion::{tgv_qsm, TgvParams, get_default_alpha, get_default_iterations, ilsqr_qsmm, IlsqrParams, TkdParams};
+use qsm_core::inversion::{tgv_qsm, TgvParams, get_default_alpha, get_default_iterations, ilsqr_with_padding, IlsqrParams, TkdParams, STI_DEFAULT_PAD_MM};
 use qsm_core::inversion::{TvParams, NltvParams, RtsParams, MediParams, TfiParams, TikhonovParams};
 use qsm_core::inversion::{NdiParams, FansiParams, L1QsmParams, WhQsmParams, HdQsmParams, AmpPeParams};
 use qsm_core::inversion::{LsqrQsmParams, HeidiParams};
@@ -2359,18 +2359,21 @@ fn test_all_combinations() {
         let ppm_factor = gyro_rad * data.field_strength / 1e6;
         let scale_to_ppm = 1e6 / (42.576e6 * data.field_strength);
 
+        // QSMART's QSM_iLSQR call: 'niter' 50, STI's default padding
+        let qsmart_ilsqr = IlsqrParams { max_iter: 50, ..IlsqrParams::default() };
+
         // Stage 1
         let ones_vasc: Vec<f64> = vec![1.0; n_total];
         let lfs_stage1 = sdf(&field_hz, &weighted_mask, &ones_vasc, &grid, &SdfParams::stage1(), |_, _| {});
         let mask_stage1_u8: Vec<u8> = weighted_mask.iter().map(|&v| if v > 0.1 { 1 } else { 0 }).collect();
-        let (chi_stage1, _, _, _) = ilsqr_qsmm(&lfs_stage1, &mask_stage1_u8, &grid, data.b0_dir, &IlsqrParams::qsmm(), |_, _| {});
+        let (chi_stage1, _, _, _) = ilsqr_with_padding(&lfs_stage1, &mask_stage1_u8, &grid, data.b0_dir, &qsmart_ilsqr, [STI_DEFAULT_PAD_MM; 3], |_, _| {});
 
         // Stage 2
         let field_hz_weighted: Vec<f64> = field_hz.iter().zip(weighted_mask.iter()).map(|(&f, &m)| f * m).collect();
         let lfs_stage2 = sdf(&field_hz_weighted, &weighted_mask, &vasc_mask, &grid, &SdfParams::stage2(), |_, _| {});
         let mask_stage2_u8: Vec<u8> = weighted_mask.iter().zip(vasc_mask.iter())
             .map(|(&wm, &v)| if wm > 0.1 && v > 0.5 { 1 } else { 0 }).collect();
-        let (chi_stage2, _, _, _) = ilsqr_qsmm(&lfs_stage2, &mask_stage2_u8, &grid, data.b0_dir, &IlsqrParams::qsmm(), |_, _| {});
+        let (chi_stage2, _, _, _) = ilsqr_with_padding(&lfs_stage2, &mask_stage2_u8, &grid, data.b0_dir, &qsmart_ilsqr, [STI_DEFAULT_PAD_MM; 3], |_, _| {});
 
         // Offset adjustment
         let removed_voxels: Vec<f64> = weighted_mask.iter().zip(vasc_mask.iter()).map(|(&wm, &v)| wm - v).collect();
