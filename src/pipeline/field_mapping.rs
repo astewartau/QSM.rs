@@ -59,10 +59,10 @@ pub fn run_field_mapping(
         }
     }
 
-    if let B0WeightType::T2Star { t2star_s } = config.b0_weight_type {
+    if let B0WeightType::AssumedDecay { t2star_s } = config.b0_weight_type {
         if !(t2star_s.is_finite() && t2star_s > 0.0) {
             return Err(PipelineError::InvalidConfig(format!(
-                "T2* for the t2star B0 weighting must be positive, got {} s", t2star_s
+                "assumed T2* for the assumed-decay B0 weighting must be positive, got {} s", t2star_s
             )));
         }
     }
@@ -657,7 +657,7 @@ mod tests {
                     B0WeightType::Average => 1.0,
                     B0WeightType::TEs => te,
                     B0WeightType::Mag => m,
-                    B0WeightType::T2Star { t2star_s } => te * te * (-te / t2star_s).exp(),
+                    B0WeightType::AssumedDecay { t2star_s } => te * te * (-te / t2star_s).exp(),
                 };
                 num += w * uw[e][i] / te;
                 den += w;
@@ -666,8 +666,8 @@ mod tests {
         }).collect()
     }
 
-    /// UK Biobank / STI Suite form of the T2* combination: `Σ Wφ / Σ W·TE`, `W = TE·exp(−TE/T2*)`.
-    fn ukb_t2star(uw: &[Vec<f64>], tes: &[f64], mask: &[u8], t2s: f64, b0_t: f64) -> Vec<f64> {
+    /// UK Biobank's form of the assumed-decay combination: `Σ Wφ / Σ W·TE`, `W = TE·exp(−TE/T2*)`.
+    fn ukb_assumed_decay(uw: &[Vec<f64>], tes: &[f64], mask: &[u8], t2s: f64, b0_t: f64) -> Vec<f64> {
         let gamma = 42.576e6;
         let w: Vec<f64> = tes.iter().map(|&te| te * (-te / t2s).exp()).collect();
         let den: f64 = w.iter().zip(tes).map(|(w, te)| w * te).sum();
@@ -681,7 +681,7 @@ mod tests {
     fn all_weight_types() -> [B0WeightType; 6] {
         [
             B0WeightType::PhaseSNR, B0WeightType::PhaseVar, B0WeightType::Average,
-            B0WeightType::TEs, B0WeightType::Mag, B0WeightType::t2star_default(),
+            B0WeightType::TEs, B0WeightType::Mag, B0WeightType::assumed_decay_default(),
         ]
     }
 
@@ -728,10 +728,10 @@ mod tests {
                 assert!(d > 1e-4, "{:?} and {:?} gave the same field (max diff {d})", outputs[a].0, outputs[b].0);
             }
         }
-        // T2* weighting is UK Biobank's Σ Wφ / Σ W·TE.
-        let t2 = &outputs[5].1;
-        let ukb = ukb_t2star(&uw, &tes, &mask, 0.040, 3.0);
-        assert!(max_abs_diff(t2, &ukb, &mask) < 1e-12);
+        // Assumed-decay weighting is UK Biobank's Σ Wφ / Σ W·TE.
+        let ad = &outputs[5].1;
+        let ukb = ukb_assumed_decay(&uw, &tes, &mask, 0.040, 3.0);
+        assert!(max_abs_diff(ad, &ukb, &mask) < 1e-12);
     }
 
     #[test]
@@ -852,7 +852,7 @@ mod tests {
         let cfg = FieldMappingConfig {
             unwrapping_algorithm: UnwrappingAlgorithm::Laplacian,
             b0_estimation: B0EstimationMethod::LinearFit,
-            b0_weight_type: B0WeightType::t2star_default(), // must be ignored by the fit
+            b0_weight_type: B0WeightType::assumed_decay_default(), // must be ignored by the fit
             ..Default::default()
         };
         let got = run_field_mapping(&refs(&ph), Some(&refs(&mg)), &mask, &meta, &cfg, &mut |_, _| {})
@@ -902,8 +902,8 @@ mod tests {
     }
 
     #[test]
-    fn offset_removal_path_accepts_t2star_weighting() {
-        // Path A: T2* weighting changes the output, and with T2* → ∞ it is phase-variance
+    fn offset_removal_path_accepts_assumed_decay_weighting() {
+        // Path A: assumed-decay weighting changes the output, and with T2* → ∞ it is phase-variance
         // weighting at unit magnitude (TE²·exp(−TE/∞) = TE² = mag²·TE²).
         let tes = [0.004, 0.009, 0.014];
         let meta = meta_n(&tes);
@@ -914,16 +914,16 @@ mod tests {
             run_field_mapping(&refs(&ph), None, &mask, &meta, &cfg, &mut |_, _| {}).unwrap()
         };
         let snr = run(B0WeightType::PhaseSNR);
-        let t2 = run(B0WeightType::t2star_default());
-        let inf = run(B0WeightType::T2Star { t2star_s: 1e30 });
+        let ad = run(B0WeightType::assumed_decay_default());
+        let inf = run(B0WeightType::AssumedDecay { t2star_s: 1e30 });
         let pv = run(B0WeightType::PhaseVar);
-        assert!(t2.phase_offset.is_some());
-        assert!(max_abs_diff(&snr.b0_field_ppm, &t2.b0_field_ppm, &mask) > 1e-4);
+        assert!(ad.phase_offset.is_some());
+        assert!(max_abs_diff(&snr.b0_field_ppm, &ad.b0_field_ppm, &mask) > 1e-4);
         assert!(max_abs_diff(&inf.b0_field_ppm, &pv.b0_field_ppm, &mask) < 1e-12);
     }
 
     #[test]
-    fn rejects_non_positive_t2star() {
+    fn rejects_non_positive_assumed_t2star() {
         let tes = [0.004, 0.009];
         let meta = meta_n(&tes);
         let (ph, _) = echoes(&tes, omega_small, 0.0);
@@ -931,7 +931,7 @@ mod tests {
         for t2 in [0.0, -0.01, f64::NAN] {
             let cfg = FieldMappingConfig {
                 unwrapping_algorithm: UnwrappingAlgorithm::Laplacian,
-                b0_weight_type: B0WeightType::T2Star { t2star_s: t2 },
+                b0_weight_type: B0WeightType::AssumedDecay { t2star_s: t2 },
                 ..Default::default()
             };
             assert!(run_field_mapping(&refs(&ph), None, &mask, &meta, &cfg, &mut |_, _| {}).is_err());

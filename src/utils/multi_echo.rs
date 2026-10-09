@@ -75,7 +75,7 @@ fn idx3d(i: usize, j: usize, k: usize, nx: usize, ny: usize) -> usize {
     i + j * nx + k * nx * ny
 }
 
-/// B0 weighting types matching MriResearchTools.jl
+/// B0 weighting types. All but [`B0WeightType::AssumedDecay`] match MriResearchTools.jl.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum B0WeightType {
     /// mag * TE - optimal for phase SNR (default)
@@ -88,26 +88,33 @@ pub enum B0WeightType {
     TEs,
     /// Magnitude only
     Mag,
-    /// Modelled mono-exponential decay with an assumed tissue T2* (seconds), as used by
-    /// STI Suite and the UK Biobank pipeline: those average the unwrapped *phases* with
-    /// `Wₑ = TEₑ·exp(−TEₑ/T2*)` and divide by the equally weighted mean echo time,
-    /// `f = Σ Wₑ φₑ / Σ Wₑ TEₑ`. In the `φ/TE` form used for every weight type here
-    /// (`f = Σ wₑ (φₑ/TEₑ) / Σ wₑ`) that is `wₑ = TEₑ²·exp(−TEₑ/T2*)`: [`Self::PhaseVar`]
-    /// with a modelled rather than a measured magnitude. It does not read the magnitude, so
-    /// the relative echo weights are the same in every voxel.
-    T2Star {
+    /// Fixed per-echo weights computed from the echo times and an *assumed* T2*:
+    /// UK Biobank's echo-combination weighting.
+    ///
+    /// The UK Biobank QSM pipeline (Wang et al. 2022, "Phenotypic and genetic associations of
+    /// quantitative magnetic susceptibility in UK Biobank brain imaging", *Nat. Neurosci.*
+    /// 25:818-831, doi:10.1038/s41593-022-01074-w) averages the unwrapped *phases* with
+    /// `Wₑ = TEₑ·exp(−TEₑ/T2*)`, T2* = 40 ms for every participant, and divides by the
+    /// equally weighted mean echo time: `f = Σ Wₑ φₑ / Σ Wₑ TEₑ`. In the `φ/TE` form used for
+    /// every weight type here (`f = Σ wₑ (φₑ/TEₑ) / Σ wₑ`) that is `wₑ = TEₑ²·exp(−TEₑ/T2*)`.
+    ///
+    /// No T2* map and no magnitude enter it: the T2* is a single assumed constant, so every
+    /// voxel gets the same echo weights. It is a heuristic, not the inverse-variance weighting
+    /// for that decay. When magnitude images are available, [`Self::PhaseSNR`], which uses the
+    /// measured magnitude in each voxel, is generally preferable.
+    AssumedDecay {
         /// Assumed T2* in seconds (same unit as the echo times); must be positive.
         t2star_s: f64,
     },
 }
 
 impl B0WeightType {
-    /// T2* assumed by [`B0WeightType::T2Star`] when none is given: 40 ms, UK Biobank's value.
-    pub const DEFAULT_T2STAR_S: f64 = 0.040;
+    /// T2* assumed by [`B0WeightType::AssumedDecay`] when none is given: 40 ms, UK Biobank's value.
+    pub const DEFAULT_ASSUMED_T2STAR_S: f64 = 0.040;
 
-    /// [`B0WeightType::T2Star`] with [`Self::DEFAULT_T2STAR_S`].
-    pub fn t2star_default() -> Self {
-        B0WeightType::T2Star { t2star_s: Self::DEFAULT_T2STAR_S }
+    /// [`B0WeightType::AssumedDecay`] with [`Self::DEFAULT_ASSUMED_T2STAR_S`].
+    pub fn assumed_decay_default() -> Self {
+        B0WeightType::AssumedDecay { t2star_s: Self::DEFAULT_ASSUMED_T2STAR_S }
     }
 
     /// Per-echo weight in the `φ/TE` form, `B0 = Σ w (φ/TE) / Σ w`.
@@ -119,7 +126,7 @@ impl B0WeightType {
             B0WeightType::Average => 1.0,
             B0WeightType::TEs => te,
             B0WeightType::Mag => mag,
-            B0WeightType::T2Star { t2star_s } => te * te * (-te / t2star_s).exp(),
+            B0WeightType::AssumedDecay { t2star_s } => te * te * (-te / t2star_s).exp(),
         }
     }
 
@@ -135,7 +142,7 @@ impl B0WeightType {
             "average" | "uniform" => B0WeightType::Average,
             "tes" | "te" => B0WeightType::TEs,
             "mag" | "magnitude" => B0WeightType::Mag,
-            "t2star" | "t2_star" | "t2*" => B0WeightType::t2star_default(),
+            "assumed-decay" => B0WeightType::assumed_decay_default(),
             _ => B0WeightType::PhaseSNR, // default
         }
     }
@@ -1918,8 +1925,10 @@ mod tests {
         assert_eq!(B0WeightType::from_str("te"), B0WeightType::TEs);
         assert_eq!(B0WeightType::from_str("mag"), B0WeightType::Mag);
         assert_eq!(B0WeightType::from_str("magnitude"), B0WeightType::Mag);
-        assert_eq!(B0WeightType::from_str("t2star"), B0WeightType::T2Star { t2star_s: 0.040 });
-        assert_eq!(B0WeightType::from_str("T2Star"), B0WeightType::t2star_default());
+        assert_eq!(B0WeightType::from_str("assumed-decay"), B0WeightType::AssumedDecay { t2star_s: 0.040 });
+        assert_eq!(B0WeightType::from_str("Assumed-Decay"), B0WeightType::assumed_decay_default());
+        // No "t2star" alias: the weighting does not use a T2* map.
+        assert_eq!(B0WeightType::from_str("t2star"), B0WeightType::PhaseSNR);
         // Unknown string should default to PhaseSNR
         assert_eq!(B0WeightType::from_str("unknown"), B0WeightType::PhaseSNR);
     }
