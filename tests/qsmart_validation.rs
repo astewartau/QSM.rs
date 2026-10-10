@@ -13,7 +13,8 @@
 //!   SDF spatial radius: 8, lower_lim: 0.7, curv_constant: 500
 //!   Frangi: scaleRange=[0.01, 0.05], scaleRatio=0.01, C=500
 //!   Vasculature sphere radius: 8
-//!   iLSQR: cgs_num=500, inv_num=500, smv_rad=0.1
+//!   iLSQR: cgs_num=500, inv_num=500, smv_rad=0.1 (Demo_QSMART.m fields, unused: QSMART.m calls
+//!   STI Suite's QSM_iLSQR(..., 'niter', 50, 'TE', 1000, 'B0', B0) with STI's default padding)
 //!
 //! Run with: cargo test --test qsmart_validation -- --ignored --nocapture
 
@@ -24,7 +25,7 @@ use std::time::Instant;
 use common::load_nifti_file;
 use qsm_core::Grid;
 use qsm_core::bgremove::{sdf, SdfParams};
-use qsm_core::inversion::{ilsqr, IlsqrParams};
+use qsm_core::inversion::{ilsqr_with_padding, IlsqrParams, STI_DEFAULT_PAD_MM};
 use qsm_core::inversion::tkd;
 use qsm_core::inversion::TkdParams;
 use qsm_core::utils::{
@@ -66,9 +67,13 @@ const FRANGI_C: f64 = 500.0;
 // Vasculature
 const VASC_SPHERE_RADIUS: i32 = 8;
 
-// iLSQR parameters
-const ILSQR_MAX_ITER: usize = 500;
-const ILSQR_TOL: f64 = 0.01; // MATLAB uses cgs_num=500, inv_num=500
+// iLSQR: QSMART.m calls STI Suite's QSM_iLSQR with 'niter' 50 and no 'padsize' (STI's default).
+// The Demo's cgs_num/inv_num/smv_rad are never passed to it.
+const ILSQR_MAX_ITER: usize = 50;
+
+fn qsmart_ilsqr_params() -> IlsqrParams {
+    IlsqrParams { max_iter: ILSQR_MAX_ITER, ..IlsqrParams::default() }
+}
 
 // B0 direction (assumed axial)
 const B0_DIR: (f64, f64, f64) = (0.0, 0.0, 1.0);
@@ -943,12 +948,13 @@ fn test_qsmart_07_ilsqr_stage1() {
     let start = Instant::now();
 
     // Use MATLAB local field as input to isolate iLSQR errors
-    let (chi_stage1_rust, _, _, _) = ilsqr(
+    let (chi_stage1_rust, _, _, _) = ilsqr_with_padding(
         matlab_lfs1,
         &data.mask_u8,
         &grid,
         B0_DIR,
-        &IlsqrParams { tol: ILSQR_TOL, max_iter: ILSQR_MAX_ITER },
+        &qsmart_ilsqr_params(),
+        [STI_DEFAULT_PAD_MM; 3],
         |_, _| {},
     );
 
@@ -1003,12 +1009,13 @@ fn test_qsmart_08_ilsqr_stage2() {
 
     let start = Instant::now();
 
-    let (chi_stage2_rust, _, _, _) = ilsqr(
+    let (chi_stage2_rust, _, _, _) = ilsqr_with_padding(
         matlab_lfs2,
         &mask_stage2,
         &grid,
         B0_DIR,
-        &IlsqrParams { tol: ILSQR_TOL, max_iter: ILSQR_MAX_ITER },
+        &qsmart_ilsqr_params(),
+        [STI_DEFAULT_PAD_MM; 3],
         |_, _| {},
     );
 
@@ -1209,10 +1216,11 @@ fn test_qsmart_full_pipeline() {
     println!("[INFO] Step 3: iLSQR Stage 1...");
     let step_start = Instant::now();
 
-    let (chi_stage1, _, _, _) = ilsqr(
+    let (chi_stage1, _, _, _) = ilsqr_with_padding(
         &lfs_stage1, &data.mask_u8,
         &grid, B0_DIR,
-        &IlsqrParams { tol: ILSQR_TOL, max_iter: ILSQR_MAX_ITER },
+        &qsmart_ilsqr_params(),
+        [STI_DEFAULT_PAD_MM; 3],
         |_, _| {},
     );
     println!("[INFO] iLSQR Stage 1: {:.2?}", step_start.elapsed());
@@ -1246,10 +1254,11 @@ fn test_qsmart_full_pipeline() {
         .map(|(&m, &v)| if m > 0.5 && v > 0.5 { 1 } else { 0 })
         .collect();
 
-    let (chi_stage2, _, _, _) = ilsqr(
+    let (chi_stage2, _, _, _) = ilsqr_with_padding(
         &lfs_stage2, &mask_stage2,
         &grid, B0_DIR,
-        &IlsqrParams { tol: ILSQR_TOL, max_iter: ILSQR_MAX_ITER },
+        &qsmart_ilsqr_params(),
+        [STI_DEFAULT_PAD_MM; 3],
         |_, _| {},
     );
     println!("[INFO] iLSQR Stage 2: {:.2?}", step_start.elapsed());
@@ -1413,12 +1422,13 @@ fn test_qsmart_07b_ilsqr_diagnostics() {
 
     // Run iLSQR with full output (chi, xsa, xfs, xlsqr)
     let start = Instant::now();
-    let (chi, xsa, xfs, xlsqr) = ilsqr(
+    let (chi, xsa, xfs, xlsqr) = ilsqr_with_padding(
         matlab_lfs1,
         &data.mask_u8,
         &grid,
         B0_DIR,
-        &IlsqrParams { tol: ILSQR_TOL, max_iter: ILSQR_MAX_ITER },
+        &qsmart_ilsqr_params(),
+        [STI_DEFAULT_PAD_MM; 3],
         |_, _| {},
     );
     let elapsed = start.elapsed();

@@ -152,10 +152,11 @@ pub struct QsmartParams {
     pub frangi_scale_ratio: f64,
     /// Frangi C parameter
     pub frangi_c: f64,
-    /// iLSQR tolerance
-    pub ilsqr_tol: f64,
-    /// iLSQR max iterations
+    /// iLSQR iteration cap for both LSQR solves: STI's `'niter'`, which QSMART passes as 50
     pub ilsqr_max_iter: usize,
+    /// iLSQR zero padding in mm: STI's `'padsize'`, which QSMART leaves at STI's default
+    /// ([`crate::inversion::STI_DEFAULT_PAD_MM`])
+    pub ilsqr_pad_mm: f64,
     /// Dipole inversion algorithm used for both QSMART stages
     pub inversion: InversionAlgorithm,
     /// B0 field direction
@@ -179,8 +180,8 @@ impl Default for QsmartParams {
             frangi_scale_range: [0.5, 6.0],
             frangi_scale_ratio: 0.5,
             frangi_c: 500.0,
-            ilsqr_tol: 0.01,
             ilsqr_max_iter: 50,
+            ilsqr_pad_mm: crate::inversion::STI_DEFAULT_PAD_MM,
             inversion: InversionAlgorithm::Ilsqr,
             b0_dir: (0.0, 0.0, 1.0),
         }

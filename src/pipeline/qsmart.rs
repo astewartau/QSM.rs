@@ -1,6 +1,8 @@
 //! QSMART two-stage reconstruction
 //!
-//! Two-stage SDF + iLSQR pipeline with vasculature detection.
+//! Two-stage SDF + iLSQR pipeline with vasculature detection, after Yaghmaie et al. (2021)
+//! and their MATLAB toolbox (<https://github.com/wtsyeda/QSMART>), which inverts each stage
+//! with STI Suite's `QSM_iLSQR`.
 //! Stage 1: whole-ROI reconstruction. Stage 2: tissue-only reconstruction
 //! with vasculature excluded. Final offset adjustment combines both.
 
@@ -15,9 +17,12 @@ use super::config::*;
 ///   inversion is MEDI, edge weighting; uniform if None)
 /// * `metadata` - Scan metadata
 /// * `inversion_config` - Inversion configuration. QSMART-specific settings (SDF,
-///   vasculature, iLSQR tolerance) come from `inversion_config.qsmart`; the inner
-///   dipole inversion algorithm is selected by `inversion_config.qsmart.inversion`
-///   and tuned via the matching per-algorithm field on this config.
+///   vasculature, iLSQR iteration cap and padding) come from `inversion_config.qsmart`; the
+///   inner dipole inversion algorithm is selected by `inversion_config.qsmart.inversion` and
+///   tuned via the matching per-algorithm field on this config. With the default iLSQR, the
+///   inversion is STI Suite's [`ilsqr`](fn@crate::inversion::ilsqr) with QSMART's arguments
+///   (`qsmart.ilsqr_max_iter`, `qsmart.ilsqr_pad_mm`; the artefact tolerance and precision
+///   come from `inversion_config.ilsqr`).
 /// * `reference` - QSM referencing method
 /// * `progress` - Progress callback (current_step, total_steps)
 ///
@@ -51,14 +56,27 @@ pub fn run_qsmart(
         ));
     }
 
-    // Inner inversion config: same per-algorithm params as the caller, but with the
-    // QSMART-selected algorithm and iLSQR params pinned to QSMART's own fields so the
-    // default (iLSQR) path is identical to the previous hardcoded call.
+    // Inner inversion config: same per-algorithm params as the caller, with the
+    // QSMART-selected algorithm.
     let mut inner_config = inversion_config.clone();
     inner_config.algorithm = qsmart_params.inversion;
-    inner_config.ilsqr = crate::inversion::IlsqrParams {
-        tol: qsmart_params.ilsqr_tol,
+    // The original QSMART (QSMART_toolbox_v1.0/QSMART.m) calls STI Suite's QSM_iLSQR for both
+    // stages as `QSM_iLSQR(lfs, mask, 'H', z_prjs, 'voxelsize', res, 'niter', 50, 'TE', 1000,
+    // 'B0', B0)`: no `'padsize'` (STI's default, 6 mm) and both LSQR solves capped at 50
+    // iterations. TE/B0 only convert units (the field here is already in ppm).
+    let ilsqr_params = crate::inversion::IlsqrParams {
         max_iter: qsmart_params.ilsqr_max_iter,
+        ..inversion_config.ilsqr.clone()
+    };
+    let invert = |lfs: &[f64], m: &[u8]| -> Result<Vec<f64>, PipelineError> {
+        if matches!(inner_config.algorithm, InversionAlgorithm::Ilsqr) {
+            let (chi, _, _, _) = crate::inversion::ilsqr_with_padding(
+                lfs, m, &grid, bdir, &ilsqr_params, [qsmart_params.ilsqr_pad_mm; 3], |_, _| {},
+            );
+            Ok(chi)
+        } else {
+            super::inversion::run_dipole_inversion(lfs, m, metadata, &inner_config, magnitude, &mut |_, _| {})
+        }
     };
 
     // Step 1: Vasculature detection (vasc_mask: 1 = tissue, 0 = vessel)
@@ -96,9 +114,7 @@ pub fn run_qsmart(
     // Step 3: dipole inversion stage 1 over the whole ROI.
     progress(3, 6);
     let mask_stage1: Vec<u8> = weighted_mask.iter().map(|&v| if v > 0.1 { 1 } else { 0 }).collect();
-    let chi1 = super::inversion::run_dipole_inversion(
-        &lfs1, &mask_stage1, metadata, &inner_config, magnitude, &mut |_, _| {},
-    )?;
+    let chi1 = invert(&lfs1, &mask_stage1)?;
 
     // Step 4: SDF stage 2 — tissue-only, vessel-aware (mask-zeroed field input).
     progress(4, 6);
@@ -124,9 +140,7 @@ pub fn run_qsmart(
         .zip(vasc_mask.iter())
         .map(|(&m, &v)| if m > 0.1 && v > 0.5 { 1 } else { 0 })
         .collect();
-    let chi2 = super::inversion::run_dipole_inversion(
-        &lfs2, &mask_stage2, metadata, &inner_config, magnitude, &mut |_, _| {},
-    )?;
+    let chi2 = invert(&lfs2, &mask_stage2)?;
 
     // Step 6: offset adjustment (combine stages) and reference.
     // removed_voxels = vessel regions (in mask but excluded from stage 2).
