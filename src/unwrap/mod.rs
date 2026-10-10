@@ -8,7 +8,9 @@
 //!   ([`BestPathParams`])
 //! - [`unwrap_prelude`] — PRELUDE, best-pair-first region merging ([`PreludeParams`]);
 //!   the literature's reference unwrapper, kept as a baseline rather than a default
-//! - [`laplacian_unwrap`] — Laplacian unwrapping (Neumann BC on the array)
+//! - [`laplacian_unwrap`] — Laplacian unwrapping, with a [`LaplacianSolver`]: `Dct` (default;
+//!   unweighted least squares, Neumann BC on the array) or `Fft { pad }` (Schofield & Zhu sin/cos
+//!   method on the zero-padded volume, which reproduces STI Suite 3.0's `MRPhaseUnwrap`)
 //! - [`laplacian_unwrap_bfr`] — Laplacian unwrapping **+ background field removal**
 //!   (∇² masked to the ROI); see the [`laplacian`] module docs for why these differ
 //!
@@ -35,7 +37,7 @@ pub use slicewise::{
 };
 #[allow(deprecated)]
 pub use laplacian::laplacian_unwrap_bfr;
-pub use laplacian::laplacian_unwrap;
+pub use laplacian::{laplacian_unwrap, LaplacianSolver};
 
 /// Phase unwrapping method selection.
 ///
@@ -45,8 +47,9 @@ pub use laplacian::laplacian_unwrap;
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum UnwrapMethod {
     Romeo,
-    /// Laplacian unwrapping under a Neumann boundary condition; see
-    /// [`laplacian_unwrap`]. Unwraps only — the background field is left alone.
+    /// Laplacian unwrapping with [`LaplacianSolver::Dct`] (Neumann boundary on the array); see
+    /// [`laplacian_unwrap`]. Unwraps only — the background field is left alone. Call
+    /// [`laplacian_unwrap`] directly for [`LaplacianSolver::Fft`].
     Laplacian,
     /// Best path (3D-SRNCP); see [`unwrap_bestpath`]. The original Abdul-Rahman
     /// algorithm, not ROMEO run with best-path weights — for that, set

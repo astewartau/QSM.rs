@@ -19,6 +19,7 @@ use crate::separation::{
     WaveSepParams,
 };
 use crate::unwrap::romeo::RomeoParams;
+use crate::unwrap::LaplacianSolver;
 use crate::utils::multi_echo::{B0WeightType, LinearFitParams};
 use crate::utils::QsmartParams;
 
@@ -310,6 +311,11 @@ pub struct FieldMappingConfig {
     pub bipolar_correction: bool,
     pub b0_estimation: B0EstimationMethod,
     pub b0_weight_type: B0WeightType,
+    /// Poisson solver used when `unwrapping_algorithm` is [`UnwrappingAlgorithm::Laplacian`]
+    /// (default [`LaplacianSolver::Dct`]). With [`LaplacianSolver::Fft`] `{ pad: [64; 3] }` and
+    /// [`B0WeightType::AssumedDecay`] at 40 ms, a multi-echo run gives UK Biobank's field map
+    /// (see [`run_field_mapping`](super::run_field_mapping)).
+    pub laplacian_solver: LaplacianSolver,
     pub romeo_params: RomeoParams,
     pub linear_fit_params: LinearFitParams,
 }
@@ -323,6 +329,7 @@ impl Default for FieldMappingConfig {
             bipolar_correction: false,
             b0_estimation: B0EstimationMethod::WeightedAvg,
             b0_weight_type: B0WeightType::PhaseSNR,
+            laplacian_solver: LaplacianSolver::Dct,
             romeo_params: RomeoParams::default(),
             linear_fit_params: LinearFitParams::default(),
         }

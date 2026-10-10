@@ -20,6 +20,29 @@ use crate::utils::B0WeightType;
 ///
 /// # Returns
 /// `FieldMappingResult` with B0 field in ppm and optional phase offset
+///
+/// # UK Biobank's field map
+///
+/// On offset-free echoes (e.g. MCPC-3D-S coil-combined), Laplacian unwrapping with
+/// `laplacian_solver: LaplacianSolver::Fft { pad: [64; 3] }` and
+/// `b0_weight_type: B0WeightType::AssumedDecay { t2star_s: 0.040 }` (default `WeightedAvg`)
+/// reproduces the UK Biobank QSM pipeline's field map: STI Suite's `MRPhaseUnwrap(mask .* φ)`
+/// per echo, then `Σ Wφ / Σ W·TE` with `W = TE·exp(−TE/T2*)`. It matches up to a global
+/// constant (each echo's masked mean is removed before combining, see the direct path below),
+/// to ≈1e-14 rad in the combined phase on in-vivo two-echo data.
+///
+/// ```
+/// use qsm_core::pipeline::{FieldMappingConfig, UnwrappingAlgorithm};
+/// use qsm_core::unwrap::LaplacianSolver;
+/// use qsm_core::utils::B0WeightType;
+/// let ukb = FieldMappingConfig {
+///     unwrapping_algorithm: UnwrappingAlgorithm::Laplacian,
+///     laplacian_solver: LaplacianSolver::Fft { pad: [64; 3] },
+///     b0_weight_type: B0WeightType::assumed_decay_default(),
+///     ..Default::default()
+/// };
+/// # let _ = ukb;
+/// ```
 pub fn run_field_mapping(
     phases: &[&[f64]],
     magnitudes: Option<&[&[f64]]>,
@@ -137,7 +160,7 @@ fn field_mapping_with_offset(
             // Background removal is a later stage, and the masked variant would remove it
             // here first — measurably worse than doing it once, properly.
             corrected.iter()
-                .map(|p| crate::unwrap::laplacian_unwrap(p, mask, &grid))
+                .map(|p| crate::unwrap::laplacian_unwrap(p, mask, &grid, config.laplacian_solver))
                 .collect()
         }
         UnwrappingAlgorithm::Romeo => {
@@ -179,7 +202,7 @@ fn field_mapping_with_offset(
 ///
 /// Taken whenever offset removal is off: always with Laplacian unwrapping, and with ROMEO when
 /// `phase_offset_removal` is false. Each echo is unwrapped on its own (for Laplacian, with the
-/// phase zeroed outside `mask` first), and the echoes are then combined with
+/// phase zeroed outside `mask` first and `config.laplacian_solver` as the Poisson solver), and the echoes are then combined with
 /// `config.b0_estimation`, as on the offset-removal path:
 ///
 /// * [`B0EstimationMethod::WeightedAvg`] (the default): each echo is unwrapped only up to a
@@ -357,7 +380,7 @@ fn unwrap_single(
     let grid = crate::Grid::new(nx, ny, nz, vsx, vsy, vsz);
     match config.unwrapping_algorithm {
         UnwrappingAlgorithm::Laplacian => {
-            crate::unwrap::laplacian_unwrap(phase, mask, &grid)
+            crate::unwrap::laplacian_unwrap(phase, mask, &grid, config.laplacian_solver)
         }
         UnwrappingAlgorithm::Romeo => {
             crate::unwrap::unwrap_romeo(
@@ -371,6 +394,7 @@ fn unwrap_single(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::unwrap::LaplacianSolver;
     use std::f64::consts::PI;
 
     fn make_test_metadata(n_echoes: usize) -> ScanMetadata {
@@ -701,7 +725,7 @@ mod tests {
 
         // Reference: unwrap each echo, remove its masked mean, combine by hand.
         let uw: Vec<Vec<f64>> = ph.iter().map(|p| {
-            let mut u = crate::unwrap::laplacian_unwrap(p, &mask, &grid);
+            let mut u = crate::unwrap::laplacian_unwrap(p, &mask, &grid, LaplacianSolver::Dct);
             let m = masked_mean(&u, &mask);
             u.iter_mut().for_each(|v| *v -= m);
             u
@@ -858,7 +882,7 @@ mod tests {
         let got = run_field_mapping(&refs(&ph), Some(&refs(&mg)), &mask, &meta, &cfg, &mut |_, _| {})
             .unwrap().b0_field_ppm;
         let uw: Vec<Vec<f64>> = ph.iter()
-            .map(|p| crate::unwrap::laplacian_unwrap(&mask_phase(p, &mask), &mask, &grid))
+            .map(|p| crate::unwrap::laplacian_unwrap(&mask_phase(p, &mask), &mask, &grid, LaplacianSolver::Dct))
             .collect();
         let fit = crate::utils::multi_echo_linear_fit(
             &refs(&uw), &refs(&mg), &tes, &mask,
@@ -893,7 +917,7 @@ mod tests {
         assert_eq!(got, run(&scrambled));
 
         let uw: Vec<Vec<f64>> = ph.iter().map(|p| {
-            let mut u = crate::unwrap::laplacian_unwrap(&mask_phase(p, &mask), &mask, &grid);
+            let mut u = crate::unwrap::laplacian_unwrap(&mask_phase(p, &mask), &mask, &grid, LaplacianSolver::Dct);
             remove_masked_mean(&mut u, &mask);
             u
         }).collect();
@@ -936,5 +960,75 @@ mod tests {
             };
             assert!(run_field_mapping(&refs(&ph), None, &mask, &meta, &cfg, &mut |_, _| {}).is_err());
         }
+    }
+
+    // ---- Laplacian solver choice on the direct path --------------------------------------
+
+    /// Masked phase, unwrapped with `solver`, as the direct path does before aligning echoes.
+    fn masked_unwrap(ph: &[Vec<f64>], mask: &[u8], solver: LaplacianSolver) -> Vec<Vec<f64>> {
+        let grid = crate::Grid::new(N, N, N, 1.0, 1.0, 1.0);
+        ph.iter().map(|p| crate::unwrap::laplacian_unwrap(&mask_phase(p, mask), mask, &grid, solver)).collect()
+    }
+
+    #[test]
+    fn laplacian_direct_uses_the_configured_solver() {
+        let tes = [0.004, 0.009, 0.014];
+        let meta = meta_n(&tes);
+        let (ph, mg) = echoes(&tes, omega_cos, 0.4);
+        let mask = sphere_mask();
+        let fft = LaplacianSolver::Fft { pad: [4; 3] };
+        let run = |solver| {
+            let cfg = FieldMappingConfig {
+                unwrapping_algorithm: UnwrappingAlgorithm::Laplacian,
+                laplacian_solver: solver,
+                ..Default::default()
+            };
+            run_field_mapping(&refs(&ph), Some(&refs(&mg)), &mask, &meta, &cfg, &mut |_, _| {})
+                .unwrap().b0_field_ppm
+        };
+        assert_eq!(FieldMappingConfig::default().laplacian_solver, LaplacianSolver::Dct);
+        let (dct, got) = (run(LaplacianSolver::Dct), run(fft));
+        let mut uw = masked_unwrap(&ph, &mask, fft);
+        uw.iter_mut().for_each(|u| remove_masked_mean(u, &mask));
+        let want = hand_combination(&uw, &mg, &tes, &mask, B0WeightType::PhaseSNR, 3.0);
+        assert!(max_abs_diff(&got, &want, &mask) < 1e-12);
+        assert!(max_abs_diff(&got, &dct, &mask) > 1e-6, "solver setting had no effect");
+    }
+
+    #[test]
+    fn assumed_decay_with_fft_is_ukb_up_to_a_constant() {
+        // UK Biobank: MRPhaseUnwrap(mask .* φ) per echo (Fft), then Σ Wφ / Σ W·TE with
+        // W = TE·exp(−TE/40 ms). The direct path removes each echo's masked mean first, which
+        // with voxel-independent weights shifts the field by one constant and nothing else.
+        let tes = [0.00942, 0.0197];
+        let meta = meta_n(&tes);
+        let (ph, mg) = echoes(&tes, omega_cos, 0.4);
+        let mask = sphere_mask();
+        let fft = LaplacianSolver::Fft { pad: [8; 3] };
+        let cfg = FieldMappingConfig {
+            unwrapping_algorithm: UnwrappingAlgorithm::Laplacian,
+            laplacian_solver: fft,
+            b0_weight_type: B0WeightType::assumed_decay_default(),
+            ..Default::default()
+        };
+        let got = run_field_mapping(&refs(&ph), Some(&refs(&mg)), &mask, &meta, &cfg, &mut |_, _| {})
+            .unwrap().b0_field_ppm;
+        let ukb = ukb_assumed_decay(&masked_unwrap(&ph, &mask, fft), &tes, &mask, 0.040, 3.0);
+        let d: Vec<f64> = got.iter().zip(&ukb).map(|(a, b)| a - b).collect();
+        let c = masked_mean(&d, &mask);
+        let dev = d.iter().zip(&mask).filter(|(_, &m)| m != 0).map(|(v, _)| (v - c).abs()).fold(0.0, f64::max);
+        assert!(dev < 1e-12, "not a constant offset: {dev}");
+    }
+
+    #[test]
+    fn assumed_decay_effective_te_matches_ukb() {
+        // UK Biobank's effective TE Σ W·TE / Σ W for TE 9.42 / 19.7 ms and T2* = 40 ms is
+        // 15.772350 ms (from the MATLAB run). The phase weight is W = w / TE.
+        let tes = [9.42e-3, 19.7e-3];
+        let wt = B0WeightType::assumed_decay_default();
+        let w: Vec<f64> = tes.iter().map(|&te| wt.weight(te, 1.0) / te).collect();
+        assert!((w[0] - 9.42e-3 * (-9.42f64 / 40.0).exp()).abs() < 1e-15);
+        let te_eff = (w[0] * tes[0] + w[1] * tes[1]) / (w[0] + w[1]);
+        assert!((te_eff - 15.772350e-3).abs() < 1e-9, "{te_eff}");
     }
 }
