@@ -25,23 +25,44 @@ use crate::utils::B0WeightType;
 ///
 /// On offset-free echoes (e.g. MCPC-3D-S coil-combined), Laplacian unwrapping with
 /// `laplacian_solver: LaplacianSolver::Fft { pad: [64; 3] }` and
-/// `b0_weight_type: B0WeightType::AssumedDecay { t2star_s: 0.040 }` (default `WeightedAvg`)
+/// `b0_estimation: B0EstimationMethod::WeightedAvg { weighting: B0WeightType::AssumedDecay { t2star_s: 0.040 } }`
 /// reproduces the UK Biobank QSM pipeline's field map: STI Suite's `MRPhaseUnwrap(mask .* φ)`
 /// per echo, then `Σ Wφ / Σ W·TE` with `W = TE·exp(−TE/T2*)`. It matches up to a global
 /// constant (each echo's masked mean is removed before combining, see the direct path below),
 /// to ≈1e-14 rad in the combined phase on in-vivo two-echo data.
 ///
 /// ```
-/// use qsm_core::pipeline::{FieldMappingConfig, UnwrappingAlgorithm};
+/// use qsm_core::pipeline::{B0EstimationMethod, FieldMappingConfig, UnwrappingAlgorithm};
 /// use qsm_core::unwrap::LaplacianSolver;
 /// use qsm_core::utils::B0WeightType;
 /// let ukb = FieldMappingConfig {
 ///     unwrapping_algorithm: UnwrappingAlgorithm::Laplacian,
 ///     laplacian_solver: LaplacianSolver::Fft { pad: [64; 3] },
-///     b0_weight_type: B0WeightType::assumed_decay_default(),
+///     b0_estimation: B0EstimationMethod::WeightedAvg {
+///         weighting: B0WeightType::assumed_decay_default(),
+///     },
 ///     ..Default::default()
 /// };
 /// # let _ = ukb;
+/// ```
+///
+/// # Motion-robust echo combination
+///
+/// [`B0EstimationMethod::RobustFit`] combines the echoes with
+/// [`multi_echo_robust_fit`](crate::utils::multi_echo_robust_fit) on whichever path runs, so it
+/// composes with ROMEO and Laplacian unwrapping and with phase-offset removal on or off. It
+/// needs [`RobustFitParams::min_echoes`](crate::utils::RobustFitParams::min_echoes) echoes or
+/// more (fewer is [`PipelineError::InvalidConfig`]) and returns its per-echo report in
+/// [`FieldMappingResult::robust_fit`]:
+///
+/// ```
+/// use qsm_core::pipeline::{B0EstimationMethod, FieldMappingConfig};
+/// use qsm_core::utils::RobustFitParams;
+/// let robust = FieldMappingConfig {
+///     b0_estimation: B0EstimationMethod::RobustFit(RobustFitParams::default()),
+///     ..Default::default()
+/// };
+/// # let _ = robust;
 /// ```
 pub fn run_field_mapping(
     phases: &[&[f64]],
@@ -82,12 +103,33 @@ pub fn run_field_mapping(
         }
     }
 
-    if let B0WeightType::AssumedDecay { t2star_s } = config.b0_weight_type {
-        if !(t2star_s.is_finite() && t2star_s > 0.0) {
-            return Err(PipelineError::InvalidConfig(format!(
-                "assumed T2* for the assumed-decay B0 weighting must be positive, got {} s", t2star_s
-            )));
+    match &config.b0_estimation {
+        B0EstimationMethod::WeightedAvg { weighting: B0WeightType::AssumedDecay { t2star_s } } => {
+            if !(t2star_s.is_finite() && *t2star_s > 0.0) {
+                return Err(PipelineError::InvalidConfig(format!(
+                    "assumed T2* for the assumed-decay B0 weighting must be positive, got {} s", t2star_s
+                )));
+            }
         }
+        B0EstimationMethod::RobustFit(params) => {
+            params.validate().map_err(PipelineError::InvalidConfig)?;
+            // The library falls back to the plain fit, silently, below this. Asking for the robust
+            // fit and getting a plain one with an empty report is worse than being told.
+            if n_echoes < params.min_echoes() {
+                return Err(PipelineError::InvalidConfig(format!(
+                    "the robust B0 fit needs at least {} echoes ({}), got {}; use the weighted \
+                     average or the linear fit for this series",
+                    params.min_echoes(),
+                    if params.estimate_offset {
+                        "4 with estimate_offset, which costs a degree of freedom"
+                    } else {
+                        "3 without estimate_offset"
+                    },
+                    n_echoes,
+                )));
+            }
+        }
+        B0EstimationMethod::WeightedAvg { .. } | B0EstimationMethod::LinearFit(_) => {}
     }
 
     let is_laplacian = config.unwrapping_algorithm == UnwrappingAlgorithm::Laplacian;
@@ -173,21 +215,27 @@ fn field_mapping_with_offset(
 
     // Step 4: B0 estimation
     progress(3, 4);
-    let b0_hz = match config.b0_estimation {
-        B0EstimationMethod::WeightedAvg => {
+    let mut robust_fit = None;
+    let b0_hz = match &config.b0_estimation {
+        B0EstimationMethod::WeightedAvg { weighting } => {
             crate::utils::calculate_b0_weighted(
                 &unwrapped, mag_slices, tes, mask,
-                config.b0_weight_type, &grid,
+                *weighting, &grid,
             )
         }
-        B0EstimationMethod::LinearFit => {
+        B0EstimationMethod::LinearFit(params) => {
             let uw_refs: Vec<&[f64]> = unwrapped.iter().map(|u| u.as_slice()).collect();
             let fit = crate::utils::multi_echo_linear_fit(
                 &uw_refs, mag_slices, tes, mask,
-                config.linear_fit_params.estimate_offset,
-                config.linear_fit_params.reliability_threshold_percentile,
+                params.estimate_offset,
+                params.reliability_threshold_percentile,
             );
             crate::utils::field_to_hz(&fit.field)
+        }
+        B0EstimationMethod::RobustFit(params) => {
+            let (field_rads, report) = robust_fit_echoes(&unwrapped, mag_slices, tes, mask, params);
+            robust_fit = Some(report);
+            crate::utils::field_to_hz(&field_rads)
         }
     };
 
@@ -195,6 +243,7 @@ fn field_mapping_with_offset(
     Ok(FieldMappingResult {
         b0_field_ppm: hz_to_ppm(&b0_hz, metadata.field_strength),
         phase_offset: Some(phase_offset),
+        robust_fit,
     })
 }
 
@@ -218,14 +267,19 @@ fn field_mapping_with_offset(
 ///     ([`correct_multi_echo_wraps`](crate::unwrap::correct_multi_echo_wraps)); this is a no-op
 ///     when the echoes are already consistent.
 ///
-///   Then `B0 = Σ w (φ/TE) / Σ w` with `config.b0_weight_type`.
+///   Then `B0 = Σ w (φ/TE) / Σ w` with the variant's `weighting`.
 /// * [`B0EstimationMethod::LinearFit`]: the magnitude-weighted fit of phase against TE with
-///   `config.linear_fit_params`, on the per-echo unwrapped phases as they come out of the
-///   unwrapper. This is what this path computed unconditionally before it honoured
+///   the variant's [`LinearFitParams`](crate::utils::LinearFitParams), on the per-echo unwrapped
+///   phases as they come out of the unwrapper. This is what this path computed unconditionally before it honoured
 ///   `b0_estimation` (bit-identical for ROMEO; for Laplacian it now sees the masked phase).
 ///   With an intercept and two echoes the fit is the echo difference `(φ₂ − φ₁)/(TE₂ − TE₁)`,
 ///   which discards the absolute phase, so it is only worth choosing when the echoes carry a
 ///   phase offset that has not been removed.
+/// * [`B0EstimationMethod::RobustFit`]: the per-echo constants are aligned exactly as for the
+///   weighted mean (an unaligned constant is a departure from linearity in TE that the robust
+///   loss would blame on the echo), then the robust fit runs on the aligned echoes. Keep
+///   `estimate_offset` on unless the echoes are known to be offset-free (e.g. MCPC-3D-S
+///   combined): the offset removal that would otherwise take the intercept out does not run here.
 #[allow(clippy::too_many_arguments)]
 fn field_mapping_direct(
     phases: &[&[f64]],
@@ -266,24 +320,39 @@ fn field_mapping_direct(
     }
 
     progress(3, 4);
-    let b0_field_ppm = match config.b0_estimation {
-        B0EstimationMethod::WeightedAvg => {
+    let mut robust_fit = None;
+    let b0_field_ppm = match &config.b0_estimation {
+        B0EstimationMethod::WeightedAvg { weighting } => {
             align_per_echo_constants(&mut unwrapped, tes, mask, config.unwrapping_algorithm);
             let grid = crate::Grid::new(nx, ny, nz, vsx, vsy, vsz);
             let b0_hz = crate::utils::calculate_b0_weighted(
                 &unwrapped, mag_slices, tes, mask,
-                config.b0_weight_type, &grid,
+                *weighting, &grid,
             );
             hz_to_ppm(&b0_hz, metadata.field_strength)
         }
-        B0EstimationMethod::LinearFit => {
+        B0EstimationMethod::LinearFit(params) => {
             let uw_refs: Vec<&[f64]> = unwrapped.iter().map(|u| u.as_slice()).collect();
             let fit = crate::utils::multi_echo_linear_fit(
                 &uw_refs, mag_slices, tes, mask,
-                config.linear_fit_params.estimate_offset,
-                config.linear_fit_params.reliability_threshold_percentile,
+                params.estimate_offset,
+                params.reliability_threshold_percentile,
             );
             rads_to_ppm(&fit.field, metadata.field_strength)
+        }
+        B0EstimationMethod::RobustFit(params) => {
+            // Aligned first, as for the weighted mean. A per-echo constant left by the unwrapper is
+            // exactly what the robust loss is built to see as a bad echo — a departure from a
+            // straight line in TE at every voxel — so unaligned echoes would be down-weighted for
+            // the unwrapper's convention, not for anything in the data. Both alignments keep a
+            // series that is linear in TE linear in TE (Laplacian: the demeaned echo
+            // `φ₀ − φ̄₀ + TEₑ(ω − ω̄)` still has one intercept and one slope; ROMEO: whole turns
+            // only, and a no-op on consistent echoes), so the fit itself loses nothing but a
+            // global constant field.
+            align_per_echo_constants(&mut unwrapped, tes, mask, config.unwrapping_algorithm);
+            let (field_rads, report) = robust_fit_echoes(&unwrapped, mag_slices, tes, mask, params);
+            robust_fit = Some(report);
+            rads_to_ppm(&field_rads, metadata.field_strength)
         }
     };
 
@@ -291,7 +360,21 @@ fn field_mapping_direct(
     Ok(FieldMappingResult {
         b0_field_ppm,
         phase_offset: None,
+        robust_fit,
     })
+}
+
+/// [`multi_echo_robust_fit`](crate::utils::multi_echo_robust_fit) on unwrapped echoes: the field
+/// in rad/s and the report. Echo count and params are checked by [`run_field_mapping`].
+fn robust_fit_echoes(
+    unwrapped: &[Vec<f64>],
+    mag_slices: &[&[f64]],
+    tes: &[f64],
+    mask: &[u8],
+    params: &crate::utils::RobustFitParams,
+) -> (Vec<f64>, RobustFitReport) {
+    let r = crate::utils::multi_echo_robust_fit(unwrapped, mag_slices, tes, mask, params);
+    (r.fit.field, RobustFitReport { quality: r.quality, robust_weights: r.robust_weights })
 }
 
 /// `phase` with every voxel outside `mask` set to zero.
@@ -362,6 +445,7 @@ fn field_mapping_single_echo(
     Ok(FieldMappingResult {
         b0_field_ppm: rads_to_ppm(&field_rads, metadata.field_strength),
         phase_offset: None,
+        robust_fit: None,
     })
 }
 
@@ -394,6 +478,7 @@ fn unwrap_single(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::utils::{LinearFitParams, RobustFitParams};
     use crate::unwrap::LaplacianSolver;
     use std::f64::consts::PI;
 
@@ -501,7 +586,7 @@ mod tests {
         let config = FieldMappingConfig {
             phase_offset_removal: true,
             unwrapping_algorithm: UnwrappingAlgorithm::Romeo,
-            b0_estimation: B0EstimationMethod::WeightedAvg,
+            b0_estimation: B0EstimationMethod::default(),
             ..Default::default()
         };
 
@@ -571,7 +656,7 @@ mod tests {
         // Path A: offset removal + weighted avg (uses ROMEO)
         let config_a = FieldMappingConfig {
             phase_offset_removal: true,
-            b0_estimation: B0EstimationMethod::WeightedAvg,
+            b0_estimation: B0EstimationMethod::default(),
             unwrapping_algorithm: UnwrappingAlgorithm::Romeo,
             ..Default::default()
         };
@@ -582,7 +667,7 @@ mod tests {
         // Path B: no offset removal, explicit linear fit (uses ROMEO)
         let config_b = FieldMappingConfig {
             phase_offset_removal: false,
-            b0_estimation: B0EstimationMethod::LinearFit,
+            b0_estimation: B0EstimationMethod::LinearFit(LinearFitParams::default()),
             unwrapping_algorithm: UnwrappingAlgorithm::Romeo,
             ..Default::default()
         };
@@ -605,7 +690,7 @@ mod tests {
             "WeightedAvg ({:.4}) and LinearFit ({:.4}) should agree on linear data", mean_a, mean_b);
     }
 
-    // ---- Path B honours b0_estimation / b0_weight_type ------------------------------------
+    // ---- Path B honours b0_estimation and its weighting ---------------------------------------
 
     const N: usize = 16;
 
@@ -735,7 +820,7 @@ mod tests {
         for wt in all_weight_types() {
             let cfg = FieldMappingConfig {
                 unwrapping_algorithm: UnwrappingAlgorithm::Laplacian,
-                b0_weight_type: wt,
+                b0_estimation: B0EstimationMethod::WeightedAvg { weighting: wt },
                 ..Default::default()
             };
             let got = run_field_mapping(&refs(&ph), Some(&refs(&mg)), &mask, &meta, &cfg, &mut |_, _| {})
@@ -774,7 +859,7 @@ mod tests {
         for wt in all_weight_types() {
             let cfg = FieldMappingConfig {
                 unwrapping_algorithm: UnwrappingAlgorithm::Laplacian,
-                b0_weight_type: wt,
+                b0_estimation: B0EstimationMethod::WeightedAvg { weighting: wt },
                 ..Default::default()
             };
             let got = run_field_mapping(&refs(&ph), Some(&refs(&mg)), &mask, &meta, &cfg, &mut |_, _| {})
@@ -798,7 +883,7 @@ mod tests {
             let cfg = FieldMappingConfig {
                 unwrapping_algorithm: UnwrappingAlgorithm::Romeo,
                 phase_offset_removal: false,
-                b0_weight_type: wt,
+                b0_estimation: B0EstimationMethod::WeightedAvg { weighting: wt },
                 ..Default::default()
             };
             let got = run_field_mapping(&refs(&ph), Some(&refs(&mg)), &mask, &meta, &cfg, &mut |_, _| {})
@@ -836,7 +921,7 @@ mod tests {
         let want = hand_combination(&ph, &mg, &tes, &mask, B0WeightType::PhaseSNR, 3.0);
         assert!(max_abs_diff(&wavg, &want, &mask) < 1e-12);
 
-        let lf_cfg = FieldMappingConfig { b0_estimation: B0EstimationMethod::LinearFit, ..base.clone() };
+        let lf_cfg = FieldMappingConfig { b0_estimation: B0EstimationMethod::LinearFit(LinearFitParams::default()), ..base.clone() };
         let lf = run_field_mapping(&refs(&ph), Some(&refs(&mg)), &mask, &meta, &lf_cfg, &mut |_, _| {})
             .unwrap().b0_field_ppm;
         let diff: Vec<f64> = (0..mask.len())
@@ -867,7 +952,7 @@ mod tests {
     fn direct_linear_fit_is_the_fit_on_the_unwrapped_echoes() {
         // `b0_estimation = LinearFit` on the direct path is the fit this path always ran:
         // per-echo unwrap (Laplacian: of the masked phase), then multi_echo_linear_fit with
-        // an intercept. `b0_weight_type` does not enter it.
+        // an intercept (the variant carries no weighting).
         let tes = [0.004, 0.009, 0.014];
         let meta = meta_n(&tes);
         let (ph, mg) = echoes(&tes, omega_cos, 0.4);
@@ -875,8 +960,7 @@ mod tests {
         let grid = crate::Grid::new(N, N, N, 1.0, 1.0, 1.0);
         let cfg = FieldMappingConfig {
             unwrapping_algorithm: UnwrappingAlgorithm::Laplacian,
-            b0_estimation: B0EstimationMethod::LinearFit,
-            b0_weight_type: B0WeightType::assumed_decay_default(), // must be ignored by the fit
+            b0_estimation: B0EstimationMethod::LinearFit(LinearFitParams::default()),
             ..Default::default()
         };
         let got = run_field_mapping(&refs(&ph), Some(&refs(&mg)), &mask, &meta, &cfg, &mut |_, _| {})
@@ -886,8 +970,8 @@ mod tests {
             .collect();
         let fit = crate::utils::multi_echo_linear_fit(
             &refs(&uw), &refs(&mg), &tes, &mask,
-            cfg.linear_fit_params.estimate_offset,
-            cfg.linear_fit_params.reliability_threshold_percentile,
+            LinearFitParams::default().estimate_offset,
+            LinearFitParams::default().reliability_threshold_percentile,
         );
         assert_eq!(got, rads_to_ppm(&fit.field, 3.0));
     }
@@ -934,7 +1018,7 @@ mod tests {
         let (ph, _) = echoes(&tes, omega_small, 0.3);
         let mask = vec![1u8; N * N * N];
         let run = |wt| {
-            let cfg = FieldMappingConfig { b0_weight_type: wt, ..Default::default() };
+            let cfg = FieldMappingConfig { b0_estimation: B0EstimationMethod::WeightedAvg { weighting: wt }, ..Default::default() };
             run_field_mapping(&refs(&ph), None, &mask, &meta, &cfg, &mut |_, _| {}).unwrap()
         };
         let snr = run(B0WeightType::PhaseSNR);
@@ -955,7 +1039,7 @@ mod tests {
         for t2 in [0.0, -0.01, f64::NAN] {
             let cfg = FieldMappingConfig {
                 unwrapping_algorithm: UnwrappingAlgorithm::Laplacian,
-                b0_weight_type: B0WeightType::AssumedDecay { t2star_s: t2 },
+                b0_estimation: B0EstimationMethod::WeightedAvg { weighting: B0WeightType::AssumedDecay { t2star_s: t2 } },
                 ..Default::default()
             };
             assert!(run_field_mapping(&refs(&ph), None, &mask, &meta, &cfg, &mut |_, _| {}).is_err());
@@ -1008,7 +1092,7 @@ mod tests {
         let cfg = FieldMappingConfig {
             unwrapping_algorithm: UnwrappingAlgorithm::Laplacian,
             laplacian_solver: fft,
-            b0_weight_type: B0WeightType::assumed_decay_default(),
+            b0_estimation: B0EstimationMethod::WeightedAvg { weighting: B0WeightType::assumed_decay_default() },
             ..Default::default()
         };
         let got = run_field_mapping(&refs(&ph), Some(&refs(&mg)), &mask, &meta, &cfg, &mut |_, _| {})
@@ -1030,5 +1114,275 @@ mod tests {
         assert!((w[0] - 9.42e-3 * (-9.42f64 / 40.0).exp()).abs() < 1e-15);
         let te_eff = (w[0] * tes[0] + w[1] * tes[1]) / (w[0] + w[1]);
         assert!((te_eff - 15.772350e-3).abs() < 1e-9, "{te_eff}");
+    }
+
+    // ---- B0EstimationMethod::RobustFit ----------------------------------------------------------
+
+    const TES4: [f64; 4] = [0.004, 0.009, 0.014, 0.019];
+    /// The echo the corruption tests damage. Not the first two, which the offset removal reads,
+    /// and not the last, which a linear fit follows (see `multi_echo_robust_fit`'s docs).
+    const BAD: usize = 2;
+
+    fn robust_cfg(unwrapping_algorithm: UnwrappingAlgorithm, phase_offset_removal: bool) -> FieldMappingConfig {
+        FieldMappingConfig {
+            unwrapping_algorithm,
+            phase_offset_removal,
+            b0_estimation: B0EstimationMethod::RobustFit(RobustFitParams::default()),
+            ..Default::default()
+        }
+    }
+
+    /// A four-echo series `wrap(φ₀ + TE·ω + noise/mag)` over a sphere, with phase noise scaled
+    /// as `1/magnitude` (phase SNR is magnitude SNR, the model the robust scale assumes). With
+    /// `corrupt`, echo [`BAD`] loses 70% of its magnitude and gains a smooth phase error of up to
+    /// ~0.8 rad over a slab of slices — what a shot taken mid-movement does to one echo.
+    ///
+    /// Returns `(phases, mags, mask, true field in ppm, slab mask)`.
+    #[allow(clippy::type_complexity)]
+    fn robust_series(corrupt: bool) -> (Vec<Vec<f64>>, Vec<Vec<f64>>, Vec<u8>, Vec<f64>, Vec<u8>) {
+        let n = N * N * N;
+        let mask = sphere_mask();
+        let mut ph = vec![vec![0.0; n]; TES4.len()];
+        let mut mg = vec![vec![0.0; n]; TES4.len()];
+        let mut truth = vec![0.0; n];
+        let mut slab = vec![0u8; n];
+        let mut st = 7u64;
+        let ppm = 1e6 / (2.0 * PI * 42.576e6 * 3.0);
+        for k in 0..N { for j in 0..N { for i in 0..N {
+            let idx = i + j * N + k * N * N;
+            let w = omega_small(i, j, k);
+            let phi0 = 0.2 * (i as f64 * 0.3).cos() * (k as f64 * 0.2).sin();
+            truth[idx] = w * ppm;
+            let in_slab = (5..11).contains(&k);
+            slab[idx] = (in_slab && mask[idx] != 0) as u8;
+            for (e, &te) in TES4.iter().enumerate() {
+                let mut m = (1.0 + 0.8 * (i as f64 / N as f64)) * (-te / 0.030).exp();
+                let mut p = phi0 + te * w + 0.02 * noise(&mut st) / m;
+                if corrupt && e == BAD && in_slab {
+                    m *= 0.3;
+                    p += 0.8 * ((2.5 * i as f64 / N as f64).sin() + (1.7 * j as f64 / N as f64).cos()) * 0.5;
+                }
+                ph[e][idx] = wrap(p);
+                mg[e][idx] = m;
+            }
+        }}}
+        (ph, mg, mask, truth, slab)
+    }
+
+    fn median(mut v: Vec<f64>) -> f64 {
+        v.sort_by(f64::total_cmp);
+        v[v.len() / 2]
+    }
+
+    fn mean_abs_err_demeaned(got: &[f64], want: &[f64], mask: &[u8]) -> f64 {
+        // The direct path loses a global constant field (removed by referencing anyway).
+        let d: Vec<f64> = got.iter().zip(want).map(|(a, b)| a - b).collect();
+        let c = masked_mean(&d, mask);
+        let (s, n) = d.iter().zip(mask).filter(|(_, &m)| m != 0)
+            .fold((0.0, 0usize), |(s, n), (&x, _)| (s + (x - c).abs(), n + 1));
+        s / n as f64
+    }
+
+    #[test]
+    fn default_estimation_is_the_phase_snr_weighted_average_and_reports_nothing() {
+        let cfg = FieldMappingConfig::default();
+        assert_eq!(cfg.b0_estimation, B0EstimationMethod::WeightedAvg { weighting: B0WeightType::PhaseSNR });
+        let (ph, mg, mask, _, _) = robust_series(false);
+        let meta = meta_n(&TES4);
+        let r = run_field_mapping(&refs(&ph), Some(&refs(&mg)), &mask, &meta, &cfg, &mut |_, _| {}).unwrap();
+        assert!(r.robust_fit.is_none());
+        let lf = FieldMappingConfig {
+            b0_estimation: B0EstimationMethod::LinearFit(LinearFitParams::default()),
+            ..Default::default()
+        };
+        let r = run_field_mapping(&refs(&ph), Some(&refs(&mg)), &mask, &meta, &lf, &mut |_, _| {}).unwrap();
+        assert!(r.robust_fit.is_none());
+    }
+
+    /// Selecting the robust fit in the config runs `multi_echo_robust_fit` on exactly the echoes
+    /// each path would hand any other estimator — bit for bit, and with its report returned.
+    #[test]
+    fn robust_fit_is_the_library_fit_on_every_path() {
+        let (ph, mg, mask, _, _) = robust_series(true);
+        let meta = meta_n(&TES4);
+        let grid = crate::Grid::new(N, N, N, 1.0, 1.0, 1.0);
+        let params = RobustFitParams::default();
+        let run = |cfg: &FieldMappingConfig| {
+            run_field_mapping(&refs(&ph), Some(&refs(&mg)), &mask, &meta, cfg, &mut |_, _| {}).unwrap()
+        };
+
+        // Path A: ROMEO with phase-offset removal (the default unwrapping).
+        let cfg = robust_cfg(UnwrappingAlgorithm::Romeo, true);
+        let got = run(&cfg);
+        let (corrected, _) = crate::utils::phase_offset_removal(
+            &ph, &mg, &TES4, &mask, cfg.phase_offset_sigma, [0, 1],
+            crate::unwrap::UnwrapMethod::Romeo, &grid,
+        );
+        let uw = crate::unwrap::unwrap_romeo_multi_echo(&corrected, &refs(&mg), &TES4, &mask, &cfg.romeo_params, &grid);
+        let want = crate::utils::multi_echo_robust_fit(&uw, &mg, &TES4, &mask, &params);
+        assert_eq!(got.b0_field_ppm, hz_to_ppm(&crate::utils::field_to_hz(&want.fit.field), 3.0));
+        let rep = got.robust_fit.expect("path A must return the robust-fit report");
+        assert_eq!(rep.robust_weights, want.robust_weights);
+        assert_eq!(rep.quality.flagged, want.quality.flagged);
+        assert!(got.phase_offset.is_some());
+
+        // Path B: Laplacian (always direct): masked unwrap, demean, fit.
+        let got = run(&robust_cfg(UnwrappingAlgorithm::Laplacian, true));
+        let mut uw = masked_unwrap(&ph, &mask, LaplacianSolver::Dct);
+        uw.iter_mut().for_each(|u| remove_masked_mean(u, &mask));
+        let want = crate::utils::multi_echo_robust_fit(&uw, &mg, &TES4, &mask, &params);
+        assert_eq!(got.b0_field_ppm, rads_to_ppm(&want.fit.field, 3.0));
+        assert_eq!(got.robust_fit.expect("Laplacian path report").robust_weights, want.robust_weights);
+
+        // Path B: ROMEO without phase-offset removal: per-echo unwrap, wrap alignment, fit.
+        let cfg = robust_cfg(UnwrappingAlgorithm::Romeo, false);
+        let got = run(&cfg);
+        let mut uw: Vec<Vec<f64>> = (0..TES4.len()).map(|e| unwrap_single(
+            &ph[e], &mg[0], &mask, &cfg, N, N, N, 1.0, 1.0, 1.0,
+            ph.get(e + 1).map(|p| p.as_slice()), TES4[e], TES4.get(e + 1).copied().unwrap_or(0.0),
+        )).collect();
+        crate::unwrap::correct_multi_echo_wraps(&mut uw, &TES4, &mask);
+        let want = crate::utils::multi_echo_robust_fit(&uw, &mg, &TES4, &mask, &params);
+        assert_eq!(got.b0_field_ppm, rads_to_ppm(&want.fit.field, 3.0));
+        assert!(got.robust_fit.is_some() && got.phase_offset.is_none());
+    }
+
+    /// The point of the option, end to end through `run_field_mapping`: one echo corrupted over a
+    /// slab is named, is down-weighted where it is corrupted (with ROMEO, only there), and the field map
+    /// is closer to the truth than either of the existing estimators manages — on every path.
+    /// On the clean series nothing is flagged.
+    #[test]
+    fn robust_fit_downweights_a_corrupted_echo_end_to_end() {
+        let meta = meta_n(&TES4);
+        let (ph, mg, mask, truth, slab) = robust_series(true);
+        let (cph, cmg, _, _, _) = robust_series(false);
+        let outside: Vec<u8> = mask.iter().zip(&slab).map(|(&m, &s)| (m != 0 && s == 0) as u8).collect();
+        let in_set = |w: &[f64], set: &[u8]| -> Vec<f64> {
+            w.iter().zip(set).filter(|(_, &m)| m != 0).map(|(&x, _)| x).collect()
+        };
+
+        for (alg, offset) in [
+            (UnwrappingAlgorithm::Romeo, true),
+            (UnwrappingAlgorithm::Romeo, false),
+            (UnwrappingAlgorithm::Laplacian, true),
+        ] {
+            let with = |b0_estimation: B0EstimationMethod, ph: &[Vec<f64>], mg: &[Vec<f64>]| {
+                let cfg = FieldMappingConfig {
+                    unwrapping_algorithm: alg,
+                    phase_offset_removal: offset,
+                    b0_estimation,
+                    ..Default::default()
+                };
+                run_field_mapping(&refs(ph), Some(&refs(mg)), &mask, &meta, &cfg, &mut |_, _| {}).unwrap()
+            };
+            let robust = with(B0EstimationMethod::RobustFit(RobustFitParams::default()), &ph, &mg);
+            let linear = with(B0EstimationMethod::LinearFit(LinearFitParams::default()), &ph, &mg);
+            let wavg = with(B0EstimationMethod::default(), &ph, &mg);
+            let clean = with(B0EstimationMethod::RobustFit(RobustFitParams::default()), &cph, &cmg);
+
+            let rep = robust.robust_fit.as_ref().unwrap();
+            let tag = format!("{alg:?}, offset removal {offset}");
+            assert_eq!(rep.quality.flagged, vec![BAD], "{tag}: must name exactly the corrupted echo ({:?})", rep.quality.outlier_score);
+            assert!(clean.robust_fit.as_ref().unwrap().quality.flagged.is_empty(),
+                "{tag}: clean series flagged: {:?}", clean.robust_fit.as_ref().unwrap().quality.outlier_score);
+
+            let bad_in = median(in_set(&rep.robust_weights[BAD], &slab));
+            let bad_out = median(in_set(&rep.robust_weights[BAD], &outside));
+            let good_in = median(in_set(&rep.robust_weights[0], &slab));
+            assert!(bad_in < 0.5, "{tag}: corrupted echo kept median weight {bad_in} in the slab");
+            println!("{tag}: median robust weight, bad echo in slab {bad_in}, outside {bad_out}; good echo in slab {good_in}");
+            // Laplacian unwrapping is a global Poisson solve, so a corrupted slab leaves that echo
+            // wrong (smeared, then shifted by its demeaning) everywhere, and the fit is right to
+            // drop it everywhere: it does, and gets the lowest error of the three paths. ROMEO
+            // keeps the damage local, so there the weight must stay up outside the slab.
+            let local = alg == UnwrappingAlgorithm::Romeo;
+            assert!((bad_out > 0.9 || !local) && good_in > 0.9,
+                "{tag}: weights moved where nothing is wrong: bad echo outside {bad_out}, good echo inside {good_in}");
+
+            let e_rob = mean_abs_err_demeaned(&robust.b0_field_ppm, &truth, &mask);
+            let e_lin = mean_abs_err_demeaned(&linear.b0_field_ppm, &truth, &mask);
+            let e_avg = mean_abs_err_demeaned(&wavg.b0_field_ppm, &truth, &mask);
+            let e_cln = mean_abs_err_demeaned(&clean.b0_field_ppm, &truth, &mask);
+            println!("{tag}: field error (ppm) robust {e_rob:.5}, linear {e_lin:.5}, weighted avg {e_avg:.5}, robust on clean {e_cln:.5}");
+            assert!(e_rob < e_lin && e_rob < e_avg, "{tag}: robust {e_rob} vs linear {e_lin} / weighted avg {e_avg}");
+        }
+    }
+
+    #[test]
+    fn robust_fit_refuses_a_series_too_short_to_judge() {
+        let (ph, mg, mask, _, _) = robust_series(false);
+        let run = |n: usize, estimate_offset: bool| {
+            let cfg = FieldMappingConfig {
+                b0_estimation: B0EstimationMethod::RobustFit(RobustFitParams { estimate_offset, ..Default::default() }),
+                ..Default::default()
+            };
+            run_field_mapping(&refs(&ph[..n]), Some(&refs(&mg[..n])), &mask, &meta_n(&TES4[..n]), &cfg, &mut |_, _| {})
+        };
+        for (n, offset) in [(1, true), (2, true), (3, true), (1, false), (2, false)] {
+            match run(n, offset) {
+                Err(PipelineError::InvalidConfig(msg)) => assert!(msg.contains("at least"), "{msg}"),
+                other => panic!("{n} echoes, estimate_offset {offset}: expected InvalidConfig, got {:?}", other.map(|r| r.robust_fit.is_some())),
+            }
+        }
+        assert!(run(3, false).unwrap().robust_fit.is_some());
+        assert!(run(4, true).unwrap().robust_fit.is_some());
+    }
+
+    #[test]
+    fn robust_fit_rejects_out_of_range_parameters() {
+        let (ph, mg, mask, _, _) = robust_series(false);
+        let d = RobustFitParams::default();
+        assert_eq!(d.min_echoes(), 4);
+        assert!(d.validate().is_ok());
+        let bad = [
+            RobustFitParams { tuning: Some(0.0), ..d.clone() },
+            RobustFitParams { tuning: Some(-1.0), ..d.clone() },
+            RobustFitParams { tuning: Some(f64::NAN), ..d.clone() },
+            RobustFitParams { tuning: Some(f64::INFINITY), ..d.clone() },
+            RobustFitParams { downweight_level: 0.0, ..d.clone() },
+            RobustFitParams { downweight_level: 1.5, ..d.clone() },
+            RobustFitParams { downweight_level: f64::NAN, ..d.clone() },
+            RobustFitParams { flag_ratio: 0.5, ..d.clone() },
+            RobustFitParams { flag_ratio: f64::NAN, ..d.clone() },
+            RobustFitParams { reliability_threshold_percentile: -1.0, ..d.clone() },
+            RobustFitParams { reliability_threshold_percentile: 100.5, ..d.clone() },
+        ];
+        for p in bad {
+            let cfg = FieldMappingConfig { b0_estimation: B0EstimationMethod::RobustFit(p.clone()), ..Default::default() };
+            let r = run_field_mapping(&refs(&ph), Some(&refs(&mg)), &mask, &meta_n(&TES4), &cfg, &mut |_, _| {});
+            assert!(matches!(r, Err(PipelineError::InvalidConfig(_))), "{p:?} was accepted");
+        }
+        // The edges of every range are valid; iterations = 0 is the report-only mode.
+        let edges = [
+            RobustFitParams { tuning: Some(1e-3), ..d.clone() },
+            RobustFitParams { downweight_level: 1.0, ..d.clone() },
+            RobustFitParams { flag_ratio: 1.0, ..d.clone() },
+            RobustFitParams { flag_ratio: f64::INFINITY, ..d.clone() },
+            RobustFitParams { reliability_threshold_percentile: 0.0, ..d.clone() },
+            RobustFitParams { reliability_threshold_percentile: 100.0, ..d.clone() },
+            RobustFitParams { iterations: 0, ..d.clone() },
+        ];
+        for p in edges {
+            assert!(p.validate().is_ok(), "{p:?} was refused");
+        }
+    }
+
+    /// `iterations: 0` leaves every robust weight at 1, so the field map is the plain linear fit
+    /// (same estimate_offset) bit for bit, while the report is still produced and still names the
+    /// corrupted echo.
+    #[test]
+    fn robust_fit_with_no_iterations_is_the_linear_fit_plus_a_report() {
+        let (ph, mg, mask, _, _) = robust_series(true);
+        let meta = meta_n(&TES4);
+        let run = |b0_estimation| {
+            let cfg = FieldMappingConfig { b0_estimation, ..Default::default() };
+            run_field_mapping(&refs(&ph), Some(&refs(&mg)), &mask, &meta, &cfg, &mut |_, _| {}).unwrap()
+        };
+        let r = run(B0EstimationMethod::RobustFit(RobustFitParams { iterations: 0, ..Default::default() }));
+        let l = run(B0EstimationMethod::LinearFit(LinearFitParams::default()));
+        assert_eq!(r.b0_field_ppm, l.b0_field_ppm);
+        let rep = r.robust_fit.unwrap();
+        assert!(rep.robust_weights.iter().all(|w| w.iter().all(|&x| x == 1.0)));
+        assert_eq!(rep.quality.flagged, vec![BAD]);
     }
 }

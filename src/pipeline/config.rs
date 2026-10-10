@@ -20,7 +20,7 @@ use crate::separation::{
 };
 use crate::unwrap::romeo::RomeoParams;
 use crate::unwrap::LaplacianSolver;
-use crate::utils::multi_echo::{B0WeightType, LinearFitParams};
+use crate::utils::multi_echo::{B0WeightType, EchoQuality, LinearFitParams, RobustFitParams};
 use crate::utils::QsmartParams;
 
 
@@ -155,11 +155,41 @@ pub enum InversionAlgorithm {
     IqsmPlus,
 }
 
-/// B0 estimation method
-#[derive(Clone, Copy, Debug, PartialEq)]
+/// How [`run_field_mapping`](super::run_field_mapping) combines the unwrapped echoes into one
+/// B0 map. Each method carries exactly the settings it reads, so a weighting cannot be set on a
+/// fit that ignores it.
+///
+/// Only multi-echo data is combined. A single echo is `φ/TE` whatever is chosen here, except
+/// that [`Self::RobustFit`] refuses a series too short for it (see [`RobustFitParams::min_echoes`]).
+#[derive(Clone, Debug, PartialEq)]
 pub enum B0EstimationMethod {
-    WeightedAvg,
-    LinearFit,
+    /// Weighted mean of the per-echo frequencies, `B0 = Σ wₑ (φₑ/TEₑ) / Σ wₑ`, with `wₑ` from
+    /// `weighting` (default [`B0WeightType::PhaseSNR`]). The default method.
+    WeightedAvg {
+        /// Per-echo weight; [`B0WeightType::AssumedDecay`] needs a finite, positive T2*.
+        weighting: B0WeightType,
+    },
+    /// Magnitude-weighted least-squares fit of phase against TE
+    /// ([`multi_echo_linear_fit`](crate::utils::multi_echo_linear_fit)). The weight is always the
+    /// magnitude; there is no `B0WeightType` here.
+    LinearFit(LinearFitParams),
+    /// Motion-robust echo combination
+    /// ([`multi_echo_robust_fit`](crate::utils::multi_echo_robust_fit)): the same
+    /// magnitude-weighted fit as [`Self::LinearFit`], iteratively reweighted so that an echo which
+    /// departs from a straight line in TE at a voxel stops pulling the slope there. The weight is
+    /// magnitude × robust weight; there is no `B0WeightType`, because the robust scale is measured
+    /// on magnitude-standardised residuals and another weighting would break that.
+    ///
+    /// Needs at least [`RobustFitParams::min_echoes`] echoes (4 with `estimate_offset`, else 3);
+    /// fewer is [`PipelineError::InvalidConfig`] rather than a silent plain fit. The per-echo
+    /// report is returned in [`FieldMappingResult::robust_fit`].
+    RobustFit(RobustFitParams),
+}
+
+impl Default for B0EstimationMethod {
+    fn default() -> Self {
+        B0EstimationMethod::WeightedAvg { weighting: B0WeightType::PhaseSNR }
+    }
 }
 
 /// QSM referencing method
@@ -309,15 +339,16 @@ pub struct FieldMappingConfig {
     pub phase_offset_removal: bool,
     pub phase_offset_sigma: [f64; 3],
     pub bipolar_correction: bool,
+    /// How the unwrapped echoes are combined, with that method's own settings (default
+    /// [`B0EstimationMethod::WeightedAvg`] with [`B0WeightType::PhaseSNR`]).
     pub b0_estimation: B0EstimationMethod,
-    pub b0_weight_type: B0WeightType,
     /// Poisson solver used when `unwrapping_algorithm` is [`UnwrappingAlgorithm::Laplacian`]
     /// (default [`LaplacianSolver::Dct`]). With [`LaplacianSolver::Fft`] `{ pad: [64; 3] }` and
+    /// `b0_estimation` [`B0EstimationMethod::WeightedAvg`] with
     /// [`B0WeightType::AssumedDecay`] at 40 ms, a multi-echo run gives UK Biobank's field map
     /// (see [`run_field_mapping`](super::run_field_mapping)).
     pub laplacian_solver: LaplacianSolver,
     pub romeo_params: RomeoParams,
-    pub linear_fit_params: LinearFitParams,
 }
 
 impl Default for FieldMappingConfig {
@@ -327,11 +358,9 @@ impl Default for FieldMappingConfig {
             phase_offset_removal: true,
             phase_offset_sigma: [10.0, 10.0, 5.0],
             bipolar_correction: false,
-            b0_estimation: B0EstimationMethod::WeightedAvg,
-            b0_weight_type: B0WeightType::PhaseSNR,
+            b0_estimation: B0EstimationMethod::default(),
             laplacian_solver: LaplacianSolver::Dct,
             romeo_params: RomeoParams::default(),
-            linear_fit_params: LinearFitParams::default(),
         }
     }
 }
@@ -754,6 +783,25 @@ pub struct FieldMappingResult {
     pub b0_field_ppm: Vec<f64>,
     /// Phase offset map (if phase offset removal was used)
     pub phase_offset: Option<Vec<f64>>,
+    /// What the robust fit found, when [`B0EstimationMethod::RobustFit`] combined the echoes;
+    /// `None` for every other method.
+    pub robust_fit: Option<RobustFitReport>,
+}
+
+/// Per-echo evidence from [`B0EstimationMethod::RobustFit`]: which echoes the fit stopped
+/// trusting, and where. Diagnostics only; the field map has already been computed with these
+/// weights and nothing here drops an echo.
+#[derive(Clone, Debug)]
+pub struct RobustFitReport {
+    /// Per-echo summary, including [`EchoQuality::flagged`] (the echoes that are out of line
+    /// with the rest) and [`EchoQuality::voxels_examined`] (check it before trusting a clean
+    /// report).
+    pub quality: EchoQuality,
+    /// Final robust weight per echo per voxel, on `[0, 1]`, before the magnitude is multiplied
+    /// in: `robust_weights[echo][voxel]`, same voxel order as the input. `1.0` where the loss
+    /// never fired, including
+    /// everywhere outside the mask, which is never examined.
+    pub robust_weights: Vec<Vec<f64>>,
 }
 
 /// Results from background removal stage
