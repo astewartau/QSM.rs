@@ -13,7 +13,7 @@ use qsm_core::Grid;
 use qsm_core::bet;
 use qsm_core::bet::BetParams;
 use qsm_core::inversion;
-use qsm_core::inversion::{tgv_qsm, TgvParams, get_default_alpha, get_default_iterations, ilsqr_with_padding, IlsqrParams, TkdParams, STI_DEFAULT_PAD_MM};
+use qsm_core::inversion::{tgv_qsm, TgvInput, TgvParams, get_default_alpha, get_default_iterations, ilsqr_with_padding, IlsqrParams, TkdParams, STI_DEFAULT_PAD_MM};
 use qsm_core::inversion::{TvParams, NltvParams, RtsParams, MediParams, TfiParams, TikhonovParams};
 use qsm_core::inversion::{NdiParams, FansiParams, L1QsmParams, WhQsmParams, HdQsmParams, AmpPeParams};
 use qsm_core::inversion::{LsqrQsmParams, HeidiParams};
@@ -1345,42 +1345,18 @@ fn test_combined_tgv() {
 
     let start = Instant::now();
 
-    // Convert total field map from ppm to phase (radians) for TGV
-    // phase = fieldmap_ppm × 2π × TE × B0 × γ
-    // where γ = 42.5781 Hz/T (matches TGV's internal scaling constant)
-    // The specific TE and B0 values are arbitrary — the ppm→rad→ppm round-trip
-    // cancels out as long as TGV receives the same values.
-    let te = data.echo_times[0] as f32; // seconds
-    let b0 = data.field_strength as f32; // Tesla
-    let gamma = 42.5781_f32; // Hz/T
-    let ppm_to_rad = 2.0 * std::f32::consts::PI * te * b0 * gamma;
-
-    let phase_for_tgv: Vec<f32> = data.fieldmap.iter()
-        .map(|&ppm| (ppm as f32) * ppm_to_rad)
-        .collect();
-
-    // Run TGV with same TE and field strength so internal scaling inverts correctly
+    // TGV takes the total field in ppm directly; no echo time is involved.
     let step_size = 3.0_f32;
     let res_tgv = (vsx as f32, vsy as f32, vsz as f32);
     let (alpha0, alpha1) = get_default_alpha(2);
     let iterations = get_default_iterations(res_tgv, step_size);
-    println!("[INFO] TGV iterations (auto): {}, alpha0={}, alpha1={}", iterations, alpha0, alpha1);
-    let tgv_params = TgvParams {
-        alpha0,
-        alpha1,
-        iterations,
-        erosions: 3,
-        step_size,
-        fieldstrength: b0,
-        te,
-        tol: 1e-5,
-    };
+    println!("[INFO] TGV iterations (auto): {}, alpha0={}, alpha1={} (ppm)", iterations, alpha0, alpha1);
+    let tgv_params = TgvParams { alpha0, alpha1, iterations, erosions: 3, step_size, tol: 1e-5 };
 
     println!("[INFO] Running TGV (from total field map)...");
     let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
-    let phase_f64: Vec<f64> = phase_for_tgv.iter().map(|&v| v as f64).collect();
     let result = tgv_qsm(
-        &phase_f64,
+        TgvInput::FieldPpm(&data.fieldmap),
         &data.mask,
         &grid,
         &tgv_params,
@@ -1389,8 +1365,6 @@ fn test_combined_tgv() {
     );
 
     let elapsed = start.elapsed();
-
-    // TGV output is already in ppm
 
     let res = TestResult::new("TGV (from field)", &result, &data.chi, &data.mask, data.dims);
     res.print_with_time(elapsed);
@@ -1743,36 +1717,24 @@ fn test_pipeline_tgv() {
     println!("[INFO] Running phase offset removal + ROMEO + B0 estimation...");
     let b0_hz = run_field_mapping(&data);
 
-    // Step 2: Convert B0 (Hz) to single-echo phase (radians) for TGV
-    // phase = 2π × B0_Hz × TE_seconds
-    let te_for_tgv = data.echo_times[0]; // seconds
-    let phase_for_tgv: Vec<f32> = b0_hz.iter()
-        .map(|&hz| (hz * 2.0 * std::f64::consts::PI * te_for_tgv) as f32)
+    // Step 2: Convert B0 (Hz) to ppm for TGV (γ/2π = 42.5781 MHz/T, TGV's constant)
+    let field_ppm: Vec<f64> = b0_hz.iter()
+        .map(|&hz| hz / (42.5781 * data.field_strength))
         .collect();
 
-    // Step 3: Run TGV
+    // Step 3: Run TGV on the field in ppm
     // Parameters from get_default_alpha(2) and get_default_iterations
     let step_size = 3.0_f32;
     let res_tgv = (vsx as f32, vsy as f32, vsz as f32);
     let (alpha0, alpha1) = get_default_alpha(2);
     let iterations = get_default_iterations(res_tgv, step_size);
-    println!("[INFO] TGV iterations (auto): {}, alpha0={}, alpha1={}", iterations, alpha0, alpha1);
-    let tgv_params = TgvParams {
-        alpha0,
-        alpha1,
-        iterations,
-        erosions: 3,
-        step_size,
-        fieldstrength: data.field_strength as f32,
-        te: te_for_tgv as f32,
-        tol: 1e-5,
-    };
+    println!("[INFO] TGV iterations (auto): {}, alpha0={}, alpha1={} (ppm)", iterations, alpha0, alpha1);
+    let tgv_params = TgvParams { alpha0, alpha1, iterations, erosions: 3, step_size, tol: 1e-5 };
 
     println!("[INFO] Running TGV...");
     let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
-    let phase_f64: Vec<f64> = phase_for_tgv.iter().map(|&v| v as f64).collect();
     let result = tgv_qsm(
-        &phase_f64,
+        TgvInput::FieldPpm(&field_ppm),
         &data.mask,
         &grid,
         &tgv_params,
@@ -1781,8 +1743,6 @@ fn test_pipeline_tgv() {
     );
 
     let elapsed = start.elapsed();
-
-    // TGV output is already in ppm
 
     let res = TestResult::new("TGV", &result, &data.chi, &data.mask, data.dims);
     res.print_with_time(elapsed);
@@ -1793,6 +1753,46 @@ fn test_pipeline_tgv() {
 
     assert!(res.nrmse < 0.8, "TGV NRMSE too high: {}", res.nrmse);
     assert!(res.correlation > 0.5, "TGV correlation too low: {}", res.correlation);
+}
+
+/// Single-echo TGV: the original single-step TGV-QSM on one wrapped echo, which unwraps,
+/// removes the background and inverts in one go. The echo time and field strength enter only
+/// to convert the wrapped phase to ppm.
+#[test]
+#[ignore]
+fn test_pipeline_tgv_single_echo() {
+    println!("[INFO] Loading test data...");
+    let data = TestData::load().expect("Failed to load test data");
+    let (nx, ny, nz) = data.dims;
+    let (vsx, vsy, vsz) = data.voxel_size;
+
+    let start = Instant::now();
+    let step_size = 3.0_f32;
+    let res_tgv = (vsx as f32, vsy as f32, vsz as f32);
+    let (alpha0, alpha1) = get_default_alpha(2);
+    let iterations = get_default_iterations(res_tgv, step_size);
+    println!("[INFO] TGV iterations (auto): {}, alpha0={}, alpha1={} (ppm)", iterations, alpha0, alpha1);
+    let tgv_params = TgvParams { alpha0, alpha1, iterations, erosions: 3, step_size, tol: 1e-5 };
+
+    println!("[INFO] Running TGV on echo 1 (wrapped phase)...");
+    let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
+    let input = TgvInput::WrappedPhase {
+        phase: &data.phase_echoes[0],
+        te_s: data.echo_times[0],
+        b0_t: data.field_strength,
+    };
+    let result = tgv_qsm(input, &data.mask, &grid, &tgv_params, data.b0_dir, |_, _| {});
+    let elapsed = start.elapsed();
+
+    let res = TestResult::new("TGV (single echo)", &result, &data.chi, &data.mask, data.dims);
+    res.print_with_time(elapsed);
+    let challenge = ChallengeMetrics::compute("TGV (single echo)", &result, &data.chi, &data.mask, &data.segmentation, data.dims);
+    challenge.print();
+    challenge.print_ci_metrics(elapsed);
+    common::save_center_slices(&result, &common::valid_support(&result, &data.mask), data.dims, "pipeline_tgv_single_echo");
+
+    assert!(res.nrmse < 0.8, "single-echo TGV NRMSE too high: {}", res.nrmse);
+    assert!(res.correlation > 0.5, "single-echo TGV correlation too low: {}", res.correlation);
 }
 
 /// Run the full QSMART reconstruction via `qsm_core::pipeline::run_qsmart`
@@ -2327,25 +2327,13 @@ fn test_all_combinations() {
     // --- TGV (from total field map) ---
     {
         let start = Instant::now();
-        let te = data.echo_times[0] as f32;
-        let b0 = data.field_strength as f32;
-        let gamma = 42.5781_f32;
-        let ppm_to_rad = 2.0 * std::f32::consts::PI * te * b0 * gamma;
-        let phase_for_tgv: Vec<f32> = data.fieldmap.iter()
-            .map(|&ppm| (ppm as f32) * ppm_to_rad)
-            .collect();
-
         let step_size = 3.0_f32;
         let res_tgv = (vsx as f32, vsy as f32, vsz as f32);
         let (alpha0, alpha1) = get_default_alpha(2);
         let iterations = get_default_iterations(res_tgv, step_size);
-        let tgv_params = TgvParams {
-            alpha0, alpha1, iterations, erosions: 3, step_size,
-            fieldstrength: b0, te, tol: 1e-5,
-        };
-        let phase_f64: Vec<f64> = phase_for_tgv.iter().map(|&v| v as f64).collect();
+        let tgv_params = TgvParams { alpha0, alpha1, iterations, erosions: 3, step_size, tol: 1e-5 };
         let result = tgv_qsm(
-            &phase_f64, &data.mask, &grid,
+            TgvInput::FieldPpm(&data.fieldmap), &data.mask, &grid,
             &tgv_params,
             data.b0_dir,
             |_, _| {},

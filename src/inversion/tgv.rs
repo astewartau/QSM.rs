@@ -1,6 +1,7 @@
 //! TGV-QSM: Total Generalized Variation for Quantitative Susceptibility Mapping
 //!
-//! Single-step QSM reconstruction from wrapped phase data using TGV regularization.
+//! Single-step QSM: background removal and dipole inversion (and, for a wrapped echo, phase
+//! unwrapping) in one primal-dual iteration with TGV regularisation.
 //!
 //! References:
 //! Langkammer, C., Bredies, K., Poser, B.A., et al. (2015).
@@ -13,33 +14,105 @@
 //!
 //! Reference implementation: https://github.com/korbinian90/QuantitativeSusceptibilityMappingTGV.jl
 //!
-//! The algorithm solves:
-//!   min_χ ||∇²(phase) - D*χ||₂² + α₁||∇χ - w||₁ + α₀||ε(w)||₁
+//! # Units
 //!
-//! where:
-//! - χ is the susceptibility map
-//! - w is an auxiliary vector field (velocity)
-//! - ε(w) is the symmetric gradient of w
-//! - D is the dipole kernel
-//! - α₀, α₁ are TGV regularization parameters
+//! The solver works in ppm throughout. It solves
+//!
+//! ```text
+//!   min_{χ,w,ψ}  α₁‖∇χ − w‖₁ + α₀‖ε(w)‖₁ + ½‖ψ‖²   s.t.  ∇²f = (⅓∇² − ∂²_z)χ + ∇²ψ
+//! ```
+//!
+//! where `∇²f` is the Laplacian of the field in ppm/mm², χ is the susceptibility in ppm, `w`
+//! is the auxiliary vector field, `ε` the symmetric gradient and `ψ` the harmonic background.
+//! What the caller has decides how `∇²f` is formed (see [`TgvInput`]):
+//!
+//! - [`TgvInput::FieldPpm`]: an unwrapped field in ppm (for example a multi-echo field map).
+//!   `∇²f` is the ordinary discrete Laplacian. No echo time is involved.
+//! - [`TgvInput::WrappedPhase`]: one wrapped echo in rad, the original single-step TGV-QSM.
+//!   `∇²f` is the wrap-insensitive sin/cos (DEL) Laplacian divided by `2π·γ·B0·TE`. The echo
+//!   time and field strength appear here and nowhere else.
+//!
+//! The output is χ in ppm with no further scaling.
+//!
+//! ## α units
+//!
+//! `alpha0`/`alpha1` weigh a 1-homogeneous term against a quadratic data constraint, so they
+//! carry the units of the data: here ppm. The Julia package and Langkammer's original Python
+//! code instead run the same iteration on the phase Laplacian in rad and divide χ by
+//! `c = 2π·γ·B0·TE` at the end. Their α are therefore α_ppm · c, and the same numbers
+//! regularise differently at every TE and B0. Running on `∇²φ / c` with `α / c` is the same
+//! problem: every iterate is the rad-domain iterate divided by `c`. The ppm defaults below are
+//! the previous rad-domain defaults divided by [`ALPHA_REFERENCE_RAD_PER_PPM`] (3 T, 20 ms),
+//! so at that reference point the output is unchanged. To convert a rad-domain α tuned at
+//! some TE/B0, divide it by [`rad_per_ppm`]`(te, b0)`.
 //!
 //! Optimizations:
 //! - Bounding box reduction: only process the region containing the mask
 //! - Pre-allocated buffers: all temporary arrays allocated once outside the loop
 //! - Early termination: convergence check every 100 iterations
 
-use std::f32::consts::PI;
 use crate::utils::mask::erode_mask;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
-/// TGV parameters
+/// γ/2π in MHz/T, as used by TGV-QSM (Julia and Python reference implementations).
+pub const TGV_GAMMA_MHZ_PER_T: f64 = 42.5781;
+
+/// Phase (rad) per ppm of field at echo time `te_s` (s) and field strength `b0_t` (T):
+/// `2π·γ·B0·TE` with γ/2π = [`TGV_GAMMA_MHZ_PER_T`].
+pub fn rad_per_ppm(te_s: f64, b0_t: f64) -> f64 {
+    2.0 * std::f64::consts::PI * TGV_GAMMA_MHZ_PER_T * b0_t * te_s
+}
+
+/// Echo time (s) of the reference point at which the ppm α defaults equal the previous
+/// rad-domain defaults. It is the TE that `TgvParams::default()` used before α moved to ppm.
+pub const ALPHA_REFERENCE_TE_S: f64 = 0.020;
+/// Field strength (T) of the α reference point. See [`ALPHA_REFERENCE_TE_S`].
+pub const ALPHA_REFERENCE_B0_T: f64 = 3.0;
+/// `rad_per_ppm(ALPHA_REFERENCE_TE_S, ALPHA_REFERENCE_B0_T)` ≈ 16.05: the factor the
+/// rad-domain α defaults are divided by to give the ppm defaults.
+pub const ALPHA_REFERENCE_RAD_PER_PPM: f64 =
+    2.0 * std::f64::consts::PI * TGV_GAMMA_MHZ_PER_T * ALPHA_REFERENCE_B0_T * ALPHA_REFERENCE_TE_S;
+
+/// Convert a rad-domain α (as used by the Julia/Python TGV-QSM) to ppm at the reference point.
+const fn alpha_ppm(alpha_rad: f64) -> f32 {
+    (alpha_rad / ALPHA_REFERENCE_RAD_PER_PPM) as f32
+}
+
+/// What TGV-QSM reconstructs from.
+#[derive(Clone, Copy, Debug)]
+pub enum TgvInput<'a> {
+    /// Unwrapped total (or local) field in ppm, e.g. a multi-echo field map.
+    /// Its Laplacian is the ordinary discrete Laplacian.
+    FieldPpm(&'a [f64]),
+    /// One wrapped echo in rad (the original single-step TGV-QSM). Its Laplacian is the
+    /// sin/cos (DEL) identity, divided by [`rad_per_ppm`]`(te_s, b0_t)` to give ppm/mm².
+    WrappedPhase {
+        /// Wrapped phase in rad.
+        phase: &'a [f64],
+        /// Echo time of `phase` in seconds.
+        te_s: f64,
+        /// Field strength in Tesla.
+        b0_t: f64,
+    },
+}
+
+impl TgvInput<'_> {
+    fn data(&self) -> &[f64] {
+        match self {
+            TgvInput::FieldPpm(f) => f,
+            TgvInput::WrappedPhase { phase, .. } => phase,
+        }
+    }
+}
+
+/// TGV parameters. `alpha0`/`alpha1` are in ppm (see the module docs on α units).
 #[cfg_attr(feature = "introspection", derive(serde::Serialize))]
 #[derive(Clone, Debug)]
 pub struct TgvParams {
-    /// First-order TGV weight (gradient term)
+    /// First-order TGV weight (gradient term), in ppm units
     pub alpha1: f32,
-    /// Second-order TGV weight (symmetric gradient term)
+    /// Second-order TGV weight (symmetric gradient term), in ppm units
     pub alpha0: f32,
     /// Number of primal-dual iterations
     pub iterations: usize,
@@ -47,10 +120,6 @@ pub struct TgvParams {
     pub erosions: usize,
     /// Primal step size multiplier (larger = faster but less stable)
     pub step_size: f32,
-    /// Field strength in Tesla
-    pub fieldstrength: f32,
-    /// Echo time in seconds
-    pub te: f32,
     /// Convergence tolerance (relative change in chi)
     pub tol: f32,
 }
@@ -58,32 +127,33 @@ pub struct TgvParams {
 impl Default for TgvParams {
     fn default() -> Self {
         Self {
-            // Langkammer et al. TGV-QSM reference regularization (alpha1 = gradient/first-order
-            // weight, alpha0 = second-order weight). The previous 0.001/0.001 roughly doubled the
-            // gradient penalty vs the reference and visibly over-smoothed the susceptibility map
-            // (recovered gradient magnitude ~47% of ground truth on a simulated 7T volume; lowering
-            // alpha1 to the reference restored contrast — xsim 0.33 -> 0.47).
-            alpha1: 0.0005,
-            alpha0: 0.0015,
+            // Langkammer et al. TGV-QSM regularisation (the TGV_QSM nipype interface default,
+            // alpha0 = 0.0015, alpha1 = 0.0005 in rad units), converted to ppm at the reference
+            // point (3 T, 20 ms): alpha0 ≈ 9.345e-5, alpha1 ≈ 3.115e-5. The rad-unit
+            // 0.001/0.001 used before that roughly doubled the gradient penalty and visibly
+            // over-smoothed the susceptibility map (recovered gradient magnitude ~47% of ground
+            // truth on a simulated 7T volume; lowering alpha1 restored contrast, xsim
+            // 0.33 -> 0.47).
+            alpha1: alpha_ppm(0.0005),
+            alpha0: alpha_ppm(0.0015),
             iterations: 1000,
             erosions: 3,
             step_size: 3.0,
-            fieldstrength: 3.0,
-            te: 0.020, // 20ms
             tol: 1e-5,
         }
     }
 }
 
-/// Get default alpha values based on regularization level (1-4)
+/// Get default `(alpha0, alpha1)` in ppm for a regularization level (1-4).
 ///
-/// Level 2 (default) gives α₀=0.001, α₁=0.001
+/// The levels are the previous rad-domain table (level 2 = 0.001/0.001) divided by
+/// [`ALPHA_REFERENCE_RAD_PER_PPM`], so level 2 gives α₀ = α₁ ≈ 6.230e-5 ppm.
 pub fn get_default_alpha(regularization: u8) -> (f32, f32) {
     match regularization.clamp(1, 4) {
-        1 => (0.0005, 0.0005),
-        2 => (0.001, 0.001),
-        3 => (0.002, 0.003),
-        _ => (0.003, 0.005),
+        1 => (alpha_ppm(0.0005), alpha_ppm(0.0005)),
+        2 => (alpha_ppm(0.001), alpha_ppm(0.001)),
+        3 => (alpha_ppm(0.002), alpha_ppm(0.003)),
+        _ => (alpha_ppm(0.003), alpha_ppm(0.005)),
     }
 }
 
@@ -712,7 +782,31 @@ fn apply_stencil(
     });
 }
 
-/// Compute Laplacian of wrapped phase using the DEL method
+/// Laplacian of an unwrapped field (any units), zero outside `mask`.
+///
+/// Ordinary 7-point discrete Laplacian with replicated boundaries. This is what
+/// [`TgvInput::FieldPpm`] uses: unlike [`compute_phase_laplacian`] it is linear, so it is
+/// exact for fields whose neighbour differences are not small compared with 1.
+pub fn compute_field_laplacian(
+    field: &[f32],
+    mask: &[u8],
+    nx: usize, ny: usize, nz: usize,
+    vsx: f32, vsy: f32, vsz: f32,
+) -> Vec<f32> {
+    let mut lap = compute_laplacian(field, nx, ny, nz, vsx, vsy, vsz);
+    for (v, &m) in lap.iter_mut().zip(mask.iter()) {
+        if m == 0 {
+            *v = 0.0;
+        }
+    }
+    lap
+}
+
+/// Compute Laplacian of wrapped phase (rad) using the DEL method.
+///
+/// `cos φ·∇²sin φ − sin φ·∇²cos φ`, which on the discrete grid is
+/// `Σ_neighbours sin(φ_n − φ)/h²`: insensitive to 2π wraps, and equal to the ordinary
+/// Laplacian only while neighbour differences are small. Only meaningful for phase in rad.
 pub fn compute_phase_laplacian(
     phase: &[f32],
     mask: &[u8],
@@ -1033,30 +1127,42 @@ impl TgvWorkspace {
 /// Main TGV-QSM reconstruction
 ///
 /// # Arguments
-/// * `phase` - Wrapped phase data
+/// * `input` - Field in ppm or one wrapped echo in rad (see [`TgvInput`])
 /// * `mask` - Binary mask
 /// * `grid` - Volume grid (dimensions and voxel sizes)
-/// * `params` - TGV parameters
+/// * `params` - TGV parameters (α in ppm)
 /// * `b0_dir` - B0 field direction
 /// * `progress` - Progress callback `(iteration, total_iterations)`
+///
+/// Returns χ in ppm.
+///
+/// # Panics
+/// If the input length does not match `grid`, or if `WrappedPhase` has a non-positive or
+/// non-finite `te_s` or `b0_t`.
 ///
 /// The reconstruction runs in single precision internally; inputs and
 /// outputs use `f64` to match the rest of the crate's API.
 pub fn tgv_qsm(
-    phase: &[f64],
+    input: TgvInput,
     mask: &[u8],
     grid: &crate::Grid,
     params: &TgvParams,
     b0_dir: (f64, f64, f64),
     mut progress: impl FnMut(usize, usize),
 ) -> Vec<f64> {
+    let n_total = grid.n_total();
+    assert_eq!(input.data().len(), n_total, "TGV input length does not match the grid");
+    assert_eq!(mask.len(), n_total, "TGV mask length does not match the grid");
+    if let TgvInput::WrappedPhase { te_s, b0_t, .. } = input {
+        assert!(te_s.is_finite() && te_s > 0.0, "TGV WrappedPhase needs te_s > 0, got {te_s}");
+        assert!(b0_t.is_finite() && b0_t > 0.0, "TGV WrappedPhase needs b0_t > 0, got {b0_t}");
+    }
+
     // The algorithm runs in single precision; convert the f64 boundary inputs.
-    let phase_f32: Vec<f32> = phase.iter().map(|&v| v as f32).collect();
-    let phase: &[f32] = &phase_f32;
+    let data_f32: Vec<f32> = input.data().iter().map(|&v| v as f32).collect();
     let b0_dir = (b0_dir.0 as f32, b0_dir.1 as f32, b0_dir.2 as f32);
 
     let (nx, ny, nz) = grid.dims;
-    let n_total = grid.n_total();
     let vsx = grid.vsx() as f32;
     let vsy = grid.vsy() as f32;
     let vsz = grid.vsz() as f32;
@@ -1079,12 +1185,22 @@ pub fn tgv_qsm(
     let sub_grid = crate::Grid::new(bx, by, bz, vsx as f64, vsy as f64, vsz as f64);
 
     // Extract sub-volumes for the bounding box region
-    let phase_sub = extract_subvolume(phase, &bbox, nx, ny, nz);
+    let data_sub = extract_subvolume(&data_f32, &bbox, nx, ny, nz);
     let mask0_sub = extract_subvolume(&mask0, &bbox, nx, ny, nz);
     let mask_eroded_sub = extract_subvolume(&mask_eroded, &bbox, nx, ny, nz);
 
-    // Compute phase Laplacian on sub-volume
-    let mut laplace_phi0 = compute_phase_laplacian(&phase_sub, &mask0_sub, bx, by, bz, vsx, vsy, vsz);
+    // Laplacian of the field in ppm/mm² on the sub-volume
+    let mut laplace_phi0 = match input {
+        TgvInput::FieldPpm(_) => {
+            compute_field_laplacian(&data_sub, &mask0_sub, bx, by, bz, vsx, vsy, vsz)
+        }
+        TgvInput::WrappedPhase { te_s, b0_t, .. } => {
+            let ppm_per_rad = (1.0 / rad_per_ppm(te_s, b0_t)) as f32;
+            let mut lap = compute_phase_laplacian(&data_sub, &mask0_sub, bx, by, bz, vsx, vsy, vsz);
+            lap.iter_mut().for_each(|v| *v *= ppm_per_rad);
+            lap
+        }
+    };
 
     // Subtract mean within mask
     let (sum, count): (f32, usize) = laplace_phi0.iter().zip(mask0_sub.iter())
@@ -1277,23 +1393,17 @@ pub fn tgv_qsm(
 
     progress(final_iter, params.iterations);
 
-    // Scale to susceptibility (ppm)
-    let gamma = 42.5781f32;  // Hz/T
-    let scale = 1.0 / (2.0 * PI * params.te * params.fieldstrength * gamma);
-
-    // Create full-size result and insert sub-volume
+    // Create full-size result; chi is already in ppm, keep it inside the eroded mask
     let mut result = vec![0.0f32; n_total];
-
-    // Scale chi in sub-volume and apply mask
-    let mut chi_scaled = vec![0.0f32; b_total];
+    let mut chi_masked = vec![0.0f32; b_total];
     for i in 0..b_total {
         if mask_eroded_sub[i] != 0 {
-            chi_scaled[i] = ws.chi[i] * scale;
+            chi_masked[i] = ws.chi[i];
         }
     }
 
     // Insert back into full volume
-    insert_subvolume(&mut result, &chi_scaled, &bbox, nx, ny, nz);
+    insert_subvolume(&mut result, &chi_masked, &bbox, nx, ny, nz);
 
     result.iter().map(|&v| v as f64).collect()
 }
@@ -1350,9 +1460,16 @@ mod tests {
 
     #[test]
     fn test_default_alpha() {
+        // Level 2 is the previous rad-domain 0.001/0.001 at the reference point (3 T, 20 ms).
+        let c = rad_per_ppm(ALPHA_REFERENCE_TE_S, ALPHA_REFERENCE_B0_T);
+        assert!((c - 16.0516).abs() < 1e-3, "c_ref = {c}");
+        assert_eq!(c, ALPHA_REFERENCE_RAD_PER_PPM);
         let (a0, a1) = get_default_alpha(2);
-        assert!((a0 - 0.001).abs() < 1e-6);
-        assert!((a1 - 0.001).abs() < 1e-6);
+        assert!((a0 as f64 * c - 0.001).abs() < 1e-9);
+        assert!((a1 as f64 * c - 0.001).abs() < 1e-9);
+        let d = TgvParams::default();
+        assert!((d.alpha0 as f64 * c - 0.0015).abs() < 1e-9);
+        assert!((d.alpha1 as f64 * c - 0.0005).abs() < 1e-9);
     }
 
     #[test]
@@ -1422,7 +1539,8 @@ mod tests {
         };
 
         let grid = crate::Grid::new(n, n, n, 1.0, 1.0, 1.0);
-        let result = tgv_qsm(&phase, &mask, &grid, &params, (0.0, 0.0, 1.0), |_, _| {});
+        let input = TgvInput::WrappedPhase { phase: &phase, te_s: 0.02, b0_t: 3.0 };
+        let result = tgv_qsm(input, &mask, &grid, &params, (0.0, 0.0, 1.0), |_, _| {});
 
         assert_eq!(result.len(), n_total);
 
@@ -1592,7 +1710,7 @@ mod tests {
         let grid = crate::Grid::new(n, n, n, 1.0, 1.0, 1.0);
         let progress_iters = std::cell::RefCell::new(Vec::new());
         let result = tgv_qsm(
-            &phase, &mask, &grid, &params, (0.0, 0.0, 1.0),
+            TgvInput::FieldPpm(&phase), &mask, &grid, &params, (0.0, 0.0, 1.0),
             |iter, _total| { progress_iters.borrow_mut().push(iter); }
         );
 
@@ -1615,5 +1733,135 @@ mod tests {
             "Expected early convergence by iter 100, but last progress was at iter {}",
             last_iter
         );
+    }
+
+    fn sphere_mask(n: usize, radius: f64) -> Vec<u8> {
+        let c = (n as f64 - 1.0) / 2.0;
+        let mut mask = vec![0u8; n * n * n];
+        for k in 0..n {
+            for j in 0..n {
+                for i in 0..n {
+                    let (dx, dy, dz) = (i as f64 - c, j as f64 - c, k as f64 - c);
+                    if (dx * dx + dy * dy + dz * dz).sqrt() < radius {
+                        mask[i + j * n + k * n * n] = 1;
+                    }
+                }
+            }
+        }
+        mask
+    }
+
+    /// A smooth, non-harmonic field in ppm: a Gaussian bump plus a quadratic.
+    fn test_field(n: usize, scale: f64) -> Vec<f64> {
+        let c = (n as f64 - 1.0) / 2.0;
+        let mut f = vec![0.0; n * n * n];
+        for k in 0..n {
+            for j in 0..n {
+                for i in 0..n {
+                    let (x, y, z) = (i as f64 - c, j as f64 - c, k as f64 - c);
+                    let r2 = x * x + y * y + z * z;
+                    f[i + j * n + k * n * n] = scale * ((-r2 / 8.0).exp() + 0.002 * (x * x - z * z));
+                }
+            }
+        }
+        f
+    }
+
+    /// FieldPpm must use the plain Laplacian. On a field whose rad-equivalent exceeds π and
+    /// whose neighbour differences are not small, the DEL route (what the old code applied to
+    /// `field·2π·γ·B0·TE`) is wrong, while the plain Laplacian is exact.
+    #[test]
+    fn field_ppm_uses_plain_laplacian_where_del_would_be_wrong() {
+        let n = 16;
+        let mask = vec![1u8; n * n * n];
+        // Quadratic field f = a·x² ppm, ∇²f = 2a exactly with the 3-point stencil.
+        let a = 0.05f32;
+        let c = (n as f32 - 1.0) / 2.0;
+        let field: Vec<f32> = (0..n * n * n)
+            .map(|idx| { let x = (idx % n) as f32 - c; a * x * x })
+            .collect();
+        let rad_per = rad_per_ppm(0.020, 3.0) as f32; // ≈ 16.05
+        let phase: Vec<f32> = field.iter().map(|&v| v * rad_per).collect();
+        let max_rad = phase.iter().cloned().fold(0.0f32, f32::max);
+        assert!(max_rad > std::f32::consts::PI, "test needs rad-equivalent > π, max {max_rad}");
+
+        let plain = compute_field_laplacian(&field, &mask, n, n, n, 1.0, 1.0, 1.0);
+        let del = compute_phase_laplacian(&phase, &mask, n, n, n, 1.0, 1.0, 1.0);
+
+        // Interior voxels, away from the replicated boundary
+        let mut max_err_plain = 0.0f32;
+        let mut max_err_del = 0.0f32;
+        for k in 1..n - 1 {
+            for j in 1..n - 1 {
+                for i in 1..n - 1 {
+                    let idx = i + j * n + k * n * n;
+                    max_err_plain = max_err_plain.max((plain[idx] - 2.0 * a).abs());
+                    max_err_del = max_err_del.max((del[idx] / rad_per - 2.0 * a).abs());
+                }
+            }
+        }
+        assert!(max_err_plain < 1e-4, "plain Laplacian error {max_err_plain}");
+        // DEL sees sin of the neighbour differences, which reach several rad here.
+        assert!(max_err_del > 0.5 * 2.0 * a, "DEL error unexpectedly small: {max_err_del}");
+    }
+
+    /// The reparametrisation is exact: data scaled by c with α scaled by c gives χ scaled by c.
+    /// This is why ppm α = rad α / (2π·γ·B0·TE) reproduces the old rad-domain solver.
+    #[test]
+    fn field_ppm_is_homogeneous_in_data_and_alpha() {
+        let n = 20;
+        let mask = sphere_mask(n, 8.5);
+        let grid = crate::Grid::new(n, n, n, 1.0, 1.0, 1.0);
+        let field = test_field(n, 0.1);
+        let params = TgvParams { iterations: 300, erosions: 1, tol: 0.0, ..TgvParams::default() };
+        let chi = tgv_qsm(TgvInput::FieldPpm(&field), &mask, &grid, &params, (0.0, 0.0, 1.0), |_, _| {});
+
+        let c = 7.0;
+        let field_c: Vec<f64> = field.iter().map(|v| v * c).collect();
+        let params_c = TgvParams {
+            alpha0: params.alpha0 * c as f32,
+            alpha1: params.alpha1 * c as f32,
+            ..params.clone()
+        };
+        let chi_c = tgv_qsm(TgvInput::FieldPpm(&field_c), &mask, &grid, &params_c, (0.0, 0.0, 1.0), |_, _| {});
+
+        let norm = chi.iter().map(|v| v * v).sum::<f64>().sqrt();
+        let diff = chi.iter().zip(&chi_c).map(|(a, b)| (a - b / c).powi(2)).sum::<f64>().sqrt();
+        assert!(norm > 0.0);
+        assert!(diff / norm < 1e-5, "relative difference {}", diff / norm);
+    }
+
+    /// WrappedPhase of an unwrapped, gently varying phase equals FieldPpm of the same field
+    /// (DEL ≈ plain Laplacian when neighbour differences are small), and the result does not
+    /// depend on TE: the TE only converts rad to ppm.
+    #[test]
+    fn wrapped_phase_matches_field_ppm_and_is_te_independent() {
+        let n = 20;
+        let mask = sphere_mask(n, 8.5);
+        let grid = crate::Grid::new(n, n, n, 1.0, 1.0, 1.0);
+        let field = test_field(n, 0.02);
+        let params = TgvParams { iterations: 300, erosions: 1, tol: 0.0, ..TgvParams::default() };
+        let chi_f = tgv_qsm(TgvInput::FieldPpm(&field), &mask, &grid, &params, (0.0, 0.0, 1.0), |_, _| {});
+        let norm = chi_f.iter().map(|v| v * v).sum::<f64>().sqrt();
+        for te in [0.005, 0.020] {
+            let c = rad_per_ppm(te, 3.0);
+            let wrap = |x: f64| (x + std::f64::consts::PI).rem_euclid(2.0 * std::f64::consts::PI) - std::f64::consts::PI;
+            let phase: Vec<f64> = field.iter().map(|v| wrap(v * c)).collect();
+            let input = TgvInput::WrappedPhase { phase: &phase, te_s: te, b0_t: 3.0 };
+            let chi_p = tgv_qsm(input, &mask, &grid, &params, (0.0, 0.0, 1.0), |_, _| {});
+            let diff = chi_f.iter().zip(&chi_p).map(|(a, b)| (a - b).powi(2)).sum::<f64>().sqrt();
+            assert!(diff / norm < 0.02, "TE {te}: relative difference {}", diff / norm);
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "te_s > 0")]
+    fn wrapped_phase_rejects_zero_te() {
+        let n = 8;
+        let mask = vec![1u8; n * n * n];
+        let phase = vec![0.0; n * n * n];
+        let grid = crate::Grid::new(n, n, n, 1.0, 1.0, 1.0);
+        let input = TgvInput::WrappedPhase { phase: &phase, te_s: 0.0, b0_t: 3.0 };
+        tgv_qsm(input, &mask, &grid, &TgvParams::default(), (0.0, 0.0, 1.0), |_, _| {});
     }
 }

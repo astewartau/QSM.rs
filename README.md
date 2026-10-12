@@ -357,7 +357,7 @@ repeats, runs or echoes, and reports one B0 direction per volume for the same re
 
 | Algorithm | Description | Reference |
 |-----------|-------------|-----------|
-| **TGV** | Total Generalized Variation — single-step QSM from wrapped phase, combining unwrapping, background removal, and dipole inversion | Langkammer, C., et al. (2015). "Fast quantitative susceptibility mapping using 3D EPI and total generalized variation." *NeuroImage*, 111:622-630. [DOI](https://doi.org/10.1016/j.neuroimage.2015.02.041) |
+| **TGV** | Total Generalized Variation — single-step QSM combining background removal and dipole inversion. Takes an unwrapped field in ppm (`TgvInput::FieldPpm`, e.g. a multi-echo field map) or one wrapped echo in rad with its TE and B0 (`TgvInput::WrappedPhase`, the original method, which also unwraps). Works in ppm throughout, so `alpha0`/`alpha1` are in ppm and mean the same at any TE and field strength | Langkammer, C., et al. (2015). "Fast quantitative susceptibility mapping using 3D EPI and total generalized variation." *NeuroImage*, 111:622-630. [DOI](https://doi.org/10.1016/j.neuroimage.2015.02.041) |
 | **QSMART** | Two-stage QSM artifact reduction using SDF background removal, TKD inversion, and Frangi vesselness-based tissue/vasculature separation | Yaghmaie, N., Syeda, W., et al. (2021). "QSMART: Quantitative Susceptibility Mapping Artifact Reduction Technique." *NeuroImage*, 231:117701. [DOI](https://doi.org/10.1016/j.neuroimage.2020.117701) |
 
 ### Artefact Reduction

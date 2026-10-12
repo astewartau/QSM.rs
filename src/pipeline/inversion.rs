@@ -591,9 +591,11 @@ pub fn run_iqfm(
 
 /// Run TGV single-step QSM reconstruction.
 ///
-/// For multi-echo data, runs field mapping first to get B0, then converts
-/// to phase at TE1. For single-echo, uses wrapped phase directly.
-/// TGV internally handles unwrapping + background removal + inversion.
+/// Multi-echo data goes through field mapping first and TGV runs on the field in ppm
+/// ([`TgvInput::FieldPpm`](crate::inversion::TgvInput::FieldPpm)). Single-echo data goes in
+/// as the wrapped phase with its echo time and the scan's field strength
+/// ([`TgvInput::WrappedPhase`](crate::inversion::TgvInput::WrappedPhase)), and TGV handles
+/// unwrapping as well. Either way TGV also does background removal and inversion.
 ///
 /// # Returns
 /// Susceptibility map in ppm (unreferenced — call `apply_reference` after)
@@ -607,28 +609,38 @@ pub fn run_tgv(
     reference: QsmReference,
     progress: &mut dyn FnMut(usize, usize),
 ) -> Result<Vec<f64>, PipelineError> {
+    use crate::inversion::TgvInput;
+
     metadata.require_contiguous_slices()?;
     let grid = metadata.grid();
     let (bx, by, bz) = metadata.b0_direction;
 
-    // For multi-echo: compute B0 field map first, then convert to phase
-    // For single-echo: use wrapped phase directly
-    let phase_data: Vec<f64> = if phases.len() > 1 {
+    let chi_ppm = if phases.len() > 1 {
         let field_result = super::field_mapping::run_field_mapping(
             phases, magnitudes, mask, metadata,
             field_mapping_config, &mut |_, _| {},
         )?;
-        let gamma_hz = 42.576e6;
-        let te1 = metadata.echo_times[0];
-        let ppm_to_rad = 2.0 * PI * gamma_hz * metadata.field_strength * te1 * 1e-6;
-        field_result.b0_field_ppm.iter().map(|&v| v * ppm_to_rad).collect()
+        crate::inversion::tgv_qsm(
+            TgvInput::FieldPpm(&field_result.b0_field_ppm),
+            mask, &grid, tgv_params, (bx, by, bz), &mut *progress,
+        )
     } else {
-        phases[0].to_vec()
+        let te_s = *metadata.echo_times.first().ok_or_else(|| {
+            PipelineError::InvalidInput("TGV needs the echo time of the phase".into())
+        })?;
+        let b0_t = metadata.field_strength;
+        if !(te_s.is_finite() && te_s > 0.0 && b0_t.is_finite() && b0_t > 0.0) {
+            return Err(PipelineError::InvalidInput(format!(
+                "single-echo TGV needs a positive echo time and field strength, got TE = {te_s} s, B0 = {b0_t} T"
+            )));
+        }
+        let input = TgvInput::WrappedPhase {
+            phase: phases[0],
+            te_s,
+            b0_t,
+        };
+        crate::inversion::tgv_qsm(input, mask, &grid, tgv_params, (bx, by, bz), &mut *progress)
     };
-
-    let chi_ppm = crate::inversion::tgv_qsm(
-        &phase_data, mask, &grid, tgv_params, (bx, by, bz), &mut *progress,
-    );
 
     Ok(super::referencing::apply_reference(&chi_ppm, mask, reference))
 }
