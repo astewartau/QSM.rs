@@ -121,8 +121,29 @@ Methods marked † need the `onnx` feature and model weights.
 | **BET** | Brain extraction by surface-mesh evolution (`run_bet`) | Smith, S.M. (2002). "Fast robust automated brain extraction." *Human Brain Mapping*, 17(3):143-155. [DOI](https://doi.org/10.1002/hbm.10062) |
 | **HD-BET** † | Deep-learning brain extraction from a magnitude image (`hd_bet`) | Isensee, F., et al. (2019). "Automated brain extraction of multisequence MRI using artificial neural networks." *Human Brain Mapping*, 40(17):4952-4964. [DOI](https://doi.org/10.1002/hbm.24750) |
 | **RS2-Net** † | Deep-learning rodent brain extraction (`rs2_net`) | Lin, Y., et al. (2024). "RS2-Net: An end-to-end deep learning framework for rodent skull stripping in multi-center brain MRI." *NeuroImage*, 298:120769. [DOI](https://doi.org/10.1016/j.neuroimage.2024.120769) |
-| **Signal-gated erosion** | Mask refinement that erodes only low-signal boundary voxels (`signal_gated_erosion`) | QSM-CI harmonization masking, [QSMxT/QSM-CI](https://github.com/QSMxT/QSM-CI) |
 | **SynthSeg** † | Contrast-agnostic whole-brain segmentation into FreeSurfer labels (`segment::synthseg`) | Billot, B., et al. (2023). "SynthSeg: Segmentation of brain MRI scans of any contrast and resolution without retraining." *Medical Image Analysis*, 86:102789. [DOI](https://doi.org/10.1016/j.media.2023.102789) |
+| **Threshold masking** | Otsu, fixed or percentile threshold of the magnitude or of the ROMEO phase-quality map (`MaskOp::Threshold`, `otsu_threshold`) | Otsu, N. (1979). "A Threshold Selection Method from Gray-Level Histograms." *IEEE Transactions on Systems, Man, and Cybernetics*, 9(1):62-66. [DOI](https://doi.org/10.1109/TSMC.1979.4310076) |
+
+### Mask Operations
+
+| Algorithm | Description | Reference |
+|-----------|-------------|-----------|
+| **Erosion / dilation** | Iterated 6-connected erosion and dilation (`erode_mask`, `dilate_mask`) | — |
+| **Closing** | Dilation then erosion with a spherical structuring element (`morphological_close`) | — |
+| **Hole filling** | Fills enclosed background components up to a size limit (`fill_holes`) | — |
+| **Gaussian smoothing** | Smooths the mask and re-thresholds it at 0.5 (`MaskOp::GaussianSmooth`) | — |
+| **Signal-gated erosion** | Mask refinement that erodes only low-signal boundary voxels (`signal_gated_erosion`) | QSM-CI harmonization masking, [QSMxT/QSM-CI](https://github.com/QSMxT/QSM-CI) |
+| **Connected components** | 6-connected component labelling, as `scipy.ndimage.label` (internal: signal-gated erosion, PRELUDE, SynthSeg) | — |
+
+### Coil Combination and Field Mapping
+
+| Algorithm | Description | Reference |
+|-----------|-------------|-----------|
+| **MCPC-3D-S** | Coil combination and phase-offset removal (`mcpc3ds_combine`, `phase_offset_removal`) | Eckstein, K., et al. (2018). "Computationally Efficient Combination of Multi-channel Phase Data From Multi-echo Acquisitions (ASPIRE)." *Magnetic Resonance in Medicine*, 79:2996-3006. [DOI](https://doi.org/10.1002/mrm.26963) |
+| **Bipolar correction** | Removes the linear phase artefact of bipolar readout gradients; needs three or more echoes (`bipolar_correction`) | Eckstein, K. (2021). PhD thesis, TU Wien, Section 3.1.3. [DOI](https://doi.org/10.34726/hss.2021.43447) |
+| **B0 weighted average** | Weighted average of unwrapped phase / TE over echoes; weights by phase SNR, phase variance, magnitude, TE, uniform, or an assumed T2* decay (`calculate_b0_weighted`, `B0WeightType`) | — |
+| **Linear fit** | Magnitude-weighted least-squares fit of phase against TE, with optional phase offset and reliability mask (`multi_echo_linear_fit`) | — |
+| **Robust echo combination** | Robust-loss multi-echo field fit with per-echo outlier scores (`multi_echo_robust_fit`, `B0EstimationMethod::RobustFit`) | Biondetti, E., et al. (2022). *Magnetic Resonance in Medicine*. [PMC9545116](https://pmc.ncbi.nlm.nih.gov/articles/PMC9545116/) |
 
 ### Phase Unwrapping
 
@@ -149,14 +170,13 @@ Methods marked † need the `onnx` feature and model weights.
 | **SDF** | Spatially dependent filtering (QSMART) | Yaghmaie, N., Syeda, W., et al. (2021). "QSMART: Quantitative Susceptibility Mapping Artifact Reduction Technique." *NeuroImage*, 231:117701. [DOI](https://doi.org/10.1016/j.neuroimage.2020.117701) |
 | **BFRnet** † | Deep-learning background field prediction | Zhu, X., et al. (2023). "BFRnet: A deep learning-based MR background field removal method for QSM of the brain containing significant pathological susceptibility sources." *Zeitschrift für Medizinische Physik*. [DOI](https://doi.org/10.1016/j.zemedi.2022.08.001) |
 
-### Combined Phase Unwrapping + Background Removal
+### Combined Phase Unwrapping and Background Removal
 
 | Algorithm | Description | Reference |
 |-----------|-------------|-----------|
-| **HARPERELLA** | Integrated Laplacian unwrapping and background removal | Li, W., et al. (2014). "Integrated Laplacian-based phase unwrapping and background phase removal for quantitative susceptibility mapping." *NMR in Biomedicine*, 27(2):219-227. [DOI](https://doi.org/10.1002/nbm.3056) |
-| **iHARPERELLA** | Improved HARPERELLA | Li, W., Wu, B., Liu, C. (2015). "iHARPERELLA: an improved method for integrated 3D phase unwrapping and background phase removal." *Proc. ISMRM* 23, p.3313. |
-| **Laplacian (ROI-masked)** | Laplacian unwrapping with the Laplacian zeroed outside the mask; returns a local field (`laplacian_unwrap_bfr`) | Schofield, M.A., Zhu, Y. (2003). *Optics Letters*, 28(14):1194-1196. [DOI](https://doi.org/10.1364/OL.28.001194); Zhou, D., et al. (2014). *NMR in Biomedicine*, 27(3):312-319. [DOI](https://doi.org/10.1002/nbm.3064) |
-| **iQFM** † | Deep-learning wrapped phase → local field | Gao, Y., et al. (2022). "Instant tissue field and magnetic susceptibility mapping from MRI raw phase using Laplacian enhanced deep neural networks." *NeuroImage*, 259:119410. [DOI](https://doi.org/10.1016/j.neuroimage.2022.119410) |
+| **HARPERELLA** | Integrated Laplacian unwrapping and background removal, wrapped phase → local field (`harperella`) | Li, W., et al. (2014). "Integrated Laplacian-based phase unwrapping and background phase removal for quantitative susceptibility mapping." *NMR in Biomedicine*, 27(2):219-227. [DOI](https://doi.org/10.1002/nbm.3056) |
+| **iHARPERELLA** | Improved HARPERELLA (`iharperella`) | Li, W., Wu, B., Liu, C. (2015). "iHARPERELLA: an improved method for integrated 3D phase unwrapping and background phase removal." *Proc. ISMRM* 23, p.3313. |
+| **iQFM** † | Deep-learning wrapped phase → local field (`run_iqfm`) | Gao, Y., et al. (2022). "Instant tissue field and magnetic susceptibility mapping from MRI raw phase using Laplacian enhanced deep neural networks." *NeuroImage*, 259:119410. [DOI](https://doi.org/10.1016/j.neuroimage.2022.119410) |
 
 ### Dipole Inversion
 
@@ -185,6 +205,18 @@ Methods marked † need the `onnx` feature and model weights.
 | **MoDL-QSM** † | Unrolled model-based gradient descent with a learned prior | Feng, R., et al. (2021). "MoDL-QSM: Model-based deep learning for quantitative susceptibility mapping." *NeuroImage*, 240:118376. [DOI](https://doi.org/10.1016/j.neuroimage.2021.118376) |
 | **IR2QSM** † | Iterative reverse-concatenation recurrent U-Net | Li, M., et al. (2025). *Medical Physics*. [DOI](https://doi.org/10.1002/mp.17747); [arXiv:2406.12300](https://arxiv.org/abs/2406.12300) |
 
+### Single-Step QSM
+
+| Algorithm | Input | Description | Reference |
+|-----------|-------|-------------|-----------|
+| **TGV** | Total field (ppm), or one wrapped echo with its TE and B0 | Single-step total generalized variation (`tgv_qsm`, `TgvInput`) | Langkammer, C., et al. (2015). "Fast quantitative susceptibility mapping using 3D EPI and total generalized variation." *NeuroImage*, 111:622-630. [DOI](https://doi.org/10.1016/j.neuroimage.2015.02.041) |
+| **TFI** | Total field (ppm) | Preconditioned total field inversion | Liu, Z., et al. (2017). "Preconditioned total field inversion (TFI) algorithm for quantitative susceptibility mapping." *Magnetic Resonance in Medicine*, 78(1):303-315. [DOI](https://doi.org/10.1002/mrm.26946) |
+| **QSMART** | Total field (ppm) | SDF background removal, inversion, and vasculature separation | Yaghmaie, N., Syeda, W., et al. (2021). *NeuroImage*, 231:117701. [DOI](https://doi.org/10.1016/j.neuroimage.2020.117701) |
+| **AutoQSM** † | Total field (ppm) | Patch V-Net from total field to χ | Wei, H., et al. (2019). "Learning-based single-step quantitative susceptibility mapping reconstruction without brain extraction." *NeuroImage*, 202:116064. [DOI](https://doi.org/10.1016/j.neuroimage.2019.116064) |
+| **NeXtQSM** † | Total field (ppm) | Background-removal U-Net followed by a variational inversion network | Cognolato, F., et al. (2023). "NeXtQSM—A complete deep learning pipeline for data-consistent Quantitative Susceptibility Mapping trained with hybrid data." *Medical Image Analysis*, 84:102700. [DOI](https://doi.org/10.1016/j.media.2022.102700) |
+| **iQSM** † | Wrapped phase | Wrapped phase → χ (`run_iqsm`) | Gao, Y., et al. (2022). *NeuroImage*, 259:119410. [DOI](https://doi.org/10.1016/j.neuroimage.2022.119410) |
+| **iQSM+** † | Wrapped phase | Orientation-adaptive iQSM (`run_iqsm_plus`) | Gao, Y., et al. (2024). *Medical Image Analysis*. [DOI](https://doi.org/10.1016/j.media.2024.103160) |
+
 ### Multi-Orientation
 
 | Algorithm | Description | Reference |
@@ -192,50 +224,14 @@ Methods marked † need the `onnx` feature and model weights.
 | **COSMOS** | Closed-form multi-orientation inversion (`cosmos`, `cosmos_weighted`) | Liu, T., et al. (2009). "Calculation of susceptibility through multiple orientation sampling (COSMOS)." *Magnetic Resonance in Medicine*, 61(1):196-204. [DOI](https://doi.org/10.1002/mrm.21828) |
 | **STI** | Susceptibility tensor imaging from six or more orientations (`sti`) | Liu, C. (2010). "Susceptibility tensor imaging." *Magnetic Resonance in Medicine*, 63(6):1471-1477. [DOI](https://doi.org/10.1002/mrm.22482) |
 
-### End-to-End QSM
+### Relaxometry
 
 | Algorithm | Description | Reference |
 |-----------|-------------|-----------|
-| **TGV** | Single-step total generalized variation, from a ppm field or one wrapped echo | Langkammer, C., et al. (2015). "Fast quantitative susceptibility mapping using 3D EPI and total generalized variation." *NeuroImage*, 111:622-630. [DOI](https://doi.org/10.1016/j.neuroimage.2015.02.041) |
-| **TFI** | Preconditioned total field inversion | Liu, Z., et al. (2017). "Preconditioned total field inversion (TFI) algorithm for quantitative susceptibility mapping." *Magnetic Resonance in Medicine*, 78(1):303-315. [DOI](https://doi.org/10.1002/mrm.26946) |
-| **QSMART** | SDF background removal, inversion, and vasculature separation | Yaghmaie, N., Syeda, W., et al. (2021). *NeuroImage*, 231:117701. [DOI](https://doi.org/10.1016/j.neuroimage.2020.117701) |
-| **AutoQSM** † | Patch V-Net from total field to χ | Wei, H., et al. (2019). "Learning-based single-step quantitative susceptibility mapping reconstruction without brain extraction." *NeuroImage*, 202:116064. [DOI](https://doi.org/10.1016/j.neuroimage.2019.116064) |
-| **NeXtQSM** † | Background-removal U-Net followed by a variational inversion network | Cognolato, F., et al. (2023). "NeXtQSM—A complete deep learning pipeline for data-consistent Quantitative Susceptibility Mapping trained with hybrid data." *Medical Image Analysis*, 84:102700. [DOI](https://doi.org/10.1016/j.media.2022.102700) |
-| **iQSM** † | Wrapped phase → χ (`run_iqsm`) | Gao, Y., et al. (2022). *NeuroImage*, 259:119410. [DOI](https://doi.org/10.1016/j.neuroimage.2022.119410) |
-| **iQSM+** † | Orientation-adaptive iQSM (`run_iqsm_plus`) | Gao, Y., et al. (2024). *Medical Image Analysis*. [DOI](https://doi.org/10.1016/j.media.2024.103160) |
-
-### Artefact Reduction
-
-| Algorithm | Description | Reference |
-|-----------|-------------|-----------|
-| **Two-pass** | Reconstructs on a hole-preserving and a filled mask and combines them, keeping streaking from strong sources out of the brain | Stewart, A.W., et al. (2022). "QSMxT: Robust masking and artifact reduction for quantitative susceptibility mapping." *Magnetic Resonance in Medicine*, 87(3):1289-1300. [DOI](https://doi.org/10.1002/mrm.29048) |
-
-### SWI Processing
-
-| Algorithm | Description | Reference |
-|-----------|-------------|-----------|
-| **CLEAR-SWI** | Phase-mask SWI with high-pass filtering and minimum intensity projection | Eckstein, K., et al. (2024). "CLEAR-SWI: Computational Efficient T2* Weighted Imaging." *Proc. ISMRM*. |
-| **SMWI** | Magnitude weighted by a susceptibility-map mask | Gho, S.-M., et al. (2014). "Susceptibility map-weighted imaging (SMWI) for neuroimaging." *Magnetic Resonance in Medicine*, 72:337-346. [DOI](https://doi.org/10.1002/mrm.24920) |
-
-### Multi-Echo Processing and Relaxometry
-
-| Algorithm | Description | Reference |
-|-----------|-------------|-----------|
-| **MCPC-3D-S** | Coil combination and phase-offset removal (`mcpc3ds_combine`, `phase_offset_removal`) | Eckstein, K., et al. (2018). "Computationally Efficient Combination of Multi-channel Phase Data From Multi-echo Acquisitions (ASPIRE)." *Magnetic Resonance in Medicine*, 79:2996-3006. [DOI](https://doi.org/10.1002/mrm.26963) |
-| **Robust echo combination** | Robust-loss multi-echo field fit with per-echo outlier scores (`multi_echo_robust_fit`, `B0EstimationMethod::RobustFit`) | Biondetti, E., et al. (2022). *Magnetic Resonance in Medicine*. [PMC9545116](https://pmc.ncbi.nlm.nih.gov/articles/PMC9545116/) |
 | **R2\*/T2\* (ARLO)** | R2* mapping from multi-echo magnitude (`r2star_arlo`) | Pei, M., et al. (2015). "Algorithm for fast monoexponential fitting based on Auto-Regression on Linear Operations (ARLO) of data." *Magnetic Resonance in Medicine*, 73(2):843-850. [DOI](https://doi.org/10.1002/mrm.25137) |
 | **R2 (EPG)** | R2 mapping from multi-echo spin echo by extended-phase-graph matching (`r2_epg`) | Weigel, M. (2015). "Extended phase graphs: dephasing, RF pulses, and echoes — pure and simple." *Journal of Magnetic Resonance Imaging*, 41(2):266-295. [DOI](https://doi.org/10.1002/jmri.24619) |
 | **R2′** | R2* − R2 from paired gradient- and spin-echo data (`r2prime`) | Yablonskiy, D.A., Haacke, E.M. (1994). "Theory of NMR signal behavior in magnetically inhomogeneous tissues: the static dephasing regime." *Magnetic Resonance in Medicine*, 32(6):749-763. [DOI](https://doi.org/10.1002/mrm.1910320610) |
 | **R2PRIMEnet** † | Deep-learning R2* → R2′ for GRE-only data (3 T) | Kim, M., et al. (2025). "χ-sepnet: Deep neural network for magnetic susceptibility source separation." *Human Brain Mapping*, 46(4):e70136. [DOI](https://doi.org/10.1002/hbm.70136) |
-
-### Preprocessing
-
-| Algorithm | Description | Reference |
-|-----------|-------------|-----------|
-| **Bias correction** | Receive-field homogeneity correction | Eckstein, K., Trattnig, S., Robinson, S.D. (2019). "A Simple Homogeneity Correction for Neuroimaging at 7T." *Proc. ISMRM 27th Annual Meeting*. |
-| **MP-PCA denoising** | Marchenko–Pastur PCA denoising across echoes or volumes (`mppca_denoise`) | Veraart, J., et al. (2016). "Denoising of diffusion MRI using random matrix theory." *NeuroImage*, 142:394-406. [DOI](https://doi.org/10.1016/j.neuroimage.2016.08.016) |
-| **Gibbs unringing** | Local subvoxel-shift Gibbs-ringing removal (`gibbs_unring`) | Kellner, E., et al. (2016). "Gibbs-ringing artifact removal based on local subvoxel-shifts." *Magnetic Resonance in Medicine*, 76(5):1574-1581. [DOI](https://doi.org/10.1002/mrm.26054) |
-| **Motion correction** | Rigid co-registration of a series in the complex domain, with a B0 direction per volume (`motion`) | — |
 
 ### Susceptibility Source Separation
 
@@ -249,13 +245,33 @@ Methods marked † need the `onnx` feature and model weights.
 | **χ-sepnet** † | 3D U-Net separation | Kim, M., et al. (2025). *Human Brain Mapping*, 46(4):e70136. [DOI](https://doi.org/10.1002/hbm.70136) |
 | **SUSEP-Net** † | 3D U-Net separation | Li, Z., Gao, Y., Sun, H., et al. (2025). [arXiv:2506.13293](https://arxiv.org/abs/2506.13293) |
 
+### SWI Processing
+
+| Algorithm | Description | Reference |
+|-----------|-------------|-----------|
+| **CLEAR-SWI** | Phase-mask SWI with high-pass filtering and minimum intensity projection | Eckstein, K., et al. (2024). "CLEAR-SWI: Computational Efficient T2* Weighted Imaging." *Proc. ISMRM*. |
+| **SMWI** | Magnitude weighted by a susceptibility-map mask | Gho, S.-M., et al. (2014). "Susceptibility map-weighted imaging (SMWI) for neuroimaging." *Magnetic Resonance in Medicine*, 72:337-346. [DOI](https://doi.org/10.1002/mrm.24920) |
+
+### Preprocessing and Artefact Reduction
+
+| Algorithm | Description | Reference |
+|-----------|-------------|-----------|
+| **Bias correction** | Receive-field homogeneity correction (`makehomogeneous`) | Eckstein, K., Trattnig, S., Robinson, S.D. (2019). "A Simple Homogeneity Correction for Neuroimaging at 7T." *Proc. ISMRM 27th Annual Meeting*. |
+| **MP-PCA denoising** | Marchenko–Pastur PCA denoising across echoes or volumes (`mppca_denoise`) | Veraart, J., et al. (2016). "Denoising of diffusion MRI using random matrix theory." *NeuroImage*, 142:394-406. [DOI](https://doi.org/10.1016/j.neuroimage.2016.08.016) |
+| **Gibbs unringing** | Local subvoxel-shift Gibbs-ringing removal (`gibbs_unring`) | Kellner, E., et al. (2016). "Gibbs-ringing artifact removal based on local subvoxel-shifts." *Magnetic Resonance in Medicine*, 76(5):1574-1581. [DOI](https://doi.org/10.1002/mrm.26054) |
+| **Anisotropic diffusion** | Edge-preserving gradient anisotropic diffusion smoothing (`gradient_anisotropic_diffusion`) | Perona, P., Malik, J. (1990). "Scale-space and edge detection using anisotropic diffusion." *IEEE Transactions on Pattern Analysis and Machine Intelligence*, 12(7):629-639. [DOI](https://doi.org/10.1109/34.56205) |
+| **Motion correction** | Rigid co-registration of a series in the complex domain, with a B0 direction per volume (`motion`) | — |
+| **Two-pass** | Reconstructs on a hole-preserving and a filled mask and combines them, keeping streaking from strong sources out of the brain | Stewart, A.W., et al. (2022). "QSMxT: Robust masking and artifact reduction for quantitative susceptibility mapping." *Magnetic Resonance in Medicine*, 87(3):1289-1300. [DOI](https://doi.org/10.1002/mrm.29048) |
+
 ### Utilities
 
 | Algorithm | Description | Reference |
 |-----------|-------------|-----------|
-| **Otsu thresholding** | Automatic bimodal threshold | Otsu, N. (1979). "A Threshold Selection Method from Gray-Level Histograms." *IEEE Transactions on Systems, Man, and Cybernetics*, 9(1):62-66. [DOI](https://doi.org/10.1109/TSMC.1979.4310076) |
-| **Frangi filter** | Multi-scale 3D vesselness | Frangi, A.F., et al. (1998). "Multiscale vessel enhancement filtering." *MICCAI'98*, LNCS vol 1496, 130-137. [DOI](https://doi.org/10.1007/BFb0056195) |
-| **Surface curvature** | Discrete differential-geometry operators on triangle meshes | Meyer, M., et al. (2003). "Discrete Differential-Geometry Operators for Triangulated 2-Manifolds." *Visualization and Mathematics III*, 35-57. [DOI](https://doi.org/10.1007/978-3-662-05105-4_2) |
+| **Frangi filter** | Multi-scale 3D vesselness (`frangi_filter_3d`) | Frangi, A.F., et al. (1998). "Multiscale vessel enhancement filtering." *MICCAI'98*, LNCS vol 1496, 130-137. [DOI](https://doi.org/10.1007/BFb0056195) |
+| **Vasculature mask** | Bottom-hat filtering then Frangi vesselness, for QSMART (`generate_vasculature_mask`) | Yaghmaie, N., Syeda, W., et al. (2021). *NeuroImage*, 231:117701. [DOI](https://doi.org/10.1016/j.neuroimage.2020.117701) |
+| **Surface curvature** | Discrete differential-geometry operators on triangle meshes (`calculate_gaussian_curvature`) | Meyer, M., et al. (2003). "Discrete Differential-Geometry Operators for Triangulated 2-Manifolds." *Visualization and Mathematics III*, 35-57. [DOI](https://doi.org/10.1007/978-3-662-05105-4_2) |
+| **Rigid registration** | 6-DOF registration by normalised cross-correlation, with the B0 direction of each orientation (`register_rigid`) | — |
+| **Resampling / reorientation** | Affine-derived B0 direction and obliquity, reorientation, and resampling (complex-domain for phase) to an axial or another grid (`geometry`) | — |
 
 ## Reference Implementations
 
@@ -263,20 +279,21 @@ This library was developed with reference to the following open-source implement
 
 | Repository | Algorithms | Language |
 |------------|------------|----------|
-| [QSM.jl](https://github.com/kamesy/QSM.jl) | SHARP, V-SHARP, SMV, PDF, iSMV, LBV, Laplacian unwrap, TKD, TSVD, Tikhonov, TV, RTS, NLTV | Julia |
+| [QSM.jl](https://github.com/kamesy/QSM.jl) | SHARP, V-SHARP, SMV, PDF, iSMV, LBV, Laplacian unwrap, TKD, TSVD, Tikhonov, TV, RTS, NLTV, multi-echo linear fit | Julia |
 | [FANSI-toolbox](https://gitlab.com/cmilovic/FANSI-toolbox) | NDI, FANSI (nlTV/nlTGV), L1-QSM, WH-QSM | MATLAB |
 | [HD-QSM](https://github.com/mglambert/HD-QSM) | HD-QSM | MATLAB |
 | [QSM_AMP_PE](https://github.com/EmoryCN2L/QSM_AMP_PE) | AMP-PE | MATLAB |
 | [qsm_heidi](https://gitlab.com/R01NS114227/qsm_heidi) | LSQR, HEIDI | MATLAB |
 | [QuantitativeSusceptibilityMappingTGV.jl](https://github.com/korbinian90/QuantitativeSusceptibilityMappingTGV.jl) | TGV | Julia |
-| [MriResearchTools.jl](https://github.com/korbinian90/MriResearchTools.jl) | ROMEO, MCPC-3D-S, R2*/T2*, bias correction | Julia |
+| [MriResearchTools.jl](https://github.com/korbinian90/MriResearchTools.jl) | ROMEO, MCPC-3D-S, B0 weighted average, R2*/T2*, bias correction, hole filling | Julia |
 | [MEDI_toolbox](https://github.com/huawu02/MEDI_toolbox) | MEDI | MATLAB |
 | [FSL-BET2](https://github.com/Bostrix/FSL-BET2) | BET | C++ |
 | [Rodent-Skull-Stripping](https://github.com/VitoLin21/Rodent-Skull-Stripping) | RS2-Net | Python |
-| [QSMART](https://github.com/wtsyeda/QSMART) | SDF, QSMART pipeline, Frangi filter, curvature | MATLAB |
+| [QSMART](https://github.com/wtsyeda/QSMART) | SDF, QSMART pipeline, Frangi filter, vasculature mask, curvature | MATLAB |
 | [CLEARSWI.jl](https://github.com/korbinian90/CLEARSWI.jl) | CLEAR-SWI | Julia |
 | [SEPIA](https://github.com/kschan0214/sepia) | SMWI | MATLAB |
 | [QSM-CI](https://github.com/QSMxT/QSM-CI) | Signal-gated mask erosion | Python |
+| [ITK](https://github.com/InsightSoftwareConsortium/ITK) | Gradient anisotropic diffusion | C++ |
 | [chi-separation](https://github.com/SNU-LIST/chi-separation) | Chi-separation | MATLAB |
 
 ## License
