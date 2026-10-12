@@ -25,9 +25,6 @@ impl Default for PhaseOffsetParams {
     }
 }
 
-/// Backward-compatible alias.
-pub type Mcpc3dsParams = PhaseOffsetParams;
-
 /// Parameters for multi-echo linear fit.
 #[cfg_attr(feature = "introspection", derive(serde::Serialize))]
 #[derive(Clone, Debug, PartialEq)]
