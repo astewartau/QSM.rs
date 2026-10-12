@@ -18,7 +18,9 @@
 //! the affine's column norms, as MATLAB computes it).
 
 use qsm_core::io::{read_nifti_file, save_nifti_to_file};
-use qsm_core::pipeline::{run_field_mapping, FieldMappingConfig, ScanMetadata, UnwrappingAlgorithm};
+use qsm_core::pipeline::{
+    run_field_mapping, B0EstimationMethod, FieldMappingConfig, ScanMetadata, UnwrappingAlgorithm,
+};
 use qsm_core::unwrap::{laplacian_unwrap, LaplacianSolver};
 use qsm_core::utils::B0WeightType;
 use qsm_core::Grid;
@@ -77,14 +79,14 @@ fn main() {
         save(&format!("echo-{}_unwrapped", e + 1), &laplacian_unwrap(&input, &mask, &grid, solver));
     }
     if let Some(tes) = tes.filter(|_| echoes.len() > 1) {
-        let b0_weight_type = match B0WeightType::from_str(&weighting) {
+        let weighting = match B0WeightType::from_str(&weighting) {
             B0WeightType::AssumedDecay { .. } => B0WeightType::AssumedDecay { t2star_s: t2star },
             w => w,
         };
         let config = FieldMappingConfig {
             unwrapping_algorithm: UnwrappingAlgorithm::Laplacian,
             laplacian_solver: solver,
-            b0_weight_type,
+            b0_estimation: B0EstimationMethod::WeightedAvg { weighting },
             ..Default::default()
         };
         let meta = ScanMetadata {
@@ -98,7 +100,7 @@ fn main() {
         let phases: Vec<&[f64]> = echoes.iter().map(|n| n.data.as_slice()).collect();
         let field = run_field_mapping(&phases, None, &mask, &meta, &config, &mut |_, _| {})
             .expect("field mapping");
-        println!("B0 weighting {b0_weight_type:?}");
+        println!("B0 weighting {weighting:?}");
         save("fieldmap-ppm", &field.b0_field_ppm);
     }
     println!("grid {:?} voxel size {:?} solver {solver:?}: {:.1} s", grid.dims, grid.voxel_size, t.elapsed().as_secs_f64());

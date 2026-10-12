@@ -3680,6 +3680,35 @@ fn test_robust_echo_combination() {
         multi_echo_robust_fit(&uw_clean, &data.mag_echoes, &data.echo_times, &data.mask, &params)
     );
 
+    // --- 0: the same fit, selected through the pipeline config ------------------------------
+    // `B0EstimationMethod::RobustFit` in `run_field_mapping` must be exactly this function on
+    // exactly these echoes (offset removal at the default sigma, multi-echo ROMEO), and must
+    // hand back the same report.
+    {
+        let meta = pipeline::ScanMetadata {
+            dims,
+            voxel_size: data.voxel_size,
+            echo_times: data.echo_times.clone(),
+            field_strength: data.field_strength,
+            b0_direction: data.b0_dir,
+            slice_geometry: None,
+        };
+        let config = pipeline::FieldMappingConfig {
+            b0_estimation: pipeline::B0EstimationMethod::RobustFit(params.clone()),
+            ..Default::default()
+        };
+        let ph: Vec<&[f64]> = phases_bad.iter().map(|p| p.as_slice()).collect();
+        let mg: Vec<&[f64]> = mags_bad.iter().map(|m| m.as_slice()).collect();
+        let via_config = pipeline::run_field_mapping(&ph, Some(&mg), &data.mask, &meta, &config, &mut |_, _| {})
+            .expect("run_field_mapping(RobustFit) failed");
+        let want = pipeline::hz_to_ppm(&field_to_hz(&robust.fit.field), data.field_strength);
+        assert_eq!(via_config.b0_field_ppm, want, "run_field_mapping(RobustFit) is not the robust fit");
+        let report = via_config.robust_fit.expect("run_field_mapping(RobustFit) returned no report");
+        assert_eq!(report.quality.flagged, robust.quality.flagged);
+        assert_eq!(report.robust_weights, robust.robust_weights);
+        println!("[INFO] run_field_mapping(RobustFit) reproduces the library fit bit for bit");
+    }
+
     // --- 1: detection --------------------------------------------------------------------------
     let q = &robust.quality;
     let best = q.outlier_score.iter().copied().fold(f64::INFINITY, f64::min);

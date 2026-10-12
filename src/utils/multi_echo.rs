@@ -30,7 +30,7 @@ pub type Mcpc3dsParams = PhaseOffsetParams;
 
 /// Parameters for multi-echo linear fit.
 #[cfg_attr(feature = "introspection", derive(serde::Serialize))]
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct LinearFitParams {
     /// Estimate and remove constant phase offset
     pub estimate_offset: bool,
@@ -1242,7 +1242,7 @@ impl RobustLoss {
 
 /// Parameters for [`multi_echo_robust_fit`].
 #[cfg_attr(feature = "introspection", derive(serde::Serialize))]
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct RobustFitParams {
     /// Which robust loss turns a residual into a weight.
     pub loss: RobustLoss,
@@ -1256,6 +1256,10 @@ pub struct RobustFitParams {
     /// IRLS reweighting passes. Three is plenty: the weights are a bounded function of a
     /// residual that is already close after the first pass, and more iterations mostly
     /// re-confirm the same decision.
+    ///
+    /// `0` is allowed and means *report only*: every robust weight stays at 1, so the field map
+    /// is exactly [`multi_echo_linear_fit`]'s, and [`EchoQuality`] (including
+    /// [`EchoQuality::flagged`], which reads the final fit's residuals) is still computed.
     pub iterations: usize,
     /// Robust weight below which an echo counts as *downweighted* at a voxel, for
     /// [`EchoQuality::downweighted_fraction`]. Purely a reporting threshold — it changes no
@@ -1284,6 +1288,47 @@ pub struct RobustFitParams {
     pub estimate_offset: bool,
     /// Percentile for the returned reliability mask, as in [`multi_echo_linear_fit`].
     pub reliability_threshold_percentile: f64,
+}
+
+impl RobustFitParams {
+    /// Fewest echoes [`multi_echo_robust_fit`] can act on: the model's parameter count plus two,
+    /// so 4 with [`Self::estimate_offset`] and 3 without. Below this it has no residual degrees
+    /// of freedom to judge an echo with and returns the plain fit.
+    pub fn min_echoes(&self) -> usize {
+        if self.estimate_offset { 4 } else { 3 }
+    }
+
+    /// Check every field is in range, naming the first one that is not.
+    ///
+    /// | field | valid |
+    /// |---|---|
+    /// | `tuning` | `None`, or finite and `> 0` |
+    /// | `iterations` | any (`0` = report only) |
+    /// | `downweight_level` | `0 < level ≤ 1` |
+    /// | `flag_ratio` | `≥ 1` (`+∞` never flags) |
+    /// | `reliability_threshold_percentile` | `0 ≤ p ≤ 100` (`0` disables) |
+    pub fn validate(&self) -> Result<(), String> {
+        if let Some(t) = self.tuning {
+            if !(t.is_finite() && t > 0.0) {
+                return Err(format!("robust fit tuning must be finite and positive, got {t}"));
+            }
+        }
+        if self.downweight_level.is_nan() || self.downweight_level <= 0.0 || self.downweight_level > 1.0 {
+            return Err(format!(
+                "robust fit downweight level must be in (0, 1], got {}", self.downweight_level
+            ));
+        }
+        if self.flag_ratio.is_nan() || self.flag_ratio < 1.0 {
+            return Err(format!("robust fit flag ratio must be at least 1, got {}", self.flag_ratio));
+        }
+        if !(0.0..=100.0).contains(&self.reliability_threshold_percentile) {
+            return Err(format!(
+                "robust fit reliability threshold percentile must be in [0, 100], got {}",
+                self.reliability_threshold_percentile
+            ));
+        }
+        Ok(())
+    }
 }
 
 impl Default for RobustFitParams {
@@ -1530,7 +1575,7 @@ pub fn multi_echo_robust_fit(
 
     // Not enough echoes to have an opinion: fall back to the ordinary fit rather than
     // manufacturing weights out of a fit with no residual degrees of freedom to spare.
-    if n_echoes < n_params + 2 {
+    if n_echoes < params.min_echoes() {
         let fit = multi_echo_linear_fit(
             unwrapped_phases,
             mags,
