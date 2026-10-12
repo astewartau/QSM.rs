@@ -88,7 +88,7 @@ pub use lbv::{lbv, LbvParams};
 pub use sdf::{sdf, sdf_curvature, sdf_simple, SdfParams};
 pub use iharperella::{
     harperella, iharperella, iharperella_with_weights,
-    HarperellaParams, IharperellaParams,
+    HarperellaParams,
 };
 #[cfg(feature = "onnx")]
 pub use bfrnet::bfrnet;
