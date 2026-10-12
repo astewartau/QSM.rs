@@ -192,7 +192,7 @@ fn slicewise_beats_unaided_3d_on_slices_with_phase_offsets() {
     );
 }
 
-/// Bounds the recommendation. The module docs and the README both say to prefer ROMEO or best
+/// Bounds the recommendation. The module docs say to prefer ROMEO or best
 /// path over the Laplacian for slice-wise unwrapping, and quote 0.81 against 0.983 for it. That
 /// figure had nothing asserting it, so a regression would have left a stale recommendation
 /// rather than a failing test — the Laplacian could have gone to 0.3 and the docs would still
@@ -225,7 +225,7 @@ fn slicewise_laplacian_trails_the_region_growers_but_is_not_broken() {
     assert!(
         laplacian < romeo - 0.1,
         "slice-wise Laplacian ({laplacian:.4}) no longer trails ROMEO ({romeo:.4}) — if that is \
-         real, the \"prefer ROMEO or best path\" guidance in the module docs and README is stale"
+         real, the \"prefer ROMEO or best path\" guidance in the module docs is stale"
     );
     // This bound was set by measuring 0.8140 and backing off, and no mutation has been found
     // that trips it: removing the Laplacian's re-anchoring leaves it passing (the consistency
@@ -400,7 +400,7 @@ fn the_consistency_pass_fixes_the_fit_and_slice_wise_fixes_the_phase() {
     assert!(
         with_slicewise < pass_only / 2,
         "slice-wise left {with_slicewise} in-plane 2pi jumps against the pass alone's \
-         {pass_only}; if that gap has closed, the module docs and README overstate what the \
+         {pass_only}; if that gap has closed, the module docs overstate what the \
          slice-wise mode is for"
     );
 }
