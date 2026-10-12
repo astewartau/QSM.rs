@@ -16,8 +16,7 @@
 //! (the [`SignalErosionParams::default`]). Distances and smoothing scales are in **voxels**, as in
 //! the reference implementation.
 
-use crate::utils::bias_correction::fill_holes;
-use crate::utils::mask::erode_mask;
+use crate::utils::morphology::{erode_mask, fill_holes};
 use crate::Grid;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;

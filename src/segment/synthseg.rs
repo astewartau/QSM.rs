@@ -45,7 +45,7 @@ use crate::segment::labels::SynthSegVersion;
 #[cfg(feature = "onnx")]
 use crate::utils::connected::largest_component;
 use crate::utils::resample::resize;
-use crate::utils::signal_erosion::gaussian_filter_anisotropic;
+use crate::utils::morphology::signal_erosion::gaussian_filter_anisotropic;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 

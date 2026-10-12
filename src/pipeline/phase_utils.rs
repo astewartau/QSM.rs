@@ -100,9 +100,6 @@ pub fn rss_combine(magnitudes: &[&[f64]]) -> Vec<f64> {
     combined
 }
 
-// Re-export mask operations from canonical location
-pub use crate::utils::mask::{erode_mask, dilate_mask};
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -190,26 +187,5 @@ mod tests {
         let e0 = vec![1.0; 512];
         let e1 = vec![1.0; 216];
         rss_combine(&[&e0, &e1]);
-    }
-
-    #[test]
-    fn test_erode_mask_cube() {
-        let mask = vec![1u8; 27]; // 3x3x3
-        let grid = crate::Grid::new(3, 3, 3, 1.0, 1.0, 1.0);
-        let result = erode_mask(&mask, &grid, 1);
-        let center = 1 + 3 + 9;
-        assert_eq!(result[center], 1);
-        let total: u32 = result.iter().map(|&v| v as u32).sum();
-        assert_eq!(total, 1);
-    }
-
-    #[test]
-    fn test_dilate_mask_single() {
-        let mut mask = vec![0u8; 27];
-        mask[1 + 3 + 9] = 1; // center
-        let grid = crate::Grid::new(3, 3, 3, 1.0, 1.0, 1.0);
-        let result = dilate_mask(&mask, &grid, 1);
-        let total: u32 = result.iter().map(|&v| v as u32).sum();
-        assert_eq!(total, 7); // center + 6 neighbors
     }
 }
