@@ -269,9 +269,13 @@ fn field_mapping_with_offset(
 ///
 ///   Then `B0 = Σ w (φ/TE) / Σ w` with the variant's `weighting`.
 /// * [`B0EstimationMethod::LinearFit`]: the magnitude-weighted fit of phase against TE with
-///   the variant's [`LinearFitParams`](crate::utils::LinearFitParams), on the per-echo unwrapped
-///   phases as they come out of the unwrapper. This is what this path computed unconditionally before it honoured
-///   `b0_estimation` (bit-identical for ROMEO; for Laplacian it now sees the masked phase).
+///   the variant's [`LinearFitParams`](crate::utils::LinearFitParams). With ROMEO it runs on the
+///   per-echo unwrapped phases as they come out of the unwrapper, which is what this path
+///   computed unconditionally before it honoured `b0_estimation` (bit-identical). With Laplacian
+///   the per-echo constants are aligned first, as for the weighted mean: a constant `cₑ` that
+///   differs between echoes is not linear in TE, so the fit turns it into a slope error, and
+///   because the fit is magnitude-weighted that error varies over the brain rather than being a
+///   constant that background removal would take out.
 ///   With an intercept and two echoes the fit is the echo difference `(φ₂ − φ₁)/(TE₂ − TE₁)`,
 ///   which discards the absolute phase, so it is only worth choosing when the echoes carry a
 ///   phase offset that has not been removed.
@@ -332,6 +336,11 @@ fn field_mapping_direct(
             hz_to_ppm(&b0_hz, metadata.field_strength)
         }
         B0EstimationMethod::LinearFit(params) => {
+            // Laplacian only: ROMEO's whole-turn alignment would change what this path has
+            // always computed for it.
+            if is_laplacian {
+                align_per_echo_constants(&mut unwrapped, tes, mask, config.unwrapping_algorithm);
+            }
             let uw_refs: Vec<&[f64]> = unwrapped.iter().map(|u| u.as_slice()).collect();
             let fit = crate::utils::multi_echo_linear_fit(
                 &uw_refs, mag_slices, tes, mask,
@@ -432,10 +441,25 @@ fn field_mapping_single_echo(
     progress: &mut dyn FnMut(usize, usize),
 ) -> Result<FieldMappingResult, PipelineError> {
     progress(1, 4);
-    let unwrapped = unwrap_single(
+    // Laplacian: as on the multi-echo path, the phase is zeroed outside the mask first (a global
+    // Poisson solve otherwise carries the noise there into the brain) and the masked mean the
+    // unwrap leaves undetermined is removed, so one echo gives the same field as each echo of a
+    // series does.
+    let is_laplacian = config.unwrapping_algorithm == UnwrappingAlgorithm::Laplacian;
+    let masked;
+    let phase: &[f64] = if is_laplacian {
+        masked = mask_phase(phase, mask);
+        &masked
+    } else {
+        phase
+    };
+    let mut unwrapped = unwrap_single(
         phase, mag, mask, config, nx, ny, nz, vsx, vsy, vsz,
         None, metadata.echo_times[0], 0.0,
     );
+    if is_laplacian {
+        remove_masked_mean(&mut unwrapped, mask);
+    }
 
     // field = unwrapped / TE → rad/s
     let te = metadata.echo_times[0];
@@ -843,6 +867,64 @@ mod tests {
         assert!(max_abs_diff(ad, &ukb, &mask) < 1e-12);
     }
 
+    /// Laplacian + linear fit aligns the per-echo constants (as the weighted mean does), and a
+    /// single Laplacian echo is masked and demeaned like each echo of a series.
+    #[test]
+    fn laplacian_linear_fit_and_single_echo_align_like_the_weighted_mean() {
+        let tes = [0.004, 0.009, 0.014];
+        let meta = meta_n(&tes);
+        let (mut ph, mg) = echoes(&tes, omega_cos, 0.4);
+        // A sphere mask with noise outside it, and the FFT solver, whose unwraps are not
+        // zero-mean over the mask: the cases where alignment and masking matter.
+        let c = N as f64 / 2.0;
+        let mask: Vec<u8> = (0..N * N * N).map(|idx| {
+            let d = |x: usize| x as f64 + 0.5 - c;
+            (d(idx % N).powi(2) + d((idx / N) % N).powi(2) + d(idx / (N * N)).powi(2) < (c - 2.0).powi(2)) as u8
+        }).collect();
+        let mut st = 5u64;
+        for p in ph.iter_mut() {
+            for (v, &m) in p.iter_mut().zip(&mask) {
+                if m == 0 { *v = noise(&mut st) * PI; }
+            }
+        }
+        let grid = crate::Grid::new(N, N, N, 1.0, 1.0, 1.0);
+        let solver = LaplacianSolver::Fft { pad: [8, 8, 6] };
+        let uw: Vec<Vec<f64>> = ph.iter().map(|p| {
+            let masked = mask_phase(p, &mask);
+            let mut u = crate::unwrap::laplacian_unwrap(&masked, &mask, &grid, solver);
+            remove_masked_mean(&mut u, &mask);
+            u
+        }).collect();
+
+        for estimate_offset in [true, false] {
+            let p = LinearFitParams { estimate_offset, ..Default::default() };
+            let cfg = FieldMappingConfig {
+                unwrapping_algorithm: UnwrappingAlgorithm::Laplacian,
+                b0_estimation: B0EstimationMethod::LinearFit(p.clone()),
+                laplacian_solver: solver,
+                ..Default::default()
+            };
+            let got = run_field_mapping(&refs(&ph), Some(&refs(&mg)), &mask, &meta, &cfg, &mut |_, _| {})
+                .unwrap().b0_field_ppm;
+            let fit = crate::utils::multi_echo_linear_fit(
+                &refs(&uw), &refs(&mg), &tes, &mask, p.estimate_offset, p.reliability_threshold_percentile);
+            let want = rads_to_ppm(&fit.field, 3.0);
+            let d = max_abs_diff(&got, &want, &mask);
+            assert!(d < 1e-12, "estimate_offset {estimate_offset}: differs from the aligned fit by {d}");
+        }
+
+        let one = meta_n(&tes[..1]);
+        let cfg = FieldMappingConfig {
+            unwrapping_algorithm: UnwrappingAlgorithm::Laplacian,
+            laplacian_solver: solver,
+            ..Default::default()
+        };
+        let got = run_field_mapping(&[&ph[0]], None, &mask, &one, &cfg, &mut |_, _| {}).unwrap().b0_field_ppm;
+        let want: Vec<f64> = uw[0].iter().map(|&u| u / tes[0]).collect();
+        let d = max_abs_diff(&got, &rads_to_ppm(&want, 3.0), &mask);
+        assert!(d < 1e-12, "single echo differs from the masked, demeaned unwrap by {d}");
+    }
+
     #[test]
     fn laplacian_direct_recovers_wrapped_field() {
         // Noise-free: every weighting recovers the true field up to its masked mean.
@@ -950,9 +1032,9 @@ mod tests {
 
     #[test]
     fn direct_linear_fit_is_the_fit_on_the_unwrapped_echoes() {
-        // `b0_estimation = LinearFit` on the direct path is the fit this path always ran:
-        // per-echo unwrap (Laplacian: of the masked phase), then multi_echo_linear_fit with
-        // an intercept (the variant carries no weighting).
+        // `b0_estimation = LinearFit` on the Laplacian direct path: per-echo unwrap of the
+        // masked phase, each echo's masked mean removed (the per-echo alignment), then
+        // multi_echo_linear_fit with an intercept (the variant carries no weighting).
         let tes = [0.004, 0.009, 0.014];
         let meta = meta_n(&tes);
         let (ph, mg) = echoes(&tes, omega_cos, 0.4);
@@ -966,7 +1048,11 @@ mod tests {
         let got = run_field_mapping(&refs(&ph), Some(&refs(&mg)), &mask, &meta, &cfg, &mut |_, _| {})
             .unwrap().b0_field_ppm;
         let uw: Vec<Vec<f64>> = ph.iter()
-            .map(|p| crate::unwrap::laplacian_unwrap(&mask_phase(p, &mask), &mask, &grid, LaplacianSolver::Dct))
+            .map(|p| {
+                let mut u = crate::unwrap::laplacian_unwrap(&mask_phase(p, &mask), &mask, &grid, LaplacianSolver::Dct);
+                remove_masked_mean(&mut u, &mask);
+                u
+            })
             .collect();
         let fit = crate::utils::multi_echo_linear_fit(
             &refs(&uw), &refs(&mg), &tes, &mask,
