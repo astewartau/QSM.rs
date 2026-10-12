@@ -21,8 +21,8 @@ use super::config::*;
 ///   inner dipole inversion algorithm is selected by `inversion_config.qsmart.inversion` and
 ///   tuned via the matching per-algorithm field on this config. With the default iLSQR, the
 ///   inversion is STI Suite's [`ilsqr`](fn@crate::inversion::ilsqr) with QSMART's arguments
-///   (`qsmart.ilsqr_max_iter`, `qsmart.ilsqr_pad_mm`; the artefact tolerance and precision
-///   come from `inversion_config.ilsqr`).
+///   (`qsmart.ilsqr_max_iter`, `qsmart.ilsqr_pad_mm`; the artefact tolerance comes from
+///   `inversion_config.ilsqr`).
 /// * `reference` - QSM referencing method
 /// * `progress` - Progress callback (current_step, total_steps)
 ///

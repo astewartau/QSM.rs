@@ -3,7 +3,7 @@
 //! Provides 3D FFT/IFFT operations compatible with NumPy's FFT conventions.
 //! Uses Fortran (column-major) order indexing to match NIfTI convention.
 
-use num_complex::{Complex, Complex32, Complex64};
+use num_complex::{Complex32, Complex64};
 use rustfft::{Fft, FftPlanner, FftDirection};
 use std::f64::consts::PI;
 use std::sync::Arc;
@@ -16,26 +16,25 @@ use rayon::prelude::*;
 /// Safety: caller must guarantee non-overlapping access patterns.
 #[cfg(feature = "parallel")]
 #[derive(Clone, Copy)]
-struct SendPtr<T> {
+struct SendPtr {
     ptr: usize,
     len: usize,
-    _t: std::marker::PhantomData<T>,
 }
 #[cfg(feature = "parallel")]
-unsafe impl<T> Send for SendPtr<T> {}
+unsafe impl Send for SendPtr {}
 #[cfg(feature = "parallel")]
-unsafe impl<T> Sync for SendPtr<T> {}
+unsafe impl Sync for SendPtr {}
 
 #[cfg(feature = "parallel")]
 #[allow(clippy::mut_from_ref)]
-impl<T> SendPtr<T> {
-    fn new(data: &mut [Complex<T>]) -> Self {
-        Self { ptr: data.as_mut_ptr() as usize, len: data.len(), _t: std::marker::PhantomData }
+impl SendPtr {
+    fn new(data: &mut [Complex64]) -> Self {
+        Self { ptr: data.as_mut_ptr() as usize, len: data.len() }
     }
     // SAFETY: Caller must guarantee non-overlapping access patterns across threads.
     // Each (k, i) or (j, i) pair accesses a unique strided column of the 3D array.
-    unsafe fn as_slice(&self) -> &mut [Complex<T>] {
-        std::slice::from_raw_parts_mut(self.ptr as *mut Complex<T>, self.len)
+    unsafe fn as_slice(&self) -> &mut [Complex64] {
+        std::slice::from_raw_parts_mut(self.ptr as *mut Complex64, self.len)
     }
 }
 
@@ -44,27 +43,21 @@ pub type Box3 = [std::ops::Range<usize>; 3];
 
 /// Produces the x line of a transform's input that starts at linear index `l` (the slice has
 /// length nx), instead of reading it from the data buffer.
-pub type RowLoader<'a, T = f64> = &'a (dyn Fn(usize, &mut [Complex<T>]) + Sync);
+pub type RowLoader<'a> = &'a (dyn Fn(usize, &mut [Complex64]) + Sync);
 
 /// Pruning and fused elementwise steps for [`Fft3dWorkspace::fft3d_with`] and
 /// [`Fft3dWorkspace::ifft3d_with`]. The default is the plain transform.
-#[derive(Clone, Copy)]
-pub struct FftOpts<'a, T = f64> {
+#[derive(Clone, Copy, Default)]
+pub struct FftOpts<'a> {
     /// The input is treated as zero outside this box (whatever the buffer holds there).
     pub support: Option<&'a Box3>,
     /// Only this box of the output is computed; the buffer is unspecified (finite or not)
     /// elsewhere.
     pub needed: Option<&'a Box3>,
     /// Input lines come from this instead of the buffer (fused into the first pass).
-    pub load: Option<RowLoader<'a, T>>,
+    pub load: Option<RowLoader<'a>>,
     /// The output is multiplied elementwise by this real array (fused into the last pass).
-    pub post: Option<&'a [T]>,
-}
-
-impl<T> Default for FftOpts<'_, T> {
-    fn default() -> Self {
-        Self { support: None, needed: None, load: None, post: None }
-    }
+    pub post: Option<&'a [f64]>,
 }
 
 /// FFT workspace that caches plans and scratch buffers for reuse
@@ -452,44 +445,6 @@ impl Fft3dWorkspaceF32 {
         }
     }
 
-    /// Single-precision [`Fft3dWorkspace::fft3d_with`].
-    pub fn fft3d_with(&mut self, data: &mut [Complex32], opts: &FftOpts<f32>) {
-        self.transform_with(data, false, opts);
-    }
-
-    /// Single-precision [`Fft3dWorkspace::ifft3d_with`].
-    pub fn ifft3d_with(&mut self, data: &mut [Complex32], opts: &FftOpts<f32>) {
-        self.transform_with(data, true, opts);
-    }
-
-    fn transform_with(&mut self, data: &mut [Complex32], inverse: bool, opts: &FftOpts<f32>) {
-        let full: Box3 = [0..self.nx, 0..self.ny, 0..self.nz];
-        #[cfg(feature = "parallel")]
-        {
-            let (px, py, pz) = if inverse {
-                (&self.ifft_x, &self.ifft_y, &self.ifft_z)
-            } else {
-                (&self.fft_x, &self.fft_y, &self.fft_z)
-            };
-            let pass = Pass {
-                scale: inverse.then_some(self.n_total as f32),
-                post: opts.post,
-                load: opts.load,
-                support: opts.support.unwrap_or(&full).clone(),
-                needed: opts.needed.unwrap_or(&full).clone(),
-            };
-            transform_3d_par(data, self.nx, self.ny, self.nz, px, py, pz, &pass);
-        }
-        #[cfg(not(feature = "parallel"))]
-        {
-            seq_prepare(data, self.nx, self.ny, opts.load, opts.support.filter(|b| **b != full));
-            if inverse { self.ifft3d(data) } else { self.fft3d(data) }
-            if let Some(post) = opts.post {
-                data.iter_mut().zip(post).for_each(|(z, &p)| *z *= p);
-            }
-        }
-    }
-
     /// Apply dipole convolution in-place: out = real(ifft(D * fft(x)))
     #[inline]
     pub fn apply_dipole_inplace(&mut self, x: &[f32], d_kernel: &[f32], out: &mut [f32], complex_buf: &mut [Complex32]) {
@@ -525,7 +480,7 @@ pub fn fft3d(data: &mut [Complex64], nx: usize, ny: usize, nz: usize) {
 /// Sequential builds' version of the first-pass work of [`transform_3d_par`]: load the rows
 /// and zero the input outside the support.
 #[cfg(not(feature = "parallel"))]
-fn seq_prepare<T: rustfft::FftNum>(data: &mut [Complex<T>], nx: usize, ny: usize, load: Option<RowLoader<T>>, support: Option<&Box3>) {
+fn seq_prepare(data: &mut [Complex64], nx: usize, ny: usize, load: Option<RowLoader>, support: Option<&Box3>) {
     if let Some(load) = load {
         for (r, row) in data.chunks_mut(nx).enumerate() {
             load(r * nx, row);
@@ -535,7 +490,7 @@ fn seq_prepare<T: rustfft::FftNum>(data: &mut [Complex<T>], nx: usize, ny: usize
         for (l, z) in data.iter_mut().enumerate() {
             let (i, j, k) = (l % nx, (l / nx) % ny, l / (nx * ny));
             if !(s[0].contains(&i) && s[1].contains(&j) && s[2].contains(&k)) {
-                *z = Complex::new(T::zero(), T::zero());
+                *z = Complex64::new(0.0, 0.0);
             }
         }
     }
@@ -549,13 +504,13 @@ const COL_BLOCK: usize = 16;
 
 /// What a [`transform_3d_par`] call computes besides the three passes of 1-D transforms.
 #[cfg(feature = "parallel")]
-struct Pass<'a, T> {
+struct Pass<'a> {
     /// divide by this in the last pass's write-back (the inverse transform's N)
-    scale: Option<T>,
+    scale: Option<f64>,
     /// then multiply by this real array
-    post: Option<&'a [T]>,
+    post: Option<&'a [f64]>,
     /// x lines come from this instead of the buffer
-    load: Option<RowLoader<'a, T>>,
+    load: Option<RowLoader<'a>>,
     /// the input is zero outside this box
     support: Box3,
     /// only this box of the output is needed
@@ -578,23 +533,23 @@ struct Pass<'a, T> {
 /// input or not needed on output. `scale` and `post` are applied in the z pass's write-back.
 #[cfg(feature = "parallel")]
 #[allow(clippy::too_many_arguments)]
-fn transform_3d_par<T: rustfft::FftNum>(
-    data: &mut [Complex<T>],
+fn transform_3d_par(
+    data: &mut [Complex64],
     nx: usize, ny: usize, nz: usize,
-    plan_x: &Arc<dyn Fft<T>>,
-    plan_y: &Arc<dyn Fft<T>>,
-    plan_z: &Arc<dyn Fft<T>>,
-    pass: &Pass<T>,
+    plan_x: &Arc<dyn Fft<f64>>,
+    plan_y: &Arc<dyn Fft<f64>>,
+    plan_z: &Arc<dyn Fft<f64>>,
+    pass: &Pass,
 ) {
     let nxy = nx * ny;
-    let zero = Complex::new(T::zero(), T::zero());
+    let zero = Complex64::new(0.0, 0.0);
     let (s, r) = (&pass.support, &pass.needed);
 
     // x-axis: contiguous rows of length nx, ~64 KiB of rows per task.
     {
         let slen = plan_x.get_inplace_scratch_len();
         let s0_full = s[0].len() == nx;
-        let prep = |l: usize, row: &mut [Complex<T>]| {
+        let prep = |l: usize, row: &mut [Complex64]| {
             if let Some(load) = pass.load {
                 load(l, row);
             }
