@@ -42,9 +42,19 @@
 //! `c = 2π·γ·B0·TE` at the end. Their α are therefore α_ppm · c, and the same numbers
 //! regularise differently at every TE and B0. Running on `∇²φ / c` with `α / c` is the same
 //! problem: every iterate is the rad-domain iterate divided by `c`. The ppm defaults below are
-//! the previous rad-domain defaults divided by [`ALPHA_REFERENCE_RAD_PER_PPM`] (3 T, 20 ms),
+//! the previous rad-domain defaults divided by [`ALPHA_REFERENCE_RAD_PER_PPM`] (7 T, 4 ms),
 //! so at that reference point the output is unchanged. To convert a rad-domain α tuned at
 //! some TE/B0, divide it by [`rad_per_ppm`]`(te, b0)`.
+//!
+//! The reference is the acquisition of the 7 T qsm-forward phantom that CI scores TGV on,
+//! the only data the rad-domain defaults were evaluated on: `TgvParams::default()`'s α were
+//! chosen there and `get_default_alpha(2)` was scored there. A sweep of a common factor `s`
+//! on the ppm α (`s` = 0.5 … 4) puts `s` = 1 at this reference inside the good range for
+//! every case tried. On the phantom (true field, ROMEO field map, one wrapped echo) the
+//! metrics are flat to slowly improving up to `s` ≈ 2–3. On a 3 T UK Biobank local field
+//! (TE 15.8 ms, compared with STI Suite iLSQR) this α reproduces iLSQR's susceptibility
+//! spread (SD 0.0291 vs 0.0293 ppm). The 3 T / 20 ms reference first used (c ≈ 16.05, α
+//! 2.14× weaker) was worse on all of them.
 //!
 //! Optimizations:
 //! - Bounding box reduction: only process the region containing the mask
@@ -65,11 +75,12 @@ pub fn rad_per_ppm(te_s: f64, b0_t: f64) -> f64 {
 }
 
 /// Echo time (s) of the reference point at which the ppm α defaults equal the previous
-/// rad-domain defaults. It is the TE that `TgvParams::default()` used before α moved to ppm.
-pub const ALPHA_REFERENCE_TE_S: f64 = 0.020;
+/// rad-domain defaults: TE1 of the 7 T qsm-forward phantom the rad-domain defaults were
+/// evaluated on (see the module docs on α units).
+pub const ALPHA_REFERENCE_TE_S: f64 = 0.004;
 /// Field strength (T) of the α reference point. See [`ALPHA_REFERENCE_TE_S`].
-pub const ALPHA_REFERENCE_B0_T: f64 = 3.0;
-/// `rad_per_ppm(ALPHA_REFERENCE_TE_S, ALPHA_REFERENCE_B0_T)` ≈ 16.05: the factor the
+pub const ALPHA_REFERENCE_B0_T: f64 = 7.0;
+/// `rad_per_ppm(ALPHA_REFERENCE_TE_S, ALPHA_REFERENCE_B0_T)` ≈ 7.49: the factor the
 /// rad-domain α defaults are divided by to give the ppm defaults.
 pub const ALPHA_REFERENCE_RAD_PER_PPM: f64 =
     2.0 * std::f64::consts::PI * TGV_GAMMA_MHZ_PER_T * ALPHA_REFERENCE_B0_T * ALPHA_REFERENCE_TE_S;
@@ -129,7 +140,7 @@ impl Default for TgvParams {
         Self {
             // Langkammer et al. TGV-QSM regularisation (the TGV_QSM nipype interface default,
             // alpha0 = 0.0015, alpha1 = 0.0005 in rad units), converted to ppm at the reference
-            // point (3 T, 20 ms): alpha0 ≈ 9.345e-5, alpha1 ≈ 3.115e-5. The rad-unit
+            // point (7 T, 4 ms): alpha0 ≈ 2.002e-4, alpha1 ≈ 6.675e-5. The rad-unit
             // 0.001/0.001 used before that roughly doubled the gradient penalty and visibly
             // over-smoothed the susceptibility map (recovered gradient magnitude ~47% of ground
             // truth on a simulated 7T volume; lowering alpha1 restored contrast, xsim
@@ -147,7 +158,7 @@ impl Default for TgvParams {
 /// Get default `(alpha0, alpha1)` in ppm for a regularization level (1-4).
 ///
 /// The levels are the previous rad-domain table (level 2 = 0.001/0.001) divided by
-/// [`ALPHA_REFERENCE_RAD_PER_PPM`], so level 2 gives α₀ = α₁ ≈ 6.230e-5 ppm.
+/// [`ALPHA_REFERENCE_RAD_PER_PPM`], so level 2 gives α₀ = α₁ ≈ 1.335e-4 ppm.
 pub fn get_default_alpha(regularization: u8) -> (f32, f32) {
     match regularization.clamp(1, 4) {
         1 => (alpha_ppm(0.0005), alpha_ppm(0.0005)),
@@ -1460,9 +1471,9 @@ mod tests {
 
     #[test]
     fn test_default_alpha() {
-        // Level 2 is the previous rad-domain 0.001/0.001 at the reference point (3 T, 20 ms).
+        // Level 2 is the previous rad-domain 0.001/0.001 at the reference point (7 T, 4 ms).
         let c = rad_per_ppm(ALPHA_REFERENCE_TE_S, ALPHA_REFERENCE_B0_T);
-        assert!((c - 16.0516).abs() < 1e-3, "c_ref = {c}");
+        assert!((c - 7.4907).abs() < 1e-3, "c_ref = {c}");
         assert_eq!(c, ALPHA_REFERENCE_RAD_PER_PPM);
         let (a0, a1) = get_default_alpha(2);
         assert!((a0 as f64 * c - 0.001).abs() < 1e-9);
