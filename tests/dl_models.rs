@@ -136,7 +136,7 @@ fn test_dl_r2primenet() {
         }
     }
     let (r2star, _t2star) =
-        qsm_core::r2star::r2star_arlo(&mag_voxel_major, &data.mask, &data.echo_times, &grid);
+        qsm_core::r2star::r2star_arlo(&mag_voxel_major, &data.mask, &data.echo_times, &grid).unwrap();
 
     let t = Instant::now();
     // This phantom is 7 T and R2PRIMEnet's weights are 3 T, so the guard would refuse it. What

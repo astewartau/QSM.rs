@@ -1147,9 +1147,9 @@ impl TgvWorkspace {
 ///
 /// Returns χ in ppm.
 ///
-/// # Panics
-/// If the input length does not match `grid`, or if `WrappedPhase` has a non-positive or
-/// non-finite `te_s` or `b0_t`.
+/// # Errors
+/// If the input or mask length does not match `grid`, or if `WrappedPhase` has a
+/// non-positive or non-finite `te_s` or `b0_t`.
 ///
 /// The reconstruction runs in single precision internally; inputs and
 /// outputs use `f64` to match the rest of the crate's API.
@@ -1160,13 +1160,17 @@ pub fn tgv_qsm(
     params: &TgvParams,
     b0_dir: (f64, f64, f64),
     mut progress: impl FnMut(usize, usize),
-) -> Vec<f64> {
+) -> Result<Vec<f64>, crate::error::InputError> {
+    use crate::error::{check_len, InputError};
     let n_total = grid.n_total();
-    assert_eq!(input.data().len(), n_total, "TGV input length does not match the grid");
-    assert_eq!(mask.len(), n_total, "TGV mask length does not match the grid");
+    check_len("TGV input", input.data().len(), n_total)?;
+    check_len("TGV mask", mask.len(), n_total)?;
     if let TgvInput::WrappedPhase { te_s, b0_t, .. } = input {
-        assert!(te_s.is_finite() && te_s > 0.0, "TGV WrappedPhase needs te_s > 0, got {te_s}");
-        assert!(b0_t.is_finite() && b0_t > 0.0, "TGV WrappedPhase needs b0_t > 0, got {b0_t}");
+        if !(te_s.is_finite() && te_s > 0.0 && b0_t.is_finite() && b0_t > 0.0) {
+            return Err(InputError(format!(
+                "TGV WrappedPhase needs te_s > 0 and b0_t > 0, got TE = {te_s} s, B0 = {b0_t} T"
+            )));
+        }
     }
 
     // The algorithm runs in single precision; convert the f64 boundary inputs.
@@ -1416,7 +1420,7 @@ pub fn tgv_qsm(
     // Insert back into full volume
     insert_subvolume(&mut result, &chi_masked, &bbox, nx, ny, nz);
 
-    result.iter().map(|&v| v as f64).collect()
+    Ok(result.iter().map(|&v| v as f64).collect())
 }
 
 #[cfg(test)]
@@ -1551,7 +1555,7 @@ mod tests {
 
         let grid = crate::Grid::new(n, n, n, 1.0, 1.0, 1.0);
         let input = TgvInput::WrappedPhase { phase: &phase, te_s: 0.02, b0_t: 3.0 };
-        let result = tgv_qsm(input, &mask, &grid, &params, (0.0, 0.0, 1.0), |_, _| {});
+        let result = tgv_qsm(input, &mask, &grid, &params, (0.0, 0.0, 1.0), |_, _| {}).unwrap();
 
         assert_eq!(result.len(), n_total);
 
@@ -1723,7 +1727,7 @@ mod tests {
         let result = tgv_qsm(
             TgvInput::FieldPpm(&phase), &mask, &grid, &params, (0.0, 0.0, 1.0),
             |iter, _total| { progress_iters.borrow_mut().push(iter); }
-        );
+        ).unwrap();
 
         assert_eq!(result.len(), n_total);
 
@@ -1825,7 +1829,7 @@ mod tests {
         let grid = crate::Grid::new(n, n, n, 1.0, 1.0, 1.0);
         let field = test_field(n, 0.1);
         let params = TgvParams { iterations: 300, erosions: 1, tol: 0.0, ..TgvParams::default() };
-        let chi = tgv_qsm(TgvInput::FieldPpm(&field), &mask, &grid, &params, (0.0, 0.0, 1.0), |_, _| {});
+        let chi = tgv_qsm(TgvInput::FieldPpm(&field), &mask, &grid, &params, (0.0, 0.0, 1.0), |_, _| {}).unwrap();
 
         let c = 7.0;
         let field_c: Vec<f64> = field.iter().map(|v| v * c).collect();
@@ -1834,7 +1838,7 @@ mod tests {
             alpha1: params.alpha1 * c as f32,
             ..params.clone()
         };
-        let chi_c = tgv_qsm(TgvInput::FieldPpm(&field_c), &mask, &grid, &params_c, (0.0, 0.0, 1.0), |_, _| {});
+        let chi_c = tgv_qsm(TgvInput::FieldPpm(&field_c), &mask, &grid, &params_c, (0.0, 0.0, 1.0), |_, _| {}).unwrap();
 
         let norm = chi.iter().map(|v| v * v).sum::<f64>().sqrt();
         let diff = chi.iter().zip(&chi_c).map(|(a, b)| (a - b / c).powi(2)).sum::<f64>().sqrt();
@@ -1852,27 +1856,31 @@ mod tests {
         let grid = crate::Grid::new(n, n, n, 1.0, 1.0, 1.0);
         let field = test_field(n, 0.02);
         let params = TgvParams { iterations: 300, erosions: 1, tol: 0.0, ..TgvParams::default() };
-        let chi_f = tgv_qsm(TgvInput::FieldPpm(&field), &mask, &grid, &params, (0.0, 0.0, 1.0), |_, _| {});
+        let chi_f = tgv_qsm(TgvInput::FieldPpm(&field), &mask, &grid, &params, (0.0, 0.0, 1.0), |_, _| {}).unwrap();
         let norm = chi_f.iter().map(|v| v * v).sum::<f64>().sqrt();
         for te in [0.005, 0.020] {
             let c = rad_per_ppm(te, 3.0);
             let wrap = |x: f64| (x + std::f64::consts::PI).rem_euclid(2.0 * std::f64::consts::PI) - std::f64::consts::PI;
             let phase: Vec<f64> = field.iter().map(|v| wrap(v * c)).collect();
             let input = TgvInput::WrappedPhase { phase: &phase, te_s: te, b0_t: 3.0 };
-            let chi_p = tgv_qsm(input, &mask, &grid, &params, (0.0, 0.0, 1.0), |_, _| {});
+            let chi_p = tgv_qsm(input, &mask, &grid, &params, (0.0, 0.0, 1.0), |_, _| {}).unwrap();
             let diff = chi_f.iter().zip(&chi_p).map(|(a, b)| (a - b).powi(2)).sum::<f64>().sqrt();
             assert!(diff / norm < 0.02, "TE {te}: relative difference {}", diff / norm);
         }
     }
 
     #[test]
-    #[should_panic(expected = "te_s > 0")]
     fn wrapped_phase_rejects_zero_te() {
         let n = 8;
         let mask = vec![1u8; n * n * n];
         let phase = vec![0.0; n * n * n];
         let grid = crate::Grid::new(n, n, n, 1.0, 1.0, 1.0);
         let input = TgvInput::WrappedPhase { phase: &phase, te_s: 0.0, b0_t: 3.0 };
-        tgv_qsm(input, &mask, &grid, &TgvParams::default(), (0.0, 0.0, 1.0), |_, _| {});
+        let err = tgv_qsm(input, &mask, &grid, &TgvParams::default(), (0.0, 0.0, 1.0), |_, _| {})
+            .unwrap_err();
+        assert!(err.to_string().contains("te_s > 0"), "{err}");
+        // and a mask of the wrong size is an error, not a panic
+        let input = TgvInput::FieldPpm(&phase);
+        assert!(tgv_qsm(input, &mask[1..], &grid, &TgvParams::default(), (0.0, 0.0, 1.0), |_, _| {}).is_err());
     }
 }

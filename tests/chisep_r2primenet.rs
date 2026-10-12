@@ -35,7 +35,8 @@ fn test_chisep_r2primenet() {
     // so fit it here rather than taking a shortcut the real condition does not have.
     let (r2star, _t2star) = qsm_core::r2star::r2star_arlo(
         &ph.mag_voxel_major, &ph.mask, &ph.tes, &ph.grid,
-    );
+    )
+    .expect("the phantom's echo times suit ARLO");
 
     let t = Instant::now();
     // This phantom is simulated at 7 T and R2PRIMEnet's weights are 3 T, so the field guard

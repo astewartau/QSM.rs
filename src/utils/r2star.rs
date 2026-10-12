@@ -9,26 +9,51 @@
 //! Auto-Regression on Linear Operations (ARLO) of data."
 //! Magnetic Resonance in Medicine, 73(2):843-850.
 
-/// Check if echo times are approximately equi-spaced (suitable for ARLO).
+/// How far each echo spacing may deviate from the mean spacing, in seconds, for
+/// [`r2star_arlo`] to accept the echo times as equally spaced (0.1 ms). It covers the rounding
+/// of echo times in DICOM and BIDS sidecars, not genuinely unequal spacing.
+pub const ARLO_TE_SPACING_TOLERANCE_S: f64 = 1e-4;
+
+/// Whether ARLO can be used on these echo times: at least 3, all finite, distinct, and equally
+/// spaced to within `tolerance` seconds (each spacing within `tolerance` of the mean spacing).
 ///
-/// Requires at least 3 echo times with spacing deviations below `tolerance`.
+/// [`r2star_arlo`] applies this with [`ARLO_TE_SPACING_TOLERANCE_S`]; a host can call it with
+/// the same constant to reject a run before any work starts.
 ///
 /// # Arguments
-/// * `echo_times` - Echo times in seconds
-/// * `tolerance` - Maximum allowed deviation from uniform spacing (seconds, e.g. 0.1e-3)
+/// * `echo_times` - Echo times in seconds, in any order
+/// * `tolerance` - Maximum allowed deviation from uniform spacing in seconds
 pub fn use_arlo(echo_times: &[f64], tolerance: f64) -> bool {
+    arlo_echo_time_problem(echo_times, tolerance).is_none()
+}
+
+/// Why ARLO cannot use these echo times, or `None` if it can. See [`use_arlo`].
+fn arlo_echo_time_problem(echo_times: &[f64], tolerance: f64) -> Option<String> {
     if echo_times.len() < 3 {
-        return false;
+        return Some(format!("ARLO needs at least 3 echoes, got {}", echo_times.len()));
+    }
+    if echo_times.iter().any(|t| !t.is_finite()) {
+        return Some(format!("ARLO needs finite echo times, got {echo_times:?}"));
     }
 
     let mut te_sorted: Vec<f64> = echo_times.to_vec();
-    te_sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    te_sorted.sort_by(f64::total_cmp);
 
     let diffs: Vec<f64> = te_sorted.windows(2).map(|w| w[1] - w[0]).collect();
     let mean_diff: f64 = diffs.iter().sum::<f64>() / diffs.len() as f64;
     let max_dev = diffs.iter().map(|&d| (d - mean_diff).abs()).fold(0.0_f64, f64::max);
 
-    max_dev <= tolerance
+    if diffs.iter().any(|&d| d <= 0.0) {
+        Some(format!("ARLO needs distinct echo times, got {echo_times:?} s"))
+    } else if max_dev > tolerance {
+        Some(format!(
+            "ARLO needs equally spaced echo times, got {echo_times:?} s (spacings deviate from \
+             their mean by up to {:.3} ms, tolerance {:.3} ms)",
+            max_dev * 1e3, tolerance * 1e3
+        ))
+    } else {
+        None
+    }
 }
 
 /// R2* mapping using ARLO for equi-spaced echo times (≥3 echoes).
@@ -48,20 +73,25 @@ pub fn use_arlo(echo_times: &[f64], tolerance: f64) -> bool {
 /// # Returns
 /// `(r2star_map, s0_map)` - R2* in Hz and S0 (proton density), both `[nx*ny*nz]`
 ///
-/// # Panics
-/// Panics if `echo_times.len() < 3` or echo times are not equi-spaced.
+/// # Errors
+/// Fewer than 3 echo times, or echo times that are not equally spaced to within
+/// [`ARLO_TE_SPACING_TOLERANCE_S`] (see [`use_arlo`]): the Simpson integral uses one spacing
+/// for every step, so unequal spacing gives a wrong R2* rather than a noisy one. Also
+/// `magnitude` or `mask` lengths that do not match `grid`.
 pub fn r2star_arlo(
     magnitude: &[f64],
     mask: &[u8],
     echo_times: &[f64],
     grid: &crate::Grid,
-) -> (Vec<f64>, Vec<f64>) {
+) -> Result<(Vec<f64>, Vec<f64>), crate::error::InputError> {
+    use crate::error::{check_len, InputError};
     let n_echoes = echo_times.len();
-    assert!(n_echoes >= 3, "ARLO requires at least 3 echo times");
+    if let Some(problem) = arlo_echo_time_problem(echo_times, ARLO_TE_SPACING_TOLERANCE_S) {
+        return Err(InputError(problem));
+    }
     let n_voxels = grid.n_total();
-    assert_eq!(magnitude.len(), n_voxels * n_echoes,
-        "magnitude length must be n_voxels * n_echoes");
-    assert_eq!(mask.len(), n_voxels, "mask length must be n_voxels");
+    check_len("magnitude (n_voxels * n_echoes)", magnitude.len(), n_voxels * n_echoes)?;
+    check_len("mask", mask.len(), n_voxels)?;
 
     // Sort echo times and get the uniform spacing
     let mut te_sorted: Vec<f64> = echo_times.to_vec();
@@ -122,7 +152,7 @@ pub fn r2star_arlo(
         s0_map[v] = s0.max(0.0);
     }
 
-    (r2star_map, s0_map)
+    Ok((r2star_map, s0_map))
 }
 
 /// Convert an R2* map (Hz) to a T2* map (seconds).
@@ -213,13 +243,41 @@ mod tests {
             .map(|&t| s0_true * (-r2star_true * t).exp())
             .collect();
 
-        let (r2star_map, s0_map) = r2star_arlo(&magnitude, &mask, &te, &grid(1, 1, 1));
+        let (r2star_map, s0_map) = r2star_arlo(&magnitude, &mask, &te, &grid(1, 1, 1)).unwrap();
 
         let r2star_err = (r2star_map[0] - r2star_true).abs() / r2star_true;
         let s0_err = (s0_map[0] - s0_true).abs() / s0_true;
 
         assert!(r2star_err < 0.01, "R2* error {:.4}% should be < 1%", r2star_err * 100.0);
         assert!(s0_err < 0.01, "S0 error {:.4}% should be < 1%", s0_err * 100.0);
+    }
+
+    /// Unequal spacing used to be accepted silently and give a wrong R2*; now it is refused,
+    /// as are too few, repeated or non-finite echo times, and mismatched buffers (#273).
+    #[test]
+    fn r2star_arlo_refuses_echo_times_it_cannot_use() {
+        let g = grid(1, 1, 1);
+        let run = |te: &[f64]| {
+            let mag: Vec<f64> = te.iter().map(|t| (-30.0 * t).exp()).collect();
+            r2star_arlo(&mag, &[1], te, &g)
+        };
+        assert!(run(&[0.005, 0.010, 0.015, 0.020]).is_ok());
+        // rounding-level jitter is fine
+        assert!(run(&[0.005, 0.01002, 0.01499, 0.020]).is_ok());
+        for (te, why) in [
+            (&[0.005, 0.010][..], "at least 3"),
+            (&[0.005, 0.010, 0.020][..], "equally spaced"),
+            (&[0.004, 0.008, 0.012, 0.030][..], "equally spaced"),
+            (&[0.005, 0.005, 0.005][..], "distinct"),
+            (&[0.005, f64::NAN, 0.015][..], "finite"),
+        ] {
+            let err = run(te).unwrap_err().to_string();
+            assert!(err.contains(why), "{te:?}: {err}");
+            assert!(!use_arlo(te, ARLO_TE_SPACING_TOLERANCE_S), "{te:?}");
+        }
+        let te = [0.005, 0.010, 0.015];
+        assert!(r2star_arlo(&[1.0; 2], &[1], &te, &g).is_err());
+        assert!(r2star_arlo(&[1.0; 3], &[1, 1], &te, &g).is_err());
     }
 
     #[test]
@@ -238,7 +296,7 @@ mod tests {
         let mask = vec![0u8; 1]; // masked out
         let magnitude = vec![100.0, 80.0, 60.0];
 
-        let (r2star_map, s0_map) = r2star_arlo(&magnitude, &mask, &te, &grid(1, 1, 1));
+        let (r2star_map, s0_map) = r2star_arlo(&magnitude, &mask, &te, &grid(1, 1, 1)).unwrap();
         assert_eq!(r2star_map[0], 0.0);
         assert_eq!(s0_map[0], 0.0);
     }
@@ -261,7 +319,7 @@ mod tests {
             }
         }
 
-        let (r2star_map, _s0_map) = r2star_arlo(&magnitude, &mask, &te, &grid(nx, ny, nz));
+        let (r2star_map, _s0_map) = r2star_arlo(&magnitude, &mask, &te, &grid(nx, ny, nz)).unwrap();
 
         for v in 0..n_voxels {
             let err = (r2star_map[v] - r2star_values[v]).abs() / r2star_values[v];

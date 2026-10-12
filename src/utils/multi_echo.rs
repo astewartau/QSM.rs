@@ -49,6 +49,7 @@ impl Default for LinearFitParams {
 
 use std::f64::consts::PI;
 use crate::Grid;
+use crate::error::{check_len, InputError};
 use crate::unwrap::romeo::{unwrap_romeo, RomeoParams};
 use crate::unwrap::laplacian::{laplacian_unwrap, LaplacianSolver};
 use crate::unwrap::bestpath::{unwrap_bestpath, BestPathParams};
@@ -689,9 +690,12 @@ pub struct CoilCombinationResult {
 /// * `unwrap_method` - How to unwrap the HIP phase (ROMEO or Laplacian)
 /// * `grid` - Volume grid
 ///
-/// # Panics
-/// If there are no coils, the coils do not all have the same number of echoes, magnitude
-/// and phase layouts differ, or `echoes` is out of range.
+/// # Errors
+/// If there are no coils, fewer than two echoes (the HIP needs two; a single-echo uncombined
+/// acquisition cannot be combined this way), the coils do not all have the same number of
+/// echoes, magnitude and phase layouts differ, `tes` does not have one time per echo, the two
+/// `echoes` are the same or out of range, their echo times are equal, or a volume does not
+/// match `grid`.
 pub fn mcpc3ds_combine<P: AsRef<[f64]>, M: AsRef<[f64]>>(
     phases: &[Vec<P>],
     mags: &[Vec<M>],
@@ -700,23 +704,44 @@ pub fn mcpc3ds_combine<P: AsRef<[f64]>, M: AsRef<[f64]>>(
     echoes: [usize; 2],
     unwrap_method: UnwrapMethod,
     grid: &Grid,
-) -> CoilCombinationResult {
+) -> Result<CoilCombinationResult, InputError> {
     let (nx, ny, nz) = grid.dims;
     let n = nx * ny * nz;
     let n_coils = phases.len();
-    assert!(n_coils > 0, "mcpc3ds_combine: no coils");
-    assert_eq!(mags.len(), n_coils, "mcpc3ds_combine: magnitude/phase coil count differ");
+    let fail = |msg: String| Err(InputError(format!("mcpc3ds_combine: {msg}")));
+    if n_coils == 0 {
+        return fail("no coils".into());
+    }
+    if mags.len() != n_coils {
+        return fail(format!("{} magnitude coils but {n_coils} phase coils", mags.len()));
+    }
     let n_echoes = phases[0].len();
-    assert!(n_echoes >= 2, "mcpc3ds_combine: at least two echoes are required");
-    assert_eq!(tes.len(), n_echoes, "mcpc3ds_combine: echo time count must match echoes");
+    if n_echoes < 2 {
+        return fail(format!(
+            "at least two echoes are required (the coil phase offsets come from the phase \
+             difference of two echoes), got {n_echoes}"
+        ));
+    }
+    if tes.len() != n_echoes {
+        return fail(format!("{} echo times for {n_echoes} echoes", tes.len()));
+    }
     let [e1, e2] = echoes;
-    assert!(e1 < n_echoes && e2 < n_echoes && e1 != e2, "mcpc3ds_combine: HIP echoes out of range");
+    if !(e1 < n_echoes && e2 < n_echoes && e1 != e2) {
+        return fail(format!("HIP echoes {echoes:?} must be two different echoes of {n_echoes}"));
+    }
+    if !(tes[e1].is_finite() && tes[e2].is_finite() && tes[e2] != tes[e1]) {
+        return fail(format!("HIP echoes need different, finite echo times, got {} and {}", tes[e1], tes[e2]));
+    }
     for c in 0..n_coils {
-        assert_eq!(phases[c].len(), n_echoes, "mcpc3ds_combine: coil {} has a different echo count", c);
-        assert_eq!(mags[c].len(), n_echoes, "mcpc3ds_combine: coil {} magnitude echo count differs", c);
+        if phases[c].len() != n_echoes || mags[c].len() != n_echoes {
+            return fail(format!(
+                "coil {c} has {} phase and {} magnitude echoes, coil 0 has {n_echoes}",
+                phases[c].len(), mags[c].len()
+            ));
+        }
         for e in 0..n_echoes {
-            assert_eq!(phases[c][e].as_ref().len(), n, "mcpc3ds_combine: coil {} echo {} phase size", c, e);
-            assert_eq!(mags[c][e].as_ref().len(), n, "mcpc3ds_combine: coil {} echo {} magnitude size", c, e);
+            check_len(&format!("mcpc3ds_combine: coil {c} echo {e} phase"), phases[c][e].as_ref().len(), n)?;
+            check_len(&format!("mcpc3ds_combine: coil {c} echo {e} magnitude"), mags[c][e].as_ref().len(), n)?;
         }
     }
 
@@ -787,7 +812,7 @@ pub fn mcpc3ds_combine<P: AsRef<[f64]>, M: AsRef<[f64]>>(
         mags_out.push((0..n).map(|i| (re[i] * re[i] + im[i] * im[i]).sqrt().sqrt()).collect());
     }
 
-    CoilCombinationResult { phases: phases_out, magnitudes: mags_out, mask }
+    Ok(CoilCombinationResult { phases: phases_out, magnitudes: mags_out, mask })
 }
 
 /// Calculate B0 field from unwrapped phase using weighted averaging
@@ -2902,13 +2927,42 @@ mod tests {
         (phases, mags, field)
     }
 
+    /// A single-echo uncombined acquisition, and other unusable inputs, are errors rather
+    /// than panics (QSMxT #273).
+    #[test]
+    fn mcpc3ds_combine_refuses_input_it_cannot_combine() {
+        let (nx, ny, nz) = (6, 6, 4);
+        let g = grid(nx, ny, nz);
+        let tes = [0.005, 0.010];
+        let (phases, mags, _) = synthetic_coils(nx, ny, nz, &tes);
+        let run = |p: &[Vec<Vec<f64>>], m: &[Vec<Vec<f64>>], tes: &[f64], echoes: [usize; 2]| {
+            mcpc3ds_combine(p, m, tes, [2.0, 2.0, 2.0], echoes, UnwrapMethod::Romeo, &g)
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        };
+        assert!(run(&phases, &mags, &tes, [0, 1]).is_ok());
+        let one_echo: Vec<Vec<Vec<f64>>> = phases.iter().map(|c| c[..1].to_vec()).collect();
+        let one_echo_m: Vec<Vec<Vec<f64>>> = mags.iter().map(|c| c[..1].to_vec()).collect();
+        let err = run(&one_echo, &one_echo_m, &tes[..1], [0, 1]).unwrap_err();
+        assert!(err.contains("at least two echoes"), "{err}");
+        assert!(run(&[], &[], &tes, [0, 1]).unwrap_err().contains("no coils"));
+        assert!(run(&phases, &mags[..1], &tes, [0, 1]).is_err());
+        assert!(run(&phases, &mags, &tes[..1], [0, 1]).is_err());
+        assert!(run(&phases, &mags, &tes, [0, 0]).is_err());
+        assert!(run(&phases, &mags, &tes, [0, 2]).is_err());
+        assert!(run(&phases, &mags, &[0.005, 0.005], [0, 1]).is_err());
+        let mut short = phases.clone();
+        short[1][0].pop();
+        assert!(run(&short, &mags, &tes, [0, 1]).unwrap_err().contains("coil 1 echo 0 phase"));
+    }
+
     #[test]
     fn test_mcpc3ds_combine_removes_coil_offsets() {
         let (nx, ny, nz) = (20, 20, 10);
         let tes = [0.005, 0.010];
         let g = grid(nx, ny, nz);
         let (phases, mags, field) = synthetic_coils(nx, ny, nz, &tes);
-        let res = mcpc3ds_combine(&phases, &mags, &tes, [2.0, 2.0, 2.0], [0, 1], UnwrapMethod::Romeo, &g);
+        let res = mcpc3ds_combine(&phases, &mags, &tes, [2.0, 2.0, 2.0], [0, 1], UnwrapMethod::Romeo, &g).unwrap();
         assert_eq!(res.phases.len(), 2);
         assert_eq!(res.magnitudes.len(), 2);
         let n_mask = res.mask.iter().filter(|&&m| m > 0).count();
@@ -2945,7 +2999,7 @@ mod tests {
         let (mut phases, mut mags, field) = synthetic_coils(nx, ny, nz, &tes);
         phases.truncate(1);
         mags.truncate(1);
-        let res = mcpc3ds_combine(&phases, &mags, &tes, [2.0, 2.0, 2.0], [0, 1], UnwrapMethod::Romeo, &g);
+        let res = mcpc3ds_combine(&phases, &mags, &tes, [2.0, 2.0, 2.0], [0, 1], UnwrapMethod::Romeo, &g).unwrap();
         let n = nx * ny * nz;
         for e in 0..2 {
             for i in 0..n {
@@ -2982,7 +3036,7 @@ mod tests {
         let (p, m) = (phases[0].clone(), mags[0].clone());
         phases.push(p);
         mags.push(m);
-        let res = mcpc3ds_combine(&phases, &mags, &tes, [2.0, 2.0, 2.0], [0, 1], UnwrapMethod::Laplacian, &g);
+        let res = mcpc3ds_combine(&phases, &mags, &tes, [2.0, 2.0, 2.0], [0, 1], UnwrapMethod::Laplacian, &g).unwrap();
         for i in 0..nx * ny * nz {
             let expected = (2.0f64).sqrt() * mags[0][1][i];
             assert!((res.magnitudes[1][i] - expected).abs() < 1e-6);
