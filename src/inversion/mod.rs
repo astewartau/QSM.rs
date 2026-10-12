@@ -11,7 +11,7 @@
 //! - NLTV: Nonlinear TV with iterative reweighting
 //! - RTS: Rapid two-step method
 //! - MEDI: Morphology-enabled dipole inversion
-//! - TGV: Total Generalized Variation (single-step from wrapped phase)
+//! - TGV: Total Generalized Variation (single-step from a field in ppm or one wrapped echo; α in ppm)
 //! - COSMOS: multi-orientation least squares (closed form, well-posed)
 //! - STI: susceptibility tensor imaging (multi-orientation, 6-component tensor)
 
@@ -69,7 +69,10 @@ pub use nltv::{nltv, NltvParams};
 pub use rts::{rts, RtsParams};
 pub use medi::{medi, MediParams, MediWorkspace};
 pub use tfi::{tfi, TfiParams};
-pub use tgv::{tgv_qsm, TgvParams, get_default_alpha, get_default_iterations};
+pub use tgv::{
+    tgv_qsm, TgvInput, TgvParams, get_default_alpha, get_default_iterations, rad_per_ppm,
+    ALPHA_REFERENCE_B0_T, ALPHA_REFERENCE_RAD_PER_PPM, ALPHA_REFERENCE_TE_S,
+};
 pub use ilsqr::{ilsqr, ilsqr_with_padding, IlsqrParams, STI_DEFAULT_PAD_MM, STI_PAD_MM};
 #[doc(hidden)]
 pub use ilsqr::{ilsqr_with_padding_traced, IlsqrTrace};
