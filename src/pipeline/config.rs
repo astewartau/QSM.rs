@@ -41,6 +41,14 @@ pub enum UnwrappingAlgorithm {
 /// voxel grid, so an oblique acquisition has to be handled deliberately. There are three cases,
 /// and the difference matters because getting it wrong is silent — the reconstruction completes
 /// and the numbers are simply wrong.
+///
+/// Every algorithm enum reports its case through `orientation_support()`. Hosts should check
+/// [`OrientationSupport::requires_axial`] before running an oblique dataset. See
+/// [`crate::geometry`] for the B0 direction and for resampling to a cardinal grid,
+/// [`crate::registration`] for recovering the rigid transform between volumes (which is how a
+/// multi-orientation set gets onto one grid, and where its per-orientation B0 directions come
+/// from, since the object rotates and B0 does not), and [`crate::motion`] for the same within
+/// one acquisition, which reports one B0 direction per volume.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OrientationSupport {
     /// The B0 direction is an explicit parameter — the dipole kernel is built from it — so the
