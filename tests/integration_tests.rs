@@ -1596,53 +1596,6 @@ fn test_pipeline_unwrap_bfr_laplacian_neumann() {
     );
 }
 
-/// `laplacian_unwrap_bfr` on a single wrapped phase volume, scored against the ground-truth
-/// local field, with `bgremove::lbv` on the same field as the reference.
-///
-/// This is the input the function is designed for. It takes wrapped phase, so in a
-/// multi-echo pipeline the only way to use it is per echo before combining — a usage that
-/// has not been validated and is not what the algorithm describes. The unwrapper comparison
-/// therefore does not include it.
-#[test]
-#[ignore]
-#[allow(deprecated)]
-fn test_unwrap_bfr_single_volume() {
-    // Imported here rather than at the top of the file so the deprecation allow covers only
-    // this test, which exists to exercise that deprecated entry point.
-    use qsm_core::unwrap::laplacian_unwrap_bfr;
-    use std::f64::consts::PI;
-    println!("[INFO] Loading test data...");
-    let data = TestData::load().expect("Failed to load test data");
-    let (nx, ny, nz) = data.dims;
-    let (vsx, vsy, vsz) = data.voxel_size;
-    let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
-
-    // Phase from the ground-truth total field at the dataset's first-echo TE, which wraps
-    // inside the brain so the unwrapping half is exercised. Laplacian-family methods degrade
-    // at long TE on 7T data — at 12 ms even plain unwrapping followed by bgremove::lbv drops
-    // to r = 0.69 — so this is not a place to be ambitious with the echo time.
-    let ppm_to_hz = 42.576e6 * data.field_strength / 1e6;
-    let te = data.echo_times[0];
-    let wrap = |x: f64| { let y = x.rem_euclid(2.0 * PI); if y > PI { y - 2.0 * PI } else { y } };
-    let phase: Vec<f64> = data.fieldmap.iter().map(|&p| wrap(2.0 * PI * p * ppm_to_hz * te)).collect();
-
-    let start = Instant::now();
-    let out = laplacian_unwrap_bfr(&phase, &data.mask, &grid);
-    let elapsed = start.elapsed();
-    let local_ppm: Vec<f64> = out.iter().map(|&v| v / (2.0 * PI * te) / ppm_to_hz).collect();
-
-    let res = TestResult::new("Laplacian + BFR (single volume)", &local_ppm, &data.fieldmap_local, &data.mask, data.dims);
-    res.print_with_time(elapsed);
-    res.print_ci_metrics(elapsed);
-    common::save_center_slices(&local_ppm, &data.mask, data.dims, "unwrap_bfr_single");
-
-    let (lbv, lbv_mask) = bgremove::lbv(&data.fieldmap, &data.mask, &grid, &LbvParams::default(), |_, _| {});
-    let reference = TestResult::new("LBV (reference)", &lbv, &data.fieldmap_local, &lbv_mask, data.dims);
-    println!("[INFO] reference bgremove::lbv on the same field: r = {:.4}", reference.correlation);
-
-    assert!(res.correlation > 0.75, "Laplacian + BFR local field correlation too low: {}", res.correlation);
-}
-
 /// Drives the shared field-mapping stage with `UnwrappingAlgorithm::Laplacian` — the path
 /// `UnwrapMethod::Laplacian` actually selects, and which `qsmxt.rs` and `qsmbly` go through.
 ///

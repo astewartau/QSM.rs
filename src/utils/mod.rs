@@ -3,7 +3,7 @@
 //! This module provides common utility functions:
 //! - Gradient operators (forward/backward differences)
 //! - Padding utilities
-//! - Mask operations (incl. signal-gated erosion)
+//! - Mask creation and morphology (erosion, dilation, closing, hole filling, signal-gated erosion)
 //! - R2*/R2 relaxometry and learned R2* -> R2' conversion (`onnx`)
 //! - Multi-echo field mapping (phase offset removal, B0 estimation)
 //! - Bias field correction (makehomogeneous)
@@ -25,7 +25,7 @@ pub mod threshold;
 pub mod mask;
 pub mod connected;
 pub mod union_find;
-pub mod signal_erosion;
+pub mod morphology;
 pub mod resample;
 pub mod simd_ops;
 pub mod r2star;
@@ -51,7 +51,7 @@ pub use vasculature::*;
 pub use qsmart::*;
 pub use threshold::*;
 pub use mask::*;
-pub use signal_erosion::{signal_gated_erosion, SignalErosionParams};
+pub use morphology::*;
 pub use simd_ops::*;
 pub use r2star::*;
 pub use epg::*;

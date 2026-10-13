@@ -61,7 +61,7 @@
 //! - Pre-allocated buffers: all temporary arrays allocated once outside the loop
 //! - Early termination: convergence check every 100 iterations
 
-use crate::utils::mask::erode_mask;
+use crate::utils::morphology::erode_mask;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 

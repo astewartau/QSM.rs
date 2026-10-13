@@ -41,7 +41,6 @@ pub mod two_pass;
 pub use config::*;
 pub use phase_utils::{
     scale_phase_to_pi, hz_to_ppm, rads_to_ppm, rss_combine,
-    erode_mask, dilate_mask,
 };
 pub use referencing::apply_reference;
 pub use masking::{apply_mask_ops, build_mask_section, run_masking};

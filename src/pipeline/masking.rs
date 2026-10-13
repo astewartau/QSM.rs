@@ -5,7 +5,7 @@
 //! Multiple mask sections can be OR'd together.
 
 use super::config::*;
-use super::phase_utils::{erode_mask, dilate_mask};
+use crate::utils::morphology::{erode_mask, dilate_mask, morphological_close, fill_holes, signal_gated_erosion};
 
 /// Resolve masking input data based on the MaskingInput type.
 ///
@@ -160,11 +160,11 @@ pub fn apply_mask_ops(
                 mask = dilate_mask(&mask, &grid, *iterations);
             }
             MaskOp::Close { radius } => {
-                mask = crate::utils::morphological_close(&mask, &grid, *radius as i32);
+                mask = morphological_close(&mask, &grid, *radius as i32);
             }
             MaskOp::FillHoles { max_size } => {
                 let effective_size = if *max_size == 0 { n_voxels / 20 } else { *max_size };
-                mask = crate::utils::fill_holes(&mask, &grid, effective_size);
+                mask = fill_holes(&mask, &grid, effective_size);
             }
             MaskOp::GaussianSmooth { sigma_mm } => {
                 let sigma = *sigma_mm;
@@ -181,7 +181,7 @@ pub fn apply_mask_ops(
                 let mag_data = magnitude.ok_or_else(|| {
                     PipelineError::InvalidInput("signal-gated erosion requires magnitude data".into())
                 })?;
-                mask = crate::utils::signal_gated_erosion(&mask, mag_data, &grid, params);
+                mask = signal_gated_erosion(&mask, mag_data, &grid, params);
             }
             MaskOp::HdBet(params) => {
                 let mag_data = magnitude.ok_or_else(|| {
@@ -466,7 +466,7 @@ mod tests {
             generator: MaskOp::Threshold { method: MaskThresholdMethod::Fixed, value: Some(5.0) },
             refinements: vec![refinement],
         }];
-        let params = crate::utils::SignalErosionParams { min_component: 1, ..Default::default() };
+        let params = crate::utils::morphology::SignalErosionParams { min_component: 1, ..Default::default() };
         let result = run_masking(&section(MaskOp::SignalErode(params.clone())), &[], Some(&mag), &meta).unwrap();
         // Uniform signal: nothing is gated, so only the one global erosion applies.
         let plain = run_masking(&section(MaskOp::Erode { iterations: 1 }), &[], Some(&mag), &meta).unwrap();
@@ -517,7 +517,7 @@ mod tests {
                 MaskOp::Dilate { iterations: 1 },
                 MaskOp::FillHoles { max_size: 0 },
                 MaskOp::Erode { iterations: 1 },
-                MaskOp::SignalErode(crate::utils::SignalErosionParams { min_component: 1, ..Default::default() }),
+                MaskOp::SignalErode(crate::utils::morphology::SignalErosionParams { min_component: 1, ..Default::default() }),
             ],
         };
         let whole = build_mask_section(&section, &input, Some(&mag), &meta).unwrap();

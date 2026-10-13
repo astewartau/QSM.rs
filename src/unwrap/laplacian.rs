@@ -37,19 +37,6 @@
 //! `Fft { pad: [64; 3] }` with [`B0WeightType::AssumedDecay`](crate::utils::B0WeightType::AssumedDecay)
 //! at 40 ms.
 //!
-//! [`laplacian_unwrap_bfr`] (deprecated) is a different algorithm: finite-difference ∇² masked
-//! to the ROI and solved under a Dirichlet condition on it. Zeroing ∇²φ outside the mask
-//! discards every field source outside the ROI. Background fields are harmonic inside the ROI,
-//! and ∇²(harmonic) = 0 carries no information about them, so they cannot be recovered
-//! afterwards — the function returns a partially background-removed field, not a total field.
-//! That is the same combination HARPERELLA and iHARPERELLA perform, and is why it is
-//! categorised with them rather than with ROMEO. Pair it with a separate background-removal
-//! stage only deliberately: doing so removes background twice, by an amount that is not
-//! controlled. On the project's test data it reaches r = 0.887 against the ground-truth local
-//! field, against r = 0.909 for [`crate::bgremove::lbv`] on the same field and 0.879 for V-SHARP,
-//! and it matches QSM.jl's `:mgpcg` to r = 0.999983 (Gauss-Seidel against
-//! multigrid-preconditioned CG on the same equation).
-//!
 //! [`UnwrapMethod::Laplacian`](super::UnwrapMethod::Laplacian) selects [`laplacian_unwrap`] with
 //! [`LaplacianSolver::Dct`], since the pipeline removes background as a later stage.
 //!
@@ -65,10 +52,6 @@
 //! Li, W., Wu, B., Liu, C. (2011). "Quantitative susceptibility mapping of human brain reflects
 //! spatial variation in tissue composition." NeuroImage, 55(4):1645-1656 (STI Suite's use of
 //! the Schofield & Zhu method). <https://doi.org/10.1016/j.neuroimage.2010.11.088>
-//!
-//! Zhou, D., Liu, T., Spincemaille, P., Wang, Y. (2014). "Background field removal by
-//! solving the Laplacian boundary value problem." NMR in Biomedicine, 27(3):312-319 (the
-//! boundary-value half of [`laplacian_unwrap_bfr`]). <https://doi.org/10.1002/nbm.3064>
 //!
 //! Reference implementation: <https://github.com/kamesy/QSM.jl> (`unwrap_laplacian`).
 
@@ -185,144 +168,6 @@ pub(crate) fn solve_poisson_fft(
 
     ifft3d(&mut f_complex, nx, ny, nz);
     f_complex.iter().map(|c| c.re).collect()
-}
-
-/// Laplacian phase unwrapping **combined with background field removal**.
-///
-/// Solves the Poisson equation with the Laplacian zeroed outside `mask`. That discards the
-/// field sources outside the ROI, and a field generated outside the ROI is harmonic inside
-/// it — so the background component is removed along with the wraps.
-///
-/// **The result is not a total field.** It is unwrapped *and* partially background-removed,
-/// by an amount that depends on the mask and the field geometry. Following this with a
-/// separate background-removal stage (V-SHARP, PDF, …) removes background twice.
-///
-/// Use [`laplacian_unwrap`] to unwrap without removing background.
-///
-/// Because ∇²(harmonic) = 0, the discarded component leaves no trace in the input to the
-/// Poisson solve and cannot be restored afterwards.
-///
-/// # Intended input
-/// One wrapped phase volume. On the project's test data it then matches
-/// [`crate::bgremove::lbv`] on the same field (r = 0.887 against 0.909, identical residual
-/// smooth content). It takes *wrapped phase*, so in a multi-echo pipeline the only way to
-/// apply it is to each echo before combining; that usage is not what the algorithm
-/// describes, has not been validated, and leaves visibly more background than either
-/// unwrapping then a field-map background removal or this function on a single volume.
-/// For multi-echo data use [`laplacian_unwrap`] or ROMEO, combine, then a background
-/// removal from [`crate::bgremove`].
-///
-/// # Echo time
-/// Accuracy falls off with the amount of phase to unwrap. On the 7 T test data, against
-/// the ground-truth local field: r = 0.84 at TE = 4 ms, 0.70 at 8 ms, 0.50 at 12 ms —
-/// where unwrapping then [`crate::bgremove::lbv`] gives 0.86, 0.84, 0.69 and
-/// [`crate::bgremove::vsharp`] holds near 0.82 throughout. Prefer the earliest echo.
-///
-/// # Arguments
-/// * `phase` - Wrapped phase (nx * ny * nz)
-/// * `mask` - Binary mask (nx * ny * nz), 1 = inside ROI
-/// * `grid` - Volume grid (dimensions and voxel sizes)
-///
-/// # Returns
-/// Unwrapped, partially background-removed phase, zero outside `mask`.
-///
-/// # References
-/// Schofield & Zhu (2003) for the unwrapping; Zhou et al. (2014) for the
-/// boundary-value formulation of the background removal. See the module docs.
-/// Solve ∇²u = f inside `mask` with u = 0 outside it (homogeneous Dirichlet on the ROI),
-/// by Gauss-Seidel with successive over-relaxation.
-///
-/// Masking the source term is only half of the ROI formulation: the solution has to be
-/// constrained at the ROI boundary too, or it picks up an arbitrary harmonic component.
-/// Solving the masked source over the whole volume with a periodic FFT does not constrain
-/// it, and that component is large — which is what this replaces.
-///
-/// Mirrors the solver in [`crate::bgremove::lbv`], which solves the homogeneous case
-/// (`f = 0`) with boundary values taken from the field.
-fn solve_poisson_dirichlet_roi(
-    f: &[f64],
-    mask: &[u8],
-    grid: &Grid,
-    tol: f64,
-    max_iter: usize,
-) -> Vec<f64> {
-    let (nx, ny, nz) = grid.dims;
-    let (vsx, vsy, vsz) = grid.voxel_size;
-    let (dx2, dy2, dz2) = (1.0 / (vsx * vsx), 1.0 / (vsy * vsy), 1.0 / (vsz * vsz));
-    let diag = -2.0 * (dx2 + dy2 + dz2);
-    let omega = 1.5;
-
-    let mut u = vec![0.0f64; nx * ny * nz];
-
-    // Relative criterion, so convergence does not depend on the units of `f`.
-    let scale = f.iter().map(|v| v.abs()).fold(0.0f64, f64::max).max(1e-30);
-    let scaled_tol = tol * scale / diag.abs();
-
-    for _ in 0..max_iter {
-        let mut max_change = 0.0f64;
-        for k in 1..nz - 1 {
-            for j in 1..ny - 1 {
-                for i in 1..nx - 1 {
-                    let idx = i + j * nx + k * nx * ny;
-                    if mask[idx] == 0 {
-                        continue; // stays 0: this is the Dirichlet condition
-                    }
-                    let sum = dx2 * (u[idx - 1] + u[idx + 1])
-                            + dy2 * (u[idx - nx] + u[idx + nx])
-                            + dz2 * (u[idx - nx * ny] + u[idx + nx * ny]);
-                    // ∇²u = sum + diag*u = f  =>  u = (f - sum) / diag
-                    let target = (f[idx] - sum) / diag;
-                    let old = u[idx];
-                    let next = old + omega * (target - old);
-                    max_change = max_change.max((next - old).abs());
-                    u[idx] = next;
-                }
-            }
-        }
-        if max_change < scaled_tol {
-            break;
-        }
-    }
-    u
-}
-
-#[deprecated(
-    since = "0.35.0",
-    note = "unwrap with `laplacian_unwrap` and then remove background with a `bgremove` \
-            method (`lbv` reproduces this; `vsharp` is more robust at long TE). That route \
-            is more accurate at every echo time measured and composes with any background \
-            removal. Kept for parity with QSM.jl's `unwrap_laplacian(solver = :mgpcg)`."
-)]
-pub fn laplacian_unwrap_bfr(
-    phase: &[f64],
-    mask: &[u8],
-    grid: &Grid,
-) -> Vec<f64> {
-    let (nx, ny, nz) = grid.dims;
-    let (vsx, vsy, vsz) = grid.voxel_size;
-    let n_total = nx * ny * nz;
-
-    let d2u = wrapped_laplacian_periodic(phase, nx, ny, nz, vsx, vsy, vsz);
-
-    let d2u_masked: Vec<f64> = d2u.iter()
-        .enumerate()
-        .map(|(i, &val)| if mask[i] != 0 { val } else { 0.0 })
-        .collect();
-
-    // Dirichlet on the ROI, matching QSM.jl's `:mgpcg` path. Masking the source and then
-    // solving over the whole volume with a periodic FFT leaves the harmonic component
-    // unconstrained, which showed up as a large spurious background field.
-    let max_iter = (3 * nx.max(ny).max(nz)).min(500);
-    let unwrapped = solve_poisson_dirichlet_roi(&d2u_masked, mask, grid, 1e-6, max_iter);
-
-    let mut result = vec![0.0; n_total];
-    for i in 0..n_total {
-        if mask[i] != 0 {
-            result[i] = unwrapped[i];
-        }
-    }
-
-    result
 }
 
 /// Wrapped Laplacian under a Neumann boundary: at each array face the missing neighbour is
@@ -544,14 +389,12 @@ impl LaplacianSolver {
 /// (With [`LaplacianSolver::Fft`] the total field carries a harmonic error from the zero
 /// padding wherever the phase at the array edge is not zero; the local field is unaffected.)
 ///
-/// Use [`laplacian_unwrap_bfr`] if you want unwrapping and background removal together.
-///
 /// Because the whole array participates, this is sensitive to phase quality *outside* the
 /// ROI. STI Suite-based pipelines zero the phase outside the brain first (`mask · φ`), which
 /// [`run_field_mapping`](crate::pipeline::run_field_mapping) does on its multi-echo Laplacian
 /// path; otherwise, where the phase outside the object is
 /// noise, or wraps faster than one radian per voxel, prefer ROMEO
-/// ([`super::romeo::unwrap_romeo`]) or the masked variant.
+/// ([`super::romeo::unwrap_romeo`]).
 ///
 /// # Arguments
 /// * `phase` - Wrapped phase (nx * ny * nz)
@@ -674,7 +517,6 @@ fn apply_k2(buf: &mut [Complex64], kx: &[f64], ky: &[f64], kz: &[f64], invert: b
 }
 
 #[cfg(test)]
-#[allow(deprecated)]
 mod tests {
     use super::*;
 
@@ -690,50 +532,6 @@ mod tests {
         assert!((wrap(2.0 * PI) - 0.0).abs() < 1e-10);
         assert!((wrap(3.0 * PI) - PI).abs() < 1e-10);
         assert!((wrap(-3.0 * PI) - (-PI)).abs() < 1e-10);
-    }
-
-    #[test]
-    fn test_laplacian_unwrap_bfr_constant() {
-        let n = 8;
-        let phase = vec![1.0; n * n * n];
-        let mask = vec![1u8; n * n * n];
-
-        let unwrapped = laplacian_unwrap_bfr(&phase, &mask, &grid(n));
-
-        let mean: f64 = unwrapped.iter().sum::<f64>() / (n * n * n) as f64;
-        for &val in unwrapped.iter() {
-            assert!((val - mean).abs() < 1e-6, "Constant phase should unwrap to constant");
-        }
-    }
-
-    #[test]
-    fn test_laplacian_unwrap_bfr_smooth() {
-        let n = 16;
-        let mut phase = vec![0.0; n * n * n];
-        let mask = vec![1u8; n * n * n];
-
-        for k in 0..n {
-            for j in 0..n {
-                for i in 0..n {
-                    let idx = i + j * n + k * n * n;
-                    phase[idx] = 0.5 * (2.0 * PI * i as f64 / n as f64).sin();
-                }
-            }
-        }
-
-        let unwrapped = laplacian_unwrap_bfr(&phase, &mask, &grid(n));
-
-        // This function solves under a Dirichlet condition on the ROI, so it does *not*
-        // round-trip its input — the harmonic part that would be needed to match at the
-        // boundary is exactly what it removes. What must hold is that the output is finite,
-        // stays bounded by the input, and is zero where the ROI is not.
-        //
-        // The original assertion here was `< 1.0` against a signal of amplitude 0.5, which
-        // passed for an all-zero output. `laplacian_unwrap_bfr_removes_the_harmonic_component`
-        // is the test that pins what this function actually does.
-        assert!(unwrapped.iter().all(|v| v.is_finite()), "output must be finite");
-        let peak = unwrapped.iter().fold(0.0f64, |m, &v| m.max(v.abs()));
-        assert!(peak <= 0.5 + 1e-6, "output should not exceed the input amplitude, got {peak}");
     }
 
     /// Pearson r and the slope of `want` regressed on `obs`, inside `mask`.
@@ -796,28 +594,6 @@ mod tests {
     }
 
     #[test]
-    fn laplacian_unwrap_bfr_removes_the_harmonic_component() {
-        // Pins the documented contract: laplacian_unwrap_bfr is unwrapping + background
-        // removal. It reproduces the non-harmonic field faithfully and returns the
-        // harmonic (background) component as zero, because ∇²(harmonic) = 0 leaves no
-        // trace in the input to the Poisson solve.
-        //
-        // If the harmonic assertion starts failing, the limitation was lifted — update
-        // the module docs and the README categorisation along with it.
-        let n = 64;
-        let (wrapped, _, ramp, blob, mask) = ramp_plus_blob(n);
-
-        let out = laplacian_unwrap_bfr(&wrapped, &mask, &grid(n));
-
-        let (r_blob, slope_blob) = corr_slope(&out, &blob, &mask);
-        assert!(r_blob > 0.99, "non-harmonic part should survive, got r = {r_blob}");
-        assert!((slope_blob - 1.0).abs() < 0.05, "expected unit slope, got {slope_blob}");
-
-        let (r_ramp, _) = corr_slope(&out, &ramp, &mask);
-        assert!(r_ramp.abs() < 0.05, "harmonic part should be discarded, got r = {r_ramp}");
-    }
-
-    #[test]
     fn dct_solve_matches_the_even_extended_solve() {
         // The DCT-II is the FFT of the even extension, so these are the same computation
         // with and without materialising the extension. Agreement should be to rounding.
@@ -828,34 +604,6 @@ mod tests {
         let scale = padded.iter().fold(0.0f64, |m, &v| m.max(v.abs()));
         let max_diff = padded.iter().zip(&dct).fold(0.0f64, |m, (&a, &b)| m.max((a - b).abs()));
         assert!(max_diff < 1e-9 * scale, "DCT and padded solves differ: max |diff| = {max_diff} (scale {scale})");
-    }
-
-    #[test]
-    fn the_two_variants_disagree_by_the_background_field() {
-        // The difference between them is the harmonic component, which is what makes
-        // them different algorithms rather than two settings of one.
-        let n = 64;
-        let (wrapped, _, ramp, _, mask) = ramp_plus_blob(n);
-
-        let pure = laplacian_unwrap(&wrapped, &mask, &grid(n), LaplacianSolver::Dct);
-        let combined = laplacian_unwrap_bfr(&wrapped, &mask, &grid(n));
-        let diff: Vec<f64> = pure.iter().zip(&combined).map(|(a, b)| a - b).collect();
-
-        let (r, _) = corr_slope(&diff, &ramp, &mask);
-        assert!(r > 0.95, "their difference should be the harmonic field, got r = {r}");
-    }
-
-    #[test]
-    fn test_laplacian_unwrap_bfr_finite() {
-        let n = 8;
-        let phase: Vec<f64> = (0..n*n*n).map(|i| wrap((i as f64) * 0.1)).collect();
-        let mask = vec![1u8; n * n * n];
-
-        let unwrapped = laplacian_unwrap_bfr(&phase, &mask, &grid(n));
-
-        for (i, &val) in unwrapped.iter().enumerate() {
-            assert!(val.is_finite(), "Unwrapped phase should be finite at index {}", i);
-        }
     }
 
     // ---- LaplacianSolver::Fft (Schofield & Zhu; STI Suite's MRPhaseUnwrap) and multi-echo ----

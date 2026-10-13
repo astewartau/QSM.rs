@@ -20,6 +20,7 @@ use std::collections::HashMap;
 use std::f64::consts::PI;
 use delaunator::{triangulate, Point};
 use crate::Grid;
+use crate::utils::morphology::{dilate_ball, erode_ball};
 
 /// Result of curvature calculation
 pub struct CurvatureResult {
@@ -98,7 +99,7 @@ fn extract_surface_voxels(
     mask: &[u8],
     nx: usize, ny: usize, nz: usize,
 ) -> Vec<usize> {
-    let eroded = erode_mask(mask, nx, ny, nz, 1);
+    let eroded = erode_ball(mask, nx, ny, nz, 1);
 
     let mut surface = Vec::new();
     for i in 0..mask.len() {
@@ -432,7 +433,7 @@ pub fn calculate_curvature_proximity(
     //   prox4(prox4==0) = 1;
     //   prox4((imdilate(mask, strel('sphere',5)) - mask)==1) = 0;
     let surface_mask = create_surface_mask(mask, nx, ny, nz);
-    let dilated_mask = dilate_mask(mask, nx, ny, nz, 5);
+    let dilated_mask = dilate_ball(mask, nx, ny, nz, 5);
 
     // Step 1: prox4 = prox * surface_mask (surface voxels get prox, rest get 0)
     let mut prox4 = vec![0.0f64; n_total];
@@ -476,7 +477,7 @@ pub fn calculate_curvature_proximity(
 
 /// Create a surface mask (boundary voxels)
 fn create_surface_mask(mask: &[u8], nx: usize, ny: usize, nz: usize) -> Vec<u8> {
-    let eroded = erode_mask(mask, nx, ny, nz, 1);
+    let eroded = erode_ball(mask, nx, ny, nz, 1);
     let mut surface = vec![0u8; mask.len()];
 
     for i in 0..mask.len() {
@@ -486,106 +487,6 @@ fn create_surface_mask(mask: &[u8], nx: usize, ny: usize, nz: usize) -> Vec<u8> 
     }
 
     surface
-}
-
-/// Erode a binary mask using spherical structuring element
-fn erode_mask(mask: &[u8], nx: usize, ny: usize, nz: usize, radius: i32) -> Vec<u8> {
-    let n_total = nx * ny * nz;
-    let mut eroded = vec![0u8; n_total];
-
-    let idx = |i: usize, j: usize, k: usize| i + j * nx + k * nx * ny;
-
-    for k in 0..nz {
-        for j in 0..ny {
-            for i in 0..nx {
-                if mask[idx(i, j, k)] == 0 {
-                    continue;
-                }
-
-                let mut all_inside = true;
-
-                'outer: for dz in -radius..=radius {
-                    for dy in -radius..=radius {
-                        for dx in -radius..=radius {
-                            let dist2 = dx * dx + dy * dy + dz * dz;
-                            if dist2 > radius * radius {
-                                continue;
-                            }
-
-                            let ni = i as i32 + dx;
-                            let nj = j as i32 + dy;
-                            let nk = k as i32 + dz;
-
-                            if ni < 0 || ni >= nx as i32 ||
-                               nj < 0 || nj >= ny as i32 ||
-                               nk < 0 || nk >= nz as i32 {
-                                all_inside = false;
-                                break 'outer;
-                            }
-
-                            if mask[idx(ni as usize, nj as usize, nk as usize)] == 0 {
-                                all_inside = false;
-                                break 'outer;
-                            }
-                        }
-                    }
-                }
-
-                if all_inside {
-                    eroded[idx(i, j, k)] = 1;
-                }
-            }
-        }
-    }
-
-    eroded
-}
-
-/// Dilate a binary mask using spherical structuring element
-fn dilate_mask(mask: &[u8], nx: usize, ny: usize, nz: usize, radius: i32) -> Vec<u8> {
-    let n_total = nx * ny * nz;
-    let mut dilated = vec![0u8; n_total];
-
-    let idx = |i: usize, j: usize, k: usize| i + j * nx + k * nx * ny;
-
-    for k in 0..nz {
-        for j in 0..ny {
-            for i in 0..nx {
-                if mask[idx(i, j, k)] != 0 {
-                    // Set all neighbors within radius
-                    for dz in -radius..=radius {
-                        for dy in -radius..=radius {
-                            for dx in -radius..=radius {
-                                let dist2 = dx * dx + dy * dy + dz * dz;
-                                if dist2 > radius * radius {
-                                    continue;
-                                }
-
-                                let ni = i as i32 + dx;
-                                let nj = j as i32 + dy;
-                                let nk = k as i32 + dz;
-
-                                if ni >= 0 && ni < nx as i32 &&
-                                   nj >= 0 && nj < ny as i32 &&
-                                   nk >= 0 && nk < nz as i32 {
-                                    dilated[idx(ni as usize, nj as usize, nk as usize)] = 1;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    dilated
-}
-
-/// Morphological closing (dilation followed by erosion)
-pub fn morphological_close(mask: &[u8], grid: &Grid, radius: i32) -> Vec<u8> {
-    let (nx, ny, nz) = grid.dims;
-    let dilated = dilate_mask(mask, nx, ny, nz, radius);
-    erode_mask(&dilated, nx, ny, nz, radius)
 }
 
 /// 3D Gaussian smoothing with anisotropic sigma
@@ -800,31 +701,6 @@ mod tests {
         assert_eq!(surface[0], 13);
     }
 
-    #[test]
-    fn test_erode_mask() {
-        // 5x5x5 solid cube
-        let mask = vec![1u8; 125];
-        let eroded = erode_mask(&mask, 5, 5, 5, 1);
-
-        // Center 3x3x3 should remain
-        let count: usize = eroded.iter().map(|&v| v as usize).sum();
-        assert!(count > 0);
-        assert!(count < 125);
-    }
-
-    #[test]
-    fn test_dilate_mask() {
-        // Single center voxel in 5x5x5
-        let mut mask = vec![0u8; 125];
-        mask[62] = 1; // Center
-
-        let dilated = dilate_mask(&mask, 5, 5, 5, 1);
-
-        // Should expand to 6-connectivity
-        let count: usize = dilated.iter().map(|&v| v as usize).sum();
-        assert!(count >= 7); // At least 7 voxels (center + 6 neighbors)
-    }
-
     // =====================================================================
     // Helper: create a 3D sphere mask
     // =====================================================================
@@ -956,105 +832,6 @@ mod tests {
         let mask = vec![0u8; 27];
         let surface = extract_surface_voxels(&mask, 3, 3, 3);
         assert!(surface.is_empty(), "Empty mask should have no surface voxels");
-    }
-
-    // =====================================================================
-    // Tests for erode_mask (more thorough)
-    // =====================================================================
-
-    #[test]
-    fn test_erode_mask_sphere() {
-        let n = 10;
-        let mask = make_sphere_mask(n, 4.0);
-        let eroded = erode_mask(&mask, n, n, n, 1);
-
-        let orig_count: usize = mask.iter().map(|&v| v as usize).sum();
-        let eroded_count: usize = eroded.iter().map(|&v| v as usize).sum();
-        assert!(
-            eroded_count < orig_count,
-            "Eroded sphere should be smaller: {} < {}",
-            eroded_count,
-            orig_count
-        );
-        assert!(eroded_count > 0, "Eroded sphere should not be empty");
-
-        // Center should still be in eroded mask
-        let center = n / 2 + (n / 2) * n + (n / 2) * n * n;
-        assert_eq!(eroded[center], 1, "Center should survive erosion");
-    }
-
-    #[test]
-    fn test_erode_mask_single_voxel() {
-        // A single voxel should be eroded away
-        let mut mask = vec![0u8; 125];
-        mask[62] = 1; // center of 5x5x5
-        let eroded = erode_mask(&mask, 5, 5, 5, 1);
-        let count: usize = eroded.iter().map(|&v| v as usize).sum();
-        assert_eq!(count, 0, "Single voxel should be fully eroded");
-    }
-
-    // =====================================================================
-    // Tests for dilate_mask (more thorough)
-    // =====================================================================
-
-    #[test]
-    fn test_dilate_mask_sphere() {
-        let n = 10;
-        let mask = make_sphere_mask(n, 3.0);
-        let dilated = dilate_mask(&mask, n, n, n, 1);
-
-        let orig_count: usize = mask.iter().map(|&v| v as usize).sum();
-        let dilated_count: usize = dilated.iter().map(|&v| v as usize).sum();
-        assert!(
-            dilated_count > orig_count,
-            "Dilated sphere should be larger: {} > {}",
-            dilated_count,
-            orig_count
-        );
-    }
-
-    #[test]
-    fn test_dilate_mask_radius_2() {
-        let mut mask = vec![0u8; 125];
-        mask[62] = 1; // center of 5x5x5
-        let dilated = dilate_mask(&mask, 5, 5, 5, 2);
-        let count: usize = dilated.iter().map(|&v| v as usize).sum();
-        // Should be more than radius=1 dilation
-        assert!(count > 7, "Radius-2 dilation should produce more than 7 voxels, got {}", count);
-    }
-
-    // =====================================================================
-    // Tests for morphological_close
-    // =====================================================================
-
-    #[test]
-    fn test_morphological_close_fills_small_gaps() {
-        let n = 10;
-        let mut mask = make_sphere_mask(n, 4.0);
-        // Remove a surface voxel to create a small gap
-        let surface = extract_surface_voxels(&mask, n, n, n);
-        if !surface.is_empty() {
-            mask[surface[0]] = 0;
-        }
-
-        let closed = morphological_close(&mask, &grid(n, n, n), 1);
-        let orig_count: usize = mask.iter().map(|&v| v as usize).sum();
-        let closed_count: usize = closed.iter().map(|&v| v as usize).sum();
-        // Closing should recover the gap or at least not shrink significantly
-        assert!(
-            closed_count >= orig_count,
-            "Closing should not reduce mask size: {} vs {}",
-            closed_count,
-            orig_count
-        );
-    }
-
-    #[test]
-    fn test_morphological_close_empty() {
-        let mask = vec![0u8; 27];
-        let closed = morphological_close(&mask, &grid(3, 3, 3), 1);
-        let count: usize = closed.iter().map(|&v| v as usize).sum();
-        assert_eq!(count, 0, "Closing empty mask should stay empty");
     }
 
     // =====================================================================

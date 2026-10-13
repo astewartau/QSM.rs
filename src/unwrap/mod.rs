@@ -11,8 +11,6 @@
 //! - [`laplacian_unwrap`] — Laplacian unwrapping, with a [`LaplacianSolver`]: `Dct` (default;
 //!   unweighted least squares, Neumann BC on the array) or `Fft { pad }` (Schofield & Zhu sin/cos
 //!   method on the zero-padded volume, which reproduces STI Suite 3.0's `MRPhaseUnwrap`)
-//! - [`laplacian_unwrap_bfr`] — Laplacian unwrapping **+ background field removal**
-//!   (∇² masked to the ROI); see the [`laplacian`] module docs for why these differ
 //!
 //! All of the above read across slice boundaries. For a 2D multi-slice acquisition, where
 //! each slice carries its own receive phase offset, run one of them per slice with
@@ -35,15 +33,12 @@ pub use slicewise::{
     unwrap_slicewise, unwrap_slicewise_multi_echo, enforce_inter_echo_consistency,
     SliceWiseParams,
 };
-#[allow(deprecated)]
-pub use laplacian::laplacian_unwrap_bfr;
 pub use laplacian::{laplacian_unwrap, LaplacianSolver};
 
 /// Phase unwrapping method selection.
 ///
-/// These select unwrappers only. [`laplacian_unwrap_bfr`], which unwraps *and* removes the
-/// harmonic background, is deliberately not reachable here — call it directly if that
-/// combination is what you want, and read the [`laplacian`] module docs first.
+/// These select unwrappers only. Methods that unwrap *and* remove the background field
+/// (HARPERELLA, iHARPERELLA) live in [`crate::bgremove`].
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum UnwrapMethod {
     Romeo,

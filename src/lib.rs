@@ -198,14 +198,15 @@ pub mod unring {
 /// Brain-mask thresholding and morphology.
 ///
 /// Mask generation ([`otsu_threshold`](crate::mask::otsu_threshold)) plus
-/// morphological operations (erode/dilate/close/fill-holes) and sphere masks.
+/// morphological operations (erode/dilate/close/fill-holes, signal-gated erosion) and sphere
+/// masks.
 pub mod mask {
-    pub use crate::utils::mask::{
-        create_sphere_mask, apply_mask_zero, erode_mask, dilate_mask,
-    };
+    pub use crate::utils::mask::{create_sphere_mask, apply_mask_zero};
     pub use crate::utils::threshold::otsu_threshold;
-    pub use crate::utils::curvature::morphological_close;
-    pub use crate::utils::bias_correction::fill_holes;
+    pub use crate::utils::morphology::{
+        erode_mask, dilate_mask, morphological_close, fill_holes,
+        signal_gated_erosion, SignalErosionParams,
+    };
 }
 
 /// Receive-field (B1−) bias correction for magnitude images.

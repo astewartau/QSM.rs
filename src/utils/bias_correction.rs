@@ -31,10 +31,11 @@ impl Default for HomogeneityParams {
 
 use std::collections::VecDeque;
 use crate::Grid;
+use crate::utils::morphology::fill_holes;
 
 /// Index into 3D array (Fortran/column-major order)
 #[inline(always)]
-fn idx3d(i: usize, j: usize, k: usize, nx: usize, ny: usize) -> usize {
+pub(crate) fn idx3d(i: usize, j: usize, k: usize, nx: usize, ny: usize) -> usize {
     i + j * nx + k * nx * ny
 }
 
@@ -45,7 +46,7 @@ fn idx3d(i: usize, j: usize, k: usize, nx: usize, ny: usize) -> usize {
 /// at the entry point names both sizes; the index panic 300 lines down does not
 /// say which input was wrong, or that the grid was the problem at all.
 #[inline]
-fn check_volume(name: &str, len: usize, grid: &Grid) -> usize {
+pub(crate) fn check_volume(name: &str, len: usize, grid: &Grid) -> usize {
     let (nx, ny, nz) = grid.dims;
     let n_total = nx * ny * nz;
     assert_eq!(
@@ -526,106 +527,6 @@ pub fn gaussian_smooth_3d_boxsizes(
 }
 
 //=============================================================================
-// Connected Components and Hole Filling
-//=============================================================================
-
-/// Find connected component using flood fill (6-connectivity in 3D)
-fn flood_fill_component(
-    mask: &[u8],
-    visited: &mut [bool],
-    start: usize,
-    nx: usize, ny: usize, nz: usize,
-) -> Vec<usize> {
-    let mut component = Vec::new();
-    let mut stack = vec![start];
-
-    while let Some(idx) = stack.pop() {
-        if visited[idx] || mask[idx] != 0 {
-            continue;
-        }
-
-        visited[idx] = true;
-        component.push(idx);
-
-        // Get 3D coordinates
-        let k = idx / (nx * ny);
-        let rem = idx % (nx * ny);
-        let j = rem / nx;
-        let i = rem % nx;
-
-        // 6-connectivity neighbors
-        if i > 0 {
-            let n = idx3d(i - 1, j, k, nx, ny);
-            if !visited[n] && mask[n] == 0 { stack.push(n); }
-        }
-        if i + 1 < nx {
-            let n = idx3d(i + 1, j, k, nx, ny);
-            if !visited[n] && mask[n] == 0 { stack.push(n); }
-        }
-        if j > 0 {
-            let n = idx3d(i, j - 1, k, nx, ny);
-            if !visited[n] && mask[n] == 0 { stack.push(n); }
-        }
-        if j + 1 < ny {
-            let n = idx3d(i, j + 1, k, nx, ny);
-            if !visited[n] && mask[n] == 0 { stack.push(n); }
-        }
-        if k > 0 {
-            let n = idx3d(i, j, k - 1, nx, ny);
-            if !visited[n] && mask[n] == 0 { stack.push(n); }
-        }
-        if k + 1 < nz {
-            let n = idx3d(i, j, k + 1, nx, ny);
-            if !visited[n] && mask[n] == 0 { stack.push(n); }
-        }
-    }
-
-    component
-}
-
-/// Fill holes in a binary mask
-///
-/// Matches MriResearchTools.jl's fill_holes function.
-/// Fills connected components of zeros (holes) up to max_hole_size.
-/// Uses 6-connectivity for 3D.
-pub fn fill_holes(mask: &[u8], grid: &Grid, max_hole_size: usize) -> Vec<u8> {
-    let (nx, ny, nz) = grid.dims;
-    let n_total = check_volume("fill_holes: mask", mask.len(), grid);
-    let mut result = mask.to_vec();
-    let mut visited = vec![false; n_total];
-
-    // Find all connected components of zeros (potential holes)
-    for idx in 0..n_total {
-        if mask[idx] == 0 && !visited[idx] {
-            let component = flood_fill_component(mask, &mut visited, idx, nx, ny, nz);
-
-            // Check if this component touches the boundary
-            let mut touches_boundary = false;
-            for &cidx in &component {
-                let k = cidx / (nx * ny);
-                let rem = cidx % (nx * ny);
-                let j = rem / nx;
-                let i = rem % nx;
-
-                if i == 0 || i == nx - 1 || j == 0 || j == ny - 1 || k == 0 || k == nz - 1 {
-                    touches_boundary = true;
-                    break;
-                }
-            }
-
-            // Fill if it's a hole (doesn't touch boundary) and small enough
-            if !touches_boundary && component.len() <= max_hole_size {
-                for cidx in component {
-                    result[cidx] = 1;
-                }
-            }
-        }
-    }
-
-    result
-}
-
-//=============================================================================
 // Robust Mask (matching MriResearchTools.jl)
 //=============================================================================
 
@@ -1031,16 +932,6 @@ mod tests {
     }
 
     #[test]
-    fn test_fill_holes_basic() {
-        // 3x3x3 cube with a hole in the center
-        let mut mask = vec![1u8; 27];
-        mask[13] = 0; // center voxel
-
-        let filled = fill_holes(&mask, &grid(3, 3, 3), 5);
-        assert_eq!(filled[13], 1, "Center hole should be filled");
-    }
-
-    #[test]
     fn test_robust_mask_basic() {
         // Simple test with uniform high values
         let mag = vec![100.0; 27];
@@ -1396,39 +1287,6 @@ mod tests {
     }
 
     // =====================================================================
-    // Tests for fill_holes (more complex cases)
-    // =====================================================================
-
-    #[test]
-    fn test_fill_holes_boundary_hole_not_filled() {
-        // A hole touching the boundary should NOT be filled
-        let mut mask = vec![1u8; 125]; // 5x5x5
-        mask[0] = 0; // corner voxel - touches boundary
-        let filled = fill_holes(&mask, &grid(5, 5, 5), 100);
-        assert_eq!(filled[0], 0, "Boundary hole should not be filled");
-    }
-
-    #[test]
-    fn test_fill_holes_large_hole_not_filled() {
-        // A hole larger than max_hole_size should NOT be filled
-        let n = 7;
-        let n_total = n * n * n;
-        let mut mask = vec![1u8; n_total];
-        // Create a large internal hole (3x3x3 = 27 voxels)
-        for k in 2..5 {
-            for j in 2..5 {
-                for i in 2..5 {
-                    mask[i + j * n + k * n * n] = 0;
-                }
-            }
-        }
-        let filled = fill_holes(&mask, &grid(n, n, n), 5); // max_hole_size=5, hole is 27
-        // Hole should NOT be filled because it's too large
-        let center = 3 + 3 * n + 3 * n * n;
-        assert_eq!(filled[center], 0, "Large hole should not be filled");
-    }
-
-    // =====================================================================
     // Tests for robust_mask (more comprehensive)
     // =====================================================================
 
@@ -1660,34 +1518,6 @@ mod tests {
     }
 
     // =====================================================================
-    // Tests for flood_fill_component
-    // =====================================================================
-
-    #[test]
-    fn test_flood_fill_component_single() {
-        let mask = vec![1u8; 27]; // 3x3x3 all filled => no zeros
-        let mut visited = vec![false; 27];
-        // Start at a filled voxel -> should find nothing (mask[idx] != 0)
-        let component = flood_fill_component(&mask, &mut visited, 0, 3, 3, 3);
-        assert!(component.is_empty(), "All filled mask should have no zero component");
-    }
-
-    #[test]
-    fn test_flood_fill_component_connected_zeros() {
-        let n = 5;
-        let n_total = n * n * n;
-        let mut mask = vec![1u8; n_total];
-        // Create a connected line of zeros along x at j=2, k=2
-        for i in 1..4 {
-            mask[i + 2 * n + 2 * n * n] = 0;
-        }
-        let mut visited = vec![false; n_total];
-        let start = 1 + 2 * n + 2 * n * n;
-        let component = flood_fill_component(&mask, &mut visited, start, n, n, n);
-        assert_eq!(component.len(), 3, "Should find 3 connected zero voxels");
-    }
-
-    // =====================================================================
     // Tests for gaussian_smooth_3d with reversed passes (mask + even pass)
     // =====================================================================
 
@@ -1766,12 +1596,6 @@ mod tests {
         let data = vec![1.0; 8 * 8 * 8];
         let mut weight = vec![1.0; 6 * 6 * 6];
         gaussian_smooth_3d(&data, [1.5, 1.5, 1.5], None, Some(&mut weight), 3, &grid(8, 8, 8));
-    }
-
-    #[test]
-    #[should_panic(expected = "fill_holes: mask has 216 voxels but the grid is 8x8x8 (512 voxels)")]
-    fn fill_holes_refuses_mask_not_matching_grid() {
-        fill_holes(&vec![1u8; 6 * 6 * 6], &grid(8, 8, 8), 10);
     }
 
     #[test]

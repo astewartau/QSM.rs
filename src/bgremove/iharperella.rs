@@ -40,9 +40,6 @@ pub struct HarperellaParams {
     pub tol: f64,
 }
 
-/// Type alias for backwards compatibility
-pub type IharperellaParams = HarperellaParams;
-
 impl Default for HarperellaParams {
     fn default() -> Self {
         Self {

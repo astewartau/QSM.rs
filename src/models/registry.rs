@@ -39,7 +39,7 @@ const MODELS: &[ModelSpec] = &[
         origin: Framework::Matlab,
         description: "Dual-frequency octave-convolution U-Net for background field \
                       removal (total field → local field). Fully convolutional.",
-        paper: "Kames et al. / Sun group; https://github.com/sunhongfu/BFRnet",
+        paper: "Zhu et al., Z Med Phys 2023; doi:10.1016/j.zemedi.2022.08.001",
         source: "https://github.com/sunhongfu/BFRnet",
         license: "",
         // Mirrored on Hugging Face (qsmxt/qsm-onnx-weights). Verified: anonymous

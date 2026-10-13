@@ -20,7 +20,7 @@
 //! The input should be a magnitude image (for multi-echo GRE, the root-sum-of-squares over
 //! echoes works well) in roughly standard radiological orientation (axial slices along z), as
 //! HD-BET was trained on MNI-aligned data. HD-BET applies no post-processing; combine with
-//! [`crate::utils::fill_holes`] / erosion refinements as needed.
+//! [`crate::utils::morphology::fill_holes`] / erosion refinements as needed.
 //!
 //! Reference:
 //! Isensee, F., Schell, M., Pflueger, I., et al. (2019). "Automated brain extraction of
