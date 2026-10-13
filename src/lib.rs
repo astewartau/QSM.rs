@@ -140,10 +140,11 @@ pub mod swi;
 ///
 /// [`complex_to_mag_phase`](complex::complex_to_mag_phase) also detects and undoes
 /// alternate-slice π "chopping" (a reconstruction artefact common in GE real/imaginary
-/// exports), deciding once for all echoes.
+/// exports), deciding once for all echoes, and can negate the phase for vendors (GE) whose
+/// real/imaginary phase runs opposite to the Siemens/Philips convention.
 pub mod complex {
     pub use crate::utils::complex::{
-        complex_to_mag_phase, slice_chopping_coherence, ChopCorrection, MagPhaseEchoes,
+        complex_to_mag_phase, slice_chopping_coherence, ChopCorrection, ComplexToMagPhaseParams, MagPhaseEchoes,
         SliceChopping, CHOP_AMBIGUOUS_COHERENCE,
     };
 }

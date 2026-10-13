@@ -139,7 +139,7 @@ Methods marked † need the `onnx` feature and model weights.
 
 | Algorithm | Description | Reference |
 |-----------|-------------|-----------|
-| **Real/imaginary input** | Converts real/imaginary echoes to magnitude/phase, detecting and undoing alternate-slice π chopping with one decision for all echoes (`complex_to_mag_phase`, `ChopCorrection`) | — |
+| **Real/imaginary input** | Converts real/imaginary echoes to magnitude/phase, detecting and undoing alternate-slice π chopping with one decision for all echoes, and optionally negating the phase for GE's opposite sign convention (`complex_to_mag_phase`, `ComplexToMagPhaseParams`) | — |
 | **MCPC-3D-S** | Coil combination and phase-offset removal (`mcpc3ds_combine`, `phase_offset_removal`) | Eckstein, K., et al. (2018). "Computationally Efficient Combination of Multi-channel Phase Data From Multi-echo Acquisitions (ASPIRE)." *Magnetic Resonance in Medicine*, 79:2996-3006. [DOI](https://doi.org/10.1002/mrm.26963) |
 | **Bipolar correction** | Removes the linear phase artefact of bipolar readout gradients; needs three or more echoes (`bipolar_correction`) | Eckstein, K. (2021). PhD thesis, TU Wien, Section 3.1.3. [DOI](https://doi.org/10.34726/hss.2021.43447) |
 | **B0 weighted average** | Weighted average of unwrapped phase / TE over echoes; weights by phase SNR, phase variance, magnitude, TE, uniform, or an assumed T2* decay (`calculate_b0_weighted`, `B0WeightType`) | — |

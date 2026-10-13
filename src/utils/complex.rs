@@ -12,6 +12,12 @@
 //! from the reconstruction, not the signal, so all echoes share it. Flipping the same slices in
 //! every echo leaves at most a common π offset, which phase-offset removal absorbs; flipping
 //! different slices per echo would put a slice-alternating offset into the field.
+//!
+//! The sign of the phase is a vendor convention too: GE's real/imaginary pair gives phase of the
+//! opposite sign to Siemens and Philips phase images (on the same subject, high-pass field maps
+//! anti-correlate). Nothing in the data says which convention it follows, so the caller states
+//! it ([`ComplexToMagPhaseParams::negate_phase`]); conjugating `z` brings it to the convention
+//! the rest of the crate assumes.
 
 use std::f64::consts::PI;
 
@@ -35,6 +41,17 @@ pub enum ChopCorrection {
     /// Correct exactly these axes (`[x, y, z]`) whatever the data says. `[false; 3]` converts
     /// without any correction.
     Axes([bool; 3]),
+}
+
+/// Options for [`complex_to_mag_phase`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct ComplexToMagPhaseParams {
+    /// How alternate-slice π chopping is handled.
+    pub chop: ChopCorrection,
+    /// Negate the phase (take `arg z̄`). Set it for data whose phase runs opposite to the
+    /// Siemens/Philips convention the rest of the crate assumes, such as GE real/imaginary
+    /// exports; it cannot be detected from the data.
+    pub negate_phase: bool,
 }
 
 /// What [`complex_to_mag_phase`] found and did about slice chopping.
@@ -63,9 +80,12 @@ impl SliceChopping {
 pub struct MagPhaseEchoes {
     /// Per-echo magnitude `|z|`.
     pub magnitudes: Vec<Vec<f64>>,
-    /// Per-echo phase `arg z` in `[-π, π]`, after the chop correction.
+    /// Per-echo phase `arg z` in `[-π, π]`, after the chop correction (and negated when
+    /// `phase_negated`).
     pub phases: Vec<Vec<f64>>,
     pub chopping: SliceChopping,
+    /// Whether the phase was negated ([`ComplexToMagPhaseParams::negate_phase`]).
+    pub phase_negated: bool,
 }
 
 /// Magnitude-weighted neighbour coherence along each axis, pooled over echoes.
@@ -132,7 +152,8 @@ pub fn slice_chopping_coherence(real: &[&[f64]], imag: &[&[f64]], grid: &Grid) -
 /// [`SliceChopping::ambiguous_axes`] on the result for axes where that decision was close.
 ///
 /// The correction negates `z` on odd-indexed planes along each corrected axis before taking
-/// `arg z`; magnitude is unchanged by it. Non-finite inputs are treated as zero.
+/// `arg z`; magnitude is unchanged by it. With `negate_phase` the phase is `arg z̄` instead,
+/// which leaves the chop detection unchanged. Non-finite inputs are treated as zero.
 ///
 /// # Panics
 /// As [`slice_chopping_coherence`].
@@ -140,10 +161,10 @@ pub fn complex_to_mag_phase(
     real: &[&[f64]],
     imag: &[&[f64]],
     grid: &Grid,
-    chop: ChopCorrection,
+    params: &ComplexToMagPhaseParams,
 ) -> MagPhaseEchoes {
     let coherence = slice_chopping_coherence(real, imag, grid);
-    let (corrected, detected) = match chop {
+    let (corrected, detected) = match params.chop {
         ChopCorrection::Auto => (coherence.map(|c| c < 0.0), true),
         ChopCorrection::Axes(axes) => (axes, false),
     };
@@ -160,6 +181,7 @@ pub fn complex_to_mag_phase(
                 for i in 0..nx {
                     let v = i + j * nx + k * nx * ny;
                     let (r, q) = (finite(re[v]), finite(im[v]));
+                    let q = if params.negate_phase { -q } else { q };
                     let odd = (corrected[0] && i % 2 == 1) as u8
                         + (corrected[1] && j % 2 == 1) as u8
                         + (corrected[2] && k % 2 == 1) as u8;
@@ -178,6 +200,7 @@ pub fn complex_to_mag_phase(
         magnitudes,
         phases,
         chopping: SliceChopping { coherence, corrected, detected },
+        phase_negated: params.negate_phase,
     }
 }
 
@@ -256,6 +279,14 @@ mod tests {
         }
     }
 
+    fn auto() -> ComplexToMagPhaseParams {
+        ComplexToMagPhaseParams::default()
+    }
+
+    fn axes(a: [bool; 3]) -> ComplexToMagPhaseParams {
+        ComplexToMagPhaseParams { chop: ChopCorrection::Axes(a), ..Default::default() }
+    }
+
     fn refs(v: &[Vec<f64>]) -> Vec<&[f64]> {
         v.iter().map(|x| x.as_slice()).collect()
     }
@@ -269,7 +300,7 @@ mod tests {
     fn unchopped_input_is_left_alone() {
         let grid = Grid::new(16, 16, 16, 1.0, 1.0, 1.0);
         let (re, im, ph) = smooth_echoes(&grid, 3);
-        let out = complex_to_mag_phase(&refs(&re), &refs(&im), &grid, ChopCorrection::Auto);
+        let out = complex_to_mag_phase(&refs(&re), &refs(&im), &grid, &auto());
         assert_eq!(out.chopping.corrected, [false; 3]);
         assert!(out.chopping.detected);
         assert!(out.chopping.coherence.iter().all(|&c| c > 0.8), "{:?}", out.chopping.coherence);
@@ -289,7 +320,7 @@ mod tests {
             let (mut re, mut im, ph) = smooth_echoes(&grid, 3);
             chop(&mut re, &grid, axis);
             chop(&mut im, &grid, axis);
-            let out = complex_to_mag_phase(&refs(&re), &refs(&im), &grid, ChopCorrection::Auto);
+            let out = complex_to_mag_phase(&refs(&re), &refs(&im), &grid, &auto());
             let mut expected = [false; 3];
             expected[axis] = true;
             assert_eq!(out.chopping.corrected, expected, "axis {axis}: {:?}", out.chopping.coherence);
@@ -309,7 +340,7 @@ mod tests {
             chop(&mut re, &grid, axis);
             chop(&mut im, &grid, axis);
         }
-        let out = complex_to_mag_phase(&refs(&re), &refs(&im), &grid, ChopCorrection::Auto);
+        let out = complex_to_mag_phase(&refs(&re), &refs(&im), &grid, &auto());
         assert_eq!(out.chopping.corrected, [true, false, true]);
         assert!(max_phase_err(&out.phases[1], &ph[1]) < 1e-12);
     }
@@ -331,7 +362,7 @@ mod tests {
             re[1][v] = m * p.cos();
             im[1][v] = m * p.sin();
         }
-        let out = complex_to_mag_phase(&refs(&re), &refs(&im), &grid, ChopCorrection::Auto);
+        let out = complex_to_mag_phase(&refs(&re), &refs(&im), &grid, &auto());
         assert_eq!(out.chopping.corrected, [false, false, true]);
         assert!(max_phase_err(&out.phases[0], &ph[0]) < 1e-12);
     }
@@ -343,16 +374,34 @@ mod tests {
         chop(&mut re, &grid, 1);
         chop(&mut im, &grid, 1);
 
-        let off = complex_to_mag_phase(&refs(&re), &refs(&im), &grid, ChopCorrection::Axes([false; 3]));
+        let off = complex_to_mag_phase(&refs(&re), &refs(&im), &grid, &axes([false; 3]));
         assert_eq!(off.chopping.corrected, [false; 3]);
         assert!(!off.chopping.detected);
         // The coherence is still reported, so a caller can see the override disagreed.
         assert!(off.chopping.coherence[1] < -0.8);
         assert!(max_phase_err(&off.phases[0], &ph[0]) > 3.0);
 
-        let forced = complex_to_mag_phase(&refs(&re), &refs(&im), &grid, ChopCorrection::Axes([false, true, false]));
+        let forced = complex_to_mag_phase(&refs(&re), &refs(&im), &grid, &axes([false, true, false]));
         assert_eq!(forced.chopping.corrected, [false, true, false]);
         assert!(max_phase_err(&forced.phases[0], &ph[0]) < 1e-12);
+    }
+
+    #[test]
+    fn negate_phase_conjugates_and_keeps_the_chop_decision() {
+        let grid = Grid::new(16, 16, 16, 1.0, 1.0, 1.0);
+        let (mut re, mut im, ph) = smooth_echoes(&grid, 2);
+        chop(&mut re, &grid, 2);
+        chop(&mut im, &grid, 2);
+        let plain = complex_to_mag_phase(&refs(&re), &refs(&im), &grid, &auto());
+        let params = ComplexToMagPhaseParams { negate_phase: true, ..Default::default() };
+        let negated = complex_to_mag_phase(&refs(&re), &refs(&im), &grid, &params);
+        assert!(!plain.phase_negated && negated.phase_negated);
+        assert_eq!(negated.chopping, plain.chopping);
+        for e in 0..2 {
+            let flipped: Vec<f64> = ph[e].iter().map(|p| -p).collect();
+            assert!(max_phase_err(&negated.phases[e], &flipped) < 1e-12);
+            assert_eq!(negated.magnitudes[e], plain.magnitudes[e]);
+        }
     }
 
     #[test]
@@ -365,7 +414,7 @@ mod tests {
         };
         let re: Vec<f64> = (0..grid.n_total()).map(|_| next()).collect();
         let im: Vec<f64> = (0..grid.n_total()).map(|_| next()).collect();
-        let out = complex_to_mag_phase(&[&re], &[&im], &grid, ChopCorrection::Auto);
+        let out = complex_to_mag_phase(&[&re], &[&im], &grid, &auto());
         assert_eq!(out.chopping.ambiguous_axes(), vec![0, 1, 2]);
     }
 
@@ -375,7 +424,7 @@ mod tests {
         let mut re = vec![1.0; 64];
         let im = vec![0.0; 64];
         re[5] = f64::NAN;
-        let out = complex_to_mag_phase(&[&re], &[&im], &grid, ChopCorrection::Axes([false; 3]));
+        let out = complex_to_mag_phase(&[&re], &[&im], &grid, &axes([false; 3]));
         assert_eq!(out.magnitudes[0][5], 0.0);
         assert_eq!(out.phases[0][5], 0.0);
     }
@@ -384,6 +433,6 @@ mod tests {
     #[should_panic(expected = "complex_to_mag_phase: echo 0 has 64 real and 63 imaginary voxels")]
     fn mismatched_volumes_are_refused() {
         let grid = Grid::new(4, 4, 4, 1.0, 1.0, 1.0);
-        complex_to_mag_phase(&[&[0.0; 64]], &[&[0.0; 63]], &grid, ChopCorrection::Auto);
+        complex_to_mag_phase(&[&[0.0; 64]], &[&[0.0; 63]], &grid, &auto());
     }
 }
