@@ -47,6 +47,13 @@ pub fn run_bg_removal(
 
     let (mut local_field, eroded_mask) = match config.algorithm {
         BgRemovalAlgorithm::Vsharp => {
+            if let crate::bgremove::VsharpGrid::Isotropic { spacing_mm } = config.vsharp.working_grid(&grid) {
+                if !(spacing_mm.is_finite() && spacing_mm > 0.0) {
+                    return Err(PipelineError::InvalidConfig(format!(
+                        "V-SHARP isotropic working grid spacing must be finite and > 0 mm, got {spacing_mm}"
+                    )));
+                }
+            }
             crate::bgremove::vsharp(
                 field_ppm, mask, &grid, &config.vsharp, progress,
             )
@@ -176,6 +183,26 @@ mod tests {
         let r = result.unwrap();
         assert_eq!(r.local_field_ppm.len(), n);
         assert_eq!(r.eroded_mask.len(), n);
+    }
+
+    #[test]
+    fn vsharp_rejects_a_bad_working_grid_spacing() {
+        let (nx, ny, nz) = (8, 8, 8);
+        let n = nx * ny * nz;
+        let meta = ScanMetadata {
+            dims: (nx, ny, nz),
+            voxel_size: (1.0, 1.0, 1.0),
+            echo_times: vec![0.005],
+            field_strength: 3.0,
+            b0_direction: (0.0, 0.0, 1.0),
+            slice_geometry: None,
+        };
+        for spacing_mm in [0.0, -1.0, f64::NAN] {
+            let mut config = BgRemovalConfig::default();
+            config.vsharp.grid = Some(crate::bgremove::VsharpGrid::Isotropic { spacing_mm });
+            let r = run_bg_removal(&vec![0.1; n], &vec![1u8; n], &meta, &config, &mut |_, _| {});
+            assert!(matches!(r, Err(PipelineError::InvalidConfig(_))), "spacing {spacing_mm}");
+        }
     }
 
     /// The coverage test in `config.rs` reads the stage sources; this one actually calls the

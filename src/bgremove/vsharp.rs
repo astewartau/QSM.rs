@@ -14,6 +14,28 @@
 //! gives a more reproducible local field at the cost of attenuating genuinely
 //! low-frequency tissue contrast.
 //!
+//! ## Working grid
+//!
+//! The SMV balls live on a voxel grid. On strongly anisotropic voxels (e.g. 0.8 × 0.8 × 3 mm)
+//! the native grid makes them crude in the coarse direction: a 1–2 mm ball is a single-slice
+//! disk. [`VsharpParams::grid`] can instead estimate the background on an isotropic working
+//! grid ([`VsharpGrid::Isotropic`]):
+//!
+//! 1. crop the field and mask to the mask's bounding box with a zero margin of
+//!    [`CROP_MARGIN`] native voxels per side (this also fixes where the working grid sits
+//!    relative to the anatomy, so it lands the same way on repeat scans);
+//! 2. resample both trilinearly onto the isotropic grid (mask: interpolated value > 0.5), axes
+//!    whose voxel size already equals the spacing are left as they are;
+//! 3. run V-SHARP there (same balls, radii, edge test and deconvolution as on the native grid);
+//! 4. interpolate the **background** (field − local field on the working grid) back to the native
+//!    grid trilinearly, and return local = native field − background, on the voxels where the
+//!    back-interpolated working-grid support is > 0.5.
+//!
+//! The local field thus keeps native resolution; only the smooth background estimate is made on
+//! the working grid. By default ([`VsharpParams::grid`] = `None`) the grid is chosen from the
+//! voxel size by [`VsharpGrid::for_voxel_size`]: 1 mm isotropic for anisotropic voxels,
+//! native otherwise.
+//!
 //! Reference:
 //! Wu, B., Li, W., Guidon, A., Liu, C. (2012).
 //! "Whole brain susceptibility mapping using compressed sensing."
@@ -25,6 +47,44 @@ use num_complex::Complex64;
 use crate::Grid;
 use crate::fft::{fft3d, ifft3d};
 use crate::kernels::smv::{smv_kernel, erode_mask_smv};
+
+/// Zero margin (native voxels per side) around the mask's bounding box when V-SHARP runs on an
+/// isotropic working grid. See the [module docs](self).
+pub const CROP_MARGIN: usize = 12;
+
+/// Grid V-SHARP estimates the background field on. See the [module docs](self#working-grid).
+#[cfg_attr(feature = "introspection", derive(serde::Serialize))]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum VsharpGrid {
+    /// The input voxel grid (no resampling).
+    Native,
+    /// An isotropic grid of `spacing_mm`, anchored at the mask's bounding box. The background
+    /// is estimated there and interpolated back; the local field keeps native resolution.
+    Isotropic {
+        /// Working-grid voxel size in mm; must be finite and > 0.
+        spacing_mm: f64,
+    },
+}
+
+impl VsharpGrid {
+    /// Voxels count as anisotropic when the largest voxel dimension exceeds the smallest by more
+    /// than this fraction (1 %): enough to ignore header rounding, small enough that any real
+    /// slice-thickness difference counts.
+    pub const ANISOTROPY_TOLERANCE: f64 = 0.01;
+
+    /// The automatic choice used when [`VsharpParams::grid`] is `None`: 1 mm isotropic when the
+    /// voxels are anisotropic (`max / min > 1 + ANISOTROPY_TOLERANCE`), else [`Native`](Self::Native).
+    /// Isotropic input, including sub-millimetre, is never resampled by default.
+    pub fn for_voxel_size(voxel_size: (f64, f64, f64)) -> Self {
+        let (a, b, c) = voxel_size;
+        let (lo, hi) = (a.min(b).min(c), a.max(b).max(c));
+        if hi > lo * (1.0 + Self::ANISOTROPY_TOLERANCE) {
+            VsharpGrid::Isotropic { spacing_mm: 1.0 }
+        } else {
+            VsharpGrid::Native
+        }
+    }
+}
 
 /// V-SHARP algorithm parameters
 #[cfg_attr(feature = "introspection", derive(serde::Serialize))]
@@ -46,6 +106,18 @@ pub struct VsharpParams {
     /// residual background and field-map error, so `false` is the more reproducible choice
     /// there, while `true` recovers more low-frequency tissue contrast on a clean field.
     pub deconvolve: bool,
+    /// Grid the background is estimated on. `None` (default) chooses from the voxel size with
+    /// [`VsharpGrid::for_voxel_size`]: 1 mm isotropic for anisotropic voxels, native otherwise.
+    /// See [`VsharpParams::working_grid`] for the resolved choice.
+    pub grid: Option<VsharpGrid>,
+}
+
+impl VsharpParams {
+    /// The working grid V-SHARP will use on `grid`: [`Self::grid`] if set, else
+    /// [`VsharpGrid::for_voxel_size`].
+    pub fn working_grid(&self, grid: &Grid) -> VsharpGrid {
+        self.grid.unwrap_or_else(|| VsharpGrid::for_voxel_size(grid.voxel_size))
+    }
 }
 
 impl Default for VsharpParams {
@@ -59,6 +131,7 @@ impl Default for VsharpParams {
             max_radius: 12.0,
             min_radius: 1.0,
             deconvolve: true,
+            grid: None,
         }
     }
 }
@@ -73,11 +146,15 @@ impl Default for VsharpParams {
 /// * `field` - Unwrapped total field (nx * ny * nz)
 /// * `mask` - Binary mask (nx * ny * nz), 1 = inside ROI
 /// * `grid` - Volume dimensions and voxel sizes
-/// * `params` - V-SHARP parameters (min/max radius in mm, deconvolution on/off and its threshold)
+/// * `params` - V-SHARP parameters (min/max radius in mm, deconvolution on/off and its
+///   threshold, working grid)
 /// * `progress` - Progress callback (radius_index, total_radii)
 ///
 /// # Returns
 /// (local_field, eroded_mask)
+///
+/// # Panics
+/// If the working grid is [`VsharpGrid::Isotropic`] with a spacing that is not finite and > 0.
 pub fn vsharp(
     field: &[f64],
     mask: &[u8],
@@ -87,7 +164,179 @@ pub fn vsharp(
 ) -> (Vec<f64>, Vec<u8>) {
     let radii = vsharp_radii(params);
     let deconvolve = params.deconvolve.then_some(params.threshold);
-    vsharp_with_radii(field, mask, grid, &radii, deconvolve, progress)
+    match params.working_grid(grid) {
+        VsharpGrid::Native => vsharp_with_radii(field, mask, grid, &radii, deconvolve, progress),
+        VsharpGrid::Isotropic { spacing_mm } => {
+            assert!(
+                spacing_mm.is_finite() && spacing_mm > 0.0,
+                "V-SHARP isotropic working grid spacing must be finite and > 0, got {spacing_mm}"
+            );
+            vsharp_isotropic(field, mask, grid, spacing_mm, &radii, deconvolve, progress)
+        }
+    }
+}
+
+/// V-SHARP with the background estimated on an isotropic grid of spacing `h` mm anchored at the
+/// mask's bounding box (see the [module docs](self#working-grid)).
+fn vsharp_isotropic(
+    field: &[f64],
+    mask: &[u8],
+    grid: &Grid,
+    h: f64,
+    radii: &[f64],
+    deconvolve: Option<f64>,
+    progress: impl FnMut(usize, usize),
+) -> (Vec<f64>, Vec<u8>) {
+    let (nx, ny, nz) = grid.dims;
+    let vs = [grid.voxel_size.0, grid.voxel_size.1, grid.voxel_size.2];
+    let mut local_out = vec![0.0; nx * ny * nz];
+    let mut mask_out = vec![0u8; nx * ny * nz];
+    let Some((lo, hi)) = bounding_box(mask, grid.dims) else { return (local_out, mask_out) };
+
+    // 1. crop to the bounding box with a zero margin
+    let pad = CROP_MARGIN;
+    let np = [0, 1, 2].map(|d| hi[d] - lo[d] + 1 + 2 * pad);
+    let mut p = vec![0.0; np[0] * np[1] * np[2]];
+    let mut m = vec![0.0; p.len()];
+    for k in lo[2]..=hi[2] {
+        for j in lo[1]..=hi[1] {
+            for i in lo[0]..=hi[0] {
+                let src = i + j * nx + k * nx * ny;
+                let dst = (i - lo[0] + pad) + (j - lo[1] + pad) * np[0] + (k - lo[2] + pad) * np[0] * np[1];
+                p[dst] = field[src];
+                m[dst] = if mask[src] != 0 { 1.0 } else { 0.0 };
+            }
+        }
+    }
+
+    // 2. resample onto the working grid W: sample q (1-based) of axis d sits at 1-based native
+    // index q·h/vs[d]; an axis already at spacing h stays on its native lattice. W is zero-filled
+    // to even dimensions.
+    let ni = [0, 1, 2].map(|d| if vs[d] == h { np[d] } else { (np[d] as f64 * vs[d] / h).ceil() as usize });
+    let fwd = [0, 1, 2].map(|d| {
+        (1..=ni[d]).map(|q| if vs[d] == h { q as f64 } else { q as f64 * h / vs[d] }).collect::<Vec<f64>>()
+    });
+    let pi = trilinear(&p, np, &fwd);
+    let mi = trilinear(&m, np, &fwd);
+    let ne = ni.map(|n| n + n % 2);
+    let mut pe = vec![0.0; ne[0] * ne[1] * ne[2]];
+    let mut me = vec![0u8; pe.len()];
+    for k in 0..ni[2] {
+        for j in 0..ni[1] {
+            for i in 0..ni[0] {
+                let s = i + j * ni[0] + k * ni[0] * ni[1];
+                let d = i + j * ne[0] + k * ne[0] * ne[1];
+                pe[d] = pi[s];
+                me[d] = u8::from(mi[s] > 0.5);
+            }
+        }
+    }
+    drop((pi, mi));
+
+    // 3. V-SHARP on W
+    let w_grid = Grid::new(ne[0], ne[1], ne[2], h, h, h);
+    let (local_w, support_w) = vsharp_with_radii(&pe, &me, &w_grid, radii, deconvolve, progress);
+
+    // 4. background (field − local) and support back to the native grid
+    let mut bg_c = vec![0.0; ni[0] * ni[1] * ni[2]];
+    let mut nm_c = vec![0.0; bg_c.len()];
+    for k in 0..ni[2] {
+        for j in 0..ni[1] {
+            for i in 0..ni[0] {
+                let d = i + j * ni[0] + k * ni[0] * ni[1];
+                let s = i + j * ne[0] + k * ne[0] * ne[1];
+                bg_c[d] = pe[s] - local_w[s];
+                nm_c[d] = f64::from(support_w[s]);
+            }
+        }
+    }
+    let back = [0, 1, 2].map(|d| {
+        (1..=np[d]).map(|a| if vs[d] == h { a as f64 } else { a as f64 * vs[d] / h }).collect::<Vec<f64>>()
+    });
+    let bg_n = trilinear(&bg_c, ni, &back);
+    let nm_n = trilinear(&nm_c, ni, &back);
+    for k in lo[2]..=hi[2] {
+        for j in lo[1]..=hi[1] {
+            for i in lo[0]..=hi[0] {
+                let s = (i - lo[0] + pad) + (j - lo[1] + pad) * np[0] + (k - lo[2] + pad) * np[0] * np[1];
+                if nm_n[s] > 0.5 {
+                    let d = i + j * nx + k * nx * ny;
+                    local_out[d] = p[s] - bg_n[s];
+                    mask_out[d] = 1;
+                }
+            }
+        }
+    }
+    (local_out, mask_out)
+}
+
+/// Inclusive bounding box of the nonzero mask voxels, or `None` for an empty mask.
+fn bounding_box(mask: &[u8], dims: (usize, usize, usize)) -> Option<([usize; 3], [usize; 3])> {
+    let (nx, ny, nz) = dims;
+    let mut lo = [usize::MAX; 3];
+    let mut hi = [0usize; 3];
+    let mut any = false;
+    for k in 0..nz {
+        for j in 0..ny {
+            for i in 0..nx {
+                if mask[i + j * nx + k * nx * ny] != 0 {
+                    any = true;
+                    for (d, v) in [i, j, k].into_iter().enumerate() {
+                        lo[d] = lo[d].min(v);
+                        hi[d] = hi[d].max(v);
+                    }
+                }
+            }
+        }
+    }
+    any.then_some((lo, hi))
+}
+
+/// Separable trilinear interpolation (MATLAB `interp3(..., 'linear')`): `coords[d]` are 1-based
+/// fractional source indices along axis `d`, one output sample per entry, output in the same
+/// Fortran order. Samples outside `[1, n]` on any axis are 0.
+fn trilinear(src: &[f64], n: [usize; 3], coords: &[Vec<f64>; 3]) -> Vec<f64> {
+    let w = |d: usize| -> Vec<Option<(usize, f64)>> {
+        coords[d]
+            .iter()
+            .map(|&u| {
+                if !(1.0..=n[d] as f64).contains(&u) {
+                    return None;
+                }
+                let t = u - 1.0;
+                let i0 = (t.floor() as usize).min(n[d].saturating_sub(2));
+                Some((i0, t - i0 as f64))
+            })
+            .collect()
+    };
+    let (wx, wy, wz) = (w(0), w(1), w(2));
+    let (ox, oy) = (wx.len(), wy.len());
+    let at = |i: usize, j: usize, k: usize| -> f64 {
+        if i < n[0] && j < n[1] && k < n[2] { src[i + j * n[0] + k * n[0] * n[1]] } else { 0.0 }
+    };
+    let mut out = vec![0.0; ox * oy * wz.len()];
+    for (c, wzk) in wz.iter().enumerate() {
+        let Some((k0, fz)) = *wzk else { continue };
+        for (b, wyj) in wy.iter().enumerate() {
+            let Some((j0, fy)) = *wyj else { continue };
+            for (a, wxi) in wx.iter().enumerate() {
+                let Some((i0, fx)) = *wxi else { continue };
+                let mut v = 0.0;
+                for (dk, gz) in [(0, 1.0 - fz), (1, fz)] {
+                    if gz == 0.0 { continue; }
+                    for (dj, gy) in [(0, 1.0 - fy), (1, fy)] {
+                        if gy == 0.0 { continue; }
+                        for (di, gx) in [(0, 1.0 - fx), (1, fx)] {
+                            if gx == 0.0 { continue; }
+                            v += gx * gy * gz * at(i0 + di, j0 + dj, k0 + dk);
+                        }
+                    }
+                }
+                out[a + b * ox + c * ox * oy] = v;
+            }
+        }
+    }
+    out
 }
 
 /// Build the descending list of SMV kernel radii (mm) from the params.
@@ -577,5 +826,218 @@ mod tests {
         let (sh, sh_mask) = crate::bgremove::sharp::sharp_core(&field, &mask, &grid, 0.05, 3.0);
         assert_eq!(hp_mask, sh_mask);
         assert!(hp.iter().zip(&sh).any(|(a, b)| (a - b).abs() > 1e-6));
+    }
+
+    #[test]
+    fn test_grid_for_voxel_size() {
+        let iso1 = VsharpGrid::Isotropic { spacing_mm: 1.0 };
+        assert_eq!(VsharpGrid::for_voxel_size((1.0, 1.0, 1.0)), VsharpGrid::Native);
+        assert_eq!(VsharpGrid::for_voxel_size((0.5, 0.5, 0.5)), VsharpGrid::Native);
+        // header rounding is not anisotropy
+        assert_eq!(VsharpGrid::for_voxel_size((1.0, 1.0, 1.005)), VsharpGrid::Native);
+        assert_eq!(VsharpGrid::for_voxel_size((0.8, 0.8, 3.0)), iso1);
+        assert_eq!(VsharpGrid::for_voxel_size((3.0, 0.8, 0.8)), iso1);
+        assert_eq!(VsharpGrid::for_voxel_size((0.9375, 0.9375, 1.0)), iso1);
+        assert_eq!(VsharpParams::default().grid, None);
+        let g = Grid::new(4, 4, 4, 1.0, 1.0, 1.0);
+        let native = VsharpParams { grid: Some(VsharpGrid::Native), ..Default::default() };
+        assert_eq!(native.working_grid(&Grid::new(4, 4, 4, 0.8, 0.8, 3.0)), VsharpGrid::Native);
+        assert_eq!(VsharpParams::default().working_grid(&g), VsharpGrid::Native);
+    }
+
+    /// Ellipsoidal mask on a `dims` grid of voxel size `vs` (semi-axes in mm) and a smooth
+    /// non-harmonic field with a background-like linear and quadratic part.
+    fn ellipsoid_case(dims: (usize, usize, usize), vs: (f64, f64, f64), semi: [f64; 3]) -> (Vec<f64>, Vec<u8>) {
+        let (nx, ny, nz) = dims;
+        let c = [nx as f64 / 2.0, ny as f64 / 2.0, nz as f64 / 2.0];
+        let mut field = vec![0.0; nx * ny * nz];
+        let mut mask = vec![0u8; nx * ny * nz];
+        for z in 0..nz {
+            for y in 0..ny {
+                for x in 0..nx {
+                    let (dx, dy, dz) = ((x as f64 - c[0]) * vs.0, (y as f64 - c[1]) * vs.1, (z as f64 - c[2]) * vs.2);
+                    let i = x + y * nx + z * nx * ny;
+                    field[i] = 0.01 * dz + 0.002 * (dx * dx - dy * dy) + 0.05 * (0.3 * dx).sin() * (0.2 * dz).cos();
+                    let e = (dx / semi[0]).powi(2) + (dy / semi[1]).powi(2) + (dz / semi[2]).powi(2);
+                    mask[i] = (e <= 1.0) as u8;
+                }
+            }
+        }
+        (field, mask)
+    }
+
+    #[test]
+    fn test_native_grid_is_unchanged_v_sharp() {
+        // `grid: Native` (and the default on isotropic voxels) is the plain native-grid V-SHARP.
+        let n = 20;
+        let (field, mask) = sphere_case(n, 8.0);
+        let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
+        for deconvolve in [true, false] {
+            let base = VsharpParams { max_radius: 4.0, deconvolve, ..Default::default() };
+            let radii = vsharp_radii(&base);
+            let expected = vsharp_with_radii(&field, &mask, &grid, &radii, deconvolve.then_some(base.threshold), |_, _| {});
+            assert_eq!(vsharp(&field, &mask, &grid, &base, |_, _| {}), expected);
+            let native = VsharpParams { grid: Some(VsharpGrid::Native), ..base.clone() };
+            assert_eq!(vsharp(&field, &mask, &grid, &native, |_, _| {}), expected);
+        }
+        // anisotropic voxels, explicit native
+        let ag = Grid::new(24, 24, 10, 0.8, 0.8, 3.0);
+        let (af, am) = ellipsoid_case(ag.dims, ag.voxel_size, [8.0, 8.0, 12.0]);
+        let p = VsharpParams { max_radius: 4.0, grid: Some(VsharpGrid::Native), ..Default::default() };
+        let expected = vsharp_with_radii(&af, &am, &ag, &vsharp_radii(&p), Some(p.threshold), |_, _| {});
+        assert_eq!(vsharp(&af, &am, &ag, &p, |_, _| {}), expected);
+    }
+
+    #[test]
+    fn test_anisotropic_default_uses_1mm_grid() {
+        let grid = Grid::new(30, 30, 12, 0.8, 0.8, 3.0);
+        let (field, mask) = ellipsoid_case(grid.dims, grid.voxel_size, [10.0, 10.0, 14.0]);
+        let auto = VsharpParams { max_radius: 4.0, deconvolve: false, ..Default::default() };
+        assert_eq!(auto.working_grid(&grid), VsharpGrid::Isotropic { spacing_mm: 1.0 });
+        let iso = VsharpParams { grid: Some(VsharpGrid::Isotropic { spacing_mm: 1.0 }), ..auto.clone() };
+        let native = VsharpParams { grid: Some(VsharpGrid::Native), ..auto.clone() };
+        let (la, ma) = vsharp(&field, &mask, &grid, &auto, |_, _| {});
+        assert_eq!((la.clone(), ma.clone()), vsharp(&field, &mask, &grid, &iso, |_, _| {}));
+        let (ln, mn) = vsharp(&field, &mask, &grid, &native, |_, _| {});
+        assert!(ma.contains(&1));
+        assert!(ma != mn || la.iter().zip(&ln).any(|(a, b)| (a - b).abs() > 1e-6));
+        for i in 0..la.len() {
+            if ma[i] == 0 { assert_eq!(la[i], 0.0); } else { assert!(mask[i] == 1 && la[i].is_finite()); }
+        }
+    }
+
+    #[test]
+    fn test_isotropic_grid_empty_mask_and_bad_spacing() {
+        let grid = Grid::new(8, 8, 4, 0.8, 0.8, 3.0);
+        let (l, m) = vsharp(&vec![1.0; 256], &[0u8; 256], &grid, &VsharpParams::default(), |_, _| {});
+        assert!(l.iter().all(|&v| v == 0.0) && m.iter().all(|&v| v == 0));
+        let bad = VsharpParams { grid: Some(VsharpGrid::Isotropic { spacing_mm: 0.0 }), ..Default::default() };
+        let r = std::panic::catch_unwind(|| vsharp(&vec![1.0; 256], &[1u8; 256], &grid, &bad, |_, _| {}));
+        assert!(r.is_err());
+    }
+
+    /// The QSM.rs V-SHARP ablation prototype's isotropic-grid path (`exp/vsharp-ablation`,
+    /// `vsharp.rs::ablation::run`, spec `d?g1b0r0p1e0`: 1 mm grid, main ball, main radii,
+    /// crop to the mask bbox + 12 voxels, main edge test), kept here verbatim as the reference
+    /// that was scored on UK Biobank (ukb-qsmxt docs/18).
+    fn prototype_iso(field: &[f64], mask: &[u8], grid: &Grid, p: &VsharpParams) -> (Vec<f64>, Vec<u8>) {
+        fn kernel_fft(n: [usize; 3], vs: [f64; 3], r: f64) -> (Vec<Complex64>, f64) {
+            let mut k = vec![Complex64::new(0.0, 0.0); n[0] * n[1] * n[2]];
+            let lim = r * r;
+            let h = [0, 1, 2].map(|d| ((r / vs[d]).floor() as i64).min(n[d] as i64 / 2));
+            let wrap = |d: i64, nd: usize| d.rem_euclid(nd as i64) as usize;
+            let mut count = 0.0;
+            for dz in -h[2]..=h[2] { for dy in -h[1]..=h[1] { for dx in -h[0]..=h[0] {
+                let (x, y, z) = (dx as f64 * vs[0], dy as f64 * vs[1], dz as f64 * vs[2]);
+                if x * x + y * y + z * z > lim { continue; }
+                let idx = wrap(dx, n[0]) + wrap(dy, n[1]) * n[0] + wrap(dz, n[2]) * n[0] * n[1];
+                if k[idx].re == 0.0 { k[idx] = Complex64::new(1.0, 0.0); count += 1.0; }
+            }}}
+            fft3d(&mut k, n[0], n[1], n[2]);
+            (k, count)
+        }
+        let to_complex = |v: &[f64]| -> Vec<Complex64> { v.iter().map(|&x| Complex64::new(x, 0.0)).collect() };
+        let (nx, ny, nz) = grid.dims;
+        let vs = [grid.voxel_size.0, grid.voxel_size.1, grid.voxel_size.2];
+        let mut local_out = vec![0.0; nx * ny * nz];
+        let mut mask_out = vec![0u8; nx * ny * nz];
+        let Some((lo, hi)) = bounding_box(mask, grid.dims) else { return (local_out, mask_out) };
+        let pad = 12;
+        let np = [0, 1, 2].map(|d| hi[d] - lo[d] + 1 + 2 * pad);
+        let mut pp = vec![0.0; np[0] * np[1] * np[2]];
+        let mut m = vec![0.0; pp.len()];
+        for k in lo[2]..=hi[2] { for j in lo[1]..=hi[1] { for i in lo[0]..=hi[0] {
+            let src = i + j * nx + k * nx * ny;
+            let dst = (i - lo[0] + pad) + (j - lo[1] + pad) * np[0] + (k - lo[2] + pad) * np[0] * np[1];
+            pp[dst] = field[src];
+            m[dst] = if mask[src] != 0 { 1.0 } else { 0.0 };
+        }}}
+        let h = 1.0;
+        let ni = [0, 1, 2].map(|d| if vs[d] == h { np[d] } else { (np[d] as f64 * vs[d] / h).ceil() as usize });
+        let fwd = [0, 1, 2].map(|d| (1..=ni[d]).map(|q| if vs[d] == h { q as f64 } else { q as f64 * h / vs[d] }).collect::<Vec<f64>>());
+        let pi = trilinear(&pp, np, &fwd);
+        let mi = trilinear(&m, np, &fwd);
+        let ne = ni.map(|n| n + n % 2);
+        let mut pe = vec![0.0; ne[0] * ne[1] * ne[2]];
+        let mut me = vec![0.0; pe.len()];
+        for k in 0..ni[2] { for j in 0..ni[1] { for i in 0..ni[0] {
+            let s = i + j * ni[0] + k * ni[0] * ni[1];
+            let d = i + j * ne[0] + k * ne[0] * ne[1];
+            pe[d] = pi[s];
+            me[d] = if mi[s] > 0.5 { 1.0 } else { 0.0 };
+        }}}
+        let nw = ne[0] * ne[1] * ne[2];
+        let mut radii = vsharp_radii(p);
+        radii.sort_by(|a, b| b.partial_cmp(a).unwrap());
+        let mut p_fft = to_complex(&pe);
+        fft3d(&mut p_fft, ne[0], ne[1], ne[2]);
+        let mut m_fft = to_complex(&me);
+        fft3d(&mut m_fft, ne[0], ne[1], ne[2]);
+        let mut bg = pe.clone();
+        let mut nm = vec![0.0; nw];
+        let mut buf = vec![Complex64::new(0.0, 0.0); nw];
+        let mut inv: Option<Vec<f64>> = None;
+        let delta = 1.0 - 1e-7_f64.sqrt();
+        for &r in &radii {
+            let (mut k_fft, count) = kernel_fft(ne, [h; 3], r);
+            if count == 0.0 { continue; }
+            for i in 0..nw { buf[i] = m_fft[i] * k_fft[i]; }
+            ifft3d(&mut buf, ne[0], ne[1], ne[2]);
+            let fits: Vec<bool> = (0..nw).map(|i| me[i] > 0.0 && buf[i].re / count > delta).collect();
+            for v in k_fft.iter_mut() { *v /= count; }
+            if inv.is_none() {
+                inv = Some(k_fft.iter().map(|s| { let oms = 1.0 - s.re; if oms.abs() < p.threshold { 0.0 } else { 1.0 / oms } }).collect());
+            }
+            for i in 0..nw { buf[i] = p_fft[i] * k_fft[i]; }
+            ifft3d(&mut buf, ne[0], ne[1], ne[2]);
+            for i in 0..nw { if fits[i] && nm[i] == 0.0 { bg[i] = buf[i].re; nm[i] = 1.0; } }
+        }
+        let mut l: Vec<Complex64> = (0..nw).map(|i| Complex64::new((pe[i] - bg[i]) * nm[i], 0.0)).collect();
+        if p.deconvolve {
+            if let Some(inv) = inv {
+                fft3d(&mut l, ne[0], ne[1], ne[2]);
+                for i in 0..nw { l[i] *= inv[i]; }
+                ifft3d(&mut l, ne[0], ne[1], ne[2]);
+                for i in 0..nw { l[i] = Complex64::new(l[i].re * nm[i], 0.0); }
+            }
+        }
+        let mut bg_c = vec![0.0; ni[0] * ni[1] * ni[2]];
+        let mut nm_c = vec![0.0; bg_c.len()];
+        for k in 0..ni[2] { for j in 0..ni[1] { for i in 0..ni[0] {
+            let d = i + j * ni[0] + k * ni[0] * ni[1];
+            let s = i + j * ne[0] + k * ne[0] * ne[1];
+            bg_c[d] = if p.deconvolve { pe[s] - l[s].re } else { bg[s] };
+            nm_c[d] = nm[s];
+        }}}
+        let back = [0, 1, 2].map(|d| (1..=np[d]).map(|a| if vs[d] == h { a as f64 } else { a as f64 * vs[d] / h }).collect::<Vec<f64>>());
+        let bg_n = trilinear(&bg_c, ni, &back);
+        let nm_n = trilinear(&nm_c, ni, &back);
+        for k in lo[2]..=hi[2] { for j in lo[1]..=hi[1] { for i in lo[0]..=hi[0] {
+            let s = (i - lo[0] + pad) + (j - lo[1] + pad) * np[0] + (k - lo[2] + pad) * np[0] * np[1];
+            if nm_n[s] > 0.5 {
+                let d = i + j * nx + k * nx * ny;
+                local_out[d] = pp[s] - bg_n[s];
+                mask_out[d] = 1;
+            }
+        }}}
+        (local_out, mask_out)
+    }
+
+    #[test]
+    fn test_isotropic_grid_reproduces_the_prototype() {
+        // UK Biobank-like voxels (0.8 × 0.8 × 3 mm); the mask touches neither the FOV edge nor
+        // itself across the wrap.
+        let grid = Grid::new(40, 36, 14, 0.8, 0.8, 3.0);
+        let (field, mask) = ellipsoid_case(grid.dims, grid.voxel_size, [13.0, 11.0, 17.0]);
+        for deconvolve in [false, true] {
+            let p = VsharpParams { max_radius: 6.0, deconvolve, ..Default::default() };
+            let (want, want_mask) = prototype_iso(&field, &mask, &grid, &p);
+            let (got, got_mask) = vsharp(&field, &mask, &grid, &p, |_, _| {});
+            assert_eq!(got_mask, want_mask, "support (deconvolve {deconvolve})");
+            assert!(got_mask.contains(&1));
+            let scale = want.iter().map(|v| v.abs()).fold(0.0, f64::max);
+            let worst = got.iter().zip(&want).map(|(a, b)| (a - b).abs()).fold(0.0, f64::max);
+            assert!(worst <= 1e-12 * scale.max(1.0), "deconvolve {deconvolve}: max |Δ| {worst} (scale {scale})");
+        }
     }
 }
