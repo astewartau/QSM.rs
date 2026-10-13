@@ -185,7 +185,6 @@ pub fn apply_mask_ops(
     metadata: &ScanMetadata,
 ) -> Result<Vec<u8>, PipelineError> {
     let (nx, ny, nz) = metadata.dims;
-    let (vsx, vsy, vsz) = metadata.voxel_size;
     let grid = metadata.grid();
     let n_voxels = nx * ny * nz;
     if mask.len() != n_voxels {
@@ -218,17 +217,11 @@ pub fn apply_mask_ops(
                     .map(|&v| if v > threshold { 1u8 } else { 0u8 })
                     .collect();
             }
-            MaskOp::Bet { fractional_intensity, voxel_scale } => {
+            MaskOp::Bet(params) => {
                 let mag_data = magnitude.ok_or_else(|| {
                     PipelineError::InvalidInput("BET requires magnitude data".into())
                 })?;
-                let bet_params = crate::bet::BetParams {
-                    fractional_intensity: *fractional_intensity,
-                    voxel_scale: *voxel_scale,
-                    ..crate::bet::BetParams::default()
-                };
-                let grid = crate::Grid::new(nx, ny, nz, vsx, vsy, vsz);
-                mask = crate::bet::run_bet(mag_data, &grid, &bet_params, |_, _| {});
+                mask = crate::bet::run_bet(mag_data, &grid, params, |_, _| {});
             }
             MaskOp::Erode { iterations } => {
                 mask = erode_mask(&mask, &grid, *iterations);
@@ -751,5 +744,41 @@ mod tests {
         let meta = test_metadata();
         let result = run_masking(&[], &[], &[], &meta);
         assert!(result.is_err());
+    }
+
+    /// Every [`BetParams`](crate::bet::BetParams) field set on `MaskOp::Bet` must reach
+    /// `run_bet` — not just the fractional intensity and voxel scale the op used to carry.
+    #[test]
+    fn test_bet_op_passes_every_bet_param_through() {
+        use crate::bet::{run_bet, BetParams};
+        let n = 20;
+        let meta = ScanMetadata { dims: (n, n, n), ..test_metadata() };
+        let grid = meta.grid();
+        // A bright ellipsoid on a dim background, with a soft edge so the surface parameters matter.
+        let c = (n as f64 - 1.0) / 2.0;
+        let mag: Vec<f64> = (0..n * n * n).map(|idx| {
+            let (i, j, k) = (idx % n, (idx / n) % n, idx / (n * n));
+            let r = (((i as f64 - c) / 7.0).powi(2) + ((j as f64 - c) / 6.0).powi(2)
+                + ((k as f64 - c) / 5.0).powi(2)).sqrt();
+            10.0 + 190.0 / (1.0 + ((r - 1.0) * 2.5).exp())
+        }).collect();
+        let base = BetParams { iterations: 50, subdivisions: 1, ..BetParams::default() };
+        let base_mask = run_bet(&mag, &grid, &base, |_, _| {});
+
+        let variants = [
+            BetParams { fractional_intensity: 0.2, ..base.clone() },
+            BetParams { voxel_scale: 2.0, ..base.clone() },
+            BetParams { smoothness: 3.0, ..base.clone() },
+            BetParams { gradient_threshold: 0.5, ..base.clone() },
+            BetParams { iterations: 5, ..base.clone() },
+            BetParams { subdivisions: 2, ..base.clone() },
+        ];
+        for params in variants {
+            let direct = run_bet(&mag, &grid, &params, |_, _| {});
+            assert!(direct != base_mask, "{params:?} should change the mask, or this test proves nothing");
+            let op = MaskOp::Bet(params.clone());
+            let via_op = apply_mask_ops(vec![1; n * n * n], &[op], &mag, Some(&mag), &meta).unwrap();
+            assert_eq!(via_op, direct, "MaskOp::Bet dropped a field of {params:?}");
+        }
     }
 }
