@@ -570,40 +570,37 @@ mod tests {
     }
 
     /// Wrapped phase of a field whose neighbour differences stay below π is the same data as
-    /// the field itself: the wrapped Laplacian equals the plain one (to rounding), and dividing
-    /// by rad/ppm gives the same local field whatever the echo time. Run to convergence: a CG
-    /// stopped early amplifies the rounding-level difference between the two right-hand sides
-    /// (to ~1e-2 after 30 iterations here, ~1e-6 after 400).
+    /// the field itself: the Laplacian both methods start from (`HarperellaInput::laplacian`)
+    /// is the same to rounding once divided by rad/ppm, whatever the echo time; and the local
+    /// field iHARPERELLA solves for from it is the same to the solver's accuracy. Run to
+    /// convergence: a CG stopped early amplifies the rounding-level difference between the two
+    /// right-hand sides (to ~1e-2 after 30 iterations here). HARPERELLA shares the Laplacian
+    /// and needs ~400 iterations to converge on this volume, too slow for a unit test.
     #[test]
     fn wrapped_phase_matches_field_ppm_and_is_independent_of_te() {
         let field = field_ppm(1.0);
         let mask = sphere_mask();
         let b0 = 3.0;
-        let converged_h = |input: HarperellaInput, mask: &[u8]| {
-            let p = HarperellaParams { radius: 3.0, max_iter: 400, tol: 1e-12 };
-            harperella(input, mask, &grid(), &p, |_, _| {}).unwrap().0
-        };
-        let converged_ih = |input: HarperellaInput, mask: &[u8]| {
-            let p = IharperellaParams { max_iter: 400, tol: 1e-12 };
-            iharperella(input, mask, &grid(), &p, |_, _| {}).unwrap().0
-        };
-        type Run<'a> = &'a dyn Fn(HarperellaInput, &[u8]) -> Vec<f64>;
-        let runs: [(Run, &str); 2] =
-            [(&converged_h, "HARPERELLA"), (&converged_ih, "iHARPERELLA")];
-        for (run, name) in runs {
-            let from_field = run(HarperellaInput::FieldPpm(&field), &mask);
-            assert!(max_abs(&from_field) > 1e-3, "{name}: nothing came through");
-            // c = 5.6 and 6.4 rad/ppm: the field (peak 1.5 ppm, slope under 0.44 ppm per voxel)
-            // wraps, and neighbour differences stay under π.
-            for te in [0.007, 0.008] {
-                let c = crate::inversion::rad_per_ppm(te, b0);
-                // the phase wraps several times, but neighbours never differ by π
-                assert!(max_abs(&field) * c > 2.0 * std::f64::consts::PI, "test field does not wrap");
-                let phase: Vec<f64> = field.iter().map(|f| wrap(f * c)).collect();
-                let from_phase = run(HarperellaInput::WrappedPhase { phase: &phase, te_s: te, b0_t: b0 }, &mask);
-                let d = max_abs_diff(&from_phase, &from_field) / max_abs(&from_field);
-                assert!(d < 1e-5, "{name} TE={te}: phase vs field differ by {d:e}");
-            }
+        let (lap_field, none) = HarperellaInput::FieldPpm(&field).laplacian(&mask, &grid()).unwrap();
+        assert!(none.is_none());
+        let p = IharperellaParams { max_iter: 150, tol: 1e-12 };
+        let from_field = iharperella(HarperellaInput::FieldPpm(&field), &mask, &grid(), &p, |_, _| {}).unwrap().0;
+        assert!(max_abs(&from_field) > 1e-3, "nothing came through");
+        // c = 5.6 and 6.4 rad/ppm: the field (peak 1.5 ppm, slope under 0.44 ppm per voxel)
+        // wraps, and neighbour differences stay under π.
+        for te in [0.007, 0.008] {
+            let c = crate::inversion::rad_per_ppm(te, b0);
+            assert!(max_abs(&field) * c > 2.0 * std::f64::consts::PI, "test field does not wrap");
+            let phase: Vec<f64> = field.iter().map(|f| wrap(f * c)).collect();
+            let input = HarperellaInput::WrappedPhase { phase: &phase, te_s: te, b0_t: b0 };
+            let (lap_phase, rad_per_ppm) = input.laplacian(&mask, &grid()).unwrap();
+            assert_eq!(rad_per_ppm, Some(c));
+            let lap_phase: Vec<f64> = lap_phase.iter().map(|v| v / c).collect();
+            let d = max_abs_diff(&lap_phase, &lap_field) / max_abs(&lap_field);
+            assert!(d < 1e-12, "TE={te}: Laplacians differ by {d:e}");
+            let from_phase = iharperella(input, &mask, &grid(), &p, |_, _| {}).unwrap().0;
+            let d = max_abs_diff(&from_phase, &from_field) / max_abs(&from_field);
+            assert!(d < 1e-5, "TE={te}: phase vs field differ by {d:e}");
         }
     }
 

@@ -383,24 +383,24 @@ mod tests {
     /// iHARPERELLA reads its own params, not HARPERELLA's (#169).
     #[test]
     fn iharperella_uses_its_own_params() {
-        let (nx, ny, nz) = (20, 20, 20);
+        let (nx, ny, nz) = (16, 16, 16);
         let n = nx * ny * nz;
         let meta = ScanMetadata {
             dims: (nx, ny, nz), voxel_size: (1.0, 1.0, 1.0),
             echo_times: vec![0.005], field_strength: 3.0, b0_direction: (0.0, 0.0, 1.0),
             slice_geometry: None,
         };
-        // a blob inside a 12-voxel cube: big enough to leave an interior after the ~3-voxel erosion
+        // a blob inside a 10-voxel cube: big enough to leave an interior after the ~3-voxel erosion
         let field: Vec<f64> = (0..n)
             .map(|i| {
-                let (x, y, z) = ((i % nx) as f64 - 9.5, ((i / nx) % ny) as f64 - 9.5, (i / (nx * ny)) as f64 - 9.5);
+                let (x, y, z) = ((i % nx) as f64 - 7.5, ((i / nx) % ny) as f64 - 7.5, (i / (nx * ny)) as f64 - 7.5);
                 (-(x * x + y * y + z * z) / 10.0).exp() + 0.01 * x
             })
             .collect();
         let mask: Vec<u8> = (0..n)
             .map(|i| {
                 let (x, y, z) = (i % nx, (i / nx) % ny, i / (nx * ny));
-                u8::from((4..16).contains(&x) && (4..16).contains(&y) && (4..16).contains(&z))
+                u8::from((3..13).contains(&x) && (3..13).contains(&y) && (3..13).contains(&z))
             })
             .collect();
         let run = |config: &BgRemovalConfig| {
