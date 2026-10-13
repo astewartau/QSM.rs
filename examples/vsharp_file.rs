@@ -1,8 +1,8 @@
 //! Run V-SHARP on NIfTI files, e.g. for parity checks against other implementations.
 //!
 //! usage: vsharp_file <field.nii[.gz]> <mask.nii[.gz]> <local_out.nii[.gz]> <support_out.nii[.gz]> [grid] [deconv]
-//! - grid: `auto` (default; 1 mm isotropic for anisotropic voxels, else native), `native`, or
-//!   `iso:<mm>` (isotropic working grid of that spacing)
+//! - grid: `native` (default), `iso` (isotropic at the finest voxel size), or `iso:<mm>`
+//!   (isotropic working grid of that spacing)
 //! - deconv: `deconv` or `nodeconv` (default: `VsharpParams::default()`)
 //!
 //! The local field is in the units of the input field. Prints the resolved working grid and the
@@ -16,17 +16,17 @@ use std::path::Path;
 fn main() {
     let a: Vec<String> = std::env::args().collect();
     if !(5..=7).contains(&a.len()) {
-        eprintln!("usage: {} <field.nii[.gz]> <mask.nii[.gz]> <local_out.nii[.gz]> <support_out.nii[.gz]> [auto|native|iso:<mm>] [deconv|nodeconv]", a[0]);
+        eprintln!("usage: {} <field.nii[.gz]> <mask.nii[.gz]> <local_out.nii[.gz]> <support_out.nii[.gz]> [native|iso|iso:<mm>] [deconv|nodeconv]", a[0]);
         std::process::exit(2);
     }
     let mut params = VsharpParams::default();
     if let Some(g) = a.get(5) {
         params.grid = match g.as_str() {
-            "auto" => None,
-            "native" => Some(VsharpGrid::Native),
+            "native" => VsharpGrid::Native,
+            "iso" => VsharpGrid::IsotropicFinest,
             s => match s.strip_prefix("iso:").and_then(|v| v.parse().ok()) {
-                Some(spacing_mm) => Some(VsharpGrid::Isotropic { spacing_mm }),
-                None => panic!("grid must be auto, native or iso:<mm>, got {s}"),
+                Some(spacing_mm) => VsharpGrid::Isotropic { spacing_mm },
+                None => panic!("grid must be native, iso or iso:<mm>, got {s}"),
             },
         };
     }

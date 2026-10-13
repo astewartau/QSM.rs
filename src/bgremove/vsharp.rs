@@ -19,7 +19,8 @@
 //! The SMV balls live on a voxel grid. On strongly anisotropic voxels (e.g. 0.8 × 0.8 × 3 mm)
 //! the native grid makes them crude in the coarse direction: a 1–2 mm ball is a single-slice
 //! disk. [`VsharpParams::grid`] can instead estimate the background on an isotropic working
-//! grid ([`VsharpGrid::Isotropic`]):
+//! grid, at the finest input voxel size ([`VsharpGrid::IsotropicFinest`]) or at a fixed spacing
+//! ([`VsharpGrid::Isotropic`]):
 //!
 //! 1. crop the field and mask to the mask's bounding box with a zero margin of
 //!    [`CROP_MARGIN`] native voxels per side (this also fixes where the working grid sits
@@ -32,9 +33,11 @@
 //!    back-interpolated working-grid support is > 0.5.
 //!
 //! The local field thus keeps native resolution; only the smooth background estimate is made on
-//! the working grid. By default ([`VsharpParams::grid`] = `None`) the grid is chosen from the
-//! voxel size by [`VsharpGrid::for_voxel_size`]: 1 mm isotropic for anisotropic voxels,
-//! native otherwise.
+//! the working grid. The default is [`VsharpGrid::Native`]. [`VsharpGrid::IsotropicFinest`]
+//! makes the balls spherical without coarsening any axis, at the cost of a working grid that
+//! is larger by the anisotropy ratio. A fixed [`VsharpGrid::Isotropic`] spacing gives the same
+//! working grid whatever the acquisition resolution, but coarsens axes finer than it,
+//! including the mask edge the background is estimated from.
 //!
 //! Reference:
 //! Wu, B., Li, W., Guidon, A., Liu, C. (2012).
@@ -54,10 +57,14 @@ pub const CROP_MARGIN: usize = 12;
 
 /// Grid V-SHARP estimates the background field on. See the [module docs](self#working-grid).
 #[cfg_attr(feature = "introspection", derive(serde::Serialize))]
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub enum VsharpGrid {
-    /// The input voxel grid (no resampling).
+    /// The input voxel grid (no resampling). The default.
+    #[default]
     Native,
+    /// An isotropic grid at the smallest input voxel dimension (e.g. 0.3 mm for
+    /// 0.3 × 0.3 × 1 mm): no axis is coarsened. Isotropic input runs on the native grid.
+    IsotropicFinest,
     /// An isotropic grid of `spacing_mm`, anchored at the mask's bounding box. The background
     /// is estimated there and interpolated back; the local field keeps native resolution.
     Isotropic {
@@ -67,21 +74,26 @@ pub enum VsharpGrid {
 }
 
 impl VsharpGrid {
-    /// Voxels count as anisotropic when the largest voxel dimension exceeds the smallest by more
-    /// than this fraction (1 %): enough to ignore header rounding, small enough that any real
-    /// slice-thickness difference counts.
+    /// Voxels count as isotropic for [`IsotropicFinest`](Self::IsotropicFinest) when the
+    /// largest voxel dimension exceeds the smallest by at most this fraction (1 %), so header
+    /// rounding does not trigger a resample.
     pub const ANISOTROPY_TOLERANCE: f64 = 0.01;
 
-    /// The automatic choice used when [`VsharpParams::grid`] is `None`: 1 mm isotropic when the
-    /// voxels are anisotropic (`max / min > 1 + ANISOTROPY_TOLERANCE`), else [`Native`](Self::Native).
-    /// Isotropic input, including sub-millimetre, is never resampled by default.
-    pub fn for_voxel_size(voxel_size: (f64, f64, f64)) -> Self {
-        let (a, b, c) = voxel_size;
-        let (lo, hi) = (a.min(b).min(c), a.max(b).max(c));
-        if hi > lo * (1.0 + Self::ANISOTROPY_TOLERANCE) {
-            VsharpGrid::Isotropic { spacing_mm: 1.0 }
-        } else {
-            VsharpGrid::Native
+    /// This choice resolved for `voxel_size`: [`IsotropicFinest`](Self::IsotropicFinest)
+    /// becomes [`Isotropic`](Self::Isotropic) at the smallest voxel dimension, or
+    /// [`Native`](Self::Native) when the voxels are isotropic. The others are returned as is.
+    pub fn resolve(self, voxel_size: (f64, f64, f64)) -> Self {
+        match self {
+            VsharpGrid::IsotropicFinest => {
+                let (a, b, c) = voxel_size;
+                let (lo, hi) = (a.min(b).min(c), a.max(b).max(c));
+                if hi > lo * (1.0 + Self::ANISOTROPY_TOLERANCE) {
+                    VsharpGrid::Isotropic { spacing_mm: lo }
+                } else {
+                    VsharpGrid::Native
+                }
+            }
+            g => g,
         }
     }
 }
@@ -106,17 +118,16 @@ pub struct VsharpParams {
     /// residual background and field-map error, so `false` is the more reproducible choice
     /// there, while `true` recovers more low-frequency tissue contrast on a clean field.
     pub deconvolve: bool,
-    /// Grid the background is estimated on. `None` (default) chooses from the voxel size with
-    /// [`VsharpGrid::for_voxel_size`]: 1 mm isotropic for anisotropic voxels, native otherwise.
-    /// See [`VsharpParams::working_grid`] for the resolved choice.
-    pub grid: Option<VsharpGrid>,
+    /// Grid the background is estimated on (default: [`VsharpGrid::Native`]). See
+    /// [`VsharpParams::working_grid`] for the choice resolved on a given input.
+    pub grid: VsharpGrid,
 }
 
 impl VsharpParams {
-    /// The working grid V-SHARP will use on `grid`: [`Self::grid`] if set, else
-    /// [`VsharpGrid::for_voxel_size`].
+    /// The working grid V-SHARP will use on `grid`: [`Self::grid`] resolved by
+    /// [`VsharpGrid::resolve`]; never [`VsharpGrid::IsotropicFinest`].
     pub fn working_grid(&self, grid: &Grid) -> VsharpGrid {
-        self.grid.unwrap_or_else(|| VsharpGrid::for_voxel_size(grid.voxel_size))
+        self.grid.resolve(grid.voxel_size)
     }
 }
 
@@ -131,7 +142,7 @@ impl Default for VsharpParams {
             max_radius: 12.0,
             min_radius: 1.0,
             deconvolve: true,
-            grid: None,
+            grid: VsharpGrid::Native,
         }
     }
 }
@@ -173,6 +184,7 @@ pub fn vsharp(
             );
             vsharp_isotropic(field, mask, grid, spacing_mm, &radii, deconvolve, progress)
         }
+        VsharpGrid::IsotropicFinest => unreachable!("working_grid resolves IsotropicFinest"),
     }
 }
 
@@ -829,20 +841,22 @@ mod tests {
     }
 
     #[test]
-    fn test_grid_for_voxel_size() {
-        let iso1 = VsharpGrid::Isotropic { spacing_mm: 1.0 };
-        assert_eq!(VsharpGrid::for_voxel_size((1.0, 1.0, 1.0)), VsharpGrid::Native);
-        assert_eq!(VsharpGrid::for_voxel_size((0.5, 0.5, 0.5)), VsharpGrid::Native);
+    fn test_grid_resolve() {
+        let finest = VsharpGrid::IsotropicFinest;
+        assert_eq!(finest.resolve((1.0, 1.0, 1.0)), VsharpGrid::Native);
+        assert_eq!(finest.resolve((0.5, 0.5, 0.5)), VsharpGrid::Native);
         // header rounding is not anisotropy
-        assert_eq!(VsharpGrid::for_voxel_size((1.0, 1.0, 1.005)), VsharpGrid::Native);
-        assert_eq!(VsharpGrid::for_voxel_size((0.8, 0.8, 3.0)), iso1);
-        assert_eq!(VsharpGrid::for_voxel_size((3.0, 0.8, 0.8)), iso1);
-        assert_eq!(VsharpGrid::for_voxel_size((0.9375, 0.9375, 1.0)), iso1);
-        assert_eq!(VsharpParams::default().grid, None);
-        let g = Grid::new(4, 4, 4, 1.0, 1.0, 1.0);
-        let native = VsharpParams { grid: Some(VsharpGrid::Native), ..Default::default() };
-        assert_eq!(native.working_grid(&Grid::new(4, 4, 4, 0.8, 0.8, 3.0)), VsharpGrid::Native);
-        assert_eq!(VsharpParams::default().working_grid(&g), VsharpGrid::Native);
+        assert_eq!(finest.resolve((1.0, 1.0, 1.005)), VsharpGrid::Native);
+        assert_eq!(finest.resolve((0.8, 0.8, 3.0)), VsharpGrid::Isotropic { spacing_mm: 0.8 });
+        assert_eq!(finest.resolve((3.0, 0.8, 0.8)), VsharpGrid::Isotropic { spacing_mm: 0.8 });
+        assert_eq!(finest.resolve((0.3, 0.3, 0.5)), VsharpGrid::Isotropic { spacing_mm: 0.3 });
+        let iso1 = VsharpGrid::Isotropic { spacing_mm: 1.0 };
+        assert_eq!(iso1.resolve((0.3, 0.3, 0.5)), iso1);
+        assert_eq!(VsharpGrid::Native.resolve((0.8, 0.8, 3.0)), VsharpGrid::Native);
+        // the default is native, whatever the voxel size
+        assert_eq!(VsharpParams::default().grid, VsharpGrid::Native);
+        assert_eq!(VsharpParams::default().working_grid(&Grid::new(4, 4, 4, 0.8, 0.8, 3.0)), VsharpGrid::Native);
+        assert_eq!(VsharpParams::default().working_grid(&Grid::new(4, 4, 4, 1.0, 1.0, 1.0)), VsharpGrid::Native);
     }
 
     /// Ellipsoidal mask on a `dims` grid of voxel size `vs` (semi-axes in mm) and a smooth
@@ -868,7 +882,8 @@ mod tests {
 
     #[test]
     fn test_native_grid_is_unchanged_v_sharp() {
-        // `grid: Native` (and the default on isotropic voxels) is the plain native-grid V-SHARP.
+        // `grid: Native` (the default) and `IsotropicFinest` on isotropic voxels are the plain
+        // native-grid V-SHARP.
         let n = 20;
         let (field, mask) = sphere_case(n, 8.0);
         let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
@@ -877,41 +892,46 @@ mod tests {
             let radii = vsharp_radii(&base);
             let expected = vsharp_with_radii(&field, &mask, &grid, &radii, deconvolve.then_some(base.threshold), |_, _| {});
             assert_eq!(vsharp(&field, &mask, &grid, &base, |_, _| {}), expected);
-            let native = VsharpParams { grid: Some(VsharpGrid::Native), ..base.clone() };
-            assert_eq!(vsharp(&field, &mask, &grid, &native, |_, _| {}), expected);
+            let finest = VsharpParams { grid: VsharpGrid::IsotropicFinest, ..base.clone() };
+            assert_eq!(vsharp(&field, &mask, &grid, &finest, |_, _| {}), expected);
         }
-        // anisotropic voxels, explicit native
+        // anisotropic voxels, default (native)
         let ag = Grid::new(24, 24, 10, 0.8, 0.8, 3.0);
         let (af, am) = ellipsoid_case(ag.dims, ag.voxel_size, [8.0, 8.0, 12.0]);
-        let p = VsharpParams { max_radius: 4.0, grid: Some(VsharpGrid::Native), ..Default::default() };
+        let p = VsharpParams { max_radius: 4.0, ..Default::default() };
         let expected = vsharp_with_radii(&af, &am, &ag, &vsharp_radii(&p), Some(p.threshold), |_, _| {});
         assert_eq!(vsharp(&af, &am, &ag, &p, |_, _| {}), expected);
     }
 
     #[test]
-    fn test_anisotropic_default_uses_1mm_grid() {
+    fn test_isotropic_working_grids() {
         let grid = Grid::new(30, 30, 12, 0.8, 0.8, 3.0);
         let (field, mask) = ellipsoid_case(grid.dims, grid.voxel_size, [10.0, 10.0, 14.0]);
-        let auto = VsharpParams { max_radius: 4.0, deconvolve: false, ..Default::default() };
-        assert_eq!(auto.working_grid(&grid), VsharpGrid::Isotropic { spacing_mm: 1.0 });
-        let iso = VsharpParams { grid: Some(VsharpGrid::Isotropic { spacing_mm: 1.0 }), ..auto.clone() };
-        let native = VsharpParams { grid: Some(VsharpGrid::Native), ..auto.clone() };
-        let (la, ma) = vsharp(&field, &mask, &grid, &auto, |_, _| {});
-        assert_eq!((la.clone(), ma.clone()), vsharp(&field, &mask, &grid, &iso, |_, _| {}));
+        let native = VsharpParams { max_radius: 4.0, deconvolve: false, ..Default::default() };
         let (ln, mn) = vsharp(&field, &mask, &grid, &native, |_, _| {});
-        assert!(ma.contains(&1));
-        assert!(ma != mn || la.iter().zip(&ln).any(|(a, b)| (a - b).abs() > 1e-6));
-        for i in 0..la.len() {
-            if ma[i] == 0 { assert_eq!(la[i], 0.0); } else { assert!(mask[i] == 1 && la[i].is_finite()); }
+        let finest = VsharpParams { grid: VsharpGrid::IsotropicFinest, ..native.clone() };
+        assert_eq!(finest.working_grid(&grid), VsharpGrid::Isotropic { spacing_mm: 0.8 });
+        let at_finest = VsharpParams { grid: VsharpGrid::Isotropic { spacing_mm: 0.8 }, ..native.clone() };
+        let iso1 = VsharpParams { grid: VsharpGrid::Isotropic { spacing_mm: 1.0 }, ..native.clone() };
+        let (lf, mf) = vsharp(&field, &mask, &grid, &finest, |_, _| {});
+        assert_eq!((lf.clone(), mf.clone()), vsharp(&field, &mask, &grid, &at_finest, |_, _| {}));
+        let (l1, m1) = vsharp(&field, &mask, &grid, &iso1, |_, _| {});
+        for (l, m) in [(&lf, &mf), (&l1, &m1)] {
+            assert!(m.contains(&1));
+            assert!(*m != mn || l.iter().zip(&ln).any(|(a, b)| (a - b).abs() > 1e-6));
+            for i in 0..l.len() {
+                if m[i] == 0 { assert_eq!(l[i], 0.0); } else { assert!(mask[i] == 1 && l[i].is_finite()); }
+            }
         }
     }
 
     #[test]
     fn test_isotropic_grid_empty_mask_and_bad_spacing() {
         let grid = Grid::new(8, 8, 4, 0.8, 0.8, 3.0);
-        let (l, m) = vsharp(&vec![1.0; 256], &[0u8; 256], &grid, &VsharpParams::default(), |_, _| {});
+        let iso1 = VsharpParams { grid: VsharpGrid::Isotropic { spacing_mm: 1.0 }, ..Default::default() };
+        let (l, m) = vsharp(&vec![1.0; 256], &[0u8; 256], &grid, &iso1, |_, _| {});
         assert!(l.iter().all(|&v| v == 0.0) && m.iter().all(|&v| v == 0));
-        let bad = VsharpParams { grid: Some(VsharpGrid::Isotropic { spacing_mm: 0.0 }), ..Default::default() };
+        let bad = VsharpParams { grid: VsharpGrid::Isotropic { spacing_mm: 0.0 }, ..Default::default() };
         let r = std::panic::catch_unwind(|| vsharp(&vec![1.0; 256], &[1u8; 256], &grid, &bad, |_, _| {}));
         assert!(r.is_err());
     }
@@ -1030,7 +1050,12 @@ mod tests {
         let grid = Grid::new(40, 36, 14, 0.8, 0.8, 3.0);
         let (field, mask) = ellipsoid_case(grid.dims, grid.voxel_size, [13.0, 11.0, 17.0]);
         for deconvolve in [false, true] {
-            let p = VsharpParams { max_radius: 6.0, deconvolve, ..Default::default() };
+            let p = VsharpParams {
+                max_radius: 6.0,
+                deconvolve,
+                grid: VsharpGrid::Isotropic { spacing_mm: 1.0 },
+                ..Default::default()
+            };
             let (want, want_mask) = prototype_iso(&field, &mask, &grid, &p);
             let (got, got_mask) = vsharp(&field, &mask, &grid, &p, |_, _| {});
             assert_eq!(got_mask, want_mask, "support (deconvolve {deconvolve})");

@@ -199,7 +199,7 @@ mod tests {
         };
         for spacing_mm in [0.0, -1.0, f64::NAN] {
             let mut config = BgRemovalConfig::default();
-            config.vsharp.grid = Some(crate::bgremove::VsharpGrid::Isotropic { spacing_mm });
+            config.vsharp.grid = crate::bgremove::VsharpGrid::Isotropic { spacing_mm };
             let r = run_bg_removal(&vec![0.1; n], &vec![1u8; n], &meta, &config, &mut |_, _| {});
             assert!(matches!(r, Err(PipelineError::InvalidConfig(_))), "spacing {spacing_mm}");
         }

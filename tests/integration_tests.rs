@@ -204,8 +204,7 @@ fn test_bgremove_vsharp() {
     let (vsx, vsy, vsz) = data.voxel_size;
 
     let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
-    // The phantom is 1 mm isotropic, so the default working grid is the native one (the
-    // isotropic working grid is only chosen automatically for anisotropic voxels).
+    // The default working grid is the native one.
     assert_eq!(VsharpParams::default().working_grid(&grid), VsharpGrid::Native);
     let ((result, eroded_mask), elapsed) = run_timed!("V-SHARP", bgremove::vsharp(
         &data.fieldmap,
