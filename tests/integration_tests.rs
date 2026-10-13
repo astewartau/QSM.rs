@@ -8,7 +8,7 @@ mod common;
 use std::time::Instant;
 use common::{TestData, TestResult, ChallengeMetrics};
 use qsm_core::bgremove;
-use qsm_core::bgremove::{sdf, SdfParams, ResharpParams, SharpParams, VsharpParams, PdfParams, IsmvParams, LbvParams};
+use qsm_core::bgremove::{sdf, SdfParams, ResharpParams, SharpParams, VsharpGrid, VsharpParams, PdfParams, IsmvParams, LbvParams};
 use qsm_core::Grid;
 use qsm_core::bet;
 use qsm_core::bet::BetParams;
@@ -204,6 +204,8 @@ fn test_bgremove_vsharp() {
     let (vsx, vsy, vsz) = data.voxel_size;
 
     let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
+    // The default working grid is the native one.
+    assert_eq!(VsharpParams::default().working_grid(&grid), VsharpGrid::Native);
     let ((result, eroded_mask), elapsed) = run_timed!("V-SHARP", bgremove::vsharp(
         &data.fieldmap,
         &data.mask,

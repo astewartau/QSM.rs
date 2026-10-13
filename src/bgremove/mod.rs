@@ -81,7 +81,7 @@ pub use smv::smv;
 pub use msmv::{msmv, MsmvParams};
 pub use sharp::{sharp, SharpParams};
 pub use resharp::{resharp, ResharpParams};
-pub use vsharp::{vsharp, VsharpParams};
+pub use vsharp::{vsharp, VsharpGrid, VsharpParams};
 pub use pdf::{pdf, PdfParams};
 pub use ismv::{ismv, IsmvParams};
 pub use lbv::{lbv, LbvParams};
