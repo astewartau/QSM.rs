@@ -678,7 +678,7 @@ fn evolution_pass(
 
 /// BET algorithm parameters
 #[cfg_attr(feature = "introspection", derive(serde::Serialize))]
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct BetParams {
     /// Fractional intensity threshold (0.0-1.0, smaller = larger brain)
     pub fractional_intensity: f64,

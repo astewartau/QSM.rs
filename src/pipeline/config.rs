@@ -269,13 +269,11 @@ pub enum MaskOp {
         method: MaskThresholdMethod,
         value: Option<f64>,
     },
-    Bet {
-        fractional_intensity: f64,
-        /// Factor applied to the voxel sizes before BET runs — see
-        /// [`BetParams::voxel_scale`](crate::bet::BetParams::voxel_scale). 1.0 is the
-        /// acquisition's own geometry; 10.0 is the usual preclinical setting for mouse data.
-        voxel_scale: f64,
-    },
+    /// BET brain extraction from the **magnitude** (a generator), with the full
+    /// [`BetParams`](crate::bet::BetParams) — fractional intensity, smoothness, gradient
+    /// threshold, iterations, subdivisions and voxel scale. `BetParams::default()` is FSL's
+    /// defaults on the acquisition's own geometry.
+    Bet(crate::bet::BetParams),
     Erode {
         iterations: usize,
     },
@@ -315,7 +313,7 @@ impl MaskOp {
         match self {
             Self::HdBet(_) => Some("hd-bet"),
             Self::Rs2Net(_) => Some("rs2-net"),
-            Self::Threshold { .. } | Self::Bet { .. } | Self::Erode { .. } | Self::Dilate { .. }
+            Self::Threshold { .. } | Self::Bet(_) | Self::Erode { .. } | Self::Dilate { .. }
             | Self::Close { .. } | Self::FillHoles { .. } | Self::GaussianSmooth { .. }
             | Self::SignalErode(_) => None,
         }
