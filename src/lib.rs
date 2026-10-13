@@ -49,6 +49,7 @@
 //! - [`inversion`] — dipole inversion (TKD, TSVD, Tikhonov, TV, NLTV, RTS, MEDI, iLSQR, TGV)
 //! - [`separation`] — paramagnetic/diamagnetic source separation (χ-separation, R2\*-QSM, WaveSep)
 //! - [`swi`] — susceptibility weighted imaging (CLEAR-SWI, SMWI)
+//! - [`complex`] — real/imaginary input to magnitude/phase
 //! - [`fieldmap`] — multi-echo phase combination and B0 field mapping
 //! - [`r2star`] — R2\*/T2\* mapping (ARLO)
 //! - [`mask`] — mask thresholding and morphology
@@ -74,6 +75,7 @@
 //! | Combined unwrap+BFR | HARPERELLA, iHARPERELLA |
 //! | SWI | CLEAR-SWI |
 //! | Separation | Chi-separation (Shin 2021 iLSQR-initialized, MEDI-based) |
+//! | Input | Real/imaginary to magnitude/phase (slice-chopping correction) |
 //! | Multi-echo | MCPC-3D-S, R2\*/T2\* (ARLO), bias correction |
 //! | Utilities | Frangi vesselness, surface curvature, Otsu thresholding, QSMART |
 
@@ -133,6 +135,18 @@ pub mod bgremove;
 pub mod inversion;
 pub mod separation;
 pub mod swi;
+
+/// Real/imaginary input: conversion to magnitude and phase.
+///
+/// [`complex_to_mag_phase`](complex::complex_to_mag_phase) also detects and undoes
+/// alternate-slice π "chopping" (a reconstruction artefact common in GE real/imaginary
+/// exports), deciding once for all echoes.
+pub mod complex {
+    pub use crate::utils::complex::{
+        complex_to_mag_phase, slice_chopping_coherence, ChopCorrection, MagPhaseEchoes,
+        SliceChopping, CHOP_AMBIGUOUS_COHERENCE,
+    };
+}
 
 /// Multi-echo phase combination and B0 field mapping.
 ///
