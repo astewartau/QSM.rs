@@ -105,8 +105,13 @@ pub mod utils;
 // `SliceGapError` is deliberately not re-exported here: it is reached as
 // `qsm_core::grid::SliceGapError`, matching `models::onnx::OnnxError` and
 // `models::download::DownloadError`. Each error type stays with the concern that
-// produces it rather than accumulating at the crate root.
+// produces it rather than accumulating at the crate root. The one shared by every
+// algorithm entry point, for input it cannot process, is `qsm_core::error::InputError`.
 pub use grid::Grid;
+
+/// [`InputError`](error::InputError): what an algorithm returns instead of panicking when it is
+/// handed input it cannot process.
+pub mod error;
 
 // ============================================================================
 // Deep-learning model registry and weight management
@@ -151,7 +156,7 @@ pub mod fieldmap {
 /// R2\*/T2\* mapping from multi-echo magnitude (ARLO).
 pub mod r2star {
     pub use crate::utils::r2star::{
-        r2star_arlo, t2star_from_r2star, use_arlo,
+        r2star_arlo, t2star_from_r2star, use_arlo, ARLO_TE_SPACING_TOLERANCE_S,
     };
 }
 
@@ -169,7 +174,7 @@ pub mod r2star {
 /// lets the R2'-consuming [`separation`] methods run on GRE-only data.
 pub mod relaxometry {
     pub use crate::utils::epg::{
-        epg_cpmg_echoes, r2_epg, r2prime, R2EpgParams, R2PrimeMap,
+        epg_cpmg_echoes, r2_epg, r2prime, R2EpgParams, R2PrimeMap, EPG_TE_TOLERANCE_S,
     };
     #[cfg(feature = "onnx")]
     pub use crate::utils::r2primenet::{

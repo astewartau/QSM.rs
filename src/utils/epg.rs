@@ -26,6 +26,7 @@
 //!   73(2):809-817.
 
 use num_complex::Complex64;
+use crate::error::{check_len, InputError};
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
@@ -237,6 +238,11 @@ fn build_dictionary(params: &R2EpgParams, esp: f64, n_echoes: usize) -> Vec<Vec<
         .collect()
 }
 
+/// How far, in seconds, [`r2_epg`]'s echo times may be from `TEₙ = n·ESP` (each spacing from
+/// the first, and the first echo from the spacing): 0.1 ms, which covers the rounding of echo
+/// times in DICOM and BIDS sidecars.
+pub const EPG_TE_TOLERANCE_S: f64 = 1e-4;
+
 /// R2 mapping from multi-echo spin-echo magnitude via EPG dictionary matching.
 ///
 /// For each masked voxel the (normalized) measured echo train is matched against
@@ -267,9 +273,14 @@ fn build_dictionary(params: &R2EpgParams, esp: f64, n_echoes: usize) -> Vec<Vec<
 /// voxel — fitted, or the snapped input when `b1_map` was given — both
 /// `[nx*ny*nz]`.
 ///
-/// # Panics
-/// Panics if `echo_times.len() < 3`, echo times are not equi-spaced, or the
-/// `magnitude`/`mask`/`b1_map` lengths are inconsistent with `grid`.
+/// # Errors
+/// - fewer than 3 echoes;
+/// - echo times that are not equally spaced, or whose first echo is not at the echo spacing
+///   (`TE₁ = ESP`), each to within [`EPG_TE_TOLERANCE_S`]. The dictionary simulates a CPMG
+///   train with echoes at `n·ESP`; a train that starts elsewhere has a different first
+///   interval, and fitting it against this dictionary gives a wrong R2 rather than a noisy one;
+/// - an empty dictionary (`params` grids with no usable `(T2, B1)` pair);
+/// - `magnitude`/`mask`/`b1_map` lengths inconsistent with `grid`.
 pub fn r2_epg(
     magnitude: &[f64],
     mask: &[u8],
@@ -277,43 +288,53 @@ pub fn r2_epg(
     grid: &crate::Grid,
     params: &R2EpgParams,
     b1_map: Option<&[f64]>,
-) -> (Vec<f64>, Vec<f64>) {
+) -> Result<(Vec<f64>, Vec<f64>), InputError> {
     let n_echoes = echo_times.len();
-    assert!(n_echoes >= 3, "EPG R2 fitting requires at least 3 echoes");
+    if n_echoes < 3 {
+        return Err(InputError(format!("EPG R2 fitting needs at least 3 echoes, got {n_echoes}")));
+    }
+    if echo_times.iter().any(|t| !t.is_finite()) {
+        return Err(InputError(format!("EPG R2 fitting needs finite echo times, got {echo_times:?}")));
+    }
     let n_voxels = grid.n_total();
-    assert_eq!(
-        magnitude.len(),
-        n_voxels * n_echoes,
-        "magnitude length must be n_voxels * n_echoes"
-    );
-    assert_eq!(mask.len(), n_voxels, "mask length must be n_voxels");
+    check_len("magnitude (n_voxels * n_echoes)", magnitude.len(), n_voxels * n_echoes)?;
+    check_len("mask", mask.len(), n_voxels)?;
     if let Some(b1) = b1_map {
-        assert_eq!(b1.len(), n_voxels, "b1_map length must be n_voxels");
+        check_len("b1_map", b1.len(), n_voxels)?;
     }
 
     // Sort echoes by time and require (approximately) uniform spacing.
     let sort_indices: Vec<usize> = {
         let mut idx: Vec<usize> = (0..n_echoes).collect();
-        idx.sort_by(|&a, &b| echo_times[a].partial_cmp(&echo_times[b]).unwrap());
+        idx.sort_by(|&a, &b| echo_times[a].total_cmp(&echo_times[b]));
         idx
     };
     let mut te_sorted: Vec<f64> = echo_times.to_vec();
-    te_sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    te_sorted.sort_by(f64::total_cmp);
     let esp = te_sorted[1] - te_sorted[0];
     let diffs: Vec<f64> = te_sorted.windows(2).map(|w| w[1] - w[0]).collect();
     let max_dev = diffs.iter().map(|&d| (d - esp).abs()).fold(0.0_f64, f64::max);
-    assert!(
-        max_dev <= 1e-4,
-        "EPG R2 fitting requires equi-spaced echo times"
-    );
+    if esp <= 0.0 || max_dev > EPG_TE_TOLERANCE_S {
+        return Err(InputError(format!(
+            "EPG R2 fitting needs distinct, equally spaced echo times, got {echo_times:?} s"
+        )));
+    }
     // EPG forms echoes at TE_n = n*esp; require the acquisition to start at esp.
     // (A constant offset would need a different first-interval model.)
+    if (te_sorted[0] - esp).abs() > EPG_TE_TOLERANCE_S {
+        return Err(InputError(format!(
+            "EPG R2 fitting needs the first echo at the echo spacing (TE1 = ESP), got \
+             TE1 = {:.3} ms, ESP = {:.3} ms",
+            te_sorted[0] * 1e3, esp * 1e3
+        )));
+    }
 
     let dict = build_dictionary(params, esp, n_echoes);
-    assert!(
-        dict.iter().any(|g| !g.is_empty()),
-        "EPG dictionary is empty"
-    );
+    if dict.iter().all(|g| g.is_empty()) {
+        return Err(InputError(
+            "EPG dictionary is empty: no (T2, B1) pair in the parameter grids is usable".into(),
+        ));
+    }
 
     let mut r2_out = vec![0.0_f64; n_voxels];
     let mut b1_out = vec![0.0_f64; n_voxels];
@@ -378,7 +399,7 @@ pub fn r2_epg(
         b1_out[v] = out[v].1;
     }
 
-    (r2_out, b1_out)
+    Ok((r2_out, b1_out))
 }
 
 /// R2' and the region over which it is a measurement.
@@ -433,16 +454,20 @@ pub struct R2PrimeMap {
 ///
 /// # Returns
 /// [`R2PrimeMap`]: the R2' map in Hz and the coverage it is valid over.
+///
+/// # Errors
+/// If `r2`, `mask` or `r2_coverage` is not the same length as `r2star`: R2 from a separate
+/// spin-echo acquisition has to be resampled onto the R2\* grid first.
 pub fn r2prime(
     r2star: &[f64],
     r2: &[f64],
     mask: &[u8],
     r2_coverage: Option<&[u8]>,
-) -> R2PrimeMap {
-    assert_eq!(r2star.len(), r2.len(), "r2star and r2 must be the same length");
-    assert_eq!(r2star.len(), mask.len(), "mask must match map length");
+) -> Result<R2PrimeMap, InputError> {
+    check_len("r2 (must be on the r2star grid)", r2.len(), r2star.len())?;
+    check_len("mask", mask.len(), r2star.len())?;
     if let Some(c) = r2_coverage {
-        assert_eq!(c.len(), r2star.len(), "r2_coverage must match map length");
+        check_len("r2_coverage", c.len(), r2star.len())?;
     }
 
     let n = r2star.len();
@@ -458,7 +483,7 @@ pub fn r2prime(
             out[i] = (r2star[i] - r2[i]).max(0.0);
         }
     }
-    R2PrimeMap { r2prime: out, coverage }
+    Ok(R2PrimeMap { r2prime: out, coverage })
 }
 
 #[cfg(test)]
@@ -540,12 +565,12 @@ mod tests {
 
         // EPG fit (dictionary includes b1 = 0.75 and t2 near 70 ms).
         let params = R2EpgParams::default();
-        let (r2_epg_map, b1_map) = r2_epg(&mag, &mask, &te, &grid, &params, None);
+        let (r2_epg_map, b1_map) = r2_epg(&mag, &mask, &te, &grid, &params, None).unwrap();
         let r2_epg_val = r2_epg_map[0];
         let epg_err = (r2_epg_val - r2_true).abs() / r2_true;
 
         // Mono-exponential (ARLO) fit for comparison.
-        let (r2_arlo_map, _) = crate::utils::r2star::r2star_arlo(&mag, &mask, &te, &grid);
+        let (r2_arlo_map, _) = crate::utils::r2star::r2star_arlo(&mag, &mask, &te, &grid).unwrap();
         let arlo_err = (r2_arlo_map[0] - r2_true).abs() / r2_true;
 
         // EPG should be within ~5% (grid-limited) and clearly better than ARLO.
@@ -587,7 +612,7 @@ mod tests {
 
         let grid = Grid::new(1, 1, 1, 1.0, 1.0, 1.0);
         let mask = vec![1u8];
-        let (r2_epg_map, _) = r2_epg(&mag, &mask, &te, &grid, &R2EpgParams::default(), None);
+        let (r2_epg_map, _) = r2_epg(&mag, &mask, &te, &grid, &R2EpgParams::default(), None).unwrap();
         let err = (r2_epg_map[0] - r2_true).abs() / r2_true;
         assert!(err < 0.05, "EPG R2 {} vs true {}", r2_epg_map[0], r2_true);
     }
@@ -616,7 +641,7 @@ mod tests {
             &grid,
             &R2EpgParams::default(),
             Some(&b1_known),
-        );
+        ).unwrap();
         let err = (r2_map[0] - r2_true).abs() / r2_true;
         assert!(
             err < 0.06,
@@ -653,7 +678,7 @@ mod tests {
         let params = R2EpgParams::default();
 
         // Off-grid input snaps to the nearest grid entry (0.695 -> 0.70).
-        let (_, b1_out) = r2_epg(&mag, &mask, &te, &grid, &params, Some(&[0.695]));
+        let (_, b1_out) = r2_epg(&mag, &mask, &te, &grid, &params, Some(&[0.695])).unwrap();
         assert!(
             (b1_out[0] - 0.70).abs() < 1e-12,
             "B1 0.695 should snap to 0.70, got {}",
@@ -662,8 +687,8 @@ mod tests {
 
         // Forcing perfect refocusing on a b1 = 0.7 train mis-reads the
         // stimulated-echo signal as slower decay: R2 biased low vs truth.
-        let (r2_right, _) = r2_epg(&mag, &mask, &te, &grid, &params, Some(&[b1_true]));
-        let (r2_wrong, _) = r2_epg(&mag, &mask, &te, &grid, &params, Some(&[1.0]));
+        let (r2_right, _) = r2_epg(&mag, &mask, &te, &grid, &params, Some(&[b1_true])).unwrap();
+        let (r2_wrong, _) = r2_epg(&mag, &mask, &te, &grid, &params, Some(&[1.0])).unwrap();
         let err_right = (r2_right[0] - r2_true).abs() / r2_true;
         let err_wrong = (r2_wrong[0] - r2_true).abs() / r2_true;
         assert!(
@@ -682,7 +707,7 @@ mod tests {
         let r2star = vec![50.0, 30.0, 10.0, 0.0];
         let r2 = vec![20.0, 35.0, 10.0, 5.0];
         let mask = vec![1u8, 1, 0, 1];
-        let out = r2prime(&r2star, &r2, &mask, None);
+        let out = r2prime(&r2star, &r2, &mask, None).unwrap();
         assert!((out.r2prime[0] - 30.0).abs() < 1e-12); // 50 - 20
         assert!(out.r2prime[1].abs() < 1e-12); // clamp negative (30 - 35)
         assert!(out.r2prime[2].abs() < 1e-12); // masked out
@@ -706,7 +731,7 @@ mod tests {
         let mask = vec![1u8; 4];
         let coverage = vec![1u8, 1, 0, 0];
 
-        let out = r2prime(&r2star, &r2, &mask, Some(&coverage));
+        let out = r2prime(&r2star, &r2, &mask, Some(&coverage)).unwrap();
         assert_eq!(out.coverage, coverage, "coverage should be the supplied one");
         // Inside: R2* − R2, computed independently of the function under test.
         assert!((out.r2prime[0] - 25.0).abs() < 1e-12);
@@ -725,7 +750,7 @@ mod tests {
         let r2 = vec![15.0, 0.0, f64::NAN];
         let mask = vec![1u8; 3];
         // The caller claims the acquisition covered everything.
-        let out = r2prime(&r2star, &r2, &mask, Some(&[1u8, 1, 1]));
+        let out = r2prime(&r2star, &r2, &mask, Some(&[1u8, 1, 1])).unwrap();
         assert_eq!(out.coverage, vec![1u8, 0, 0], "a zero or non-finite R2 is not a measurement");
         assert!((out.r2prime[0] - 25.0).abs() < 1e-12);
         assert_eq!(out.r2prime[1], 0.0);
@@ -739,8 +764,43 @@ mod tests {
         let r2star = vec![40.0, 35.0, 30.0];
         let r2 = vec![15.0, 12.0, 0.0]; // third voxel never fitted
         let mask = vec![1u8; 3];
-        let out = r2prime(&r2star, &r2, &mask, None);
+        let out = r2prime(&r2star, &r2, &mask, None).unwrap();
         assert_eq!(out.coverage, vec![1u8, 1, 0]);
         assert_eq!(out.r2prime[2], 0.0, "an unfitted voxel must not report R2* as R2'");
+    }
+
+    /// Echo times the dictionary cannot model are refused, not asserted on or fitted
+    /// wrongly (#273).
+    #[test]
+    fn r2_epg_refuses_echo_times_it_cannot_model() {
+        let grid = crate::Grid::new(1, 1, 1, 1.0, 1.0, 1.0);
+        let params = R2EpgParams::default();
+        let run = |te: &[f64]| {
+            let mag: Vec<f64> = te.iter().map(|t| (-t / 0.08).exp()).collect();
+            r2_epg(&mag, &[1], te, &grid, &params, None)
+        };
+        assert!(run(&[0.01, 0.02, 0.03, 0.04]).is_ok());
+        for (te, why) in [
+            (&[0.01, 0.02][..], "at least 3"),
+            (&[0.01, 0.02, 0.04][..], "equally spaced"),
+            (&[0.01, 0.01, 0.01][..], "equally spaced"),
+            (&[0.015, 0.025, 0.035][..], "TE1 = ESP"),
+            (&[0.01, f64::NAN, 0.03][..], "finite"),
+        ] {
+            let err = run(te).unwrap_err().to_string();
+            assert!(err.contains(why), "{te:?}: {err}");
+        }
+        let te = [0.01, 0.02, 0.03];
+        assert!(r2_epg(&[1.0; 2], &[1], &te, &grid, &params, None).is_err());
+        assert!(r2_epg(&[1.0; 3], &[1], &te, &grid, &params, Some(&[1.0, 1.0])).is_err());
+        let empty = R2EpgParams { t2_grid: vec![], ..R2EpgParams::default() };
+        assert!(r2_epg(&[1.0; 3], &[1], &te, &grid, &empty, None).unwrap_err().to_string().contains("empty"));
+    }
+
+    #[test]
+    fn r2prime_refuses_maps_on_different_grids() {
+        assert!(r2prime(&[1.0; 4], &[1.0; 3], &[1; 4], None).is_err());
+        assert!(r2prime(&[1.0; 4], &[1.0; 4], &[1; 3], None).is_err());
+        assert!(r2prime(&[1.0; 4], &[1.0; 4], &[1; 4], Some(&[1; 5])).is_err());
     }
 }

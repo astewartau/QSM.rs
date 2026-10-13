@@ -80,19 +80,22 @@ pub fn run_bg_removal(
                 progress,
             )
         }
+        // HARPERELLA / iHARPERELLA are integrated unwrap + BFR methods, but this stage has the
+        // unwrapped total field in ppm, so they take it as such (ordinary Laplacian). Wrapped
+        // phase input is `HarperellaInput::WrappedPhase`, called directly.
         BgRemovalAlgorithm::Harperella => {
             crate::bgremove::harperella(
-                field_ppm, mask, &grid,
+                crate::bgremove::HarperellaInput::FieldPpm(field_ppm), mask, &grid,
                 &config.harperella,
                 progress,
-            )
+            )?
         }
         BgRemovalAlgorithm::Iharperella => {
             crate::bgremove::iharperella(
-                field_ppm, mask, &grid,
-                &config.harperella,
+                crate::bgremove::HarperellaInput::FieldPpm(field_ppm), mask, &grid,
+                &config.iharperella,
                 progress,
-            )
+            )?
         }
         BgRemovalAlgorithm::Bfrnet => {
             let local = run_bfrnet(field_ppm, mask, &grid)?;
@@ -375,6 +378,45 @@ mod tests {
         let config = BgRemovalConfig { algorithm: BgRemovalAlgorithm::Resharp, ..Default::default() };
         let r = run_bg_removal(&field, &mask, &meta, &config, &mut |_, _| {}).unwrap();
         assert_eq!(r.local_field_ppm.len(), n);
+    }
+
+    /// iHARPERELLA reads its own params, not HARPERELLA's (#169).
+    #[test]
+    fn iharperella_uses_its_own_params() {
+        let (nx, ny, nz) = (16, 16, 16);
+        let n = nx * ny * nz;
+        let meta = ScanMetadata {
+            dims: (nx, ny, nz), voxel_size: (1.0, 1.0, 1.0),
+            echo_times: vec![0.005], field_strength: 3.0, b0_direction: (0.0, 0.0, 1.0),
+            slice_geometry: None,
+        };
+        // a blob inside a 10-voxel cube: big enough to leave an interior after the ~3-voxel erosion
+        let field: Vec<f64> = (0..n)
+            .map(|i| {
+                let (x, y, z) = ((i % nx) as f64 - 7.5, ((i / nx) % ny) as f64 - 7.5, (i / (nx * ny)) as f64 - 7.5);
+                (-(x * x + y * y + z * z) / 10.0).exp() + 0.01 * x
+            })
+            .collect();
+        let mask: Vec<u8> = (0..n)
+            .map(|i| {
+                let (x, y, z) = (i % nx, (i / nx) % ny, i / (nx * ny));
+                u8::from((3..13).contains(&x) && (3..13).contains(&y) && (3..13).contains(&z))
+            })
+            .collect();
+        let run = |config: &BgRemovalConfig| {
+            run_bg_removal(&field, &mask, &meta, config, &mut |_, _| {}).unwrap().local_field_ppm
+        };
+        let base = BgRemovalConfig { algorithm: BgRemovalAlgorithm::Iharperella, ..Default::default() };
+        let reference = run(&base);
+        assert!(reference.iter().any(|v| v.abs() > 1e-6), "nothing came through");
+        // HARPERELLA's settings must not reach iHARPERELLA
+        let mut other = base.clone();
+        other.harperella = crate::bgremove::HarperellaParams { radius: 2.0, max_iter: 1, tol: 0.5 };
+        assert_eq!(run(&other), reference);
+        // its own settings must
+        let mut own = base.clone();
+        own.iharperella.max_iter = 1;
+        assert_ne!(run(&own), reference);
     }
 
     #[test]

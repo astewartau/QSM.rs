@@ -11,13 +11,27 @@ use std::f64::consts::PI;
 
 use super::config::*;
 
-/// Run standard dipole inversion on a local field.
+/// Run a dipole inversion on the field its method takes.
+///
+/// Which field that is comes from [`InversionConfig::input`]:
+///
+/// - [`InversionInput::LocalField`] (most methods): the local field after background removal,
+///   with the eroded mask background removal returned.
+/// - [`InversionInput::TotalField`]: the total field straight from field mapping, with the
+///   brain mask and no background removal. Through this function that is TFI, MEDI with SMV,
+///   AutoQSM and NeXtQSM. TFI solves over the whole FOV under its preconditioner (1 inside
+///   `mask`, `precond` outside) and weights the data by the magnitude inside the mask, so the
+///   total field and the brain mask are exactly what it needs; given a local field and an
+///   eroded mask it would run, but would be solving a different problem.
+/// - [`InversionInput::WrappedPhase`] methods, and TGV and QSMART, have their own entry points
+///   and are refused here.
 ///
 /// Handles MEDI's unit conversion (ppm → radians) internally.
 ///
 /// # Arguments
-/// * `local_field_ppm` - Local field in ppm (after background removal)
-/// * `mask` - Eroded binary mask from background removal
+/// * `field_ppm` - The local or total field in ppm, as above
+/// * `mask` - The eroded mask from background removal (local field), or the brain mask
+///   (total field)
 /// * `metadata` - Scan metadata
 /// * `config` - Inversion configuration
 /// * `magnitude` - Combined magnitude image (needed for MEDI edge weighting)
@@ -26,7 +40,7 @@ use super::config::*;
 /// # Returns
 /// Susceptibility map in ppm (unreferenced)
 pub fn run_dipole_inversion(
-    local_field_ppm: &[f64],
+    field_ppm: &[f64],
     mask: &[u8],
     metadata: &ScanMetadata,
     config: &InversionConfig,
@@ -39,42 +53,42 @@ pub fn run_dipole_inversion(
     let bdir = metadata.b0_direction;
     let n_voxels = grid.n_total();
 
-    if local_field_ppm.len() != n_voxels {
+    if field_ppm.len() != n_voxels {
         return Err(PipelineError::DimensionMismatch {
             expected: n_voxels,
-            got: local_field_ppm.len(),
+            got: field_ppm.len(),
         });
     }
 
     let chi = match config.algorithm {
         InversionAlgorithm::Tkd => {
             crate::inversion::tkd(
-                local_field_ppm, mask, &grid, bdir, &config.tkd,
+                field_ppm, mask, &grid, bdir, &config.tkd,
             )
         }
         InversionAlgorithm::Tsvd => {
             crate::inversion::tsvd(
-                local_field_ppm, mask, &grid, bdir, &config.tsvd,
+                field_ppm, mask, &grid, bdir, &config.tsvd,
             )
         }
         InversionAlgorithm::Tikhonov => {
             crate::inversion::tikhonov(
-                local_field_ppm, mask, &grid, bdir, &config.tikhonov,
+                field_ppm, mask, &grid, bdir, &config.tikhonov,
             )
         }
         InversionAlgorithm::Tv => {
             crate::inversion::tv_admm(
-                local_field_ppm, mask, &grid, bdir, &config.tv, progress,
+                field_ppm, mask, &grid, bdir, &config.tv, progress,
             )
         }
         InversionAlgorithm::Rts => {
             crate::inversion::rts(
-                local_field_ppm, mask, &grid, bdir, &config.rts, progress,
+                field_ppm, mask, &grid, bdir, &config.rts, progress,
             )
         }
         InversionAlgorithm::Nltv => {
             crate::inversion::nltv(
-                local_field_ppm, mask, &grid, bdir, &config.nltv, progress,
+                field_ppm, mask, &grid, bdir, &config.nltv, progress,
             )
         }
         InversionAlgorithm::Medi => {
@@ -83,7 +97,7 @@ pub fn run_dipole_inversion(
             let te1 = metadata.echo_times.first().copied().unwrap_or(0.005);
             let ppm_to_rad = 2.0 * PI * gamma_hz * metadata.field_strength * te1 * 1e-6;
 
-            let local_field_rad: Vec<f64> = local_field_ppm.iter()
+            let local_field_rad: Vec<f64> = field_ppm.iter()
                 .map(|&v| v * ppm_to_rad)
                 .collect();
 
@@ -101,54 +115,54 @@ pub fn run_dipole_inversion(
         }
         InversionAlgorithm::Tfi => {
             // TFI takes the field in ppm (same convention as NDI and the other inversions —
-            // NOT MEDI's radians). It is single-step: `local_field_ppm` is fed as the TOTAL
-            // field (caller supplies the pre-background-removal field). Converting to radians
-            // here would wrap the large total field in exp(i·field) and destroy the result.
+            // NOT MEDI's radians). It is single-step: `field_ppm` is the TOTAL field and `mask`
+            // the brain mask (InversionConfig::input). Converting to radians here would wrap
+            // the large total field in exp(i·field) and destroy the result.
             let uniform_mag = vec![1.0f64; n_voxels];
             let mag = magnitude.unwrap_or(&uniform_mag);
             let n_std = vec![1.0f64; n_voxels];
 
             crate::inversion::tfi(
-                local_field_ppm, &n_std, mag, mask,
+                field_ppm, &n_std, mag, mask,
                 &grid, bdir, &config.tfi, progress,
             )
         }
         InversionAlgorithm::Ilsqr => {
             let (chi, _, _, _) = crate::inversion::ilsqr(
-                local_field_ppm, mask, &grid, bdir, &config.ilsqr, &mut *progress,
+                field_ppm, mask, &grid, bdir, &config.ilsqr, &mut *progress,
             );
             chi
         }
         InversionAlgorithm::Ndi => {
             crate::inversion::ndi(
-                local_field_ppm, mask, &grid, bdir, &config.ndi, progress,
+                field_ppm, mask, &grid, bdir, &config.ndi, progress,
             )
         }
         InversionAlgorithm::Fansi => {
             let params = crate::inversion::FansiParams { is_tgv: false, ..config.fansi.clone() };
             crate::inversion::fansi(
-                local_field_ppm, mask, &grid, bdir, &params, progress,
+                field_ppm, mask, &grid, bdir, &params, progress,
             )
         }
         InversionAlgorithm::FansiTgv => {
             let params = crate::inversion::FansiParams { is_tgv: true, ..config.fansi.clone() };
             crate::inversion::fansi(
-                local_field_ppm, mask, &grid, bdir, &params, progress,
+                field_ppm, mask, &grid, bdir, &params, progress,
             )
         }
         InversionAlgorithm::L1qsm => {
             crate::inversion::l1qsm(
-                local_field_ppm, mask, &grid, bdir, &config.l1qsm, progress,
+                field_ppm, mask, &grid, bdir, &config.l1qsm, progress,
             )
         }
         InversionAlgorithm::Whqsm => {
             crate::inversion::whqsm(
-                local_field_ppm, mask, &grid, bdir, &config.whqsm, progress,
+                field_ppm, mask, &grid, bdir, &config.whqsm, progress,
             )
         }
         InversionAlgorithm::Hdqsm => {
             crate::inversion::hdqsm(
-                local_field_ppm, mask, &grid, bdir, &config.hdqsm, progress,
+                field_ppm, mask, &grid, bdir, &config.hdqsm, progress,
             )
         }
         InversionAlgorithm::AmpPe => {
@@ -160,7 +174,7 @@ pub fn run_dipole_inversion(
                 ..config.amp_pe.clone()
             };
             crate::inversion::amp_pe(
-                local_field_ppm, mask, magnitude, &grid, bdir, &params, progress,
+                field_ppm, mask, magnitude, &grid, bdir, &params, progress,
             )
         }
         InversionAlgorithm::Lsqr => {
@@ -169,7 +183,7 @@ pub fn run_dipole_inversion(
                 ..config.lsqr.clone()
             };
             crate::inversion::lsqr_qsm(
-                local_field_ppm, mask, magnitude, &grid, bdir, &params, progress,
+                field_ppm, mask, magnitude, &grid, bdir, &params, progress,
             )
         }
         InversionAlgorithm::Heidi => {
@@ -190,24 +204,24 @@ pub fn run_dipole_inversion(
             let total = lsqr_iters + heidi_iters;
 
             let chi_init = crate::inversion::lsqr_qsm(
-                local_field_ppm, mask, magnitude, &grid, bdir, &lsqr_params,
+                field_ppm, mask, magnitude, &grid, bdir, &lsqr_params,
                 |i, _| progress(i, total),
             );
             crate::inversion::heidi(
-                local_field_ppm, mask, &chi_init, &grid, bdir, heidi_params,
+                field_ppm, mask, &chi_init, &grid, bdir, heidi_params,
                 |i, _| progress(lsqr_iters + i, total),
             )
         }
-        InversionAlgorithm::Xqsm => run_xqsm(local_field_ppm, mask, &grid, config.tile, progress)?,
-        InversionAlgorithm::Qsmnet => run_qsmnet(local_field_ppm, mask, &grid, "qsmnet", config.tile, progress)?,
-        InversionAlgorithm::QsmnetPlus => run_qsmnet(local_field_ppm, mask, &grid, "qsmnet-plus", config.tile, progress)?,
-        InversionAlgorithm::Autoqsm => run_autoqsm(local_field_ppm, mask, &grid)?,
-        InversionAlgorithm::Qsmgan => run_qsmgan(local_field_ppm, mask, &grid)?,
-        InversionAlgorithm::Ir2qsm => run_ir2qsm(local_field_ppm, mask, &grid, config.tile, progress)?,
-        InversionAlgorithm::Lpcnn => run_lpcnn(local_field_ppm, mask, &grid, bdir, config.tile, progress)?,
-        InversionAlgorithm::ModlQsm => run_modl_qsm(local_field_ppm, mask, &grid, bdir, config.tile, progress)?,
-        // NeXtQSM is single-step (own BFR): `local_field_ppm` must be the total field.
-        InversionAlgorithm::Nextqsm => run_nextqsm(local_field_ppm, mask, metadata, config.tile, progress)?,
+        InversionAlgorithm::Xqsm => run_xqsm(field_ppm, mask, &grid, config.tile, progress)?,
+        InversionAlgorithm::Qsmnet => run_qsmnet(field_ppm, mask, &grid, "qsmnet", config.tile, progress)?,
+        InversionAlgorithm::QsmnetPlus => run_qsmnet(field_ppm, mask, &grid, "qsmnet-plus", config.tile, progress)?,
+        InversionAlgorithm::Autoqsm => run_autoqsm(field_ppm, mask, &grid)?,
+        InversionAlgorithm::Qsmgan => run_qsmgan(field_ppm, mask, &grid)?,
+        InversionAlgorithm::Ir2qsm => run_ir2qsm(field_ppm, mask, &grid, config.tile, progress)?,
+        InversionAlgorithm::Lpcnn => run_lpcnn(field_ppm, mask, &grid, bdir, config.tile, progress)?,
+        InversionAlgorithm::ModlQsm => run_modl_qsm(field_ppm, mask, &grid, bdir, config.tile, progress)?,
+        // NeXtQSM is single-step (own BFR): `field_ppm` must be the total field.
+        InversionAlgorithm::Nextqsm => run_nextqsm(field_ppm, mask, metadata, config.tile, progress)?,
         InversionAlgorithm::Tgv | InversionAlgorithm::Qsmart => {
             return Err(PipelineError::InvalidConfig(
                 format!("{:?} should use run_tgv or run_qsmart", config.algorithm),
@@ -623,7 +637,7 @@ pub fn run_tgv(
         crate::inversion::tgv_qsm(
             TgvInput::FieldPpm(&field_result.b0_field_ppm),
             mask, &grid, tgv_params, (bx, by, bz), &mut *progress,
-        )
+        )?
     } else {
         let te_s = *metadata.echo_times.first().ok_or_else(|| {
             PipelineError::InvalidInput("TGV needs the echo time of the phase".into())
@@ -639,7 +653,7 @@ pub fn run_tgv(
             te_s,
             b0_t,
         };
-        crate::inversion::tgv_qsm(input, mask, &grid, tgv_params, (bx, by, bz), &mut *progress)
+        crate::inversion::tgv_qsm(input, mask, &grid, tgv_params, (bx, by, bz), &mut *progress)?
     };
 
     Ok(super::referencing::apply_reference(&chi_ppm, mask, reference))
@@ -889,6 +903,42 @@ mod tests {
         let config = InversionConfig { algorithm: InversionAlgorithm::Medi, ..Default::default() };
         let chi = run_dipole_inversion(&field, &mask, &meta, &config, Some(&mag), &mut |_, _| {}).unwrap();
         assert_eq!(chi.len(), n);
+    }
+
+    /// TFI is a total-field method (`InversionConfig::input`): the dispatcher must hand the
+    /// field to `tfi` in ppm, untouched (no ppm→rad scaling as for MEDI), with the brain mask.
+    #[test]
+    fn tfi_gets_the_total_field_unchanged() {
+        let (nx, ny, nz) = (10, 10, 10);
+        let n = nx * ny * nz;
+        // a background ramp plus a local bump: a total field
+        let field: Vec<f64> = (0..n)
+            .map(|i| {
+                let (x, y, z) = ((i % nx) as f64, ((i / nx) % ny) as f64, (i / (nx * ny)) as f64);
+                0.5 * (z - 4.5) / 4.5 + 0.02 * (-((x - 4.5).powi(2) + (y - 4.5).powi(2) + (z - 4.5).powi(2)) / 4.0).exp()
+            })
+            .collect();
+        let mask: Vec<u8> = (0..n)
+            .map(|i| {
+                let (x, y, z) = (i % nx, (i / nx) % ny, i / (nx * ny));
+                u8::from((2..8).contains(&x) && (2..8).contains(&y) && (2..8).contains(&z))
+            })
+            .collect();
+        let meta = ScanMetadata {
+            dims: (nx, ny, nz), voxel_size: (1.0, 1.0, 1.0),
+            echo_times: vec![0.005, 0.010], field_strength: 3.0, b0_direction: (0.0, 0.0, 1.0),
+            slice_geometry: None,
+        };
+        let config = InversionConfig { algorithm: InversionAlgorithm::Tfi, ..Default::default() };
+        assert_eq!(config.input(2), InversionInput::TotalField);
+        let tfi = crate::inversion::TfiParams { max_iter: 2, cg_max_iter: 5, ..config.tfi.clone() };
+        let config = InversionConfig { tfi: tfi.clone(), ..config };
+        let via_stage = run_dipole_inversion(&field, &mask, &meta, &config, None, &mut |_, _| {}).unwrap();
+        let direct = crate::inversion::tfi(
+            &field, &vec![1.0; n], &vec![1.0; n], &mask, &meta.grid(), meta.b0_direction, &tfi, |_, _| {},
+        );
+        assert_eq!(via_stage, direct);
+        assert!(via_stage.iter().all(|v| v.is_finite()));
     }
 
     #[test]

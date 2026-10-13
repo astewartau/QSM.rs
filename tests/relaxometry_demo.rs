@@ -195,10 +195,10 @@ fn test_relaxometry_demo() {
     }
 
     // --- EPG R2 vs mono-exp R2 (clean) ---
-    let (r2_epg, b1_map) = r2_epg(&se, &mask, &se_te, &grid, &R2EpgParams::default(), None);
-    let (r2_mono, _) = r2star_arlo(&se, &mask, &se_te, &grid);
-    let (r2star, _) = r2star_arlo(&gre, &mask, &gre_te, &grid);
-    let rp_derived = r2prime(&r2star, &r2_epg, &mask, None).r2prime;
+    let (r2_epg, b1_map) = r2_epg(&se, &mask, &se_te, &grid, &R2EpgParams::default(), None).unwrap();
+    let (r2_mono, _) = r2star_arlo(&se, &mask, &se_te, &grid).unwrap();
+    let (r2star, _) = r2star_arlo(&gre, &mask, &gre_te, &grid).unwrap();
+    let rp_derived = r2prime(&r2star, &r2_epg, &mask, None).unwrap().r2prime;
 
     metric("EPG R2", "corr", correlation(&r2_epg, &r2_true, &mask));
     metric("EPG R2", "bias_Hz", mean_masked(&r2_epg, &mask) - mean_masked(&r2_true, &mask));
@@ -215,9 +215,9 @@ fn test_relaxometry_demo() {
 
     // --- MP-PCA denoising (noisy GRE → R2*) ---
     let gre_noisy = add_rician(&gre, n_vox, n_gre, 15.0, 1);
-    let (r2star_noisy, _) = r2star_arlo(&gre_noisy, &mask, &gre_te, &grid);
+    let (r2star_noisy, _) = r2star_arlo(&gre_noisy, &mask, &gre_te, &grid).unwrap();
     let gre_dn = qsm_core::denoise::mppca_denoise(&gre_noisy, dims, n_gre, 2, Some(&mask));
-    let (r2star_dn, _) = r2star_arlo(&gre_dn, &mask, &gre_te, &grid);
+    let (r2star_dn, _) = r2star_arlo(&gre_dn, &mask, &gre_te, &grid).unwrap();
     let corr_noisy = correlation(&r2star_noisy, &r2star_true, &mask);
     let corr_dn = correlation(&r2star_dn, &r2star_true, &mask);
     metric("R2* MP-PCA", "corr_noisy", corr_noisy);
@@ -317,11 +317,11 @@ fn test_r2prime_slab_coverage() {
         }
     }
 
-    let (r2_meas, _) = r2_epg(&se, &fit_mask, &se_te, &grid, &R2EpgParams::default(), None);
-    let (r2star, _) = r2star_arlo(&gre, &mask, &gre_te, &grid);
+    let (r2_meas, _) = r2_epg(&se, &fit_mask, &se_te, &grid, &R2EpgParams::default(), None).unwrap();
+    let (r2star, _) = r2star_arlo(&gre, &mask, &gre_te, &grid).unwrap();
 
     // ── Condition 1: EPG-fitted slab MESE ──
-    let out = r2prime(&r2star, &r2_meas, &mask, Some(&slab));
+    let out = r2prime(&r2star, &r2_meas, &mask, Some(&slab)).unwrap();
     // What the whole-brain subtraction gave before coverage existed.
     let naive: Vec<f64> = (0..n_vox)
         .map(|i| if mask[i] > 0 { (r2star[i] - r2_meas[i]).max(0.0) } else { 0.0 })
@@ -360,7 +360,7 @@ fn test_r2prime_slab_coverage() {
     );
     // For an EPG-derived R2 the `r2 > 0` floor alone reproduces the FOV, because r2_epg leaves
     // every unfitted voxel at exactly zero. So this condition does not need the explicit mask.
-    let heuristic = r2prime(&r2star, &r2_meas, &mask, None);
+    let heuristic = r2prime(&r2star, &r2_meas, &mask, None).unwrap();
     let differ = mask_diff(&heuristic.coverage, &out.coverage);
     assert_eq!(differ, 0, "the r2 > 0 floor should match the FOV here (differs at {differ} voxels)");
     assert!(heuristic.r2prime == out.r2prime, "the two routes should give the same R2' here");
@@ -379,7 +379,7 @@ fn test_r2prime_slab_coverage() {
 
     // The heuristic cannot see that these are outside the acquisition, so it admits them and
     // reports a spurious R2' — this is the limit the explicit mask exists to cover.
-    let without = r2prime(&r2star, &r2_resampled, &mask, None);
+    let without = r2prime(&r2star, &r2_resampled, &mask, None).unwrap();
     let spurious = mean_masked(&without.r2prime, &bleed);
     metric("R2prime slab", "heuristic_bleed_R2prime_Hz", spurious);
     assert!(
@@ -390,7 +390,7 @@ fn test_r2prime_slab_coverage() {
 
     // With the FOV supplied, the bleed is excluded: coverage and map are unchanged from the
     // hard-edged case, even though the R2 map now has values outside the slab.
-    let with = r2prime(&r2star, &r2_resampled, &mask, Some(&slab));
+    let with = r2prime(&r2star, &r2_resampled, &mask, Some(&slab)).unwrap();
     let differ = mask_diff(&with.coverage, &fit_mask);
     assert_eq!(differ, 0, "an explicit FOV must exclude the interpolation bleed ({differ} voxels differ)");
     let leaked = (0..n_vox).filter(|&i| outside[i] > 0 && with.r2prime[i] != 0.0).count();

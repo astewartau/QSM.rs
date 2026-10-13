@@ -274,7 +274,7 @@ pub fn r2primenet(
 /// Convenience: fit R2* from multi-echo magnitude with ARLO, then run [`r2primenet`].
 ///
 /// `magnitude` is voxel-major `(n_voxels, n_echoes)` and `echo_times` are in **seconds**
-/// (ARLO requires ≥3 equi-spaced echoes). Returns `(r2prime_hz, r2star_hz)` so the caller
+/// (ARLO requires ≥3 equi-spaced echoes; other echo times are [`OnnxError::Domain`]). Returns `(r2prime_hz, r2star_hz)` so the caller
 /// can keep the intermediate R2* map.
 pub fn r2primenet_from_magnitude(
     magnitude: &[f64],
@@ -287,7 +287,9 @@ pub fn r2primenet_from_magnitude(
     params: &R2PrimeNetParams,
     progress: impl FnMut(usize, usize),
 ) -> Result<(Vec<f64>, Vec<f64>), OnnxError> {
-    let (r2star, _s0) = super::r2star::r2star_arlo(magnitude, mask, echo_times, grid);
+    // Echo times ARLO cannot use are refused like any other input the network cannot take.
+    let (r2star, _s0) = super::r2star::r2star_arlo(magnitude, mask, echo_times, grid)
+        .map_err(|e| OnnxError::Domain(format!("R2* fit: {e}")))?;
     let r2prime = r2primenet(&r2star, mask, grid, b0_tesla, model_onnx, norm, params, progress)?;
     Ok((r2prime, r2star))
 }

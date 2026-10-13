@@ -75,6 +75,7 @@ pub fn run_separation(
     if inputs.qsm.len() != n || inputs.mask.len() != n {
         return Err(PipelineError::DimensionMismatch { expected: n, got: inputs.qsm.len() });
     }
+    check_inputs(&inputs, metadata, config.algorithm, n)?;
     let mask = inputs.mask;
 
     let (chi_pos, chi_neg, chi_total) = match config.algorithm {
@@ -205,6 +206,51 @@ fn run_chi_sepnet(
     Err(PipelineError::InvalidConfig(
         "χ-sepnet requires building qsm-core with the 'onnx' feature".into(),
     ))
+}
+
+/// Check what the separation algorithms would otherwise `assert!` on, so bad input is an error
+/// rather than a panic: map sizes, the multi-echo magnitude's echo count, Decompose's minimum
+/// of three echoes, and an empty mask.
+fn check_inputs(
+    inputs: &SeparationInputs,
+    metadata: &ScanMetadata,
+    algorithm: SeparationAlgorithm,
+    n: usize,
+) -> Result<(), PipelineError> {
+    let maps = [
+        ("local_field_ppm", Some(inputs.local_field_ppm)),
+        ("r2prime", inputs.r2prime),
+        ("r2star", inputs.r2star),
+        ("magnitude_rss", inputs.magnitude_rss),
+    ];
+    let needs_local_field = matches!(
+        algorithm,
+        SeparationAlgorithm::ChiSepIlsqr | SeparationAlgorithm::ChiSepMedi
+            | SeparationAlgorithm::SusepNet | SeparationAlgorithm::ChiSepNet
+    );
+    for (name, map) in maps {
+        if name == "local_field_ppm" && !needs_local_field {
+            continue;
+        }
+        if let Some(m) = map {
+            crate::error::check_len(name, m.len(), n)?;
+        }
+    }
+    let n_echoes = metadata.echo_times.len();
+    if let Some(m) = inputs.magnitude_multi {
+        crate::error::check_len(
+            &format!("magnitude_multi ({n_echoes} echoes x {n} voxels)"), m.len(), n * n_echoes,
+        )?;
+    }
+    if algorithm == SeparationAlgorithm::Decompose && n_echoes < 3 {
+        return Err(PipelineError::InvalidInput(format!(
+            "Decompose needs at least 3 echoes, got {n_echoes}"
+        )));
+    }
+    if !inputs.mask.iter().any(|&m| m != 0) {
+        return Err(PipelineError::InvalidInput("the mask is empty".into()));
+    }
+    Ok(())
 }
 
 /// Require an optional input, or return an `InvalidInput` error naming it.
@@ -347,5 +393,50 @@ mod tests {
         let cfg = SeparationConfig { algorithm: SeparationAlgorithm::R2starQsm, ..Default::default() };
         let err = run_separation(inputs, &m, &cfg, &mut |_, _| {}).unwrap_err();
         assert!(matches!(err, PipelineError::InvalidInput(_)), "got {err:?}");
+    }
+
+    /// Inputs the separation algorithms would `assert!` on are refused by the stage instead
+    /// (QSMxT #273): too few echoes for Decompose, a multi-echo magnitude with the wrong echo
+    /// count, a map of the wrong size, an empty mask.
+    #[test]
+    fn bad_inputs_are_errors_not_panics() {
+        let (nx, ny, nz) = (6, 6, 6);
+        let n = nx * ny * nz;
+        let qsm = vec![0.01; n];
+        let mask = vec![1u8; n];
+        let mut m = meta(nx, ny, nz);
+        let run = |inputs: SeparationInputs, m: &ScanMetadata, alg| {
+            let cfg = SeparationConfig { algorithm: alg, ..Default::default() };
+            run_separation(inputs, m, &cfg, &mut |_, _| {}).map(|_| ())
+        };
+        let invalid = |r: Result<(), PipelineError>| matches!(r, Err(PipelineError::InvalidInput(_)));
+
+        // Decompose with two echoes
+        m.echo_times = vec![0.004, 0.012];
+        let mag2 = vec![1.0; n * 2];
+        let mut inputs = base_inputs(&qsm, &mask);
+        inputs.magnitude_multi = Some(&mag2);
+        assert!(invalid(run(inputs, &m, SeparationAlgorithm::Decompose)));
+
+        // multi-echo magnitude with 3 echoes for 4 echo times
+        let m4 = meta(nx, ny, nz);
+        let mag3 = vec![1.0; n * 3];
+        let mut inputs = base_inputs(&qsm, &mask);
+        inputs.magnitude_multi = Some(&mag3);
+        assert!(invalid(run(inputs, &m4, SeparationAlgorithm::R2starQsm)));
+
+        // R2' on another grid
+        let short = vec![1.0; n - 1];
+        let mut inputs = base_inputs(&qsm, &mask);
+        inputs.r2prime = Some(&short);
+        assert!(invalid(run(inputs, &m4, SeparationAlgorithm::WaveSep)));
+
+        // empty mask
+        let empty = vec![0u8; n];
+        let r2prime = vec![2.0; n];
+        let mut inputs = base_inputs(&qsm, &empty);
+        inputs.r2prime = Some(&r2prime);
+        inputs.magnitude_rss = Some(&qsm);
+        assert!(invalid(run(inputs, &m4, SeparationAlgorithm::ChiSepIlsqr)));
     }
 }

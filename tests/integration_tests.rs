@@ -1250,7 +1250,7 @@ fn test_r2star_t2star() {
     let grid = Grid::new(nx, ny, nz, data.voxel_size.0, data.voxel_size.1, data.voxel_size.2);
     let (r2star_map, s0_map) = r2star_arlo(
         &magnitude_interleaved, &data.mask, &data.echo_times, &grid,
-    );
+    ).expect("the phantom's echo times suit ARLO");
     let t2star_map = t2star_from_r2star(&r2star_map);
     let elapsed = start.elapsed();
 
@@ -1362,7 +1362,7 @@ fn test_combined_tgv() {
         &tgv_params,
         data.b0_dir,
         |_, _| {},
-    );
+    ).expect("valid TGV input");
 
     let elapsed = start.elapsed();
 
@@ -1381,43 +1381,47 @@ fn test_combined_tgv() {
 // Pipeline Tests (HARPERELLA, iHARPERELLA, TGV, QSMART)
 // ============================================================================
 
-/// Helper: wrap fieldmap to simulate wrapped phase input for HARPERELLA/iHARPERELLA
-fn wrap_fieldmap(fieldmap: &[f64]) -> Vec<f64> {
-    fieldmap.iter()
-        .map(|&f| {
-            let mut y = f % (2.0 * std::f64::consts::PI);
-            if y > std::f64::consts::PI { y -= 2.0 * std::f64::consts::PI; }
-            else if y < -std::f64::consts::PI { y += 2.0 * std::f64::consts::PI; }
-            y
-        })
-        .collect()
+/// HARPERELLA / iHARPERELLA as the pipeline runs them: on the total field in ppm
+/// (`HarperellaInput::FieldPpm`). The published wrapped-phase input (echo 1) is printed
+/// alongside for comparison but is not what is scored.
+fn run_harperella_family(name: &str, slug: &str, iterative: bool) -> TestResult {
+    use bgremove::{HarperellaInput, HarperellaParams, IharperellaParams};
+    println!("[INFO] Loading test data...");
+    let data = TestData::load().expect("Failed to load test data");
+    let (nx, ny, nz) = data.dims;
+    let (vsx, vsy, vsz) = data.voxel_size;
+    let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
+    let run = |input: HarperellaInput| {
+        if iterative {
+            bgremove::iharperella(input, &data.mask, &grid, &IharperellaParams::default(), |_, _| {})
+        } else {
+            bgremove::harperella(input, &data.mask, &grid, &HarperellaParams::default(), |_, _| {})
+        }
+        .expect("valid input")
+    };
+
+    let ((result, eroded_mask), elapsed) =
+        run_timed!(name, run(HarperellaInput::FieldPpm(&data.fieldmap)));
+    let res = TestResult::new(name, &result, &data.fieldmap_local, &data.mask, data.dims);
+    res.print_with_time(elapsed);
+    res.print_ci_metrics(elapsed);
+    // Plot within the eroded mask the method returns, so its rim shows as "no value".
+    common::save_center_slices(&result, &eroded_mask, data.dims, slug);
+
+    let (from_phase, _) = run(HarperellaInput::WrappedPhase {
+        phase: &data.phase_echoes[0],
+        te_s: data.echo_times[0],
+        b0_t: data.field_strength,
+    });
+    TestResult::new(&format!("{name} (echo-1 phase)"), &from_phase, &data.fieldmap_local, &data.mask, data.dims)
+        .print();
+    res
 }
 
 #[test]
 #[ignore]
 fn test_pipeline_harperella() {
-    println!("[INFO] Loading test data...");
-    let data = TestData::load().expect("Failed to load test data");
-    let (nx, ny, nz) = data.dims;
-    let (vsx, vsy, vsz) = data.voxel_size;
-
-    let wrapped_phase = wrap_fieldmap(&data.fieldmap);
-
-    let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
-    let ((result, eroded_mask), elapsed) = run_timed!("HARPERELLA", bgremove::harperella(
-        &wrapped_phase,
-        &data.mask,
-        &grid,
-        &bgremove::HarperellaParams { radius: 10.0, max_iter: 40, tol: 1e-6 },
-        |_, _| {},
-    ));
-
-    let res = TestResult::new("HARPERELLA", &result, &data.fieldmap_local, &data.mask, data.dims);
-    res.print_with_time(elapsed);
-    res.print_ci_metrics(elapsed);
-    // Plot within the eroded mask the method returns, so its rim shows as "no value".
-    common::save_center_slices(&result, &eroded_mask, data.dims, "pipeline_harperella");
-
+    let res = run_harperella_family("HARPERELLA", "pipeline_harperella", false);
     assert!(res.nrmse < 0.8, "HARPERELLA NRMSE too high: {}", res.nrmse);
     assert!(res.correlation > 0.5, "HARPERELLA correlation too low: {}", res.correlation);
 }
@@ -1425,28 +1429,7 @@ fn test_pipeline_harperella() {
 #[test]
 #[ignore]
 fn test_pipeline_iharperella() {
-    println!("[INFO] Loading test data...");
-    let data = TestData::load().expect("Failed to load test data");
-    let (nx, ny, nz) = data.dims;
-    let (vsx, vsy, vsz) = data.voxel_size;
-
-    let wrapped_phase = wrap_fieldmap(&data.fieldmap);
-
-    let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
-    let ((result, eroded_mask), elapsed) = run_timed!("iHARPERELLA", bgremove::iharperella(
-        &wrapped_phase,
-        &data.mask,
-        &grid,
-        &bgremove::HarperellaParams { radius: 10.0, max_iter: 40, tol: 1e-6 },
-        |_, _| {},
-    ));
-
-    let res = TestResult::new("iHARPERELLA", &result, &data.fieldmap_local, &data.mask, data.dims);
-    res.print_with_time(elapsed);
-    res.print_ci_metrics(elapsed);
-    // Plot within the eroded mask the method returns, so its rim shows as "no value".
-    common::save_center_slices(&result, &eroded_mask, data.dims, "pipeline_iharperella");
-
+    let res = run_harperella_family("iHARPERELLA", "pipeline_iharperella", true);
     assert!(res.nrmse < 0.8, "iHARPERELLA NRMSE too high: {}", res.nrmse);
     assert!(res.correlation > 0.5, "iHARPERELLA correlation too low: {}", res.correlation);
 }
@@ -1693,7 +1676,7 @@ fn test_pipeline_tgv() {
         &tgv_params,
         data.b0_dir,
         |_, _| {},
-    );
+    ).expect("valid TGV input");
 
     let elapsed = start.elapsed();
 
@@ -1734,7 +1717,8 @@ fn test_pipeline_tgv_single_echo() {
         te_s: data.echo_times[0],
         b0_t: data.field_strength,
     };
-    let result = tgv_qsm(input, &data.mask, &grid, &tgv_params, data.b0_dir, |_, _| {});
+    let result = tgv_qsm(input, &data.mask, &grid, &tgv_params, data.b0_dir, |_, _| {})
+        .expect("valid TGV input");
     let elapsed = start.elapsed();
 
     let res = TestResult::new("TGV (single echo)", &result, &data.chi, &data.mask, data.dims);
@@ -2290,7 +2274,7 @@ fn test_all_combinations() {
             &tgv_params,
             data.b0_dir,
             |_, _| {},
-        );
+        ).expect("valid TGV input");
         let elapsed = start.elapsed();
 
         let c = ChallengeMetrics::compute("TGV", &result, &data.chi, &data.mask, &data.segmentation, data.dims);

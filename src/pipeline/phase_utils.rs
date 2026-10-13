@@ -73,20 +73,21 @@ pub fn rads_to_ppm(field_rads: &[f64], field_strength: f64) -> Vec<f64> {
 /// masking), so an echo of a different matrix size would otherwise either be
 /// silently truncated or make the result the wrong size for every later stage.
 ///
-/// # Panics
-/// If the echoes do not all have the same length.
-pub fn rss_combine(magnitudes: &[&[f64]]) -> Vec<f64> {
+/// # Errors
+/// If the echoes do not all have the same length. No echoes gives an empty volume.
+pub fn rss_combine(magnitudes: &[&[f64]]) -> Result<Vec<f64>, crate::error::InputError> {
     if magnitudes.is_empty() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
     let n = magnitudes[0].len();
     for (e, mag) in magnitudes.iter().enumerate() {
-        assert_eq!(
-            mag.len(), n,
-            "rss_combine: echo {e} has {} voxels but echo 0 has {n} \
-             (all echoes must come from the same acquisition)",
-            mag.len()
-        );
+        if mag.len() != n {
+            return Err(crate::error::InputError(format!(
+                "rss_combine: echo {e} has {} voxels but echo 0 has {n} \
+                 (all echoes must come from the same acquisition)",
+                mag.len()
+            )));
+        }
     }
     let mut combined = vec![0.0f64; n];
     for mag in magnitudes {
@@ -97,7 +98,7 @@ pub fn rss_combine(magnitudes: &[&[f64]]) -> Vec<f64> {
     for v in &mut combined {
         *v = v.sqrt();
     }
-    combined
+    Ok(combined)
 }
 
 #[cfg(test)]
@@ -157,35 +158,35 @@ mod tests {
     fn test_rss_combine() {
         let a = vec![3.0, 0.0];
         let b = vec![4.0, 1.0];
-        let result = rss_combine(&[&a, &b]);
+        let result = rss_combine(&[&a, &b]).unwrap();
         assert!((result[0] - 5.0).abs() < 1e-10);
         assert!((result[1] - 1.0).abs() < 1e-10);
     }
 
     #[test]
     fn test_rss_combine_empty() {
-        let result = rss_combine(&[]);
+        let result = rss_combine(&[]).unwrap();
         assert!(result.is_empty());
     }
 
     // Issue #70: the combined volume inherits echo 0's size and is then indexed
-    // by the run's grid, so a mismatched echo either panicked here on an index
-    // or made every later stage read past the end of the result.
+    // by the run's grid, so a mismatched echo either panicked on an index or made
+    // every later stage read past the end of the result. Now it is an error.
     #[test]
-    #[should_panic(expected = "rss_combine: echo 1 has 576 voxels but echo 0 has 512")]
     fn rss_combine_refuses_a_longer_echo() {
         let e0 = vec![1.0; 512];
         let e1 = vec![1.0; 576];
-        rss_combine(&[&e0, &e1]);
+        let err = rss_combine(&[&e0, &e1]).unwrap_err();
+        assert!(err.to_string().contains("rss_combine: echo 1 has 576 voxels but echo 0 has 512"), "{err}");
     }
 
     #[test]
-    #[should_panic(expected = "rss_combine: echo 1 has 216 voxels but echo 0 has 512")]
     fn rss_combine_refuses_a_shorter_echo() {
         // The short case never panicked - it silently summed only the part of
         // the stack that echo 1 covered.
         let e0 = vec![1.0; 512];
         let e1 = vec![1.0; 216];
-        rss_combine(&[&e0, &e1]);
+        let err = rss_combine(&[&e0, &e1]).unwrap_err();
+        assert!(err.to_string().contains("rss_combine: echo 1 has 216 voxels but echo 0 has 512"), "{err}");
     }
 }

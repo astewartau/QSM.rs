@@ -424,6 +424,85 @@ impl GridMap {
         }
         out
     }
+
+    /// Label image resampled by trilinear-weighted majority vote; `T::default()` outside the
+    /// source. See [`resample_labels_onto`]. `data` must be the source grid's size.
+    fn sample_labels<T: Copy + PartialEq + Default>(&self, data: &[T]) -> Vec<T> {
+        let (dx, dy, dz) = self.dst_dims;
+        let mut out = vec![T::default(); dx * dy * dz];
+        for k in 0..dz {
+            for j in 0..dy {
+                for i in 0..dx {
+                    if let Some((ox, oy, oz)) = self.source_coord(i, j, k) {
+                        out[i + j * dx + k * dx * dy] = majority_label(data, self.src_dims, ox, oy, oz);
+                    }
+                }
+            }
+        }
+        out
+    }
+}
+
+/// The label with the largest total trilinear weight among the (up to) eight source voxels
+/// around a fractional coordinate: the argmax of each label's indicator, linearly
+/// interpolated. A tie goes to the nearest voxel's label, then to the first found.
+fn majority_label<T: Copy + PartialEq>(
+    data: &[T],
+    (nx, ny, nz): (usize, usize, usize),
+    x: f64,
+    y: f64,
+    z: f64,
+) -> T {
+    // corner indices and in-cell fractions, clamped at the edges as `trilinear_sample` does,
+    // but with the fraction clamped too so every weight is non-negative
+    let axis = |c: f64, n: usize| {
+        let c0 = (c.floor() as isize).clamp(0, n as isize - 1) as usize;
+        let c1 = (c0 + 1).min(n - 1);
+        (c0, c1, (c - c0 as f64).clamp(0.0, 1.0))
+    };
+    let (x0, x1, fx) = axis(x, nx);
+    let (y0, y1, fy) = axis(y, ny);
+    let (z0, z1, fz) = axis(z, nz);
+    let idx = |a: usize, b: usize, c: usize| a + b * nx + c * nx * ny;
+    let nearest = data[idx(
+        if fx < 0.5 { x0 } else { x1 },
+        if fy < 0.5 { y0 } else { y1 },
+        if fz < 0.5 { z0 } else { z1 },
+    )];
+
+    let mut labels: [Option<(T, f64)>; 8] = [None; 8];
+    for (cx, wx) in [(x0, 1.0 - fx), (x1, fx)] {
+        for (cy, wy) in [(y0, 1.0 - fy), (y1, fy)] {
+            for (cz, wz) in [(z0, 1.0 - fz), (z1, fz)] {
+                let w = wx * wy * wz;
+                let label = data[idx(cx, cy, cz)];
+                for slot in labels.iter_mut() {
+                    match slot {
+                        Some((l, total)) if *l == label => {
+                            *total += w;
+                            break;
+                        }
+                        None => {
+                            *slot = Some((label, w));
+                            break;
+                        }
+                        Some(_) => {}
+                    }
+                }
+            }
+        }
+    }
+
+    const TIE: f64 = 1e-12;
+    let best = labels.iter().flatten().map(|&(_, w)| w).fold(f64::NEG_INFINITY, f64::max);
+    if labels.iter().flatten().any(|&(l, w)| l == nearest && w >= best - TIE) {
+        return nearest;
+    }
+    labels
+        .iter()
+        .flatten()
+        .find(|&&(_, w)| w >= best - TIE)
+        .map_or(nearest, |&(l, _)| l)
 }
 
 /// Resample continuous data (magnitude, an unwrapped field, χ) from one grid onto another.
@@ -438,7 +517,8 @@ pub fn resample_onto(
     Some(GridMap::new(src_dims, src_affine, dst_dims, dst_affine)?.sample(data))
 }
 
-/// Resample a binary mask from one grid onto another (nearest neighbour).
+/// Resample a binary mask from one grid onto another (nearest neighbour). For a label image,
+/// use [`resample_labels_onto`].
 pub fn resample_mask_onto(
     mask: &[u8],
     src_dims: (usize, usize, usize),
@@ -447,6 +527,41 @@ pub fn resample_mask_onto(
     dst_affine: &[f64; 16],
 ) -> Option<Vec<u8>> {
     Some(GridMap::new(src_dims, src_affine, dst_dims, dst_affine)?.sample_nearest(mask))
+}
+
+/// Resample a label image (a segmentation, a parcellation) from one grid onto another.
+///
+/// Each destination voxel takes the label with the largest total trilinear weight among the
+/// eight source voxels around it: equivalently, each label's indicator is interpolated
+/// linearly and the largest wins. Ties go to the nearest voxel's label. Outside the source the
+/// output is `T::default()` (0, background).
+///
+/// The output only ever holds labels that are in the input. Trilinear interpolation
+/// ([`resample_onto`]) would invent values between label ids at every boundary; plain nearest
+/// neighbour does not, but on a rotated grid it takes whichever single voxel the rounding
+/// lands on, so boundaries come out staircased and a structure one or two voxels thick can be
+/// dropped or doubled depending on where the grids happen to line up. The vote moves each
+/// boundary to where the interpolated label fraction crosses one half, as a linearly
+/// interpolated mask thresholded at 0.5 would, and costs the same eight lookups as trilinear
+/// interpolation. On the identity mapping it returns the input unchanged.
+///
+/// Works for any label type: `u8`/`u16`/`u32` ids, or integer-valued `f64` as read from a
+/// NIfTI.
+///
+/// # Errors
+/// If `labels` is not `src_dims` in size, or the source affine is singular.
+pub fn resample_labels_onto<T: Copy + PartialEq + Default>(
+    labels: &[T],
+    src_dims: (usize, usize, usize),
+    src_affine: &[f64; 16],
+    dst_dims: (usize, usize, usize),
+    dst_affine: &[f64; 16],
+) -> Result<Vec<T>, crate::error::InputError> {
+    crate::error::check_len("labels", labels.len(), src_dims.0 * src_dims.1 * src_dims.2)?;
+    let map = GridMap::new(src_dims, src_affine, dst_dims, dst_affine).ok_or_else(|| {
+        crate::error::InputError("the source affine is singular".into())
+    })?;
+    Ok(map.sample_labels(labels))
 }
 
 /// Resample magnitude and wrapped phase from one grid onto another, through the complex domain
@@ -1402,5 +1517,82 @@ mod tests {
         let out = resample_mask_to_axial(&mask, nx, ny, nz, &a);
         assert!(out.iter().all(|v| *v == 0 || *v == 1), "mask must stay binary");
         assert!(out.iter().filter(|v| **v == 1).count() > 100, "mask should survive");
+    }
+
+    /// QSMxT #267: a label image sent to an oblique grid and back holds only labels it started
+    /// with, unlike trilinear interpolation, which invents values at every boundary.
+    #[test]
+    fn label_resampling_only_produces_input_labels() {
+        let (nx, ny, nz) = (16, 16, 8);
+        let a = ukb_swi_affine();
+        let ids = [0.0f64, 2.0, 3.0, 41.0, 42.0, 2035.0];
+        let labels: Vec<f64> = (0..nx * ny * nz)
+            .map(|i| {
+                let (x, y, z) = (i % nx, (i / nx) % ny, i / (nx * ny));
+                if !(2..nx - 2).contains(&x) || !(2..ny - 2).contains(&y) || !(1..nz - 1).contains(&z) {
+                    0.0
+                } else {
+                    ids[1 + (x / 3 + y / 5 + z) % (ids.len() - 1)]
+                }
+            })
+            .collect();
+        let grid = axial_grid_for(nx, ny, nz, &a);
+        let there = resample_labels_onto(&labels, (nx, ny, nz), &a, grid.dims, &grid.affine).unwrap();
+        let back = resample_labels_onto(&there, grid.dims, &grid.affine, (nx, ny, nz), &a).unwrap();
+        for v in there.iter().chain(&back) {
+            assert!(ids.contains(v), "{v} is not one of the input labels");
+        }
+        // every structure survives the round trip
+        for id in &ids[1..] {
+            assert!(back.contains(id), "label {id} was lost");
+        }
+        // most voxels come back with their own label
+        let same = back.iter().zip(&labels).filter(|(a, b)| a == b).count();
+        assert!(same > nx * ny * nz * 3 / 4, "only {same} of {} voxels kept their label", nx * ny * nz);
+
+        // trilinear would not have: it produces values between the ids
+        let smeared = resample_onto(&labels, (nx, ny, nz), &a, grid.dims, &grid.affine).unwrap();
+        assert!(smeared.iter().any(|v| !ids.contains(v)), "test volume too easy");
+
+        // integer label types work the same way
+        let labels_u16: Vec<u16> = labels.iter().map(|&v| v as u16).collect();
+        let there_u16 = resample_labels_onto(&labels_u16, (nx, ny, nz), &a, grid.dims, &grid.affine).unwrap();
+        assert!(there_u16.iter().zip(&there).all(|(&a, &b)| a as f64 == b));
+    }
+
+    #[test]
+    fn label_resampling_on_the_identity_is_a_no_op() {
+        let (nx, ny, nz) = (6, 5, 4);
+        let a = identity_affine((1.0, 2.0, 3.0));
+        let labels: Vec<u32> = (0..nx * ny * nz).map(|i| (i % 7) as u32 * 100).collect();
+        assert_eq!(resample_labels_onto(&labels, (nx, ny, nz), &a, (nx, ny, nz), &a).unwrap(), labels);
+    }
+
+    /// Between eight voxels, six labelled 1 and two labelled 2, the vote gives 1 even where the
+    /// nearest voxel (by rounding) is a 2.
+    #[test]
+    fn label_resampling_takes_the_majority_not_the_nearest() {
+        let src = identity_affine((1.0, 1.0, 1.0));
+        // corner (1,1,1) is where rounding (0.5,0.5,0.5) lands
+        let mut labels = vec![1u8; 8];
+        labels[7] = 2; // (1,1,1)
+        labels[6] = 2; // (0,1,1)
+        let dst = affine_from([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]], [0.5, 0.5, 0.5]);
+        let nearest = resample_mask_onto(&labels, (2, 2, 2), &src, (1, 1, 1), &dst).unwrap();
+        assert_eq!(nearest, vec![2]);
+        assert_eq!(resample_labels_onto(&labels, (2, 2, 2), &src, (1, 1, 1), &dst).unwrap(), vec![1]);
+        // a 4-4 tie goes to the nearest voxel's label
+        let mut tie = vec![1u8; 8];
+        for i in [4, 5, 6, 7] {
+            tie[i] = 2;
+        }
+        assert_eq!(resample_labels_onto(&tie, (2, 2, 2), &src, (1, 1, 1), &dst).unwrap(), vec![2]);
+    }
+
+    #[test]
+    fn label_resampling_reports_bad_input() {
+        let a = identity_affine((1.0, 1.0, 1.0));
+        assert!(resample_labels_onto(&[0u8; 7], (2, 2, 2), &a, (2, 2, 2), &a).is_err());
+        assert!(resample_labels_onto(&[0u8; 8], (2, 2, 2), &[0.0; 16], (2, 2, 2), &a).is_err());
     }
 }

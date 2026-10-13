@@ -7,7 +7,7 @@
 
 use crate::bgremove::{
     IsmvParams, LbvParams, PdfParams, ResharpParams, SharpParams, SdfParams, VsharpParams,
-    HarperellaParams, MsmvParams,
+    HarperellaParams, IharperellaParams, MsmvParams,
 };
 use crate::inversion::{
     IlsqrParams, MediParams, NltvParams, RtsParams, TgvParams, TikhonovParams, TkdParams, TvParams,
@@ -73,6 +73,40 @@ impl OrientationSupport {
     /// Whether oblique data must be resampled before this method can be trusted.
     pub fn requires_axial(&self) -> bool {
         matches!(self, OrientationSupport::AxialOnly)
+    }
+}
+
+/// What a dipole inversion reconstructs from, and so which earlier stages a host has to run.
+///
+/// Reported by [`InversionConfig::input`], the one place this is decided. A host should route
+/// from it rather than keep its own lists of methods that skip background removal.
+///
+/// The pipeline's own background-removal methods ([`BgRemovalAlgorithm`]) all take the total
+/// field in ppm and produce a local field, and so does iQFM ([`run_iqfm`](super::run_iqfm)) from
+/// wrapped phase. Each of them is therefore only useful in front of a
+/// [`InversionInput::LocalField`] inversion: with the others it would have no effect.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InversionInput {
+    /// The background-removed local field in ppm: field mapping, then background removal,
+    /// then [`run_dipole_inversion`](super::run_dipole_inversion) with the eroded mask the
+    /// background removal returned.
+    LocalField,
+    /// The total field in ppm, straight from field mapping with **no** background removal,
+    /// and the brain mask. The method removes or models the background itself.
+    TotalField,
+    /// The per-echo wrapped phase (and magnitude): no field mapping and no background removal.
+    WrappedPhase,
+}
+
+impl InversionInput {
+    /// Whether a background-removal stage (or iQFM) belongs in front of the inversion.
+    pub fn needs_bg_removal(&self) -> bool {
+        matches!(self, InversionInput::LocalField)
+    }
+
+    /// Whether the echoes have to be field-mapped (unwrapped and combined) first.
+    pub fn needs_field_mapping(&self) -> bool {
+        !matches!(self, InversionInput::WrappedPhase)
     }
 }
 
@@ -384,6 +418,7 @@ pub struct BgRemovalConfig {
     pub sharp: SharpParams,
     pub resharp: ResharpParams,
     pub harperella: HarperellaParams,
+    pub iharperella: IharperellaParams,
     pub sdf: SdfParams,
     /// mSMV refinement parameters (`b0`/`te` are overridden from scan metadata by
     /// the dispatcher). Used by the `msmv_refine` post-step.
@@ -405,6 +440,7 @@ impl Default for BgRemovalConfig {
             sharp: SharpParams::default(),
             resharp: ResharpParams::default(),
             harperella: HarperellaParams::default(),
+            iharperella: IharperellaParams::default(),
             sdf: SdfParams::default(),
             msmv: MsmvParams::default(),
             msmv_refine: false,
@@ -448,6 +484,65 @@ pub struct InversionConfig {
     /// the dispatcher converts it to a [`crate::inversion::TileConfig`]. Ignored by the
     /// natively-patch-based nets (autoqsm/qsmgan) and by non-DL algorithms.
     pub tile: Option<(usize, usize)>,
+}
+
+impl InversionConfig {
+    /// What the selected inversion reconstructs from, for data with `n_echoes` echoes. See
+    /// [`InversionInput`].
+    ///
+    /// It is a property of the config rather than of [`InversionAlgorithm`] alone, because
+    /// two methods depend on more than their name:
+    ///
+    /// - **MEDI** with [`MediParams::smv`] (the default) high-pass filters the field and the
+    ///   dipole kernel with a spherical mean value kernel before inverting, `(1−S)f = (1−S)Dχ`.
+    ///   That removes the harmonic background, so MEDI+SMV takes the total field. Without SMV,
+    ///   MEDI takes the local field.
+    /// - **TGV** ([`run_tgv`](super::run_tgv)) reconstructs multi-echo data from the
+    ///   field-mapped total field ([`TgvInput::FieldPpm`](crate::inversion::TgvInput::FieldPpm))
+    ///   and a single echo from its wrapped phase
+    ///   ([`TgvInput::WrappedPhase`](crate::inversion::TgvInput::WrappedPhase)). Either way it
+    ///   does its own background removal.
+    ///
+    /// The other total-field methods are TFI (a total-field method by definition: it inverts
+    /// the field over the whole FOV under a preconditioner), QSMART
+    /// ([`run_qsmart`](super::run_qsmart), whose two SDF stages are its background removal),
+    /// AutoQSM and NeXtQSM (networks with their own background removal). iQSM and iQSM+
+    /// ([`run_iqsm`](super::run_iqsm), [`run_iqsm_plus`](super::run_iqsm_plus)) take wrapped
+    /// phase. Every other method, including WH-QSM (which models only a *residual* harmonic
+    /// field) and LSQR (a residual-field term), takes the local field.
+    pub fn input(&self, n_echoes: usize) -> InversionInput {
+        use InversionAlgorithm as A;
+        match self.algorithm {
+            A::Medi if self.medi.smv => InversionInput::TotalField,
+            A::Tgv if n_echoes > 1 => InversionInput::TotalField,
+            A::Tgv | A::Iqsm | A::IqsmPlus => InversionInput::WrappedPhase,
+            A::Tfi | A::Qsmart | A::Autoqsm | A::Nextqsm => InversionInput::TotalField,
+            A::Medi
+            | A::Tkd
+            | A::Tsvd
+            | A::Tikhonov
+            | A::Tv
+            | A::Rts
+            | A::Nltv
+            | A::Ilsqr
+            | A::Ndi
+            | A::Fansi
+            | A::FansiTgv
+            | A::L1qsm
+            | A::Whqsm
+            | A::Hdqsm
+            | A::AmpPe
+            | A::Lsqr
+            | A::Heidi
+            | A::Xqsm
+            | A::Qsmnet
+            | A::QsmnetPlus
+            | A::Qsmgan
+            | A::Ir2qsm
+            | A::Lpcnn
+            | A::ModlQsm => InversionInput::LocalField,
+        }
+    }
 }
 
 impl Default for InversionConfig {
@@ -848,6 +943,12 @@ impl std::fmt::Display for PipelineError {
 
 impl std::error::Error for PipelineError {}
 
+impl From<crate::error::InputError> for PipelineError {
+    fn from(e: crate::error::InputError) -> Self {
+        Self::InvalidInput(e.0)
+    }
+}
+
 #[cfg(test)]
 mod orientation_tests {
     use super::*;
@@ -912,6 +1013,79 @@ mod orientation_tests {
         ] {
             assert!(!a.orientation_support().requires_axial(), "{a:?}");
         }
+    }
+}
+
+#[cfg(test)]
+mod inversion_input_tests {
+    use super::*;
+
+    fn input(algorithm: InversionAlgorithm, smv: bool, n_echoes: usize) -> InversionInput {
+        let mut c = InversionConfig { algorithm, ..Default::default() };
+        c.medi.smv = smv;
+        c.input(n_echoes)
+    }
+
+    /// Every variant, spelled out, so a new algorithm cannot be added without deciding its input.
+    #[test]
+    fn every_inversion_declares_its_input() {
+        use InversionAlgorithm as A;
+        use InversionInput::*;
+        let expected: &[(A, InversionInput)] = &[
+            (A::Tkd, LocalField), (A::Tsvd, LocalField), (A::Tikhonov, LocalField),
+            (A::Tv, LocalField), (A::Rts, LocalField), (A::Nltv, LocalField),
+            (A::Tfi, TotalField), (A::Ilsqr, LocalField), (A::Qsmart, TotalField),
+            (A::Ndi, LocalField), (A::Fansi, LocalField), (A::FansiTgv, LocalField),
+            (A::L1qsm, LocalField), (A::Whqsm, LocalField), (A::Hdqsm, LocalField),
+            (A::AmpPe, LocalField), (A::Lsqr, LocalField), (A::Heidi, LocalField),
+            (A::Xqsm, LocalField), (A::Qsmnet, LocalField), (A::QsmnetPlus, LocalField),
+            (A::Autoqsm, TotalField), (A::Qsmgan, LocalField), (A::Ir2qsm, LocalField),
+            (A::Lpcnn, LocalField), (A::ModlQsm, LocalField), (A::Nextqsm, TotalField),
+            (A::Iqsm, WrappedPhase), (A::IqsmPlus, WrappedPhase),
+        ];
+        // MEDI and TGV depend on more than the name; checked below.
+        let special = [A::Medi, A::Tgv];
+        for v in A::VARIANTS {
+            if special.contains(v) {
+                continue;
+            }
+            let (_, want) = expected.iter().find(|(a, _)| a == v)
+                .unwrap_or_else(|| panic!("{v:?} is missing from this test"));
+            for n_echoes in [1, 4] {
+                for smv in [false, true] {
+                    assert_eq!(input(*v, smv, n_echoes), *want, "{v:?}, {n_echoes} echoes, smv {smv}");
+                }
+            }
+        }
+        assert_eq!(expected.len() + special.len(), A::VARIANTS.len());
+    }
+
+    #[test]
+    fn medi_takes_the_total_field_only_with_smv() {
+        for n in [1, 4] {
+            assert_eq!(input(InversionAlgorithm::Medi, true, n), InversionInput::TotalField);
+            assert_eq!(input(InversionAlgorithm::Medi, false, n), InversionInput::LocalField);
+        }
+        // the default MEDI uses SMV
+        assert!(MediParams::default().smv);
+    }
+
+    #[test]
+    fn tgv_takes_the_field_for_multi_echo_and_phase_for_one_echo() {
+        assert_eq!(input(InversionAlgorithm::Tgv, true, 1), InversionInput::WrappedPhase);
+        for n in [2, 4] {
+            assert_eq!(input(InversionAlgorithm::Tgv, true, n), InversionInput::TotalField);
+        }
+    }
+
+    #[test]
+    fn routing_predicates() {
+        assert!(InversionInput::LocalField.needs_bg_removal());
+        assert!(!InversionInput::TotalField.needs_bg_removal());
+        assert!(!InversionInput::WrappedPhase.needs_bg_removal());
+        assert!(InversionInput::LocalField.needs_field_mapping());
+        assert!(InversionInput::TotalField.needs_field_mapping());
+        assert!(!InversionInput::WrappedPhase.needs_field_mapping());
     }
 }
 
@@ -1070,6 +1244,8 @@ mod slice_gap_coverage {
         // and the stages that consume the mask refuse the gap themselves.
         ("run_masking", "no kernel, no field: a gap is irrelevant"),
         ("build_mask_section", "no kernel, no field: a gap is irrelevant"),
+        ("resolve_masking_input", "no kernel, no field: a gap is irrelevant"),
+        ("section_magnitude", "no kernel, no field: a gap is irrelevant"),
         ("apply_mask_ops", "no kernel, no field: a gap is irrelevant"),
         // Registration and resampling are interpolation on the sampled grid, not a convolution
         // with a kernel that assumes one. A gap makes the through-plane interpolation cross

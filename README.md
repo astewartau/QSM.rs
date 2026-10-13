@@ -174,7 +174,7 @@ Methods marked † need the `onnx` feature and model weights.
 
 | Algorithm | Description | Reference |
 |-----------|-------------|-----------|
-| **HARPERELLA** | Integrated Laplacian unwrapping and background removal, wrapped phase → local field (`harperella`) | Li, W., et al. (2014). "Integrated Laplacian-based phase unwrapping and background phase removal for quantitative susceptibility mapping." *NMR in Biomedicine*, 27(2):219-227. [DOI](https://doi.org/10.1002/nbm.3056) |
+| **HARPERELLA** | Integrated Laplacian unwrapping and background removal, wrapped phase or total field (ppm) → local field (`harperella`, `HarperellaInput`) | Li, W., et al. (2014). "Integrated Laplacian-based phase unwrapping and background phase removal for quantitative susceptibility mapping." *NMR in Biomedicine*, 27(2):219-227. [DOI](https://doi.org/10.1002/nbm.3056) |
 | **iHARPERELLA** | Improved HARPERELLA (`iharperella`) | Li, W., Wu, B., Liu, C. (2015). "iHARPERELLA: an improved method for integrated 3D phase unwrapping and background phase removal." *Proc. ISMRM* 23, p.3313. |
 | **iQFM** † | Deep-learning wrapped phase → local field (`run_iqfm`) | Gao, Y., et al. (2022). "Instant tissue field and magnetic susceptibility mapping from MRI raw phase using Laplacian enhanced deep neural networks." *NeuroImage*, 259:119410. [DOI](https://doi.org/10.1016/j.neuroimage.2022.119410) |
 

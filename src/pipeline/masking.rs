@@ -3,81 +3,157 @@
 //! Generates a binary brain mask from magnitude/phase data using a
 //! configurable sequence of operations (threshold, BET, morphological ops).
 //! Multiple mask sections can be OR'd together.
+//!
+//! ## Each section builds its own input
+//!
+//! The stage takes every echo's magnitude, and each [`MaskSection`] builds what its
+//! [`MaskingInput`] asks for, independently of the other sections:
+//!
+//! | input | thresholded image | magnitude for BET / HD-BET / RS2-Net / signal-gated erosion |
+//! |---|---|---|
+//! | [`MaskingInput::MagnitudeFirst`] | echo 1 | echo 1 |
+//! | [`MaskingInput::Magnitude`] | root-sum-of-squares over echoes | the RSS |
+//! | [`MaskingInput::MagnitudeLast`] | last echo | last echo |
+//! | [`MaskingInput::PhaseQuality`] | ROMEO voxel quality of echoes 1–2, weighted by the RSS | the RSS |
+//!
+//! **Phase quality is weighted by the RSS**, not echo 1: it is the highest-SNR magnitude there
+//! is, it is the same whatever other sections ask for, and it is what ROMEO itself weights by
+//! when unwrapping multi-echo data. With one echo the RSS is that echo.
+//!
+//! Any homogeneity correction is the caller's, applied to all echoes before they are passed in.
 
 use super::config::*;
+use super::phase_utils::rss_combine;
 use crate::utils::morphology::{erode_mask, dilate_mask, morphological_close, fill_holes, signal_gated_erosion};
 
-/// Resolve masking input data based on the MaskingInput type.
+/// Check every volume is the grid's size.
+fn check_volumes(name: &str, volumes: &[&[f64]], n_voxels: usize) -> Result<(), PipelineError> {
+    for (e, v) in volumes.iter().enumerate() {
+        if v.len() != n_voxels {
+            return Err(PipelineError::InvalidInput(format!(
+                "{name} echo {} has {} voxels, the grid has {n_voxels}", e + 1, v.len()
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// The magnitude a section with this `input` works from (see the module docs): echo 1, the
+/// root-sum-of-squares over echoes, or the last echo. [`MaskingInput::PhaseQuality`] uses the
+/// RSS. `None` when there are no magnitudes.
 ///
-/// # Arguments
-/// * `input` - Which data source to use
-/// * `phases` - Per-echo phase arrays
-/// * `magnitudes` - Per-echo magnitude arrays (already resolved: RSS for Magnitude,
-///   specific echo for First/Last, optionally homogeneity-corrected)
-/// * `metadata` - Scan metadata
+/// This is also the magnitude the section's BET, HD-BET, RS2-Net and signal-gated erosion see,
+/// so a host that applies a section's ops itself through [`apply_mask_ops`] should pass it as
+/// `magnitude`.
 ///
-/// # Returns
-/// The input data array to threshold/mask from
-pub fn resolve_masking_input(
+/// # Errors
+/// [`PipelineError::InvalidInput`] if an echo does not match the grid.
+pub fn section_magnitude(
+    input: MaskingInput,
+    magnitudes: &[&[f64]],
+    metadata: &ScanMetadata,
+) -> Result<Option<Vec<f64>>, PipelineError> {
+    check_volumes("magnitude", magnitudes, metadata.grid().n_total())?;
+    let (Some(first), Some(last)) = (magnitudes.first(), magnitudes.last()) else {
+        return Ok(None);
+    };
+    Ok(Some(match input {
+        MaskingInput::MagnitudeFirst => first.to_vec(),
+        MaskingInput::MagnitudeLast => last.to_vec(),
+        MaskingInput::Magnitude | MaskingInput::PhaseQuality => rss_combine(magnitudes)?,
+    }))
+}
+
+/// The image a section with this `input` thresholds, built from `magnitude` (that section's
+/// [`section_magnitude`]) and, for phase quality, the phases.
+fn section_input(
     input: MaskingInput,
     phases: &[&[f64]],
     magnitude: Option<&[f64]>,
     metadata: &ScanMetadata,
-) -> Vec<f64> {
-    let (nx, ny, nz) = metadata.dims;
-    let n_voxels = nx * ny * nz;
-
+) -> Result<Vec<f64>, PipelineError> {
     match input {
         MaskingInput::MagnitudeFirst | MaskingInput::Magnitude | MaskingInput::MagnitudeLast => {
-            magnitude.map(|m| m.to_vec()).unwrap_or_else(|| vec![0.0; n_voxels])
+            magnitude.map(<[f64]>::to_vec).ok_or_else(|| {
+                PipelineError::InvalidInput(format!("a {input:?} mask section needs magnitude data"))
+            })
         }
         MaskingInput::PhaseQuality => {
-            if phases.is_empty() {
-                return vec![0.0; n_voxels];
-            }
-            let all_ones = vec![1u8; n_voxels];
-            let mag = magnitude.unwrap_or(&[]);
-            let mag_data: Vec<f64> = if mag.is_empty() {
-                vec![1.0; n_voxels]
-            } else {
-                mag.to_vec()
+            let n_voxels = metadata.grid().n_total();
+            check_volumes("phase", phases, n_voxels)?;
+            let Some(&phase1) = phases.first() else {
+                return Err(PipelineError::InvalidInput(
+                    "a PhaseQuality mask section needs phase data".into(),
+                ));
             };
-
+            let ones;
+            let weight = match magnitude {
+                Some(m) => m,
+                None => {
+                    ones = vec![1.0; n_voxels];
+                    &ones
+                }
+            };
+            let all_ones = vec![1u8; n_voxels];
             let grid = metadata.grid();
-            if phases.len() >= 2 && metadata.echo_times.len() >= 2 {
+            Ok(if phases.len() >= 2 && metadata.echo_times.len() >= 2 {
                 crate::unwrap::voxel_quality_romeo(
-                    phases[0], &mag_data,
+                    phase1, weight,
                     Some(phases[1]),
                     metadata.echo_times[0], metadata.echo_times[1],
                     &all_ones, &grid,
                 )
             } else {
                 crate::unwrap::voxel_quality_romeo(
-                    phases[0], &mag_data,
+                    phase1, weight,
                     None,
                     metadata.echo_times.first().copied().unwrap_or(0.02),
                     0.0, &all_ones, &grid,
                 )
-            }
+            })
         }
     }
 }
 
-/// Build a mask from a single section (generator + refinements).
+/// The image a section with this `input` thresholds (see the module docs).
+///
+/// # Arguments
+/// * `input` - Which data source to use
+/// * `phases` - Per-echo wrapped phase (for [`MaskingInput::PhaseQuality`])
+/// * `magnitudes` - Per-echo magnitude, all echoes (optionally homogeneity-corrected)
+/// * `metadata` - Scan metadata
+///
+/// # Errors
+/// [`PipelineError::InvalidInput`] if the input needs data that was not supplied, or a volume
+/// does not match the grid.
+pub fn resolve_masking_input(
+    input: MaskingInput,
+    phases: &[&[f64]],
+    magnitudes: &[&[f64]],
+    metadata: &ScanMetadata,
+) -> Result<Vec<f64>, PipelineError> {
+    let magnitude = section_magnitude(input, magnitudes, metadata)?;
+    section_input(input, phases, magnitude.as_deref(), metadata)
+}
+
+/// Build a mask from a single section (generator + refinements). The section builds its own
+/// input and magnitude from the echoes (see the module docs).
 ///
 /// # Arguments
 /// * `section` - Mask section config (input type, generator, refinements)
-/// * `input_data` - Pre-resolved input data (from `resolve_masking_input`)
-/// * `magnitude` - Magnitude data for BET (optional)
+/// * `phases` - Per-echo wrapped phase (for [`MaskingInput::PhaseQuality`])
+/// * `magnitudes` - Per-echo magnitude, all echoes (optionally homogeneity-corrected)
 /// * `metadata` - Scan metadata
 pub fn build_mask_section(
     section: &MaskSection,
-    input_data: &[f64],
-    magnitude: Option<&[f64]>,
+    phases: &[&[f64]],
+    magnitudes: &[&[f64]],
     metadata: &ScanMetadata,
 ) -> Result<Vec<u8>, PipelineError> {
     let n_voxels = metadata.dims.0 * metadata.dims.1 * metadata.dims.2;
-    apply_mask_ops(vec![1u8; n_voxels], &section.all_ops(), input_data, magnitude, metadata)
+    let magnitude = section_magnitude(section.input, magnitudes, metadata)?;
+    let input_data = section_input(section.input, phases, magnitude.as_deref(), metadata)?;
+    apply_mask_ops(vec![1u8; n_voxels], &section.all_ops(), &input_data, magnitude.as_deref(), metadata)
 }
 
 /// Apply mask operations to an existing mask, in order.
@@ -92,7 +168,8 @@ pub fn build_mask_section(
 /// need real signal use: [`MaskOp::Bet`], [`MaskOp::HdBet`], [`MaskOp::Rs2Net`] and [`MaskOp::SignalErode`]. Passing
 /// the section input as `magnitude` is a bug: signal-gated erosion divides out a receive-coil bias
 /// estimate and gates on the in-mask median, which only means anything for a magnitude image.
-/// Those ops error when `magnitude` is `None`.
+/// Those ops error when `magnitude` is `None`. To match what [`build_mask_section`] does, pass
+/// [`resolve_masking_input`] as `input_data` and [`section_magnitude`] as `magnitude`.
 ///
 /// # Arguments
 /// * `mask` - Starting mask (0/1), length `nx*ny*nz`
@@ -252,17 +329,18 @@ fn run_rs2_net(
 /// Build a mask from multiple sections, OR'd together.
 ///
 /// Each section specifies an input source, a generator (threshold/BET),
-/// and optional refinements (erode, dilate, close, fill holes, smooth).
+/// and optional refinements (erode, dilate, close, fill holes, smooth). Each builds its own
+/// input from the echoes, so sections with different inputs do not affect each other.
 ///
 /// # Arguments
 /// * `sections` - Mask section configs
-/// * `phases` - Per-echo phase arrays (for PhaseQuality input)
-/// * `magnitude` - Combined magnitude (for Magnitude/BET input)
+/// * `phases` - Per-echo wrapped phase (for [`MaskingInput::PhaseQuality`])
+/// * `magnitudes` - Per-echo magnitude, all echoes (optionally homogeneity-corrected)
 /// * `metadata` - Scan metadata
 pub fn run_masking(
     sections: &[MaskSection],
     phases: &[&[f64]],
-    magnitude: Option<&[f64]>,
+    magnitudes: &[&[f64]],
     metadata: &ScanMetadata,
 ) -> Result<Vec<u8>, PipelineError> {
     let (nx, ny, nz) = metadata.dims;
@@ -272,18 +350,11 @@ pub fn run_masking(
         return Err(PipelineError::InvalidConfig("no mask sections configured".into()));
     }
 
-    if sections.len() == 1 {
-        let input_data = resolve_masking_input(sections[0].input, phases, magnitude, metadata);
-        return build_mask_section(&sections[0], &input_data, magnitude, metadata);
-    }
-
-    // Multiple sections: run each, OR together
     let mut final_mask = vec![0u8; n_voxels];
     for section in sections {
-        let input_data = resolve_masking_input(section.input, phases, magnitude, metadata);
-        let section_mask = build_mask_section(section, &input_data, magnitude, metadata)?;
-        for j in 0..n_voxels {
-            final_mask[j] |= section_mask[j];
+        let section_mask = build_mask_section(section, phases, magnitudes, metadata)?;
+        for (f, s) in final_mask.iter_mut().zip(&section_mask) {
+            *f |= s;
         }
     }
 
@@ -324,7 +395,7 @@ mod tests {
             refinements: vec![],
         }];
 
-        let result = run_masking(&sections, &[], Some(&mag), &meta).unwrap();
+        let result = run_masking(&sections, &[], &[&mag], &meta).unwrap();
         assert_eq!(result.len(), n);
 
         // Bright half should be masked in, dark half masked out
@@ -351,7 +422,7 @@ mod tests {
             ],
         }];
 
-        let result = run_masking(&sections, &[], Some(&mag), &meta).unwrap();
+        let result = run_masking(&sections, &[], &[&mag], &meta).unwrap();
         assert_eq!(result.len(), n);
         // After erode+dilate, interior should still be masked
         let (nx, ny, nz) = meta.dims;
@@ -387,7 +458,7 @@ mod tests {
             },
         ];
 
-        let result = run_masking(&sections, &[], Some(&mag), &meta).unwrap();
+        let result = run_masking(&sections, &[], &[&mag], &meta).unwrap();
         let count: usize = result.iter().map(|&m| m as usize).sum();
         assert_eq!(count, n, "OR of identical sections should give full mask");
     }
@@ -402,7 +473,7 @@ mod tests {
             generator: MaskOp::Threshold { method: MaskThresholdMethod::Fixed, value: Some(5.0) },
             refinements: vec![],
         }];
-        let result = run_masking(&sections, &[], Some(&mag), &meta).unwrap();
+        let result = run_masking(&sections, &[], &[&mag], &meta).unwrap();
         let count: usize = result.iter().map(|&m| m as usize).sum();
         assert_eq!(count, n, "all voxels above threshold=5");
     }
@@ -417,7 +488,7 @@ mod tests {
             generator: MaskOp::Threshold { method: MaskThresholdMethod::Percentile, value: Some(50.0) },
             refinements: vec![],
         }];
-        let result = run_masking(&sections, &[], Some(&mag), &meta).unwrap();
+        let result = run_masking(&sections, &[], &[&mag], &meta).unwrap();
         let count: usize = result.iter().map(|&m| m as usize).sum();
         assert!(count > 0 && count < n, "percentile should mask ~half");
     }
@@ -436,7 +507,7 @@ mod tests {
                 MaskOp::GaussianSmooth { sigma_mm: 1.0 },
             ],
         }];
-        let result = run_masking(&sections, &[], Some(&mag), &meta).unwrap();
+        let result = run_masking(&sections, &[], &[&mag], &meta).unwrap();
         assert_eq!(result.len(), n);
     }
 
@@ -452,7 +523,7 @@ mod tests {
             generator: MaskOp::Threshold { method: MaskThresholdMethod::Otsu, value: None },
             refinements: vec![],
         }];
-        let result = run_masking(&sections, &[&phase1, &phase2], Some(&mag), &meta).unwrap();
+        let result = run_masking(&sections, &[&phase1, &phase2], &[&mag], &meta).unwrap();
         assert_eq!(result.len(), n);
     }
 
@@ -467,12 +538,12 @@ mod tests {
             refinements: vec![refinement],
         }];
         let params = crate::utils::morphology::SignalErosionParams { min_component: 1, ..Default::default() };
-        let result = run_masking(&section(MaskOp::SignalErode(params.clone())), &[], Some(&mag), &meta).unwrap();
+        let result = run_masking(&section(MaskOp::SignalErode(params.clone())), &[], &[&mag], &meta).unwrap();
         // Uniform signal: nothing is gated, so only the one global erosion applies.
-        let plain = run_masking(&section(MaskOp::Erode { iterations: 1 }), &[], Some(&mag), &meta).unwrap();
+        let plain = run_masking(&section(MaskOp::Erode { iterations: 1 }), &[], &[&mag], &meta).unwrap();
         assert_eq!(result, plain);
         // Needs magnitude.
-        assert!(run_masking(&section(MaskOp::SignalErode(params)), &[], None, &meta).is_err());
+        assert!(run_masking(&section(MaskOp::SignalErode(params)), &[], &[], &meta).is_err());
     }
 
     #[test]
@@ -483,9 +554,9 @@ mod tests {
             generator: MaskOp::HdBet(Default::default()),
             refinements: vec![],
         }];
-        assert!(run_masking(&sections, &[], None, &meta).is_err());
+        assert!(run_masking(&sections, &[], &[], &meta).is_err());
         #[cfg(not(feature = "onnx"))]
-        assert!(run_masking(&sections, &[], Some(&vec![1.0; 512]), &meta).is_err());
+        assert!(run_masking(&sections, &[], &[&vec![1.0; 512]], &meta).is_err());
     }
 
     #[test]
@@ -496,9 +567,9 @@ mod tests {
             generator: MaskOp::Rs2Net(Default::default()),
             refinements: vec![],
         }];
-        assert!(run_masking(&sections, &[], None, &meta).is_err());
+        assert!(run_masking(&sections, &[], &[], &meta).is_err());
         #[cfg(not(feature = "onnx"))]
-        assert!(run_masking(&sections, &[], Some(&vec![1.0; 512]), &meta).is_err());
+        assert!(run_masking(&sections, &[], &[&vec![1.0; 512]], &meta).is_err());
     }
 
     /// Applying ops one at a time (what an interactive host does) must equal building the whole
@@ -508,10 +579,14 @@ mod tests {
     fn test_apply_mask_ops_matches_build_mask_section() {
         let meta = test_metadata();
         let n = 8 * 8 * 8;
-        let input: Vec<f64> = (0..n).map(|i| ((i * 37) % 19) as f64).collect();
-        let mag: Vec<f64> = (0..n).map(|i| 50.0 + ((i * 7) % 13) as f64).collect();
+        let e1: Vec<f64> = (0..n).map(|i| 50.0 + ((i * 7) % 13) as f64).collect();
+        let e2: Vec<f64> = (0..n).map(|i| ((i * 37) % 19) as f64).collect();
+        // what the host would hand apply_mask_ops for a MagnitudeLast section
+        let input = section_magnitude(MaskingInput::MagnitudeLast, &[&e1, &e2], &meta).unwrap().unwrap();
+        let mag = input.clone();
+        assert_eq!(input, e2);
         let section = MaskSection {
-            input: MaskingInput::Magnitude,
+            input: MaskingInput::MagnitudeLast,
             generator: MaskOp::Threshold { method: MaskThresholdMethod::Fixed, value: Some(5.0) },
             refinements: vec![
                 MaskOp::Dilate { iterations: 1 },
@@ -520,7 +595,7 @@ mod tests {
                 MaskOp::SignalErode(crate::utils::morphology::SignalErosionParams { min_component: 1, ..Default::default() }),
             ],
         };
-        let whole = build_mask_section(&section, &input, Some(&mag), &meta).unwrap();
+        let whole = build_mask_section(&section, &[], &[&e1, &e2], &meta).unwrap();
 
         let mut step = vec![1u8; n];
         for op in section.all_ops() {
@@ -542,10 +617,139 @@ mod tests {
         assert!(apply_mask_ops(vec![1u8; n - 1], &[MaskOp::Erode { iterations: 1 }], &input, Some(&input), &meta).is_err());
     }
 
+    /// Synthetic 3-echo volume on the 8³ test grid: x < 4 is bright on echo 1 and has decayed
+    /// by the last echo; x ≥ 4 is dim on echo 1 and bright on the last (#173).
+    fn two_region_echoes() -> Vec<Vec<f64>> {
+        let n = 8 * 8 * 8;
+        let left = |i: usize| i % 8 < 4;
+        vec![
+            (0..n).map(|i| if left(i) { 10.0 } else { 1.0 }).collect(),
+            vec![5.0; n],
+            (0..n).map(|i| if left(i) { 1.0 } else { 10.0 }).collect(),
+        ]
+    }
+
+    fn fixed(input: MaskingInput) -> MaskSection {
+        MaskSection {
+            input,
+            generator: MaskOp::Threshold { method: MaskThresholdMethod::Fixed, value: Some(6.0) },
+            refinements: vec![],
+        }
+    }
+
+    fn count(mask: &[u8]) -> usize {
+        mask.iter().map(|&m| m as usize).sum()
+    }
+
+    /// The three magnitude inputs are three different images.
+    #[test]
+    fn magnitude_inputs_are_distinguishable() {
+        let meta = test_metadata();
+        let echoes = two_region_echoes();
+        let mags: Vec<&[f64]> = echoes.iter().map(Vec::as_slice).collect();
+        let get = |input| resolve_masking_input(input, &[], &mags, &meta).unwrap();
+        assert_eq!(get(MaskingInput::MagnitudeFirst), echoes[0]);
+        assert_eq!(get(MaskingInput::MagnitudeLast), echoes[2]);
+        let rss = get(MaskingInput::Magnitude);
+        assert!((rss[0] - (100.0f64 + 25.0 + 1.0).sqrt()).abs() < 1e-12);
+        assert_ne!(rss, echoes[0]);
+        assert_ne!(rss, echoes[2]);
+    }
+
+    /// Two sections with different inputs each see their own input; swapping one section's
+    /// input changes only that section's mask.
+    #[test]
+    fn each_section_uses_its_own_input() {
+        let meta = test_metadata();
+        let echoes = two_region_echoes();
+        let mags: Vec<&[f64]> = echoes.iter().map(Vec::as_slice).collect();
+        let n = 8 * 8 * 8;
+        let build = |input| build_mask_section(&fixed(input), &[], &mags, &meta).unwrap();
+
+        let first = build(MaskingInput::MagnitudeFirst);
+        let last = build(MaskingInput::MagnitudeLast);
+        // echo 1 picks the left half, the last echo the right half
+        assert_eq!(count(&first), n / 2);
+        assert_eq!(count(&last), n / 2);
+        assert!(first.iter().zip(&last).all(|(a, b)| a + b == 1));
+
+        // both sections together: each contributes its own half
+        let both = run_masking(&[fixed(MaskingInput::MagnitudeFirst), fixed(MaskingInput::MagnitudeLast)], &[], &mags, &meta).unwrap();
+        assert_eq!(count(&both), n);
+
+        // swap the second section to echo 1: only its contribution changes, to the left half
+        let swapped = run_masking(&[fixed(MaskingInput::MagnitudeFirst), fixed(MaskingInput::MagnitudeFirst)], &[], &mags, &meta).unwrap();
+        assert_eq!(swapped, first);
+        // and the first section's own mask is the same whatever the second asks for
+        assert_eq!(build(MaskingInput::MagnitudeFirst), first);
+    }
+
+    /// Signal-gated ops get the section's own magnitude: a MagnitudeLast section's signal
+    /// erosion gates on the last echo, an echo-1 section's on echo 1.
+    #[test]
+    fn signal_gated_ops_use_the_sections_magnitude() {
+        let meta = test_metadata();
+        let n = 8 * 8 * 8;
+        // echo 1 uniform; the last echo has a dropout along the x = 0 face
+        let e1 = vec![10.0; n];
+        let e_last: Vec<f64> = (0..n).map(|i| if i % 8 == 0 { 0.5 } else { 10.0 }).collect();
+        let mags: [&[f64]; 2] = [&e1, &e_last];
+        let params = crate::utils::morphology::SignalErosionParams { min_component: 1, ..Default::default() };
+        let section = |input| MaskSection {
+            input,
+            generator: MaskOp::Threshold { method: MaskThresholdMethod::Fixed, value: Some(0.1) },
+            refinements: vec![MaskOp::SignalErode(params.clone())],
+        };
+        let all = vec![1u8; n];
+        let erode_with = |m: &[f64]| apply_mask_ops(all.clone(), &[MaskOp::SignalErode(params.clone())], m, Some(m), &meta).unwrap();
+        let on_first = erode_with(&e1);
+        let on_last = erode_with(&e_last);
+        assert_ne!(on_first, on_last, "test magnitudes do not separate the two cases");
+
+        assert_eq!(build_mask_section(&section(MaskingInput::MagnitudeFirst), &[], &mags, &meta).unwrap(), on_first);
+        assert_eq!(build_mask_section(&section(MaskingInput::MagnitudeLast), &[], &mags, &meta).unwrap(), on_last);
+    }
+
+    /// Phase quality is weighted by the RSS of all echoes (the documented choice), whatever
+    /// the other sections use.
+    #[test]
+    fn phase_quality_is_weighted_by_the_rss() {
+        let meta = test_metadata();
+        let n = 8 * 8 * 8;
+        let phase1: Vec<f64> = (0..n).map(|i| ((i * 13) % 7) as f64 * 0.4 - 1.2).collect();
+        let phase2: Vec<f64> = phase1.iter().map(|p| 2.0 * p).collect();
+        let echoes = two_region_echoes();
+        let mags: Vec<&[f64]> = echoes.iter().map(Vec::as_slice).collect();
+        let rss = rss_combine(&mags).unwrap();
+        let phases: [&[f64]; 2] = [&phase1, &phase2];
+        let q = resolve_masking_input(MaskingInput::PhaseQuality, &phases, &mags, &meta).unwrap();
+        let q_rss = resolve_masking_input(MaskingInput::PhaseQuality, &phases, &[&rss], &meta).unwrap();
+        let q_e1 = resolve_masking_input(MaskingInput::PhaseQuality, &phases, &mags[..1], &meta).unwrap();
+        assert_eq!(q, q_rss);
+        assert_ne!(q, q_e1);
+        assert_eq!(section_magnitude(MaskingInput::PhaseQuality, &mags, &meta).unwrap(), Some(rss));
+    }
+
+    #[test]
+    fn missing_or_mismatched_data_is_an_error() {
+        let meta = test_metadata();
+        let n = 8 * 8 * 8;
+        let mag = vec![1.0; n];
+        let short = vec![1.0; n - 1];
+        for input in [MaskingInput::MagnitudeFirst, MaskingInput::Magnitude, MaskingInput::MagnitudeLast] {
+            assert!(resolve_masking_input(input, &[], &[], &meta).is_err(), "{input:?} without magnitude");
+            assert!(resolve_masking_input(input, &[], &[&mag, &short], &meta).is_err(), "{input:?} short echo");
+        }
+        assert!(resolve_masking_input(MaskingInput::PhaseQuality, &[], &[&mag], &meta).is_err());
+        assert!(resolve_masking_input(MaskingInput::PhaseQuality, &[&short], &[&mag], &meta).is_err());
+        // phase quality without magnitude is weighted uniformly, as before
+        assert!(resolve_masking_input(MaskingInput::PhaseQuality, &[&mag], &[], &meta).is_ok());
+    }
+
     #[test]
     fn test_run_masking_empty_sections() {
         let meta = test_metadata();
-        let result = run_masking(&[], &[], None, &meta);
+        let result = run_masking(&[], &[], &[], &meta);
         assert!(result.is_err());
     }
 }
