@@ -232,7 +232,10 @@ mod tests {
 
     /// A smooth multi-echo complex image on a 16³ grid: an ellipsoid of signal in noise-free
     /// background, phase a smooth field times TE plus a constant offset.
-    fn smooth_echoes(grid: &Grid, n_echoes: usize) -> (Vec<Vec<f64>>, Vec<Vec<f64>>, Vec<Vec<f64>>) {
+    /// Per-echo real, imaginary and phase volumes.
+    type Echoes = (Vec<Vec<f64>>, Vec<Vec<f64>>, Vec<Vec<f64>>);
+
+    fn smooth_echoes(grid: &Grid, n_echoes: usize) -> Echoes {
         let (nx, ny, nz) = grid.dims;
         let (mut re, mut im, mut ph) = (Vec::new(), Vec::new(), Vec::new());
         for e in 0..n_echoes {
