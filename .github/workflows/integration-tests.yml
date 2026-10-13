@@ -420,7 +420,7 @@ jobs:
                 pipeline="$pipeline test_pipeline_romeo_b0" ;;
               src/pipeline/qsmart.rs)
                 pipeline="$pipeline test_pipeline_qsmart test_pipeline_qsmart_tikhonov" ;;
-              src/pipeline/iharperella.rs) pipeline="$pipeline test_pipeline_harperella test_pipeline_iharperella" ;;
+              src/bgremove/iharperella.rs) pipeline="$pipeline test_pipeline_harperella test_pipeline_iharperella" ;;
 
               # Utils (QSMART components)
               src/utils/multi_echo.rs)
