@@ -574,8 +574,9 @@ mod tests {
     /// is the same to rounding once divided by rad/ppm, whatever the echo time; and the local
     /// field iHARPERELLA solves for from it is the same to the solver's accuracy. Run to
     /// convergence: a CG stopped early amplifies the rounding-level difference between the two
-    /// right-hand sides (to ~1e-2 after 30 iterations here). HARPERELLA shares the Laplacian
-    /// and needs ~400 iterations to converge on this volume, too slow for a unit test.
+    /// right-hand sides (to ~1e-2 after 30 iterations here). HARPERELLA's SMV normal equations
+    /// are worse conditioned and need ~400 iterations on this volume, so it is checked at one
+    /// echo time.
     #[test]
     fn wrapped_phase_matches_field_ppm_and_is_independent_of_te() {
         let field = field_ppm(1.0);
@@ -602,6 +603,18 @@ mod tests {
             let d = max_abs_diff(&from_phase, &from_field) / max_abs(&from_field);
             assert!(d < 1e-5, "TE={te}: phase vs field differ by {d:e}");
         }
+
+        let ph = HarperellaParams { radius: 3.0, max_iter: 400, tol: 1e-12 };
+        let te = 0.007;
+        let c = crate::inversion::rad_per_ppm(te, b0);
+        let phase: Vec<f64> = field.iter().map(|f| wrap(f * c)).collect();
+        let h_field = harperella(HarperellaInput::FieldPpm(&field), &mask, &grid(), &ph, |_, _| {}).unwrap().0;
+        let h_phase = harperella(
+            HarperellaInput::WrappedPhase { phase: &phase, te_s: te, b0_t: b0 }, &mask, &grid(), &ph, |_, _| {},
+        ).unwrap().0;
+        assert!(max_abs(&h_field) > 1e-3, "HARPERELLA: nothing came through");
+        let d = max_abs_diff(&h_phase, &h_field) / max_abs(&h_field);
+        assert!(d < 1e-5, "HARPERELLA: phase vs field differ by {d:e}");
     }
 
     /// No regularisation and a relative stopping rule: scaling the field scales the result,
