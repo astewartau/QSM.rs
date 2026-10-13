@@ -5,6 +5,7 @@
 //! - Padding utilities
 //! - Mask creation and morphology (erosion, dilation, closing, hole filling, signal-gated erosion)
 //! - R2*/R2 relaxometry and learned R2* -> R2' conversion (`onnx`)
+//! - Real/imaginary to magnitude/phase conversion with slice-chopping correction
 //! - Multi-echo field mapping (phase offset removal, B0 estimation)
 //! - Bias field correction (makehomogeneous)
 //! - Frangi vesselness filter for vessel detection
@@ -15,6 +16,7 @@
 
 pub mod gradient;
 pub mod padding;
+pub mod complex;
 pub mod multi_echo;
 pub mod bias_correction;
 pub mod frangi;
