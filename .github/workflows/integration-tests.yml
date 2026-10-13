@@ -172,7 +172,7 @@ jobs:
           # Check if any Rust/CI files changed (for unit tests)
           for file in $CHANGED; do
             case "$file" in
-              src/**|tests/**|Cargo.toml|Cargo.lock|.github/workflows/unit-tests.yml|.github/workflows/integration-tests.yml)
+              src/**|tests/**|Cargo.toml|Cargo.lock|.github/workflows/unit-tests.yml|.github/workflows/integration-tests.yml|scripts/coverage_summary.py)
                 run_unit_tests=true; break ;;
             esac
           done
@@ -218,7 +218,7 @@ jobs:
               tests/common/*|Cargo.toml|Cargo.lock)
                 echo "Shared test/build file changed: $file → all tests"
                 output_all; exit 0 ;;
-              .github/workflows/unit-tests.yml)
+              .github/workflows/unit-tests.yml|scripts/coverage_summary.py)
                 run_unit_tests=true ;;
               # Only the data-download script (which changes what data every test
               # sees) forces a full integration rerun. The render_*.py scripts are

@@ -38,7 +38,10 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: ${{ runner.os }}-cargo-tarpaulin-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-llvm-cov-${{ hashFiles('**/Cargo.lock') }}
+          # Falls back to the old tarpaulin-era cache for the registry and the plain debug build.
+          restore-keys: |
+            ${{ runner.os }}-cargo-
 
       # Typechecks every target, including examples/ and the integration tests
       # in tests/, which nothing else in CI compiles: integration-tests.yml
@@ -49,14 +52,6 @@ jobs:
       # `download`-gated code. Not `-D warnings`; this is a compile gate.
       - name: Check all targets compile
         run: cargo check --all-targets --features "parallel onnx download"
-
-      # Gates on test failures. The tarpaulin step below cannot: it runs with
-      # `|| true` because tarpaulin returns non-zero of its own accord (see
-      # ed00937), and the coverage threshold is not a substitute, since a test
-      # that fails every assertion still covers the lines it ran. Runs before
-      # the tarpaulin install so a failure skips that build entirely.
-      - name: Run unit tests
-        run: cargo test --lib --features parallel
 
       # Gates on `-D warnings`, so every clippy and rustc lint is a build failure, not a
       # line of scrollback nobody reads. The crate-wide exceptions are two lints that were
@@ -86,51 +81,38 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets --features "parallel onnx download" -- -D warnings
 
-      - name: Install cargo-tarpaulin
-        run: |
-          if ! command -v cargo-tarpaulin &>/dev/null; then
-            cargo install cargo-tarpaulin
-          fi
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
 
+      # One parallel, instrumented test run that both gates and measures. It used to be two:
+      # `cargo test --lib` (~3 min) to gate, then cargo-tarpaulin (~7 min) under `|| true` and
+      # `--test-threads 1` for coverage, so every test ran twice. cargo-llvm-cov exits non-zero
+      # when a test fails, and `shell: bash` runs with `-o pipefail`, so the `tee` does not
+      # hide that. Same targets tarpaulin ran: the library's unit tests plus the non-ignored
+      # tests in tests/ (doctests are not run by either).
       - name: Run unit tests with coverage
         id: tests
         run: |
           mkdir -p coverage
+          cargo llvm-cov --features parallel --lcov --output-path coverage/lcov.info \
+            2>&1 | tee coverage/test.log
 
-          # Run tarpaulin; ignore its exit code since we check coverage separately
-          cargo tarpaulin --engine llvm --out json --output-dir coverage/ \
-            --features parallel --skip-clean --timeout 600 -- --test-threads 1 \
-            2>&1 | tee coverage/tarpaulin.log || true
-
-          # Count passed tests from output (sum across all test suites)
-          # `|| true`: tarpaulin crashing is tolerated above, and a log with no "N passed" in it
-          # must stay a zero count rather than failing this step under pipefail.
-          PASSED=$(grep -oP '\d+(?= passed)' coverage/tarpaulin.log | awk '{s+=$1} END {print s+0}' || true)
+          # Sum of "N passed" across the test binaries.
+          PASSED=$(grep -oP '\d+(?= passed)' coverage/test.log | awk '{s+=$1} END {print s+0}' || true)
           echo "tests_passed=$PASSED" >> "$GITHUB_OUTPUT"
 
+      # Line coverage of non-test code: LLVM line counts with every `#[cfg(test)]` item
+      # dropped (see scripts/coverage_summary.py), which is what tarpaulin's figure excluded
+      # too. The two tools still draw "coverable line" differently, so the number is close
+      # to the old one but not identical.
       - name: Extract coverage
         id: coverage
         run: |
-          if [ ! -f coverage/tarpaulin-report.json ]; then
-            echo "WARNING: tarpaulin report not found (tarpaulin may have crashed)"
-            echo "coverage=0.0" >> "$GITHUB_OUTPUT"
-            exit 1
-          fi
-
-          COVERAGE=$(python3 -c "
-          import json
-          with open('coverage/tarpaulin-report.json') as f:
-              data = json.load(f)
-          if 'coverage' in data:
-              cov = data['coverage']
-          else:
-              total = sum(f.get('coverable', 0) for f in data.get('files', []))
-              covered = sum(f.get('covered', 0) for f in data.get('files', []))
-              cov = (covered / total * 100) if total > 0 else 0
-          print(f'{cov:.1f}')
-          ")
+          SUMMARY=$(python3 scripts/coverage_summary.py coverage/lcov.info)
+          read -r PCT COVERED COVERABLE <<< "$SUMMARY"
+          COVERAGE=$(printf '%.1f' "$PCT")
           echo "coverage=$COVERAGE" >> "$GITHUB_OUTPUT"
-          echo "Code coverage: ${COVERAGE}%"
+          echo "Code coverage: ${COVERAGE}% (${COVERED}/${COVERABLE} lines)"
 
       - name: Enforce 90% coverage threshold
         if: steps.coverage.outcome == 'success'
