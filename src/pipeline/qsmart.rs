@@ -66,13 +66,15 @@ pub fn run_qsmart(
     // iterations. TE/B0 only convert units (the field here is already in ppm).
     let ilsqr_params = crate::inversion::IlsqrParams {
         max_iter: qsmart_params.ilsqr_max_iter,
+        pad_mm: qsmart_params.ilsqr_pad_mm,
         ..inversion_config.ilsqr.clone()
     };
+    if matches!(inner_config.algorithm, InversionAlgorithm::Ilsqr) {
+        ilsqr_params.validate().map_err(|e| PipelineError::InvalidConfig(format!("QSMART: {e}")))?;
+    }
     let invert = |lfs: &[f64], m: &[u8]| -> Result<Vec<f64>, PipelineError> {
         if matches!(inner_config.algorithm, InversionAlgorithm::Ilsqr) {
-            let (chi, _, _, _) = crate::inversion::ilsqr_with_padding(
-                lfs, m, &grid, bdir, &ilsqr_params, [qsmart_params.ilsqr_pad_mm; 3], |_, _| {},
-            );
+            let (chi, _, _, _) = crate::inversion::ilsqr(lfs, m, &grid, bdir, &ilsqr_params, |_, _| {});
             Ok(chi)
         } else {
             super::inversion::run_dipole_inversion(lfs, m, metadata, &inner_config, magnitude, &mut |_, _| {})
