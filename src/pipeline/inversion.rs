@@ -719,6 +719,7 @@ mod tests {
             field_strength: 3.0,
             b0_direction: (0.0, 0.0, 1.0),
             slice_geometry: Some(crate::grid::SliceGeometry { thickness: 2.0, axis: 2 }),
+            affine: None,
         }
     }
 
@@ -735,6 +736,7 @@ mod tests {
             field_strength: 3.0,
             b0_direction: (0.0, 0.0, 1.0),
             slice_geometry: None,
+            affine: None,
         };
         let config = InversionConfig::default();
 
@@ -762,6 +764,7 @@ mod tests {
             field_strength: 3.0,
             b0_direction: (0.0, 0.0, 1.0),
             slice_geometry: None,
+            affine: None,
         };
         let config = InversionConfig {
             algorithm: InversionAlgorithm::Tkd,
@@ -788,6 +791,7 @@ mod tests {
             dims: (nx, ny, nz), voxel_size: (1.0, 1.0, 1.0),
             echo_times: vec![0.005], field_strength: 3.0, b0_direction: (0.0, 0.0, 1.0),
             slice_geometry: None,
+            affine: None,
         };
         run_dipole_inversion(&field, &mask, &meta, &config, None, &mut |_, _| {}).unwrap()
     }
@@ -836,6 +840,7 @@ mod tests {
             dims: (8, 8, 8), voxel_size: (1.0, 1.0, 1.0),
             echo_times: vec![0.005], field_strength: 3.0, b0_direction: (0.0, 0.0, 1.0),
             slice_geometry: None,
+            affine: None,
         };
         for pad_mm in [-1.0, f64::NAN, f64::INFINITY] {
             let ilsqr = crate::inversion::IlsqrParams { pad_mm, ..Default::default() };
@@ -875,6 +880,7 @@ mod tests {
             dims: (nx, ny, nz), voxel_size: (1.0, 1.0, 1.0),
             echo_times: vec![0.005], field_strength: 3.0, b0_direction: (0.0, 0.0, 1.0),
             slice_geometry: None,
+            affine: None,
         };
         let config = InversionConfig {
             algorithm: InversionAlgorithm::Heidi,
@@ -914,6 +920,7 @@ mod tests {
             dims: (nx, ny, nz), voxel_size: (1.0, 1.0, 1.0),
             echo_times: vec![0.005], field_strength: 3.0, b0_direction: (0.0, 0.0, 1.0),
             slice_geometry: None,
+            affine: None,
         };
         let config = InversionConfig { algorithm: InversionAlgorithm::Medi, ..Default::default() };
         let chi = run_dipole_inversion(&field, &mask, &meta, &config, Some(&mag), &mut |_, _| {}).unwrap();
@@ -943,6 +950,7 @@ mod tests {
             dims: (nx, ny, nz), voxel_size: (1.0, 1.0, 1.0),
             echo_times: vec![0.005, 0.010], field_strength: 3.0, b0_direction: (0.0, 0.0, 1.0),
             slice_geometry: None,
+            affine: None,
         };
         let config = InversionConfig { algorithm: InversionAlgorithm::Tfi, ..Default::default() };
         assert_eq!(config.input(2), InversionInput::TotalField);
@@ -966,6 +974,7 @@ mod tests {
             field_strength: 3.0,
             b0_direction: (0.0, 0.0, 1.0),
             slice_geometry: None,
+            affine: None,
         };
         let config = InversionConfig {
             algorithm: InversionAlgorithm::Tgv,

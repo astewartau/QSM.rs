@@ -43,7 +43,7 @@ use crate::grid::Grid;
 use crate::models::onnx::{OnnxError, OnnxModel, Tensor};
 use crate::segment::labels::SynthSegVersion;
 #[cfg(feature = "onnx")]
-use crate::utils::connected::largest_component;
+use crate::utils::connected::{largest_component, Connectivity};
 use crate::utils::resample::resize;
 use crate::utils::morphology::signal_erosion::gaussian_filter_anisotropic;
 #[cfg(feature = "parallel")]
@@ -563,7 +563,7 @@ fn postprocess(
     for (v, chunk) in fg.iter_mut().zip(post.chunks_exact(n_labels)) {
         *v = (chunk[1..].iter().sum::<f32>() > 0.25) as u8;
     }
-    let fg = largest_component(&fg, cc_dims);
+    let fg = largest_component(&fg, cc_dims, Connectivity::Face);
     for (keep, chunk) in fg.iter().zip(post.chunks_exact_mut(n_labels)) {
         if *keep == 0 {
             chunk[1..].fill(0.0);
@@ -582,7 +582,7 @@ fn postprocess(
             for (v, chunk) in mask.iter_mut().zip(post.chunks_exact(n_labels)) {
                 *v = members.iter().any(|&c| chunk[c] > 0.25) as u8;
             }
-            let mask = largest_component(&mask, cc_dims);
+            let mask = largest_component(&mask, cc_dims, Connectivity::Face);
             for (keep, chunk) in mask.iter().zip(post.chunks_exact_mut(n_labels)) {
                 if *keep == 0 {
                     for &c in &members {

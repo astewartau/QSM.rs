@@ -109,7 +109,7 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, BinaryHeap, HashMap};
 
 use crate::grid::Grid;
-use crate::utils::connected::label_components;
+use crate::utils::connected::{label_components, Connectivity};
 use crate::utils::union_find::UnionFind;
 
 use super::bestpath::correct_global_offset;
@@ -337,7 +337,7 @@ fn label_regions(
             partition_mask[i] = u8::from(inside);
         }
 
-        let (labels, sizes) = label_components(&partition_mask, dims);
+        let (labels, sizes) = label_components(&partition_mask, dims, Connectivity::Face);
         for i in 0..n_total {
             if labels[i] != 0 {
                 region_of[i] = next_id + labels[i] - 1;

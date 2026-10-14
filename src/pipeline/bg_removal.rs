@@ -173,6 +173,7 @@ mod tests {
             field_strength: 3.0,
             b0_direction: (0.0, 0.0, 1.0),
             slice_geometry: None,
+            affine: None,
         };
 
         let result = run_bg_removal(
@@ -196,6 +197,7 @@ mod tests {
             field_strength: 3.0,
             b0_direction: (0.0, 0.0, 1.0),
             slice_geometry: None,
+            affine: None,
         };
         for spacing_mm in [0.0, -1.0, f64::NAN] {
             let mut config = BgRemovalConfig::default();
@@ -220,6 +222,7 @@ mod tests {
             field_strength: 3.0,
             b0_direction: (0.0, 0.0, 1.0),
             slice_geometry: None,
+            affine: None,
         };
 
         // undeclared: nothing can be concluded, so it runs
@@ -261,6 +264,7 @@ mod tests {
             dims: (nx, ny, nz), voxel_size: (1.0, 1.0, 1.0),
             echo_times: vec![0.005], field_strength: 3.0, b0_direction: (0.0, 0.0, 1.0),
             slice_geometry: None,
+            affine: None,
         };
         let config = BgRemovalConfig { algorithm: BgRemovalAlgorithm::Pdf, ..Default::default() };
         let r = run_bg_removal(&field, &mask, &meta, &config, &mut |_, _| {}).unwrap();
@@ -298,6 +302,7 @@ mod tests {
                 dims: (nx, ny, nz), voxel_size: (1.0, 1.0, 1.0),
                 echo_times: vec![0.005], field_strength: 3.0, b0_direction: bdir,
                 slice_geometry: None,
+                affine: None,
             };
             run_bg_removal(&field, &mask, &meta, &config, &mut |_, _| {}).unwrap().local_field_ppm
         };
@@ -332,6 +337,7 @@ mod tests {
             dims: (nx, ny, nz), voxel_size: (1.0, 1.0, 1.0),
             echo_times: vec![0.005], field_strength: 3.0, b0_direction: (0.0, 0.0, 1.0),
             slice_geometry: None,
+            affine: None,
         };
         let config = BgRemovalConfig { algorithm: BgRemovalAlgorithm::Lbv, ..Default::default() };
         let r = run_bg_removal(&field, &mask, &meta, &config, &mut |_, _| {}).unwrap();
@@ -348,6 +354,7 @@ mod tests {
             dims: (nx, ny, nz), voxel_size: (1.0, 1.0, 1.0),
             echo_times: vec![0.005], field_strength: 3.0, b0_direction: (0.0, 0.0, 1.0),
             slice_geometry: None,
+            affine: None,
         };
         let config = BgRemovalConfig { algorithm: BgRemovalAlgorithm::Sharp, ..Default::default() };
         let r = run_bg_removal(&field, &mask, &meta, &config, &mut |_, _| {}).unwrap();
@@ -364,6 +371,7 @@ mod tests {
             dims: (nx, ny, nz), voxel_size: (1.0, 1.0, 1.0),
             echo_times: vec![0.005], field_strength: 3.0, b0_direction: (0.0, 0.0, 1.0),
             slice_geometry: None,
+            affine: None,
         };
         let config = BgRemovalConfig { algorithm: BgRemovalAlgorithm::Ismv, ..Default::default() };
         let r = run_bg_removal(&field, &mask, &meta, &config, &mut |_, _| {}).unwrap();
@@ -380,6 +388,7 @@ mod tests {
             dims: (nx, ny, nz), voxel_size: (1.0, 1.0, 1.0),
             echo_times: vec![0.005], field_strength: 3.0, b0_direction: (0.0, 0.0, 1.0),
             slice_geometry: None,
+            affine: None,
         };
         // Primary V-SHARP + mSMV boundary-shadow refinement.
         let config = BgRemovalConfig {
@@ -401,6 +410,7 @@ mod tests {
             dims: (nx, ny, nz), voxel_size: (1.0, 1.0, 1.0),
             echo_times: vec![0.005], field_strength: 3.0, b0_direction: (0.0, 0.0, 1.0),
             slice_geometry: None,
+            affine: None,
         };
         let config = BgRemovalConfig { algorithm: BgRemovalAlgorithm::Resharp, ..Default::default() };
         let r = run_bg_removal(&field, &mask, &meta, &config, &mut |_, _| {}).unwrap();
@@ -416,6 +426,7 @@ mod tests {
             dims: (nx, ny, nz), voxel_size: (1.0, 1.0, 1.0),
             echo_times: vec![0.005], field_strength: 3.0, b0_direction: (0.0, 0.0, 1.0),
             slice_geometry: None,
+            affine: None,
         };
         // a blob inside a 10-voxel cube: big enough to leave an interior after the ~3-voxel erosion
         let field: Vec<f64> = (0..n)
@@ -455,6 +466,7 @@ mod tests {
             field_strength: 3.0,
             b0_direction: (0.0, 0.0, 1.0),
             slice_geometry: None,
+            affine: None,
         };
         let field = vec![0.0; 32]; // wrong size, should be 64
         let mask = vec![1u8; 64];

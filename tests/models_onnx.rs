@@ -1024,6 +1024,48 @@ fn rs2net_matches_python_reference() {
     assert!(dice > 0.999, "Dice {dice}");
 }
 
+/// MindGrab end-to-end parity: `bet::mindgrab` (tract + the Rust conform / normalise /
+/// largest-component / reslice pipeline) vs `brainchop --skull-strip`'s pipeline (niimath
+/// conform / bwlabel / reslice, the same graph under ONNX Runtime) on an in-vivo GRE magnitude.
+/// `scripts/onnx-export/ref_mindgrab.py` writes `mag.nii` and `ref_mask.nii.gz`.
+///
+/// ```bash
+/// MINDGRAB_ONNX=/path/mindgrab.onnx MINDGRAB_REF_DIR=/path/ref \
+///   cargo test --release --features onnx --test models_onnx mindgrab -- --ignored --nocapture
+/// ```
+#[test]
+#[ignore]
+fn mindgrab_matches_brainchop() {
+    use qsm_core::bet::{mindgrab, MindGrabParams};
+    use qsm_core::io::read_nifti_file;
+    use std::path::Path;
+
+    let onnx = std::fs::read(std::env::var("MINDGRAB_ONNX").unwrap_or("/tmp/mindgrab_export/mindgrab.onnx".into()))
+        .expect("MINDGRAB_ONNX");
+    let dir = std::env::var("MINDGRAB_REF_DIR").unwrap_or("/tmp/mindgrab_ref".into());
+    let mag = read_nifti_file(Path::new(&format!("{dir}/mag.nii"))).expect("magnitude");
+    let (nx, ny, nz) = mag.dims;
+    let (vx, vy, vz) = mag.voxel_size;
+    let grid = qsm_core::Grid::new(nx, ny, nz, vx, vy, vz);
+    let t = std::time::Instant::now();
+    let mask = mindgrab(&mag.data, &grid, &mag.affine, &onnx, &MindGrabParams::default(), |_, _| {})
+        .expect("mindgrab");
+    println!("mindgrab: {:.1}s, {} brain voxels", t.elapsed().as_secs_f64(), mask.iter().filter(|&&m| m != 0).count());
+    let want = read_nifti_file(Path::new(&format!("{dir}/ref_mask.nii.gz"))).expect("reference mask");
+    let (mut inter, mut a, mut b, mut diff) = (0usize, 0usize, 0usize, 0usize);
+    for (&m, &r) in mask.iter().zip(&want.data) {
+        let (m, r) = (m != 0, r > 0.5);
+        inter += (m && r) as usize;
+        a += m as usize;
+        b += r as usize;
+        diff += (m != r) as usize;
+    }
+    let dice = 2.0 * inter as f64 / (a + b) as f64;
+    println!("{:?} @ {:?} mm  Dice vs reference {dice:.6}  differing voxels {diff}  ({:.1}s)",
+        mag.dims, mag.voxel_size, t.elapsed().as_secs_f64());
+    assert!(dice > 0.999, "Dice {dice}");
+}
+
 /// Parity: `relaxometry::r2primenet` (tract, with the column-major↔NCDHW repack and the
 /// sliding-window overlap averaging) must match the authors' ONNX-Runtime recipe on the
 /// same R2* volume. Generate the fixtures first with

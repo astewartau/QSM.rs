@@ -326,7 +326,11 @@ fn edt_1d(f: &[f64], d: &mut Vec<f64>) {
 
 /// Keep the 6-connected foreground components of at least `min(min_size, largest)` voxels.
 fn keep_large_components(mask: &[u8], dims: (usize, usize, usize), min_size: usize) -> Vec<u8> {
-    let (label, sizes) = crate::utils::connected::label_components(mask, dims);
+    let (label, sizes) = crate::utils::connected::label_components(
+        mask,
+        dims,
+        crate::utils::connected::Connectivity::Face,
+    );
     let largest = sizes.iter().copied().max().unwrap_or(0);
     let keep = min_size.min(largest);
     label.iter().map(|&l| (l != 0 && sizes[l as usize] >= keep) as u8).collect()
