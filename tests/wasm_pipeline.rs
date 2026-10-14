@@ -46,6 +46,7 @@ fn meta() -> ScanMetadata {
         field_strength: B0_T,
         b0_direction: (0.0, 0.0, 1.0),
         slice_geometry: None,
+        affine: None,
     }
 }
 
