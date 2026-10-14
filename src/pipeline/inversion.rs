@@ -128,6 +128,7 @@ pub fn run_dipole_inversion(
             )
         }
         InversionAlgorithm::Ilsqr => {
+            config.ilsqr.validate().map_err(PipelineError::InvalidConfig)?;
             let (chi, _, _, _) = crate::inversion::ilsqr(
                 field_ppm, mask, &grid, bdir, &config.ilsqr, &mut *progress,
             );
@@ -823,11 +824,25 @@ mod tests {
 
     #[test]
     fn test_inversion_ilsqr() {
-        // iLSQR pads by 64 mm as STI does, so this 8^3 volume is solved on a 144^3 grid: keep
-        // the LSQR solves short.
-        let ilsqr = crate::inversion::IlsqrParams { max_iter: 3, ..Default::default() };
+        // 6 mm keeps this 8^3 volume on a 32^3 grid (the default 16 mm gives 48^3).
+        let ilsqr = crate::inversion::IlsqrParams { max_iter: 3, pad_mm: 6.0, ..Default::default() };
         let chi = make_inversion_test_with(InversionConfig { algorithm: InversionAlgorithm::Ilsqr, ilsqr, ..Default::default() });
         assert_eq!(chi.len(), 8 * 8 * 8);
+    }
+
+    #[test]
+    fn test_inversion_ilsqr_rejects_bad_padding() {
+        let meta = ScanMetadata {
+            dims: (8, 8, 8), voxel_size: (1.0, 1.0, 1.0),
+            echo_times: vec![0.005], field_strength: 3.0, b0_direction: (0.0, 0.0, 1.0),
+            slice_geometry: None,
+        };
+        for pad_mm in [-1.0, f64::NAN, f64::INFINITY] {
+            let ilsqr = crate::inversion::IlsqrParams { pad_mm, ..Default::default() };
+            let config = InversionConfig { algorithm: InversionAlgorithm::Ilsqr, ilsqr, ..Default::default() };
+            let r = run_dipole_inversion(&[0.01; 512], &[1u8; 512], &meta, &config, None, &mut |_, _| {});
+            assert!(matches!(r, Err(PipelineError::InvalidConfig(_))), "pad {pad_mm} accepted");
+        }
     }
 
     #[test]

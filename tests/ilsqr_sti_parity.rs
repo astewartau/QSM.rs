@@ -12,7 +12,7 @@
 //! errors decide the details, so the full-length comparison with STI is loose, and the
 //! algorithm itself is pinned by the short double-precision runs.
 
-use qsm_core::inversion::{ilsqr_with_padding, IlsqrParams};
+use qsm_core::inversion::{ilsqr, IlsqrParams};
 use qsm_core::Grid;
 
 struct Fixture {
@@ -46,8 +46,8 @@ fn load() -> Fixture {
 fn run(fx: &Fixture, max_iter: usize) -> (Vec<f64>, Vec<f64>) {
     let to_ppm = 1.0 / (2.0 * std::f64::consts::PI * 42.575 * 3.0 * 20.0e-3); // STI's scaling
     let grid = Grid::new(DIMS.0, DIMS.1, DIMS.2, 1.0, 1.0, 1.5);
-    let params = IlsqrParams { max_iter, ..IlsqrParams::default() };
-    let (chi, _, _, x1) = ilsqr_with_padding(&fx.phase, &fx.mask, &grid, (0.1, -0.2, 0.95f64.sqrt()), &params, [8.0; 3], |_, _| {});
+    let params = IlsqrParams { max_iter, pad_mm: 8.0, ..IlsqrParams::default() };
+    let (chi, _, _, x1) = ilsqr(&fx.phase, &fx.mask, &grid, (0.1, -0.2, 0.95f64.sqrt()), &params, |_, _| {});
     for i in 0..chi.len() { if fx.mask[i] == 0 { assert_eq!(chi[i], 0.0); } }
     let pick = |v: &[f64]| fx.inside.iter().map(|&i| v[i] * to_ppm).collect::<Vec<f64>>();
     (pick(&chi), pick(&x1))

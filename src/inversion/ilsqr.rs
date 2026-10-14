@@ -1,7 +1,9 @@
 //! iLSQR: LSQR dipole inversion with streaking-artefact removal
 //!
 //! [`ilsqr`] implements **STI Suite 3.0's `QSM_iLSQR`** (Li et al. 2015), as called with
-//! `QSM_iLSQR(phase, mask, 'TE', TE, 'B0', B0, 'H', H, 'padsize', [64 64 64], 'voxelsize', vs)`.
+//! `QSM_iLSQR(phase, mask, 'TE', TE, 'B0', B0, 'H', H, 'padsize', [p p p], 'voxelsize', vs)`
+//! with `p` = [`IlsqrParams::pad_mm`] (default [`DEFAULT_PAD_MM`] = 16; UK Biobank and STI Suite's
+//! examples pass 64, [`STI_PAD_MM`]).
 //! STI Suite ships as protected P-code, so the algorithm was recovered by black-box probing
 //! (call tracing, capturing the operators and right-hand sides it hands to MATLAB's `lsqr`, and
 //! fitting every stage until a MATLAB re-implementation reproduced STI to its own
@@ -9,7 +11,7 @@
 //!
 //! 1. Crop field and mask to the mask's bounding box (odd extents grown by one voxel to make
 //!    them even), then zero-pad each axis to the next multiple of 16 strictly above
-//!    `crop + 2·pad_mm/voxel_size` (default `pad_mm` = 64). Everything below runs on that grid.
+//!    `crop + 2·pad_mm/voxel_size` (default `pad_mm` = 16). Everything below runs on that grid.
 //! 2. **Laplacian weights** `W`: `L = |F⁻¹(k²·F φ)|` with `k²` in (cycles/mm)² and the DC term
 //!    set to 10⁶ (STI's value, which adds `10⁶·mean(φ)` to every voxel, so the `|·|` decides
 //!    which tail of the Laplacian is down-weighted). Ranked inside the mask:
@@ -48,6 +50,26 @@
 //! the remaining difference to STI's output (r = 0.9999985, 99.9th percentile |Δ| 3.7e-4 ppm
 //! on that field) is that rounding, amplified by the solves.
 //!
+//! # Padding
+//!
+//! [`IlsqrParams::pad_mm`] is STI's `'padsize'`: millimetres of zero padding per side, the same
+//! on every axis. It sets the grid that both LSQR solves run on, so for small or thin volumes it
+//! dominates the cost: an 8³ volume at 1 mm is solved on 144³ with 64 mm, on 48³ with the
+//! default 16 mm. [`STI_PAD_MM`] (64) is what UK Biobank's pipeline and STI Suite's examples
+//! pass (set it to reproduce them exactly); [`STI_DEFAULT_PAD_MM`] (6) is what `QSM_iLSQR` uses
+//! when called without `'padsize'`, as QSMART calls it. 0 is allowed (the grid is still rounded
+//! up past the crop to a multiple of 16) but wraps thin volumes onto themselves. The padding
+//! changes χ because the dipole convolution is circular on the padded grid and the Laplacian
+//! and gradient weights are ranked over it.
+//!
+//! The default, [`DEFAULT_PAD_MM`] = 16 mm, was chosen on 150 UK Biobank subjects × 2 visits,
+//! the qsm-forward head phantom and thin slabs, comparing 0–128 mm (ukb-qsmxt docs/19). No
+//! test-retest, age or longitudinal metric differed from 64 mm. Above 32 mm the result only
+//! moves by the floor set by the capped LSQR iterations (32 and 128 mm are each ~2 ppb RMS from
+//! 64 mm); 16 mm is ~3 ppb. On a thin phantom slab 0–6 mm lose ~1.5 NRMSE points against the
+//! ground truth and 16 mm ~0.5; on whole heads every pad gave the same accuracy. 16 mm takes
+//! about 40 % of the time and memory of 64 mm on UK Biobank SWI.
+//!
 //! QSM.rs ≤ v0.38 shipped a different iLSQR (a port of QSM.m's formulation: no padding, LSMR
 //! for the artefacts, other weights). It was removed: STI Suite's algorithm is the reference
 //! iLSQR, and it is also what the original QSMART calls (see [`crate::pipeline::run_qsmart`]).
@@ -65,6 +87,7 @@
 ///
 /// STI Suite defaults: `tol = 1e-3`, `max_iter = 100`. The initial LSQR solve always uses
 /// STI's tolerance of 0.01. `max_iter` is STI's `'niter'` argument (it caps both solves).
+/// `pad_mm` is STI's `'padsize'` (see the module docs, *Padding*).
 #[cfg_attr(feature = "introspection", derive(serde::Serialize))]
 #[derive(Clone, Debug)]
 pub struct IlsqrParams {
@@ -72,6 +95,10 @@ pub struct IlsqrParams {
     pub tol: f64,
     /// Maximum iterations of each LSQR solve (default: 100)
     pub max_iter: usize,
+    /// Zero padding per side in mm, on every axis: STI's `'padsize'` (default:
+    /// [`DEFAULT_PAD_MM`] = 16; [`STI_PAD_MM`] reproduces UK Biobank / STI Suite). Must be
+    /// finite and ≥ 0.
+    pub pad_mm: f64,
 }
 
 impl Default for IlsqrParams {
@@ -79,9 +106,23 @@ impl Default for IlsqrParams {
         Self {
             tol: 1e-3,
             max_iter: 100,
+            pad_mm: DEFAULT_PAD_MM,
         }
     }
 }
+
+impl IlsqrParams {
+    /// Checks the parameters: `pad_mm` must be finite and ≥ 0.
+    pub fn validate(&self) -> Result<(), String> {
+        if !(self.pad_mm.is_finite() && self.pad_mm >= 0.0) {
+            return Err(format!("iLSQR padding must be finite and >= 0 mm, got {}", self.pad_mm));
+        }
+        Ok(())
+    }
+}
+
+/// Default zero padding of [`ilsqr`], in mm per side (see the module docs, *Padding*).
+pub const DEFAULT_PAD_MM: f64 = 16.0;
 
 /// Zero padding STI's `QSM_iLSQR` is given by UK Biobank and in STI Suite's examples, in mm.
 pub const STI_PAD_MM: f64 = 64.0;
@@ -554,8 +595,8 @@ fn sti_bounding_box(mask: &[u8], dims: (usize, usize, usize)) -> Option<([usize;
 }
 
 /// STI's padded grid: per axis the next multiple of 16 strictly above `c + 2·pad_mm/vs`.
-fn sti_padded_dims(c: [usize; 3], vs: [f64; 3], pad_mm: [f64; 3]) -> [usize; 3] {
-    [0, 1, 2].map(|d| 16 * ((c[d] as f64 + 2.0 * pad_mm[d] / vs[d] + 1.0) / 16.0).ceil() as usize)
+fn sti_padded_dims(c: [usize; 3], vs: [f64; 3], pad_mm: f64) -> [usize; 3] {
+    [0, 1, 2].map(|d| 16 * ((c[d] as f64 + 2.0 * pad_mm / vs[d] + 1.0) / 16.0).ceil() as usize)
 }
 
 /// Sentinel of the compact-index maps in the artefact solve.
@@ -612,7 +653,7 @@ fn grad_masked_adj(r: &[Complex64], mask_of: &[u32], gw: &[Vec<f64>], n: [usize;
     });
 }
 
-/// iLSQR as in STI Suite 3.0 (`QSM_iLSQR`), with STI's 64 mm padding.
+/// iLSQR as in STI Suite 3.0 (`QSM_iLSQR`), padded by `params.pad_mm`.
 ///
 /// See the module docs for the algorithm. `field` is the local field (any linear unit; QSM.rs
 /// passes ppm), `bdir` the B0 direction in voxel axes (normalised here).
@@ -620,6 +661,10 @@ fn grad_masked_adj(r: &[Complex64], mask_of: &[u32], gw: &[Vec<f64>], n: [usize;
 /// # Returns
 /// `(chi, streaking_artifacts, fast_qsm, initial_lsqr)` on the input grid, all masked.
 /// `initial_lsqr` is STI's second output (the step-3 LSQR solution).
+///
+/// # Panics
+/// If `params` fails [`IlsqrParams::validate`] (the pipeline checks this first and returns
+/// `InvalidConfig`).
 pub fn ilsqr(
     field: &[f64],
     mask: &[u8],
@@ -628,23 +673,10 @@ pub fn ilsqr(
     params: &IlsqrParams,
     progress: impl FnMut(usize, usize),
 ) -> (Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>) {
-    ilsqr_with_padding(field, mask, grid, bdir, params, [STI_PAD_MM; 3], progress)
+    ilsqr_traced(field, mask, grid, bdir, params, progress, &mut IlsqrTrace::default())
 }
 
-/// [`ilsqr`] with an explicit STI `padsize` (mm per axis; STI's `'padsize'` argument).
-pub fn ilsqr_with_padding(
-    field: &[f64],
-    mask: &[u8],
-    grid: &Grid,
-    bdir: (f64, f64, f64),
-    params: &IlsqrParams,
-    pad_mm: [f64; 3],
-    progress: impl FnMut(usize, usize),
-) -> (Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>) {
-    ilsqr_with_padding_traced(field, mask, grid, bdir, params, pad_mm, progress, &mut IlsqrTrace::default())
-}
-
-/// Where an [`ilsqr_with_padding_traced`] run spent its time, and how its two LSQR solves ended.
+/// Where an [`ilsqr_traced`] run spent its time, and how its two LSQR solves ended.
 #[doc(hidden)]
 #[derive(Clone, Debug, Default)]
 pub struct IlsqrTrace {
@@ -659,19 +691,20 @@ pub struct IlsqrTrace {
     pub fft_secs: f64,
 }
 
-/// [`ilsqr_with_padding`], also filling an [`IlsqrTrace`] (for benchmarks and parity checks).
+/// [`ilsqr`], also filling an [`IlsqrTrace`] (for benchmarks and parity checks).
 #[doc(hidden)]
-#[allow(clippy::too_many_arguments)]
-pub fn ilsqr_with_padding_traced(
+pub fn ilsqr_traced(
     field: &[f64],
     mask: &[u8],
     grid: &Grid,
     bdir: (f64, f64, f64),
     params: &IlsqrParams,
-    pad_mm: [f64; 3],
     mut progress: impl FnMut(usize, usize),
     trace: &mut IlsqrTrace,
 ) -> (Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>) {
+    if let Err(e) = params.validate() {
+        panic!("{e}");
+    }
     *trace = IlsqrTrace::default();
     let clock = FftClock::default();
     let mut t_stage = (std::time::Instant::now(), 0usize, 0.0f64);
@@ -691,7 +724,7 @@ pub fn ilsqr_with_padding_traced(
 
     // 1. crop to the (even) bounding box and pad to the next multiple of 16 above c + 2 pad/vs
     let c = [0, 1, 2].map(|d| hi[d] - lo[d] + 1);
-    let n = sti_padded_dims(c, vs, pad_mm);
+    let n = sti_padded_dims(c, vs, params.pad_mm);
     let pd = [0, 1, 2].map(|d| (n[d] - c[d]) / 2);
     let nt = n[0] * n[1] * n[2];
     let mut p = vec![0.0; nt];
@@ -836,7 +869,7 @@ impl FftClock {
     }
 }
 
-/// Step 3 of [`ilsqr_with_padding`]: LSQR (tol 0.01) on D W D χ = D W φ with
+/// Step 3 of [`ilsqr`]: LSQR (tol 0.01) on D W D χ = D W φ with
 /// D = F⁻¹ diag(dk) F. Returns χ and how LSQR ended.
 ///
 /// Solved in k-space, for x̃ = F χ: with the unitary U = F/√N, D W D = U* (dk·U W U*·dk) U,
@@ -875,7 +908,7 @@ fn initial_solve(
     (crate::maybe_par_iter!(x1).map(|z| z.re).collect(), out)
 }
 
-/// Step 6 of [`ilsqr_with_padding`]: the streaking artefacts, by LSQR (`tol`) over
+/// Step 6 of [`ilsqr`]: the streaking artefacts, by LSQR (`tol`) over
 /// the k-space cone |D| < 0.1 against the weighted gradient (weights `gw`, full grid,
 /// zero off the mask) of the initial solution `x1`. Returns the real part of F⁻¹ of the
 /// solution (the artefacts divided by √N) and how LSQR ended.
@@ -1169,7 +1202,10 @@ mod tests {
             ([40, 42, 10], [1.05, 2.2, 3.3], [20.0; 3], [80, 64, 32]),
             ([46, 42, 10], [0.5, 0.5, 2.0], [64.0; 3], [304, 304, 80]),
         ];
-        for (c, vs, pad, want) in cases { assert_eq!(sti_padded_dims(c, vs, pad), want); }
+        // axes are padded independently, so the per-axis probes check each axis on its own
+        for (c, vs, pad, want) in cases {
+            assert_eq!([0, 1, 2].map(|d| sti_padded_dims(c, vs, pad[d])[d]), want);
+        }
     }
 
     #[test]
@@ -1277,8 +1313,8 @@ mod tests {
         let (field, mask, chi) = sphere_phantom(n, (1.0, 1.0, 1.0), bdir);
         let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
         let mut steps = Vec::new();
-        let params = IlsqrParams { max_iter: 40, ..IlsqrParams::default() };
-        let (x, xsa, xfs, x1) = ilsqr_with_padding(&field, &mask, &grid, bdir, &params, [4.0; 3], |s, t| steps.push((s, t)));
+        let params = IlsqrParams { max_iter: 40, pad_mm: 4.0, ..IlsqrParams::default() };
+        let (x, xsa, xfs, x1) = ilsqr(&field, &mask, &grid, bdir, &params, |s, t| steps.push((s, t)));
         assert_eq!(steps, vec![(1, 4), (2, 4), (3, 4), (4, 4)]);
         for v in [&x, &xsa, &xfs, &x1] {
             assert!(v.iter().all(|z| z.is_finite()));
@@ -1291,7 +1327,7 @@ mod tests {
         for i in 0..x.len() { assert!((x[i] - (x1[i] - xsa[i])).abs() < 1e-12); }
         // linear in the field (up to LSQR rounding: the artefact solve runs 100 unconverged steps)
         let f2: Vec<f64> = field.iter().map(|v| 3.0 * v).collect();
-        let (y, _, _, _) = ilsqr_with_padding(&f2, &mask, &grid, bdir, &params, [4.0; 3], |_, _| {});
+        let (y, _, _, _) = ilsqr(&f2, &mask, &grid, bdir, &params, |_, _| {});
         let x3: Vec<f64> = x.iter().map(|v| 3.0 * v).collect();
         let worst = y.iter().zip(&x3).map(|(a, b)| (a - b).abs()).fold(0.0, f64::max);
         println!("scaling: max|chi(3f) - 3 chi(f)| = {:.2e}", worst);
@@ -1305,14 +1341,63 @@ mod tests {
         assert!(x.iter().all(|&v| v == 0.0));
         let mut mask = vec![0u8; 512];
         for k in 2..6 { for j in 2..6 { for i in 2..6 { mask[i + 8 * j + 64 * k] = 1; } } }
-        let (x, _, _, _) = ilsqr_with_padding(&[0.0; 512], &mask, &grid, (0.0, 0.0, 1.0), &IlsqrParams::default(), [4.0; 3], |_, _| {});
+        let p4 = IlsqrParams { pad_mm: 4.0, ..IlsqrParams::default() };
+        let (x, _, _, _) = ilsqr(&[0.0; 512], &mask, &grid, (0.0, 0.0, 1.0), &p4, |_, _| {});
         assert!(x.iter().all(|&v| v == 0.0));
     }
 
     #[test]
     fn test_ilsqr_params_defaults() {
         let p = IlsqrParams::default();
-        assert_eq!((p.tol, p.max_iter), (1e-3, 100));
+        assert_eq!((p.tol, p.max_iter, p.pad_mm), (1e-3, 100, DEFAULT_PAD_MM));
+        assert_eq!((DEFAULT_PAD_MM, STI_PAD_MM, STI_DEFAULT_PAD_MM), (16.0, 64.0, 6.0));
+        assert!(p.validate().is_ok());
+    }
+
+    #[test]
+    fn test_ilsqr_pad_sets_the_grid() {
+        // 8^3 at 2 mm, mask = the whole volume (crop 8): next multiple of 16 above 8 + 2 pad/2 + 1
+        let n = 8;
+        let bdir = (0.0, 0.0, 1.0);
+        let (field, _, _) = sphere_phantom(n, (2.0, 2.0, 2.0), bdir);
+        let mask = vec![1u8; n * n * n];
+        let run = |vs: (f64, f64, f64), p: &IlsqrParams| {
+            let grid = Grid::new(n, n, n, vs.0, vs.1, vs.2);
+            let mut tr = IlsqrTrace::default();
+            let (x, _, _, _) = ilsqr_traced(&field, &mask, &grid, bdir, p, |_, _| {}, &mut tr);
+            (tr.dims, x)
+        };
+        let iso = (2.0, 2.0, 2.0);
+        let with_pad = |pad_mm: f64| IlsqrParams { max_iter: 2, pad_mm, ..IlsqrParams::default() };
+        let (d_default, x_default) = run(iso, &IlsqrParams { max_iter: 2, ..IlsqrParams::default() });
+        let (d16, x16) = run(iso, &with_pad(DEFAULT_PAD_MM));
+        assert_eq!((d_default, d16), ([32; 3], [32; 3]));
+        // the default is exactly an explicit 16 mm
+        assert!(x_default.iter().zip(&x16).all(|(a, b)| a.to_bits() == b.to_bits()));
+        let (d64, x64) = run(iso, &with_pad(STI_PAD_MM));
+        assert_eq!(d64, [80; 3]);
+        assert!(x16.iter().zip(&x64).any(|(a, b)| a != b), "padding should change chi");
+        assert_eq!(run(iso, &with_pad(STI_DEFAULT_PAD_MM)).0, [16; 3]);
+        assert_eq!(run(iso, &with_pad(0.0)).0, [16; 3]);
+        // the padding is in mm, so fewer voxels along a coarser axis
+        assert_eq!(run((2.0, 2.0, 4.0), &with_pad(STI_PAD_MM)).0, [80, 80, 48]);
+    }
+
+    #[test]
+    fn test_ilsqr_pad_validation() {
+        for bad in [-1.0, f64::NAN, f64::INFINITY] {
+            let p = IlsqrParams { pad_mm: bad, ..IlsqrParams::default() };
+            assert!(p.validate().is_err(), "pad {bad} accepted");
+        }
+        assert!(IlsqrParams { pad_mm: 0.0, ..IlsqrParams::default() }.validate().is_ok());
+    }
+
+    #[test]
+    #[should_panic(expected = "iLSQR padding must be finite")]
+    fn test_ilsqr_rejects_negative_pad() {
+        let grid = Grid::new(8, 8, 8, 1.0, 1.0, 1.0);
+        let p = IlsqrParams { pad_mm: -1.0, ..IlsqrParams::default() };
+        ilsqr(&[0.0; 512], &[1u8; 512], &grid, (0.0, 0.0, 1.0), &p, |_, _| {});
     }
 
 }
