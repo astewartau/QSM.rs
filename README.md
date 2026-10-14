@@ -250,7 +250,7 @@ Methods marked † need the `onnx` feature and model weights.
 
 | Algorithm | Description | Reference |
 |-----------|-------------|-----------|
-| **CLEAR-SWI** | Phase-mask SWI with high-pass filtering and minimum intensity projection | Eckstein, K., et al. (2024). "CLEAR-SWI: Computational Efficient T2* Weighted Imaging." *Proc. ISMRM*. |
+| **CLEAR-SWI** | Multi-echo SWI: combined, bias-corrected magnitude × phase mask from the echo-combined, high-pass filtered phase; minimum intensity projection | Eckstein, K., et al. (2021). "Improved susceptibility weighted imaging at ultra-high field using bipolar multi-echo acquisition and optimized image processing: CLEAR-SWI." *NeuroImage*, 237:118175. [doi:10.1016/j.neuroimage.2021.118175](https://doi.org/10.1016/j.neuroimage.2021.118175) |
 | **SMWI** | Magnitude weighted by a susceptibility-map mask | Gho, S.-M., et al. (2014). "Susceptibility map-weighted imaging (SMWI) for neuroimaging." *Magnetic Resonance in Medicine*, 72:337-346. [DOI](https://doi.org/10.1002/mrm.24920) |
 
 ### Preprocessing and Artefact Reduction
