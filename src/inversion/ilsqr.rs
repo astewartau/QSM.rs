@@ -132,7 +132,7 @@ pub const STI_PAD_MM: f64 = 64.0;
 /// (and different at 5.5 and 6.5) on five crop / voxel-size combinations.
 pub const STI_DEFAULT_PAD_MM: f64 = 6.0;
 
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use num_complex::Complex64;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
@@ -673,46 +673,123 @@ pub fn ilsqr(
     params: &IlsqrParams,
     progress: impl FnMut(usize, usize),
 ) -> (Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>) {
-    ilsqr_traced(field, mask, grid, bdir, params, progress, &mut IlsqrTrace::default())
+    ilsqr_with(field, mask, grid, bdir, params, progress, &())
 }
 
-/// Where an [`ilsqr_traced`] run spent its time, and how its two LSQR solves ended.
-#[doc(hidden)]
-#[derive(Clone, Debug, Default)]
-pub struct IlsqrTrace {
-    /// Padded grid
-    pub dims: [usize; 3],
-    /// (stage, wall seconds, 3-D FFTs, FFT wall seconds) in execution order
-    pub stages: Vec<(&'static str, f64, usize, f64)>,
-    /// Initial solve and artefact solve
-    pub solves: Vec<LsqrOutcome>,
-    /// 3-D FFTs (forward + inverse) on the padded grid, and their total wall time
-    pub n_fft: usize,
-    pub fft_secs: f64,
+/// Instrumentation hooks for [`ilsqr_with`]. The library path ([`ilsqr`]) uses `()`, whose hooks
+/// do nothing, so it never reads a clock (`std::time::Instant` panics on
+/// `wasm32-unknown-unknown`). The hooks only observe; they cannot change the result.
+trait Tracer {
+    /// Run one 3-D transform on the padded grid.
+    fn fft<R>(&self, f: impl FnOnce() -> R) -> R {
+        f()
+    }
+    /// A stage has just ended.
+    fn stage(&self, _name: &'static str) {}
+    /// The padded grid.
+    fn dims(&self, _n: [usize; 3]) {}
+    /// An LSQR solve has ended.
+    fn solve(&self, _out: &LsqrOutcome) {}
 }
 
-/// [`ilsqr`], also filling an [`IlsqrTrace`] (for benchmarks and parity checks).
-#[doc(hidden)]
-pub fn ilsqr_traced(
+impl Tracer for () {}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub use timing::{ilsqr_traced, IlsqrTrace};
+
+/// Wall-clock tracing of iLSQR for native benchmarks and parity checks. Not compiled for
+/// `wasm32`, which has no clock in `std`.
+#[cfg(not(target_arch = "wasm32"))]
+mod timing {
+    use super::{ilsqr_with, IlsqrParams, LsqrOutcome, Tracer};
+    use crate::Grid;
+    use std::cell::{Cell, RefCell};
+    use std::time::Instant;
+
+    /// `(chi, streaking_artifacts, fast_qsm, initial_lsqr)`, as [`super::ilsqr`] returns them.
+    type Maps = (Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>);
+
+    /// Where an [`ilsqr_traced`] run spent its time, and how its two LSQR solves ended.
+    #[derive(Clone, Debug, Default)]
+    pub struct IlsqrTrace {
+        /// Padded grid
+        pub dims: [usize; 3],
+        /// (stage, wall seconds, 3-D FFTs, FFT wall seconds) in execution order
+        pub stages: Vec<(&'static str, f64, usize, f64)>,
+        /// Initial solve and artefact solve
+        pub solves: Vec<LsqrOutcome>,
+        /// 3-D FFTs (forward + inverse) on the padded grid, and their total wall time
+        pub n_fft: usize,
+        pub fft_secs: f64,
+    }
+
+    struct Timer {
+        trace: RefCell<IlsqrTrace>,
+        n_fft: Cell<usize>,
+        fft_secs: Cell<f64>,
+        /// start of the current stage, and the FFT count and time at that point
+        stage_start: Cell<(Instant, usize, f64)>,
+    }
+
+    impl Tracer for Timer {
+        fn fft<R>(&self, f: impl FnOnce() -> R) -> R {
+            let t = Instant::now();
+            let r = f();
+            self.n_fft.set(self.n_fft.get() + 1);
+            self.fft_secs.set(self.fft_secs.get() + t.elapsed().as_secs_f64());
+            r
+        }
+        fn stage(&self, name: &'static str) {
+            let (t0, n0, s0) = self.stage_start.get();
+            let (n, s) = (self.n_fft.get(), self.fft_secs.get());
+            self.trace.borrow_mut().stages.push((name, t0.elapsed().as_secs_f64(), n - n0, s - s0));
+            self.stage_start.set((Instant::now(), n, s));
+        }
+        fn dims(&self, n: [usize; 3]) {
+            self.trace.borrow_mut().dims = n;
+        }
+        fn solve(&self, out: &LsqrOutcome) {
+            self.trace.borrow_mut().solves.push(*out);
+        }
+    }
+
+    /// [`super::ilsqr`], also returning an [`IlsqrTrace`] (wall time per stage and per FFT, and
+    /// how both LSQR solves ended). Native targets only; the result is identical to `ilsqr`'s.
+    pub fn ilsqr_traced(
+        field: &[f64],
+        mask: &[u8],
+        grid: &Grid,
+        bdir: (f64, f64, f64),
+        params: &IlsqrParams,
+        progress: impl FnMut(usize, usize),
+    ) -> (Maps, IlsqrTrace) {
+        let timer = Timer {
+            trace: RefCell::default(),
+            n_fft: Cell::new(0),
+            fft_secs: Cell::new(0.0),
+            stage_start: Cell::new((Instant::now(), 0, 0.0)),
+        };
+        let out = ilsqr_with(field, mask, grid, bdir, params, progress, &timer);
+        let mut trace = timer.trace.into_inner();
+        trace.n_fft = timer.n_fft.get();
+        trace.fft_secs = timer.fft_secs.get();
+        (out, trace)
+    }
+}
+
+/// [`ilsqr`] with instrumentation hooks.
+fn ilsqr_with(
     field: &[f64],
     mask: &[u8],
     grid: &Grid,
     bdir: (f64, f64, f64),
     params: &IlsqrParams,
     mut progress: impl FnMut(usize, usize),
-    trace: &mut IlsqrTrace,
+    tracer: &impl Tracer,
 ) -> (Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>) {
     if let Err(e) = params.validate() {
         panic!("{e}");
     }
-    *trace = IlsqrTrace::default();
-    let clock = FftClock::default();
-    let mut t_stage = (std::time::Instant::now(), 0usize, 0.0f64);
-    let mut stage = |trace: &mut IlsqrTrace, name: &'static str| {
-        let (n, t) = (clock.n.get(), clock.secs.get());
-        trace.stages.push((name, t_stage.0.elapsed().as_secs_f64(), n - t_stage.1, t - t_stage.2));
-        t_stage = (std::time::Instant::now(), n, t);
-    };
     let (nx, ny, nz) = grid.dims;
     let n_in = nx * ny * nz;
     let vs = [grid.voxel_size.0, grid.voxel_size.1, grid.voxel_size.2];
@@ -742,14 +819,14 @@ pub fn ilsqr_traced(
     let inside: Vec<usize> = (0..nt).filter(|&l| m[l] > 0.0).collect();
     let pgrid = Grid::new(n[0], n[1], n[2], vs[0], vs[1], vs[2]);
     let dk = dipole_kernel(&pgrid, bdir);
-    trace.dims = n;
+    tracer.dims(n);
     let ws = RefCell::new(Fft3dWorkspace::new(n[0], n[1], n[2]));
-    let fft = |a: &mut [Complex64]| clock.time(|| ws.borrow_mut().fft3d(a));
-    let ifft = |a: &mut [Complex64]| clock.time(|| ws.borrow_mut().ifft3d(a));
+    let fft = |a: &mut [Complex64]| tracer.fft(|| ws.borrow_mut().fft3d(a));
+    let ifft = |a: &mut [Complex64]| tracer.fft(|| ws.borrow_mut().ifft3d(a));
     // the mask lies in the crop box; its forward-difference neighbours in the box grown by one
     let crop_box: Box3 = [0, 1, 2].map(|d| pd[d]..pd[d] + c[d]);
     let crop_box1: Box3 = [0, 1, 2].map(|d| pd[d]..(pd[d] + c[d] + 1).min(n[d]));
-    stage(trace, "crop/pad, dipole kernel, plans");
+    tracer.stage("crop/pad, dipole kernel, plans");
     let mut p_k: Vec<Complex64> = crate::maybe_par_iter!(p).map(|&v| Complex64::new(v, 0.0)).collect();
     fft(&mut p_k[..]);
 
@@ -780,18 +857,18 @@ pub fn ilsqr_traced(
             0.2
         };
     });
-    stage(trace, "Laplacian weights (incl. F phi)");
+    tracer.stage("Laplacian weights (incl. F phi)");
 
     // 3. initial solution: LSQR on D W D χ = D W φ, with D = F⁻¹ diag(dk) F (initial_solve)
-    let (x1r, out1) = initial_solve(n, &p, &w, &dk, &crop_box, params.max_iter, &clock);
-    trace.solves.push(out1);
-    stage(trace, "solve 1 (initial LSQR)");
+    let (x1r, out1) = initial_solve(n, &p, &w, &dk, &crop_box, params.max_iter, tracer);
+    tracer.solve(&out1);
+    tracer.stage("solve 1 (initial LSQR)");
     progress(2, 4);
 
     // 4. FastQSM prior (sign(D) inverse blended with a k-space-smoothed copy where |D| is small)
     let xfs = sti_fastqsm(&p_k, &m, &inside, &dk, n, &fft, &ifft);
     drop(p_k);
-    stage(trace, "FastQSM");
+    tracer.stage("FastQSM");
     progress(3, 4);
 
     // 5. gradient weights from the FastQSM map, pooled over the three axes in the mask
@@ -818,13 +895,13 @@ pub fn ilsqr_traced(
             };
         });
     }
-    stage(trace, "gradient weights");
+    tracer.stage("gradient weights");
     progress(4, 4);
 
     // 6. streaking artefacts (artefact_solve), subtracted from the initial solution
     let sq = (nt as f64).sqrt();
-    let (xsa, out2) = artefact_solve(n, &x1r, &m, &inside, gw, &dk, &crop_box1, params.tol, params.max_iter, &clock);
-    trace.solves.push(out2);
+    let (xsa, out2) = artefact_solve(n, &x1r, &m, &inside, gw, &dk, &crop_box1, params.tol, params.max_iter, tracer);
+    tracer.solve(&out2);
 
     // 7. subtract, mask, crop back
     let mut chi = zeros();
@@ -846,27 +923,8 @@ pub fn ilsqr_traced(
             }
         }
     }
-    stage(trace, "solve 2 (artefact LSQR, incl. setup) + output");
-    trace.n_fft = clock.n.get();
-    trace.fft_secs = clock.secs.get();
+    tracer.stage("solve 2 (artefact LSQR, incl. setup) + output");
     (chi, sa, fs, x0)
-}
-
-/// FFT count and wall time of an iLSQR run (for [`IlsqrTrace`]).
-#[derive(Default)]
-struct FftClock {
-    n: Cell<usize>,
-    secs: Cell<f64>,
-}
-
-impl FftClock {
-    fn time<R>(&self, f: impl FnOnce() -> R) -> R {
-        let t = std::time::Instant::now();
-        let r = f();
-        self.n.set(self.n.get() + 1);
-        self.secs.set(self.secs.get() + t.elapsed().as_secs_f64());
-        r
-    }
 }
 
 /// Step 3 of [`ilsqr`]: LSQR (tol 0.01) on D W D χ = D W φ with
@@ -887,10 +945,10 @@ fn initial_solve(
     dk: &[f64],
     crop_box: &Box3,
     max_iter: usize,
-    clock: &FftClock,
+    tracer: &impl Tracer,
 ) -> (Vec<f64>, LsqrOutcome) {
     let ws = RefCell::new(Fft3dWorkspace::new(n[0], n[1], n[2]));
-    let tr = |a: &mut [Complex64], inverse: bool, o: &FftOpts| clock.time(|| transform(&mut ws.borrow_mut(), a, inverse, o));
+    let tr = |a: &mut [Complex64], inverse: bool, o: &FftOpts| tracer.fft(|| transform(&mut ws.borrow_mut(), a, inverse, o));
     let apply1 = |v: &[Complex64], t: &mut [Complex64]| {
         let load = |l: usize, row: &mut [Complex64]| {
             row.iter_mut().zip(&v[l..]).zip(&dk[l..]).for_each(|((o, &z), &dv)| *o = z * dv);
@@ -930,7 +988,7 @@ fn artefact_solve(
     crop_box1: &Box3,
     tol: f64,
     max_iter: usize,
-    clock: &FftClock,
+    tracer: &impl Tracer,
 ) -> (Vec<f64>, LsqrOutcome) {
     let nt = dk.len();
     let sq = (nt as f64).sqrt();
@@ -952,7 +1010,7 @@ fn artefact_solve(
     let v_parts = compact_parts(cone.iter().copied());
     let zero = Complex64::new(0.0, 0.0);
     let ws = RefCell::new(Fft3dWorkspace::new(n[0], n[1], n[2]));
-    let tr = |a: &mut [Complex64], inverse: bool, o: &FftOpts| clock.time(|| transform(&mut ws.borrow_mut(), a, inverse, o));
+    let tr = |a: &mut [Complex64], inverse: bool, o: &FftOpts| tracer.fft(|| transform(&mut ws.borrow_mut(), a, inverse, o));
     let isq = 1.0 / sq;
     let t_cell = RefCell::new(vec![zero; nt]);
     let apply2 = |y: &[Complex64], out: &mut [Complex64]| {
@@ -1363,8 +1421,7 @@ mod tests {
         let mask = vec![1u8; n * n * n];
         let run = |vs: (f64, f64, f64), p: &IlsqrParams| {
             let grid = Grid::new(n, n, n, vs.0, vs.1, vs.2);
-            let mut tr = IlsqrTrace::default();
-            let (x, _, _, _) = ilsqr_traced(&field, &mask, &grid, bdir, p, |_, _| {}, &mut tr);
+            let ((x, _, _, _), tr) = ilsqr_traced(&field, &mask, &grid, bdir, p, |_, _| {});
             (tr.dims, x)
         };
         let iso = (2.0, 2.0, 2.0);
