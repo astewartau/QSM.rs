@@ -98,26 +98,33 @@ pub fn mindgrab(
 }
 
 /// The input conformed to the 256³ 1 mm LIA grid, plus what is needed to map a mask back.
+///
+/// The geometry is computed as niimath computes it — `f32` matrices, inverted in `f64` and
+/// rounded back to `f32`, applied in `f32` in the same order — so that voxels whose sample point
+/// falls on a rounding tie (common: a 0.9375 mm grid against a 1 mm one) land where niimath puts
+/// them.
 struct Conformed {
     /// Conformed `u8` intensities, column-major `(256, 256, 256)`.
     data: Vec<u8>,
     /// Input dimensions.
     dims: (usize, usize, usize),
-    /// Input voxel → conformed voxel (row-major 3×4).
-    to_conformed: [[f64; 4]; 3],
+    /// Input voxel→world, as `f32`.
+    in_affine: M44,
+    /// Conformed voxel→world, as `f32`.
+    out_affine: M44,
 }
 
 impl Conformed {
     /// niimath `-conform`: scale to `u8`'s range, reslice to 256³ 1 mm LIA. `None` if the affine
     /// is singular.
     fn new(image: &[f64], dims: (usize, usize, usize), affine: &[f64; 16]) -> Option<Self> {
-        let out_affine = conform_affine(dims, affine);
+        let in_affine: M44 = std::array::from_fn(|r| std::array::from_fn(|c| affine[4 * r + c] as f32));
+        let out_affine = conform_affine(dims, &in_affine);
         // conformed voxel → input voxel
-        let from_conformed = compose(&invert(affine)?, &out_affine);
-        let to_conformed = invert(&from_conformed).map(|m| top3(&m))?;
+        let to_input = vox2vox_inverse(&in_affine, &out_affine)?;
         let scaled = scale_to_u8_range(image);
-        let data = reslice_linear(&scaled, dims, &top3(&from_conformed));
-        Some(Self { data, dims, to_conformed })
+        let data = reslice_linear(&scaled, dims, &to_input);
+        Some(Self { data, dims, in_affine, out_affine })
     }
 
     /// niimath `-reslice_nn`: nearest-neighbour from the conformed grid back onto the input grid
@@ -125,12 +132,16 @@ impl Conformed {
     fn reslice_back(&self, mask: &[u8]) -> Vec<u8> {
         let (nx, ny, nz) = self.dims;
         let n = CONFORM_DIM as i64;
-        let m = &self.to_conformed;
+        // input voxel → conformed voxel
+        let Some(m) = vox2vox_inverse(&self.out_affine, &self.in_affine) else {
+            return vec![0; nx * ny * nz];
+        };
         let mut out = vec![0u8; nx * ny * nz];
         for z in 0..nz {
             for y in 0..ny {
+                let yz = row_yz(&m, y, z);
                 for x in 0..nx {
-                    let c = apply(m, x as f64, y as f64, z as f64).map(|v| v.round() as i64);
+                    let c: [i64; 3] = std::array::from_fn(|r| (x as f32 * m[r][0] + yz[r]).round() as i64);
                     if c.iter().all(|&v| (0..n).contains(&v)) {
                         out[x + nx * (y + ny * z)] = mask[(c[0] + n * (c[1] + n * c[2])) as usize];
                     }
@@ -141,23 +152,100 @@ impl Conformed {
     }
 }
 
+/// Row-major 4×4 in `f32`, as niimath's `mat44`.
+type M44 = [[f32; 4]; 4];
+
+/// `nifti_mat44_mul`: `f32` products accumulated in `f32`.
+fn mul44(a: &M44, b: &M44) -> M44 {
+    std::array::from_fn(|i| {
+        std::array::from_fn(|j| {
+            let mut c = 0.0f32;
+            for k in 0..4 {
+                c += a[i][k] * b[k][j];
+            }
+            c
+        })
+    })
+}
+
+/// `nifti_mat44_inverse`: the inverse of the affine, computed in `f64` and rounded to `f32`.
+/// `None` if singular.
+fn inv44(r: &M44) -> Option<M44> {
+    let g = |i: usize, j: usize| r[i][j] as f64;
+    let (r11, r12, r13, r21, r22, r23, r31, r32, r33) =
+        (g(0, 0), g(0, 1), g(0, 2), g(1, 0), g(1, 1), g(1, 2), g(2, 0), g(2, 1), g(2, 2));
+    let (v1, v2, v3) = (g(0, 3), g(1, 3), g(2, 3));
+    let det = r11 * r22 * r33 - r11 * r32 * r23 - r21 * r12 * r33 + r21 * r32 * r13 + r31 * r12 * r23
+        - r31 * r22 * r13;
+    if det == 0.0 {
+        return None;
+    }
+    let d = 1.0 / det;
+    let f = |v: f64| (d * v) as f32;
+    Some([
+        [
+            f(r22 * r33 - r32 * r23),
+            f(-r12 * r33 + r32 * r13),
+            f(r12 * r23 - r22 * r13),
+            f(-r12 * r23 * v3 + r12 * v2 * r33 + r22 * r13 * v3 - r22 * v1 * r33 - r32 * r13 * v2 + r32 * v1 * r23),
+        ],
+        [
+            f(-r21 * r33 + r31 * r23),
+            f(r11 * r33 - r31 * r13),
+            f(-r11 * r23 + r21 * r13),
+            f(r11 * r23 * v3 - r11 * v2 * r33 - r21 * r13 * v3 + r21 * v1 * r33 + r31 * r13 * v2 - r31 * v1 * r23),
+        ],
+        [
+            f(r21 * r32 - r31 * r22),
+            f(-r11 * r32 + r31 * r12),
+            f(r11 * r22 - r21 * r12),
+            f(-r11 * r22 * v3 + r11 * r32 * v2 + r21 * r12 * v3 - r21 * r32 * v1 - r31 * r12 * v2 + r31 * r22 * v1),
+        ],
+        [0.0, 0.0, 0.0, 1.0],
+    ])
+}
+
+/// `nifti_vect44mat44_mul`: `m · (v, 1)` in `f32`.
+fn mul_vec(m: &M44, v: [f32; 3]) -> [f32; 4] {
+    let v = [v[0], v[1], v[2], 1.0];
+    std::array::from_fn(|i| {
+        let mut o = 0.0f32;
+        for j in 0..4 {
+            o += m[i][j] * v[j];
+        }
+        o
+    })
+}
+
+/// niimath's `resliceVox2Vox` inverse: destination voxel → source voxel, i.e.
+/// `inv(inv(dst) · src)`, for resampling a `src`-grid image onto `dst`. `None` if singular.
+fn vox2vox_inverse(src: &M44, dst: &M44) -> Option<M44> {
+    inv44(&mul44(&inv44(dst)?, src))
+}
+
+/// niimath's per-row partial sums `y·m[r][1] + z·m[r][2] + m[r][3]`, in `f32`.
+fn row_yz(m: &M44, y: usize, z: usize) -> [f32; 3] {
+    std::array::from_fn(|r| y as f32 * m[r][1] + z as f32 * m[r][2] + m[r][3])
+}
+
 /// The conformed grid's voxel→world affine (niimath's `conformVox2Vox` with `toRAS = false`):
-/// 1 mm voxels along LIA (+i left, +j inferior, +k anterior), with the cube's centre voxel
+/// 1 mm voxels along LIA (+i left, +j inferior, +k anterior), with the cube's centre
 /// `(128, 128, 128)` on the world position of the input's voxel `dims / 2`.
-fn conform_affine(dims: (usize, usize, usize), affine: &[f64; 16]) -> [f64; 16] {
-    let half = [dims.0 as f64 / 2.0, dims.1 as f64 / 2.0, dims.2 as f64 / 2.0];
-    let centre: [f64; 3] = std::array::from_fn(|r| {
-        affine[4 * r] * half[0] + affine[4 * r + 1] * half[1] + affine[4 * r + 2] * half[2] + affine[4 * r + 3]
-    });
-    let c = CONFORM_DIM as f64 / 2.0;
-    // rotation rows: x = -i, y = k, z = -j
-    #[rustfmt::skip]
-    let out = [
-        -1.0, 0.0, 0.0, centre[0] + c,
-         0.0, 0.0, 1.0, centre[1] - c,
-         0.0, -1.0, 0.0, centre[2] + c,
-         0.0, 0.0, 0.0, 1.0,
+fn conform_affine(dims: (usize, usize, usize), affine: &M44) -> M44 {
+    let half = [dims.0 as f32 / 2.0, dims.1 as f32 / 2.0, dims.2 as f32 / 2.0];
+    let centre = mul_vec(affine, half);
+    // rotation rows: x = -i, y = k, z = -j (1 mm, so no scaling)
+    let mut out: M44 = [
+        [-1.0, 0.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0, 0.0],
+        [0.0, -1.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0, 1.0],
     ];
+    let n = CONFORM_DIM as f32;
+    let vol_centre = mul_vec(&out, [n, n, n]).map(|v| v * 0.5);
+    for r in 0..3 {
+        out[r][3] = centre[r] - vol_centre[r];
+    }
     out
 }
 
@@ -203,16 +291,16 @@ fn scale_to_u8_range(image: &[f64]) -> Vec<f32> {
 ///
 /// A conformed voxel whose 2×2×2 input neighbourhood is not wholly inside the input keeps the
 /// image minimum, as niimath fills it.
-fn reslice_linear(img: &[f32], (nx, ny, nz): (usize, usize, usize), m: &[[f64; 4]; 3]) -> Vec<u8> {
+fn reslice_linear(img: &[f32], (nx, ny, nz): (usize, usize, usize), m: &M44) -> Vec<u8> {
     let n = CONFORM_DIM;
     let fill = img.iter().copied().fold(f32::INFINITY, f32::min);
     let mut out = vec![fill; n * n * n];
-    let (sx, sy) = (1, nx);
-    let sz = nx * ny;
+    let (sy, sz) = (nx, nx * ny);
     for z in 0..n {
         for y in 0..n {
+            let yz = row_yz(m, y, z);
             for x in 0..n {
-                let [ix, iy, iz] = apply(m, x as f64, y as f64, z as f64);
+                let [ix, iy, iz]: [f32; 3] = std::array::from_fn(|r| x as f32 * m[r][0] + yz[r]);
                 let (fx, fy, fz) = (ix.floor(), iy.floor(), iz.floor());
                 if fx < 0.0 || fy < 0.0 || fz < 0.0 {
                     continue;
@@ -221,17 +309,19 @@ fn reslice_linear(img: &[f32], (nx, ny, nz): (usize, usize, usize), m: &[[f64; 4
                 if fx + 1 >= nx || fy + 1 >= ny || fz + 1 >= nz {
                     continue;
                 }
-                let (dx, dy, dz) = ((ix - fx as f64) as f32, (iy - fy as f64) as f32, (iz - fz as f64) as f32);
-                let i000 = fx * sx + fy * sy + fz * sz;
-                let at = |o: usize| img[i000 + o];
-                let v = at(0) * (1.0 - dx) * (1.0 - dy) * (1.0 - dz)
-                    + at(sz) * (1.0 - dx) * (1.0 - dy) * dz
-                    + at(sy) * (1.0 - dx) * dy * (1.0 - dz)
-                    + at(sy + sz) * (1.0 - dx) * dy * dz
-                    + at(sx) * dx * (1.0 - dy) * (1.0 - dz)
-                    + at(sx + sz) * dx * (1.0 - dy) * dz
-                    + at(sx + sy) * dx * dy * (1.0 - dz)
-                    + at(sx + sy + sz) * dx * dy * dz;
+                let (dx, dy, dz) = (ix - fx as f32, iy - fy as f32, iz - fz as f32);
+                let (wx0, wy0, wz0) = (1.0 - dx, 1.0 - dy, 1.0 - dz);
+                let i000 = fx + fy * sy + fz * sz;
+                // same terms, same order as niimath
+                let mut v = 0.0f32;
+                v += img[i000] * wx0 * wy0 * wz0;
+                v += img[i000 + sz] * wx0 * wy0 * dz;
+                v += img[i000 + sy] * wx0 * dy * wz0;
+                v += img[i000 + sy + sz] * wx0 * dy * dz;
+                v += img[i000 + 1] * dx * wy0 * wz0;
+                v += img[i000 + 1 + sz] * dx * wy0 * dz;
+                v += img[i000 + 1 + sy] * dx * dy * wz0;
+                v += img[i000 + 1 + sy + sz] * dx * dy * dz;
                 out[x + n * (y + n * z)] = v;
             }
         }
@@ -314,33 +404,6 @@ fn flip_axis0(data: &[f32], channels: usize) -> Vec<f32> {
     out
 }
 
-// ---- 4×4 affine helpers (row-major) ----
-
-fn compose(a: &[f64; 16], b: &[f64; 16]) -> [f64; 16] {
-    std::array::from_fn(|i| {
-        let (r, c) = (i / 4, i % 4);
-        (0..4).map(|k| a[4 * r + k] * b[4 * k + c]).sum()
-    })
-}
-
-fn invert(a: &[f64; 16]) -> Option<[f64; 16]> {
-    let inv = crate::geometry::world_to_voxel(a)?;
-    let mut out = [0.0; 16];
-    for r in 0..3 {
-        out[4 * r..4 * r + 4].copy_from_slice(&inv[r]);
-    }
-    out[15] = 1.0;
-    Some(out)
-}
-
-fn top3(a: &[f64; 16]) -> [[f64; 4]; 3] {
-    std::array::from_fn(|r| std::array::from_fn(|c| a[4 * r + c]))
-}
-
-fn apply(m: &[[f64; 4]; 3], x: f64, y: f64, z: f64) -> [f64; 3] {
-    std::array::from_fn(|r| m[r][0] * x + m[r][1] * y + m[r][2] * z + m[r][3])
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -355,16 +418,14 @@ mod tests {
 
     #[test]
     fn conform_affine_is_lia_centred_on_the_input() {
-        let a = conform_affine((40, 60, 80), &RAS_1MM);
+        let aff: M44 = std::array::from_fn(|r| std::array::from_fn(|c| RAS_1MM[4 * r + c] as f32));
+        let a = conform_affine((40, 60, 80), &aff);
         // input voxel dims/2 = (20, 30, 40) sits at world (10, 10, 10)
-        let centre = [a[0] * 128.0 + a[1] * 128.0 + a[2] * 128.0 + a[3],
-                      a[4] * 128.0 + a[5] * 128.0 + a[6] * 128.0 + a[7],
-                      a[8] * 128.0 + a[9] * 128.0 + a[10] * 128.0 + a[11]];
-        assert_eq!(centre, [10.0, 10.0, 10.0]);
+        assert_eq!(mul_vec(&a, [128.0, 128.0, 128.0])[..3], [10.0, 10.0, 10.0]);
         // +i → left (-x), +j → inferior (-z), +k → anterior (+y)
-        assert_eq!([a[0], a[4], a[8]], [-1.0, 0.0, 0.0]);
-        assert_eq!([a[1], a[5], a[9]], [0.0, 0.0, -1.0]);
-        assert_eq!([a[2], a[6], a[10]], [0.0, 1.0, 0.0]);
+        assert_eq!([a[0][0], a[1][0], a[2][0]], [-1.0, 0.0, 0.0]);
+        assert_eq!([a[0][1], a[1][1], a[2][1]], [0.0, 0.0, -1.0]);
+        assert_eq!([a[0][2], a[1][2], a[2][2]], [0.0, 1.0, 0.0]);
     }
 
     #[test]
@@ -474,8 +535,8 @@ mod tests {
         let n_diff = diff.iter().filter(|&&d| d != 0).count();
         let max = diff.iter().map(|d| d.abs()).max().unwrap();
         eprintln!("{n_diff} conformed voxels differ, max |d| {max}");
-        // niimath composes the affines in f32; allow off-by-one rounding at a few voxels
-        assert!(max <= 1 && n_diff < 1000, "{n_diff} voxels differ, max |d| = {max}");
+        // the histogram scaling rounds differently at a handful of voxels
+        assert!(max <= 1 && n_diff < 100, "{n_diff} voxels differ, max |d| = {max}");
     }
 
     /// Normalisation of niimath's conformed volume vs brainchop's `qnormalize`.
@@ -491,7 +552,7 @@ mod tests {
     }
 
     /// Argmax + largest component + reslice back, applied to the reference logits, reproduces
-    /// brainchop's mask.
+    /// brainchop's post-processing (niimath `-bwlabel 26`, `-reslice_nn`) exactly.
     #[test]
     #[ignore]
     #[cfg(feature = "onnx")]
@@ -502,7 +563,7 @@ mod tests {
         let mask = largest_component(&argmax_mask(&logits), (n, n, n), Connectivity::Full);
         let want_c = read_conformed(&dir, "ref_mask_conformed.nii");
         let diff_c = mask.iter().zip(&want_c).filter(|(&m, &w)| (m != 0) != (w != 0)).count();
-        eprintln!("{diff_c} conformed voxels differ from brainchop's (tinygrad) mask");
+        eprintln!("{diff_c} conformed voxels differ after the largest component");
 
         // the reslice itself, on brainchop's own conformed mask
         let c = Conformed::new(&mag.data, mag.dims, &mag.affine).unwrap();
@@ -510,8 +571,7 @@ mod tests {
         let want = crate::io::read_nifti_file(std::path::Path::new(&format!("{dir}/ref_mask.nii.gz"))).unwrap();
         let diff = back.iter().zip(&want.data).filter(|(&m, &w)| (m != 0) != (w > 0.5)).count();
         eprintln!("{diff} native voxels differ from niimath -reslice_nn");
+        assert_eq!(diff_c, 0, "largest component: {diff_c} differing voxels");
         assert_eq!(diff, 0, "reslice: {diff} differing voxels");
-        let brain = want_c.iter().filter(|&&w| w != 0).count();
-        assert!((diff_c as f64) < 1e-3 * brain as f64, "{diff_c} of {brain} conformed voxels differ");
     }
 }

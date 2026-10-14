@@ -86,12 +86,19 @@ Environment: Python 3.11, torch 2.14 (CPU), onnx 1.23. Export: 672,150 bytes, sh
 `mindgrab.onnx` on `qsmxt/qsm-onnx-weights` (registry status `Pending` until then;
 bring-your-own via `$QSM_MODEL_DIR` works meanwhile).
 
-`ref_mindgrab.py` runs `brainchop --skull-strip`'s pipeline (niimath `-conform`, `qnormalize`, the
-tinygrad network, niimath `-bwlabel 26`, `-reslice_nn`) and the ONNX graph on the same input, and
-writes the fixtures for `bet::mindgrab`'s parity tests (`MINDGRAB_REF_DIR`) and
+`ref_mindgrab.py` runs `brainchop --skull-strip`'s pipeline (niimath `-conform`, `qnormalize`,
+niimath `-bwlabel 26`, `-reslice_nn`) around the ONNX graph under ONNX Runtime, and writes the
+fixtures for `bet::mindgrab`'s parity tests (`MINDGRAB_REF_DIR`) and
 `tests/models_onnx.rs::mindgrab_matches_brainchop` (`MINDGRAB_ONNX`). It needs
-`pip install brainchop onnxruntime nibabel`; tinygrad's CPU backend needs `clang` on the `PATH`
-and `DEV=CPU`.
+`pip install brainchop onnxruntime nibabel`.
+
+The network is deliberately not brainchop-cli's tinygrad MeshNet: that one drops the trained head
+bias (`[+1.525, -1.526]`) — `MeshNet` builds the head without a bias and `convert_keys` zips the
+state dicts, so `model.25.bias` is discarded — which shifts every logit pair by 3.05 towards
+brain. brainchop's web app (tfjs, `use_bias: true`) keeps it, as does this export. Apart from
+that the two agree: on a 96³ crop of a real input, PyTorch's logits minus the head bias match
+tinygrad's to max |diff| 2.9e-4. `--tinygrad` also runs brainchop-cli's `segment` for comparison (about an
+hour and ~100 GB on 16 CPUs; tinygrad's CPU backend needs `clang` on the `PATH` and `DEV=CPU`).
 
 ## R2PRIMEnet and χ-sepnet
 

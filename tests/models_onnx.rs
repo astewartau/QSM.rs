@@ -1025,9 +1025,9 @@ fn rs2net_matches_python_reference() {
 }
 
 /// MindGrab end-to-end parity: `bet::mindgrab` (tract + the Rust conform / normalise /
-/// largest-component / reslice pipeline) vs `brainchop --skull-strip` (tinygrad + niimath) on
-/// an in-vivo GRE magnitude. `scripts/onnx-export/ref_mindgrab.py` writes `mag.nii` and
-/// `ref_mask.nii.gz`.
+/// largest-component / reslice pipeline) vs `brainchop --skull-strip`'s pipeline (niimath
+/// conform / bwlabel / reslice, the same graph under ONNX Runtime) on an in-vivo GRE magnitude.
+/// `scripts/onnx-export/ref_mindgrab.py` writes `mag.nii` and `ref_mask.nii.gz`.
 ///
 /// ```bash
 /// MINDGRAB_ONNX=/path/mindgrab.onnx MINDGRAB_REF_DIR=/path/ref \
@@ -1044,13 +1044,14 @@ fn mindgrab_matches_brainchop() {
         .expect("MINDGRAB_ONNX");
     let dir = std::env::var("MINDGRAB_REF_DIR").unwrap_or("/tmp/mindgrab_ref".into());
     let mag = read_nifti_file(Path::new(&format!("{dir}/mag.nii"))).expect("magnitude");
-    let want = read_nifti_file(Path::new(&format!("{dir}/ref_mask.nii.gz"))).expect("reference mask");
     let (nx, ny, nz) = mag.dims;
     let (vx, vy, vz) = mag.voxel_size;
     let grid = qsm_core::Grid::new(nx, ny, nz, vx, vy, vz);
     let t = std::time::Instant::now();
     let mask = mindgrab(&mag.data, &grid, &mag.affine, &onnx, &MindGrabParams::default(), |_, _| {})
         .expect("mindgrab");
+    println!("mindgrab: {:.1}s, {} brain voxels", t.elapsed().as_secs_f64(), mask.iter().filter(|&&m| m != 0).count());
+    let want = read_nifti_file(Path::new(&format!("{dir}/ref_mask.nii.gz"))).expect("reference mask");
     let (mut inter, mut a, mut b, mut diff) = (0usize, 0usize, 0usize, 0usize);
     for (&m, &r) in mask.iter().zip(&want.data) {
         let (m, r) = (m != 0, r > 0.5);
@@ -1060,7 +1061,7 @@ fn mindgrab_matches_brainchop() {
         diff += (m != r) as usize;
     }
     let dice = 2.0 * inter as f64 / (a + b) as f64;
-    println!("{:?} @ {:?} mm  Dice vs brainchop {dice:.6}  differing voxels {diff}  ({:.1}s)",
+    println!("{:?} @ {:?} mm  Dice vs reference {dice:.6}  differing voxels {diff}  ({:.1}s)",
         mag.dims, mag.voxel_size, t.elapsed().as_secs_f64());
     assert!(dice > 0.999, "Dice {dice}");
 }

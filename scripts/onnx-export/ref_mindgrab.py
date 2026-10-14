@@ -1,17 +1,25 @@
 """Reference fixtures for `bet::mindgrab`'s parity tests, from brainchop-cli's own pipeline.
 
-Runs MindGrab exactly as `brainchop --skull-strip` does — niimath `-conform` (256^3, 1 mm,
-LIA, intensities robustly scaled to uint8), quantile normalisation, the tinygrad MeshNet,
-largest 26-connected component (niimath `-bwlabel 26`), nearest-neighbour reslice back to
-the input grid (niimath `-reslice_nn`) — and the exported ONNX graph on the same input.
+Runs MindGrab as `brainchop --skull-strip` does — niimath `-conform` (256^3, 1 mm, LIA,
+intensities robustly scaled to uint8), brainchop's `qnormalize`, the network, the largest
+26-connected component (brainchop's `bwlabel`, i.e. niimath `-bwlabel 26`) and a
+nearest-neighbour reslice back to the input grid (niimath `-reslice_nn`) — with the network run
+as the exported ONNX graph under ONNX Runtime.
+
+The network is not brainchop-cli's tinygrad MeshNet because that one drops the trained head
+bias ([+1.525, -1.526]): `MeshNet` builds the 1x1x1 head without a bias and `convert_keys` zips
+the state dicts, discarding `model.25.bias`. Its logits are therefore shifted by a constant
+3.05 towards brain. brainchop's web app (tfjs, `use_bias: true`) and this export keep it.
+`--tinygrad` additionally runs brainchop-cli's `segment` and reports how far its mask is from the
+reference; it takes about an hour and ~100 GB on 16 CPUs.
 
 Writes to --out:
   mag.nii                   the 3D input (first volume of a 4D input)
   conformed.nii             niimath's uint8 conformed volume (its header carries the affine)
   ref_input.npy             normalised network input, float32 C-order (x, y, z) = (1,1,256,256,256)
   ref_logits.npy            ONNX Runtime logits on ref_input (1,2,256,256,256)
-  ref_mask_conformed.nii    brainchop's mask in conformed space (after the largest component)
-  ref_mask.nii.gz           brainchop's mask on the input grid
+  ref_mask_conformed.nii    the mask in conformed space (after the largest component)
+  ref_mask.nii.gz           the mask on the input grid
 
     pip install brainchop onnxruntime nibabel     # brainchop pulls in tinygrad and niimath
     python ref_mindgrab.py --mag magnitude.nii.gz --onnx mindgrab.onnx --out /tmp/mindgrab_ref
@@ -29,6 +37,7 @@ def main():
     ap.add_argument("--mag", required=True)
     ap.add_argument("--onnx", required=True)
     ap.add_argument("--out", required=True)
+    ap.add_argument("--tinygrad", action="store_true", help="also run brainchop-cli's segment")
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
 
@@ -40,9 +49,8 @@ def main():
     nib.save(nib.Nifti1Image(data, img.affine, img.header), mag)
 
     from brainchop import load, segment
-    from brainchop.niimath import conform, truncate_header_bytes
+    from brainchop.niimath import bwlabel, conform, truncate_header_bytes
     from brainchop.tiny_meshnet import qnormalize
-    from tinygrad import Tensor
 
     vol = load(mag)
     conf_u8, conf_hdr = conform(mag)
@@ -60,11 +68,15 @@ def main():
     logits = ort.InferenceSession(a.onnx, so).run(None, {"image": x})[0]
     np.save(os.path.join(a.out, "ref_logits.npy"), logits.astype(np.float32))
 
-    result = segment(vol, "mindgrab")
-    m = result.data.numpy().astype(np.uint8)  # (z, y, x) C-order == NIfTI (x, y, z) Fortran
-    onnx_argmax = (logits[0, 1] > logits[0, 0]).astype(np.uint8).transpose(2, 1, 0)
-    print("ONNX argmax vs tinygrad (before largest component): differing voxels",
-          int(((onnx_argmax > 0) != (m > 0)).sum()), "of", int((m > 0).sum()), "brain")
+    # logits are (1, 2, x, y, z); masks are written (z, y, x) C-order == NIfTI (x, y, z)
+    m = np.ascontiguousarray((logits[0, 1] > logits[0, 0]).astype(np.uint8).transpose(2, 1, 0))
+    m, _ = bwlabel(conf_hdr, m)
+    m = (m > 0).astype(np.uint8)
+
+    if a.tinygrad:
+        t = segment(vol, "mindgrab").data.numpy().astype(np.uint8) > 0
+        print("brainchop-cli (no head bias) vs reference: differing conformed voxels",
+              int((t != (m > 0)).sum()), "of", int(m.sum()), "brain")
 
     mc = os.path.join(a.out, "ref_mask_conformed.nii")
     with open(mc, "wb") as f:
