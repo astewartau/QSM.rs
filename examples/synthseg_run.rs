@@ -18,16 +18,10 @@ fn main() {
 
     let img = read_nifti_file(Path::new(positional[0])).expect("read image");
     let onnx = if positional[1] == "auto" {
-        #[cfg(feature = "download")]
-        {
-            let spec = qsm_core::models::find_model("synthseg").expect("registry entry");
-            println!("fetching {} weights...", spec.name);
-            qsm_core::models::download::primary_bytes(spec).expect("download weights")
-        }
-        #[cfg(not(feature = "download"))]
-        panic!("`auto` needs the `download` feature");
+        println!("resolving synthseg weights...");
+        qsm_core::models::primary_weight("synthseg").expect("synthseg weights")
     } else {
-        std::fs::read(positional[1]).expect("read onnx")
+        std::fs::read(positional[1]).expect("read onnx").into()
     };
     let grid = Grid::new(
         img.dims.0, img.dims.1, img.dims.2,

@@ -1,0 +1,5 @@
+# Builds of this repository for the browser target. `models::onnx` refuses to compile on wasm32
+# without SIMD128 (tract registers its wasm matmul kernels only under it). Downstream hosts set
+# their own flags; this only covers `cargo build/check/test --target wasm32-unknown-unknown` here.
+[target.wasm32-unknown-unknown]
+rustflags = ["-C", "target-feature=+simd128"]

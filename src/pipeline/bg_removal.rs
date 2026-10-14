@@ -129,8 +129,8 @@ pub fn run_bg_removal(
 }
 
 /// Source the BFRnet weights and run inference. Requires the `onnx` feature;
-/// weights come from the model registry (local `$QSM_MODEL_DIR`/cache, or the
-/// `download` feature).
+/// weights resolve through [`crate::models`] (bytes supplied with
+/// [`crate::models::provide_weights`], then `$QSM_MODEL_DIR`/cache/download on native).
 #[cfg(feature = "onnx")]
 fn run_bfrnet(
     field_ppm: &[f64],

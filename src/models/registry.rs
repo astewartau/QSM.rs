@@ -4,7 +4,7 @@
 //! vendored here. Entries marked [`WeightStatus::Pending`] are recognized
 //! targets whose ONNX weights are not yet converted and hosted — their `url`
 //! and `sha256` are filled in once the exported `.onnx` is uploaded (Hugging Face). Until then a host can still run them via bring-your-own-weights
-//! (`$QSM_MODEL_DIR`).
+//! (`$QSM_MODEL_DIR`, or [`super::provide_weights`]).
 //!
 //! Editing checklist when a model goes from Pending → Available:
 //! 1. export/convert to ONNX, upload the file,

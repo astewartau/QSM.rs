@@ -240,8 +240,8 @@ pub fn run_dipole_inversion(
 }
 
 /// Source the xQSM weights and run inference. Requires the `onnx` feature;
-/// weights come from the model registry (local `$QSM_MODEL_DIR`/cache, or the
-/// `download` feature).
+/// weights resolve through [`crate::models`] (bytes supplied with
+/// [`crate::models::provide_weights`], then `$QSM_MODEL_DIR`/cache/download on native).
 #[cfg(feature = "onnx")]
 fn run_xqsm(
     local_field_ppm: &[f64],
@@ -285,8 +285,8 @@ fn run_xqsm(
 /// [`run_dipole_inversion`], and directly here for a caller that wants it standalone.
 ///
 /// `total_field_ppm` and `mask` are column-major `(nx,ny,nz)`; the grid and B0 direction come
-/// from `metadata`. Requires the `onnx` feature; weights resolve local-first then via the
-/// `download` feature. Returns susceptibility (ppm), masked.
+/// from `metadata`. Requires the `onnx` feature; both weight files resolve through [`crate::models`]
+/// (supplied bytes first, as for every network). Returns susceptibility (ppm), masked.
 ///
 /// Refuses a volume whose slices are not contiguous, like every other stage here: NeXtQSM's
 /// unrolled data-consistency term is an FFT dipole convolution, so a gap invalidates it as

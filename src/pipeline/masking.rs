@@ -282,7 +282,7 @@ pub fn apply_mask_ops(
 }
 
 /// Source the HD-BET weights and run it. Requires the `onnx` feature; weights come from the
-/// model registry (local `$QSM_MODEL_DIR`/cache, or the `download` feature).
+/// model registry through [`crate::models`] (supplied bytes first, then local/download on native).
 #[cfg(feature = "onnx")]
 fn run_hd_bet(
     magnitude: &[f64],
@@ -306,7 +306,7 @@ fn run_hd_bet(
 }
 
 /// Source the RS2-Net weights and run it. Requires the `onnx` feature; weights come from the
-/// model registry (local `$QSM_MODEL_DIR`/cache, or the `download` feature).
+/// model registry through [`crate::models`] (supplied bytes first, then local/download on native).
 #[cfg(feature = "onnx")]
 fn run_rs2_net(
     magnitude: &[f64],
