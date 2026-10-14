@@ -17,6 +17,11 @@
 //!
 //! For TGV, use [`run_tgv`] which combines steps 1-4 internally.
 //!
+//! Echo-planar data has one more step, ahead of all of these and not wrapped as a stage here:
+//! unwarp the susceptibility distortion with [`crate::distortion`], on each volume in its own
+//! acquired geometry. It has to precede even stage 0 — see [`motion`] for why the two corrections
+//! do not commute.
+//!
 //! ## Combined algorithms
 //!
 //! - HARPERELLA: SMV-based exterior Laplacian estimation (Li et al., 2014)
