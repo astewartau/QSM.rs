@@ -1775,7 +1775,7 @@ fn run_qsmart_reconstruction(
         &meta,
         &inv_config,
         pipeline::QsmReference::None,
-        &mut |_, _| {},
+        &mut (),
     )
     .expect("run_qsmart failed");
 

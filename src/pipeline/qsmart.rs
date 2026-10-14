@@ -7,6 +7,25 @@
 //! with vasculature excluded. Final offset adjustment combines both.
 
 use super::config::*;
+use super::observer::{Observer, VolumeRef};
+
+/// Names of the intermediates [`run_qsmart`] reports through [`Observer::output`], in the order
+/// they are produced. Each is reported once per run.
+pub mod outputs {
+    /// Vessels found by vasculature detection ([`VolumeRef::Mask`](super::VolumeRef::Mask),
+    /// 1 = vessel, always inside the brain mask). Stage 2 runs on the brain mask minus these.
+    pub const VESSEL_MASK: &str = "vessel_mask";
+    /// Stage-1 local field: SDF over the whole brain mask, vessels included (ppm).
+    pub const LOCAL_FIELD_STAGE1: &str = "local_field_stage1";
+    /// Stage-1 susceptibility: inner inversion of the stage-1 local field over the brain mask
+    /// (ppm, unreferenced).
+    pub const CHI_STAGE1: &str = "chi_stage1";
+    /// Stage-2 local field: vessel-aware SDF on the tissue-only field (ppm).
+    pub const LOCAL_FIELD_STAGE2: &str = "local_field_stage2";
+    /// Stage-2 susceptibility: inner inversion of the stage-2 local field over tissue only
+    /// (ppm, unreferenced, zero in vessels).
+    pub const CHI_STAGE2: &str = "chi_stage2";
+}
 
 /// Run QSMART two-stage QSM reconstruction.
 ///
@@ -24,10 +43,13 @@ use super::config::*;
 ///   (`qsmart.ilsqr_max_iter`, `qsmart.ilsqr_pad_mm`; the artefact tolerance comes from
 ///   `inversion_config.ilsqr`).
 /// * `reference` - QSM referencing method
-/// * `progress` - Progress callback (current_step, total_steps)
+/// * `observer` - Receives progress (step of 6) and the intermediates named in [`outputs`] as
+///   they are produced, as borrowed slices. A plain `FnMut(usize, usize)` progress closure works
+///   here too and ignores the intermediates.
 ///
 /// # Returns
-/// Susceptibility map in ppm (referenced)
+/// Susceptibility map in ppm (referenced): the stage-1 and stage-2 χ combined by offset
+/// adjustment, zero outside the brain mask.
 pub fn run_qsmart(
     field_ppm: &[f64],
     mask: &[u8],
@@ -35,7 +57,7 @@ pub fn run_qsmart(
     metadata: &ScanMetadata,
     inversion_config: &InversionConfig,
     reference: QsmReference,
-    progress: &mut dyn FnMut(usize, usize),
+    observer: &mut dyn Observer,
 ) -> Result<Vec<f64>, PipelineError> {
     // Refused up front rather than part-way through the two inversions below.
     metadata.require_contiguous_slices()?;
@@ -82,7 +104,7 @@ pub fn run_qsmart(
     };
 
     // Step 1: Vasculature detection (vasc_mask: 1 = tissue, 0 = vessel)
-    progress(1, 6);
+    observer.progress(1, 6);
     let uniform_mag = vec![1.0f64; n_voxels];
     let mag = magnitude.unwrap_or(&uniform_mag);
     let vasc_params = crate::utils::VasculatureParams {
@@ -94,13 +116,17 @@ pub fn run_qsmart(
     let vasc_mask = crate::utils::generate_vasculature_mask(
         mag, mask, &grid, &vasc_params, |_, _| {},
     );
+    {
+        let vessel_mask: Vec<u8> = vasc_mask.iter().map(|&v| u8::from(v < 0.5)).collect();
+        observer.output(outputs::VESSEL_MASK, VolumeRef::Mask(&vessel_mask));
+    }
 
     // No reliability map at this layer, so the QSMART weighting mask is just the brain mask.
     let weighted_mask: Vec<f64> = mask.iter().map(|&m| m as f64).collect();
     let ones_vasc = vec![1.0f64; n_voxels];
 
     // Step 2: SDF stage 1 — background removal over the whole ROI (vessels included).
-    progress(2, 6);
+    observer.progress(2, 6);
     let sdf_params1 = crate::bgremove::SdfParams {
         sigma1: qsmart_params.sdf_sigma1_stage1,
         sigma2: qsmart_params.sdf_sigma2_stage1,
@@ -112,14 +138,16 @@ pub fn run_qsmart(
     let lfs1 = crate::bgremove::sdf::sdf(
         field_ppm, &weighted_mask, &ones_vasc, &grid, &sdf_params1, |_, _| {},
     );
+    observer.output(outputs::LOCAL_FIELD_STAGE1, VolumeRef::Real(&lfs1));
 
     // Step 3: dipole inversion stage 1 over the whole ROI.
-    progress(3, 6);
+    observer.progress(3, 6);
     let mask_stage1: Vec<u8> = weighted_mask.iter().map(|&v| if v > 0.1 { 1 } else { 0 }).collect();
     let chi1 = invert(&lfs1, &mask_stage1)?;
+    observer.output(outputs::CHI_STAGE1, VolumeRef::Real(&chi1));
 
     // Step 4: SDF stage 2 — tissue-only, vessel-aware (mask-zeroed field input).
-    progress(4, 6);
+    observer.progress(4, 6);
     let sdf_params2 = crate::bgremove::SdfParams {
         sigma1: qsmart_params.sdf_sigma1_stage2,
         sigma2: qsmart_params.sdf_sigma2_stage2,
@@ -135,19 +163,21 @@ pub fn run_qsmart(
     let lfs2 = crate::bgremove::sdf::sdf(
         &field_weighted, &weighted_mask, &vasc_mask, &grid, &sdf_params2, |_, _| {},
     );
+    observer.output(outputs::LOCAL_FIELD_STAGE2, VolumeRef::Real(&lfs2));
 
     // Step 5: dipole inversion stage 2 over tissue only (in-mask AND not vessel).
-    progress(5, 6);
+    observer.progress(5, 6);
     let mask_stage2: Vec<u8> = weighted_mask.iter()
         .zip(vasc_mask.iter())
         .map(|(&m, &v)| if m > 0.1 && v > 0.5 { 1 } else { 0 })
         .collect();
     let chi2 = invert(&lfs2, &mask_stage2)?;
+    observer.output(outputs::CHI_STAGE2, VolumeRef::Real(&chi2));
 
     // Step 6: offset adjustment (combine stages) and reference.
     // removed_voxels = vessel regions (in mask but excluded from stage 2).
     // Everything is in ppm here, so adjust_offset's lfs rescale is the identity (ppm = 1.0).
-    progress(6, 6);
+    observer.progress(6, 6);
     let removed_voxels: Vec<f64> = weighted_mask.iter()
         .zip(vasc_mask.iter())
         .map(|(&m, &v)| m - v)
@@ -192,7 +222,7 @@ mod tests {
 
         let result = run_qsmart(
             &field, &mask, None, &meta, &config, QsmReference::Mean,
-            &mut |_, _| {},
+            &mut (),
         );
         assert!(result.is_ok());
         let chi = result.unwrap();
@@ -228,13 +258,98 @@ mod tests {
 
         let chi = run_qsmart(
             &field, &mask, None, &meta, &config, QsmReference::Mean,
-            &mut |_, _| {},
+            &mut (),
         )
         .unwrap();
         assert_eq!(chi.len(), n);
         for &v in &chi {
             assert!(v.is_finite(), "QSMART output must be finite");
         }
+    }
+
+    #[test]
+    fn test_run_qsmart_reports_intermediates() {
+        #[derive(Default)]
+        struct Recorder {
+            steps: Vec<(usize, usize)>,
+            outputs: Vec<(&'static str, Vec<f64>)>,
+        }
+        impl Observer for Recorder {
+            fn progress(&mut self, done: usize, total: usize) {
+                self.steps.push((done, total));
+            }
+            fn output(&mut self, name: &'static str, volume: VolumeRef<'_>) {
+                let data = match volume {
+                    VolumeRef::Real(v) => v.to_vec(),
+                    VolumeRef::Mask(m) => m.iter().map(|&b| b as f64).collect(),
+                };
+                self.outputs.push((name, data));
+            }
+        }
+
+        let (nx, ny, nz) = (12, 12, 12);
+        let n = nx * ny * nz;
+        let field: Vec<f64> = (0..n).map(|i| 0.01 * ((i % 7) as f64 - 3.0)).collect();
+        let magnitude: Vec<f64> = (0..n).map(|i| if i % 11 == 0 { 0.2 } else { 1.0 }).collect();
+        let mask = vec![1u8; n];
+        let meta = ScanMetadata {
+            dims: (nx, ny, nz),
+            voxel_size: (1.0, 1.0, 1.0),
+            echo_times: vec![0.005],
+            field_strength: 3.0,
+            b0_direction: (0.0, 0.0, 1.0),
+            slice_geometry: None,
+        };
+        let mut qsmart = crate::utils::QsmartParams::for_field_strength(3.0);
+        qsmart.inversion = InversionAlgorithm::Tkd;
+        let config = InversionConfig { algorithm: InversionAlgorithm::Qsmart, qsmart, ..Default::default() };
+
+        let mut rec = Recorder::default();
+        let chi = run_qsmart(
+            &field, &mask, Some(&magnitude), &meta, &config, QsmReference::None, &mut rec,
+        )
+        .unwrap();
+        // Reporting intermediates does not change the result.
+        let plain = run_qsmart(
+            &field, &mask, Some(&magnitude), &meta, &config, QsmReference::None, &mut (),
+        )
+        .unwrap();
+        assert_eq!(chi, plain);
+
+        assert_eq!(rec.steps, (1..=6).map(|i| (i, 6)).collect::<Vec<_>>());
+        let names: Vec<_> = rec.outputs.iter().map(|(name, _)| *name).collect();
+        assert_eq!(
+            names,
+            [
+                outputs::VESSEL_MASK,
+                outputs::LOCAL_FIELD_STAGE1,
+                outputs::CHI_STAGE1,
+                outputs::LOCAL_FIELD_STAGE2,
+                outputs::CHI_STAGE2,
+            ]
+        );
+        for (name, data) in &rec.outputs {
+            assert_eq!(data.len(), n, "{name}");
+            assert!(data.iter().all(|v| v.is_finite()), "{name}");
+        }
+        // Stage 2 inverts tissue only, so its χ is zero in vessels.
+        let vessels = &rec.outputs[0].1;
+        let chi2 = &rec.outputs[4].1;
+        for (&v, &c) in vessels.iter().zip(chi2) {
+            assert!(v == 0.0 || v == 1.0);
+            if v == 1.0 {
+                assert_eq!(c, 0.0);
+            }
+        }
+
+        // A progress closure is an observer too.
+        let mut steps = 0;
+        run_qsmart(
+            &field, &mask, Some(&magnitude), &meta, &config, QsmReference::None,
+            &mut |_: usize, _: usize| steps += 1,
+        )
+        .unwrap();
+        assert_eq!(steps, 6);
     }
 
     #[test]
@@ -260,7 +375,7 @@ mod tests {
 
         let result = run_qsmart(
             &vec![0.0; n], &vec![1u8; n], None, &meta, &config,
-            QsmReference::Mean, &mut |_, _| {},
+            QsmReference::Mean, &mut (),
         );
         assert!(result.is_err());
     }
