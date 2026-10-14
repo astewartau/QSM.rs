@@ -330,7 +330,7 @@ fn run_rs2_net(
 }
 
 /// Source the MindGrab weights and run it. Requires the `onnx` feature; weights come from the
-/// model registry (local `$QSM_MODEL_DIR`/cache, or the `download` feature).
+/// model registry through [`crate::models`] (supplied bytes first, then local/download on native).
 #[cfg(feature = "onnx")]
 fn run_mindgrab(
     magnitude: &[f64],
