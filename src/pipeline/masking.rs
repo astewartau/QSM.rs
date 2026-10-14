@@ -165,7 +165,8 @@ pub fn build_mask_section(
 ///
 /// **Two different images.** `input_data` is what a generator looks at — thresholding may use a
 /// phase-quality map, for instance. `magnitude` is the magnitude image, and is what the ops that
-/// need real signal use: [`MaskOp::Bet`], [`MaskOp::HdBet`], [`MaskOp::Rs2Net`] and [`MaskOp::SignalErode`]. Passing
+/// need real signal use: [`MaskOp::Bet`], [`MaskOp::HdBet`], [`MaskOp::Rs2Net`], [`MaskOp::MindGrab`] and
+/// [`MaskOp::SignalErode`]. Passing
 /// the section input as `magnitude` is a bug: signal-gated erosion divides out a receive-coil bias
 /// estimate and gates on the in-mask median, which only means anything for a magnitude image.
 /// Those ops error when `magnitude` is `None`. To match what [`build_mask_section`] does, pass
@@ -265,6 +266,15 @@ pub fn apply_mask_ops(
                 })?;
                 mask = run_rs2_net(mag_data, &grid, params)?;
             }
+            MaskOp::MindGrab(params) => {
+                let mag_data = magnitude.ok_or_else(|| {
+                    PipelineError::InvalidInput("MindGrab requires magnitude data".into())
+                })?;
+                let affine = metadata.affine.as_ref().ok_or_else(|| {
+                    PipelineError::InvalidInput("MindGrab requires the image affine".into())
+                })?;
+                mask = run_mindgrab(mag_data, &grid, affine, params)?;
+            }
         }
     }
 
@@ -319,6 +329,32 @@ fn run_rs2_net(
     ))
 }
 
+/// Source the MindGrab weights and run it. Requires the `onnx` feature; weights come from the
+/// model registry (local `$QSM_MODEL_DIR`/cache, or the `download` feature).
+#[cfg(feature = "onnx")]
+fn run_mindgrab(
+    magnitude: &[f64],
+    grid: &crate::Grid,
+    affine: &[f64; 16],
+    params: &crate::bet::MindGrabParams,
+) -> Result<Vec<u8>, PipelineError> {
+    let bytes = crate::models::primary_weight("mindgrab").map_err(PipelineError::InvalidConfig)?;
+    crate::bet::mindgrab(magnitude, grid, affine, &bytes, params, |_, _| {})
+        .map_err(|e| PipelineError::AlgorithmError(e.to_string()))
+}
+
+#[cfg(not(feature = "onnx"))]
+fn run_mindgrab(
+    _magnitude: &[f64],
+    _grid: &crate::Grid,
+    _affine: &[f64; 16],
+    _params: &crate::bet::MindGrabParams,
+) -> Result<Vec<u8>, PipelineError> {
+    Err(PipelineError::InvalidConfig(
+        "MindGrab requires building qsm-core with the 'onnx' feature".into(),
+    ))
+}
+
 /// Build a mask from multiple sections, OR'd together.
 ///
 /// Each section specifies an input source, a generator (threshold/BET),
@@ -366,6 +402,7 @@ mod tests {
             field_strength: 3.0,
             b0_direction: (0.0, 0.0, 1.0),
             slice_geometry: None,
+            affine: None,
         }
     }
 
@@ -563,6 +600,24 @@ mod tests {
         assert!(run_masking(&sections, &[], &[], &meta).is_err());
         #[cfg(not(feature = "onnx"))]
         assert!(run_masking(&sections, &[], &[&vec![1.0; 512]], &meta).is_err());
+    }
+
+    #[test]
+    fn test_masking_mindgrab_requires_magnitude_and_affine() {
+        let mut meta = test_metadata();
+        let sections = vec![MaskSection {
+            input: MaskingInput::Magnitude,
+            generator: MaskOp::MindGrab(Default::default()),
+            refinements: vec![],
+        }];
+        let mag = vec![1.0; 512];
+        assert!(run_masking(&sections, &[], &[], &meta).is_err());
+        // no affine
+        let err = run_masking(&sections, &[], &[&mag], &meta).unwrap_err();
+        assert!(err.to_string().contains("affine"), "{err}");
+        meta.affine = Some([1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0]);
+        #[cfg(not(feature = "onnx"))]
+        assert!(run_masking(&sections, &[], &[&mag], &meta).is_err());
     }
 
     /// Applying ops one at a time (what an interactive host does) must equal building the whole

@@ -1597,6 +1597,7 @@ fn test_pipeline_unwrap_bfr_stage_laplacian() {
         field_strength: data.field_strength,
         b0_direction: data.b0_dir,
         slice_geometry: None,
+        affine: None,
     };
     let config = pipeline::FieldMappingConfig {
         unwrapping_algorithm: pipeline::UnwrappingAlgorithm::Laplacian,
@@ -1761,6 +1762,7 @@ fn run_qsmart_reconstruction(
         field_strength: data.field_strength,
         b0_direction: data.b0_dir,
         slice_geometry: None,
+        affine: None,
     };
     let mut inv_config = pipeline::InversionConfig::default();
     inv_config.qsmart.inversion = inversion;
@@ -3611,6 +3613,7 @@ fn test_robust_echo_combination() {
             field_strength: data.field_strength,
             b0_direction: data.b0_dir,
             slice_geometry: None,
+            affine: None,
         };
         let config = pipeline::FieldMappingConfig {
             b0_estimation: pipeline::B0EstimationMethod::RobustFit(params.clone()),

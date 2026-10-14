@@ -1,16 +1,28 @@
-//! 6-connected component labelling for binary masks.
+//! Connected-component labelling for binary masks.
 //!
-//! Matches `scipy.ndimage.label(mask)` with its default structuring element (connectivity 1,
-//! i.e. face neighbours only), which is what the reference implementations of the ported
-//! deep-learning post-processing use.
+//! [`Connectivity::Face`] matches `scipy.ndimage.label(mask)` with its default structuring
+//! element (connectivity 1, face neighbours only); [`Connectivity::Full`] matches niimath's
+//! `-bwlabel 26` (face, edge and corner neighbours).
 
-/// Label the 6-connected foreground components of `mask`.
+/// Which neighbours of a voxel count as touching it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Connectivity {
+    /// The 6 face neighbours.
+    Face,
+    /// All 26 neighbours: faces, edges and corners.
+    // Only MindGrab's post-processing (`onnx`) uses it outside tests.
+    #[cfg_attr(not(feature = "onnx"), allow(dead_code))]
+    Full,
+}
+
+/// Label the connected foreground components of `mask`.
 ///
 /// Returns `(labels, sizes)`: `labels[i]` is 0 for background or a 1-based component id, and
 /// `sizes[k]` is the voxel count of component `k` (`sizes[0]` is unused and always 0).
 pub(crate) fn label_components(
     mask: &[u8],
     dims: (usize, usize, usize),
+    connectivity: Connectivity,
 ) -> (Vec<u32>, Vec<usize>) {
     let (nx, ny, nz) = dims;
     let nxy = nx * ny;
@@ -34,28 +46,45 @@ pub(crate) fn label_components(
                     stack.push(j);
                 }
             };
-            if x > 0 { visit(i - 1); }
-            if x + 1 < nx { visit(i + 1); }
-            if y > 0 { visit(i - nx); }
-            if y + 1 < ny { visit(i + nx); }
-            if z > 0 { visit(i - nxy); }
-            if z + 1 < nz { visit(i + nxy); }
+            match connectivity {
+                Connectivity::Face => {
+                    if x > 0 { visit(i - 1); }
+                    if x + 1 < nx { visit(i + 1); }
+                    if y > 0 { visit(i - nx); }
+                    if y + 1 < ny { visit(i + nx); }
+                    if z > 0 { visit(i - nxy); }
+                    if z + 1 < nz { visit(i + nxy); }
+                }
+                Connectivity::Full => {
+                    for zz in z.saturating_sub(1)..(z + 2).min(nz) {
+                        for yy in y.saturating_sub(1)..(y + 2).min(ny) {
+                            for xx in x.saturating_sub(1)..(x + 2).min(nx) {
+                                visit(xx + yy * nx + zz * nxy);
+                            }
+                        }
+                    }
+                }
+            }
         }
         sizes.push(size);
     }
     (label, sizes)
 }
 
-/// Keep only the largest 6-connected component of `mask`.
+/// Keep only the largest connected component of `mask`.
 ///
 /// Mirrors lab2im's `get_largest_connected_component`: an all-background mask is returned
 /// unchanged, and ties go to the component encountered first in the raster scan.
-// Its only caller is SynthSeg's `postprocess`, which is `#[cfg(feature = "onnx")]`, so
-// without that feature the lib build has no user for it. Allowed only in that configuration,
-// so that it stays a genuine dead-code check whenever `onnx` is on.
+// Its only callers are SynthSeg's and MindGrab's post-processing, which are
+// `#[cfg(feature = "onnx")]`, so without that feature the lib build has no user for it. Allowed
+// only in that configuration, so that it stays a genuine dead-code check whenever `onnx` is on.
 #[cfg_attr(not(feature = "onnx"), allow(dead_code))]
-pub(crate) fn largest_component(mask: &[u8], dims: (usize, usize, usize)) -> Vec<u8> {
-    let (label, sizes) = label_components(mask, dims);
+pub(crate) fn largest_component(
+    mask: &[u8],
+    dims: (usize, usize, usize),
+    connectivity: Connectivity,
+) -> Vec<u8> {
+    let (label, sizes) = label_components(mask, dims, connectivity);
     if sizes.len() <= 1 {
         return mask.to_vec();
     }
@@ -78,7 +107,7 @@ mod tests {
         let dims = (6, 1, 1);
         // two components: {0,1,2} and {4}
         let mask = [1u8, 1, 1, 0, 1, 0];
-        assert_eq!(largest_component(&mask, dims), vec![1, 1, 1, 0, 0, 0]);
+        assert_eq!(largest_component(&mask, dims, Connectivity::Face), vec![1, 1, 1, 0, 0, 0]);
     }
 
     #[test]
@@ -88,13 +117,26 @@ mod tests {
         let mut mask = vec![0u8; 4];
         mask[0] = 1; // (0,0,0)
         mask[3] = 1; // (1,1,0)
-        let (_, sizes) = label_components(&mask, dims);
+        let (_, sizes) = label_components(&mask, dims, Connectivity::Face);
         assert_eq!(sizes.len() - 1, 2, "expected two separate components");
+    }
+
+    #[test]
+    fn full_connectivity_joins_corner_neighbours() {
+        // (0,0,0) and (1,1,1) touch only at a corner: one component under 26-connectivity.
+        let dims = (2, 2, 2);
+        let mut mask = vec![0u8; 8];
+        mask[0] = 1;
+        mask[7] = 1;
+        let (_, sizes) = label_components(&mask, dims, Connectivity::Full);
+        assert_eq!(sizes, vec![0, 2]);
+        let (_, sizes) = label_components(&mask, dims, Connectivity::Face);
+        assert_eq!(sizes, vec![0, 1, 1]);
     }
 
     #[test]
     fn empty_mask_is_returned_unchanged() {
         let mask = vec![0u8; 8];
-        assert_eq!(largest_component(&mask, (2, 2, 2)), mask);
+        assert_eq!(largest_component(&mask, (2, 2, 2), Connectivity::Full), mask);
     }
 }

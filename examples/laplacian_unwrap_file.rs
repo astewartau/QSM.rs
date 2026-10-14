@@ -96,6 +96,7 @@ fn main() {
             field_strength: b0,
             b0_direction: (0.0, 0.0, 1.0),
             slice_geometry: None,
+            affine: None,
         };
         let phases: Vec<&[f64]> = echoes.iter().map(|n| n.data.as_slice()).collect();
         let field = run_field_mapping(&phases, None, &mask, &meta, &config, &mut |_, _| {})

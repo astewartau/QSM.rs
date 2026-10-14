@@ -121,6 +121,7 @@ Methods marked † need the `onnx` feature and model weights.
 | **BET** | Brain extraction by surface-mesh evolution (`run_bet`) | Smith, S.M. (2002). "Fast robust automated brain extraction." *Human Brain Mapping*, 17(3):143-155. [DOI](https://doi.org/10.1002/hbm.10062) |
 | **HD-BET** † | Deep-learning brain extraction from a magnitude image (`hd_bet`) | Isensee, F., et al. (2019). "Automated brain extraction of multisequence MRI using artificial neural networks." *Human Brain Mapping*, 40(17):4952-4964. [DOI](https://doi.org/10.1002/hbm.24750) |
 | **RS2-Net** † | Deep-learning rodent brain extraction (`rs2_net`) | Lin, Y., et al. (2024). "RS2-Net: An end-to-end deep learning framework for rodent skull stripping in multi-center brain MRI." *NeuroImage*, 298:120769. [DOI](https://doi.org/10.1016/j.neuroimage.2024.120769) |
+| **MindGrab** † | Deep-learning brain extraction for any contrast (`mindgrab`) | Fani, A., et al. (2025). "MindGrab for BrainChop: Fast and Accurate Skull Stripping for Command Line and Browser." *arXiv*:2506.11860. [DOI](https://doi.org/10.48550/arXiv.2506.11860) |
 | **SynthSeg** † | Contrast-agnostic whole-brain segmentation into FreeSurfer labels (`segment::synthseg`) | Billot, B., et al. (2023). "SynthSeg: Segmentation of brain MRI scans of any contrast and resolution without retraining." *Medical Image Analysis*, 86:102789. [DOI](https://doi.org/10.1016/j.media.2023.102789) |
 | **Threshold masking** | Otsu, fixed or percentile threshold of the magnitude or of the ROMEO phase-quality map (`MaskOp::Threshold`, `otsu_threshold`) | Otsu, N. (1979). "A Threshold Selection Method from Gray-Level Histograms." *IEEE Transactions on Systems, Man, and Cybernetics*, 9(1):62-66. [DOI](https://doi.org/10.1109/TSMC.1979.4310076) |
 
@@ -290,6 +291,8 @@ This library was developed with reference to the following open-source implement
 | [MEDI_toolbox](https://github.com/huawu02/MEDI_toolbox) | MEDI | MATLAB |
 | [FSL-BET2](https://github.com/Bostrix/FSL-BET2) | BET | C++ |
 | [Rodent-Skull-Stripping](https://github.com/VitoLin21/Rodent-Skull-Stripping) | RS2-Net | Python |
+| [brainchop-cli](https://github.com/neuroneural/brainchop-cli) | MindGrab | Python |
+| [niimath](https://github.com/rordenlab/niimath) | MindGrab conform and reslice | C |
 | [QSMART](https://github.com/wtsyeda/QSMART) | SDF, QSMART pipeline, Frangi filter, vasculature mask, curvature | MATLAB |
 | [CLEARSWI.jl](https://github.com/korbinian90/CLEARSWI.jl) | CLEAR-SWI | Julia |
 | [SEPIA](https://github.com/kschan0214/sepia) | SMWI | MATLAB |

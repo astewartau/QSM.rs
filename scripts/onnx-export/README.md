@@ -63,6 +63,36 @@ fixtures for `bet::rs2net`'s parity tests and `tests/models_onnx.rs::rs2net_matc
 (`RS2_REF_DIR`, `RS2NET_ONNX`). It needs RS2-Net's requirements plus `blosc2` and
 `acvl_utils==0.2.1`; set `TORCHDYNAMO_DISABLE=1`, as RS2-Net calls `torch.compile`.
 
+## MindGrab
+
+`export_mindgrab.py` rebuilds brainchop-cli's MeshNet (`brainchop/tiny_meshnet.py`) in PyTorch
+from `model.json` + `model.pth` in neuroneural/brainchop-models (`meshnet/mindgrab`, MIT): 25
+blocks of Conv3d (no bias) → GroupNorm with one channel per group (no affine, eps 1e-5) → GELU,
+then a 1×1×1 two-class head, 146,237 parameters. The config uses `-1` placeholders, which
+brainchop fills with 15 channels and 2 classes. Two details follow tinygrad, which brainchop runs
+the weights in, rather than torch's defaults: GELU is the tanh approximation, and the instance
+normalisation is written out as ReduceMean/Sub/Mul/Sqrt/Div. Spatial axes are dynamic (the net is
+fully convolutional, padding = dilation); it is run on the 256³ conformed volume.
+
+```
+curl -LO https://github.com/neuroneural/brainchop-models/raw/main/meshnet/mindgrab/model.json
+curl -LO https://github.com/neuroneural/brainchop-models/raw/main/meshnet/mindgrab/model.pth
+python -m venv .venv && .venv/bin/pip install torch onnx onnxruntime
+.venv/bin/python export_mindgrab.py --config model.json --weights model.pth --out mindgrab.onnx
+```
+
+Environment: Python 3.11, torch 2.14 (CPU), onnx 1.23. Export: 672,150 bytes, sha256
+`2e20e5e03211976d4c30b4e704c57f7f18cb1b78e840105acf12765c6e3c342b`. To be hosted as
+`mindgrab.onnx` on `qsmxt/qsm-onnx-weights` (registry status `Pending` until then;
+bring-your-own via `$QSM_MODEL_DIR` works meanwhile).
+
+`ref_mindgrab.py` runs `brainchop --skull-strip`'s pipeline (niimath `-conform`, `qnormalize`, the
+tinygrad network, niimath `-bwlabel 26`, `-reslice_nn`) and the ONNX graph on the same input, and
+writes the fixtures for `bet::mindgrab`'s parity tests (`MINDGRAB_REF_DIR`) and
+`tests/models_onnx.rs::mindgrab_matches_brainchop` (`MINDGRAB_ONNX`). It needs
+`pip install brainchop onnxruntime nibabel`; tinygrad's CPU backend needs `clang` on the `PATH`
+and `DEV=CPU`.
+
 ## R2PRIMEnet and χ-sepnet
 
 The SNU-LIST χ-sepnet toolbox ships both networks already in ONNX — `240531_R2PRIMEnet.onnx`

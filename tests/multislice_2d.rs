@@ -294,6 +294,7 @@ fn a_gapped_acquisition_is_refused_by_the_pipeline() {
         field_strength: 3.0,
         b0_direction: (0.0, 0.0, 1.0),
         slice_geometry: Some(SliceGeometry { thickness: s.slice_thickness, axis: SLICE_AXIS }),
+        affine: None,
     };
     let cfg = BgRemovalConfig::default();
     let Err(err) = run_bg_removal(&s.fieldmap, &s.mask, &meta, &cfg, &mut |_, _| {}) else {

@@ -8,11 +8,14 @@
 //!   [`hdbet`].
 //! - **RS2-Net** (`rs2_net`, `onnx` feature): deep-learning *rodent* brain extraction (mouse,
 //!   rat); see [`rs2net`].
+//! - **MindGrab** (`mindgrab`, `onnx` feature): deep-learning brain extraction for any
+//!   contrast; see [`mod@mindgrab`].
 
 mod icosphere;
 mod mesh;
 mod evolution;
 pub mod hdbet;
+pub mod mindgrab;
 pub mod rs2net;
 
 pub use evolution::{run_bet, BetParams};
@@ -22,3 +25,6 @@ pub use hdbet::{HdBetInference, HdBetParams};
 #[cfg(feature = "onnx")]
 pub use rs2net::rs2_net;
 pub use rs2net::{Rs2NetParams, RS2_NET_PATCH};
+#[cfg(feature = "onnx")]
+pub use mindgrab::mindgrab;
+pub use mindgrab::MindGrabParams;

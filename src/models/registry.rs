@@ -473,6 +473,32 @@ const MODELS: &[ModelSpec] = &[
         outputs: &["logits"],
         size_divisor: 32,
     },
+    ModelSpec {
+        id: "mindgrab",
+        name: "MindGrab",
+        stage: ModelStage::BrainExtraction,
+        status: WeightStatus::Pending,
+        origin: Framework::PyTorch,
+        description: "MeshNet brain extraction for any contrast (25 dilated 3×3×3 convolutions, \
+                      15 channels, 146 k parameters) trained only on synthetic data: image → \
+                      brain mask. Runs on the whole 256³ 1 mm LIA conformed volume; the \
+                      conform/normalise/largest-component/reslice pipeline is in the Rust glue \
+                      (bet::mindgrab). Spatial axes are dynamic.",
+        paper: "Fani et al., arXiv:2506.11860 (2025); https://doi.org/10.48550/arXiv.2506.11860",
+        source: "https://github.com/neuroneural/brainchop-cli",
+        license: "MIT",
+        // Exported from brainchop-models meshnet/mindgrab (model.json + model.pth) with
+        // scripts/onnx-export/export_mindgrab.py; to be hosted on qsmxt/qsm-onnx-weights.
+        files: &[WeightFile {
+            name: "mindgrab.onnx",
+            url: "",
+            sha256: "2e20e5e03211976d4c30b4e704c57f7f18cb1b78e840105acf12765c6e3c342b",
+            bytes: 672_150,
+        }],
+        inputs: &["image"],
+        outputs: &["logits"],
+        size_divisor: 1,
+    },
     // ---- Anatomical segmentation -------------------------------------------
     ModelSpec {
         id: "synthseg",

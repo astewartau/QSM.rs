@@ -515,6 +515,7 @@ mod tests {
             field_strength: 3.0,
             b0_direction: (0.0, 0.0, 1.0),
             slice_geometry: None,
+            affine: None,
         }
     }
 
@@ -652,6 +653,7 @@ mod tests {
             field_strength: 3.0,
             b0_direction: (0.0, 0.0, 1.0),
             slice_geometry: None,
+            affine: None,
         };
         let mask = vec![1u8; 64];
         let result = run_field_mapping(
@@ -726,6 +728,7 @@ mod tests {
             field_strength: 3.0,
             b0_direction: (0.0, 0.0, 1.0),
             slice_geometry: None,
+            affine: None,
         }
     }
 

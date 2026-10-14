@@ -305,6 +305,10 @@ pub enum MaskOp {
     /// like `HdBet`). Requires the `onnx` feature and the `rs2-net` model weights; see
     /// [`crate::models`].
     Rs2Net(crate::bet::Rs2NetParams),
+    /// MindGrab deep-learning brain extraction from the **magnitude** (a generator, like
+    /// `HdBet`), for any contrast. Needs [`ScanMetadata::affine`], the `onnx` feature and the
+    /// `mindgrab` model weights; see [`crate::models`].
+    MindGrab(crate::bet::MindGrabParams),
 }
 
 impl MaskOp {
@@ -313,6 +317,7 @@ impl MaskOp {
         match self {
             Self::HdBet(_) => Some("hd-bet"),
             Self::Rs2Net(_) => Some("rs2-net"),
+            Self::MindGrab(_) => Some("mindgrab"),
             Self::Threshold { .. } | Self::Bet(_) | Self::Erode { .. } | Self::Dilate { .. }
             | Self::Close { .. } | Self::FillHoles { .. } | Self::GaussianSmooth { .. }
             | Self::SignalErode(_) => None,
@@ -846,6 +851,10 @@ pub struct ScanMetadata {
     /// cannot should tell its user that this check could not run. See
     /// [`Grid::require_contiguous_slices_if_known`](crate::Grid::require_contiguous_slices_if_known).
     pub slice_geometry: Option<crate::grid::SliceGeometry>,
+    /// The image's voxel→world affine (row-major 4×4, as in a NIfTI sform/qform), when the host
+    /// has one. Only the steps that need the anatomical orientation read it — currently
+    /// [`MaskOp::MindGrab`], which errors without it; everything else works in voxel space.
+    pub affine: Option<[f64; 16]>,
 }
 
 impl ScanMetadata {
@@ -1108,7 +1117,11 @@ mod tests {
                 ModelStage::DipoleInversion | ModelStage::SingleStep => (inv.contains(&m.id), "InversionAlgorithm"),
                 ModelStage::ChiSeparation => (sep.contains(&m.id), "SeparationAlgorithm"),
                 ModelStage::BrainExtraction => {
-                    let ops = [MaskOp::HdBet(Default::default()), MaskOp::Rs2Net(Default::default())];
+                    let ops = [
+                        MaskOp::HdBet(Default::default()),
+                        MaskOp::Rs2Net(Default::default()),
+                        MaskOp::MindGrab(Default::default()),
+                    ];
                     (ops.iter().any(|op| op.dl_model_id() == Some(m.id)), "MaskOp")
                 }
                 // iQFM: standalone run_iqfm, no stage enum.
@@ -1184,6 +1197,7 @@ mod slice_gap_tests {
             field_strength: 3.0,
             b0_direction: (0.0, 0.0, 1.0),
             slice_geometry: thickness.map(|t| SliceGeometry { thickness: t, axis: 2 }),
+            affine: None,
         }
     }
 
