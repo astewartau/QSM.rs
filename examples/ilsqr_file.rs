@@ -8,7 +8,7 @@
 //! Prints the time per stage, the FFT count and how both LSQR solves ended. With
 //! `ILSQR_RAW=<path>` it also writes χ and the initial solution (ppm, f64, little-endian, χ
 //! first) for bit-level comparisons, since the NIfTI output may be single precision.
-use qsm_core::inversion::{ilsqr_traced, IlsqrParams, IlsqrTrace};
+use qsm_core::inversion::{ilsqr_traced, IlsqrParams};
 use qsm_core::io::{read_nifti_file, save_nifti_to_file};
 use qsm_core::Grid;
 use std::path::Path;
@@ -26,12 +26,11 @@ fn main() {
     let grid = Grid::new(f.dims.0, f.dims.1, f.dims.2, f.voxel_size.0, f.voxel_size.1, f.voxel_size.2);
     let mask: Vec<u8> = m.data.iter().map(|&v| (v > 0.5) as u8).collect();
     let t = std::time::Instant::now();
-    let mut tr = IlsqrTrace::default();
     let mut params = IlsqrParams::default();
     if a.len() == 10 {
         params.pad_mm = num(9);
     }
-    let (chi, _, _, x0) = ilsqr_traced(&f.data, &mask, &grid, h, &params, |_, _| {}, &mut tr);
+    let ((chi, _, _, x0), tr) = ilsqr_traced(&f.data, &mask, &grid, h, &params, |_, _| {});
     let to_ppm = 1.0 / (2.0 * std::f64::consts::PI * 42.575 * b0 * te * 1e-3);
     let chi: Vec<f64> = chi.iter().map(|v| v * to_ppm).collect();
     eprintln!("ilsqr: {:?} vs {:?} (pad {} mm, padded {:?}), {:.2}s", f.dims, f.voxel_size, params.pad_mm, tr.dims, t.elapsed().as_secs_f64());

@@ -74,6 +74,7 @@ pub use tgv::{
     ALPHA_REFERENCE_B0_T, ALPHA_REFERENCE_RAD_PER_PPM, ALPHA_REFERENCE_TE_S,
 };
 pub use ilsqr::{ilsqr, IlsqrParams, DEFAULT_PAD_MM, STI_DEFAULT_PAD_MM, STI_PAD_MM};
+#[cfg(not(target_arch = "wasm32"))]
 #[doc(hidden)]
 pub use ilsqr::{ilsqr_traced, IlsqrTrace};
 pub use lsqr_qsm::{lsqr_qsm, LsqrQsmParams, RESIDUAL_WEIGHTING_PER_TESLA};
