@@ -9,8 +9,11 @@
 //! 2. z-score normalise over the cropped image;
 //! 3. resample to 1 mm with cubic splines (nnU-Net's "separate z" rule for anisotropic voxels:
 //!    cubic in-plane, nearest-neighbour through-plane);
-//! 4. pad to at least one patch, then Gaussian-weighted sliding-window inference with 50 %
-//!    overlap (optionally with 8-fold mirroring test-time augmentation);
+//! 4. run the network on the whole resampled volume, zero-padded to a size the network accepts
+//!    ([`HdBetInference::FullVolume`], the default, as HD-BET v1 did), or — as nnU-Net and
+//!    HD-BET v2 do — pad to at least one patch and run Gaussian-weighted sliding-window
+//!    inference with 50 % overlap ([`HdBetInference::SlidingWindow`]); either optionally with
+//!    8-fold mirroring test-time augmentation;
 //! 5. resample the logits back (linear; nearest through-plane for anisotropic voxels), take the
 //!    argmax and un-crop.
 //!
@@ -37,18 +40,39 @@ use crate::grid::Grid;
 use crate::models::onnx::{OnnxError, OnnxModel, Tensor};
 use crate::utils::resample::{resize, resize_axis};
 
+/// How the network is applied to the preprocessed (cropped, 1 mm) volume.
+#[cfg_attr(feature = "introspection", derive(serde::Serialize))]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum HdBetInference {
+    /// One network pass over the whole volume, zero-padded (centred) to the next multiple of
+    /// `(32, 32, 16)`. Fastest, and every voxel sees the whole head; peak memory grows with the
+    /// head's bounding box (≈1.2 KB per padded voxel: ≈9–13 GB for a 1 mm whole-head volume).
+    FullVolume,
+    /// Gaussian-weighted sliding window, as nnU-Net (and the HD-BET v2 CLI) runs it.
+    SlidingWindow {
+        /// Patch size `(px, py, pz)` in voxels at 1 mm; HD-BET v2 was trained with
+        /// `(192, 192, 96)`. Must be multiples of `(32, 32, 16)`. Peak memory follows the patch
+        /// (≈4.5 GB at `(192, 192, 96)`, ≈1.9 GB at `(128, 128, 64)`); below ~`(128, 128, 64)`
+        /// tiles that lie wholly inside the brain start to be labelled background.
+        patch: (usize, usize, usize),
+        /// Step between windows as a fraction of the patch (nnU-Net: 0.5).
+        tile_step: f64,
+    },
+}
+
+impl HdBetInference {
+    /// nnU-Net's sliding window: HD-BET v2's training patch `(192, 192, 96)`, 50 % overlap.
+    pub const SLIDING_WINDOW: Self = Self::SlidingWindow { patch: (192, 192, 96), tile_step: 0.5 };
+    /// Memory-bounded sliding window: `(128, 128, 64)` patches, 50 % overlap.
+    pub const LOW_MEMORY: Self = Self::SlidingWindow { patch: (128, 128, 64), tile_step: 0.5 };
+}
+
 /// HD-BET inference parameters.
 #[cfg_attr(feature = "introspection", derive(serde::Serialize))]
 #[derive(Clone, Debug, PartialEq)]
 pub struct HdBetParams {
-    /// Sliding-window patch size `(px, py, pz)` in voxels at 1 mm (default `(192, 192, 96)`, the
-    /// size HD-BET was trained with). Must be multiples of `(32, 32, 16)`. Smaller patches bound
-    /// memory (peak ≈1.9 GB for `(128, 128, 64)` vs ≈4.5 GB native, on a 164×205×205 volume) at a
-    /// small accuracy cost; below ~`(128, 128, 64)` tiles that lie wholly inside the brain start
-    /// to be labelled background.
-    pub patch: (usize, usize, usize),
-    /// Sliding-window step as a fraction of the patch (default 0.5, nnU-Net's).
-    pub tile_step: f64,
+    /// Whole-volume (default) or sliding-window inference.
+    pub inference: HdBetInference,
     /// 8-fold mirroring test-time augmentation (default off, as in QSM-CI; 8× slower for a
     /// marginal gain).
     pub mirror_tta: bool,
@@ -56,16 +80,17 @@ pub struct HdBetParams {
 
 impl Default for HdBetParams {
     fn default() -> Self {
-        Self { patch: (192, 192, 96), tile_step: 0.5, mirror_tta: false }
+        Self { inference: HdBetInference::FullVolume, mirror_tta: false }
     }
 }
 
 impl HdBetParams {
-    /// Memory-bounded setting for constrained hosts (e.g. 32-bit WASM): `(128, 128, 64)` patches,
-    /// peak ≈1.9 GB on a 164×205×205 volume. Agreed with the native patch at Dice ≈0.99 in
-    /// validation (and with nnU-Net run at the same patch size to 2 voxels).
+    /// Memory-bounded setting for constrained hosts (e.g. 32-bit WASM): `(128, 128, 64)`
+    /// sliding-window patches, peak ≈1.9 GB on a 164×205×205 volume. Agreed with the native
+    /// patch at Dice ≈0.99 in validation (and with nnU-Net run at the same patch size to 2
+    /// voxels).
     pub fn low_memory() -> Self {
-        Self { patch: (128, 128, 64), ..Self::default() }
+        Self { inference: HdBetInference::LOW_MEMORY, ..Self::default() }
     }
 }
 
@@ -92,21 +117,26 @@ pub fn hd_bet(
 ) -> Result<Vec<u8>, OnnxError> {
     let (nx, ny, nz) = grid.dims;
     assert_eq!(magnitude.len(), nx * ny * nz, "magnitude length must match grid");
-    let patch = [params.patch.2, params.patch.1, params.patch.0];
-    if patch.iter().zip(PATCH_DIVISOR).any(|(&p, d)| p == 0 || p % d != 0) {
-        return Err(OnnxError::Shape(format!(
-            "HD-BET patch {:?} must be a non-zero multiple of (32, 32, 16)",
-            params.patch
-        )));
-    }
-    if !(params.tile_step > 0.0 && params.tile_step <= 1.0) {
-        return Err(OnnxError::Shape(format!("tile_step {} must be in (0, 1]", params.tile_step)));
+    if let HdBetInference::SlidingWindow { patch, tile_step } = params.inference {
+        let p = [patch.2, patch.1, patch.0];
+        if p.iter().zip(PATCH_DIVISOR).any(|(&p, d)| p == 0 || p % d != 0) {
+            return Err(OnnxError::Shape(format!(
+                "HD-BET patch {patch:?} must be a non-zero multiple of (32, 32, 16)"
+            )));
+        }
+        if !(tile_step > 0.0 && tile_step <= 1.0) {
+            return Err(OnnxError::Shape(format!("tile_step {tile_step} must be in (0, 1]")));
+        }
     }
     let Some(pre) = preprocess(magnitude, grid) else {
         return Ok(vec![0; magnitude.len()]);
     };
+    let (patch, tile_step) = match params.inference {
+        HdBetInference::FullVolume => (full_volume_patch(pre.dims), 1.0),
+        HdBetInference::SlidingWindow { patch, tile_step } => ([patch.2, patch.1, patch.0], tile_step),
+    };
     let model = OnnxModel::load(model_onnx)?;
-    let logits = predict_logits(&pre.data, pre.dims, &model, patch, 2, params.tile_step, params.mirror_tta, progress)?;
+    let logits = predict_logits(&pre.data, pre.dims, &model, patch, 2, tile_step, params.mirror_tta, progress)?;
     Ok(postprocess(&logits, &pre))
 }
 
@@ -270,6 +300,12 @@ fn for_each_slice(data: &mut [f64], dims: [usize; 3], axis: usize, mut f: impl F
     }
 }
 
+/// The single "patch" covering a whole `(z, y, x)` volume: each axis rounded up to the network's
+/// divisor. [`predict_logits`] centres the volume in it and runs one window.
+pub(super) fn full_volume_patch(dims: [usize; 3]) -> [usize; 3] {
+    std::array::from_fn(|a| dims[a].div_ceil(PATCH_DIVISOR[a]).max(1) * PATCH_DIVISOR[a])
+}
+
 /// nnU-Net `compute_steps_for_sliding_window` for one axis.
 pub(super) fn window_steps(size: usize, tile: usize, step: f64) -> Vec<usize> {
     let n = ((size - tile) as f64 / (tile as f64 * step)).ceil() as usize + 1;
@@ -329,7 +365,10 @@ pub(super) fn predict_logits(
     }
 
     let steps: [Vec<usize>; 3] = std::array::from_fn(|a| window_steps(pdims[a], patch[a], tile_step));
-    let gauss = gaussian_importance(patch);
+    let windows = steps.iter().map(Vec::len).product::<usize>();
+    // One window covers everything: weight it uniformly (a Gaussian would cancel out anyway,
+    // apart from rounding where it is ~1e-10 at the corners).
+    let gauss = if windows == 1 { vec![1.0f32; patch.iter().product()] } else { gaussian_importance(patch) };
     let pp: usize = patch.iter().product();
     let shape = [1, 1, patch[0], patch[1], patch[2]];
     let plan = model.plan_for(&[&shape])?;
@@ -339,7 +378,7 @@ pub(super) fn predict_logits(
     } else {
         &[[false, false, false]]
     };
-    let total = steps.iter().map(Vec::len).product::<usize>() * flips.len();
+    let total = windows * flips.len();
     let mut done = 0;
 
     let mut acc = vec![0.0f32; channels * np];
@@ -461,6 +500,24 @@ mod tests {
         assert_eq!(window_steps(205, 96, 0.5), vec![0, 36, 73, 109]);
         assert_eq!(window_steps(192, 192, 0.5), vec![0]);
         assert_eq!(window_steps(205, 192, 1.0), vec![0, 13]);
+    }
+
+    #[test]
+    fn full_volume_patch_rounds_up_to_the_divisor() {
+        // (z, y, x): z to a multiple of 16, y and x to multiples of 32
+        assert_eq!(full_volume_patch([150, 240, 240]), [160, 256, 256]);
+        assert_eq!(full_volume_patch([160, 256, 224]), [160, 256, 224]);
+        assert_eq!(full_volume_patch([1, 1, 1]), [16, 32, 32]);
+        // ... so the sliding window over it is a single window
+        let p = full_volume_patch([150, 240, 241]);
+        assert!([150, 240, 241].iter().zip(p).all(|(&d, p)| window_steps(p.max(d), p, 1.0) == vec![0]));
+    }
+
+    #[test]
+    fn default_is_full_volume() {
+        assert_eq!(HdBetParams::default().inference, HdBetInference::FullVolume);
+        assert!(!HdBetParams::default().mirror_tta);
+        assert_eq!(HdBetParams::low_memory().inference, HdBetInference::LOW_MEMORY);
     }
 
     #[test]
