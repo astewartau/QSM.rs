@@ -97,6 +97,13 @@ rustdct = "0.7.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
+# The WASM test harness (`tests/wasm_pipeline.rs`), run under Node by the `wasm` job in
+# `.github/workflows/unit-tests.yml`.
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen-test = "0.3"
+# tract (the `onnx` feature) draws on getrandom, which on wasm32 needs its JS backend named.
+getrandom = { version = "0.4", features = ["wasm_js"] }
+
 # Both of these drive ONNX models, so they do not build with the default feature
 # set; without this cargo tries to compile them for `--all-targets` and fails.
 # `download` is deliberately NOT required: each falls back to a local weights
