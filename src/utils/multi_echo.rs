@@ -74,6 +74,7 @@ fn idx3d(i: usize, j: usize, k: usize, nx: usize, ny: usize) -> usize {
 }
 
 /// B0 weighting types. All but [`B0WeightType::AssumedDecay`] match MriResearchTools.jl.
+#[cfg_attr(feature = "introspection", derive(serde::Serialize))]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum B0WeightType {
     /// mag * TE - optimal for phase SNR (default)

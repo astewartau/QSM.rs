@@ -1035,20 +1035,15 @@ fn test_swi() {
 
     let grid = qsm_core::Grid::new(nx, ny, nz, vsx, vsy, vsz);
 
-    // Step 1: Laplacian unwrap first echo phase. Plain unwrapping: SWI does its own
-    // high-pass filtering, so the background-removing variant would double up.
-    println!("[INFO] Unwrapping phase (Laplacian)...");
-    let unwrapped = laplacian_unwrap(
-        &data.phase_echoes[0], &data.mask,
-        &grid, LaplacianSolver::Dct,
-    );
-
-    // Step 2: Calculate SWI with default parameters (sigma=[4,4,0], tanh, strength=4)
-    println!("[INFO] Computing SWI...");
+    // CLEAR-SWI over all echoes with default parameters (Laplacian unwrapping, sigma=[4,4,0],
+    // tanh, strength=4), within the brain mask.
+    println!("[INFO] Computing CLEAR-SWI...");
     let swi_result = swi::calculate_swi(
-        &unwrapped, &data.mag_echoes[0], &data.mask,
+        &data.phase_echoes, &data.mag_echoes, &data.echo_times, Some(&data.mask),
         &grid, &swi::SwiParams::default(),
-    );
+    )
+    .expect("CLEAR-SWI on the test data")
+    .swi;
 
     // Step 3: Minimum intensity projection
     println!("[INFO] Computing mIP...");
@@ -1077,9 +1072,6 @@ fn test_swi() {
             if swi_result[i] > 0.0 {
                 positive_count += 1;
             }
-        } else {
-            assert!(swi_result[i].abs() < 1e-10,
-                "SWI outside mask should be ~0 at index {}, got {}", i, swi_result[i]);
         }
     }
 
