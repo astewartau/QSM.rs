@@ -477,7 +477,7 @@ const MODELS: &[ModelSpec] = &[
         id: "mindgrab",
         name: "MindGrab",
         stage: ModelStage::BrainExtraction,
-        status: WeightStatus::Pending,
+        status: WeightStatus::Available,
         origin: Framework::PyTorch,
         description: "MeshNet brain extraction for any contrast (25 dilated 3×3×3 convolutions, \
                       15 channels, 146 k parameters) trained only on synthetic data: image → \
@@ -488,10 +488,11 @@ const MODELS: &[ModelSpec] = &[
         source: "https://github.com/neuroneural/brainchop-cli",
         license: "MIT",
         // Exported from brainchop-models meshnet/mindgrab (model.json + model.pth) with
-        // scripts/onnx-export/export_mindgrab.py; to be hosted on qsmxt/qsm-onnx-weights.
+        // scripts/onnx-export/export_mindgrab.py. Mirrored on Hugging Face
+        // (qsmxt/qsm-onnx-weights). Verified: anonymous download + SHA-256 match.
         files: &[WeightFile {
             name: "mindgrab.onnx",
-            url: "",
+            url: "https://huggingface.co/qsmxt/qsm-onnx-weights/resolve/main/mindgrab.onnx",
             sha256: "2e20e5e03211976d4c30b4e704c57f7f18cb1b78e840105acf12765c6e3c342b",
             bytes: 672_150,
         }],

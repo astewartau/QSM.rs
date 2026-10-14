@@ -82,9 +82,8 @@ python -m venv .venv && .venv/bin/pip install torch onnx onnxruntime
 ```
 
 Environment: Python 3.11, torch 2.14 (CPU), onnx 1.23. Export: 672,150 bytes, sha256
-`2e20e5e03211976d4c30b4e704c57f7f18cb1b78e840105acf12765c6e3c342b`. To be hosted as
-`mindgrab.onnx` on `qsmxt/qsm-onnx-weights` (registry status `Pending` until then;
-bring-your-own via `$QSM_MODEL_DIR` works meanwhile).
+`2e20e5e03211976d4c30b4e704c57f7f18cb1b78e840105acf12765c6e3c342b`. Hosted as
+`mindgrab.onnx` on `qsmxt/qsm-onnx-weights`.
 
 `ref_mindgrab.py` runs `brainchop --skull-strip`'s pipeline (niimath `-conform`, `qnormalize`,
 niimath `-bwlabel 26`, `-reslice_nn`) around the ONNX graph under ONNX Runtime, and writes the
