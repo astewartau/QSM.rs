@@ -124,3 +124,71 @@ jobs:
               exit(1)
           print(f'PASS: Coverage {cov}% meets 90% threshold')
           "
+
+  # Builds the crate for `wasm32-unknown-unknown` and runs tests/wasm_pipeline.rs under Node
+  # (`wasm-bindgen-test`): every `pipeline::*` stage and every classical background-removal,
+  # inversion and separation algorithm on a 16³ phantom. Browser hosts (qsmbly) run this code
+  # on that target, where anything that needs what a browser does not have -- `Instant`,
+  # `SystemTime`, threads, the file system -- compiles fine and panics at run time. Nothing
+  # else in CI would notice; this job does. Checked by perturbation: an `Instant::now()` put
+  # back on iLSQR's path fails `dipole_inversion` here with "time not implemented on this
+  # platform".
+  #
+  # Two builds: the plain one a classical-only host makes, and the one with the deep-learning
+  # stack (`onnx`, plus `simd`), which on wasm32 needs SIMD128 (see `src/models/onnx.rs`).
+  # Release builds, because an unoptimised wasm build of the inversions is slow under Node.
+  wasm:
+    name: wasm32 (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: classical
+            features: ""
+            rustflags: ""
+          - name: onnx simd
+            features: "onnx simd"
+            rustflags: "-C target-feature=+simd128"
+    env:
+      CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER: wasm-bindgen-test-runner
+      CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUSTFLAGS: ${{ matrix.rustflags }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-wasm-${{ matrix.name }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-wasm-${{ matrix.name }}-
+
+      # The test runner must be the same version as the `wasm-bindgen` crate the test links.
+      - name: wasm-bindgen version
+        id: wbg
+        run: |
+          VERSION=$(awk '/^name = "wasm-bindgen"$/ { getline; gsub(/version = |"/, ""); print }' Cargo.lock)
+          test -n "$VERSION"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Install wasm-bindgen-test-runner
+        uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-bindgen@${{ steps.wbg.outputs.version }}
+
+      - name: Run the pipeline under Node
+        run: cargo test --release --target wasm32-unknown-unknown --features "${{ matrix.features }}" --test wasm_pipeline
