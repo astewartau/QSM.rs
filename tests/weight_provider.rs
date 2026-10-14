@@ -43,6 +43,7 @@ fn xqsm_dispatcher_runs_on_provided_weights() {
         field_strength: 3.0,
         b0_direction: (0.0, 0.0, 1.0),
         slice_geometry: None,
+        affine: None,
     };
     let c = (n as f64 - 1.0) / 2.0;
     let mut field = vec![0.0f64; n * n * n];
