@@ -102,6 +102,10 @@ serde_json = "1"
 # `download` is deliberately NOT required: each falls back to a local weights
 # file or $QSM_MODEL_DIR, so they stay buildable without the HTTP stack.
 [[example]]
+name = "hdbet_file"
+required-features = ["onnx"]
+
+[[example]]
 name = "synthseg_run"
 required-features = ["onnx"]
 

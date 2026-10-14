@@ -429,9 +429,10 @@ const MODELS: &[ModelSpec] = &[
         origin: Framework::PyTorch,
         description: "nnU-Net v2 3D U-Net brain extraction (HD-BET v2): magnitude → brain \
                       mask, trained on 11,751 multi-sequence clinical MRIs. Runs at 1 mm \
-                      with Gaussian-weighted 96×192×192 sliding-window patches; nnU-Net's \
-                      crop/normalise/resample pipeline is in the Rust glue (bet::hd_bet). \
-                      Spatial axes are dynamic (patch dims multiples of 16×32×32).",
+                      on the whole volume (or Gaussian-weighted sliding-window patches, \
+                      96×192×192 as trained); nnU-Net's crop/normalise/resample pipeline \
+                      is in the Rust glue (bet::hd_bet). Spatial axes are dynamic \
+                      (multiples of 16×32×32).",
         paper: "Isensee et al., Hum Brain Mapp 40(17):4952-4964 (2019); https://doi.org/10.1002/hbm.24750",
         source: "https://github.com/MIC-DKFZ/HD-BET",
         license: "CC-BY-NC-4.0",

@@ -45,6 +45,16 @@ single-threaded). Patches down to 128×128×64 (peak ≈1.9 GB,
 `HdBetParams::low_memory`) match the native 192×192×96 (≈4.5 GB) at Dice ≈0.99; smaller patches fail
 because a tile wholly inside the brain is labelled background.
 
+The network is fully convolutional with dynamic spatial axes, so `bet::hd_bet` runs it on the
+**whole volume** by default (`HdBetInference::FullVolume`: the cropped 1 mm volume, zero-padded
+centred to multiples of 16×32×32, one pass — what HD-BET v1 did at 1.5 mm); the sliding window
+stays available (`HdBetInference::SlidingWindow`, `SLIDING_WINDOW`, `LOW_MEMORY`). Measured with
+`examples/hdbet_file` on 8 threads (AMD EPYC 9745), whole volume vs 192×192×96 window: 1 mm
+whole-head GRE (240×240×150, 256×256×140, 260×320×160 at 0.75 mm) 23–32 s / 6.4–8.2 GB vs
+36–106 s / 3.6 GB; UK Biobank SWI (0.8×0.8×3 mm, 256×288×48) 28 s / 7.3 GB vs 71 s / 3.6 GB.
+Masks agree at Dice 0.994–0.996 (the whole-volume mask is 0.5–1 % smaller), the same agreement
+as the 128×128×64 window has with the 192×192×96 one (0.993–0.994).
+
 RS2-Net (rodent brain extraction) is a Swin-UNETR trained inside nnU-Net v2, so it reuses HD-BET's
 pipeline helpers (`bet::hdbet`: crop, separate-z resampling, sliding window — generalised to any
 channel count) with its own plans: transpose `(z, y, x)`→`(y, z, x)`, 0.25×0.2×0.16 mm target,

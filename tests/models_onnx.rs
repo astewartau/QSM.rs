@@ -951,7 +951,7 @@ fn osf_download_and_verify() {
 #[test]
 #[ignore]
 fn hdbet_matches_python_reference() {
-    use qsm_core::bet::{hd_bet, HdBetParams};
+    use qsm_core::bet::{hd_bet, HdBetInference, HdBetParams};
     use qsm_core::io::read_nifti_file;
     use std::path::Path;
 
@@ -966,7 +966,9 @@ fn hdbet_matches_python_reference() {
         let (vx, vy, vz) = mag.voxel_size;
         let grid = qsm_core::Grid::new(nx, ny, nz, vx, vy, vz);
         let t = std::time::Instant::now();
-        let mask = hd_bet(&mag.data, &grid, &onnx, &HdBetParams::default(), |_, _| {}).expect("hd_bet");
+        // the CLI runs nnU-Net's sliding window
+        let params = HdBetParams { inference: HdBetInference::SLIDING_WINDOW, ..HdBetParams::default() };
+        let mask = hd_bet(&mag.data, &grid, &onnx, &params, |_, _| {}).expect("hd_bet");
         let (mut inter, mut a, mut b, mut diff) = (0usize, 0usize, 0usize, 0usize);
         for (&m, &c) in mask.iter().zip(&cli.data) {
             let (m, c) = (m != 0, c > 0.5);
