@@ -824,8 +824,7 @@ mod tests {
 
     #[test]
     fn test_inversion_ilsqr() {
-        // With the default 64 mm padding this 8^3 volume would be solved on a 144^3 grid; 6 mm
-        // (STI's own default) gives 32^3.
+        // 6 mm keeps this 8^3 volume on a 32^3 grid (the default 16 mm gives 48^3).
         let ilsqr = crate::inversion::IlsqrParams { max_iter: 3, pad_mm: 6.0, ..Default::default() };
         let chi = make_inversion_test_with(InversionConfig { algorithm: InversionAlgorithm::Ilsqr, ilsqr, ..Default::default() });
         assert_eq!(chi.len(), 8 * 8 * 8);

@@ -2,7 +2,8 @@
 //!
 //! [`ilsqr`] implements **STI Suite 3.0's `QSM_iLSQR`** (Li et al. 2015), as called with
 //! `QSM_iLSQR(phase, mask, 'TE', TE, 'B0', B0, 'H', H, 'padsize', [p p p], 'voxelsize', vs)`
-//! with `p` = [`IlsqrParams::pad_mm`] (default 64, as UK Biobank and STI Suite's examples call it).
+//! with `p` = [`IlsqrParams::pad_mm`] (default [`DEFAULT_PAD_MM`] = 16; UK Biobank and STI Suite's
+//! examples pass 64, [`STI_PAD_MM`]).
 //! STI Suite ships as protected P-code, so the algorithm was recovered by black-box probing
 //! (call tracing, capturing the operators and right-hand sides it hands to MATLAB's `lsqr`, and
 //! fitting every stage until a MATLAB re-implementation reproduced STI to its own
@@ -10,7 +11,7 @@
 //!
 //! 1. Crop field and mask to the mask's bounding box (odd extents grown by one voxel to make
 //!    them even), then zero-pad each axis to the next multiple of 16 strictly above
-//!    `crop + 2·pad_mm/voxel_size` (default `pad_mm` = 64). Everything below runs on that grid.
+//!    `crop + 2·pad_mm/voxel_size` (default `pad_mm` = 16). Everything below runs on that grid.
 //! 2. **Laplacian weights** `W`: `L = |F⁻¹(k²·F φ)|` with `k²` in (cycles/mm)² and the DC term
 //!    set to 10⁶ (STI's value, which adds `10⁶·mean(φ)` to every voxel, so the `|·|` decides
 //!    which tail of the Laplacian is down-weighted). Ranked inside the mask:
@@ -53,12 +54,21 @@
 //!
 //! [`IlsqrParams::pad_mm`] is STI's `'padsize'`: millimetres of zero padding per side, the same
 //! on every axis. It sets the grid that both LSQR solves run on, so for small or thin volumes it
-//! dominates the cost: an 8³ volume at 1 mm is solved on 144³ with the default 64 mm, on 32³
-//! with 6 mm. [`STI_PAD_MM`] (64) is what UK Biobank's pipeline and STI Suite's examples pass;
-//! [`STI_DEFAULT_PAD_MM`] (6) is what `QSM_iLSQR` uses when called without `'padsize'`, as
-//! QSMART calls it. 0 is allowed (the grid is still rounded up past the crop to a multiple of
-//! 16). The padding changes χ because the dipole convolution is circular on the padded grid
-//! and the Laplacian and gradient weights are ranked over it.
+//! dominates the cost: an 8³ volume at 1 mm is solved on 144³ with 64 mm, on 48³ with the
+//! default 16 mm. [`STI_PAD_MM`] (64) is what UK Biobank's pipeline and STI Suite's examples
+//! pass (set it to reproduce them exactly); [`STI_DEFAULT_PAD_MM`] (6) is what `QSM_iLSQR` uses
+//! when called without `'padsize'`, as QSMART calls it. 0 is allowed (the grid is still rounded
+//! up past the crop to a multiple of 16) but wraps thin volumes onto themselves. The padding
+//! changes χ because the dipole convolution is circular on the padded grid and the Laplacian
+//! and gradient weights are ranked over it.
+//!
+//! The default, [`DEFAULT_PAD_MM`] = 16 mm, was chosen on 150 UK Biobank subjects × 2 visits,
+//! the qsm-forward head phantom and thin slabs, comparing 0–128 mm (ukb-qsmxt docs/19). No
+//! test-retest, age or longitudinal metric differed from 64 mm. Above 32 mm the result only
+//! moves by the floor set by the capped LSQR iterations (32 and 128 mm are each ~2 ppb RMS from
+//! 64 mm); 16 mm is ~3 ppb. On a thin phantom slab 0–6 mm lose ~1.5 NRMSE points against the
+//! ground truth and 16 mm ~0.5; on whole heads every pad gave the same accuracy. 16 mm takes
+//! about 40 % of the time and memory of 64 mm on UK Biobank SWI.
 //!
 //! QSM.rs ≤ v0.38 shipped a different iLSQR (a port of QSM.m's formulation: no padding, LSMR
 //! for the artefacts, other weights). It was removed: STI Suite's algorithm is the reference
@@ -85,8 +95,9 @@ pub struct IlsqrParams {
     pub tol: f64,
     /// Maximum iterations of each LSQR solve (default: 100)
     pub max_iter: usize,
-    /// Zero padding per side in mm, on every axis: STI's `'padsize'` (default: [`STI_PAD_MM`]
-    /// = 64). Must be finite and ≥ 0.
+    /// Zero padding per side in mm, on every axis: STI's `'padsize'` (default:
+    /// [`DEFAULT_PAD_MM`] = 16; [`STI_PAD_MM`] reproduces UK Biobank / STI Suite). Must be
+    /// finite and ≥ 0.
     pub pad_mm: f64,
 }
 
@@ -95,7 +106,7 @@ impl Default for IlsqrParams {
         Self {
             tol: 1e-3,
             max_iter: 100,
-            pad_mm: STI_PAD_MM,
+            pad_mm: DEFAULT_PAD_MM,
         }
     }
 }
@@ -109,6 +120,9 @@ impl IlsqrParams {
         Ok(())
     }
 }
+
+/// Default zero padding of [`ilsqr`], in mm per side (see the module docs, *Padding*).
+pub const DEFAULT_PAD_MM: f64 = 16.0;
 
 /// Zero padding STI's `QSM_iLSQR` is given by UK Biobank and in STI Suite's examples, in mm.
 pub const STI_PAD_MM: f64 = 64.0;
@@ -1335,8 +1349,8 @@ mod tests {
     #[test]
     fn test_ilsqr_params_defaults() {
         let p = IlsqrParams::default();
-        assert_eq!((p.tol, p.max_iter, p.pad_mm), (1e-3, 100, STI_PAD_MM));
-        assert_eq!(STI_PAD_MM, 64.0);
+        assert_eq!((p.tol, p.max_iter, p.pad_mm), (1e-3, 100, DEFAULT_PAD_MM));
+        assert_eq!((DEFAULT_PAD_MM, STI_PAD_MM, STI_DEFAULT_PAD_MM), (16.0, 64.0, 6.0));
         assert!(p.validate().is_ok());
     }
 
@@ -1356,12 +1370,12 @@ mod tests {
         let iso = (2.0, 2.0, 2.0);
         let with_pad = |pad_mm: f64| IlsqrParams { max_iter: 2, pad_mm, ..IlsqrParams::default() };
         let (d_default, x_default) = run(iso, &IlsqrParams { max_iter: 2, ..IlsqrParams::default() });
+        let (d16, x16) = run(iso, &with_pad(DEFAULT_PAD_MM));
+        assert_eq!((d_default, d16), ([32; 3], [32; 3]));
+        // the default is exactly an explicit 16 mm
+        assert!(x_default.iter().zip(&x16).all(|(a, b)| a.to_bits() == b.to_bits()));
         let (d64, x64) = run(iso, &with_pad(STI_PAD_MM));
-        assert_eq!((d_default, d64), ([80; 3], [80; 3]));
-        // the default is exactly an explicit 64 mm
-        assert!(x_default.iter().zip(&x64).all(|(a, b)| a.to_bits() == b.to_bits()));
-        let (d16, x16) = run(iso, &with_pad(16.0));
-        assert_eq!(d16, [32; 3]);
+        assert_eq!(d64, [80; 3]);
         assert!(x16.iter().zip(&x64).any(|(a, b)| a != b), "padding should change chi");
         assert_eq!(run(iso, &with_pad(STI_DEFAULT_PAD_MM)).0, [16; 3]);
         assert_eq!(run(iso, &with_pad(0.0)).0, [16; 3]);

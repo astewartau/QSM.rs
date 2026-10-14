@@ -3,7 +3,7 @@
 //! writes susceptibility in ppm (STI's scaling, gamma = 42.575 MHz/T).
 //!
 //! usage: ilsqr_file <phase_rad.nii[.gz]> <mask.nii[.gz]> <chi_out.nii.gz> <TE_ms> <B0_T> <Hx> <Hy> <Hz> [pad_mm]
-//! (H = B0 direction in voxel axes; pad_mm = STI's 'padsize', default 64)
+//! (H = B0 direction in voxel axes; pad_mm = STI's 'padsize', default 16; UK Biobank uses 64)
 //!
 //! Prints the time per stage, the FFT count and how both LSQR solves ended. With
 //! `ILSQR_RAW=<path>` it also writes χ and the initial solution (ppm, f64, little-endian, χ
