@@ -120,9 +120,10 @@ pub mod error;
 // ============================================================================
 /// Registry of deep-learning QSM models and their downloadable ONNX weights.
 ///
-/// Query the catalog with [`models::all_models`] / [`models::find_model`]. Native
-/// hosts fetch weights on use with the `download` feature; the `onnx` feature runs
-/// them via the pure-Rust `tract` engine from a byte buffer (native and WASM).
+/// Query the catalog with [`models::all_models`] / [`models::find_model`]. A host can
+/// supply weights from memory with [`models::provide_weights`] (the only source in WASM);
+/// native hosts can also use `$QSM_MODEL_DIR`, the cache, or fetch on use with the `download`
+/// feature. The `onnx` feature runs them via the pure-Rust `tract` engine (native and WASM).
 pub mod models;
 
 // ============================================================================

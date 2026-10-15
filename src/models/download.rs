@@ -2,16 +2,14 @@
 //!
 //! Fetches a model's weight files over HTTP, verifies their SHA-256, and stores
 //! them under [`super::cache_dir`]. This is the "download on use" path for native
-//! hosts (e.g. QSMxT). WASM hosts do not use this module — they fetch weights in
-//! JavaScript and feed the bytes to [`super::onnx`] directly.
+//! hosts (e.g. QSMxT). It is not compiled for `wasm32-unknown-unknown`, where hosts fetch
+//! weights themselves and hand them over with [`super::provide_weights`].
 
 use std::fs;
 use std::io::{Read, Write};
 use std::path::PathBuf;
 
-use sha2::{Digest, Sha256};
-
-use super::{cache_dir, cache_path, resolve_local, ModelSpec, WeightFile};
+use super::{cache_dir, cache_path, resolve_local, sha256_hex, ModelSpec, WeightFile};
 
 /// Error from resolving or downloading model weights.
 #[derive(Debug)]
@@ -50,19 +48,6 @@ impl From<std::io::Error> for DownloadError {
     fn from(e: std::io::Error) -> Self {
         Self::Io(e)
     }
-}
-
-/// Lowercase hex SHA-256 of a byte slice.
-pub fn sha256_hex(bytes: &[u8]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(bytes);
-    let digest = hasher.finalize();
-    let mut out = String::with_capacity(64);
-    for b in digest {
-        use std::fmt::Write as _;
-        let _ = write!(out, "{b:02x}");
-    }
-    out
 }
 
 /// Ensure a single weight file is present locally, downloading it if needed, and
@@ -130,17 +115,6 @@ pub fn ensure_file_with_progress(
 /// [`ModelSpec::files`] order.
 pub fn ensure_model(spec: &ModelSpec) -> Result<Vec<PathBuf>, DownloadError> {
     spec.files.iter().map(|f| ensure_file(spec.id, f)).collect()
-}
-
-/// Read the primary (first) weight file of a model into memory. Convenience for
-/// handing bytes straight to [`super::onnx::OnnxModel::load`].
-pub fn primary_bytes(spec: &ModelSpec) -> Result<Vec<u8>, DownloadError> {
-    let file = spec.files.first().ok_or_else(|| DownloadError::NotHosted {
-        model: spec.id.to_string(),
-        file: "<none>".to_string(),
-    })?;
-    let path = ensure_file(spec.id, file)?;
-    Ok(fs::read(path)?)
 }
 
 fn checksum_ok(path: &PathBuf, expected: &str) -> Result<bool, DownloadError> {
@@ -222,24 +196,5 @@ fn http_get_once(
         }
         // Connection resets / timeouts / DNS blips — retry.
         Err(e @ ureq::Error::Transport(_)) => Err((e.to_string(), true)),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn sha256_matches_known_vector() {
-        // SHA-256 of the empty string.
-        assert_eq!(
-            sha256_hex(b""),
-            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-        );
-        // SHA-256 of "abc".
-        assert_eq!(
-            sha256_hex(b"abc"),
-            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
-        );
     }
 }

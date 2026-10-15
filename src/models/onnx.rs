@@ -3,7 +3,7 @@
 //!
 //! The model is loaded from a **byte buffer**, never a path, so the identical
 //! code path runs natively (bytes from the [`super::download`] cache) and in WASM
-//! (bytes fetched by JavaScript and handed back in). All tensors are `f32`
+//! (bytes fetched by the host and supplied with [`super::provide_weights`]). All tensors are `f32`
 //! (NCDHW for the volumetric nets); callers convert to/from the crate's `f64`
 //! volumes and handle model-specific normalization and padding.
 //!

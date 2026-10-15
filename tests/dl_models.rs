@@ -23,7 +23,7 @@ fn grid_of(data: &TestData) -> Grid {
 }
 
 /// First weight file of a registry model (downloads + caches with `download`).
-fn weights(id: &str) -> Vec<u8> {
+fn weights(id: &str) -> qsm_core::models::WeightBytes {
     let spec = qsm_core::models::find_model(id).unwrap_or_else(|| panic!("no registry model '{id}'"));
     qsm_core::models::primary_weight_bytes(spec)
         .expect("weights not found (set $QSM_MODEL_DIR or build with the 'download' feature)")

@@ -24,10 +24,10 @@ simd = ["wide"]
 introspection = ["dep:serde"]
 # Native "download on use" of deep-learning model weights (HTTP + SHA-256 cache).
 # Not used by WASM hosts, which fetch weights in JavaScript instead.
-download = ["dep:ureq", "dep:sha2"]
+download = ["dep:ureq"]
 # ONNX inference for deep-learning models via the pure-Rust `tract` engine.
 # Byte-buffer based, so it compiles for both native and WASM targets.
-onnx = ["dep:tract-onnx", "dep:tract-linalg"]
+onnx = ["dep:tract-onnx", "dep:tract-linalg", "dep:getrandom"]
 
 # Lint configuration for the clippy gate in `.github/workflows/unit-tests.yml`, which runs
 # `--all-targets -D warnings`. A `[lints]` table is used rather than crate-level `#![allow]`
@@ -82,9 +82,10 @@ delaunator = "1.0"
 # Serde derive, only linked when the `introspection` feature is on (see [features]).
 serde = { version = "1", features = ["derive"], optional = true }
 
-# Deep-learning model weights: HTTP download + checksum (see the `download` feature).
+# Deep-learning model weights: HTTP download (see the `download` feature).
 ureq = { version = "2", optional = true }
-sha2 = { version = "0.10", optional = true }
+# SHA-256 of weight files, checked on download and on `models::provide_weights` (also in WASM).
+sha2 = "0.10"
 
 # ONNX inference engine, pure Rust so it also compiles to WASM (see `onnx` feature).
 tract-onnx = { version = "0.23", optional = true }
@@ -92,6 +93,13 @@ tract-onnx = { version = "0.23", optional = true }
 # (resolves to the same version tract-onnx uses; WASM builds without `parallel` stay single-threaded).
 tract-linalg = { version = "0.23", optional = true }
 rustdct = "0.7.1"
+
+# tract-onnx pulls getrandom 0.4, which on wasm32-unknown-unknown refuses to build unless a
+# backend is chosen. "wasm_js" (browser/Node `crypto.getRandomValues`) lets
+# `cargo build --target wasm32-unknown-unknown --features onnx` build on its own, rather than
+# every WASM host having to add this. Not compiled on other targets.
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+getrandom = { version = "0.4", features = ["wasm_js"], optional = true }
 
 [dev-dependencies]
 serde = { version = "1", features = ["derive"] }

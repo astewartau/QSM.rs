@@ -914,7 +914,7 @@ fn nextqsm_matches_python_reference() {
 #[test]
 #[ignore]
 fn osf_download_and_verify() {
-    use qsm_core::models::{download::sha256_hex, find_model, primary_weight_bytes};
+    use qsm_core::models::{find_model, primary_weight_bytes, sha256_hex};
 
     let id = std::env::var("QSM_DL_MODEL").unwrap_or("xqsm".to_string());
 
