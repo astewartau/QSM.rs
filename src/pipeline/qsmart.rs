@@ -299,6 +299,7 @@ mod tests {
             field_strength: 3.0,
             b0_direction: (0.0, 0.0, 1.0),
             slice_geometry: None,
+            affine: None,
         };
         let mut qsmart = crate::utils::QsmartParams::for_field_strength(3.0);
         qsmart.inversion = InversionAlgorithm::Tkd;
