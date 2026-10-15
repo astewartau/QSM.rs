@@ -17,6 +17,10 @@
 //!
 //! For TGV, use [`run_tgv`] which combines steps 1-4 internally.
 //!
+//! [`run_qsmart`] reports its progress and intermediates (vessel mask, per-stage local fields and
+//! χ) to an [`Observer`] as borrowed slices, so a host can show or save them without the stage
+//! keeping copies.
+//!
 //! ## Combined algorithms
 //!
 //! - HARPERELLA: SMV-based exterior Laplacian estimation (Li et al., 2014)
@@ -35,6 +39,7 @@ pub mod field_mapping;
 pub mod bg_removal;
 pub mod inversion;
 pub mod separation;
+pub mod observer;
 pub mod qsmart;
 pub mod two_pass;
 
@@ -49,5 +54,6 @@ pub use field_mapping::run_field_mapping;
 pub use bg_removal::run_bg_removal;
 pub use inversion::{run_dipole_inversion, run_tgv, run_nextqsm, run_iqsm, run_iqsm_plus, run_iqfm};
 pub use separation::{run_separation, SeparationInputs, SeparationResult};
+pub use observer::{Observer, VolumeRef};
 pub use qsmart::run_qsmart;
 pub use two_pass::{combine_two_pass, default_reliable_sections, restrict_reliable_mask};
