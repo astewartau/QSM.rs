@@ -190,5 +190,38 @@ jobs:
         with:
           tool: wasm-bindgen@${{ steps.wbg.outputs.version }}
 
+      # The `onnx` build also runs one deep-learning case, xQSM on weights handed over in memory
+      # (`models::provide_weights`), as a browser host does. The test reads the file named by
+      # `$XQSM_ONNX` through Node's `fs`; the URL and checksum come from the model registry, and
+      # the file is cached under its checksum.
+      - name: xQSM weights (registry entry)
+        id: xqsm
+        if: contains(matrix.features, 'onnx')
+        run: |
+          ENTRY=$(grep -A3 'name: "xqsm.onnx"' src/models/registry.rs)
+          URL=$(sed -n 's/.*url: "\(.*\)",/\1/p' <<< "$ENTRY")
+          SHA=$(sed -n 's/.*sha256: "\(.*\)",/\1/p' <<< "$ENTRY")
+          test -n "$URL" && test -n "$SHA"
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Cache xQSM weights
+        if: contains(matrix.features, 'onnx')
+        uses: actions/cache@v4
+        with:
+          path: ~/qsm-weights/xqsm.onnx
+          key: xqsm-onnx-${{ steps.xqsm.outputs.sha }}
+
+      - name: Fetch xQSM weights
+        if: contains(matrix.features, 'onnx')
+        run: |
+          F=~/qsm-weights/xqsm.onnx
+          if ! echo "${{ steps.xqsm.outputs.sha }}  $F" | sha256sum -c --status 2>/dev/null; then
+            mkdir -p ~/qsm-weights
+            curl -fsSL --retry 5 --retry-all-errors -o "$F" "${{ steps.xqsm.outputs.url }}"
+            echo "${{ steps.xqsm.outputs.sha }}  $F" | sha256sum -c
+          fi
+          echo "XQSM_ONNX=$F" >> "$GITHUB_ENV"
+
       - name: Run the pipeline under Node
         run: cargo test --release --target wasm32-unknown-unknown --features "${{ matrix.features }}" --test wasm_pipeline

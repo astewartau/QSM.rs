@@ -13,8 +13,9 @@
 //! `Cargo.lock`) set as the target's runner (`CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER`).
 //!
 //! Deep-learning variants are skipped (see [`needs_weights`]): they need model weights, which a
-//! WASM host hands over in memory. To add one, write a case that provides its weights and then
-//! calls the stage exactly as the classical cases here do.
+//! WASM host hands over in memory. [`xqsm_on_provided_weights`] is the case that does so: it
+//! reads the file named by `$XQSM_ONNX` (at compile time) through Node's `fs`, passes the bytes to
+//! `models::provide_weights` and runs the inversion. To add another, do the same.
 
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen_test::wasm_bindgen_test as test;
@@ -389,4 +390,64 @@ fn referencing_and_two_pass() {
     check_mask("restrict_reliable_mask", &reliable);
     let filled: Vec<f64> = p.chi.iter().map(|x| x + 0.001).collect();
     check("combine_two_pass", &combine_two_pass(&p.chi, &filled, &reliable).unwrap());
+}
+
+/// The bytes of the file `$XQSM_ONNX` named when this test was compiled, or `None` (with a note)
+/// when it was unset. CI downloads the file and sets it (see the `wasm` job), so there an unset
+/// variable is a failure, not a skip.
+#[cfg(feature = "onnx")]
+fn xqsm_bytes() -> Option<Vec<u8>> {
+    let Some(path) = option_env!("XQSM_ONNX") else {
+        assert!(option_env!("CI").is_none(), "$XQSM_ONNX must be set in CI");
+        println!("skipping the xQSM case: $XQSM_ONNX was not set at compile time");
+        return None;
+    };
+    #[cfg(target_arch = "wasm32")]
+    {
+        #[wasm_bindgen::prelude::wasm_bindgen(module = "fs")]
+        extern "C" {
+            #[wasm_bindgen(js_name = readFileSync, catch)]
+            fn read_file_sync(path: &str) -> Result<js_sys::Uint8Array, wasm_bindgen::JsValue>;
+        }
+        let bytes = read_file_sync(path).unwrap_or_else(|e| panic!("read {path}: {e:?}"));
+        Some(bytes.to_vec())
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    Some(std::fs::read(path).unwrap_or_else(|e| panic!("read {path}: {e}")))
+}
+
+/// xQSM through `run_dipole_inversion` on weights supplied in memory, as a browser host runs it.
+#[cfg(feature = "onnx")]
+#[test]
+fn xqsm_on_provided_weights() {
+    use qsm_core::models;
+    const FILE: &str = "xqsm.onnx";
+    let Some(bytes) = xqsm_bytes() else { return };
+    let p = Phantom::new();
+    let m = meta();
+    let config = InversionConfig {
+        algorithm: InversionAlgorithm::Xqsm,
+        ..Default::default()
+    };
+    assert_eq!(config.input(TES.len()), InversionInput::LocalField);
+
+    // Without supplied bytes there is nothing to load on wasm32 (natively the cache or a download
+    // could still find the file), and the error says what to do.
+    models::forget_weights(FILE);
+    #[cfg(target_arch = "wasm32")]
+    {
+        let err =
+            run_dipole_inversion(&p.local_ppm, &p.mask, &m, &config, None, &mut no_progress())
+                .expect_err("xQSM ran without weights");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("provide_weights") && msg.contains(FILE),
+            "{msg}"
+        );
+    }
+
+    models::provide_weights(FILE, bytes).unwrap();
+    let chi = run_dipole_inversion(&p.local_ppm, &p.mask, &m, &config, None, &mut no_progress());
+    models::forget_weights(FILE);
+    check("Xqsm", &chi.unwrap_or_else(|e| panic!("Xqsm: {e}")));
 }
