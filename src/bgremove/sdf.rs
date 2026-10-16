@@ -19,14 +19,15 @@ use crate::Grid;
 use crate::utils::curvature::calculate_curvature_proximity;
 
 /// Parameters for SDF background field removal
+///
+/// There is no indent/closing radius: the reference `QSMART_SDF.m` builds an indent mask from
+/// `sdf_sp_radius` but never passes it to `sdf_curvature.m`, so the radius has no effect.
 #[derive(Clone, Debug)]
 pub struct SdfParams {
     /// Sigma parameter for initial proximity map (default 10 for stage 1, 8 for stage 2)
     pub sigma1: f64,
     /// Sigma parameter for vasculature proximity (default 0 for stage 1, 2 for stage 2)
     pub sigma2: f64,
-    /// Spatial radius for morphological closing of indents (default 8 voxels)
-    pub spatial_radius: i32,
     /// Lower limit for clamping proximity values (default 0.6)
     pub lower_lim: f64,
     /// Scaling constant for curvature (default 500)
@@ -43,7 +44,6 @@ impl Default for SdfParams {
             // sigma2 affects the combined sigma even though vasculature
             // proximity is skipped when vasc_only is all-ones.
             sigma2: 10.0,
-            spatial_radius: 8,
             lower_lim: 0.6,
             curv_constant: 500.0,
             use_curvature: true,
@@ -58,7 +58,6 @@ impl SdfParams {
         Self {
             sigma1: 10.0,
             sigma2: 10.0,
-            spatial_radius: 8,
             lower_lim: 0.6,
             curv_constant: 500.0,
             use_curvature: true,
@@ -70,7 +69,6 @@ impl SdfParams {
         Self {
             sigma1: 8.0,
             sigma2: 2.0,
-            spatial_radius: 8,
             lower_lim: 0.6,
             curv_constant: 500.0,
             use_curvature: true,

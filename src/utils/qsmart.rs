@@ -138,8 +138,6 @@ pub struct QsmartParams {
     /// SDF parameters for stage 2
     pub sdf_sigma1_stage2: f64,
     pub sdf_sigma2_stage2: f64,
-    /// SDF spatial radius for morphological closing
-    pub sdf_spatial_radius: i32,
     /// SDF lower limit for proximity clamping
     pub sdf_lower_lim: f64,
     /// SDF curvature constant
@@ -172,7 +170,6 @@ impl Default for QsmartParams {
             sdf_sigma2_stage1: 10.0,
             sdf_sigma1_stage2: 8.0,
             sdf_sigma2_stage2: 2.0,
-            sdf_spatial_radius: 8,
             sdf_lower_lim: 0.6,
             sdf_curv_constant: 500.0,
             vasc_sphere_radius: 8,
