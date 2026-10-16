@@ -49,7 +49,6 @@ const FIELD_TESLA: f64 = 7.0;
 const GYRO: f64 = 2.675e8; // rad/s/T
 
 // SDF parameters
-const SDF_SPATIAL_RADIUS: i32 = 8;
 const SDF_LOWER_LIM: f64 = 0.7;
 const SDF_CURV_CONSTANT: f64 = 500.0;
 
@@ -665,7 +664,6 @@ fn test_qsmart_05_sdf_stage1() {
     let params_stage1 = SdfParams {
         sigma1: SDF_SIGMA1_STAGE1,
         sigma2: SDF_SIGMA2_STAGE1, // 0.0 per Warda
-        spatial_radius: SDF_SPATIAL_RADIUS,
         lower_lim: SDF_LOWER_LIM,
         curv_constant: SDF_CURV_CONSTANT,
         use_curvature: true,
@@ -692,7 +690,6 @@ fn test_qsmart_05_sdf_stage1() {
     let params_stage1_old = SdfParams {
         sigma1: SDF_SIGMA1_STAGE1,
         sigma2: 10.0, // current Rust default
-        spatial_radius: SDF_SPATIAL_RADIUS,
         lower_lim: SDF_LOWER_LIM,
         curv_constant: SDF_CURV_CONSTANT,
         use_curvature: true,
@@ -894,7 +891,6 @@ fn test_qsmart_06_sdf_stage2() {
     let params_stage2 = SdfParams {
         sigma1: SDF_SIGMA1_STAGE2,
         sigma2: SDF_SIGMA2_STAGE2,
-        spatial_radius: SDF_SPATIAL_RADIUS,
         lower_lim: SDF_LOWER_LIM,
         curv_constant: SDF_CURV_CONSTANT,
         use_curvature: true,
@@ -1199,7 +1195,6 @@ fn test_qsmart_full_pipeline() {
     let params_stage1 = SdfParams {
         sigma1: SDF_SIGMA1_STAGE1,
         sigma2: SDF_SIGMA2_STAGE1,
-        spatial_radius: SDF_SPATIAL_RADIUS,
         lower_lim: SDF_LOWER_LIM,
         curv_constant: SDF_CURV_CONSTANT,
         use_curvature: true,
@@ -1231,7 +1226,6 @@ fn test_qsmart_full_pipeline() {
     let params_stage2 = SdfParams {
         sigma1: SDF_SIGMA1_STAGE2,
         sigma2: SDF_SIGMA2_STAGE2,
-        spatial_radius: SDF_SPATIAL_RADIUS,
         lower_lim: SDF_LOWER_LIM,
         curv_constant: SDF_CURV_CONSTANT,
         use_curvature: true,

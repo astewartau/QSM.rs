@@ -130,7 +130,6 @@ pub fn run_qsmart(
     let sdf_params1 = crate::bgremove::SdfParams {
         sigma1: qsmart_params.sdf_sigma1_stage1,
         sigma2: qsmart_params.sdf_sigma2_stage1,
-        spatial_radius: qsmart_params.sdf_spatial_radius,
         lower_lim: qsmart_params.sdf_lower_lim,
         curv_constant: qsmart_params.sdf_curv_constant,
         use_curvature: true,
@@ -151,7 +150,6 @@ pub fn run_qsmart(
     let sdf_params2 = crate::bgremove::SdfParams {
         sigma1: qsmart_params.sdf_sigma1_stage2,
         sigma2: qsmart_params.sdf_sigma2_stage2,
-        spatial_radius: qsmart_params.sdf_spatial_radius,
         lower_lim: qsmart_params.sdf_lower_lim,
         curv_constant: qsmart_params.sdf_curv_constant,
         use_curvature: true,
