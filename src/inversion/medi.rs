@@ -413,6 +413,9 @@ pub fn medi(
             tempn[i] = 0.0;
         }
     }
+    // MATLAB masks N_std once up front (N_std = N_std.*Mask), and MERIT reweights that
+    // masked map, so nothing from outside the brain reaches its SMV-smoothed copy.
+    let n_std_masked = tempn.clone();
 
     // Generate dipole kernel
     let mut d_kernel = dipole_kernel_f32(grid, bdir_f32);
@@ -434,10 +437,10 @@ pub fn medi(
             work_mask[i] = if smv_mask[i] > 0.999 { 1 } else { 0 };
         }
 
-        // Modify dipole kernel: D = (1 - SphereK) * D
-        for i in 0..n_total {
-            d_kernel[i] *= 1.0 - sk[i];
-        }
+        // Modify dipole kernel: D = (1 - SphereK) * D, where SphereK is the sphere's
+        // k-space response (MEDI's sphere_kernel returns fftn of the sphere), not the
+        // image-space sphere. The sphere is symmetric, so its FFT is real.
+        smv_filter_dipole_kernel(&mut d_kernel, &sk_fft);
 
         // Modify RDF: RDF = RDF - SMV(RDF)
         let smv_rdf = apply_smv_kernel_ws(&rdf, &sk_fft, &mut ws);
@@ -489,7 +492,7 @@ pub fn medi(
     let mut w: Vec<Complex32> = vec![Complex32::new(0.0, 0.0); n_total]; // Reusable buffer for w
     let mut chi_prev = vec![0.0f32; n_total]; // Reusable buffer for convergence check
     let mut badpoint = vec![0.0f32; n_total];
-    let mut n_std_work: Vec<f32> = n_std_f32.clone();
+    let mut n_std_work: Vec<f32> = n_std_masked;
 
     // MATLAB: beta = sqrt(eps(class(f))) where eps for f64 ≈ 2.22e-16, so sqrt(eps) ≈ 1.49e-8.
     // This is a regularization parameter for the P weight denominator, not a precision limit.
@@ -650,6 +653,17 @@ pub fn medi(
         .zip(mask.iter())
         .map(|(&c, &m)| if m == 0 { 0.0 } else { c as f64 })
         .collect()
+}
+
+/// High-pass the dipole kernel with the SMV kernel in place: `D = (1 - S) * D`.
+///
+/// `sk_fft` is the FFT of the image-space SMV sphere, i.e. its k-space response `S`. This
+/// matches MEDI_L1's `D = (1-SphereK).*D` with `SphereK = sphere_kernel(...)`, which is
+/// already in k-space, so the data model is `(1-S)f = (1-S)Dχ`.
+fn smv_filter_dipole_kernel(d_kernel: &mut [f32], sk_fft: &[Complex32]) {
+    for (d, s) in d_kernel.iter_mut().zip(sk_fft.iter()) {
+        *d *= 1.0 - s.re;
+    }
 }
 
 /// Apply SMV kernel using workspace buffers (f32)
@@ -1652,5 +1666,100 @@ mod tests {
         for &val in &chi {
             assert!(val.is_finite(), "MEDI with SMV should produce finite results");
         }
+    }
+
+    /// SMV-filtered dipole kernel used by MEDI+SMV, built the way `medi` builds it.
+    fn smv_dipole_kernel(grid: &Grid, radius: f32, ws: &mut MediWorkspace) -> (Vec<f32>, Vec<Complex32>) {
+        let mut d = dipole_kernel_f32(grid, (0.0, 0.0, 1.0));
+        let mut sk_fft: Vec<Complex32> = smv_kernel_f32(grid, radius).iter()
+            .map(|&v| Complex32::new(v, 0.0))
+            .collect();
+        ws.fft_ws.fft3d(&mut sk_fft);
+        smv_filter_dipole_kernel(&mut d, &sk_fft);
+        (d, sk_fft)
+    }
+
+    #[test]
+    fn test_smv_dipole_kernel_matches_smv_filtered_field() {
+        // The SMV data model is (1-S)f = (1-S)Dχ: convolving χ with the filtered kernel must
+        // equal the dipole field minus its spherical mean. Applying the image-space sphere as
+        // if it were the k-space response leaves D almost unchanged and fails this.
+        let n = 16;
+        let n_total = n * n * n;
+        let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
+        let mut ws = MediWorkspace::new(&grid);
+        let (d_smv, sk_fft) = smv_dipole_kernel(&grid, 3.0, &mut ws);
+        let d = dipole_kernel_f32(&grid, (0.0, 0.0, 1.0));
+
+        let chi: Vec<f32> = (0..n_total)
+            .map(|i| ((i * 7919) % 101) as f32 / 101.0 - 0.5)
+            .collect();
+        let mut field = vec![0.0f32; n_total];
+        apply_dipole_conv(&mut ws.fft_ws, &chi, &d, &mut field, &mut ws.complex_buf);
+        let smv_field = apply_smv_kernel_ws(&field, &sk_fft, &mut ws);
+        let mut filtered = vec![0.0f32; n_total];
+        apply_dipole_conv(&mut ws.fft_ws, &chi, &d_smv, &mut filtered, &mut ws.complex_buf);
+
+        let mut max_err = 0.0f32;
+        let mut max_val = 0.0f32;
+        for i in 0..n_total {
+            let expected = field[i] - smv_field[i];
+            max_err = max_err.max((filtered[i] - expected).abs());
+            max_val = max_val.max(expected.abs());
+        }
+        assert!(max_err < 1e-4 * max_val.max(1.0),
+            "(1-S)D χ should equal f - SMV(f): max err {max_err}, max |f - SMV(f)| {max_val}");
+    }
+
+    #[test]
+    fn test_medi_smv_recovers_source_under_background() {
+        // A susceptibility sphere inside the mask, plus a strong source outside it whose field
+        // is harmonic inside the mask. MEDI+SMV must remove that background and recover the
+        // inner sphere (NRMSE ~0.05; an unfiltered dipole kernel gives ~0.5).
+        let n = 32;
+        let n_total = n * n * n;
+        let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
+        let idx = |x: usize, y: usize, z: usize| x + y * n + z * n * n;
+        let dist2 = |x: usize, y: usize, z: usize, c: (f64, f64, f64)| {
+            (x as f64 - c.0).powi(2) + (y as f64 - c.1).powi(2) + (z as f64 - c.2).powi(2)
+        };
+        let mut chi_true = vec![0.0f32; n_total];
+        let mut chi_all = vec![0.0f32; n_total];
+        let mut mask = vec![0u8; n_total];
+        for z in 0..n { for y in 0..n { for x in 0..n {
+            let i = idx(x, y, z);
+            if dist2(x, y, z, (16.0, 16.0, 16.0)) <= 100.0 { mask[i] = 1; }
+            if dist2(x, y, z, (16.0, 16.0, 16.0)) <= 9.0 { chi_true[i] = 0.1; chi_all[i] = 0.1; }
+            if dist2(x, y, z, (16.0, 16.0, 29.0)) <= 4.0 { chi_all[i] = 1.0; }
+        }}}
+
+        let mut ws = MediWorkspace::new(&grid);
+        let d = dipole_kernel_f32(&grid, (0.0, 0.0, 1.0));
+        let mut field = vec![0.0f32; n_total];
+        apply_dipole_conv(&mut ws.fft_ws, &chi_all, &d, &mut field, &mut ws.complex_buf);
+        let field: Vec<f64> = field.iter().map(|&v| v as f64).collect();
+
+        let params = MediParams {
+            lambda: 1e-4, smv: true, smv_radius: 3.0, percentage: 0.3,
+            cg_tol: 0.01, cg_max_iter: 50, max_iter: 10, tol: 0.01,
+            ..MediParams::default()
+        };
+        let ones = vec![1.0f64; n_total];
+        let chi = medi(&field, &ones, &ones, &mask, &grid, (0.0, 0.0, 1.0), &params, |_, _| {});
+
+        // Score inside the SMV-eroded mask, where MEDI's data term applies.
+        let (_, sk_fft) = smv_dipole_kernel(&grid, 3.0, &mut ws);
+        let mask_f: Vec<f32> = mask.iter().map(|&m| m as f32).collect();
+        let eroded = apply_smv_kernel_ws(&mask_f, &sk_fft, &mut ws);
+        let inside: Vec<usize> = (0..n_total).filter(|&i| eroded[i] > 0.999).collect();
+        let mean = |v: &dyn Fn(usize) -> f64| inside.iter().map(|&i| v(i)).sum::<f64>() / inside.len() as f64;
+        let (mr, mt) = (mean(&|i| chi[i]), mean(&|i| chi_true[i] as f64));
+        let (mut num, mut den) = (0.0, 0.0);
+        for &i in &inside {
+            num += ((chi[i] - mr) - (chi_true[i] as f64 - mt)).powi(2);
+            den += (chi_true[i] as f64 - mt).powi(2);
+        }
+        let nrmse = (num / den).sqrt();
+        assert!(nrmse < 0.2, "MEDI+SMV should recover the inner source: NRMSE {nrmse:.3}");
     }
 }
