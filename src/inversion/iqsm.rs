@@ -11,10 +11,24 @@
 //! echo is reconstructed and combined with magnitude·TE² weighting
 //! ([`iqsm_multi_echo`]).
 //!
+//! The authors run the whole volume in one pass, and so does [`iqsm`]. Its activations scale with
+//! the volume; the multi-echo entry point can instead run each echo patch by patch (a
+//! [`TileConfig`]), with memory bounded by the patch: an approximation, since the network's
+//! unwrapping, background removal and inversion are not local, as for the other tiled networks
+//! (see [`super::tiled`]).
+//!
 //! Weights are not bundled; the caller passes the exported `iqsm.onnx` bytes.
 
+use super::tiled::{tile_patch_size, tiled_volume_algorithm, TileConfig};
 use crate::grid::Grid;
 use crate::models::onnx::{OnnxModel, OnnxError, Tensor};
+
+/// Runs the network on its input tensors: a whole-volume model (re-planned per shape) or a plan
+/// built once for a tile's shape.
+pub(crate) type Net<'a> = &'a (dyn Fn(&[Tensor]) -> Result<Vec<Tensor>, OnnxError> + Sync);
+
+/// Four pooling levels: the LoT-Unet takes multiples of 16.
+pub(crate) const LOT_DIVISOR: usize = 16;
 
 /// Run iQSM on a single echo of wrapped phase.
 ///
@@ -38,12 +52,15 @@ pub fn iqsm(
     model_onnx: &[u8],
 ) -> Result<Vec<f64>, OnnxError> {
     let model = OnnxModel::load(model_onnx)?;
-    iqsm_with(&model, phase_rad, mask, grid, te, b0, phase_sign, eroded_rad)
+    iqsm_with(&|i| model.run(i), phase_rad, mask, grid, te, b0, phase_sign, eroded_rad)
 }
 
 /// Multi-echo iQSM: reconstruct each echo and combine with magnitude·TE² weights
 /// (the authors' `--echo_4d` path). `phases`/`magnitudes` are per-echo volumes;
 /// `tes` the echo times (s). Falls back to uniform weights if `magnitudes` is empty.
+///
+/// `tile: None` runs each echo on the whole volume; `Some` runs it patch by patch (see the
+/// module docs), the mask eroded once on the whole volume first.
 #[allow(clippy::too_many_arguments)]
 pub fn iqsm_multi_echo(
     phases: &[&[f64]],
@@ -55,15 +72,53 @@ pub fn iqsm_multi_echo(
     phase_sign: f64,
     eroded_rad: i32,
     model_onnx: &[u8],
+    tile: Option<&TileConfig>,
 ) -> Result<Vec<f64>, OnnxError> {
     assert_eq!(phases.len(), tes.len(), "one TE per echo");
-    let n = grid.n_total();
     let model = OnnxModel::load(model_onnx)?;
+    let whole = |i: &[Tensor]| model.run(i);
+    let tiled = match tile {
+        Some(cfg) => {
+            let p = tile_patch_size(cfg, LOT_DIVISOR);
+            let v = [1, 1, p, p, p];
+            Some((cfg, model.plan_for(&[&v, &v, &[1], &[1], &v])?))
+        }
+        None => None,
+    };
+    combine_echoes(phases, magnitudes, tes, grid.n_total(), |phase, te| match &tiled {
+        None => iqsm_with(&whole, phase, mask, grid, te, b0, phase_sign, eroded_rad),
+        Some((cfg, plan)) => tiled_echo(phase, mask, grid, eroded_rad, cfg, |ph, m, g| {
+            iqsm_with(&|i| plan.run(i), ph, m, g, te, b0, phase_sign, 0)
+        }),
+    })
+}
 
+/// One echo patch by patch: erode the mask on the whole volume, then run `run_patch` (the
+/// network with no erosion of its own) on each tile.
+pub(crate) fn tiled_echo(
+    phase: &[f64],
+    mask: &[u8],
+    grid: &Grid,
+    eroded_rad: i32,
+    cfg: &TileConfig,
+    run_patch: impl Fn(&[f64], &[u8], &Grid) -> Result<Vec<f64>, OnnxError> + Sync,
+) -> Result<Vec<f64>, OnnxError> {
+    let eroded = if eroded_rad > 0 { sphere_erode(mask, grid, eroded_rad) } else { mask.to_vec() };
+    tiled_volume_algorithm(phase, &eroded, grid, LOT_DIVISOR, cfg, run_patch, |_, _| {})
+}
+
+/// Reconstruct each echo with `echo(phase, te)` and combine with magnitude·TE² weights.
+pub(crate) fn combine_echoes(
+    phases: &[&[f64]],
+    magnitudes: &[&[f64]],
+    tes: &[f64],
+    n: usize,
+    mut echo: impl FnMut(&[f64], f64) -> Result<Vec<f64>, OnnxError>,
+) -> Result<Vec<f64>, OnnxError> {
     let mut acc = vec![0.0f64; n];
     let mut wsum = vec![0.0f64; n];
     for (e, &phase) in phases.iter().enumerate() {
-        let chi = iqsm_with(&model, phase, mask, grid, tes[e], b0, phase_sign, eroded_rad)?;
+        let chi = echo(phase, tes[e])?;
         let te2 = tes[e] * tes[e];
         for i in 0..n {
             let w = magnitudes.get(e).map(|m| m[i]).unwrap_or(1.0) * te2;
@@ -77,8 +132,9 @@ pub fn iqsm_multi_echo(
     Ok(acc)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn iqsm_with(
-    model: &OnnxModel,
+    net: Net,
     phase_rad: &[f64],
     mask: &[u8],
     grid: &Grid,
@@ -143,7 +199,7 @@ fn iqsm_with(
         Tensor::new(vec![1], vec![b0 as f32]),
         Tensor::new(shape, border),
     ];
-    let out = model.run(&inputs)?;
+    let out = net(&inputs)?;
     let chi_pad = &out[0].data;
 
     // Multiply by the (padded) mask, crop, unpack → column-major.

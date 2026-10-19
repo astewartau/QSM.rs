@@ -16,6 +16,7 @@
 //! Weights are not bundled; the caller passes the exported `iqfm.onnx` bytes.
 
 use crate::grid::Grid;
+use crate::inversion::TileConfig;
 use crate::models::onnx::OnnxError;
 
 /// Run iQFM on a single echo of wrapped phase; returns the local field (ppm),
@@ -36,7 +37,8 @@ pub fn iqfm(
 }
 
 /// Multi-echo iQFM: reconstruct each echo and combine with magnitude·TE² weights,
-/// exactly as [`super::iqsm::iqsm_multi_echo`] (the authors' `--echo_4d` path).
+/// exactly as [`super::iqsm::iqsm_multi_echo`] (the authors' `--echo_4d` path), whole-volume
+/// or tiled (`tile`).
 #[allow(clippy::too_many_arguments)]
 pub fn iqfm_multi_echo(
     phases: &[&[f64]],
@@ -48,8 +50,9 @@ pub fn iqfm_multi_echo(
     phase_sign: f64,
     eroded_rad: i32,
     model_onnx: &[u8],
+    tile: Option<&TileConfig>,
 ) -> Result<Vec<f64>, OnnxError> {
     super::iqsm::iqsm_multi_echo(
-        phases, magnitudes, mask, grid, tes, b0, phase_sign, eroded_rad, model_onnx,
+        phases, magnitudes, mask, grid, tes, b0, phase_sign, eroded_rad, model_onnx, tile,
     )
 }

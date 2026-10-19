@@ -17,7 +17,8 @@
 //! Weights are not bundled; the caller passes the exported `iqsm-plus.onnx` bytes.
 
 use crate::grid::Grid;
-use crate::inversion::iqsm::sphere_erode;
+use crate::inversion::iqsm::{combine_echoes, sphere_erode, tiled_echo, Net, LOT_DIVISOR};
+use crate::inversion::tiled::{tile_patch_size, TileConfig};
 use crate::models::onnx::{OnnxModel, OnnxError, Tensor};
 
 /// Run iQSM+ on a single echo of wrapped phase.
@@ -40,10 +41,13 @@ pub fn iqsm_plus(
     model_onnx: &[u8],
 ) -> Result<Vec<f64>, OnnxError> {
     let model = OnnxModel::load(model_onnx)?;
-    iqsm_plus_with(&model, phase_rad, mask, grid, te, b0, b0_dir, phase_sign, eroded_rad)
+    iqsm_plus_with(&|i| model.run(i), phase_rad, mask, grid, te, b0, b0_dir, phase_sign, eroded_rad, true)
 }
 
 /// Multi-echo iQSM+: reconstruct each echo and combine with magnitude·TE² weights.
+///
+/// `tile: None` runs each echo on the brain's bounding box in one pass; `Some` runs it patch by
+/// patch, with memory bounded by the patch (an approximation; see [`super::iqsm`]).
 #[allow(clippy::too_many_arguments)]
 pub fn iqsm_plus_multi_echo(
     phases: &[&[f64]],
@@ -56,30 +60,33 @@ pub fn iqsm_plus_multi_echo(
     phase_sign: f64,
     eroded_rad: i32,
     model_onnx: &[u8],
+    tile: Option<&TileConfig>,
 ) -> Result<Vec<f64>, OnnxError> {
     assert_eq!(phases.len(), tes.len(), "one TE per echo");
-    let n = grid.n_total();
     let model = OnnxModel::load(model_onnx)?;
-    let mut acc = vec![0.0f64; n];
-    let mut wsum = vec![0.0f64; n];
-    for (e, &phase) in phases.iter().enumerate() {
-        let chi = iqsm_plus_with(&model, phase, mask, grid, tes[e], b0, b0_dir, phase_sign, eroded_rad)?;
-        let te2 = tes[e] * tes[e];
-        for i in 0..n {
-            let w = magnitudes.get(e).map(|m| m[i]).unwrap_or(1.0) * te2;
-            acc[i] += w * chi[i];
-            wsum[i] += w;
+    let whole = |i: &[Tensor]| model.run(i);
+    let tiled = match tile {
+        Some(cfg) => {
+            let p = tile_patch_size(cfg, LOT_DIVISOR);
+            let v = [1, 1, p, p, p];
+            Some((cfg, model.plan_for(&[&v, &v, &[1], &[1], &[1, 1, 3], &v])?))
         }
-    }
-    for i in 0..n {
-        acc[i] = if wsum[i] > 0.0 { acc[i] / wsum[i] } else { 0.0 };
-    }
-    Ok(acc)
+        None => None,
+    };
+    combine_echoes(phases, magnitudes, tes, grid.n_total(), |phase, te| match &tiled {
+        None => iqsm_plus_with(&whole, phase, mask, grid, te, b0, b0_dir, phase_sign, eroded_rad, true),
+        // A tile is already a multiple of 16 and shaped as the plan is: no crop to the brain.
+        Some((cfg, plan)) => tiled_echo(phase, mask, grid, eroded_rad, cfg, |ph, m, g| {
+            iqsm_plus_with(&|i| plan.run(i), ph, m, g, te, b0, b0_dir, phase_sign, 0, false)
+        }),
+    })
 }
 
+/// One pass of the network. With `crop`, on the eroded mask's bounding box plus 16 voxels,
+/// centre-padded to a multiple of 16; without, on the whole input, which must already be one.
 #[allow(clippy::too_many_arguments)]
 fn iqsm_plus_with(
-    model: &OnnxModel,
+    net: Net,
     phase_rad: &[f64],
     mask: &[u8],
     grid: &Grid,
@@ -88,6 +95,7 @@ fn iqsm_plus_with(
     b0_dir: (f64, f64, f64),
     phase_sign: f64,
     eroded_rad: i32,
+    crop: bool,
 ) -> Result<Vec<f64>, OnnxError> {
     let (nx, ny, nz) = grid.dims;
     let n = nx * ny * nz;
@@ -120,12 +128,18 @@ fn iqsm_plus_with(
         return Ok(vec![0.0; n]);
     }
     let pad = 16usize;
-    let bx0 = x0.saturating_sub(pad);
-    let by0 = y0.saturating_sub(pad);
-    let bz0 = z0.saturating_sub(pad);
-    let bx1 = (x1 + 1 + pad).min(nx);
-    let by1 = (y1 + 1 + pad).min(ny);
-    let bz1 = (z1 + 1 + pad).min(nz);
+    let (bx0, by0, bz0, bx1, by1, bz1) = if crop {
+        (
+            x0.saturating_sub(pad),
+            y0.saturating_sub(pad),
+            z0.saturating_sub(pad),
+            (x1 + 1 + pad).min(nx),
+            (y1 + 1 + pad).min(ny),
+            (z1 + 1 + pad).min(nz),
+        )
+    } else {
+        (0, 0, 0, nx, ny, nz)
+    };
     let (cx, cy, cz) = (bx1 - bx0, by1 - by0, bz1 - bz0);
 
     // Centre-pad the cropped box to a multiple of 16.
@@ -179,7 +193,7 @@ fn iqsm_plus_with(
         Tensor::new(vec![1, 1, 3], z_prjs),
         Tensor::new(shape, border),
     ];
-    let out = model.run(&inputs)?;
+    let out = net(&inputs)?;
     let chi_pad = &out[0].data;
 
     // ×mask, crop pad, paste back into the full grid at the bounding box.

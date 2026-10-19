@@ -6,10 +6,15 @@
 //! sees TE/B0/B0-direction. This mirrors the QSM-CI ONNX port (faithful to the
 //! authors' MATLAB `predict` to |Δ| ≈ 1e-7).
 //!
+//! The whole volume runs in one pass, as the authors run it. Its activations scale with the
+//! volume: a 184×256×128 scan needs more than a 32-bit (WASM) heap holds. [`bfrnet_tiled`] runs
+//! it patch by patch instead, with memory bounded by the patch; see it for what that costs.
+//!
 //! Weights are not bundled; the caller passes the exported `bfrnet.onnx` bytes
 //! (see [`crate::models`]).
 
 use crate::grid::Grid;
+use crate::inversion::TileConfig;
 use crate::models::onnx::{OnnxModel, OnnxError, Tensor};
 
 /// Run BFRnet on a total field map.
@@ -22,8 +27,7 @@ use crate::models::onnx::{OnnxModel, OnnxError, Tensor};
 ///
 /// The whole volume is run in one pass. BFRnet is fully convolutional with three
 /// pooling levels, so each spatial dimension is zero-padded up to a multiple of
-/// 8 and cropped back. (Memory-bounded Hann-blended tiling — as the Python port
-/// uses for very large volumes — is a future refinement.)
+/// 8 and cropped back. For bounded memory see [`bfrnet_tiled`].
 pub fn bfrnet(
     field_ppm: &[f64],
     mask: &[u8],
@@ -87,4 +91,35 @@ pub fn bfrnet(
         }
     }
     Ok(local)
+}
+
+/// BFRnet patch by patch: each `core` block of the background field is predicted from a patch
+/// with `halo` voxels of context on every side (zero outside the volume), padded to a multiple of
+/// 8, so peak memory follows the patch, not the volume.
+///
+/// An approximation of [`bfrnet`]: each patch sees only its own part of the masked field, while
+/// the background field it predicts comes from sources outside the brain. Tiles that do not touch
+/// `mask` are skipped. Returns the local field (ppm), masked, like [`bfrnet`].
+pub fn bfrnet_tiled(
+    field_ppm: &[f64],
+    mask: &[u8],
+    grid: &Grid,
+    model_onnx: &[u8],
+    cfg: &TileConfig,
+    progress: impl FnMut(usize, usize),
+) -> Result<Vec<f64>, OnnxError> {
+    let n = grid.n_total();
+    assert_eq!(field_ppm.len(), n, "field length must match grid");
+    assert_eq!(mask.len(), n, "mask length must match grid");
+    let masked: Vec<f64> = field_ppm.iter().zip(mask).map(|(&f, &m)| if m != 0 { f } else { 0.0 }).collect();
+    let model = OnnxModel::load(model_onnx)?;
+    let background = crate::inversion::tiled::tiled_field_inversion(
+        &masked, mask, grid, &model, 8, cfg, |v| v as f32, |o| o as f64, progress,
+    )?;
+    Ok(masked
+        .iter()
+        .zip(&background)
+        .zip(mask)
+        .map(|((&f, &b), &m)| if m != 0 { f - b } else { 0.0 })
+        .collect())
 }

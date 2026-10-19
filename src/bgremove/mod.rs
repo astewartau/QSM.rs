@@ -91,4 +91,4 @@ pub use iharperella::{
     HarperellaInput, HarperellaParams, IharperellaParams,
 };
 #[cfg(feature = "onnx")]
-pub use bfrnet::bfrnet;
+pub use bfrnet::{bfrnet, bfrnet_tiled};

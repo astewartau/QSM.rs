@@ -315,7 +315,7 @@ fn test_dl_iqsm() {
     let t = Instant::now();
     let chi = inversion::iqsm_multi_echo(
         &phases, &mags, &data.mask, &grid, &data.echo_times, data.field_strength,
-        IQSM_PHASE_SIGN, IQSM_ERODED_RAD, &w,
+        IQSM_PHASE_SIGN, IQSM_ERODED_RAD, &w, None,
     )
     .expect("iqsm");
     report_chi("iQSM", "dl_iqsm", &chi, &data, t.elapsed());
@@ -333,7 +333,7 @@ fn test_dl_iqsm_plus() {
     let t = Instant::now();
     let chi = inversion::iqsm_plus_multi_echo(
         &phases, &mags, &data.mask, &grid, &data.echo_times, data.field_strength, data.b0_dir,
-        IQSM_PHASE_SIGN, IQSM_ERODED_RAD, &w,
+        IQSM_PHASE_SIGN, IQSM_ERODED_RAD, &w, None,
     )
     .expect("iqsm+");
     report_chi("iQSM+", "dl_iqsm_plus", &chi, &data, t.elapsed());

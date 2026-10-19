@@ -105,7 +105,7 @@ pub fn run_bg_removal(
             )?
         }
         BgRemovalAlgorithm::Bfrnet => {
-            let local = run_bfrnet(field_ppm, mask, &grid)?;
+            let local = run_bfrnet(field_ppm, mask, &grid, config.tile, progress)?;
             (local, mask.to_vec())
         }
     };
@@ -128,21 +128,28 @@ pub fn run_bg_removal(
     })
 }
 
-/// Source the BFRnet weights and run inference. Requires the `onnx` feature;
-/// weights resolve through [`crate::models`] (bytes supplied with
+/// Source the BFRnet weights and run inference, whole-volume or tiled (`tile`). Requires the
+/// `onnx` feature; weights resolve through [`crate::models`] (bytes supplied with
 /// [`crate::models::provide_weights`], then `$QSM_MODEL_DIR`/cache/download on native).
 #[cfg(feature = "onnx")]
 fn run_bfrnet(
     field_ppm: &[f64],
     mask: &[u8],
     grid: &crate::Grid,
+    tile: Option<(usize, usize)>,
+    progress: &mut dyn FnMut(usize, usize),
 ) -> Result<Vec<f64>, PipelineError> {
     let spec = crate::models::find_model("bfrnet")
         .ok_or_else(|| PipelineError::InvalidConfig("bfrnet not in model registry".into()))?;
     let bytes = crate::models::primary_weight_bytes(spec)
         .map_err(PipelineError::InvalidConfig)?;
-    crate::bgremove::bfrnet(field_ppm, mask, grid, &bytes)
-        .map_err(|e| PipelineError::AlgorithmError(e.to_string()))
+    match tile {
+        Some((core, halo)) => crate::bgremove::bfrnet_tiled(
+            field_ppm, mask, grid, &bytes, &crate::inversion::TileConfig { core, halo }, progress,
+        ),
+        None => crate::bgremove::bfrnet(field_ppm, mask, grid, &bytes),
+    }
+    .map_err(|e| PipelineError::AlgorithmError(e.to_string()))
 }
 
 #[cfg(not(feature = "onnx"))]
@@ -150,6 +157,8 @@ fn run_bfrnet(
     _field_ppm: &[f64],
     _mask: &[u8],
     _grid: &crate::Grid,
+    _tile: Option<(usize, usize)>,
+    _progress: &mut dyn FnMut(usize, usize),
 ) -> Result<Vec<f64>, PipelineError> {
     Err(PipelineError::InvalidConfig(
         "BFRnet requires building qsm-core with the 'onnx' feature".into(),
