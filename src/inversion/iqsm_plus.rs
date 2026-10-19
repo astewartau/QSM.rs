@@ -17,8 +17,8 @@
 //! Weights are not bundled; the caller passes the exported `iqsm-plus.onnx` bytes.
 
 use crate::grid::Grid;
-use crate::inversion::iqsm::{combine_echoes, sphere_erode, tiled_echo, Net, LOT_DIVISOR};
-use crate::inversion::tiled::{tile_patch_size, TileConfig};
+use crate::inversion::iqsm::{combine_echoes, sphere_erode, tiled_echo, Net};
+use crate::inversion::tiled::{tile_cost_of, tile_patch_size, TileConfig};
 use crate::models::onnx::{OnnxModel, OnnxError, Tensor};
 
 /// Run iQSM+ on a single echo of wrapped phase.
@@ -65,9 +65,10 @@ pub fn iqsm_plus_multi_echo(
     assert_eq!(phases.len(), tes.len(), "one TE per echo");
     let model = OnnxModel::load(model_onnx)?;
     let whole = |i: &[Tensor]| model.run(i);
+    let cost = tile_cost_of("iqsm-plus");
     let tiled = match tile {
         Some(cfg) => {
-            let p = tile_patch_size(cfg, LOT_DIVISOR);
+            let p = tile_patch_size(cfg, cost.divisor);
             let v = [1, 1, p, p, p];
             Some((cfg, model.plan_for(&[&v, &v, &[1], &[1], &[1, 1, 3], &v])?))
         }
@@ -76,7 +77,7 @@ pub fn iqsm_plus_multi_echo(
     combine_echoes(phases, magnitudes, tes, grid.n_total(), |phase, te| match &tiled {
         None => iqsm_plus_with(&whole, phase, mask, grid, te, b0, b0_dir, phase_sign, eroded_rad, true),
         // A tile is already a multiple of 16 and shaped as the plan is: no crop to the brain.
-        Some((cfg, plan)) => tiled_echo(phase, mask, grid, eroded_rad, cfg, |ph, m, g| {
+        Some((cfg, plan)) => tiled_echo(phase, mask, grid, eroded_rad, cfg, &cost, |ph, m, g| {
             iqsm_plus_with(&|i| plan.run(i), ph, m, g, te, b0, b0_dir, phase_sign, 0, false)
         }),
     })

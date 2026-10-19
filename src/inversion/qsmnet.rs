@@ -133,7 +133,9 @@ pub fn qsmnet_tiled(
     let (in_mean, inv_std, out_std, out_mean) =
         (norm.in_mean, 1.0 / norm.in_std, norm.out_std, norm.out_mean);
     super::tiled::tiled_field_inversion(
-        local_field_ppm, mask, grid, &model, 16, cfg,
+        // QSMnet and QSMnet+ are one architecture, so one tile costs the same (a registry test
+        // checks the two figures agree).
+        local_field_ppm, mask, grid, &model, &super::tiled::tile_cost_of("qsmnet"), cfg,
         move |v| ((v - in_mean) * inv_std) as f32,
         move |o| out_std * o as f64 + out_mean,
         progress,

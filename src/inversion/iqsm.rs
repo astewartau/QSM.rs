@@ -19,16 +19,14 @@
 //!
 //! Weights are not bundled; the caller passes the exported `iqsm.onnx` bytes.
 
-use super::tiled::{tile_patch_size, tiled_volume_algorithm, TileConfig};
+use super::tiled::{tile_cost_of, tile_patch_size, tiled_volume_algorithm, TileConfig};
+use crate::models::TileCost;
 use crate::grid::Grid;
 use crate::models::onnx::{OnnxModel, OnnxError, Tensor};
 
 /// Runs the network on its input tensors: a whole-volume model (re-planned per shape) or a plan
 /// built once for a tile's shape.
 pub(crate) type Net<'a> = &'a (dyn Fn(&[Tensor]) -> Result<Vec<Tensor>, OnnxError> + Sync);
-
-/// Four pooling levels: the LoT-Unet takes multiples of 16.
-pub(crate) const LOT_DIVISOR: usize = 16;
 
 /// Run iQSM on a single echo of wrapped phase.
 ///
@@ -74,12 +72,32 @@ pub fn iqsm_multi_echo(
     model_onnx: &[u8],
     tile: Option<&TileConfig>,
 ) -> Result<Vec<f64>, OnnxError> {
+    lot_multi_echo("iqsm", phases, magnitudes, mask, grid, tes, b0, phase_sign, eroded_rad, model_onnx, tile)
+}
+
+/// [`iqsm_multi_echo`] for either head of the network: `model_id` (`"iqsm"` or `"iqfm"`) names
+/// the registry entry whose tile cost the tiled path budgets with.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn lot_multi_echo(
+    model_id: &str,
+    phases: &[&[f64]],
+    magnitudes: &[&[f64]],
+    mask: &[u8],
+    grid: &Grid,
+    tes: &[f64],
+    b0: f64,
+    phase_sign: f64,
+    eroded_rad: i32,
+    model_onnx: &[u8],
+    tile: Option<&TileConfig>,
+) -> Result<Vec<f64>, OnnxError> {
     assert_eq!(phases.len(), tes.len(), "one TE per echo");
     let model = OnnxModel::load(model_onnx)?;
     let whole = |i: &[Tensor]| model.run(i);
+    let cost = tile_cost_of(model_id);
     let tiled = match tile {
         Some(cfg) => {
-            let p = tile_patch_size(cfg, LOT_DIVISOR);
+            let p = tile_patch_size(cfg, cost.divisor);
             let v = [1, 1, p, p, p];
             Some((cfg, model.plan_for(&[&v, &v, &[1], &[1], &v])?))
         }
@@ -87,24 +105,26 @@ pub fn iqsm_multi_echo(
     };
     combine_echoes(phases, magnitudes, tes, grid.n_total(), |phase, te| match &tiled {
         None => iqsm_with(&whole, phase, mask, grid, te, b0, phase_sign, eroded_rad),
-        Some((cfg, plan)) => tiled_echo(phase, mask, grid, eroded_rad, cfg, |ph, m, g| {
+        Some((cfg, plan)) => tiled_echo(phase, mask, grid, eroded_rad, cfg, &cost, |ph, m, g| {
             iqsm_with(&|i| plan.run(i), ph, m, g, te, b0, phase_sign, 0)
         }),
     })
 }
 
 /// One echo patch by patch: erode the mask on the whole volume, then run `run_patch` (the
-/// network with no erosion of its own) on each tile.
+/// network with no erosion of its own) on each tile. `cost` is the network's tile cost, whose
+/// divisor (16: the LoT-Unet has four pooling levels) pads each patch.
 pub(crate) fn tiled_echo(
     phase: &[f64],
     mask: &[u8],
     grid: &Grid,
     eroded_rad: i32,
     cfg: &TileConfig,
+    cost: &TileCost,
     run_patch: impl Fn(&[f64], &[u8], &Grid) -> Result<Vec<f64>, OnnxError> + Sync,
 ) -> Result<Vec<f64>, OnnxError> {
     let eroded = if eroded_rad > 0 { sphere_erode(mask, grid, eroded_rad) } else { mask.to_vec() };
-    tiled_volume_algorithm(phase, &eroded, grid, LOT_DIVISOR, cfg, run_patch, |_, _| {})
+    tiled_volume_algorithm(phase, &eroded, grid, cost, cfg, run_patch, |_, _| {})
 }
 
 /// Reconstruct each echo with `echo(phase, te)` and combine with magnitude·TE² weights.

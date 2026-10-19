@@ -53,6 +53,7 @@ const MODELS: &[ModelSpec] = &[
         inputs: &["field"],
         outputs: &["local_field"],
         size_divisor: 8,
+        tile_bytes_per_voxel: Some(1762),
     },
     // ---- Dipole inversion --------------------------------------------------
     ModelSpec {
@@ -77,6 +78,7 @@ const MODELS: &[ModelSpec] = &[
         inputs: &["field"],
         outputs: &["chi"],
         size_divisor: 8,
+        tile_bytes_per_voxel: Some(904),
     },
     ModelSpec {
         id: "qsmnet",
@@ -100,6 +102,7 @@ const MODELS: &[ModelSpec] = &[
         inputs: &["field"],
         outputs: &["chi"],
         size_divisor: 16,
+        tile_bytes_per_voxel: Some(868),
     },
     ModelSpec {
         id: "qsmnet-plus",
@@ -123,6 +126,7 @@ const MODELS: &[ModelSpec] = &[
         inputs: &["field"],
         outputs: &["chi"],
         size_divisor: 16,
+        tile_bytes_per_voxel: Some(874),
     },
     ModelSpec {
         id: "qsmgan",
@@ -146,6 +150,7 @@ const MODELS: &[ModelSpec] = &[
         inputs: &["field"],
         outputs: &["chi"],
         size_divisor: 8,
+        tile_bytes_per_voxel: None,
     },
     ModelSpec {
         id: "lpcnn",
@@ -169,6 +174,7 @@ const MODELS: &[ModelSpec] = &[
         inputs: &["field", "mask", "b_vec"],
         outputs: &["chi"],
         size_divisor: 8,
+        tile_bytes_per_voxel: Some(733),
     },
     ModelSpec {
         id: "ir2qsm",
@@ -194,6 +200,7 @@ const MODELS: &[ModelSpec] = &[
         inputs: &["field", "mask"],
         outputs: &["chi"],
         size_divisor: 8,
+        tile_bytes_per_voxel: Some(707),
     },
     // ---- Single-step (phase/total field → χ) -------------------------------
     ModelSpec {
@@ -221,6 +228,7 @@ const MODELS: &[ModelSpec] = &[
         inputs: &["field"],
         outputs: &["chi"],
         size_divisor: 1,
+        tile_bytes_per_voxel: None,
     },
     ModelSpec {
         id: "iqsm",
@@ -242,7 +250,8 @@ const MODELS: &[ModelSpec] = &[
         }],
         inputs: &["phase", "mask", "te", "b0", "border"],
         outputs: &["chi"],
-        size_divisor: 8,
+        size_divisor: 16,
+        tile_bytes_per_voxel: Some(493),
     },
     ModelSpec {
         id: "iqsm-plus",
@@ -265,6 +274,7 @@ const MODELS: &[ModelSpec] = &[
         inputs: &["phase", "mask", "te", "b0", "z_prjs", "border"],
         outputs: &["chi"],
         size_divisor: 16,
+        tile_bytes_per_voxel: Some(1066),
     },
     ModelSpec {
         id: "iqfm",
@@ -287,7 +297,8 @@ const MODELS: &[ModelSpec] = &[
         }],
         inputs: &["phase", "mask", "te", "b0", "border"],
         outputs: &["localfield"],
-        size_divisor: 8,
+        size_divisor: 16,
+        tile_bytes_per_voxel: Some(493),
     },
     ModelSpec {
         id: "nextqsm",
@@ -321,6 +332,7 @@ const MODELS: &[ModelSpec] = &[
         inputs: &["field", "mask", "b_vec"],
         outputs: &["chi"],
         size_divisor: 64,
+        tile_bytes_per_voxel: Some(700),
     },
     ModelSpec {
         id: "modl-qsm",
@@ -346,6 +358,7 @@ const MODELS: &[ModelSpec] = &[
         inputs: &["field", "mask", "b_vec"],
         outputs: &["chi"],
         size_divisor: 1,
+        tile_bytes_per_voxel: Some(777),
     },
     // ---- χ-separation (χ+ / χ−) --------------------------------------------
     ModelSpec {
@@ -369,6 +382,7 @@ const MODELS: &[ModelSpec] = &[
         inputs: &["qsm", "r2prime", "lfs"],
         outputs: &["chi_pos", "chi_neg"],
         size_divisor: 8,
+        tile_bytes_per_voxel: None,
     },
     ModelSpec {
         id: "r2primenet",
@@ -395,6 +409,7 @@ const MODELS: &[ModelSpec] = &[
         inputs: &["r2star"],
         outputs: &["r2prime"],
         size_divisor: 16,
+        tile_bytes_per_voxel: None,
     },
     ModelSpec {
         id: "chi-sepnet",
@@ -420,6 +435,7 @@ const MODELS: &[ModelSpec] = &[
         inputs: &["local_field", "qsm", "r2prime"],
         outputs: &["chi_pos", "chi_neg"],
         size_divisor: 8,
+        tile_bytes_per_voxel: None,
     },
     ModelSpec {
         id: "hd-bet",
@@ -445,6 +461,7 @@ const MODELS: &[ModelSpec] = &[
         inputs: &["image"],
         outputs: &["logits"],
         size_divisor: 32,
+        tile_bytes_per_voxel: None,
     },
     ModelSpec {
         id: "rs2-net",
@@ -472,6 +489,7 @@ const MODELS: &[ModelSpec] = &[
         inputs: &["input"],
         outputs: &["logits"],
         size_divisor: 32,
+        tile_bytes_per_voxel: None,
     },
     ModelSpec {
         id: "mindgrab",
@@ -499,6 +517,7 @@ const MODELS: &[ModelSpec] = &[
         inputs: &["image"],
         outputs: &["logits"],
         size_divisor: 1,
+        tile_bytes_per_voxel: None,
     },
     // ---- Anatomical segmentation -------------------------------------------
     ModelSpec {
@@ -527,6 +546,7 @@ const MODELS: &[ModelSpec] = &[
         inputs: &["image"],
         outputs: &["unet_prediction"],
         size_divisor: 32,
+        tile_bytes_per_voxel: None,
     },
     ModelSpec {
         id: "synthseg-2.0",
@@ -546,6 +566,7 @@ const MODELS: &[ModelSpec] = &[
         inputs: &["image"],
         outputs: &["unet_prediction"],
         size_divisor: 32,
+        tile_bytes_per_voxel: None,
     },
 ];
 

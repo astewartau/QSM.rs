@@ -163,9 +163,43 @@ pub struct ModelSpec {
     /// inference (`0`/`1` = no constraint). Fully-convolutional nets with
     /// pooling need e.g. 8 or 16.
     pub size_divisor: u32,
+    /// Heap one tile of this network holds while it runs, in bytes per voxel of its padded
+    /// patch, for the networks QSM-Core runs tiled (`None` for the rest).
+    ///
+    /// Covers the tile's activations and everything else its wrapper allocates per tile (the
+    /// input and output patches, and for the unrolled networks their FFT buffers), as measured
+    /// in WASM, fragmentation included: the slope of the heap's high-water against patch voxels,
+    /// one tile in flight (the `browser_memory::tile_cost_*` cases in `tests/wasm_pipeline.rs`;
+    /// `examples/tile_memory_footprint.rs` measures the same natively by counting allocations).
+    /// What a run holds once whatever the number of tiles (the parsed model and its plan, the
+    /// full-volume buffers) is not in it.
+    ///
+    /// `inversion::tile_bytes` turns it into a tile's bytes for a config, and it is what
+    /// `inversion::tile_concurrency` budgets with on WASM, so a host estimating a tiled run's
+    /// memory should use this same figure.
+    pub tile_bytes_per_voxel: Option<u64>,
+}
+
+/// What one tile of a tiled network costs, for budgeting how many fit in memory at once.
+#[cfg_attr(feature = "introspection", derive(serde::Serialize))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TileCost {
+    /// The network's size divisor: a tile's patch is `core + 2·halo` rounded up to a multiple of
+    /// it ([`ModelSpec::size_divisor`]).
+    pub divisor: usize,
+    /// Heap per patch voxel ([`ModelSpec::tile_bytes_per_voxel`]).
+    pub bytes_per_voxel: u64,
 }
 
 impl ModelSpec {
+    /// The cost of one tile of this network, for the networks QSM-Core runs tiled. The tiled
+    /// wrappers budget with it, and a host estimating a tiled run's memory should use it too
+    /// (`inversion::tile_bytes`, `inversion::wasm_tiles_in_flight`).
+    pub fn tile_cost(&self) -> Option<TileCost> {
+        self.tile_bytes_per_voxel
+            .map(|bytes_per_voxel| TileCost { divisor: self.size_divisor.max(1) as usize, bytes_per_voxel })
+    }
+
     /// `true` if every weight file has a non-empty URL and hash (i.e. hosted).
     pub fn is_available(&self) -> bool {
         self.status == WeightStatus::Available

@@ -221,7 +221,7 @@ pub fn modl_qsm_tiled(
     progress: impl FnMut(usize, usize),
 ) -> Result<Vec<f64>, OnnxError> {
     super::tiled::tiled_volume_algorithm(
-        local_field_ppm, mask, grid, 1, cfg,
+        local_field_ppm, mask, grid, &super::tiled::tile_cost_of("modl-qsm"), cfg,
         |f, m, g| modl_qsm(f, m, g, bdir, prior_onnx),
         progress,
     )
