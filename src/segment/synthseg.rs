@@ -23,9 +23,12 @@
 //! segmentation); on the echo-combined GRE magnitude the structure volumes come out in the
 //! normal physiological range. For multi-echo data the root-sum-of-squares over echoes works.
 //!
-//! Memory is the practical constraint: the posteriors alone are `nx·ny·nz·n_labels` floats, and
-//! peak usage on a 192×256×128 volume is around 6 GB. [`SynthSegParams::crop`] bounds it for
-//! constrained hosts.
+//! Memory is the practical constraint: the network takes about 0.95 KB per padded voxel at once
+//! (2.2 GB at 128³, 6.0 GB on a 184×256×128 scan padded to 192×256×128, measured natively), more
+//! than a 32-bit WASM heap (4 GB) holds. [`SynthSegInference::SlidingWindow`] bounds it by the
+//! patch instead of the volume: the network runs on overlapping patches whose posteriors are
+//! blended with a Gaussian weight, as nnU-Net does ([`SynthSegParams::low_memory`]). The
+//! posteriors themselves (`n_labels` floats per padded voxel) are kept either way.
 //!
 //! Reference:
 //! Billot, B., Greve, D.N., Puonti, O., et al. (2023). "SynthSeg: Segmentation of brain MRI
@@ -56,6 +59,31 @@ const MIN_PAD: usize = 128;
 /// Target resolution (mm).
 const TARGET_RES: f64 = 1.0;
 
+/// How the network is applied to the preprocessed (1 mm, RAS, padded) volume.
+#[cfg_attr(feature = "introspection", derive(serde::Serialize))]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum SynthSegInference {
+    /// One network pass over the whole padded volume, as the SynthSeg CLI runs it. Peak memory
+    /// grows with the volume (about 0.95 KB per padded voxel).
+    FullVolume,
+    /// Gaussian-weighted sliding window: the network runs on overlapping cubes of `patch` voxels
+    /// (at least 64, rounded up to a multiple of 32), stepping `tile_step` of a patch, and each voxel's
+    /// posteriors are the Gaussian-weighted (σ = patch/8) mean over the windows that cover it.
+    /// Peak memory for the network follows the patch. An axis the padded volume does not exceed
+    /// is covered by one window.
+    SlidingWindow {
+        /// Edge of the cubic patch, voxels at 1 mm.
+        patch: usize,
+        /// Step between windows as a fraction of the patch (nnU-Net: 0.5).
+        tile_step: f64,
+    },
+}
+
+impl SynthSegInference {
+    /// The memory-bounded window: 128³ patches, half-overlapping.
+    pub const LOW_MEMORY: Self = Self::SlidingWindow { patch: 128, tile_step: 0.5 };
+}
+
 /// SynthSeg inference parameters.
 #[cfg_attr(feature = "introspection", derive(serde::Serialize))]
 #[derive(Clone, Debug, PartialEq)]
@@ -77,6 +105,8 @@ pub struct SynthSegParams {
     /// Gaussian blur applied to the posteriors, in voxels (SynthSeg's default is 0.5). Zero
     /// disables it.
     pub sigma_smoothing: f64,
+    /// Whole-volume (default, the CLI's) or sliding-window inference.
+    pub inference: SynthSegInference,
 }
 
 impl Default for SynthSegParams {
@@ -87,6 +117,7 @@ impl Default for SynthSegParams {
             flip_averaging: true,
             topology_cleanup: true,
             sigma_smoothing: 0.5,
+            inference: SynthSegInference::FullVolume,
         }
     }
 }
@@ -96,6 +127,12 @@ impl SynthSegParams {
     /// runtime for a small accuracy cost.
     pub fn fast() -> Self {
         Self { flip_averaging: false, topology_cleanup: false, ..Self::default() }
+    }
+
+    /// Memory-bounded setting for constrained hosts (e.g. 32-bit WASM): the defaults with
+    /// [`SynthSegInference::LOW_MEMORY`] windows.
+    pub fn low_memory() -> Self {
+        Self { inference: SynthSegInference::LOW_MEMORY, ..Self::default() }
     }
 }
 
@@ -132,8 +169,30 @@ pub fn synthseg(
     }
     let n_labels = params.version.n_labels();
 
+    if let SynthSegInference::SlidingWindow { patch, tile_step } = params.inference {
+        if patch < 64 {
+            return Err(OnnxError::Shape(format!("the SynthSeg patch must be at least 64 voxels, not {patch}")));
+        }
+        if !(tile_step > 0.0 && tile_step <= 1.0) {
+            return Err(OnnxError::Shape(format!("the SynthSeg tile step must be in (0, 1], not {tile_step}")));
+        }
+    }
+
     let pre = preprocess(magnitude, grid, affine, params);
     let model = OnnxModel::load(model_onnx)?;
+
+    if let SynthSegInference::SlidingWindow { patch, tile_step } = params.inference {
+        // A volume one window covers runs as a whole volume does.
+        if pre.dims.iter().any(|&d| d > round_up(patch, DIVISOR)) {
+            let flip = params.flip_averaging.then(|| params.version.labels().flip);
+            let patch = round_up(patch, DIVISOR);
+            let mut post = run_windows(&model, &pre.data, pre.dims, n_labels, patch, tile_step, flip, &mut progress)?;
+            if params.sigma_smoothing > 0.0 {
+                blur_posteriors(&mut post, pre.dims, n_labels, params.sigma_smoothing);
+            }
+            return Ok(postprocess(post, &pre, params));
+        }
+    }
 
     let passes = 1 + params.flip_averaging as usize;
     let mut done = 0;
@@ -469,6 +528,94 @@ fn run_pass(
         blur_posteriors(&mut post, dims, n_labels, params.sigma_smoothing);
     }
     Ok(post)
+}
+
+/// Sliding-window posteriors (channels-last, `[d0, d1, d2, n_labels]`) of the padded volume
+/// `data`: the network on each `patch`-cube window (a multiple of 32) (clamped to the volume on an axis it does not
+/// exceed), blended with nnU-Net's Gaussian importance. With `flip` (the label table's
+/// left-right partners), each window is also run mirrored along axis 0 and its posteriors, mirrored
+/// back with each channel mapped to its partner, averaged in, as the whole-volume flip averaging
+/// does. The blur is the caller's, once, on the blended posteriors.
+#[cfg(feature = "onnx")]
+#[allow(clippy::too_many_arguments)]
+fn run_windows(
+    model: &OnnxModel,
+    data: &[f32],
+    dims: [usize; 3],
+    n_labels: usize,
+    patch: usize,
+    tile_step: f64,
+    flip: Option<&[usize]>,
+    progress: &mut impl FnMut(usize, usize),
+) -> Result<Vec<f32>, OnnxError> {
+    use crate::bet::hdbet::{gaussian_importance, window_steps};
+    let p: [usize; 3] = std::array::from_fn(|a| patch.min(dims[a]));
+    let steps: [Vec<usize>; 3] = std::array::from_fn(|a| window_steps(dims[a], p[a], tile_step));
+    let gauss = gaussian_importance(p);
+    let shape = [1, p[0], p[1], p[2], 1];
+    let plan = model.plan_for(&[&shape])?;
+    let passes = 1 + flip.is_some() as usize;
+    let total = steps.iter().map(Vec::len).product::<usize>() * passes;
+    let mut done = 0;
+
+    let n: usize = dims.iter().product();
+    let mut acc = vec![0f32; n * n_labels];
+    let mut weight = vec![0f32; n];
+    let pp: usize = p.iter().product();
+    let mut input = vec![0f32; pp];
+    let rows = |o: [usize; 3], mut f: Box<dyn FnMut(usize, usize) + '_>| {
+        for z in 0..p[0] {
+            for y in 0..p[1] {
+                f(((o[0] + z) * dims[1] + o[1] + y) * dims[2] + o[2], (z * p[1] + y) * p[2]);
+            }
+        }
+    };
+    let run = |x: Vec<f32>| -> Result<Vec<f32>, OnnxError> {
+        let out = plan.run_single(&Tensor::new(shape.to_vec(), x))?;
+        let expect = [1, p[0], p[1], p[2], n_labels];
+        if out.shape != expect {
+            return Err(OnnxError::Shape(format!(
+                "SynthSeg returned {:?}, expected {:?} — do the weights match params.version?",
+                out.shape, expect
+            )));
+        }
+        Ok(out.data)
+    };
+    for &s0 in &steps[0] {
+        for &s1 in &steps[1] {
+            for &s2 in &steps[2] {
+                let o = [s0, s1, s2];
+                rows(o, Box::new(|v, w| input[w..w + p[2]].copy_from_slice(&data[v..v + p[2]])));
+                let mut pred = run(input.clone())?;
+                done += 1;
+                progress(done, total);
+                if let Some(table) = flip {
+                    let back = flip_axis0(&run(flip_axis0(&input, p, 1))?, p, n_labels);
+                    done += 1;
+                    progress(done, total);
+                    for (out, chunk) in pred.chunks_exact_mut(n_labels).zip(back.chunks_exact(n_labels)) {
+                        for c in 0..n_labels {
+                            out[c] = 0.5 * (out[c] + chunk[table[c]]);
+                        }
+                    }
+                }
+                rows(o, Box::new(|v, w| {
+                    for k in 0..p[2] {
+                        let g = gauss[w + k];
+                        weight[v + k] += g;
+                        let (a, b) = ((v + k) * n_labels, (w + k) * n_labels);
+                        for c in 0..n_labels {
+                            acc[a + c] += g * pred[b + c];
+                        }
+                    }
+                }));
+            }
+        }
+    }
+    for (chunk, &w) in acc.chunks_exact_mut(n_labels).zip(&weight) {
+        chunk.iter_mut().for_each(|v| *v /= w);
+    }
+    Ok(acc)
 }
 
 /// Per-channel separable Gaussian blur of a `[d0, d1, d2, n_ch]` posterior map.
@@ -808,6 +955,26 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[cfg(feature = "onnx")]
+    #[test]
+    fn a_window_under_64_or_a_step_out_of_range_is_refused() {
+        let grid = Grid::new(4, 4, 4, 1.0, 1.0, 1.0);
+        let mag = vec![1.0; 64];
+        let aff = [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0];
+        for (patch, tile_step) in [(63, 0.5), (32, 0.5), (128, 0.0), (128, 1.5)] {
+            let params = SynthSegParams { inference: SynthSegInference::SlidingWindow { patch, tile_step }, ..SynthSegParams::default() };
+            let err = synthseg(&mag, &grid, &aff, &[], &params, |_, _| {}).err().expect("refused");
+            assert!(matches!(err, OnnxError::Shape(_)), "{patch} {tile_step}: {err:?}");
+        }
+    }
+
+    #[test]
+    fn low_memory_is_the_defaults_with_windows() {
+        let p = SynthSegParams::low_memory();
+        assert_eq!(p.inference, SynthSegInference::LOW_MEMORY);
+        assert_eq!(SynthSegParams { inference: SynthSegInference::FullVolume, ..p }, SynthSegParams::default());
     }
 
     #[test]

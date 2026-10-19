@@ -2,11 +2,11 @@
 //! segmentation (e.g. one produced by the upstream Python implementation).
 //!
 //! cargo run --release --features "parallel onnx download" --example synthseg_run -- \
-//!     <image.nii[.gz]> <synthseg.onnx|auto> <out.nii.gz> [reference.nii.gz] [--v1|--v2] [--fast]
+//!     <image.nii[.gz]> <synthseg.onnx|auto> <out.nii.gz> [reference.nii.gz] [--v1|--v2] [--fast] [--low-memory]
 //!
 //! Passing `auto` for the model fetches and caches the registry weights (needs `download`).
 use qsm_core::io::{read_nifti_file, save_nifti_gz};
-use qsm_core::segment::{synthseg, SynthSegParams, SynthSegVersion};
+use qsm_core::segment::{synthseg, SynthSegInference, SynthSegParams, SynthSegVersion};
 use qsm_core::Grid;
 use std::path::Path;
 use std::time::Instant;
@@ -29,6 +29,7 @@ fn main() {
     );
     let params = SynthSegParams {
         version: if flag("--v1") { SynthSegVersion::V1 } else { SynthSegVersion::V2 },
+        inference: if flag("--low-memory") { SynthSegInference::LOW_MEMORY } else { SynthSegInference::FullVolume },
         ..if flag("--fast") { SynthSegParams::fast() } else { SynthSegParams::default() }
     };
     println!("image {:?} @ {:?} mm, {:?}", img.dims, img.voxel_size, params.version);
