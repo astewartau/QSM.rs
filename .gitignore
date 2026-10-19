@@ -23,3 +23,6 @@ bids.zip
 # Coverage
 coverage/
 tarpaulin-report.json
+
+# Python bytecode
+__pycache__/
