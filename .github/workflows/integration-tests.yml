@@ -204,9 +204,13 @@ jobs:
           # select tests (`echo "run_dl=true" >> "$GITHUB_OUTPUT"`) are still caught.
           workflow_registration_only=false
           if echo "$CHANGED" | grep -qx '\.github/workflows/integration-tests\.yml'; then
-            if git diff "$BASE_SHA"..."$HEAD_SHA" -- .github/workflows/integration-tests.yml \
+            # Collected into a variable rather than tested with `grep -q` at the end of the pipe:
+            # `grep -q` exits at its first match, the greps upstream of it die of SIGPIPE, and under
+            # pipefail that made a large diff read as "registration only" and skip the full suite.
+            beyond=$(git diff "$BASE_SHA"..."$HEAD_SHA" -- .github/workflows/integration-tests.yml \
                  | grep -E '^[+-]' | grep -vE '^(\+\+\+|---)' \
-                 | grep -qvE '^[+-][[:space:]]*(#|all_[a-z_]+=|[A-Za-z0-9_./*|$-]+\)([[:space:]]|$)|[a-z_]+="\$[a-z_]+[[:space:]]|;;[[:space:]]*$|echo[[:space:]][^>]*$|emit_figures[[:space:]]|if[[:space:]]+TABLE=\$\(emit_table[[:space:]]|if[[:space:]]+\[[[:space:]]+-f[[:space:]]+"(slices|metrics|figures)/)'; then
+                 | grep -vE '^[+-][[:space:]]*(#|all_[a-z_]+=|[A-Za-z0-9_./*|$-]+\)([[:space:]]|$)|[a-z_]+="\$[a-z_]+[[:space:]]|;;[[:space:]]*$|echo[[:space:]][^>]*$|emit_figures[[:space:]]|if[[:space:]]+TABLE=\$\(emit_table[[:space:]]|if[[:space:]]+\[[[:space:]]+-f[[:space:]]+"(slices|metrics|figures)/)' || true)
+            if [ -n "$beyond" ]; then
               echo "integration-tests.yml: changed beyond test registration → full integration suite"
             else
               echo "integration-tests.yml: only test registration changed → mapping as usual"
@@ -221,6 +225,13 @@ jobs:
                 run_unit_tests=true; break ;;
             esac
           done
+
+          # Whether the PR's diff of a file removes or edits any line. Not `| grep -q` at the end of
+          # a pipe: it exits at its first match, the commands upstream die of SIGPIPE, and under
+          # pipefail the pipeline then reads as false — "additions only" — exactly when it is not.
+          has_removals() {
+            [ -n "$(git diff "$BASE_SHA"..."$HEAD_SHA" -- "$1" | grep -E '^-' | grep -vE '^---' || true)" ]
+          }
 
           # Map changed files to test names
           bgremove=""
@@ -440,8 +451,7 @@ jobs:
               # rest — but a diff that only *adds* lines cannot, so adding a test runs just that
               # test. Any removal or edit falls back to the full set.
               tests/dl_models.rs)
-                if git diff "$BASE_SHA"..."$HEAD_SHA" -- tests/dl_models.rs \
-                     | grep -E '^-' | grep -qvE '^---'; then
+                if has_removals tests/dl_models.rs; then
                   dl="$dl $all_dl_names"
                 else
                   # `|| true`: see above.
@@ -540,8 +550,7 @@ jobs:
               # name to their matrix); any edit or removal can touch a shared helper, so it reruns
               # every test in the file.
               tests/integration_tests.rs)
-                if git diff "$BASE_SHA"..."$HEAD_SHA" -- tests/integration_tests.rs \
-                     | grep -E '^-' | grep -qvE '^---'; then
+                if has_removals tests/integration_tests.rs; then
                   bgremove="$bgremove $(echo "$all_bgremove" | jq -r '.[]' | tr '\n' ' ')"
                   inversion="$inversion $(echo "$all_inversion" | jq -r '.[]' | tr '\n' ' ')"
                   combined="$combined $(echo "$all_combined" | jq -r '.[]' | tr '\n' ' ')"
