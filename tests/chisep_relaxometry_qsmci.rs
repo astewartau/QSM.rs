@@ -22,7 +22,7 @@
 
 mod common;
 
-use common::{chisep_score, correlation, load_chisep_phantom, save_center_slices};
+use common::{assert_chisep_separated, chisep_score, load_chisep_phantom, save_center_slices};
 use qsm_core::separation::{
     decompose, hc_chisep, r2star_qsm_from_magnitude, wavesep, DecomposeParams, HcChisepParams,
     R2starQsmParams, WaveSepParams,
@@ -60,8 +60,7 @@ fn test_r2star_qsm_qsmci() {
 
     // Regression floors — R2*-QSM's single-constant model is a coarse separator,
     // so these are conservative (it carries the irreversible R2 baseline).
-    let para_corr = correlation(&chi_pos, &ph.gt_para, &ph.mask);
-    assert!(para_corr > 0.3, "R2*-QSM chi+ corr {:.3} too low", para_corr);
+    assert_chisep_separated("R2*-QSM", &chi_pos, &dia_mag, &ph.gt_para, &ph.gt_dia, &ph.mask, 0.3, 0.3);
 }
 
 #[test]
@@ -99,10 +98,7 @@ fn test_wavesep_qsmci() {
     save_center_slices(&chi_pos, &ph.mask, ph.dims, "relaxchisep_wavesep_para");
     save_center_slices(&dia_mag, &ph.mask, ph.dims, "relaxchisep_wavesep_dia");
 
-    let para_corr = correlation(&chi_pos, &ph.gt_para, &ph.mask);
-    let dia_corr = correlation(&dia_mag, &ph.gt_dia, &ph.mask);
-    assert!(para_corr > 0.5, "WaveSep chi+ corr {:.3} too low", para_corr);
-    assert!(dia_corr > 0.4, "WaveSep chi- corr {:.3} too low", dia_corr);
+    assert_chisep_separated("WaveSep", &chi_pos, &dia_mag, &ph.gt_para, &ph.gt_dia, &ph.mask, 0.5, 0.4);
 }
 
 #[test]
@@ -139,8 +135,7 @@ fn test_decompose_qsmci() {
     save_center_slices(&dia_mag, &ph.mask, ph.dims, "relaxchisep_decompose_dia");
 
     // Conservative floor: DECOMPOSE is a coarse per-voxel separator on this phantom.
-    let para_corr = correlation(&chi_pos, &ph.gt_para, &ph.mask);
-    assert!(para_corr > 0.2, "DECOMPOSE chi+ corr {:.3} too low", para_corr);
+    assert_chisep_separated("DECOMPOSE", &chi_pos, &dia_mag, &ph.gt_para, &ph.gt_dia, &ph.mask, 0.2, 0.2);
 }
 
 #[test]
@@ -179,8 +174,5 @@ fn test_hc_chisep_qsmci() {
     save_center_slices(&chi_pos, &ph.mask, ph.dims, "relaxchisep_hcchisep_para");
     save_center_slices(&dia_mag, &ph.mask, ph.dims, "relaxchisep_hcchisep_dia");
 
-    let para_corr = correlation(&chi_pos, &ph.gt_para, &ph.mask);
-    let dia_corr = correlation(&dia_mag, &ph.gt_dia, &ph.mask);
-    assert!(para_corr > 0.4, "HC-ChiSep chi+ corr {:.3} too low", para_corr);
-    assert!(dia_corr > 0.4, "HC-ChiSep chi- corr {:.3} too low", dia_corr);
+    assert_chisep_separated("HC-ChiSep", &chi_pos, &dia_mag, &ph.gt_para, &ph.gt_dia, &ph.mask, 0.4, 0.4);
 }

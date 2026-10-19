@@ -21,7 +21,7 @@
 
 mod common;
 
-use common::{chisep_score, correlation, load_chisep_phantom, save_center_slices};
+use common::{assert_chisep_separated, chisep_score, load_chisep_phantom, save_center_slices};
 use qsm_core::inversion::{ilsqr, IlsqrParams};
 use qsm_core::separation::{chi_sep_ilsqr, chi_sep_medi, ChiSepIlsqrParams, ChiSepParams};
 use std::time::Instant;
@@ -90,11 +90,13 @@ fn test_chi_sep_ilsqr_qsmci() {
     // Conservative gates: the CI dataset (chisep-mc, multicompartment) is harder
     // than the local single-compartment phantom, so these are regression floors,
     // not the headline numbers (chisep phantom: para 0.95, dia 0.87).
-    let para_corr = correlation(&chi_pos, &ph.gt_para, &ph.mask);
-    let dia_corr = correlation(&dia_mag, &ph.gt_dia, &ph.mask);
-    assert!(para_corr > 0.6, "chi+ corr {:.3} too low", para_corr);
-    assert!(dia_corr > 0.4, "chi- corr {:.3} too low", dia_corr);
+    assert_chisep_separated("chi_sep_ilsqr", &chi_pos, &dia_mag, &ph.gt_para, &ph.gt_dia, &ph.mask, 0.6, 0.4);
 }
+
+/// Regression floors for `chi_sep_medi`'s χ+ / |χ−| correlation with ground truth. Measured
+/// 0.88 / 0.66 on the local copy of the phantom after the R2' weighting fix (0.74 / -0.22 before).
+const MEDI_PARA_FLOOR: f64 = 0.6;
+const MEDI_DIA_FLOOR: f64 = 0.4;
 
 #[test]
 #[ignore] // needs the qsmci phantom; run with --release (see module docs)
@@ -134,4 +136,8 @@ fn test_chi_sep_medi_qsmci() {
     chisep_score("chi_sep_medi χ−", &dia_mag, &ph.gt_dia, &ph.mask, ph.dims, secs);
     save_center_slices(&chi_pos, &ph.mask, ph.dims, "chisep_medi_para");
     save_center_slices(&dia_mag, &ph.mask, ph.dims, "chisep_medi_dia");
+
+    // Before its R2' term was weighted as in Shin 2021, χ+ and |χ−| were the same map (both
+    // ≈ R2'/2Dr; corr(χ+, |χ−|) 0.99) and |χ−| scored 0.07 against its ground truth.
+    assert_chisep_separated("chi_sep_medi", &chi_pos, &dia_mag, &ph.gt_para, &ph.gt_dia, &ph.mask, MEDI_PARA_FLOOR, MEDI_DIA_FLOOR);
 }

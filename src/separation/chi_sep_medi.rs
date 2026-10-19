@@ -12,6 +12,10 @@
 //!           = dr_p_eff * |chi_pos| + dr_q_eff * |chi_neg|
 //!   where dr_eff = ppm_factor * Dr (dimensionless effective relaxivity)
 //!
+//! The two residuals are weighted as in Shin et al. 2021, the field term by (2π)² against
+//! the R2' term's 1 (both in Hz), under the coupling weight `lambda_cpl`; edge-masked L1 TV
+//! on each source (`lambda_para`, `lambda_dia`) regularises.
+//!
 //! The constraints (chi_pos >= 0, chi_neg <= 0) naturally break the gauge
 //! freedom of the chi_pos + chi_neg formulation. In most voxels, either
 //! chi_pos = 0 or chi_neg = 0, which pins one variable to its constraint
@@ -114,8 +118,12 @@ impl Default for ChiSepParams {
     fn default() -> Self {
         Self {
             cf: 123.2e6,
-            lambda_para: 1000.0,
-            lambda_dia: 1000.0,
+            // 30 against λ_cpl = 100, with the R2' term at Shin 2021's weight. On the QSM-CI
+            // chisep phantom χ+/|χ−| correlate 0.88/0.66 with truth at 30 (10: 0.91/0.57,
+            // 100: 0.83/0.65, 300: 0.73/0.58, 1000: 0.64/0.37). The old default of 1000 was
+            // tuned with the R2' term weighted ~5000x heavier, where no λ separated the sources.
+            lambda_para: 30.0,
+            lambda_dia: 30.0,
             lambda_cpl: 100.0,
             // Same paper, same forward model, same single-orientation QSM as `chi_sep_ilsqr`, so
             // the same relaxivity. These read 114/30 until QSM.rs#130: 114 is the COSMOS-
@@ -240,21 +248,17 @@ where
     let dr_p_eff = ppm_factor * dr_pos as f32;
     let dr_q_eff = ppm_factor * dr_neg as f32;
 
-    // Auto-tune R2' normalization for field-strength-independent gauge breaking.
+    // Data-term weighting from Shin et al. 2021: the cost is
+    //   ‖Wr·(R2' − Dr·(|χ+| + |χ−|))‖² + ‖i·2π·Wf·(f − D(χ+ + χ−))‖²
+    // with both residuals in Hz, so the field term carries (2π)² against the R2' term's 1
+    // (the same weighting `chi_sep_ilsqr` uses). Here λ_cpl multiplies the field term, so the
+    // R2' equation (data and relaxivities) is scaled by 1/(2π).
     //
-    // The chi-sep gauge mode (χ+ grows, χ- shrinks equally) lives in the null space
-    // of the field Hessian and is ONLY constrained by R2'. The gauge eigenvalue is
-    // λ_cpl * (dr_p + dr_q)² which at 7T is only ~23 vs ~1000 for TV modes.
-    //
-    // We scale the R2' equation (both data and relaxivities) by r2_scale so that the
-    // gauge eigenvalue = max(λ_para, λ_dia), matching the TV regularization strength.
-    // This doesn't change the solution (R2' residual is still 0 at truth).
-    //
-    // r2_scale = sqrt(target / (λ_cpl * dr_sum²))
-    // → eigenvalue = λ_cpl * (r2_scale * dr_sum)² = target
-    let dr_sum = dr_p_eff + dr_q_eff;
-    let target_eig = 10.0 * lambda_para_f32.max(lambda_dia_f32);
-    let r2_scale = (target_eig / (lambda_cpl_f32 * dr_sum * dr_sum)).sqrt();
+    // This used to be auto-tuned to put the χ+/χ− gauge mode's eigenvalue at 10·max(λ_para,
+    // λ_dia), which weighted the R2' term ~120x above the field term at 3-7 T instead of ~40x
+    // below it. The solver then met R2' alone and returned χ+ ≈ |χ−| ≈ R2'/2Dr: the same map
+    // twice (corr(χ+, |χ−|) 0.99 on the QSM-CI chisep phantom, |χ−| at 0.07 against its truth).
+    let r2_scale = 1.0 / std::f32::consts::TAU;
     let dr_p_use = dr_p_eff * r2_scale;
     let dr_q_use = dr_q_eff * r2_scale;
 
@@ -325,8 +329,8 @@ where
             field_residual[i] = field_f32[i] - ws.dipole_buf[i];
         }
 
-        // R2' residual (normalized): r2_norm - dr_p_use * chi_pos + dr_q_use * chi_neg
-        // where r2_norm = R2' / (dr_p_eff + dr_q_eff), dr_p_use = dr_p_eff / dr_sum
+        // R2' residual, scaled by r2_scale: R2'·s - dr_p_use * chi_pos + dr_q_use * chi_neg
+        // where dr_*_use = dr_*_eff·s
         for i in 0..n {
             r2_residual[i] = r2p_f32[i] - dr_p_use * chi_pos[i] + dr_q_use * chi_neg[i];
         }
@@ -739,5 +743,75 @@ mod tests {
         let neg_min = chi_neg_out.iter().cloned().fold(0.0_f64, f64::min);
         assert!(pos_max > 0.0, "chi+ should have positive values, max={}", pos_max);
         assert!(neg_min < 0.0, "chi- should have negative values, min={}", neg_min);
+    }
+
+    fn corr(a: &[f64], b: &[f64], mask: &[u8]) -> f64 {
+        let idx: Vec<usize> = (0..a.len()).filter(|&i| mask[i] != 0).collect();
+        let n = idx.len() as f64;
+        let ma = idx.iter().map(|&i| a[i]).sum::<f64>() / n;
+        let mb = idx.iter().map(|&i| b[i]).sum::<f64>() / n;
+        let (mut ab, mut aa, mut bb) = (0.0, 0.0, 0.0);
+        for &i in &idx {
+            let (x, y) = (a[i] - ma, b[i] - mb);
+            ab += x * y;
+            aa += x * x;
+            bb += y * y;
+        }
+        ab / (aa * bb).sqrt()
+    }
+
+    /// The two sources must come back as two different maps, each where it was put.
+    ///
+    /// A paramagnetic and a diamagnetic sphere side by side at 7 T. Before the R2' term carried
+    /// Shin 2021's weight (1 against the field term's (2π)²) it was auto-scaled ~120x above the
+    /// field term, and the solver met R2' alone: χ+ and |χ−| both came back ≈ R2'/2Dr, i.e. the
+    /// same map, with |χ−| bright in the paramagnetic sphere.
+    #[test]
+    fn test_chi_sep_medi_separates_sources() {
+        let (nx, ny, nz) = (32, 32, 32);
+        let n = nx * ny * nz;
+        let grid = Grid::new(nx, ny, nz, 1.0, 1.0, 1.0);
+        let bdir = (0.0, 0.0, 1.0);
+        let cf: f64 = 42.576e6 * 7.0;
+        let dr = super::DR_SHIN_2021;
+
+        let para = make_sphere(nx, ny, nz, 10.0, 16.0, 16.0, 4.0);
+        let dia = make_sphere(nx, ny, nz, 22.0, 16.0, 16.0, 4.0);
+        let brain = make_sphere(nx, ny, nz, 16.0, 16.0, 16.0, 13.0);
+        let mask: Vec<u8> = brain.iter().map(|&v| (v > 0.5) as u8).collect();
+        let gt_pos: Vec<f64> = para.iter().map(|&v| if v > 0.5 { 0.1 } else { 0.0 }).collect();
+        let gt_neg: Vec<f64> = dia.iter().map(|&v| if v > 0.5 { -0.05 } else { 0.0 }).collect();
+
+        let total: Vec<f64> = gt_pos.iter().zip(&gt_neg).map(|(p, q)| p + q).collect();
+        let d = dipole_kernel(&grid, bdir);
+        let f: Vec<_> = fft3d_real(&total, nx, ny, nz).iter().zip(&d).map(|(&c, &k)| c * k).collect();
+        let field = ifft3d_real(&f, nx, ny, nz);
+        let r2prime: Vec<f64> = (0..n).map(|i| dr * (gt_pos[i] - gt_neg[i])).collect();
+        let magnitude: Vec<f64> = mask.iter().map(|&m| 100.0 * m as f64).collect();
+
+        let params = ChiSepParams { cf, ..ChiSepParams::default() };
+        let (chi_pos, chi_neg, _) =
+            chi_sep_medi(&field, &r2prime, &magnitude, &mask, &grid, bdir, &params, |_, _| {});
+        let dia_mag: Vec<f64> = chi_neg.iter().map(|v| -v).collect();
+        let gt_dia: Vec<f64> = gt_neg.iter().map(|v| -v).collect();
+
+        let mean_in = |v: &[f64], region: &[f64]| {
+            let idx: Vec<usize> = (0..n).filter(|&i| region[i] > 0.5).collect();
+            idx.iter().map(|&i| v[i]).sum::<f64>() / idx.len() as f64
+        };
+        let same = corr(&chi_pos, &dia_mag, &mask);
+        let pos_own = corr(&chi_pos, &gt_pos, &mask);
+        let neg_own = corr(&dia_mag, &gt_dia, &mask);
+        println!("corr(χ+,|χ−|) {same:.3}  χ+ vs truth {pos_own:.3}  |χ−| vs truth {neg_own:.3}");
+        println!(
+            "χ+ in para/dia sphere {:.4}/{:.4}  |χ−| in para/dia sphere {:.4}/{:.4}",
+            mean_in(&chi_pos, &para), mean_in(&chi_pos, &dia),
+            mean_in(&dia_mag, &para), mean_in(&dia_mag, &dia)
+        );
+        assert!(same < 0.3, "χ+ and |χ−| are the same map: corr {same:.3}");
+        assert!(pos_own > 0.7, "χ+ vs its truth {pos_own:.3}");
+        assert!(neg_own > 0.7, "|χ−| vs its truth {neg_own:.3}");
+        assert!(mean_in(&chi_pos, &para) > 3.0 * mean_in(&chi_pos, &dia), "χ+ not concentrated in the paramagnetic sphere");
+        assert!(mean_in(&dia_mag, &dia) > 3.0 * mean_in(&dia_mag, &para), "|χ−| not concentrated in the diamagnetic sphere");
     }
 }
