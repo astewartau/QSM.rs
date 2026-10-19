@@ -127,16 +127,19 @@ jobs:
 
   # Builds the crate for `wasm32-unknown-unknown` and runs tests/wasm_pipeline.rs under Node
   # (`wasm-bindgen-test`): every `pipeline::*` stage and every classical background-removal,
-  # inversion and separation algorithm on a 16³ phantom. Browser hosts (qsmbly) run this code
-  # on that target, where anything that needs what a browser does not have -- `Instant`,
-  # `SystemTime`, threads, the file system -- compiles fine and panics at run time. Nothing
-  # else in CI would notice; this job does. Checked by perturbation: an `Instant::now()` put
-  # back on iLSQR's path fails `dipole_inversion` here with "time not implemented on this
-  # platform".
+  # inversion and separation algorithm on a 16³ phantom, and every deep-learning model in the
+  # registry on the smallest input it takes. Browser hosts (qsmbly) run this code on that target,
+  # where anything that needs what a browser does not have -- `Instant`, `SystemTime`, threads,
+  # the file system -- compiles fine and panics at run time, and where the heap ends at 4 GB.
+  # Nothing else in CI would notice; this job does. Checked by perturbation: an `Instant::now()`
+  # put back on iLSQR's path fails `dipole_inversion` here with "time not implemented on this
+  # platform", and one put on BFRnet's path fails `dl_bfr_bfrnet` the same way.
   #
   # Two builds: the plain one a classical-only host makes, and the one with the deep-learning
   # stack (`onnx`, plus `simd`), which on wasm32 needs SIMD128 (see `src/models/onnx.rs`).
-  # Release builds, because an unoptimised wasm build of the inversions is slow under Node.
+  # Release builds, because an unoptimised wasm build of the inversions is slow under Node. The
+  # deep-learning build is split three ways by test name so no one job runs every network; the
+  # three share one cargo cache. Each shard fetches only the weights its cases read.
   wasm:
     name: wasm32 (${{ matrix.name }})
     runs-on: ubuntu-latest
@@ -147,9 +150,30 @@ jobs:
           - name: classical
             features: ""
             rustflags: ""
-          - name: onnx simd
+            cache: classical
+            filter: ""
+            models: ""
+          # The stages, and the networks that stand in for one: BFR, inversion, separation.
+          - name: onnx simd, stages
             features: "onnx simd"
             rustflags: "-C target-feature=+simd128"
+            cache: onnx-simd
+            filter: "--skip dl_mask --skip dl_seg"
+            models: >-
+              bfrnet iqfm xqsm qsmnet qsmnet-plus qsmgan lpcnn ir2qsm modl-qsm autoqsm nextqsm
+              iqsm iqsm-plus r2primenet susep-net chi-sepnet
+          - name: onnx simd, masking
+            features: "onnx simd"
+            rustflags: "-C target-feature=+simd128"
+            cache: onnx-simd
+            filter: "dl_mask"
+            models: "hd-bet rs2-net"
+          - name: onnx simd, segmentation
+            features: "onnx simd"
+            rustflags: "-C target-feature=+simd128"
+            cache: onnx-simd
+            filter: "dl_seg"
+            models: "synthseg"
     env:
       CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER: wasm-bindgen-test-runner
       CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUSTFLAGS: ${{ matrix.rustflags }}
@@ -173,9 +197,9 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: ${{ runner.os }}-cargo-wasm-${{ matrix.name }}-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-wasm-${{ matrix.cache }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-wasm-${{ matrix.name }}-
+            ${{ runner.os }}-cargo-wasm-${{ matrix.cache }}-
 
       # The test runner must be the same version as the `wasm-bindgen` crate the test links.
       - name: wasm-bindgen version
@@ -190,69 +214,27 @@ jobs:
         with:
           tool: wasm-bindgen@${{ steps.wbg.outputs.version }}
 
-      # The `onnx` build also runs the deep-learning cases, xQSM and SynthSeg on weights handed over in memory
-      # (`models::provide_weights`), as a browser host does. The test reads the file named by
-      # `$XQSM_ONNX` through Node's `fs`; the URL and checksum come from the model registry, and
-      # the file is cached under its checksum.
-      - name: xQSM weights (registry entry)
-        id: xqsm
-        if: contains(matrix.features, 'onnx')
-        run: |
-          ENTRY=$(grep -A3 'name: "xqsm.onnx"' src/models/registry.rs)
-          URL=$(sed -n 's/.*url: "\(.*\)",/\1/p' <<< "$ENTRY")
-          SHA=$(sed -n 's/.*sha256: "\(.*\)",/\1/p' <<< "$ENTRY")
-          test -n "$URL" && test -n "$SHA"
-          echo "url=$URL" >> "$GITHUB_OUTPUT"
-          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+      # The deep-learning cases run each network on weights handed over in memory
+      # (`models::provide_weights`), as a browser host does: the test reads each file from
+      # `$QSM_WEIGHTS_DIR` through Node's `fs`. URLs and checksums come from the model registry,
+      # and the shard's files are cached under a digest of their checksums.
+      - name: Weights cache key
+        id: weights
+        if: matrix.models != ''
+        run: echo "key=$(python3 scripts/fetch_model_weights.py --key ${{ matrix.models }})" >> "$GITHUB_OUTPUT"
 
-      - name: Cache xQSM weights
-        if: contains(matrix.features, 'onnx')
+      - name: Cache weights
+        if: matrix.models != ''
         uses: actions/cache@v4
         with:
-          path: ~/qsm-weights/xqsm.onnx
-          key: xqsm-onnx-${{ steps.xqsm.outputs.sha }}
+          path: ~/qsm-weights
+          key: qsm-weights-${{ steps.weights.outputs.key }}
 
-      - name: Fetch xQSM weights
-        if: contains(matrix.features, 'onnx')
+      - name: Fetch weights
+        if: matrix.models != ''
         run: |
-          F=~/qsm-weights/xqsm.onnx
-          if ! echo "${{ steps.xqsm.outputs.sha }}  $F" | sha256sum -c --status 2>/dev/null; then
-            mkdir -p ~/qsm-weights
-            curl -fsSL --retry 5 --retry-all-errors -o "$F" "${{ steps.xqsm.outputs.url }}"
-            echo "${{ steps.xqsm.outputs.sha }}  $F" | sha256sum -c
-          fi
-          echo "XQSM_ONNX=$F" >> "$GITHUB_ENV"
-
-      # SynthSeg, the same way: on the smallest input it takes (padded to 128³) and, in windows,
-      # on a volume whose whole-volume pass does not fit a 32-bit heap.
-      - name: SynthSeg weights (registry entry)
-        id: synthseg
-        if: contains(matrix.features, 'onnx')
-        run: |
-          ENTRY=$(grep -A3 'name: "synthseg.onnx"' src/models/registry.rs)
-          URL=$(sed -n 's/.*url: "\(.*\)",/\1/p' <<< "$ENTRY")
-          SHA=$(sed -n 's/.*sha256: "\(.*\)",/\1/p' <<< "$ENTRY")
-          test -n "$URL" && test -n "$SHA"
-          echo "url=$URL" >> "$GITHUB_OUTPUT"
-          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
-
-      - name: Cache SynthSeg weights
-        if: contains(matrix.features, 'onnx')
-        uses: actions/cache@v4
-        with:
-          path: ~/qsm-weights/synthseg.onnx
-          key: synthseg-onnx-${{ steps.synthseg.outputs.sha }}
-
-      - name: Fetch SynthSeg weights
-        if: contains(matrix.features, 'onnx')
-        run: |
-          F=~/qsm-weights/synthseg.onnx
-          if ! echo "${{ steps.synthseg.outputs.sha }}  $F" | sha256sum -c --status 2>/dev/null; then
-            mkdir -p ~/qsm-weights
-            curl -fsSL --retry 5 --retry-all-errors -o "$F" "${{ steps.synthseg.outputs.url }}"
-            echo "${{ steps.synthseg.outputs.sha }}  $F" | sha256sum -c
-          fi
-          echo "SYNTHSEG_ONNX=$F" >> "$GITHUB_ENV"
+          python3 scripts/fetch_model_weights.py ~/qsm-weights ${{ matrix.models }}
+          echo "QSM_WEIGHTS_DIR=$HOME/qsm-weights" >> "$GITHUB_ENV"
 
       - name: Run the pipeline under Node
-        run: cargo test --release --target wasm32-unknown-unknown --features "${{ matrix.features }}" --test wasm_pipeline
+        run: cargo test --release --target wasm32-unknown-unknown --features "${{ matrix.features }}" --test wasm_pipeline -- ${{ matrix.filter }}
