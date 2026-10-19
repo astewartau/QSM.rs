@@ -35,6 +35,7 @@ pub mod l1qsm;
 pub mod whqsm;
 pub mod hdqsm;
 pub mod amp_pe;
+pub mod tile_budget;
 #[cfg(feature = "onnx")]
 pub mod tiled;
 #[cfg(feature = "onnx")]
@@ -85,12 +86,14 @@ pub use l1qsm::{l1qsm, L1QsmParams};
 pub use whqsm::{whqsm, WhQsmParams};
 pub use hdqsm::{hdqsm, HdQsmParams};
 pub use amp_pe::{amp_pe, AmpPeParams};
+pub use tile_budget::{
+    max_wasm_patch_edge, tile_bytes, tile_patch_size, tiles_within_wasm_budget, wasm_tiles_in_flight,
+    TileConfig, WASM_MAX_PATCH_ACTIVATION_BYTES, WASM_TILE_ACTIVATION_BUDGET,
+};
 #[cfg(feature = "onnx")]
 pub use tiled::{
-    check_wasm_patch_fits, max_wasm_patch_edge, tile_bytes, tile_concurrency, tile_patch_size,
-    tiled_field_inversion, tiled_scatter, tiled_volume_algorithm, tiles_within_wasm_budget,
-    wasm_tiles_in_flight, Tile,
-    TileConfig, WASM_MAX_PATCH_ACTIVATION_BYTES, WASM_TILE_ACTIVATION_BUDGET,
+    check_wasm_patch_fits, tile_concurrency, tiled_field_inversion, tiled_scatter,
+    tiled_volume_algorithm, Tile,
 };
 #[cfg(feature = "onnx")]
 pub use xqsm::{xqsm, xqsm_tiled};
