@@ -138,6 +138,22 @@ mod tests {
         assert!(data.is_empty());
     }
 
+    /// A constant volume has no range to map: it is left as it is.
+    #[test]
+    fn test_scale_phase_constant_is_left_alone() {
+        let mut data = vec![5.0, 5.0, 5.0];
+        scale_phase_to_pi(&mut data);
+        assert!(data.iter().all(|v| (v - 5.0).abs() < 1e-10), "{data:?}");
+    }
+
+    /// Nothing finite: every value becomes 0, and there is then no range to map.
+    #[test]
+    fn test_scale_phase_all_nan_is_zero() {
+        let mut data = vec![f64::NAN, f64::INFINITY, f64::NAN];
+        scale_phase_to_pi(&mut data);
+        assert_eq!(data, vec![0.0, 0.0, 0.0]);
+    }
+
     #[test]
     fn test_hz_to_ppm_3t() {
         let gamma_hz = 42.576e6;
