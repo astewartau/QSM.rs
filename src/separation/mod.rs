@@ -62,9 +62,9 @@ pub mod decompose;
 pub mod hc_chisep;
 pub mod r2star_qsm;
 pub mod wavesep;
-#[cfg(feature = "onnx")]
+// The modules are always built, so configs can carry the networks' parameters; the inference
+// functions themselves need `onnx`.
 pub mod susep_net;
-#[cfg(feature = "onnx")]
 pub mod chisepnet;
 
 pub use chi_sep_ilsqr::{chi_sep_ilsqr, ChiSepIlsqrParams};
@@ -73,10 +73,12 @@ pub use decompose::{decompose, DecomposeParams};
 pub use hc_chisep::{hc_chisep, HcChisepParams};
 pub use r2star_qsm::{r2star_qsm, r2star_qsm_from_magnitude, R2starQsmParams};
 pub use wavesep::{wavesep, WaveSepParams};
+pub use susep_net::{SusepNetNorm, SusepNetParams};
+pub use chisepnet::{ChiSepNetNorm, ChiSepNetParams};
 #[cfg(feature = "onnx")]
-pub use susep_net::{susep_net, SusepNetNorm, SusepNetParams};
+pub use susep_net::susep_net;
 #[cfg(feature = "onnx")]
-pub use chisepnet::{chisepnet, ChiSepNetNorm, ChiSepNetParams};
+pub use chisepnet::chisepnet;
 
 #[cfg(test)]
 mod tests {
