@@ -5,7 +5,10 @@
 //! into the PR summary comment. Weights are fetched from the model registry at
 //! run time (needs the `download` feature, or `$QSM_MODEL_DIR`). Ignored by
 //! default (network + weights). Metrics are informational — DL models are run on
-//! an out-of-distribution synthetic phantom — so tests only assert finiteness.
+//! an out-of-distribution synthetic phantom — so tests assert only finiteness and
+//! that each output correlates positively with its ground truth above
+//! [`MIN_CORR`]: a sign or units convention mix-up shows up as a negative or
+//! near-zero correlation, not as a merely poor one.
 #![cfg(feature = "onnx")]
 
 mod common;
@@ -13,6 +16,23 @@ mod common;
 use std::time::Instant;
 
 use common::{ChallengeMetrics, TestData, TestResult};
+
+/// Correlation floor for every network's output against the phantom's ground truth.
+///
+/// Out of distribution as the phantom is, the lowest a correctly wired network has scored is
+/// ~0.5 (iQFM 0.53, AutoQSM 0.52, the rest 0.6-0.93). A sign convention mix-up scores below
+/// zero instead: AutoQSM, fed this crate's field without the negation its training convention
+/// needs, scored -0.50 with deep grey matter dark.
+const MIN_CORR: f64 = 0.3;
+
+/// Assert the sign/units floor (see [`MIN_CORR`]).
+fn assert_corr(name: &str, recon: &[f64], truth: &[f64], mask: &[u8]) {
+    let corr = common::correlation(recon, truth, mask);
+    assert!(
+        corr > MIN_CORR,
+        "{name} correlates at {corr:.3} with ground truth (floor {MIN_CORR}): sign or units convention?"
+    );
+}
 use qsm_core::inversion;
 use qsm_core::Grid;
 
@@ -37,6 +57,7 @@ fn report_chi(name: &str, slug: &str, chi: &[f64], data: &TestData, elapsed: std
     challenge.print_ci_metrics(elapsed);
     common::save_center_slices(chi, &data.mask, data.dims, slug);
     assert!(chi.iter().all(|v| v.is_finite()), "{name} produced non-finite values");
+    assert_corr(name, chi, &data.chi, &data.mask);
 }
 
 #[test]
@@ -113,6 +134,7 @@ fn test_dl_iqfm() {
     res.print_ci_metrics(t.elapsed());
     common::save_center_slices(&lfs, &common::valid_support(&lfs, &data.mask), data.dims, "dl_iqfm");
     assert!(lfs.iter().all(|v| v.is_finite()), "iQFM produced non-finite values");
+    assert_corr("iQFM", &lfs, &data.fieldmap_local, &data.mask);
 }
 
 /// R2PRIMEnet on the phantom's multi-echo magnitude: fit R2* with ARLO — the route a GRE-only
@@ -242,6 +264,7 @@ fn report_local_field(name: &str, slug: &str, lfs: &[f64], data: &TestData, elap
     res.print_ci_metrics(elapsed);
     common::save_center_slices(lfs, &common::valid_support(lfs, &data.mask), data.dims, slug);
     assert!(lfs.iter().all(|v| v.is_finite()), "{name} produced non-finite values");
+    assert_corr(name, lfs, &data.fieldmap_local, &data.mask);
 }
 
 /// Report a brain mask against the ground-truth mask (Brain Extraction table), in the

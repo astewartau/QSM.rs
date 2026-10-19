@@ -12,6 +12,17 @@
 //! (`scripts/onnx-export/export_autoqsm.py`) so `tract` runs it. The network is
 //! all Conv3D+ReLU with no normalization, so no input scaling is applied.
 //!
+//! **Field sign.** AutoQSM was trained on fields of the opposite sign to this
+//! crate's (`field = D * chi` with `D = 1/3 - kz^2/k^2`, so a paramagnetic source
+//! raises the field along B0). On the authors' own `test_data/0.mat` input the
+//! network returns bright deep grey matter, while the same field read in this
+//! crate's convention (SHARP + TKD) anticorrelates with that output (r = -0.42);
+//! fed this crate's field unchanged it returns `-chi`-like maps (r = -0.50 on the
+//! test phantom). The field is therefore negated on the way in: the network sees
+//! its own training convention and its output is already susceptibility in ppm
+//! with the usual sign. The network is non-linear, so negating the output instead
+//! would not be equivalent.
+//!
 //! Weights are not bundled; the caller passes the exported `autoqsm.onnx` bytes.
 
 use crate::grid::Grid;
@@ -37,7 +48,9 @@ fn output_extent(d: usize) -> usize {
 
 /// Run AutoQSM on a total field map.
 ///
-/// * `field_ppm` — total field (ppm), column-major `(nx,ny,nz)`.
+/// * `field_ppm` — total field (ppm) in this crate's sign convention,
+///   column-major `(nx,ny,nz)`. It is negated internally to match the network's
+///   training convention (see the module docs).
 /// * `mask` — binary brain mask; applied to the output (AutoQSM has no brain
 ///   extraction, so the raw output is whole-head).
 /// * `model_onnx` — bytes of the exported `autoqsm.onnx` (fixed 64³→32³).
@@ -54,12 +67,13 @@ pub fn autoqsm(
     assert_eq!(field_ppm.len(), n, "field length must match grid");
     assert_eq!(mask.len(), n, "mask length must match grid");
 
-    // Column-major (crate) -> row-major (X,Y,Z) working volume.
+    // Column-major (crate) -> row-major (X,Y,Z) working volume, negated into the
+    // network's training field convention (module docs).
     let mut vol = vec![0.0f64; n];
     for z in 0..nz {
         for y in 0..ny {
             for x in 0..nx {
-                vol[ri(x, y, z, ny, nz)] = field_ppm[x + nx * (y + ny * z)];
+                vol[ri(x, y, z, ny, nz)] = -field_ppm[x + nx * (y + ny * z)];
             }
         }
     }
