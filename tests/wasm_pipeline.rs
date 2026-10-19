@@ -914,7 +914,7 @@ fn dl_sep_chi_sepnet() {
 ///
 /// ```text
 /// QSM_WEIGHTS_DIR=… cargo test --release --target wasm32-unknown-unknown --features "onnx simd" \
-///   --test wasm_pipeline -- --ignored --exact browser_memory::hd_bet_low_memory
+///   --test wasm_pipeline -- --include-ignored --nocapture --exact browser_memory::hd_bet_low_memory
 /// ```
 ///
 /// A WASM memory only grows, so its size after the run is the run's peak. Each case prints it
@@ -1063,6 +1063,41 @@ mod browser_memory {
         measure("bfrnet", &tile_label(tile), || run_bg_removal(&total, &mask, &s.m, &config, &mut |_, _| {}));
     }
 
+    /// Tiled BFRnet against the 4 GiB heap with the tiles a 4-thread browser keeps in flight.
+    ///
+    /// Node runs this harness on one thread, so it cannot hold several tiles at once; what it can
+    /// show is the measured part and the arithmetic on top of it. It runs the browser config on
+    /// the browser-sized scan one tile at a time and reads the heap's high-water, which holds
+    /// everything a run needs once (inputs, weights, parsed model, volumes) plus one tile. Each
+    /// further tile in flight adds one tile's heap, `inversion::tile_bytes` at BFRnet's registry
+    /// figure, which `tile_cost_bfrnet` measures in WASM. So a threaded run's peak is the measured
+    /// one plus that for every tile beyond the first, and with the cap a 4-thread pool gets
+    /// (`inversion::wasm_tiles_in_flight`), that has to stay under 4 GiB. It also prints what the
+    /// four tiles the old shared (xQSM) figure let through would need.
+    fn bfrnet_tiled_at_four_threads() {
+        use qsm_core::inversion::{tile_bytes, wasm_tiles_in_flight, TileConfig};
+        let Some(_weights) = provide("bfrnet") else { return };
+        let s = Scan::new();
+        let (total, mask) = (s.total(), s.mask());
+        let (core, halo) = BROWSER_TILE.unwrap();
+        let config = BgRemovalConfig { algorithm: BgRemovalAlgorithm::Bfrnet, tile: BROWSER_TILE, ..Default::default() };
+        let base = heap_mb();
+        run_bg_removal(&total, &mask, &s.m, &config, &mut |_, _| {}).unwrap_or_else(|e| panic!("bfrnet: {e}"));
+        let one = heap_mb();
+        let cfg = TileConfig { core, halo };
+        let cost = qsm_core::models::find_model("bfrnet").unwrap().tile_cost().unwrap();
+        let tile_mb = tile_bytes(&cfg, &cost) as f64 / 1e6;
+        let cap = wasm_tiles_in_flight(&cfg, &cost, 4);
+        let at_cap = one + (cap - 1) as f64 * tile_mb;
+        let at_four = one + 3.0 * tile_mb;
+        let heap = 4.0 * 1024.0 * 1024.0 * 1024.0 / 1e6;
+        wasm_bindgen_test::console_log!(
+            "BFRNET before {base:.0} MB, one tile in flight {one:.0} MB, a tile {tile_mb:.0} MB; 4 threads: cap {cap} \
+             tiles -> {at_cap:.0} MB; 4 tiles would be {at_four:.0} MB; heap {heap:.0} MB"
+        );
+        assert!(at_cap < heap, "{cap} BFRnet tiles in flight need {at_cap:.0} MB, over the {heap:.0} MB heap");
+    }
+
     /// The wrapped-phase networks, on all five echoes.
     fn phase_net(id: &str, tile: Option<(usize, usize)>) {
         let s = Scan::new();
@@ -1115,6 +1150,83 @@ mod browser_memory {
         });
     }
 
+    /// Heap one tile of tiled network `id` costs in WASM, per patch voxel: the figure its registry
+    /// entry carries (`ModelSpec::tile_bytes_per_voxel`), measured where it is spent.
+    ///
+    /// The network's own tiled entry point runs on an 80³ volume whose mask touches only the first
+    /// tile, so one tile is in flight, at 48³, 64³ and 80³ patches in turn (64³ and 128³ for
+    /// NeXtQSM). The heap after each is
+    /// that size's high-water (memory only grows, and a larger run reuses what a smaller one
+    /// freed), and the least-squares slope of high-water against patch voxels is the cost of a tile
+    /// per voxel, fragmentation included; the intercept (parsed model, plan, volumes) is paid once.
+    /// `examples/tile_memory_footprint.rs` measures the same natively, by counting allocations.
+    fn tile_cost(id: &str) {
+        use qsm_core::inversion::{self, TileConfig};
+        let Some(dir) = weights_dir() else { return };
+        let spec = qsm_core::models::find_model(id).unwrap();
+        let w: Vec<Vec<u8>> = spec.files.iter().map(|f| read_file(&format!("{dir}/{}", f.name))).collect();
+        let (nx, ny, nz) = (80, 80, 80);
+        let grid = qsm_core::Grid::new(nx, ny, nz, 1.0, 1.0, 1.0);
+        let field: Vec<f64> = (0..nx * ny * nz).map(|l| 0.02 * (l as f64 * 0.11).cos()).collect();
+        let mut mask = vec![0u8; nx * ny * nz];
+        for k in 4..12 {
+            for j in 4..12 {
+                for i in 4..12 {
+                    mask[i + nx * (j + ny * k)] = 1;
+                }
+            }
+        }
+        let (bdir, te, b0) = ((0.0, 0.0, 1.0), 0.02, 3.0);
+        let divisor = spec.size_divisor as usize;
+        // Multiples of 16 or less: three sizes. NeXtQSM takes multiples of 64: its two smallest.
+        let patches = if divisor <= 16 { vec![48, 64, 80] } else { vec![divisor, 2 * divisor] };
+        let before = heap_mb();
+        let mut pts = Vec::new();
+        let mut at_64 = 0.0;
+        for p in patches {
+            let cfg = TileConfig { core: p - 16, halo: 8 };
+            assert_eq!(inversion::tile_patch_size(&cfg, divisor), p);
+            let none = |_: usize, _: usize| {};
+            let (f, m, g) = (&field[..], &mask[..], &grid);
+            let out = match id {
+                "bfrnet" => qsm_core::bgremove::bfrnet::bfrnet_tiled(f, m, g, &w[0], &cfg, none),
+                "xqsm" => inversion::xqsm_tiled(f, m, g, &w[0], &cfg, none),
+                "qsmnet" => inversion::qsmnet_tiled(f, m, g, &w[0], &inversion::QsmnetNorm::qsmnet(), &cfg, none),
+                "qsmnet-plus" => {
+                    inversion::qsmnet_tiled(f, m, g, &w[0], &inversion::QsmnetNorm::qsmnet_plus(), &cfg, none)
+                }
+                "ir2qsm" => inversion::ir2qsm::ir2qsm_tiled(f, m, g, &w[0], &cfg, none),
+                "lpcnn" => inversion::lpcnn::lpcnn_tiled(f, m, g, bdir, &w[0], &cfg, none),
+                "modl-qsm" => inversion::modl_qsm::modl_qsm_tiled(f, m, g, bdir, &w[0], &cfg, none),
+                "nextqsm" => inversion::nextqsm::nextqsm_tiled(f, m, g, bdir, &w[0], &w[1], &cfg, none),
+                "iqsm" => inversion::iqsm_multi_echo(&[f], &[], m, g, &[te], b0, 1.0, 0, &w[0], Some(&cfg)),
+                "iqsm-plus" => {
+                    inversion::iqsm_plus_multi_echo(&[f], &[], m, g, &[te], b0, bdir, 1.0, 0, &w[0], Some(&cfg))
+                }
+                "iqfm" => inversion::iqfm_multi_echo(&[f], &[], m, g, &[te], b0, 1.0, 0, &w[0], Some(&cfg)),
+                _ => panic!("{id} is not a tiled network"),
+            };
+            out.unwrap_or_else(|e| panic!("{id}: {e}"));
+            let mb = heap_mb() - before;
+            wasm_bindgen_test::console_log!("TILE {id} {p}³ patch: heap +{mb:.0} MB");
+            let voxels = (p * p * p) as f64;
+            if p == 64 {
+                at_64 = mb * 1e6 / voxels;
+            }
+            pts.push((voxels, mb * 1e6));
+        }
+        let n = pts.len() as f64;
+        let (mx, my) = pts.iter().fold((0.0, 0.0), |(a, b), &(x, y)| (a + x / n, b + y / n));
+        let slope = pts.iter().map(|&(x, y)| (x - mx) * (y - my)).sum::<f64>()
+            / pts.iter().map(|&(x, _)| (x - mx).powi(2)).sum::<f64>();
+        wasm_bindgen_test::console_log!(
+            "TILE {id} => slope {slope:.0} B per patch voxel, intercept {:.0} MB; a 64³ tile with the \
+             intercept {at_64:.0} B per patch voxel (registry: {:?})",
+            (my - slope * mx) / 1e6,
+            spec.tile_bytes_per_voxel
+        );
+    }
+
     macro_rules! cases {
         ($($name:ident => $body:expr;)*) => {$(
             #[test]
@@ -1136,6 +1248,7 @@ mod browser_memory {
         synthseg_low_memory => synthseg("low_memory 96³", qsm_core::segment::SynthSegParams::low_memory());
         bfrnet_whole_volume => bfrnet(None);
         bfrnet_tiled => bfrnet(BROWSER_TILE);
+        bfrnet_tiled_cap_at_four_threads => bfrnet_tiled_at_four_threads();
         iqfm_whole_volume => phase_net("iqfm", None);
         iqfm_tiled => phase_net("iqfm", BROWSER_TILE);
         iqsm_whole_volume => phase_net("iqsm", None);
@@ -1164,5 +1277,16 @@ mod browser_memory {
         susep_net_wasm_patch => separation(SeparationAlgorithm::SusepNet, Some(qsm_core::separation::susep_net::WASM_PATCH));
         chi_sepnet_authors_patch => separation(SeparationAlgorithm::ChiSepNet, None);
         chi_sepnet_wasm_patch => separation(SeparationAlgorithm::ChiSepNet, Some(qsm_core::separation::chisepnet::WASM_PATCH));
+        tile_cost_bfrnet => tile_cost("bfrnet");
+        tile_cost_xqsm => tile_cost("xqsm");
+        tile_cost_qsmnet => tile_cost("qsmnet");
+        tile_cost_qsmnet_plus => tile_cost("qsmnet-plus");
+        tile_cost_ir2qsm => tile_cost("ir2qsm");
+        tile_cost_lpcnn => tile_cost("lpcnn");
+        tile_cost_modl_qsm => tile_cost("modl-qsm");
+        tile_cost_nextqsm => tile_cost("nextqsm");
+        tile_cost_iqsm => tile_cost("iqsm");
+        tile_cost_iqsm_plus => tile_cost("iqsm-plus");
+        tile_cost_iqfm => tile_cost("iqfm");
     }
 }

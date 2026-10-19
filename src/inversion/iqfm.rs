@@ -52,7 +52,7 @@ pub fn iqfm_multi_echo(
     model_onnx: &[u8],
     tile: Option<&TileConfig>,
 ) -> Result<Vec<f64>, OnnxError> {
-    super::iqsm::iqsm_multi_echo(
-        phases, magnitudes, mask, grid, tes, b0, phase_sign, eroded_rad, model_onnx, tile,
+    super::iqsm::lot_multi_echo(
+        "iqfm", phases, magnitudes, mask, grid, tes, b0, phase_sign, eroded_rad, model_onnx, tile,
     )
 }

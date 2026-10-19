@@ -145,7 +145,7 @@ pub fn lpcnn_tiled(
     progress: impl FnMut(usize, usize),
 ) -> Result<Vec<f64>, OnnxError> {
     super::tiled::tiled_volume_algorithm(
-        local_field_ppm, mask, grid, 8, cfg,
+        local_field_ppm, mask, grid, &super::tiled::tile_cost_of("lpcnn"), cfg,
         |f, m, g| lpcnn(f, m, g, bdir, gen_onnx),
         progress,
     )

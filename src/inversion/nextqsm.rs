@@ -215,7 +215,7 @@ pub fn nextqsm_tiled(
     progress: impl FnMut(usize, usize),
 ) -> Result<Vec<f64>, OnnxError> {
     super::tiled::tiled_volume_algorithm(
-        total_field, mask, grid, 64, cfg,
+        total_field, mask, grid, &super::tiled::tile_cost_of("nextqsm"), cfg,
         |f, m, g| nextqsm(f, m, g, bdir, bf_onnx, vjp_onnx),
         progress,
     )

@@ -114,7 +114,7 @@ pub fn bfrnet_tiled(
     let masked: Vec<f64> = field_ppm.iter().zip(mask).map(|(&f, &m)| if m != 0 { f } else { 0.0 }).collect();
     let model = OnnxModel::load(model_onnx)?;
     let background = crate::inversion::tiled::tiled_field_inversion(
-        &masked, mask, grid, &model, 8, cfg, |v| v as f32, |o| o as f64, progress,
+        &masked, mask, grid, &model, &crate::inversion::tiled::tile_cost_of("bfrnet"), cfg, |v| v as f32, |o| o as f64, progress,
     )?;
     Ok(masked
         .iter()
