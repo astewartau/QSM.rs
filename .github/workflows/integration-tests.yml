@@ -114,9 +114,8 @@ jobs:
           all_dl='["test_dl_qsmgan","test_dl_lpcnn","test_dl_ir2qsm","test_dl_modl_qsm","test_dl_nextqsm","test_dl_iqfm","test_dl_hdbet","test_dl_r2primenet","test_dl_xqsm","test_dl_qsmnet","test_dl_qsmnet_plus","test_dl_autoqsm","test_dl_iqsm","test_dl_iqsm_plus","test_dl_bfrnet","test_dl_mindgrab","test_dl_rs2net","test_dl_synthseg","test_dl_synthseg_window"]'
           all_dl_names=$(echo "$all_dl" | jq -r '.[]' | tr '\n' ' ')
           # Ignored tests deliberately not run here: the manual benchmark and combinatorial sweep
-          # (combinatorial-tests.yml), and two simulations of a Hz<->ppm conversion layer qsmbly no
-          # longer has, which exercise no algorithm the tests above do not.
-          not_in_ci="benchmark_all_algorithms test_all_combinations test_bgremove_lbv_hz_scale test_pipeline_lbv_tv"
+          # (combinatorial-tests.yml).
+          not_in_ci="benchmark_all_algorithms test_all_combinations"
 
           run_unit_tests=false
 
