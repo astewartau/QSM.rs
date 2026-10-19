@@ -140,8 +140,9 @@ fn test_chisepnet_low_memory_patch() {
         "chisepnet",
         SeparationConfig { algorithm: alg, ..Default::default() },
         SeparationConfig { algorithm: alg, chi_sepnet: ChiSepNetParams::low_memory(), ..Default::default() },
-        0.99,
-        0.10,
+        // Measured: r = 0.9989 (χ+) / 0.9965 (χ−), rel. err. 0.036 / 0.047.
+        0.995,
+        0.06,
     );
 }
 
@@ -155,7 +156,7 @@ fn test_susep_net_low_memory_patch() {
         "susep-net",
         SeparationConfig { algorithm: alg, ..Default::default() },
         SeparationConfig { algorithm: alg, susep_net: SusepNetParams::low_memory(), ..Default::default() },
-        0.99,
-        0.10,
+        0.995,
+        0.06,
     );
 }

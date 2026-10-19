@@ -42,8 +42,12 @@ use crate::utils::sliding::starts;
 /// Three 2× pooling levels, so every patch dimension must be a multiple of this.
 const POOL_MULTIPLE: usize = 8;
 
-/// A patch that fits a 32-bit (WASM) heap; see the module docs for what it costs.
-pub const WASM_PATCH: (usize, usize, usize) = (128, 128, 64);
+/// A patch that fits a 32-bit (WASM) heap alongside a browser pipeline's other volumes. Peak
+/// memory, measured natively (single-threaded): about 1.8 KB per patch voxel plus ~0.9 GB for the
+/// parsed model and buffers, so 2.0 GB at this patch, 2.8 GB at 128×128×64 and 12.5 GB for a
+/// whole 184×256×128 volume. On the QSM-CI χ-separation phantom it agrees with the whole volume
+/// to r ≥ 0.998 on both maps (`tests/chisep_xsepnet.rs`).
+pub const WASM_PATCH: (usize, usize, usize) = (96, 96, 64);
 
 /// Inference parameters for [`susep_net`].
 #[cfg_attr(feature = "introspection", derive(serde::Serialize))]
