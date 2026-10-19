@@ -338,7 +338,10 @@ fn autoqsm_matches_keras_reference() {
 
     let grid = qsm_core::Grid { dims: field.dims, voxel_size: field.voxel_size };
     let mask: Vec<u8> = mask_nii.data.iter().map(|&v| (v > 0.5) as u8).collect();
-    let chi = qsm_core::inversion::autoqsm(&field.data, &mask, &grid, &onnx_bytes).expect("autoqsm");
+    // The Keras reference was fed this field as-is, in the network's own training convention;
+    // `autoqsm` takes this crate's convention and negates it, so hand it the negated field.
+    let field_crate: Vec<f64> = field.data.iter().map(|&v| -v).collect();
+    let chi = qsm_core::inversion::autoqsm(&field_crate, &mask, &grid, &onnx_bytes).expect("autoqsm");
 
     // Reference is whole-head (unmasked); our output is masked — compare in-mask.
     let (mut sxx, mut syy, mut sxy, mut sx, mut sy, mut n) = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
