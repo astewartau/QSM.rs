@@ -29,8 +29,14 @@
 //! Weights are not bundled; the caller passes the exported `susep-net.onnx` bytes
 //! (see [`crate::models`]).
 
+// The parameters are plain Rust, so configs can carry them; only inference needs `onnx`.
+#![cfg_attr(not(feature = "onnx"), allow(dead_code))]
+
+#[cfg(feature = "onnx")]
 use crate::grid::Grid;
+#[cfg(feature = "onnx")]
 use crate::models::onnx::{OnnxModel, OnnxError, Tensor};
+#[cfg(feature = "onnx")]
 use crate::utils::sliding::starts;
 
 /// Three 2× pooling levels, so every patch dimension must be a multiple of this.
@@ -41,12 +47,34 @@ pub const WASM_PATCH: (usize, usize, usize) = (128, 128, 64);
 
 /// Inference parameters for [`susep_net`].
 #[cfg_attr(feature = "introspection", derive(serde::Serialize))]
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct SusepNetParams {
     /// `None` (the default) runs the whole volume in one pass, as the authors do. `Some(patch)`
     /// runs an overlapping sliding window instead — bounded memory, at the cost of each patch
     /// seeing less context. Each dimension must be a multiple of 8.
     pub patch: Option<(usize, usize, usize)>,
+}
+
+impl SusepNetParams {
+    /// Settings for a 32-bit (WASM) heap: a [`WASM_PATCH`] sliding window.
+    pub fn low_memory() -> Self {
+        Self { patch: Some(WASM_PATCH) }
+    }
+
+    /// Check the patch, if any: every dimension a positive multiple of 8 (the network's three
+    /// pooling levels). [`susep_net`] panics on what this refuses.
+    pub fn validate(&self) -> Result<(), String> {
+        let Some((d, h, w)) = self.patch else { return Ok(()) };
+        for (axis, v) in [("D", d), ("H", h), ("W", w)] {
+            if v == 0 || v % POOL_MULTIPLE != 0 {
+                return Err(format!(
+                    "SUSEP-Net patch {axis} = {v} must be a positive multiple of {POOL_MULTIPLE} \
+                     (three pooling levels)"
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Training z-score constants for SUSEP-Net (`all_mean_std.mat`): each field is
@@ -86,6 +114,7 @@ impl Default for SusepNetNorm {
 ///
 /// Returns `(chi_pos ≥ 0, chi_neg ≤ 0, chi_total = chi_pos + chi_neg)` in ppm,
 /// masked, in the same layout.
+#[cfg(feature = "onnx")]
 #[allow(clippy::too_many_arguments)]
 pub fn susep_net(
     local_field_ppm: &[f64],
@@ -109,19 +138,10 @@ pub fn susep_net(
     // padded volume, so both paths share the code below. Either way every extent is a
     // multiple of 8, the network's three pooling levels.
     let round_up = |v: usize| v.div_ceil(POOL_MULTIPLE) * POOL_MULTIPLE;
-    let (pd, ph, pw) = match params.patch {
-        Some((d, h, w)) => {
-            for (axis, v) in [("D", d), ("H", h), ("W", w)] {
-                assert!(
-                    v > 0 && v % POOL_MULTIPLE == 0,
-                    "patch {axis} = {v} must be a positive multiple of {POOL_MULTIPLE} \
-                     (three pooling levels)"
-                );
-            }
-            (d, h, w)
-        }
-        None => (round_up(nx), round_up(ny), round_up(nz)),
-    };
+    if let Err(e) = params.validate() {
+        panic!("{e}");
+    }
+    let (pd, ph, pw) = params.patch.unwrap_or((round_up(nx), round_up(ny), round_up(nz)));
     let (px, py, pz) = (nx.max(pd), ny.max(ph), nz.max(pw));
 
     // z-score + mask, in the padded volume's row-major NCDHW layout.
@@ -220,4 +240,22 @@ pub fn susep_net(
         }
     }
     Ok((chi_pos, chi_neg, chi_total))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Whole volume needs no patch; a given patch must sit on the 8-grid.
+    #[test]
+    fn patch_validation() {
+        assert_eq!(SusepNetParams::default().patch, None);
+        assert_eq!(SusepNetParams::low_memory().patch, Some(WASM_PATCH));
+        assert!(SusepNetParams::default().validate().is_ok());
+        assert!(SusepNetParams::low_memory().validate().is_ok());
+        for bad in [(0, 128, 64), (128, 124, 64), (128, 128, 4)] {
+            let e = SusepNetParams { patch: Some(bad) }.validate().unwrap_err();
+            assert!(e.contains("multiple of 8"), "{e}");
+        }
+    }
 }

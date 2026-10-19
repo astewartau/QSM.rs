@@ -65,8 +65,14 @@
 //!
 //! Weights are not bundled; the caller passes the exported `chi-sepnet.onnx` bytes.
 
+// The parameters are plain Rust, so configs can carry them; only inference needs `onnx`.
+#![cfg_attr(not(feature = "onnx"), allow(dead_code))]
+
+#[cfg(feature = "onnx")]
 use crate::grid::Grid;
+#[cfg(feature = "onnx")]
 use crate::models::onnx::{OnnxError, OnnxModel, Tensor};
+#[cfg(feature = "onnx")]
 use crate::utils::sliding::starts;
 
 /// The authors' patch: `(D, H, W)` = `(x, y, z)`.
@@ -80,7 +86,7 @@ const POOL_MULTIPLE: usize = 16;
 
 /// Inference parameters for [`chisepnet`].
 #[cfg_attr(feature = "introspection", derive(serde::Serialize))]
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ChiSepNetParams {
     /// Sliding-window patch `(D, H, W)`; each dimension a multiple of 16. Defaults to
     /// [`AUTHORS_PATCH`]; WASM hosts pass [`WASM_PATCH`].
@@ -90,6 +96,28 @@ pub struct ChiSepNetParams {
 impl Default for ChiSepNetParams {
     fn default() -> Self {
         Self { patch: AUTHORS_PATCH }
+    }
+}
+
+impl ChiSepNetParams {
+    /// Settings for a 32-bit (WASM) heap: the defaults with [`WASM_PATCH`].
+    pub fn low_memory() -> Self {
+        Self { patch: WASM_PATCH }
+    }
+
+    /// Check the patch: every dimension a positive multiple of 16 (the network's four pooling
+    /// levels). [`chisepnet`] panics on what this refuses.
+    pub fn validate(&self) -> Result<(), String> {
+        let (d, h, w) = self.patch;
+        for (axis, v) in [("D", d), ("H", h), ("W", w)] {
+            if v == 0 || v % POOL_MULTIPLE != 0 {
+                return Err(format!(
+                    "χ-sepnet patch {axis} = {v} must be a positive multiple of {POOL_MULTIPLE} \
+                     (four pooling levels)"
+                ));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -134,6 +162,7 @@ impl Default for ChiSepNetNorm {
 ///
 /// # Panics
 /// If a patch dimension is not a multiple of 16 (the network's four pooling levels).
+#[cfg(feature = "onnx")]
 #[allow(clippy::too_many_arguments)]
 pub fn chisepnet(
     local_field_ppm: &[f64],
@@ -146,13 +175,10 @@ pub fn chisepnet(
     params: &ChiSepNetParams,
 ) -> Result<super::ChiSepMaps, OnnxError> {
     let (nx, ny, nz) = grid.dims;
-    let (pd, ph, pw) = params.patch;
-    for (axis, d) in [("D", pd), ("H", ph), ("W", pw)] {
-        assert!(
-            d > 0 && d % POOL_MULTIPLE == 0,
-            "patch {axis} = {d} must be a positive multiple of {POOL_MULTIPLE} (four pooling levels)"
-        );
+    if let Err(e) = params.validate() {
+        panic!("{e}");
     }
+    let (pd, ph, pw) = params.patch;
     let n = nx * ny * nz;
     for (name, v) in [("field", local_field_ppm), ("qsm", qsm), ("r2prime", r2prime)] {
         assert_eq!(v.len(), n, "{name} length must match grid");
@@ -239,4 +265,22 @@ pub fn chisepnet(
         }
     }
     Ok((chi_pos, chi_neg, chi_total))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Both shipped patches are legal; anything off the 16-grid, or zero, is refused.
+    #[test]
+    fn patch_validation() {
+        assert_eq!(ChiSepNetParams::default().patch, AUTHORS_PATCH);
+        assert_eq!(ChiSepNetParams::low_memory().patch, WASM_PATCH);
+        assert!(ChiSepNetParams::default().validate().is_ok());
+        assert!(ChiSepNetParams::low_memory().validate().is_ok());
+        for bad in [(0, 128, 64), (128, 120, 64), (128, 128, 8)] {
+            let e = ChiSepNetParams { patch: bad }.validate().unwrap_err();
+            assert!(e.contains("multiple of 16"), "{e}");
+        }
+    }
 }

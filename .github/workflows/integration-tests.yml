@@ -360,6 +360,8 @@ jobs:
 
               # χ-separation (all methods share src/separation; both test binaries)
               src/separation/chisepnet.rs) chisep="$chisep chisep_xsepnet chisep_orientation" ;;
+              src/separation/susep_net.rs) chisep="$chisep chisep_xsepnet" ;;
+              src/pipeline/separation.rs) chisep="$chisep chisep_xsepnet" ;;
               src/utils/r2primenet.rs) chisep="$chisep chisep_r2primenet chisep_orientation"; dl="$dl test_dl_r2primenet" ;;
               # geometry.rs feeds three different things: the axis relabelling chisep_orientation
               # is built on; the cardinal-resample pathway oblique_sagittal covers, on the
@@ -424,7 +426,7 @@ jobs:
                       synthseg|synthseg-2.0) dl="$dl test_dl_synthseg test_dl_synthseg_window" ;;
                       r2primenet) dl="$dl test_dl_r2primenet"; chisep="$chisep chisep_r2primenet" ;;
                       chi-sepnet) chisep="$chisep chisep_xsepnet" ;;
-                      susep-net)  chisep="$chisep chisep_qsmci" ;;
+                      susep-net)  chisep="$chisep chisep_xsepnet" ;;
                       # No dedicated test (xqsm, qsmnet, autoqsm, iqsm, synthseg, …): cover it
                       # with the full DL set rather than assume nothing needs running.
                       *) echo "registry.rs: '$id' has no mapped test → all DL tests"

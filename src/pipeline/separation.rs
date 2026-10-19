@@ -132,11 +132,18 @@ pub fn run_separation(
         }
         SeparationAlgorithm::SusepNet => {
             let r2prime = need(inputs.r2prime, "r2prime")?;
-            run_susep_net(inputs.local_field_ppm, inputs.qsm, r2prime, mask, &grid)?
+            config.susep_net.validate().map_err(PipelineError::InvalidConfig)?;
+            run_susep_net(
+                inputs.local_field_ppm, inputs.qsm, r2prime, mask, &grid, &config.susep_net,
+                progress,
+            )?
         }
         SeparationAlgorithm::ChiSepNet => {
             let r2prime = need(inputs.r2prime, "r2prime")?;
-            run_chi_sepnet(inputs.local_field_ppm, inputs.qsm, r2prime, mask, &grid)?
+            config.chi_sepnet.validate().map_err(PipelineError::InvalidConfig)?;
+            run_chi_sepnet(
+                inputs.local_field_ppm, inputs.qsm, r2prime, mask, &grid, &config.chi_sepnet,
+            )?
         }
     };
 
@@ -151,6 +158,8 @@ fn run_susep_net(
     r2prime: &[f64],
     mask: &[u8],
     grid: &crate::Grid,
+    params: &crate::separation::SusepNetParams,
+    progress: &mut dyn FnMut(usize, usize),
 ) -> Result<crate::separation::ChiSepMaps, PipelineError> {
     let spec = crate::models::find_model("susep-net")
         .ok_or_else(|| PipelineError::InvalidConfig("susep-net not in model registry".into()))?;
@@ -158,8 +167,8 @@ fn run_susep_net(
     crate::separation::susep_net(
         local_field_ppm, qsm, r2prime, mask, grid, &bytes,
         &crate::separation::SusepNetNorm::default(),
-        &crate::separation::SusepNetParams::default(),
-        |_, _| {},
+        params,
+        progress,
     )
     .map_err(|e| PipelineError::AlgorithmError(e.to_string()))
 }
@@ -171,6 +180,8 @@ fn run_susep_net(
     _r2prime: &[f64],
     _mask: &[u8],
     _grid: &crate::Grid,
+    _params: &crate::separation::SusepNetParams,
+    _progress: &mut dyn FnMut(usize, usize),
 ) -> Result<crate::separation::ChiSepMaps, PipelineError> {
     Err(PipelineError::InvalidConfig(
         "SUSEP-Net requires building qsm-core with the 'onnx' feature".into(),
@@ -185,12 +196,13 @@ fn run_chi_sepnet(
     r2prime: &[f64],
     mask: &[u8],
     grid: &crate::Grid,
+    params: &crate::separation::ChiSepNetParams,
 ) -> Result<crate::separation::ChiSepMaps, PipelineError> {
     let bytes = crate::models::primary_weight("chi-sepnet").map_err(PipelineError::InvalidConfig)?;
     crate::separation::chisepnet(
         local_field_ppm, qsm, r2prime, mask, grid, &bytes,
         &crate::separation::ChiSepNetNorm::default(),
-        &crate::separation::ChiSepNetParams::default(),
+        params,
     )
     .map_err(|e| PipelineError::AlgorithmError(e.to_string()))
 }
@@ -202,6 +214,7 @@ fn run_chi_sepnet(
     _r2prime: &[f64],
     _mask: &[u8],
     _grid: &crate::Grid,
+    _params: &crate::separation::ChiSepNetParams,
 ) -> Result<crate::separation::ChiSepMaps, PipelineError> {
     Err(PipelineError::InvalidConfig(
         "χ-sepnet requires building qsm-core with the 'onnx' feature".into(),
@@ -394,6 +407,45 @@ mod tests {
         let cfg = SeparationConfig { algorithm: SeparationAlgorithm::R2starQsm, ..Default::default() };
         let err = run_separation(inputs, &m, &cfg, &mut |_, _| {}).unwrap_err();
         assert!(matches!(err, PipelineError::InvalidInput(_)), "got {err:?}");
+    }
+
+    /// The deep-learning methods take their patch from the config, and a patch the network
+    /// cannot take is a config error, refused before any weights are fetched (so this needs
+    /// none). The defaults are the networks' own: the authors' χ-sepnet patch and SUSEP-Net's
+    /// whole volume.
+    #[test]
+    fn dl_patches_from_config() {
+        use crate::separation::{chisepnet, ChiSepNetParams, SusepNetParams};
+        let d = SeparationConfig::default();
+        assert_eq!(d.chi_sepnet, ChiSepNetParams { patch: chisepnet::AUTHORS_PATCH });
+        assert_eq!(d.susep_net, SusepNetParams { patch: None });
+
+        let (nx, ny, nz) = (6, 6, 6);
+        let n = nx * ny * nz;
+        let v = vec![0.01; n];
+        let mask = vec![1u8; n];
+        let m = meta(nx, ny, nz);
+        let mut inputs = base_inputs(&v, &mask);
+        inputs.r2prime = Some(&v);
+        let bad = [
+            SeparationConfig {
+                algorithm: SeparationAlgorithm::ChiSepNet,
+                chi_sepnet: ChiSepNetParams { patch: (128, 120, 64) },
+                ..Default::default()
+            },
+            SeparationConfig {
+                algorithm: SeparationAlgorithm::SusepNet,
+                susep_net: SusepNetParams { patch: Some((128, 128, 4)) },
+                ..Default::default()
+            },
+        ];
+        for cfg in bad {
+            let err = run_separation(inputs, &m, &cfg, &mut |_, _| {}).unwrap_err();
+            match err {
+                PipelineError::InvalidConfig(msg) => assert!(msg.contains("patch"), "{msg}"),
+                e => panic!("{:?}: expected InvalidConfig, got {e:?}", cfg.algorithm),
+            }
+        }
     }
 
     /// Inputs the separation algorithms would `assert!` on are refused by the stage instead

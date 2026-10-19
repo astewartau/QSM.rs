@@ -15,8 +15,8 @@ use crate::inversion::{
     LsqrQsmParams, HeidiParams,
 };
 use crate::separation::{
-    ChiSepIlsqrParams, ChiSepParams, DecomposeParams, HcChisepParams, R2starQsmParams,
-    WaveSepParams,
+    ChiSepIlsqrParams, ChiSepNetParams, ChiSepParams, DecomposeParams, HcChisepParams,
+    R2starQsmParams, SusepNetParams, WaveSepParams,
 };
 use crate::unwrap::romeo::RomeoParams;
 use crate::unwrap::LaplacianSolver;
@@ -772,6 +772,10 @@ pub struct SeparationConfig {
     pub decompose: DecomposeParams,
     /// `b0` overridden from scan metadata; `se_echo_times` supplies the SE echoes.
     pub hc_chisep: HcChisepParams,
+    /// χ-sepnet sliding-window patch (default: the authors' 192×192×128).
+    pub chi_sepnet: ChiSepNetParams,
+    /// SUSEP-Net whole volume (default) or sliding-window patch.
+    pub susep_net: SusepNetParams,
 }
 
 impl Default for SeparationConfig {
@@ -784,6 +788,8 @@ impl Default for SeparationConfig {
             wavesep: WaveSepParams::default(),
             decompose: DecomposeParams::default(),
             hc_chisep: HcChisepParams::default(),
+            chi_sepnet: ChiSepNetParams::default(),
+            susep_net: SusepNetParams::default(),
         }
     }
 }
