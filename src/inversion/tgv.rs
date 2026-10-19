@@ -409,8 +409,7 @@ pub fn compute_oblique_stencil(
         }
     }
 
-    // Pre-compute DST-I sin table
-    let sin_table = dst_sin_table(n);
+    let dst = rustdct::DctPlanner::<f64>::new().plan_dst1(n);
     // Inverse DST-I scale: our DST computes Σ x[n]*sin(...) (no factor of 2),
     // so the inverse is (2/(N+1))^3 for 3D (unlike FFTW which uses 1/(2*(N+1))^3).
     let idst_scale = (2.0 / (n as f64 + 1.0)).powi(3);
@@ -440,26 +439,32 @@ pub fn compute_oblique_stencil(
     // so only compute 13 unique Poisson solutions (one per centrosymmetric pair).
     // Pair p corresponds to stencil_positions[p] and stencil_positions[25-p].
     let num_pairs = 13;
-    let mut a_rows: Vec<Vec<f64>> = Vec::with_capacity(num_pairs);
-
-    for p in 0..num_pairs {
+    let sin_table = dst_sin_table(n);
+    let pairs: Vec<usize> = (0..num_pairs).collect();
+    let a_rows: Vec<Vec<f64>> = maybe_par_iter!(pairs).map(|&p| {
         let (di, dj, dk) = stencil_positions[p];
 
-        // Create delta function: delta[mid+I] = 1, delta[mid-I] = 1, delta[mid] = -2
-        let mut delta = vec![0.0_f64; n3];
-        let pi = (mid as i32 + di) as usize;
-        let pj = (mid as i32 + dj) as usize;
-        let pk = (mid as i32 + dk) as usize;
-        let mi = (mid as i32 - di) as usize;
-        let mj = (mid as i32 - dj) as usize;
-        let mk = (mid as i32 - dk) as usize;
-
-        delta[pi + pj * n + pk * n2] = 1.0;
-        delta[mi + mj * n + mk * n2] += 1.0; // += handles coincident positions
-        delta[mid + mid * n + mid * n2] = -2.0;
-
-        // Forward 3D DST-I
-        let mut fdelta = dst3d(&delta, n, &sin_table);
+        // Delta function: 1 at mid+I and at mid-I, -2 at mid. Its forward 3D DST-I is the
+        // weighted sum of the separable transforms of its three points, written down directly.
+        let at = |o: i32| (mid as i32 + o) as usize;
+        let points = [
+            ((at(di), at(dj), at(dk)), 1.0),
+            ((at(-di), at(-dj), at(-dk)), 1.0),
+            ((mid, mid, mid), -2.0),
+        ];
+        let mut fdelta = vec![0.0_f64; n3];
+        for &((a, b, c), w) in &points {
+            for k in 0..n {
+                let sk = w * sin_table[c][k];
+                for j in 0..n {
+                    let sjk = sk * sin_table[b][j];
+                    let base = j * n + k * n2;
+                    for (i, v) in fdelta[base..base + n].iter_mut().enumerate() {
+                        *v += sjk * sin_table[a][i];
+                    }
+                }
+            }
+        }
 
         // Poisson solve: divide by -coord2_grid
         for idx in 0..n3 {
@@ -467,15 +472,11 @@ pub fn compute_oblique_stencil(
         }
 
         // Inverse 3D DST-I (= forward DST-I * scale)
-        let vdelta = dst3d(&fdelta, n, &sin_table);
+        let vdelta = dst3d(&fdelta, n, dst.as_ref());
 
         // Extract values at valid dipole points, applying inverse scale
-        let row: Vec<f64> = valid_indices
-            .iter()
-            .map(|&idx| vdelta[idx] * idst_scale)
-            .collect();
-        a_rows.push(row);
-    }
+        valid_indices.iter().map(|&idx| vdelta[idx] * idst_scale).collect()
+    }).collect();
 
     // Extract dipole values at valid points
     let d_valid: Vec<f64> = valid_indices.iter().map(|&idx| d[idx]).collect();
@@ -559,6 +560,39 @@ pub fn compute_oblique_stencil(
     result
 }
 
+/// 3D separable DST-I, unnormalised: X[k] = Σ x[j]·sin(π·(j+1)·(k+1)/(N+1)) along each axis.
+fn dst3d(input: &[f64], n: usize, dst: &dyn rustdct::Dst1<f64>) -> Vec<f64> {
+    let n2 = n * n;
+    let mut data = input.to_vec();
+    let mut scratch = vec![0.0_f64; dst.get_scratch_len()];
+    let mut line = vec![0.0_f64; n];
+    // rustdct's FFT-based DST-I takes the zero padding of its FFT input from the scratch
+    // buffer, so the scratch is cleared before every line.
+    let mut dst1 = |buf: &mut [f64]| {
+        scratch.fill(0.0);
+        dst.process_dst1_with_scratch(buf, &mut scratch);
+    };
+    for row in data.chunks_mut(n) {
+        dst1(row);
+    }
+    // y lines start at i + k·n² with stride n; z lines start at i + j·n with stride n².
+    for (stride, outer_step) in [(n, n2), (n2, n)] {
+        for a in 0..n {
+            for i in 0..n {
+                let base = i + a * outer_step;
+                for t in 0..n {
+                    line[t] = data[base + t * stride];
+                }
+                dst1(&mut line);
+                for t in 0..n {
+                    data[base + t * stride] = line[t];
+                }
+            }
+        }
+    }
+    data
+}
+
 /// Build sin table for DST-I of given length.
 /// sin_table[n][k] = sin(π*(n+1)*(k+1)/(N+1))
 fn dst_sin_table(n: usize) -> Vec<Vec<f64>> {
@@ -572,8 +606,9 @@ fn dst_sin_table(n: usize) -> Vec<Vec<f64>> {
     table
 }
 
-/// 3D separable DST-I (Type I Discrete Sine Transform).
-fn dst3d(input: &[f64], n: usize, sin_table: &[Vec<f64>]) -> Vec<f64> {
+/// 3D separable DST-I by the direct O(N⁴) sum, the reference [`dst3d`] is checked against.
+#[cfg(test)]
+fn dst3d_direct(input: &[f64], n: usize, sin_table: &[Vec<f64>]) -> Vec<f64> {
     let n2 = n * n;
     let mut data = input.to_vec();
     let mut buf_in = vec![0.0_f64; n];
@@ -618,6 +653,7 @@ fn dst3d(input: &[f64], n: usize, sin_table: &[Vec<f64>]) -> Vec<f64> {
     data
 }
 
+#[cfg(test)]
 /// 1D DST-I: X[k] = Σ x[n] * sin(π*(n+1)*(k+1)/(N+1))
 fn dst1(input: &[f64], sin_table: &[Vec<f64>], output: &mut [f64]) {
     let n = input.len();
@@ -1867,6 +1903,68 @@ mod tests {
             let diff = chi_f.iter().zip(&chi_p).map(|(a, b)| (a - b).powi(2)).sum::<f64>().sqrt();
             assert!(diff / norm < 0.02, "TE {te}: relative difference {}", diff / norm);
         }
+    }
+
+    /// The fast DST-I is the direct sum, to rounding.
+    #[test]
+    fn dst3d_matches_the_direct_sum() {
+        let n = 9;
+        let x: Vec<f64> = (0..n * n * n).map(|i| ((i * 37 % 101) as f64 / 50.0) - 1.0).collect();
+        let fast = dst3d(&x, n, rustdct::DctPlanner::<f64>::new().plan_dst1(n).as_ref());
+        let direct = dst3d_direct(&x, n, &dst_sin_table(n));
+        let err = fast.iter().zip(&direct).map(|(a, b)| (a - b).abs()).fold(0.0, f64::max);
+        assert!(err < 1e-9, "max difference {err}");
+    }
+
+    /// Least-squares slope of `got` against `truth` over the voxels where `keep` holds:
+    /// 1 when χ comes out in the units of the phantom, offset-invariant.
+    fn slope(got: &[f64], truth: &[f64], keep: impl Fn(usize) -> bool) -> f64 {
+        let idx: Vec<usize> = (0..truth.len()).filter(|&i| keep(i)).collect();
+        let k = idx.len() as f64;
+        let mt = idx.iter().map(|&i| truth[i]).sum::<f64>() / k;
+        let mg = idx.iter().map(|&i| got[i]).sum::<f64>() / k;
+        let cov: f64 = idx.iter().map(|&i| (truth[i] - mt) * (got[i] - mg)).sum();
+        let var: f64 = idx.iter().map(|&i| (truth[i] - mt).powi(2)).sum();
+        cov / var
+    }
+
+    /// TGV returns χ in ppm on the scale of the field it was given: three spheres of known χ,
+    /// forward-simulated through the dipole kernel, come back with a slope near 1 against the
+    /// truth, whether TGV gets the field in ppm or one wrapped echo with its TE and B0. A
+    /// field in ppm read as rad at TE1 (QSM.rs#170) gave a slope of about 0.2 here.
+    #[test]
+    fn chi_comes_back_on_the_phantom_scale() {
+        let n = 24;
+        let c = n as f64 / 2.0;
+        let at = |i: usize| ((i % n) as f64 + 0.5, ((i / n) % n) as f64 + 0.5, (i / (n * n)) as f64 + 0.5);
+        let blobs = [((c - 4.0, c, c), 3.0, 0.15), ((c + 4.0, c + 2.0, c), 2.5, -0.10), ((c, c - 4.0, c + 3.0), 2.0, 0.20)];
+        let chi: Vec<f64> = (0..n * n * n).map(|i| {
+            let p = at(i);
+            blobs.iter().rev()
+                .find(|&&((x, y, z), r, _)| ((p.0 - x).powi(2) + (p.1 - y).powi(2) + (p.2 - z).powi(2)).sqrt() < r)
+                .map_or(0.0, |b| b.2)
+        }).collect();
+        let r = |i: usize| { let p = at(i); ((p.0 - c).powi(2) + (p.1 - c).powi(2) + (p.2 - c).powi(2)).sqrt() };
+        let mask: Vec<u8> = (0..n * n * n).map(|i| (r(i) < c - 1.0) as u8).collect();
+        let grid = crate::Grid::new(n, n, n, 1.0, 1.0, 1.0);
+        let kernel = crate::kernels::dipole::dipole_kernel(&grid, (0.0, 0.0, 1.0));
+        let field = crate::fft::apply_real_kernel(&chi, &kernel, n, n, n);
+        // Scored well inside the mask, clear of the eroded rim TGV leaves at zero.
+        let scored = |i: usize| r(i) < c - 5.0;
+
+        let params = TgvParams::default();
+        let ppm = tgv_qsm(TgvInput::FieldPpm(&field), &mask, &grid, &params, (0.0, 0.0, 1.0), |_, _| {}).unwrap();
+        let s_ppm = slope(&ppm, &chi, scored);
+        assert!((0.7..1.3).contains(&s_ppm), "FieldPpm slope {s_ppm:.3} against the phantom");
+
+        let (te, b0) = (0.010, 3.0);
+        let wrap = |x: f64| (x + std::f64::consts::PI).rem_euclid(2.0 * std::f64::consts::PI) - std::f64::consts::PI;
+        let phase: Vec<f64> = field.iter().map(|v| wrap(v * rad_per_ppm(te, b0))).collect();
+        let input = TgvInput::WrappedPhase { phase: &phase, te_s: te, b0_t: b0 };
+        let rad = tgv_qsm(input, &mask, &grid, &params, (0.0, 0.0, 1.0), |_, _| {}).unwrap();
+        let s_rad = slope(&rad, &chi, scored);
+        eprintln!("phantom χ slope vs truth: FieldPpm {s_ppm:.3}, WrappedPhase {s_rad:.3}");
+        assert!((0.7..1.3).contains(&s_rad), "WrappedPhase slope {s_rad:.3} against the phantom");
     }
 
     #[test]
