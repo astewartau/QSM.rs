@@ -28,6 +28,13 @@ fn ri(x: usize, y: usize, z: usize, dy: usize, dz: usize) -> usize {
     (x * dy + y) * dz + z // row-major (X,Y,Z), matches numpy C-order
 }
 
+/// The output-grid extent for an axis of `d` voxels: the smallest whole number of output
+/// patches (`OUT`, then one more per `SHIFT`) that covers it. An axis shorter than one patch gets
+/// one patch; the samples past `d` are edge-padded and cropped away.
+fn output_extent(d: usize) -> usize {
+    OUT + d.saturating_sub(OUT).div_ceil(SHIFT) * SHIFT
+}
+
 /// Run AutoQSM on a total field map.
 ///
 /// * `field_ppm` — total field (ppm), column-major `(nx,ny,nz)`.
@@ -57,13 +64,7 @@ pub fn autoqsm(
         }
     }
 
-    // Intermediate padded size so (dim - OUT) is a multiple of SHIFT.
-    let pad_to = |d: usize| -> usize {
-        let e = d - OUT;
-        e.div_ceil(SHIFT) * SHIFT - e // extra samples appended
-    };
-    let (padx, pady, padz) = (pad_to(nx), pad_to(ny), pad_to(nz));
-    let (xp, yp, zp) = (nx + padx, ny + pady, nz + padz); // output-grid size
+    let (xp, yp, zp) = (output_extent(nx), output_extent(ny), output_extent(nz)); // output-grid size
 
     // Edge-pad: MARGIN before, (pad + MARGIN) after, per axis (replicate).
     let (bx, by, bz) = (MARGIN, MARGIN, MARGIN);
@@ -160,6 +161,25 @@ fn blend(patch: &mut [f64], neighbor: &[f64], dir: usize) {
                 };
                 patch[pi] = w * neighbor[ni] + (1.0 - w) * patch[pi];
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An axis shorter than one output patch used to underflow `d - OUT` (a panic in debug
+    /// builds, a wrapped size and a "capacity overflow" in release ones).
+    #[test]
+    fn output_extent_covers_every_axis_in_whole_patches() {
+        for (d, want) in [(1, 32), (16, 32), (32, 32), (33, 56), (56, 56), (57, 80), (184, 200)] {
+            assert_eq!(output_extent(d), want, "d = {d}");
+        }
+        for d in 1..300 {
+            let e = output_extent(d);
+            assert!(e >= d.max(OUT) && (e - OUT).is_multiple_of(SHIFT), "d = {d}: {e}");
+            assert!(e < d.max(OUT) + SHIFT, "d = {d}: {e} is a patch too many");
         }
     }
 }
