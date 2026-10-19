@@ -190,7 +190,7 @@ jobs:
         with:
           tool: wasm-bindgen@${{ steps.wbg.outputs.version }}
 
-      # The `onnx` build also runs one deep-learning case, xQSM on weights handed over in memory
+      # The `onnx` build also runs the deep-learning cases, xQSM and SynthSeg on weights handed over in memory
       # (`models::provide_weights`), as a browser host does. The test reads the file named by
       # `$XQSM_ONNX` through Node's `fs`; the URL and checksum come from the model registry, and
       # the file is cached under its checksum.
@@ -222,6 +222,37 @@ jobs:
             echo "${{ steps.xqsm.outputs.sha }}  $F" | sha256sum -c
           fi
           echo "XQSM_ONNX=$F" >> "$GITHUB_ENV"
+
+      # SynthSeg, the same way: on the smallest input it takes (padded to 128³) and, in windows,
+      # on a volume whose whole-volume pass does not fit a 32-bit heap.
+      - name: SynthSeg weights (registry entry)
+        id: synthseg
+        if: contains(matrix.features, 'onnx')
+        run: |
+          ENTRY=$(grep -A3 'name: "synthseg.onnx"' src/models/registry.rs)
+          URL=$(sed -n 's/.*url: "\(.*\)",/\1/p' <<< "$ENTRY")
+          SHA=$(sed -n 's/.*sha256: "\(.*\)",/\1/p' <<< "$ENTRY")
+          test -n "$URL" && test -n "$SHA"
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Cache SynthSeg weights
+        if: contains(matrix.features, 'onnx')
+        uses: actions/cache@v4
+        with:
+          path: ~/qsm-weights/synthseg.onnx
+          key: synthseg-onnx-${{ steps.synthseg.outputs.sha }}
+
+      - name: Fetch SynthSeg weights
+        if: contains(matrix.features, 'onnx')
+        run: |
+          F=~/qsm-weights/synthseg.onnx
+          if ! echo "${{ steps.synthseg.outputs.sha }}  $F" | sha256sum -c --status 2>/dev/null; then
+            mkdir -p ~/qsm-weights
+            curl -fsSL --retry 5 --retry-all-errors -o "$F" "${{ steps.synthseg.outputs.url }}"
+            echo "${{ steps.synthseg.outputs.sha }}  $F" | sha256sum -c
+          fi
+          echo "SYNTHSEG_ONNX=$F" >> "$GITHUB_ENV"
 
       - name: Run the pipeline under Node
         run: cargo test --release --target wasm32-unknown-unknown --features "${{ matrix.features }}" --test wasm_pipeline

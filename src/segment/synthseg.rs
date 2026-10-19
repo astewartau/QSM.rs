@@ -80,8 +80,12 @@ pub enum SynthSegInference {
 }
 
 impl SynthSegInference {
-    /// The memory-bounded window: 128³ patches, half-overlapping.
-    pub const LOW_MEMORY: Self = Self::SlidingWindow { patch: 128, tile_step: 0.5 };
+    /// The memory-bounded window, for a 32-bit WASM heap: 96³ patches, half-overlapping. On a
+    /// 184×256×128 1 mm scan with flip averaging it peaks at 2.0 GB natively (the whole volume:
+    /// 6.8 GB) and agrees with the whole volume at Dice 0.985 on average over the labels (lowest
+    /// 0.964); 128³ windows agree better (0.995, lowest 0.983) but peak at 3.25 GB, which took a
+    /// browser run of that scan to 3.97 GB of its 4 GB heap.
+    pub const LOW_MEMORY: Self = Self::SlidingWindow { patch: 96, tile_step: 0.5 };
 }
 
 /// SynthSeg inference parameters.
