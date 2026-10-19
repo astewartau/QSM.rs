@@ -118,6 +118,8 @@ emit_figures() {
   for slug in "$@"; do
     case " $EMITTED_FIGURES " in *" $slug "*) continue ;; esac
     if [ -f "figures/${slug}.png" ]; then
+      # A blank line first: right after a table, an image line would be read as one more row.
+      echo ""
       echo "![${slug}](figures/${slug}.png)"
       echo ""
       EMITTED_FIGURES="$EMITTED_FIGURES $slug"
