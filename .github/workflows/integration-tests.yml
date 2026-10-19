@@ -543,7 +543,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: qsmci-chisep
-          key: chisep-data-v1-y8adf
+          # Bump the key whenever the OSF dataset changes (no content hash; see the setup job).
+          # v2 (2026-10-19): forces a real download so the WaterButler fix below is exercised.
+          key: chisep-data-v2-y8adf
 
       - name: Download chisep phantom from OSF
         if: steps.cache-chisep.outputs.cache-hit != 'true'
@@ -562,12 +564,18 @@ jobs:
               with urllib.request.urlopen(req) as r:
                   return json.load(r)
 
+          # Download through WaterButler (files.osf.io/v1/resources/<node>/providers/osfstorage/<id>,
+          # the file's `upload` link), never `links.download` (osf.io/download/<guid>). WaterButler
+          # authorises the Bearer token and 302s to a pre-signed object-storage URL. curl -L drops
+          # the Authorization header on that cross-host redirect, as the signed URL requires: the
+          # storage backend rejects a signed request that also carries a Bearer header with
+          # 400 "authorization mechanism ... not supported". The osf.io/download/<guid> link needs
+          # one more hop, osf.io -> files.osf.io, which with -L loses the token (private project:
+          # 403), and with --location-trusted carries it all the way to storage (400).
           url = None
           if override:
-              if len(override) == 24 and all(c in "0123456789abcdef" for c in override):
-                  url = f"https://files.osf.io/v1/resources/y8adf/providers/osfstorage/{override}"
-              else:
-                  url = f"https://osf.io/{override}/download"
+              # File id (24 hex) or GUID: resolve to its WaterButler link through the API.
+              url = api(f"https://api.osf.io/v2/files/{override}/")["data"]["links"]["upload"]
               print(f"using pinned OSF_FILE_CHISEP -> {url}")
           else:
               # Walk the project's osfstorage and take the first chisep zip.
@@ -584,8 +592,8 @@ jobs:
                                   + "?page%5Bsize%5D=100"
                               )
                           elif "chisep" in a["name"].lower() and a["name"].lower().endswith(".zip"):
-                              url = f["links"]["download"]
-                              print(f"found {a['materialized_path']} ({a['size']} bytes)")
+                              url = f["links"]["upload"]
+                              print(f"found {a['materialized_path']} ({a['size']} bytes) -> {url}")
                               break
                       if url:
                           break
@@ -598,8 +606,8 @@ jobs:
           with open("osf_url.txt", "w") as fh:
               fh.write(url)
           EOF
-          curl -fS --location-trusted -H "Authorization: Bearer ${OSF_TOKEN}" \
-            "$(cat osf_url.txt)" -o chisep.zip
+          # -L, not --location-trusted: see the WaterButler note above.
+          curl -fSL -H "Authorization: Bearer ${OSF_TOKEN}" "$(cat osf_url.txt)" -o chisep.zip
           mkdir -p qsmci-chisep
           unzip -q chisep.zip -d qsmci-chisep
           # Prepacked zips are flattened (inputs/ + groundtruth/ at the root),
