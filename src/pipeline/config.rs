@@ -430,6 +430,12 @@ pub struct BgRemovalConfig {
     /// mSMV is a refinement, not a standalone primary remover, so it is exposed
     /// only as this post-step (redundant after `Ismv`, which is already SMV-based).
     pub msmv_refine: bool,
+    /// Overlap-tiling for BFRnet, as `(core, halo)` in voxels, as [`InversionConfig::tile`] is
+    /// for the inversion networks. `None` (default) runs the whole volume, which on a whole-head
+    /// scan does not fit a 32-bit (WASM) heap; `Some` runs it patch by patch, an approximation
+    /// with bounded memory ([`bfrnet_tiled`](crate::bgremove::bfrnet_tiled)). Ignored by the
+    /// classical methods.
+    pub tile: Option<(usize, usize)>,
 }
 
 impl Default for BgRemovalConfig {
@@ -447,6 +453,7 @@ impl Default for BgRemovalConfig {
             sdf: SdfParams::default(),
             msmv: MsmvParams::default(),
             msmv_refine: false,
+            tile: None,
         }
     }
 }

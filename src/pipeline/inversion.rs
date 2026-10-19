@@ -529,13 +529,15 @@ pub fn run_iqsm(
     mask: &[u8],
     metadata: &ScanMetadata,
     reference: QsmReference,
+    tile: Option<(usize, usize)>,
 ) -> Result<Vec<f64>, PipelineError> {
     metadata.require_contiguous_slices()?;
     let grid = metadata.grid();
     let bytes = crate::models::primary_weight("iqsm").map_err(PipelineError::InvalidConfig)?;
+    let tile = tile.map(|(core, halo)| crate::inversion::TileConfig { core, halo });
     let chi = crate::inversion::iqsm_multi_echo(
         phases, magnitudes, mask, &grid, &metadata.echo_times,
-        metadata.field_strength, IQSM_PHASE_SIGN, IQSM_ERODED_RAD, &bytes,
+        metadata.field_strength, IQSM_PHASE_SIGN, IQSM_ERODED_RAD, &bytes, tile.as_ref(),
     ).map_err(|e| PipelineError::AlgorithmError(e.to_string()))?;
     Ok(super::referencing::apply_reference(&chi, mask, reference))
 }
@@ -543,7 +545,7 @@ pub fn run_iqsm(
 #[cfg(not(feature = "onnx"))]
 pub fn run_iqsm(
     _phases: &[&[f64]], _magnitudes: &[&[f64]], _mask: &[u8],
-    _metadata: &ScanMetadata, _reference: QsmReference,
+    _metadata: &ScanMetadata, _reference: QsmReference, _tile: Option<(usize, usize)>,
 ) -> Result<Vec<f64>, PipelineError> {
     Err(PipelineError::InvalidConfig("iQSM requires building qsm-core with the 'onnx' feature".into()))
 }
@@ -557,13 +559,16 @@ pub fn run_iqsm_plus(
     mask: &[u8],
     metadata: &ScanMetadata,
     reference: QsmReference,
+    tile: Option<(usize, usize)>,
 ) -> Result<Vec<f64>, PipelineError> {
     metadata.require_contiguous_slices()?;
     let grid = metadata.grid();
     let bytes = crate::models::primary_weight("iqsm-plus").map_err(PipelineError::InvalidConfig)?;
+    let tile = tile.map(|(core, halo)| crate::inversion::TileConfig { core, halo });
     let chi = crate::inversion::iqsm_plus_multi_echo(
         phases, magnitudes, mask, &grid, &metadata.echo_times,
         metadata.field_strength, metadata.b0_direction, IQSM_PHASE_SIGN, IQSM_ERODED_RAD, &bytes,
+        tile.as_ref(),
     ).map_err(|e| PipelineError::AlgorithmError(e.to_string()))?;
     Ok(super::referencing::apply_reference(&chi, mask, reference))
 }
@@ -571,7 +576,7 @@ pub fn run_iqsm_plus(
 #[cfg(not(feature = "onnx"))]
 pub fn run_iqsm_plus(
     _phases: &[&[f64]], _magnitudes: &[&[f64]], _mask: &[u8],
-    _metadata: &ScanMetadata, _reference: QsmReference,
+    _metadata: &ScanMetadata, _reference: QsmReference, _tile: Option<(usize, usize)>,
 ) -> Result<Vec<f64>, PipelineError> {
     Err(PipelineError::InvalidConfig("iQSM+ requires building qsm-core with the 'onnx' feature".into()))
 }
@@ -587,19 +592,22 @@ pub fn run_iqfm(
     magnitudes: &[&[f64]],
     mask: &[u8],
     metadata: &ScanMetadata,
+    tile: Option<(usize, usize)>,
 ) -> Result<Vec<f64>, PipelineError> {
     metadata.require_contiguous_slices()?;
     let grid = metadata.grid();
     let bytes = crate::models::primary_weight("iqfm").map_err(PipelineError::InvalidConfig)?;
+    let tile = tile.map(|(core, halo)| crate::inversion::TileConfig { core, halo });
     crate::inversion::iqfm_multi_echo(
         phases, magnitudes, mask, &grid, &metadata.echo_times,
-        metadata.field_strength, IQSM_PHASE_SIGN, IQSM_ERODED_RAD, &bytes,
+        metadata.field_strength, IQSM_PHASE_SIGN, IQSM_ERODED_RAD, &bytes, tile.as_ref(),
     ).map_err(|e| PipelineError::AlgorithmError(e.to_string()))
 }
 
 #[cfg(not(feature = "onnx"))]
 pub fn run_iqfm(
     _phases: &[&[f64]], _magnitudes: &[&[f64]], _mask: &[u8], _metadata: &ScanMetadata,
+    _tile: Option<(usize, usize)>,
 ) -> Result<Vec<f64>, PipelineError> {
     Err(PipelineError::InvalidConfig("iQFM requires building qsm-core with the 'onnx' feature".into()))
 }

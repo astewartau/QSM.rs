@@ -695,28 +695,33 @@ fn dl_seg_synthseg_beyond_the_heap_in_windows() {
     assert!(out.labels.iter().any(|&l| l != 0), "found no brain");
 }
 
-/// BFRnet through `run_bg_removal`, on the phantom's total field (padded to multiples of 8).
+/// BFRnet through `run_bg_removal`, on the phantom's total field (padded to multiples of 8),
+/// whole and in 16³ tiles (`BgRemovalConfig::tile`), the path a browser host takes.
 #[cfg(feature = "onnx")]
 #[test]
 fn dl_bfr_bfrnet() {
     let p = Phantom::new();
     let m = meta();
-    let config = BgRemovalConfig { algorithm: BgRemovalAlgorithm::Bfrnet, ..Default::default() };
-    let r = on_provided_weights("bfrnet", || run_bg_removal(&p.total_ppm, &p.mask, &m, &config, &mut no_progress()));
-    if let Some(r) = r {
-        check("bfrnet", &r.local_field_ppm);
+    for tile in [None, Some((8, 4))] {
+        let config = BgRemovalConfig { algorithm: BgRemovalAlgorithm::Bfrnet, tile, ..Default::default() };
+        let r = on_provided_weights("bfrnet", || run_bg_removal(&p.total_ppm, &p.mask, &m, &config, &mut no_progress()));
+        if let Some(r) = r {
+            check("bfrnet", &r.local_field_ppm);
+        }
     }
 }
 
-/// iQFM (wrapped phase → local field) through `run_iqfm`, on one echo.
+/// iQFM (wrapped phase → local field) through `run_iqfm`, on one echo, whole and in 16³ tiles.
 #[cfg(feature = "onnx")]
 #[test]
 fn dl_bfr_iqfm() {
     let p = Phantom::new();
     let m = meta_one_echo();
     let (phases, mags) = (p.phase_refs(), p.mag_refs());
-    if let Some(local) = on_provided_weights("iqfm", || run_iqfm(&phases[..1], &mags[..1], &p.mask, &m)) {
-        check("iqfm", &local);
+    for tile in [None, Some((8, 4))] {
+        if let Some(local) = on_provided_weights("iqfm", || run_iqfm(&phases[..1], &mags[..1], &p.mask, &m, tile)) {
+            check("iqfm", &local);
+        }
     }
 }
 
@@ -783,30 +788,36 @@ fn dl_inv_nextqsm() {
     dl_inversion(InversionAlgorithm::Nextqsm, None);
 }
 
-/// iQSM (wrapped phase → χ) through `run_iqsm`, on one echo.
+/// iQSM (wrapped phase → χ) through `run_iqsm`, on one echo, whole and in 16³ tiles.
 #[cfg(feature = "onnx")]
 #[test]
 fn dl_inv_iqsm() {
     let p = Phantom::new();
     let m = meta_one_echo();
     let (phases, mags) = (p.phase_refs(), p.mag_refs());
-    let chi = on_provided_weights("iqsm", || run_iqsm(&phases[..1], &mags[..1], &p.mask, &m, QsmReference::None));
-    if let Some(chi) = chi {
-        check("iqsm", &chi);
+    for tile in [None, Some((8, 4))] {
+        let chi =
+            on_provided_weights("iqsm", || run_iqsm(&phases[..1], &mags[..1], &p.mask, &m, QsmReference::None, tile));
+        if let Some(chi) = chi {
+            check("iqsm", &chi);
+        }
     }
 }
 
-/// iQSM+ through `run_iqsm_plus`, on one echo.
+/// iQSM+ through `run_iqsm_plus`, on one echo, whole and in 16³ tiles.
 #[cfg(feature = "onnx")]
 #[test]
 fn dl_inv_iqsm_plus() {
     let p = Phantom::new();
     let m = meta_one_echo();
     let (phases, mags) = (p.phase_refs(), p.mag_refs());
-    let chi =
-        on_provided_weights("iqsm-plus", || run_iqsm_plus(&phases[..1], &mags[..1], &p.mask, &m, QsmReference::None));
-    if let Some(chi) = chi {
-        check("iqsm-plus", &chi);
+    for tile in [None, Some((8, 4))] {
+        let chi = on_provided_weights("iqsm-plus", || {
+            run_iqsm_plus(&phases[..1], &mags[..1], &p.mask, &m, QsmReference::None, tile)
+        });
+        if let Some(chi) = chi {
+            check("iqsm-plus", &chi);
+        }
     }
 }
 
@@ -1041,6 +1052,31 @@ mod browser_memory {
         measure(id, &label, || run_dipole_inversion(&field, &mask, &s.m, &config, None, &mut |_, _| {}));
     }
 
+    fn tile_label(tile: Option<(usize, usize)>) -> String {
+        tile.map_or("whole volume".to_string(), |(c, h)| format!("tile ({c}, {h})"))
+    }
+
+    fn bfrnet(tile: Option<(usize, usize)>) {
+        let s = Scan::new();
+        let (total, mask) = (s.total(), s.mask());
+        let config = BgRemovalConfig { algorithm: BgRemovalAlgorithm::Bfrnet, tile, ..Default::default() };
+        measure("bfrnet", &tile_label(tile), || run_bg_removal(&total, &mask, &s.m, &config, &mut |_, _| {}));
+    }
+
+    /// The wrapped-phase networks, on all five echoes.
+    fn phase_net(id: &str, tile: Option<(usize, usize)>) {
+        let s = Scan::new();
+        let (ph, mg, mask) = (s.phases(), s.magnitudes(), s.mask());
+        let ph: Vec<&[f64]> = ph.iter().map(Vec::as_slice).collect();
+        let mg: Vec<&[f64]> = mg.iter().map(Vec::as_slice).collect();
+        let label = format!("5 echoes, {}", tile_label(tile));
+        measure(id, &label, || match id {
+            "iqfm" => run_iqfm(&ph, &mg, &mask, &s.m, tile),
+            "iqsm" => run_iqsm(&ph, &mg, &mask, &s.m, QsmReference::None, tile),
+            _ => run_iqsm_plus(&ph, &mg, &mask, &s.m, QsmReference::None, tile),
+        });
+    }
+
     fn synthseg(config: &str, params: qsm_core::segment::SynthSegParams) {
         let s = Scan::new();
         let mag = s.magnitudes().swap_remove(0);
@@ -1098,30 +1134,14 @@ mod browser_memory {
         mindgrab => mask_op("mindgrab", "default", MaskOp::MindGrab(Default::default()), &Scan::new());
         synthseg_whole_volume => synthseg("whole volume", qsm_core::segment::SynthSegParams::default());
         synthseg_low_memory => synthseg("low_memory 96³", qsm_core::segment::SynthSegParams::low_memory());
-        bfrnet => {
-            let s = Scan::new();
-            let (total, mask) = (s.total(), s.mask());
-            let config = BgRemovalConfig { algorithm: BgRemovalAlgorithm::Bfrnet, ..Default::default() };
-            measure("bfrnet", "whole volume", || run_bg_removal(&total, &mask, &s.m, &config, &mut |_, _| {}));
-        };
-        iqfm => {
-            let s = Scan::new();
-            let (ph, mg, mask) = (s.phases(), s.magnitudes(), s.mask());
-            let (ph, mg): (Vec<&[f64]>, Vec<&[f64]>) = (ph.iter().map(Vec::as_slice).collect(), mg.iter().map(Vec::as_slice).collect());
-            measure("iqfm", "5 echoes", || run_iqfm(&ph, &mg, &mask, &s.m));
-        };
-        iqsm => {
-            let s = Scan::new();
-            let (ph, mg, mask) = (s.phases(), s.magnitudes(), s.mask());
-            let (ph, mg): (Vec<&[f64]>, Vec<&[f64]>) = (ph.iter().map(Vec::as_slice).collect(), mg.iter().map(Vec::as_slice).collect());
-            measure("iqsm", "5 echoes", || run_iqsm(&ph, &mg, &mask, &s.m, QsmReference::None));
-        };
-        iqsm_plus => {
-            let s = Scan::new();
-            let (ph, mg, mask) = (s.phases(), s.magnitudes(), s.mask());
-            let (ph, mg): (Vec<&[f64]>, Vec<&[f64]>) = (ph.iter().map(Vec::as_slice).collect(), mg.iter().map(Vec::as_slice).collect());
-            measure("iqsm-plus", "5 echoes", || run_iqsm_plus(&ph, &mg, &mask, &s.m, QsmReference::None));
-        };
+        bfrnet_whole_volume => bfrnet(None);
+        bfrnet_tiled => bfrnet(BROWSER_TILE);
+        iqfm_whole_volume => phase_net("iqfm", None);
+        iqfm_tiled => phase_net("iqfm", BROWSER_TILE);
+        iqsm_whole_volume => phase_net("iqsm", None);
+        iqsm_tiled => phase_net("iqsm", BROWSER_TILE);
+        iqsm_plus_whole_volume => phase_net("iqsm-plus", None);
+        iqsm_plus_tiled => phase_net("iqsm-plus", BROWSER_TILE);
         xqsm_whole_volume => inversion(InversionAlgorithm::Xqsm, None);
         xqsm_tiled => inversion(InversionAlgorithm::Xqsm, BROWSER_TILE);
         qsmnet_whole_volume => inversion(InversionAlgorithm::Qsmnet, None);

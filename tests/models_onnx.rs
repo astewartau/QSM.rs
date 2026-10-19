@@ -1248,3 +1248,120 @@ fn susep_net_matches_ref_and_tiles_closely() {
     println!("SUSEP-Net tiled vs whole-volume: χ+ corr={tcp:.4} NRMSE={tnp:.2}% | χ− corr={tcn:.4} NRMSE={tnn:.2}%");
     assert!(tcp > 0.95 && tcn > 0.95, "tiled correlation regressed: χ+={tcp} χ−={tcn}");
 }
+
+/// Tiled vs whole-volume BFRnet, iQFM, iQSM and iQSM+ on an in-vivo scan, through the pipeline
+/// dispatchers, at the tile a browser host runs (`(56, 4)`, 64³ patches) and at the native
+/// default (`(128, 8)`), or at the tiles in `QSM_TILES` (`core,halo;core,halo…`). Tiling these
+/// networks is an approximation; this pins how much of one. On the 184×256×128 example scan the
+/// worst correlation with the whole volume was 0.91 (iQSM, `(48, 8)`).
+///
+/// `QSM_EXAMPLE_DIR` holds `phase.nii.gz` / `magnitude.nii.gz` (4D, multi-echo), `mask.nii.gz`
+/// and `params.json` (`TE` in s, `B0` in T), as in the example scan QSMxT ships; `QSM_WEIGHTS_DIR`
+/// the weights (`scripts/fetch_model_weights.py`).
+///
+/// ```bash
+/// QSM_EXAMPLE_DIR=… QSM_WEIGHTS_DIR=… cargo test --release --features "parallel onnx" \
+///   --test models_onnx tiled_phase_nets_and_bfrnet -- --ignored --nocapture
+/// ```
+#[test]
+#[ignore]
+fn tiled_phase_nets_and_bfrnet_track_whole_volume() {
+    use qsm_core::io::{load_nifti_4d, read_nifti_file};
+    use qsm_core::pipeline::*;
+    use std::path::Path;
+
+    let dir = std::env::var("QSM_EXAMPLE_DIR").expect("QSM_EXAMPLE_DIR");
+    let weights = std::env::var("QSM_WEIGHTS_DIR").expect("QSM_WEIGHTS_DIR");
+    for id in ["bfrnet", "iqfm", "iqsm", "iqsm-plus"] {
+        for f in qsm_core::models::find_model(id).unwrap().files {
+            let bytes = std::fs::read(format!("{weights}/{}", f.name)).expect("weights");
+            qsm_core::models::provide_weights(f.name, bytes).unwrap();
+        }
+    }
+    let read4 = |name: &str| load_nifti_4d(&std::fs::read(format!("{dir}/{name}")).expect(name)).expect(name);
+    let (phase, (nx, ny, nz, ne), voxel, _) = read4("phase.nii.gz");
+    let (mag, ..) = read4("magnitude.nii.gz");
+    let mask: Vec<u8> =
+        read_nifti_file(Path::new(&format!("{dir}/mask.nii.gz"))).expect("mask").data.iter().map(|&v| (v > 0.5) as u8).collect();
+    let params: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(format!("{dir}/params.json")).expect("params")).unwrap();
+    let tes: Vec<f64> = params["TE"].as_array().unwrap().iter().map(|v| v.as_f64().unwrap()).collect();
+    let b0 = params["B0"].as_f64().unwrap();
+    assert_eq!(tes.len(), ne);
+    let n = nx * ny * nz;
+    let echo = |v: &[f64], e: usize| v[e * n..(e + 1) * n].to_vec();
+    let mut phases: Vec<Vec<f64>> = (0..ne).map(|e| echo(&phase, e)).collect();
+    for p in &mut phases {
+        if p.iter().any(|v| v.abs() > 3.2) {
+            scale_phase_to_pi(p);
+        }
+    }
+    let mags: Vec<Vec<f64>> = (0..ne).map(|e| echo(&mag, e)).collect();
+    let meta = ScanMetadata {
+        dims: (nx, ny, nz),
+        voxel_size: voxel,
+        echo_times: tes.clone(),
+        field_strength: b0,
+        b0_direction: (0.0, 0.0, 1.0),
+        slice_geometry: None,
+        affine: None,
+    };
+
+    let stats = |a: &[f64], b: &[f64], m: &[u8]| -> (f64, f64) {
+        let (mut sx, mut sy, mut sxx, mut syy, mut sxy, mut k) = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0f64);
+        let (mut num, mut den) = (0.0f64, 0.0f64);
+        for i in 0..a.len() {
+            if m[i] != 0 {
+                sx += a[i]; sy += b[i]; sxx += a[i] * a[i]; syy += b[i] * b[i]; sxy += a[i] * b[i];
+                k += 1.0;
+                num += (a[i] - b[i]).powi(2); den += a[i] * a[i];
+            }
+        }
+        let corr = (sxy - sx * sy / k) / ((sxx - sx * sx / k).sqrt() * (syy - sy * sy / k).sqrt());
+        (corr, 100.0 * (num / den).sqrt())
+    };
+    let tiles: Vec<(usize, usize)> = std::env::var("QSM_TILES").ok().map(|s| s.split(';').map(|t| { let (c, h) = t.split_once(',').unwrap(); (c.parse().unwrap(), h.parse().unwrap()) }).collect()).unwrap_or(vec![(56, 4), (128, 8)]);
+    let mut worst = f64::INFINITY;
+    let mut report = |what: &str, whole: &[f64], run: &dyn Fn(Option<(usize, usize)>) -> Vec<f64>, m: &[u8]| {
+        for &tile in &tiles {
+            let t = std::time::Instant::now();
+            let tiled = run(Some(tile));
+            let (corr, nrmse) = stats(whole, &tiled, m);
+            println!("{what} tile {tile:?}: corr {corr:.4}, NRMSE {nrmse:.1}% ({:.0} s)", t.elapsed().as_secs_f64());
+            worst = worst.min(corr);
+        }
+    };
+
+    // One echo for the phase networks: the tiling error is per echo.
+    let e = 1;
+    let m1 = ScanMetadata { echo_times: vec![tes[e]], ..meta.clone() };
+    let (ph1, mg1): (Vec<&[f64]>, Vec<&[f64]>) = (vec![&phases[e]], vec![&mags[e]]);
+    let iqfm = |tile| run_iqfm(&ph1, &mg1, &mask, &m1, tile).expect("iqfm");
+    let iqsm = |tile| run_iqsm(&ph1, &mg1, &mask, &m1, QsmReference::None, tile).expect("iqsm");
+    let iqsm_plus = |tile| run_iqsm_plus(&ph1, &mg1, &mask, &m1, QsmReference::None, tile).expect("iqsm+");
+    // The networks erode the mask by 3 voxels; compare where they wrote.
+    let compare_mask = |v: &[f64]| -> Vec<u8> { v.iter().map(|&x| (x != 0.0) as u8).collect() };
+    for (what, run) in [
+        ("iQFM", &iqfm as &dyn Fn(Option<(usize, usize)>) -> Vec<f64>),
+        ("iQSM", &iqsm),
+        ("iQSM+", &iqsm_plus),
+    ] {
+        let whole = run(None);
+        let m = compare_mask(&whole);
+        report(what, &whole, run, &m);
+    }
+
+    // BFRnet on the total field from the default field mapping.
+    let prefs: Vec<&[f64]> = phases.iter().map(Vec::as_slice).collect();
+    let mrefs: Vec<&[f64]> = mags.iter().map(Vec::as_slice).collect();
+    let field = run_field_mapping(&prefs, Some(&mrefs), &mask, &meta, &FieldMappingConfig::default(), &mut |_, _| {})
+        .expect("field mapping")
+        .b0_field_ppm;
+    let bfrnet = |tile| {
+        let config = BgRemovalConfig { algorithm: BgRemovalAlgorithm::Bfrnet, tile, ..Default::default() };
+        run_bg_removal(&field, &mask, &meta, &config, &mut |_, _| {}).expect("bfrnet").local_field_ppm
+    };
+    let whole = bfrnet(None);
+    report("BFRnet", &whole, &bfrnet, &mask);
+    assert!(worst > 0.85, "a tiled run no longer tracks the whole volume (worst corr {worst})");
+}
