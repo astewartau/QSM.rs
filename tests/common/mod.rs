@@ -1040,6 +1040,56 @@ pub fn chisep_score(
     println!("RESULT:{},{:.4},{:.4},{:.1},{:.2}", label, corr, xs, nr, time_s);
 }
 
+/// Highest correlation between χ+ and |χ−| that a working separation may show on the chisep
+/// phantom. The ground truth sits at -0.63 (iron-rich and myelin-rich tissue rarely coincide).
+/// A separation that hands back the same map twice, a component swap, or one driven by R2' alone
+/// (both sources = R2'/2Dr) sits near +1: `chi_sep_medi` scored 0.99 before its R2' weighting
+/// was fixed, with χ+ and |χ−| each correlating 0.99 with R2'.
+pub const CHISEP_SAME_SHAPE_CEILING: f64 = 0.5;
+
+/// Assert a χ-separation produced two distinct, correctly assigned sources.
+///
+/// * χ+ and |χ−| are not the same buffer (or bit-identical) and are not near-identical in shape
+///   ([`CHISEP_SAME_SHAPE_CEILING`]);
+/// * each correlates with its *own* ground truth above its floor, and better with its own truth
+///   than with the other source's (which catches a χ+/χ− swap).
+///
+/// `dia_mag` is |χ−| (the ground truth stores it as a positive magnitude).
+#[allow(clippy::too_many_arguments)]
+pub fn assert_chisep_separated(
+    name: &str,
+    chi_pos: &[f64],
+    dia_mag: &[f64],
+    gt_para: &[f64],
+    gt_dia: &[f64],
+    mask: &[u8],
+    para_floor: f64,
+    dia_floor: f64,
+) {
+    assert!(
+        chi_pos.iter().zip(dia_mag).any(|(a, b)| a != b),
+        "{name}: χ+ and |χ−| are identical"
+    );
+    let same = correlation(chi_pos, dia_mag, mask);
+    let para = correlation(chi_pos, gt_para, mask);
+    let dia = correlation(dia_mag, gt_dia, mask);
+    let para_vs_dia = correlation(chi_pos, gt_dia, mask);
+    let dia_vs_para = correlation(dia_mag, gt_para, mask);
+    println!(
+        "[CHECK] {name}: corr(χ+,|χ−|) {same:.3}  χ+ vs own/other truth {para:.3}/{para_vs_dia:.3}  \
+         |χ−| vs own/other truth {dia:.3}/{dia_vs_para:.3}"
+    );
+    assert!(
+        same < CHISEP_SAME_SHAPE_CEILING,
+        "{name}: χ+ and |χ−| correlate at {same:.3} (ceiling {CHISEP_SAME_SHAPE_CEILING}; truth \
+         -0.63) — the two sources are the same map"
+    );
+    assert!(para > para_floor, "{name}: χ+ corr {para:.3} with its ground truth <= {para_floor}");
+    assert!(dia > dia_floor, "{name}: |χ−| corr {dia:.3} with its ground truth <= {dia_floor}");
+    assert!(para > para_vs_dia, "{name}: χ+ matches the χ− truth ({para_vs_dia:.3}) better than its own ({para:.3})");
+    assert!(dia > dia_vs_para, "{name}: |χ−| matches the χ+ truth ({dia_vs_para:.3}) better than its own ({dia:.3})");
+}
+
 /// Report that a test is giving up for want of data — and refuse to give up quietly where the
 /// data is supposed to be there.
 ///

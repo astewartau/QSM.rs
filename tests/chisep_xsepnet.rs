@@ -14,7 +14,10 @@
 
 mod common;
 
-use common::{chisep_score, correlation, load_chisep_phantom, save_center_slices, ChiSepPhantom};
+use common::{
+    assert_chisep_separated, chisep_score, correlation, load_chisep_phantom, save_center_slices,
+    ChiSepPhantom,
+};
 use qsm_core::pipeline::{
     run_separation, ScanMetadata, SeparationAlgorithm, SeparationConfig, SeparationInputs,
 };
@@ -60,6 +63,7 @@ fn test_chisep_xsepnet() {
 
     assert!(chi_pos.iter().all(|v| v.is_finite()), "chisepnet produced non-finite χ+");
     assert!(dia_mag.iter().all(|v| v.is_finite()), "chisepnet produced non-finite χ−");
+    assert_chisep_separated("chisepnet", &chi_pos, &dia_mag, &ph.gt_para, &ph.gt_dia, &ph.mask, 0.5, 0.5);
 }
 
 /// The centred `dims` box of the phantom's maps (the magnitudes, which these tests do not read,
