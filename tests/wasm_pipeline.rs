@@ -13,9 +13,11 @@
 //! `Cargo.lock`) set as the target's runner (`CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER`).
 //!
 //! Deep-learning variants are skipped (see [`needs_weights`]): they need model weights, which a
-//! WASM host hands over in memory. [`xqsm_on_provided_weights`] is the case that does so: it
-//! reads the file named by `$XQSM_ONNX` (at compile time) through Node's `fs`, passes the bytes to
-//! `models::provide_weights` and runs the inversion. To add another, do the same.
+//! WASM host hands over in memory. [`xqsm_on_provided_weights`] and the SynthSeg cases
+//! ([`synthseg_on_provided_weights`], [`synthseg_beyond_the_heap_in_windows`]) do so: each reads
+//! the file named by an environment variable at compile time (`$XQSM_ONNX`, `$SYNTHSEG_ONNX`)
+//! through Node's `fs`, passes the bytes to `models::provide_weights` and runs the model. To add
+//! another, do the same.
 
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen_test::wasm_bindgen_test as test;
@@ -392,14 +394,14 @@ fn referencing_and_two_pass() {
     check("combine_two_pass", &combine_two_pass(&p.chi, &filled, &reliable).unwrap());
 }
 
-/// The bytes of the file `$XQSM_ONNX` named when this test was compiled, or `None` (with a note)
-/// when it was unset. CI downloads the file and sets it (see the `wasm` job), so there an unset
-/// variable is a failure, not a skip.
+/// The bytes of the weights file `path` (an environment variable `var`, read when this test was
+/// compiled), or `None` (with a note) when it was unset. CI downloads the file and sets it (see
+/// the `wasm` job), so there an unset variable is a failure, not a skip.
 #[cfg(feature = "onnx")]
-fn xqsm_bytes() -> Option<Vec<u8>> {
-    let Some(path) = option_env!("XQSM_ONNX") else {
-        assert!(option_env!("CI").is_none(), "$XQSM_ONNX must be set in CI");
-        println!("skipping the xQSM case: $XQSM_ONNX was not set at compile time");
+fn weights_bytes(var: &str, path: Option<&'static str>) -> Option<Vec<u8>> {
+    let Some(path) = path else {
+        assert!(option_env!("CI").is_none(), "${var} must be set in CI");
+        println!("skipping: ${var} was not set at compile time");
         return None;
     };
     #[cfg(target_arch = "wasm32")]
@@ -422,7 +424,7 @@ fn xqsm_bytes() -> Option<Vec<u8>> {
 fn xqsm_on_provided_weights() {
     use qsm_core::models;
     const FILE: &str = "xqsm.onnx";
-    let Some(bytes) = xqsm_bytes() else { return };
+    let Some(bytes) = weights_bytes("XQSM_ONNX", option_env!("XQSM_ONNX")) else { return };
     let p = Phantom::new();
     let m = meta();
     let config = InversionConfig {
@@ -450,4 +452,92 @@ fn xqsm_on_provided_weights() {
     let chi = run_dipole_inversion(&p.local_ppm, &p.mask, &m, &config, None, &mut no_progress());
     models::forget_weights(FILE);
     check("Xqsm", &chi.unwrap_or_else(|e| panic!("Xqsm: {e}")));
+}
+
+/// SynthSeg's weights, as the engine hands them to `segment::synthseg`: provided in memory under
+/// the registry's file name and read back through the registry, as a browser host does.
+#[cfg(feature = "onnx")]
+fn synthseg_weights() -> Option<qsm_core::models::WeightBytes> {
+    use qsm_core::models;
+    const FILE: &str = "synthseg.onnx";
+    let bytes = weights_bytes("SYNTHSEG_ONNX", option_env!("SYNTHSEG_ONNX"))?;
+    models::provide_weights(FILE, bytes).unwrap();
+    let weights = models::primary_weight("synthseg").unwrap_or_else(|e| panic!("synthseg weights: {e}"));
+    models::forget_weights(FILE);
+    Some(weights)
+}
+
+/// SynthSeg's quickest settings: one pass, no clean-up. What is under test is that the network
+/// runs on this target, not how well it segments.
+#[cfg(feature = "onnx")]
+fn synthseg_quick(inference: qsm_core::segment::SynthSegInference) -> qsm_core::segment::SynthSegParams {
+    qsm_core::segment::SynthSegParams {
+        inference,
+        sigma_smoothing: 0.0,
+        ..qsm_core::segment::SynthSegParams::fast()
+    }
+}
+
+/// A 1 mm identity-affine grid of `dims`, with a bright ellipsoid "head" in it.
+#[cfg(feature = "onnx")]
+fn synthseg_input(dims: (usize, usize, usize)) -> (Vec<f64>, qsm_core::Grid, [f64; 16]) {
+    let (nx, ny, nz) = dims;
+    let mut mag = vec![0.0; nx * ny * nz];
+    for k in 0..nz {
+        for j in 0..ny {
+            for i in 0..nx {
+                let r = |x: usize, n: usize| (x as f64 + 0.5) / n as f64 - 0.5;
+                let d = (r(i, nx) / 0.4).powi(2) + (r(j, ny) / 0.4).powi(2) + (r(k, nz) / 0.4).powi(2);
+                mag[i + nx * (j + ny * k)] = if d < 1.0 { 100.0 + 20.0 * d } else { 0.0 };
+            }
+        }
+    }
+    let grid = qsm_core::Grid::new(nx, ny, nz, 1.0, 1.0, 1.0);
+    let mut affine = [0.0; 16];
+    for a in [0, 5, 10, 15] {
+        affine[a] = 1.0;
+    }
+    (mag, grid, affine)
+}
+
+/// SynthSeg on the smallest network input it takes: the 16³ phantom's magnitude, which it pads
+/// to 128³ (SynthSeg's minimum, `MIN_PAD`), so this costs one 128³ pass whatever the phantom's
+/// size. That fits a 32-bit heap whole.
+#[cfg(feature = "onnx")]
+#[test]
+fn synthseg_on_provided_weights() {
+    use qsm_core::segment::{synthseg, SynthSegInference};
+    let Some(weights) = synthseg_weights() else { return };
+    let p = Phantom::new();
+    let grid = qsm_core::Grid::new(N, N, N, 1.0, 1.0, 1.0);
+    let (_, _, affine) = synthseg_input((1, 1, 1));
+    let params = synthseg_quick(SynthSegInference::FullVolume);
+    let out = synthseg(&p.magnitudes[0], &grid, &affine, &weights, &params, no_progress())
+        .unwrap_or_else(|e| panic!("synthseg: {e}"));
+    assert_eq!(out.labels.len(), NV);
+    assert_eq!(out.volumes.len(), params.version.n_labels());
+    assert!(out.volumes.iter().all(|v| v.is_finite()));
+}
+
+/// SynthSeg on a volume whose whole-volume pass needs more than a 32-bit heap: 128×128×256 at
+/// 1 mm (no resampling, no extra padding) takes about 4.5 GB in one pass, and the wasm build
+/// aborts ("memory allocation failed", seen as `RuntimeError: unreachable`). In windows the
+/// network sees a patch at a time. A step of a whole patch keeps it to two 128³ windows, as much
+/// network as the volume itself.
+#[cfg(feature = "onnx")]
+#[test]
+fn synthseg_beyond_the_heap_in_windows() {
+    use qsm_core::segment::{synthseg, SynthSegInference};
+    let Some(weights) = synthseg_weights() else { return };
+    let (mag, grid, affine) = synthseg_input((128, 128, 256));
+    let params = synthseg_quick(SynthSegInference::SlidingWindow { patch: 128, tile_step: 1.0 });
+    let mut passes = 0;
+    let out = synthseg(&mag, &grid, &affine, &weights, &params, |done, total| {
+        passes = total;
+        assert!(done <= total);
+    })
+    .unwrap_or_else(|e| panic!("synthseg: {e}"));
+    assert_eq!(passes, 2, "two windows");
+    assert_eq!(out.labels.len(), mag.len());
+    assert!(out.labels.iter().any(|&l| l != 0), "found no brain");
 }

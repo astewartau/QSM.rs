@@ -307,7 +307,7 @@ pub(super) fn full_volume_patch(dims: [usize; 3]) -> [usize; 3] {
 }
 
 /// nnU-Net `compute_steps_for_sliding_window` for one axis.
-pub(super) fn window_steps(size: usize, tile: usize, step: f64) -> Vec<usize> {
+pub(crate) fn window_steps(size: usize, tile: usize, step: f64) -> Vec<usize> {
     let n = ((size - tile) as f64 / (tile as f64 * step)).ceil() as usize + 1;
     if n == 1 {
         return vec![0];
@@ -318,7 +318,7 @@ pub(super) fn window_steps(size: usize, tile: usize, step: f64) -> Vec<usize> {
 
 /// nnU-Net `compute_gaussian(tile, sigma_scale=1/8, value_scaling_factor=10)`: a Gaussian
 /// centred on the patch (σ = tile/8 per axis), peak 10.
-pub(super) fn gaussian_importance(tile: [usize; 3]) -> Vec<f32> {
+pub(crate) fn gaussian_importance(tile: [usize; 3]) -> Vec<f32> {
     let w: [Vec<f64>; 3] = std::array::from_fn(|a| {
         let (c, s) = ((tile[a] / 2) as f64, tile[a] as f64 / 8.0);
         (0..tile[a]).map(|i| (-0.5 * ((i as f64 - c) / s).powi(2)).exp()).collect()
