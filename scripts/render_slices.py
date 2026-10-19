@@ -44,6 +44,7 @@ NAMES = {
     "oblique_sagittal_truth": "Sagittal 1x1x4 mm oblique - ground truth",
     "oblique_sagittal_chi": "Sagittal 1x1x4 mm oblique - reconstructed (TKD)",
     "inversion_tsvd": "TSVD",
+    "inversion_tkd_cropped": "TKD (cropped)",
     "inversion_tikhonov": "Tikhonov",
     "inversion_tv": "TV-ADMM",
     "inversion_rts": "RTS",
@@ -131,6 +132,26 @@ NAMES = {
     "dl_hdbet": "HD-BET",
     "chisep_xsepnet_para": "xSepNet χ+",
     "chisep_xsepnet_dia": "xSepNet χ− (magnitude)",
+    "chisep_medi_para": "chi_sep_medi χ+",
+    "chisep_medi_dia": "chi_sep_medi χ− (magnitude)",
+    "bgremove_msmv": "V-SHARP + mSMV",
+    "dl_bfrnet": "BFRnet",
+    "dl_xqsm": "xQSM",
+    "dl_qsmnet": "QSMnet",
+    "dl_qsmnet_plus": "QSMnet+",
+    "dl_autoqsm": "AutoQSM",
+    "dl_iqsm": "iQSM",
+    "dl_iqsm_plus": "iQSM+",
+    "pipeline_rts_single_pass": "RTS single pass",
+    "pipeline_two_pass": "RTS two-pass",
+    "dl_mindgrab": "MindGrab",
+    "dl_rs2net": "RS2-Net (scaled phantom)",
+    "mask_phase_otsu": "Phase quality + Otsu",
+    "mask_magnitude_otsu": "Magnitude + Otsu",
+    "mask_magnitude_percentile": "Magnitude percentile",
+    "mask_bet_signal_erode": "BET + signal erosion",
+    "dl_synthseg": "SynthSeg (whole volume)",
+    "dl_synthseg_window": "SynthSeg (sliding window)",
 }
 
 # Panel labels inside a stage montage. The montage already says which stage and, for
@@ -148,6 +169,7 @@ DIFF_LABELS = {
 MONTAGE_LABELS = {
     "chisep_para": "chi-sep iLSQR", "chisep_dia": "chi-sep iLSQR",
     "chisep_xsepnet_para": "xSepNet", "chisep_xsepnet_dia": "xSepNet",
+    "chisep_medi_para": "chi-sep MEDI", "chisep_medi_dia": "chi-sep MEDI",
     "relaxchisep_r2starqsm_para": "R2*-QSM", "relaxchisep_r2starqsm_dia": "R2*-QSM",
     "relaxchisep_wavesep_para": "WaveSep", "relaxchisep_wavesep_dia": "WaveSep",
     "relaxchisep_decompose_para": "DECOMPOSE", "relaxchisep_decompose_dia": "DECOMPOSE",
@@ -214,8 +236,11 @@ WINDOWS = {
     "bgremove_pdf": (-0.025, 0.025),
     "bgremove_ismv": (-0.025, 0.025),
     "bgremove_lbv": (-0.025, 0.025),
+    "bgremove_msmv": (-0.025, 0.025),
+    "dl_bfrnet": (-0.025, 0.025),
     "inversion_tkd": (-0.1, 0.1),
     "inversion_tsvd": (-0.1, 0.1),
+    "inversion_tkd_cropped": (-0.1, 0.1),
     "inversion_tikhonov": (-0.1, 0.1),
     "inversion_tv": (-0.1, 0.1),
     "inversion_rts": (-0.1, 0.1),
@@ -285,6 +310,8 @@ WINDOWS = {
     "chisep_para": (0, 0.1),
     "chisep_dia_truth": (0, 0.1),
     "chisep_dia": (0, 0.1),
+    "chisep_medi_para": (0, 0.1),
+    "chisep_medi_dia": (0, 0.1),
     # relaxometry-based chi-separation source maps (same ppm window as above)
     "relaxchisep_r2starqsm_para": (0, 0.1),
     "relaxchisep_wavesep_para": (0, 0.1),
@@ -308,7 +335,8 @@ MONTAGES = [
     ("stage_bfr", "Local field", "ppm", (-0.025, 0.025), [
         ["ground_truth_local_field", "bgremove_sharp", "bgremove_resharp", "bgremove_vsharp",
          "bgremove_pdf", "bgremove_ismv"],
-        ["bgremove_lbv", "pipeline_harperella", "pipeline_iharperella", "dl_iqfm"],
+        ["bgremove_lbv", "bgremove_msmv", "pipeline_harperella", "pipeline_iharperella",
+         "dl_iqfm", "dl_bfrnet"],
     ], ["background field removal", "spans / deep learning"]),
     ("stage_dipole", "Susceptibility maps", "ppm", (-0.1, 0.1), [
         ["ground_truth_chi", "inversion_tkd", "inversion_tsvd", "inversion_tikhonov",
@@ -317,18 +345,22 @@ MONTAGES = [
          "inversion_fansi", "inversion_fansi_tgv"],
         ["inversion_l1qsm", "inversion_whqsm", "inversion_hdqsm", "inversion_amp_pe",
          "inversion_lsqr", "inversion_heidi"],
-        ["dl_qsmgan", "dl_lpcnn", "dl_ir2qsm", "dl_modl_qsm", "dl_nextqsm"],
+        ["inversion_tkd_cropped"],
+        ["dl_qsmgan", "dl_lpcnn", "dl_ir2qsm", "dl_modl_qsm", "dl_xqsm", "dl_qsmnet"],
+        ["dl_qsmnet_plus", "dl_nextqsm", "dl_autoqsm", "dl_iqsm", "dl_iqsm_plus"],
         ["inversion_cosmos", "sti_mms"],
         ["combined_tgv", "combined_tfi", "pipeline_tgv", "pipeline_tgv_single_echo", "pipeline_qsmart",
          "pipeline_qsmart_tikhonov"],
-    ], ["dipole inversion", "dipole inversion", "dipole inversion",
-        "deep learning", "multi-orientation (N orientations in)",
-        "spans (BFR+dipole / full pipeline)"]),
+        ["pipeline_rts_single_pass", "pipeline_two_pass"],
+    ], ["dipole inversion", "dipole inversion", "dipole inversion", "dipole inversion",
+        "deep learning", "deep learning (total field / phase in)",
+        "multi-orientation (N orientations in)",
+        "spans (BFR+dipole / full pipeline)", "spans (BFR+dipole / full pipeline)"]),
     ("stage_chisep", "χ-separation", "ppm", (0, 0.1), [
-        ["chisep_para_truth", "chisep_para", "chisep_xsepnet_para",
+        ["chisep_para_truth", "chisep_para", "chisep_medi_para", "chisep_xsepnet_para",
          "relaxchisep_r2starqsm_para", "relaxchisep_wavesep_para",
          "relaxchisep_decompose_para", "relaxchisep_hcchisep_para"],
-        ["chisep_dia_truth", "chisep_dia", "chisep_xsepnet_dia",
+        ["chisep_dia_truth", "chisep_dia", "chisep_medi_dia", "chisep_xsepnet_dia",
          "relaxchisep_r2starqsm_dia", "relaxchisep_wavesep_dia",
          "relaxchisep_decompose_dia", "relaxchisep_hcchisep_dia"],
     ], ["χ+ (para)", "χ− (dia, magnitude)"]),
@@ -492,46 +524,98 @@ def load_axial_with_mask(path):
     return axial, amask > 0
 
 
+# Brain-extraction methods, in panel order: (slug, label, colour). Each test saves its predicted
+# mask as the result volume and the ground-truth mask as the mask slice.
+MASK_METHODS = [
+    ("bet", "BET", "#2fa8ff"),
+    ("dl_hdbet", "HD-BET", "#e4572e"),
+    ("dl_mindgrab", "MindGrab", "#9b5de5"),
+    ("dl_rs2net", "RS2-Net (scaled phantom)", "#f15bb5"),
+    ("mask_phase_otsu", "Phase quality + Otsu", "#00bbf9"),
+    ("mask_magnitude_otsu", "Magnitude + Otsu", "#00f5d4"),
+    ("mask_magnitude_percentile", "Magnitude percentile", "#fee440"),
+    ("mask_bet_signal_erode", "BET + signal erosion", "#fb8500"),
+]
+MASK_MAGNITUDES = ["bet_magnitude", "dl_hdbet_magnitude", "dl_synthseg_magnitude", "mask_magnitude"]
+
+
 def render_bet_overlay(input_dir, output_path):
-    """Brain extraction: every method's mask boundary drawn with the ground truth on the magnitude.
+    """Brain extraction: one panel per method, its mask boundary and the ground truth's on the
+    magnitude.
 
     A bare binary mask says nothing about whether the boundary is in the right place. Drawing
     the predicted and ground-truth outlines together on the magnitude shows exactly where they
-    agree and where they part, which is the only thing worth looking at here.
-
-    `bet.bin` / `dl_hdbet.bin` hold each method's mask (result = predicted, mask slice = ground
-    truth); `bet_magnitude.bin` (or `dl_hdbet_magnitude.bin`) supplies the underlying image.
-    Whichever methods ran are overlaid on one figure.
+    agree and where they part, which is the only thing worth looking at here. One panel per
+    method keeps that readable now that there are more methods than one figure's outlines can
+    carry.
     """
     methods = [(label, input_dir / f"{slug}.bin", color)
-               for slug, label, color in (("bet", "BET", "#2fa8ff"), ("dl_hdbet", "HD-BET", "#e4572e"))
-               if (input_dir / f"{slug}.bin").exists()]
-    mag_file = next((f for f in (input_dir / "bet_magnitude.bin", input_dir / "dl_hdbet_magnitude.bin")
-                     if f.exists()), None)
+               for slug, label, color in MASK_METHODS if (input_dir / f"{slug}.bin").exists()]
+    mag_file = next((input_dir / f"{m}.bin" for m in MASK_MAGNITUDES
+                     if (input_dir / f"{m}.bin").exists()), None)
     if not methods or mag_file is None:
         return False
     magnitude, truth = load_axial_with_mask(mag_file)
-
-    fig, ax = plt.subplots(figsize=(5.2, 5.6))
     finite = magnitude[np.isfinite(magnitude)]
     vmax = float(np.percentile(finite, 99)) if finite.size else 1.0
-    ax.imshow(magnitude, cmap="gray", vmin=0, vmax=vmax, origin="lower")
-    ax.contour(truth.astype(float), levels=[0.5], colors="#ffd400", linewidths=1.6)
-    handles = [Line2D([], [], color="#ffd400", lw=1.8, label="Ground truth")]
-    dices = []
-    for label, path, color in methods:
+
+    ncol = min(len(methods), 4)
+    nrow = math.ceil(len(methods) / ncol)
+    fig, axes = plt.subplots(nrow, ncol, figsize=(3.1 * ncol, 3.3 * nrow + 0.6), squeeze=False)
+    for ax in axes.ravel():
+        ax.axis("off")
+    for k, (label, path, color) in enumerate(methods):
+        ax = axes[k // ncol][k % ncol]
+        ax.imshow(magnitude, cmap="gray", vmin=0, vmax=vmax, origin="lower")
+        ax.contour(truth.astype(float), levels=[0.5], colors="#ffd400", linewidths=1.4)
         predicted = load_axial_with_mask(path)[0] > 0.5
-        ax.contour(predicted.astype(float), levels=[0.5], colors=color, linewidths=1.2)
+        ax.contour(predicted.astype(float), levels=[0.5], colors=color, linewidths=1.1)
         inter = np.logical_and(predicted, truth).sum()
-        dices.append(f"{label} {2.0 * inter / max(predicted.sum() + truth.sum(), 1):.3f}")
-        handles.append(Line2D([], [], color=color, lw=1.4, label=label))
-    ax.axis("off")
-    ax.legend(handles=handles, loc="lower right", fontsize=9, framealpha=0.85)
-    ax.set_title(f"Brain extraction — centre axial slice\n"
-                 f"(this slice: Dice {', '.join(dices)})", fontsize=12, fontweight="bold")
-    fig.savefig(output_path, dpi=120, bbox_inches="tight", facecolor="white")
+        dice = 2.0 * inter / max(predicted.sum() + truth.sum(), 1)
+        ax.set_title(f"{label}\n(this slice: Dice {dice:.3f})", fontsize=9, color=color)
+    handles = [Line2D([], [], color="#ffd400", lw=1.8, label="Ground truth")]
+    fig.legend(handles=handles, loc="lower center", fontsize=9, framealpha=0.85)
+    fig.suptitle("Brain extraction — centre axial slice", fontsize=13, fontweight="bold")
+    fig.savefig(output_path, dpi=110, bbox_inches="tight", facecolor="white")
     plt.close(fig)
-    print(f"  Rendered {output_path} (mask overlay)")
+    print(f"  Rendered {output_path} (mask overlay, {len(methods)} methods)")
+    return True
+
+
+# Whole-brain segmentation: FreeSurfer label ids, shown on one categorical colour map so the same
+# structure has the same colour in every panel.
+SEGMENTATIONS = [("dl_synthseg", "Whole volume"), ("dl_synthseg_window", "Sliding window (96³)")]
+SEG_MAGNITUDES = ["dl_synthseg_magnitude", "bet_magnitude", "dl_hdbet_magnitude", "mask_magnitude"]
+
+
+def render_segmentation(input_dir, output_path):
+    """SynthSeg label maps beside the magnitude they came from, whole volume against the
+    memory-bounded sliding window, so the two can be compared structure for structure."""
+    present = [(slug, label) for slug, label in SEGMENTATIONS if (input_dir / f"{slug}.bin").exists()]
+    if not present:
+        return False
+    mag_file = next((input_dir / f"{m}.bin" for m in SEG_MAGNITUDES
+                     if (input_dir / f"{m}.bin").exists()), None)
+    panels = ([("magnitude", "Magnitude")] if mag_file else []) + present
+    fig, axes = plt.subplots(1, len(panels), figsize=(3.2 * len(panels), 3.6), squeeze=False)
+    cmap = plt.get_cmap("tab20")
+    for ax, (slug, label) in zip(axes[0], panels):
+        ax.axis("off")
+        ax.set_title(label, fontsize=10)
+        if slug == "magnitude":
+            mag = load_axial_with_mask(mag_file)[0]
+            finite = mag[np.isfinite(mag)]
+            ax.imshow(mag, cmap="gray", vmin=0,
+                      vmax=float(np.percentile(finite, 99)) if finite.size else 1.0, origin="lower")
+            continue
+        labels = load_axial_with_mask(input_dir / f"{slug}.bin")[0].round().astype(int)
+        rgb = cmap((labels % 20) / 19.0)
+        rgb[labels == 0] = (0, 0, 0, 1)
+        ax.imshow(rgb, origin="lower", interpolation="nearest")
+    fig.suptitle("SynthSeg — centre axial slice", fontsize=13, fontweight="bold")
+    fig.savefig(output_path, dpi=110, bbox_inches="tight", facecolor="white")
+    plt.close(fig)
+    print(f"  Rendered {output_path} ({len(panels)} panels)")
     return True
 
 
@@ -727,8 +811,10 @@ def main():
     # before/after pairs) still gets its 3-panel axial/coronal/sagittal figure, since
     # there is nothing to compare it against and the extra views carry the information.
     render_bet_overlay(input_dir, output_dir / "bet.png")
+    render_segmentation(input_dir, output_dir / "segmentation.png")
 
-    rendered = set(MONTAGED) | {"bet", "bet_magnitude", "dl_hdbet", "dl_hdbet_magnitude"}
+    rendered = (set(MONTAGED) | {slug for slug, _, _ in MASK_METHODS} | set(MASK_MAGNITUDES)
+                | {slug for slug, _ in SEGMENTATIONS} | set(SEG_MAGNITUDES))
     for slug, before_slug in BEFORE_AFTER.items():
         after_file = input_dir / f"{slug}.bin"
         before_file = input_dir / f"{before_slug}.bin"

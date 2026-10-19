@@ -209,3 +209,275 @@ fn test_dl_hdbet() {
 
     assert!(dice > 0.9, "HD-BET Dice coefficient too low: {dice}");
 }
+
+// ---------------------------------------------------------------------------------------------
+// The rest of the registry. Every model QSM.rs hosts gets a run here, on the same phantom and
+// through the same public function the pipeline dispatches to, so a regression in its pre- or
+// post-processing shows up in the PR comment rather than only in the reference-parity tests
+// (`tests/models_onnx.rs`), which need locally exported Python references and do not run in CI.
+// ---------------------------------------------------------------------------------------------
+
+/// iQSM / iQSM+ / iQFM phase-sign and mask-erosion settings, as `pipeline::inversion` uses them.
+const IQSM_PHASE_SIGN: f64 = -1.0;
+const IQSM_ERODED_RAD: i32 = 3;
+
+/// The phantom's NIfTI affine (row-major 4x4), which MindGrab and SynthSeg orient by.
+fn affine_of() -> [f64; 16] {
+    common::load_nifti_file("bids/sub-1/anat/sub-1_echo-1_part-mag_MEGRE.nii")
+        .expect("phantom magnitude")
+        .affine
+}
+
+/// Root-sum-of-squares magnitude over echoes: the image the brain-extraction tests segment.
+fn rss_magnitude(data: &TestData) -> Vec<f64> {
+    (0..data.mask.len())
+        .map(|i| data.mag_echoes.iter().map(|e| e[i] * e[i]).sum::<f64>().sqrt())
+        .collect()
+}
+
+/// Report a local field against the ground-truth local field (Background Field Removal table).
+fn report_local_field(name: &str, slug: &str, lfs: &[f64], data: &TestData, elapsed: std::time::Duration) {
+    let res = TestResult::new(name, lfs, &data.fieldmap_local, &data.mask, data.dims);
+    res.print_with_time(elapsed);
+    res.print_ci_metrics(elapsed);
+    common::save_center_slices(lfs, &common::valid_support(lfs, &data.mask), data.dims, slug);
+    assert!(lfs.iter().all(|v| v.is_finite()), "{name} produced non-finite values");
+}
+
+/// Report a brain mask against the ground-truth mask (Brain Extraction table), in the
+/// `RESULT:name,dice,-,-,time` layout `test_bet` and `test_dl_hdbet` use.
+fn report_mask(name: &str, slug: &str, mask: &[u8], data: &TestData, elapsed: std::time::Duration) -> f64 {
+    assert_eq!(mask.len(), data.mask.len(), "{name}: one mask value per voxel");
+    let dice = common::dice_coefficient(mask, &data.mask);
+    println!("{name:<15} Dice={dice:.4}      {elapsed:>10.2?}");
+    println!("RESULT:{name},{dice:.6},-,-,{:.2}", elapsed.as_secs_f64());
+    let predicted: Vec<f64> = mask.iter().map(|&v| v as f64).collect();
+    common::save_center_slices(&predicted, &data.mask, data.dims, slug);
+    dice
+}
+
+#[test]
+#[ignore]
+fn test_dl_xqsm() {
+    let data = TestData::load().expect("test data");
+    let grid = grid_of(&data);
+    let w = weights("xqsm");
+    let t = Instant::now();
+    let chi = inversion::xqsm(&data.fieldmap_local, &data.mask, &grid, &w).expect("xqsm");
+    report_chi("xQSM", "dl_xqsm", &chi, &data, t.elapsed());
+}
+
+#[test]
+#[ignore]
+fn test_dl_qsmnet() {
+    let data = TestData::load().expect("test data");
+    let grid = grid_of(&data);
+    let w = weights("qsmnet");
+    let t = Instant::now();
+    let chi = inversion::qsmnet(&data.fieldmap_local, &data.mask, &grid, &w, &inversion::QsmnetNorm::qsmnet())
+        .expect("qsmnet");
+    report_chi("QSMnet", "dl_qsmnet", &chi, &data, t.elapsed());
+}
+
+#[test]
+#[ignore]
+fn test_dl_qsmnet_plus() {
+    let data = TestData::load().expect("test data");
+    let grid = grid_of(&data);
+    let w = weights("qsmnet-plus");
+    let t = Instant::now();
+    let chi = inversion::qsmnet(&data.fieldmap_local, &data.mask, &grid, &w, &inversion::QsmnetNorm::qsmnet_plus())
+        .expect("qsmnet+");
+    report_chi("QSMnet+", "dl_qsmnet_plus", &chi, &data, t.elapsed());
+}
+
+/// AutoQSM takes the TOTAL field: it does its own background removal.
+#[test]
+#[ignore]
+fn test_dl_autoqsm() {
+    let data = TestData::load().expect("test data");
+    let grid = grid_of(&data);
+    let w = weights("autoqsm");
+    let t = Instant::now();
+    let chi = inversion::autoqsm(&data.fieldmap, &data.mask, &grid, &w).expect("autoqsm");
+    report_chi("AutoQSM", "dl_autoqsm", &chi, &data, t.elapsed());
+}
+
+/// iQSM takes wrapped phase: unwrapping, background removal and inversion in one network.
+#[test]
+#[ignore]
+fn test_dl_iqsm() {
+    let data = TestData::load().expect("test data");
+    let grid = grid_of(&data);
+    let w = weights("iqsm");
+    let phases: Vec<&[f64]> = data.phase_echoes.iter().map(|p| p.as_slice()).collect();
+    let mags: Vec<&[f64]> = data.mag_echoes.iter().map(|m| m.as_slice()).collect();
+    let t = Instant::now();
+    let chi = inversion::iqsm_multi_echo(
+        &phases, &mags, &data.mask, &grid, &data.echo_times, data.field_strength,
+        IQSM_PHASE_SIGN, IQSM_ERODED_RAD, &w,
+    )
+    .expect("iqsm");
+    report_chi("iQSM", "dl_iqsm", &chi, &data, t.elapsed());
+}
+
+/// iQSM+ is iQSM with the B0 direction as a network input.
+#[test]
+#[ignore]
+fn test_dl_iqsm_plus() {
+    let data = TestData::load().expect("test data");
+    let grid = grid_of(&data);
+    let w = weights("iqsm-plus");
+    let phases: Vec<&[f64]> = data.phase_echoes.iter().map(|p| p.as_slice()).collect();
+    let mags: Vec<&[f64]> = data.mag_echoes.iter().map(|m| m.as_slice()).collect();
+    let t = Instant::now();
+    let chi = inversion::iqsm_plus_multi_echo(
+        &phases, &mags, &data.mask, &grid, &data.echo_times, data.field_strength, data.b0_dir,
+        IQSM_PHASE_SIGN, IQSM_ERODED_RAD, &w,
+    )
+    .expect("iqsm+");
+    report_chi("iQSM+", "dl_iqsm_plus", &chi, &data, t.elapsed());
+}
+
+/// BFRnet: total field → local field, scored like the classical background-removal methods.
+#[test]
+#[ignore]
+fn test_dl_bfrnet() {
+    let data = TestData::load().expect("test data");
+    let grid = grid_of(&data);
+    let w = weights("bfrnet");
+    let t = Instant::now();
+    let lfs = qsm_core::bgremove::bfrnet(&data.fieldmap, &data.mask, &grid, &w).expect("bfrnet");
+    report_local_field("BFRnet", "dl_bfrnet", &lfs, &data, t.elapsed());
+}
+
+/// MindGrab brain extraction on the RSS magnitude, oriented by the phantom's affine.
+#[test]
+#[ignore]
+fn test_dl_mindgrab() {
+    use qsm_core::bet::{mindgrab, MindGrabParams};
+
+    let data = TestData::load().expect("test data");
+    let grid = grid_of(&data);
+    let w = weights("mindgrab");
+    let rss = rss_magnitude(&data);
+    let affine = affine_of();
+    let t = Instant::now();
+    let mask = mindgrab(&rss, &grid, &affine, &w, &MindGrabParams::default(), |_, _| {}).expect("mindgrab");
+    let dice = report_mask("MindGrab", "dl_mindgrab", &mask, &data, t.elapsed());
+    assert!(dice > 0.85, "MindGrab Dice coefficient too low: {dice}");
+}
+
+/// RS2-Net is a rodent model and this phantom is a human head, so the phantom is handed to it at
+/// a tenth of its voxel size: a 16 x 20 x 20 mm head, the scale of a rat brain, which is what the
+/// network's resampling to 0.25 x 0.2 x 0.16 mm expects. The anatomy is still human, so the Dice
+/// is informational. What is checked is that preprocessing, tiled inference and the resample back
+/// run end to end and return a mask on the input grid that is neither empty nor the whole volume.
+#[test]
+#[ignore]
+fn test_dl_rs2net() {
+    use qsm_core::bet::{rs2_net, Rs2NetParams};
+
+    let data = TestData::load().expect("test data");
+    let (nx, ny, nz) = data.dims;
+    let (vx, vy, vz) = data.voxel_size;
+    let rodent_grid = Grid::new(nx, ny, nz, vx * 0.1, vy * 0.1, vz * 0.1);
+    let w = weights("rs2-net");
+    let t = Instant::now();
+    let mask = rs2_net(&data.mag_echoes[0], &rodent_grid, &w, &Rs2NetParams::default(), |_, _| {})
+        .expect("rs2_net");
+    report_mask("RS2-Net (rodent model, scaled phantom)", "dl_rs2net", &mask, &data, t.elapsed());
+    let inside = mask.iter().filter(|&&m| m > 0).count();
+    assert!(inside > 0, "RS2-Net returned an empty mask");
+    assert!(inside < mask.len(), "RS2-Net masked the whole volume");
+}
+
+/// SynthSeg on the RSS magnitude. Scored as the brain mask the labels imply (every non-background
+/// label) against the ground-truth mask, plus how many of the version's structures it found;
+/// the phantom's own `dseg` uses a different label set, so a per-structure score is not possible.
+fn run_synthseg(
+    data: &TestData,
+    params: &qsm_core::segment::SynthSegParams,
+    model: &str,
+) -> (qsm_core::segment::SynthSegResult, std::time::Duration) {
+    let grid = grid_of(data);
+    let w = weights(model);
+    let rss = rss_magnitude(data);
+    let affine = affine_of();
+    let t = Instant::now();
+    let seg = qsm_core::segment::synthseg(&rss, &grid, &affine, &w, params, |_, _| {}).expect("synthseg");
+    (seg, t.elapsed())
+}
+
+fn report_synthseg(
+    name: &str,
+    slug: &str,
+    seg: &qsm_core::segment::SynthSegResult,
+    params: &qsm_core::segment::SynthSegParams,
+    data: &TestData,
+    elapsed: std::time::Duration,
+) -> f64 {
+    assert_eq!(seg.labels.len(), data.mask.len(), "{name}: one label per voxel");
+    let ids = params.version.labels().ids;
+    assert!(seg.labels.iter().all(|l| ids.contains(l)), "{name}: label outside the version's table");
+    let brain: Vec<u8> = seg.labels.iter().map(|&l| (l != 0) as u8).collect();
+    let dice = common::dice_coefficient(&brain, &data.mask);
+    let found = ids.iter().filter(|&&id| id != 0 && seg.labels.contains(&id)).count();
+    println!("{name:<15} brain Dice={dice:.4}  structures {found}/{}  {elapsed:>10.2?}", ids.len() - 1);
+    println!("RESULT:{name},{dice:.6},{found},{},{:.2}", ids.len() - 1, elapsed.as_secs_f64());
+    let labels: Vec<f64> = seg.labels.iter().map(|&l| l as f64).collect();
+    common::save_center_slices(&labels, &data.mask, data.dims, slug);
+    dice
+}
+
+/// Mean Dice over the structures either segmentation contains (background excluded).
+fn mean_label_dice(a: &[i32], b: &[i32], ids: &[i32]) -> (f64, f64) {
+    let mut dices = Vec::new();
+    for &id in ids.iter().filter(|&&id| id != 0) {
+        let (mut both, mut na, mut nb) = (0usize, 0usize, 0usize);
+        for (&x, &y) in a.iter().zip(b) {
+            let (ia, ib) = (x == id, y == id);
+            both += (ia && ib) as usize;
+            na += ia as usize;
+            nb += ib as usize;
+        }
+        if na + nb > 0 {
+            dices.push(2.0 * both as f64 / (na + nb) as f64);
+        }
+    }
+    let mean = dices.iter().sum::<f64>() / dices.len().max(1) as f64;
+    let min = dices.iter().cloned().fold(1.0, f64::min);
+    (mean, min)
+}
+
+/// SynthSeg 1.0, whole-volume inference (the CLI's default).
+#[test]
+#[ignore]
+fn test_dl_synthseg() {
+    let data = TestData::load().expect("test data");
+    let params = qsm_core::segment::SynthSegParams::default();
+    let (seg, elapsed) = run_synthseg(&data, &params, "synthseg");
+    let dice = report_synthseg("SynthSeg", "dl_synthseg", &seg, &params, &data, elapsed);
+    common::save_center_slices(&rss_magnitude(&data), &data.mask, data.dims, "dl_synthseg_magnitude");
+    assert!(dice > 0.7, "SynthSeg brain Dice too low: {dice}");
+}
+
+/// SynthSeg 1.0 through the memory-bounded sliding window (what the browser runs), against the
+/// ground-truth mask and against the whole-volume segmentation it is meant to reproduce.
+#[test]
+#[ignore]
+fn test_dl_synthseg_window() {
+    use qsm_core::segment::{SynthSegInference, SynthSegParams};
+
+    let data = TestData::load().expect("test data");
+    let windowed = SynthSegParams { inference: SynthSegInference::LOW_MEMORY, ..SynthSegParams::default() };
+    let (seg, elapsed) = run_synthseg(&data, &windowed, "synthseg");
+    let dice = report_synthseg("SynthSeg (sliding window)", "dl_synthseg_window", &seg, &windowed, &data, elapsed);
+
+    let (whole, _) = run_synthseg(&data, &SynthSegParams::default(), "synthseg");
+    let (mean, min) = mean_label_dice(&seg.labels, &whole.labels, windowed.version.labels().ids);
+    println!("[INFO] sliding window vs whole volume: mean structure Dice {mean:.4} (lowest {min:.4})");
+    println!("RESULT:SynthSeg window vs whole,{mean:.6},{min:.6}");
+    assert!(dice > 0.7, "windowed SynthSeg brain Dice too low: {dice}");
+    assert!(mean > 0.9, "sliding window departs from the whole volume: mean structure Dice {mean:.4}");
+}

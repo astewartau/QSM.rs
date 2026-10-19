@@ -309,11 +309,40 @@ fn test_bgremove_ismv() {
     assert!(res.correlation > 0.7, "iSMV correlation too low: {}", res.correlation);
 }
 
-// mSMV is a boundary-shadow refinement, not a standalone BFR, and its benefit
-// (reduced downstream QSM shadow on in-vivo data) is not captured by a
-// local-field-vs-ground-truth comparison on a clean simulated phantom — so it is
-// intentionally not benchmarked here. The API + its modes are covered by unit
-// tests in `src/bgremove/msmv.rs`.
+/// mSMV in the role it is meant for: a boundary-shadow refinement after a primary background
+/// removal (V-SHARP here), on the V-SHARP mask. Its benefit, less downstream shadow on in-vivo
+/// data, does not show in a local-field-vs-ground-truth comparison on a clean simulated phantom,
+/// so this is a regression guard on the method, not a benchmark of it: the gates are what
+/// V-SHARP alone already clears, and the refinement must not take it below them.
+#[test]
+#[ignore]
+fn test_bgremove_msmv() {
+    use qsm_core::bgremove::MsmvParams;
+
+    println!("[INFO] Loading test data...");
+    let data = TestData::load().expect("Failed to load test data");
+    let (nx, ny, nz) = data.dims;
+    let (vsx, vsy, vsz) = data.voxel_size;
+    let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
+
+    let start = Instant::now();
+    let (primary, primary_mask) =
+        bgremove::vsharp(&data.fieldmap, &data.mask, &grid, &VsharpParams::default(), |_, _| {});
+    let params = MsmvParams { b0: data.field_strength, ..MsmvParams::refine() };
+    let (result, mask) = bgremove::msmv(&primary, &primary_mask, &grid, &params, |_, _| {});
+    let elapsed = start.elapsed();
+
+    let base = TestResult::new("V-SHARP (primary)", &primary, &data.fieldmap_local, &primary_mask, data.dims);
+    base.print();
+    let res = TestResult::new("V-SHARP + mSMV", &result, &data.fieldmap_local, &mask, data.dims);
+    res.print_with_time(elapsed);
+    res.print_ci_metrics(elapsed);
+    common::save_center_slices(&result, &mask, data.dims, "bgremove_msmv");
+
+    assert!(mask.iter().zip(&primary_mask).all(|(a, b)| a == b), "mSMV must not erode the mask");
+    assert!(res.nrmse < 0.5, "V-SHARP + mSMV NRMSE too high: {}", res.nrmse);
+    assert!(res.correlation > 0.7, "V-SHARP + mSMV correlation too low: {}", res.correlation);
+}
 
 #[test]
 #[ignore]
@@ -450,6 +479,46 @@ fn test_inversion_tkd() {
 
     assert!(res.nrmse < 0.5, "TKD NRMSE too high: {}", res.nrmse);
     assert!(res.correlation > 0.7, "TKD correlation too low: {}", res.correlation);
+}
+
+/// The mask-cropped reconstruction (`qsm_core::crop`): crop the field and mask to a box around
+/// the brain at FFT-friendly sizes, invert there, put the answer back. Scored against ground
+/// truth like every other inversion, and against TKD on the full grid, which it should reproduce
+/// almost exactly (cropping moves the FFT's periodic boundary closer, nothing else).
+#[test]
+#[ignore]
+fn test_inversion_tkd_cropped() {
+    use qsm_core::crop::{crop_box_for_mask, crop_volume, uncrop_volume};
+
+    println!("[INFO] Loading test data...");
+    let data = TestData::load().expect("Failed to load test data");
+    let (nx, ny, nz) = data.dims;
+    let (vsx, vsy, vsz) = data.voxel_size;
+    let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
+    let params = TkdParams { threshold: 0.2 };
+    let full = inversion::tkd(&data.fieldmap_local, &data.mask, &grid, data.b0_dir, &params);
+
+    let start = Instant::now();
+    let b = crop_box_for_mask(&data.mask, data.dims, data.voxel_size, 10.0);
+    let field = crop_volume(&data.fieldmap_local, &b);
+    let mask = crop_volume(&data.mask, &b);
+    let (cx, cy, cz) = b.dims;
+    let cropped_grid = Grid::new(cx, cy, cz, vsx, vsy, vsz);
+    let chi = inversion::tkd(&field, &mask, &cropped_grid, data.b0_dir, &params);
+    let result = uncrop_volume(&chi, &b, 0.0);
+    let elapsed = start.elapsed();
+    println!("[INFO] crop box {:?} of {:?} ({:.0}% of the voxels)", b.dims, data.dims,
+             100.0 * (cx * cy * cz) as f64 / (nx * ny * nz) as f64);
+
+    let challenge = ChallengeMetrics::compute("TKD (cropped to mask)", &result, &data.chi, &data.mask, &data.segmentation, data.dims);
+    challenge.print();
+    challenge.print_ci_metrics(elapsed);
+    common::save_center_slices(&result, &data.mask, data.dims, "inversion_tkd_cropped");
+
+    let agreement = common::correlation(&result, &full, &data.mask);
+    println!("[INFO] cropped vs full-grid TKD: r = {agreement:.5}");
+    assert!(cx * cy * cz < nx * ny * nz, "the crop box is the whole grid, so nothing was cropped");
+    assert!(agreement > 0.99, "cropping changed the TKD result: r = {agreement:.5} against the full grid");
 }
 
 #[test]
@@ -3749,4 +3818,178 @@ fn test_robust_echo_combination() {
 fn wrap_pi(a: f64) -> f64 {
     let tau = 2.0 * std::f64::consts::PI;
     a - tau * ((a / tau) + 0.5).floor()
+}
+
+// ============================================================================
+// Masking pipeline (run_masking: generators + refinements) and two-pass
+// ============================================================================
+
+fn scan_metadata(data: &TestData, affine: Option<[f64; 16]>) -> pipeline::ScanMetadata {
+    pipeline::ScanMetadata {
+        dims: data.dims,
+        voxel_size: data.voxel_size,
+        echo_times: data.echo_times.clone(),
+        field_strength: data.field_strength,
+        b0_direction: data.b0_dir,
+        slice_geometry: None,
+        affine,
+    }
+}
+
+/// The masking stage as the pipeline runs it, through `run_masking`, with the recipes that
+/// exercise each generator and refinement: QSMxT's default phase-quality recipe (Otsu on the
+/// ROMEO quality map, dilate, fill holes, erode), a magnitude recipe (Otsu, close, fill holes,
+/// Gaussian smoothing), a percentile threshold, and BET followed by signal-gated erosion. Each is
+/// scored as a brain mask against the phantom's ground-truth mask.
+#[test]
+#[ignore]
+fn test_pipeline_masking() {
+    use pipeline::{MaskOp, MaskSection, MaskThresholdMethod, MaskingInput};
+
+    println!("[INFO] Loading test data...");
+    let data = TestData::load().expect("Failed to load test data");
+    let meta = scan_metadata(&data, None);
+    let phases: Vec<&[f64]> = data.phase_echoes.iter().map(|p| p.as_slice()).collect();
+    let mags: Vec<&[f64]> = data.mag_echoes.iter().map(|m| m.as_slice()).collect();
+
+    let cases: Vec<(&str, &str, MaskSection, f64)> = vec![
+        (
+            "Phase quality + Otsu (QSMxT default)",
+            "mask_phase_otsu",
+            pipeline::MaskingConfig::default().sections.remove(0),
+            0.75,
+        ),
+        (
+            "Magnitude + Otsu, close, fill, smooth",
+            "mask_magnitude_otsu",
+            MaskSection {
+                input: MaskingInput::Magnitude,
+                generator: MaskOp::Threshold { method: MaskThresholdMethod::Otsu, value: None },
+                refinements: vec![
+                    MaskOp::Close { radius: 2 },
+                    MaskOp::FillHoles { max_size: 0 },
+                    MaskOp::GaussianSmooth { sigma_mm: 1.0 },
+                ],
+            },
+            0.7,
+        ),
+        (
+            "Magnitude + percentile threshold",
+            "mask_magnitude_percentile",
+            MaskSection {
+                input: MaskingInput::MagnitudeFirst,
+                generator: MaskOp::Threshold { method: MaskThresholdMethod::Percentile, value: Some(60.0) },
+                refinements: vec![MaskOp::FillHoles { max_size: 0 }],
+            },
+            0.55,
+        ),
+        (
+            "BET + signal-gated erosion",
+            "mask_bet_signal_erode",
+            MaskSection {
+                input: MaskingInput::Magnitude,
+                generator: MaskOp::Bet(BetParams::default()),
+                refinements: vec![MaskOp::SignalErode(Default::default())],
+            },
+            0.8,
+        ),
+    ];
+
+    // The image the overlays are drawn on, for when no other brain-extraction test ran.
+    let rss: Vec<f64> = (0..data.mask.len())
+        .map(|i| data.mag_echoes.iter().map(|e| e[i] * e[i]).sum::<f64>().sqrt())
+        .collect();
+    common::save_center_slices(&rss, &data.mask, data.dims, "mask_magnitude");
+
+    let mut failures = Vec::new();
+    for (name, slug, section, floor) in cases {
+        let start = Instant::now();
+        let mask = pipeline::run_masking(std::slice::from_ref(&section), &phases, &mags, &meta)
+            .unwrap_or_else(|e| panic!("{name}: run_masking failed: {e:?}"));
+        let elapsed = start.elapsed();
+        let dice = common::dice_coefficient(&mask, &data.mask);
+        println!("{name:<40} Dice={dice:.4}  {elapsed:>10.2?}");
+        println!("RESULT:{name},{dice:.6},-,-,{:.2}", elapsed.as_secs_f64());
+        let predicted: Vec<f64> = mask.iter().map(|&v| v as f64).collect();
+        common::save_center_slices(&predicted, &data.mask, data.dims, slug);
+        if dice <= floor {
+            failures.push(format!("{name}: Dice {dice:.4} <= {floor}"));
+        }
+    }
+    assert!(failures.is_empty(), "masking recipes below their floor: {failures:?}");
+}
+
+/// Two-pass artefact reduction, end to end from wrapped phase: field mapping, then background
+/// removal and RTS once on the filled mask and once on the reliable mask (Otsu on the phase
+/// quality, holes kept, restricted to the filled mask), combined on the reliable pass's support.
+/// The single pass on the filled mask is reported beside it, so the table shows what the second
+/// pass buys on this phantom, whose calcification is the kind of source it is for.
+#[test]
+#[ignore]
+fn test_pipeline_two_pass() {
+    println!("[INFO] Loading test data...");
+    let data = TestData::load().expect("Failed to load test data");
+    let meta = scan_metadata(&data, None);
+    let phases: Vec<&[f64]> = data.phase_echoes.iter().map(|p| p.as_slice()).collect();
+    let mags: Vec<&[f64]> = data.mag_echoes.iter().map(|m| m.as_slice()).collect();
+
+    let start = Instant::now();
+    let field = pipeline::run_field_mapping(
+        &phases, Some(&mags), &data.mask, &meta, &pipeline::FieldMappingConfig::default(), &mut |_, _| {},
+    )
+    .expect("run_field_mapping");
+
+    let reliable = pipeline::run_masking(&pipeline::default_reliable_sections(), &phases, &mags, &meta)
+        .expect("reliable mask");
+    let reliable = pipeline::restrict_reliable_mask(&reliable, &data.mask).expect("restrict");
+    let holes = data.mask.iter().zip(&reliable).filter(|(&m, &r)| m > 0 && r == 0).count();
+    println!("[INFO] reliable mask drops {holes} of the filled mask's voxels");
+
+    let bfr = pipeline::BgRemovalConfig::default();
+    let inv = pipeline::InversionConfig {
+        algorithm: pipeline::InversionAlgorithm::Rts,
+        ..Default::default()
+    };
+    let pass = |mask: &[u8]| -> (Vec<f64>, Vec<u8>) {
+        let local = pipeline::run_bg_removal(&field.b0_field_ppm, mask, &meta, &bfr, &mut |_, _| {})
+            .expect("run_bg_removal");
+        let chi = pipeline::run_dipole_inversion(
+            &local.local_field_ppm, &local.eroded_mask, &meta, &inv, None, &mut |_, _| {},
+        )
+        .expect("run_dipole_inversion");
+        (chi, local.eroded_mask)
+    };
+    let (filled_chi, _) = pass(&data.mask);
+    let single_elapsed = start.elapsed();
+    let (reliable_chi, reliable_support) = pass(&reliable);
+    let combined = pipeline::combine_two_pass(&reliable_chi, &filled_chi, &reliable_support)
+        .expect("combine_two_pass");
+    let elapsed = start.elapsed();
+
+    for (name, slug, chi, t) in [
+        ("RTS single pass", "pipeline_rts_single_pass", &filled_chi, single_elapsed),
+        ("RTS two-pass", "pipeline_two_pass", &combined, elapsed),
+    ] {
+        let challenge = ChallengeMetrics::compute(name, chi, &data.chi, &data.mask, &data.segmentation, data.dims);
+        challenge.print();
+        challenge.print_ci_metrics(t);
+        common::save_center_slices(chi, &common::valid_support(chi, &data.mask), data.dims, slug);
+    }
+    let res = TestResult::new("RTS two-pass", &combined, &data.chi, &data.mask, data.dims);
+    res.print();
+    // How far apart the two passes sit where both are defined. Each pass is referenced over its
+    // own mask, so a constant offset here is what the combination stitches in at the hole edges.
+    let (mut sum, mut cnt) = (0.0, 0usize);
+    for i in 0..combined.len() {
+        if reliable_support[i] != 0 {
+            sum += reliable_chi[i] - filled_chi[i];
+            cnt += 1;
+        }
+    }
+    println!("[INFO] reliable - filled pass, mean over the reliable support: {:.5} ppm", sum / cnt.max(1) as f64);
+    assert!(holes > 0, "the reliable mask has no holes, so this run did not exercise two-pass");
+    assert!(combined.iter().all(|v| v.is_finite()), "two-pass produced non-finite values");
+    // Regression floor, not a target: on this phantom the combination currently scores below the
+    // single pass on correlation (0.44 vs 0.54) while lowering the calcification streak metric.
+    assert!(res.correlation > 0.35, "two-pass correlation too low: {}", res.correlation);
 }
