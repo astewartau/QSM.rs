@@ -62,6 +62,46 @@ fn test_chisep_xsepnet() {
     assert!(dia_mag.iter().all(|v| v.is_finite()), "chisepnet produced non-finite χ−");
 }
 
+/// The centred `dims` box of the phantom's maps (the magnitudes, which these tests do not read,
+/// are left out): SUSEP-Net in patches costs several times its whole-volume pass, and the whole
+/// phantom would take most of a CI job's time limit.
+fn crop(ph: &ChiSepPhantom, dims: (usize, usize, usize)) -> ChiSepPhantom {
+    let (nx, ny, nz) = ph.dims;
+    let (cx, cy, cz) = dims;
+    let (ox, oy, oz) = ((nx - cx) / 2, (ny - cy) / 2, (nz - cz) / 2);
+    let cut = |v: &[f64]| -> Vec<f64> {
+        let mut out = Vec::with_capacity(cx * cy * cz);
+        for z in 0..cz {
+            for y in 0..cy {
+                for x in 0..cx {
+                    out.push(v[(x + ox) + nx * ((y + oy) + ny * (z + oz))]);
+                }
+            }
+        }
+        out
+    };
+    let mask_f: Vec<f64> = ph.mask.iter().map(|&m| m as f64).collect();
+    let (vx, vy, vz) = ph.grid.voxel_size;
+    ChiSepPhantom {
+        local_field_ppm: cut(&ph.local_field_ppm),
+        chi_total: cut(&ph.chi_total),
+        r2prime: cut(&ph.r2prime),
+        magnitude_rss: Vec::new(),
+        mag_voxel_major: Vec::new(),
+        tes: ph.tes.clone(),
+        se_mag_voxel_major: None,
+        se_tes: Vec::new(),
+        mask: cut(&mask_f).iter().map(|&m| (m > 0.5) as u8).collect(),
+        gt_para: cut(&ph.gt_para),
+        gt_dia: cut(&ph.gt_dia),
+        grid: qsm_core::Grid::new(cx, cy, cz, vx, vy, vz),
+        dims,
+        b0: ph.b0,
+        cf: ph.cf,
+        bdir: ph.bdir,
+    }
+}
+
 /// `‖a − b‖ / ‖b‖` over the mask.
 fn rel_err(a: &[f64], b: &[f64], mask: &[u8]) -> f64 {
     let (mut num, mut den) = (0.0, 0.0);
@@ -150,12 +190,16 @@ fn test_chisepnet_low_memory_patch() {
 #[ignore]
 fn test_susep_net_low_memory_patch() {
     let Some(ph) = load_chisep_phantom() else { return };
+    // 2 × 2 × 2 patches at the low-memory 96×96×64.
+    let ph = crop(&ph, (144, 144, 112));
     let alg = SeparationAlgorithm::SusepNet;
     low_memory_matches_default(
         &ph,
         "susep-net",
         SeparationConfig { algorithm: alg, ..Default::default() },
         SeparationConfig { algorithm: alg, susep_net: SusepNetParams::low_memory(), ..Default::default() },
+        // Measured on this crop: r = 0.9996 (χ+) / 0.9991 (χ−), rel. err. 0.021 / 0.028 (on the
+        // whole phantom 0.9994 / 0.9985, 0.027 / 0.036).
         0.995,
         0.06,
     );
