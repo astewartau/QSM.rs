@@ -3860,7 +3860,7 @@ fn test_pipeline_masking() {
             0.75,
         ),
         (
-            "Magnitude + Otsu, close, fill, smooth",
+            "Magnitude + Otsu / close / fill / smooth",
             "mask_magnitude_otsu",
             MaskSection {
                 input: MaskingInput::Magnitude,

@@ -353,7 +353,7 @@ MONTAGES = [
          "pipeline_qsmart_tikhonov"],
         ["pipeline_rts_single_pass", "pipeline_two_pass"],
     ], ["dipole inversion", "dipole inversion", "dipole inversion", "dipole inversion",
-        "deep learning", "deep learning (total field / phase in)",
+        "deep learning", "deep learning",
         "multi-orientation (N orientations in)",
         "spans (BFR+dipole / full pipeline)", "spans (BFR+dipole / full pipeline)"]),
     ("stage_chisep", "χ-separation", "ppm", (0, 0.1), [
@@ -532,8 +532,8 @@ MASK_METHODS = [
     ("dl_mindgrab", "MindGrab", "#9b5de5"),
     ("dl_rs2net", "RS2-Net (scaled phantom)", "#f15bb5"),
     ("mask_phase_otsu", "Phase quality + Otsu", "#00bbf9"),
-    ("mask_magnitude_otsu", "Magnitude + Otsu", "#00f5d4"),
-    ("mask_magnitude_percentile", "Magnitude percentile", "#fee440"),
+    ("mask_magnitude_otsu", "Magnitude + Otsu", "#06a77d"),
+    ("mask_magnitude_percentile", "Magnitude percentile", "#ff006e"),
     ("mask_bet_signal_erode", "BET + signal erosion", "#fb8500"),
 ]
 MASK_MAGNITUDES = ["bet_magnitude", "dl_hdbet_magnitude", "dl_synthseg_magnitude", "mask_magnitude"]
