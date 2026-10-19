@@ -172,7 +172,10 @@ pub struct ModelSpec {
     /// one tile in flight (the `browser_memory::tile_cost_*` cases in `tests/wasm_pipeline.rs`;
     /// `examples/tile_memory_footprint.rs` measures the same natively by counting allocations).
     /// What a run holds once whatever the number of tiles (the parsed model and its plan, the
-    /// full-volume buffers) is not in it.
+    /// full-volume buffers) is not in it, except for the networks whose wrapper loads the network
+    /// inside every patch (LPCNN, MoDL-QSM, NeXtQSM): each of their tiles in flight holds its own
+    /// parsed model, so their figure is a whole 64³ tile's heap per voxel, which over-counts larger
+    /// patches slightly.
     ///
     /// `inversion::tile_bytes` turns it into a tile's bytes for a config, and it is what
     /// `inversion::tile_concurrency` budgets with on WASM, so a host estimating a tiled run's

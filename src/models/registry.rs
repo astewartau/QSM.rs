@@ -53,7 +53,8 @@ const MODELS: &[ModelSpec] = &[
         inputs: &["field"],
         outputs: &["local_field"],
         size_divisor: 8,
-        tile_bytes_per_voxel: Some(1762),
+        // Measured in WASM: the heap's slope over 48³–80³ patches (`browser_memory::tile_cost_*`).
+        tile_bytes_per_voxel: Some(2_054),
     },
     // ---- Dipole inversion --------------------------------------------------
     ModelSpec {
@@ -78,7 +79,8 @@ const MODELS: &[ModelSpec] = &[
         inputs: &["field"],
         outputs: &["chi"],
         size_divisor: 8,
-        tile_bytes_per_voxel: Some(904),
+        // Measured in WASM: the heap's slope over 48³–80³ patches (`browser_memory::tile_cost_*`).
+        tile_bytes_per_voxel: Some(1_146),
     },
     ModelSpec {
         id: "qsmnet",
@@ -102,7 +104,9 @@ const MODELS: &[ModelSpec] = &[
         inputs: &["field"],
         outputs: &["chi"],
         size_divisor: 16,
-        tile_bytes_per_voxel: Some(868),
+        // Measured in WASM over 48³–80³ patches: QSMnet 1 680, QSMnet+ 1 694; the one tiled wrapper
+        // serves both, so both carry the larger.
+        tile_bytes_per_voxel: Some(1_694),
     },
     ModelSpec {
         id: "qsmnet-plus",
@@ -126,7 +130,9 @@ const MODELS: &[ModelSpec] = &[
         inputs: &["field"],
         outputs: &["chi"],
         size_divisor: 16,
-        tile_bytes_per_voxel: Some(874),
+        // Measured in WASM over 48³–80³ patches: QSMnet 1 680, QSMnet+ 1 694; the one tiled wrapper
+        // serves both, so both carry the larger.
+        tile_bytes_per_voxel: Some(1_694),
     },
     ModelSpec {
         id: "qsmgan",
@@ -174,7 +180,9 @@ const MODELS: &[ModelSpec] = &[
         inputs: &["field", "mask", "b_vec"],
         outputs: &["chi"],
         size_divisor: 8,
-        tile_bytes_per_voxel: Some(733),
+        // Measured in WASM: a whole 64³ tile per patch voxel, since this wrapper loads its network
+        // inside every patch, so each tile in flight also holds a parsed model.
+        tile_bytes_per_voxel: Some(964),
     },
     ModelSpec {
         id: "ir2qsm",
@@ -200,7 +208,8 @@ const MODELS: &[ModelSpec] = &[
         inputs: &["field", "mask"],
         outputs: &["chi"],
         size_divisor: 8,
-        tile_bytes_per_voxel: Some(707),
+        // Measured in WASM: the heap's slope over 48³–80³ patches (`browser_memory::tile_cost_*`).
+        tile_bytes_per_voxel: Some(904),
     },
     // ---- Single-step (phase/total field → χ) -------------------------------
     ModelSpec {
@@ -251,7 +260,8 @@ const MODELS: &[ModelSpec] = &[
         inputs: &["phase", "mask", "te", "b0", "border"],
         outputs: &["chi"],
         size_divisor: 16,
-        tile_bytes_per_voxel: Some(493),
+        // Measured in WASM: the heap's slope over 48³–80³ patches (`browser_memory::tile_cost_*`).
+        tile_bytes_per_voxel: Some(600),
     },
     ModelSpec {
         id: "iqsm-plus",
@@ -274,7 +284,8 @@ const MODELS: &[ModelSpec] = &[
         inputs: &["phase", "mask", "te", "b0", "z_prjs", "border"],
         outputs: &["chi"],
         size_divisor: 16,
-        tile_bytes_per_voxel: Some(1066),
+        // Measured in WASM: the heap's slope over 48³–80³ patches (`browser_memory::tile_cost_*`).
+        tile_bytes_per_voxel: Some(1_149),
     },
     ModelSpec {
         id: "iqfm",
@@ -298,7 +309,8 @@ const MODELS: &[ModelSpec] = &[
         inputs: &["phase", "mask", "te", "b0", "border"],
         outputs: &["localfield"],
         size_divisor: 16,
-        tile_bytes_per_voxel: Some(493),
+        // Measured in WASM: the heap's slope over 48³–80³ patches (`browser_memory::tile_cost_*`).
+        tile_bytes_per_voxel: Some(600),
     },
     ModelSpec {
         id: "nextqsm",
@@ -332,7 +344,9 @@ const MODELS: &[ModelSpec] = &[
         inputs: &["field", "mask", "b_vec"],
         outputs: &["chi"],
         size_divisor: 64,
-        tile_bytes_per_voxel: Some(700),
+        // Measured in WASM: a whole 64³ tile per patch voxel, since this wrapper loads its network
+        // inside every patch, so each tile in flight also holds a parsed model.
+        tile_bytes_per_voxel: Some(1_952),
     },
     ModelSpec {
         id: "modl-qsm",
@@ -358,7 +372,9 @@ const MODELS: &[ModelSpec] = &[
         inputs: &["field", "mask", "b_vec"],
         outputs: &["chi"],
         size_divisor: 1,
-        tile_bytes_per_voxel: Some(777),
+        // Measured in WASM: a whole 64³ tile per patch voxel, since this wrapper loads its network
+        // inside every patch, so each tile in flight also holds a parsed model.
+        tile_bytes_per_voxel: Some(909),
     },
     // ---- χ-separation (χ+ / χ−) --------------------------------------------
     ModelSpec {

@@ -36,7 +36,7 @@ impl Default for TileConfig {
     /// large core (few patches, ~4× less overlap compute than 64³/32) over a big halo. On real
     /// 3 T data this matched whole-volume xQSM at r≈0.94 in ~1/4 the time.
     ///
-    /// Sized for **native** memory: a 144³ patch of xQSM holds about 3.6 GB while it runs (see
+    /// Sized for **native** memory: a 144³ patch of xQSM holds about 3.4 GB while it runs (see
     /// [`ModelSpec::tile_bytes_per_voxel`](crate::models::ModelSpec::tile_bytes_per_voxel)), which a 32-bit WASM host cannot fit at all. Browser
     /// hosts pass a far smaller config — QSMbly uses `core: 56, halo: 4` (64³ patches).
     fn default() -> Self {
@@ -140,8 +140,8 @@ pub fn check_wasm_patch_fits(cfg: &TileConfig, cost: &TileCost) -> Result<(), On
 ///
 /// So on WASM the count is [`wasm_tiles_in_flight`]: whatever fits
 /// [`WASM_TILE_ACTIVATION_BUDGET`] at the network's own cost per tile, and never more than the
-/// pool. The cost differs a lot between networks — a 64³ tile of BFRnet holds about three times
-/// what one of xQSM does — so one network's figure cannot stand in for the others.
+/// pool. The cost differs a lot between networks — a 64³ tile of BFRnet holds 3.4 times what one
+/// of iQSM does, and 1.8 times xQSM's — so one network's figure cannot stand in for the others.
 pub fn tile_concurrency(cfg: &TileConfig, cost: &TileCost) -> usize {
     #[cfg(not(feature = "parallel"))]
     {
@@ -532,8 +532,8 @@ mod tests {
     }
 
     /// BFRnet was budgeted with xQSM's figure (1 100 B per patch voxel), which let a 4-thread
-    /// browser run four of its 64³ tiles at once: about 4 GB of tiles on its own figure. On its
-    /// own figure it runs fewer.
+    /// browser run four of its 64³ tiles at once: 2.2 GB of tiles by its own measure, over the
+    /// budget, on top of the model and the volumes. On its own figure it runs two.
     #[test]
     fn bfrnet_runs_fewer_tiles_at_once_than_on_the_shared_figure() {
         let shared = TileCost { divisor: 8, bytes_per_voxel: 1_100 };
@@ -545,7 +545,7 @@ mod tests {
         // What the four tiles the shared figure allowed would hold by BFRnet's own measure.
         assert!(4 * tile_bytes(&BROWSER, &bfrnet) > WASM_TILE_ACTIVATION_BUDGET);
     }
-    const BFRNET_CAP_AT_FOUR: usize = 1;
+    const BFRNET_CAP_AT_FOUR: usize = 2;
 
     /// A tile's bytes follow the patch the network really runs: rounded up to its divisor.
     #[test]
