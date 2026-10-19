@@ -3,7 +3,11 @@ name: Integration Tests
 on:
   pull_request:
     branches: [main, master]
-  workflow_dispatch:  # Allow manual trigger
+    # `labeled` so that adding the `run-all-tests` label runs the whole suite on the PR (and posts
+    # the full results comment). Any other label re-runs the ordinary path-based selection, which
+    # is correct, if redundant.
+    types: [opened, synchronize, reopened, labeled]
+  workflow_dispatch:  # Manual trigger: runs everything (no PR comment; results in the job summary)
 
 permissions:
   contents: read
@@ -57,6 +61,34 @@ jobs:
         with:
           fetch-depth: 0
 
+      # A test that no `all_*` list names is never run by this workflow, whatever changes — the
+      # gap this closes is a test added to a file and never registered. Each #[ignore] test in
+      # the matrix-driven files must be in one list (or in `not_in_ci`, with a reason there), and
+      # each chisep_*.rs binary with ignored tests must be in all_chisep.
+      - name: Check every test is registered
+        run: |
+          wf=.github/workflows/integration-tests.yml
+          registered=$(grep -oE "^ +all_[a-z]+='\[[^']*\]'" "$wf" | sed -E "s/^[^']*'//; s/'$//" | jq -r '.[]')
+          registered="$registered $(sed -nE 's/^ +not_in_ci="([^"]*)"/\1/p' "$wf")"
+          registered="$registered test_bet"   # its own job, bet-test
+          missing=""
+          for f in tests/integration_tests.rs tests/dl_models.rs; do
+            for t in $(awk '/#\[ignore/{ig=1; next} ig && /fn [a-z0-9_]+\(/{match($0,/fn [a-z0-9_]+/); print substr($0,RSTART+3,RLENGTH-3); ig=0; next} /^[[:space:]]*#\[/{next} {ig=0}' "$f"); do
+              echo " $registered " | tr '\n' ' ' | grep -qw -- "$t" || missing="$missing $f::$t"
+            done
+          done
+          for f in tests/chisep_*.rs; do
+            b=$(basename "$f" .rs)
+            [ "$b" = chisep_integration ] && continue   # forward-phantom variant, run locally only
+            grep -q '#\[ignore' "$f" || continue
+            echo " $registered " | tr '\n' ' ' | grep -qw -- "$b" || missing="$missing $f"
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::Ignored tests that no all_* list (or not_in_ci) names, so CI never runs them:$missing"
+            exit 1
+          fi
+          echo "All ignored integration tests are registered."
+
       - name: Map changed files to tests
         id: detect
         env:
@@ -65,18 +97,26 @@ jobs:
           BEFORE_SHA: ${{ github.event.before }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
         run: |
           set -e
 
-          all_bgremove='["test_bgremove_sharp","test_bgremove_resharp","test_bgremove_vsharp","test_bgremove_vsharp_no_deconvolve","test_bgremove_pdf","test_bgremove_ismv","test_bgremove_lbv"]'
-          all_inversion='["test_inversion_tkd","test_inversion_tsvd","test_inversion_tikhonov","test_inversion_tv","test_inversion_rts","test_inversion_ilsqr","test_inversion_medi","test_inversion_nltv","test_inversion_ndi","test_inversion_fansi","test_inversion_fansi_tgv","test_inversion_l1qsm","test_inversion_whqsm","test_inversion_hdqsm","test_inversion_amp_pe","test_inversion_lsqr","test_inversion_heidi","test_multiorient_cosmos","test_multiorient_sti","test_multiorient_coverage","test_multiorient_noise","test_multiorient_register","test_multiorient_register_capture_range"]'
+          # Every #[ignore] test in tests/integration_tests.rs and tests/dl_models.rs is in exactly one
+          # of these lists or in `not_in_ci` below; the "Check every test is registered" step fails
+          # the run otherwise, so a new test cannot be added without CI ever running it.
+          all_bgremove='["test_bgremove_sharp","test_bgremove_resharp","test_bgremove_vsharp","test_bgremove_vsharp_no_deconvolve","test_bgremove_pdf","test_bgremove_ismv","test_bgremove_lbv","test_bgremove_msmv"]'
+          all_inversion='["test_inversion_tkd","test_inversion_tkd_cropped","test_inversion_tsvd","test_inversion_tikhonov","test_inversion_tv","test_inversion_rts","test_inversion_ilsqr","test_inversion_medi","test_inversion_nltv","test_inversion_ndi","test_inversion_fansi","test_inversion_fansi_tgv","test_inversion_l1qsm","test_inversion_whqsm","test_inversion_hdqsm","test_inversion_amp_pe","test_inversion_lsqr","test_inversion_heidi","test_multiorient_cosmos","test_multiorient_sti","test_multiorient_coverage","test_multiorient_noise","test_multiorient_register","test_multiorient_register_capture_range"]'
           all_combined='["test_combined_tgv","test_combined_tfi"]'
-          all_pipeline='["test_pipeline_romeo_b0","test_pipeline_unwrap_bfr_romeo","test_pipeline_unwrap_bfr_laplacian_neumann","test_pipeline_unwrap_bfr_bestpath","test_pipeline_unwrap_bfr_prelude","test_pipeline_unwrap_bfr_stage_laplacian","test_pipeline_tgv","test_pipeline_tgv_single_echo","test_pipeline_qsmart","test_pipeline_qsmart_tikhonov","test_pipeline_harperella","test_pipeline_iharperella","test_bias_correction","test_swi","test_smwi","test_r2star_t2star","test_motion_correction","test_robust_echo_combination"]'
+          all_pipeline='["test_pipeline_romeo_b0","test_pipeline_unwrap_bfr_romeo","test_pipeline_unwrap_bfr_laplacian_neumann","test_pipeline_unwrap_bfr_bestpath","test_pipeline_unwrap_bfr_prelude","test_pipeline_unwrap_bfr_stage_laplacian","test_pipeline_tgv","test_pipeline_tgv_single_echo","test_pipeline_qsmart","test_pipeline_qsmart_tikhonov","test_pipeline_harperella","test_pipeline_iharperella","test_bias_correction","test_swi","test_smwi","test_r2star_t2star","test_motion_correction","test_robust_echo_combination","test_pipeline_masking","test_pipeline_two_pass"]'
           # χ-separation entries are whole test *binaries* (each runs several methods).
           all_chisep='["chisep_qsmci","chisep_relaxometry_qsmci","chisep_xsepnet","chisep_r2primenet","chisep_orientation"]'
           # Deep-learning models (in tests/dl_models.rs; weights fetched from the registry).
-          all_dl='["test_dl_qsmgan","test_dl_lpcnn","test_dl_ir2qsm","test_dl_modl_qsm","test_dl_nextqsm","test_dl_iqfm","test_dl_hdbet"]'
-          all_dl_names="test_dl_qsmgan test_dl_lpcnn test_dl_ir2qsm test_dl_modl_qsm test_dl_nextqsm test_dl_iqfm test_dl_hdbet test_dl_r2primenet"
+          all_dl='["test_dl_qsmgan","test_dl_lpcnn","test_dl_ir2qsm","test_dl_modl_qsm","test_dl_nextqsm","test_dl_iqfm","test_dl_hdbet","test_dl_r2primenet","test_dl_xqsm","test_dl_qsmnet","test_dl_qsmnet_plus","test_dl_autoqsm","test_dl_iqsm","test_dl_iqsm_plus","test_dl_bfrnet","test_dl_mindgrab","test_dl_rs2net","test_dl_synthseg","test_dl_synthseg_window"]'
+          all_dl_names=$(echo "$all_dl" | jq -r '.[]' | tr '\n' ' ')
+          # Ignored tests deliberately not run here: the manual benchmark and combinatorial sweep
+          # (combinatorial-tests.yml), and two simulations of a Hz<->ppm conversion layer qsmbly no
+          # longer has, which exercise no algorithm the tests above do not.
+          not_in_ci="benchmark_all_algorithms test_all_combinations test_bgremove_lbv_hz_scale test_pipeline_lbv_tv"
 
           run_unit_tests=false
 
@@ -99,9 +139,14 @@ jobs:
             echo "run_multislice=true" >> "$GITHUB_OUTPUT"
           }
 
-          # Manual trigger: run everything
+          # Manual trigger, or the `run-all-tests` label on the PR: run everything.
           if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
             echo "workflow_dispatch: running all tests"
+            output_all
+            exit 0
+          fi
+          if echo "${PR_LABELS:-[]}" | jq -e 'index("run-all-tests")' >/dev/null 2>&1; then
+            echo "run-all-tests label: running all tests"
             output_all
             exit 0
           fi
@@ -159,9 +204,13 @@ jobs:
           # select tests (`echo "run_dl=true" >> "$GITHUB_OUTPUT"`) are still caught.
           workflow_registration_only=false
           if echo "$CHANGED" | grep -qx '\.github/workflows/integration-tests\.yml'; then
-            if git diff "$BASE_SHA"..."$HEAD_SHA" -- .github/workflows/integration-tests.yml \
+            # Collected into a variable rather than tested with `grep -q` at the end of the pipe:
+            # `grep -q` exits at its first match, the greps upstream of it die of SIGPIPE, and under
+            # pipefail that made a large diff read as "registration only" and skip the full suite.
+            beyond=$(git diff "$BASE_SHA"..."$HEAD_SHA" -- .github/workflows/integration-tests.yml \
                  | grep -E '^[+-]' | grep -vE '^(\+\+\+|---)' \
-                 | grep -qvE '^[+-][[:space:]]*(#|all_[a-z_]+=|[A-Za-z0-9_./*|$-]+\)([[:space:]]|$)|[a-z_]+="\$[a-z_]+[[:space:]]|;;[[:space:]]*$|echo[[:space:]][^>]*$|emit_figures[[:space:]]|if[[:space:]]+TABLE=\$\(emit_table[[:space:]]|if[[:space:]]+\[[[:space:]]+-f[[:space:]]+"(slices|metrics|figures)/)'; then
+                 | grep -vE '^[+-][[:space:]]*(#|all_[a-z_]+=|[A-Za-z0-9_./*|$-]+\)([[:space:]]|$)|[a-z_]+="\$[a-z_]+[[:space:]]|;;[[:space:]]*$|echo[[:space:]][^>]*$|emit_figures[[:space:]]|if[[:space:]]+TABLE=\$\(emit_table[[:space:]]|if[[:space:]]+\[[[:space:]]+-f[[:space:]]+"(slices|metrics|figures)/)' || true)
+            if [ -n "$beyond" ]; then
               echo "integration-tests.yml: changed beyond test registration → full integration suite"
             else
               echo "integration-tests.yml: only test registration changed → mapping as usual"
@@ -176,6 +225,13 @@ jobs:
                 run_unit_tests=true; break ;;
             esac
           done
+
+          # Whether the PR's diff of a file removes or edits any line. Not `| grep -q` at the end of
+          # a pipe: it exits at its first match, the commands upstream die of SIGPIPE, and under
+          # pipefail the pipeline then reads as false — "additions only" — exactly when it is not.
+          has_removals() {
+            [ -n "$(git diff "$BASE_SHA"..."$HEAD_SHA" -- "$1" | grep -E '^-' | grep -vE '^---' || true)" ]
+          }
 
           # Map changed files to test names
           bgremove=""
@@ -201,7 +257,7 @@ jobs:
               src/lib.rs|src/utils/mod.rs) : ;;
               src/inversion/mod.rs|src/bgremove/mod.rs|src/pipeline/mod.rs) : ;;
               # Core infrastructure → run everything
-              src/grid.rs|src/fft.rs|src/nifti_io.rs|src/region_grow.rs|src/priority_queue.rs)
+              src/grid.rs|src/fft.rs|src/region_grow.rs|src/priority_queue.rs)
                 echo "Core file changed: $file → all tests"
                 output_all; exit 0 ;;
               src/kernels/*|src/solvers/*)
@@ -254,14 +310,16 @@ jobs:
 
               # Background removal
               src/bgremove/smv.rs)
-                bgremove="$bgremove test_bgremove_sharp test_bgremove_vsharp test_bgremove_vsharp_no_deconvolve test_bgremove_ismv" ;;
+                bgremove="$bgremove test_bgremove_sharp test_bgremove_vsharp test_bgremove_vsharp_no_deconvolve test_bgremove_ismv test_bgremove_msmv" ;;
               src/bgremove/sharp.rs)  bgremove="$bgremove test_bgremove_sharp" ;;
               src/bgremove/resharp.rs) bgremove="$bgremove test_bgremove_resharp" ;;
-              src/bgremove/vsharp.rs) bgremove="$bgremove test_bgremove_vsharp test_bgremove_vsharp_no_deconvolve" ;;
+              src/bgremove/vsharp.rs) bgremove="$bgremove test_bgremove_vsharp test_bgremove_vsharp_no_deconvolve test_bgremove_msmv"; pipeline="$pipeline test_pipeline_two_pass" ;;
               src/bgremove/pdf.rs)    bgremove="$bgremove test_bgremove_pdf" ;;
               src/bgremove/ismv.rs)   bgremove="$bgremove test_bgremove_ismv" ;;
               src/bgremove/lbv.rs)    bgremove="$bgremove test_bgremove_lbv" ;;
               src/bgremove/sdf.rs)    pipeline="$pipeline test_pipeline_qsmart test_pipeline_qsmart_tikhonov" ;;
+              src/bgremove/msmv.rs)   bgremove="$bgremove test_bgremove_msmv" ;;
+              src/bgremove/bfrnet.rs) dl="$dl test_dl_bfrnet" ;;
 
               # Dipole inversion
               src/inversion/admm.rs)
@@ -269,11 +327,12 @@ jobs:
                 combined="$combined test_combined_tfi" ;;
               # oblique_sagittal inverts with TKD, so a change there moves its numbers too.
               src/inversion/tkd.rs)
-                inversion="$inversion test_inversion_tkd test_inversion_tsvd"
+                inversion="$inversion test_inversion_tkd test_inversion_tsvd test_inversion_tkd_cropped"
                 run_geometry=true ;;
               src/inversion/tikhonov.rs)  inversion="$inversion test_inversion_tikhonov"; pipeline="$pipeline test_pipeline_qsmart_tikhonov" ;;
               src/inversion/tv.rs)        inversion="$inversion test_inversion_tv" ;;
-              src/inversion/rts.rs)       inversion="$inversion test_inversion_rts" ;;
+              src/inversion/rts.rs)       inversion="$inversion test_inversion_rts"; pipeline="$pipeline test_pipeline_two_pass" ;;
+              src/crop.rs)                inversion="$inversion test_inversion_tkd_cropped" ;;
               src/inversion/medi.rs)      inversion="$inversion test_inversion_medi"; combined="$combined test_combined_tfi" ;;
               src/inversion/tfi.rs)       combined="$combined test_combined_tfi" ;;
               src/inversion/nltv.rs)      inversion="$inversion test_inversion_nltv" ;;
@@ -351,6 +410,18 @@ jobs:
                       nextqsm)    dl="$dl test_dl_nextqsm" ;;
                       iqfm)       dl="$dl test_dl_iqfm" ;;
                       hd-bet)     dl="$dl test_dl_hdbet" ;;
+                      bfrnet)     dl="$dl test_dl_bfrnet" ;;
+                      xqsm)       dl="$dl test_dl_xqsm" ;;
+                      qsmnet)     dl="$dl test_dl_qsmnet" ;;
+                      qsmnet-plus) dl="$dl test_dl_qsmnet_plus" ;;
+                      autoqsm)    dl="$dl test_dl_autoqsm" ;;
+                      iqsm)       dl="$dl test_dl_iqsm" ;;
+                      iqsm-plus)  dl="$dl test_dl_iqsm_plus" ;;
+                      rs2-net)    dl="$dl test_dl_rs2net" ;;
+                      mindgrab)   dl="$dl test_dl_mindgrab" ;;
+                      # synthseg-2.0's weights are Pending (not hosted), so it has no test of its
+                      # own; its entry shares the SynthSeg code path.
+                      synthseg|synthseg-2.0) dl="$dl test_dl_synthseg test_dl_synthseg_window" ;;
                       r2primenet) dl="$dl test_dl_r2primenet"; chisep="$chisep chisep_r2primenet" ;;
                       chi-sepnet) chisep="$chisep chisep_xsepnet" ;;
                       susep-net)  chisep="$chisep chisep_qsmci" ;;
@@ -368,12 +439,19 @@ jobs:
               src/inversion/modl_qsm.rs) dl="$dl test_dl_modl_qsm" ;;
               src/inversion/nextqsm.rs)  dl="$dl test_dl_nextqsm" ;;
               src/inversion/iqfm.rs)     dl="$dl test_dl_iqfm" ;;
+              src/inversion/xqsm.rs)     dl="$dl test_dl_xqsm" ;;
+              src/inversion/qsmnet.rs)   dl="$dl test_dl_qsmnet test_dl_qsmnet_plus" ;;
+              src/inversion/autoqsm.rs)  dl="$dl test_dl_autoqsm" ;;
+              # iQFM and iQSM+ reuse iQSM's preprocessing.
+              src/inversion/iqsm.rs)     dl="$dl test_dl_iqsm test_dl_iqsm_plus test_dl_iqfm" ;;
+              src/inversion/iqsm_plus.rs) dl="$dl test_dl_iqsm_plus" ;;
+              # The overlap-tiling the DL inversions share (their *_tiled variants).
+              src/inversion/tiled.rs)    dl="$dl $all_dl_names" ;;
               # Every DL test shares this file's helpers, so a change to one of them can break the
               # rest — but a diff that only *adds* lines cannot, so adding a test runs just that
               # test. Any removal or edit falls back to the full set.
               tests/dl_models.rs)
-                if git diff "$BASE_SHA"..."$HEAD_SHA" -- tests/dl_models.rs \
-                     | grep -E '^-' | grep -qvE '^---'; then
+                if has_removals tests/dl_models.rs; then
                   dl="$dl $all_dl_names"
                 else
                   # `|| true`: see above.
@@ -387,9 +465,24 @@ jobs:
                   fi
                 fi ;;
 
-              # Brain extraction (HD-BET is a DL model: its own test in the DL matrix)
-              src/bet/hdbet.rs|src/utils/resample.rs) dl="$dl test_dl_hdbet" ;;
-              src/bet/*) run_bet=true ;;
+              # Brain extraction (HD-BET is a DL model: its own test in the DL matrix). RS2-Net
+              # reuses HD-BET's sliding window and resampling; SynthSeg uses `resize`.
+              src/bet/hdbet.rs) dl="$dl test_dl_hdbet test_dl_rs2net" ;;
+              src/utils/resample.rs) dl="$dl test_dl_hdbet test_dl_synthseg test_dl_synthseg_window" ;;
+              src/bet/rs2net.rs) dl="$dl test_dl_rs2net" ;;
+              src/bet/mindgrab.rs) dl="$dl test_dl_mindgrab" ;;
+              src/bet/*) run_bet=true; pipeline="$pipeline test_pipeline_masking" ;;
+
+              # Segmentation
+              src/segment/*) dl="$dl test_dl_synthseg test_dl_synthseg_window" ;;
+
+              # Masking primitives: the masking stage drives all of them. Connected components are
+              # also used by PRELUDE, MindGrab and SynthSeg's topology cleanup.
+              src/utils/threshold.rs|src/utils/morphology.rs|src/utils/morphology/*)
+                pipeline="$pipeline test_pipeline_masking test_pipeline_two_pass"; run_bet=true ;;
+              src/utils/connected.rs)
+                pipeline="$pipeline test_pipeline_masking test_pipeline_unwrap_bfr_prelude"
+                dl="$dl test_dl_mindgrab test_dl_synthseg test_dl_synthseg_window" ;;
 
               # Phase unwrapping
               src/unwrap/mod.rs)      pipeline="$pipeline test_pipeline_tgv test_pipeline_qsmart test_pipeline_qsmart_tikhonov" ;;
@@ -417,7 +510,13 @@ jobs:
                 inversion="$inversion test_inversion_tkd test_inversion_tsvd test_inversion_tikhonov test_inversion_tv test_inversion_rts test_inversion_ilsqr test_inversion_medi test_inversion_nltv"
                 combined="$combined test_combined_tgv test_combined_tfi" ;;
               src/pipeline/masking.rs)
-                pipeline="$pipeline test_pipeline_romeo_b0" ;;
+                pipeline="$pipeline test_pipeline_masking test_pipeline_two_pass" ;;
+              src/pipeline/two_pass.rs) pipeline="$pipeline test_pipeline_two_pass" ;;
+              # run_qsmart reports its intermediates through the Observer.
+              src/pipeline/observer.rs) pipeline="$pipeline test_pipeline_qsmart test_pipeline_qsmart_tikhonov" ;;
+              # The separation stage dispatcher; its integration tests are the χ-sepnet / SUSEP-Net
+              # runs and the classical methods it wires.
+              src/pipeline/separation.rs) chisep="$chisep chisep_qsmci chisep_relaxometry_qsmci chisep_xsepnet" ;;
               src/pipeline/qsmart.rs)
                 pipeline="$pipeline test_pipeline_qsmart test_pipeline_qsmart_tikhonov" ;;
               src/bgremove/iharperella.rs) pipeline="$pipeline test_pipeline_harperella test_pipeline_iharperella" ;;
@@ -434,6 +533,56 @@ jobs:
                 pipeline="$pipeline test_r2star_t2star"
                 chisep="$chisep chisep_r2primenet"; dl="$dl test_dl_r2primenet" ;;
               src/swi.rs) pipeline="$pipeline test_swi test_smwi" ;;
+
+              # Shared by nearly every algorithm: the complex type and FFT helpers, the mask
+              # helpers most inversions call, the parallel-iteration macros, NIfTI I/O (every
+              # test loads its data through it).
+              src/utils/complex.rs|src/utils/mask.rs|src/par.rs|src/io.rs)
+                echo "Shared file changed: $file → all tests"
+                output_all; exit 0 ;;
+              # The error type: no behaviour; the unit tests (already selected) cover it.
+              src/error.rs) : ;;
+              # EPG / Gibbs unringing are exercised by relaxometry-demo.yml, which posts its own
+              # comment and is selected by its own paths filter.
+              src/utils/epg.rs|src/utils/gibbs.rs) : ;;
+
+              # The integration tests themselves. Adding tests only runs the tests added (routed by
+              # name to their matrix); any edit or removal can touch a shared helper, so it reruns
+              # every test in the file.
+              tests/integration_tests.rs)
+                if has_removals tests/integration_tests.rs; then
+                  bgremove="$bgremove $(echo "$all_bgremove" | jq -r '.[]' | tr '\n' ' ')"
+                  inversion="$inversion $(echo "$all_inversion" | jq -r '.[]' | tr '\n' ' ')"
+                  combined="$combined $(echo "$all_combined" | jq -r '.[]' | tr '\n' ' ')"
+                  pipeline="$pipeline $(echo "$all_pipeline" | jq -r '.[]' | tr '\n' ' ')"
+                  run_bet=true
+                else
+                  added=$(git diff "$BASE_SHA"..."$HEAD_SHA" -- tests/integration_tests.rs \
+                    | grep -E '^\+' | grep -oE 'fn test_[a-z0-9_]+' | sed 's/^fn //' | sort -u || true)
+                  echo "integration_tests.rs: additions only → ${added:-none}"
+                  for t in $added; do
+                    if echo "$all_bgremove" | jq -e --arg t "$t" 'index($t)' >/dev/null; then bgremove="$bgremove $t"
+                    elif echo "$all_inversion" | jq -e --arg t "$t" 'index($t)' >/dev/null; then inversion="$inversion $t"
+                    elif echo "$all_combined" | jq -e --arg t "$t" 'index($t)' >/dev/null; then combined="$combined $t"
+                    elif echo "$all_pipeline" | jq -e --arg t "$t" 'index($t)' >/dev/null; then pipeline="$pipeline $t"
+                    elif [ "$t" = test_bet ]; then run_bet=true
+                    fi
+                  done
+                fi ;;
+              # Test binaries no workflow job runs (reference-parity, local-data and wasm tests):
+              # their non-ignored tests run in unit-tests.yml, which every tests/ change selects.
+              tests/amppe_qsmci.rs|tests/chisep_integration.rs|tests/crosscheck.rs|tests/ilsqr_sti_parity.rs) : ;;
+              tests/models_onnx.rs|tests/qsmart_validation.rs|tests/relaxometry_demo.rs|tests/wasm_pipeline.rs) : ;;
+              tests/weight_provider.rs|tests/data/*) : ;;
+              # Reporting only: how results are drawn and tabled, never what is computed.
+              scripts/render_slices.py|scripts/render_paper_figures.py|scripts/integration_report.sh) : ;;
+
+              # Anything else under src/ or tests/ has no mapping above — a new file, most likely.
+              # Run everything rather than nothing: a change that maps to no test must not pass
+              # unexercised. Give it a mapping above to narrow it.
+              src/*|tests/*)
+                echo "Unmapped file changed: $file → all tests (add it to the path map)"
+                output_all; exit 0 ;;
             esac
           done
 
@@ -662,6 +811,7 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Run ${{ matrix.test }}
+        id: run
         run: |
           # The default shell is `bash -e`, not `-eo pipefail`, so without this the step
           # reports tee's exit status and a failing test run passes.
@@ -676,6 +826,8 @@ jobs:
           else
             echo "RESULT:${{ matrix.test }},-,-,-,-,-" > ${{ matrix.test }}.csv
           fi
+          # Outcome, not conclusion: a continue-on-error step that failed still reads "failure".
+          echo "STATUS:${{ steps.run.outcome }}" >> ${{ matrix.test }}.csv
 
       - name: Upload metrics
         if: always()
@@ -725,6 +877,7 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Run ${{ matrix.test }}
+        id: run
         run: |
           # The default shell is `bash -e`, not `-eo pipefail`, so without this the step
           # reports tee's exit status and a failing test run passes.
@@ -739,6 +892,8 @@ jobs:
           else
             echo "RESULT:${{ matrix.test }},-,-,-,-,-" > ${{ matrix.test }}.csv
           fi
+          # Outcome, not conclusion: a continue-on-error step that failed still reads "failure".
+          echo "STATUS:${{ steps.run.outcome }}" >> ${{ matrix.test }}.csv
 
       - name: Upload metrics
         if: always()
@@ -784,6 +939,7 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Run test_bet
+        id: run
         run: |
           # See the pipefail note on the bgremove job.
           set -o pipefail
@@ -797,6 +953,8 @@ jobs:
           else
             echo "RESULT:BET,-,-,-,-,-" > test_bet.csv
           fi
+          # Outcome, not conclusion: a continue-on-error step that failed still reads "failure".
+          echo "STATUS:${{ steps.run.outcome }}" >> test_bet.csv
 
       - name: Upload metrics
         if: always()
@@ -846,6 +1004,7 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Run ${{ matrix.test }}
+        id: run
         # QSMART tests still run and report metrics/figures, but don't gate merges:
         # QSMART has a known ~0.39 corr (below the 0.5 target) pending accuracy work.
         continue-on-error: ${{ contains(matrix.test, 'qsmart') }}
@@ -863,6 +1022,8 @@ jobs:
           else
             echo "RESULT:${{ matrix.test }},-,-,-,-,-" > ${{ matrix.test }}.csv
           fi
+          # Outcome, not conclusion: a continue-on-error step that failed still reads "failure".
+          echo "STATUS:${{ steps.run.outcome }}" >> ${{ matrix.test }}.csv
 
       - name: Upload metrics
         if: always()
@@ -912,6 +1073,7 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Run ${{ matrix.test }}
+        id: run
         # QSMART tests still run and report metrics/figures, but don't gate merges:
         # QSMART has a known ~0.39 corr (below the 0.5 target) pending accuracy work.
         continue-on-error: ${{ contains(matrix.test, 'qsmart') }}
@@ -929,6 +1091,8 @@ jobs:
           else
             echo "RESULT:${{ matrix.test }},-,-,-,-,-" > ${{ matrix.test }}.csv
           fi
+          # Outcome, not conclusion: a continue-on-error step that failed still reads "failure".
+          echo "STATUS:${{ steps.run.outcome }}" >> ${{ matrix.test }}.csv
 
       - name: Upload metrics
         if: always()
@@ -980,7 +1144,16 @@ jobs:
             target/
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
+      - name: Cache model weights
+        uses: actions/cache@v4
+        with:
+          path: .model-cache
+          # Keyed on the registry, which pins every weight file's URL and SHA-256: a re-pointed
+          # model gets a fresh cache, and qsm-core re-verifies whatever it restores anyway.
+          key: model-weights-${{ matrix.test }}-${{ hashFiles('src/models/registry.rs') }}
+
       - name: Run ${{ matrix.test }}
+        id: run
         timeout-minutes: 40
         # onnx + download are needed by the χ-sepnet (deep learning) binary, which
         # fetches its weights from the registry; the classical binaries ignore them.
@@ -998,6 +1171,8 @@ jobs:
           else
             echo "RESULT:${{ matrix.test }},-,-,-,-" > ${{ matrix.test }}.csv
           fi
+          # Outcome, not conclusion: a continue-on-error step that failed still reads "failure".
+          echo "STATUS:${{ steps.run.outcome }}" >> ${{ matrix.test }}.csv
 
       - name: Upload metrics
         if: always()
@@ -1051,7 +1226,16 @@ jobs:
             target/
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
+      - name: Cache model weights
+        uses: actions/cache@v4
+        with:
+          path: .model-cache
+          # Keyed on the registry, which pins every weight file's URL and SHA-256: a re-pointed
+          # model gets a fresh cache, and qsm-core re-verifies whatever it restores anyway.
+          key: model-weights-${{ matrix.test }}-${{ hashFiles('src/models/registry.rs') }}
+
       - name: Run ${{ matrix.test }}
+        id: run
         continue-on-error: true
         timeout-minutes: 40
         run: |
@@ -1081,6 +1265,8 @@ jobs:
           else
             echo "RESULT:${{ matrix.test }},-,-,-,-,-" > ${{ matrix.test }}.csv
           fi
+          # Outcome, not conclusion: a continue-on-error step that failed still reads "failure".
+          echo "STATUS:${{ steps.run.outcome }}" >> ${{ matrix.test }}.csv
 
       - name: Upload metrics
         if: always()
@@ -1132,11 +1318,26 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Run oblique_sagittal
+        id: run
         timeout-minutes: 30
         run: |
           # See the pipefail note on the bgremove job.
           set -o pipefail
           cargo test --release --features parallel --test oblique_sagittal -- --ignored --nocapture 2>&1 | tee test_output.txt
+
+      - name: Save metrics
+        if: always()
+        run: |
+          { grep "^RESULT:" test_output.txt 2>/dev/null || true; } > oblique_sagittal.csv
+          echo "STATUS:${{ steps.run.outcome }}" >> oblique_sagittal.csv
+
+      - name: Upload metrics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: metrics-oblique_sagittal
+          path: oblique_sagittal.csv
+          retention-days: 1
 
       - name: Upload slices
         if: always()
@@ -1178,6 +1379,7 @@ jobs:
       # Until they are, each test prints why it skipped and the step says so loudly
       # rather than reporting a silent pass.
       - name: Run multislice_2d
+        id: run
         timeout-minutes: 30
         env:
           QSM_BIDS_2D: bids
@@ -1186,6 +1388,20 @@ jobs:
           # Verified: `bash -e` on `false | tee x` exits 0, and exits 1 with pipefail set.
           set -o pipefail
           cargo test --release --features parallel --test multislice_2d -- --ignored --nocapture 2>&1 | tee test_output.txt
+
+      - name: Save metrics
+        if: always()
+        run: |
+          { grep "^RESULT:" test_output.txt 2>/dev/null || true; } > multislice_2d.csv
+          echo "STATUS:${{ steps.run.outcome }}" >> multislice_2d.csv
+
+      - name: Upload metrics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: metrics-multislice_2d
+          path: multislice_2d.csv
+          retention-days: 1
 
   tests-passed:
     needs: [unit-tests, bgremove-tests, inversion-tests, bet-test, combined-tests, pipeline-tests, chisep-tests, dl-tests, geometry-tests, multislice-tests]
@@ -1230,6 +1446,7 @@ jobs:
       needs.detect-changes.outputs.run_combined == 'true' ||
       needs.detect-changes.outputs.run_pipeline == 'true' ||
       needs.detect-changes.outputs.run_chisep == 'true' ||
+      needs.detect-changes.outputs.run_dl == 'true' ||
       needs.detect-changes.outputs.run_geometry == 'true' ||
       needs.detect-changes.outputs.run_multislice == 'true')
     runs-on: ubuntu-latest
@@ -1259,316 +1476,8 @@ jobs:
         env:
           COVERAGE: ${{ needs.unit-tests.outputs.coverage }}
           TESTS_PASSED: ${{ needs.unit-tests.outputs.tests_passed }}
-        run: |
-          # Helper: emit a metrics table for background removal tests (RMSE/NRMSE/Corr/XSIM)
-          emit_table() {
-            local prefix="$1"; shift
-            local has_any=false
-            for test in "$@"; do
-              [ -f "metrics/${prefix}${test}.csv" ] && has_any=true
-            done
-            [ "$has_any" = false ] && return 1
-
-            echo "| Method | RMSE | NRMSE (range) | NRMSE% (χ) | Correlation | XSIM | Time |"
-            echo "|--------|------|---------------|------------|-------------|------|------|"
-            for test in "$@"; do
-              file="metrics/${prefix}${test}.csv"
-              if [ -f "$file" ]; then
-                line=$(awk '/^RESULT:/{print substr($0,8); exit}' "$file")
-                IFS=',' read -r name rmse nrmse nrmse_ch corr xsim time <<< "$line"
-                if [ "$rmse" = "-" ]; then
-                  echo "| ${name} | :x: Failed | - | - | - | - | - |"
-                else
-                  echo "| ${name} | ${rmse} | ${nrmse} | ${nrmse_ch} | ${corr} | ${xsim} | $(printf '%.2fs' "$time") |"
-                fi
-              fi
-            done
-            echo ""
-          }
-
-          # Helper: emit a unified metrics table for susceptibility map tests
-          # RESULT format: name,nrmse%,detrend%,tissue%,blood%,dgm%,dgm_lin,calc_dev,streak,corr,xsim,time
-          # Rows only, with a tag appended to the Method name — lets one table hold methods
-          # that start from different inputs (local field / total field / wrapped phase).
-          emit_chi_rows() {
-            local tag="$1"; local prefix="$2"; shift 2
-            for test in "$@"; do
-              file="metrics/${prefix}${test}.csv"
-              [ -f "$file" ] || continue
-              line=$(awk '/^RESULT:/{print substr($0,8); exit}' "$file")
-              IFS=',' read -r name nrmse dt tissue blood dgm dgm_lin calc_dev streak corr xsim time <<< "$line"
-              if [ "$nrmse" = "-" ]; then
-                echo "| ${name}${tag} | :x: Failed | - | - | - | - | - | - | - | - | - | - |"
-              else
-                echo "| ${name}${tag} | ${nrmse} | ${dt} | ${tissue} | ${blood} | ${dgm} | ${dgm_lin} | ${calc_dev} | ${streak} | ${corr} | ${xsim} | $(printf '%.2fs' "$time") |"
-              fi
-            done
-          }
-          # Every method that produces a susceptibility map, in one table.
-          emit_chi_table_merged() {
-            local rows
-            rows=$(
-              emit_chi_rows "" "test_inversion_" tkd tsvd tikhonov tv rts ilsqr medi nltv ndi fansi fansi_tgv l1qsm whqsm hdqsm amp_pe lsqr heidi
-              emit_chi_rows " — BFR + inversion" "test_combined_" tgv tfi
-              emit_chi_rows " — full pipeline" "test_pipeline_" tgv tgv_single_echo qsmart qsmart_tikhonov
-            )
-            [ -z "$rows" ] && return 1
-            echo "| Method | NRMSE% | Detrend% | Tissue% | Blood% | DGM% | DGM Lin | Calc Dev | Streak | Corr | XSIM | Time |"
-            echo "|--------|--------|----------|---------|--------|------|---------|----------|--------|------|------|------|"
-            echo "$rows"
-            echo ""
-          }
-          emit_chi_table() {
-            local prefix="$1"; shift
-            local has_any=false
-            for test in "$@"; do
-              [ -f "metrics/${prefix}${test}.csv" ] && has_any=true
-            done
-            [ "$has_any" = false ] && return 1
-
-            echo "| Method | NRMSE% | Detrend% | Tissue% | Blood% | DGM% | DGM Lin | Calc Dev | Streak | Corr | XSIM | Time |"
-            echo "|--------|--------|----------|---------|--------|------|---------|----------|--------|------|------|------|"
-            for test in "$@"; do
-              file="metrics/${prefix}${test}.csv"
-              if [ -f "$file" ]; then
-                line=$(awk '/^RESULT:/{print substr($0,8); exit}' "$file")
-                IFS=',' read -r name nrmse dt tissue blood dgm dgm_lin calc_dev streak corr xsim time <<< "$line"
-                if [ "$nrmse" = "-" ]; then
-                  echo "| ${name} | :x: Failed | - | - | - | - | - | - | - | - | - | - |"
-                else
-                  echo "| ${name} | ${nrmse} | ${dt} | ${tissue} | ${blood} | ${dgm} | ${dgm_lin} | ${calc_dev} | ${streak} | ${corr} | ${xsim} | $(printf '%.2fs' "$time") |"
-                fi
-              fi
-            done
-            echo ""
-          }
-
-          # Helper: emit a χ-separation table (one row per source map, metrics as
-          # columns). RESULT format: label,corr,xsim,nrmse%,time
-          emit_chisep_table() {
-            local files=(metrics/chisep_qsmci.csv metrics/chisep_relaxometry_qsmci.csv metrics/chisep_xsepnet.csv)
-            local has_any=false
-            for f in "${files[@]}"; do [ -f "$f" ] && has_any=true; done
-            [ "$has_any" = false ] && return 1
-
-            echo "| Map | Correlation | XSIM | NRMSE% | Time |"
-            echo "|-----|-------------|------|--------|------|"
-            for f in "${files[@]}"; do
-              [ -f "$f" ] || continue
-              # `|| true`: a file with no RESULT: line renders nothing, as it does today.
-              { grep "^RESULT:" "$f" || true; } | sed 's/^RESULT://' \
-                | while IFS=',' read -r name corr xsim nrmse time; do
-                    if [ "$corr" = "-" ] || [ -z "$corr" ]; then
-                      echo "| ${name} | :x: Failed | - | - | - |"
-                    else
-                      echo "| ${name} | ${corr} | ${xsim} | ${nrmse}% | $(printf '%.2fs' "$time") |"
-                    fi
-                  done
-            done
-            echo ""
-          }
-
-          {
-            echo "# QSM-Core Test Results"
-            echo ""
-            echo "## Unit Tests"
-            echo "- **Tests passed:** ${TESTS_PASSED:-N/A}"
-            echo "- **Code coverage:** ${COVERAGE:-N/A}%"
-            echo ""
-
-            if TABLE=$(emit_table "test_bgremove_" sharp resharp vsharp vsharp_no_deconvolve pdf ismv lbv); then
-              echo "## Background Field Removal"
-              echo "*Compared against ground truth local field map*"
-              echo ""
-              echo "$TABLE"
-            fi
-
-            if TABLE=$(emit_table "test_pipeline_" harperella iharperella); then
-              echo "## Combined Phase Unwrapping + Background Removal"
-              echo "*Compared against ground truth local field map (input: wrapped phase)*"
-              echo ""
-              echo "$TABLE"
-            fi
-
-            if TABLE=$(emit_chi_table_merged); then
-              echo "## Dipole Inversion"
-              echo "*Every method that produces a susceptibility map, against ground truth. Plain rows take the local field; **— BFR + inversion** rows take the total field and remove background themselves; **— full pipeline** rows start from wrapped phase.*"
-              echo ""
-              echo "$TABLE"
-            fi
-
-            if [ -f "slices/register_aligned.bin" ] || [ -f "metrics/test_multiorient_register_capture_range.csv" ]; then
-              echo "## Orientation Co-registration"
-              echo "*Orientations that are not already on one grid are rigidly co-registered before they are combined, and each one's B0 direction is read off the recovered rotation. The difference panels are the check: **as acquired** should be bright with rotational mismatch and **after registration** near-flat, both on one scale. Equally bright means the transform went on the wrong way round.*"
-              echo ""
-              if [ -f "metrics/test_multiorient_register_capture_range.csv" ]; then
-                line=$(awk '/^RESULT:/{print substr($0,8); exit}' "metrics/test_multiorient_register_capture_range.csv")
-                IFS=',' read -r name converged failed worst time <<< "$line"
-                echo "| Measure | Value |"
-                echo "|---------|-------|"
-                if [ "$converged" = "-" ]; then
-                  echo "| Capture range | :x: Failed |"
-                else
-                  echo "| Capture range (swept to 70°) | ${converged}° |"
-                  if [ "$failed" = "none" ]; then
-                    echo "| First failure | none in the swept range |"
-                  else
-                    echo "| First failure | ${failed}° |"
-                  fi
-                  echo "| Worst rotation error inside the range | ${worst}° |"
-                  echo "| Time | $(printf '%.2fs' "$time") |"
-                fi
-                echo ""
-              fi
-            fi
-
-            if [ -f "metrics/test_motion_correction.csv" ]; then
-              echo "## Motion Correction"
-              echo "*A four-echo series in which the head drifts between echoes, registered back to the first echo in the complex domain and re-fitted. Scored against the field map the same pipeline produces from the same echoes with no motion — not against ground truth, which a total field map only matches up to the harmonic field unwrapping leaves behind.*"
-              echo ""
-              recovery=$(awk '/^RESULT:Motion recovery,/{print substr($0,8); exit}' "metrics/test_motion_correction.csv")
-              if [ -n "$recovery" ]; then
-                IFS=',' read -r _ rot trans bdir disp rtime <<< "$recovery"
-                echo "| Recovered motion | Worst over the series |"
-                echo "|------------------|-----------------------|"
-                echo "| Rotation error | ${rot}° |"
-                echo "| Translation error | ${trans} mm |"
-                echo "| B0 direction error | ${bdir}° |"
-                echo "| Simulated tissue displacement | ${disp} mm |"
-                echo "| Time | $(printf '%.2fs' "$rtime") |"
-                echo ""
-              fi
-              have_rows=false
-              for variant in Uncorrected Corrected; do
-                grep -q "^RESULT:${variant}," "metrics/test_motion_correction.csv" && have_rows=true
-              done
-              echo "| Field map | NRMSE (range) | Correlation | XSIM | Time |"
-              echo "|-----------|---------------|-------------|------|------|"
-              if [ "$have_rows" = true ]; then
-                for variant in Uncorrected Corrected; do
-                  line=$(awk -v p="^RESULT:${variant}," '$0 ~ p {print substr($0,8); exit}' "metrics/test_motion_correction.csv")
-                  [ -n "$line" ] || continue
-                  IFS=',' read -r name nrmse corr xsim mtime <<< "$line"
-                  echo "| ${name} | ${nrmse} | ${corr} | ${xsim} | $(printf '%.2fs' "$mtime") |"
-                done
-              else
-                echo "| Motion correction | :x: Failed | - | - | - |"
-              fi
-              echo ""
-            fi
-
-            if [ -f "metrics/test_robust_echo_combination.csv" ]; then
-              echo "## Motion-Robust Echo Combination"
-              echo "*One echo corrupted the way spin history or a mistimed shot does — a slab losing most of*"
-              echo "*its magnitude and gaining a smooth phase error — which is deliberately not a rigid*"
-              echo "*transform, so registration cannot reach it. Scored against the ordinary fit of the*"
-              echo "*uncorrupted echoes. The last row is the cost of running this when nothing is wrong.*"
-              echo ""
-              eq=$(awk '/^RESULT:Echo quality,/{print substr($0,8); exit}' "metrics/test_robust_echo_combination.csv")
-              if [ -n "$eq" ]; then
-                IFS=',' read -r _ spread clean_spread echo_no frac <<< "$eq"
-                echo "| Detection | Value |"
-                echo "|-----------|-------|"
-                echo "| Score spread, corrupted series | ${spread}x |"
-                echo "| Score spread, clean series | ${clean_spread}x |"
-                echo "| Echo flagged | ${echo_no} (the corrupted one) |"
-                echo "| Fraction of it downweighted | ${frac} |"
-                echo ""
-              fi
-              have_rows=false
-              for variant in "Plain fit" "Robust fit" "Robust on clean"; do
-                grep -q "^RESULT:${variant}," "metrics/test_robust_echo_combination.csv" && have_rows=true
-              done
-              echo "| Field map | NRMSE (range) | Correlation | XSIM | Time |"
-              echo "|-----------|---------------|-------------|------|------|"
-              if [ "$have_rows" = true ]; then
-                for variant in "Plain fit" "Robust fit" "Robust on clean"; do
-                  line=$(awk -v p="^RESULT:${variant}," '$0 ~ p {print substr($0,8); exit}' "metrics/test_robust_echo_combination.csv")
-                  [ -n "$line" ] || continue
-                  IFS=',' read -r name nrmse corr xsim rtime <<< "$line"
-                  echo "| ${name} | ${nrmse} | ${corr} | ${xsim} | $(printf '%.2fs' "$rtime") |"
-                done
-              else
-                echo "| Robust echo combination | :x: Failed | - | - | - |"
-              fi
-              echo ""
-            fi
-
-            if TABLE=$(emit_chi_table "test_multiorient_" cosmos register sti); then
-              echo "## Multi-Orientation Inversion"
-              echo "*COSMOS and STI consume several orientations, so these are not like-for-like with the single-orientation methods above. Compared against ground truth susceptibility map; STI reports mean magnetic susceptibility.*"
-              echo ""
-              echo "$TABLE"
-            fi
-
-            if TABLE=$(emit_chi_table "test_dl_" qsmgan lpcnn ir2qsm modl_qsm nextqsm); then
-              echo "## Deep Learning — Dipole Inversion"
-              echo "*Compared against ground truth susceptibility map (NeXtQSM: total field in; others: local field in)*"
-              echo ""
-              echo "$TABLE"
-            fi
-
-            if TABLE=$(emit_table "test_dl_" iqfm); then
-              echo "## Deep Learning — Field Mapping"
-              echo "*iQFM: wrapped phase → local field, vs ground truth local field*"
-              echo ""
-              echo "$TABLE"
-            fi
-
-            if [ -f "metrics/test_bet.csv" ] || [ -f "metrics/test_dl_hdbet.csv" ]; then
-              echo "## Brain Extraction"
-              echo "*Compared against ground truth mask*"
-              echo ""
-              echo "| Method | Dice | Time |"
-              echo "|--------|------|------|"
-              for f in metrics/test_bet.csv metrics/test_dl_hdbet.csv; do
-                [ -f "$f" ] || continue
-                line=$(awk '/^RESULT:/{print substr($0,8); exit}' "$f")
-                IFS=',' read -r name dice _ _ _ time <<< "$line"
-                if [ "$dice" = "-" ]; then
-                  echo "| ${name} | :x: Failed | - |"
-                else
-                  echo "| ${name} | ${dice} | $(printf '%.2fs' "$time") |"
-                fi
-              done
-              echo ""
-            fi
-
-            if [ -f "metrics/test_bias_correction.csv" ] || [ -f "metrics/test_swi.csv" ] || [ -f "metrics/test_smwi.csv" ] || [ -f "metrics/test_r2star_t2star.csv" ]; then
-              echo "## Utilities"
-              echo ""
-              echo "| Method | Time |"
-              echo "|--------|------|"
-              if [ -f "metrics/test_bias_correction.csv" ]; then
-                line=$(awk '/^RESULT:/{print substr($0,8); exit}' "metrics/test_bias_correction.csv")
-                IFS=',' read -r name _ _ _ _ time <<< "$line"
-                echo "| ${name} | $(printf '%.2fs' "$time") |"
-              fi
-              if [ -f "metrics/test_swi.csv" ]; then
-                line=$(awk '/^RESULT:/{print substr($0,8); exit}' "metrics/test_swi.csv")
-                IFS=',' read -r name _ _ _ _ time <<< "$line"
-                echo "| ${name} | $(printf '%.2fs' "$time") |"
-              fi
-              if [ -f "metrics/test_smwi.csv" ]; then
-                line=$(awk '/^RESULT:/{print substr($0,8); exit}' "metrics/test_smwi.csv")
-                IFS=',' read -r name _ _ _ _ time <<< "$line"
-                echo "| ${name} | $(printf '%.2fs' "$time") |"
-              fi
-              if [ -f "metrics/test_r2star_t2star.csv" ]; then
-                line=$(awk '/^RESULT:/{print substr($0,8); exit}' "metrics/test_r2star_t2star.csv")
-                IFS=',' read -r name _ _ _ _ time <<< "$line"
-                echo "| ${name} | $(printf '%.2fs' "$time") |"
-              fi
-              echo ""
-            fi
-
-            if TABLE=$(emit_chisep_table); then
-              echo "## χ-Separation"
-              echo "*Paramagnetic (χ+) / diamagnetic (χ−) source maps vs ground truth (QSM-CI chisep phantom)*"
-              echo ""
-              echo "$TABLE"
-            fi
-          } >> $GITHUB_STEP_SUMMARY
+        # Same report as the PR comment, without the figures: scripts/integration_report.sh.
+        run: bash scripts/integration_report.sh >> "$GITHUB_STEP_SUMMARY"
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -1607,383 +1516,7 @@ jobs:
           COVERAGE: ${{ needs.unit-tests.outputs.coverage }}
           TESTS_PASSED: ${{ needs.unit-tests.outputs.tests_passed }}
         run: |
-          # Helper: emit a metrics table for background removal tests (RMSE/NRMSE/Corr/XSIM)
-          emit_table() {
-            local prefix="$1"; shift
-            local has_any=false
-            for test in "$@"; do
-              [ -f "metrics/${prefix}${test}.csv" ] && has_any=true
-            done
-            [ "$has_any" = false ] && return 1
-
-            echo "| Method | RMSE | NRMSE (range) | NRMSE% (χ) | Correlation | XSIM | Time |"
-            echo "|--------|------|---------------|------------|-------------|------|------|"
-            for test in "$@"; do
-              file="metrics/${prefix}${test}.csv"
-              if [ -f "$file" ]; then
-                line=$(awk '/^RESULT:/{print substr($0,8); exit}' "$file")
-                IFS=',' read -r name rmse nrmse nrmse_ch corr xsim time <<< "$line"
-                if [ "$rmse" = "-" ]; then
-                  echo "| ${name} | :x: Failed | - | - | - | - | - |"
-                else
-                  echo "| ${name} | ${rmse} | ${nrmse} | ${nrmse_ch} | ${corr} | ${xsim} | $(printf '%.2fs' "$time") |"
-                fi
-              fi
-            done
-            echo ""
-          }
-
-          # Helper: emit a unified metrics table for susceptibility map tests
-          # RESULT format: name,nrmse%,detrend%,tissue%,blood%,dgm%,dgm_lin,calc_dev,streak,corr,xsim,time
-          # Rows only, with a tag appended to the Method name — lets one table hold methods
-          # that start from different inputs (local field / total field / wrapped phase).
-          emit_chi_rows() {
-            local tag="$1"; local prefix="$2"; shift 2
-            for test in "$@"; do
-              file="metrics/${prefix}${test}.csv"
-              [ -f "$file" ] || continue
-              line=$(awk '/^RESULT:/{print substr($0,8); exit}' "$file")
-              IFS=',' read -r name nrmse dt tissue blood dgm dgm_lin calc_dev streak corr xsim time <<< "$line"
-              if [ "$nrmse" = "-" ]; then
-                echo "| ${name}${tag} | :x: Failed | - | - | - | - | - | - | - | - | - | - |"
-              else
-                echo "| ${name}${tag} | ${nrmse} | ${dt} | ${tissue} | ${blood} | ${dgm} | ${dgm_lin} | ${calc_dev} | ${streak} | ${corr} | ${xsim} | $(printf '%.2fs' "$time") |"
-              fi
-            done
-          }
-          # Every method that produces a susceptibility map, in one table.
-          emit_chi_table_merged() {
-            local rows
-            rows=$(
-              emit_chi_rows "" "test_inversion_" tkd tsvd tikhonov tv rts ilsqr medi nltv ndi fansi fansi_tgv l1qsm whqsm hdqsm amp_pe lsqr heidi
-              emit_chi_rows " — BFR + inversion" "test_combined_" tgv tfi
-              emit_chi_rows " — full pipeline" "test_pipeline_" tgv tgv_single_echo qsmart qsmart_tikhonov
-            )
-            [ -z "$rows" ] && return 1
-            echo "| Method | NRMSE% | Detrend% | Tissue% | Blood% | DGM% | DGM Lin | Calc Dev | Streak | Corr | XSIM | Time |"
-            echo "|--------|--------|----------|---------|--------|------|---------|----------|--------|------|------|------|"
-            echo "$rows"
-            echo ""
-          }
-          emit_chi_table() {
-            local prefix="$1"; shift
-            local has_any=false
-            for test in "$@"; do
-              [ -f "metrics/${prefix}${test}.csv" ] && has_any=true
-            done
-            [ "$has_any" = false ] && return 1
-
-            echo "| Method | NRMSE% | Detrend% | Tissue% | Blood% | DGM% | DGM Lin | Calc Dev | Streak | Corr | XSIM | Time |"
-            echo "|--------|--------|----------|---------|--------|------|---------|----------|--------|------|------|------|"
-            for test in "$@"; do
-              file="metrics/${prefix}${test}.csv"
-              if [ -f "$file" ]; then
-                line=$(awk '/^RESULT:/{print substr($0,8); exit}' "$file")
-                IFS=',' read -r name nrmse dt tissue blood dgm dgm_lin calc_dev streak corr xsim time <<< "$line"
-                if [ "$nrmse" = "-" ]; then
-                  echo "| ${name} | :x: Failed | - | - | - | - | - | - | - | - | - | - |"
-                else
-                  echo "| ${name} | ${nrmse} | ${dt} | ${tissue} | ${blood} | ${dgm} | ${dgm_lin} | ${calc_dev} | ${streak} | ${corr} | ${xsim} | $(printf '%.2fs' "$time") |"
-                fi
-              fi
-            done
-            echo ""
-          }
-
-          # Helper: emit a χ-separation table (one row per source map, metrics as
-          # columns). RESULT format: label,corr,xsim,nrmse%,time
-          emit_chisep_table() {
-            local files=(metrics/chisep_qsmci.csv metrics/chisep_relaxometry_qsmci.csv metrics/chisep_xsepnet.csv)
-            local has_any=false
-            for f in "${files[@]}"; do [ -f "$f" ] && has_any=true; done
-            [ "$has_any" = false ] && return 1
-
-            echo "| Map | Correlation | XSIM | NRMSE% | Time |"
-            echo "|-----|-------------|------|--------|------|"
-            for f in "${files[@]}"; do
-              [ -f "$f" ] || continue
-              # `|| true`: a file with no RESULT: line renders nothing, as it does today.
-              { grep "^RESULT:" "$f" || true; } | sed 's/^RESULT://' \
-                | while IFS=',' read -r name corr xsim nrmse time; do
-                    if [ "$corr" = "-" ] || [ -z "$corr" ]; then
-                      echo "| ${name} | :x: Failed | - | - | - |"
-                    else
-                      echo "| ${name} | ${corr} | ${xsim} | ${nrmse}% | $(printf '%.2fs' "$time") |"
-                    fi
-                  done
-            done
-            echo ""
-          }
-
-          # Helper: emit figures for a list of slugs.
-          # Idempotent: a montage can be referenced by more than one section (stage_dipole
-          # carries the single-orientation, deep-learning and multi-orientation rows), and
-          # which sections run depends on what the change touched. Emitting once, from
-          # whichever section gets there first, means the figure still appears when only one
-          # of them ran without being repeated when several did.
-          EMITTED_FIGURES=""
-          emit_figures() {
-            for slug in "$@"; do
-              case " $EMITTED_FIGURES " in *" $slug "*) continue ;; esac
-              if [ -f "figures/${slug}.png" ]; then
-                echo "![${slug}](figures/${slug}.png)"
-                echo ""
-                EMITTED_FIGURES="$EMITTED_FIGURES $slug"
-              fi
-            done
-          }
-
-          {
-            echo "## QSM-Core Test Results"
-            echo ""
-            echo "### Unit Tests"
-            echo "- **Tests passed:** ${TESTS_PASSED:-N/A}"
-            echo "- **Code coverage:** ${COVERAGE:-N/A}%"
-            echo ""
-
-            if TABLE=$(emit_table "test_bgremove_" sharp resharp vsharp vsharp_no_deconvolve pdf ismv lbv); then
-              echo "### Background Field Removal"
-              echo "*Compared against ground truth local field map*"
-              echo ""
-              echo "$TABLE"
-              echo ""
-              emit_figures stage_bfr
-            fi
-
-            if TABLE=$(emit_table "test_pipeline_" harperella iharperella); then
-              echo "### Combined Phase Unwrapping + Background Removal"
-              echo "*Compared against ground truth local field map (input: wrapped phase)*"
-              echo ""
-              echo "$TABLE"
-              echo ""
-            fi
-
-            if TABLE=$(emit_chi_table_merged); then
-              echo "### Dipole Inversion"
-              echo "*Every method that produces a susceptibility map, against ground truth. Plain rows take the local field; **— BFR + inversion** rows take the total field and remove background themselves; **— full pipeline** rows start from wrapped phase.*"
-              echo ""
-              echo "$TABLE"
-              echo ""
-              emit_figures stage_dipole
-            fi
-
-            if [ -f "slices/register_aligned.bin" ] || [ -f "metrics/test_multiorient_register_capture_range.csv" ]; then
-              echo "### Orientation Co-registration"
-              echo "*Orientations that are not already on one grid are rigidly co-registered before they are combined, and each one's B0 direction is read off the recovered rotation. The difference panels are the check: **as acquired** should be bright with rotational mismatch and **after registration** near-flat, both on one scale. Equally bright means the transform went on the wrong way round.*"
-              echo ""
-              if [ -f "metrics/test_multiorient_register_capture_range.csv" ]; then
-                line=$(awk '/^RESULT:/{print substr($0,8); exit}' "metrics/test_multiorient_register_capture_range.csv")
-                IFS=',' read -r name converged failed worst time <<< "$line"
-                echo "| Measure | Value |"
-                echo "|---------|-------|"
-                if [ "$converged" = "-" ]; then
-                  echo "| Capture range | :x: Failed |"
-                else
-                  echo "| Capture range (swept to 70°) | ${converged}° |"
-                  if [ "$failed" = "none" ]; then
-                    echo "| First failure | none in the swept range |"
-                  else
-                    echo "| First failure | ${failed}° |"
-                  fi
-                  echo "| Worst rotation error inside the range | ${worst}° |"
-                  echo "| Time | $(printf '%.2fs' "$time") |"
-                fi
-                echo ""
-              fi
-              echo ""
-              emit_figures stage_registration
-            fi
-
-            if [ -f "metrics/test_motion_correction.csv" ]; then
-              echo "### Motion Correction"
-              echo "*A four-echo series in which the head drifts between echoes, registered back to the first echo in the complex domain and re-fitted. Scored against the field map the same pipeline produces from the same echoes with no motion — not against ground truth, which a total field map only matches up to the harmonic field unwrapping leaves behind.*"
-              echo ""
-              recovery=$(awk '/^RESULT:Motion recovery,/{print substr($0,8); exit}' "metrics/test_motion_correction.csv")
-              if [ -n "$recovery" ]; then
-                IFS=',' read -r _ rot trans bdir disp rtime <<< "$recovery"
-                echo "| Recovered motion | Worst over the series |"
-                echo "|------------------|-----------------------|"
-                echo "| Rotation error | ${rot}° |"
-                echo "| Translation error | ${trans} mm |"
-                echo "| B0 direction error | ${bdir}° |"
-                echo "| Simulated tissue displacement | ${disp} mm |"
-                echo "| Time | $(printf '%.2fs' "$rtime") |"
-                echo ""
-              fi
-              have_rows=false
-              for variant in Uncorrected Corrected; do
-                grep -q "^RESULT:${variant}," "metrics/test_motion_correction.csv" && have_rows=true
-              done
-              echo "| Field map | NRMSE (range) | Correlation | XSIM | Time |"
-              echo "|-----------|---------------|-------------|------|------|"
-              if [ "$have_rows" = true ]; then
-                for variant in Uncorrected Corrected; do
-                  line=$(awk -v p="^RESULT:${variant}," '$0 ~ p {print substr($0,8); exit}' "metrics/test_motion_correction.csv")
-                  [ -n "$line" ] || continue
-                  IFS=',' read -r name nrmse corr xsim mtime <<< "$line"
-                  echo "| ${name} | ${nrmse} | ${corr} | ${xsim} | $(printf '%.2fs' "$mtime") |"
-                done
-              else
-                echo "| Motion correction | :x: Failed | - | - | - |"
-              fi
-              echo ""
-              emit_figures stage_motion
-            fi
-
-            if [ -f "metrics/test_robust_echo_combination.csv" ]; then
-              echo "### Motion-Robust Echo Combination"
-              echo "*One echo corrupted the way spin history or a mistimed shot does — a slab losing most of*"
-              echo "*its magnitude and gaining a smooth phase error — which is deliberately not a rigid*"
-              echo "*transform, so registration cannot reach it. Scored against the ordinary fit of the*"
-              echo "*uncorrupted echoes. The last row is the cost of running this when nothing is wrong.*"
-              echo ""
-              eq=$(awk '/^RESULT:Echo quality,/{print substr($0,8); exit}' "metrics/test_robust_echo_combination.csv")
-              if [ -n "$eq" ]; then
-                IFS=',' read -r _ spread clean_spread echo_no frac <<< "$eq"
-                echo "| Detection | Value |"
-                echo "|-----------|-------|"
-                echo "| Score spread, corrupted series | ${spread}x |"
-                echo "| Score spread, clean series | ${clean_spread}x |"
-                echo "| Echo flagged | ${echo_no} (the corrupted one) |"
-                echo "| Fraction of it downweighted | ${frac} |"
-                echo ""
-              fi
-              have_rows=false
-              for variant in "Plain fit" "Robust fit" "Robust on clean"; do
-                grep -q "^RESULT:${variant}," "metrics/test_robust_echo_combination.csv" && have_rows=true
-              done
-              echo "| Field map | NRMSE (range) | Correlation | XSIM | Time |"
-              echo "|-----------|---------------|-------------|------|------|"
-              if [ "$have_rows" = true ]; then
-                for variant in "Plain fit" "Robust fit" "Robust on clean"; do
-                  line=$(awk -v p="^RESULT:${variant}," '$0 ~ p {print substr($0,8); exit}' "metrics/test_robust_echo_combination.csv")
-                  [ -n "$line" ] || continue
-                  IFS=',' read -r name nrmse corr xsim rtime <<< "$line"
-                  echo "| ${name} | ${nrmse} | ${corr} | ${xsim} | $(printf '%.2fs' "$rtime") |"
-                done
-              else
-                echo "| Robust echo combination | :x: Failed | - | - | - |"
-              fi
-              echo ""
-              emit_figures stage_echo_quality
-            fi
-
-            if TABLE=$(emit_chi_table "test_multiorient_" cosmos register sti); then
-              echo "### Multi-Orientation Inversion"
-              echo "*COSMOS and STI consume several orientations, so these are not like-for-like with the single-orientation methods above. Compared against ground truth susceptibility map; STI reports mean magnetic susceptibility.*"
-              echo ""
-              echo "$TABLE"
-              echo ""
-              # Its own montage, next to its own table. COSMOS and STI also appear in
-              # stage_dipole above, where they sit against every other method on a shared
-              # scale; that answers "how does it compare", this answers "did it work".
-              # Not sti_msa: on this isotropic phantom the anisotropy is ~1e-17, so its
-              # figure is three blank panels with no mask outline, which reads as broken data
-              # rather than as a clean null. The test asserts the bound; visualising MSA only
-              # earns its space once there is anisotropic test data to show.
-              emit_figures stage_multiorient
-            fi
-
-            if [ -f "figures/oblique_sagittal_chi.png" ]; then
-              echo "### Geometry — Sagittal Anisotropic Oblique"
-              echo "*A 1x1x4 mm sagittal stack tilted 18 deg about S-I and 12 deg about A-P, synthesised from the phantom, reconstructed through the cardinal-resample pathway and mapped back to its own voxel space. No fixed-matrix phantom has this geometry, and it is the only shape of data that exercises how axial_grid_for assigns its spacings. Pass/fail only; see the job log for the correlation and S-I detail numbers. The panel labels are the renderer's generic voxel-axis names; because this stack is stored sagittally, its 'Axial' panel is the sagittal anatomical plane.*"
-              echo ""
-              emit_figures oblique_sagittal_truth oblique_sagittal_chi
-            fi
-
-            if TABLE=$(emit_chi_table "test_dl_" qsmgan lpcnn ir2qsm modl_qsm nextqsm); then
-              echo "### Deep Learning — Dipole Inversion"
-              echo "*Compared against ground truth susceptibility map (NeXtQSM: total field in; others: local field in)*"
-              echo ""
-              echo "$TABLE"
-              echo ""
-            fi
-
-            if TABLE=$(emit_table "test_dl_" iqfm); then
-              echo "### Deep Learning — Field Mapping"
-              echo "*iQFM: wrapped phase → local field, compared against ground truth local field*"
-              echo ""
-              echo "$TABLE"
-              echo ""
-              echo "_Map shown in the Local field montage above, alongside the background-field-removal methods it is scored against._"
-              echo ""
-            fi
-
-            if [ -f "metrics/test_bet.csv" ] || [ -f "metrics/test_dl_hdbet.csv" ]; then
-              echo "### Brain Extraction"
-              echo "*Compared against ground truth mask*"
-              echo ""
-              echo "| Method | Dice | Time |"
-              echo "|--------|------|------|"
-              for f in metrics/test_bet.csv metrics/test_dl_hdbet.csv; do
-                [ -f "$f" ] || continue
-                line=$(awk '/^RESULT:/{print substr($0,8); exit}' "$f")
-                IFS=',' read -r name dice _ _ _ time <<< "$line"
-                if [ "$dice" = "-" ]; then
-                  echo "| ${name} | :x: Failed | - |"
-                else
-                  echo "| ${name} | ${dice} | $(printf '%.2fs' "$time") |"
-                fi
-              done
-              echo ""
-              emit_figures bet
-            fi
-
-            if [ -f "slices/unwrap_raw_romeo.bin" ] || [ -f "slices/unwrap_raw_laplacian_neumann.bin" ] || [ -f "slices/unwrap_raw_bestpath.bin" ] || [ -f "slices/unwrap_raw_prelude.bin" ]; then
-              echo "### Phase Unwrapping + B0 Estimation"
-              echo "*MCPC-3D-S, then each unwrapper → total field map, beside the ground truth. These differ by an arbitrary harmonic field, which is expected of unwrappers; the like-for-like comparison is below.*"
-              echo ""
-              emit_figures stage_unwrap
-              echo ""
-            fi
-
-            if TABLE=$(emit_table "test_pipeline_unwrap_bfr_" romeo laplacian_neumann bestpath prelude stage_laplacian); then
-              echo "### Unwrapper Comparison (local field, after background removal)"
-              echo "*Each unwrapper → field map → V-SHARP → local field, vs ground truth.*"
-              echo ""
-              echo "Total field maps differ between unwrappers by an arbitrary harmonic field, so they are compared after background removal. ROMEO, Laplacian, best path and PRELUDE should land close. The last row drives the shared \`run_field_mapping\` stage, and is what catches a config selecting the wrong variant."
-              echo ""
-              echo "$TABLE"
-            fi
-
-            if [ -f "metrics/test_bias_correction.csv" ] || [ -f "metrics/test_swi.csv" ] || [ -f "metrics/test_smwi.csv" ] || [ -f "metrics/test_r2star_t2star.csv" ]; then
-              echo "### Utilities"
-              echo ""
-              echo "| Method | Time |"
-              echo "|--------|------|"
-              if [ -f "metrics/test_bias_correction.csv" ]; then
-                line=$(awk '/^RESULT:/{print substr($0,8); exit}' "metrics/test_bias_correction.csv")
-                IFS=',' read -r name _ _ _ _ time <<< "$line"
-                echo "| ${name} | $(printf '%.2fs' "$time") |"
-              fi
-              if [ -f "metrics/test_swi.csv" ]; then
-                line=$(awk '/^RESULT:/{print substr($0,8); exit}' "metrics/test_swi.csv")
-                IFS=',' read -r name _ _ _ _ time <<< "$line"
-                echo "| ${name} | $(printf '%.2fs' "$time") |"
-              fi
-              if [ -f "metrics/test_smwi.csv" ]; then
-                line=$(awk '/^RESULT:/{print substr($0,8); exit}' "metrics/test_smwi.csv")
-                IFS=',' read -r name _ _ _ _ time <<< "$line"
-                echo "| ${name} | $(printf '%.2fs' "$time") |"
-              fi
-              if [ -f "metrics/test_r2star_t2star.csv" ]; then
-                line=$(awk '/^RESULT:/{print substr($0,8); exit}' "metrics/test_r2star_t2star.csv")
-                IFS=',' read -r name _ _ _ _ time <<< "$line"
-                echo "| ${name} | $(printf '%.2fs' "$time") |"
-              fi
-              echo ""
-              emit_figures bias_correction stage_supplementary
-            fi
-
-            if TABLE=$(emit_chisep_table); then
-              echo "### χ-Separation"
-              echo "*Paramagnetic (χ+) / diamagnetic (χ−) source maps vs ground truth (QSM-CI chisep phantom)*"
-              echo ""
-              echo "$TABLE"
-              echo ""
-              emit_figures stage_chisep
-            fi
-          } > report.md
+          bash scripts/integration_report.sh --figures > report.md
           # Retry with backoff — `cml comment create` hits the GitHub API and can be
           # throttled (rate limit shared across concurrent runs). Best-effort: the
           # step is continue-on-error, so a persistent throttle won't fail the run.

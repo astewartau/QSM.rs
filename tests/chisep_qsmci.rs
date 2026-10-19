@@ -132,4 +132,6 @@ fn test_chi_sep_medi_qsmci() {
     println!("[RESULT] chi_sep_medi:");
     chisep_score("chi_sep_medi χ+", &chi_pos, &ph.gt_para, &ph.mask, ph.dims, secs);
     chisep_score("chi_sep_medi χ−", &dia_mag, &ph.gt_dia, &ph.mask, ph.dims, secs);
+    save_center_slices(&chi_pos, &ph.mask, ph.dims, "chisep_medi_para");
+    save_center_slices(&dia_mag, &ph.mask, ph.dims, "chisep_medi_dia");
 }
