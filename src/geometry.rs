@@ -1173,6 +1173,17 @@ mod tests {
         }
     }
 
+    /// A singular affine (a zero column, or no geometry at all) has no direction to give: B0 is
+    /// taken along z rather than as NaN.
+    #[test]
+    fn b0_direction_of_a_singular_affine_is_z() {
+        let mut flat = identity_affine((1.0, 1.0, 1.0));
+        flat[10] = 0.0;
+        for a in [[0.0; 16], flat] {
+            assert_eq!(b0_direction_from_affine(&a), (0.0, 0.0, 1.0), "{a:?}");
+        }
+    }
+
     /// The regression that matters: with anisotropic voxels, factoring the voxel scaling out of
     /// the affine is not optional. Inverting the scaled matrix instead (`A⁻¹·(0,0,1)`) is the
     /// QSMxT 8.2.2 bug, and on this acquisition it is 35° away from the right answer.
@@ -1499,6 +1510,15 @@ mod tests {
         let off = resample_complex_to_axial(&mag, &pha, nx, ny, nz, &a, &AxialResampleParams { noise_fill_fraction: None });
         assert!(off.phase.contains(&0.0));
         assert!(off.phase.iter().filter(|v| **v == 0.0).count() > a1.phase.iter().filter(|v| **v == 0.0).count());
+    }
+
+    /// On an axial grid, resampling a mask to axial changes nothing.
+    #[test]
+    fn mask_resampling_on_an_axial_grid_is_a_no_op() {
+        let mask = vec![0u8, 1, 0, 1, 1, 1, 0, 1, 0, 1, 0, 0];
+        for vs in [(1.0, 1.0, 1.0), (0.8, 0.8, 2.0)] {
+            assert_eq!(resample_mask_to_axial(&mask, 3, 2, 2, &identity_affine(vs)), mask, "{vs:?}");
+        }
     }
 
     #[test]
