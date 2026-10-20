@@ -755,7 +755,7 @@ mod tests {
 
     /// The same map for every echo — what an echo-averaged QSM provides.
     fn repeated(chi: &[f64], ne: usize) -> Vec<f64> {
-        chi.iter().flat_map(|&c| std::iter::repeat(c).take(ne)).collect()
+        chi.iter().flat_map(|&c| std::iter::repeat_n(c, ne)).collect()
     }
 
     /// Eq. 4 wiring: given a voxel's per-echo QSM χ(t) and magnitude, the data

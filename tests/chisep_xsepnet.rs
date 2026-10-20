@@ -89,6 +89,7 @@ fn crop(ph: &ChiSepPhantom, dims: (usize, usize, usize)) -> ChiSepPhantom {
     ChiSepPhantom {
         local_field_ppm: cut(&ph.local_field_ppm),
         chi_total: cut(&ph.chi_total),
+        chi_echoes: None,
         r2prime: cut(&ph.r2prime),
         magnitude_rss: Vec::new(),
         mag_voxel_major: Vec::new(),
