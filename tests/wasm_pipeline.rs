@@ -143,6 +143,11 @@ impl Phantom {
     fn mag_voxel_major(&self) -> Vec<f64> {
         (0..NV).flat_map(|l| self.magnitudes.iter().map(move |m| m[l])).collect()
     }
+
+    /// Multi-echo phase, voxel-major `(n_voxels, n_echoes)`.
+    fn phase_voxel_major(&self) -> Vec<f64> {
+        (0..NV).flat_map(|l| self.phases.iter().map(move |p| p[l])).collect()
+    }
 }
 
 /// Local field (ppm) of `chi` (ppm) inside `mask`: the dipole convolution on a doubled grid.
@@ -364,6 +369,7 @@ fn separation() {
     let m = meta();
     let mag_rss = rss_combine(&p.mag_refs()).unwrap();
     let mag_multi = p.mag_voxel_major();
+    let phase_multi = p.phase_voxel_major();
     let r2prime: Vec<f64> = p.mask.iter().zip(&p.chi).map(|(&k, &x)| if k != 0 { 5.0 + 50.0 * x.abs() } else { 0.0 }).collect();
     let inputs = SeparationInputs {
         local_field_ppm: &p.local_ppm,
@@ -373,6 +379,7 @@ fn separation() {
         r2star: None,
         magnitude_rss: Some(&mag_rss),
         magnitude_multi: Some(&mag_multi),
+        phase_multi: Some(&phase_multi),
         se_magnitude_multi: None,
     };
     for &algorithm in SeparationAlgorithm::VARIANTS {
@@ -878,6 +885,7 @@ fn dl_separation(algorithm: SeparationAlgorithm, patch: Option<(usize, usize, us
         r2star: None,
         magnitude_rss: None,
         magnitude_multi: None,
+        phase_multi: None,
         se_magnitude_multi: None,
     };
     let config = separation_config(algorithm, patch);

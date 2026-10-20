@@ -15,8 +15,8 @@ use crate::inversion::{
     LsqrQsmParams, HeidiParams,
 };
 use crate::separation::{
-    ChiSepIlsqrParams, ChiSepNetParams, ChiSepParams, DecomposeParams, HcChisepParams,
-    R2starQsmParams, SusepNetParams, WaveSepParams,
+    ChiSepIlsqrParams, ChiSepNetParams, ChiSepParams, DecomposeComplexParams, DecomposeParams,
+    HcChisepParams, R2starQsmParams, SusepNetParams, WaveSepParams,
 };
 use crate::unwrap::romeo::RomeoParams;
 use crate::unwrap::LaplacianSolver;
@@ -597,6 +597,9 @@ pub enum SeparationAlgorithm {
     WaveSep,
     /// Signal-domain per-voxel fit from a QSM + multi-echo magnitude (Chen 2021).
     Decompose,
+    /// DECOMPOSE's signal model fitted to the measured multi-echo complex signal
+    /// (magnitude + phase), with a free per-voxel phase offset and frequency; no QSM.
+    DecomposeComplex,
     /// Hollow-cylinder fit from a QSM + R2' + multi-echo magnitude (Wharton & Bowtell).
     HcChisep,
     /// SUSEP-Net deep-learning separation from QSM + R2' + local field (requires
@@ -673,6 +676,12 @@ impl InversionAlgorithm {
 }
 
 impl SeparationAlgorithm {
+    /// Whether the method reads the conventional QSM (`SeparationInputs::qsm`).
+    /// `DecomposeComplex` fits the measured signal and does not.
+    pub fn needs_qsm(&self) -> bool {
+        !matches!(self, SeparationAlgorithm::DecomposeComplex)
+    }
+
     /// How this method behaves when B0 is not along voxel `+z`.
     ///
     /// The model-based separations carry the direction through their field terms. The rest
@@ -686,6 +695,7 @@ impl SeparationAlgorithm {
             SeparationAlgorithm::R2starQsm
             | SeparationAlgorithm::WaveSep
             | SeparationAlgorithm::Decompose
+            | SeparationAlgorithm::DecomposeComplex
             | SeparationAlgorithm::HcChisep => OrientationSupport::NotApplicable,
             SeparationAlgorithm::SusepNet | SeparationAlgorithm::ChiSepNet => {
                 OrientationSupport::AxialOnly
@@ -756,12 +766,12 @@ impl SeparationAlgorithm {
             Self::SusepNet => Some("susep-net"),
             Self::ChiSepNet => Some("chi-sepnet"),
             Self::ChiSepIlsqr | Self::ChiSepMedi | Self::R2starQsm | Self::WaveSep
-            | Self::Decompose | Self::HcChisep => None,
+            | Self::Decompose | Self::DecomposeComplex | Self::HcChisep => None,
         }
     }
     pub const VARIANTS: &'static [Self] = &[
         Self::ChiSepIlsqr, Self::ChiSepMedi, Self::R2starQsm, Self::WaveSep,
-        Self::Decompose, Self::HcChisep, Self::SusepNet, Self::ChiSepNet,
+        Self::Decompose, Self::DecomposeComplex, Self::HcChisep, Self::SusepNet, Self::ChiSepNet,
     ];
 }
 
@@ -777,6 +787,8 @@ pub struct SeparationConfig {
     pub wavesep: WaveSepParams,
     /// `b0` overridden from scan metadata by the dispatcher.
     pub decompose: DecomposeParams,
+    /// `b0` overridden from scan metadata by the dispatcher.
+    pub decompose_complex: DecomposeComplexParams,
     /// `b0` overridden from scan metadata; `se_echo_times` supplies the SE echoes.
     pub hc_chisep: HcChisepParams,
     /// χ-sepnet sliding-window patch (default: the authors' 192×192×128).
@@ -794,6 +806,7 @@ impl Default for SeparationConfig {
             r2star_qsm: R2starQsmParams::default(),
             wavesep: WaveSepParams::default(),
             decompose: DecomposeParams::default(),
+            decompose_complex: DecomposeComplexParams::default(),
             hc_chisep: HcChisepParams::default(),
             chi_sepnet: ChiSepNetParams::default(),
             susep_net: SusepNetParams::default(),
@@ -1029,7 +1042,8 @@ mod orientation_tests {
         }
         for a in [
             SeparationAlgorithm::R2starQsm, SeparationAlgorithm::WaveSep,
-            SeparationAlgorithm::Decompose, SeparationAlgorithm::HcChisep,
+            SeparationAlgorithm::Decompose, SeparationAlgorithm::DecomposeComplex,
+            SeparationAlgorithm::HcChisep,
         ] {
             assert!(!a.orientation_support().requires_axial(), "{a:?}");
         }

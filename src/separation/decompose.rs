@@ -14,8 +14,13 @@
 //! coefficient, χ+ ≥ 0, χ− ≤ 0 (ppm-scale). C+, C−, C₀ are the paramagnetic,
 //! diamagnetic and neutral compartment amplitudes and R2*₀ the baseline decay.
 //!
-//! Like the QSM-CI reference, the *phase* is synthesized from the provided
-//! conventional QSM (χ_total) rather than re-derived from raw multi-echo phase —
+//! There are two entry points. [`decompose_complex`] fits this model to the
+//! measured complex multi-echo signal (magnitude and phase), with a free
+//! per-voxel phase offset and frequency; see its documentation. [`decompose`],
+//! described in the rest of this header, follows the QSM-CI reference instead.
+//!
+//! Like the QSM-CI reference, [`decompose`] synthesizes the *phase* from the provided
+//! conventional QSM (χ_total) rather than re-deriving it from raw multi-echo phase —
 //! this isolates DECOMPOSE's separation step. The observed complex data per echo
 //! is `y = |mag_norm| · exp(−i·(2/3)·χ_total·γ·B0·TE)` (magnitude normalised by its
 //! global maximum).
@@ -460,14 +465,16 @@ fn fit_voxel_complex(
 ) -> (f64, f64) {
     let ne = te.len();
     let smax = mag.iter().cloned().fold(0.0_f64, f64::max);
-    if !(smax > 0.0) || phase.iter().any(|p| !p.is_finite()) {
+    if smax.is_nan() || smax <= 0.0 || phase.iter().any(|p| !p.is_finite()) {
         return (0.0, 0.0);
     }
     // Data in DECOMPOSE's convention, where a paramagnetic pool's phase is
-    // −(2/3)·χ·γ·B0·t: the conjugate of the input's +γ·ΔB·TE convention.
-    // Alongside, the per-echo unwrapped phase and log-magnitude for the seeds.
-    let (mut st, mut stt) = (0.0, 0.0);
-    let (mut sp, mut stp, mut sl, mut stl) = (0.0, 0.0, 0.0, 0.0);
+    // −(2/3)·χ·γ·B0·t: the conjugate of the input's +γ·ΔB·TE convention. The
+    // phase, unwrapped along the echoes, is fitted with a line to seed φ₀ and Δω.
+    // Nothing is seeded from the magnitude decay: beating between the pools
+    // modulates it, and a log-linear R2* or S₀ from it lands the fit in a wrong
+    // basin more often than the fixed seeds below do.
+    let (mut st, mut stt, mut sp, mut stp) = (0.0, 0.0, 0.0, 0.0);
     let mut prev = 0.0;
     for e in 0..ne {
         let m = mag[e] / smax;
@@ -475,31 +482,23 @@ fn fit_voxel_complex(
         ws.y[e] = (m * ph.cos(), m * ph.sin());
         let ang = if e == 0 { ph } else { unwrap_near(ph, prev) };
         prev = ang;
-        let l = m.max(1e-6).ln();
         let t = te[e];
         st += t;
         stt += t * t;
         sp += ang;
         stp += t * ang;
-        sl += l;
-        stl += t * l;
     }
     let nf = ne as f64;
-    let det = nf * stt - st * st;
-    let lin = |s: f64, ts: f64| -> (f64, f64) {
-        let slope = (nf * ts - st * s) / det;
-        (slope, (s - slope * st) / nf)
-    };
-    let (dw0, phi0) = lin(sp, stp);
-    let (lslope, lint) = lin(sl, stl);
-    let s0 = lint.exp().clamp(1e-3, 10.0);
-    let r2s = (-lslope).max(0.0);
+    let dw0 = (nf * stp - st * sp) / (nf * stt - st * st);
+    let phi0 = (sp - dw0 * st) / nf;
 
     let b0 = params.b0;
     let a = (2.0 * PI * GAMMA * b0) / (9.0 * 3.0_f64.sqrt());
     let w = (2.0 / 3.0) * GAMMA * b0;
     let ub = chi_search_bound(te, b0, params.chi_bound);
-    let amp_ub = 2.0 * s0.max(1.0);
+    // The data are normalised to their largest echo, so the pool amplitudes sum
+    // to ~exp(R2*·TE₁) ≥ 1; 3 leaves room for any plausible decay before TE₁.
+    let amp_ub = 3.0;
     let r2_ub = params.r2_bound;
     let inf = f64::INFINITY;
     let lb = [0.0, 0.0, 0.0, 0.0, 0.0, -ub, -inf, -inf];
@@ -517,23 +516,23 @@ fn fit_voxel_complex(
         // The pools' mean phase slope is part of the model; take it out of the
         // measured slope so the seed's total frequency matches the data.
         let x0 = [
-            0.2 * s0,
-            0.2 * s0,
-            0.6 * s0,
-            (0.5 * r2s).min(r2_ub),
+            0.2,
+            0.2,
+            0.6,
+            10.0_f64.min(r2_ub),
             xp0,
             xm0,
             phi0,
             dw0 + w * 0.2 * (xp0 + xm0),
         ];
-        let fit = lm_core(&resid, &jac, &x0, &lb, &ubv, params.max_lm_iter, &mut ws.lm);
+        let fit = lm_core(&resid, jac, &x0, &lb, &ubv, params.max_lm_iter, true, &mut ws.lm);
         if fit.1 < best.1 {
             best = fit;
         }
     }
     let x = best.0;
     let sum = x[0] + x[1] + x[2];
-    if !(sum > 0.0) {
+    if sum.is_nan() || sum <= 0.0 {
         return (0.0, 0.0);
     }
     ((x[0] / sum * x[4]).max(0.0), (x[1] / sum * x[5]).min(0.0))
@@ -834,13 +833,23 @@ where
             }
         }
     };
-    lm_core(&resid, fd_jac, x0, lb, ub, max_iter, s).0
+    lm_core(&resid, fd_jac, x0, lb, ub, max_iter, false, s).0
 }
 
 /// Levenberg–Marquardt over the box `[lb, ub]` with a caller-supplied
 /// Jacobian. `jac(x, s)` fills `s.jac` (`m × n`, column-major) at `x`; it may
 /// read `s.r`, which holds the residual at `x`, and use `s.rp` as scratch.
 /// Returns the solution and its cost `‖r‖²`. Allocates nothing.
+///
+/// With `active_set`, a parameter sitting on a bound that the gradient pushes
+/// outward is held there for the step instead of being stepped and clamped.
+/// Clamping alone distorts the step of every other parameter, the damped
+/// retries then shrink it until the decrease falls under `ftol`, and the solve
+/// stops short of the minimum — at noise levels where a pool amplitude, R2*₀
+/// or a pool χ belongs on its bound, that left a sizeable fraction of
+/// [`decompose_complex`] voxels several-fold above the optimum cost. The
+/// alternating fit of [`decompose`] keeps the plain clamped step its results
+/// were validated with.
 fn lm_core<F, J>(
     resid: &F,
     jac: J,
@@ -848,6 +857,7 @@ fn lm_core<F, J>(
     lb: &[f64],
     ub: &[f64],
     max_iter: usize,
+    active_set: bool,
     s: &mut LmScratch,
 ) -> ([f64; LM_MAX_N], f64)
 where
@@ -880,14 +890,33 @@ where
             g[jc] = dot(&s.jac[jc * m..(jc + 1) * m], &s.r);
         }
 
+        // Parameters held on their bound for this step (see `active_set`).
+        let mut held = [false; LM_MAX_N];
+        if active_set {
+            for d in 0..n {
+                // The step is x − dx with dx ≈ A⁻¹g, so g > 0 pushes x down.
+                held[d] = (x[d] <= lb[d] && g[d] > 0.0) || (x[d] >= ub[d] && g[d] < 0.0);
+            }
+        }
+
         // Inner loop: inflate lambda until a step decreases the cost.
         let mut improved = false;
         for _ in 0..30 {
             let mut al = a;
+            let mut gl = g;
             for d in 0..n {
                 al[d * n + d] += lambda * a[d * n + d].max(1e-12);
+                if held[d] {
+                    for k in 0..n {
+                        al[d * n + k] = 0.0;
+                        al[k * n + d] = 0.0;
+                    }
+                    al[d * n + d] = 1.0;
+                    gl[d] = 0.0;
+                }
             }
-            let Some(dx) = solve_small(&al, &g, n) else {
+            let g = &gl;
+            let Some(dx) = solve_small(&al, g, n) else {
                 lambda *= 2.5;
                 continue;
             };

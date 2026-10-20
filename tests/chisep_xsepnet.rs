@@ -135,6 +135,7 @@ fn separate(ph: &ChiSepPhantom, cfg: &SeparationConfig) -> (Vec<f64>, Vec<f64>, 
         r2star: None,
         magnitude_rss: None,
         magnitude_multi: None,
+        phase_multi: None,
         se_magnitude_multi: None,
     };
     let t = Instant::now();

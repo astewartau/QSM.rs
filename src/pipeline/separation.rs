@@ -11,7 +11,8 @@
 
 use super::config::*;
 use crate::separation::{
-    ChiSepIlsqrParams, ChiSepParams, DecomposeParams, HcChisepParams, R2starQsmParams,
+    ChiSepIlsqrParams, ChiSepParams, DecomposeComplexParams, DecomposeParams, HcChisepParams,
+    R2starQsmParams,
 };
 
 /// Proton gyromagnetic ratio in Hz/T (for the central frequency `cf = γ·B0`).
@@ -24,7 +25,8 @@ pub struct SeparationInputs<'a> {
     /// Local (tissue) field in ppm — for `ChiSepIlsqr` / `ChiSepMedi`.
     pub local_field_ppm: &'a [f64],
     /// Conventional QSM χ_total in ppm — the QSM-init for `ChiSepIlsqr` and the
-    /// input for `R2starQsm` / `WaveSep` / `Decompose` / `HcChisep`.
+    /// input for `R2starQsm` / `WaveSep` / `Decompose` / `HcChisep`. Unused by
+    /// `DecomposeComplex`, which may pass an empty slice.
     pub qsm: &'a [f64],
     /// Binary brain mask (`n_voxels`, 1 = inside).
     pub mask: &'a [u8],
@@ -35,8 +37,11 @@ pub struct SeparationInputs<'a> {
     /// Root-sum-of-squares magnitude (`ChiSepIlsqr` / `ChiSepMedi`).
     pub magnitude_rss: Option<&'a [f64]>,
     /// Multi-echo magnitude, voxel-major `(n_voxels, n_echoes)`
-    /// (`R2starQsm` / `Decompose` / `HcChisep`).
+    /// (`R2starQsm` / `Decompose` / `DecomposeComplex` / `HcChisep`).
     pub magnitude_multi: Option<&'a [f64]>,
+    /// Multi-echo phase in radians, voxel-major `(n_voxels, n_echoes)`, wrapped or
+    /// not, background field included or not (`DecomposeComplex`).
+    pub phase_multi: Option<&'a [f64]>,
     /// Multi-echo spin-echo magnitude, voxel-major `(n_voxels, n_se)` (`HcChisep`, optional).
     pub se_magnitude_multi: Option<&'a [f64]>,
 }
@@ -72,7 +77,10 @@ pub fn run_separation(
     let cf = GAMMA_HZ_PER_T * metadata.field_strength;
     let b0 = metadata.field_strength;
 
-    if inputs.qsm.len() != n || inputs.mask.len() != n {
+    if inputs.mask.len() != n {
+        return Err(PipelineError::DimensionMismatch { expected: n, got: inputs.mask.len() });
+    }
+    if config.algorithm.needs_qsm() && inputs.qsm.len() != n {
         return Err(PipelineError::DimensionMismatch { expected: n, got: inputs.qsm.len() });
     }
     check_inputs(&inputs, metadata, config.algorithm, n)?;
@@ -119,6 +127,14 @@ pub fn run_separation(
             let params = DecomposeParams { b0, ..config.decompose.clone() };
             crate::separation::decompose(
                 inputs.qsm, magnitude, &metadata.echo_times, mask, &params, progress,
+            )
+        }
+        SeparationAlgorithm::DecomposeComplex => {
+            let magnitude = need(inputs.magnitude_multi, "magnitude_multi")?;
+            let phase = need(inputs.phase_multi, "phase_multi")?;
+            let params = DecomposeComplexParams { b0, ..config.decompose_complex.clone() };
+            crate::separation::decompose_complex(
+                magnitude, phase, &metadata.echo_times, mask, &params, progress,
             )
         }
         SeparationAlgorithm::HcChisep => {
@@ -250,14 +266,18 @@ fn check_inputs(
         }
     }
     let n_echoes = metadata.echo_times.len();
-    if let Some(m) = inputs.magnitude_multi {
-        crate::error::check_len(
-            &format!("magnitude_multi ({n_echoes} echoes x {n} voxels)"), m.len(), n * n_echoes,
-        )?;
+    for (name, multi) in [("magnitude_multi", inputs.magnitude_multi), ("phase_multi", inputs.phase_multi)] {
+        if let Some(m) = multi {
+            crate::error::check_len(
+                &format!("{name} ({n_echoes} echoes x {n} voxels)"), m.len(), n * n_echoes,
+            )?;
+        }
     }
-    if algorithm == SeparationAlgorithm::Decompose && n_echoes < 3 {
+    if matches!(algorithm, SeparationAlgorithm::Decompose | SeparationAlgorithm::DecomposeComplex)
+        && n_echoes < 3
+    {
         return Err(PipelineError::InvalidInput(format!(
-            "Decompose needs at least 3 echoes, got {n_echoes}"
+            "{algorithm:?} needs at least 3 echoes, got {n_echoes}"
         )));
     }
     if !inputs.mask.iter().any(|&m| m != 0) {
@@ -296,6 +316,7 @@ mod tests {
             r2star: None,
             magnitude_rss: None,
             magnitude_multi: None,
+            phase_multi: None,
             se_magnitude_multi: None,
         }
     }
@@ -369,6 +390,22 @@ mod tests {
         let d_cfg = SeparationConfig { algorithm: SeparationAlgorithm::Decompose, ..Default::default() };
         let rd = run_separation(d_inputs, &m, &d_cfg, &mut |_, _| {}).unwrap();
         assert_eq!(rd.chi_pos.len(), n);
+
+        // DecomposeComplex reads magnitude + phase, not the QSM: an empty one is fine.
+        let phase_multi = vec![0.3; n * ne];
+        let mut c_inputs = base_inputs(&[], &mask);
+        c_inputs.magnitude_multi = Some(&mag_multi);
+        c_inputs.phase_multi = Some(&phase_multi);
+        let c_cfg =
+            SeparationConfig { algorithm: SeparationAlgorithm::DecomposeComplex, ..Default::default() };
+        let rc = run_separation(c_inputs, &m, &c_cfg, &mut |_, _| {}).unwrap();
+        assert_eq!(rc.chi_pos.len(), n);
+        // ... but it does need the phase.
+        c_inputs.phase_multi = None;
+        assert!(matches!(
+            run_separation(c_inputs, &m, &c_cfg, &mut |_, _| {}),
+            Err(PipelineError::InvalidInput(_))
+        ));
 
         let mut h_inputs = base_inputs(&qsm, &mask);
         h_inputs.r2prime = Some(&r2prime);
