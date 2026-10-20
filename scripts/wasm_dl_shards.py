@@ -174,6 +174,7 @@ CLASSICAL = [
     "src/inversion/ndi.rs",
     "src/inversion/nltv.rs",
     "src/inversion/rts.rs",
+    "src/inversion/star.rs",
     "src/inversion/sti.rs",
     "src/inversion/tfi.rs",
     "src/inversion/tgv.rs",
