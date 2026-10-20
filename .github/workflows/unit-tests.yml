@@ -2,6 +2,13 @@ name: Unit Tests
 
 on:
   workflow_call:
+    inputs:
+      # The wasm32 shards to run, as a JSON list: `classical` and any of the deep-learning shards
+      # `stages`, `masking`, `segmentation`. integration-tests.yml's detect-changes picks them
+      # (scripts/wasm_dl_shards.py); a caller that passes nothing gets all four.
+      wasm_shards:
+        type: string
+        default: '["classical","stages","masking","segmentation"]'
     outputs:
       coverage:
         description: "Code coverage percentage"
@@ -140,45 +147,50 @@ jobs:
   # Release builds, because an unoptimised wasm build of the inversions is slow under Node. The
   # deep-learning build is split three ways by test name so no one job runs every network; the
   # three share one cargo cache. Each shard fetches only the weights its cases read.
+  #
+  # The shards come from the `wasm_shards` input: the deep-learning ones run only for a change
+  # their networks can reach (scripts/wasm_dl_shards.py). Each shard's test filter and weights
+  # are in the "Shard settings" step.
   wasm:
-    name: wasm32 (${{ matrix.name }})
+    name: wasm32 (${{ matrix.shard == 'classical' && 'classical' || format('onnx simd, {0}', matrix.shard) }})
+    if: inputs.wasm_shards != '[]'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - name: classical
-            features: ""
-            rustflags: ""
-            cache: classical
-            filter: ""
-            models: ""
-          # The stages, and the networks that stand in for one: BFR, inversion, separation.
-          - name: onnx simd, stages
-            features: "onnx simd"
-            rustflags: "-C target-feature=+simd128"
-            cache: onnx-simd
-            filter: "--skip dl_mask --skip dl_seg"
-            models: >-
-              bfrnet iqfm xqsm qsmnet qsmnet-plus qsmgan lpcnn ir2qsm modl-qsm autoqsm nextqsm
-              iqsm iqsm-plus r2primenet susep-net chi-sepnet
-          - name: onnx simd, masking
-            features: "onnx simd"
-            rustflags: "-C target-feature=+simd128"
-            cache: onnx-simd
-            filter: "dl_mask"
-            models: "hd-bet rs2-net"
-          - name: onnx simd, segmentation
-            features: "onnx simd"
-            rustflags: "-C target-feature=+simd128"
-            cache: onnx-simd
-            filter: "dl_seg"
-            models: "synthseg"
+        shard: ${{ fromJSON(inputs.wasm_shards) }}
     env:
       CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER: wasm-bindgen-test-runner
-      CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUSTFLAGS: ${{ matrix.rustflags }}
+      CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUSTFLAGS: ${{ matrix.shard != 'classical' && '-C target-feature=+simd128' || '' }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: Shard settings
+        id: shard
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: |
+          case "$SHARD" in
+            classical)
+              features=""; cache=classical; filter=""; models="" ;;
+            # The stages, and the networks that stand in for one: BFR, inversion, separation.
+            stages)
+              features="onnx simd"; cache=onnx-simd; filter="--skip dl_mask --skip dl_seg"
+              models="bfrnet iqfm xqsm qsmnet qsmnet-plus qsmgan lpcnn ir2qsm modl-qsm autoqsm nextqsm"
+              models="$models iqsm iqsm-plus r2primenet susep-net chi-sepnet" ;;
+            masking)
+              features="onnx simd"; cache=onnx-simd; filter="dl_mask"; models="hd-bet rs2-net" ;;
+            segmentation)
+              features="onnx simd"; cache=onnx-simd; filter="dl_seg"; models="synthseg" ;;
+            *)
+              echo "::error::unknown wasm32 shard '$SHARD'"; exit 1 ;;
+          esac
+          {
+            echo "features=$features"
+            echo "cache=$cache"
+            echo "filter=$filter"
+            echo "models=$models"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -197,9 +209,9 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: ${{ runner.os }}-cargo-wasm-${{ matrix.cache }}-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-wasm-${{ steps.shard.outputs.cache }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-wasm-${{ matrix.cache }}-
+            ${{ runner.os }}-cargo-wasm-${{ steps.shard.outputs.cache }}-
 
       # The test runner must be the same version as the `wasm-bindgen` crate the test links.
       - name: wasm-bindgen version
@@ -220,21 +232,21 @@ jobs:
       # and the shard's files are cached under a digest of their checksums.
       - name: Weights cache key
         id: weights
-        if: matrix.models != ''
-        run: echo "key=$(python3 scripts/fetch_model_weights.py --key ${{ matrix.models }})" >> "$GITHUB_OUTPUT"
+        if: steps.shard.outputs.models != ''
+        run: echo "key=$(python3 scripts/fetch_model_weights.py --key ${{ steps.shard.outputs.models }})" >> "$GITHUB_OUTPUT"
 
       - name: Cache weights
-        if: matrix.models != ''
+        if: steps.shard.outputs.models != ''
         uses: actions/cache@v4
         with:
           path: ~/qsm-weights
           key: qsm-weights-${{ steps.weights.outputs.key }}
 
       - name: Fetch weights
-        if: matrix.models != ''
+        if: steps.shard.outputs.models != ''
         run: |
-          python3 scripts/fetch_model_weights.py ~/qsm-weights ${{ matrix.models }}
+          python3 scripts/fetch_model_weights.py ~/qsm-weights ${{ steps.shard.outputs.models }}
           echo "QSM_WEIGHTS_DIR=$HOME/qsm-weights" >> "$GITHUB_ENV"
 
       - name: Run the pipeline under Node
-        run: cargo test --release --target wasm32-unknown-unknown --features "${{ matrix.features }}" --test wasm_pipeline -- ${{ matrix.filter }}
+        run: cargo test --release --target wasm32-unknown-unknown --features "${{ steps.shard.outputs.features }}" --test wasm_pipeline -- ${{ steps.shard.outputs.filter }}
