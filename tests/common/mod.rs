@@ -903,6 +903,9 @@ pub struct ChiSepPhantom {
     pub local_field_ppm: Vec<f64>,
     /// Provided conventional QSM χ_total in ppm (`chimap.nii.gz`).
     pub chi_total: Vec<f64>,
+    /// Per-echo QSM χ(t) in ppm, voxel-major `(n_voxels, n_echoes)`
+    /// (`chimap-echoes.nii.gz`), if the phantom ships it.
+    pub chi_echoes: Option<Vec<f64>>,
     /// R2' map in Hz.
     pub r2prime: Vec<f64>,
     /// Root-sum-of-squares magnitude over echoes (for ilsqr/medi).
@@ -999,12 +1002,31 @@ pub fn load_chisep_phantom() -> Option<ChiSepPhantom> {
         None
     };
 
+    // Optional per-echo QSM (DECOMPOSE's input), same echo order as the magnitude.
+    let echoes_path = format!("{}/chimap-echoes.nii.gz", inputs);
+    let chi_echoes = if Path::new(&echoes_path).exists() {
+        let bytes = fs::read(&echoes_path).expect("chimap-echoes");
+        let (q4, (qx, qy, qz, qne), _, _) =
+            qsm_core::io::load_nifti_4d(&bytes).expect("4D chimap-echoes");
+        assert_eq!((qx, qy, qz, qne), (nx, ny, nz, ne), "chimap-echoes dims mismatch");
+        let mut v = vec![0.0_f64; n * ne];
+        for e in 0..ne {
+            for i in 0..n {
+                v[i * ne + e] = q4[e * n + i];
+            }
+        }
+        Some(v)
+    } else {
+        None
+    };
+
     let gt_para = load_nifti_file(&format!("{}/chi-para.nii.gz", gt)).expect("chi-para").data;
     let gt_dia = load_nifti_file(&format!("{}/chi-dia.nii.gz", gt)).expect("chi-dia").data;
 
     Some(ChiSepPhantom {
         local_field_ppm: lf.data,
         chi_total: chi.data,
+        chi_echoes,
         r2prime: r2p.data,
         magnitude_rss,
         mag_voxel_major,

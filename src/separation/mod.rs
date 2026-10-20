@@ -10,7 +10,7 @@
 //! - `chi_sep_medi`: MEDI-based Gauss-Newton optimization with coupled field + R2' constraints
 //! - `r2star_qsm`: closed-form separation from a QSM + R2* (Dimov 2022, no R2' needed)
 //! - `wavesep`: wavelet-L1 proximal-gradient separation from a QSM + R2' (Fang 2023)
-//! - `decompose`: signal-domain 3-compartment per-voxel fit from a QSM + multi-echo
+//! - `decompose`: signal-domain 3-compartment per-voxel fit from a per-echo QSM + multi-echo
 //!   magnitude (Chen 2021)
 //! - `hc_chisep`: hollow-cylinder χ-separation with signal-derived fiber orientation
 //!   from a QSM + R2' + multi-echo magnitude (Wharton & Bowtell model)

@@ -108,14 +108,20 @@ fn test_decompose_qsmci() {
     let (nx, ny, nz) = ph.dims;
     println!("[INFO] DECOMPOSE on qsmci chisep phantom {}x{}x{}  B0 {} T", nx, ny, nz, ph.b0);
 
-    // Signal-domain 3-compartment per-voxel fit from the provided QSM + multi-echo
-    // magnitude. n_inner can be lowered via env for a quick smoke run.
+    // Signal-domain 3-compartment per-voxel fit from the per-echo QSM + multi-echo
+    // magnitude. Phantoms without `chimap-echoes.nii.gz` fall back to χ_total for
+    // every echo. n_inner can be lowered via env for a quick smoke run.
     let n_inner = std::env::var("DECOMPOSE_NINNER").ok().and_then(|s| s.parse().ok()).unwrap_or(10);
     let params = DecomposeParams { b0: ph.b0, n_inner, ..DecomposeParams::default() };
 
+    let ne = ph.tes.len();
+    let chi_echoes = ph.chi_echoes.clone().unwrap_or_else(|| {
+        println!("[INFO] no chimap-echoes.nii.gz: using χ_total for every echo");
+        ph.chi_total.iter().flat_map(|&c| std::iter::repeat_n(c, ne)).collect()
+    });
     let t = Instant::now();
     let (chi_pos, chi_neg, _chi_total) = decompose(
-        &ph.chi_total,
+        &chi_echoes,
         &ph.mag_voxel_major,
         &ph.tes,
         &ph.mask,
@@ -127,7 +133,7 @@ fn test_decompose_qsmci() {
 
     // GT diamagnetic map is stored as a positive magnitude; χ− is returned signed.
     let dia_mag: Vec<f64> = chi_neg.iter().map(|&v| -v).collect();
-    println!("[RESULT] decompose (signal-domain from χ_total + multi-echo magnitude):");
+    println!("[RESULT] decompose (signal-domain from per-echo QSM + multi-echo magnitude):");
     chisep_score("DECOMPOSE χ+", &chi_pos, &ph.gt_para, &ph.mask, ph.dims, secs);
     chisep_score("DECOMPOSE χ−", &dia_mag, &ph.gt_dia, &ph.mask, ph.dims, secs);
 

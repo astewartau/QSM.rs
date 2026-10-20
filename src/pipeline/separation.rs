@@ -24,8 +24,15 @@ pub struct SeparationInputs<'a> {
     /// Local (tissue) field in ppm — for `ChiSepIlsqr` / `ChiSepMedi`.
     pub local_field_ppm: &'a [f64],
     /// Conventional QSM χ_total in ppm — the QSM-init for `ChiSepIlsqr` and the
-    /// input for `R2starQsm` / `WaveSep` / `Decompose` / `HcChisep`.
+    /// input for `R2starQsm` / `WaveSep` / `HcChisep`. `Decompose` uses it only
+    /// when `qsm_echoes` is absent.
     pub qsm: &'a [f64],
+    /// QSM of each echo, χ(t), in ppm, voxel-major `(n_voxels, n_echoes)` in the
+    /// echo order of `magnitude_multi` — the input `Decompose` requires. When it
+    /// is absent, `Decompose` is given `qsm` repeated for every echo: it still
+    /// runs, but without the echo dependence the method separates on, so supply
+    /// per-echo QSM whenever it exists.
+    pub qsm_echoes: Option<&'a [f64]>,
     /// Binary brain mask (`n_voxels`, 1 = inside).
     pub mask: &'a [u8],
     /// R2' map in Hz (`ChiSepIlsqr` / `ChiSepMedi` / `WaveSep` / `HcChisep`).
@@ -117,8 +124,18 @@ pub fn run_separation(
         SeparationAlgorithm::Decompose => {
             let magnitude = need(inputs.magnitude_multi, "magnitude_multi")?;
             let params = DecomposeParams { b0, ..config.decompose.clone() };
+            let ne = metadata.echo_times.len();
+            // No per-echo QSM: the single map for every echo is all there is.
+            let repeated: Vec<f64>;
+            let chi_echoes = match inputs.qsm_echoes {
+                Some(q) => q,
+                None => {
+                    repeated = inputs.qsm.iter().flat_map(|&c| std::iter::repeat_n(c, ne)).collect();
+                    &repeated
+                }
+            };
             crate::separation::decompose(
-                inputs.qsm, magnitude, &metadata.echo_times, mask, &params, progress,
+                chi_echoes, magnitude, &metadata.echo_times, mask, &params, progress,
             )
         }
         SeparationAlgorithm::HcChisep => {
@@ -255,6 +272,11 @@ fn check_inputs(
             &format!("magnitude_multi ({n_echoes} echoes x {n} voxels)"), m.len(), n * n_echoes,
         )?;
     }
+    if let Some(q) = inputs.qsm_echoes {
+        crate::error::check_len(
+            &format!("qsm_echoes ({n_echoes} echoes x {n} voxels)"), q.len(), n * n_echoes,
+        )?;
+    }
     if algorithm == SeparationAlgorithm::Decompose && n_echoes < 3 {
         return Err(PipelineError::InvalidInput(format!(
             "Decompose needs at least 3 echoes, got {n_echoes}"
@@ -291,6 +313,7 @@ mod tests {
         SeparationInputs {
             local_field_ppm: qsm,
             qsm,
+            qsm_echoes: None,
             mask,
             r2prime: None,
             r2star: None,
@@ -376,6 +399,39 @@ mod tests {
         let h_cfg = SeparationConfig { algorithm: SeparationAlgorithm::HcChisep, ..Default::default() };
         let rh = run_separation(h_inputs, &m, &h_cfg, &mut |_, _| {}).unwrap();
         assert_eq!(rh.chi_pos.len(), n);
+    }
+
+    /// Decompose takes the per-echo QSM when given one; without it, the single map
+    /// stands in for every echo.
+    #[test]
+    fn decompose_per_echo_qsm_input() {
+        let (nx, ny, nz) = (3, 3, 3);
+        let n = nx * ny * nz;
+        let ne = 4;
+        let qsm = vec![0.02; n];
+        let mag_multi: Vec<f64> = (0..n * ne).map(|k| (-((k % ne) as f64) * 0.2).exp()).collect();
+        let mask = vec![1u8; n];
+        let m = meta(nx, ny, nz);
+        let cfg = SeparationConfig { algorithm: SeparationAlgorithm::Decompose, ..Default::default() };
+        let run = |echoes: Option<&[f64]>| {
+            let mut inputs = base_inputs(&qsm, &mask);
+            inputs.magnitude_multi = Some(&mag_multi);
+            inputs.qsm_echoes = echoes;
+            run_separation(inputs, &m, &cfg, &mut |_, _| {})
+        };
+
+        let flat = run(None).unwrap();
+        let repeated = vec![0.02; n * ne];
+        let same = run(Some(&repeated)).unwrap();
+        assert_eq!(flat.chi_pos, same.chi_pos);
+        assert_eq!(flat.chi_neg, same.chi_neg);
+
+        let drifting: Vec<f64> = (0..n * ne).map(|k| 0.02 + 0.01 * (k % ne) as f64).collect();
+        let per_echo = run(Some(&drifting)).unwrap();
+        assert_ne!(per_echo.chi_pos, flat.chi_pos, "qsm_echoes was ignored");
+
+        let short = vec![0.02; n * (ne - 1)];
+        assert!(matches!(run(Some(&short)), Err(PipelineError::InvalidInput(_))));
     }
 
     #[test]

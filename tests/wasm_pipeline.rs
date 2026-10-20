@@ -368,6 +368,7 @@ fn separation() {
     let inputs = SeparationInputs {
         local_field_ppm: &p.local_ppm,
         qsm: &p.chi,
+        qsm_echoes: None,
         mask: &p.mask,
         r2prime: Some(&r2prime),
         r2star: None,
@@ -873,6 +874,7 @@ fn dl_separation(algorithm: SeparationAlgorithm, patch: Option<(usize, usize, us
     let inputs = SeparationInputs {
         local_field_ppm: &p.local_ppm,
         qsm: &p.chi,
+        qsm_echoes: None,
         mask: &p.mask,
         r2prime: Some(&r2prime),
         r2star: None,
@@ -1126,6 +1128,7 @@ mod browser_memory {
         let inputs = SeparationInputs {
             local_field_ppm: &local,
             qsm: &chi,
+            qsm_echoes: None,
             mask: &mask,
             r2prime: Some(&r2prime),
             r2star: None,

@@ -14,11 +14,23 @@
 //! coefficient, χ+ ≥ 0, χ− ≤ 0 (ppm-scale). C+, C−, C₀ are the paramagnetic,
 //! diamagnetic and neutral compartment amplitudes and R2*₀ the baseline decay.
 //!
-//! Like the QSM-CI reference, the *phase* is synthesized from the provided
-//! conventional QSM (χ_total) rather than re-derived from raw multi-echo phase —
-//! this isolates DECOMPOSE's separation step. The observed complex data per echo
-//! is `y = |mag_norm| · exp(−i·(2/3)·χ_total·γ·B0·TE)` (magnitude normalised by its
-//! global maximum).
+//! **Input: one QSM per echo.** The data the model is fitted to is built from the
+//! multi-echo magnitude `M(t)` and a QSM reconstructed *separately at each echo*,
+//! χ(t) (the paper's Eq. 4):
+//!
+//! ```text
+//!   y(t) = M(t) · exp(−i·(2/3)·χ(t)·γ·B0·t)
+//! ```
+//!
+//! The paper is explicit that the echo-dependent QSM is required: the
+//! sub-voxel compartments make the apparent susceptibility drift with TE, and
+//! that drift is the signature DECOMPOSE separates. A single echo-averaged χ
+//! gives every echo the same apparent χ, a phase linear in TE, and so no
+//! compartment information beyond what the magnitude carries. `chi_echoes` is
+//! therefore one χ map per echo, in the same echo order as `magnitude`. The
+//! reference implementation computes it with STI Suite per echo (Laplacian
+//! unwrapping → V-SHARP → STAR-QSM with that echo's TE). `M(t)` is normalised by
+//! its global maximum, as in the reference.
 //!
 //! The per-voxel fit is a 3-stage alternating bounded least-squares, repeated
 //! `n_inner` times: (1) amplitudes `[C+,C−,C₀]` against the linear signal, then
@@ -27,20 +39,44 @@
 //!
 //! Each source is reconstructed from the fitted parameters via a per-compartment
 //! phase accumulation, `−Σ angle(model) / ((2/3)·γ·B0·ΣTE)`: the paramagnetic
-//! sub-model (`pscModel`) gives χ+ and the diamagnetic sub-model (`dscModel`)
-//! gives |χ−|. χ+ is returned ≥ 0, χ− ≤ 0.
+//! sub-model (`pscModel`, the paper's PCS, Eq. 6) gives χ+ and the diamagnetic
+//! sub-model (`dscModel`, the DCS, Eq. 7) gives |χ−|. χ+ is returned ≥ 0, χ− ≤ 0.
+//!
+//! **Paper vs. the reference implementation.** This port follows Tim Ho's open
+//! MATLAB re-implementation, which differs from the paper's description in ways
+//! this port inherits (they are recorded here, not changed):
+//!
+//! - *Amplitude constraints.* The paper constrains `C+ + C− + C₀ = 1` with
+//!   `0 < C < 1`. The reference bounds each amplitude only below (`C ≥ 0`,
+//!   unbounded above) and imposes no sum-to-one; so does this port.
+//! - *Solvers.* The paper solves sub-problems 5.1 (amplitudes) and 5.2 (R2*₀) with
+//!   `lsqlin` and 5.3 (χ+, χ−) with trust-region `lsqnonlin`. The reference uses
+//!   `lsqcurvefit` for all three; this port uses a bounded Levenberg–Marquardt
+//!   for all three.
+//! - *Normalisation and initial values.* The paper's main text states neither
+//!   how `M(t)` is normalised nor the initial values. The reference normalises
+//!   `M(t)` by its global maximum and starts from `C = [0.3, 0.3, 0.4]`,
+//!   `R2*₀ = 25 Hz`, `χ = [0.05, −0.05]` ppm with `|χ| ≤ 0.5` ppm; this port does
+//!   the same.
+//! - *Output files.* The reference demo writes DSC to the file `XPSC` and PSC to
+//!   `XDSC`. Per the paper the paramagnetic component is the PCS (Eq. 6), so this
+//!   port returns χ+ = |PSC| and χ− = −|DSC|.
+//!
+//! The port's own additions, for stability rather than as changes to the model,
+//! are the phase unwrapping along echoes and the χ search cap, below.
 //!
 //! **Phase unwrapping.** Every phase the fit and the reconstruction see arrives
 //! through `atan2`, on `(−π, π]`. A compartment accumulates `(2/3)·χ·γ·B0·TE`
-//! radians, so above `|χ_total| = π / ((2/3)·γ·B0·TE_max)` the late echoes fold
+//! radians, so above `|χ| = π / ((2/3)·γ·B0·TE_max)` the late echoes fold
 //! back onto that branch — 0.09 ppm at 7 T with a 28 ms last echo, which is
 //! ordinary globus pallidus. Left folded, the alternation converges to a
 //! degenerate fixed point (χ− pinned at `chi_bound`, R2*₀ and the amplitudes at
 //! zero) and returns χ+ = 0 exactly, so the most paramagnetic structure in the
 //! volume reads as a hole. Both the stage-2/3 residuals and `recon_phase`
 //! therefore walk the echoes in order and keep each phase on the branch nearest
-//! its predecessor ([`unwrap_near`]); the synthesized data phase is known in
-//! closed form and is used unwrapped rather than round-tripped through `atan2`.
+//! its predecessor ([`unwrap_near`]); the data phase `−(2/3)·χ(t)·γ·B0·t` is known
+//! in closed form from the per-echo QSM and is used as it is rather than
+//! round-tripped through `atan2`.
 //! The original method, published at 3 T, does not meet this limit in practice —
 //! the threshold there is ~0.2 ppm.
 //!
@@ -52,24 +88,21 @@
 //! and scattered voxels fall into them; capping the search is what removes the
 //! speckle of dropouts that unwrapping alone left in the recovered pallidum.
 //!
-//! Note that `−Σ angle / den` remains a *compressive* estimator of χ: its gain
-//! rises with χ itself (≈0.03 at white-matter χ+, ≈0.87 in the pallidum on the
-//! QSM-CI phantom), so it flattens contrast between weak sources. That is
-//! inherent to the reference's reconstruction, not to this port — the fitted
-//! compartment amplitudes set the gain, and they are only weakly identifiable
-//! from data that carries no sub-voxel compartment signature.
-//!
-//! **Output-mapping note.** The QSM-CI reference *comment* claims a para/dia
-//! output swap (χ+ = |DSC|); on the qsm-forward phantom that swap anti-correlates
-//! with the ground truth, while the physically-consistent mapping used here
-//! (χ+ = |PSC|, from the paramagnetic sub-model) correlates strongly. We therefore
-//! do not replicate the reference's swap.
+//! Note that `−Σ angle / den` is a *compressive* estimator of χ: its gain rises
+//! with χ itself, so it flattens contrast between weak sources. That is inherent
+//! to the reference's reconstruction, not to this port — the fitted compartment
+//! amplitudes set the gain. Fed an echo-independent χ instead of χ(t), the
+//! amplitudes are only weakly identifiable (the data then carries no sub-voxel
+//! compartment signature in its phase) and the gain is small: ≈0.03 at
+//! white-matter χ+ on the QSM-CI phantom.
 //!
 //! Reference:
-//! Chen, J., et al. (2021). "Decompose quantitative susceptibility mapping (QSM)
-//! to sub-voxel diamagnetic and paramagnetic components based on gradient-echo MRI
-//! data." NeuroImage 242:118735. https://doi.org/10.1016/j.neuroimage.2021.118735
-//! Reference implementation (QSM-CI port of Tim Ho's open MATLAB DECOMPOSE-QSM).
+//! Chen, J., Gong, N.-J., Chaim, K.T., Otaduy, M.C.G., Liu, C. (2021). "Decompose
+//! quantitative susceptibility mapping (QSM) to sub-voxel diamagnetic and
+//! paramagnetic components based on gradient-echo MRI data." NeuroImage
+//! 242:118477. https://doi.org/10.1016/j.neuroimage.2021.118477
+//! Reference implementation: Tim Ho's open MATLAB DECOMPOSE-QSM,
+//! <https://github.com/timwahoo/DECOMPOSE-QSM> (`DECOMPOSE_analysis.m`).
 
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
@@ -105,11 +138,16 @@ impl Default for DecomposeParams {
     }
 }
 
-/// DECOMPOSE source separation from a provided QSM and multi-echo magnitude.
+/// DECOMPOSE source separation from a per-echo QSM and the multi-echo magnitude.
 ///
 /// # Arguments
-/// * `chi_total` — Conventional QSM χ_total in **ppm** (`n_voxels`), used to
-///   synthesize the per-echo phase.
+/// * `chi_echoes` — QSM of each echo, χ(t), in **ppm**, flattened as
+///   `(n_voxels, n_echoes)` in row-major order (echo fastest per voxel), the same
+///   layout and echo order as `magnitude`. This is the TE-dependent QSM the
+///   method requires (see the module docs); it builds the fitted data as
+///   `y(t) = M(t)·exp(−i·(2/3)·χ(t)·γ·B0·t)`. Passing one map repeated for every
+///   echo runs the algorithm, but leaves it without the echo dependence it
+///   separates on.
 /// * `magnitude` — Multi-echo magnitude, flattened as `(n_voxels, n_echoes)` in
 ///   row-major order (echo fastest per voxel) — the same layout as
 ///   [`crate::separation::r2star_qsm_from_magnitude`]. Normalised internally by
@@ -126,21 +164,25 @@ impl Default for DecomposeParams {
 /// convention: `chi_pos` ≥ 0 (paramagnetic), `chi_neg` ≤ 0 (diamagnetic, signed),
 /// and `chi_total = chi_pos + chi_neg`.
 pub fn decompose(
-    chi_total: &[f64],
+    chi_echoes: &[f64],
     magnitude: &[f64],
     echo_times: &[f64],
     mask: &[u8],
     params: &DecomposeParams,
     mut progress: impl FnMut(usize, usize),
 ) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
-    let n = chi_total.len();
+    let n = mask.len();
     let ne = echo_times.len();
     assert_eq!(
         magnitude.len(),
         n * ne,
         "magnitude must be n_voxels * n_echoes"
     );
-    assert_eq!(mask.len(), n, "mask length must match chi_total");
+    assert_eq!(
+        chi_echoes.len(),
+        n * ne,
+        "chi_echoes must be n_voxels * n_echoes (one QSM per echo)"
+    );
     assert!(ne >= 3, "DECOMPOSE needs at least 3 echoes");
 
     let b0 = params.b0;
@@ -168,19 +210,19 @@ pub fn decompose(
         voxels,
         || Scratch::new(ne),
         |ws: &mut Scratch, &i: &usize| {
-            // Build the complex data y[e] = mag_norm · exp(-i·(2/3)·χ_total·γ·B0·TE).
-            let chi = chi_total[i];
+            // The fitted data, Eq. 4: y[e] = M(TE_e) · exp(−i·(2/3)·χ(TE_e)·γ·B0·TE_e),
+            // from this echo's own QSM.
             let mut all_zero = true;
             for e in 0..ne {
                 let m = magnitude[i * ne + e] / gmax;
                 if m > 0.0 {
                     all_zero = false;
                 }
-                let ph = -(2.0 / 3.0) * chi * GAMMA * b0 * te[e];
+                let ph = -(2.0 / 3.0) * chi_echoes[i * ne + e] * GAMMA * b0 * te[e];
                 ws.y[e] = (m * ph.cos(), m * ph.sin());
-                // log(y) for stages 2 & 3. `ph` is the phase we just synthesized,
-                // so keep it as it is rather than recovering a ±π-wrapped copy of
-                // it through `atan2` — see the note above `unwrap_near`.
+                // log(y) for stages 2 & 3. `ph` is known in closed form, so keep
+                // it as it is rather than recovering a ±π-wrapped copy of it
+                // through `atan2` — see the note above `unwrap_near`.
                 ws.logy[e] = (0.5 * (m * m).max(1e-300).ln(), ph);
             }
             if all_zero {
@@ -190,7 +232,7 @@ pub fn decompose(
             let (cp, cm, c0, r0, chip, chim) =
                 fit_voxel(te, &ws.y, &ws.logy, b0, params, &mut ws.lm);
 
-            // Reconstruct χ+ (from dscModel) and χ− (from pscModel), both as the
+            // Reconstruct χ+ (from pscModel) and χ− (from dscModel), both as the
             // per-compartment phase accumulation −Σangle/den.
             let dsc = recon_phase(te, b0, den, |t| {
                 dsc_model(t, cp, cm, c0, chip, chim, r0, b0)
@@ -198,12 +240,9 @@ pub fn decompose(
             let psc = recon_phase(te, b0, den, |t| {
                 psc_model(t, cp, cm, c0, chip, chim, r0, b0)
             });
-            // pscModel recovers the paramagnetic term (∝ χ+), dscModel the
-            // diamagnetic term (∝ |χ−|). We use this physically-correct mapping
-            // (χ+ = |PSC|, χ− = −|DSC|), which correlates positively with the
-            // qsm-forward phantom's ground truth. Note: the QSM-CI reference
-            // *comment* claims the opposite ("χ+ = |DSC|"); that swap anti-
-            // correlates with this GT, so we do not replicate it. See module docs.
+            // The paper's PCS (Eq. 6, paramagnetic sub-model) is χ+ and its DCS
+            // (Eq. 7, diamagnetic sub-model) is χ−. The reference demo's output
+            // files swap the two names; that is not followed. See module docs.
             (i, psc.abs(), -dsc.abs())
         }
     )
@@ -685,10 +724,123 @@ mod tests {
         }
     }
 
+    /// One voxel planted from DECOMPOSE's own three-compartment forward model
+    /// ([`signal_model`]): its multi-echo magnitude and its per-echo QSM χ(t), the
+    /// apparent susceptibility a QSM reconstructed at echo `t` sees,
+    /// `χ(t) = −angle(S(t)) / ((2/3)·γ·B0·t)` (phase unwrapped along echoes).
+    #[allow(clippy::too_many_arguments)]
+    fn planted_voxel(
+        te: &[f64],
+        cp: f64,
+        cm: f64,
+        c0: f64,
+        chip: f64,
+        chim: f64,
+        r0: f64,
+        b0: f64,
+    ) -> (Vec<f64>, Vec<f64>) {
+        let mut mag = Vec::with_capacity(te.len());
+        let mut chi = Vec::with_capacity(te.len());
+        let mut prev = 0.0;
+        for (e, &t) in te.iter().enumerate() {
+            let z = signal_model(t, cp, cm, c0, chip, chim, r0, b0);
+            mag.push((z.0 * z.0 + z.1 * z.1).sqrt());
+            let raw = z.1.atan2(z.0);
+            let ang = if e == 0 { raw } else { unwrap_near(raw, prev) };
+            prev = ang;
+            chi.push(-ang / ((2.0 / 3.0) * GAMMA * b0 * t));
+        }
+        (mag, chi)
+    }
+
+    /// The same map for every echo — what an echo-averaged QSM provides.
+    fn repeated(chi: &[f64], ne: usize) -> Vec<f64> {
+        chi.iter().flat_map(|&c| std::iter::repeat(c).take(ne)).collect()
+    }
+
+    /// Eq. 4 wiring: given a voxel's per-echo QSM χ(t) and magnitude, the data
+    /// `decompose` fits is `M(t)·exp(−i·(2/3)·χ(t)·γ·B0·t)`. For a voxel planted
+    /// from the three-compartment model that is the planted complex signal itself
+    /// (scaled by the global-max normalisation), so the output must equal a fit of
+    /// that signal reconstructed with χ+ = |PSC|, χ− = −|DSC|.
+    #[test]
+    fn per_echo_qsm_builds_the_eq4_data() {
+        let b0 = 3.0;
+        let te: Vec<f64> = (0..6).map(|k| 0.003 + 0.004 * k as f64).collect();
+        let params = DecomposeParams { b0, ..DecomposeParams::default() };
+        let (cp, cm, c0, chip, chim, r0) = (0.3, 0.3, 0.4, 0.12, -0.06, 20.0);
+        let (mag, chi) = planted_voxel(&te, cp, cm, c0, chip, chim, r0, b0);
+
+        // χ(t) is genuinely echo-dependent for a mixed voxel.
+        let spread = chi.iter().cloned().fold(f64::MIN, f64::max)
+            - chi.iter().cloned().fold(f64::MAX, f64::min);
+        assert!(spread > 1e-3, "planted χ(t) should drift with TE, spread {spread}");
+
+        let (pos, neg, tot) = decompose(&chi, &mag, &te, &[1u8], &params, |_, _| {});
+
+        // The planted signal, normalised as decompose normalises the magnitude.
+        let gmax = mag.iter().cloned().fold(0.0, f64::max);
+        let mut y = Vec::new();
+        let mut logy = Vec::new();
+        let mut prev = 0.0;
+        for (e, &t) in te.iter().enumerate() {
+            let z = signal_model(t, cp, cm, c0, chip, chim, r0, b0);
+            let z = (z.0 / gmax, z.1 / gmax);
+            let l = clog(z);
+            let ang = if e == 0 { l.1 } else { unwrap_near(l.1, prev) };
+            prev = ang;
+            y.push(z);
+            logy.push((l.0, ang));
+        }
+        let mut lm = LmScratch::new(2 * te.len());
+        let (fcp, fcm, fc0, fr0, fchip, fchim) = fit_voxel(&te, &y, &logy, b0, &params, &mut lm);
+        let den = (2.0 / 3.0) * GAMMA * b0 * te.iter().sum::<f64>();
+        let want_pos =
+            recon_phase(&te, b0, den, |t| psc_model(t, fcp, fcm, fc0, fchip, fchim, fr0, b0))
+                .abs();
+        let want_neg =
+            -recon_phase(&te, b0, den, |t| dsc_model(t, fcp, fcm, fc0, fchip, fchim, fr0, b0))
+                .abs();
+        // χ(t) round-trips the phase through floating point, and the alternating
+        // fit amplifies last-bit differences, so agreement is to a tolerance —
+        // one the echo-independent input misses by far.
+        let tol = 5e-4;
+        assert!((pos[0] - want_pos).abs() < tol, "χ+ {} vs {want_pos}", pos[0]);
+        assert!((neg[0] - want_neg).abs() < tol, "χ− {} vs {want_neg}", neg[0]);
+        assert!((tot[0] - (pos[0] + neg[0])).abs() < 1e-12, "χ_total = χ+ + χ−");
+
+        let flat = repeated(&[chip + chim], te.len());
+        let (fpos, fneg, _) = decompose(&flat, &mag, &te, &[1u8], &params, |_, _| {});
+        assert!(
+            (fpos[0] - want_pos).abs() + (fneg[0] - want_neg).abs() > 10.0 * tol,
+            "an echo-independent χ should not reproduce the per-echo fit: \
+             χ+ {} χ− {} vs {want_pos} {want_neg}",
+            fpos[0],
+            fneg[0]
+        );
+    }
+
+    /// Echo `e` of the input is the QSM of echo `e`: reversing the echo order of
+    /// `chi_echoes` against the magnitude must change the result.
+    #[test]
+    fn per_echo_qsm_is_read_in_echo_order() {
+        let b0 = 3.0;
+        let te: Vec<f64> = (0..6).map(|k| 0.003 + 0.004 * k as f64).collect();
+        let params = DecomposeParams { b0, n_inner: 4, ..DecomposeParams::default() };
+        let (mag, chi) = planted_voxel(&te, 0.3, 0.3, 0.4, 0.12, -0.06, 20.0, b0);
+        let rev: Vec<f64> = chi.iter().rev().cloned().collect();
+        let (p1, n1, _) = decompose(&chi, &mag, &te, &[1u8], &params, |_, _| {});
+        let (p2, n2, _) = decompose(&rev, &mag, &te, &[1u8], &params, |_, _| {});
+        assert!(
+            (p1[0] - p2[0]).abs() + (n1[0] - n2[0]).abs() > 1e-4,
+            "echo order of chi_echoes was ignored"
+        );
+    }
+
     /// Sign/plumbing check on a synthetic voxel. Verifies the output sign
-    /// convention and the physically-correct mapping: χ+ = |PSC| (paramagnetic
-    /// sub-model), χ− = −|DSC| (diamagnetic sub-model). A voxel with a large
-    /// paramagnetic fit amplitude/χ therefore yields a dominant χ+.
+    /// convention and the mapping χ+ = |PSC| (paramagnetic sub-model),
+    /// χ− = −|DSC| (diamagnetic sub-model). A voxel with a large paramagnetic
+    /// amplitude/χ therefore yields a dominant χ+.
     #[test]
     fn decompose_signs_on_synthetic_voxel() {
         let te = [0.004, 0.012, 0.020, 0.028];
@@ -699,31 +851,11 @@ mod tests {
             chi_bound: 0.5,
             max_lm_iter: 40,
         };
-
-        // Forward: paramagnetic-dominant fit parameters.
-        let (cp, cm, c0, chip, chim, r0) = (0.5, 0.1, 0.4, 0.10, -0.02, 20.0);
-        let sig: Vec<(f64, f64)> = te
-            .iter()
-            .map(|&t| signal_model(t, cp, cm, c0, chip, chim, r0, b0))
-            .collect();
-        let chi_total_val = chip + chim;
-        let n = 1;
-        let ne = te.len();
-        let mut mag = vec![0.0_f64; n * ne];
-        for e in 0..ne {
-            mag[e] = (sig[e].0 * sig[e].0 + sig[e].1 * sig[e].1).sqrt();
-        }
-        let chi_total = vec![chi_total_val; n];
-        let mask = vec![1u8; n];
-        let (pos, neg, tot) = decompose(&chi_total, &mag, &te, &mask, &params, |_, _| {});
-        // Sign convention + invariant.
+        let (mag, chi) = planted_voxel(&te, 0.5, 0.1, 0.4, 0.10, -0.02, 20.0, b0);
+        let (pos, neg, tot) = decompose(&chi, &mag, &te, &[1u8], &params, |_, _| {});
         assert!(pos[0] >= 0.0, "χ+ must be ≥ 0");
         assert!(neg[0] <= 0.0, "χ− must be ≤ 0");
-        assert!(
-            (tot[0] - (pos[0] + neg[0])).abs() < 1e-12,
-            "χ_total = χ+ + χ−"
-        );
-        // Physically-correct mapping: paramagnetic fit → χ+ (|PSC|) dominates.
+        assert!((tot[0] - (pos[0] + neg[0])).abs() < 1e-12, "χ_total = χ+ + χ−");
         assert!(
             pos[0] > neg[0].abs(),
             "expected χ+ dominant: χ+={} χ−={}",
@@ -736,11 +868,11 @@ mod tests {
     ///
     /// A compartment accumulates `(2/3)·χ·γ·B0·TE` radians, so with `atan2`'s
     /// `(−π, π]` fold and no unwrapping the alternating fit collapses to a
-    /// degenerate fixed point above `|χ_total| = π / ((2/3)·γ·B0·TE_max)` and
-    /// returns χ+ = 0 exactly. At the phantom's 7 T and 28 ms last echo that
-    /// threshold is 0.090 ppm — inside the globus pallidus, which consequently
-    /// reconstructed as a hole. Sweep across it and require a response that is
-    /// non-zero and increasing, not a dropout.
+    /// degenerate fixed point above `|χ| = π / ((2/3)·γ·B0·TE_max)` and returns
+    /// χ+ = 0 exactly. At 7 T and a 28 ms last echo that threshold is 0.090 ppm —
+    /// inside the globus pallidus, which consequently reconstructed as a hole.
+    /// Sweep across it and require a response that is non-zero and increasing,
+    /// not a dropout.
     #[test]
     fn chi_pos_survives_the_phase_wrap_threshold() {
         let te = [0.004, 0.012, 0.020, 0.028]; // 7 T phantom sampling
@@ -757,25 +889,19 @@ mod tests {
             "test assumes a threshold inside the swept range, got {threshold}"
         );
 
-        // One voxel forward-simulated from the model, for a range of true χ+ that
-        // straddles the threshold.
+        // Magnitude forward-simulated from the model and one χ for every echo
+        // (the echo-independent input that exposed the fold), for a range of true
+        // χ+ that straddles the threshold.
         let (cp, cm, c0, chim, r0) = (0.35, 0.25, 0.40, -0.03, 25.0);
         let mut prev = 0.0_f64;
         for k in 4..=13 {
             let chip = 0.02 * k as f64;
-            let mag: Vec<f64> = te
-                .iter()
-                .map(|&t| {
-                    let z = signal_model(t, cp, cm, c0, chip, chim, r0, b0);
-                    (z.0 * z.0 + z.1 * z.1).sqrt()
-                })
-                .collect();
-            let (pos, _neg, _tot) =
-                decompose(&[chip + chim], &mag, &te, &[1u8], &params, |_, _| {});
+            let (mag, _) = planted_voxel(&te, cp, cm, c0, chip, chim, r0, b0);
+            let chi = repeated(&[chip + chim], te.len());
+            let (pos, _neg, _tot) = decompose(&chi, &mag, &te, &[1u8], &params, |_, _| {});
             assert!(
                 pos[0] > 0.0,
-                "χ+ collapsed to zero at χ+={chip} (χ_total={}, threshold {threshold:.4})",
-                chip + chim
+                "χ+ collapsed to zero at χ+={chip} (threshold {threshold:.4})"
             );
             assert!(
                 pos[0] > prev,
@@ -789,14 +915,13 @@ mod tests {
 
     /// Regression: no scattered dropouts across the deep-grey χ+ range.
     ///
-    /// Unwrapping alone was not enough. The χ search ran to `chi_bound` (0.5 ppm
-    /// by default), past the 0.31 ppm that 8 ms echo spacing can represent
-    /// without the per-echo phase step exceeding π. In that aliased region the
-    /// stage-3 landscape grows spurious minima, and voxels at particular
-    /// (χ, R2*) combinations fell into them — leaving a recovered pallidum that
-    /// was bright but speckled with black. Feed single-compartment data built the
-    /// way the phantom builds it (magnitude decaying at R2* = R2 + Dr·|χ|, phase
-    /// from χ_total) and require every voxel across the band to recover.
+    /// The χ search used to run to `chi_bound` (0.5 ppm by default), past the
+    /// 0.31 ppm that 8 ms echo spacing can represent without the per-echo phase
+    /// step exceeding π. In that aliased region the stage-3 landscape grows
+    /// spurious minima, and voxels at particular (χ, R2*) combinations fell into
+    /// them. This feeds the echo-independent data that exposed it (magnitude
+    /// decaying at R2* = R2 + Dr·|χ|, one χ for every echo) and requires every
+    /// voxel across the band to recover.
     #[test]
     fn chi_pos_has_no_dropouts_across_deep_grey() {
         let te = [0.004, 0.012, 0.020, 0.028];
@@ -813,8 +938,8 @@ mod tests {
             let chip = 0.01 * k as f64;
             let r2s = r2 + dr_pos * chip + dr_neg * chim.abs();
             let mag: Vec<f64> = te.iter().map(|&t| (-r2s * t).exp()).collect();
-            let (pos, _neg, _tot) =
-                decompose(&[chip + chim], &mag, &te, &[1u8], &params, |_, _| {});
+            let chi = repeated(&[chip + chim], te.len());
+            let (pos, _neg, _tot) = decompose(&chi, &mag, &te, &[1u8], &params, |_, _| {});
             assert!(
                 pos[0] > 0.3 * chip,
                 "dropout at χ+={chip:.2}: recovered {:.5} (gain {:.3})",
@@ -831,38 +956,27 @@ mod tests {
         let b0 = 7.0;
         let ne = te.len();
         let params = DecomposeParams { b0, n_inner: 4, chi_bound: 0.5, max_lm_iter: 20 };
-
-        // A real signal for the fitted voxels.
-        let (cp, cm, c0, chip, chim, r0) = (0.4, 0.2, 0.4, 0.06, -0.05, 22.0);
-        let sig: Vec<(f64, f64)> = te
-            .iter()
-            .map(|&t| signal_model(t, cp, cm, c0, chip, chim, r0, b0))
-            .collect();
-        let smag: Vec<f64> = sig.iter().map(|z| (z.0 * z.0 + z.1 * z.1).sqrt()).collect();
+        let (smag, schi) = planted_voxel(&te, 0.4, 0.2, 0.4, 0.06, -0.05, 22.0, b0);
 
         // 4 voxels: [0]=masked-out, [1]=all-zero magnitude, [2],[3]=real signal.
         let n = 4;
         let mut mag = vec![0.0_f64; n * ne];
-        for e in 0..ne {
-            mag[2 * ne + e] = smag[e];
-            mag[3 * ne + e] = smag[e];
+        let mut chi = vec![0.0_f64; n * ne];
+        for v in [2usize, 3] {
+            mag[v * ne..(v + 1) * ne].copy_from_slice(&smag);
+            chi[v * ne..(v + 1) * ne].copy_from_slice(&schi);
         }
-        let chi_total = vec![chip + chim; n];
         let mask = vec![0u8, 1, 1, 1];
 
         let mut last = (0usize, 0usize);
-        let (pos, neg, tot) =
-            decompose(&chi_total, &mag, &te, &mask, &params, |i, t| last = (i, t));
+        let (pos, neg, tot) = decompose(&chi, &mag, &te, &mask, &params, |i, t| last = (i, t));
 
-        // Masked-out and all-zero voxels stay at zero.
         assert_eq!((pos[0], neg[0], tot[0]), (0.0, 0.0, 0.0), "masked voxel");
         assert_eq!((pos[1], neg[1], tot[1]), (0.0, 0.0, 0.0), "all-zero voxel");
-        // Fitted voxels obey the sign convention + invariant.
         for i in [2usize, 3] {
             assert!(pos[i] >= 0.0 && neg[i] <= 0.0, "signs at voxel {i}");
             assert!((tot[i] - (pos[i] + neg[i])).abs() < 1e-12, "invariant at voxel {i}");
         }
-        // Progress reported completion over the 3 masked voxels.
         assert_eq!(last, (3, 3), "final progress");
     }
 }
