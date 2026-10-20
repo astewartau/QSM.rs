@@ -49,8 +49,6 @@ pub struct TfiParams {
     pub lambda: f64,
     /// Preconditioner value outside the brain mask (1.0 inside)
     pub precond: f64,
-    /// Enable MERIT (outlier adjustment) — currently a no-op placeholder
-    pub merit: bool,
     /// Data weighting mode (1 = SNR)
     pub data_weighting: i32,
     /// Fraction of voxels considered edges (0.0-1.0)
@@ -73,7 +71,6 @@ impl Default for TfiParams {
             // preconditioner (Liu 2017). Neither is tuned to any specific dataset.
             lambda: 7.5e-5,
             precond: 30.0,
-            merit: false,
             data_weighting: 1,
             percentage: 0.9,
             cg_tol: 0.01,
@@ -345,7 +342,6 @@ pub fn tfi(
     // Final χ = P ⊙ y, zeroed outside the brain mask. The whole-FOV solve is only needed to
     // absorb the background field into out-of-brain susceptibility; that region is unconstrained
     // (artefacty), so the returned map keeps only the brain — matching MEDI/NDI/etc.
-    let _ = params.merit;
     y.iter()
         .zip(precond.iter())
         .zip(mask.iter())
