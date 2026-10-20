@@ -274,8 +274,12 @@ const COMPLEX_STARTS: [(f64, f64); 4] = [(0.05, -0.05), (0.2, -0.2), (0.1, -0.02
 /// transmit/receive phase and every field not produced inside the voxel
 /// (background and neighbouring sources). No QSM is needed. All eight
 /// parameters are fitted jointly by bounded Levenberg–Marquardt with an
-/// analytic Jacobian, from each of a few `(χc+, χc−)` starting points; the
-/// lowest-cost fit wins. The sources returned are the voxel averages
+/// analytic Jacobian, from each of four `(χc+, χc−)` starting points, both
+/// directly and after a first pass with the pool χ held at the start. φ₀ and
+/// Δω are searched within one period of their seeds (a line through the
+/// echo-unwrapped phase). The lowest-cost fit wins, except that a fit whose
+/// neutral pool has vanished ([`MIN_NEUTRAL_FRACTION`]) yields to any that has
+/// one. The sources returned are the voxel averages
 /// `χ+ = C+/(C++C−+C₀)·χc+` and `χ− = C−/(C++C−+C₀)·χc−`.
 ///
 /// The fitted frequency Δω also carries the pools' mean phase slope, so χ_total
@@ -500,37 +504,48 @@ fn fit_voxel_complex(
     // to ~exp(R2*·TE₁) ≥ 1; 3 leaves room for any plausible decay before TE₁.
     let amp_ub = 3.0;
     let r2_ub = params.r2_bound;
-    let inf = f64::INFINITY;
-    let lb = [0.0, 0.0, 0.0, 0.0, 0.0, -ub, -inf, -inf];
-    let ubv = [amp_ub, amp_ub, amp_ub, r2_ub, ub, 0.0, inf, inf];
+    // φ₀ and Δω are only defined modulo 2π and (for evenly spaced echoes)
+    // modulo 2π/ΔTE, so a window of one period around each seed loses no
+    // solution, and keeps a long first step from carrying the fit into a
+    // distant, aliased one.
+    let dte = te.windows(2).map(|w| w[1] - w[0]).fold(0.0, f64::max);
+    let dw_half = PI / dte;
+    let lb = [0.0, 0.0, 0.0, 0.0, 0.0, -ub, phi0 - PI, 0.0];
+    let ubv = [amp_ub, amp_ub, amp_ub, r2_ub, ub, 0.0, phi0 + PI, 0.0];
 
     let model = ComplexModel { te, a, w };
     let y = &ws.y;
     let resid = |x: &[f64], out: &mut [f64]| model.resid(x, y, out);
     let jac = |x: &[f64], s: &mut LmScratch| model.jac(x, &mut s.jac);
+    let maxit = params.max_lm_iter;
 
-    let mut best = ([0.0_f64; LM_MAX_N], f64::INFINITY);
+    let mut best: Option<([f64; LM_MAX_N], f64)> = None;
     for &(xp0, xm0) in &COMPLEX_STARTS {
         let xp0 = xp0.min(ub);
         let xm0 = xm0.max(-ub);
         // The pools' mean phase slope is part of the model; take it out of the
         // measured slope so the seed's total frequency matches the data.
-        let x0 = [
-            0.2,
-            0.2,
-            0.6,
-            10.0_f64.min(r2_ub),
-            xp0,
-            xm0,
-            phi0,
-            dw0 + w * 0.2 * (xp0 + xm0),
-        ];
-        let fit = lm_core(&resid, jac, &x0, &lb, &ubv, params.max_lm_iter, true, &mut ws.lm);
-        if fit.1 < best.1 {
-            best = fit;
+        let dw_seed = dw0 + w * 0.2 * (xp0 + xm0);
+        let x0 = [0.2, 0.2, 0.6, 10.0_f64.min(r2_ub), xp0, xm0, phi0, dw_seed];
+        let (mut lo, mut hi) = (lb, ubv);
+        (lo[7], hi[7]) = (dw_seed - dw_half, dw_seed + dw_half);
+        // Each start is fitted twice: jointly from the seed, and jointly after
+        // first settling the amplitudes, R2*₀, φ₀ and Δω with the pool χ held at
+        // the start. Neither path dominates: the direct one is the more reliable
+        // with few echoes at 3 T, the staged one where the pools dephase within
+        // the first echoes (7 T), which leaves the linear phase seed far off.
+        let direct = lm_core(&resid, jac, &x0, &lo, &hi, maxit, true, &mut ws.lm);
+        let (mut lo_held, mut hi_held) = (lo, hi);
+        (lo_held[4], hi_held[4], lo_held[5], hi_held[5]) = (xp0, xp0, xm0, xm0);
+        let pre = lm_core(&resid, jac, &x0, &lo_held, &hi_held, maxit, true, &mut ws.lm);
+        let staged = lm_core(&resid, jac, &pre.0[..8], &lo, &hi, maxit, true, &mut ws.lm);
+        for fit in [direct, staged] {
+            if best.is_none_or(|b| better_complex_fit(&fit, &b)) {
+                best = Some(fit);
+            }
         }
     }
-    let x = best.0;
+    let x = best.map_or([0.0; LM_MAX_N], |b| b.0);
     let sum = x[0] + x[1] + x[2];
     if sum.is_nan() || sum <= 0.0 {
         return (0.0, 0.0);
@@ -557,6 +572,31 @@ impl Scratch {
             logy: vec![(0.0, 0.0); ne],
             lm: LmScratch::new(2 * ne),
         }
+    }
+}
+
+/// Smallest neutral-pool fraction `C₀/(C++C−+C₀)` a [`decompose_complex`] fit is
+/// preferred with. Below it the fit is the pool-relabelling degeneracy rather
+/// than a DECOMPOSE voxel: one source pool stands in for the tissue water, its
+/// broadening `a·|χc|` playing R2*₀ and Δω shifting to absorb its frequency.
+/// Under noise that relabelling often fits a few hundredths better than the
+/// physical solution and then wins on cost alone, returning a voxel whose whole
+/// signal is a source; on DECOMPOSE-model voxels at 3 T and 7 T it was most of
+/// the gross outliers.
+const MIN_NEUTRAL_FRACTION: f64 = 0.02;
+
+/// Whether candidate fit `a` beats `b` (`(x, cost)` pairs): a fit with a
+/// neutral pool of at least [`MIN_NEUTRAL_FRACTION`] beats one without, and
+/// otherwise the lower cost wins.
+fn better_complex_fit(a: &([f64; LM_MAX_N], f64), b: &([f64; LM_MAX_N], f64)) -> bool {
+    let physical = |x: &[f64; LM_MAX_N]| {
+        let sum = x[0] + x[1] + x[2];
+        sum > 0.0 && x[2] >= MIN_NEUTRAL_FRACTION * sum
+    };
+    match (physical(&a.0), physical(&b.0)) {
+        (true, false) => true,
+        (false, true) => false,
+        _ => a.1 < b.1,
     }
 }
 
