@@ -221,6 +221,324 @@ pub fn decompose(
     (chi_pos, chi_neg, chi_out)
 }
 
+/// Parameters for [`decompose_complex`].
+#[cfg_attr(feature = "introspection", derive(serde::Serialize))]
+#[derive(Clone, Debug)]
+pub struct DecomposeComplexParams {
+    /// Main field strength in Tesla.
+    pub b0: f64,
+    /// Upper bound on the pool susceptibilities |χc±| in the fit, ppm.
+    pub chi_bound: f64,
+    /// Upper bound on the baseline decay rate R2*₀ in the fit, Hz.
+    pub r2_bound: f64,
+    /// Max Levenberg–Marquardt iterations per start.
+    pub max_lm_iter: usize,
+}
+
+impl Default for DecomposeComplexParams {
+    fn default() -> Self {
+        Self {
+            b0: 7.0,
+            chi_bound: 0.5,
+            r2_bound: 100.0,
+            max_lm_iter: 100,
+        }
+    }
+}
+
+/// `(χc+, χc−)` starting points of the multi-start search in [`decompose_complex`].
+/// The joint fit has distinct local minima for weak/strong pool susceptibility;
+/// these four cover both orderings of |χc+| vs |χc−| at two scales.
+const COMPLEX_STARTS: [(f64, f64); 4] = [(0.05, -0.05), (0.2, -0.2), (0.1, -0.02), (0.02, -0.1)];
+
+/// DECOMPOSE source separation fitted to the measured multi-echo complex signal.
+///
+/// [`decompose`] fits DECOMPOSE's three-pool model to a signal whose phase is
+/// rebuilt as linear in TE from a conventional QSM. The pools' own phase is not
+/// linear in TE, so that rebuilt signal is not one the model can produce, and
+/// the fit compresses both sources. This entry point instead fits the model to
+/// the measured complex data,
+///
+/// ```text
+///   S(t) = [ C+ · exp(−( a·χc+ + R2*₀ + i·(2/3)·χc+·γ·B0)·t)
+///          + C− · exp(−(−a·χc− + R2*₀ + i·(2/3)·χc−·γ·B0)·t)
+///          + C₀ · exp(−R2*₀·t) ] · exp(i·(φ₀ + Δω·t))
+/// ```
+///
+/// with a free per-voxel phase offset φ₀ and frequency Δω, which absorb the
+/// transmit/receive phase and every field not produced inside the voxel
+/// (background and neighbouring sources). No QSM is needed. All eight
+/// parameters are fitted jointly by bounded Levenberg–Marquardt with an
+/// analytic Jacobian, from each of a few `(χc+, χc−)` starting points; the
+/// lowest-cost fit wins. The sources returned are the voxel averages
+/// `χ+ = C+/(C++C−+C₀)·χc+` and `χ− = C−/(C++C−+C₀)·χc−`.
+///
+/// The fitted frequency Δω also carries the pools' mean phase slope, so χ_total
+/// is not identified from Δω; it is the sum of the two voxel-average sources.
+///
+/// # Arguments
+/// * `magnitude` — Multi-echo magnitude, `(n_voxels, n_echoes)` row-major (echo
+///   fastest per voxel), as in [`decompose`]. Each voxel is normalised by its
+///   largest echo, so the scale is arbitrary.
+/// * `phase` — Multi-echo phase in radians, same layout. Wrapped or unwrapped,
+///   background field included or not. Sign convention: phase = +γ·ΔB·TE, so a
+///   paramagnetic source advances the phase — the convention the rest of this
+///   crate uses for field maps. The phase is unwrapped along the echoes per voxel
+///   to seed φ₀ and Δω; the fit itself compares complex signals, so wraps do
+///   not enter it.
+/// * `echo_times` — Echo times in **seconds** (`n_echoes ≥ 3`).
+/// * `mask` — Binary mask (`n_voxels`, 1 = inside).
+/// * `params` — See [`DecomposeComplexParams`].
+/// * `progress` — Progress callback `(voxels_done, voxels_total)`.
+///
+/// # Returns
+/// `(chi_pos, chi_neg, chi_total)` in ppm, zero outside `mask`; `chi_pos ≥ 0`,
+/// `chi_neg ≤ 0`, `chi_total = chi_pos + chi_neg`.
+pub fn decompose_complex(
+    magnitude: &[f64],
+    phase: &[f64],
+    echo_times: &[f64],
+    mask: &[u8],
+    params: &DecomposeComplexParams,
+    mut progress: impl FnMut(usize, usize),
+) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
+    let n = mask.len();
+    let ne = echo_times.len();
+    assert_eq!(magnitude.len(), n * ne, "magnitude must be n_voxels * n_echoes");
+    assert_eq!(phase.len(), n * ne, "phase must be n_voxels * n_echoes");
+    assert!(ne >= 3, "DECOMPOSE needs at least 3 echoes");
+
+    let voxels: Vec<usize> = (0..n).filter(|&i| mask[i] != 0).collect();
+    let total = voxels.len();
+    let te = echo_times;
+
+    let results: Vec<(usize, f64, f64)> = maybe_par_map_init!(
+        voxels,
+        || ComplexScratch::new(ne),
+        |ws: &mut ComplexScratch, &i: &usize| {
+            let (pos, neg) = fit_voxel_complex(
+                &magnitude[i * ne..(i + 1) * ne],
+                &phase[i * ne..(i + 1) * ne],
+                te,
+                params,
+                ws,
+            );
+            (i, pos, neg)
+        }
+    )
+    .collect();
+
+    let mut chi_pos = vec![0.0_f64; n];
+    let mut chi_neg = vec![0.0_f64; n];
+    let mut chi_out = vec![0.0_f64; n];
+    for (i, pos, neg) in results {
+        chi_pos[i] = pos;
+        chi_neg[i] = neg;
+        chi_out[i] = pos + neg;
+    }
+    progress(total, total);
+    (chi_pos, chi_neg, chi_out)
+}
+
+/// Reusable scratch for one voxel of [`decompose_complex`]; every buffer is
+/// overwritten before it is read.
+struct ComplexScratch {
+    /// Normalised complex data per echo, in DECOMPOSE's phase convention.
+    y: Vec<(f64, f64)>,
+    /// Levenberg–Marquardt buffers.
+    lm: LmScratch,
+}
+
+impl ComplexScratch {
+    fn new(ne: usize) -> Self {
+        Self { y: vec![(0.0, 0.0); ne], lm: LmScratch::new(2 * ne) }
+    }
+}
+
+/// The complex DECOMPOSE model of [`decompose_complex`] over one voxel's echoes,
+/// parameterised as `x = [C+, C−, C₀, R2*₀, χc+, χc−, φ₀, Δω]`.
+struct ComplexModel<'a> {
+    te: &'a [f64],
+    /// Static-dephasing broadening coefficient `2π·γ·B0 / (9√3)`.
+    a: f64,
+    /// Pool frequency per ppm, `(2/3)·γ·B0`.
+    w: f64,
+}
+
+impl ComplexModel<'_> {
+    /// Each pool's term at `t` without the shared `exp(i·(φ₀ + Δω·t))`, as
+    /// `[E+, E−, E₀]`, and that shared factor.
+    #[inline]
+    fn terms(&self, x: &[f64], t: f64) -> ([(f64, f64); 3], (f64, f64)) {
+        let (r0, xp, xm) = (x[3], x[4], x[5]);
+        let ep = (-(self.a * xp + r0) * t).exp();
+        let em = (-(-self.a * xm + r0) * t).exp();
+        let (sp, cp) = (-self.w * xp * t).sin_cos();
+        let (sm, cm) = (-self.w * xm * t).sin_cos();
+        let (sn, cs) = (x[6] + x[7] * t).sin_cos();
+        ([(ep * cp, ep * sp), (em * cm, em * sm), ((-r0 * t).exp(), 0.0)], (cs, sn))
+    }
+
+    /// Complex signal at `t`.
+    #[inline]
+    fn signal(&self, x: &[f64], t: f64) -> (f64, f64) {
+        let ([tp, tm, t0], rot) = self.terms(x, t);
+        let s = (
+            x[0] * tp.0 + x[1] * tm.0 + x[2] * t0.0,
+            x[0] * tp.1 + x[1] * tm.1 + x[2] * t0.1,
+        );
+        cmul(s, rot)
+    }
+
+    /// Residual `[Re(S − y); Im(S − y)]`.
+    fn resid(&self, x: &[f64], y: &[(f64, f64)], out: &mut [f64]) {
+        let ne = self.te.len();
+        for (e, &t) in self.te.iter().enumerate() {
+            let mdl = self.signal(x, t);
+            out[e] = mdl.0 - y[e].0;
+            out[ne + e] = mdl.1 - y[e].1;
+        }
+    }
+
+    /// Analytic Jacobian of [`Self::resid`], `2·n_echoes × 8`, column-major.
+    fn jac(&self, x: &[f64], jac: &mut [f64]) {
+        let ne = self.te.len();
+        let m = 2 * ne;
+        let (a, w) = (self.a, self.w);
+        for (e, &t) in self.te.iter().enumerate() {
+            let ([tp, tm, t0], rot) = self.terms(x, t);
+            let ep = cmul(tp, rot);
+            let em = cmul(tm, rot);
+            let e0 = cmul(t0, rot);
+            let mdl = (
+                x[0] * ep.0 + x[1] * em.0 + x[2] * e0.0,
+                x[0] * ep.1 + x[1] * em.1 + x[2] * e0.1,
+            );
+            // ∂/∂χc+ = C+·E+·(−(a + i·w)·t);  ∂/∂χc− = C−·E−·((a − i·w)·t).
+            let dxp = cmul((x[0] * ep.0, x[0] * ep.1), (-a * t, -w * t));
+            let dxm = cmul((x[1] * em.0, x[1] * em.1), (a * t, -w * t));
+            let cols = [
+                ep,
+                em,
+                e0,
+                (-t * mdl.0, -t * mdl.1),
+                dxp,
+                dxm,
+                (-mdl.1, mdl.0),
+                (-t * mdl.1, t * mdl.0),
+            ];
+            for (j, c) in cols.iter().enumerate() {
+                jac[j * m + e] = c.0;
+                jac[j * m + ne + e] = c.1;
+            }
+        }
+    }
+}
+
+/// Complex product of `(re, im)` pairs.
+#[inline]
+fn cmul(p: (f64, f64), q: (f64, f64)) -> (f64, f64) {
+    (p.0 * q.0 - p.1 * q.1, p.0 * q.1 + p.1 * q.0)
+}
+
+/// Largest |χ| the echo spacing represents without the per-echo phase step of a
+/// pool exceeding π, capped at `chi_bound`. Past it the model matches a given χ
+/// on more than one branch (see the module notes).
+fn chi_search_bound(te: &[f64], b0: f64, chi_bound: f64) -> f64 {
+    let dte = te.windows(2).map(|w| w[1] - w[0]).fold(te[0], f64::max);
+    chi_bound.min(PI / ((2.0 / 3.0) * GAMMA * b0 * dte))
+}
+
+/// Joint 8-parameter fit of one voxel's complex signal. Returns the voxel-average
+/// `(χ+, χ−)`; `(0, 0)` for a voxel without signal.
+fn fit_voxel_complex(
+    mag: &[f64],
+    phase: &[f64],
+    te: &[f64],
+    params: &DecomposeComplexParams,
+    ws: &mut ComplexScratch,
+) -> (f64, f64) {
+    let ne = te.len();
+    let smax = mag.iter().cloned().fold(0.0_f64, f64::max);
+    if !(smax > 0.0) || phase.iter().any(|p| !p.is_finite()) {
+        return (0.0, 0.0);
+    }
+    // Data in DECOMPOSE's convention, where a paramagnetic pool's phase is
+    // −(2/3)·χ·γ·B0·t: the conjugate of the input's +γ·ΔB·TE convention.
+    // Alongside, the per-echo unwrapped phase and log-magnitude for the seeds.
+    let (mut st, mut stt) = (0.0, 0.0);
+    let (mut sp, mut stp, mut sl, mut stl) = (0.0, 0.0, 0.0, 0.0);
+    let mut prev = 0.0;
+    for e in 0..ne {
+        let m = mag[e] / smax;
+        let ph = -phase[e];
+        ws.y[e] = (m * ph.cos(), m * ph.sin());
+        let ang = if e == 0 { ph } else { unwrap_near(ph, prev) };
+        prev = ang;
+        let l = m.max(1e-6).ln();
+        let t = te[e];
+        st += t;
+        stt += t * t;
+        sp += ang;
+        stp += t * ang;
+        sl += l;
+        stl += t * l;
+    }
+    let nf = ne as f64;
+    let det = nf * stt - st * st;
+    let lin = |s: f64, ts: f64| -> (f64, f64) {
+        let slope = (nf * ts - st * s) / det;
+        (slope, (s - slope * st) / nf)
+    };
+    let (dw0, phi0) = lin(sp, stp);
+    let (lslope, lint) = lin(sl, stl);
+    let s0 = lint.exp().clamp(1e-3, 10.0);
+    let r2s = (-lslope).max(0.0);
+
+    let b0 = params.b0;
+    let a = (2.0 * PI * GAMMA * b0) / (9.0 * 3.0_f64.sqrt());
+    let w = (2.0 / 3.0) * GAMMA * b0;
+    let ub = chi_search_bound(te, b0, params.chi_bound);
+    let amp_ub = 2.0 * s0.max(1.0);
+    let r2_ub = params.r2_bound;
+    let inf = f64::INFINITY;
+    let lb = [0.0, 0.0, 0.0, 0.0, 0.0, -ub, -inf, -inf];
+    let ubv = [amp_ub, amp_ub, amp_ub, r2_ub, ub, 0.0, inf, inf];
+
+    let model = ComplexModel { te, a, w };
+    let y = &ws.y;
+    let resid = |x: &[f64], out: &mut [f64]| model.resid(x, y, out);
+    let jac = |x: &[f64], s: &mut LmScratch| model.jac(x, &mut s.jac);
+
+    let mut best = ([0.0_f64; LM_MAX_N], f64::INFINITY);
+    for &(xp0, xm0) in &COMPLEX_STARTS {
+        let xp0 = xp0.min(ub);
+        let xm0 = xm0.max(-ub);
+        // The pools' mean phase slope is part of the model; take it out of the
+        // measured slope so the seed's total frequency matches the data.
+        let x0 = [
+            0.2 * s0,
+            0.2 * s0,
+            0.6 * s0,
+            (0.5 * r2s).min(r2_ub),
+            xp0,
+            xm0,
+            phi0,
+            dw0 + w * 0.2 * (xp0 + xm0),
+        ];
+        let fit = lm_core(&resid, &jac, &x0, &lb, &ubv, params.max_lm_iter, &mut ws.lm);
+        if fit.1 < best.1 {
+            best = fit;
+        }
+    }
+    let x = best.0;
+    let sum = x[0] + x[1] + x[2];
+    if !(sum > 0.0) {
+        return (0.0, 0.0);
+    }
+    ((x[0] / sum * x[4]).max(0.0), (x[1] / sum * x[5]).min(0.0))
+}
+
 /// Reusable scratch for one voxel's fit. Every buffer is fully overwritten
 /// before it is read, so a `Scratch` shared across voxels (or across a rayon
 /// worker's whole share of them) cannot carry state between them.
@@ -268,8 +586,7 @@ fn fit_voxel(
     // them. At 7 T with 8 ms spacing the limit is 0.31 ppm, well inside the 0.5
     // ppm default — which is what left the recovered pallidum speckled with
     // dropouts even after the phases were unwrapped.
-    let dte = te.windows(2).map(|w| w[1] - w[0]).fold(te[0], f64::max);
-    let ub = params.chi_bound.min(PI / ((2.0 / 3.0) * GAMMA * b0 * dte));
+    let ub = chi_search_bound(te, b0, params.chi_bound);
     let inf = f64::INFINITY;
     let maxit = params.max_lm_iter;
 
@@ -448,9 +765,10 @@ fn recon_phase(te: &[f64], _b0: f64, den: f64, model: impl Fn(f64) -> (f64, f64)
 // Bounded Levenberg–Marquardt for small (n ≤ 3) least-squares problems.
 // ---------------------------------------------------------------------------
 
-/// Largest parameter count any DECOMPOSE stage fits (stage 1: `[C+, C−, C₀]`).
+/// Largest parameter count any DECOMPOSE fit solves for: the 8-parameter joint
+/// fit of [`decompose_complex`]. The alternating stages of [`decompose`] use 1–3.
 /// Keeps the LM state on the stack.
-const LM_MAX_N: usize = 3;
+const LM_MAX_N: usize = 8;
 
 /// Scratch buffers for [`lm_bounded`], sized once for a residual of length `m`
 /// and reused across every stage, LM iteration and voxel. Contents are always
@@ -497,6 +815,45 @@ fn lm_bounded<F>(
 where
     F: Fn(&[f64], &mut [f64]),
 {
+    let fd_jac = |x: &[f64], s: &mut LmScratch| {
+        let n = x.len();
+        let m = s.r.len();
+        for j in 0..n {
+            let h = 1e-6 * x[j].abs().max(1e-3);
+            let mut xp = [0.0_f64; LM_MAX_N];
+            xp[..n].copy_from_slice(x);
+            xp[j] = (x[j] + h).clamp(lb[j], ub[j]);
+            let hj = xp[j] - x[j];
+            let step = if hj.abs() < 1e-30 { h } else { hj };
+            if hj.abs() < 1e-30 {
+                xp[j] = x[j] + h; // allow out-of-box probe when pinned at a bound
+            }
+            resid(&xp[..n], &mut s.rp);
+            for k in 0..m {
+                s.jac[j * m + k] = (s.rp[k] - s.r[k]) / step;
+            }
+        }
+    };
+    lm_core(&resid, fd_jac, x0, lb, ub, max_iter, s).0
+}
+
+/// Levenberg–Marquardt over the box `[lb, ub]` with a caller-supplied
+/// Jacobian. `jac(x, s)` fills `s.jac` (`m × n`, column-major) at `x`; it may
+/// read `s.r`, which holds the residual at `x`, and use `s.rp` as scratch.
+/// Returns the solution and its cost `‖r‖²`. Allocates nothing.
+fn lm_core<F, J>(
+    resid: &F,
+    jac: J,
+    x0: &[f64],
+    lb: &[f64],
+    ub: &[f64],
+    max_iter: usize,
+    s: &mut LmScratch,
+) -> ([f64; LM_MAX_N], f64)
+where
+    F: Fn(&[f64], &mut [f64]),
+    J: Fn(&[f64], &mut LmScratch),
+{
     let n = x0.len();
     debug_assert!(n <= LM_MAX_N);
     let m = s.r.len();
@@ -510,37 +867,17 @@ where
     let ftol = 1e-10;
 
     for _ in 0..max_iter {
-        // Forward-difference Jacobian J (m×n), column-major in `s.jac`.
-        for j in 0..n {
-            let h = 1e-6 * x[j].abs().max(1e-3);
-            let mut xp = x;
-            xp[j] = (x[j] + h).clamp(lb[j], ub[j]);
-            let hj = xp[j] - x[j];
-            let step = if hj.abs() < 1e-30 { h } else { hj };
-            if hj.abs() < 1e-30 {
-                xp[j] = x[j] + h; // allow out-of-box probe when pinned at a bound
-            }
-            resid(&xp[..n], &mut s.rp);
-            for k in 0..m {
-                s.jac[j * m + k] = (s.rp[k] - s.r[k]) / step;
-            }
-        }
+        jac(&x[..n], s);
         // Normal equations A = JᵀJ (n×n), g = Jᵀr (n).
         let mut a = [0.0_f64; LM_MAX_N * LM_MAX_N];
         let mut g = [0.0_f64; LM_MAX_N];
         for jc in 0..n {
-            for jr in 0..n {
-                let mut acc = 0.0;
-                for k in 0..m {
-                    acc += s.jac[jr * m + k] * s.jac[jc * m + k];
-                }
+            for jr in 0..=jc {
+                let acc = dot(&s.jac[jr * m..(jr + 1) * m], &s.jac[jc * m..(jc + 1) * m]);
                 a[jr * n + jc] = acc;
+                a[jc * n + jr] = acc;
             }
-            let mut acc = 0.0;
-            for k in 0..m {
-                acc += s.jac[jc * m + k] * s.r[k];
-            }
-            g[jc] = acc;
+            g[jc] = dot(&s.jac[jc * m..(jc + 1) * m], &s.r);
         }
 
         // Inner loop: inflate lambda until a step decreases the cost.
@@ -568,7 +905,7 @@ where
                 lambda = (lambda * 0.4).max(1e-12);
                 improved = true;
                 if rel < ftol {
-                    return x;
+                    return (x, cost);
                 }
                 break;
             } else {
@@ -582,7 +919,7 @@ where
             break;
         }
     }
-    x
+    (x, cost)
 }
 
 #[inline]
@@ -679,7 +1016,12 @@ mod tests {
             a[3] * x_true[0] + a[4] * x_true[1] + a[5] * x_true[2],
             a[6] * x_true[0] + a[7] * x_true[1] + a[8] * x_true[2],
         ];
-        let x = solve_small(&a, &b, 3).unwrap();
+        // `solve_small` takes LM_MAX_N-sized buffers, using the leading n×n block.
+        let mut ap = [0.0; LM_MAX_N * LM_MAX_N];
+        ap[..9].copy_from_slice(&a);
+        let mut bp = [0.0; LM_MAX_N];
+        bp[..3].copy_from_slice(&b);
+        let x = solve_small(&ap, &bp, 3).unwrap();
         for i in 0..3 {
             assert!((x[i] - x_true[i]).abs() < 1e-9, "x{i} = {}", x[i]);
         }
@@ -864,5 +1206,125 @@ mod tests {
         }
         // Progress reported completion over the 3 masked voxels.
         assert_eq!(last, (3, 3), "final progress");
+    }
+
+    // ── decompose_complex ──
+
+    /// qsm-forward's DECOMPOSE pool split (χc = 0.2 ppm, pool fraction ≤ 0.45):
+    /// returns `(C+, C−, C₀, χc+, χc−)` for voxel sources χ+ ≥ 0, χ− ≤ 0.
+    fn pools(chi_pos: f64, chi_neg: f64) -> (f64, f64, f64, f64, f64) {
+        let (chi_c, f_max) = (0.2, 0.45);
+        let cp = (chi_pos / chi_c).min(f_max);
+        let cm = (chi_neg.abs() / chi_c).min(f_max);
+        let xp = if cp > 0.0 { chi_pos / cp } else { 0.0 };
+        let xm = if cm > 0.0 { chi_neg / cm } else { 0.0 };
+        (cp, cm, 1.0 - cp - cm, xp, xm)
+    }
+
+    /// One voxel's (magnitude, wrapped phase) in the input convention (phase =
+    /// +γ·ΔB·TE), forward-simulated from the complex model at `x`.
+    fn simulate(x: &[f64; 8], te: &[f64], b0: f64, scale: f64) -> (Vec<f64>, Vec<f64>) {
+        let a = (2.0 * PI * GAMMA * b0) / (9.0 * 3.0_f64.sqrt());
+        let w = (2.0 / 3.0) * GAMMA * b0;
+        let model = ComplexModel { te, a, w };
+        let (mut mag, mut ph) = (Vec::new(), Vec::new());
+        for &t in te {
+            let z = model.signal(x, t);
+            mag.push(scale * (z.0 * z.0 + z.1 * z.1).sqrt());
+            ph.push(-z.1.atan2(z.0)); // conjugate into the input convention
+        }
+        (mag, ph)
+    }
+
+    const TE_3T: [f64; 6] = [0.003, 0.007, 0.011, 0.015, 0.019, 0.023];
+
+    #[test]
+    fn complex_jacobian_matches_finite_differences() {
+        let b0 = 3.0;
+        let a = (2.0 * PI * GAMMA * b0) / (9.0 * 3.0_f64.sqrt());
+        let w = (2.0 / 3.0) * GAMMA * b0;
+        let model = ComplexModel { te: &TE_3T, a, w };
+        let x = [0.3, 0.2, 0.5, 17.0, 0.15, -0.08, 0.4, 150.0];
+        let y = vec![(0.1, -0.2); TE_3T.len()];
+        let m = 2 * TE_3T.len();
+        let mut jac = vec![0.0; m * 8];
+        model.jac(&x, &mut jac);
+        let (mut r0, mut r1) = (vec![0.0; m], vec![0.0; m]);
+        model.resid(&x, &y, &mut r0);
+        for j in 0..8 {
+            let h = 1e-7 * x[j].abs().max(1e-3);
+            let mut xp = x;
+            xp[j] += h;
+            model.resid(&xp, &y, &mut r1);
+            for k in 0..m {
+                let fd = (r1[k] - r0[k]) / h;
+                let an = jac[j * m + k];
+                assert!(
+                    (fd - an).abs() <= 1e-4 * an.abs().max(1.0),
+                    "∂r[{k}]/∂x[{j}]: analytic {an}, finite difference {fd}"
+                );
+            }
+        }
+    }
+
+    /// Planted sources come back from the measured signal, through an arbitrary
+    /// phase offset, a background frequency that wraps the phase between echoes,
+    /// and an arbitrary magnitude scale.
+    #[test]
+    fn decompose_complex_recovers_planted_sources() {
+        let b0 = 3.0;
+        let r2 = 15.0;
+        let cases = [(0.02, -0.01), (0.15, -0.03), (0.05, -0.09), (0.19, -0.08), (0.1, -0.05)];
+        let (phi0, dw) = (2.6, 2.0 * PI * 70.0);
+        let ne = TE_3T.len();
+        let n = cases.len();
+        let (mut mag, mut ph) = (Vec::new(), Vec::new());
+        for &(chp, chm) in &cases {
+            let (cp, cm, c0, xp, xm) = pools(chp, chm);
+            let (m, p) = simulate(&[cp, cm, c0, r2, xp, xm, phi0, dw], &TE_3T, b0, 830.0);
+            mag.extend(m);
+            ph.extend(p);
+        }
+        let params = DecomposeComplexParams { b0, ..Default::default() };
+        let (pos, neg, tot) =
+            decompose_complex(&mag, &ph, &TE_3T, &vec![1u8; n], &params, |_, _| {});
+        assert_eq!(pos.len(), n);
+        assert_eq!(mag.len(), n * ne);
+        for (k, &(chp, chm)) in cases.iter().enumerate() {
+            assert!(
+                (pos[k] - chp).abs() < 2e-3 && (neg[k] - chm).abs() < 2e-3,
+                "voxel {k}: planted (χ+, χ−) = ({chp}, {chm}), recovered ({}, {})",
+                pos[k],
+                neg[k]
+            );
+            assert!((tot[k] - (pos[k] + neg[k])).abs() < 1e-12);
+        }
+    }
+
+    /// Masked-out, zero-signal and non-finite-phase voxels stay zero; progress
+    /// reports the masked count.
+    #[test]
+    fn decompose_complex_mask_and_degenerate_paths() {
+        let b0 = 3.0;
+        let ne = TE_3T.len();
+        let (cp, cm, c0, xp, xm) = pools(0.1, -0.05);
+        let (m, p) = simulate(&[cp, cm, c0, 15.0, xp, xm, 0.0, 0.0], &TE_3T, b0, 1.0);
+        // [0] masked out, [1] zero magnitude, [2] NaN phase, [3] real signal.
+        let mut mag = vec![0.0; 4 * ne];
+        let mut ph = vec![0.0; 4 * ne];
+        for v in [0, 2, 3] {
+            mag[v * ne..(v + 1) * ne].copy_from_slice(&m);
+            ph[v * ne..(v + 1) * ne].copy_from_slice(&p);
+        }
+        ph[2 * ne + 1] = f64::NAN;
+        let params = DecomposeComplexParams { b0, ..Default::default() };
+        let mut last = (0, 0);
+        let (pos, neg, _) =
+            decompose_complex(&mag, &ph, &TE_3T, &[0, 1, 1, 1], &params, |i, t| last = (i, t));
+        for v in 0..3 {
+            assert_eq!((pos[v], neg[v]), (0.0, 0.0), "voxel {v}");
+        }
+        assert!(pos[3] > 0.0 && neg[3] < 0.0);
+        assert_eq!(last, (3, 3));
     }
 }
