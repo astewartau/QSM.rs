@@ -56,6 +56,7 @@ jobs:
       dl_matrix: ${{ steps.detect.outputs.dl_matrix }}
       run_geometry: ${{ steps.detect.outputs.run_geometry }}
       run_multislice: ${{ steps.detect.outputs.run_multislice }}
+      wasm_shards: ${{ steps.wasm.outputs.wasm_shards }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -88,6 +89,15 @@ jobs:
             exit 1
           fi
           echo "All ignored integration tests are registered."
+
+      # The wasm32 deep-learning shards of unit-tests.yml are selected from the source's module
+      # graph (scripts/wasm_dl_shards.py). This fails when a file that uses the model machinery
+      # is reached by no shard, or a file listed as classical has become a network's dependency,
+      # so a new network cannot skip the shards that test it in WASM.
+      - name: Check the wasm32 shard map
+        run: |
+          python3 scripts/wasm_dl_shards.py check
+          python3 -m unittest discover -s scripts -p 'test_wasm_dl_shards.py'
 
       - name: Map changed files to tests
         id: detect
@@ -216,6 +226,14 @@ jobs:
               workflow_registration_only=true
             fi
           fi
+
+          # The changed files, for the wasm32 shard selection below. A registration-only change
+          # to this file is left out, as it is from the mapping here.
+          echo "$CHANGED" | if [ "$workflow_registration_only" = true ]; then
+            grep -vx '\.github/workflows/integration-tests\.yml' || true
+          else
+            cat
+          fi > "$RUNNER_TEMP/changed-files"
 
           # Check if any Rust/CI files changed (for unit tests)
           for file in $CHANGED; do
@@ -634,11 +652,41 @@ jobs:
           echo "  geometry:  $run_geometry"
           echo "  2d slices: $run_multislice"
 
+      # Which wasm32 shards unit-tests.yml runs. `classical` runs whenever the unit tests do; the
+      # three deep-learning shards only for a change their networks can see (see
+      # scripts/wasm_dl_shards.py). Everything runs on a manual run, under the `run-all-tests`
+      # label, on any event that is not a pull request, and when the changed files are unknown.
+      - name: Select wasm32 shards
+        id: wasm
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+        run: |
+          all='["stages","masking","segmentation"]'
+          if [ "$EVENT_NAME" != pull_request ]; then
+            echo "$EVENT_NAME: every wasm32 shard"
+            dl=$all
+          elif echo "${PR_LABELS:-[]}" | jq -e 'index("run-all-tests")' >/dev/null 2>&1; then
+            echo "run-all-tests label: every wasm32 shard"
+            dl=$all
+          elif [ ! -f "$RUNNER_TEMP/changed-files" ]; then
+            echo "Changed files unknown: every wasm32 shard"
+            dl=$all
+          else
+            python3 scripts/wasm_dl_shards.py select --from "$RUNNER_TEMP/changed-files" | tee wasm-select.log
+            dl=$(tail -n 1 wasm-select.log)
+          fi
+          shards=$(jq -c '["classical"] + .' <<< "$dl")
+          echo "wasm32 shards: $shards"
+          echo "wasm_shards=$shards" >> "$GITHUB_OUTPUT"
+
   # Unit tests + code coverage (reusable workflow)
   unit-tests:
     needs: detect-changes
     if: needs.detect-changes.outputs.run_unit_tests == 'true'
     uses: ./.github/workflows/unit-tests.yml
+    with:
+      wasm_shards: ${{ needs.detect-changes.outputs.wasm_shards }}
 
   # Download test data once and cache it
   setup:
@@ -1404,7 +1452,7 @@ jobs:
           retention-days: 1
 
   tests-passed:
-    needs: [unit-tests, bgremove-tests, inversion-tests, bet-test, combined-tests, pipeline-tests, chisep-tests, dl-tests, geometry-tests, multislice-tests]
+    needs: [detect-changes, unit-tests, bgremove-tests, inversion-tests, bet-test, combined-tests, pipeline-tests, chisep-tests, dl-tests, geometry-tests, multislice-tests]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -1412,8 +1460,12 @@ jobs:
         # dl-tests is intentionally omitted from the gate: its Run step is
         # continue-on-error (weight downloads are network-dependent and the DL
         # metrics are informational), so the job result never blocks a merge.
+        # detect-changes is in the gate because its checks (every test registered, the wasm32
+        # shard map) fail it, and a failed detect-changes skips every test job, which would
+        # otherwise read here as a pass.
         run: |
           for result in \
+            "${{ needs.detect-changes.result }}" \
             "${{ needs.unit-tests.result }}" \
             "${{ needs.bgremove-tests.result }}" \
             "${{ needs.inversion-tests.result }}" \
