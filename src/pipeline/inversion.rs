@@ -134,6 +134,18 @@ pub fn run_dipole_inversion(
             );
             chi
         }
+        InversionAlgorithm::Star => {
+            // STAR-QSM's result depends on the field's scale in radians (see the module docs),
+            // so it converts the ppm field to phase at the first echo time and this field
+            // strength, as STI Suite is given the phase of one echo.
+            let params = crate::inversion::StarParams {
+                te: metadata.echo_times.first().copied().unwrap_or(config.star.te),
+                b0: metadata.field_strength,
+                ..config.star.clone()
+            };
+            params.validate().map_err(PipelineError::InvalidConfig)?;
+            crate::inversion::star_qsm(field_ppm, mask, &grid, bdir, &params, &mut *progress)
+        }
         InversionAlgorithm::Ndi => {
             crate::inversion::ndi(
                 field_ppm, mask, &grid, bdir, &config.ndi, progress,
@@ -856,6 +868,27 @@ mod tests {
             let r = run_dipole_inversion(&[0.01; 512], &[1u8; 512], &meta, &config, None, &mut |_, _| {});
             assert!(matches!(r, Err(PipelineError::InvalidConfig(_))), "pad {pad_mm} accepted");
         }
+    }
+
+    #[test]
+    fn test_inversion_star() {
+        let star = crate::inversion::StarParams { pad: 4, ..Default::default() };
+        let chi = make_inversion_test_with(InversionConfig { algorithm: InversionAlgorithm::Star, star, ..Default::default() });
+        assert_eq!(chi.len(), 8 * 8 * 8);
+        assert!(chi.iter().all(|v| v.is_finite()));
+    }
+
+    #[test]
+    fn test_inversion_star_rejects_a_bad_field_strength() {
+        let meta = ScanMetadata {
+            dims: (8, 8, 8), voxel_size: (1.0, 1.0, 1.0),
+            echo_times: vec![0.005], field_strength: 0.0, b0_direction: (0.0, 0.0, 1.0),
+            slice_geometry: None,
+            affine: None,
+        };
+        let config = InversionConfig { algorithm: InversionAlgorithm::Star, ..Default::default() };
+        let r = run_dipole_inversion(&[0.01; 512], &[1u8; 512], &meta, &config, None, &mut |_, _| {});
+        assert!(matches!(r, Err(PipelineError::InvalidConfig(_))));
     }
 
     #[test]

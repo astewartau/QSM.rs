@@ -46,7 +46,7 @@
 //! - [`bet`] — brain extraction (BET)
 //! - [`unwrap`] — phase unwrapping (ROMEO, Laplacian, best path, PRELUDE)
 //! - [`bgremove`] — background field removal (V-SHARP, SHARP, RESHARP, PDF, iSMV, mSMV, LBV, HARPERELLA)
-//! - [`inversion`] — dipole inversion (TKD, TSVD, Tikhonov, TV, NLTV, RTS, MEDI, iLSQR, TGV)
+//! - [`inversion`] — dipole inversion (TKD, TSVD, Tikhonov, TV, NLTV, RTS, MEDI, iLSQR, STAR-QSM, TGV)
 //! - [`separation`] — paramagnetic/diamagnetic source separation (χ-separation, R2\*-QSM, WaveSep)
 //! - [`swi`] — susceptibility weighted imaging (CLEAR-SWI, SMWI)
 //! - [`complex`] — real/imaginary input to magnitude/phase
@@ -71,7 +71,7 @@
 //! | Brain extraction | BET |
 //! | Phase unwrapping | ROMEO, Laplacian, best path (3D-SRNCP), PRELUDE |
 //! | Background removal | V-SHARP, SHARP, RESHARP, PDF, iSMV, LBV, SDF |
-//! | Dipole inversion | TKD, TSVD, Tikhonov, TV-ADMM, NLTV, RTS, MEDI, TGV, iLSQR |
+//! | Dipole inversion | TKD, TSVD, Tikhonov, TV-ADMM, NLTV, RTS, MEDI, TGV, iLSQR, STAR-QSM |
 //! | Combined unwrap+BFR | HARPERELLA, iHARPERELLA |
 //! | SWI | CLEAR-SWI |
 //! | Separation | Chi-separation (Shin 2021 iLSQR-initialized, MEDI-based) |

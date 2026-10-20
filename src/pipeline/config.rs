@@ -12,7 +12,7 @@ use crate::bgremove::{
 use crate::inversion::{
     IlsqrParams, MediParams, NltvParams, RtsParams, TgvParams, TikhonovParams, TkdParams, TvParams,
     NdiParams, FansiParams, L1QsmParams, WhQsmParams, HdQsmParams, TfiParams, AmpPeParams,
-    LsqrQsmParams, HeidiParams,
+    LsqrQsmParams, HeidiParams, StarParams,
 };
 use crate::separation::{
     ChiSepIlsqrParams, ChiSepNetParams, ChiSepParams, DecomposeParams, HcChisepParams,
@@ -140,6 +140,8 @@ pub enum InversionAlgorithm {
     /// Preconditioned Total Field Inversion (single-step, total field).
     Tfi,
     Ilsqr,
+    /// STAR-QSM (STI Suite 3.0's `QSM_star`): k-space initial guess refined by SpaRSA.
+    Star,
     Tgv,
     Qsmart,
     /// Nonlinear Dipole Inversion (FANSI ndi.m).
@@ -471,6 +473,8 @@ pub struct InversionConfig {
     pub medi: MediParams,
     pub tfi: TfiParams,
     pub ilsqr: IlsqrParams,
+    /// STAR-QSM (`te` and `b0` are overridden from scan metadata by the dispatcher).
+    pub star: StarParams,
     pub tgv: TgvParams,
     pub qsmart: QsmartParams,
     pub ndi: NdiParams,
@@ -535,6 +539,7 @@ impl InversionConfig {
             | A::Rts
             | A::Nltv
             | A::Ilsqr
+            | A::Star
             | A::Ndi
             | A::Fansi
             | A::FansiTgv
@@ -568,6 +573,7 @@ impl Default for InversionConfig {
             medi: MediParams::default(),
             tfi: TfiParams::default(),
             ilsqr: IlsqrParams::default(),
+            star: StarParams::default(),
             tgv: TgvParams::default(),
             qsmart: QsmartParams::default(),
             ndi: NdiParams::default(),
@@ -646,6 +652,7 @@ impl InversionAlgorithm {
             | InversionAlgorithm::Medi
             | InversionAlgorithm::Tfi
             | InversionAlgorithm::Ilsqr
+            | InversionAlgorithm::Star
             | InversionAlgorithm::Tgv
             | InversionAlgorithm::Qsmart
             | InversionAlgorithm::Ndi
@@ -734,14 +741,14 @@ impl InversionAlgorithm {
             Self::Iqsm => Some("iqsm"),
             Self::IqsmPlus => Some("iqsm-plus"),
             Self::Tkd | Self::Tsvd | Self::Tikhonov | Self::Tv | Self::Rts | Self::Nltv
-            | Self::Medi | Self::Tfi | Self::Ilsqr | Self::Tgv | Self::Qsmart | Self::Ndi
+            | Self::Medi | Self::Tfi | Self::Ilsqr | Self::Star | Self::Tgv | Self::Qsmart | Self::Ndi
             | Self::Fansi | Self::FansiTgv | Self::L1qsm | Self::Whqsm | Self::Hdqsm
             | Self::AmpPe | Self::Lsqr | Self::Heidi => None,
         }
     }
     pub const VARIANTS: &'static [Self] = &[
         Self::Tkd, Self::Tsvd, Self::Tikhonov, Self::Tv, Self::Rts, Self::Nltv, Self::Medi,
-        Self::Tfi, Self::Ilsqr, Self::Tgv, Self::Qsmart, Self::Ndi, Self::Fansi, Self::FansiTgv,
+        Self::Tfi, Self::Ilsqr, Self::Star, Self::Tgv, Self::Qsmart, Self::Ndi, Self::Fansi, Self::FansiTgv,
         Self::L1qsm, Self::Whqsm, Self::Hdqsm, Self::AmpPe, Self::Lsqr, Self::Heidi,
         Self::Xqsm, Self::Qsmnet,
         Self::QsmnetPlus, Self::Autoqsm, Self::Qsmgan, Self::Ir2qsm, Self::Lpcnn, Self::ModlQsm,
@@ -981,7 +988,7 @@ mod orientation_tests {
             InversionAlgorithm::Tkd, InversionAlgorithm::Tsvd, InversionAlgorithm::Tikhonov,
             InversionAlgorithm::Tv, InversionAlgorithm::Rts, InversionAlgorithm::Nltv,
             InversionAlgorithm::Medi, InversionAlgorithm::Tfi, InversionAlgorithm::Ilsqr,
-            InversionAlgorithm::Tgv, InversionAlgorithm::Qsmart, InversionAlgorithm::Ndi,
+            InversionAlgorithm::Star, InversionAlgorithm::Tgv, InversionAlgorithm::Qsmart, InversionAlgorithm::Ndi,
             InversionAlgorithm::Fansi, InversionAlgorithm::FansiTgv, InversionAlgorithm::L1qsm,
             InversionAlgorithm::Whqsm, InversionAlgorithm::Hdqsm, InversionAlgorithm::AmpPe,
             InversionAlgorithm::Lsqr, InversionAlgorithm::Heidi,
@@ -1054,7 +1061,7 @@ mod inversion_input_tests {
         let expected: &[(A, InversionInput)] = &[
             (A::Tkd, LocalField), (A::Tsvd, LocalField), (A::Tikhonov, LocalField),
             (A::Tv, LocalField), (A::Rts, LocalField), (A::Nltv, LocalField),
-            (A::Tfi, TotalField), (A::Ilsqr, LocalField), (A::Qsmart, TotalField),
+            (A::Tfi, TotalField), (A::Ilsqr, LocalField), (A::Star, LocalField), (A::Qsmart, TotalField),
             (A::Ndi, LocalField), (A::Fansi, LocalField), (A::FansiTgv, LocalField),
             (A::L1qsm, LocalField), (A::Whqsm, LocalField), (A::Hdqsm, LocalField),
             (A::AmpPe, LocalField), (A::Lsqr, LocalField), (A::Heidi, LocalField),

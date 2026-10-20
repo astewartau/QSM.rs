@@ -33,7 +33,7 @@
 //! 5. `χ = 1.1 · Re(x) / (2π·γ·B0·TE)` with γ = 42.575 MHz/T (STI's `ScalingFactor`), cropped
 //!    back to the input grid and masked. The factor 1.1 is a constant in STI's code.
 //!
-//! Iterations: 13 on the 48×56×40 phantoms below, 4–5 on in-vivo brains.
+//! SpaRSA takes 5–12 iterations on the phantoms below and 5 on the in-vivo field.
 //!
 //! # Units
 //!
@@ -49,15 +49,17 @@
 //!
 //! On six 48×56×40 phantoms (3 T and 7 T, TE 5–20 ms, axial and oblique B0, voxels
 //! 0.8×0.9×1.5 mm, `pad` 6, 8 and 12) and an in-vivo 7 T local field (164×206×206), χ agrees
-//! with STI Suite's output to the last few bits (relative L2 difference ≤ 1e-14), with the same
-//! iteration counts. `tests/star_sti_parity.rs` checks three of the phantoms.
+//! with STI Suite's output to rounding: relative L2 difference ≤ 1.1e-14, max |Δχ| ≤ 2.6e-15
+//! ppm, with the same iteration counts. `tests/star_sti_parity.rs` checks three of the
+//! phantoms.
 //!
 //! # Performance
 //!
 //! Each SpaRSA iteration costs four 3-D FFTs on the padded grid (`A` twice); the forward
 //! transforms skip the zero rows outside the mask's bounding box and multiply by `D` in their
 //! last pass. The initial guess and setup cost ten more. Memory is three complex and one real
-//! array on the padded grid.
+//! array on the padded grid. On the in-vivo field above (188×230×230 padded, 5 iterations)
+//! it takes 1.2–1.7 s on 16 cores; iLSQR takes 9 s on the same field and cores.
 //!
 //! Reference:
 //! Wei, H., Dibb, R., Zhou, Y., Sun, Y., Xu, J., Wang, N., Liu, C. (2015). "Streaking artifact
@@ -424,7 +426,9 @@ fn sparsa(
             .iter()
             .sum();
 
-        alpha = (dgd / (f64::MIN_POSITIVE + dd)).max(ALPHA_MIN).min(ALPHA_MAX);
+        // min(αmax, max(αmin, ·)) as MATLAB evaluates it, where max(αmin, NaN) is αmin
+        let bb = dgd / (f64::MIN_POSITIVE + dd);
+        alpha = if bb.is_nan() { ALPHA_MIN } else { bb.clamp(ALPHA_MIN, ALPHA_MAX) };
         iter += 1;
         if nnz >= 1 {
             keep_going = changed as f64 / nnz as f64 > TOL_A;

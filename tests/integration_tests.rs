@@ -621,6 +621,37 @@ fn test_inversion_ilsqr() {
 
 #[test]
 #[ignore]
+fn test_inversion_star() {
+    println!("[INFO] Loading test data...");
+    let data = TestData::load().expect("Failed to load test data");
+    let (nx, ny, nz) = data.dims;
+    let (vsx, vsy, vsz) = data.voxel_size;
+
+    let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
+    // STAR-QSM converts the ppm field to phase at TE1 and B0, as the pipeline does.
+    let params = inversion::StarParams { te: data.echo_times[0], b0: data.field_strength, ..Default::default() };
+    let (result, elapsed) = run_timed!("STAR-QSM", inversion::star_qsm(
+        &data.fieldmap_local,
+        &data.mask,
+        &grid,
+        data.b0_dir,
+        &params,
+        |_, _| {},
+    ));
+
+    let res = TestResult::new("STAR-QSM", &result, &data.chi, &data.mask, data.dims);
+    res.print_with_time(elapsed);
+    let challenge = ChallengeMetrics::compute("STAR-QSM", &result, &data.chi, &data.mask, &data.segmentation, data.dims);
+    challenge.print();
+    challenge.print_ci_metrics(elapsed);
+    common::save_center_slices(&result, &data.mask, data.dims, "inversion_star");
+
+    assert!(res.nrmse < 0.5, "STAR-QSM NRMSE too high: {}", res.nrmse);
+    assert!(res.correlation > 0.7, "STAR-QSM correlation too low: {}", res.correlation);
+}
+
+#[test]
+#[ignore]
 fn test_inversion_medi() {
     println!("[INFO] Loading test data...");
     let data = TestData::load().expect("Failed to load test data");
