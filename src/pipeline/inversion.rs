@@ -10,21 +10,24 @@
 
 use super::config::*;
 
-/// The echo magnitudes MEDI requires (its edge mask and its `Fit_ppm_complex` noise map): one
-/// volume per echo, echo slowest, for evenly spaced echoes (as `Fit_ppm_complex.m` assumes).
-pub(crate) fn medi_echo_magnitudes<'a>(
+/// The echo magnitudes a MEDI-toolbox method requires (MEDI's edge mask, and the
+/// `Fit_ppm_complex` noise map that MEDI and PDF weight the data by): one volume per echo, echo
+/// slowest, for evenly spaced echoes (as `Fit_ppm_complex.m` assumes). `method` names the
+/// method in the error messages.
+pub(crate) fn echo_magnitudes<'a>(
+    method: &str,
     magnitude: Option<&'a [f64]>,
     echo_times: &[f64],
     n_voxels: usize,
 ) -> Result<crate::inversion::EchoMagnitudes<'a>, PipelineError> {
     let n_echoes = echo_times.len();
     if n_echoes == 0 {
-        return Err(PipelineError::InvalidInput("MEDI needs the echo times".to_string()));
+        return Err(PipelineError::InvalidInput(format!("{method} needs the echo times")));
     }
     let spacing: Vec<f64> = echo_times.windows(2).map(|w| w[1] - w[0]).collect();
     if spacing.iter().any(|d| (d - spacing[0]).abs() > 1e-3 * spacing[0].abs()) {
         return Err(PipelineError::InvalidInput(format!(
-            "MEDI's noise map (Fit_ppm_complex) needs evenly spaced echoes; got {echo_times:?}"
+            "{method}'s noise map (Fit_ppm_complex) needs evenly spaced echoes; got {echo_times:?}"
         )));
     }
     match magnitude {
@@ -32,11 +35,11 @@ pub(crate) fn medi_echo_magnitudes<'a>(
             Ok(crate::inversion::EchoMagnitudes { data: m, n_echoes })
         }
         Some(m) => Err(PipelineError::InvalidInput(format!(
-            "MEDI needs the magnitude of every echo ({n_echoes} volumes, {} values); got {} values",
+            "{method} needs the magnitude of every echo ({n_echoes} volumes, {} values); got {} values",
             n_voxels * n_echoes, m.len(),
         ))),
         None => Err(PipelineError::InvalidInput(format!(
-            "MEDI needs the magnitude of every echo ({n_echoes} volumes)"
+            "{method} needs the magnitude of every echo ({n_echoes} volumes)"
         ))),
     }
 }
@@ -139,7 +142,7 @@ pub fn run_dipole_inversion(
             // strength and echo spacing are scan parameters from metadata. It requires the
             // magnitude of every echo (edge mask and the Fit_ppm_complex noise map).
             let te = &metadata.echo_times;
-            let mag = crate::pipeline::inversion::medi_echo_magnitudes(magnitude, te, n_voxels)?;
+            let mag = crate::pipeline::inversion::echo_magnitudes("MEDI", magnitude, te, n_voxels)?;
             let params = crate::inversion::MediParams {
                 b0: metadata.field_strength,
                 te: if te.len() == 1 { te[0] } else { te[1] - te[0] },
