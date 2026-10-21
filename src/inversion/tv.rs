@@ -11,9 +11,14 @@
 //! parameter selection." Magnetic Resonance in Medicine, 72(5):1444-1459.
 //! https://doi.org/10.1002/mrm.25029
 //!
-//! Reference implementation: https://github.com/kamesy/QSM.jl
+//! Reference implementation: https://github.com/kamesy/QSM.jl (`tv`), whose defaults these
+//! are: `lambda = 1e-3`, `rho = 100*lambda`, `tol = 1e-3`, 250 iterations. Like QSM.jl, the
+//! field is in ppm and the first x-update starts from the scaled split variable set to the
+//! gradient of the field. QSM.jl's optional data and TV weights (`W`, `Wtv`) are not ported;
+//! their default (`nothing`) is what this function computes.
 
 use crate::utils::{shrink, apply_mask_zero};
+use crate::utils::gradient::fgrad_inplace;
 use crate::Grid;
 use super::admm::{AdmmBuffers, admm_step, prepare_admm_spectral};
 
@@ -21,10 +26,10 @@ use super::admm::{AdmmBuffers, admm_step, prepare_admm_spectral};
 #[cfg_attr(feature = "introspection", derive(serde::Serialize))]
 #[derive(Clone, Debug)]
 pub struct TvParams {
-    /// Regularization parameter (typically 1e-3 to 1e-4)
+    /// Regularization parameter
     pub lambda: f64,
-    /// ADMM penalty parameter (typically 100*lambda)
-    pub rho: f64,
+    /// ADMM penalty parameter; `None` is QSM.jl's `100*lambda`
+    pub rho: Option<f64>,
     /// Convergence tolerance
     pub tol: f64,
     /// Maximum iterations
@@ -34,8 +39,8 @@ pub struct TvParams {
 impl Default for TvParams {
     fn default() -> Self {
         Self {
-            lambda: 2e-4,
-            rho: 2e-2,
+            lambda: 1e-3,
+            rho: None,
             tol: 1e-3,
             max_iter: 250,
         }
@@ -70,18 +75,24 @@ pub fn tv_admm(
 ) -> Vec<f64> {
     let n_total = grid.n_total();
 
+    let rho = params.rho.unwrap_or(100.0 * params.lambda);
+
     // Pre-compute spectral operators
-    let (mut fft_ws, inv_a, f_hat) = prepare_admm_spectral(local_field, grid, bdir, params.rho);
+    let (mut fft_ws, inv_a, f_hat) = prepare_admm_spectral(local_field, grid, bdir, rho);
 
     // Pre-allocate working buffers and run ADMM iterations
     let mut buf = AdmmBuffers::new(n_total);
-    let lambda_over_rho = params.lambda / params.rho;
+    let lambda_over_rho = params.lambda / rho;
+
+    // QSM.jl starts the split variable at the gradient of the field (`d = ∇f`, with `u = 0`),
+    // so the first x-update already carries the TV term.
+    fgrad_inplace(&mut buf.gx, &mut buf.gy, &mut buf.gz, local_field, grid);
 
     for iter in 0..params.max_iter {
         progress(iter + 1, params.max_iter);
 
         let converged = admm_step(
-            &mut buf, &mut fft_ws, &f_hat, &inv_a, params.rho, grid, params.tol,
+            &mut buf, &mut fft_ws, &f_hat, &inv_a, rho, grid, params.tol,
             |vx, vy, vz, _| (shrink(vx, lambda_over_rho), shrink(vy, lambda_over_rho), shrink(vz, lambda_over_rho)),
         );
 
@@ -116,7 +127,7 @@ mod tests {
         let field = vec![0.0; n * n * n];
         let mask = vec![1u8; n * n * n];
         let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
-        let params = TvParams { lambda: 1e-3, rho: 0.1, tol: 1e-2, max_iter: 10 };
+        let params = TvParams { lambda: 1e-3, rho: Some(0.1), tol: 1e-2, max_iter: 10 };
 
         let chi = tv_admm(&field, &mask, &grid, (0.0, 0.0, 1.0), &params, |_, _| {});
 
@@ -132,7 +143,7 @@ mod tests {
         let field: Vec<f64> = (0..n*n*n).map(|i| (i as f64) * 0.001).collect();
         let mask = vec![1u8; n * n * n];
         let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
-        let params = TvParams { lambda: 1e-3, rho: 0.1, tol: 1e-2, max_iter: 10 };
+        let params = TvParams { lambda: 1e-3, rho: Some(0.1), tol: 1e-2, max_iter: 10 };
 
         let chi = tv_admm(&field, &mask, &grid, (0.0, 0.0, 1.0), &params, |_, _| {});
 
@@ -152,7 +163,7 @@ mod tests {
         }
         let mask = vec![1u8; n * n * n];
         let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
-        let params = TvParams { lambda: 1e-2, rho: 1.0, tol: 1e-2, max_iter: 50 };
+        let params = TvParams { lambda: 1e-2, rho: Some(1.0), tol: 1e-2, max_iter: 50 };
 
         let chi_tv = tv_admm(&field, &mask, &grid, (0.0, 0.0, 1.0), &params, |_, _| {});
 
@@ -175,7 +186,7 @@ mod tests {
         let field: Vec<f64> = (0..n*n*n).map(|i| ((i as f64) * 0.7).sin() * 0.01).collect();
         let mask = vec![1u8; n * n * n];
         let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
-        let params = TvParams { lambda: 1e-3, rho: 0.1, tol: 1e-3, max_iter: 50 };
+        let params = TvParams { lambda: 1e-3, rho: Some(0.1), tol: 1e-3, max_iter: 50 };
 
         // Sequential (1 thread)
         let pool_1 = rayon::ThreadPoolBuilder::new().num_threads(1).build().unwrap();
