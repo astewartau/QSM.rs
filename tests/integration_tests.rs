@@ -14,7 +14,7 @@ use qsm_core::bet;
 use qsm_core::bet::BetParams;
 use qsm_core::inversion;
 use qsm_core::inversion::{tgv_qsm, TgvInput, TgvParams, get_default_alpha, get_default_iterations, ilsqr, IlsqrParams, TkdParams, STI_DEFAULT_PAD_MM};
-use qsm_core::inversion::{TvParams, NltvParams, RtsParams, MediParams, TfiParams, TikhonovParams};
+use qsm_core::inversion::{TvParams, NltvParams, RtsParams, MediMagnitude, MediParams, TfiParams, TikhonovParams};
 use qsm_core::inversion::{NdiParams, FansiParams, L1QsmParams, WhQsmParams, HdQsmParams, AmpPeParams};
 use qsm_core::inversion::{LsqrQsmParams, HeidiParams};
 use qsm_core::swi;
@@ -662,13 +662,20 @@ fn test_inversion_medi() {
     // Certify the shipped defaults (MEDI_L1's: SMV and MERIT on, as MEDI runs after PDF).
     let te = &data.echo_times;
     let delta_te = if te.len() > 1 { te[1] - te[0] } else { te[0] };
-    let params = MediParams { b0: data.field_strength, te: delta_te, ..MediParams::default() };
+    // MEDI's pipeline gives it the echo magnitudes (RSS edge mask, Fit_ppm_complex noise map).
+    // The phantom has an odd number of voxels along y and z, where MEDI's SMV sphere sits half a
+    // voxel off the grid and the inversion diverges (in MATLAB too); MEDI_L1's 'zeropad' option
+    // pads those axes by one voxel.
+    let params = MediParams {
+        b0: data.field_strength, te: delta_te, zeropad: (nx % 2, ny % 2, nz % 2),
+        ..MediParams::default()
+    };
     let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
+    let echoes: Vec<f64> = data.mag_echoes.concat();
     let (result, elapsed) = run_timed!("MEDI", inversion::medi(
         &data.fieldmap_local,
         &data.mask,
-        &data.mag_echoes[0],
-        None,
+        MediMagnitude::Echoes(&echoes, data.mag_echoes.len()),
         &grid,
         data.b0_dir,
         &params,
@@ -682,7 +689,10 @@ fn test_inversion_medi() {
     challenge.print_ci_metrics(elapsed);
     common::save_center_slices(&result, &data.mask, data.dims, "inversion_medi");
 
-    assert!(res.nrmse < 0.5, "MEDI NRMSE too high: {}", res.nrmse);
+    // MEDI_L1 2024.11.26 itself scores 0.663 here (MATLAB, same inputs): its default SMV erodes
+    // a quarter of the mask, where the result is zero. The bound catches divergence (e.g. SMV on
+    // an odd grid without zeropad scores over 100).
+    assert!(res.nrmse < 0.8, "MEDI NRMSE too high: {}", res.nrmse);
     assert!(res.correlation > 0.7, "MEDI correlation too low: {}", res.correlation);
 }
 
@@ -2168,10 +2178,14 @@ fn test_all_combinations() {
         // MEDI
         let te = &data.echo_times;
         let delta_te = if te.len() > 1 { te[1] - te[0] } else { te[0] };
+        let echoes: Vec<f64> = data.mag_echoes.concat();
         let (result, elapsed) = run_timed!("MEDI", inversion::medi(
-            &bfr.local_field, &bfr.mask, &data.mag_echoes[0], None,
+            &bfr.local_field, &bfr.mask, MediMagnitude::Echoes(&echoes, data.mag_echoes.len()),
             &grid, data.b0_dir,
-            &MediParams { b0: data.field_strength, te: delta_te, ..MediParams::default() },
+            &MediParams {
+                b0: data.field_strength, te: delta_te, zeropad: (nx % 2, ny % 2, nz % 2),
+                ..MediParams::default()
+            },
             |_, _| {},
         ));
         let c = ChallengeMetrics::compute("MEDI", &result, &data.chi, &bfr.mask, &data.segmentation, data.dims);

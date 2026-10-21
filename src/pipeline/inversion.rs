@@ -33,7 +33,8 @@ use super::config::*;
 ///   (total field)
 /// * `metadata` - Scan metadata
 /// * `config` - Inversion configuration
-/// * `magnitude` - Combined magnitude image (needed for MEDI edge weighting)
+/// * `magnitude` - Combined magnitude image (needed for MEDI edge weighting; MEDI also takes
+///   the echo magnitudes stacked, echo slowest, for its noise map)
 /// * `progress` - Progress callback (current_iter, max_iter)
 ///
 /// # Returns
@@ -109,7 +110,20 @@ pub fn run_dipole_inversion(
             let mag = magnitude.ok_or_else(|| {
                 PipelineError::InvalidInput("MEDI needs the magnitude image".to_string())
             })?;
-            crate::inversion::medi(field_ppm, mask, mag, None, &grid, bdir, &params, progress)
+            // The echo magnitudes give MEDI its Fit_ppm_complex noise map; a combined magnitude
+            // of multi-echo data does not (MEDI then weights the data uniformly, with a warning).
+            let n_echoes = te.len().max(1);
+            let mag = if mag.len() == n_voxels * n_echoes {
+                crate::inversion::MediMagnitude::Echoes(mag, n_echoes)
+            } else if mag.len() == n_voxels {
+                crate::inversion::MediMagnitude::Combined(mag)
+            } else {
+                return Err(PipelineError::InvalidInput(format!(
+                    "MEDI magnitude has {} values: expected {} (combined) or {} ({} echoes)",
+                    mag.len(), n_voxels, n_voxels * n_echoes, n_echoes,
+                )));
+            };
+            crate::inversion::medi(field_ppm, mask, mag, &grid, bdir, &params, progress)
         }
         InversionAlgorithm::Tfi => {
             // TFI takes the field in ppm (same convention as NDI and the other inversions —
@@ -967,20 +981,26 @@ mod tests {
         let mag: Vec<f64> = (0..n).map(|i| 1.0 + ((i * 3) % 7) as f64).collect();
         let medi = crate::inversion::MediParams { max_iter: 2, cg_max_iter: 5, smv: false, ..Default::default() };
         let config = InversionConfig { algorithm: InversionAlgorithm::Medi, medi: medi.clone(), ..Default::default() };
-        for (tes, delta_te) in [(vec![0.004, 0.010, 0.016], 0.006), (vec![0.02], 0.02)] {
+        use crate::inversion::MediMagnitude::{Combined, Echoes};
+        let echoes: Vec<f64> = (0..3 * n).map(|i| 1.0 + ((i * 5) % 9) as f64).collect();
+        let cases: [(Vec<f64>, f64, &[f64], crate::inversion::MediMagnitude); 3] = [
+            (vec![0.004, 0.010, 0.016], 0.006, &mag, Combined(&mag)),
+            (vec![0.004, 0.010, 0.016], 0.006, &echoes, Echoes(&echoes, 3)),
+            (vec![0.02], 0.02, &mag, Echoes(&mag, 1)),
+        ];
+        for (tes, delta_te, given, expected) in cases {
             let meta = ScanMetadata {
                 dims: (nx, ny, nz), voxel_size: (1.0, 1.0, 1.0),
                 echo_times: tes, field_strength: 7.0, b0_direction: (0.0, 0.0, 1.0),
                 slice_geometry: None,
                 affine: None,
             };
-            let via_stage = run_dipole_inversion(&field, &mask, &meta, &config, Some(&mag), &mut |_, _| {}).unwrap();
+            let via_stage = run_dipole_inversion(&field, &mask, &meta, &config, Some(given), &mut |_, _| {}).unwrap();
             let params = crate::inversion::MediParams { b0: 7.0, te: delta_te, ..medi.clone() };
-            let direct = crate::inversion::medi(
-                &field, &mask, &mag, None, &meta.grid(), meta.b0_direction, &params, |_, _| {},
-            );
+            let direct = crate::inversion::medi(&field, &mask, expected, &meta.grid(), meta.b0_direction, &params, |_, _| {});
             assert_eq!(via_stage, direct);
             assert!(run_dipole_inversion(&field, &mask, &meta, &config, None, &mut |_, _| {}).is_err());
+            assert!(run_dipole_inversion(&field, &mask, &meta, &config, Some(&mag[..n - 1]), &mut |_, _| {}).is_err());
         }
     }
 

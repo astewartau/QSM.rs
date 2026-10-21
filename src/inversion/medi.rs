@@ -29,11 +29,22 @@
 //! nonlinear and λ is fixed), so `b0` and `te` are scan parameters that the pipeline fills from
 //! metadata.
 //!
-//! # Data weight
+//! # Magnitude and data weight
 //! `MEDI_L1.m` weights the data by `1/N_std`, the noise standard deviation of the field
-//! (normalised to mean 1 in the mask); MEDI's pipeline takes `N_std` from the multi-echo field fit
-//! (`Fit_ppm_complex.m`). `n_std` is that map; with `None`, every voxel in the mask has the same
-//! noise, so the data weight is the mask.
+//! (normalised to mean 1 in the mask), and builds the edge mask from `iMag`. MEDI's pipeline
+//! (README.m) takes both from the complex echoes: `iMag = sqrt(sum(abs(iField).^2,4))` and
+//! `N_std` from `Fit_ppm_complex.m`, which depends only on the echo magnitudes
+//! ([`fit_ppm_complex_noise`](crate::utils::fit_ppm_complex_noise)). Given the echo magnitudes
+//! ([`MediMagnitude::Echoes`]), `medi` does the same; one echo is fitted as `Fit_ppm_complex.m`
+//! fits one echo. Given only a combined magnitude ([`MediMagnitude::Combined`]), there is no noise
+//! map: every voxel in the mask gets the same noise (the data weight is the mask) and a warning
+//! is printed.
+//!
+//! # Zero padding
+//! `zeropad` pads the volume at the end of each axis before the inversion and crops the result,
+//! as `MEDI_L1`'s `'zeropad'` option does. With SMV on, `sphere_kernel.m` centres the sphere
+//! half a voxel off the grid along an axis with an odd number of voxels, and the inversion then
+//! diverges (in MATLAB as here); padding such axes by one voxel avoids that.
 //!
 //! Reference:
 //! Liu, T., Liu, J., de Rochefort, L., Spincemaille, P., Khalidov, I., Ledoux, J.R.,
@@ -96,6 +107,18 @@ pub struct MediParams {
     /// Echo spacing in seconds, `TE(2) − TE(1)`, or the echo time for one echo (scan parameter,
     /// for the radian conversion)
     pub te: f64,
+    /// Voxels of zeros appended along x, y and z before the inversion (`'zeropad'`)
+    pub zeropad: (usize, usize, usize),
+}
+
+/// The magnitude given to [`medi`]
+#[derive(Clone, Copy, Debug)]
+pub enum MediMagnitude<'a> {
+    /// The magnitude of each echo, `n_echoes` volumes stacked with the echo slowest. MEDI's edge
+    /// mask uses their root sum of squares and its data weight the `Fit_ppm_complex.m` noise.
+    Echoes(&'a [f64], usize),
+    /// One combined magnitude: the edge mask uses it, and the data weight is uniform (warned).
+    Combined(&'a [f64]),
 }
 
 impl Default for MediParams {
@@ -114,6 +137,7 @@ impl Default for MediParams {
             tol: 0.1,
             b0: 3.0,
             te: 0.005,
+            zeropad: (0, 0, 0),
         }
     }
 }
@@ -123,9 +147,7 @@ impl Default for MediParams {
 /// # Arguments
 /// * `local_field` - Local field in ppm (nx * ny * nz)
 /// * `mask` - Binary mask (nx * ny * nz), 1 = brain
-/// * `magnitude` - Magnitude image, for the edge mask (nx * ny * nz)
-/// * `n_std` - Noise standard deviation of the field, for the data weight (see module docs);
-///   `None` for uniform noise
+/// * `magnitude` - Echo magnitudes, or a combined magnitude (see module docs)
 /// * `grid` - Volume grid (dimensions and voxel sizes)
 /// * `bdir` - B0 field direction
 /// * `params` - MEDI parameters, including field strength and echo spacing
@@ -133,8 +155,71 @@ impl Default for MediParams {
 ///
 /// # Returns
 /// Susceptibility in ppm, zero outside the mask (the SMV-eroded mask when `smv` is on)
-#[allow(clippy::too_many_arguments)]
 pub fn medi(
+    local_field: &[f64],
+    mask: &[u8],
+    magnitude: MediMagnitude,
+    grid: &Grid,
+    bdir: (f64, f64, f64),
+    params: &MediParams,
+    progress: impl FnMut(usize, usize),
+) -> Vec<f64> {
+    let n = grid.n_total();
+    // iMag = sqrt(sum(abs(iField).^2,4)); [~, N_std] = Fit_ppm_complex(iField)
+    let (imag, n_std) = match magnitude {
+        MediMagnitude::Echoes(m, n_echoes) => {
+            assert_eq!(m.len(), n * n_echoes, "magnitude is not n_echoes volumes");
+            let imag = (0..n)
+                .map(|i| (0..n_echoes).map(|e| m[i + n * e].powi(2)).sum::<f64>().sqrt())
+                .collect();
+            (imag, Some(crate::utils::fit_ppm_complex_noise(m, n_echoes)))
+        }
+        MediMagnitude::Combined(m) => {
+            eprintln!(
+                "warning: MEDI was given a combined magnitude, not the echo magnitudes, so it has \
+                 no noise map (Fit_ppm_complex N_std) and weights the data uniformly"
+            );
+            (m.to_vec(), None)
+        }
+    };
+
+    let (px, py, pz) = params.zeropad;
+    if (px, py, pz) == (0, 0, 0) {
+        return medi_l1(local_field, mask, &imag, n_std.as_deref(), grid, bdir, params, progress);
+    }
+    // padarray(..., pad, 'post'), then x = x(1:matrix_size0(1), ...)
+    let (nx, ny, nz) = grid.dims;
+    let (mx, my, mz) = (nx + px, ny + py, nz + pz);
+    let pad = |v: &[f64]| -> Vec<f64> {
+        let mut out = vec![0.0; mx * my * mz];
+        for k in 0..nz {
+            for j in 0..ny {
+                let (src, dst) = (nx * (j + ny * k), mx * (j + my * k));
+                out[dst..dst + nx].copy_from_slice(&v[src..src + nx]);
+            }
+        }
+        out
+    };
+    let mask_f: Vec<f64> = mask.iter().map(|&m| m as f64).collect();
+    let mask_p: Vec<u8> = pad(&mask_f).iter().map(|&v| v as u8).collect();
+    let pgrid = Grid::new(mx, my, mz, grid.vsx(), grid.vsy(), grid.vsz());
+    let chi = medi_l1(
+        &pad(local_field), &mask_p, &pad(&imag), n_std.as_deref().map(pad).as_deref(),
+        &pgrid, bdir, params, progress,
+    );
+    let mut out = vec![0.0; n];
+    for k in 0..nz {
+        for j in 0..ny {
+            let (dst, src) = (nx * (j + ny * k), mx * (j + my * k));
+            out[dst..dst + nx].copy_from_slice(&chi[src..src + nx]);
+        }
+    }
+    out
+}
+
+/// `MEDI_L1.m` on an `iMag` and an optional `N_std` (uniform when `None`)
+#[allow(clippy::too_many_arguments)]
+fn medi_l1(
     local_field: &[f64],
     mask: &[u8],
     magnitude: &[f64],
@@ -1210,14 +1295,14 @@ mod tests {
     fn zero_field_gives_zero() {
         let (grid, _, field, mag, mask) = phantom(16);
         let zero = vec![0.0; field.len()];
-        let chi = medi(&zero, &mask, &mag, None, &grid, (0.0, 0.0, 1.0), &small_params(), |_, _| {});
+        let chi = medi_l1(&zero, &mask, &mag, None, &grid, (0.0, 0.0, 1.0), &small_params(), |_, _| {});
         assert!(chi.iter().all(|&v| v == 0.0));
     }
 
     #[test]
     fn recovers_a_sphere_in_ppm() {
         let (grid, chi_true, field, mag, mask) = phantom(24);
-        let chi = medi(&field, &mask, &mag, None, &grid, (0.0, 0.0, 1.0), &small_params(), |_, _| {});
+        let chi = medi_l1(&field, &mask, &mag, None, &grid, (0.0, 0.0, 1.0), &small_params(), |_, _| {});
         let c = 12 + 24 * (12 + 24 * 12);
         assert!((chi[c] - chi_true[c]).abs() < 0.03, "centre: {} vs {}", chi[c], chi_true[c]);
         for (i, &m) in mask.iter().enumerate() {
@@ -1231,8 +1316,8 @@ mod tests {
     fn uniform_noise_map_equals_none() {
         let (grid, _, field, mag, mask) = phantom(16);
         let p = small_params();
-        let a = medi(&field, &mask, &mag, None, &grid, (0.0, 0.0, 1.0), &p, |_, _| {});
-        let b = medi(&field, &mask, &mag, Some(&vec![3.0; field.len()]), &grid, (0.0, 0.0, 1.0), &p, |_, _| {});
+        let a = medi_l1(&field, &mask, &mag, None, &grid, (0.0, 0.0, 1.0), &p, |_, _| {});
+        let b = medi_l1(&field, &mask, &mag, Some(&vec![3.0; field.len()]), &grid, (0.0, 0.0, 1.0), &p, |_, _| {});
         let err = a.iter().zip(&b).map(|(x, y)| (x - y).abs()).fold(0.0, f64::max);
         assert!(err < 1e-9, "max |diff| {err}");
     }
@@ -1242,9 +1327,45 @@ mod tests {
         let (grid, _, field, mag, mask) = phantom(16);
         let p = MediParams { smv: true, smv_radius: 2.0, merit: true, ..small_params() };
         let mut calls = 0;
-        let chi = medi(&field, &mask, &mag, None, &grid, (0.0, 0.0, 1.0), &p, |_, _| calls += 1);
+        let chi = medi_l1(&field, &mask, &mag, None, &grid, (0.0, 0.0, 1.0), &p, |_, _| calls += 1);
         assert!(chi.iter().all(|v| v.is_finite()));
         assert!(chi.iter().any(|&v| v != 0.0));
         assert!(calls > 0);
+    }
+
+    #[test]
+    fn zeropad_pads_at_the_end_and_crops() {
+        let (grid, _, field, mag, mask) = phantom(15);
+        let p = MediParams { zeropad: (1, 0, 1), ..small_params() };
+        let chi = medi(&field, &mask, MediMagnitude::Combined(&mag), &grid, (0.0, 0.0, 1.0), &p, |_, _| {});
+        // the same inversion on a volume padded by hand
+        let (n, m) = (15usize, 16usize);
+        let pad = |v: &[f64], nyp: usize| {
+            let mut out = vec![0.0; m * nyp * m];
+            for k in 0..n { for j in 0..n { for i in 0..n {
+                out[i + m * (j + nyp * k)] = v[i + n * (j + n * k)];
+            }}}
+            out
+        };
+        let mask_f: Vec<f64> = mask.iter().map(|&v| v as f64).collect();
+        let mask_p: Vec<u8> = pad(&mask_f, n).iter().map(|&v| v as u8).collect();
+        let pgrid = Grid::new(m, n, m, 1.0, 1.0, 1.0);
+        let padded = medi_l1(&pad(&field, n), &mask_p, &pad(&mag, n), None, &pgrid, (0.0, 0.0, 1.0), &small_params(), |_, _| {});
+        for k in 0..n { for j in 0..n { for i in 0..n {
+            assert_eq!(chi[i + n * (j + n * k)], padded[i + m * (j + n * k)]);
+        }}}
+    }
+
+    #[test]
+    fn echo_magnitudes_give_rss_and_the_fit_noise() {
+        let (grid, _, field, mag, mask) = phantom(16);
+        let n = mag.len();
+        let echoes: Vec<f64> = mag.iter().copied().chain(mag.iter().map(|v| 0.5 * v)).collect();
+        let p = small_params();
+        let a = medi(&field, &mask, MediMagnitude::Echoes(&echoes, 2), &grid, (0.0, 0.0, 1.0), &p, |_, _| {});
+        let rss: Vec<f64> = (0..n).map(|i| (echoes[i].powi(2) + echoes[i + n].powi(2)).sqrt()).collect();
+        let n_std = crate::utils::fit_ppm_complex_noise(&echoes, 2);
+        let b = medi_l1(&field, &mask, &rss, Some(&n_std), &grid, (0.0, 0.0, 1.0), &p, |_, _| {});
+        assert_eq!(a, b);
     }
 }
