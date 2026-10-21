@@ -27,10 +27,15 @@
 //! are scan parameters that the pipeline fills from metadata.
 //!
 //! # Data weight
-//! `WH_nlTV.m` squares `params.weight` (recommended: the magnitude). The
-//! magnitude is normalised as in FANSI's in vivo example
-//! (`min(2*mask*mag/max(mag), 1)`), as for NDI; without a magnitude the weight
-//! is the mask.
+//! `WH_nlTV.m` squares `params.weight` (recommended: the magnitude). FANSI's WH-QSM example
+//! (`script_DICOM_Philips.m`, the only script that calls `WH_nlTV`) sets
+//! `weight = m0.*mask./cnoise`, divided by its maximum, where `m0` is the proton density
+//! from its nonlinear T2* fit (`nlT2sTV`) and `cnoise` the complex-domain noise from its
+//! nonlinear multi-echo field fit (`nlme_L2gradient`). The dipole stage has neither map, only
+//! the combined magnitude, so the default ([`WhQsmWeight::MaxNormalised`]) is that formula
+//! with the magnitude for `m0` and no noise term: `mask.*mag / max(mask.*mag)`.
+//! [`WhQsmWeight::InVivo`] is FANSI's `script_invivo.m` form, `min(2*mask*mag/max(mag), 1)`,
+//! as NDI uses. Without a magnitude the weight is the mask.
 //!
 //! # Finite differences
 //! As in `WH_nlTV.m`, the gradient and Laplacian are unit-spacing differences whatever the
@@ -41,6 +46,18 @@ use crate::utils::gradient::{bdiv_inplace, fgrad_inplace};
 use crate::utils::{apply_mask_zero, shrink};
 use crate::Grid;
 use num_complex::Complex64;
+
+/// How the magnitude is normalised into the data weight (see the module docs).
+#[cfg_attr(feature = "introspection", derive(serde::Serialize))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum WhQsmWeight {
+    /// `mask.*mag / max(mask.*mag)`: FANSI's WH-QSM example (`script_DICOM_Philips.m`)
+    /// without its T2*-fit and noise maps.
+    #[default]
+    MaxNormalised,
+    /// `min(2*mask*mag/max(mag), 1)`: FANSI's `script_invivo.m`, as NDI uses.
+    InVivo,
+}
 
 /// WH-QSM parameters.
 #[cfg_attr(feature = "introspection", derive(serde::Serialize))]
@@ -62,6 +79,8 @@ pub struct WhQsmParams {
     pub tol_update: f64,
     /// Inner Newton stopping tolerance.
     pub tol_delta: f64,
+    /// Magnitude normalisation for the data weight.
+    pub weight: WhQsmWeight,
     /// Field strength in Tesla (scan parameter, for the radian conversion).
     pub b0: f64,
     /// Echo time in seconds (scan parameter, for the radian conversion).
@@ -81,6 +100,7 @@ impl Default for WhQsmParams {
             max_iter: 150,
             tol_update: 0.1,
             tol_delta: 1e-6,
+            weight: WhQsmWeight::MaxNormalised,
             b0: 3.0,
             te: 0.02,
         }
@@ -137,16 +157,25 @@ pub fn whqsm(
 
     let mask_f: Vec<f64> = mask.iter().map(|&m| if m != 0 { 1.0 } else { 0.0 }).collect();
 
-    // W = weight.^2 with weight = min(2*mask*mag/max(mag), 1) (FANSI script_invivo.m); the
+    // W = weight.^2 (WH_nlTV.m line 75), weight from the magnitude as `params.weight` says; the
     // mask when there is no magnitude.
-    let mag_max = magnitude.map_or(0.0, |m| m.iter().cloned().fold(0.0f64, f64::max));
+    let mag_max = magnitude.map_or(0.0, |m| match params.weight {
+        WhQsmWeight::MaxNormalised => (0..n)
+            .filter(|&i| mask[i] != 0)
+            .map(|i| m[i])
+            .fold(0.0f64, f64::max),
+        WhQsmWeight::InVivo => m.iter().cloned().fold(0.0f64, f64::max),
+    });
     let w: Vec<f64> = (0..n)
         .map(|i| {
             if mask[i] == 0 {
                 return 0.0;
             }
             let v = match magnitude {
-                Some(m) if mag_max > 0.0 => (2.0 * m[i] / mag_max).min(1.0),
+                Some(m) if mag_max > 0.0 => match params.weight {
+                    WhQsmWeight::MaxNormalised => m[i] / mag_max,
+                    WhQsmWeight::InVivo => (2.0 * m[i] / mag_max).min(1.0),
+                },
                 _ => 1.0,
             };
             v * v
@@ -433,7 +462,7 @@ mod tests {
 
     #[test]
     fn test_whqsm_uniform_magnitude_is_mask_weight() {
-        // A uniform magnitude normalises to min(2*1/1, 1) = 1, the same weight as no magnitude.
+        // A uniform magnitude normalises to 1 either way, the same weight as no magnitude.
         let n = 8;
         let field: Vec<f64> = (0..n * n * n).map(|i| ((i % 7) as f64 - 3.0) * 0.01).collect();
         let mask = vec![1u8; n * n * n];
@@ -442,9 +471,12 @@ mod tests {
         let params = WhQsmParams { max_iter: 10, ..Default::default() };
 
         let a = whqsm(&field, &mask, None, &grid, (0.0, 0.0, 1.0), &params, |_, _| {});
-        let b = whqsm(&field, &mask, Some(&mag), &grid, (0.0, 0.0, 1.0), &params, |_, _| {});
-        for (x, y) in a.iter().zip(&b) {
-            assert!((x - y).abs() < 1e-12);
+        for weight in [WhQsmWeight::MaxNormalised, WhQsmWeight::InVivo] {
+            let p = WhQsmParams { weight, ..params.clone() };
+            let b = whqsm(&field, &mask, Some(&mag), &grid, (0.0, 0.0, 1.0), &p, |_, _| {});
+            for (x, y) in a.iter().zip(&b) {
+                assert!((x - y).abs() < 1e-12);
+            }
         }
     }
 }

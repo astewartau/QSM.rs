@@ -86,7 +86,7 @@ pub use heidi::{heidi, homogeneity_masks, HeidiParams, HomogeneityMasks};
 pub use ndi::{ndi, NdiParams};
 pub use fansi::{fansi, FansiParams};
 pub use l1qsm::{l1qsm, L1QsmParams};
-pub use whqsm::{whqsm, WhQsmParams};
+pub use whqsm::{whqsm, WhQsmParams, WhQsmWeight};
 pub use hdqsm::{hdqsm, HdQsmParams};
 pub use amp_pe::{amp_pe, AmpPeParams};
 pub use tile_budget::{
