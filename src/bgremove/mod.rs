@@ -87,7 +87,7 @@ pub use ismv::{ismv, IsmvParams};
 pub use lbv::{lbv, LbvParams};
 pub use sdf::{sdf, sdf_curvature, sdf_simple, SdfParams};
 pub use iharperella::{
-    harperella, iharperella, iharperella_with_weights,
+    harperella, iharperella,
     HarperellaInput, HarperellaParams, IharperellaParams,
 };
 #[cfg(feature = "onnx")]
