@@ -348,7 +348,14 @@ fn dipole_inversion() {
                 &mut no_progress(),
             ),
             InversionAlgorithm::Qsmart => {
-                let config = InversionConfig { qsmart: qsm_core::utils::QsmartParams::for_field_strength(B0_T), ..config };
+                // QSMART's default SDF widths (sigma 10-14 voxels) are for brains; on this 16^3
+                // phantom they round every filter size to 0, which (as in the original) leaves no
+                // local field at all. Narrower widths keep this a check of the wasm build.
+                let qsmart = qsm_core::utils::QsmartParams {
+                    sdf_sigma1_stage1: 2.0, sdf_sigma2_stage1: 2.0, sdf_sigma1_stage2: 2.0, sdf_sigma2_stage2: 1.0,
+                    ..qsm_core::utils::QsmartParams::for_field_strength(B0_T)
+                };
+                let config = InversionConfig { qsmart, ..config };
                 run_qsmart(field, &p.mask, None, Some(&mag), &m, &config, QsmReference::Mean, &mut no_progress())
             }
             _ => run_dipole_inversion(field, &p.mask, &m, &config, Some(&mag), &mut no_progress()),
