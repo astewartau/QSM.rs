@@ -261,6 +261,7 @@ Methods marked † need the `onnx` feature and model weights.
 | Algorithm | Description | Reference |
 |-----------|-------------|-----------|
 | **Bias correction** | Receive-field homogeneity correction (`makehomogeneous`) | Eckstein, K., Trattnig, S., Robinson, S.D. (2019). "A Simple Homogeneity Correction for Neuroimaging at 7T." *Proc. ISMRM 27th Annual Meeting*. |
+| **N4 bias correction** | N4ITK bias field correction as ANTs' `N4BiasFieldCorrection` (`n4_bias_correction`) | Tustison, N.J., et al. (2010). "N4ITK: Improved N3 Bias Correction." *IEEE Transactions on Medical Imaging*, 29(6):1310-1320. [DOI](https://doi.org/10.1109/TMI.2010.2046908) |
 | **MP-PCA denoising** | Marchenko–Pastur PCA denoising across echoes or volumes (`mppca_denoise`) | Veraart, J., et al. (2016). "Denoising of diffusion MRI using random matrix theory." *NeuroImage*, 142:394-406. [DOI](https://doi.org/10.1016/j.neuroimage.2016.08.016) |
 | **Gibbs unringing** | Local subvoxel-shift Gibbs-ringing removal (`gibbs_unring`) | Kellner, E., et al. (2016). "Gibbs-ringing artifact removal based on local subvoxel-shifts." *Magnetic Resonance in Medicine*, 76(5):1574-1581. [DOI](https://doi.org/10.1002/mrm.26054) |
 | **Anisotropic diffusion** | Edge-preserving gradient anisotropic diffusion smoothing (`gradient_anisotropic_diffusion`) | Perona, P., Malik, J. (1990). "Scale-space and edge detection using anisotropic diffusion." *IEEE Transactions on Pattern Analysis and Machine Intelligence*, 12(7):629-639. [DOI](https://doi.org/10.1109/34.56205) |
@@ -299,7 +300,8 @@ This library was developed with reference to the following open-source implement
 | [CLEARSWI.jl](https://github.com/korbinian90/CLEARSWI.jl) | CLEAR-SWI | Julia |
 | [SEPIA](https://github.com/kschan0214/sepia) | SMWI | MATLAB |
 | [QSM-CI](https://github.com/QSMxT/QSM-CI) | Signal-gated mask erosion | Python |
-| [ITK](https://github.com/InsightSoftwareConsortium/ITK) | Gradient anisotropic diffusion | C++ |
+| [ITK](https://github.com/InsightSoftwareConsortium/ITK) | Gradient anisotropic diffusion, N4 bias correction | C++ |
+| [ANTs](https://github.com/ANTsX/ANTs) | N4 bias correction (command-line defaults) | C++ |
 | [chi-separation](https://github.com/SNU-LIST/chi-separation) | Chi-separation | MATLAB |
 
 ## License

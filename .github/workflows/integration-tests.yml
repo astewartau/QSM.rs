@@ -564,6 +564,9 @@ jobs:
               # EPG / Gibbs unringing are exercised by relaxometry-demo.yml, which posts its own
               # comment and is selected by its own paths filter.
               src/utils/epg.rs|src/utils/gibbs.rs) : ;;
+              # N4 bias correction: no pipeline calls it yet; its unit tests and
+              # tests/n4_ants_parity.rs run in unit-tests.yml.
+              src/utils/n4.rs) : ;;
 
               # The integration tests themselves. Adding tests only runs the tests added (routed by
               # name to their matrix); any edit or removal can touch a shared helper, so it reruns
@@ -590,7 +593,7 @@ jobs:
                 fi ;;
               # Test binaries no workflow job runs (reference-parity, local-data and wasm tests):
               # their non-ignored tests run in unit-tests.yml, which every tests/ change selects.
-              tests/amppe_qsmci.rs|tests/chisep_integration.rs|tests/crosscheck.rs|tests/ilsqr_sti_parity.rs|tests/star_sti_parity.rs) : ;;
+              tests/amppe_qsmci.rs|tests/chisep_integration.rs|tests/crosscheck.rs|tests/ilsqr_sti_parity.rs|tests/star_sti_parity.rs|tests/n4_ants_parity.rs) : ;;
               tests/models_onnx.rs|tests/qsmart_validation.rs|tests/relaxometry_demo.rs|tests/wasm_pipeline.rs) : ;;
               tests/weight_provider.rs|tests/data/*) : ;;
               # Reporting only: how results are drawn and tabled, never what is computed.
