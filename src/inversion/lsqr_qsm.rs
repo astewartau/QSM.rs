@@ -29,7 +29,7 @@
 //! * the grid: field, mask and magnitude are cropped to the mask's bounding box, each odd
 //!   extent grown by one voxel, zero-padded by 20 voxels per side and the last voxel dropped
 //!   (`zealouscrop`, `prepareforconvolution` with its 40-voxel anti-aliasing frame), so every
-//!   extent is odd;
+//!   extent is odd and the crop starts 20 voxels in;
 //! * the dipole kernel: the unit dipole response `(3cos²θ − 1)/(4πr³)` sampled in the
 //!   **spatial domain** on that grid and Fourier transformed (`generateunitdipoleresponse`
 //!   with `isFourierDomainFormula = false`), see [`spatial_dipole_kernel`];
@@ -117,9 +117,10 @@ pub(crate) type CropBox = [(usize, usize, usize); 3];
 /// by one trailing voxel and then grown by the anti-aliasing frame less one voxel
 /// (`prepareforconvolution`: `makeeven`, 20 voxels per side, `makeodd`).
 ///
-/// Returns `(start, extent, padded)` per axis, or `None` for an empty mask. Placing the crop
-/// at the corner of the padded grid rather than 20 voxels in gives the same solution: every
-/// operator is a circular convolution or a pointwise product.
+/// Returns `(start, extent, padded)` per axis, or `None` for an empty mask. The crop sits
+/// [`FRAME_OFFSET`] voxels in, as upstream's (for LSQR only the grid size matters, as every
+/// operator is a circular convolution or pointwise; HEIDI's gradients and diffusion see the
+/// grid's edges).
 pub(crate) fn crop_grid(mask: &[u8], dims: (usize, usize, usize)) -> Option<CropBox> {
     let (nx, ny, nz) = dims;
     let (mut lo, mut hi) = ([usize::MAX; 3], [0usize; 3]);
@@ -144,7 +145,11 @@ pub(crate) fn crop_grid(mask: &[u8], dims: (usize, usize, usize)) -> Option<Crop
     }))
 }
 
-/// Copy the `crop` box of `x` (on `dims`) to the corner of a zero grid of the padded size.
+/// Where the crop starts on the padded grid: half the anti-aliasing frame.
+pub(crate) const FRAME_OFFSET: usize = ANTIALIASING_FRAME / 2;
+
+/// Copy the `crop` box of `x` (on `dims`) into a zero grid of the padded size, [`FRAME_OFFSET`]
+/// voxels in along each axis.
 pub(crate) fn crop_pad<T: Copy + Default>(x: &[T], dims: (usize, usize, usize), crop: &CropBox) -> Vec<T> {
     let (nx, ny, _) = dims;
     let (px, py, pz) = (crop[0].2, crop[1].2, crop[2].2);
@@ -152,7 +157,7 @@ pub(crate) fn crop_pad<T: Copy + Default>(x: &[T], dims: (usize, usize, usize), 
     for k in 0..crop[2].1 {
         for j in 0..crop[1].1 {
             let src = crop[0].0 + nx * (crop[1].0 + j + ny * (crop[2].0 + k));
-            let dst = px * (j + py * k);
+            let dst = FRAME_OFFSET + px * (FRAME_OFFSET + j + py * (FRAME_OFFSET + k));
             out[dst..dst + crop[0].1].copy_from_slice(&x[src..src + crop[0].1]);
         }
     }
@@ -167,7 +172,7 @@ pub(crate) fn uncrop(x: &[f64], dims: (usize, usize, usize), crop: &CropBox) -> 
     for k in 0..crop[2].1 {
         for j in 0..crop[1].1 {
             let dst = crop[0].0 + nx * (crop[1].0 + j + ny * (crop[2].0 + k));
-            let src = px * (j + py * k);
+            let src = FRAME_OFFSET + px * (FRAME_OFFSET + j + py * (FRAME_OFFSET + k));
             out[dst..dst + crop[0].1].copy_from_slice(&x[src..src + crop[0].1]);
         }
     }
