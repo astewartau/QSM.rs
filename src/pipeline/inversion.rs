@@ -135,8 +135,16 @@ pub fn run_dipole_inversion(
             chi
         }
         InversionAlgorithm::Ndi => {
+            // NDI takes ppm like the others and converts to radians itself. Field strength and
+            // echo time (the first, as for MEDI) are scan parameters from metadata, not user
+            // knobs; the magnitude, when present, is the data weight.
+            let params = crate::inversion::NdiParams {
+                b0: metadata.field_strength,
+                te: metadata.echo_times.first().copied().unwrap_or(config.ndi.te),
+                ..config.ndi.clone()
+            };
             crate::inversion::ndi(
-                field_ppm, mask, &grid, bdir, &config.ndi, progress,
+                field_ppm, mask, magnitude, &grid, bdir, &params, progress,
             )
         }
         InversionAlgorithm::Fansi => {

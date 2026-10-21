@@ -747,8 +747,8 @@ fn test_inversion_ndi() {
 
     let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
     let (result, elapsed) = run_timed!("NDI", inversion::ndi(
-        &data.fieldmap_local, &data.mask, &grid, data.b0_dir,
-        &NdiParams::default(), |_, _| {},
+        &data.fieldmap_local, &data.mask, None, &grid, data.b0_dir,
+        &NdiParams { b0: data.field_strength, te: data.echo_times[0], ..Default::default() }, |_, _| {},
     ));
 
     let res = TestResult::new("NDI", &result, &data.chi, &data.mask, data.dims);
