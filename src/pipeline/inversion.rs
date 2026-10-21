@@ -159,22 +159,32 @@ pub fn run_dipole_inversion(
                 field_ppm, mask, magnitude, &grid, bdir, &params, progress,
             )
         }
-        InversionAlgorithm::Fansi => {
-            let params = crate::inversion::FansiParams { is_tgv: false, ..config.fansi.clone() };
-            crate::inversion::fansi(
-                field_ppm, mask, &grid, bdir, &params, progress,
-            )
-        }
-        InversionAlgorithm::FansiTgv => {
-            let params = crate::inversion::FansiParams { is_tgv: true, ..config.fansi.clone() };
-            crate::inversion::fansi(
-                field_ppm, mask, &grid, bdir, &params, progress,
-            )
-        }
-        InversionAlgorithm::L1qsm => {
-            crate::inversion::l1qsm(
-                field_ppm, mask, &grid, bdir, &config.l1qsm, progress,
-            )
+        InversionAlgorithm::Fansi | InversionAlgorithm::FansiTgv | InversionAlgorithm::L1qsm => {
+            // FANSI nlTV/nlTGV and L1-QSM take ppm like the others and convert to radians
+            // themselves. Field strength and echo time (the first, as for NDI) are scan
+            // parameters from metadata; the magnitude, when present, is the data weight.
+            let b0 = metadata.field_strength;
+            let te = metadata.echo_times.first().copied();
+            if config.algorithm == InversionAlgorithm::L1qsm {
+                let params = crate::inversion::L1QsmParams {
+                    b0,
+                    te: te.unwrap_or(config.l1qsm.te),
+                    ..config.l1qsm.clone()
+                };
+                crate::inversion::l1qsm(
+                    field_ppm, mask, magnitude, &grid, bdir, &params, progress,
+                )
+            } else {
+                let params = crate::inversion::FansiParams {
+                    b0,
+                    te: te.unwrap_or(config.fansi.te),
+                    is_tgv: config.algorithm == InversionAlgorithm::FansiTgv,
+                    ..config.fansi.clone()
+                };
+                crate::inversion::fansi(
+                    field_ppm, mask, magnitude, &grid, bdir, &params, progress,
+                )
+            }
         }
         InversionAlgorithm::Whqsm => {
             crate::inversion::whqsm(

@@ -839,7 +839,7 @@ fn test_inversion_fansi() {
     let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
     let params = FansiParams { is_tgv: false, ..FansiParams::default() };
     let (result, elapsed) = run_timed!("FANSI-nlTV", inversion::fansi(
-        &data.fieldmap_local, &data.mask, &grid, data.b0_dir, &params, |_, _| {},
+        &data.fieldmap_local, &data.mask, None, &grid, data.b0_dir, &params, |_, _| {},
     ));
 
     let res = TestResult::new("FANSI (nlTV)", &result, &data.chi, &data.mask, data.dims);
@@ -867,7 +867,7 @@ fn test_inversion_fansi_tgv() {
     // iterations here to keep the CI job runtime reasonable.
     let params = FansiParams { is_tgv: true, max_iter: 50, ..FansiParams::default() };
     let (result, elapsed) = run_timed!("FANSI-nlTGV", inversion::fansi(
-        &data.fieldmap_local, &data.mask, &grid, data.b0_dir, &params, |_, _| {},
+        &data.fieldmap_local, &data.mask, None, &grid, data.b0_dir, &params, |_, _| {},
     ));
 
     let res = TestResult::new("FANSI (nlTGV)", &result, &data.chi, &data.mask, data.dims);
@@ -892,7 +892,7 @@ fn test_inversion_l1qsm() {
 
     let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
     let (result, elapsed) = run_timed!("L1-QSM", inversion::l1qsm(
-        &data.fieldmap_local, &data.mask, &grid, data.b0_dir,
+        &data.fieldmap_local, &data.mask, None, &grid, data.b0_dir,
         &L1QsmParams::default(), |_, _| {},
     ));
 
