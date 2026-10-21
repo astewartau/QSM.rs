@@ -20,8 +20,14 @@
 //! Two places where this port has to choose, because QSM.jl's code is not well defined:
 //! - QSM.jl's unweighted path (`W = nothing`) never refreshes the FFT of `x` before forming
 //!   `D x` for the Newton step (it copies it only when `W` is given), so it uses `D` applied to
-//!   the previous right-hand side instead of `D x`. Here no weight means `W = 1` over the whole
-//!   (padded) volume, the problem QSM.jl's unweighted Newton step is written for.
+//!   the previous right-hand side instead of `D x`. Here no magnitude means `W = 1` over the
+//!   whole (padded) volume, the problem QSM.jl's unweighted Newton step is written for.
+//! - QSM.jl takes the data weight `W` from the caller and gives no rule for making it. With a
+//!   magnitude, `W = min(2*mask*mag/max(mag), 1)`, the normalisation of FANSI's in vivo example
+//!   by the same authors as the paper (and of [`super::ndi`]); QSM.jl squares it. With `W = 1`
+//!   and `mu = 1` the Newton step's derivative `W^2/mu*cos(z - f) + 1` reaches zero, and QSM.jl
+//!   itself diverges on fields of more than a few radians (the qsm-forward 7T phantom); with the
+//!   magnitude weight it converges. Pass the magnitude whenever there is one.
 //! - QSM.jl allocates the data-term multiplier without initialising it; here it starts at zero.
 //!
 //! QSM.jl uses real FFTs, this port complex FFTs and the real part. When B0 is tilted from the
@@ -124,8 +130,8 @@ fn shrink(v: f64, t: f64) -> f64 {
 /// # Arguments
 /// * `local_field` - Local field in ppm (nx * ny * nz)
 /// * `mask` - Binary mask (nx * ny * nz); the result is zeroed outside it
-/// * `weight` - Data weight `W` (QSM.jl's `W`), used as given and zero in the padding;
-///   `None` is `W = 1` over the whole padded volume
+/// * `magnitude` - Magnitude image, made into the data weight `W` (see module docs; zero in
+///   the padding); `None` is `W = 1` over the whole padded volume
 /// * `grid` - Volume grid (dimensions and voxel sizes)
 /// * `bdir` - B0 field direction
 /// * `params` - NLTV parameters
@@ -136,7 +142,7 @@ fn shrink(v: f64, t: f64) -> f64 {
 pub fn nltv(
     local_field: &[f64],
     mask: &[u8],
-    weight: Option<&[f64]>,
+    magnitude: Option<&[f64]>,
     grid: &Grid,
     bdir: (f64, f64, f64),
     params: &NltvParams,
@@ -160,8 +166,16 @@ pub fn nltv(
     let phase: Vec<f64> = local_field.iter().map(|&f| f * ppm_to_rad).collect();
     let fp = pad3d(&phase, dims, pdims);
     // W^2 / mu
-    let w2: Vec<f64> = match weight {
-        Some(w) => pad3d(w, dims, pdims).into_iter().map(|v| v * v / mu).collect(),
+    let w2: Vec<f64> = match magnitude {
+        Some(mag) => {
+            let mag_max = mag.iter().cloned().fold(0.0f64, f64::max);
+            let w: Vec<f64> = (0..mag.len())
+                .map(|i| {
+                    if mask[i] == 0 || mag_max <= 0.0 { 0.0 } else { (2.0 * mag[i] / mag_max).min(1.0) }
+                })
+                .collect();
+            pad3d(&w, dims, pdims).into_iter().map(|v| v * v / mu).collect()
+        }
         None => vec![1.0 / mu; n],
     };
 
@@ -295,8 +309,9 @@ mod tests {
     }
 
     #[test]
-    fn test_nltv_no_weight_is_unit_weight() {
-        // a fast FFT size, so there is no padding for the weight to be zero in
+    fn test_nltv_magnitude_weight() {
+        // a fast FFT size, so the padding cannot differ; a bright uniform magnitude with a full
+        // mask clips to W = 1 everywhere, the same as no magnitude
         let (nx, ny, nz) = (10, 9, 8);
         let nt = nx * ny * nz;
         let field: Vec<f64> = (0..nt).map(|i| ((i * 37 % 101) as f64 - 50.0) * 1e-3).collect();
@@ -304,12 +319,17 @@ mod tests {
         let grid = Grid::new(nx, ny, nz, 1.0, 1.0, 1.0);
         let p = small_params();
         let a = nltv(&field, &mask, None, &grid, (0.1, 0.0, 1.0), &p, |_, _| {});
-        let ones = vec![1.0; nt];
-        let b = nltv(&field, &mask, Some(&ones), &grid, (0.1, 0.0, 1.0), &p, |_, _| {});
+        let mag = vec![5.0; nt];
+        let b = nltv(&field, &mask, Some(&mag), &grid, (0.1, 0.0, 1.0), &p, |_, _| {});
         for (x, y) in a.iter().zip(&b) {
             assert!(x.is_finite());
             assert!((x - y).abs() < 1e-12);
         }
+        // a dimmer region gets a smaller weight and changes the result
+        let mut mag2 = mag.clone();
+        mag2[..nt / 2].iter_mut().for_each(|v| *v = 1.0);
+        let c = nltv(&field, &mask, Some(&mag2), &grid, (0.1, 0.0, 1.0), &p, |_, _| {});
+        assert!(a.iter().zip(&c).any(|(x, y)| (x - y).abs() > 1e-9));
     }
 
     #[test]

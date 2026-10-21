@@ -88,15 +88,15 @@ pub fn run_dipole_inversion(
         }
         InversionAlgorithm::Nltv => {
             // NLTV takes ppm and converts to radians itself, like NDI; field strength and echo
-            // time (the first) come from metadata. QSM.jl leaves the data weight to the caller
-            // and gives no rule for making it from the magnitude, so none is passed (W = 1).
+            // time (the first) come from metadata. The magnitude, when present, is the data
+            // weight (without one, W = 1, which can diverge on large fields; see the module docs).
             let params = crate::inversion::NltvParams {
                 b0: metadata.field_strength,
                 te: metadata.echo_times.first().copied().unwrap_or(config.nltv.te),
                 ..config.nltv.clone()
             };
             crate::inversion::nltv(
-                field_ppm, mask, None, &grid, bdir, &params, progress,
+                field_ppm, mask, magnitude, &grid, bdir, &params, progress,
             )
         }
         InversionAlgorithm::Medi => {
