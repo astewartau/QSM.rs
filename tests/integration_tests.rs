@@ -663,13 +663,8 @@ fn test_inversion_medi() {
     let te = &data.echo_times;
     let delta_te = if te.len() > 1 { te[1] - te[0] } else { te[0] };
     // MEDI's pipeline gives it the echo magnitudes (RSS edge mask, Fit_ppm_complex noise map).
-    // The phantom has an odd number of voxels along y and z, where MEDI's SMV sphere sits half a
-    // voxel off the grid and the inversion diverges (in MATLAB too); MEDI_L1's 'zeropad' option
-    // pads those axes by one voxel.
-    let params = MediParams {
-        b0: data.field_strength, te: delta_te, zeropad: (nx % 2, ny % 2, nz % 2),
-        ..MediParams::default()
-    };
+    // The phantom has an odd number of voxels along y and z; MEDI pads them itself (see medi.rs).
+    let params = MediParams { b0: data.field_strength, te: delta_te, ..MediParams::default() };
     let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
     let echoes: Vec<f64> = data.mag_echoes.concat();
     let (result, elapsed) = run_timed!("MEDI", inversion::medi(
@@ -691,7 +686,7 @@ fn test_inversion_medi() {
 
     // MEDI_L1 2024.11.26 itself scores 0.663 here (MATLAB, same inputs): its default SMV erodes
     // a quarter of the mask, where the result is zero. The bound catches divergence (e.g. SMV on
-    // an odd grid without zeropad scores over 100).
+    // an odd grid without padding scores over 100).
     assert!(res.nrmse < 0.8, "MEDI NRMSE too high: {}", res.nrmse);
     assert!(res.correlation > 0.7, "MEDI correlation too low: {}", res.correlation);
 }
@@ -2182,10 +2177,7 @@ fn test_all_combinations() {
         let (result, elapsed) = run_timed!("MEDI", inversion::medi(
             &bfr.local_field, &bfr.mask, MediMagnitude::Echoes(&echoes, data.mag_echoes.len()),
             &grid, data.b0_dir,
-            &MediParams {
-                b0: data.field_strength, te: delta_te, zeropad: (nx % 2, ny % 2, nz % 2),
-                ..MediParams::default()
-            },
+            &MediParams { b0: data.field_strength, te: delta_te, ..MediParams::default() },
             |_, _| {},
         ));
         let c = ChallengeMetrics::compute("MEDI", &result, &data.chi, &bfr.mask, &data.segmentation, data.dims);

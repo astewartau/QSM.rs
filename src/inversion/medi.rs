@@ -42,9 +42,14 @@
 //!
 //! # Zero padding
 //! `zeropad` pads the volume at the end of each axis before the inversion and crops the result,
-//! as `MEDI_L1`'s `'zeropad'` option does. With SMV on, `sphere_kernel.m` centres the sphere
-//! half a voxel off the grid along an axis with an odd number of voxels, and the inversion then
-//! diverges (in MATLAB as here); padding such axes by one voxel avoids that.
+//! as `MEDI_L1`'s `'zeropad'` option does.
+//!
+//! **Deliberate deviation from `MEDI_L1.m`:** with SMV on, `sphere_kernel.m` builds its grid as
+//! `-N/2:N/2-1`, which along an axis with an odd number of voxels centres the sphere half a voxel
+//! off the grid. The SMV operator is then not symmetric, and `MEDI_L1` diverges (in MATLAB as
+//! here: NRMSE above 10000% on a 164×205×205 phantom). So when SMV is on, `medi` pads every axis
+//! that is still odd after `zeropad` by one more voxel and crops the result back. On grids that
+//! are even after `zeropad`, and with SMV off, nothing changes and the result is `MEDI_L1`'s.
 //!
 //! Reference:
 //! Liu, T., Liu, J., de Rochefort, L., Spincemaille, P., Khalidov, I., Ledoux, J.R.,
@@ -107,7 +112,8 @@ pub struct MediParams {
     /// Echo spacing in seconds, `TE(2) − TE(1)`, or the echo time for one echo (scan parameter,
     /// for the radian conversion)
     pub te: f64,
-    /// Voxels of zeros appended along x, y and z before the inversion (`'zeropad'`)
+    /// Voxels of zeros appended along x, y and z before the inversion (`'zeropad'`). With SMV,
+    /// axes that are still odd get one more (see the module docs).
     pub zeropad: (usize, usize, usize),
 }
 
@@ -183,12 +189,15 @@ pub fn medi(
         }
     };
 
-    let (px, py, pz) = params.zeropad;
+    let (nx, ny, nz) = grid.dims;
+    let (zx, zy, zz) = params.zeropad;
+    // Deviation (see module docs): with SMV, pad axes that are still odd by one voxel.
+    let even = |n: usize, z: usize| z + usize::from(params.smv && (n + z) % 2 == 1);
+    let (px, py, pz) = (even(nx, zx), even(ny, zy), even(nz, zz));
     if (px, py, pz) == (0, 0, 0) {
         return medi_l1(local_field, mask, &imag, n_std.as_deref(), grid, bdir, params, progress);
     }
     // padarray(..., pad, 'post'), then x = x(1:matrix_size0(1), ...)
-    let (nx, ny, nz) = grid.dims;
     let (mx, my, mz) = (nx + px, ny + py, nz + pz);
     let pad = |v: &[f64]| -> Vec<f64> {
         let mut out = vec![0.0; mx * my * mz];
@@ -1366,6 +1375,22 @@ mod tests {
         let rss: Vec<f64> = (0..n).map(|i| (echoes[i].powi(2) + echoes[i + n].powi(2)).sqrt()).collect();
         let n_std = crate::utils::fit_ppm_complex_noise(&echoes, 2);
         let b = medi_l1(&field, &mask, &rss, Some(&n_std), &grid, (0.0, 0.0, 1.0), &p, |_, _| {});
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn smv_pads_odd_axes_to_even() {
+        let (grid, _, field, mag, mask) = phantom(15);
+        let p = MediParams { smv: true, smv_radius: 2.0, merit: false, ..small_params() };
+        let auto = medi(&field, &mask, MediMagnitude::Combined(&mag), &grid, (0.0, 0.0, 1.0), &p, |_, _| {});
+        let explicit = MediParams { zeropad: (1, 1, 1), ..p.clone() };
+        let manual = medi(&field, &mask, MediMagnitude::Combined(&mag), &grid, (0.0, 0.0, 1.0), &explicit, |_, _| {});
+        assert_eq!(auto, manual);
+        // an explicit pad that leaves an axis odd gets one more voxel
+        let odd = MediParams { zeropad: (2, 0, 0), ..p.clone() };
+        let more = MediParams { zeropad: (3, 1, 1), ..p };
+        let a = medi(&field, &mask, MediMagnitude::Combined(&mag), &grid, (0.0, 0.0, 1.0), &odd, |_, _| {});
+        let b = medi(&field, &mask, MediMagnitude::Combined(&mag), &grid, (0.0, 0.0, 1.0), &more, |_, _| {});
         assert_eq!(a, b);
     }
 }
