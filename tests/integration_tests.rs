@@ -660,11 +660,10 @@ fn test_inversion_medi() {
 
     // MEDI takes the field in ppm and converts it to radians over the echo spacing itself.
     // Certify the shipped defaults (MEDI_L1's: SMV and MERIT on, as MEDI runs after PDF).
-    let te = &data.echo_times;
-    let delta_te = if te.len() > 1 { te[1] - te[0] } else { te[0] };
-    // MEDI's pipeline gives it the echo magnitudes (RSS edge mask, Fit_ppm_complex noise map).
+    // MEDI's pipeline gives it the echo magnitudes (RSS edge mask, Fit_ppm_complex noise map,
+    // ARLO R2* for MEDI+0's CSF mask) and their echo times.
     // The phantom has an odd number of voxels along y and z; MEDI pads them itself (see medi.rs).
-    let params = MediParams { b0: data.field_strength, te: delta_te, ..MediParams::default() };
+    let params = MediParams { b0: data.field_strength, echo_times: data.echo_times.clone(), ..MediParams::default() };
     let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
     let echoes: Vec<f64> = data.mag_echoes.concat();
     let (result, elapsed) = run_timed!("MEDI", inversion::medi(
@@ -2212,13 +2211,11 @@ fn test_all_combinations() {
         emit_row(&mut csv, &bfr.name, "RTS", &c, bt, elapsed.as_secs_f64());
 
         // MEDI
-        let te = &data.echo_times;
-        let delta_te = if te.len() > 1 { te[1] - te[0] } else { te[0] };
         let echoes: Vec<f64> = data.mag_echoes.concat();
         let (result, elapsed) = run_timed!("MEDI", inversion::medi(
             &bfr.local_field, &bfr.mask, EchoMagnitudes { data: &echoes, n_echoes: data.mag_echoes.len() },
             &grid, data.b0_dir,
-            &MediParams { b0: data.field_strength, te: delta_te, ..MediParams::default() },
+            &MediParams { b0: data.field_strength, echo_times: data.echo_times.clone(), ..MediParams::default() },
             |_, _| {},
         ));
         let c = ChallengeMetrics::compute("MEDI", &result, &data.chi, &bfr.mask, &data.segmentation, data.dims);

@@ -155,6 +155,66 @@ pub fn r2star_arlo(
     Ok((r2star_map, s0_map))
 }
 
+/// `arlo.m` from the MEDI toolbox (release 2024.11.26), line for line: the ARLO R2* estimate of
+/// Pei et al. (2015) for any echo times,
+/// `r2 = (Σ y·x + Σ β·x²) / (Σ β·y·x + Σ y²)` over consecutive echo triplets, with `y` the
+/// Simpson-type integral and `x = s_j − s_{j+2}`. Every voxel is fitted (no mask, no clipping,
+/// no fallback); NaN and infinite results are set to 0, as in `arlo.m`.
+///
+/// [`r2star_arlo`] is a different estimator (`Σ x·y / Σ y²` with a log-linear fallback); MEDI's
+/// pipeline (`extract_CSF` for MEDI+0) uses this one.
+///
+/// # Arguments
+/// * `magnitude` - The echo magnitudes, `echo_times.len()` volumes of `n_voxels` stacked with
+///   the echo slowest
+/// * `echo_times` - Echo times in seconds
+/// * `n_voxels` - Voxels per echo
+///
+/// # Returns
+/// R2* in Hz per voxel, or `None` for fewer than two echoes (`arlo.m` returns `[]`). With two
+/// echoes `arlo.m` has no triplet and returns 0 everywhere; so does this.
+pub fn arlo(magnitude: &[f64], echo_times: &[f64], n_voxels: usize) -> Option<Vec<f64>> {
+    let nte = echo_times.len();
+    if nte < 2 {
+        return None;
+    }
+    assert_eq!(magnitude.len(), n_voxels * nte, "magnitude is not echo_times.len() volumes");
+    let te = echo_times;
+    let mut yy = vec![0.0f64; n_voxels];
+    let mut yx = vec![0.0f64; n_voxels];
+    let mut beta_yx = vec![0.0f64; n_voxels];
+    let mut beta_xx = vec![0.0f64; n_voxels];
+    for j in 0..nte - 2 {
+        let alpha = (te[j + 2] - te[j]) * (te[j + 2] - te[j]) / 2.0 / (te[j + 1] - te[j]);
+        let tmp = (2.0 * te[j + 2] * te[j + 2] - te[j] * te[j + 2] - te[j] * te[j]
+            + 3.0 * te[j] * te[j + 1] - 3.0 * te[j + 1] * te[j + 2]) / 6.0;
+        let beta = tmp / (te[j + 2] - te[j + 1]);
+        let gamma = tmp / (te[j + 1] - te[j]);
+        let (c0, c1, c2) = (te[j + 2] - te[j] - alpha + gamma, alpha - beta - gamma, beta);
+        let (s0, s1, s2) = (
+            &magnitude[j * n_voxels..(j + 1) * n_voxels],
+            &magnitude[(j + 1) * n_voxels..(j + 2) * n_voxels],
+            &magnitude[(j + 2) * n_voxels..(j + 3) * n_voxels],
+        );
+        for v in 0..n_voxels {
+            let y1 = s0[v] * c0 + s1[v] * c1 + s2[v] * c2;
+            let x1 = s0[v] - s2[v];
+            yy[v] += y1 * y1;
+            yx[v] += y1 * x1;
+            beta_yx[v] += beta * y1 * x1;
+            beta_xx[v] += beta * x1 * x1;
+        }
+    }
+    Some(
+        (0..n_voxels)
+            .map(|v| {
+                let r2 = (yx[v] + beta_xx[v]) / (beta_yx[v] + yy[v]);
+                if r2.is_finite() { r2 } else { 0.0 }
+            })
+            .collect(),
+    )
+}
+
 /// Convert an R2* map (Hz) to a T2* map (seconds).
 ///
 /// T2* = 1 / R2* for voxels where R2* > 0; zero otherwise.
@@ -278,6 +338,35 @@ mod tests {
         let te = [0.005, 0.010, 0.015];
         assert!(r2star_arlo(&[1.0; 2], &[1], &te, &g).is_err());
         assert!(r2star_arlo(&[1.0; 3], &[1, 1], &te, &g).is_err());
+    }
+
+    #[test]
+    fn arlo_matches_the_closed_form_and_arlo_m_edge_cases() {
+        // Noise-free monoexponential decay at even and uneven spacing: ARLO is close to exact.
+        for te in [vec![0.005, 0.011, 0.017, 0.023, 0.029], vec![0.004, 0.009, 0.016, 0.030]] {
+            let r2: [f64; 3] = [5.0, 30.0, 80.0];
+            let n = r2.len();
+            let mag: Vec<f64> = te.iter().flat_map(|&t| r2.iter().map(move |&r| 100.0 * (-r * t).exp())).collect();
+            let est = arlo(&mag, &te, n).unwrap();
+            for v in 0..n {
+                assert!((est[v] - r2[v]).abs() / r2[v] < 0.02, "{te:?}: {} vs {}", est[v], r2[v]);
+            }
+        }
+        // even spacing: arlo_even.m's closed form
+        let (esp, s) = (0.006, [90.0, 70.0, 61.0, 40.0]);
+        let te: Vec<f64> = (0..4).map(|i| 0.005 + esp * i as f64).collect();
+        let (mut xy, mut xx, mut yy) = (0.0, 0.0, 0.0);
+        for j in 0..2 {
+            let y = esp / 3.0 * (s[j] + 4.0 * s[j + 1] + s[j + 2]);
+            let x = s[j] - s[j + 2];
+            xy += x * y; xx += x * x; yy += y * y;
+        }
+        let want = (esp / 3.0 * xx + xy) / (yy + esp / 3.0 * xy);
+        assert!((arlo(&s, &te, 1).unwrap()[0] - want).abs() < 1e-9 * want);
+        // one echo: []; two echoes: no triplet, 0/0 -> 0; zero signal -> 0
+        assert!(arlo(&[1.0], &[0.005], 1).is_none());
+        assert_eq!(arlo(&[1.0, 0.5], &[0.005, 0.01], 1).unwrap(), vec![0.0]);
+        assert_eq!(arlo(&[0.0; 3], &[0.005, 0.01, 0.015], 1).unwrap(), vec![0.0]);
     }
 
     #[test]

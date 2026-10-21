@@ -15,10 +15,28 @@
 //! `1/sqrt(|wG ∇χ|² + 1e-6)`, `cgsolve.m`, `sphere_kernel.m` (the partial-volume sphere) for the
 //! SMV step, and the MERIT reweighting. Defaults are those of `MEDI_L1.m` and
 //! `parse_QSM_input.m`: λ = 1000, 10 Gauss-Newton iterations, 100 CG iterations, tolerances 0.1
-//! and 0.01, `percentage` 0.9, SNR data weighting, SMV (radius 5 mm, shrinking the mask) and
-//! MERIT on. Not ported: zero padding, the CSF zero reference (`lambda_CSF`, which needs a CSF
-//! mask), the preconditioner `P`, the linear formulation and the `Lreg` term (all off unless
-//! requested).
+//! and 0.01, `percentage` 0.9, SNR data weighting, SMV (radius 5 mm, shrinking the mask), MERIT
+//! and the CSF zero reference (MEDI+0, `lambda_CSF` 100) on. Not ported: the preconditioner
+//! `P`, the linear formulation and the `Lreg` term (all off unless requested).
+//!
+//! # MEDI+0: CSF zero reference
+//! MEDI's pipeline (README.m) computes R2* from the echo magnitudes with `arlo.m`
+//! ([`arlo`](crate::utils::r2star::arlo)), the ventricular CSF mask from it with
+//! `extract_CSF.m` ([`extract_csf`]), and passes the mask to `MEDI_L1`, which then adds
+//! `reg_CSF.m`'s term `lambda_CSF/2 · ||M_CSF (χ − mean_CSF(χ))||²` to the cost and subtracts
+//! the CSF mean from the result. `medi` does the same from the echo magnitudes and echo times
+//! it requires ([`MediParams::csf`], default on, as `parse_QSM_input` sets `lambda_CSF` = 100).
+//! Differences from MATLAB, which only matter where MATLAB fails or gives no answer:
+//! - Fewer than three echoes: `arlo.m` gives no R2* for one echo (so MEDI runs without the CSF
+//!   term) and 0 everywhere for two (which would make the whole central brain "CSF"). `medi`
+//!   runs without the CSF term in both cases.
+//! - A CSF mask with no voxels makes `MEDI_L1` return NaN (the mean over no voxels); `medi`
+//!   runs without the CSF term instead.
+//! - `extract_CSF.m` errors when the central sphere holds fewer than three low-R2* regions;
+//!   [`extract_csf`] uses those it finds.
+//! - `MEDI_L1` subtracts the CSF mean from every voxel, so the result is `−mean` outside the
+//!   mask; `medi` keeps the result zero outside the mask, like the other inversions. Inside the
+//!   mask the values are the same.
 //!
 //! # Units
 //! Like the other inversions, `medi` takes the local field in ppm and returns ppm. MEDI works on
@@ -26,8 +44,8 @@
 //! multi-echo data and `TE` for one echo, as MEDI's DICOM readers set it) at the centre frequency
 //! `CF = γ·B0`. The field is converted with `2π·CF·delta_TE·1e-6` first and the result converted
 //! back at the end, as `MEDI_L1.m` does. The result depends on this scale (the data term is
-//! nonlinear and λ is fixed), so `b0` and `te` are scan parameters that the pipeline fills from
-//! metadata.
+//! nonlinear and λ is fixed), so `b0` and `echo_times` are scan parameters that the pipeline
+//! fills from metadata.
 //!
 //! # Magnitude and data weight
 //! `MEDI_L1.m` weights the data by `1/N_std`, the noise standard deviation of the field
@@ -35,7 +53,8 @@
 //! (README.m) takes both from the complex echoes: `iMag = sqrt(sum(abs(iField).^2,4))` and
 //! `N_std` from `Fit_ppm_complex.m`, which depends only on the echo magnitudes
 //! ([`fit_ppm_complex_noise`](crate::utils::fit_ppm_complex_noise)). `medi` requires the echo
-//! magnitudes ([`EchoMagnitudes`]) and does the same, so it always weights the data as
+//! magnitudes ([`EchoMagnitudes`]) and their echo times ([`MediParams::echo_times`]) and does
+//! the same, so it always weights the data as
 //! `MEDI_L1` does in MEDI's pipeline; one echo is fitted as `Fit_ppm_complex.m` fits one echo.
 //! `Fit_ppm_complex.m` assumes evenly spaced echoes.
 //!
@@ -108,9 +127,20 @@ pub struct MediParams {
     pub tol: f64,
     /// Field strength in Tesla (scan parameter, for the radian conversion)
     pub b0: f64,
-    /// Echo spacing in seconds, `TE(2) − TE(1)`, or the echo time for one echo (scan parameter,
-    /// for the radian conversion)
-    pub te: f64,
+    /// Echo times in seconds, one per echo magnitude (scan parameter). The radian conversion
+    /// uses MEDI's `delta_TE`: `TE(2) − TE(1)`, or `TE` for one echo; the CSF mask uses R2*
+    /// from all of them (`arlo.m`).
+    pub echo_times: Vec<f64>,
+    /// MEDI+0: zero-reference to the ventricular CSF (`extract_CSF.m` on `arlo.m` R2*, and
+    /// `MEDI_L1`'s `lambda_CSF` term). On by default, as in MEDI's pipeline. Needs at least
+    /// three echoes; with fewer, MEDI runs without it (see the module docs).
+    pub csf: bool,
+    /// Weight of the CSF term (`'lambda_CSF'`)
+    pub lambda_csf: f64,
+    /// `extract_CSF.m`'s `thresh_R2s`: voxels below this R2* (Hz) are CSF candidates
+    pub csf_r2s_threshold: f64,
+    /// `extract_CSF.m`'s `flag_erode`: erode the mask by a 10 mm SMV before finding the CSF
+    pub csf_erode: bool,
     /// Voxels of zeros appended along x, y and z before the inversion (`'zeropad'`). With SMV,
     /// axes that are still odd get one more (see the module docs).
     pub zeropad: (usize, usize, usize),
@@ -141,7 +171,11 @@ impl Default for MediParams {
             max_iter: 10,
             tol: 0.1,
             b0: 3.0,
-            te: 0.005,
+            echo_times: vec![0.005],
+            csf: true,
+            lambda_csf: 100.0,
+            csf_r2s_threshold: 5.0,
+            csf_erode: true,
             zeropad: (0, 0, 0),
         }
     }
@@ -177,6 +211,16 @@ pub fn medi(
         .map(|i| (0..n_echoes).map(|e| m[i + n * e].powi(2)).sum::<f64>().sqrt())
         .collect();
     let n_std = crate::utils::fit_ppm_complex_noise(m, n_echoes);
+    let te = &params.echo_times;
+    assert_eq!(te.len(), n_echoes, "echo_times does not match the echo magnitudes");
+    // R2s = arlo(TE, abs(iField)); Mask_CSF = extract_CSF(R2s, Mask, voxel_size)
+    let csf: Option<Vec<bool>> = if params.csf && n_echoes >= 3 {
+        let r2s = crate::utils::r2star::arlo(m, te, n).expect("three or more echoes");
+        let c = extract_csf(&r2s, mask, grid, params.csf_r2s_threshold, params.csf_erode);
+        c.iter().any(|&v| v != 0).then(|| c.iter().map(|&v| v != 0).collect())
+    } else {
+        None
+    };
 
     let (nx, ny, nz) = grid.dims;
     let (zx, zy, zz) = params.zeropad;
@@ -184,7 +228,7 @@ pub fn medi(
     let even = |n: usize, z: usize| z + usize::from(params.smv && (n + z) % 2 == 1);
     let (px, py, pz) = (even(nx, zx), even(ny, zy), even(nz, zz));
     if (px, py, pz) == (0, 0, 0) {
-        return medi_l1(local_field, mask, &imag, &n_std, grid, bdir, params, progress);
+        return medi_l1(local_field, mask, &imag, &n_std, csf.as_deref(), grid, bdir, params, progress);
     }
     // padarray(..., pad, 'post'), then x = x(1:matrix_size0(1), ...)
     let (mx, my, mz) = (nx + px, ny + py, nz + pz);
@@ -201,8 +245,12 @@ pub fn medi(
     let mask_f: Vec<f64> = mask.iter().map(|&m| m as f64).collect();
     let mask_p: Vec<u8> = pad(&mask_f).iter().map(|&v| v as u8).collect();
     let pgrid = Grid::new(mx, my, mz, grid.vsx(), grid.vsy(), grid.vsz());
+    let csf_p: Option<Vec<bool>> = csf.map(|c| {
+        let f: Vec<f64> = c.iter().map(|&b| b as u8 as f64).collect();
+        pad(&f).iter().map(|&v| v != 0.0).collect()
+    });
     let chi = medi_l1(
-        &pad(local_field), &mask_p, &pad(&imag), &pad(&n_std),
+        &pad(local_field), &mask_p, &pad(&imag), &pad(&n_std), csf_p.as_deref(),
         &pgrid, bdir, params, progress,
     );
     let mut out = vec![0.0; n];
@@ -215,13 +263,14 @@ pub fn medi(
     out
 }
 
-/// `MEDI_L1.m` on an `iMag` and an `N_std`
+/// `MEDI_L1.m` on an `iMag`, an `N_std` and, for MEDI+0, a `Mask_CSF`
 #[allow(clippy::too_many_arguments)]
 fn medi_l1(
     local_field: &[f64],
     mask: &[u8],
     magnitude: &[f64],
     n_std: &[f64],
+    mask_csf: Option<&[bool]>,
     grid: &Grid,
     bdir: (f64, f64, f64),
     params: &MediParams,
@@ -233,7 +282,9 @@ fn medi_l1(
 
     // ppm -> radians over delta_TE; MEDI_L1 converts back with x/(2*pi*delta_TE*CF)*1e6.
     let cf = 42.576e6 * params.b0;
-    let ppm_to_rad = 2.0 * std::f64::consts::PI * params.te * cf * 1e-6;
+    let te = &params.echo_times;
+    let delta_te = if te.len() == 1 { te[0] } else { te[1] - te[0] };
+    let ppm_to_rad = 2.0 * std::f64::consts::PI * delta_te * cf * 1e-6;
     let mut rdf: Vec<f64> = local_field.iter().map(|&f| f * ppm_to_rad).collect();
 
     // N_std = N_std.*Mask; tempn = N_std
@@ -277,6 +328,27 @@ fn medi_l1(
     let wg = gradient_mask(magnitude, &mask, grid, params.percentage);
 
     let lambda2 = 2.0 * params.lambda;
+    // reg_CSF.m: opHop(x) = lambda_CSF * LT(LT(x)), LT(x) = Mask_CSF.*(x - mean(x(Mask_CSF)))
+    let csf_idx: Vec<usize> = mask_csf.map_or(Vec::new(), |c| (0..n).filter(|&i| c[i]).collect());
+    let lt = |x: &[f64], out: &mut [f64]| {
+        let mean = csf_idx.iter().map(|&i| x[i]).sum::<f64>() / csf_idx.len() as f64;
+        out.iter_mut().for_each(|v| *v = 0.0);
+        for &i in &csf_idx {
+            out[i] = x[i] - mean;
+        }
+    };
+    let reg_csf = |x: &[f64], acc: &mut [f64]| {
+        if csf_idx.is_empty() {
+            return;
+        }
+        let mut t1 = vec![0.0; n];
+        let mut t2 = vec![0.0; n];
+        lt(x, &mut t1);
+        lt(&t1, &mut t2);
+        for &i in &csf_idx {
+            acc[i] += params.lambda_csf * t2[i];
+        }
+    };
     let e = 1e-6;
     let mut x = vec![0.0f64; n];
     let mut vr = [vec![0.0f64; n], vec![0.0f64; n], vec![0.0f64; n]];
@@ -305,6 +377,7 @@ fn medi_l1(
 
         // b = reg(x) + 2*lambda*Dconv(real(conj(w).*conj(1i).*(w-b0)))
         let mut b = reg(&x, &wg, &vr, grid, vs);
+        reg_csf(&x, &mut b);
         let r: Vec<f64> = (0..n)
             .map(|i| (w[i].conj() * Complex64::new(0.0, -1.0) * (w[i] - b0[i])).re)
             .collect();
@@ -317,7 +390,8 @@ fn medi_l1(
         let base = (iter - 1) * params.cg_max_iter;
         let dx = cgsolve(
             |p: &[f64], out: &mut [f64], fft: &mut Fft3dWorkspace, buf: &mut [Complex64]| {
-                let rg = reg(p, &wg, &vr, grid, vs);
+                let mut rg = reg(p, &wg, &vr, grid, vs);
+                reg_csf(p, &mut rg);
                 let mut t = dconv(p, &d, fft, buf);
                 for i in 0..n {
                     t[i] *= w2[i];
@@ -370,7 +444,17 @@ fn medi_l1(
     progress(total, total);
 
     // x = x/(2*pi*delta_TE*CF)*1e6.*Mask
-    (0..n).map(|i| if mask[i] { x[i] / ppm_to_rad } else { 0.0 }).collect()
+    let mut x: Vec<f64> = (0..n).map(|i| if mask[i] { x[i] / ppm_to_rad } else { 0.0 }).collect();
+    // if flag_CSF, x = x - mean(x(Mask_CSF)); kept zero outside the mask (see the module docs)
+    if !csf_idx.is_empty() {
+        let mean = csf_idx.iter().map(|&i| x[i]).sum::<f64>() / csf_idx.len() as f64;
+        for i in 0..n {
+            if mask[i] {
+                x[i] -= mean;
+            }
+        }
+    }
+    x
 }
 
 /// `Dconv`: `real(ifftn(D.*fftn(x)))`
@@ -628,6 +712,122 @@ fn smv_noise(tempn: &[f64], k: &[Complex64], fft: &mut Fft3dWorkspace) -> Vec<f6
     let sq: Vec<f64> = tempn.iter().map(|v| v * v).collect();
     let s = smv(&sq, k, fft);
     (0..sq.len()).map(|i| (s[i].re + sq[i]).sqrt()).collect()
+}
+
+/// `extract_CSF.m` (MEDI toolbox 2024.11.26): the ventricular CSF mask for MEDI+0.
+///
+/// Low-R2* voxels (`r2s < r2s_threshold`) form 6-connected regions twice: inside a 30 mm sphere
+/// at the mask's centroid, and inside the mask (eroded first, when `erode`, to where the 10 mm
+/// `SMV.m` of the mask exceeds 0.999). The CSF mask is every region of the second kind that
+/// touches one of the three largest regions of the first kind. `extract_CSF.m` errors when
+/// there are fewer than three central regions; this uses those there are.
+///
+/// # Arguments
+/// * `r2s` - R2* in Hz (`arlo.m`, [`arlo`](crate::utils::r2star::arlo))
+/// * `mask` - Brain mask, 1 = brain
+/// * `grid` - Volume grid (dimensions and voxel sizes in mm)
+/// * `r2s_threshold` - `thresh_R2s` (default 5 Hz)
+/// * `erode` - `flag_erode` (default on)
+///
+/// # Returns
+/// The CSF mask, 1 = CSF
+pub fn extract_csf(r2s: &[f64], mask: &[u8], grid: &Grid, r2s_threshold: f64, erode: bool) -> Vec<u8> {
+    let (nx, ny, nz) = grid.dims;
+    let n = grid.n_total();
+    assert!(r2s.len() == n && mask.len() == n, "r2s and mask must match the grid");
+    let vs = [grid.vsx(), grid.vsy(), grid.vsz()];
+    let pos = |p: usize| {
+        let (i, j, k) = (p % nx, (p / nx) % ny, p / (nx * ny));
+        [(i + 1) as f64 * vs[0], (j + 1) as f64 * vs[1], (k + 1) as f64 * vs[2]]
+    };
+    // Center region (sphere): radius 30 mm about the centroid of the mask
+    let inside: Vec<usize> = (0..n).filter(|&p| mask[p] > 0).collect();
+    let mut cen = [0.0f64; 3];
+    for &p in &inside {
+        let x = pos(p);
+        for a in 0..3 {
+            cen[a] += x[a];
+        }
+    }
+    let count = inside.len() as f64;
+    let cen = cen.map(|c| c / count);
+    let mask_cen: Vec<bool> = (0..n)
+        .map(|p| {
+            let x = pos(p);
+            ((x[0] - cen[0]).powi(2) + (x[1] - cen[1]).powi(2) + (x[2] - cen[2]).powi(2)).sqrt() <= 30.0
+        })
+        .collect();
+    // if flag_erode, Mask = SMV(Mask, matrix_size, voxel_size, 10) > 0.999
+    let mask: Vec<bool> = if erode {
+        let mut fft = Fft3dWorkspace::new(nx, ny, nz);
+        let k = sphere_kernel(grid, 10.0, &mut fft);
+        let m: Vec<f64> = mask.iter().map(|&v| v as f64).collect();
+        smv(&m, &k, &mut fft).iter().map(|v| v.re > 0.999).collect()
+    } else {
+        mask.iter().map(|&v| v != 0).collect()
+    };
+    let low: Vec<bool> = r2s.iter().map(|&r| r < r2s_threshold).collect();
+
+    // ROIs_region_cen: the three largest 6-connected regions of (R2s < thresh) in the sphere
+    let raw1: Vec<bool> = (0..n).map(|p| low[p] && mask_cen[p]).collect();
+    let (lab1, sizes1) = label6(&raw1, grid.dims);
+    let mut order: Vec<usize> = (0..sizes1.len()).collect();
+    order.sort_by(|&a, &b| sizes1[b].cmp(&sizes1[a])); // stable, as MATLAB's sort
+    let mut central = vec![false; sizes1.len()];
+    for &c in order.iter().take(3) {
+        central[c] = true;
+    }
+    // ROIs_region: 6-connected regions of (R2s < thresh) in the (eroded) mask; keep those that
+    // overlap a central region
+    let raw2: Vec<bool> = (0..n).map(|p| low[p] && mask[p]).collect();
+    let (lab2, sizes2) = label6(&raw2, grid.dims);
+    let mut keep = vec![false; sizes2.len()];
+    for p in 0..n {
+        if let (Some(a), Some(b)) = (lab1[p], lab2[p]) {
+            if central[a] {
+                keep[b] = true;
+            }
+        }
+    }
+    // Mask_ROI_CSF(Mask == 0) = 0
+    (0..n).map(|p| u8::from(mask[p] && lab2[p].is_some_and(|b| keep[b]))).collect()
+}
+
+/// 6-connected components (`bwconncomp(·, 6)`), numbered in the order of their first voxel in
+/// memory order (x fastest, as MATLAB's column-major order). Returns each voxel's component and
+/// the component sizes.
+fn label6(fg: &[bool], dims: (usize, usize, usize)) -> (Vec<Option<usize>>, Vec<usize>) {
+    let (nx, ny, nz) = dims;
+    let mut label = vec![None; fg.len()];
+    let mut sizes = Vec::new();
+    let mut stack = Vec::new();
+    for start in 0..fg.len() {
+        if !fg[start] || label[start].is_some() {
+            continue;
+        }
+        let c = sizes.len();
+        let mut size = 0;
+        label[start] = Some(c);
+        stack.push(start);
+        while let Some(p) = stack.pop() {
+            size += 1;
+            let (i, j, k) = (p % nx, (p / nx) % ny, p / (nx * ny));
+            let mut visit = |q: usize| {
+                if fg[q] && label[q].is_none() {
+                    label[q] = Some(c);
+                    stack.push(q);
+                }
+            };
+            if i > 0 { visit(p - 1); }
+            if i + 1 < nx { visit(p + 1); }
+            if j > 0 { visit(p - nx); }
+            if j + 1 < ny { visit(p + nx); }
+            if k > 0 { visit(p - nx * ny); }
+            if k + 1 < nz { visit(p + nx * ny); }
+        }
+        sizes.push(size);
+    }
+    (label, sizes)
 }
 
 // ============================================================================
@@ -1240,6 +1440,9 @@ mod tests {
         assert_eq!((p.cg_max_iter, p.max_iter, p.data_weighting), (100, 10, 1));
         assert!(p.smv && p.merit && p.smv_shrink_mask);
         assert_eq!(p.smv_radius, 5.0);
+        // MEDI+0 as in MEDI's README: lambda_CSF 100, extract_CSF's defaults
+        assert!(p.csf && p.csf_erode);
+        assert_eq!((p.lambda_csf, p.csf_r2s_threshold), (100.0, 5.0));
     }
 
     #[test]
@@ -1293,14 +1496,14 @@ mod tests {
     fn zero_field_gives_zero() {
         let (grid, _, field, mag, mask) = phantom(16);
         let zero = vec![0.0; field.len()];
-        let chi = medi_l1(&zero, &mask, &mag, &vec![1.0; mag.len()], &grid, (0.0, 0.0, 1.0), &small_params(), |_, _| {});
+        let chi = medi_l1(&zero, &mask, &mag, &vec![1.0; mag.len()], None, &grid, (0.0, 0.0, 1.0), &small_params(), |_, _| {});
         assert!(chi.iter().all(|&v| v == 0.0));
     }
 
     #[test]
     fn recovers_a_sphere_in_ppm() {
         let (grid, chi_true, field, mag, mask) = phantom(24);
-        let chi = medi_l1(&field, &mask, &mag, &vec![1.0; mag.len()], &grid, (0.0, 0.0, 1.0), &small_params(), |_, _| {});
+        let chi = medi_l1(&field, &mask, &mag, &vec![1.0; mag.len()], None, &grid, (0.0, 0.0, 1.0), &small_params(), |_, _| {});
         let c = 12 + 24 * (12 + 24 * 12);
         assert!((chi[c] - chi_true[c]).abs() < 0.03, "centre: {} vs {}", chi[c], chi_true[c]);
         for (i, &m) in mask.iter().enumerate() {
@@ -1314,8 +1517,8 @@ mod tests {
     fn uniform_noise_map_equals_none() {
         let (grid, _, field, mag, mask) = phantom(16);
         let p = small_params();
-        let a = medi_l1(&field, &mask, &mag, &vec![1.0; mag.len()], &grid, (0.0, 0.0, 1.0), &p, |_, _| {});
-        let b = medi_l1(&field, &mask, &mag, &vec![3.0; field.len()], &grid, (0.0, 0.0, 1.0), &p, |_, _| {});
+        let a = medi_l1(&field, &mask, &mag, &vec![1.0; mag.len()], None, &grid, (0.0, 0.0, 1.0), &p, |_, _| {});
+        let b = medi_l1(&field, &mask, &mag, &vec![3.0; field.len()], None, &grid, (0.0, 0.0, 1.0), &p, |_, _| {});
         let err = a.iter().zip(&b).map(|(x, y)| (x - y).abs()).fold(0.0, f64::max);
         assert!(err < 1e-9, "max |diff| {err}");
     }
@@ -1325,7 +1528,7 @@ mod tests {
         let (grid, _, field, mag, mask) = phantom(16);
         let p = MediParams { smv: true, smv_radius: 2.0, merit: true, ..small_params() };
         let mut calls = 0;
-        let chi = medi_l1(&field, &mask, &mag, &vec![1.0; mag.len()], &grid, (0.0, 0.0, 1.0), &p, |_, _| calls += 1);
+        let chi = medi_l1(&field, &mask, &mag, &vec![1.0; mag.len()], None, &grid, (0.0, 0.0, 1.0), &p, |_, _| calls += 1);
         assert!(chi.iter().all(|v| v.is_finite()));
         assert!(chi.iter().any(|&v| v != 0.0));
         assert!(calls > 0);
@@ -1348,7 +1551,7 @@ mod tests {
         let mask_f: Vec<f64> = mask.iter().map(|&v| v as f64).collect();
         let mask_p: Vec<u8> = pad(&mask_f, n).iter().map(|&v| v as u8).collect();
         let pgrid = Grid::new(m, n, m, 1.0, 1.0, 1.0);
-        let padded = medi_l1(&pad(&field, n), &mask_p, &pad(&mag, n), &pad(&crate::utils::fit_ppm_complex_noise(&mag, 1), n), &pgrid, (0.0, 0.0, 1.0), &small_params(), |_, _| {});
+        let padded = medi_l1(&pad(&field, n), &mask_p, &pad(&mag, n), &pad(&crate::utils::fit_ppm_complex_noise(&mag, 1), n), None, &pgrid, (0.0, 0.0, 1.0), &small_params(), |_, _| {});
         for k in 0..n { for j in 0..n { for i in 0..n {
             assert_eq!(chi[i + n * (j + n * k)], padded[i + m * (j + n * k)]);
         }}}
@@ -1359,11 +1562,11 @@ mod tests {
         let (grid, _, field, mag, mask) = phantom(16);
         let n = mag.len();
         let echoes: Vec<f64> = mag.iter().copied().chain(mag.iter().map(|v| 0.5 * v)).collect();
-        let p = small_params();
+        let p = MediParams { echo_times: vec![0.005, 0.010], ..small_params() };
         let a = medi(&field, &mask, EchoMagnitudes { data: &echoes, n_echoes: 2 }, &grid, (0.0, 0.0, 1.0), &p, |_, _| {});
         let rss: Vec<f64> = (0..n).map(|i| (echoes[i].powi(2) + echoes[i + n].powi(2)).sqrt()).collect();
         let n_std = crate::utils::fit_ppm_complex_noise(&echoes, 2);
-        let b = medi_l1(&field, &mask, &rss, &n_std, &grid, (0.0, 0.0, 1.0), &p, |_, _| {});
+        let b = medi_l1(&field, &mask, &rss, &n_std, None, &grid, (0.0, 0.0, 1.0), &p, |_, _| {});
         assert_eq!(a, b);
     }
 
@@ -1381,5 +1584,109 @@ mod tests {
         let a = medi(&field, &mask, EchoMagnitudes { data: &mag, n_echoes: 1 }, &grid, (0.0, 0.0, 1.0), &odd, |_, _| {});
         let b = medi(&field, &mask, EchoMagnitudes { data: &mag, n_echoes: 1 }, &grid, (0.0, 0.0, 1.0), &more, |_, _| {});
         assert_eq!(a, b);
+    }
+
+    /// A 100³ head-sized phantom: a 48 mm-radius brain at R2* 20 Hz with low-R2* regions.
+    fn csf_phantom() -> (Grid, Vec<f64>, Vec<u8>, impl Fn(usize) -> [f64; 3]) {
+        let n = 100;
+        let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
+        let at = move |p: usize| [(p % n) as f64 - 50.0, ((p / n) % n) as f64 - 50.0, (p / (n * n)) as f64 - 50.0];
+        let mask: Vec<u8> = (0..n * n * n).map(|p| u8::from(dist(at(p), [0.0; 3]) <= 48.0)).collect();
+        let r2s: Vec<f64> = (0..n * n * n)
+            .map(|p| {
+                let x = at(p);
+                if is_ventricle(x) {
+                    2.0
+                // low R2* inside the eroded mask but 35 mm from the centre
+                } else if dist(x, [0.0, 35.0, 0.0]) <= 2.0 {
+                    1.0
+                // a rim the 10 mm erosion removes, and the background
+                } else if dist(x, [0.0; 3]) > 44.0 {
+                    0.0
+                } else {
+                    20.0
+                }
+            })
+            .collect();
+        (grid, r2s, mask, at)
+    }
+
+    fn dist(x: [f64; 3], c: [f64; 3]) -> f64 {
+        ((x[0] - c[0]).powi(2) + (x[1] - c[1]).powi(2) + (x[2] - c[2]).powi(2)).sqrt()
+    }
+
+    /// Two central "ventricles"
+    fn is_ventricle(x: [f64; 3]) -> bool {
+        dist(x, [-5.0, 0.0, 0.0]) <= 3.0 || dist(x, [5.0, 0.0, 0.0]) <= 2.0
+    }
+
+    #[test]
+    fn extract_csf_keeps_central_low_r2s_regions_in_the_eroded_mask() {
+        let (grid, r2s, mask, at) = csf_phantom();
+        let csf = extract_csf(&r2s, &mask, &grid, 5.0, true);
+        for (p, &c) in csf.iter().enumerate() {
+            assert_eq!(c == 1, is_ventricle(at(p)), "voxel {:?}", at(p));
+        }
+        // Without the erosion the rim is a candidate region, but it does not touch the 30 mm
+        // central sphere, so the result is the same.
+        assert_eq!(extract_csf(&r2s, &mask, &grid, 5.0, false), csf);
+        // a threshold below the ventricles' R2* finds nothing there
+        assert!(extract_csf(&r2s, &mask, &grid, 1.5, true).iter().all(|&v| v == 0));
+    }
+
+    #[test]
+    fn extract_csf_takes_the_three_largest_central_regions() {
+        let n = 24;
+        let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
+        let mask = vec![1u8; n * n * n];
+        // four separate low-R2* single-row regions of 4, 3, 2 and 1 voxels near the centre
+        let mut r2s = vec![20.0; n * n * n];
+        for (len, j) in [(4usize, 6usize), (3, 10), (2, 14), (1, 18)] {
+            for i in 0..len {
+                r2s[(10 + i) + n * (j + n * 12)] = 0.0;
+            }
+        }
+        let csf = extract_csf(&r2s, &mask, &grid, 5.0, false);
+        assert_eq!(csf.iter().filter(|&&v| v == 1).count(), 4 + 3 + 2);
+        assert_eq!(csf[10 + n * (18 + n * 12)], 0);
+    }
+
+    #[test]
+    fn csf_term_zero_references_the_result() {
+        let (grid, _, field, mag, mask) = phantom(16);
+        let n = mag.len();
+        let csf: Vec<bool> = (0..n).map(|i| mask[i] == 1 && i % 7 == 0).collect();
+        let p = small_params();
+        let off = medi_l1(&field, &mask, &mag, &vec![1.0; n], None, &grid, (0.0, 0.0, 1.0), &p, |_, _| {});
+        let on = medi_l1(&field, &mask, &mag, &vec![1.0; n], Some(&csf), &grid, (0.0, 0.0, 1.0), &p, |_, _| {});
+        let mean = |x: &[f64]| (0..n).filter(|&i| csf[i]).map(|i| x[i]).sum::<f64>() / csf.iter().filter(|&&c| c).count() as f64;
+        assert!(mean(&on).abs() < 1e-12, "CSF mean {}", mean(&on));
+        assert!(mean(&off).abs() > 1e-6);
+        for i in 0..n {
+            if mask[i] == 0 {
+                assert_eq!(on[i], 0.0);
+            }
+        }
+        // with lambda_CSF = 0 the result is the plain result shifted by its CSF mean
+        let p0 = MediParams { lambda_csf: 0.0, ..p };
+        let shifted = medi_l1(&field, &mask, &mag, &vec![1.0; n], Some(&csf), &grid, (0.0, 0.0, 1.0), &p0, |_, _| {});
+        let m = mean(&off);
+        for i in 0..n {
+            let want = if mask[i] == 1 { off[i] - m } else { 0.0 };
+            assert!((shifted[i] - want).abs() < 1e-12);
+        }
+        // and the CSF term changes the solution itself
+        let d = (0..n).map(|i| (on[i] - shifted[i]).abs()).fold(0.0, f64::max);
+        assert!(d > 1e-6, "lambda_CSF had no effect");
+    }
+
+    #[test]
+    fn fewer_than_three_echoes_run_without_the_csf_term() {
+        let (grid, _, field, mag, mask) = phantom(16);
+        let echoes: Vec<f64> = mag.iter().copied().chain(mag.iter().map(|v| 0.5 * v)).collect();
+        let p = MediParams { echo_times: vec![0.005, 0.010], ..small_params() };
+        let on = medi(&field, &mask, EchoMagnitudes { data: &echoes, n_echoes: 2 }, &grid, (0.0, 0.0, 1.0), &p, |_, _| {});
+        let off = medi(&field, &mask, EchoMagnitudes { data: &echoes, n_echoes: 2 }, &grid, (0.0, 0.0, 1.0), &MediParams { csf: false, ..p }, |_, _| {});
+        assert_eq!(on, off);
     }
 }
