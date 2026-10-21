@@ -68,7 +68,8 @@ NAMES = {
     "inversion_cosmos_noisy": "COSMOS (noisy)",
     "bet": "BET",
     "combined_tgv": "TGV (Combined)",
-    "bias_correction": "Bias Correction",
+    "bias_correction": "Bias Correction (makehomogeneous)",
+    "n4_bias_correction": "Bias Correction (N4)",
     "ground_truth_total_field": "Ground truth total field",
     "unwrap_raw_romeo": "ROMEO (unwrapped)",
     "unwrap_raw_laplacian_neumann": "Laplacian (unwrapped)",
@@ -268,6 +269,7 @@ WINDOWS = {
     "bet": (0, 1),
     "combined_tgv": (-0.1, 0.1),
     "bias_correction": (-0.1, 0.1),  # fallback; before/after rendering uses auto-range
+    "n4_bias_correction": (-0.1, 0.1),  # likewise
     # Local fields after background removal — same window for all three, since the point of
     # the panel is that the first two agree and the third does not.
     "ground_truth_total_field": (-0.05, 0.05),
@@ -797,6 +799,7 @@ def main():
     # Handle before/after pairs (e.g. bias_correction_before + bias_correction)
     BEFORE_AFTER = {
         "bias_correction": "bias_correction_before",
+        "n4_bias_correction": "n4_bias_correction_before",
         "relax_denoise_after": "relax_denoise_before",
         "relax_unring_after": "relax_unring_before",
     }

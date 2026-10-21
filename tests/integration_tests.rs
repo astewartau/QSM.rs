@@ -1073,6 +1073,38 @@ fn test_bias_correction() {
     assert!(valid_fraction > 0.9, "Too few valid voxels after bias correction: {:.1}%", valid_fraction * 100.0);
 }
 
+#[test]
+#[ignore]
+fn test_n4_bias_correction() {
+    println!("[INFO] Loading test data...");
+    let data = TestData::load().expect("Failed to load test data");
+    let (nx, ny, nz) = data.dims;
+    let (vsx, vsy, vsz) = data.voxel_size;
+    let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
+
+    // As QSMART calls it: the mean magnitude over echoes, ANTs' defaults, no mask.
+    let n = data.mag_echoes[0].len();
+    let ne = data.mag_echoes.len() as f64;
+    let mean: Vec<f64> = (0..n).map(|i| data.mag_echoes.iter().map(|m| m[i]).sum::<f64>() / ne).collect();
+    let (out, elapsed) = run_timed!("N4", qsm_core::utils::n4_bias_correction(
+        &mean, None, &grid, &qsm_core::utils::N4Params::default(), |_, _| {},
+    ));
+
+    println!("N4 {:>10.2?}", elapsed);
+    println!("RESULT:N4 bias correction,-,-,-,-,{:.2}", elapsed.as_secs_f64());
+    common::save_center_slices(&mean, &data.mask, data.dims, "n4_bias_correction_before");
+    common::save_center_slices(&out.corrected, &data.mask, data.dims, "n4_bias_correction");
+
+    // Finite, positive values and a finite, positive bias field within the mask.
+    let inside: Vec<usize> = (0..n).filter(|&i| data.mask[i] > 0).collect();
+    let valid = inside.iter()
+        .filter(|&&i| out.corrected[i].is_finite() && out.corrected[i] > 0.0 && out.bias_field[i].is_finite() && out.bias_field[i] > 0.0)
+        .count();
+    let valid_fraction = valid as f64 / inside.len() as f64;
+    println!("[INFO] N4: {:.1}% valid positive voxels in mask", valid_fraction * 100.0);
+    assert!(valid_fraction > 0.9, "Too few valid voxels after N4: {:.1}%", valid_fraction * 100.0);
+}
+
 // ============================================================================
 // Susceptibility Weighted Imaging (SWI) Test
 // ============================================================================

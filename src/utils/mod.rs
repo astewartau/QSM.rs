@@ -7,7 +7,7 @@
 //! - R2*/R2 relaxometry and learned R2* -> R2' conversion (`onnx`)
 //! - Real/imaginary to magnitude/phase conversion with slice-chopping correction
 //! - Multi-echo field mapping (phase offset removal, B0 estimation)
-//! - Bias field correction (makehomogeneous)
+//! - Bias field correction (makehomogeneous; N4 as in ANTs)
 //! - Frangi vesselness filter for vessel detection
 //! - Surface curvature calculation
 //! - Vasculature mask generation
@@ -19,6 +19,7 @@ pub mod padding;
 pub mod complex;
 pub mod multi_echo;
 pub mod bias_correction;
+pub mod n4;
 pub mod frangi;
 pub mod curvature;
 pub mod vasculature;
@@ -47,6 +48,7 @@ pub use gradient::*;
 pub use padding::*;
 pub use multi_echo::*;
 pub use bias_correction::*;
+pub use n4::{n4_bias_correction, N4Output, N4Params};
 pub use frangi::*;
 pub use curvature::*;
 pub use vasculature::*;
