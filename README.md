@@ -147,6 +147,7 @@ Methods marked † need the `onnx` feature and model weights.
 | **Linear fit** | Magnitude-weighted least-squares fit of phase against TE, with optional phase offset and reliability mask (`multi_echo_linear_fit`) | — |
 | **QSMART echo fit** | QSMART's magnitude-weighted fit of phase against TE through the origin, on echoes unwrapped over the whole volume, with its reliability map `R_0` from the box-filtered fit residual (`qsmart_echofit`, `B0EstimationMethod::QsmartEchofit`) | Yaghmaie, N., Syeda, W., et al. (2021). *NeuroImage*, 231:117701. [DOI](https://doi.org/10.1016/j.neuroimage.2020.117701) |
 | **Robust echo combination** | Robust-loss multi-echo field fit with per-echo outlier scores (`multi_echo_robust_fit`, `B0EstimationMethod::RobustFit`) | Biondetti, E., et al. (2022). *Magnetic Resonance in Medicine*. [PMC9545116](https://pmc.ncbi.nlm.nih.gov/articles/PMC9545116/) |
+| **Complex fit (MEDI)** | Magnitude-weighted Gauss-Newton fit of the complex echoes, giving the wrapped field per echo spacing and its noise map, then spatial unwrapping (`fit_ppm_complex`, `B0EstimationMethod::ComplexFit`); port of MEDI's `Fit_ppm_complex.m` | Liu, T., et al. (2013). "Nonlinear formulation of the magnetic field to source relationship for robust quantitative susceptibility mapping." *Magnetic Resonance in Medicine*, 69(2):467-476. [DOI](https://doi.org/10.1002/mrm.24272) |
 
 ### Phase Unwrapping
 

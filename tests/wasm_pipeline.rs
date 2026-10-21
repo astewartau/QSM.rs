@@ -29,7 +29,7 @@ use wasm_bindgen_test::wasm_bindgen_test as test;
 
 use num_complex::Complex64;
 use qsm_core::bet::BetParams;
-use qsm_core::fieldmap::{B0WeightType, LinearFitParams, RobustFitParams};
+use qsm_core::fieldmap::{B0WeightType, FitPpmComplexParams, LinearFitParams, RobustFitParams};
 use qsm_core::pipeline::*;
 use qsm_core::unwrap::LaplacianSolver;
 use qsm_core::utils::morphology::SignalErosionParams;
@@ -276,6 +276,7 @@ fn field_mapping() {
         weightings.iter().map(|&weighting| B0EstimationMethod::WeightedAvg { weighting }).collect();
     estimations.push(B0EstimationMethod::LinearFit(LinearFitParams::default()));
     estimations.push(B0EstimationMethod::RobustFit(RobustFitParams::default()));
+    estimations.push(B0EstimationMethod::ComplexFit(FitPpmComplexParams::default()));
     let unwrappers = [
         (UnwrappingAlgorithm::Romeo, LaplacianSolver::Dct),
         (UnwrappingAlgorithm::Laplacian, LaplacianSolver::Dct),

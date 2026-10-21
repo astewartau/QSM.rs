@@ -1876,12 +1876,76 @@ pub fn field_to_hz(field: &[f64]) -> Vec<f64> {
     field.iter().map(|&f| f / TWO_PI).collect()
 }
 
+/// Settings of [`fit_ppm_complex`], the `opts` of `Fit_ppm_complex.m` (defaults as there).
+#[cfg_attr(feature = "introspection", derive(serde::Serialize))]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FitPpmComplexParams {
+    /// The Gauss-Newton iterations stop once `‖Δp1‖ ≤ reltol · ‖p1₀‖`, both norms taken over the
+    /// whole volume (`opts.reltol`, default 1e-4).
+    pub reltol: f64,
+    /// Iteration cap (`opts.max_iter`, default 30).
+    pub max_iter: usize,
+}
+
+impl Default for FitPpmComplexParams {
+    fn default() -> Self {
+        Self { reltol: 1e-4, max_iter: 30 }
+    }
+}
+
+/// Output of [`fit_ppm_complex`]. Each map has one value per voxel.
+#[derive(Clone, Debug)]
+pub struct FitPpmComplexResult {
+    /// Field as phase accrued per echo spacing (radians), **wrapped** to `[-π, π]`: it still needs
+    /// spatial unwrapping. Divide by [`Self::echo_spacing`] for rad/s. Sign: that of the input
+    /// phase (it increases with TE for a positive field), the convention of QSM.rs's other field
+    /// maps. MATLAB's `p1` is minus this, because `Fit_ppm_complex.m` fits `conj(M)`.
+    pub field: Vec<f64>,
+    /// A priori standard deviation of [`Self::field`], radians per echo spacing (`dp1`, which
+    /// MEDI passes on as `N_std`). Depends only on the echo magnitudes; 0 where the fit is
+    /// undefined. Same as [`fit_ppm_complex_noise`].
+    pub noise: Vec<f64>,
+    /// Fitted phase at the first echo (radians, not wrapped). MATLAB's `p0` is minus this.
+    pub phase0: Vec<f64>,
+    /// Relative residual `Σₑ|Sₑ − Ŝₑ|² / Σₑ|Sₑ|²` (`relres`); 0 where undefined.
+    pub relres: Vec<f64>,
+    /// The echo spacing the field is per (s): `TE₂ − TE₁`, or `TE₁` for a single echo, which is
+    /// how MEDI's readers set `delta_TE`.
+    pub echo_spacing: f64,
+    /// Gauss-Newton iterations run (the same for every voxel, as in the reference).
+    pub iterations: usize,
+}
+
+/// The inverse of the magnitude-weighted normal matrix of the fit of phase to echo index,
+/// `(ai11, ai12, ai22)`, from `|Sₑ|` for echo indices `e = 0, 1, …` (`Fit_ppm_complex.m`'s
+/// `a11 … ai22`, operation for operation, so the results round as MATLAB's do).
+fn fit_ppm_complex_normal_inverse(abs_m: impl Iterator<Item = f64>) -> (f64, f64, f64) {
+    let (mut a11, mut a12, mut a22) = (0.0f64, 0.0f64, 0.0f64);
+    for (e, s) in abs_m.enumerate() {
+        let w = s * s;
+        let t = e as f64;
+        a11 += w;
+        a12 += w * t;
+        a22 += w * (t * t);
+    }
+    let d = a11 * a22 - a12 * a12;
+    (a22 / d, -a12 / d, a11 / d)
+}
+
+/// `sqrt(ai22)` with NaN and ±Inf set to 0, as `dp1` at the end of `Fit_ppm_complex.m` (a
+/// negative `ai22` gives a complex root there whose real part is kept, i.e. 0; NaN here).
+fn fit_ppm_complex_std(ai22: f64) -> f64 {
+    let v = ai22.sqrt();
+    if v.is_finite() { v } else { 0.0 }
+}
+
 /// Noise standard deviation of the field fit, as `Fit_ppm_complex.m` in the MEDI toolbox returns
 /// it (`dp1`, MEDI's `N_std`): the a priori error of the frequency in a magnitude-weighted linear
 /// fit of phase to echo index, `sqrt(a11 / (a11·a22 − a12²))` with `a_jk = Σ_e |S_e|² e^(j+k−2)`
-/// over echo indices `e = 0, 1, …`. It depends only on the echo magnitudes. A single echo is
-/// treated as `Fit_ppm_complex.m` does, as two echoes of the same magnitude. Voxels where the
-/// fit is undefined get 0, as there (MEDI's data weight then ignores them).
+/// over echo indices `e = 0, 1, …`. It depends only on the echo magnitudes, so this is
+/// [`fit_ppm_complex`]'s `noise` without the phase. A single echo is treated as
+/// `Fit_ppm_complex.m` does, as two echoes of the same magnitude. Voxels where the fit is
+/// undefined get 0, as there (MEDI's data weight then ignores them).
 ///
 /// `magnitude` holds `n_echoes` volumes of `n` voxels each, echo slowest.
 pub fn fit_ppm_complex_noise(magnitude: &[f64], n_echoes: usize) -> Vec<f64> {
@@ -1889,20 +1953,189 @@ pub fn fit_ppm_complex_noise(magnitude: &[f64], n_echoes: usize) -> Vec<f64> {
     let n = magnitude.len() / n_echoes;
     (0..n)
         .map(|i| {
-            let (mut a11, mut a12, mut a22) = (0.0f64, 0.0f64, 0.0f64);
             let echoes = n_echoes.max(2);
-            for e in 0..echoes {
-                let s = magnitude[i + n * e.min(n_echoes - 1)];
-                let w = s * s;
-                let t = e as f64;
-                a11 += w;
-                a12 += w * t;
-                a22 += w * t * t;
-            }
-            let v = (a11 / (a11 * a22 - a12 * a12)).sqrt();
-            if v.is_finite() { v } else { 0.0 }
+            let abs_m = (0..echoes).map(|e| magnitude[i + n * e.min(n_echoes - 1)].abs());
+            fit_ppm_complex_std(fit_ppm_complex_normal_inverse(abs_m).2)
         })
         .collect()
+}
+
+/// Complex multi-echo field fit, a port of `Fit_ppm_complex.m` (MEDI toolbox 2024.11.26; Liu et
+/// al., MRM 2013;69:467; Kressler et al., IEEE TMI 2010;29:273; de Rochefort et al., MRM
+/// 2008;60:1003).
+///
+/// Fits `Sₑ = |Sₑ| exp(i(p0 + e·p1))` over echo indices `e = 0, 1, …` to the complex echoes by
+/// magnitude-weighted Gauss-Newton, starting from a linear fit to the temporally unwrapped phase
+/// of the first three echoes, and returns `p1`, the phase per echo spacing, wrapped to `[-π, π]`.
+/// MEDI then unwraps it spatially (`unwrapPhase`, a region-growing unwrapper) and divides by
+/// `delta_TE`; [`run_field_mapping`](crate::pipeline::run_field_mapping) does the same with
+/// QSM.rs's own unwrappers when
+/// [`B0EstimationMethod::ComplexFit`](crate::pipeline::B0EstimationMethod::ComplexFit) is chosen.
+///
+/// As in the reference:
+/// - the echoes must be evenly spaced (`echo_times` is only used to check that and to report the
+///   spacing; the model is in echo index);
+/// - the stopping test and the iteration count are global over the volume, not per voxel;
+/// - a single echo is fitted as `cat(4, abs(M), M)`, i.e. with zero phase at `TE = 0`, so the
+///   field is the echo's phase over `TE₁`;
+/// - a zero magnitude has phase 0 (MATLAB's `angle(0)`), and NaN updates are set to 0.
+///
+/// Not ported, because a QSM.rs caller does not need them: the coil combination of a 5th
+/// (channel) dimension (pass coil-combined echoes) and the splitting of inputs over 1e9 bytes
+/// into slabs (memory only; the result is the same, apart from the global stopping test being
+/// evaluated per slab there).
+///
+/// Sign: MATLAB fits `conj(M)`, so its `p1` and `p0` are minus [`FitPpmComplexResult::field`] and
+/// [`FitPpmComplexResult::phase0`]. Here the conjugate is taken as the first step and undone as
+/// the last, so every intermediate is MATLAB's and the outputs follow QSM.rs's convention (the
+/// sign of the input phase, as the ROMEO and Laplacian field maps).
+///
+/// `magnitudes[e]` and `phases[e]` are echo `e` (phase in radians, wrapped or not).
+pub fn fit_ppm_complex(
+    magnitudes: &[&[f64]],
+    phases: &[&[f64]],
+    echo_times: &[f64],
+    params: &FitPpmComplexParams,
+) -> Result<FitPpmComplexResult, InputError> {
+    use num_complex::Complex64;
+    let n_in = phases.len();
+    if n_in == 0 {
+        return Err(InputError::new("fit_ppm_complex: no echoes"));
+    }
+    if magnitudes.len() != n_in || echo_times.len() != n_in {
+        return Err(InputError(format!(
+            "fit_ppm_complex: {} phase echoes, {} magnitude echoes and {} echo times",
+            n_in, magnitudes.len(), echo_times.len()
+        )));
+    }
+    let n = phases[0].len();
+    for e in 0..n_in {
+        check_len(&format!("fit_ppm_complex: phase of echo {}", e + 1), phases[e].len(), n)?;
+        check_len(&format!("fit_ppm_complex: magnitude of echo {}", e + 1), magnitudes[e].len(), n)?;
+    }
+    let echo_spacing = if n_in == 1 { echo_times[0] } else { echo_times[1] - echo_times[0] };
+    let uneven = echo_times.windows(2)
+        .any(|w| ((w[1] - w[0]) - echo_spacing).abs() > 1e-3 * echo_spacing.abs());
+    if uneven || !(echo_spacing.is_finite() && echo_spacing > 0.0) {
+        return Err(InputError(format!(
+            "fit_ppm_complex needs evenly spaced, increasing echo times; got {echo_times:?}"
+        )));
+    }
+    if !(params.reltol.is_finite() && params.reltol >= 0.0) {
+        return Err(InputError(format!("fit_ppm_complex: reltol must be >= 0, got {}", params.reltol)));
+    }
+
+    // M = mag .* exp(1i*phase); one echo: M = cat(4, abs(M), M); M = conj(M)
+    let echo = |e: usize, i: usize| Complex64::from_polar(magnitudes[e][i], phases[e][i]);
+    let nechos = n_in.max(2);
+    let m: Vec<Vec<Complex64>> = if n_in == 1 {
+        vec![
+            (0..n).map(|i| Complex64::new(echo(0, i).norm(), 0.0)).collect(),
+            (0..n).map(|i| echo(0, i).conj()).collect(),
+        ]
+    } else {
+        (0..n_in).map(|e| (0..n).map(|i| echo(e, i).conj()).collect()).collect()
+    };
+    let abs_m: Vec<Vec<f64>> = m.iter().map(|me| me.iter().map(|z| z.norm()).collect()).collect();
+
+    // Initial guess: temporally unwrap the phase of the first (up to) three echoes against the
+    // first difference, then fit p0 + e·p1 to them by least squares.
+    let k = nechos.min(3);
+    let mut p0 = vec![0.0f64; n];
+    let mut p1 = vec![0.0f64; n];
+    for i in 0..n {
+        let mut y = [0.0f64; 3];
+        for (e, ye) in y.iter_mut().enumerate().take(k) {
+            *ye = m[e][i].arg();
+        }
+        // [m ind] = min([abs(c-2*pi), abs(c), abs(c+2*pi)], [], 2): the first minimum wins
+        let mut c = y[1] - y[0];
+        let cands = [(c - 2.0 * PI).abs(), c.abs(), (c + 2.0 * PI).abs()];
+        let mut ind = 0;
+        for j in 1..3 {
+            if cands[j] < cands[ind] {
+                ind = j;
+            }
+        }
+        if ind == 0 {
+            c -= 2.0 * PI;
+        } else if ind == 2 {
+            c += 2.0 * PI;
+        }
+        for nn in 0..(nechos - 1).min(2) {
+            let cd = (y[nn + 1] - y[nn]) - c;
+            if cd < -PI {
+                for ye in y.iter_mut().take(k).skip(nn + 1) {
+                    *ye += 2.0 * PI;
+                }
+            }
+            if cd > PI {
+                for ye in y.iter_mut().take(k).skip(nn + 1) {
+                    *ye -= 2.0 * PI;
+                }
+            }
+        }
+        // ip = A \ Y' with A = [1 0; 1 1; 1 2] (first k rows)
+        if k == 2 {
+            p0[i] = y[0];
+            p1[i] = y[1] - y[0];
+        } else {
+            p0[i] = (5.0 * y[0] + 2.0 * y[1] - y[2]) / 6.0;
+            p1[i] = (y[2] - y[0]) / 2.0;
+        }
+    }
+
+    let norm = |v: &[f64]| v.iter().map(|x| x * x).sum::<f64>().sqrt();
+    let tol = norm(&p1) * params.reltol;
+    let mut dp1 = p1.clone();
+    let mut dp0 = vec![0.0f64; n];
+    let ai: Vec<(f64, f64, f64)> = (0..n)
+        .map(|i| fit_ppm_complex_normal_inverse((0..nechos).map(|e| abs_m[e][i])))
+        .collect();
+
+    // Weighted Gauss-Newton, globally stopped as in the reference.
+    let mut iter = 0;
+    while norm(&dp1) > tol && iter < params.max_iter {
+        iter += 1;
+        for i in 0..n {
+            let (mut pr1, mut pr2) = (Complex64::new(0.0, 0.0), Complex64::new(0.0, 0.0));
+            for e in 0..nechos {
+                let t = e as f64;
+                let w = abs_m[e][i] * Complex64::new(0.0, p0[i] + p1[i] * t).exp();
+                let g = (Complex64::i() * w).conj();
+                let r = m[e][i] - w;
+                pr1 += g * r;
+                pr2 += (g * t) * r;
+            }
+            let (ai11, ai12, ai22) = ai[i];
+            let d0 = ai11 * pr1.re + ai12 * pr2.re;
+            let d1 = ai12 * pr1.re + ai22 * pr2.re;
+            dp1[i] = if d1.is_nan() { 0.0 } else { d1 };
+            dp0[i] = if d0.is_nan() { 0.0 } else { d0 };
+            p1[i] += dp1[i];
+            p0[i] += dp0[i];
+        }
+    }
+
+    let noise: Vec<f64> = ai.iter().map(|&(_, _, ai22)| fit_ppm_complex_std(ai22)).collect();
+    let relres: Vec<f64> = (0..n)
+        .map(|i| {
+            let (mut num, mut den) = (0.0f64, 0.0f64);
+            for e in 0..nechos {
+                let fit = abs_m[e][i] * Complex64::new(0.0, p0[i] + p1[i] * e as f64).exp();
+                num += (m[e][i] - fit).norm().powi(2);
+                den += abs_m[e][i].powi(2);
+            }
+            let r = num / den;
+            if r.is_nan() { 0.0 } else { r }
+        })
+        .collect();
+    // p1(p1>pi) = mod(p1+pi, 2*pi) - pi, likewise below -pi; then undo the conjugate
+    let field = p1.iter()
+        .map(|&p| -(if (-PI..=PI).contains(&p) { p } else { (p + PI).rem_euclid(TWO_PI) - PI }))
+        .collect();
+    let phase0 = p0.iter().map(|&p| -p).collect();
+    Ok(FitPpmComplexResult { field, noise, phase0, relres, echo_spacing, iterations: iter })
 }
 
 #[cfg(test)]
@@ -1918,6 +2151,56 @@ mod tests {
         // one echo is two echoes of the same magnitude: a11 = 2|S|², a12 = a22 = |S|², so 2/|S|²
         let one = super::fit_ppm_complex_noise(&[2.0], 1);
         assert!((one[0] - (2.0f64 / 4.0).sqrt()).abs() < 1e-15);
+    }
+
+    /// Noise-free echoes `|S| exp(i(φ₀ + ω·TEₑ))`, wrapped, for a few voxels.
+    fn complex_echoes(omegas: &[f64], phi0: f64, tes: &[f64]) -> (Vec<Vec<f64>>, Vec<Vec<f64>>) {
+        let mags = tes.iter().enumerate()
+            .map(|(e, _)| omegas.iter().map(|_| 2.0 - 0.2 * e as f64).collect())
+            .collect();
+        let phases = tes.iter()
+            .map(|&te| omegas.iter().map(|&w| wrap_to_pi(phi0 + w * te)).collect())
+            .collect();
+        (mags, phases)
+    }
+
+    #[test]
+    fn fit_ppm_complex_recovers_the_wrapped_field_with_the_input_sign() {
+        let tes = [0.004, 0.009, 0.014, 0.019];
+        // per echo spacing: 0.25, -1.0, 2.5 and 4.0 (which wraps to 4 - 2π) radians
+        let omegas = [50.0, -200.0, 500.0, 800.0];
+        let (m, p) = complex_echoes(&omegas, 0.7, &tes);
+        let (mr, pr): (Vec<&[f64]>, Vec<&[f64]>) =
+            (m.iter().map(|v| v.as_slice()).collect(), p.iter().map(|v| v.as_slice()).collect());
+        let r = fit_ppm_complex(&mr, &pr, &tes, &FitPpmComplexParams::default()).unwrap();
+        assert!((r.echo_spacing - 0.005).abs() < 1e-15);
+        for (i, &w) in omegas.iter().enumerate() {
+            let want = wrap_to_pi(w * 0.005);
+            assert!((r.field[i] - want).abs() < 1e-9, "voxel {i}: {} vs {want}", r.field[i]);
+            assert!(wrap_to_pi(r.phase0[i] - (0.7 + w * tes[0])).abs() < 1e-9);
+            assert!(r.relres[i] < 1e-20);
+        }
+        assert_eq!(r.noise, fit_ppm_complex_noise(&m.concat(), tes.len()));
+        // 0.25 rad per spacing over 5 ms: positive phase slope, positive field
+        assert!(r.field[0] > 0.0 && r.field[1] < 0.0);
+    }
+
+    #[test]
+    fn fit_ppm_complex_one_echo_is_its_phase() {
+        // cat(4, abs(M), M): zero phase at TE = 0, so the field is the phase over TE₁
+        let r = fit_ppm_complex(&[&[1.0, 3.0, 0.0]], &[&[0.3, -2.9, 1.0]], &[0.01], &FitPpmComplexParams::default())
+            .unwrap();
+        assert_eq!(r.echo_spacing, 0.01);
+        assert!((r.field[0] - 0.3).abs() < 1e-12 && (r.field[1] + 2.9).abs() < 1e-12);
+        // a zero magnitude has angle 0 and no noise estimate
+        assert_eq!((r.field[2], r.noise[2]), (0.0, 0.0));
+    }
+
+    #[test]
+    fn fit_ppm_complex_refuses_uneven_echoes() {
+        let v = [1.0];
+        let e = fit_ppm_complex(&[&v, &v, &v], &[&v, &v, &v], &[0.005, 0.010, 0.020], &FitPpmComplexParams::default());
+        assert!(e.unwrap_err().0.contains("evenly spaced"));
     }
 
     use super::*;

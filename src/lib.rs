@@ -158,14 +158,15 @@ pub mod complex {
 /// Multi-echo phase combination and B0 field mapping.
 ///
 /// Building blocks for turning multi-echo wrapped phase into a B0 field map:
-/// phase-offset removal (MCPC-3D-S / ASPIRE), weighted B0 estimation, and
-/// linear multi-echo fitting.
+/// phase-offset removal (MCPC-3D-S / ASPIRE), weighted B0 estimation,
+/// linear multi-echo fitting, and MEDI's complex fit (`Fit_ppm_complex`).
 pub mod fieldmap {
     pub use crate::utils::multi_echo::{
         phase_offset_removal, mcpc3ds_combine, calculate_b0_weighted, multi_echo_linear_fit,
         bipolar_correction, field_to_hz, nan_box_smooth_3d, nan_box_smooth_3d_phase, gaussian_box_sizes,
         PhaseOffsetParams, CoilCombinationResult, LinearFitParams, LinearFitResult, B0WeightType,
         multi_echo_robust_fit, RobustFitParams, RobustFitResult, RobustLoss, EchoQuality,
+        fit_ppm_complex, fit_ppm_complex_noise, FitPpmComplexParams, FitPpmComplexResult,
     };
 }
 
