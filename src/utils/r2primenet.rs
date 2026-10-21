@@ -156,6 +156,10 @@ impl Default for R2PrimeNetNorm {
 /// # Returns
 /// R2′ in **Hz**, clipped at zero and restricted to `mask`, in the same layout.
 ///
+/// **Deviation:** the authors' `test.py` (χ-sepnet-R2*) passes R2PRIMEnet's output on to
+/// χ-sepnet without truncating it. Here negative R2′ is set to 0, since a negative reversible
+/// decay rate has no physical meaning; every non-negative value is the network's unchanged.
+///
 /// # Errors
 /// [`OnnxError::Domain`] when `b0_tesla` is more than [`B0_TOLERANCE_T`] from [`TRAINED_B0_T`]
 /// and [`R2PrimeNetParams::ignore_field_mismatch`] is not set — checked before anything is

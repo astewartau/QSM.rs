@@ -10,7 +10,8 @@
 //! outside the mask, end-pad each dim up to the patch size, tile with a 0.75 stride
 //! plus a final flush patch, average overlaps, de-normalize, crop, and mask. `Dr`
 //! (114 Hz/ppm, the network's COSMOS-referenced relaxivity) scales R2′ into the
-//! network's ppm-equivalent input channel. We return χ− as a signed (≤ 0) value to
+//! network's ppm-equivalent input channel. Negative de-normalised magnitudes are set to 0, as the
+//! authors' `test.py` does ("zero-truncation"). We return χ− as a signed (≤ 0) value to
 //! match the crate's separation convention `(chi_pos ≥ 0, chi_neg ≤ 0, chi_total)`.
 //!
 //! **Array orientation.** The network takes no B0 direction, so whatever orientation the caller
@@ -261,9 +262,8 @@ pub fn chisepnet(
                 let w = wsum[p].max(1.0);
                 let pos = (acc0[p] / w) * norm.chi_pos.1 + norm.chi_pos.0;
                 let neg = (acc1[p] / w) * norm.chi_neg.1 + norm.chi_neg.0;
-                chi_pos[i] = pos;
-                chi_neg[i] = -neg;
-                chi_total[i] = pos - neg;
+                // test.py: pred_x_pos[pred_x_pos < 0] = 0; pred_x_neg[pred_x_neg < 0] = 0
+                (chi_pos[i], chi_neg[i], chi_total[i]) = super::sources_from_magnitudes(pos, neg);
             }
         }
     }

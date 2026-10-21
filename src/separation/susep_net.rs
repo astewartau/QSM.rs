@@ -7,9 +7,13 @@
 //!
 //! Recipe (mirrors the authors' `recon.py`): z-score each input by the training
 //! stats, zero outside the mask, post-pad each dim to a multiple of 8, run,
-//! de-normalize the outputs, crop, and mask. The network's ReLU makes both
-//! outputs non-negative magnitudes; we return χ− as a signed (≤ 0) value to match
+//! de-normalize the outputs, crop, and mask. We return χ− as a signed (≤ 0) value to match
 //! the crate's separation convention `(chi_pos ≥ 0, chi_neg ≤ 0, chi_total)`.
+//!
+//! **Deviation:** both decoders end in a 1×1 convolution with no activation (`SQNet.py`), so a
+//! de-normalised magnitude can be negative, and `test_demo.py` saves it as it is. Here negative
+//! χ+ and |χ−| are set to 0, since a negative source magnitude has no physical meaning, and
+//! χ_total is χ+ + χ− after that. Every non-negative value is the network's unchanged.
 //!
 //! **Array orientation.** SUSEP-Net is a different group's network from the χ-sepnet family and
 //! its training orientation has not been established here; the authors' `recon.py` does not
@@ -237,9 +241,8 @@ pub fn susep_net(
                 let w = wsum[src].max(1.0);
                 let pos = (acc_pos[src] / w) * ps + pm;
                 let neg_mag = (acc_neg[src] / w) * ns + nm;
-                chi_pos[i] = pos;
-                chi_neg[i] = -neg_mag;
-                chi_total[i] = pos - neg_mag;
+                // deviation: no negative source magnitudes (see the module docs)
+                (chi_pos[i], chi_neg[i], chi_total[i]) = super::sources_from_magnitudes(pos, neg_mag);
             }
         }
     }
