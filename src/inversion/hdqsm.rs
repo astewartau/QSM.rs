@@ -6,20 +6,33 @@
 //! problem reweighted by that discrepancy map. Both stages use ADMM with an
 //! L1 total-variation regularizer.
 //!
-//! Because the whole method is linear and scale-consistent, feed the local field
-//! in ppm directly and the output susceptibility is in ppm as well (no phase
-//! scaling required).
+//! # Data weight
+//! `w` is the magnitude normalised as in HDQSM.m's usage example,
+//! `mask.*mag/max(mag)`, or the mask when there is no magnitude (the paper
+//! allows either). The paper (Eq. 2) builds the magnitude from the echoes as
+//! `sum(TE_i*mag_i^2) / sum(TE_i*mag_i)`; combining the echoes is the caller's job.
+//!
+//! # Finite differences
+//! As in HDQSM.m, the gradients are unit-spacing forward differences whatever
+//! the voxel size; only the dipole kernel uses the voxel size.
+//!
+//! # Units
+//! Like the other inversions, HD-QSM takes the local field in ppm and returns
+//! ppm. HDQSM.m's usage example passes `phase/phase_scale`, and the authors'
+//! scripts on the 2019 challenge data divide the frequency map by
+//! `gamma*B0`, i.e. they work in ppm, so no conversion is made. Stage 2 is not
+//! scale invariant, so `alpha_l2` is a value for fields in ppm.
 //!
 //! Reference:
-//! Lambert, M., Tejos, C., Langkammer, C., et al. (2022).
+//! Lambert, M., Tejos, C., Langkammer, C., Milovic, C. (2022).
 //! "Hybrid data fidelity term approach for quantitative susceptibility mapping."
-//! Magnetic Resonance in Medicine, 87(6):3059-3072.
+//! Magnetic Resonance in Medicine, 88(2):962-972.
 //! https://doi.org/10.1002/mrm.29218
 //!
 //! Reference implementation: HDQSM.m, https://github.com/mglambert/HD-QSM (MIT).
 
 use num_complex::Complex64;
-use crate::inversion::admm::prepare_fansi_spectral;
+use crate::inversion::admm::{fansi_unit_ee2, prepare_fansi_spectral};
 use crate::utils::gradient::{bdiv_inplace, fgrad_inplace};
 use crate::utils::{apply_mask_zero, shrink};
 use crate::Grid;
@@ -28,25 +41,20 @@ use crate::Grid;
 #[cfg_attr(feature = "introspection", derive(serde::Serialize))]
 #[derive(Clone, Debug)]
 pub struct HdQsmParams {
-    /// L2-stage TV weight (default 1e-4).
+    /// L2-stage TV weight (default 1e-4). HDQSM.m has no default and requires it.
     pub alpha_l2: f64,
-    /// L2-stage gradient-consistency ADMM weight (default 1e-2 = 100*alpha_l2).
-    ///
-    /// The TV soft-threshold is `alpha_l2 / mu1_l2`; the FANSI HDQSM.m example's
-    /// `mu1_l2 = 10*alpha_l2` locks that ratio at 0.1, which over-smooths on the
-    /// ppm-scaled QSM-CI phantom (the README warns the example is calibrated to a
-    /// different, normalized brain). We use `mu1_l2 = 100*alpha_l2` (ratio 0.01),
-    /// matching QSM.rs's proven TV-ADMM balance — corr jumps from ~0.48 to ~0.84.
+    /// L2-stage gradient-consistency ADMM weight (default 1e-2 = 100*alpha_l2). HDQSM.m
+    /// requires it; the paper's heuristic is 10 <= mu1_l2/alpha_l2 <= 100.
     pub mu1_l2: f64,
-    /// Fidelity consistency weight (default 1.0).
+    /// Fidelity consistency weight (HDQSM.m `mu2L1`, default 1.0).
     pub mu2: f64,
-    /// Stage-1 (L1) iterations (default 20).
+    /// Stage-1 (L1) iterations (HDQSM.m `maxOuterIterL1`, default 20).
     pub max_iter_l1: usize,
-    /// Stage-2 (L2) iterations (default 80).
+    /// Stage-2 (L2) iterations (HDQSM.m `maxOuterIterL2`, default 80).
     pub max_iter_l2: usize,
-    /// Stage-2 percent-update stopping tolerance (default 1.0).
+    /// Stage-2 percent-update stopping tolerance (HDQSM.m `tol_update`, default 1e-2).
     pub tol_update: f64,
-    // Stage-1 alpha_l1 / mu1_l1 default to sqrt(alpha_l2) / sqrt(mu1_l2) internally.
+    // Stage-1 alpha_l1 / mu1_l1 are sqrt(alpha_l2) / sqrt(mu1_l2), as in HDQSM.m.
 }
 
 impl Default for HdQsmParams {
@@ -57,7 +65,7 @@ impl Default for HdQsmParams {
             mu2: 1.0,
             max_iter_l1: 20,
             max_iter_l2: 80,
-            tol_update: 1.0,
+            tol_update: 1e-2,
         }
     }
 }
@@ -104,6 +112,8 @@ fn apply_dipole(
 /// # Arguments
 /// * `local_field` - Local field values in ppm (nx * ny * nz).
 /// * `mask` - Binary ROI mask (nx * ny * nz), 1 = inside.
+/// * `magnitude` - Magnitude image, the data weight (see module docs); `None` weights every
+///   voxel in the mask by 1
 /// * `grid` - Volume grid (dimensions and voxel sizes).
 /// * `bdir` - B0 field direction.
 /// * `params` - HD-QSM parameters.
@@ -114,20 +124,37 @@ fn apply_dipole(
 pub fn hdqsm(
     local_field: &[f64],
     mask: &[u8],
+    magnitude: Option<&[f64]>,
     grid: &Grid,
     bdir: (f64, f64, f64),
     params: &HdQsmParams,
     mut progress: impl FnMut(usize, usize),
 ) -> Vec<f64> {
     let n = grid.n_total();
-    let (mut fft_ws, k, ee2) = prepare_fansi_spectral(grid, bdir);
+    let (mut fft_ws, k, _) = prepare_fansi_spectral(grid, bdir);
+    // HDQSM.m's finite differences are on unit spacing whatever the voxel size
+    // (E_j = 1 - exp(2*pi*i*k_j/N_j)); the dipole kernel keeps the voxel size.
+    let ee2 = fansi_unit_ee2(grid.dims);
+    let ugrid = Grid::new(grid.nx(), grid.ny(), grid.nz(), 1.0, 1.0, 1.0);
     // K2 = abs(kernel).^2 = k^2 (kernel is real). mu*EE2 is added per stage.
     let denom_base: Vec<f64> = k.iter()
         .map(|&kk| 1e-30 + params.mu2 * kk * kk)
         .collect();
 
-    // weight = mask (as f64 in [0,1]).
-    let weight_mask: Vec<f64> = mask.iter().map(|&m| if m != 0 { 1.0 } else { 0.0 }).collect();
+    // weight = mask.*(mag/max(mag(:))) (HDQSM.m usage example); the mask when there is no
+    // magnitude.
+    let mag_max = magnitude.map_or(0.0, |m| m.iter().cloned().fold(0.0f64, f64::max));
+    let weight_mask: Vec<f64> = (0..n)
+        .map(|i| {
+            if mask[i] == 0 {
+                return 0.0;
+            }
+            match magnitude {
+                Some(m) if mag_max > 0.0 => m[i] / mag_max,
+                _ => 1.0,
+            }
+        })
+        .collect();
 
     let total_iter = params.max_iter_l1 + params.max_iter_l2;
     let mut global_iter = 0usize;
@@ -196,7 +223,7 @@ pub fn hdqsm(
                 gy[i] = z_dy[i] - s_dy[i];
                 gz[i] = z_dz[i] - s_dz[i];
             }
-            bdiv_inplace(&mut div, &gx, &gy, &gz, grid);
+            bdiv_inplace(&mut div, &gx, &gy, &gz, &ugrid);
             for (c, &v) in fdiv.iter_mut().zip(div.iter()) {
                 *c = Complex64::new(v, 0.0);
             }
@@ -222,7 +249,7 @@ pub fn hdqsm(
 
             if t < params.max_iter_l1 - 1 {
                 // fgrad(x) -> x_d
-                fgrad_inplace(&mut x_dx, &mut x_dy, &mut x_dz, &x, grid);
+                fgrad_inplace(&mut x_dx, &mut x_dy, &mut x_dz, &x, &ugrid);
                 // z_d = shrink(x_d + s_d, ll); s_d += x_d - z_d.
                 for i in 0..n {
                     let ax = x_dx[i] + s_dx[i];
@@ -301,7 +328,7 @@ pub fn hdqsm(
             x_prev.copy_from_slice(&x);
 
             // z/s updates BEFORE the x-update (unlike stage 1).
-            fgrad_inplace(&mut x_dx, &mut x_dy, &mut x_dz, &x, grid);
+            fgrad_inplace(&mut x_dx, &mut x_dy, &mut x_dz, &x, &ugrid);
             for i in 0..n {
                 let ax = x_dx[i] + s_dx[i];
                 let ay = x_dy[i] + s_dy[i];
@@ -336,7 +363,7 @@ pub fn hdqsm(
                 gy[i] = z_dy[i] - s_dy[i];
                 gz[i] = z_dz[i] - s_dz[i];
             }
-            bdiv_inplace(&mut div, &gx, &gy, &gz, grid);
+            bdiv_inplace(&mut div, &gx, &gy, &gz, &ugrid);
             for (c, &v) in fdiv.iter_mut().zip(div.iter()) {
                 *c = Complex64::new(v, 0.0);
             }
@@ -389,7 +416,7 @@ mod tests {
             ..HdQsmParams::default()
         };
 
-        let chi = hdqsm(&field, &mask, &grid, (0.0, 0.0, 1.0), &params, |_, _| {});
+        let chi = hdqsm(&field, &mask, None, &grid, (0.0, 0.0, 1.0), &params, |_, _| {});
 
         for &val in chi.iter() {
             assert!(val.abs() < 1e-6, "Zero field should give zero chi, got {}", val);
@@ -408,10 +435,32 @@ mod tests {
             ..HdQsmParams::default()
         };
 
-        let chi = hdqsm(&field, &mask, &grid, (0.0, 0.0, 1.0), &params, |_, _| {});
+        let chi = hdqsm(&field, &mask, None, &grid, (0.0, 0.0, 1.0), &params, |_, _| {});
 
         for (i, &val) in chi.iter().enumerate() {
             assert!(val.is_finite(), "Chi should be finite at index {}", i);
         }
+    }
+
+    #[test]
+    fn test_hdqsm_magnitude_weight() {
+        let n = 8;
+        let field: Vec<f64> = (0..n * n * n).map(|i| ((i % 7) as f64 - 3.0) * 0.01).collect();
+        let mask = vec![1u8; n * n * n];
+        let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
+        let params = HdQsmParams { max_iter_l1: 5, max_iter_l2: 10, ..HdQsmParams::default() };
+        let run = |mag: Option<&[f64]>| hdqsm(&field, &mask, mag, &grid, (0.0, 0.0, 1.0), &params, |_, _| {});
+
+        // A flat magnitude normalises to 1 everywhere: the same as no magnitude (mask weight).
+        let flat = vec![5.0; n * n * n];
+        let a = run(None);
+        let b = run(Some(&flat));
+        assert!(a.iter().zip(&b).all(|(x, y)| (x - y).abs() < 1e-12));
+
+        // A varying magnitude changes the weight, and so the result.
+        let ramp: Vec<f64> = (0..n * n * n).map(|i| 1.0 + (i % n) as f64).collect();
+        let c = run(Some(&ramp));
+        assert!(c.iter().all(|v| v.is_finite()));
+        assert!(a.iter().zip(&c).any(|(x, y)| (x - y).abs() > 1e-9));
     }
 }

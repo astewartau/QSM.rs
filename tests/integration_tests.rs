@@ -1024,7 +1024,7 @@ fn test_inversion_hdqsm() {
 
     let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
     let (result, elapsed) = run_timed!("HD-QSM", inversion::hdqsm(
-        &data.fieldmap_local, &data.mask, &grid, data.b0_dir,
+        &data.fieldmap_local, &data.mask, None, &grid, data.b0_dir,
         &HdQsmParams::default(), |_, _| {},
     ));
 

@@ -211,8 +211,9 @@ pub fn run_dipole_inversion(
             )
         }
         InversionAlgorithm::Hdqsm => {
+            // The magnitude, when present, is the data weight (HDQSM.m usage example).
             crate::inversion::hdqsm(
-                field_ppm, mask, &grid, bdir, &config.hdqsm, progress,
+                field_ppm, mask, magnitude, &grid, bdir, &config.hdqsm, progress,
             )
         }
         InversionAlgorithm::AmpPe => {
