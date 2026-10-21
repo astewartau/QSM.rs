@@ -78,6 +78,10 @@ pub struct AmpPeParams {
     pub cvg_thd: f64,
     /// Tikhonov regularization weight for the L2 seed (`chiL2`).
     pub tikhonov_beta: f64,
+    /// Rescale the magnitude weight to unit mean inside the mask. Off by default: upstream
+    /// (`qsm_multi_echo_combined.m`) weights by the magnitude as it is; the QSM-CI wrapper
+    /// normalises it.
+    pub normalize_weight: bool,
 }
 
 impl Default for AmpPeParams {
@@ -96,6 +100,7 @@ impl Default for AmpPeParams {
             max_pe_est_ite: 5,
             cvg_thd: 1e-6,
             tikhonov_beta: 2e-2,
+            normalize_weight: false,
         }
     }
 }
@@ -191,8 +196,12 @@ impl DipoleOp {
 ///
 /// * `local_field` — local (tissue) field, ppm-scale, full volume (`nx*ny*nz`).
 /// * `mask` — binary ROI mask (non-zero = inside).
-/// * `magnitude` — optional data-fidelity weight (single combined volume, e.g.
-///   RSS over echoes). When `None`, uniform weights and no morphology mask.
+/// * `magnitude` — optional data-fidelity weight. Upstream (`qsm_multi_echo_combined.m`)
+///   weights the single simulated echo by the **first echo's** magnitude, as it is. When
+///   `None`, uniform weights and no morphology mask.
+/// * `morphology_magnitude` — optional image for the wavelet morphology mask. Upstream uses
+///   the root-sum-of-squares magnitude over all echoes (`iMagWtd`). When `None`, `magnitude`
+///   is used.
 /// * `grid` — volume grid (dims + voxel size).
 /// * `bdir` — B0 direction.
 /// * `params` — see [`AmpPeParams`].
@@ -203,6 +212,7 @@ pub fn amp_pe(
     local_field: &[f64],
     mask: &[u8],
     magnitude: Option<&[f64]>,
+    morphology_magnitude: Option<&[f64]>,
     grid: &Grid,
     bdir: (f64, f64, f64),
     params: &AmpPeParams,
@@ -233,6 +243,10 @@ pub fn amp_pe(
         None => mask_p.clone(),
     };
     let have_mag = magnitude.is_some();
+    let morph_p = match morphology_magnitude {
+        Some(mag) => pad_volume(&mag.iter().map(|&v| v.abs()).collect::<Vec<_>>(), orig, pad),
+        None => imag_p.clone(),
+    };
 
     let n = pad.0 * pad.1 * pad.2;
     let mask_idx: Vec<usize> = (0..n).filter(|&i| mask_p[i] > 0.5).collect();
@@ -244,11 +258,16 @@ pub fn amp_pe(
     // Measurement: simulated single-echo tissue phase (radians) at the mask.
     let phase_image: Vec<f64> = mask_idx.iter().map(|&j| field_p[j] * mut_cst).collect();
 
-    // Data-fidelity weights, normalized to unit mean within the mask.
+    // Data-fidelity weights: the magnitude inside the mask, as upstream; optionally rescaled
+    // to unit mean (QSM-CI wrapper).
     let weight_vect: Vec<f64> = if have_mag {
         let wv: Vec<f64> = mask_idx.iter().map(|&j| imag_p[j]).collect();
-        let mean = (wv.iter().sum::<f64>() / m as f64).max(EPS);
-        wv.iter().map(|&v| v / mean).collect()
+        if params.normalize_weight {
+            let mean = (wv.iter().sum::<f64>() / m as f64).max(EPS);
+            wv.iter().map(|&v| v / mean).collect()
+        } else {
+            wv
+        }
     } else {
         vec![1.0; m]
     };
@@ -270,7 +289,7 @@ pub fn amp_pe(
     let x_init_par_psi = plan.forward(&x_init_par);
 
     // Wavelet morphology mask: pass the largest magnitude wavelet coefficients through.
-    let wave_mask = build_wave_mask(&plan, &imag_p, &mask_p, have_mag, params.wave_pec, n);
+    let wave_mask = build_wave_mask(&plan, &morph_p, &mask_p, have_mag || morphology_magnitude.is_some(), params.wave_pec, n);
 
     // --- GAMP shared state ---
     let mut st = GampState {
@@ -1050,7 +1069,7 @@ mod tests {
         }
         let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
         let params = AmpPeParams { max_linearization_ite: 3, ..Default::default() };
-        let chi = amp_pe(&field, &mask, None, &grid, (0.0, 0.0, 1.0), &params, |_, _| {});
+        let chi = amp_pe(&field, &mask, None, None, &grid, (0.0, 0.0, 1.0), &params, |_, _| {});
         assert_eq!(chi.len(), n * n * n);
         for (i, &v) in chi.iter().enumerate() {
             assert!(v.is_finite(), "chi[{i}] not finite: {v}");
@@ -1092,8 +1111,8 @@ mod tests {
 
         let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
         let params = AmpPeParams { max_linearization_ite: 4, ..Default::default() };
-        let a = amp_pe(&with_bg, &mask, None, &grid, (0.0, 0.0, 1.0), &params, |_, _| {});
-        let b = amp_pe(&masked, &mask, None, &grid, (0.0, 0.0, 1.0), &params, |_, _| {});
+        let a = amp_pe(&with_bg, &mask, None, None, &grid, (0.0, 0.0, 1.0), &params, |_, _| {});
+        let b = amp_pe(&masked, &mask, None, None, &grid, (0.0, 0.0, 1.0), &params, |_, _| {});
         let maxerr = a.iter().zip(&b).map(|(x, y)| (x - y).abs()).fold(0.0, f64::max);
         assert!(maxerr < 1e-9, "out-of-mask field leaked into result: maxerr={maxerr}");
     }
@@ -1135,7 +1154,7 @@ mod tests {
         let params = AmpPeParams { max_linearization_ite: 4, ..Default::default() };
 
         GUARD_FIRINGS.with(|c| c.set(0));
-        let chi = amp_pe(&field, &mask, Some(&mag), &grid, (0.0, 0.0, 1.0), &params, |_, _| {});
+        let chi = amp_pe(&field, &mask, Some(&mag), None, &grid, (0.0, 0.0, 1.0), &params, |_, _| {});
         let fired = GUARD_FIRINGS.with(|c| c.get());
 
         assert_eq!(
@@ -1153,7 +1172,7 @@ mod tests {
         let mask = vec![1u8; n * n * n];
         let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
         let params = AmpPeParams { max_linearization_ite: 3, ..Default::default() };
-        let chi = amp_pe(&field, &mask, None, &grid, (0.0, 0.0, 1.0), &params, |_, _| {});
+        let chi = amp_pe(&field, &mask, None, None, &grid, (0.0, 0.0, 1.0), &params, |_, _| {});
         for &v in &chi {
             assert!(v.is_finite());
         }
