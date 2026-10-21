@@ -574,7 +574,7 @@ fn test_inversion_rts() {
         &data.mask,
         &grid,
         data.b0_dir,
-        &RtsParams { delta: 0.15, mu: 1e5, rho: 10.0, tol: 1e-2, max_iter: 20, lsmr_iter: 4 },
+        &RtsParams::default(),
         |_, _| {},
     ));
 
@@ -1983,7 +1983,7 @@ fn benchmark_all_algorithms() {
     // RTS
     let (result, elapsed) = run_timed!("RTS", inversion::rts(
         &data.fieldmap_local, &data.mask, &grid,
-        data.b0_dir, &RtsParams { delta: 0.15, mu: 1e5, rho: 10.0, tol: 1e-2, max_iter: 20, lsmr_iter: 4 },
+        data.b0_dir, &RtsParams::default(),
         |_, _| {},
     ));
     TestResult::new("RTS", &result, &data.chi, &data.mask, data.dims).print_with_time(elapsed);
@@ -2172,7 +2172,7 @@ fn test_all_combinations() {
         // RTS
         let (result, elapsed) = run_timed!("RTS", inversion::rts(
             &bfr.local_field, &bfr.mask, &grid,
-            data.b0_dir, &RtsParams { delta: 0.15, mu: 1e5, rho: 10.0, tol: 1e-2, max_iter: 20, lsmr_iter: 4 },
+            data.b0_dir, &RtsParams::default(),
             |_, _| {},
         ));
         let c = ChallengeMetrics::compute("RTS", &result, &data.chi, &bfr.mask, &data.segmentation, data.dims);
