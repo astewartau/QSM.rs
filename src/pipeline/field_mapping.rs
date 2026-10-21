@@ -129,6 +129,23 @@ pub fn run_field_mapping(
                 )));
             }
         }
+        B0EstimationMethod::QsmartEchofit { fit_threshold } => {
+            if config.unwrapping_algorithm != UnwrappingAlgorithm::Laplacian {
+                return Err(PipelineError::InvalidConfig(
+                    "QSMART's echo fit follows its Laplacian unwrapping; choose Laplacian unwrapping".into(),
+                ));
+            }
+            if config.bipolar_correction {
+                return Err(PipelineError::InvalidConfig(
+                    "QSMART's echo fit has no bipolar correction; turn bipolar correction off".into(),
+                ));
+            }
+            if !fit_threshold.is_finite() || *fit_threshold <= 0.0 {
+                return Err(PipelineError::InvalidConfig(format!(
+                    "QSMART's echo-fit threshold must be positive, got {fit_threshold}"
+                )));
+            }
+        }
         B0EstimationMethod::WeightedAvg { .. } | B0EstimationMethod::LinearFit(_) => {}
     }
 
@@ -141,6 +158,10 @@ pub fn run_field_mapping(
     let mag_slices: &[&[f64]] = magnitudes.unwrap_or(&uniform_mags);
 
     progress(0, 4);
+
+    if let B0EstimationMethod::QsmartEchofit { fit_threshold } = config.b0_estimation {
+        return field_mapping_qsmart(phases, mag_slices, metadata, config, fit_threshold, progress);
+    }
 
     if n_echoes > 1 && do_offset {
         // ---- Path A: Phase offset removal + unwrap + B0 estimation ----
@@ -237,6 +258,7 @@ fn field_mapping_with_offset(
             robust_fit = Some(report);
             crate::utils::field_to_hz(&field_rads)
         }
+        B0EstimationMethod::QsmartEchofit { .. } => unreachable!("taken by field_mapping_qsmart"),
     };
 
     progress(4, 4);
@@ -244,6 +266,7 @@ fn field_mapping_with_offset(
         b0_field_ppm: hz_to_ppm(&b0_hz, metadata.field_strength),
         phase_offset: Some(phase_offset),
         robust_fit,
+        reliability: None,
     })
 }
 
@@ -363,6 +386,7 @@ fn field_mapping_direct(
             robust_fit = Some(report);
             rads_to_ppm(&field_rads, metadata.field_strength)
         }
+        B0EstimationMethod::QsmartEchofit { .. } => unreachable!("taken by field_mapping_qsmart"),
     };
 
     progress(4, 4);
@@ -370,6 +394,36 @@ fn field_mapping_direct(
         b0_field_ppm,
         phase_offset: None,
         robust_fit,
+        reliability: None,
+    })
+}
+
+/// [`B0EstimationMethod::QsmartEchofit`]: QSMART.m's `unwrap_phase` (Laplacian, each echo over
+/// the whole volume, nothing masked or aligned) followed by `echofit.m`.
+fn field_mapping_qsmart(
+    phases: &[&[f64]],
+    mag_slices: &[&[f64]],
+    metadata: &ScanMetadata,
+    config: &FieldMappingConfig,
+    fit_threshold: f64,
+    progress: &mut dyn FnMut(usize, usize),
+) -> Result<FieldMappingResult, PipelineError> {
+    let grid = metadata.grid();
+    let everywhere = vec![1u8; phases[0].len()];
+    progress(1, 4);
+    let unwrapped: Vec<Vec<f64>> = phases.iter()
+        .map(|p| crate::unwrap::laplacian_unwrap(p, &everywhere, &grid, config.laplacian_solver))
+        .collect();
+    progress(3, 4);
+    let uw: Vec<&[f64]> = unwrapped.iter().map(|u| u.as_slice()).collect();
+    let ppm = crate::utils::QSMART_GYRO * metadata.field_strength / 1e6;
+    let fit = crate::utils::qsmart_echofit(&uw, mag_slices, &metadata.echo_times, &grid, ppm, fit_threshold);
+    progress(4, 4);
+    Ok(FieldMappingResult {
+        b0_field_ppm: fit.field_ppm,
+        phase_offset: None,
+        robust_fit: None,
+        reliability: Some(fit.reliability),
     })
 }
 
@@ -470,6 +524,7 @@ fn field_mapping_single_echo(
         b0_field_ppm: rads_to_ppm(&field_rads, metadata.field_strength),
         phase_offset: None,
         robust_fit: None,
+        reliability: None,
     })
 }
 
@@ -517,6 +572,52 @@ mod tests {
             slice_geometry: None,
             affine: None,
         }
+    }
+
+    #[test]
+    fn qsmart_echofit_is_unmasked_laplacian_then_echofit() {
+        // QSMART's route: every echo unwrapped over the whole volume (the mask plays no part),
+        // then qsmart_echofit, which also returns R_0.
+        let meta = make_test_metadata(3);
+        let n = 8 * 8 * 8;
+        let phases: Vec<Vec<f64>> = meta.echo_times.iter()
+            .map(|te| (0..n).map(|i| { let t = 400.0 * te * (1.0 + (i as f64 * 0.37).sin()) + 0.2 * (i as f64).cos(); t.sin().atan2(t.cos()) }).collect())
+            .collect();
+        let mags: Vec<Vec<f64>> = (0..3).map(|e| (0..n).map(|i| 1.0 + ((i + e) % 5) as f64).collect()).collect();
+        let p: Vec<&[f64]> = phases.iter().map(|v| v.as_slice()).collect();
+        let m: Vec<&[f64]> = mags.iter().map(|v| v.as_slice()).collect();
+        let mut mask = vec![0u8; n];
+        mask[100..300].fill(1);
+        let grid = meta.grid();
+        let uw: Vec<Vec<f64>> = p.iter().map(|ph| crate::unwrap::laplacian_unwrap(ph, &vec![1; n], &grid, LaplacianSolver::Mirror)).collect();
+        let uw: Vec<&[f64]> = uw.iter().map(|v| v.as_slice()).collect();
+        let ppm = crate::utils::QSMART_GYRO * 3.0 / 1e6;
+        // A threshold at the median residual, so R_0 has both values.
+        let mut blur = crate::utils::qsmart_echofit(&uw, &m, &meta.echo_times, &grid, ppm, 1.0).fit_residual_blur;
+        blur.sort_by(f64::total_cmp);
+        let thr = blur[n / 2];
+        let want = crate::utils::qsmart_echofit(&uw, &m, &meta.echo_times, &grid, ppm, thr);
+        let config = FieldMappingConfig {
+            unwrapping_algorithm: UnwrappingAlgorithm::Laplacian,
+            laplacian_solver: LaplacianSolver::Mirror,
+            b0_estimation: B0EstimationMethod::QsmartEchofit { fit_threshold: thr },
+            ..Default::default()
+        };
+        let got = run_field_mapping(&p, Some(&m), &mask, &meta, &config, &mut |_, _| {}).unwrap();
+        assert_eq!(got.b0_field_ppm, want.field_ppm);
+        assert_eq!(got.reliability, Some(want.reliability));
+        assert!(got.reliability.as_ref().unwrap().contains(&0) && got.reliability.as_ref().unwrap().contains(&1));
+
+        for bad in [
+            FieldMappingConfig { unwrapping_algorithm: UnwrappingAlgorithm::Romeo, ..config.clone() },
+            FieldMappingConfig { bipolar_correction: true, ..config.clone() },
+            FieldMappingConfig { b0_estimation: B0EstimationMethod::QsmartEchofit { fit_threshold: 0.0 }, ..config.clone() },
+        ] {
+            assert!(run_field_mapping(&p, Some(&m), &mask, &meta, &bad, &mut |_, _| {}).is_err());
+        }
+        // Every other method leaves R_0 out.
+        let linear = FieldMappingConfig { b0_estimation: B0EstimationMethod::LinearFit(LinearFitParams::default()), ..config };
+        assert!(run_field_mapping(&p, Some(&m), &mask, &meta, &linear, &mut |_, _| {}).unwrap().reliability.is_none());
     }
 
     #[test]

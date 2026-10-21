@@ -1825,6 +1825,7 @@ fn run_qsmart_reconstruction(
     let chi = pipeline::run_qsmart(
         &field_ppm,
         &data.mask,
+        None,
         Some(&data.mag_echoes[0]),
         &meta,
         &inv_config,

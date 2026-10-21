@@ -32,6 +32,10 @@ pub mod outputs {
 /// # Arguments
 /// * `field_ppm` - Total field in ppm (after field mapping)
 /// * `mask` - Binary brain mask
+/// * `reliability` - QSMART's reliability map `R_0` (1 = reliable), from its echo fit
+///   ([`qsmart_echofit`](crate::utils::qsmart_echofit)). Both stages run on `mask` × `R_0`, as
+///   `QSMART.m` does; vasculature detection uses `mask` alone. `None` means every voxel is
+///   reliable.
 /// * `magnitude` - Combined magnitude (for vasculature detection and, when the inner
 ///   inversion is MEDI, edge weighting; uniform if None)
 /// * `metadata` - Scan metadata
@@ -53,6 +57,7 @@ pub mod outputs {
 pub fn run_qsmart(
     field_ppm: &[f64],
     mask: &[u8],
+    reliability: Option<&[u8]>,
     magnitude: Option<&[f64]>,
     metadata: &ScanMetadata,
     inversion_config: &InversionConfig,
@@ -121,8 +126,13 @@ pub fn run_qsmart(
         observer.output(outputs::VESSEL_MASK, VolumeRef::Mask(&vessel_mask));
     }
 
-    // No reliability map at this layer, so the QSMART weighting mask is just the brain mask.
-    let weighted_mask: Vec<f64> = mask.iter().map(|&m| m as f64).collect();
+    // QSMART.m's `mask.*R_0`: the region both stages reconstruct.
+    if reliability.is_some_and(|r| r.len() != n_voxels) {
+        return Err(PipelineError::InvalidConfig("QSMART: reliability map does not match the grid".into()));
+    }
+    let weighted_mask: Vec<f64> = (0..n_voxels)
+        .map(|i| if mask[i] != 0 && reliability.is_none_or(|r| r[i] != 0) { 1.0 } else { 0.0 })
+        .collect();
     let ones_vasc = vec![1.0f64; n_voxels];
 
     // Step 2: SDF stage 1 — background removal over the whole ROI (vessels included).
@@ -219,7 +229,7 @@ mod tests {
         };
 
         let result = run_qsmart(
-            &field, &mask, None, &meta, &config, QsmReference::Mean,
+            &field, &mask, None, None, &meta, &config, QsmReference::Mean,
             &mut (),
         );
         assert!(result.is_ok());
@@ -255,7 +265,7 @@ mod tests {
         };
 
         let chi = run_qsmart(
-            &field, &mask, None, &meta, &config, QsmReference::Mean,
+            &field, &mask, None, None, &meta, &config, QsmReference::Mean,
             &mut (),
         )
         .unwrap();
@@ -305,12 +315,12 @@ mod tests {
 
         let mut rec = Recorder::default();
         let chi = run_qsmart(
-            &field, &mask, Some(&magnitude), &meta, &config, QsmReference::None, &mut rec,
+            &field, &mask, None, Some(&magnitude), &meta, &config, QsmReference::None, &mut rec,
         )
         .unwrap();
         // Reporting intermediates does not change the result.
         let plain = run_qsmart(
-            &field, &mask, Some(&magnitude), &meta, &config, QsmReference::None, &mut (),
+            &field, &mask, None, Some(&magnitude), &meta, &config, QsmReference::None, &mut (),
         )
         .unwrap();
         assert_eq!(chi, plain);
@@ -344,11 +354,46 @@ mod tests {
         // A progress closure is an observer too.
         let mut steps = 0;
         run_qsmart(
-            &field, &mask, Some(&magnitude), &meta, &config, QsmReference::None,
+            &field, &mask, None, Some(&magnitude), &meta, &config, QsmReference::None,
             &mut |_: usize, _: usize| steps += 1,
         )
         .unwrap();
         assert_eq!(steps, 6);
+    }
+
+    #[test]
+    fn unreliable_voxels_are_left_out_of_both_stages() {
+        // R_0 = 0 takes a voxel out of both stages' region (QSMART.m's `mask.*R_0`), as an
+        // unmasked voxel would be, but not out of the vessel search or the brain mask.
+        #[derive(Default)]
+        struct Chis(Vec<(&'static str, Vec<f64>)>);
+        impl Observer for Chis {
+            fn progress(&mut self, _: usize, _: usize) {}
+            fn output(&mut self, name: &'static str, volume: VolumeRef<'_>) {
+                if let VolumeRef::Real(v) = volume { self.0.push((name, v.to_vec())); }
+            }
+        }
+        let (nx, ny, nz) = (12, 12, 12);
+        let n = nx * ny * nz;
+        let field: Vec<f64> = (0..n).map(|i| 0.01 * ((i % 7) as f64 - 3.0)).collect();
+        let mask = vec![1u8; n];
+        let reliability: Vec<u8> = (0..n).map(|i| u8::from(i % 5 != 0)).collect();
+        let meta = ScanMetadata {
+            dims: (nx, ny, nz), voxel_size: (1.0, 1.0, 1.0), echo_times: vec![0.005],
+            field_strength: 3.0, b0_direction: (0.0, 0.0, 1.0), slice_geometry: None, affine: None,
+        };
+        let mut qsmart = crate::utils::QsmartParams::for_field_strength(3.0);
+        qsmart.inversion = InversionAlgorithm::Tkd;
+        let config = InversionConfig { algorithm: InversionAlgorithm::Qsmart, qsmart, ..Default::default() };
+        let mut rec = Chis::default();
+        run_qsmart(&field, &mask, Some(&reliability), None, &meta, &config, QsmReference::None, &mut rec).unwrap();
+        for (name, v) in &rec.0 {
+            for i in (0..n).filter(|&i| reliability[i] == 0) {
+                assert_eq!(v[i], 0.0, "{name} at unreliable voxel {i}");
+            }
+        }
+        let short = vec![1u8; n - 1];
+        assert!(run_qsmart(&field, &mask, Some(&short), None, &meta, &config, QsmReference::None, &mut ()).is_err());
     }
 
     #[test]
@@ -373,7 +418,7 @@ mod tests {
         };
 
         let result = run_qsmart(
-            &vec![0.0; n], &vec![1u8; n], None, &meta, &config,
+            &vec![0.0; n], &vec![1u8; n], None, None, &meta, &config,
             QsmReference::Mean, &mut (),
         );
         assert!(result.is_err());
