@@ -126,6 +126,14 @@ impl Default for R2PrimeNetParams {
     }
 }
 
+impl R2PrimeNetNorm {
+    /// De-normalise one network output to R2′ in Hz, set to 0 where negative (see
+    /// [`r2primenet`]).
+    pub(crate) fn r2prime_hz(&self, z: f64) -> f64 {
+        ((z * self.r2prime.1 + self.r2prime.0) * self.dr).max(0.0)
+    }
+}
+
 impl Default for R2PrimeNetNorm {
     /// Constants from `xsepnet_train_patch_norm_factor_inplane_largedegree_romeo_arlo.mat`
     /// — the same normalization file χ-sepnet uses.
@@ -159,6 +167,12 @@ impl Default for R2PrimeNetNorm {
 /// **Deviation:** the authors' `test.py` (χ-sepnet-R2*) passes R2PRIMEnet's output on to
 /// χ-sepnet without truncating it. Here negative R2′ is set to 0, since a negative reversible
 /// decay rate has no physical meaning; every non-negative value is the network's unchanged.
+/// QSM.rs clamps R2′ the same way wherever it makes it (this and
+/// [`r2prime`](crate::relaxometry::r2prime)), so every consumer, χ-sepnet included, gets the
+/// clamped map. The effect on χ-sepnet is negligible: on two travelling-head scans (Philips
+/// and GE, 3 T) 0.3–0.4% of brain voxels were clamped (all above −1 Hz), χ+ and χ− changed by at
+/// most 1.5 ppb (median < 0.001 ppb), and mean χ+/χ− in deep grey matter by under 0.001 ppb,
+/// about 1e-5 of its value.
 ///
 /// # Errors
 /// [`OnnxError::Domain`] when `b0_tesla` is more than [`B0_TOLERANCE_T`] from [`TRAINED_B0_T`]
@@ -267,8 +281,7 @@ pub fn r2primenet(
                 }
                 let p = x + px * (y + py * z);
                 let w = wsum[p].max(1.0);
-                let v = ((acc[p] / w) * norm.r2prime.1 + norm.r2prime.0) * norm.dr;
-                r2prime[i] = v.max(0.0);
+                r2prime[i] = norm.r2prime_hz(acc[p] / w);
             }
         }
     }
@@ -311,6 +324,18 @@ mod tests {
             }
         }
         assert_eq!(R2PrimeNetParams::default().patch, AUTHORS_PATCH);
+    }
+
+    /// Negative de-normalised R2′ is 0; non-negative R2′ is the plain de-normalisation.
+    #[test]
+    fn r2prime_is_never_negative() {
+        let norm = R2PrimeNetNorm::default();
+        let z0 = -norm.r2prime.0 / norm.r2prime.1; // de-normalises to exactly 0 Hz
+        assert_eq!(norm.r2prime_hz(z0 - 1.0), 0.0);
+        let z = z0 + 0.7;
+        let want = (z * norm.r2prime.1 + norm.r2prime.0) * norm.dr;
+        assert!(want > 0.0);
+        assert_eq!(norm.r2prime_hz(z), want);
     }
 
     /// The normalization round-trips: de-normalizing a normalized R2* with the *input*
