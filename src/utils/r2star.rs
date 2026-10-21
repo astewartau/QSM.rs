@@ -32,12 +32,17 @@ pub fn arlo_echo_times_problem(echo_times: &[f64]) -> Option<String> {
 /// Over each consecutive echo triplet `j, j+1, j+2`, `y` is `arlo.m`'s integral of the signal
 /// (Simpson's rule for even spacing, its general form otherwise) and `x = s_j − s_{j+2}`; then
 /// `R2* = (Σ y·x + Σ β·x²) / (Σ β·y·x + Σ y²)`. Echo spacing may be uneven. Every voxel is
-/// fitted; there is no clipping and no fallback, and NaN or infinite results are 0, as in
-/// `arlo.m`. Noise-only voxels can give negative values, as they do in `arlo.m`.
+/// fitted, with no upper clip and no fallback, and NaN or infinite results are 0, as in
+/// `arlo.m`.
 ///
-/// **Deviation:** `arlo.m` returns `[]` for one echo and 0 everywhere for two (no triplet); this
-/// returns an error for fewer than three echoes, and for echo times that are not finite and
-/// strictly increasing (where `arlo.m` divides by zero or fits the wrong order).
+/// **Deviations from `arlo.m`:**
+/// - Negative estimates (noise-only or rising-signal voxels) are set to 0: a negative decay rate
+///   has no physical meaning, and QSM.rs does not output negative relaxation rates. Every
+///   non-negative estimate is `arlo.m`'s value unchanged. (MEDI's `extract_CSF` thresholds R2*
+///   at 5 Hz, so its CSF mask is the same either way.)
+/// - `arlo.m` returns `[]` for one echo and 0 everywhere for two (no triplet); this returns an
+///   error for fewer than three echoes, and for echo times that are not finite and strictly
+///   increasing (where `arlo.m` divides by zero or fits the wrong order).
 ///
 /// # Arguments
 /// * `magnitude` - The echo magnitudes, `echo_times.len()` volumes of `n_voxels` stacked with
@@ -85,16 +90,18 @@ pub fn arlo(magnitude: &[f64], echo_times: &[f64], n_voxels: usize) -> Result<Ve
     }
     Ok((0..n_voxels)
         .map(|v| {
-            // r2(isnan(r2)) = 0; r2(isinf(r2)) = 0
+            // r2(isnan(r2)) = 0; r2(isinf(r2)) = 0; and (deviation) no negative R2*
             let r2 = (yx[v] + beta_xx[v]) / (beta_yx[v] + yy[v]);
-            if r2.is_finite() { r2 } else { 0.0 }
+            if r2.is_finite() { r2.max(0.0) } else { 0.0 }
         })
         .collect())
 }
 
 /// Convert an R2* map (Hz) to a T2* map (seconds).
 ///
-/// T2* = 1 / R2* for voxels where R2* > 0; zero otherwise.
+/// T2* = 1 / R2* for voxels where R2* > 0; zero otherwise. R2* = 0 (no measurable decay, or no
+/// fit) has no finite T2*; 0 marks it as "no value" rather than a cap such as 1 s, so a T2*
+/// map is never larger than the decay it can measure.
 pub fn t2star_from_r2star(r2star: &[f64]) -> Vec<f64> {
     r2star.iter().map(|&r| if r > 0.0 { 1.0 / r } else { 0.0 }).collect()
 }
@@ -130,6 +137,8 @@ mod tests {
         assert!((arlo(&s, &te, 1).unwrap()[0] - want).abs() < 1e-9 * want);
         // zero signal: 0/0 -> 0
         assert_eq!(arlo(&[0.0; 3], &[0.005, 0.01, 0.015], 1).unwrap(), vec![0.0]);
+        // a rising signal gives a negative arlo.m estimate; clamped to 0
+        assert_eq!(arlo(&[10.0, 20.0, 40.0], &[0.005, 0.01, 0.015], 1).unwrap(), vec![0.0]);
     }
 
     #[test]
