@@ -239,29 +239,24 @@ pub fn run_dipole_inversion(
             )
         }
         InversionAlgorithm::Heidi => {
-            // HEIDI is incremental: it keeps the well-conditioned k-space of a
-            // seed map and re-derives the rest. The seed is the minimally
-            // regularised LSQR solution, left unmasked so the cone projection
-            // does not ring off a hard mask edge.
+            // HEIDI runs its own LSQR seed (qsm_heidi's inversion_lsqr.m, then
+            // inversion_heidi.m on the same cropped grid); the field strength sets the
+            // seed's residual weighting.
             let lsqr_params = crate::inversion::LsqrQsmParams {
                 b0: metadata.field_strength,
-                mask_output: false,
                 ..config.lsqr.clone()
             };
-            let heidi_params = &config.heidi;
-
-            let lsqr_iters = lsqr_params.max_iter;
-            let heidi_iters =
-                heidi_params.continuation_steps.max(1) * heidi_params.inner_iterations;
-            let total = lsqr_iters + heidi_iters;
-
-            let chi_init = crate::inversion::lsqr_qsm(
-                field_ppm, mask, magnitude, &grid, bdir, &lsqr_params,
-                |i, _| progress(i, total),
-            );
+            // NESTA's result depends on χ's scale in upstream's phase units (see the HEIDI
+            // module docs): field strength and the echo time of the field (the last, as
+            // qsm_heidi's phase2susceptibilityfactor and SEPIA's wrapper use) are scan
+            // parameters from metadata.
+            let heidi_params = crate::inversion::HeidiParams {
+                b0: metadata.field_strength,
+                te: metadata.echo_times.last().copied().unwrap_or(config.heidi.te),
+                ..config.heidi.clone()
+            };
             crate::inversion::heidi(
-                field_ppm, mask, &chi_init, &grid, bdir, heidi_params,
-                |i, _| progress(lsqr_iters + i, total),
+                field_ppm, mask, magnitude, &grid, bdir, &lsqr_params, &heidi_params, progress,
             )
         }
         InversionAlgorithm::Xqsm => run_xqsm(field_ppm, mask, &grid, config.tile, progress)?,
@@ -978,7 +973,9 @@ mod tests {
 
     #[test]
     fn test_inversion_heidi() {
-        let chi = make_inversion_test(InversionAlgorithm::Heidi);
+        // A short NESTA budget: the default runs all 8 x 500 iterations (tolerance eps).
+        let heidi = crate::inversion::HeidiParams { continuation_steps: 2, inner_iterations: 20, ..Default::default() };
+        let chi = make_inversion_test_with(InversionConfig { algorithm: InversionAlgorithm::Heidi, heidi, ..Default::default() });
         assert_eq!(chi.len(), 8 * 8 * 8);
         assert!(chi.iter().all(|v| v.is_finite()));
     }

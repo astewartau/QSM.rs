@@ -981,26 +981,16 @@ fn test_inversion_heidi() {
     let (vsx, vsy, vsz) = data.voxel_size;
 
     let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
-    let lsqr_params = LsqrQsmParams {
-        b0: data.field_strength,
-        mask_output: false,
-        ..Default::default()
-    };
-    let (chi_init, lsqr_elapsed) = run_timed!("HEIDI/LSQR seed", inversion::lsqr_qsm(
-        &data.fieldmap_local, &data.mask, None, &grid, data.b0_dir,
-        &lsqr_params, |_, _| {},
-    ));
+    let lsqr_params = LsqrQsmParams { b0: data.field_strength, ..Default::default() };
 
-    // Reduced inner-iteration budget to keep CI tractable: the default 500 per
-    // continuation step costs thousands of FFT round trips on a whole brain, and
-    // the objective has largely settled by ~150 total iterations (corr 0.8907 at
-    // 116 iterations vs 0.8923 at 166 on this phantom).
+    // Reduced inner-iteration budget to keep CI tractable: the default runs all 8 x 500
+    // NESTA iterations (the driver's tolerance is eps), thousands of FFT round trips on a
+    // whole brain.
     let heidi_params = HeidiParams { inner_iterations: 50, ..Default::default() };
     let (result, elapsed) = run_timed!("HEIDI", inversion::heidi(
-        &data.fieldmap_local, &data.mask, &chi_init, &grid, data.b0_dir,
-        &heidi_params, |_, _| {},
+        &data.fieldmap_local, &data.mask, None, &grid, data.b0_dir,
+        &lsqr_params, &heidi_params, |_, _| {},
     ));
-    let elapsed = elapsed + lsqr_elapsed;
 
     let res = TestResult::new("HEIDI", &result, &data.chi, &data.mask, data.dims);
     res.print_with_time(elapsed);

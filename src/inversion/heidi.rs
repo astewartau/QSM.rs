@@ -29,10 +29,25 @@
 //! (`A·Aᵀ = I` for a restricted FFT), the projection step is exact and costs one
 //! FFT round trip.
 //!
+//! Ported from the authors' code, qsm_heidi's `inversion_heidi.m` and
+//! `computesusceptibility_heidi.m` (<https://gitlab.com/R01NS114227/qsm_heidi>), run after
+//! its `inversion_lsqr.m` ([`super::lsqr_qsm`]):
+//!
+//! * the seed is the LSQR solution on LSQR's grid (the mask's bounding box with a 40-voxel
+//!   anti-aliasing frame, odd extents), unmasked, and HEIDI runs on that same grid;
+//! * the cone is `|D| > 0.1` (the driver's `PostProcCone.threshold`) with `D` the
+//!   spatial-domain unit dipole response ([`super::lsqr_qsm::spatial_dipole_kernel`]);
+//! * NESTA runs with the driver's tolerance, machine epsilon, so every continuation step uses
+//!   all of its inner iterations (8 × 500).
+//!
 //! Units: the field is in ppm and χ comes back in ppm. The gradient and Laplacian
 //! thresholds below are therefore in ppm/mm and ppm/voxel², independent of echo
-//! time and field strength — upstream expresses the same numbers in units of
-//! phase/(TE·B₀), which is the same quantity.
+//! time and field strength — upstream divides the phase by TE[ms]·B₀[T] before
+//! thresholding, which is the same quantity. The cone fill is not scale-free: NESTA's
+//! smoothing ends at an absolute μ (machine epsilon) and upstream's χ is in units of the
+//! phase (`ppm · γ·TE·B₀·1e-6`, `γ` in rad/s/T), so the seed is converted to those units
+//! before NESTA and back after, with [`HeidiParams::te`] and [`HeidiParams::b0`] (scan
+//! parameters the pipeline fills from metadata).
 //!
 //! Reference:
 //! Schweser, F., Sommer, K., Deistung, A., Reichenbach, J.R. (2012).
@@ -48,14 +63,14 @@
 use num_complex::Complex64;
 
 use crate::fft::Fft3dWorkspace;
-use crate::kernels::dipole::dipole_kernel;
 use crate::kernels::laplacian::laplacian_kernel;
 use crate::utils::anisotropic_diffusion::{
     gradient_anisotropic_diffusion, AnisotropicDiffusionParams,
 };
 use crate::utils::apply_mask_zero;
-use crate::utils::padding::{next_fast_fft_size, pad3d, unpad3d};
 use crate::Grid;
+
+use super::lsqr_qsm::{crop_pad, lsqr_qsm_padded, spatial_dipole_kernel, uncrop, LsqrQsmParams};
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
@@ -118,15 +133,20 @@ pub struct HeidiParams {
     pub mu_min: f64,
     /// Relative objective change that ends an inner loop early.
     ///
-    /// This is upstream's own `DEFAULT_TV_TOLVAR`. Its shipped driver overrides it
-    /// to machine epsilon, which disables early stopping and always burns the full
-    /// `continuation_steps × inner_iterations` budget — thousands of FFT round
-    /// trips, and hours on a whole brain. At `1e-3` the continuation levels settle
-    /// on their own, typically in a few hundred iterations total.
+    /// The driver `inversion_heidi.m` sets `PostProcCone.tol = eps`, which never
+    /// triggers: every continuation step runs all `inner_iterations`.
+    /// (`computesusceptibility_heidi`'s own default, used when the driver sets none, is
+    /// `DEFAULT_TV_TOLVAR` = 1e-3.)
     pub tol: f64,
+    /// Field strength in tesla (scan parameter, for the conversion to upstream's units)
+    pub b0: f64,
+    /// Echo time in seconds of the phase the field stands for (scan parameter, for the
+    /// conversion to upstream's units)
+    pub te: f64,
 }
 
 impl Default for HeidiParams {
+    /// `inversion_heidi.m`'s settings.
     fn default() -> Self {
         Self {
             // Upstream's `computesusceptibility_heidi` defaults to 0.14; the
@@ -144,7 +164,9 @@ impl Default for HeidiParams {
             continuation_steps: 8,
             inner_iterations: 500,
             mu_min: f64::EPSILON,
-            tol: 1e-3,
+            tol: f64::EPSILON,
+            b0: 3.0,
+            te: 0.02,
         }
     }
 }
@@ -156,58 +178,50 @@ pub struct HomogeneityMasks {
     pub z: Vec<f64>,
 }
 
-/// HEIDI dipole inversion.
+/// HEIDI dipole inversion: LSQR ([`super::lsqr_qsm`]) followed by HEIDI's cone fill, as
+/// qsm_heidi's `inversion_lsqr.m` then `inversion_heidi.m`.
 ///
 /// # Arguments
 /// * `local_field` - Local field in ppm (`nx * ny * nz`, Fortran order)
 /// * `mask` - Binary brain mask
-/// * `chi_init` - Starting χ map in ppm, supplying the well-conditioned k-space
-///   coefficients. [`super::lsqr_qsm`] with `mask_output: false` is the intended
-///   source; any inversion will work, but the cone content is then that method's.
+/// * `magnitude` - Optional magnitude image, the LSQR seed's data weight
 /// * `grid` - Volume grid
 /// * `bdir` - B0 direction
-/// * `params` - Algorithm parameters
-/// * `progress` - Progress callback `(iteration, total_iterations)`
+/// * `lsqr` - Parameters of the LSQR seed (its `mask_output` is ignored: the seed stays
+///   unmasked, as upstream's `susceptibilityRaw`)
+/// * `params` - HEIDI parameters
+/// * `progress` - Progress callback `(iteration, total_iterations)`, over both stages
 ///
 /// # Returns
 /// Susceptibility map in ppm, masked.
+#[allow(clippy::too_many_arguments)] // the dipole-inversion inputs plus the seed's parameters
 pub fn heidi(
     local_field: &[f64],
     mask: &[u8],
-    chi_init: &[f64],
+    magnitude: Option<&[f64]>,
     grid: &Grid,
     bdir: (f64, f64, f64),
+    lsqr: &LsqrQsmParams,
     params: &HeidiParams,
-    progress: impl FnMut(usize, usize),
+    mut progress: impl FnMut(usize, usize),
 ) -> Vec<f64> {
-    // Thousands of FFT round trips make the transform size the dominant cost, so
-    // grow the grid to one that factors into small primes first. Zero padding is
-    // transparent here: the dipole cone and the TV masks are both rebuilt on the
-    // padded grid, and the mask keeps the extra voxels out of the result.
-    let dims = grid.dims;
-    let fast = (
-        next_fast_fft_size(dims.0),
-        next_fast_fft_size(dims.1),
-        next_fast_fft_size(dims.2),
-    );
-    if fast == dims {
-        return heidi_core(local_field, mask, chi_init, grid, bdir, params, progress);
-    }
-    let (vsx, vsy, vsz) = grid.voxel_size;
-    let pgrid = Grid::new(fast.0, fast.1, fast.2, vsx, vsy, vsz);
-    let chi = heidi_core(
-        &pad3d(local_field, dims, fast),
-        &pad3d(mask, dims, fast),
-        &pad3d(chi_init, dims, fast),
-        &pgrid,
-        bdir,
-        params,
-        progress,
-    );
-    unpad3d(&chi, fast, dims)
+    let lsqr_iters = lsqr.max_iter;
+    let total = lsqr_iters + params.continuation_steps.max(1) * params.inner_iterations;
+    let seed = lsqr_qsm_padded(local_field, mask, magnitude, grid, bdir, lsqr, |i, _| progress(i, total));
+    let Some((pgrid, crop, chi_seed)) = seed else {
+        return vec![0.0; grid.n_total()];
+    };
+    let field = crop_pad(local_field, grid.dims, &crop);
+    let pmask = crop_pad(mask, grid.dims, &crop);
+    let chi = heidi_on_grid(&field, &pmask, &chi_seed, &pgrid, bdir, params, |i, _| progress(lsqr_iters + i, total));
+    let mut chi = uncrop(&chi, grid.dims, &crop);
+    apply_mask_zero(&mut chi, mask);
+    chi
 }
 
-fn heidi_core(
+/// HEIDI's cone fill on a grid with odd extents (upstream's), from the seed `chi_init`
+/// (unmasked). Returns χ unmasked.
+fn heidi_on_grid(
     local_field: &[f64],
     mask: &[u8],
     chi_init: &[f64],
@@ -223,15 +237,20 @@ fn heidi_core(
 
     let masks = homogeneity_masks(local_field, mask, grid, params);
     let cone = cone_mask(grid, bdir, params.cone_threshold);
-
-    let mut chi = nesta_cone_fill(chi_init, &cone, &masks, grid, params, progress);
-    apply_mask_zero(&mut chi, mask);
+    // ppm -> upstream's phase units for χ (see the module docs, *Units*), and back.
+    let to_phase = GAMMA * params.te * params.b0 * 1e-6;
+    let seed: Vec<f64> = chi_init.iter().map(|v| v * to_phase).collect();
+    let mut chi = nesta_cone_fill(&seed, &cone, &masks, grid, params, progress);
+    for v in &mut chi {
+        *v /= to_phase;
+    }
     chi
 }
 
-/// `|D(k)| > threshold`: the k-space region the dipole model conditions well.
+/// `|D(k)| > threshold`: the k-space region the dipole model conditions well, with `D` the
+/// spatial-domain unit dipole response, as upstream (`generateunitdipoleresponse`).
 fn cone_mask(grid: &Grid, bdir: (f64, f64, f64), threshold: f64) -> Vec<bool> {
-    dipole_kernel(grid, bdir)
+    spatial_dipole_kernel(grid, bdir)
         .into_iter()
         .map(|d| d.abs() > threshold)
         .collect()
@@ -782,7 +801,7 @@ mod tests {
     /// well-conditioned ones must come back unchanged.
     #[test]
     fn cone_coefficients_are_preserved() {
-        let n = 16;
+        let n = 17;
         let g = test_grid(n);
         let n_total = g.n_total();
         let bdir = (0.0, 0.0, 1.0);
@@ -809,7 +828,7 @@ mod tests {
             inner_iterations: 20,
             ..Default::default()
         };
-        let chi = heidi(&field, &mask, &chi_init, &g, bdir, &params, |_, _| {});
+        let chi = heidi_on_grid(&field, &mask, &chi_init, &g, bdir, &params, |_, _| {});
 
         // Compare the two maps' k-space inside the cone.
         let cone = cone_mask(&g, bdir, params.cone_threshold);
@@ -890,47 +909,66 @@ mod tests {
         }
     }
 
-    /// A prime-factored grid takes the padding path; the result must still come
-    /// back at the caller's dimensions and match an already-fast grid's behaviour.
+    /// End to end on an even, prime-factored grid: LSQR's cropped odd grid is used inside and
+    /// the result comes back at the caller's dimensions, masked.
     #[test]
-    fn padding_path_preserves_dimensions() {
-        let (nx, ny, nz) = (7usize, 11usize, 13usize);
-        assert_ne!(
-            (
-                crate::utils::padding::next_fast_fft_size(nx),
-                crate::utils::padding::next_fast_fft_size(ny),
-                crate::utils::padding::next_fast_fft_size(nz),
-            ),
-            (nx, ny, nz),
-            "test grid must actually need padding"
-        );
-
+    fn heidi_runs_on_upstream_grid_and_returns_the_input_grid() {
+        let (nx, ny, nz) = (12usize, 11usize, 13usize);
         let g = Grid::new(nx, ny, nz, 1.0, 1.0, 1.0);
         let n_total = g.n_total();
-        let chi_init: Vec<f64> = (0..n_total).map(|i| ((i as f64) * 0.31).sin() * 0.05).collect();
-        let params = HeidiParams {
-            denoise: None,
-            continuation_steps: 2,
-            inner_iterations: 10,
-            ..Default::default()
-        };
-        let chi = heidi(
-            &vec![0.0; n_total],
-            &vec![1u8; n_total],
-            &chi_init,
-            &g,
-            (0.0, 0.0, 1.0),
-            &params,
-            |_, _| {},
-        );
+        let field: Vec<f64> = (0..n_total).map(|i| ((i as f64) * 0.31).sin() * 0.05).collect();
+        let mut mask = vec![0u8; n_total];
+        for k in 3..10 {
+            for j in 2..9 {
+                for i in 3..9 {
+                    mask[i + nx * (j + ny * k)] = 1;
+                }
+            }
+        }
+        let lsqr = LsqrQsmParams { max_iter: 10, ..Default::default() };
+        let params = HeidiParams { denoise: None, continuation_steps: 2, inner_iterations: 10, ..Default::default() };
+        let mut last = 0;
+        let chi = heidi(&field, &mask, None, &g, (0.0, 0.0, 1.0), &lsqr, &params, |i, total| {
+            assert!(i <= total);
+            last = i;
+        });
         assert_eq!(chi.len(), n_total);
         assert!(chi.iter().all(|v| v.is_finite()));
-        assert!(chi.iter().any(|v| v.abs() > 0.0), "padded run produced an empty map");
+        assert!(chi.iter().zip(&mask).all(|(v, &m)| m != 0 || *v == 0.0), "not masked");
+        assert!(chi.iter().any(|v| v.abs() > 0.0), "empty map");
+        assert!(last > 10, "progress did not cover the HEIDI stage");
+        // empty mask
+        let z = heidi(&field, &vec![0u8; n_total], None, &g, (0.0, 0.0, 1.0), &lsqr, &params, |_, _| {});
+        assert!(z.iter().all(|v| *v == 0.0));
+    }
+
+    /// The cone fill runs on χ in upstream's phase units (ppm · γ·TE·B0·1e-6): NESTA's final
+    /// μ is absolute, so the scale changes the answer.
+    #[test]
+    fn cone_fill_runs_in_phase_units() {
+        let n = 11;
+        let g = test_grid(n);
+        let nt = g.n_total();
+        let seed: Vec<f64> = (0..nt).map(|i| ((i as f64) * 0.13).sin() * 0.05).collect();
+        let field: Vec<f64> = (0..nt).map(|i| ((i as f64) * 0.07).cos() * 0.01).collect();
+        let mask = vec![1u8; nt];
+        let p = HeidiParams { denoise: None, continuation_steps: 3, inner_iterations: 30, te: 0.025, b0: 7.0, ..Default::default() };
+        let chi = heidi_on_grid(&field, &mask, &seed, &g, (0.0, 0.0, 1.0), &p, |_, _| {});
+        let s = GAMMA * p.te * p.b0 * 1e-6;
+        let masks = homogeneity_masks(&field, &mask, &g, &p);
+        let cone = cone_mask(&g, (0.0, 0.0, 1.0), p.cone_threshold);
+        let scaled: Vec<f64> = seed.iter().map(|v| v * s).collect();
+        let manual = nesta_cone_fill(&scaled, &cone, &masks, &g, &p, |_, _| {});
+        for (a, b) in chi.iter().zip(&manual) {
+            assert!((a - b / s).abs() < 1e-12, "{a} vs {}", b / s);
+        }
+        let unscaled = nesta_cone_fill(&seed, &cone, &masks, &g, &p, |_, _| {});
+        assert!(chi.iter().zip(&unscaled).any(|(a, b)| (a - b).abs() > 1e-9), "scale had no effect");
     }
 
     #[test]
     fn zero_init_gives_zero_output() {
-        let n = 8;
+        let n = 9;
         let g = test_grid(n);
         let n_total = g.n_total();
         let params = HeidiParams {
@@ -939,7 +977,7 @@ mod tests {
             inner_iterations: 5,
             ..Default::default()
         };
-        let chi = heidi(
+        let chi = heidi_on_grid(
             &vec![0.0; n_total],
             &vec![1u8; n_total],
             &vec![0.0; n_total],
@@ -955,7 +993,7 @@ mod tests {
     /// total variation relative to just low-passing the initial map.
     #[test]
     fn tv_is_reduced_against_the_bare_cone_projection() {
-        let n = 16;
+        let n = 17;
         let g = test_grid(n);
         let n_total = g.n_total();
         let bdir = (0.0, 0.0, 1.0);
@@ -982,7 +1020,7 @@ mod tests {
             inner_iterations: 60,
             ..Default::default()
         };
-        let chi = heidi(&field, &mask, &chi_init, &g, bdir, &params, |_, _| {});
+        let chi = heidi_on_grid(&field, &mask, &chi_init, &g, bdir, &params, |_, _| {});
 
         // Bare projection = what you get with no prior at all.
         let cone = cone_mask(&g, bdir, params.cone_threshold);
