@@ -748,7 +748,7 @@ fn test_inversion_nltv() {
 
     let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
     let (result, elapsed) = run_timed!("NLTV", inversion::nltv(
-        &data.fieldmap_local, &data.mask, Some(&data.mag_echoes[0]), &grid, data.b0_dir,
+        &data.fieldmap_local, &data.mask, &data.mag_echoes[0], &grid, data.b0_dir,
         &NltvParams { b0: data.field_strength, te: data.echo_times[0], ..Default::default() }, |_, _| {},
     ));
 
@@ -2161,7 +2161,7 @@ fn test_all_combinations() {
         // NLTV
         let nltv_params = NltvParams { b0: data.field_strength, te: data.echo_times[0], ..Default::default() };
         let (result, elapsed) = run_timed!("NLTV", inversion::nltv(
-            &bfr.local_field, &bfr.mask, Some(&data.mag_echoes[0]), &grid, data.b0_dir, &nltv_params, |_, _| {}
+            &bfr.local_field, &bfr.mask, &data.mag_echoes[0], &grid, data.b0_dir, &nltv_params, |_, _| {}
         ));
         let c = ChallengeMetrics::compute("NLTV", &result, &data.chi, &bfr.mask, &data.segmentation, data.dims);
         emit_row(&mut csv, &bfr.name, "NLTV", &c, bt, elapsed.as_secs_f64());
