@@ -31,8 +31,12 @@
 //! magnitude is normalised as in FANSI's in vivo example
 //! (`min(2*mask*mag/max(mag), 1)`), as for NDI; without a magnitude the weight
 //! is the mask.
+//!
+//! # Finite differences
+//! As in `WH_nlTV.m`, the gradient and Laplacian are unit-spacing differences whatever the
+//! voxel size; only the dipole kernel uses it.
 
-use crate::inversion::admm::prepare_fansi_spectral;
+use crate::inversion::admm::{fansi_unit_ee2, prepare_fansi_spectral};
 use crate::utils::gradient::{bdiv_inplace, fgrad_inplace};
 use crate::utils::{apply_mask_zero, shrink};
 use crate::Grid;
@@ -124,8 +128,12 @@ pub fn whqsm(
     let muh = params.muh;
     let alpha_over_mu = alpha / mu;
 
-    // Spectral operators: k = real dipole kernel D(k) (DC=0), ee2 = real Laplacian |E|^2.
-    let (mut fft_ws, k, ee2) = prepare_fansi_spectral(grid, bdir);
+    // Spectral operators: k = real dipole kernel D(k) (DC=0), ee2 = FANSI's EE2. WH_nlTV.m's
+    // E1..E3 are unit-spacing differences whatever the voxel size, so the gradient and
+    // divergence below run on a unit-voxel grid too; only the dipole kernel uses the voxel size.
+    let (mut fft_ws, k, _) = prepare_fansi_spectral(grid, bdir);
+    let ee2 = fansi_unit_ee2(grid.dims);
+    let ugrid = Grid::new(grid.nx(), grid.ny(), grid.nz(), 1.0, 1.0, 1.0);
 
     let mask_f: Vec<f64> = mask.iter().map(|&m| if m != 0 { 1.0 } else { 0.0 }).collect();
 
@@ -200,7 +208,7 @@ pub fn whqsm(
             gy[i] = z_dy[i] - s_dy[i];
             gz[i] = z_dz[i] - s_dz[i];
         }
-        bdiv_inplace(&mut dg, &gx, &gy, &gz, grid);
+        bdiv_inplace(&mut dg, &gx, &gy, &gz, &ugrid);
         for i in 0..n {
             cbuf[i] = Complex64::new(dg[i], 0.0);
         }
@@ -253,7 +261,7 @@ pub fn whqsm(
             fft_ws.fft3d(&mut fx);
 
             // Forward gradient of x (== [real(ifft(E1.*Fx)), ...]).
-            fgrad_inplace(&mut gx, &mut gy, &mut gz, &x, grid);
+            fgrad_inplace(&mut gx, &mut gy, &mut gz, &x, &ugrid);
 
             // z_d = shrink(grad + s_d, alpha_over_mu) ; s_d += grad - z_d.
             for i in 0..n {
