@@ -1,138 +1,288 @@
-//! Nonlinear Total Variation (NLTV) regularized dipole inversion
+//! Nonlinear total variation (NLTV) dipole inversion
 //!
-//! NLTV extends standard TV by using iteratively reweighted minimization,
-//! which produces sharper edges and better preserves fine details.
+//! TV-regularised dipole inversion with a nonlinear data term on the wrapped phase:
 //!
-//! The method solves:
-//! min_x ||Dx - f||_2^2 + lambda * sum w_i |grad(x)|_i
+//! min_x || W (exp(i D x) - exp(i f)) ||_2^2 + lambda || grad x ||_1
 //!
-//! where weights w_i are iteratively updated based on the current solution.
+//! solved with ADMM. The data term gets its own auxiliary variable `z = D x`, whose
+//! subproblem `W^2 sin(z - f) + mu (z - (D x + u)) = 0` is solved per voxel with Newton's
+//! method.
 //!
 //! Reference:
-//! Kames, C., Wiggermann, V., Rauscher, A. (2018).
-//! "Rapid two-step dipole inversion for susceptibility mapping with sparsity priors."
-//! NeuroImage, 167:276-283. https://doi.org/10.1016/j.neuroimage.2017.11.018
+//! Milovic, C., Bilgic, B., Zhao, B., Acosta-Cabronero, J., Tejos, C. (2018).
+//! "Fast nonlinear susceptibility inversion with variational regularization."
+//! Magnetic Resonance in Medicine, 80(2):814-821. https://doi.org/10.1002/mrm.27073
 //!
-//! Reference implementation: https://github.com/kamesy/QSM.jl
+//! Ported line for line from QSM.jl's `nltv` (`src/inversion/nltv.jl`,
+//! https://github.com/kamesy/QSM.jl), including its defaults, its zero padding to a fast FFT
+//! size, and its starting point (`z - u = grad f` for the TV term).
+//!
+//! Two places where this port has to choose, because QSM.jl's code is not well defined:
+//! - QSM.jl's unweighted path (`W = nothing`) never refreshes the FFT of `x` before forming
+//!   `D x` for the Newton step (it copies it only when `W` is given), so it uses `D` applied to
+//!   the previous right-hand side instead of `D x`. Here no weight means `W = 1` over the whole
+//!   (padded) volume, the problem QSM.jl's unweighted Newton step is written for.
+//! - QSM.jl allocates the data-term multiplier without initialising it; here it starts at zero.
+//!
+//! QSM.jl uses real FFTs, this port complex FFTs and the real part. When B0 is tilted from the
+//! grid axes the dipole kernel is not symmetric on the Nyquist planes, and the two treat those
+//! bins differently. That is the only difference between the two: about 1e-4 ppm RMS on a 3T
+//! scan tilted by 6 degrees, and none for axial B0.
+//!
+//! # Units
+//! Like the other inversions, NLTV takes the local field in ppm and returns ppm. The nonlinear
+//! data term needs the phase in radians, so the field is converted with `2*pi*gamma*b0*te`
+//! first and the result converted back at the end. `b0` and `te` are scan parameters that the
+//! pipeline fills from metadata.
 
-use crate::utils::gradient::fgrad_inplace;
-use crate::utils::{weighted_shrink, apply_mask_zero};
+use crate::utils::gradient::{bdiv_inplace, fgrad_inplace};
+use crate::utils::padding::{pad3d, unpad3d};
+use crate::utils::apply_mask_zero;
 use crate::Grid;
-use super::admm::{AdmmBuffers, admm_step, prepare_admm_spectral};
+use super::admm::prepare_fansi_spectral;
+use num_complex::Complex64;
 
-/// NLTV algorithm parameters
+/// NLTV algorithm parameters (QSM.jl `nltv` defaults)
 #[cfg_attr(feature = "introspection", derive(serde::Serialize))]
 #[derive(Clone, Debug)]
 pub struct NltvParams {
-    /// Regularization parameter
+    /// TV regularisation parameter
     pub lambda: f64,
-    /// Penalty parameter
+    /// ADMM penalty for the TV term; `None` uses QSM.jl's default, `100 * lambda`
+    pub rho: Option<f64>,
+    /// ADMM penalty for the data term
     pub mu: f64,
-    /// Convergence tolerance
+    /// Stopping tolerance on ||x - x_prev|| / ||x||
     pub tol: f64,
     /// Maximum ADMM iterations
     pub max_iter: usize,
-    /// Newton iterations for weight update
-    pub newton_iter: usize,
+    /// Stopping tolerance for the Newton iterations of the data subproblem
+    pub tol_newton: f64,
+    /// Maximum Newton iterations per ADMM iteration
+    pub max_iter_newton: usize,
+    /// Field strength in Tesla (scan parameter, for the radian conversion)
+    pub b0: f64,
+    /// Echo time in seconds (scan parameter, for the radian conversion)
+    pub te: f64,
 }
 
 impl Default for NltvParams {
     fn default() -> Self {
         Self {
             lambda: 1e-3,
+            rho: None,
             mu: 1.0,
             tol: 1e-3,
             max_iter: 250,
-            newton_iter: 10,
+            tol_newton: 1e-6,
+            max_iter_newton: 10,
+            b0: 3.0,
+            te: 0.02,
         }
     }
 }
 
-/// NLTV dipole inversion using iteratively reweighted ADMM
+/// Next size >= n whose only prime factors are 2, 3, 5, 7 (Julia `nextprod((2,3,5,7), n)`).
+fn next_fast_fft(n: usize) -> usize {
+    let mut s = n.max(1);
+    loop {
+        let mut m = s;
+        for p in [2, 3, 5, 7] {
+            while m.is_multiple_of(p) {
+                m /= p;
+            }
+        }
+        if m == 1 {
+            return s;
+        }
+        s += 1;
+    }
+}
+
+/// QSM.jl `fastfftsize(sz, (0, 0, 0); rfft=true)`: the fast FFT size, with an even first
+/// dimension where one is close.
+fn fast_fft_dims(dims: (usize, usize, usize)) -> (usize, usize, usize) {
+    let s0 = next_fast_fft(dims.0);
+    let mut s = s0;
+    for _ in 0..3 {
+        if s.is_multiple_of(2) {
+            break;
+        }
+        s = next_fast_fft(s + 1);
+    }
+    let sx = if s.is_multiple_of(2) { s } else { s0 + 1 };
+    (sx, next_fast_fft(dims.1), next_fast_fft(dims.2))
+}
+
+#[inline]
+fn shrink(v: f64, t: f64) -> f64 {
+    if v.abs() <= t { 0.0 } else { (v.abs() - t).copysign(v) }
+}
+
+/// NLTV dipole inversion (QSM.jl `nltv`)
 ///
 /// # Arguments
-/// * `local_field` - Local field values (nx * ny * nz)
-/// * `mask` - Binary mask (nx * ny * nz), 1 = inside ROI
+/// * `local_field` - Local field in ppm (nx * ny * nz)
+/// * `mask` - Binary mask (nx * ny * nz); the result is zeroed outside it
+/// * `weight` - Data weight `W` (QSM.jl's `W`), used as given and zero in the padding;
+///   `None` is `W = 1` over the whole padded volume
 /// * `grid` - Volume grid (dimensions and voxel sizes)
 /// * `bdir` - B0 field direction
 /// * `params` - NLTV parameters
-/// * `progress` - Progress callback `(iteration, total_iterations)`
+/// * `progress` - Progress callback `(iteration, max_iter)`
 ///
 /// # Returns
-/// Susceptibility map
+/// Susceptibility map in ppm, masked to the ROI.
 pub fn nltv(
     local_field: &[f64],
     mask: &[u8],
+    weight: Option<&[f64]>,
     grid: &Grid,
     bdir: (f64, f64, f64),
     params: &NltvParams,
     mut progress: impl FnMut(usize, usize),
 ) -> Vec<f64> {
-    let n_total = grid.n_total();
-    let eps = 1e-6; // Small constant to avoid division by zero
+    let rho = params.rho.unwrap_or(100.0 * params.lambda);
+    let mu = params.mu;
+    let lambda_over_rho = params.lambda / rho;
+    let tol_newton2 = params.tol_newton * params.tol_newton;
 
-    // Compute rho adaptively (for ADMM)
-    let rho = 100.0 * params.lambda;
+    // ppm -> radians, as the nonlinear data term needs.
+    let ppm_to_rad = 2.0 * std::f64::consts::PI * 42.576 * params.b0 * params.te;
 
-    // Pre-compute spectral operators
-    let (mut fft_ws, inv_a, f_hat) = prepare_admm_spectral(local_field, grid, bdir, rho);
+    // Zero padding to a fast FFT size (QSM.jl `pad = (0, 0, 0)`). Every step is
+    // shift-equivariant, so placing the data in the corner is the same as centring it.
+    let dims = grid.dims;
+    let pdims = fast_fft_dims(dims);
+    let pgrid = Grid::new(pdims.0, pdims.1, pdims.2, grid.vsx(), grid.vsy(), grid.vsz());
+    let n = pgrid.n_total();
 
-    // Pre-allocate working buffers and run ADMM iterations
-    let mut buf = AdmmBuffers::new(n_total);
-    let mut weights = vec![1.0; n_total];
+    let phase: Vec<f64> = local_field.iter().map(|&f| f * ppm_to_rad).collect();
+    let fp = pad3d(&phase, dims, pdims);
+    // W^2 / mu
+    let w2: Vec<f64> = match weight {
+        Some(w) => pad3d(w, dims, pdims).into_iter().map(|v| v * v / mu).collect(),
+        None => vec![1.0 / mu; n],
+    };
 
-    let total_iter = params.max_iter * params.newton_iter;
-    let mut current_iter = 0;
+    let (mut fft_ws, d, l) = prepare_fansi_spectral(&pgrid, bdir);
 
-    // Outer loop: Newton-like reweighting
-    for _newton in 0..params.newton_iter {
-        let lambda_over_rho = params.lambda / rho;
+    // iA = (mu D^H D - rho Laplacian)^-1
+    let ia: Vec<f64> = (0..n)
+        .map(|i| {
+            let a = mu * d[i] * d[i] + rho * l[i];
+            if a == 0.0 { 0.0 } else { 1.0 / a }
+        })
+        .collect();
 
-        // Inner loop: ADMM with current weights
-        for _iter in 0..params.max_iter {
-            current_iter += 1;
-            progress(current_iter, total_iter);
+    let mut f_hat = vec![Complex64::new(0.0, 0.0); n];
+    let mut x_hat = vec![Complex64::new(0.0, 0.0); n];
+    let mut work = vec![Complex64::new(0.0, 0.0); n];
 
-            let converged = admm_step(
-                &mut buf, &mut fft_ws, &f_hat, &inv_a, rho, grid, params.tol,
-                |vx, vy, vz, i| (
-                    weighted_shrink(vx, lambda_over_rho, weights[i]),
-                    weighted_shrink(vy, lambda_over_rho, weights[i]),
-                    weighted_shrink(vz, lambda_over_rho, weights[i]),
-                ),
-            );
+    // previous iterate; only the first convergence check sees this starting value
+    let mut x = vec![0.0; n];
+    let mut x0 = vec![0.0; n];
+    let (mut ux, mut uy, mut uz) = (vec![0.0; n], vec![0.0; n], vec![0.0; n]);
+    let (mut dx, mut dy, mut dz) = (vec![0.0; n], vec![0.0; n], vec![0.0; n]);
+    let mut ue = vec![0.0; n];
+    let mut ze = vec![0.0; n];
+    let mut div = vec![0.0; n];
 
-            if converged {
+    // d = z - u = grad f to start
+    fgrad_inplace(&mut dx, &mut dy, &mut dz, &fp, &pgrid);
+
+    for it in 1..=params.max_iter {
+        progress(it, params.max_iter);
+        std::mem::swap(&mut x, &mut x0);
+
+        // x-subproblem: x = iA (rho grad^T (z - u) + mu D^H (z_e - u_e)), grad^T = -bdiv
+        bdiv_inplace(&mut div, &dx, &dy, &dz, &pgrid);
+        for i in 0..n {
+            x_hat[i] = Complex64::new(-div[i], 0.0);
+        }
+        fft_ws.fft3d(&mut x_hat);
+        for i in 0..n {
+            x_hat[i] = rho * ia[i] * x_hat[i] + f_hat[i];
+            work[i] = x_hat[i];
+        }
+        fft_ws.ifft3d(&mut work);
+        for i in 0..n {
+            x[i] = work[i].re;
+        }
+
+        // convergence check
+        let (mut ndx, mut nx) = (0.0, 0.0);
+        for i in 0..n {
+            let (a, b) = (x[i], x0[i]);
+            ndx += (a - b) * (a - b);
+            nx += a * a;
+        }
+        if ndx.sqrt() < params.tol * nx.sqrt() || it == params.max_iter {
+            break;
+        }
+
+        // TV term: z = shrink(grad x + u, lambda/rho), u = u + grad x - z, d = z - u
+        fgrad_inplace(&mut dx, &mut dy, &mut dz, &x, &pgrid);
+        for (u, g) in [(&mut ux, &mut dx), (&mut uy, &mut dy), (&mut uz, &mut dz)] {
+            for i in 0..n {
+                let v = u[i] + g[i];
+                let z = shrink(v, lambda_over_rho);
+                u[i] = v - z;
+                g[i] = z - v + z;
+            }
+        }
+
+        // Data term: v = D x + u_e; Newton on W^2/mu sin(z - f) + z - v = 0, from z = v
+        for i in 0..n {
+            work[i] = x_hat[i] * d[i];
+        }
+        fft_ws.ifft3d(&mut work);
+        for i in 0..n {
+            let v = work[i].re + ue[i];
+            ze[i] = v;
+            ue[i] = v;
+        }
+        for _ in 0..params.max_iter_newton {
+            let (mut nd, mut nz) = (0.0, 0.0);
+            for i in 0..n {
+                let (v, w, z) = (ue[i], w2[i], ze[i]);
+                let (s, c) = (z - fp[i]).sin_cos();
+                let delta = (w * s + z - v) / (w * c + 1.0);
+                ze[i] = z - delta;
+                nd += delta * delta;
+                nz += z * z;
+            }
+            if nd < nz * tol_newton2 {
                 break;
             }
         }
-
-        // Update weights based on current gradient magnitude
-        fgrad_inplace(&mut buf.gx, &mut buf.gy, &mut buf.gz, &buf.x, grid);
-
-        for i in 0..n_total {
-            let grad_mag = (buf.gx[i] * buf.gx[i] + buf.gy[i] * buf.gy[i] + buf.gz[i] * buf.gz[i]).sqrt();
-            weights[i] = 1.0 / (grad_mag + params.mu * eps);
+        // u_e = v - z; data part of the next right-hand side: mu D^H (z - u_e) iA
+        for i in 0..n {
+            let (v, z) = (ue[i], ze[i]);
+            ue[i] = v - z;
+            f_hat[i] = Complex64::new(z - v + z, 0.0);
         }
-
-        // Normalize weights to prevent explosion
-        let max_weight: f64 = weights.iter().cloned().fold(0.0, f64::max);
-        if max_weight > 1.0 {
-            for w in weights.iter_mut() {
-                *w /= max_weight;
-            }
+        fft_ws.fft3d(&mut f_hat);
+        for i in 0..n {
+            f_hat[i] *= mu * d[i] * ia[i];
         }
     }
 
-    apply_mask_zero(&mut buf.x, mask);
-
-    buf.x
+    let mut chi = unpad3d(&x, pdims, dims);
+    for v in chi.iter_mut() {
+        *v /= ppm_to_rad;
+    }
+    apply_mask_zero(&mut chi, mask);
+    chi
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::utils::weighted_shrink;
+
+    fn small_params() -> NltvParams {
+        NltvParams { max_iter: 20, ..NltvParams::default() }
+    }
 
     #[test]
     fn test_nltv_zero_field() {
@@ -140,39 +290,47 @@ mod tests {
         let field = vec![0.0; n * n * n];
         let mask = vec![1u8; n * n * n];
         let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
-        let params = NltvParams { lambda: 1e-3, mu: 1.0, tol: 1e-2, max_iter: 10, newton_iter: 2 };
+        let chi = nltv(&field, &mask, None, &grid, (0.0, 0.0, 1.0), &small_params(), |_, _| {});
+        assert!(chi.iter().all(|v| v.abs() < 1e-12), "zero field should give zero chi");
+    }
 
-        let chi = nltv(&field, &mask, &grid, (0.0, 0.0, 1.0), &params, |_, _| {});
-
-        for &val in chi.iter() {
-            assert!(val.abs() < 1e-8, "Zero field should give zero chi");
+    #[test]
+    fn test_nltv_no_weight_is_unit_weight() {
+        // a fast FFT size, so there is no padding for the weight to be zero in
+        let (nx, ny, nz) = (10, 9, 8);
+        let nt = nx * ny * nz;
+        let field: Vec<f64> = (0..nt).map(|i| ((i * 37 % 101) as f64 - 50.0) * 1e-3).collect();
+        let mask = vec![1u8; nt];
+        let grid = Grid::new(nx, ny, nz, 1.0, 1.0, 1.0);
+        let p = small_params();
+        let a = nltv(&field, &mask, None, &grid, (0.1, 0.0, 1.0), &p, |_, _| {});
+        let ones = vec![1.0; nt];
+        let b = nltv(&field, &mask, Some(&ones), &grid, (0.1, 0.0, 1.0), &p, |_, _| {});
+        for (x, y) in a.iter().zip(&b) {
+            assert!(x.is_finite());
+            assert!((x - y).abs() < 1e-12);
         }
     }
 
     #[test]
-    fn test_nltv_finite() {
-        let n = 8;
-        let field: Vec<f64> = (0..n*n*n).map(|i| (i as f64) * 0.001).collect();
-        let mask = vec![1u8; n * n * n];
+    fn test_nltv_masks_output() {
+        let n = 11; // padded to 12
+        let field: Vec<f64> = (0..n * n * n).map(|i| (i as f64) * 1e-4).collect();
+        let mut mask = vec![1u8; n * n * n];
+        mask[0] = 0;
         let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
-        let params = NltvParams { lambda: 1e-3, mu: 1.0, tol: 1e-2, max_iter: 10, newton_iter: 2 };
-
-        let chi = nltv(&field, &mask, &grid, (0.0, 0.0, 1.0), &params, |_, _| {});
-
-        for (i, &val) in chi.iter().enumerate() {
-            assert!(val.is_finite(), "Chi should be finite at index {}", i);
-        }
+        let chi = nltv(&field, &mask, None, &grid, (0.0, 0.0, 1.0), &small_params(), |_, _| {});
+        assert_eq!(chi.len(), n * n * n);
+        assert_eq!(chi[0], 0.0);
+        assert!(chi.iter().all(|v| v.is_finite()));
     }
 
     #[test]
-    fn test_weighted_shrink() {
-        // w=1 should behave like regular shrink
-        assert!((weighted_shrink(1.0, 0.5, 1.0) - 0.5).abs() < 1e-10);
-        assert!((weighted_shrink(-1.0, 0.5, 1.0) - (-0.5)).abs() < 1e-10);
-        assert!((weighted_shrink(0.3, 0.5, 1.0) - 0.0).abs() < 1e-10);
-
-        // w=0.5 should have half the threshold
-        assert!((weighted_shrink(1.0, 0.5, 0.5) - 0.75).abs() < 1e-10);
-        assert!((weighted_shrink(0.3, 0.5, 0.5) - 0.05).abs() < 1e-10);
+    fn test_fast_fft_dims() {
+        // values from QSM.jl fastfftsize(sz, (0, 0, 0); rfft=true)
+        assert_eq!(fast_fft_dims((11, 11, 13)), (12, 12, 14));
+        assert_eq!(fast_fft_dims((176, 240, 150)), (180, 240, 150));
+        assert_eq!(fast_fft_dims((255, 97, 49)), (256, 98, 49));
+        assert_eq!(fast_fft_dims((15, 15, 15)), (16, 15, 15));
     }
 }
