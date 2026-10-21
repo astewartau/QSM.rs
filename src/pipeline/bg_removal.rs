@@ -458,7 +458,7 @@ mod tests {
         assert!(reference.iter().any(|v| v.abs() > 1e-6), "nothing came through");
         // HARPERELLA's settings must not reach iHARPERELLA
         let mut other = base.clone();
-        other.harperella = crate::bgremove::HarperellaParams { radius: 2.0, max_iter: 1, tol: 0.5 };
+        other.harperella = crate::bgremove::HarperellaParams { radius: 2.0, max_iter: 1, tol: 0.5, pad: [3, 3, 3] };
         assert_eq!(run(&other), reference);
         // its own settings must
         let mut own = base.clone();
