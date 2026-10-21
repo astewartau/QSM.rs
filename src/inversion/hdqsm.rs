@@ -41,11 +41,21 @@ use crate::Grid;
 #[cfg_attr(feature = "introspection", derive(serde::Serialize))]
 #[derive(Clone, Debug)]
 pub struct HdQsmParams {
-    /// L2-stage TV weight (default 1e-4). HDQSM.m has no default and requires it.
+    /// L2-stage TV weight, for a field in ppm and the magnitude weight (default 3e-5).
+    ///
+    /// HDQSM.m requires it and gives no default; its example uses 10^-4.785 (1.6e-5) and the
+    /// paper's 2019-challenge reconstructions 6.3e-6, both on simulated data. 3e-5 was chosen
+    /// from a sweep (1e-6 to 1e-4) on the 2016 challenge (COSMOS reference: best correlation,
+    /// 0.76, NRMSE 73%), the 2019-style simulation (NRMSE 39%) and ten travelling-head scans
+    /// (stable on all of them, with less noise than the mask-weighted 1e-4 the port used).
     pub alpha_l2: f64,
-    /// L2-stage gradient-consistency ADMM weight (default 1e-2 = 100*alpha_l2). HDQSM.m
-    /// requires it; the paper's heuristic is 10 <= mu1_l2/alpha_l2 <= 100.
-    pub mu1_l2: f64,
+    /// L2-stage gradient-consistency ADMM weight; `None` is `100 * alpha_l2`.
+    ///
+    /// The paper ties it to alpha_l2 with 10 <= mu1_l2/alpha_l2 <= 100; HDQSM.m's example and
+    /// the paper's challenge reconstructions use 10. On in vivo travelling-head scans the ADMM
+    /// diverges (in HDQSM.m as well) once mu1_l2 falls to about 3e-4 or below, which a ratio of
+    /// 10 reaches at the alpha_l2 that suits in vivo data, so the default uses the paper's 100.
+    pub mu1_l2: Option<f64>,
     /// Fidelity consistency weight (HDQSM.m `mu2L1`, default 1.0).
     pub mu2: f64,
     /// Stage-1 (L1) iterations (HDQSM.m `maxOuterIterL1`, default 20).
@@ -60,8 +70,8 @@ pub struct HdQsmParams {
 impl Default for HdQsmParams {
     fn default() -> Self {
         Self {
-            alpha_l2: 1e-4,
-            mu1_l2: 1e-2,
+            alpha_l2: 3e-5,
+            mu1_l2: None,
             mu2: 1.0,
             max_iter_l1: 20,
             max_iter_l2: 80,
@@ -131,6 +141,7 @@ pub fn hdqsm(
     mut progress: impl FnMut(usize, usize),
 ) -> Vec<f64> {
     let n = grid.n_total();
+    let mu1_l2 = params.mu1_l2.unwrap_or(100.0 * params.alpha_l2);
     let (mut fft_ws, k, _) = prepare_fansi_spectral(grid, bdir);
     // HDQSM.m's finite differences are on unit spacing whatever the voxel size
     // (E_j = 1 - exp(2*pi*i*k_j/N_j)); the dipole kernel keeps the voxel size.
@@ -193,7 +204,7 @@ pub fn hdqsm(
     // STAGE 1: L1 data fidelity.
     // =========================================================================
     {
-        let mu = params.mu1_l2.sqrt();
+        let mu = mu1_l2.sqrt();
         let alpha = params.alpha_l2.sqrt();
         let mu2 = params.mu2;
         let ll = alpha / mu;
@@ -300,7 +311,7 @@ pub fn hdqsm(
     // STAGE 2: L2 data fidelity, reweighted by discrepancy.
     // =========================================================================
     {
-        let mu = params.mu1_l2;
+        let mu = mu1_l2;
         let alpha = params.alpha_l2;
         let mu2 = params.mu2;
         let ll = alpha / mu;

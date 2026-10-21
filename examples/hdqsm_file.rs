@@ -22,7 +22,7 @@ fn main() {
     let mut params = HdQsmParams::default();
     if a.len() == 11 {
         params.alpha_l2 = num(8);
-        params.mu1_l2 = num(9);
+        params.mu1_l2 = Some(num(9));
         params.tol_update = num(10);
     }
     let mut last = 0;
