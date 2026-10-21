@@ -3,7 +3,7 @@
 //! A multi-echo spin-echo (CPMG) train uses repeated refocusing pulses. Real
 //! refocusing pulses are not perfect 180° flips (B1 inhomogeneity, slice
 //! profile), so they generate stimulated and indirect echoes that add signal at
-//! later echoes. A naive mono-exponential fit (e.g. [`r2star_arlo`]) reads that
+//! later echoes. A naive mono-exponential fit (e.g. [`arlo`](crate::utils::r2star::arlo)) reads that
 //! extra signal as slower decay and therefore *overestimates* T2 (underestimates
 //! R2). The Extended Phase Graph (EPG) formalism models the full echo train,
 //! including the stimulated-echo pathways, as a function of `(T2, T1, B1)` and so
@@ -249,7 +249,7 @@ pub const EPG_TE_TOLERANCE_S: f64 = 1e-4;
 /// a dictionary of EPG-simulated trains over a `(T2, B1)` grid; the R2 = 1/T2 of
 /// the best match is returned. Normalization removes the proton-density / receive
 /// gain, so only the decay *shape* is fit. This corrects the stimulated-echo bias
-/// that a mono-exponential fit ([`r2star_arlo`]) suffers on imperfectly-refocused
+/// that a mono-exponential fit ([`arlo`](crate::utils::r2star::arlo)) suffers on imperfectly-refocused
 /// (B1 < 1) data.
 ///
 /// When a per-voxel `b1_map` is supplied (e.g. from a separate B1 acquisition),
@@ -260,7 +260,7 @@ pub const EPG_TE_TOLERANCE_S: f64 = 1e-4;
 ///
 /// # Arguments
 /// * `magnitude` - MESE magnitude, flattened `[v0_e0, v0_e1, ..., v1_e0, ...]`
-///   (row-major `(n_voxels, n_echoes)`, same layout as [`r2star_arlo`])
+///   (row-major `(n_voxels, n_echoes)`)
 /// * `mask` - Binary brain mask `[nx*ny*nz]` (1 = process, 0 = skip)
 /// * `echo_times` - Spin-echo times in seconds `[n_echoes]` (equi-spaced, ≥3)
 /// * `grid` - Volume grid (dimensions and voxel sizes)
@@ -570,7 +570,8 @@ mod tests {
         let epg_err = (r2_epg_val - r2_true).abs() / r2_true;
 
         // Mono-exponential (ARLO) fit for comparison.
-        let (r2_arlo_map, _) = crate::utils::r2star::r2star_arlo(&mag, &mask, &te, &grid).unwrap();
+        // one voxel: voxel-major and echo-slowest are the same
+        let r2_arlo_map = crate::utils::r2star::arlo(&mag, &te, 1).unwrap();
         let arlo_err = (r2_arlo_map[0] - r2_true).abs() / r2_true;
 
         // EPG should be within ~5% (grid-limited) and clearly better than ARLO.

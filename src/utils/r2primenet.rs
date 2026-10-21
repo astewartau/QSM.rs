@@ -36,7 +36,7 @@
 //! its own validation, so it is not here yet; the guard refuses 7 T input rather than pretending.
 //!
 //! **R2\* fitting.** The training pipeline fitted R2* with ARLO, so
-//! [`r2primenet_from_magnitude`] uses [`r2star_arlo`](super::r2star::r2star_arlo). Supplying
+//! [`r2primenet_from_magnitude`] uses [`arlo`](super::r2star::arlo). Supplying
 //! an R2* map fitted some other way is allowed but moves the input off-distribution.
 //!
 //! **Array orientation.** R2PRIMEnet shares χ-sepnet's training set and so its orientation
@@ -274,7 +274,7 @@ pub fn r2primenet(
 /// Convenience: fit R2* from multi-echo magnitude with ARLO, then run [`r2primenet`].
 ///
 /// `magnitude` is voxel-major `(n_voxels, n_echoes)` and `echo_times` are in **seconds**
-/// (ARLO requires ≥3 equi-spaced echoes; other echo times are [`OnnxError::Domain`]). Returns `(r2prime_hz, r2star_hz)` so the caller
+/// (ARLO requires ≥3 increasing echo times; other echo times are [`OnnxError::Domain`]); R2* is 0 outside `mask`. Returns `(r2prime_hz, r2star_hz)` so the caller
 /// can keep the intermediate R2* map.
 pub fn r2primenet_from_magnitude(
     magnitude: &[f64],
@@ -288,8 +288,21 @@ pub fn r2primenet_from_magnitude(
     progress: impl FnMut(usize, usize),
 ) -> Result<(Vec<f64>, Vec<f64>), OnnxError> {
     // Echo times ARLO cannot use are refused like any other input the network cannot take.
-    let (r2star, _s0) = super::r2star::r2star_arlo(magnitude, mask, echo_times, grid)
+    let (n, ne) = (grid.n_total(), echo_times.len());
+    if magnitude.len() != n * ne {
+        return Err(OnnxError::Domain(format!(
+            "R2* fit: magnitude has {} values, expected {}", magnitude.len(), n * ne
+        )));
+    }
+    // arlo takes the echoes stacked echo-slowest
+    let echo_slowest: Vec<f64> = (0..ne).flat_map(|e| (0..n).map(move |v| magnitude[v * ne + e])).collect();
+    let mut r2star = super::r2star::arlo(&echo_slowest, echo_times, n)
         .map_err(|e| OnnxError::Domain(format!("R2* fit: {e}")))?;
+    for (r, &m) in r2star.iter_mut().zip(mask) {
+        if m == 0 {
+            *r = 0.0;
+        }
+    }
     let r2prime = r2primenet(&r2star, mask, grid, b0_tesla, model_onnx, norm, params, progress)?;
     Ok((r2prime, r2star))
 }

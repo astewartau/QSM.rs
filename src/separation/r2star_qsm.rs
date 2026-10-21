@@ -53,7 +53,7 @@ impl Default for R2starQsmParams {
 ///
 /// # Arguments
 /// * `chi_total` — Conventional QSM χ_total in **ppm** (`n` voxels).
-/// * `r2star` — R2* map in **Hz** (`n` voxels), e.g. from [`crate::r2star::r2star_arlo`].
+/// * `r2star` — R2* map in **Hz** (`n` voxels), e.g. from [`crate::r2star::arlo`].
 /// * `mask` — Binary brain mask (`n` voxels, 1 = inside).
 /// * `params` — See [`R2starQsmParams`].
 ///
@@ -101,7 +101,7 @@ pub fn r2star_qsm(
 /// # Arguments
 /// * `magnitude` — Multi-echo magnitude, flattened as `(n_voxels, n_echoes)` in
 ///   row-major order (echo fastest per voxel) — the same layout as
-///   [`crate::r2star::r2star_arlo`].
+///   [`crate::r2star::arlo`].
 /// * `echo_times` — Echo times in **seconds** (`n_echoes`).
 /// * `chi_total` — Conventional QSM χ_total in **ppm** (`n_voxels`).
 /// * `mask` — Binary brain mask (`n_voxels`).

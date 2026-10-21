@@ -173,7 +173,7 @@ pub mod fieldmap {
 /// R2\*/T2\* mapping from multi-echo magnitude (ARLO).
 pub mod r2star {
     pub use crate::utils::r2star::{
-        arlo, r2star_arlo, t2star_from_r2star, use_arlo, ARLO_TE_SPACING_TOLERANCE_S,
+        arlo, arlo_echo_times_problem, t2star_from_r2star,
     };
 }
 

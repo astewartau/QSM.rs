@@ -132,7 +132,7 @@ fn mp_noise_variance(d: &[f64], n_samples: usize) -> f64 {
 ///
 /// # Arguments
 /// * `data` - Interleaved `[voxel0_vol0, voxel0_vol1, ..., voxel1_vol0, ...]`
-///   (row-major `(n_voxels, n_vols)`), the same layout as [`r2star_arlo`].
+///   (row-major `(n_voxels, n_vols)`).
 /// * `dims` - Volume dimensions `(nx, ny, nz)`.
 /// * `n_vols` - Number of volumes (e.g. echoes).
 /// * `patch_radius` - Half-width of the cubic patch (radius 2 → 5×5×5).

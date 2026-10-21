@@ -150,15 +150,12 @@ fn test_dl_r2primenet() {
     let w = weights("r2primenet");
 
     let n = data.mag_echoes[0].len();
-    let ne = data.mag_echoes.len();
-    let mut mag_voxel_major = vec![0.0_f64; n * ne];
-    for (e, echo) in data.mag_echoes.iter().enumerate() {
-        for (v, &m) in echo.iter().enumerate() {
-            mag_voxel_major[v * ne + e] = m;
-        }
-    }
-    let (r2star, _t2star) =
-        qsm_core::r2star::r2star_arlo(&mag_voxel_major, &data.mask, &data.echo_times, &grid).unwrap();
+    let r2star: Vec<f64> = qsm_core::r2star::arlo(&data.mag_echoes.concat(), &data.echo_times, n)
+        .unwrap()
+        .iter()
+        .zip(&data.mask)
+        .map(|(&r, &m)| if m != 0 { r } else { 0.0 })
+        .collect();
 
     let t = Instant::now();
     // This phantom is 7 T and R2PRIMEnet's weights are 3 T, so the guard would refuse it. What

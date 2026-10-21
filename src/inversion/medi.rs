@@ -215,7 +215,7 @@ pub fn medi(
     assert_eq!(te.len(), n_echoes, "echo_times does not match the echo magnitudes");
     // R2s = arlo(TE, abs(iField)); Mask_CSF = extract_CSF(R2s, Mask, voxel_size)
     let csf: Option<Vec<bool>> = if params.csf && n_echoes >= 3 {
-        let r2s = crate::utils::r2star::arlo(m, te, n).expect("three or more echoes");
+        let r2s = crate::utils::r2star::arlo(m, te, n).expect("three or more increasing echo times");
         let c = extract_csf(&r2s, mask, grid, params.csf_r2s_threshold, params.csf_erode);
         c.iter().any(|&v| v != 0).then(|| c.iter().map(|&v| v != 0).collect())
     } else {

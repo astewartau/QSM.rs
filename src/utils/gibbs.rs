@@ -368,7 +368,7 @@ pub fn gibbs_unring_volume(vol: &[f64], dims: (usize, usize, usize)) -> Vec<f64>
 ///
 /// # Arguments
 /// * `data` - Interleaved `[voxel0_vol0, voxel0_vol1, ..., voxel1_vol0, ...]`
-///   (row-major `(n_voxels, n_vols)`), same layout as [`r2star_arlo`].
+///   (row-major `(n_voxels, n_vols)`).
 /// * `dims` - Volume dimensions `(nx, ny, nz)`.
 /// * `n_vols` - Number of volumes.
 ///
