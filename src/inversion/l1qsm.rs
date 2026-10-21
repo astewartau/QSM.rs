@@ -45,7 +45,9 @@ use num_complex::Complex64;
 #[cfg_attr(feature = "introspection", derive(serde::Serialize))]
 #[derive(Clone, Debug)]
 pub struct L1QsmParams {
-    /// Gradient (TV) L1 penalty weight.
+    /// Gradient (TV) L1 penalty weight. nlL1TV.m gives no default, and FANSI's example says
+    /// L1-QSM needs its own tuning. The default 5e-3 was chosen from an alpha1 sweep on the
+    /// EMTP travelling-head data: 2e-4 streaks, 1e-2 starts to oversmooth.
     pub alpha1: f64,
     /// Gradient-consistency ADMM weight; `None` is nlL1TV.m's `100 * alpha1`.
     pub mu1: Option<f64>,
@@ -71,7 +73,7 @@ pub struct L1QsmParams {
 impl Default for L1QsmParams {
     fn default() -> Self {
         Self {
-            alpha1: 2e-4,
+            alpha1: 5e-3,
             mu1: None,
             mu2: 1.0,
             mu3: 1.0,
