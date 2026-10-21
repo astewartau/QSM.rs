@@ -218,6 +218,38 @@ fn box_mean_replicate(data: &[f64], dims: (usize, usize, usize), half: [usize; 3
     out
 }
 
+/// The magnitude QSMART detects vessels on (`vasculature_mask.m`): the mean over echoes, then
+/// N4 bias correction with ANTs' defaults and no mask
+/// ([`n4_bias_correction`](crate::utils::n4_bias_correction)), as QSMART runs
+/// `N4BiasFieldCorrection -i AvgEcho.nii -o AvgEcho_n4.nii`. Pass the result to
+/// [`run_qsmart`](crate::pipeline::run_qsmart) as its magnitude.
+///
+/// QSMART's vessel threshold depends on the magnitude's intensity scale, so the mean (not the sum
+/// or the root sum of squares) and N4 (not another bias correction) matter.
+///
+/// # Errors
+/// If there are no echoes, or an echo does not match the grid.
+pub fn qsmart_vessel_magnitude(
+    magnitudes: &[&[f64]],
+    grid: &crate::Grid,
+) -> Result<Vec<f64>, crate::error::InputError> {
+    let (nx, ny, nz) = grid.dims;
+    let n = nx * ny * nz;
+    if magnitudes.is_empty() {
+        return Err(crate::error::InputError::new("QSMART's vessel magnitude needs at least one magnitude echo"));
+    }
+    if let Some(e) = magnitudes.iter().position(|m| m.len() != n) {
+        return Err(crate::error::InputError::new(format!(
+            "QSMART's vessel magnitude: echo {} has {} voxels but the grid has {n}",
+            e + 1,
+            magnitudes[e].len()
+        )));
+    }
+    let ne = magnitudes.len() as f64;
+    let mean: Vec<f64> = (0..n).map(|i| magnitudes.iter().map(|m| m[i]).sum::<f64>() / ne).collect();
+    Ok(crate::utils::n4_bias_correction(&mean, None, grid, &crate::utils::N4Params::default(), |_, _| {}).corrected)
+}
+
 /// Complete QSMART pipeline parameters
 #[cfg_attr(feature = "introspection", derive(serde::Serialize))]
 #[derive(Clone, Debug)]
@@ -338,6 +370,21 @@ pub fn compute_weighted_mask_stage2(mask: &[f64], r_0: &[f64], vasc_only: &[f64]
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn vessel_magnitude_is_n4_of_the_echo_mean() {
+        let grid = crate::Grid::new(12, 10, 8, 1.0, 1.0, 1.0);
+        let n = 12 * 10 * 8;
+        let echoes: Vec<Vec<f64>> = (0..3)
+            .map(|e| (0..n).map(|i| 100.0 + 40.0 * (i as f64 * 0.11).sin() + 10.0 * e as f64 + (i % 12) as f64).collect())
+            .collect();
+        let refs: Vec<&[f64]> = echoes.iter().map(|v| v.as_slice()).collect();
+        let mean: Vec<f64> = (0..n).map(|i| (echoes[0][i] + echoes[1][i] + echoes[2][i]) / 3.0).collect();
+        let want = crate::utils::n4_bias_correction(&mean, None, &grid, &crate::utils::N4Params::default(), |_, _| {}).corrected;
+        assert_eq!(qsmart_vessel_magnitude(&refs, &grid).unwrap(), want);
+        assert!(qsmart_vessel_magnitude(&[], &grid).is_err());
+        assert!(qsmart_vessel_magnitude(&[&echoes[0][..n - 1]], &grid).is_err());
+    }
 
     #[test]
     fn echofit_matches_matlab() {
