@@ -837,9 +837,15 @@ fn test_inversion_fansi() {
     let (vsx, vsy, vsz) = data.voxel_size;
 
     let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
-    let params = FansiParams { is_tgv: false, ..FansiParams::default() };
+    // FANSI works in radians, so b0 and te are the scan's (as the pipeline passes them), and
+    // the magnitude is the data weight nlTV.m recommends. With an unweighted (mask) data term
+    // the Newton step's denominator W*cos(z2 - phase) + mu2 reaches 0 where the phantom's
+    // phase reaches +-pi, and nlTV.m itself diverges.
+    let params = FansiParams {
+        is_tgv: false, b0: data.field_strength, te: data.echo_times[0], ..FansiParams::default()
+    };
     let (result, elapsed) = run_timed!("FANSI-nlTV", inversion::fansi(
-        &data.fieldmap_local, &data.mask, None, &grid, data.b0_dir, &params, |_, _| {},
+        &data.fieldmap_local, &data.mask, Some(&data.mag_echoes[0]), &grid, data.b0_dir, &params, |_, _| {},
     ));
 
     let res = TestResult::new("FANSI (nlTV)", &result, &data.chi, &data.mask, data.dims);
@@ -865,9 +871,13 @@ fn test_inversion_fansi_tgv() {
     let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
     // nlTGV's per-iteration cost (per-voxel 4x4 Cramer solve) is high; cap
     // iterations here to keep the CI job runtime reasonable.
-    let params = FansiParams { is_tgv: true, max_iter: 50, ..FansiParams::default() };
+    // Scan b0/te and the magnitude weight, as for nlTV above.
+    let params = FansiParams {
+        is_tgv: true, max_iter: 50, b0: data.field_strength, te: data.echo_times[0],
+        ..FansiParams::default()
+    };
     let (result, elapsed) = run_timed!("FANSI-nlTGV", inversion::fansi(
-        &data.fieldmap_local, &data.mask, None, &grid, data.b0_dir, &params, |_, _| {},
+        &data.fieldmap_local, &data.mask, Some(&data.mag_echoes[0]), &grid, data.b0_dir, &params, |_, _| {},
     ));
 
     let res = TestResult::new("FANSI (nlTGV)", &result, &data.chi, &data.mask, data.dims);
@@ -892,8 +902,9 @@ fn test_inversion_l1qsm() {
 
     let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
     let (result, elapsed) = run_timed!("L1-QSM", inversion::l1qsm(
-        &data.fieldmap_local, &data.mask, None, &grid, data.b0_dir,
-        &L1QsmParams::default(), |_, _| {},
+        &data.fieldmap_local, &data.mask, Some(&data.mag_echoes[0]), &grid, data.b0_dir,
+        &L1QsmParams { b0: data.field_strength, te: data.echo_times[0], ..L1QsmParams::default() },
+        |_, _| {},
     ));
 
     let res = TestResult::new("L1-QSM", &result, &data.chi, &data.mask, data.dims);
