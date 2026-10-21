@@ -18,9 +18,8 @@
 //! is locally flat the susceptibility is expected to be flat too, and TV is applied;
 //! across an anatomical edge the mask opens and the gradient goes unpenalised. A
 //! Laplacian test additionally opens the mask wherever the field curves sharply.
-//! Voxels that are an edge in every direction keep a small residual weight
-//! ([`HeidiParams::gradient_mask_floor`]) rather than being fully unconstrained,
-//! which suppresses noise in otherwise-free regions.
+//! Voxels that are an edge in every direction get the weight
+//! [`HeidiParams::gradient_mask_floor`], 0 in the shipped code (see that field).
 //!
 //! The constrained minimisation is solved with NESTA (Nesterov's smoothing with
 //! continuation): the TV term is smoothed by a parameter μ that is annealed down
@@ -108,13 +107,10 @@ pub struct HeidiParams {
     pub denoise: Option<AnisotropicDiffusionParams>,
     /// TV weight kept at voxels that read as an edge in *every* direction.
     ///
-    /// Upstream's shipped code passes the masks through a `> 0.5` resize test that
-    /// silently rounds this floor away, but its own changelog calls binarising the
-    /// masks a bug ("must contain values of 0.1"), so the documented intent is the
-    /// default here. Set it to `0.0` to reproduce the shipped behaviour — on the
-    /// CI phantom the two are indistinguishable (r=0.8923 vs 0.8918), since the
-    /// floor exists to damp noise in otherwise-unconstrained voxels and that
-    /// phantom is noiseless.
+    /// The default, 0, is what the shipped code does: `computesusceptibility_heidi` sets
+    /// these voxels to `gradientMaskReplaceValue` (0.1) and then passes the masks through
+    /// `fourierbasedresize(...) > 0.5`, which rounds the 0.1 away. (Its changelog, v10.6,
+    /// says the masks "must contain values of 0.1"; set 0.1 to follow that instead.)
     pub gradient_mask_floor: f64,
     /// NESTA continuation steps on μ.
     ///
@@ -160,7 +156,7 @@ impl Default for HeidiParams {
                 time_step: 0.05,
                 conductance: 1.0,
             }),
-            gradient_mask_floor: 0.1,
+            gradient_mask_floor: 0.0,
             continuation_steps: 8,
             inner_iterations: 500,
             mu_min: f64::EPSILON,

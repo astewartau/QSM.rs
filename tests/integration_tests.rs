@@ -986,7 +986,12 @@ fn test_inversion_heidi() {
     // Reduced inner-iteration budget to keep CI tractable: the default runs all 8 x 500
     // NESTA iterations (the driver's tolerance is eps), thousands of FFT round trips on a
     // whole brain.
-    let heidi_params = HeidiParams { inner_iterations: 50, ..Default::default() };
+    let heidi_params = HeidiParams {
+        inner_iterations: 50,
+        b0: data.field_strength,
+        te: *data.echo_times.last().expect("echo times"),
+        ..Default::default()
+    };
     let (result, elapsed) = run_timed!("HEIDI", inversion::heidi(
         &data.fieldmap_local, &data.mask, None, &grid, data.b0_dir,
         &lsqr_params, &heidi_params, |_, _| {},
