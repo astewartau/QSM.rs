@@ -508,7 +508,9 @@ pub fn fgrad_masked_inplace_f32(
     }
 }
 
-/// Backward divergence operator (in-place, f32) - masked version
+/// Backward divergence of the masked field `mask·g` (in-place, f32), at every voxel:
+/// `div = mask[i]·g[i] − mask[i−1]·g[i−1]` per axis (0 for i = 0), as TGV-QSM's `div_local`.
+/// Voxels just outside the mask get the contribution of their in-mask neighbour.
 #[inline]
 pub fn bdiv_masked_inplace_f32(
     div: &mut [f32],
@@ -530,11 +532,6 @@ pub fn bdiv_masked_inplace_f32(
             for i in 0..nx {
                 let local = i + j_offset;
                 let idx = local + k_offset;
-
-                if mask[idx] == 0 {
-                    div_slab[local] = 0.0;
-                    continue;
-                }
 
                 // Julia: div = mask[i]*g[i] - mask[i-1]*g[i-1] (0 if i<=1)
                 let m = if mask[idx] != 0 { 1.0 } else { 0.0 };
@@ -827,6 +824,28 @@ mod tests {
         );
     }
 
+    /// TGV-QSM's `div_local` on `mask·g`, written out per voxel (unit voxels).
+    fn div_local_ref(g: [&[f32]; 3], mask: &[u8], nx: usize, ny: usize, nz: usize) -> Vec<f32> {
+        let m = |idx: usize| if mask[idx] != 0 { 1.0f32 } else { 0.0 };
+        let mut out = vec![0.0f32; nx * ny * nz];
+        for k in 0..nz {
+            for j in 0..ny {
+                for i in 0..nx {
+                    let idx = i + j * nx + k * nx * ny;
+                    let mut d = 0.0;
+                    for (axis, step, pos) in [(0, 1, i), (1, nx, j), (2, nx * ny, k)] {
+                        d += m(idx) * g[axis][idx];
+                        if pos > 0 {
+                            d -= m(idx - step) * g[axis][idx - step];
+                        }
+                    }
+                    out[idx] = d;
+                }
+            }
+        }
+        out
+    }
+
     #[test]
     fn test_bdiv_masked_f32() {
         let nx = 4;
@@ -853,21 +872,14 @@ mod tests {
         let mut div = vec![0.0f32; n];
         bdiv_masked_inplace_f32(&mut div, &gx, &gy, &gz, &mask, &grid);
 
-        // Outside the mask, divergence should be zero
-        for k in 0..nz {
-            for j in 0..ny {
-                for i in 0..nx {
-                    let idx = i + j * nx + k * nx * ny;
-                    if mask[idx] == 0 {
-                        assert!(
-                            div[idx].abs() < 1e-6,
-                            "div outside mask at [{},{},{}] = {}, expected 0",
-                            i, j, k, div[idx]
-                        );
-                    }
-                }
-            }
+        // The divergence of mask·g at every voxel: zero away from the mask, −g of the in-mask
+        // neighbour just past its upper faces (as TGV-QSM's div_local)
+        let want = div_local_ref([&gx, &gy, &gz], &mask, nx, ny, nz);
+        for idx in 0..n {
+            assert!((div[idx] - want[idx]).abs() < 1e-6, "div at {idx} = {}, expected {}", div[idx], want[idx]);
         }
+        assert_eq!(div[3 + nx + nx * ny], -1.0, "just past the mask's +x face");
+        assert_eq!(div[0], 0.0, "away from the mask");
 
         // Inside the mask with a neighbor also in mask: constant field gives 0 divergence
         // At (2,2,2): mask[2,2,2]=1, mask[1,2,2]=1 => gx_term = 1*1 - 1*1 = 0, same for y,z
@@ -1214,11 +1226,9 @@ mod tests {
         let mut div = vec![0.0f32; n];
         bdiv_masked_inplace_f32(&mut div, &gx, &gy, &gz, &mask, &grid);
 
-        // Outside mask should be zero
+        let want = div_local_ref([&gx, &gy, &gz], &mask, nx, ny, nz);
         for i in 0..n {
-            if mask[i] == 0 {
-                assert_eq!(div[i], 0.0, "Outside mask div should be zero");
-            }
+            assert!((div[i] - want[i]).abs() < 1e-6, "div at {i} = {}, expected {}", div[i], want[i]);
         }
     }
 

@@ -74,7 +74,6 @@ pub use medi::{medi, EchoMagnitudes, MediParams, MediWorkspace};
 pub use tfi::{tfi, TfiParams};
 pub use tgv::{
     tgv_qsm, TgvInput, TgvParams, get_default_alpha, get_default_iterations, rad_per_ppm,
-    ALPHA_REFERENCE_B0_T, ALPHA_REFERENCE_RAD_PER_PPM, ALPHA_REFERENCE_TE_S,
 };
 pub use ilsqr::{ilsqr, IlsqrParams, STI_DEFAULT_PAD_MM, STI_PAD_MM};
 #[cfg(not(target_arch = "wasm32"))]
