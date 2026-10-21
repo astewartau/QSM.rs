@@ -273,7 +273,7 @@ Methods marked † need the `onnx` feature and model weights.
 | Algorithm | Description | Reference |
 |-----------|-------------|-----------|
 | **Frangi filter** | Multi-scale 3D vesselness (`frangi_filter_3d`) | Frangi, A.F., et al. (1998). "Multiscale vessel enhancement filtering." *MICCAI'98*, LNCS vol 1496, 130-137. [DOI](https://doi.org/10.1007/BFb0056195) |
-| **Vasculature mask** | Bottom-hat filtering then Frangi vesselness, for QSMART (`generate_vasculature_mask`) | Yaghmaie, N., Syeda, W., et al. (2021). *NeuroImage*, 231:117701. [DOI](https://doi.org/10.1016/j.neuroimage.2020.117701) |
+| **Vasculature mask** | Bottom-hat filtering then Frangi vesselness, for QSMART (`generate_vasculature_mask`), on QSMART's mean-echo, N4-corrected magnitude (`qsmart_vessel_magnitude`) | Yaghmaie, N., Syeda, W., et al. (2021). *NeuroImage*, 231:117701. [DOI](https://doi.org/10.1016/j.neuroimage.2020.117701) |
 | **Surface curvature** | Discrete differential-geometry operators on triangle meshes (`calculate_gaussian_curvature`) | Meyer, M., et al. (2003). "Discrete Differential-Geometry Operators for Triangulated 2-Manifolds." *Visualization and Mathematics III*, 35-57. [DOI](https://doi.org/10.1007/978-3-662-05105-4_2) |
 | **Rigid registration** | 6-DOF registration by normalised cross-correlation, with the B0 direction of each orientation (`register_rigid`) | — |
 | **Resampling / reorientation** | Affine-derived B0 direction and obliquity, reorientation, and resampling (complex-domain for phase) to an axial or another grid (`geometry`) | — |
