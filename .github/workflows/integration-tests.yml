@@ -115,7 +115,7 @@ jobs:
           # of these lists or in `not_in_ci` below; the "Check every test is registered" step fails
           # the run otherwise, so a new test cannot be added without CI ever running it.
           all_bgremove='["test_bgremove_sharp","test_bgremove_resharp","test_bgremove_vsharp","test_bgremove_vsharp_no_deconvolve","test_bgremove_pdf","test_bgremove_ismv","test_bgremove_lbv","test_bgremove_msmv"]'
-          all_inversion='["test_inversion_tkd","test_inversion_tkd_cropped","test_inversion_tsvd","test_inversion_tikhonov","test_inversion_tv","test_inversion_rts","test_inversion_ilsqr","test_inversion_medi","test_inversion_nltv","test_inversion_ndi","test_inversion_fansi","test_inversion_fansi_tgv","test_inversion_l1qsm","test_inversion_whqsm","test_inversion_hdqsm","test_inversion_amp_pe","test_inversion_lsqr","test_inversion_heidi","test_multiorient_cosmos","test_multiorient_sti","test_multiorient_coverage","test_multiorient_noise","test_multiorient_register","test_multiorient_register_capture_range"]'
+          all_inversion='["test_inversion_tkd","test_inversion_tkd_cropped","test_inversion_tsvd","test_inversion_tikhonov","test_inversion_tv","test_inversion_rts","test_inversion_ilsqr","test_inversion_star","test_inversion_medi","test_inversion_nltv","test_inversion_ndi","test_inversion_fansi","test_inversion_fansi_tgv","test_inversion_l1qsm","test_inversion_whqsm","test_inversion_hdqsm","test_inversion_amp_pe","test_inversion_lsqr","test_inversion_heidi","test_multiorient_cosmos","test_multiorient_sti","test_multiorient_coverage","test_multiorient_noise","test_multiorient_register","test_multiorient_register_capture_range"]'
           all_combined='["test_combined_tgv","test_combined_tfi"]'
           all_pipeline='["test_pipeline_romeo_b0","test_pipeline_unwrap_bfr_romeo","test_pipeline_unwrap_bfr_laplacian_neumann","test_pipeline_unwrap_bfr_bestpath","test_pipeline_unwrap_bfr_prelude","test_pipeline_unwrap_bfr_stage_laplacian","test_pipeline_tgv","test_pipeline_tgv_single_echo","test_pipeline_qsmart","test_pipeline_qsmart_tikhonov","test_pipeline_harperella","test_pipeline_iharperella","test_bias_correction","test_swi","test_smwi","test_r2star_t2star","test_motion_correction","test_robust_echo_combination","test_pipeline_masking","test_pipeline_two_pass"]'
           # χ-separation entries are whole test *binaries* (each runs several methods).
@@ -355,6 +355,7 @@ jobs:
               src/inversion/nltv.rs)      inversion="$inversion test_inversion_nltv" ;;
               src/inversion/tgv.rs)       combined="$combined test_combined_tgv"; pipeline="$pipeline test_pipeline_tgv test_pipeline_tgv_single_echo" ;;
               src/inversion/ilsqr.rs)     inversion="$inversion test_inversion_ilsqr"; pipeline="$pipeline test_pipeline_qsmart"; chisep="$chisep chisep_qsmci" ;;
+              src/inversion/star.rs)      inversion="$inversion test_inversion_star" ;;
               src/inversion/ndi.rs)       inversion="$inversion test_inversion_ndi" ;;
               src/inversion/fansi.rs)     inversion="$inversion test_inversion_fansi test_inversion_fansi_tgv" ;;
               src/inversion/l1qsm.rs)     inversion="$inversion test_inversion_l1qsm" ;;
@@ -525,7 +526,7 @@ jobs:
                 bgremove="$bgremove test_bgremove_sharp test_bgremove_resharp test_bgremove_vsharp test_bgremove_vsharp_no_deconvolve test_bgremove_pdf test_bgremove_ismv test_bgremove_lbv"
                 pipeline="$pipeline test_pipeline_harperella test_pipeline_iharperella" ;;
               src/pipeline/inversion.rs)
-                inversion="$inversion test_inversion_tkd test_inversion_tsvd test_inversion_tikhonov test_inversion_tv test_inversion_rts test_inversion_ilsqr test_inversion_medi test_inversion_nltv"
+                inversion="$inversion test_inversion_tkd test_inversion_tsvd test_inversion_tikhonov test_inversion_tv test_inversion_rts test_inversion_ilsqr test_inversion_star test_inversion_medi test_inversion_nltv"
                 combined="$combined test_combined_tgv test_combined_tfi" ;;
               src/pipeline/masking.rs)
                 pipeline="$pipeline test_pipeline_masking test_pipeline_two_pass" ;;
@@ -589,7 +590,7 @@ jobs:
                 fi ;;
               # Test binaries no workflow job runs (reference-parity, local-data and wasm tests):
               # their non-ignored tests run in unit-tests.yml, which every tests/ change selects.
-              tests/amppe_qsmci.rs|tests/chisep_integration.rs|tests/crosscheck.rs|tests/ilsqr_sti_parity.rs) : ;;
+              tests/amppe_qsmci.rs|tests/chisep_integration.rs|tests/crosscheck.rs|tests/ilsqr_sti_parity.rs|tests/star_sti_parity.rs) : ;;
               tests/models_onnx.rs|tests/qsmart_validation.rs|tests/relaxometry_demo.rs|tests/wasm_pipeline.rs) : ;;
               tests/weight_provider.rs|tests/data/*) : ;;
               # Reporting only: how results are drawn and tabled, never what is computed.

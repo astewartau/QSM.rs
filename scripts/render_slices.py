@@ -59,6 +59,7 @@ NAMES = {
     "inversion_amp_pe": "AMP-PE",
     "inversion_lsqr": "LSQR",
     "inversion_heidi": "HEIDI",
+    "inversion_star": "STAR-QSM",
     "inversion_cosmos": "COSMOS",
     # COSMOS over orientations that were co-registered here rather than arriving on one grid.
     "multiorient_register": "COSMOS (co-registered)",
@@ -263,6 +264,7 @@ WINDOWS = {
     "inversion_amp_pe": (-0.1, 0.1),
     "inversion_lsqr": (-0.1, 0.1),
     "inversion_heidi": (-0.1, 0.1),
+    "inversion_star": (-0.1, 0.1),
     "bet": (0, 1),
     "combined_tgv": (-0.1, 0.1),
     "bias_correction": (-0.1, 0.1),  # fallback; before/after rendering uses auto-range
@@ -345,7 +347,7 @@ MONTAGES = [
          "inversion_fansi", "inversion_fansi_tgv"],
         ["inversion_l1qsm", "inversion_whqsm", "inversion_hdqsm", "inversion_amp_pe",
          "inversion_lsqr", "inversion_heidi"],
-        ["inversion_tkd_cropped"],
+        ["inversion_tkd_cropped", "inversion_star"],
         ["dl_qsmgan", "dl_lpcnn", "dl_ir2qsm", "dl_modl_qsm", "dl_xqsm", "dl_qsmnet"],
         ["dl_qsmnet_plus", "dl_nextqsm", "dl_autoqsm", "dl_iqsm", "dl_iqsm_plus"],
         ["inversion_cosmos", "sti_mms"],

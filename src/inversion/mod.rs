@@ -14,6 +14,7 @@
 //! - TGV: Total Generalized Variation (single-step from a field in ppm or one wrapped echo; α in ppm)
 //! - COSMOS: multi-orientation least squares (closed form, well-posed)
 //! - STI: susceptibility tensor imaging (multi-orientation, 6-component tensor)
+//! - STAR-QSM: streaking artifact reduction (STI Suite 3.0's `QSM_star`)
 
 pub mod admm;
 pub mod cosmos;
@@ -27,6 +28,7 @@ pub mod medi;
 pub mod tfi;
 pub mod tgv;
 pub mod ilsqr;
+pub mod star;
 pub mod lsqr_qsm;
 pub mod heidi;
 pub mod ndi;
@@ -78,6 +80,7 @@ pub use ilsqr::{ilsqr, IlsqrParams, DEFAULT_PAD_MM, STI_DEFAULT_PAD_MM, STI_PAD_
 #[cfg(not(target_arch = "wasm32"))]
 #[doc(hidden)]
 pub use ilsqr::{ilsqr_traced, IlsqrTrace};
+pub use star::{star_qsm, StarParams};
 pub use lsqr_qsm::{lsqr_qsm, LsqrQsmParams, RESIDUAL_WEIGHTING_PER_TESLA};
 pub use heidi::{heidi, homogeneity_masks, HeidiParams, HomogeneityMasks};
 pub use ndi::{ndi, NdiParams};
