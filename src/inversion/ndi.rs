@@ -11,8 +11,8 @@
 //! x <- x - tau * D^H(W^2 .* sin(Dx - phase)) - tau*alpha*x
 //!
 //! `W` is the data weight: the magnitude, normalised as in FANSI's in vivo
-//! example (`min(2*mask*mag/max(mag), 1)`), or the mask when there is no
-//! magnitude.
+//! example (`min(2*mask*mag/max(mag), 1)`). The magnitude is required: with a
+//! uniform weight the update can diverge where the phase nears ±π.
 //!
 //! Because the dipole kernel `D` is real, `conj(D) = D` and the adjoint is just
 //! another forward dipole application.
@@ -153,8 +153,7 @@ fn apply_dipole(
 /// # Arguments
 /// * `local_field` - Local field in ppm (nx * ny * nz)
 /// * `mask` - Binary mask (nx * ny * nz), non-zero = inside ROI
-/// * `magnitude` - Magnitude image, the data weight (see module docs); `None` weights every
-///   voxel in the mask by 1
+/// * `magnitude` - Magnitude image, the data weight (see module docs)
 /// * `grid` - Volume grid (dimensions and voxel sizes)
 /// * `bdir` - B0 field direction
 /// * `params` - NDI parameters
@@ -165,7 +164,7 @@ fn apply_dipole(
 pub fn ndi(
     local_field: &[f64],
     mask: &[u8],
-    magnitude: Option<&[f64]>,
+    magnitude: &[f64],
     grid: &Grid,
     bdir: (f64, f64, f64),
     params: &NdiParams,
@@ -179,18 +178,14 @@ pub fn ndi(
     let ppm_to_rad = 2.0 * std::f64::consts::PI * 42.576 * params.b0 * params.te;
     let phase: Vec<f64> = local_field.iter().map(|&f| f * ppm_to_rad).collect();
 
-    // W = min(2*mask*mag/max(mag), 1) (FANSI script_invivo.m), squared as in ndi.m; the mask
-    // when there is no magnitude.
-    let mag_max = magnitude.map_or(0.0, |m| m.iter().cloned().fold(0.0f64, f64::max));
+    // W = min(2*mask*mag/max(mag), 1) (FANSI script_invivo.m), squared as in ndi.m.
+    let mag_max = magnitude.iter().cloned().fold(0.0f64, f64::max);
     let w: Vec<f64> = (0..n)
         .map(|i| {
-            if mask[i] == 0 {
+            if mask[i] == 0 || mag_max <= 0.0 {
                 return 0.0;
             }
-            let v = match magnitude {
-                Some(m) if mag_max > 0.0 => (2.0 * m[i] / mag_max).min(1.0),
-                _ => 1.0,
-            };
+            let v = (2.0 * magnitude[i] / mag_max).min(1.0);
             v * v
         })
         .collect();
@@ -268,7 +263,7 @@ mod tests {
         let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
         let params = NdiParams { max_iter: 20, ..Default::default() };
 
-        let chi = ndi(&field, &mask, None, &grid, (0.0, 0.0, 1.0), &params, |_, _| {});
+        let chi = ndi(&field, &mask, &vec![1.0; n * n * n], &grid, (0.0, 0.0, 1.0), &params, |_, _| {});
 
         for &val in chi.iter() {
             assert!(val.abs() < 1e-6, "Zero field should give zero chi, got {}", val);
@@ -284,7 +279,7 @@ mod tests {
         let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
         let params = NdiParams { max_iter: 20, ..Default::default() };
 
-        let chi = ndi(&field, &mask, None, &grid, (0.0, 0.0, 1.0), &params, |_, _| {});
+        let chi = ndi(&field, &mask, &vec![1.0; n * n * n], &grid, (0.0, 0.0, 1.0), &params, |_, _| {});
 
         for (i, &val) in chi.iter().enumerate() {
             assert!(val.is_finite(), "Chi should be finite at index {}", i);
