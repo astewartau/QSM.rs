@@ -31,7 +31,8 @@
 //!
 //! `W = lambda * min(2*mask*mag/max(mag), 1)`: the magnitude in [0, 1] as in
 //! FANSI's in vivo example, scaled by lambda (nlL1TV.m: "lambda*magnitude_data
-//! or lambda*mask"); `lambda * mask` without a magnitude.
+//! or lambda*mask"). The magnitude is required: with a flat (mask) weight the
+//! nonlinear data term can diverge where the phase nears +-pi.
 //!
 //! The finite differences are FANSI's, on unit spacing whatever the voxel size.
 
@@ -56,7 +57,7 @@ pub struct L1QsmParams {
     /// L1 proximal ADMM weight.
     pub mu3: f64,
     /// Phase-rejection strength: the data weight is `lambda` times the normalised
-    /// magnitude (or the mask). Smaller values reject more inconsistent voxels.
+    /// magnitude. Smaller values reject more inconsistent voxels.
     pub lambda: f64,
     /// Number of outer ADMM iterations.
     pub max_iter: usize,
@@ -97,8 +98,7 @@ fn norm2(v: &[f64]) -> f64 {
 /// # Arguments
 /// * `local_field` - Local field in ppm (nx * ny * nz).
 /// * `mask` - Binary mask (nx * ny * nz), non-zero = inside ROI.
-/// * `magnitude` - Magnitude image for the data weight (see module docs); `None`
-///   weights every voxel in the mask by `lambda`.
+/// * `magnitude` - Magnitude image, the data weight (see module docs).
 /// * `grid` - Volume grid (dimensions and voxel sizes).
 /// * `bdir` - B0 field direction.
 /// * `params` - L1-QSM parameters.
@@ -109,7 +109,7 @@ fn norm2(v: &[f64]) -> f64 {
 pub fn l1qsm(
     local_field: &[f64],
     mask: &[u8],
-    magnitude: Option<&[f64]>,
+    magnitude: &[f64],
     grid: &Grid,
     bdir: (f64, f64, f64),
     params: &L1QsmParams,
@@ -388,7 +388,7 @@ mod tests {
             ..L1QsmParams::default()
         };
 
-        let chi = l1qsm(&field, &mask, None, &grid, (0.0, 0.0, 1.0), &params, |_, _| {});
+        let chi = l1qsm(&field, &mask, &mask.iter().map(|_| 1.0).collect::<Vec<f64>>(), &grid, (0.0, 0.0, 1.0), &params, |_, _| {});
 
         for &val in chi.iter() {
             assert!(val.abs() < 1e-6, "Zero field should give ~zero chi, got {}", val);
@@ -407,7 +407,7 @@ mod tests {
             ..L1QsmParams::default()
         };
 
-        let chi = l1qsm(&field, &mask, None, &grid, (0.0, 0.0, 1.0), &params, |_, _| {});
+        let chi = l1qsm(&field, &mask, &mask.iter().map(|_| 1.0).collect::<Vec<f64>>(), &grid, (0.0, 0.0, 1.0), &params, |_, _| {});
 
         for (i, &val) in chi.iter().enumerate() {
             assert!(val.is_finite(), "Chi should be finite at index {}", i);

@@ -236,17 +236,15 @@ pub fn fansi_ppm_to_rad(b0: f64, te: f64) -> f64 {
 }
 
 /// FANSI's data weight from the magnitude, as in its in vivo example (script_invivo.m):
-/// `min(2*mask*mag/max(mag), 1)`. Without a magnitude it is the mask.
-pub fn fansi_magnitude_weight(mask: &[u8], magnitude: Option<&[f64]>) -> Vec<f64> {
-    let mag_max = magnitude.map_or(0.0, |m| m.iter().cloned().fold(0.0f64, f64::max));
+/// `min(2*mask*mag/max(mag), 1)`.
+pub fn fansi_magnitude_weight(mask: &[u8], magnitude: &[f64]) -> Vec<f64> {
+    let mag_max = magnitude.iter().cloned().fold(0.0f64, f64::max);
     (0..mask.len())
         .map(|i| {
-            if mask[i] == 0 {
-                return 0.0;
-            }
-            match magnitude {
-                Some(m) if mag_max > 0.0 => (2.0 * m[i] / mag_max).min(1.0),
-                _ => 1.0,
+            if mask[i] == 0 || mag_max <= 0.0 {
+                0.0
+            } else {
+                (2.0 * magnitude[i] / mag_max).min(1.0)
             }
         })
         .collect()

@@ -27,7 +27,9 @@
 //!
 //! The data weight is the magnitude, normalised as in FANSI's in vivo example
 //! (`min(2*mask*mag/max(mag), 1)`), and squared as nlTV.m/nlTGV.m square
-//! `params.weight`; the mask without a magnitude.
+//! `params.weight`. The magnitude is required: with a flat (mask) weight, the Newton
+//! step's denominator `W*cos(z2 - phase) + mu2` reaches 0 where the phase nears +-pi
+//! and the solver diverges (as nlTV.m does).
 //!
 //! The finite differences are FANSI's, on unit spacing whatever the voxel size.
 
@@ -95,7 +97,7 @@ impl FansiParams {
 fn phase_and_weight(
     local_field: &[f64],
     mask: &[u8],
-    magnitude: Option<&[f64]>,
+    magnitude: &[f64],
     params: &FansiParams,
 ) -> (f64, Vec<f64>, Vec<f64>) {
     let ppm_to_rad = fansi_ppm_to_rad(params.b0, params.te);
@@ -114,8 +116,7 @@ fn norm2(v: &[f64]) -> f64 {
 /// # Arguments
 /// * `local_field` - Local field in ppm (nx * ny * nz).
 /// * `mask` - Binary mask (nx * ny * nz), non-zero = inside ROI.
-/// * `magnitude` - Magnitude image, the data weight (see module docs); `None` weights
-///   every voxel in the mask by 1.
+/// * `magnitude` - Magnitude image, the data weight (see module docs).
 /// * `grid` - Volume grid (dimensions and voxel sizes).
 /// * `bdir` - B0 field direction.
 /// * `params` - FANSI parameters (`is_tgv` selects nlTGV vs nlTV).
@@ -126,7 +127,7 @@ fn norm2(v: &[f64]) -> f64 {
 pub fn fansi(
     local_field: &[f64],
     mask: &[u8],
-    magnitude: Option<&[f64]>,
+    magnitude: &[f64],
     grid: &Grid,
     bdir: (f64, f64, f64),
     params: &FansiParams,
@@ -143,7 +144,7 @@ pub fn fansi(
 fn nltv(
     local_field: &[f64],
     mask: &[u8],
-    magnitude: Option<&[f64]>,
+    magnitude: &[f64],
     grid: &Grid,
     bdir: (f64, f64, f64),
     params: &FansiParams,
@@ -340,7 +341,7 @@ fn spectral_mul_assign(dst: &mut [Complex64], m: &[Complex64]) {
 fn nltgv(
     local_field: &[f64],
     mask: &[u8],
-    magnitude: Option<&[f64]>,
+    magnitude: &[f64],
     grid: &Grid,
     bdir: (f64, f64, f64),
     params: &FansiParams,
@@ -881,7 +882,7 @@ mod tests {
             ..FansiParams::default()
         };
 
-        let chi = fansi(&field, &mask, None, &grid, (0.0, 0.0, 1.0), &params, |_, _| {});
+        let chi = fansi(&field, &mask, &mask.iter().map(|_| 1.0).collect::<Vec<f64>>(), &grid, (0.0, 0.0, 1.0), &params, |_, _| {});
 
         for &val in chi.iter() {
             assert!(val.abs() < 1e-6, "Zero field should give ~zero chi, got {}", val);
@@ -901,7 +902,7 @@ mod tests {
             ..FansiParams::default()
         };
 
-        let chi = fansi(&field, &mask, None, &grid, (0.0, 0.0, 1.0), &params, |_, _| {});
+        let chi = fansi(&field, &mask, &mask.iter().map(|_| 1.0).collect::<Vec<f64>>(), &grid, (0.0, 0.0, 1.0), &params, |_, _| {});
 
         for (i, &val) in chi.iter().enumerate() {
             assert!(val.is_finite(), "Chi should be finite at index {}", i);
@@ -921,7 +922,7 @@ mod tests {
             ..FansiParams::default()
         };
 
-        let chi = fansi(&field, &mask, None, &grid, (0.0, 0.0, 1.0), &params, |_, _| {});
+        let chi = fansi(&field, &mask, &mask.iter().map(|_| 1.0).collect::<Vec<f64>>(), &grid, (0.0, 0.0, 1.0), &params, |_, _| {});
 
         for &val in chi.iter() {
             assert!(val.abs() < 1e-6, "Zero field should give ~zero chi, got {}", val);
@@ -941,7 +942,7 @@ mod tests {
             ..FansiParams::default()
         };
 
-        let chi = fansi(&field, &mask, None, &grid, (0.0, 0.0, 1.0), &params, |_, _| {});
+        let chi = fansi(&field, &mask, &mask.iter().map(|_| 1.0).collect::<Vec<f64>>(), &grid, (0.0, 0.0, 1.0), &params, |_, _| {});
 
         for (i, &val) in chi.iter().enumerate() {
             assert!(val.is_finite(), "Chi should be finite at index {}", i);

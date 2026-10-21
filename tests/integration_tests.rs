@@ -845,7 +845,7 @@ fn test_inversion_fansi() {
         is_tgv: false, b0: data.field_strength, te: data.echo_times[0], ..FansiParams::default()
     };
     let (result, elapsed) = run_timed!("FANSI-nlTV", inversion::fansi(
-        &data.fieldmap_local, &data.mask, Some(&data.mag_echoes[0]), &grid, data.b0_dir, &params, |_, _| {},
+        &data.fieldmap_local, &data.mask, &data.mag_echoes[0], &grid, data.b0_dir, &params, |_, _| {},
     ));
 
     let res = TestResult::new("FANSI (nlTV)", &result, &data.chi, &data.mask, data.dims);
@@ -877,7 +877,7 @@ fn test_inversion_fansi_tgv() {
         ..FansiParams::default()
     };
     let (result, elapsed) = run_timed!("FANSI-nlTGV", inversion::fansi(
-        &data.fieldmap_local, &data.mask, Some(&data.mag_echoes[0]), &grid, data.b0_dir, &params, |_, _| {},
+        &data.fieldmap_local, &data.mask, &data.mag_echoes[0], &grid, data.b0_dir, &params, |_, _| {},
     ));
 
     let res = TestResult::new("FANSI (nlTGV)", &result, &data.chi, &data.mask, data.dims);
@@ -902,7 +902,7 @@ fn test_inversion_l1qsm() {
 
     let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
     let (result, elapsed) = run_timed!("L1-QSM", inversion::l1qsm(
-        &data.fieldmap_local, &data.mask, Some(&data.mag_echoes[0]), &grid, data.b0_dir,
+        &data.fieldmap_local, &data.mask, &data.mag_echoes[0], &grid, data.b0_dir,
         &L1QsmParams { b0: data.field_strength, te: data.echo_times[0], ..L1QsmParams::default() },
         |_, _| {},
     ));
