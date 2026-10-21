@@ -5,39 +5,59 @@
 //!
 //! min_x  || W .* ( exp(i * D x) - exp(i * phi) ) ||_1  +  alpha1 * ||grad(x)||_1
 //!
-//! where `D` is the dipole operator, `phi` is the (scaled) local field phase,
-//! and `W = lambda * mask`. The nonlinear fidelity is linearized around the
-//! current auxiliary phase and solved with an inner complex-argument Newton
-//! iteration, all embedded in an ADMM splitting.
+//! where `D` is the dipole operator and `phi` the local field phase in radians.
+//! The nonlinear fidelity is linearized around the current auxiliary phase and
+//! solved with an inner complex-argument Newton iteration, all embedded in an
+//! ADMM splitting.
 //!
 //! Reference:
-//! Milovic, C., Tejos, C., Acosta-Cabronero, J., et al. (2022).
-//! "The 2016 QSM Challenge: L1-QSM and PI-QSM — comparison of nonlinear
-//! L1 and phase-integral data-fidelity QSM reconstructions."
-//! Magnetic Resonance in Medicine (MRM), 2022.
+//! Milovic C, Lambert M, Langkammer C, Bredies K, Irarrazaval P, Tejos C.
+//! "Streaking artifact suppression of quantitative susceptibility mapping
+//! reconstructions via L1-norm data fidelity optimization (L1-QSM)."
+//! Magnetic Resonance in Medicine, 2022;87:457-473.
+//! https://doi.org/10.1002/mrm.28957
 //!
 //! Ported from the FANSI toolbox `nlL1TV.m`
 //! (https://gitlab.com/cmilovic/FANSI-toolbox).
+//!
+//! # Units and weights
+//! Like the other inversions, L1-QSM takes the local field in ppm and returns ppm.
+//! nlL1TV.m works on the phase in radians, so the field is converted with
+//! `2*pi*gamma*b0*te` first and the result converted back at the end. The
+//! scale matters here: the L1 proximal step thresholds `|exp(i*Dx) - exp(i*phi)|`
+//! at `W/mu3`, so in ppm every residual falls below it and the data are fitted
+//! exactly. `b0` and `te` are scan parameters that the pipeline fills from
+//! metadata.
+//!
+//! `W = lambda * min(2*mask*mag/max(mag), 1)`: the magnitude in [0, 1] as in
+//! FANSI's in vivo example, scaled by lambda (nlL1TV.m: "lambda*magnitude_data
+//! or lambda*mask"). The magnitude is required: with a flat (mask) weight the
+//! nonlinear data term can diverge where the phase nears +-pi.
+//!
+//! The finite differences are FANSI's, on unit spacing whatever the voxel size.
 
-use crate::inversion::admm::prepare_fansi_spectral;
+use crate::inversion::admm::{fansi_magnitude_weight, fansi_ppm_to_rad, fansi_unit_ee2, prepare_fansi_spectral};
 use crate::utils::gradient::{bdiv_inplace, fgrad_inplace};
 use crate::utils::{apply_mask_zero, shrink};
 use crate::Grid;
 use num_complex::Complex64;
 
-/// L1-QSM algorithm parameters.
+/// L1-QSM algorithm parameters (FANSI `nlL1TV.m` defaults where it has them).
 #[cfg_attr(feature = "introspection", derive(serde::Serialize))]
 #[derive(Clone, Debug)]
 pub struct L1QsmParams {
-    /// Gradient (TV) L1 penalty weight.
+    /// Gradient (TV) L1 penalty weight. nlL1TV.m gives no default, and FANSI's example says
+    /// L1-QSM needs its own tuning. The default 5e-3 was chosen from an alpha1 sweep on the
+    /// EMTP travelling-head data: 2e-4 streaks, 1e-2 starts to oversmooth.
     pub alpha1: f64,
-    /// Gradient-consistency ADMM weight (typically 100 * alpha1).
-    pub mu1: f64,
+    /// Gradient-consistency ADMM weight; `None` is nlL1TV.m's `100 * alpha1`.
+    pub mu1: Option<f64>,
     /// Fidelity-consistency ADMM weight.
     pub mu2: f64,
     /// L1 proximal ADMM weight.
     pub mu3: f64,
-    /// L1 fidelity strength; effective weight is `lambda * mask`.
+    /// Phase-rejection strength: the data weight is `lambda` times the normalised
+    /// magnitude. Smaller values reject more inconsistent voxels.
     pub lambda: f64,
     /// Number of outer ADMM iterations.
     pub max_iter: usize,
@@ -45,22 +65,25 @@ pub struct L1QsmParams {
     pub tol_update: f64,
     /// Inner Newton convergence tolerance.
     pub tol_delta: f64,
-    /// ppm -> working (phase) scale applied to the input local field.
-    pub phase_scale: f64,
+    /// Field strength in Tesla (scan parameter, for the radian conversion)
+    pub b0: f64,
+    /// Echo time in seconds (scan parameter, for the radian conversion)
+    pub te: f64,
 }
 
 impl Default for L1QsmParams {
     fn default() -> Self {
         Self {
-            alpha1: 2e-4,
-            mu1: 2e-2,
+            alpha1: 5e-3,
+            mu1: None,
             mu2: 1.0,
             mu3: 1.0,
             lambda: 1.0,
             max_iter: 50,
             tol_update: 1.0,
             tol_delta: 1e-6,
-            phase_scale: 1.0,
+            b0: 3.0,
+            te: 0.02,
         }
     }
 }
@@ -73,18 +96,20 @@ fn norm2(v: &[f64]) -> f64 {
 /// L1-QSM nonlinear dipole inversion.
 ///
 /// # Arguments
-/// * `local_field` - Local field values, ppm-scale (nx * ny * nz).
+/// * `local_field` - Local field in ppm (nx * ny * nz).
 /// * `mask` - Binary mask (nx * ny * nz), non-zero = inside ROI.
+/// * `magnitude` - Magnitude image, the data weight (see module docs).
 /// * `grid` - Volume grid (dimensions and voxel sizes).
 /// * `bdir` - B0 field direction.
 /// * `params` - L1-QSM parameters.
 /// * `progress` - Progress callback `(iteration, max_iter)`.
 ///
 /// # Returns
-/// Estimated susceptibility map (ppm-scale), masked to the ROI.
+/// Susceptibility map in ppm, masked to the ROI.
 pub fn l1qsm(
     local_field: &[f64],
     mask: &[u8],
+    magnitude: &[f64],
     grid: &Grid,
     bdir: (f64, f64, f64),
     params: &L1QsmParams,
@@ -92,13 +117,18 @@ pub fn l1qsm(
 ) -> Vec<f64> {
     let n = grid.n_total();
 
-    let (mut fft_ws, k, ee2) = prepare_fansi_spectral(grid, bdir);
+    let (mut fft_ws, k, _) = prepare_fansi_spectral(grid, bdir);
+    // FANSI's E1..E3 are unit-spacing differences.
+    let ee2 = fansi_unit_ee2(grid.dims);
+    let ugrid = Grid::new(grid.nx(), grid.ny(), grid.nz(), 1.0, 1.0, 1.0);
+    let grid = &ugrid;
 
-    // Scaled phase and L1 fidelity weight W = lambda * mask.
-    let phase: Vec<f64> = local_field.iter().map(|&f| f * params.phase_scale).collect();
-    let w: Vec<f64> = mask
-        .iter()
-        .map(|&m| if m != 0 { params.lambda } else { 0.0 })
+    // ppm -> radians, as nlL1TV.m expects; W = lambda * normalised magnitude (or mask).
+    let ppm_to_rad = fansi_ppm_to_rad(params.b0, params.te);
+    let phase: Vec<f64> = local_field.iter().map(|&f| f * ppm_to_rad).collect();
+    let w: Vec<f64> = fansi_magnitude_weight(mask, magnitude)
+        .into_iter()
+        .map(|v| params.lambda * v)
         .collect();
 
     // IS = exp(1i * phase)
@@ -107,7 +137,7 @@ pub fn l1qsm(
         .map(|&p| Complex64::new(p.cos(), p.sin()))
         .collect();
 
-    let mu1 = params.mu1;
+    let mu1 = params.mu1.unwrap_or(100.0 * params.alpha1);
     let mu2 = params.mu2;
     let mu3 = params.mu3;
     let alpha_over_mu = params.alpha1 / mu1;
@@ -197,16 +227,14 @@ pub fn l1qsm(
         }
 
         // ---- convergence check (percent update) ---------------------------
-        let xnorm = norm2(&x);
-        if xnorm > 0.0 {
-            for i in 0..n {
-                diff[i] = x[i] - x_prev[i];
-            }
-            let x_update = 100.0 * norm2(&diff) / xnorm;
-            if x_update < params.tol_update || x_update.is_nan() {
-                progress(t + 1, t + 1);
-                break;
-            }
+        // As nlL1TV.m, a zero solution gives NaN and stops.
+        for i in 0..n {
+            diff[i] = x[i] - x_prev[i];
+        }
+        let x_update = 100.0 * norm2(&diff) / norm2(&x);
+        if x_update < params.tol_update || x_update.is_nan() {
+            progress(t + 1, t + 1);
+            break;
         }
 
         if t + 1 >= params.max_iter {
@@ -335,11 +363,9 @@ pub fn l1qsm(
         }
     }
 
-    // Undo working-scale so the output is ppm-scale.
-    if params.phase_scale != 1.0 {
-        for v in &mut x {
-            *v /= params.phase_scale;
-        }
+    // Back to ppm.
+    for v in &mut x {
+        *v /= ppm_to_rad;
     }
 
     apply_mask_zero(&mut x, mask);
@@ -362,7 +388,7 @@ mod tests {
             ..L1QsmParams::default()
         };
 
-        let chi = l1qsm(&field, &mask, &grid, (0.0, 0.0, 1.0), &params, |_, _| {});
+        let chi = l1qsm(&field, &mask, &mask.iter().map(|_| 1.0).collect::<Vec<f64>>(), &grid, (0.0, 0.0, 1.0), &params, |_, _| {});
 
         for &val in chi.iter() {
             assert!(val.abs() < 1e-6, "Zero field should give ~zero chi, got {}", val);
@@ -381,7 +407,7 @@ mod tests {
             ..L1QsmParams::default()
         };
 
-        let chi = l1qsm(&field, &mask, &grid, (0.0, 0.0, 1.0), &params, |_, _| {});
+        let chi = l1qsm(&field, &mask, &mask.iter().map(|_| 1.0).collect::<Vec<f64>>(), &grid, (0.0, 0.0, 1.0), &params, |_, _| {});
 
         for (i, &val) in chi.iter().enumerate() {
             assert!(val.is_finite(), "Chi should be finite at index {}", i);

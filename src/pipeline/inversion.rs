@@ -172,22 +172,38 @@ pub fn run_dipole_inversion(
                 field_ppm, mask, magnitude, &grid, bdir, &params, progress,
             )
         }
-        InversionAlgorithm::Fansi => {
-            let params = crate::inversion::FansiParams { is_tgv: false, ..config.fansi.clone() };
-            crate::inversion::fansi(
-                field_ppm, mask, &grid, bdir, &params, progress,
-            )
-        }
-        InversionAlgorithm::FansiTgv => {
-            let params = crate::inversion::FansiParams { is_tgv: true, ..config.fansi.clone() };
-            crate::inversion::fansi(
-                field_ppm, mask, &grid, bdir, &params, progress,
-            )
-        }
-        InversionAlgorithm::L1qsm => {
-            crate::inversion::l1qsm(
-                field_ppm, mask, &grid, bdir, &config.l1qsm, progress,
-            )
+        InversionAlgorithm::Fansi | InversionAlgorithm::FansiTgv | InversionAlgorithm::L1qsm => {
+            // FANSI nlTV/nlTGV and L1-QSM take ppm like the others and convert to radians
+            // themselves. Field strength and echo time (the first, as for NDI) are scan
+            // parameters from metadata. The magnitude is the data weight and is required:
+            // with a flat weight these solvers can diverge.
+            let magnitude = magnitude.ok_or_else(|| {
+                PipelineError::InvalidInput(format!(
+                    "{:?} requires magnitude data (its data weight)", config.algorithm
+                ))
+            })?;
+            let b0 = metadata.field_strength;
+            let te = metadata.echo_times.first().copied();
+            if config.algorithm == InversionAlgorithm::L1qsm {
+                let params = crate::inversion::L1QsmParams {
+                    b0,
+                    te: te.unwrap_or(config.l1qsm.te),
+                    ..config.l1qsm.clone()
+                };
+                crate::inversion::l1qsm(
+                    field_ppm, mask, magnitude, &grid, bdir, &params, progress,
+                )
+            } else {
+                let params = crate::inversion::FansiParams {
+                    b0,
+                    te: te.unwrap_or(config.fansi.te),
+                    is_tgv: config.algorithm == InversionAlgorithm::FansiTgv,
+                    ..config.fansi.clone()
+                };
+                crate::inversion::fansi(
+                    field_ppm, mask, magnitude, &grid, bdir, &params, progress,
+                )
+            }
         }
         InversionAlgorithm::Whqsm => {
             crate::inversion::whqsm(
@@ -924,6 +940,26 @@ mod tests {
         let config = InversionConfig { algorithm: InversionAlgorithm::Star, ..Default::default() };
         let r = run_dipole_inversion(&[0.01; 512], &[1u8; 512], &meta, &config, None, &mut |_, _| {});
         assert!(matches!(r, Err(PipelineError::InvalidConfig(_))));
+    }
+
+    #[test]
+    fn test_fansi_family_requires_magnitude() {
+        let meta = ScanMetadata {
+            dims: (8, 8, 8), voxel_size: (1.0, 1.0, 1.0),
+            echo_times: vec![0.005], field_strength: 3.0, b0_direction: (0.0, 0.0, 1.0),
+            slice_geometry: None,
+            affine: None,
+        };
+        for algorithm in [InversionAlgorithm::Fansi, InversionAlgorithm::FansiTgv, InversionAlgorithm::L1qsm] {
+            let mut config = InversionConfig { algorithm, ..Default::default() };
+            config.fansi.max_iter = 2;
+            config.l1qsm.max_iter = 2;
+            let r = run_dipole_inversion(&[0.01; 512], &[1u8; 512], &meta, &config, None, &mut |_, _| {});
+            assert!(matches!(r, Err(PipelineError::InvalidInput(_))), "{algorithm:?} ran without magnitude");
+            let mag = [1.0; 512];
+            let r = run_dipole_inversion(&[0.01; 512], &[1u8; 512], &meta, &config, Some(&mag), &mut |_, _| {});
+            assert!(r.is_ok(), "{algorithm:?} failed with magnitude");
+        }
     }
 
     #[test]

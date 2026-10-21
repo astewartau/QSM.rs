@@ -18,43 +18,53 @@
 //! Ported faithfully from the FANSI toolbox `nlTV.m` and `nlTGV.m`
 //! (<https://gitlab.com/cmilovic/FANSI-toolbox>).
 //!
-//! # Units / `phase_scale`
-//! The FANSI fidelity is a *phase* (radians) model: `sin(z2 - phase)`. If the
-//! input `local_field` is already radians, use `phase_scale = 1.0`. If it is
-//! ppm-scale, `phase_scale` should convert ppm -> radians (`2*pi*gamma*B0*TE`);
-//! the returned map is divided by `phase_scale` so it is expressed on the same
-//! scale as the input field.
+//! # Units and weights
+//! Like the other inversions, these take the local field in ppm and return ppm.
+//! nlTV.m and nlTGV.m work on the phase in radians, so the field is converted
+//! with `2*pi*gamma*b0*te` first and the result converted back at the end; left
+//! in ppm, `sin(x) ~ x` and the data term is not nonlinear. `b0` and `te` are
+//! scan parameters that the pipeline fills from metadata.
+//!
+//! The data weight is the magnitude, normalised as in FANSI's in vivo example
+//! (`min(2*mask*mag/max(mag), 1)`), and squared as nlTV.m/nlTGV.m square
+//! `params.weight`. The magnitude is required: with a flat (mask) weight, the Newton
+//! step's denominator `W*cos(z2 - phase) + mu2` reaches 0 where the phase nears +-pi
+//! and the solver diverges (as nlTV.m does).
+//!
+//! The finite differences are FANSI's, on unit spacing whatever the voxel size.
 
-use crate::inversion::admm::prepare_fansi_spectral;
+use crate::inversion::admm::{fansi_magnitude_weight, fansi_ppm_to_rad, fansi_unit_ee2, prepare_fansi_spectral};
 use crate::utils::gradient::{bdiv_inplace, fgrad_inplace};
 use crate::utils::{apply_mask_zero, shrink};
 use crate::Grid;
 use num_complex::Complex64;
 use std::f64::consts::PI;
 
-/// FANSI nlTV/nlTGV parameters.
+/// FANSI nlTV/nlTGV parameters (nlTV.m / nlTGV.m defaults where they have them).
 #[cfg_attr(feature = "introspection", derive(serde::Serialize))]
 #[derive(Clone, Debug)]
 pub struct FansiParams {
     /// First-order (TV / TGV gradient) L1 penalty weight.
     pub alpha1: f64,
-    /// Gradient-consistency ADMM weight.
-    pub mu1: f64,
+    /// Gradient-consistency ADMM weight; `None` is FANSI's `100 * alpha1`.
+    pub mu1: Option<f64>,
     /// Fidelity-consistency ADMM weight.
     pub mu2: f64,
-    /// Second-order (symmetric-gradient) L1 penalty weight (nlTGV only).
-    pub alpha0: f64,
-    /// Second-order consistency ADMM weight (nlTGV only).
-    pub mu0: f64,
+    /// Second-order (symmetric-gradient) L1 penalty weight (nlTGV only); `None` is
+    /// nlTGV.m's `2 * alpha1`.
+    pub alpha0: Option<f64>,
+    /// Second-order consistency ADMM weight (nlTGV only); `None` is nlTGV.m's `2 * mu1`.
+    pub mu0: Option<f64>,
     /// Number of outer ADMM iterations.
     pub max_iter: usize,
     /// Percent-update convergence stopping tolerance.
     pub tol_update: f64,
     /// Inner Newton convergence tolerance.
     pub tol_delta: f64,
-    /// Working (phase) scale applied to the input local field; output is divided
-    /// by it. Use 1.0 for radians input, ppm->radians factor for ppm input.
-    pub phase_scale: f64,
+    /// Field strength in Tesla (scan parameter, for the radian conversion)
+    pub b0: f64,
+    /// Echo time in seconds (scan parameter, for the radian conversion)
+    pub te: f64,
     /// Select nlTGV (`true`) or nlTV (`false`).
     pub is_tgv: bool,
 }
@@ -63,17 +73,37 @@ impl Default for FansiParams {
     fn default() -> Self {
         Self {
             alpha1: 2e-4,
-            mu1: 2e-2,
+            mu1: None,
             mu2: 1.0,
-            alpha0: 4e-4,
-            mu0: 4e-2,
+            alpha0: None,
+            mu0: None,
             max_iter: 150,
             tol_update: 0.1,
             tol_delta: 1e-6,
-            phase_scale: 1.0,
+            b0: 3.0,
+            te: 0.02,
             is_tgv: false,
         }
     }
+}
+
+impl FansiParams {
+    fn mu1(&self) -> f64 {
+        self.mu1.unwrap_or(100.0 * self.alpha1)
+    }
+}
+
+/// ppm -> radians, and the squared data weight (see module docs).
+fn phase_and_weight(
+    local_field: &[f64],
+    mask: &[u8],
+    magnitude: &[f64],
+    params: &FansiParams,
+) -> (f64, Vec<f64>, Vec<f64>) {
+    let ppm_to_rad = fansi_ppm_to_rad(params.b0, params.te);
+    let phase = local_field.iter().map(|&f| f * ppm_to_rad).collect();
+    let w = fansi_magnitude_weight(mask, magnitude).into_iter().map(|v| v * v).collect();
+    (ppm_to_rad, phase, w)
 }
 
 /// L2 norm of a real slice.
@@ -84,27 +114,29 @@ fn norm2(v: &[f64]) -> f64 {
 /// FANSI nlTV/nlTGV dipole inversion.
 ///
 /// # Arguments
-/// * `local_field` - Local field values (nx * ny * nz).
+/// * `local_field` - Local field in ppm (nx * ny * nz).
 /// * `mask` - Binary mask (nx * ny * nz), non-zero = inside ROI.
+/// * `magnitude` - Magnitude image, the data weight (see module docs).
 /// * `grid` - Volume grid (dimensions and voxel sizes).
 /// * `bdir` - B0 field direction.
 /// * `params` - FANSI parameters (`is_tgv` selects nlTGV vs nlTV).
 /// * `progress` - Progress callback `(iteration, max_iter)`.
 ///
 /// # Returns
-/// Estimated susceptibility map, masked to the ROI.
+/// Susceptibility map in ppm, masked to the ROI.
 pub fn fansi(
     local_field: &[f64],
     mask: &[u8],
+    magnitude: &[f64],
     grid: &Grid,
     bdir: (f64, f64, f64),
     params: &FansiParams,
     progress: impl FnMut(usize, usize),
 ) -> Vec<f64> {
     if params.is_tgv {
-        nltgv(local_field, mask, grid, bdir, params, progress)
+        nltgv(local_field, mask, magnitude, grid, bdir, params, progress)
     } else {
-        nltv(local_field, mask, grid, bdir, params, progress)
+        nltv(local_field, mask, magnitude, grid, bdir, params, progress)
     }
 }
 
@@ -112,6 +144,7 @@ pub fn fansi(
 fn nltv(
     local_field: &[f64],
     mask: &[u8],
+    magnitude: &[f64],
     grid: &Grid,
     bdir: (f64, f64, f64),
     params: &FansiParams,
@@ -119,13 +152,15 @@ fn nltv(
 ) -> Vec<f64> {
     let n = grid.n_total();
 
-    let (mut fft_ws, k, ee2) = prepare_fansi_spectral(grid, bdir);
+    let (mut fft_ws, k, _) = prepare_fansi_spectral(grid, bdir);
+    // FANSI's E1..E3 are unit-spacing differences.
+    let ee2 = fansi_unit_ee2(grid.dims);
+    let ugrid = Grid::new(grid.nx(), grid.ny(), grid.nz(), 1.0, 1.0, 1.0);
+    let grid = &ugrid;
 
-    // Scaled phase and W = mask (0/1 weight).
-    let phase: Vec<f64> = local_field.iter().map(|&f| f * params.phase_scale).collect();
-    let w: Vec<f64> = mask.iter().map(|&m| if m != 0 { 1.0 } else { 0.0 }).collect();
+    let (ppm_to_rad, phase, w) = phase_and_weight(local_field, mask, magnitude, params);
 
-    let mu1 = params.mu1;
+    let mu1 = params.mu1();
     let mu2 = params.mu2;
     let alpha_over_mu = params.alpha1 / mu1;
 
@@ -211,16 +246,14 @@ fn nltv(
         }
 
         // ---- convergence check --------------------------------------------
-        let xnorm = norm2(&x);
-        if xnorm > 0.0 {
-            for i in 0..n {
-                diff[i] = x[i] - x_prev[i];
-            }
-            let x_update = 100.0 * norm2(&diff) / xnorm;
-            if x_update < params.tol_update || x_update.is_nan() {
-                progress(t + 1, t + 1);
-                break;
-            }
+        // As nlTV.m, a zero solution gives NaN and stops.
+        for i in 0..n {
+            diff[i] = x[i] - x_prev[i];
+        }
+        let x_update = 100.0 * norm2(&diff) / norm2(&x);
+        if x_update < params.tol_update || x_update.is_nan() {
+            progress(t + 1, t + 1);
+            break;
         }
 
         if t + 1 >= params.max_iter {
@@ -282,10 +315,9 @@ fn nltv(
         }
     }
 
-    if params.phase_scale != 1.0 {
-        for v in &mut x {
-            *v /= params.phase_scale;
-        }
+    // Back to ppm.
+    for v in &mut x {
+        *v /= ppm_to_rad;
     }
 
     apply_mask_zero(&mut x, mask);
@@ -309,6 +341,7 @@ fn spectral_mul_assign(dst: &mut [Complex64], m: &[Complex64]) {
 fn nltgv(
     local_field: &[f64],
     mask: &[u8],
+    magnitude: &[f64],
     grid: &Grid,
     bdir: (f64, f64, f64),
     params: &FansiParams,
@@ -342,11 +375,11 @@ fn nltgv(
         }
     }
 
-    let phase: Vec<f64> = local_field.iter().map(|&f| f * params.phase_scale).collect();
-    let w: Vec<f64> = mask.iter().map(|&m| if m != 0 { 1.0 } else { 0.0 }).collect();
+    let (ppm_to_rad, phase, w) = phase_and_weight(local_field, mask, magnitude, params);
 
-    let mu0 = params.mu0;
-    let mu1 = params.mu1;
+    let mu1 = params.mu1();
+    let mu0 = params.mu0.unwrap_or(2.0 * mu1);
+    let alpha0 = params.alpha0.unwrap_or(2.0 * params.alpha1);
     let mu2 = params.mu2;
 
     // Precompute per-voxel normal-equation cofactors (all complex).
@@ -539,7 +572,7 @@ fn nltgv(
     let mut s2 = vec![0.0f64; n];
 
     let alpha1_over_mu1 = params.alpha1 / mu1;
-    let alpha0_over_mu0 = params.alpha0 / mu0;
+    let alpha0_over_mu0 = alpha0 / mu0;
 
     // Reusable complex/real buffers.
     let mut rhs1 = vec![Complex64::new(0.0, 0.0); n];
@@ -823,10 +856,9 @@ fn nltgv(
         }
     }
 
-    if params.phase_scale != 1.0 {
-        for v in &mut x {
-            *v /= params.phase_scale;
-        }
+    // Back to ppm.
+    for v in &mut x {
+        *v /= ppm_to_rad;
     }
 
     apply_mask_zero(&mut x, mask);
@@ -850,7 +882,7 @@ mod tests {
             ..FansiParams::default()
         };
 
-        let chi = fansi(&field, &mask, &grid, (0.0, 0.0, 1.0), &params, |_, _| {});
+        let chi = fansi(&field, &mask, &mask.iter().map(|_| 1.0).collect::<Vec<f64>>(), &grid, (0.0, 0.0, 1.0), &params, |_, _| {});
 
         for &val in chi.iter() {
             assert!(val.abs() < 1e-6, "Zero field should give ~zero chi, got {}", val);
@@ -870,7 +902,7 @@ mod tests {
             ..FansiParams::default()
         };
 
-        let chi = fansi(&field, &mask, &grid, (0.0, 0.0, 1.0), &params, |_, _| {});
+        let chi = fansi(&field, &mask, &mask.iter().map(|_| 1.0).collect::<Vec<f64>>(), &grid, (0.0, 0.0, 1.0), &params, |_, _| {});
 
         for (i, &val) in chi.iter().enumerate() {
             assert!(val.is_finite(), "Chi should be finite at index {}", i);
@@ -890,7 +922,7 @@ mod tests {
             ..FansiParams::default()
         };
 
-        let chi = fansi(&field, &mask, &grid, (0.0, 0.0, 1.0), &params, |_, _| {});
+        let chi = fansi(&field, &mask, &mask.iter().map(|_| 1.0).collect::<Vec<f64>>(), &grid, (0.0, 0.0, 1.0), &params, |_, _| {});
 
         for &val in chi.iter() {
             assert!(val.abs() < 1e-6, "Zero field should give ~zero chi, got {}", val);
@@ -910,7 +942,7 @@ mod tests {
             ..FansiParams::default()
         };
 
-        let chi = fansi(&field, &mask, &grid, (0.0, 0.0, 1.0), &params, |_, _| {});
+        let chi = fansi(&field, &mask, &mask.iter().map(|_| 1.0).collect::<Vec<f64>>(), &grid, (0.0, 0.0, 1.0), &params, |_, _| {});
 
         for (i, &val) in chi.iter().enumerate() {
             assert!(val.is_finite(), "Chi should be finite at index {}", i);

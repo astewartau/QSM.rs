@@ -210,3 +210,42 @@ pub fn prepare_fansi_spectral(
     let ee2: Vec<f64> = l_complex.iter().map(|c| c.re).collect();
     (fft_ws, k_kernel, ee2)
 }
+
+/// FANSI's `EE2 = |E1|^2 + |E2|^2 + |E3|^2` with `E_j = 1 - exp(2*pi*i*k_j/N_j)`: the
+/// spectral Laplacian of unit-spacing forward differences, as FANSI's nlTV.m, nlTGV.m and
+/// nlL1TV.m build it (whatever the voxel size). Pair it with `fgrad_inplace`/`bdiv_inplace`
+/// on a unit-voxel grid. FFT order, `i + nx*(j + ny*k)`.
+pub fn fansi_unit_ee2(dims: (usize, usize, usize)) -> Vec<f64> {
+    let (nx, ny, nz) = dims;
+    let e = |k: usize, n: usize| 2.0 - 2.0 * (2.0 * std::f64::consts::PI * k as f64 / n as f64).cos();
+    let mut ee2 = Vec::with_capacity(nx * ny * nz);
+    for k in 0..nz {
+        for j in 0..ny {
+            for i in 0..nx {
+                ee2.push(e(i, nx) + e(j, ny) + e(k, nz));
+            }
+        }
+    }
+    ee2
+}
+
+/// ppm -> radians factor `2*pi*gamma*b0*te` (gamma = 42.576 MHz/T), for the FANSI solvers,
+/// which work on the phase in radians while the crate's inversions take ppm.
+pub fn fansi_ppm_to_rad(b0: f64, te: f64) -> f64 {
+    2.0 * std::f64::consts::PI * 42.576 * b0 * te
+}
+
+/// FANSI's data weight from the magnitude, as in its in vivo example (script_invivo.m):
+/// `min(2*mask*mag/max(mag), 1)`.
+pub fn fansi_magnitude_weight(mask: &[u8], magnitude: &[f64]) -> Vec<f64> {
+    let mag_max = magnitude.iter().cloned().fold(0.0f64, f64::max);
+    (0..mask.len())
+        .map(|i| {
+            if mask[i] == 0 || mag_max <= 0.0 {
+                0.0
+            } else {
+                (2.0 * magnitude[i] / mag_max).min(1.0)
+            }
+        })
+        .collect()
+}
