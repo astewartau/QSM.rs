@@ -659,7 +659,7 @@ fn test_inversion_medi() {
     let (vsx, vsy, vsz) = data.voxel_size;
 
     // MEDI takes the field in ppm and converts it to radians over the echo spacing itself.
-    // Certify the shipped defaults (MEDI_L1's, no SMV: the field is already background-removed).
+    // Certify the shipped defaults (MEDI_L1's: SMV and MERIT on, as MEDI runs after PDF).
     let te = &data.echo_times;
     let delta_te = if te.len() > 1 { te[1] - te[0] } else { te[0] };
     let params = MediParams { b0: data.field_strength, te: delta_te, ..MediParams::default() };

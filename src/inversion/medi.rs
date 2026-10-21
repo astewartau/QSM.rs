@@ -1,4 +1,5 @@
 //! MEDI (Morphology Enabled Dipole Inversion), a port of `MEDI_L1.m` from the MEDI toolbox
+//! (release 2024.11.26)
 //!
 //! Solves
 //!
@@ -12,10 +13,12 @@
 //! The port follows `MEDI_L1.m` and its helpers line for line: `fgrad.m`/`bdiv.m` (forward
 //! differences, zero at the last voxel, and their adjoint), the per-direction weight
 //! `1/sqrt(|wG ∇χ|² + 1e-6)`, `cgsolve.m`, `sphere_kernel.m` (the partial-volume sphere) for the
-//! optional SMV step, and the optional MERIT reweighting. Defaults are those of `MEDI_L1.m` and
+//! SMV step, and the MERIT reweighting. Defaults are those of `MEDI_L1.m` and
 //! `parse_QSM_input.m`: λ = 1000, 10 Gauss-Newton iterations, 100 CG iterations, tolerances 0.1
-//! and 0.01, `percentage` 0.9, SNR data weighting, SMV and MERIT off. Not ported: zero padding
-//! and the CSF zero reference (`lambda_CSF`, which needs a CSF mask).
+//! and 0.01, `percentage` 0.9, SNR data weighting, SMV (radius 5 mm, shrinking the mask) and
+//! MERIT on. Not ported: zero padding, the CSF zero reference (`lambda_CSF`, which needs a CSF
+//! mask), the preconditioner `P`, the linear formulation and the `Lreg` term (all off unless
+//! requested).
 //!
 //! # Units
 //! Like the other inversions, `medi` takes the local field in ppm and returns ppm. MEDI works on
@@ -44,7 +47,8 @@
 //! structural consistency between the magnitude image and the susceptibility map."
 //! NeuroImage, 59(3):2560-2568.
 //!
-//! Reference implementation: https://github.com/huawu02/MEDI_toolbox (`functions/MEDI_L1.m`)
+//! Reference implementation: MEDI toolbox release 2024.11.26 (Cornell MRI Research Lab,
+//! `functions/MEDI_L1.m`)
 //!
 //! The single-precision helpers at the end of this file (`MediWorkspace`, `gradient_mask_f32`,
 //! the periodic gradients, ...) are not used by `medi`. They follow the MEDI variant in the
@@ -71,6 +75,8 @@ pub struct MediParams {
     pub smv: bool,
     /// SMV radius in mm
     pub smv_radius: f64,
+    /// With SMV, erode the mask to where the SMV of the mask exceeds 0.999 (`smv_shrink_mask`)
+    pub smv_shrink_mask: bool,
     /// Data weighting: 0 uniform (1 everywhere), 1 SNR (`mask / n_std`, mean 1 in the mask)
     pub data_weighting: i32,
     /// Edge fraction for the gradient mask (`'percentage'`): the threshold is set so that the
@@ -96,9 +102,10 @@ impl Default for MediParams {
     fn default() -> Self {
         Self {
             lambda: 1000.0,
-            merit: false,
-            smv: false,
+            merit: true,
+            smv: true,
             smv_radius: 5.0,
+            smv_shrink_mask: true,
             data_weighting: 1,
             percentage: 0.9,
             cg_tol: 0.01,
@@ -158,11 +165,13 @@ pub fn medi(
 
     let sphere_k = if params.smv {
         let k = sphere_kernel(grid, params.smv_radius, &mut fft);
-        // Mask = SMV(Mask, SphereK) > 0.999
-        let m: Vec<f64> = mask.iter().map(|&b| b as u8 as f64).collect();
-        let sm = smv(&m, &k, &mut fft);
-        for i in 0..n {
-            mask[i] = sm[i].re > 0.999;
+        // if opts.smv_shrink_mask, Mask = SMV(Mask, SphereK) > 0.999
+        if params.smv_shrink_mask {
+            let m: Vec<f64> = mask.iter().map(|&b| b as u8 as f64).collect();
+            let sm = smv(&m, &k, &mut fft);
+            for i in 0..n {
+                mask[i] = sm[i].re > 0.999;
+            }
         }
         // D = (1-SphereK).*D
         for i in 0..n {
@@ -204,17 +213,10 @@ pub fn medi(
                 vr[c][i] = 1.0 / (u * u + e).sqrt();
             }
         }
-        // w = m.*exp(1i*ifftn(D.*fftn(x))) (the complex ifftn, as in MATLAB)
+        // w = W(m, x) = m.*exp(1i*Dconv(x))
+        let dxr = dconv(&x, &d, &mut fft, &mut buf);
         for i in 0..n {
-            buf[i] = Complex64::new(x[i], 0.0);
-        }
-        fft.fft3d(&mut buf);
-        for i in 0..n {
-            buf[i] *= d[i];
-        }
-        fft.ifft3d(&mut buf);
-        for i in 0..n {
-            w[i] = m[i] * (Complex64::new(0.0, 1.0) * buf[i]).exp();
+            w[i] = m[i] * Complex64::new(0.0, dxr[i]).exp();
         }
         let w2: Vec<f64> = w.iter().map(|v| v.norm_sqr()).collect();
 
@@ -1125,7 +1127,7 @@ mod tests {
     }
 
     fn small_params() -> MediParams {
-        MediParams { cg_max_iter: 20, max_iter: 3, ..MediParams::default() }
+        MediParams { cg_max_iter: 20, max_iter: 3, smv: false, merit: false, ..MediParams::default() }
     }
 
     /// A sphere of susceptibility in a cube, its field in ppm, a magnitude with an edge at the
@@ -1153,7 +1155,7 @@ mod tests {
         let p = MediParams::default();
         assert_eq!((p.lambda, p.percentage, p.cg_tol, p.tol), (1000.0, 0.9, 0.01, 0.1));
         assert_eq!((p.cg_max_iter, p.max_iter, p.data_weighting), (100, 10, 1));
-        assert!(!p.smv && !p.merit);
+        assert!(p.smv && p.merit && p.smv_shrink_mask);
         assert_eq!(p.smv_radius, 5.0);
     }
 

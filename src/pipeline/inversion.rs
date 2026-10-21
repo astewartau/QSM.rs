@@ -965,7 +965,7 @@ mod tests {
         let field: Vec<f64> = (0..n).map(|i| 0.01 * ((i * 7) % 5) as f64).collect();
         let mask = vec![1u8; n];
         let mag: Vec<f64> = (0..n).map(|i| 1.0 + ((i * 3) % 7) as f64).collect();
-        let medi = crate::inversion::MediParams { max_iter: 2, cg_max_iter: 5, ..Default::default() };
+        let medi = crate::inversion::MediParams { max_iter: 2, cg_max_iter: 5, smv: false, ..Default::default() };
         let config = InversionConfig { algorithm: InversionAlgorithm::Medi, medi: medi.clone(), ..Default::default() };
         for (tes, delta_te) in [(vec![0.004, 0.010, 0.016], 0.006), (vec![0.02], 0.02)] {
             let meta = ScanMetadata {
