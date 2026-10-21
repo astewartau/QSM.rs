@@ -388,7 +388,7 @@ if TABLE=$(emit_table test_pipeline_unwrap_bfr_romeo test_pipeline_unwrap_bfr_la
   echo "$TABLE"
 fi
 
-util_files=(metrics/test_bias_correction.csv metrics/test_swi.csv metrics/test_smwi.csv metrics/test_r2star_t2star.csv metrics/test_dl_r2primenet.csv)
+util_files=(metrics/test_bias_correction.csv metrics/test_n4_bias_correction.csv metrics/test_swi.csv metrics/test_smwi.csv metrics/test_r2star_t2star.csv metrics/test_dl_r2primenet.csv)
 have_util=false
 for f in "${util_files[@]}"; do [ -f "$f" ] && have_util=true; done
 if [ "$have_util" = true ]; then
@@ -398,7 +398,7 @@ if [ "$have_util" = true ]; then
   echo "|--------|------|"
   for f in "${util_files[@]}"; do util_row "$f"; done
   echo ""
-  emit_figures bias_correction stage_supplementary
+  emit_figures bias_correction n4_bias_correction stage_supplementary
 fi
 
 chisep_files=(metrics/chisep_qsmci.csv metrics/chisep_relaxometry_qsmci.csv metrics/chisep_xsepnet.csv metrics/chisep_r2primenet.csv)
