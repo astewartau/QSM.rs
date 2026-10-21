@@ -657,36 +657,23 @@ fn test_inversion_medi() {
     let data = TestData::load().expect("Failed to load test data");
     let (nx, ny, nz) = data.dims;
     let (vsx, vsy, vsz) = data.voxel_size;
-    let n_total = nx * ny * nz;
 
-    // MEDI needs magnitude and noise std; use uniform noise std for synthetic data
-    let n_std = vec![1.0; n_total];
-
-    // MEDI is nonlinear (data term uses exp(i·field)), so the local field must be
-    // in RADIANS. Convert the ppm fieldmap with B0 and TE exactly as the
-    // qsmxt/QSM-CI pipeline does, run MEDI, then convert χ back to ppm. Feeding the
-    // raw ppm field here (~7.5× smaller) would exercise a near-linear, trivially
-    // conditioned regime and validate the default λ at the wrong scale.
-    let gamma_hz = 42.576e6;
-    let ppm_to_rad =
-        2.0 * std::f64::consts::PI * gamma_hz * data.field_strength * data.echo_times[0] * 1e-6;
-    let field_rad: Vec<f64> = data.fieldmap_local.iter().map(|&v| v * ppm_to_rad).collect();
-
-    // Certify the SHIPPED default parameters (smv disabled to match the already
-    // background-removed local field, as the QSM-CI submission runs it).
-    let params = MediParams { smv: false, ..MediParams::default() };
+    // MEDI takes the field in ppm and converts it to radians over the echo spacing itself.
+    // Certify the shipped defaults (MEDI_L1's, no SMV: the field is already background-removed).
+    let te = &data.echo_times;
+    let delta_te = if te.len() > 1 { te[1] - te[0] } else { te[0] };
+    let params = MediParams { b0: data.field_strength, te: delta_te, ..MediParams::default() };
     let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
-    let (result_rad, elapsed) = run_timed!("MEDI", inversion::medi(
-        &field_rad,
-        &n_std,
-        &data.mag_echoes[0],
+    let (result, elapsed) = run_timed!("MEDI", inversion::medi(
+        &data.fieldmap_local,
         &data.mask,
+        &data.mag_echoes[0],
+        None,
         &grid,
         data.b0_dir,
         &params,
         |_, _| {},
     ));
-    let result: Vec<f64> = result_rad.iter().map(|&v| v / ppm_to_rad).collect();
 
     let res = TestResult::new("MEDI", &result, &data.chi, &data.mask, data.dims);
     res.print_with_time(elapsed);
@@ -2179,15 +2166,12 @@ fn test_all_combinations() {
         emit_row(&mut csv, &bfr.name, "RTS", &c, bt, elapsed.as_secs_f64());
 
         // MEDI
-        let n_std = vec![1.0; n_total];
+        let te = &data.echo_times;
+        let delta_te = if te.len() > 1 { te[1] - te[0] } else { te[0] };
         let (result, elapsed) = run_timed!("MEDI", inversion::medi(
-            &bfr.local_field, &n_std, &data.mag_echoes[0], &bfr.mask,
+            &bfr.local_field, &bfr.mask, &data.mag_echoes[0], None,
             &grid, data.b0_dir,
-            &MediParams {
-                lambda: 7.5e-5, merit: false, smv: false, smv_radius: 5.0,
-                data_weighting: 1, percentage: 0.3, cg_tol: 0.01, cg_max_iter: 10,
-                max_iter: 30, tol: 0.1,
-            },
+            &MediParams { b0: data.field_strength, te: delta_te, ..MediParams::default() },
             |_, _| {},
         ));
         let c = ChallengeMetrics::compute("MEDI", &result, &data.chi, &bfr.mask, &data.segmentation, data.dims);

@@ -7,7 +7,6 @@
 //! MEDI Hz↔radians conversion is handled internally — the caller
 //! passes ppm fields and receives ppm results.
 
-use std::f64::consts::PI;
 
 use super::config::*;
 
@@ -92,30 +91,29 @@ pub fn run_dipole_inversion(
             )
         }
         InversionAlgorithm::Medi => {
-            // MEDI requires field in radians, not ppm
-            let gamma_hz = 42.576e6;
-            let te1 = metadata.echo_times.first().copied().unwrap_or(0.005);
-            let ppm_to_rad = 2.0 * PI * gamma_hz * metadata.field_strength * te1 * 1e-6;
-
-            let local_field_rad: Vec<f64> = field_ppm.iter()
-                .map(|&v| v * ppm_to_rad)
-                .collect();
-
-            let uniform_mag = vec![1.0f64; n_voxels];
-            let mag = magnitude.unwrap_or(&uniform_mag);
-            let n_std = vec![1.0f64; n_voxels];
-
-            let chi_rad = crate::inversion::medi(
-                &local_field_rad, &n_std, mag, mask,
-                &grid, bdir, &config.medi, progress,
-            );
-
-            let rad_to_ppm = 1.0 / ppm_to_rad;
-            chi_rad.iter().map(|&v| v * rad_to_ppm).collect()
+            // MEDI takes ppm like the others and converts to radians itself, over the echo
+            // spacing as MEDI's readers set delta_TE: TE(2) - TE(1), or TE for one echo. Field
+            // strength and echo spacing are scan parameters from metadata. The magnitude is
+            // required (edge mask); there is no noise map here, so the data weight is uniform.
+            let te = &metadata.echo_times;
+            let delta_te = match te.len() {
+                0 => config.medi.te,
+                1 => te[0],
+                _ => te[1] - te[0],
+            };
+            let params = crate::inversion::MediParams {
+                b0: metadata.field_strength,
+                te: delta_te,
+                ..config.medi.clone()
+            };
+            let mag = magnitude.ok_or_else(|| {
+                PipelineError::InvalidInput("MEDI needs the magnitude image".to_string())
+            })?;
+            crate::inversion::medi(field_ppm, mask, mag, None, &grid, bdir, &params, progress)
         }
         InversionAlgorithm::Tfi => {
             // TFI takes the field in ppm (same convention as NDI and the other inversions —
-            // NOT MEDI's radians). It is single-step: `field_ppm` is the TOTAL field and `mask`
+            // MEDI's). It is single-step: `field_ppm` is the TOTAL field and `mask`
             // the brain mask (InversionConfig::input). Converting to radians here would wrap
             // the large total field in exp(i·field) and destroy the result.
             let uniform_mag = vec![1.0f64; n_voxels];
@@ -958,22 +956,32 @@ mod tests {
         assert!(seen.last().unwrap().0 <= total);
     }
 
+    /// MEDI gets the ppm field, the field strength and the echo spacing (MEDI's delta_TE:
+    /// TE(2) - TE(1), or TE for one echo), and needs the magnitude.
     #[test]
     fn test_inversion_medi() {
         let (nx, ny, nz) = (8, 8, 8);
         let n = nx * ny * nz;
-        let field = vec![0.01; n];
+        let field: Vec<f64> = (0..n).map(|i| 0.01 * ((i * 7) % 5) as f64).collect();
         let mask = vec![1u8; n];
-        let mag = vec![1.0; n];
-        let meta = ScanMetadata {
-            dims: (nx, ny, nz), voxel_size: (1.0, 1.0, 1.0),
-            echo_times: vec![0.005], field_strength: 3.0, b0_direction: (0.0, 0.0, 1.0),
-            slice_geometry: None,
-            affine: None,
-        };
-        let config = InversionConfig { algorithm: InversionAlgorithm::Medi, ..Default::default() };
-        let chi = run_dipole_inversion(&field, &mask, &meta, &config, Some(&mag), &mut |_, _| {}).unwrap();
-        assert_eq!(chi.len(), n);
+        let mag: Vec<f64> = (0..n).map(|i| 1.0 + ((i * 3) % 7) as f64).collect();
+        let medi = crate::inversion::MediParams { max_iter: 2, cg_max_iter: 5, ..Default::default() };
+        let config = InversionConfig { algorithm: InversionAlgorithm::Medi, medi: medi.clone(), ..Default::default() };
+        for (tes, delta_te) in [(vec![0.004, 0.010, 0.016], 0.006), (vec![0.02], 0.02)] {
+            let meta = ScanMetadata {
+                dims: (nx, ny, nz), voxel_size: (1.0, 1.0, 1.0),
+                echo_times: tes, field_strength: 7.0, b0_direction: (0.0, 0.0, 1.0),
+                slice_geometry: None,
+                affine: None,
+            };
+            let via_stage = run_dipole_inversion(&field, &mask, &meta, &config, Some(&mag), &mut |_, _| {}).unwrap();
+            let params = crate::inversion::MediParams { b0: 7.0, te: delta_te, ..medi.clone() };
+            let direct = crate::inversion::medi(
+                &field, &mask, &mag, None, &meta.grid(), meta.b0_direction, &params, |_, _| {},
+            );
+            assert_eq!(via_stage, direct);
+            assert!(run_dipole_inversion(&field, &mask, &meta, &config, None, &mut |_, _| {}).is_err());
+        }
     }
 
     /// TFI is a total-field method (`InversionConfig::input`): the dispatcher must hand the
