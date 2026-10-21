@@ -14,7 +14,7 @@ use qsm_core::bet;
 use qsm_core::bet::BetParams;
 use qsm_core::inversion;
 use qsm_core::inversion::{tgv_qsm, TgvInput, TgvParams, get_default_alpha, get_default_iterations, ilsqr, IlsqrParams, TkdParams, STI_DEFAULT_PAD_MM};
-use qsm_core::inversion::{TvParams, NltvParams, RtsParams, MediMagnitude, MediParams, TfiParams, TikhonovParams};
+use qsm_core::inversion::{TvParams, NltvParams, RtsParams, EchoMagnitudes, MediParams, TfiParams, TikhonovParams};
 use qsm_core::inversion::{NdiParams, FansiParams, L1QsmParams, WhQsmParams, HdQsmParams, AmpPeParams};
 use qsm_core::inversion::{LsqrQsmParams, HeidiParams};
 use qsm_core::swi;
@@ -670,7 +670,7 @@ fn test_inversion_medi() {
     let (result, elapsed) = run_timed!("MEDI", inversion::medi(
         &data.fieldmap_local,
         &data.mask,
-        MediMagnitude::Echoes(&echoes, data.mag_echoes.len()),
+        EchoMagnitudes { data: &echoes, n_echoes: data.mag_echoes.len() },
         &grid,
         data.b0_dir,
         &params,
@@ -2175,7 +2175,7 @@ fn test_all_combinations() {
         let delta_te = if te.len() > 1 { te[1] - te[0] } else { te[0] };
         let echoes: Vec<f64> = data.mag_echoes.concat();
         let (result, elapsed) = run_timed!("MEDI", inversion::medi(
-            &bfr.local_field, &bfr.mask, MediMagnitude::Echoes(&echoes, data.mag_echoes.len()),
+            &bfr.local_field, &bfr.mask, EchoMagnitudes { data: &echoes, n_echoes: data.mag_echoes.len() },
             &grid, data.b0_dir,
             &MediParams { b0: data.field_strength, te: delta_te, ..MediParams::default() },
             |_, _| {},

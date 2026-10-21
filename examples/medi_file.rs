@@ -4,9 +4,9 @@
 //! usage: medi_file <field_ppm> <mask> <magnitude> <chi_out> <delta_TE_ms> <B0_T> <Hx> <Hy> <Hz>
 //!                  [smv_radius_mm, 0 = no SMV] [merit|nomerit] [zeropad: even|none]
 //!
-//! `<magnitude>` is `echoes:<echo1>,<echo2>,...` (echo magnitudes: RSS edge mask and the
-//! Fit_ppm_complex noise map) or `combined:<file>` (uniform data weight).
-use qsm_core::inversion::{medi, MediMagnitude, MediParams};
+//! `<magnitude>` is `<echo1>,<echo2>,...`, the echo magnitudes (RSS edge mask and the
+//! Fit_ppm_complex noise map).
+use qsm_core::inversion::{medi, EchoMagnitudes, MediParams};
 use qsm_core::io::{read_nifti_file, save_nifti_to_file};
 use qsm_core::Grid;
 use std::path::Path;
@@ -14,23 +14,19 @@ use std::path::Path;
 fn main() {
     let a: Vec<String> = std::env::args().collect();
     if a.len() < 10 {
-        eprintln!("usage: {} <field_ppm> <mask> <echoes:f1,f2,..|combined:f> <chi_out> <delta_TE_ms> <B0_T> <Hx> <Hy> <Hz> [smv_radius_mm] [merit|nomerit] [even|none]", a[0]);
+        eprintln!("usage: {} <field_ppm> <mask> <echo1,echo2,..> <chi_out> <delta_TE_ms> <B0_T> <Hx> <Hy> <Hz> [smv_radius_mm] [merit|nomerit] [even|none]", a[0]);
         std::process::exit(2);
     }
     let num = |i: usize| -> f64 { a[i].parse().unwrap_or_else(|_| panic!("not a number: {}", a[i])) };
     let f = read_nifti_file(Path::new(&a[1])).expect("read field");
     let m = read_nifti_file(Path::new(&a[2])).expect("read mask");
     let mask: Vec<u8> = m.data.iter().map(|&v| (v > 0.5) as u8).collect();
-    let (kind, files) = a[3].split_once(':').expect("magnitude: echoes:... or combined:...");
+    let files = a[3].as_str();
     let mags: Vec<f64> = files.split(',')
         .flat_map(|p| read_nifti_file(Path::new(p)).expect("read magnitude").data)
         .collect();
     let n_echoes = files.split(',').count();
-    let magnitude = match kind {
-        "echoes" => MediMagnitude::Echoes(&mags, n_echoes),
-        "combined" => MediMagnitude::Combined(&mags),
-        _ => panic!("magnitude kind must be echoes or combined"),
-    };
+    let magnitude = EchoMagnitudes { data: &mags, n_echoes };
     let grid = Grid::new(f.dims.0, f.dims.1, f.dims.2, f.voxel_size.0, f.voxel_size.1, f.voxel_size.2);
     let mut params = MediParams { te: num(5) * 1e-3, b0: num(6), ..MediParams::default() };
     if a.len() > 10 {

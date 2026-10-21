@@ -70,7 +70,7 @@ pub use tikhonov::{tikhonov, TikhonovParams, Regularization};
 pub use tv::{tv_admm, TvParams};
 pub use nltv::{nltv, NltvParams};
 pub use rts::{rts, RtsParams};
-pub use medi::{medi, MediMagnitude, MediParams, MediWorkspace};
+pub use medi::{medi, EchoMagnitudes, MediParams, MediWorkspace};
 pub use tfi::{tfi, TfiParams};
 pub use tgv::{
     tgv_qsm, TgvInput, TgvParams, get_default_alpha, get_default_iterations, rad_per_ppm,
