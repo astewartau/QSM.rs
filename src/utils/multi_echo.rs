@@ -2046,7 +2046,10 @@ pub fn fit_ppm_complex(
     for i in 0..n {
         let mut y = [0.0f64; 3];
         for (e, ye) in y.iter_mut().enumerate().take(k) {
-            *ye = m[e][i].arg();
+            // MATLAB's angle of a zero is 0 whatever the signs of its zero parts; atan2 would
+            // give ±π for a negative-zero real part, which mag .* exp(1i*phase) produces.
+            let z = m[e][i];
+            *ye = if z.re == 0.0 && z.im == 0.0 { 0.0 } else { z.arg() };
         }
         // [m ind] = min([abs(c-2*pi), abs(c), abs(c+2*pi)], [], 2): the first minimum wins
         let mut c = y[1] - y[0];
@@ -2194,6 +2197,12 @@ mod tests {
         assert!((r.field[0] - 0.3).abs() < 1e-12 && (r.field[1] + 2.9).abs() < 1e-12);
         // a zero magnitude has angle 0 and no noise estimate
         assert_eq!((r.field[2], r.noise[2]), (0.0, 0.0));
+        // also when the zero's real part is negative (phase near ±π): angle 0, as MATLAB's
+        // angle(0), not atan2's π. Echo 1 at -3 rad and two zero echoes: Y = (3, 0, 0) after the
+        // conjugate, c = -3 is kept, p1 = (0 - 3) / 2, so the field is +1.5.
+        let r = fit_ppm_complex(&[&[1.0], &[0.0], &[0.0]], &[&[-3.0], &[-3.0], &[-3.0]], &[0.01, 0.02, 0.03],
+            &FitPpmComplexParams::default()).unwrap();
+        assert!((r.field[0] - 1.5).abs() < 1e-12, "{}", r.field[0]);
     }
 
     #[test]
