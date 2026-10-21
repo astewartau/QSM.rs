@@ -7,11 +7,12 @@
 //! The algorithm:
 //! 1. Apply morphological bottom-hat filtering to enhance dark tubular structures
 //! 2. Apply Frangi vesselness filter to detect vessels
-//! 3. Threshold: vesselness above 0.2% of maximum = vessel (noise floor filtering)
+//! 3. Threshold: vesselness above Otsu's threshold (MATLAB's `graythresh`) = vessel
 //! 4. Return complementary mask (1 = tissue, 0 = vessel)
 
 use crate::Grid;
 use crate::utils::frangi::{FrangiParams, frangi_filter_3d};
+use crate::utils::threshold::graythresh;
 
 /// Parameters for vasculature mask generation
 #[derive(Clone, Debug)]
@@ -86,30 +87,16 @@ pub fn generate_vasculature_mask(
     let frangi_result = frangi_filter_3d(&masked_bottom_hat, grid, &frangi_params, |_, _| {});
     let enhanced = frangi_result.vesselness;
 
-    // Step 4: Threshold vesselness
-    // Apply a relative noise floor before thresholding. Our Hessian eigenvalue
-    // computation (Cardano analytical) produces more near-zero vesselness values
-    // than MATLAB's implementation due to numerical differences in eigenvalue signs
-    // for near-degenerate matrices at the mask boundary. A noise floor of 0.2% of
-    // the max vesselness filters these out, matching MATLAB's effective vessel count.
+    // Step 4: Otsu threshold, as vasculature_mask.m does: `T = graythresh(enhanced)` over the
+    // whole volume, vessels where `enhanced > T`, nothing outside the brain mask.
     progress_callback(3, 4);
 
-    let max_enhanced = enhanced.iter()
-        .zip(mask.iter())
-        .filter(|(_, &m)| m != 0)
-        .map(|(&v, _)| v)
-        .fold(0.0f64, f64::max);
-
-    let noise_floor = max_enhanced * 2e-3;
+    let threshold = graythresh(&enhanced);
 
     // Return complementary mask (1 = tissue, 0 = vessel)
     let vasc_only: Vec<f64> = enhanced.iter()
         .zip(mask.iter())
-        .map(|(&v, &m)| {
-            if m == 0 { 1.0 } // outside brain → tissue (excluded)
-            else if v > noise_floor { 0.0 } // significant vesselness → vessel
-            else { 1.0 } // below noise floor → tissue
-        })
+        .map(|(&v, &m)| if m != 0 && v > threshold { 0.0 } else { 1.0 })
         .collect();
 
     progress_callback(4, 4);

@@ -232,6 +232,14 @@ pub fn sdf(
         }
     }
 
+    // sdf_curvature.m filters alpha == 0 as `PhiK = tfs.*mask`: where the rounded proximity is
+    // 0, the background is the whole field and the local field is 0.
+    for i in 0..n_total {
+        if mask[i] > 0.0 && alpha[i] == 0.0 {
+            background[i] = tfs[i] * mask[i];
+        }
+    }
+
     progress(total_alphas, total_alphas);
 
     // Compute local field: (tfs - background) * mask
@@ -444,6 +452,24 @@ pub fn sdf_simple(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn zero_alpha_leaves_no_local_field() {
+        // One tissue voxel amid vessel: its vessel proximity (the Gaussian of the tissue mask,
+        // sigma2 = 4) is ~1e-3, so alpha = sigma * round(prox^n, 2) is 0 there, and
+        // sdf_curvature.m takes the whole field as its background: local field 0.
+        let (nx, ny, nz) = (16, 16, 16);
+        let n = nx * ny * nz;
+        let grid = Grid::new(nx, ny, nz, 1.0, 1.0, 1.0);
+        let mask = vec![1.0; n];
+        let centre = 8 + 8 * nx + 8 * nx * ny;
+        let mut vasc = vec![0.0; n];
+        vasc[centre] = 1.0;
+        let tfs: Vec<f64> = (0..n).map(|i| 1.0 + 0.01 * (i % nx) as f64).collect();
+        let params = SdfParams { sigma1: 1.0, sigma2: 4.0, use_curvature: false, ..SdfParams::default() };
+        let lfs = sdf(&tfs, &mask, &vasc, &grid, &params, |_, _| {});
+        assert_eq!(lfs[centre], 0.0);
+    }
+
     use super::*;
 
     #[test]
