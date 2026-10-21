@@ -8,7 +8,7 @@
 //! - TSVD: Truncated SVD (zeros small values)
 //! - Tikhonov: L2 regularization (closed-form)
 //! - TV: Total variation regularization via ADMM (iterative)
-//! - NLTV: Nonlinear TV with iterative reweighting
+//! - NLTV: Nonlinear-data-term TV via ADMM (QSM.jl nltv)
 //! - RTS: Rapid two-step method
 //! - MEDI: Morphology-enabled dipole inversion
 //! - TGV: Total Generalized Variation (single-step from a field in ppm or one wrapped echo; α in ppm)

@@ -87,8 +87,19 @@ pub fn run_dipole_inversion(
             )
         }
         InversionAlgorithm::Nltv => {
+            // NLTV takes ppm and converts to radians itself, like NDI; field strength and echo
+            // time (the first) come from metadata. The magnitude is the data weight and is
+            // required: without it the method can diverge (see the module docs).
+            let mag = magnitude.ok_or_else(|| PipelineError::InvalidInput(
+                "NLTV needs the magnitude (its data weight)".into(),
+            ))?;
+            let params = crate::inversion::NltvParams {
+                b0: metadata.field_strength,
+                te: metadata.echo_times.first().copied().unwrap_or(config.nltv.te),
+                ..config.nltv.clone()
+            };
             crate::inversion::nltv(
-                field_ppm, mask, &grid, bdir, &config.nltv, progress,
+                field_ppm, mask, mag, &grid, bdir, &params, progress,
             )
         }
         InversionAlgorithm::Medi => {
@@ -852,8 +863,22 @@ mod tests {
 
     #[test]
     fn test_inversion_nltv() {
-        let chi = make_inversion_test(InversionAlgorithm::Nltv);
-        assert_eq!(chi.len(), 8 * 8 * 8);
+        let n = 8 * 8 * 8;
+        let field = vec![0.01; n];
+        let mask = vec![1u8; n];
+        let mag = vec![1.0; n];
+        let meta = ScanMetadata {
+            dims: (8, 8, 8), voxel_size: (1.0, 1.0, 1.0),
+            echo_times: vec![0.005], field_strength: 3.0, b0_direction: (0.0, 0.0, 1.0),
+            slice_geometry: None,
+            affine: None,
+        };
+        let config = InversionConfig { algorithm: InversionAlgorithm::Nltv, ..Default::default() };
+        let chi = run_dipole_inversion(&field, &mask, &meta, &config, Some(&mag), &mut |_, _| {}).unwrap();
+        assert_eq!(chi.len(), n);
+        // the magnitude is required
+        let r = run_dipole_inversion(&field, &mask, &meta, &config, None, &mut |_, _| {});
+        assert!(matches!(r, Err(PipelineError::InvalidInput(_))));
     }
 
     #[test]
