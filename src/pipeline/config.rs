@@ -228,6 +228,19 @@ pub enum B0EstimationMethod {
     /// fewer is [`PipelineError::InvalidConfig`] rather than a silent plain fit. The per-echo
     /// report is returned in [`FieldMappingResult::robust_fit`].
     RobustFit(RobustFitParams),
+    /// QSMART's echo fit (`echofit.m`, [`qsmart_echofit`](crate::utils::qsmart_echofit)): each
+    /// echo unwrapped on its own over the whole, unmasked volume (Laplacian unwrapping only; QSMART
+    /// uses [`LaplacianSolver::Mirror`](crate::unwrap::LaplacianSolver::Mirror)), then the
+    /// magnitude-weighted fit of phase against TE through the origin, with no per-echo constant
+    /// removed. Also returns QSMART's reliability map `R_0`
+    /// ([`FieldMappingResult::reliability`]): voxels whose fit residual, box-filtered over ~1 mm,
+    /// reaches `fit_threshold` ([`QSMART_FIT_THRESHOLD`](crate::utils::QSMART_FIT_THRESHOLD) = 40
+    /// in QSMART). The field is converted to ppm with QSMART's γ = 2.675e8 rad/s/T. Phase-offset
+    /// removal and bipolar correction do not apply.
+    QsmartEchofit {
+        /// Residual threshold for `R_0`
+        fit_threshold: f64,
+    },
 }
 
 impl Default for B0EstimationMethod {
@@ -916,6 +929,10 @@ pub struct FieldMappingResult {
     /// What the robust fit found, when [`B0EstimationMethod::RobustFit`] combined the echoes;
     /// `None` for every other method.
     pub robust_fit: Option<RobustFitReport>,
+    /// QSMART's reliability map `R_0` (1 = reliable), when [`B0EstimationMethod::QsmartEchofit`]
+    /// combined the echoes; `None` for every other method. Pass it to
+    /// [`run_qsmart`](crate::pipeline::run_qsmart).
+    pub reliability: Option<Vec<u8>>,
 }
 
 /// Per-echo evidence from [`B0EstimationMethod::RobustFit`]: which echoes the fit stopped

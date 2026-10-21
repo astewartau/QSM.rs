@@ -4,9 +4,9 @@
 
 /// Otsu's method for automatic threshold selection
 ///
-/// Finds the threshold that maximizes inter-class variance.
-/// Matches MATLAB's graythresh: operates on all values including zeros,
-/// normalizes to [0,1] range, and returns threshold at bin edge.
+/// Finds the threshold that maximizes inter-class variance over a histogram spanning the data's
+/// own range (all values, zeros included), and returns the threshold at a bin edge. For MATLAB's
+/// `graythresh` on double data, which does not rescale, see [`graythresh`].
 ///
 /// # Arguments
 /// * `data` - Input data (e.g. flattened 3D image)
@@ -75,13 +75,66 @@ pub fn otsu_threshold(data: &[f64], num_bins: usize) -> f64 {
         }
     }
 
-    // Convert bin to threshold value (bin edge, matching MATLAB's graythresh)
+    // Convert bin to threshold value (bin edge)
     min_val + optimal_threshold_bin as f64 * bin_width
+}
+
+/// MATLAB's `graythresh` on double data: Otsu's threshold, in [0, 1].
+///
+/// As `graythresh` does, the data are converted with `im2uint8` (clipped to [0, 1], scaled by
+/// 255 and rounded; NaN becomes 0), not rescaled to their own range, and Otsu's method runs on
+/// the 256-bin histogram of every value (`otsuthresh`: ties take the mean of the maximising bins;
+/// a non-finite maximum gives 0).
+pub fn graythresh(data: &[f64]) -> f64 {
+    let mut counts = [0f64; 256];
+    for &v in data {
+        let q = if v.is_nan() { 0.0 } else { (v.clamp(0.0, 1.0) * 255.0).round() };
+        counts[q as usize] += 1.0;
+    }
+    let total: f64 = counts.iter().sum();
+    if total == 0.0 {
+        return 0.0;
+    }
+    let (mut omega, mut mu) = ([0f64; 256], [0f64; 256]);
+    let (mut o, mut m) = (0.0, 0.0);
+    for i in 0..256 {
+        let p = counts[i] / total;
+        o += p;
+        m += p * (i + 1) as f64;
+        omega[i] = o;
+        mu[i] = m;
+    }
+    let mu_t = mu[255];
+    let sigma: Vec<f64> = (0..256)
+        .map(|i| (mu_t * omega[i] - mu[i]).powi(2) / (omega[i] * (1.0 - omega[i])))
+        .collect();
+    let max = sigma.iter().copied().filter(|v| !v.is_nan()).fold(f64::NEG_INFINITY, f64::max);
+    if !max.is_finite() {
+        return 0.0;
+    }
+    let idx: Vec<f64> = (0..256).filter(|&i| sigma[i] == max).map(|i| (i + 1) as f64).collect();
+    let idx = idx.iter().sum::<f64>() / idx.len() as f64;
+    (idx - 1.0) / 255.0
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn graythresh_matches_matlab() {
+        // MATLAB R2023b graythresh on the same vectors.
+        let a = [0.0, 0.0, 0.0, 0.1, 0.2, 0.8, 0.9, 0.95, 1.2, -0.1, f64::NAN, 0.5, 0.51];
+        assert!((graythresh(&a) - 0.349019607843137).abs() < 1e-14);
+        let b: Vec<f64> = std::iter::repeat_n(0.0, 1000)
+            .chain((1..=50).map(|i| 0.02 * i as f64))
+            .chain((1..=30).map(|i| 0.6 + 0.003 * i as f64))
+            .collect();
+        assert!((graythresh(&b) - 0.329411764705882).abs() < 1e-14);
+        assert_eq!(graythresh(&[0.3; 10]), 0.0);
+        // A tie across bins 1..254 takes their mean.
+        assert!((graythresh(&[0.004, 0.005, 0.006, 0.996]) - 0.5).abs() < 1e-14);
+    }
 
     #[test]
     fn test_otsu_threshold_bimodal() {

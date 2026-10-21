@@ -397,6 +397,12 @@ pub enum LaplacianSolver {
         /// Zero-padding added to both sides of each axis, in voxels.
         pad: [usize; 3],
     },
+    /// Schofield & Zhu (2003) as Hongfu Sun's `lapunwrap.m` does it (QSMART's Laplacian
+    /// unwrapping): ∇²φ from the sin/cos identity with spectral derivatives and an FFT Poisson
+    /// solve, on the volume mirrored to twice its size along each axis (so no seam at the edge)
+    /// rather than zero-padded. DC → 0 (`lapunwrap.m` divides it by `eps`, a constant that
+    /// depends only on rounding).
+    Mirror,
 }
 
 impl LaplacianSolver {
@@ -445,6 +451,7 @@ pub fn laplacian_unwrap(
             solve_poisson_dct(&d2u, nx, ny, nz, vsx, vsy, vsz)
         }
         LaplacianSolver::Fft { pad } => laplacian_unwrap_fft_padded(phase, grid, pad),
+        LaplacianSolver::Mirror => laplacian_unwrap_fft_mirrored(phase, grid),
     };
     u.iter().zip(mask).map(|(&v, &m)| if m != 0 { v } else { 0.0 }).collect()
 }
@@ -515,6 +522,57 @@ fn laplacian_unwrap_fft_padded(phase: &[f64], grid: &Grid, pad: [usize; 3]) -> V
     out
 }
 
+/// Schofield & Zhu sin/cos unwrapping on the volume mirrored to `2n` along each axis
+/// (`lapunwrap.m`). Returns the whole volume, unmasked.
+fn laplacian_unwrap_fft_mirrored(phase: &[f64], grid: &Grid) -> Vec<f64> {
+    let (nx, ny, nz) = grid.dims;
+    let (vsx, vsy, vsz) = grid.voxel_size;
+    assert_eq!(phase.len(), nx * ny * nz, "phase length does not match grid");
+    let (mx, my, mz) = (2 * nx, 2 * ny, 2 * nz);
+    let mxy = mx * my;
+    let k2 = |n: usize, h: f64| -> Vec<f64> { fftfreq(n, h).into_iter().map(|f| f * f).collect() };
+    let (kx, ky, kz) = (k2(mx, vsx), k2(my, vsy), k2(mz, vsz));
+    let fold = |i: usize, n: usize| if i < n { i } else { 2 * n - 1 - i };
+    let sincos = |i: usize, j: usize, k: usize| phase[fold(i, nx) + fold(j, ny) * nx + fold(k, nz) * nx * ny].sin_cos();
+
+    let mut ws = Fft3dWorkspace::new(mx, my, mz);
+    let mut buf = vec![Complex64::new(0.0, 0.0); mxy * mz];
+    for k in 0..mz {
+        for j in 0..my {
+            for i in 0..mx {
+                let (s, c) = sincos(i, j, k);
+                buf[i + j * mx + k * mxy] = Complex64::new(s, c);
+            }
+        }
+    }
+    ws.fft3d(&mut buf);
+    apply_k2(&mut buf, &kx, &ky, &kz, false);
+    ws.ifft3d(&mut buf);
+    for k in 0..mz {
+        for j in 0..my {
+            for i in 0..mx {
+                let idx = i + j * mx + k * mxy;
+                let (s, c) = sincos(i, j, k);
+                let v = buf[idx];
+                buf[idx] = Complex64::new(c * v.re - s * v.im, 0.0);
+            }
+        }
+    }
+    ws.fft3d(&mut buf);
+    apply_k2(&mut buf, &kx, &ky, &kz, true);
+    ws.ifft3d(&mut buf);
+
+    let mut out = vec![0.0; nx * ny * nz];
+    for k in 0..nz {
+        for j in 0..ny {
+            for i in 0..nx {
+                out[i + j * nx + k * nx * ny] = buf[i + j * mx + k * mxy].re;
+            }
+        }
+    }
+    out
+}
+
 /// Multiply (or, with `invert`, divide) a spectrum by `K = kx² + ky² + kz²`; DC → 0 on divide.
 fn apply_k2(buf: &mut [Complex64], kx: &[f64], ky: &[f64], kz: &[f64], invert: bool) {
     let (mx, my) = (kx.len(), ky.len());
@@ -543,6 +601,30 @@ fn apply_k2(buf: &mut [Complex64], kx: &[f64], ky: &[f64], kz: &[f64], invert: b
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mirror_matches_lapunwrap() {
+        // Hongfu Sun's lapunwrap.m (as QSMART calls it) in MATLAB R2023b on the same wrapped
+        // phase, both made zero-mean (lapunwrap's DC is a rounding-dependent constant).
+        let (nx, ny, nz) = (8, 6, 5);
+        let grid = Grid::new(nx, ny, nz, 1.0, 1.5, 2.0);
+        let phase: Vec<f64> = (0..nx * ny * nz)
+            .map(|i| {
+                let (a, b, c) = ((i % nx) as f64, ((i / nx) % ny) as f64, (i / (nx * ny)) as f64);
+                let t = 0.9 * a * a / 4.0 + 1.7 * b - 0.6 * c * c + 0.3 * (i as f64).sin();
+                t.sin().atan2(t.cos())
+            })
+            .collect();
+        let mut u = laplacian_unwrap(&phase, &vec![1; phase.len()], &grid, LaplacianSolver::Mirror);
+        let mean = u.iter().sum::<f64>() / u.len() as f64;
+        u.iter_mut().for_each(|v| *v -= mean);
+        let close = |a: f64, b: f64| assert!((a - b).abs() <= 1e-10 * b.abs().max(1.0), "{a} vs {b}");
+        close(u.iter().map(|v| v.abs()).sum(), 809.9262085647304);
+        close(u.iter().map(|v| v * v).sum(), 4077.856347779972);
+        close(u[0], -5.778520101297622);
+        close(u[7], 2.016668604865187);
+        close(u[100], -4.332690703087126);
+    }
 
     fn grid(n: usize) -> Grid {
         Grid::new(n, n, n, 1.0, 1.0, 1.0)

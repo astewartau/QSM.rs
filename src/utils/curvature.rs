@@ -345,7 +345,7 @@ pub fn calculate_curvature_proximity(
         .collect();
 
     // Deduplicate (x,y) coordinates before triangulation.
-    // MATLAB's delaunay (via Qhull) suppresses duplicate (x,y) points, keeping
+    // MATLAB's delaunay suppresses duplicate (x,y) points, keeping
     // the first occurrence (smallest z). Duplicate vertices get GC=Inf → curvI=1.0.
     // We explicitly dedup to avoid degenerate zero-area triangles that would
     // corrupt curvature values.
@@ -369,7 +369,9 @@ pub fn calculate_curvature_proximity(
     }
     let rep_points: Vec<Point3D> = rep_indices.iter().map(|&i| all_points[i]).collect();
 
-    // Triangulate unique representatives via Qhull (same library MATLAB uses)
+    // 2-D Delaunay of the unique representatives. Surface voxels lie on an integer grid, so many
+    // point quadruples are cocircular and the triangulation is not unique: MATLAB's `delaunay`
+    // and delaunator break those ties differently, and the curvatures follow the triangulation.
     let (triangles, boundary) = triangulate_surface(&rep_points);
 
     // Compute curvatures on representative points
@@ -378,11 +380,12 @@ pub fn calculate_curvature_proximity(
     // Create full curvature volume
     let mut curv_i = vec![1.0f64; n_total];
 
-    // Find max negative curvature for scaling
+    // Scale for the negative curvatures: calculate_curvature.m's `max(abs(GC(GC<0)))`, which
+    // can be below 1. With no negative curvature there is nothing to scale.
     let max_neg_gc = gc.iter()
         .filter(|&&v| v < 0.0)
         .map(|&v| v.abs())
-        .fold(1.0f64, |a, b| a.max(b));
+        .fold(0.0f64, f64::max);
 
     // Scale and assign curvature values for representative vertices only.
     // Non-representative (duplicate x,y) vertices keep curvI=1.0, matching MATLAB
@@ -657,7 +660,7 @@ pub fn calculate_gaussian_curvature(
     }
     let rep_points: Vec<Point3D> = rep_indices.iter().map(|&i| all_points[i]).collect();
 
-    // Triangulate unique representatives via Qhull
+    // Triangulate the unique representatives (2-D Delaunay, as above)
     let (triangles, boundary) = triangulate_surface(&rep_points);
 
     // Compute curvatures on representatives

@@ -126,6 +126,98 @@ pub fn adjust_offset(
     adjusted
 }
 
+/// QSMART's proton gyromagnetic ratio in rad/s/T (`Demo_QSMART.m`'s `gyro`).
+pub const QSMART_GYRO: f64 = 2.675e8;
+
+/// QSMART's echo-fit residual threshold for `R_0` (`Demo_QSMART.m`'s `fit_threshold`).
+pub const QSMART_FIT_THRESHOLD: f64 = 40.0;
+
+/// QSMART's echo fit ([`qsmart_echofit`]): the total field and the reliability map `R_0`.
+pub struct QsmartEchofit {
+    /// Total field in ppm: the magnitude-weighted, zero-intercept fit of phase to echo time
+    pub field_ppm: Vec<f64>,
+    /// The fit's magnitude-weighted residual, normalised by the magnitude sum and times the
+    /// number of echoes (0 where undefined)
+    pub fit_residual: Vec<f64>,
+    /// `fit_residual` box-filtered over about 1 mm (`smooth3(res, 'box', round(1./vox)*2+1)`)
+    pub fit_residual_blur: Vec<f64>,
+    /// `R_0`: 1 where `fit_residual_blur < fit_threshold`, else 0
+    pub reliability: Vec<u8>,
+}
+
+/// QSMART's `echofit.m` (zero intercept, fixed threshold): fits the unwrapped phase of each echo
+/// to its echo time, weighted by magnitude, and marks voxels whose blurred fit residual reaches
+/// `fit_threshold` ([`QSMART_FIT_THRESHOLD`]) as unreliable (`R_0` = 0).
+///
+/// `phases` are unwrapped phases in radians, `magnitudes` the matching magnitudes, one volume per
+/// echo; `echo_times` in seconds; `ppm` converts rad/s to ppm (QSMART: `gyro * B0 / 1e6` with
+/// `gyro = 2.675e8`). `echofit.m`'s adaptive (percentile) threshold is not provided.
+pub fn qsmart_echofit(
+    phases: &[&[f64]],
+    magnitudes: &[&[f64]],
+    echo_times: &[f64],
+    grid: &crate::Grid,
+    ppm: f64,
+    fit_threshold: f64,
+) -> QsmartEchofit {
+    let (nx, ny, nz) = grid.dims;
+    let n = nx * ny * nz;
+    let ne = echo_times.len();
+    assert!(ne > 0 && phases.len() == ne && magnitudes.len() == ne, "qsmart_echofit: one phase and magnitude per echo time");
+    assert!(phases.iter().chain(magnitudes).all(|v| v.len() == n), "qsmart_echofit: volumes must match the grid");
+    let mut field_ppm = vec![0.0; n];
+    let mut fit_residual = vec![0.0; n];
+    for v in 0..n {
+        // tfs = sum(mag.*ph.*TE) ./ (sum(mag.*TE.^2) + eps)
+        let (mut num, mut den, mut wsum) = (0.0, 0.0, 0.0);
+        for e in 0..ne {
+            let (m, te) = (magnitudes[e][v], echo_times[e]);
+            num += m * phases[e][v] * te;
+            den += m * te * te;
+            wsum += m;
+        }
+        let tfs = num / (den + f64::EPSILON);
+        let mut r = 0.0;
+        for e in 0..ne {
+            let d = phases[e][v] - tfs * echo_times[e];
+            r += d * magnitudes[e][v] * d;
+        }
+        let res = r / wsum * ne as f64;
+        fit_residual[v] = if res.is_finite() { res } else { 0.0 };
+        field_ppm[v] = tfs / ppm;
+    }
+    let (vx, vy, vz) = grid.voxel_size;
+    let half = |vs: f64| (1.0 / vs).round() as usize;
+    let fit_residual_blur = box_mean_replicate(&fit_residual, grid.dims, [half(vx), half(vy), half(vz)]);
+    let reliability = fit_residual_blur.iter().map(|&b| u8::from(b < fit_threshold || b.is_nan())).collect();
+    QsmartEchofit { field_ppm, fit_residual, fit_residual_blur, reliability }
+}
+
+/// MATLAB's `smooth3(data, 'box', 2*half+1)`: the mean over a box, replicate-padded.
+fn box_mean_replicate(data: &[f64], dims: (usize, usize, usize), half: [usize; 3]) -> Vec<f64> {
+    let (nx, ny, nz) = dims;
+    let mut out = data.to_vec();
+    for (axis, &h) in half.iter().enumerate() {
+        if h == 0 {
+            continue;
+        }
+        let (len, stride) = [(nx, 1), (ny, nx), (nz, nx * ny)][axis];
+        let src = out.clone();
+        let w = (2 * h + 1) as f64;
+        for i in 0..data.len() {
+            let c = (i / stride) % len;
+            let base = i - c * stride;
+            let mut acc = 0.0;
+            for k in 0..=2 * h {
+                let p = (c + k).saturating_sub(h).min(len - 1);
+                acc += src[base + p * stride];
+            }
+            out[i] = acc / w;
+        }
+    }
+    out
+}
+
 /// Complete QSMART pipeline parameters
 #[cfg_attr(feature = "introspection", derive(serde::Serialize))]
 #[derive(Clone, Debug)]
@@ -188,9 +280,8 @@ impl Default for QsmartParams {
 impl QsmartParams {
     /// Create parameters for specific field strength
     pub fn for_field_strength(field_tesla: f64) -> Self {
-        let gyro = 2.675e8; // Proton gyromagnetic ratio
         Self {
-            ppm: gyro * field_tesla / 1e6,
+            ppm: QSMART_GYRO * field_tesla / 1e6,
             ..Default::default()
         }
     }
@@ -247,6 +338,35 @@ pub fn compute_weighted_mask_stage2(mask: &[f64], r_0: &[f64], vasc_only: &[f64]
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn echofit_matches_matlab() {
+        // QSMART_toolbox_v1.0/echofit.m (MATLAB R2023b) on the same synthetic data: anisotropic
+        // voxels (box 3x5x1) and zero-magnitude voxels (residual 0/0 -> 0).
+        let grid = crate::Grid::new(6, 5, 4, 1.0, 0.5, 2.0);
+        let te = [0.004, 0.009, 0.014];
+        let n = 120;
+        let mags: Vec<Vec<f64>> = (0..3)
+            .map(|e| (0..n).map(|i| if i % 13 == 0 { 0.0 } else { 1.0 + ((i * 7 + e * 3) % 11) as f64 / 5.0 }).collect())
+            .collect();
+        let phases: Vec<Vec<f64>> = (0..3)
+            .map(|e| (0..n).map(|i| 30.0 * te[e] * (1.0 + (i as f64 * 0.7).sin()) + 0.4 * (i as f64 * 1.3 + e as f64 * 2.1).cos()).collect())
+            .collect();
+        let p: Vec<&[f64]> = phases.iter().map(|v| v.as_slice()).collect();
+        let m: Vec<&[f64]> = mags.iter().map(|v| v.as_slice()).collect();
+        let fit = qsmart_echofit(&p, &m, &te, &grid, 2.675e8 * 3.0 / 1e6, 0.19491409729604658);
+        let close = |a: f64, b: f64| assert!((a - b).abs() <= 1e-12 * b.abs().max(1.0), "{a} vs {b}");
+        close(fit.field_ppm.iter().sum(), 4.228895044177502);
+        close(fit.fit_residual.iter().sum(), 23.334665367421614);
+        close(fit.fit_residual_blur.iter().sum(), 23.280564657566376);
+        close(fit.fit_residual_blur.iter().map(|v| v * v).sum(), 4.534541884237994);
+        close(fit.field_ppm[7], 0.009255448272120092);
+        close(fit.fit_residual[7], 0.19925363423077985);
+        close(fit.fit_residual_blur[7], 0.1834123131209351);
+        close(fit.fit_residual_blur[0], 0.15544118128559214);
+        let r0: String = fit.reliability.iter().map(|&r| char::from(b'0' + r)).collect();
+        assert_eq!(r0, "110000110000111100111100111100110011110011110100111100111000001011000011001110001110000010111000111000001010001110001110");
+    }
     use crate::Grid;
 
     #[test]
