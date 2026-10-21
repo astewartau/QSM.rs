@@ -162,7 +162,7 @@ fn lsmr_diag(d: &[f64], b: &[Complex64], nx: usize, maxit: usize) -> Vec<Complex
         cbar = rhotmp / rhobar;
         sbar = thetanew / rhobar;
         zeta = cbar * zetabar;
-        zetabar = -sbar * zetabar;
+        zetabar *= -sbar;
 
         let delta = -thetabar * rho / (rhoold * rhobarold);
         let sigma = zeta / (rho * rhobar);
