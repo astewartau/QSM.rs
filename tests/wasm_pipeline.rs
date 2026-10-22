@@ -309,13 +309,15 @@ fn field_mapping() {
 fn bg_removal() {
     let p = Phantom::new();
     let m = meta();
+    // PDF requires the magnitude of every echo (stacked, echo slowest); the others ignore it
+    let echoes: Vec<f64> = p.mag_refs().concat();
     for &algorithm in BgRemovalAlgorithm::VARIANTS {
         if needs_weights(algorithm.dl_model_id()) {
             continue;
         }
         for msmv_refine in [false, true] {
             let config = BgRemovalConfig { algorithm, msmv_refine, ..Default::default() };
-            let r = run_bg_removal(&p.total_ppm, &p.mask, &m, &config, &mut no_progress())
+            let r = run_bg_removal(&p.total_ppm, &p.mask, &m, &config, Some(&echoes), &mut no_progress())
                 .unwrap_or_else(|e| panic!("{algorithm:?} (mSMV {msmv_refine}): {e}"));
             check(&format!("{algorithm:?}"), &r.local_field_ppm);
             check_mask(&format!("{algorithm:?} eroded mask"), &r.eroded_mask);
@@ -717,7 +719,7 @@ fn dl_bfr_bfrnet() {
     let m = meta();
     for tile in [None, Some((8, 4))] {
         let config = BgRemovalConfig { algorithm: BgRemovalAlgorithm::Bfrnet, tile, ..Default::default() };
-        let r = on_provided_weights("bfrnet", || run_bg_removal(&p.total_ppm, &p.mask, &m, &config, &mut no_progress()));
+        let r = on_provided_weights("bfrnet", || run_bg_removal(&p.total_ppm, &p.mask, &m, &config, None, &mut no_progress()));
         if let Some(r) = r {
             check("bfrnet", &r.local_field_ppm);
         }
@@ -1073,7 +1075,7 @@ mod browser_memory {
         let s = Scan::new();
         let (total, mask) = (s.total(), s.mask());
         let config = BgRemovalConfig { algorithm: BgRemovalAlgorithm::Bfrnet, tile, ..Default::default() };
-        measure("bfrnet", &tile_label(tile), || run_bg_removal(&total, &mask, &s.m, &config, &mut |_, _| {}));
+        measure("bfrnet", &tile_label(tile), || run_bg_removal(&total, &mask, &s.m, &config, None, &mut |_, _| {}));
     }
 
     /// Tiled BFRnet against the 4 GiB heap with the tiles a 4-thread browser keeps in flight.
@@ -1095,7 +1097,7 @@ mod browser_memory {
         let (core, halo) = BROWSER_TILE.unwrap();
         let config = BgRemovalConfig { algorithm: BgRemovalAlgorithm::Bfrnet, tile: BROWSER_TILE, ..Default::default() };
         let base = heap_mb();
-        run_bg_removal(&total, &mask, &s.m, &config, &mut |_, _| {}).unwrap_or_else(|e| panic!("bfrnet: {e}"));
+        run_bg_removal(&total, &mask, &s.m, &config, None, &mut |_, _| {}).unwrap_or_else(|e| panic!("bfrnet: {e}"));
         let one = heap_mb();
         let cfg = TileConfig { core, halo };
         let cost = qsm_core::models::find_model("bfrnet").unwrap().tile_cost().unwrap();

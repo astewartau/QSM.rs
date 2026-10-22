@@ -13,6 +13,8 @@ use super::config::*;
 /// * `mask` - Binary brain mask
 /// * `metadata` - Scan metadata
 /// * `config` - Background removal configuration
+/// * `magnitude` - The magnitude of every echo, stacked with the echo slowest. PDF requires it
+///   (its data weight is the `Fit_ppm_complex` noise map); the other methods ignore it.
 /// * `progress` - Progress callback (current_iter, max_iter)
 ///
 /// # Returns
@@ -22,6 +24,7 @@ pub fn run_bg_removal(
     mask: &[u8],
     metadata: &ScanMetadata,
     config: &BgRemovalConfig,
+    magnitude: Option<&[f64]>,
     progress: &mut dyn FnMut(usize, usize),
 ) -> Result<BgRemovalResult, PipelineError> {
     // Every background removal here convolves with a kernel defined on the voxel grid, so a
@@ -59,10 +62,22 @@ pub fn run_bg_removal(
             )
         }
         BgRemovalAlgorithm::Pdf => {
+            // PDF weights the fit by 1/N_std, the noise of the field, which MEDI's pipeline takes
+            // from Fit_ppm_complex (radians over the echo spacing, from the echo magnitudes). PDF
+            // takes ppm like the others, and N_std must be in the field's unit (it sets the CG
+            // tolerance), so it is converted with the factor that converts the field.
+            let te = &metadata.echo_times;
+            let mag = super::inversion::echo_magnitudes("PDF", magnitude, te, n_voxels)?;
+            let delta_te = if te.len() == 1 { te[0] } else { te[1] - te[0] };
+            let rad_per_ppm = 2.0 * std::f64::consts::PI * 42.576e6 * metadata.field_strength * delta_te * 1e-6;
+            let n_std: Vec<f64> = crate::utils::fit_ppm_complex_noise(mag.data, mag.n_echoes)
+                .into_iter()
+                .map(|v| v / rad_per_ppm)
+                .collect();
             let local = crate::bgremove::pdf(
-                field_ppm, mask, &grid,
+                field_ppm, &n_std, mask, &grid,
                 metadata.b0_direction, &config.pdf, progress,
-            );
+            )?;
             (local, mask.to_vec())
         }
         BgRemovalAlgorithm::Lbv => {
@@ -186,7 +201,7 @@ mod tests {
         };
 
         let result = run_bg_removal(
-            &field, &mask, &meta, &BgRemovalConfig::default(),
+            &field, &mask, &meta, &BgRemovalConfig::default(), None,
             &mut |_, _| {},
         );
         assert!(result.is_ok());
@@ -211,7 +226,7 @@ mod tests {
         for spacing_mm in [0.0, -1.0, f64::NAN] {
             let mut config = BgRemovalConfig::default();
             config.vsharp.grid = crate::bgremove::VsharpGrid::Isotropic { spacing_mm };
-            let r = run_bg_removal(&vec![0.1; n], &vec![1u8; n], &meta, &config, &mut |_, _| {});
+            let r = run_bg_removal(&vec![0.1; n], &vec![1u8; n], &meta, &config, None, &mut |_, _| {});
             assert!(matches!(r, Err(PipelineError::InvalidConfig(_))), "spacing {spacing_mm}");
         }
     }
@@ -235,13 +250,13 @@ mod tests {
         };
 
         // undeclared: nothing can be concluded, so it runs
-        assert!(run_bg_removal(&field, &mask, &meta, &BgRemovalConfig::default(), &mut |_, _| {})
+        assert!(run_bg_removal(&field, &mask, &meta, &BgRemovalConfig::default(), None, &mut |_, _| {})
             .is_ok());
 
         // declared contiguous: runs
         meta.slice_geometry =
             Some(crate::grid::SliceGeometry { thickness: 3.0, axis: 2 });
-        assert!(run_bg_removal(&field, &mask, &meta, &BgRemovalConfig::default(), &mut |_, _| {})
+        assert!(run_bg_removal(&field, &mask, &meta, &BgRemovalConfig::default(), None, &mut |_, _| {})
             .is_ok());
 
         // declared gapped: refused, for every algorithm the enum offers
@@ -253,7 +268,7 @@ mod tests {
             BgRemovalAlgorithm::Harperella, BgRemovalAlgorithm::Iharperella,
         ] {
             let config = BgRemovalConfig { algorithm, ..BgRemovalConfig::default() };
-            match run_bg_removal(&field, &mask, &meta, &config, &mut |_, _| {}) {
+            match run_bg_removal(&field, &mask, &meta, &config, None, &mut |_, _| {}) {
                 Err(PipelineError::InvalidInput(msg)) => {
                     assert!(msg.contains("1.0000 mm gap"), "{algorithm:?}: {msg}");
                 }
@@ -276,8 +291,71 @@ mod tests {
             affine: None,
         };
         let config = BgRemovalConfig { algorithm: BgRemovalAlgorithm::Pdf, ..Default::default() };
-        let r = run_bg_removal(&field, &mask, &meta, &config, &mut |_, _| {}).unwrap();
+        let mag = vec![1.0; n];
+        let r = run_bg_removal(&field, &mask, &meta, &config, Some(&mag), &mut |_, _| {}).unwrap();
         assert_eq!(r.local_field_ppm.len(), n);
+    }
+
+    /// PDF weights the data by the Fit_ppm_complex noise map, so it needs every echo's
+    /// magnitude and says so rather than running unweighted.
+    #[test]
+    fn pdf_requires_the_echo_magnitudes() {
+        let (nx, ny, nz) = (8, 8, 8);
+        let n = nx * ny * nz;
+        let meta = ScanMetadata {
+            dims: (nx, ny, nz), voxel_size: (1.0, 1.0, 1.0),
+            echo_times: vec![0.005, 0.01], field_strength: 3.0, b0_direction: (0.0, 0.0, 1.0),
+            slice_geometry: None,
+            affine: None,
+        };
+        let config = BgRemovalConfig { algorithm: BgRemovalAlgorithm::Pdf, ..Default::default() };
+        let (field, mask) = (vec![0.1; n], vec![1u8; n]);
+        for mag in [None, Some(vec![1.0; n])] {
+            match run_bg_removal(&field, &mask, &meta, &config, mag.as_deref(), &mut |_, _| {}) {
+                Err(PipelineError::InvalidInput(msg)) => {
+                    assert!(msg.contains("PDF needs the magnitude of every echo (2 volumes"), "{msg}");
+                }
+                Err(other) => panic!("{other:?}"),
+                Ok(_) => panic!("PDF ran without the echo magnitudes"),
+            }
+        }
+        assert!(run_bg_removal(&field, &mask, &meta, &config, Some(&vec![1.0; 2 * n]), &mut |_, _| {}).is_ok());
+    }
+
+    /// The noise map reaches PDF in the field's unit: the pipeline gives the same local field as
+    /// `pdf` called with `Fit_ppm_complex`'s N_std divided by the ppm-to-radian factor.
+    #[test]
+    fn pdf_gets_the_noise_map_in_ppm() {
+        let (nx, ny, nz) = (12, 12, 12);
+        let n = nx * ny * nz;
+        let mut field = vec![0.0f64; n];
+        let mut mask = vec![0u8; n];
+        let mut mag = vec![0.0f64; 3 * n];
+        for k in 0..nz {
+            for j in 0..ny {
+                for i in 0..nx {
+                    let idx = i + j * nx + k * nx * ny;
+                    let (x, y, z) = (i as f64 - 5.5, j as f64 - 5.5, k as f64 - 5.5);
+                    mask[idx] = u8::from(x * x + y * y + z * z < 16.0);
+                    field[idx] = 0.01 * (0.3 * x - 0.7 * z + 0.02 * x * y * z);
+                    for e in 0..3 {
+                        mag[idx + e * n] = (1.0 + 0.1 * x.abs()) * (1.0 - 0.2 * e as f64);
+                    }
+                }
+            }
+        }
+        let meta = ScanMetadata {
+            dims: (nx, ny, nz), voxel_size: (1.0, 1.0, 1.0),
+            echo_times: vec![0.004, 0.008, 0.012], field_strength: 3.0, b0_direction: (0.0, 0.0, 1.0),
+            slice_geometry: None,
+            affine: None,
+        };
+        let config = BgRemovalConfig { algorithm: BgRemovalAlgorithm::Pdf, ..Default::default() };
+        let got = run_bg_removal(&field, &mask, &meta, &config, Some(&mag), &mut |_, _| {}).unwrap();
+        let rad_per_ppm = 2.0 * std::f64::consts::PI * 42.576e6 * 3.0 * 0.004 * 1e-6;
+        let n_std: Vec<f64> = crate::utils::fit_ppm_complex_noise(&mag, 3).iter().map(|v| v / rad_per_ppm).collect();
+        let want = crate::bgremove::pdf(&field, &n_std, &mask, &meta.grid(), (0.0, 0.0, 1.0), &config.pdf, |_, _| {}).unwrap();
+        assert_eq!(got.local_field_ppm, want);
     }
 
     /// PDF is the one background remover that builds a dipole kernel, so the
@@ -313,7 +391,9 @@ mod tests {
                 slice_geometry: None,
                 affine: None,
             };
-            run_bg_removal(&field, &mask, &meta, &config, &mut |_, _| {}).unwrap().local_field_ppm
+            // high SNR, so PDF's noise-based tolerance lets CG run
+            let mag = vec![1e4; n];
+            run_bg_removal(&field, &mask, &meta, &config, Some(&mag), &mut |_, _| {}).unwrap().local_field_ppm
         };
 
         let axial = run((0.0, 0.0, 1.0));
@@ -349,7 +429,7 @@ mod tests {
             affine: None,
         };
         let config = BgRemovalConfig { algorithm: BgRemovalAlgorithm::Lbv, ..Default::default() };
-        let r = run_bg_removal(&field, &mask, &meta, &config, &mut |_, _| {}).unwrap();
+        let r = run_bg_removal(&field, &mask, &meta, &config, None, &mut |_, _| {}).unwrap();
         assert_eq!(r.local_field_ppm.len(), n);
     }
 
@@ -366,7 +446,7 @@ mod tests {
             affine: None,
         };
         let config = BgRemovalConfig { algorithm: BgRemovalAlgorithm::Sharp, ..Default::default() };
-        let r = run_bg_removal(&field, &mask, &meta, &config, &mut |_, _| {}).unwrap();
+        let r = run_bg_removal(&field, &mask, &meta, &config, None, &mut |_, _| {}).unwrap();
         assert_eq!(r.local_field_ppm.len(), n);
     }
 
@@ -383,7 +463,7 @@ mod tests {
             affine: None,
         };
         let config = BgRemovalConfig { algorithm: BgRemovalAlgorithm::Ismv, ..Default::default() };
-        let r = run_bg_removal(&field, &mask, &meta, &config, &mut |_, _| {}).unwrap();
+        let r = run_bg_removal(&field, &mask, &meta, &config, None, &mut |_, _| {}).unwrap();
         assert_eq!(r.local_field_ppm.len(), n);
     }
 
@@ -405,7 +485,7 @@ mod tests {
             msmv_refine: true,
             ..Default::default()
         };
-        let r = run_bg_removal(&field, &mask, &meta, &config, &mut |_, _| {}).unwrap();
+        let r = run_bg_removal(&field, &mask, &meta, &config, None, &mut |_, _| {}).unwrap();
         assert_eq!(r.local_field_ppm.len(), n);
     }
 
@@ -422,7 +502,7 @@ mod tests {
             affine: None,
         };
         let config = BgRemovalConfig { algorithm: BgRemovalAlgorithm::Resharp, ..Default::default() };
-        let r = run_bg_removal(&field, &mask, &meta, &config, &mut |_, _| {}).unwrap();
+        let r = run_bg_removal(&field, &mask, &meta, &config, None, &mut |_, _| {}).unwrap();
         assert_eq!(r.local_field_ppm.len(), n);
     }
 
@@ -451,7 +531,7 @@ mod tests {
             })
             .collect();
         let run = |config: &BgRemovalConfig| {
-            run_bg_removal(&field, &mask, &meta, config, &mut |_, _| {}).unwrap().local_field_ppm
+            run_bg_removal(&field, &mask, &meta, config, None, &mut |_, _| {}).unwrap().local_field_ppm
         };
         let base = BgRemovalConfig { algorithm: BgRemovalAlgorithm::Iharperella, ..Default::default() };
         let reference = run(&base);
@@ -481,7 +561,7 @@ mod tests {
         let mask = vec![1u8; 64];
 
         let result = run_bg_removal(
-            &field, &mask, &meta, &BgRemovalConfig::default(),
+            &field, &mask, &meta, &BgRemovalConfig::default(), None,
             &mut |_, _| {},
         );
         assert!(result.is_err());

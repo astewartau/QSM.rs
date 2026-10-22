@@ -1362,7 +1362,7 @@ fn tiled_phase_nets_and_bfrnet_track_whole_volume() {
         .b0_field_ppm;
     let bfrnet = |tile| {
         let config = BgRemovalConfig { algorithm: BgRemovalAlgorithm::Bfrnet, tile, ..Default::default() };
-        run_bg_removal(&field, &mask, &meta, &config, &mut |_, _| {}).expect("bfrnet").local_field_ppm
+        run_bg_removal(&field, &mask, &meta, &config, None, &mut |_, _| {}).expect("bfrnet").local_field_ppm
     };
     let whole = bfrnet(None);
     report("BFRnet", &whole, &bfrnet, &mask);

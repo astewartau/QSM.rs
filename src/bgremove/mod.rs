@@ -82,7 +82,7 @@ pub use msmv::{msmv, MsmvParams};
 pub use sharp::{sharp, SharpParams};
 pub use resharp::{resharp, ResharpParams};
 pub use vsharp::{vsharp, VsharpGrid, VsharpParams};
-pub use pdf::{pdf, PdfParams};
+pub use pdf::{pdf, DipoleKernelSpace, PdfParams};
 pub use ismv::{ismv, IsmvParams};
 pub use lbv::{lbv, LbvParams};
 pub use sdf::{sdf, sdf_curvature, sdf_simple, SdfParams};

@@ -59,7 +59,7 @@ fn main() {
     // 2. Total field -> local field (ppm); also returns the eroded mask
     let bg = run_bg_removal(
         &field.b0_field_ppm, &mask, &meta,
-        &BgRemovalConfig::default(), &mut |_, _| {},
+        &BgRemovalConfig::default(), None, &mut |_, _| {},
     ).expect("background removal failed");
 
     // 3. Local field -> susceptibility (ppm)

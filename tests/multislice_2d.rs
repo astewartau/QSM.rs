@@ -297,7 +297,7 @@ fn a_gapped_acquisition_is_refused_by_the_pipeline() {
         affine: None,
     };
     let cfg = BgRemovalConfig::default();
-    let Err(err) = run_bg_removal(&s.fieldmap, &s.mask, &meta, &cfg, &mut |_, _| {}) else {
+    let Err(err) = run_bg_removal(&s.fieldmap, &s.mask, &meta, &cfg, None, &mut |_, _| {}) else {
         panic!("a gapped acquisition must be refused, not computed");
     };
     println!("RESULT:bfr_gap_refused={err}");
@@ -305,7 +305,7 @@ fn a_gapped_acquisition_is_refused_by_the_pipeline() {
     // and the same data, declared contiguous, is accepted - so the refusal is reading the
     // thickness and not just failing on this session for some other reason
     meta.slice_geometry = Some(SliceGeometry { thickness: pitch, axis: SLICE_AXIS });
-    assert!(run_bg_removal(&s.fieldmap, &s.mask, &meta, &cfg, &mut |_, _| {}).is_ok());
+    assert!(run_bg_removal(&s.fieldmap, &s.mask, &meta, &cfg, None, &mut |_, _| {}).is_ok());
     // and the message names the geometry, so the person who scanned it can act on it
     let msg = err.to_string();
     for part in ["3.0000", "4.0000", "1.0000", "not contiguous"] {
