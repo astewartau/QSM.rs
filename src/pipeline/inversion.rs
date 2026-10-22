@@ -899,8 +899,7 @@ mod tests {
 
     #[test]
     fn test_inversion_ilsqr() {
-        // 6 mm keeps this 8^3 volume on a 32^3 grid (the default 16 mm gives 48^3).
-        let ilsqr = crate::inversion::IlsqrParams { max_iter: 3, pad_mm: 6.0, ..Default::default() };
+        let ilsqr = crate::inversion::IlsqrParams { max_iter: 3, ..Default::default() };
         let chi = make_inversion_test_with(InversionConfig { algorithm: InversionAlgorithm::Ilsqr, ilsqr, ..Default::default() });
         assert_eq!(chi.len(), 8 * 8 * 8);
     }
