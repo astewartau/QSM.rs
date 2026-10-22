@@ -421,7 +421,9 @@ pub struct R2PrimeMap {
 /// R2* (from a gradient-echo acquisition) captures reversible + irreversible dephasing; R2 (from a
 /// spin-echo acquisition) captures only the irreversible part. Their difference R2' is the
 /// reversible dephasing that chi-separation uses to constrain the paramagnetic/diamagnetic split.
-/// Noise can make R2* < R2 in some voxels, so negative values are clamped to zero.
+/// Noise can make R2* < R2 in some voxels, so negative values are clamped to zero, as
+/// [`r2primenet`](super::r2primenet::r2primenet) does: every R2′ QSM.rs makes is non-negative,
+/// and the χ-separation methods are given that map.
 ///
 /// **R2' is only defined where R2 exists.** R2 comes from a multi-echo spin-echo acquisition, and
 /// a MESE is routinely a *slab* — a band of slices rather than the whole head — because

@@ -56,6 +56,21 @@ pub const DR_KIM_2025_COSMOS: f64 = 114.0;
 /// from any other three volumes at a call site.
 pub type ChiSepMaps = (Vec<f64>, Vec<f64>, Vec<f64>);
 
+/// One voxel of a network's de-normalised source magnitudes, as `(χ+, χ−, χ_total)` in the
+/// crate's order: χ+ and |χ−| are set to 0 where they are negative, χ− is returned signed (≤ 0),
+/// and χ_total is the sum of the two after that.
+///
+/// A source magnitude below zero has no physical meaning; it comes from the de-normalisation
+/// (`z·std + mean`) of a network output with no output activation. χ-sepnet's own `test.py` sets
+/// those voxels to 0 ("zero-truncation"); for SUSEP-Net, whose `test_demo.py` does not, it is a
+/// deliberate deviation.
+#[cfg_attr(not(feature = "onnx"), allow(dead_code))]
+pub(crate) fn sources_from_magnitudes(pos: f64, neg_mag: f64) -> (f64, f64, f64) {
+    let pos = pos.max(0.0);
+    let neg = -neg_mag.max(0.0);
+    (pos, neg, pos + neg)
+}
+
 pub mod chi_sep_ilsqr;
 pub mod chi_sep_medi;
 pub mod decompose;
@@ -113,6 +128,18 @@ mod tests {
                  method's output incomparable with the others' on the same data."
             );
         }
+    }
+
+    /// Negative source magnitudes become 0; non-negative ones pass through unchanged, and
+    /// χ_total stays χ+ + χ−.
+    #[test]
+    fn network_sources_are_never_the_wrong_sign() {
+        assert_eq!(sources_from_magnitudes(0.03, 0.02), (0.03, -0.02, 0.03 - 0.02));
+        assert_eq!(sources_from_magnitudes(-0.01, 0.02), (0.0, -0.02, -0.02));
+        assert_eq!(sources_from_magnitudes(0.03, -0.01), (0.03, 0.0, 0.03));
+        let (p, n, t) = sources_from_magnitudes(-0.01, -0.01);
+        assert_eq!((p, t), (0.0, 0.0));
+        assert!(n == 0.0);
     }
 
     /// The two published values are distinct and neither drifted.

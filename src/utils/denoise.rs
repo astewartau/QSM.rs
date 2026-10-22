@@ -139,8 +139,10 @@ fn mp_noise_variance(d: &[f64], n_samples: usize) -> f64 {
 /// * `mask` - Optional binary mask; masked-out voxels are copied unchanged.
 ///
 /// # Returns
-/// Denoised data in the same layout. Voxels within `patch_radius` of the volume
-/// border, or outside the mask, are returned unchanged.
+/// Denoised data in the same layout, with negative denoised values set to 0 as DIPY's
+/// `localpca` does (`clip(min=0)`): the input is magnitude, where a negative value has no
+/// physical meaning. Voxels within `patch_radius` of the volume border, or outside the mask, are
+/// returned unchanged.
 pub fn mppca_denoise(
     data: &[f64],
     dims: (usize, usize, usize),
@@ -234,7 +236,7 @@ pub fn mppca_denoise(
                 slot[t] += proj * w[t * n + k];
             }
         }
-        // Non-negativity (magnitude data).
+        // Non-negativity (magnitude data), as DIPY's localpca: denoised_arr.clip(min=0)
         for t in 0..n {
             if slot[t] < 0.0 {
                 slot[t] = 0.0;
@@ -307,6 +309,34 @@ mod tests {
         for (r, a) in recon.iter().zip(a.iter()) {
             assert!((r - a).abs() < 1e-9);
         }
+    }
+
+    /// Pure zero-mean noise denoises to values around 0; none of them may be negative.
+    #[test]
+    fn test_mppca_output_is_never_negative() {
+        let (nx, ny, nz, n) = (9usize, 9usize, 9usize, 6usize);
+        let mut seed = 7u64;
+        let data: Vec<f64> = (0..nx * ny * nz * n)
+            .map(|_| {
+                seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                (seed >> 33) as f64 / (1u64 << 31) as f64 - 0.5
+            })
+            .collect();
+        let den = mppca_denoise(&data, (nx, ny, nz), n, 2, None);
+        let r = 2usize;
+        let mut zeros = 0;
+        for z in r..nz - r {
+            for y in r..ny - r {
+                for x in r..nx - r {
+                    let v = x + y * nx + z * nx * ny;
+                    for t in 0..n {
+                        assert!(den[v * n + t] >= 0.0, "negative denoised magnitude");
+                        zeros += (den[v * n + t] == 0.0) as usize;
+                    }
+                }
+            }
+        }
+        assert!(zeros > 0, "zero-mean noise should have been clamped somewhere");
     }
 
     #[test]

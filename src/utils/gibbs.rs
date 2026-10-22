@@ -22,6 +22,10 @@
 //! unpaired Nyquist bin on even-length lines. This differs from DIPY only in
 //! that one bin — measured max |diff| ~4e-3 on unit-scale data, r > 0.9999999 —
 //! and halves the per-line FFT work (~2× overall).
+//!
+//! A second deliberate deviation: negative output values are set to 0. The input is magnitude,
+//! where a negative value has no physical meaning; DIPY returns the undershoot as it is. Every
+//! non-negative value is unchanged.
 
 use crate::fft::{fft3d_real, ifft3d_real};
 use num_complex::Complex64;
@@ -317,6 +321,8 @@ fn unring_axis(vol: &[f64], (nx, ny, nz): (usize, usize, usize), axis: usize) ->
 }
 
 /// Gibbs-unring a single 3-D volume.
+///
+/// Negative results are set to 0 (a deviation from DIPY; see the module docs).
 pub fn gibbs_unring_volume(vol: &[f64], dims: (usize, usize, usize)) -> Vec<f64> {
     let (nx, ny, nz) = dims;
     let n_vox = nx * ny * nz;
@@ -356,6 +362,7 @@ pub fn gibbs_unring_volume(vol: &[f64], dims: (usize, usize, usize)) -> Vec<f64>
         }
     }
     let mut out = ifft3d_real(&spec, nx, ny, nz);
+    // Deviation from DIPY: no negative magnitudes.
     for v in out.iter_mut() {
         if *v < 0.0 {
             *v = 0.0;
@@ -373,7 +380,7 @@ pub fn gibbs_unring_volume(vol: &[f64], dims: (usize, usize, usize)) -> Vec<f64>
 /// * `n_vols` - Number of volumes.
 ///
 /// # Returns
-/// Unrung data in the same layout.
+/// Unrung data in the same layout, with negative values set to 0 (see the module docs).
 pub fn gibbs_unring(data: &[f64], dims: (usize, usize, usize), n_vols: usize) -> Vec<f64> {
     let (nx, ny, nz) = dims;
     let n_vox = nx * ny * nz;
@@ -551,6 +558,43 @@ mod tests {
         let tv = |a: &[f64]| a.windows(2).map(|w| (w[1] - w[0]).abs()).sum::<f64>();
         let tv_rung: f64 = rung.windows(2).map(|w| (w[1] - w[0]).abs()).sum();
         assert!(tv(&line) < 0.85 * tv_rung, "unring should cut TV: {:.3} -> {:.3}", tv_rung, tv(&line));
+    }
+
+    /// Ringing around a block on a zero background undershoots below 0; the output never does,
+    /// and the clamp leaves the block's interior and the far background untouched.
+    #[test]
+    fn test_unring_volume_is_never_negative() {
+        let (nx, ny, nz) = (24usize, 24usize, 24usize);
+        let n = nx * ny * nz;
+        let mut block = vec![0.0_f64; n];
+        for z in 8..16 {
+            for y in 8..16 {
+                for x in 8..16 {
+                    block[x + y * nx + z * nx * ny] = 1.0;
+                }
+            }
+        }
+        // Band-limit in 3-D to make it ring.
+        let mut spec = fft3d_real(&block, nx, ny, nz);
+        let f = fftfreq(nx);
+        for z in 0..nz {
+            for y in 0..ny {
+                for x in 0..nx {
+                    if f[x].abs() > 0.2 || f[y].abs() > 0.2 || f[z].abs() > 0.2 {
+                        spec[x + y * nx + z * nx * ny] = Complex64::new(0.0, 0.0);
+                    }
+                }
+            }
+        }
+        let rung = ifft3d_real(&spec, nx, ny, nz);
+        assert!(rung.iter().any(|&v| v < -1e-3), "the test input should undershoot");
+        let un = gibbs_unring_volume(&rung, (nx, ny, nz));
+        assert!(un.iter().all(|&v| v >= 0.0), "unrung magnitude must not be negative");
+        assert!(un.contains(&0.0));
+        let c = 12 + 12 * nx + 12 * nx * ny;
+        assert!(un[c] > 0.5, "block interior kept: {}", un[c]);
+        let multi = gibbs_unring(&rung, (nx, ny, nz), 1);
+        assert!(multi.iter().all(|&v| v >= 0.0));
     }
 
     /// Timing + numeric fingerprint on a synthetic volume (sphere + deterministic
