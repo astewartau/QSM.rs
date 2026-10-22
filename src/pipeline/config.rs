@@ -538,8 +538,8 @@ impl InversionConfig {
     ///   That removes the harmonic background, so MEDI+SMV takes the total field. Without SMV,
     ///   MEDI takes the local field.
     /// - **TGV** ([`run_tgv`](super::run_tgv)) reconstructs multi-echo data from the
-    ///   field-mapped total field ([`TgvInput::FieldPpm`](crate::inversion::TgvInput::FieldPpm))
-    ///   and a single echo from its wrapped phase
+    ///   field-mapped total field ([`TgvInput::FieldPpm`](crate::inversion::TgvInput::FieldPpm),
+    ///   expressed as phase at the first echo time) and a single echo from its wrapped phase
     ///   ([`TgvInput::WrappedPhase`](crate::inversion::TgvInput::WrappedPhase)). Either way it
     ///   does its own background removal.
     ///

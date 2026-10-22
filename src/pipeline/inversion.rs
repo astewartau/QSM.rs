@@ -697,10 +697,12 @@ pub fn run_iqfm(
 /// Run TGV single-step QSM reconstruction.
 ///
 /// Multi-echo data goes through field mapping first and TGV runs on the field in ppm
-/// ([`TgvInput::FieldPpm`](crate::inversion::TgvInput::FieldPpm)). Single-echo data goes in
-/// as the wrapped phase with its echo time and the scan's field strength
+/// ([`TgvInput::FieldPpm`](crate::inversion::TgvInput::FieldPpm)), expressed as phase at the
+/// first echo time. Single-echo data goes in as the wrapped phase with its echo time
 /// ([`TgvInput::WrappedPhase`](crate::inversion::TgvInput::WrappedPhase)), and TGV handles
-/// unwrapping as well. Either way TGV also does background removal and inversion.
+/// unwrapping as well. Either way the scan's field strength is passed, α are in the
+/// reference's rad units at that TE and B0, and TGV also does background removal and
+/// inversion.
 ///
 /// # Returns
 /// Susceptibility map in ppm (unreferenced — call `apply_reference` after)
@@ -720,25 +722,28 @@ pub fn run_tgv(
     let grid = metadata.grid();
     let (bx, by, bz) = metadata.b0_direction;
 
+    // The reference (QuantitativeSusceptibilityMappingTGV.jl) takes one echo and its TE; for
+    // a multi-echo field map the first echo time is used.
+    let te_s = *metadata.echo_times.first().ok_or_else(|| {
+        PipelineError::InvalidInput("TGV needs the echo time of the phase".into())
+    })?;
+    let b0_t = metadata.field_strength;
+    if !(te_s.is_finite() && te_s > 0.0 && b0_t.is_finite() && b0_t > 0.0) {
+        return Err(PipelineError::InvalidInput(format!(
+            "TGV needs a positive echo time and field strength, got TE = {te_s} s, B0 = {b0_t} T"
+        )));
+    }
+
     let chi_ppm = if phases.len() > 1 {
         let field_result = super::field_mapping::run_field_mapping(
             phases, magnitudes, mask, metadata,
             field_mapping_config, &mut |_, _| {},
         )?;
         crate::inversion::tgv_qsm(
-            TgvInput::FieldPpm(&field_result.b0_field_ppm),
+            TgvInput::FieldPpm { field: &field_result.b0_field_ppm, te_s, b0_t },
             mask, &grid, tgv_params, (bx, by, bz), &mut *progress,
         )?
     } else {
-        let te_s = *metadata.echo_times.first().ok_or_else(|| {
-            PipelineError::InvalidInput("TGV needs the echo time of the phase".into())
-        })?;
-        let b0_t = metadata.field_strength;
-        if !(te_s.is_finite() && te_s > 0.0 && b0_t.is_finite() && b0_t > 0.0) {
-            return Err(PipelineError::InvalidInput(format!(
-                "single-echo TGV needs a positive echo time and field strength, got TE = {te_s} s, B0 = {b0_t} T"
-            )));
-        }
         let input = TgvInput::WrappedPhase {
             phase: phases[0],
             te_s,

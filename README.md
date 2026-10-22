@@ -214,7 +214,7 @@ Methods marked † need the `onnx` feature and model weights.
 
 | Algorithm | Input | Description | Reference |
 |-----------|-------|-------------|-----------|
-| **TGV** | Total field (ppm), or one wrapped echo with its TE and B0 | Single-step total generalized variation (`tgv_qsm`, `TgvInput`) | Langkammer, C., et al. (2015). "Fast quantitative susceptibility mapping using 3D EPI and total generalized variation." *NeuroImage*, 111:622-630. [DOI](https://doi.org/10.1016/j.neuroimage.2015.02.041) |
+| **TGV** | Total field (ppm) or one wrapped echo, with TE and B0 | Single-step total generalized variation (`tgv_qsm`, `TgvInput`) | Langkammer, C., et al. (2015). "Fast quantitative susceptibility mapping using 3D EPI and total generalized variation." *NeuroImage*, 111:622-630. [DOI](https://doi.org/10.1016/j.neuroimage.2015.02.041) |
 | **TFI** | Total field (ppm) | Preconditioned total field inversion | Liu, Z., et al. (2017). "Preconditioned total field inversion (TFI) algorithm for quantitative susceptibility mapping." *Magnetic Resonance in Medicine*, 78(1):303-315. [DOI](https://doi.org/10.1002/mrm.26946) |
 | **QSMART** | Total field (ppm), optional reliability map `R_0` | SDF background removal, inversion, and vasculature separation | Yaghmaie, N., Syeda, W., et al. (2021). *NeuroImage*, 231:117701. [DOI](https://doi.org/10.1016/j.neuroimage.2020.117701) |
 | **AutoQSM** † | Total field (ppm) | Patch V-Net from total field to χ | Wei, H., et al. (2019). "Learning-based single-step quantitative susceptibility mapping reconstruction without brain extraction." *NeuroImage*, 202:116064. [DOI](https://doi.org/10.1016/j.neuroimage.2019.116064) |
