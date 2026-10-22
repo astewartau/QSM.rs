@@ -93,11 +93,23 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Upload figures
+        # Kept with the run, so the comment can point here if the image host is down.
+        if: github.event_name == 'pull_request'
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: figures
+          path: figures/
+          if-no-files-found: ignore
+
       - name: Post PR comment with results
         if: github.event_name == 'pull_request'
         continue-on-error: true
         env:
           REPO_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           fig() {  # emit an image only if it was rendered
             [ -f "figures/$1.png" ] && echo "![$1](figures/$1.png)"
@@ -135,15 +147,4 @@ jobs:
             echo ""
             echo "</details>"
           } > report.md
-          for attempt in 1 2 3 4 5; do
-            if cml comment create report.md; then
-              echo "PR comment posted (attempt $attempt)."; break
-            fi
-            if [ "$attempt" -lt 5 ]; then
-              wait=$((attempt * 30))
-              echo "cml comment create failed (attempt $attempt); retrying in ${wait}s..."
-              sleep "$wait"
-            else
-              echo "cml comment create still failing after $attempt attempts; giving up (non-fatal)."
-            fi
-          done
+          bash scripts/post_pr_comment.sh report.md
