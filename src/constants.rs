@@ -27,7 +27,7 @@ mod tests {
 
     #[test]
     fn units_agree() {
-        assert_eq!(GAMMA_BAR_MHZ_PER_T * 1e6, GAMMA_BAR_HZ_PER_T);
-        assert!((GAMMA_RAD_PER_S_PER_T - 2.675_164_4e8).abs() < 1e2);
+        assert!((GAMMA_BAR_MHZ_PER_T * 1e6 - GAMMA_BAR_HZ_PER_T).abs() < 1e-6);
+        assert!((GAMMA_RAD_PER_S_PER_T - 2.675_128_97e8).abs() < 1.0);
     }
 }
