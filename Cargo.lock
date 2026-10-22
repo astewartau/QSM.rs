@@ -1048,6 +1048,7 @@ dependencies = [
  "delaunator",
  "flate2",
  "getrandom 0.4.3",
+ "half",
  "js-sys",
  "libm",
  "ndarray 0.16.1",

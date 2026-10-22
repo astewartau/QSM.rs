@@ -813,15 +813,15 @@ fn dl_seg_synthseg() {
 /// SynthSeg on a volume whose whole-volume pass needs more than a 32-bit heap: 128×128×256 at
 /// 1 mm (no resampling, no extra padding) takes about 4.5 GB in one pass, and the wasm build
 /// aborts ("memory allocation failed", seen as `RuntimeError: unreachable`). In windows the
-/// network sees a patch at a time. A step of a whole patch keeps it to two 128³ windows, as much
-/// network as the volume itself.
+/// network sees a patch at a time. Windows that do not overlap keep it to two 128³ windows, as
+/// much network as the volume itself.
 #[cfg(feature = "onnx")]
 #[test]
 fn dl_seg_synthseg_beyond_the_heap_in_windows() {
     use qsm_core::segment::SynthSegInference;
     let Some(_weights) = provide("synthseg") else { return };
     let (mag, grid) = synthseg_input((128, 128, 256));
-    let params = synthseg_quick(SynthSegInference::SlidingWindow { patch: 128, tile_step: 1.0 });
+    let params = synthseg_quick(SynthSegInference::SlidingWindow { patch: 128, overlap: 0 });
     let mut passes = 0;
     let out = synthseg_run(&mag, &grid, &params, |done, total| {
         passes = total;
@@ -1251,7 +1251,15 @@ mod browser_memory {
     }
 
     fn synthseg(config: &str, params: qsm_core::segment::SynthSegParams) {
-        let s = Scan::new();
+        synthseg_on(Scan::new(), config, params)
+    }
+
+    /// SynthSeg on a 180×241×131 head (a 1.25 mm GRE resampled to 1 mm; padded to 192×256×160).
+    fn synthseg_gre_size(config: &str, params: qsm_core::segment::SynthSegParams) {
+        synthseg_on(Scan { m: scan_meta((180, 241, 131), (1.0, 1.0, 1.0)) }, config, params)
+    }
+
+    fn synthseg_on(s: Scan, config: &str, params: qsm_core::segment::SynthSegParams) {
         let mag = s.magnitudes().swap_remove(0);
         measure("synthseg", config, || synthseg_run(&mag, &s.m.grid(), &params, |_, _| {}));
     }
@@ -1407,7 +1415,20 @@ mod browser_memory {
             &Scan { m: scan_meta((128, 100, 20), (0.17, 0.20, 0.8)) });
         mindgrab => mask_op("mindgrab", "default", MaskOp::MindGrab(Default::default()), &Scan::new());
         synthseg_whole_volume => synthseg("whole volume", qsm_core::segment::SynthSegParams::default());
-        synthseg_low_memory => synthseg("low_memory 96³", qsm_core::segment::SynthSegParams::low_memory());
+        synthseg_low_memory => synthseg("low_memory", qsm_core::segment::SynthSegParams::low_memory());
+        synthseg_low_memory_128 => synthseg("low_memory, 128³ windows overlapping by 64", qsm_core::segment::SynthSegParams {
+            inference: qsm_core::segment::SynthSegInference::SlidingWindow { patch: 128, overlap: 64 },
+            ..qsm_core::segment::SynthSegParams::low_memory()
+        });
+        synthseg_low_memory_f32 => synthseg("low_memory, single precision", qsm_core::segment::SynthSegParams {
+            posteriors: qsm_core::segment::PosteriorPrecision::F32,
+            ..qsm_core::segment::SynthSegParams::low_memory()
+        });
+        synthseg_low_memory_gre_size => synthseg_gre_size("low_memory", qsm_core::segment::SynthSegParams::low_memory());
+        synthseg_low_memory_f32_gre_size => synthseg_gre_size("low_memory, single precision", qsm_core::segment::SynthSegParams {
+            posteriors: qsm_core::segment::PosteriorPrecision::F32,
+            ..qsm_core::segment::SynthSegParams::low_memory()
+        });
         bfrnet_whole_volume => bfrnet(None);
         bfrnet_tiled => bfrnet(BROWSER_TILE);
         bfrnet_tiled_cap_at_four_threads => bfrnet_tiled_at_four_threads();

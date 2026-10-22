@@ -487,10 +487,10 @@ fn test_dl_synthseg() {
 #[test]
 #[ignore]
 fn test_dl_synthseg_window() {
-    use qsm_core::segment::{SynthSegInference, SynthSegParams};
+    use qsm_core::segment::SynthSegParams;
 
     let data = TestData::load().expect("test data");
-    let windowed = SynthSegParams { inference: SynthSegInference::LOW_MEMORY, ..SynthSegParams::default() };
+    let windowed = SynthSegParams::low_memory();
     let (seg, elapsed) = run_synthseg(&data, &windowed, "synthseg");
     let dice = report_synthseg("SynthSeg (sliding window)", "dl_synthseg_window", &seg, &windowed, &data, elapsed);
 
