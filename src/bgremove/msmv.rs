@@ -54,10 +54,6 @@ use crate::fft::{apply_real_kernel, fft_real_kernel};
 use crate::kernels::smv::smv_kernel;
 use crate::Grid;
 
-/// Proton gyromagnetic ratio in MHz/T: the reference implementation's value (the `recon.m`
-/// wrapper this port was validated against), not `crate::constants`. Keep it.
-const GYRO_MHZ_T: f64 = 42.5774;
-
 /// Parameters for [`msmv`].
 #[cfg_attr(feature = "introspection", derive(serde::Serialize))]
 #[derive(Clone, Debug)]
@@ -69,6 +65,11 @@ pub struct MsmvParams {
     /// Main field strength in Tesla — sets the radian shadow-threshold cap `0.01·B0/3`.
     pub b0: f64,
     /// Echo time in seconds for the ppm↔radian conversion (MEDI-representative default).
+    ///
+    /// The conversion uses the centre frequency `CF = γ̄·B0` with γ̄ =
+    /// [`GAMMA_BAR_HZ_PER_T`](crate::constants::GAMMA_BAR_HZ_PER_T): the mSMV authors take CF
+    /// from the scan header, so there is no reference γ̄ to match, and the crate's own value is
+    /// used.
     pub te: f64,
     /// Whether to run mSMV's own SMV primary removal before the boundary
     /// correction. `true` (default) = self-contained total→local BFR; `false` =
@@ -119,8 +120,10 @@ pub fn msmv(
     assert_eq!(field.len(), n, "field length must match grid");
     assert_eq!(mask.len(), n, "mask length must match grid");
 
-    // ppm -> radians: rad = ppm · 2π · γ(MHz/T) · B0 · TE  (the 1e6/1e-6 cancel).
-    let ppm2rad = std::f64::consts::TAU * GYRO_MHZ_T * params.b0 * params.te;
+    // ppm -> radians: rad = ppm · 1e-6 · 2π · CF · TE, with CF = γ̄ · B0 (the authors read CF
+    // from the header; here it comes from the field strength the caller passes).
+    let cf = crate::constants::GAMMA_BAR_HZ_PER_T * params.b0;
+    let ppm2rad = std::f64::consts::TAU * cf * 1e-6 * params.te;
     let rdf: Vec<f64> = field.iter().map(|&v| v * ppm2rad).collect();
 
     let maskf: Vec<f64> = mask.iter().map(|&m| m as f64).collect();

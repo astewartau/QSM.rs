@@ -183,8 +183,8 @@ pub fn whqsm(
         .collect();
 
     // ppm -> radians, as WH_nlTV.m expects.
-    // FANSI's own scripts scale with `gyro = 2*pi*42.58` (script_invivo.m); this port has used
-    // the crate-wide value so far. Matching FANSI would change results, so it is left as is.
+    // FANSI's scripts use `gyro = 2*pi*42.58`; QSM.rs uses GAMMA_BAR_MHZ_PER_T, which is closer
+    // to the CODATA shielded-proton value (see `crate::constants`).
     let ppm_to_rad = 2.0 * std::f64::consts::PI * crate::constants::GAMMA_BAR_MHZ_PER_T * params.b0 * params.te;
     let phase: Vec<f64> = local_field.iter().map(|&f| f * ppm_to_rad).collect();
 

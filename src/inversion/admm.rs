@@ -231,8 +231,8 @@ pub fn fansi_unit_ee2(dims: (usize, usize, usize)) -> Vec<f64> {
 
 /// ppm -> radians factor `2*pi*gamma*b0*te` (gamma = [`GAMMA_BAR_MHZ_PER_T`](crate::constants::GAMMA_BAR_MHZ_PER_T)),
 /// for the FANSI solvers, which work on the phase in radians while the crate's inversions take
-/// ppm. FANSI's own scripts use `gyro = 2*pi*42.58` (script_invivo.m); matching that would
-/// change results, so the crate-wide value stays for now.
+/// ppm. FANSI's scripts use `gyro = 2*pi*42.58`; QSM.rs uses the shared constant, which is
+/// closer to the CODATA shielded-proton value (see [`crate::constants`]).
 pub fn fansi_ppm_to_rad(b0: f64, te: f64) -> f64 {
     2.0 * std::f64::consts::PI * crate::constants::GAMMA_BAR_MHZ_PER_T * b0 * te
 }
