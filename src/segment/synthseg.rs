@@ -23,15 +23,21 @@
 //! segmentation); on the echo-combined GRE magnitude the structure volumes come out in the
 //! normal physiological range. For multi-echo data the root-sum-of-squares over echoes works.
 //!
+//! The default whole-volume run reproduces FreeSurfer's `mri_synthseg` (SynthSeg 2.0,
+//! non-robust): on three 1 mm scans (a 184×256×128 GRE magnitude, a 180×241×131 GRE magnitude
+//! and a 176×240×256 MP2RAGE), every label's Dice against it is at least 0.9999 and the soft
+//! volumes agree to 0.03 % on average.
+//!
 //! Memory is the practical constraint: the network takes about 0.95 KB per voxel of its input at
 //! once (2.2 GB at 128³, 6.0 GB on a 184×256×128 scan padded to 192×256×128, measured natively),
-//! more than a 32-bit WASM heap (4 GB) holds. Three settings bound it:
+//! more than a 32-bit WASM heap (4 GB) holds. The whole volume needed 6–12 GB on those scans,
+//! with or without the head crop and half-precision posteriors, because the network's
+//! activations dominate; no whole-volume setting fits the browser. Three settings bound it:
 //!
 //! - [`SynthSegInference::SlidingWindow`] runs the network on overlapping cubic windows whose
 //!   posteriors are blended with a Gaussian weight, as nnU-Net does, so the network's memory
-//!   follows the window instead of the volume. Window origins sit on the network's max-pooling
-//!   lattice (multiples of 16 voxels from the whole-volume input's origin), so every window pools
-//!   the same voxels together that the whole-volume pass does.
+//!   follows the window instead of the volume. This is what makes the browser possible, at an
+//!   accuracy cost set by the window's size (see [`SynthSegInference::LOW_MEMORY`]).
 //! - [`SynthSegParams::head_crop`] runs everything (network, posteriors, post-processing) on the
 //!   head's bounding box plus a margin instead of the padded field of view.
 //! - [`PosteriorPrecision::F16`] keeps the posteriors (`n_labels` values per voxel, the one
@@ -78,16 +84,32 @@ const HEAD_THRESHOLD: f32 = 0.1;
 #[cfg_attr(feature = "introspection", derive(serde::Serialize))]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum SynthSegInference {
-    /// One network pass over the whole padded volume, as the SynthSeg CLI runs it. Peak memory
-    /// grows with the volume (about 0.95 KB per padded voxel).
+    /// One network pass over the whole padded volume, as the SynthSeg CLI runs it; the output
+    /// matches FreeSurfer's `mri_synthseg` (every label Dice ≥ 0.9999). Peak memory grows with the
+    /// volume (about 0.95 KB per padded voxel): 6–12 GB on 1 mm head scans, so it does not fit a
+    /// 4 GB WASM heap even with the head crop and half-precision posteriors.
     FullVolume,
     /// Gaussian-weighted sliding window: the network runs on cubes of `patch` voxels (at least
     /// 64, rounded up to a multiple of 16) that overlap their neighbours by at least `overlap`
     /// voxels, and each voxel's posteriors are the Gaussian-weighted (σ = patch/8) mean over the
-    /// windows that cover it. Window origins are on the network's pooling lattice, so the step
-    /// between windows is a multiple of 16 no larger than `patch − overlap`, spread evenly over
-    /// the axis. Peak memory for the network follows the patch. An axis the volume does not
-    /// exceed is covered by one window; a volume one window covers runs as `FullVolume` does.
+    /// windows that cover it. Peak memory for the network follows the patch. An axis the volume
+    /// does not exceed is covered by one window; a volume one window covers runs as `FullVolume`
+    /// does.
+    ///
+    /// Window origins are on the network's max-pooling lattice (multiples of 16 voxels from the
+    /// whole-volume input's origin), so every window pools the same voxels together that the
+    /// whole-volume pass does; the step between windows is a multiple of 16 no larger than
+    /// `patch − overlap`, spread evenly over the axis. Against windows at a step of half a patch
+    /// this gave no measurable gain on three 1 mm scans: at 128³ those steps were already on the
+    /// lattice, and at 96³ the lowest label rose on one scan (Dice 0.948 → 0.963) and fell on
+    /// another (0.937 → 0.928). The error at 96³ comes from the window's limited context, not
+    /// from pooling phase. The lattice is kept because it costs nothing and is the placement
+    /// under which a window sees exactly what the whole-volume pass sees.
+    ///
+    /// The overlap is a minimum in voxels, so the window count is explicit. At 96³, an overlap
+    /// of 64 instead of 48 raised mean Dice by up to 0.003 on two of the three scans and cut the
+    /// worst label's volume error (9.8 → 6.1 %), but needs 1.5–2× the windows and about 1.6× the
+    /// time. At 128³ the two give the same windows on 192- and 256-voxel axes.
     SlidingWindow {
         /// Edge of the cubic patch, voxels at 1 mm.
         patch: usize,
@@ -99,9 +121,14 @@ pub enum SynthSegInference {
 impl SynthSegInference {
     /// The memory-bounded window, for a 32-bit WASM heap (see [`SynthSegParams::low_memory`]):
     /// 96³ patches overlapping by at least 48. Against FreeSurfer's `mri_synthseg` (which the
-    /// whole volume matches) on three 1 mm scans, mean Dice over the labels 0.984–0.988 (lowest
-    /// label 0.93–0.96); 128³ windows reach 0.993–0.996 (lowest 0.98) but, even with
-    /// half-precision posteriors, took a 184×256×128 scan to 3.8 GB of a 4 GB heap.
+    /// whole volume matches) on three 1 mm scans: mean Dice over the labels 0.984–0.988, lowest
+    /// label 0.93–0.96, single labels' volumes off by up to 6–10 % (the inferior lateral
+    /// ventricles and the cerebellum). 128³ windows reach 0.993–0.996 (lowest 0.98, volumes
+    /// within 3 %) but, even with half-precision posteriors and the head crop, took a 184×256×128
+    /// scan (padded to 192×256×128) to 3.83 GB of the 4 GB heap; a larger grid does not fit, so
+    /// 128³ is an option only for grids up to about 192×256×128. Overlap 48 rather than 64: on
+    /// 192- and 256-voxel axes it places as many windows as a step of half a patch, where 64
+    /// needs 1.5–2× as many (see [`SynthSegInference::SlidingWindow`]).
     pub const LOW_MEMORY: Self = Self::SlidingWindow { patch: 96, overlap: 48 };
 }
 
@@ -117,6 +144,14 @@ pub enum PosteriorPrecision {
     /// `FullVolume` and flip averaging, the first pass's posteriors are rounded to half
     /// precision before the flipped pass runs, so the two passes are never held in full
     /// precision at once.
+    ///
+    /// No accuracy cost on three 1 mm scans: with windows, Dice and soft volumes match single
+    /// precision to 4 digits; on the whole volume the lowest label's Dice against single
+    /// precision is 0.9993. It saved 0.4 GB natively on a 192×256×128 grid (0.8 GB on
+    /// 192×256×256) and 0.39 GB of WASM heap with 96³ windows (2418 → 2025 MB). Conversions go
+    /// through slices (see `Posterior::load`), so it runs as fast as single precision.
+    /// 16-bit fixed point on `[0, 1]` was tried as an alternative and rejected: it rounds the
+    /// many tiny posteriors to zero, shifting small labels' soft volumes by up to 0.4 %.
     F16,
 }
 
@@ -147,6 +182,11 @@ pub struct SynthSegParams {
     /// connected region brighter than 10 % of the normalised intensity range, grown by this
     /// many voxels on every side and rounded out to the pooling lattice. Everything outside it
     /// is background. `None` (the default, and the CLI's) runs on the whole padded volume.
+    ///
+    /// It saves memory and time only where there is empty space around the head (wide-FOV
+    /// acquisitions, e.g. a 256³ field of view). When the head fills the field of view, as on
+    /// typical GRE and MP2RAGE head scans (and their neck), the box plus margin is the whole
+    /// padded volume and the run is identical to `None`, at no extra cost.
     pub head_crop: Option<usize>,
     /// How the posteriors are stored (the default, single precision, is the CLI's).
     pub posteriors: PosteriorPrecision,
@@ -177,6 +217,21 @@ impl SynthSegParams {
     /// Memory-bounded setting for constrained hosts (e.g. 32-bit WASM): the defaults with
     /// [`SynthSegInference::LOW_MEMORY`] windows, a 16-voxel head crop and half-precision
     /// posteriors.
+    ///
+    /// - The windows are what bring the network under a 4 GB heap; no whole-volume setting
+    ///   fits. 96³ rather than 128³ because 128³ fits only grids up to about 192×256×128.
+    /// - The head crop saves memory and time on wide-FOV scans and changes nothing (at no cost)
+    ///   when the head fills the field of view.
+    /// - Half-precision posteriors save 0.4 GB with no accuracy loss: peak WASM heap 2025 MB
+    ///   against 2418 MB at single precision on a 184×256×128 head, 2138 against 2634 MB on a
+    ///   180×241×131 one.
+    ///
+    /// It runs no slower than 96³ windows at a step of half a patch (the earlier browser
+    /// setting): both place the same number of windows on 192×256×128 and 192×256×160 grids,
+    /// and in back-to-back runs on those two grids it took 0.96–1.00× that setting's time
+    /// natively (median of 3 pairs each, 1 and 8 threads) and 0.98–1.00× in a single-threaded
+    /// WASM build under Node (about 17 and 26 minutes). Converting half-precision values one
+    /// at a time had made it 1–6 % slower natively; see `Posterior::load`.
     pub fn low_memory() -> Self {
         Self {
             inference: SynthSegInference::LOW_MEMORY,
@@ -288,6 +343,14 @@ trait Posterior: Copy + Default + Send + Sync + 'static {
     fn put(v: f32) -> Self;
     /// Convert a single-precision buffer (no copy when `Self` is `f32`).
     fn store(v: Vec<f32>) -> Vec<Self>;
+    /// `dst[i] = src[i].get()`, in bulk.
+    fn load(src: &[Self], dst: &mut [f32]) {
+        dst.iter_mut().zip(src).for_each(|(d, s)| *d = s.get());
+    }
+    /// `dst[i] = put(src[i])`, in bulk.
+    fn save(src: &[f32], dst: &mut [Self]) {
+        dst.iter_mut().zip(src).for_each(|(d, &s)| *d = Self::put(s));
+    }
 }
 
 impl Posterior for f32 {
@@ -302,6 +365,12 @@ impl Posterior for f32 {
     fn store(v: Vec<f32>) -> Vec<Self> {
         v
     }
+    fn load(src: &[Self], dst: &mut [f32]) {
+        dst.copy_from_slice(src);
+    }
+    fn save(src: &[f32], dst: &mut [Self]) {
+        dst.copy_from_slice(src);
+    }
 }
 
 #[cfg(feature = "onnx")]
@@ -315,7 +384,20 @@ impl Posterior for half::f16 {
         half::f16::from_f32(v)
     }
     fn store(v: Vec<f32>) -> Vec<Self> {
-        v.into_iter().map(half::f16::from_f32).collect()
+        let mut out = vec![half::f16::ZERO; v.len()];
+        Self::save(&v, &mut out);
+        out
+    }
+    // The slice conversions use the CPU's half-precision instructions (F16C on x86-64) several
+    // values at a time; converting one value per call costs a feature check and a function call
+    // each, which made half-precision posteriors 2–7 % slower than single precision natively.
+    fn load(src: &[Self], dst: &mut [f32]) {
+        use half::slice::HalfFloatSliceExt;
+        src.convert_to_f32_slice(dst);
+    }
+    fn save(src: &[f32], dst: &mut [Self]) {
+        use half::slice::HalfFloatSliceExt;
+        dst.convert_from_f32_slice(src);
     }
 }
 
@@ -774,6 +856,7 @@ fn run_windows<T: Posterior>(
 
     let mut post = vec![T::default(); n * n_labels];
     let mut input = vec![0f32; p.iter().product()];
+    let mut row = vec![0f32; p[2] * n_labels];
     let run = |x: Vec<f32>| -> Result<Vec<f32>, OnnxError> {
         let out = plan.run_single(&Tensor::new(shape.to_vec(), x))?;
         let expect = [1, p[0], p[1], p[2], n_labels];
@@ -800,14 +883,18 @@ fn run_windows<T: Posterior>(
                 }
             }
         }
+        // Row by row through a single-precision copy, so half-precision rows convert in bulk.
         rows(o, &mut |v, w| {
+            let dst = &mut post[v * n_labels..(v + p[2]) * n_labels];
+            T::load(dst, &mut row);
             for k in 0..p[2] {
                 let g = gauss[w + k] * inv_weight[v + k];
-                let (a, b) = ((v + k) * n_labels, (w + k) * n_labels);
+                let (a, b) = (k * n_labels, (w + k) * n_labels);
                 for c in 0..n_labels {
-                    post[a + c] = T::put(post[a + c].get() + g * pred[b + c]);
+                    row[a + c] += g * pred[b + c];
                 }
             }
+            T::save(&row, dst);
         });
     }
     Ok(post)
@@ -845,43 +932,34 @@ fn blur_along<T: Posterior>(data: &mut [T], outer: usize, n: usize, inner: usize
         return;
     }
     let stride = n * inner;
+    let taps = 2 * radius + 1;
     crate::maybe_par_chunks_mut!(data, stride).take(outer).for_each(|line| {
-        // A rolling copy of the taps that have already been overwritten.
-        let mut history = vec![0f32; (2 * radius + 1) * inner];
-        let mut filled = 0usize;
+        // Single-precision copies of the last `taps` input rows (a ring), so a row is read
+        // before it is overwritten and each row converts once, in bulk.
+        let mut history = vec![0f32; taps * inner];
+        let mut acc = vec![0f32; inner];
         for i in 0..n + radius {
-            // Stash the slot about to be consumed, then write the output for `i - radius`.
             if i < n {
-                let slot = (i % (2 * radius + 1)) * inner;
-                for (h, v) in history[slot..slot + inner].iter_mut().zip(&line[i * inner..(i + 1) * inner]) {
-                    *h = v.get();
-                }
-                filled += 1;
+                let slot = (i % taps) * inner;
+                T::load(&line[i * inner..(i + 1) * inner], &mut history[slot..slot + inner]);
             }
-            if i < radius || filled == 0 {
+            if i < radius {
                 continue;
             }
+            // Output row `o` needs input rows `o − radius ..= o + radius = i`, all in the ring.
             let o = i - radius;
-            if o >= n {
-                break;
-            }
-            for c in 0..inner {
-                let mut acc = 0f32;
-                for (t, &wt) in w.iter().enumerate() {
-                    let src = o as isize + t as isize - radius as isize;
-                    if src < 0 || src as usize >= n {
-                        continue; // zero padding
-                    }
-                    let src = src as usize;
-                    acc += wt
-                        * if src <= i {
-                            history[(src % (2 * radius + 1)) * inner + c]
-                        } else {
-                            line[src * inner + c].get()
-                        };
+            acc.fill(0.0);
+            for (t, &wt) in w.iter().enumerate() {
+                let src = o as isize + t as isize - radius as isize;
+                if src < 0 || src as usize >= n {
+                    continue; // zero padding
                 }
-                line[o * inner + c] = T::put(acc);
+                let slot = (src as usize % taps) * inner;
+                for (a, &h) in acc.iter_mut().zip(&history[slot..slot + inner]) {
+                    *a += wt * h;
+                }
             }
+            T::save(&acc, &mut line[o * inner..(o + 1) * inner]);
         }
     });
 }

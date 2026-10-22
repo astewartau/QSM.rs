@@ -3,10 +3,12 @@
 //!
 //! cargo run --release --features "parallel onnx download" --example synthseg_run -- \
 //!     <image.nii[.gz]> <synthseg.onnx|auto> <out.nii.gz> [reference.nii.gz] [--v1|--v2] [--fast] \
-//!     [--low-memory] [--patch=N] [--overlap=N] [--head-crop=N] [--f16] [--volumes=out.csv]
+//!     [--low-memory] [--patch=N] [--overlap=N] [--head-crop=N] [--no-head-crop] [--f16|--f32]
+//!     [--volumes=out.csv]
 //!
 //! `--low-memory` starts from `SynthSegParams::low_memory()`; `--patch`/`--overlap` set sliding
-//! windows, `--head-crop` the head crop's margin, `--f16` half-precision posteriors.
+//! windows, `--head-crop`/`--no-head-crop` the head crop's margin or turn it off, `--f16`/`--f32`
+//! the posteriors' precision.
 //!
 //! Passing `auto` for the model fetches and caches the registry weights (needs `download`).
 use qsm_core::io::{read_nifti_file, save_nifti_gz};
@@ -53,6 +55,12 @@ fn main() {
     if flag("--f16") {
         params.posteriors = PosteriorPrecision::F16;
     }
+    if flag("--f32") {
+        params.posteriors = PosteriorPrecision::F32;
+    }
+    if flag("--no-head-crop") {
+        params.head_crop = None;
+    }
     println!("image {:?} @ {:?} mm, {:?}", img.dims, img.voxel_size, params);
 
     let t = Instant::now();
@@ -61,6 +69,7 @@ fn main() {
     })
     .expect("synthseg");
     println!("total {:?}", t.elapsed());
+    println!("SECONDS {:.3}", t.elapsed().as_secs_f64());
 
     let labels = params.version.labels();
     for (c, name) in labels.names.iter().enumerate().skip(1) {

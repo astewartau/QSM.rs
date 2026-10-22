@@ -1128,7 +1128,15 @@ mod browser_memory {
     }
 
     fn synthseg(config: &str, params: qsm_core::segment::SynthSegParams) {
-        let s = Scan::new();
+        synthseg_on(Scan::new(), config, params)
+    }
+
+    /// SynthSeg on a 180×241×131 head (a 1.25 mm GRE resampled to 1 mm; padded to 192×256×160).
+    fn synthseg_gre_size(config: &str, params: qsm_core::segment::SynthSegParams) {
+        synthseg_on(Scan { m: scan_meta((180, 241, 131), (1.0, 1.0, 1.0)) }, config, params)
+    }
+
+    fn synthseg_on(s: Scan, config: &str, params: qsm_core::segment::SynthSegParams) {
         let mag = s.magnitudes().swap_remove(0);
         measure("synthseg", config, || synthseg_run(&mag, &s.m.grid(), &params, |_, _| {}));
     }
@@ -1265,9 +1273,14 @@ mod browser_memory {
             inference: qsm_core::segment::SynthSegInference::SlidingWindow { patch: 128, overlap: 64 },
             ..qsm_core::segment::SynthSegParams::low_memory()
         });
-        synthseg_windows_96_single_precision => synthseg("96³ windows overlapping by 64, single precision", qsm_core::segment::SynthSegParams {
-            inference: qsm_core::segment::SynthSegInference::SlidingWindow { patch: 96, overlap: 64 },
-            ..qsm_core::segment::SynthSegParams::default()
+        synthseg_low_memory_f32 => synthseg("low_memory, single precision", qsm_core::segment::SynthSegParams {
+            posteriors: qsm_core::segment::PosteriorPrecision::F32,
+            ..qsm_core::segment::SynthSegParams::low_memory()
+        });
+        synthseg_low_memory_gre_size => synthseg_gre_size("low_memory", qsm_core::segment::SynthSegParams::low_memory());
+        synthseg_low_memory_f32_gre_size => synthseg_gre_size("low_memory, single precision", qsm_core::segment::SynthSegParams {
+            posteriors: qsm_core::segment::PosteriorPrecision::F32,
+            ..qsm_core::segment::SynthSegParams::low_memory()
         });
         bfrnet_whole_volume => bfrnet(None);
         bfrnet_tiled => bfrnet(BROWSER_TILE);
