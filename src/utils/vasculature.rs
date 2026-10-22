@@ -6,7 +6,9 @@
 //!
 //! The algorithm:
 //! 1. Apply morphological bottom-hat filtering to enhance dark tubular structures
-//! 2. Apply Frangi vesselness filter to detect vessels
+//!    (MATLAB's `imbothat` with `strel('sphere', 8)`, edge handling included)
+//! 2. Apply Frangi vesselness filter to detect vessels (single precision, as QSMART's
+//!    `FrangiFilter3D` runs on its single-precision magnitude; see `frangi`)
 //! 3. Threshold: vesselness above Otsu's threshold (MATLAB's `graythresh`) = vessel
 //! 4. Return complementary mask (1 = tissue, 0 = vessel)
 
@@ -145,28 +147,44 @@ impl SphereKernel {
     }
 }
 
-/// Morphological bottom-hat filter (closing - original)
+/// Morphological bottom-hat filter (closing - original), as MATLAB's
+/// `imbothat(I, strel('sphere', radius))`.
 ///
-/// Enhances dark features smaller than the structuring element.
-/// Uses true spherical structuring element for accuracy.
-/// Optimized with pre-computed linear offsets and interior/boundary separation.
+/// Enhances dark features smaller than the structuring element. Like MATLAB's `imclose`,
+/// the closing pads the volume with -Inf by the radius before dilating, so near the
+/// volume's edge the erosion also takes the dilated padding into account (without the
+/// padding, voxels within `radius` of the edge close to higher values; on QSMART's 7T
+/// exemplar that changed 5,128 brain voxels). Matches `imbothat` exactly on QSMART's
+/// exemplar and three 3T cases.
 fn morphological_bottom_hat(
     data: &[f64],
     nx: usize, ny: usize, nz: usize,
     radius: i32,
 ) -> Vec<f64> {
-    // Pre-compute spherical kernel with linear offsets
-    let kernel = SphereKernel::new(radius, nx, ny);
-
-    // Closing = dilation followed by erosion with spherical SE
-    let dilated = dilate_grayscale_optimized(data, nx, ny, nz, &kernel);
-    let closed = erode_grayscale_optimized(&dilated, nx, ny, nz, &kernel);
-
-    // Bottom-hat = closed - original
-    closed.iter()
-        .zip(data.iter())
-        .map(|(&c, &d)| (c - d).max(0.0))
-        .collect()
+    let r = radius.max(0) as usize;
+    let (px, py, pz) = (nx + 2 * r, ny + 2 * r, nz + 2 * r);
+    let mut padded = vec![f64::NEG_INFINITY; px * py * pz];
+    for k in 0..nz {
+        for j in 0..ny {
+            let src = j * nx + k * nx * ny;
+            let dst = r + (j + r) * px + (k + r) * px * py;
+            padded[dst..dst + nx].copy_from_slice(&data[src..src + nx]);
+        }
+    }
+    let kernel = SphereKernel::new(radius, px, py);
+    let dilated = dilate_grayscale_optimized(&padded, px, py, pz, &kernel);
+    let closed = erode_grayscale_optimized(&dilated, px, py, pz, &kernel);
+    let mut out = vec![0.0; data.len()];
+    for k in 0..nz {
+        for j in 0..ny {
+            for i in 0..nx {
+                let idx = i + j * nx + k * nx * ny;
+                let c = closed[i + r + (j + r) * px + (k + r) * px * py];
+                out[idx] = (c - data[idx]).max(0.0);
+            }
+        }
+    }
+    out
 }
 
 /// Optimized grayscale dilation with spherical structuring element
@@ -352,6 +370,23 @@ mod tests {
         for &v in &result {
             assert!(v.abs() < 0.01, "Bottom-hat of constant should be ~0");
         }
+    }
+
+    #[test]
+    fn bottom_hat_edge_matches_imbothat() {
+        // MATLAB R2023b: rng(3); x = randi([0 9], 4, 4, 4); imbothat(x, strel('sphere', 1)).
+        // In a volume this small every voxel is near the edge; closing without the padding
+        // (imerode(imdilate(x, se), se)) differs at 33 of the 64 voxels.
+        let x = [
+            5., 7., 2., 5., 8., 8., 1., 2., 0., 4., 0., 4., 6., 2., 6., 5., 0., 5., 2., 4., 2., 6.,
+            4., 1., 5., 7., 3., 2., 3., 9., 9., 6., 9., 8., 3., 0., 6., 5., 3., 2., 4., 4., 2., 2.,
+            4., 8., 5., 2., 2., 4., 2., 2., 5., 0., 4., 3., 7., 7., 6., 6., 3., 6., 3., 5.,
+        ];
+        let mut expected = vec![0.0; 64];
+        expected[26] = 3.0;
+        expected[41] = 2.0;
+        expected[42] = 3.0;
+        assert_eq!(morphological_bottom_hat(&x, 4, 4, 4, 1), expected);
     }
 
     #[test]
