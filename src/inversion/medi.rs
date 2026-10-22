@@ -1,18 +1,54 @@
-//! MEDI (Morphology Enabled Dipole Inversion) L1 regularization
+//! MEDI (Morphology Enabled Dipole Inversion), a port of `MEDI_L1.m` from the MEDI toolbox
+//! (release 2024.11.26)
 //!
-//! Gauss-Newton optimization with L1 TV regularization and
-//! morphology-based gradient weighting from magnitude images.
+//! Solves
 //!
-//! Features:
-//! - **Per-direction gradient masks** (mx, my, mz) matching the original MEDI formulation
-//! - Adaptive edge detection with configurable percentage threshold (default: 30% edges)
-//! - SNR-based data weighting using noise standard deviation maps
-//! - Optional SMV (Spherical Mean Value) preprocessing
-//! - Optional merit-based outlier adjustment (MERIT)
-//! - **Optimized with f32 single precision for WASM performance**
-//! - **Buffer reuse to minimize allocations**
-//! - **Standard CG convergence (relative tolerance)**
-//! - **Linear extrapolation boundary conditions** matching MATLAB's gradf
+//! min_χ ||wG ∇χ||₁ + 2λ ||m (exp(i Dχ) − exp(i f))||²₂
+//!
+//! by Gauss-Newton, with the L1 term handled by lagged diffusivity and each Gauss-Newton step
+//! solved by conjugate gradients. `f` is the local field in radians, `m` the data weight
+//! (`dataterm_mask.m`) and `wG` the binary edge mask from the magnitude (`gradient_mask.m`): 0 at
+//! the strongest magnitude edges, 1 elsewhere, per gradient direction.
+//!
+//! The port follows `MEDI_L1.m` and its helpers line for line: `fgrad.m`/`bdiv.m` (forward
+//! differences, zero at the last voxel, and their adjoint), the per-direction weight
+//! `1/sqrt(|wG ∇χ|² + 1e-6)`, `cgsolve.m`, `sphere_kernel.m` (the partial-volume sphere) for the
+//! SMV step, and the MERIT reweighting. Defaults are those of `MEDI_L1.m` and
+//! `parse_QSM_input.m`: λ = 1000, 10 Gauss-Newton iterations, 100 CG iterations, tolerances 0.1
+//! and 0.01, `percentage` 0.9, SNR data weighting, SMV (radius 5 mm, shrinking the mask) and
+//! MERIT on. Not ported: zero padding, the CSF zero reference (`lambda_CSF`, which needs a CSF
+//! mask), the preconditioner `P`, the linear formulation and the `Lreg` term (all off unless
+//! requested).
+//!
+//! # Units
+//! Like the other inversions, `medi` takes the local field in ppm and returns ppm. MEDI works on
+//! the field in radians accumulated over the echo spacing (`delta_TE`, `TE(2) − TE(1)` for
+//! multi-echo data and `TE` for one echo, as MEDI's DICOM readers set it) at the centre frequency
+//! `CF = γ·B0`. The field is converted with `2π·CF·delta_TE·1e-6` first and the result converted
+//! back at the end, as `MEDI_L1.m` does. The result depends on this scale (the data term is
+//! nonlinear and λ is fixed), so `b0` and `te` are scan parameters that the pipeline fills from
+//! metadata.
+//!
+//! # Magnitude and data weight
+//! `MEDI_L1.m` weights the data by `1/N_std`, the noise standard deviation of the field
+//! (normalised to mean 1 in the mask), and builds the edge mask from `iMag`. MEDI's pipeline
+//! (README.m) takes both from the complex echoes: `iMag = sqrt(sum(abs(iField).^2,4))` and
+//! `N_std` from `Fit_ppm_complex.m`, which depends only on the echo magnitudes
+//! ([`fit_ppm_complex_noise`](crate::utils::fit_ppm_complex_noise)). `medi` requires the echo
+//! magnitudes ([`EchoMagnitudes`]) and does the same, so it always weights the data as
+//! `MEDI_L1` does in MEDI's pipeline; one echo is fitted as `Fit_ppm_complex.m` fits one echo.
+//! `Fit_ppm_complex.m` assumes evenly spaced echoes.
+//!
+//! # Zero padding
+//! `zeropad` pads the volume at the end of each axis before the inversion and crops the result,
+//! as `MEDI_L1`'s `'zeropad'` option does.
+//!
+//! **Deliberate deviation from `MEDI_L1.m`:** with SMV on, `sphere_kernel.m` builds its grid as
+//! `-N/2:N/2-1`, which along an axis with an odd number of voxels centres the sphere half a voxel
+//! off the grid. The SMV operator is then not symmetric, and `MEDI_L1` diverges (in MATLAB as
+//! here: NRMSE above 10000% on a 164×205×205 phantom). So when SMV is on, `medi` pads every axis
+//! that is still odd after `zeropad` by one more voxel and crops the result back. On grids that
+//! are even after `zeropad`, and with SMV off, nothing changes and the result is `MEDI_L1`'s.
 //!
 //! Reference:
 //! Liu, T., Liu, J., de Rochefort, L., Spincemaille, P., Khalidov, I., Ledoux, J.R.,
@@ -26,70 +62,578 @@
 //! structural consistency between the magnitude image and the susceptibility map."
 //! NeuroImage, 59(3):2560-2568.
 //!
-//! Reference implementation: https://github.com/huawu02/MEDI_toolbox
+//! Reference implementation: MEDI toolbox release 2024.11.26 (Cornell MRI Research Lab,
+//! `functions/MEDI_L1.m`)
+//!
+//! The single-precision helpers at the end of this file (`MediWorkspace`, `gradient_mask_f32`,
+//! the periodic gradients, ...) are not used by `medi`. They follow the MEDI variant in the
+//! chi-separation toolbox and Cornell's TFI code, and are shared by [`tfi`](super::tfi) and the
+//! chi-separation solvers.
 
-use num_complex::Complex32;
+use num_complex::{Complex32, Complex64};
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
-use crate::fft::Fft3dWorkspaceF32;
-use crate::kernels::dipole::dipole_kernel_f32;
-use crate::kernels::smv::smv_kernel_f32;
-use crate::utils::simd_ops::{
-    dot_product_f32, norm_squared_f32, axpy_f32, xpby_f32,
-    apply_gradient_weights_f32, compute_p_weights_f32, combine_terms_f32, negate_f32,
-};
+use crate::fft::{Fft3dWorkspace, Fft3dWorkspaceF32};
+use crate::kernels::dipole::dipole_kernel;
+use crate::utils::simd_ops::{apply_gradient_weights_f32, combine_terms_f32};
 use crate::Grid;
-// Note: Uses fgrad_periodic_inplace_f32 / bdiv_periodic_inplace_f32 (periodic BCs)
-// for the MEDI inner loop matching MATLAB's gradfp_mex / gradfp_adj_mex.
-// Uses fgrad_linext_inplace_f32 (linear extrapolation BCs) only for gradient mask
-// computation, matching MATLAB's gradf_mex.
 
-/// MEDI algorithm parameters
+/// MEDI parameters (`MEDI_L1.m` / `parse_QSM_input.m` defaults)
 #[cfg_attr(feature = "introspection", derive(serde::Serialize))]
 #[derive(Clone, Debug)]
 pub struct MediParams {
-    /// Regularization weight
+    /// Weight of the data-fidelity term (`'lambda'`): larger fits the data more closely
     pub lambda: f64,
-    /// Enable MERIT (outlier adjustment)
+    /// MERIT: reweight the noise by the data residual after each iteration (`'merit'`)
     pub merit: bool,
-    /// Enable SMV preprocessing
+    /// Apply the spherical mean value high-pass to the field and the dipole kernel (`'smv'`)
     pub smv: bool,
     /// SMV radius in mm
     pub smv_radius: f64,
-    /// Data weighting mode (1 = SNR)
+    /// With SMV, erode the mask to where the SMV of the mask exceeds 0.999 (`smv_shrink_mask`)
+    pub smv_shrink_mask: bool,
+    /// Data weighting: 0 uniform (1 everywhere), 1 SNR (`mask / n_std`, mean 1 in the mask)
     pub data_weighting: i32,
-    /// Fraction of voxels considered edges (0.0-1.0)
+    /// Edge fraction for the gradient mask (`'percentage'`): the threshold is set so that the
+    /// number of gradient components (all three directions) above it is this fraction of the
+    /// number of voxels in the mask
     pub percentage: f64,
-    /// CG convergence tolerance
+    /// CG relative residual tolerance
     pub cg_tol: f64,
-    /// Maximum CG iterations
+    /// Maximum CG iterations per Gauss-Newton step
     pub cg_max_iter: usize,
-    /// Maximum outer iterations
+    /// Maximum Gauss-Newton iterations
     pub max_iter: usize,
-    /// Outer convergence tolerance
+    /// Stop when ||dχ|| / ||χ|| falls below this
     pub tol: f64,
+    /// Field strength in Tesla (scan parameter, for the radian conversion)
+    pub b0: f64,
+    /// Echo spacing in seconds, `TE(2) − TE(1)`, or the echo time for one echo (scan parameter,
+    /// for the radian conversion)
+    pub te: f64,
+    /// Voxels of zeros appended along x, y and z before the inversion (`'zeropad'`). With SMV,
+    /// axes that are still odd get one more (see the module docs).
+    pub zeropad: (usize, usize, usize),
+}
+
+/// The magnitude of each echo, `n_echoes` volumes stacked with the echo slowest. MEDI's edge
+/// mask uses their root sum of squares and its data weight the `Fit_ppm_complex.m` noise.
+#[derive(Clone, Copy, Debug)]
+pub struct EchoMagnitudes<'a> {
+    /// `n_echoes` magnitude volumes, echo slowest
+    pub data: &'a [f64],
+    /// Number of echoes (evenly spaced)
+    pub n_echoes: usize,
 }
 
 impl Default for MediParams {
     fn default() -> Self {
         Self {
-            // Tuned for the field in RADIANS (the scale `medi` expects — the data
-            // term uses exp(i·field)). At 7T/4ms a typical local field is ~0.1 rad
-            // std; 1e-3 matches Cornell MEDI's smoothness there. A smaller λ that
-            // "looks fine" is usually a symptom of feeding a ppm-scale field.
-            lambda: 1e-3,
-            merit: false,
+            lambda: 1000.0,
+            merit: true,
             smv: true,
             smv_radius: 5.0,
+            smv_shrink_mask: true,
             data_weighting: 1,
-            percentage: 0.3,
+            percentage: 0.9,
             cg_tol: 0.01,
-            cg_max_iter: 10,
-            max_iter: 30,
+            cg_max_iter: 100,
+            max_iter: 10,
             tol: 0.1,
+            b0: 3.0,
+            te: 0.005,
+            zeropad: (0, 0, 0),
         }
     }
 }
+
+/// MEDI dipole inversion (`MEDI_L1.m`)
+///
+/// # Arguments
+/// * `local_field` - Local field in ppm (nx * ny * nz)
+/// * `mask` - Binary mask (nx * ny * nz), 1 = brain
+/// * `magnitude` - The echo magnitudes (see module docs)
+/// * `grid` - Volume grid (dimensions and voxel sizes)
+/// * `bdir` - B0 field direction
+/// * `params` - MEDI parameters, including field strength and echo spacing
+/// * `progress` - Progress callback `(current_step, total_steps)` over CG iterations
+///
+/// # Returns
+/// Susceptibility in ppm, zero outside the mask (the SMV-eroded mask when `smv` is on)
+pub fn medi(
+    local_field: &[f64],
+    mask: &[u8],
+    magnitude: EchoMagnitudes,
+    grid: &Grid,
+    bdir: (f64, f64, f64),
+    params: &MediParams,
+    progress: impl FnMut(usize, usize),
+) -> Vec<f64> {
+    let n = grid.n_total();
+    // iMag = sqrt(sum(abs(iField).^2,4)); [~, N_std] = Fit_ppm_complex(iField)
+    let EchoMagnitudes { data: m, n_echoes } = magnitude;
+    assert!(n_echoes > 0 && m.len() == n * n_echoes, "magnitude is not n_echoes volumes");
+    let imag: Vec<f64> = (0..n)
+        .map(|i| (0..n_echoes).map(|e| m[i + n * e].powi(2)).sum::<f64>().sqrt())
+        .collect();
+    let n_std = crate::utils::fit_ppm_complex_noise(m, n_echoes);
+
+    let (nx, ny, nz) = grid.dims;
+    let (zx, zy, zz) = params.zeropad;
+    // Deviation (see module docs): with SMV, pad axes that are still odd by one voxel.
+    let even = |n: usize, z: usize| z + usize::from(params.smv && (n + z) % 2 == 1);
+    let (px, py, pz) = (even(nx, zx), even(ny, zy), even(nz, zz));
+    if (px, py, pz) == (0, 0, 0) {
+        return medi_l1(local_field, mask, &imag, &n_std, grid, bdir, params, progress);
+    }
+    // padarray(..., pad, 'post'), then x = x(1:matrix_size0(1), ...)
+    let (mx, my, mz) = (nx + px, ny + py, nz + pz);
+    let pad = |v: &[f64]| -> Vec<f64> {
+        let mut out = vec![0.0; mx * my * mz];
+        for k in 0..nz {
+            for j in 0..ny {
+                let (src, dst) = (nx * (j + ny * k), mx * (j + my * k));
+                out[dst..dst + nx].copy_from_slice(&v[src..src + nx]);
+            }
+        }
+        out
+    };
+    let mask_f: Vec<f64> = mask.iter().map(|&m| m as f64).collect();
+    let mask_p: Vec<u8> = pad(&mask_f).iter().map(|&v| v as u8).collect();
+    let pgrid = Grid::new(mx, my, mz, grid.vsx(), grid.vsy(), grid.vsz());
+    let chi = medi_l1(
+        &pad(local_field), &mask_p, &pad(&imag), &pad(&n_std),
+        &pgrid, bdir, params, progress,
+    );
+    let mut out = vec![0.0; n];
+    for k in 0..nz {
+        for j in 0..ny {
+            let (dst, src) = (nx * (j + ny * k), mx * (j + my * k));
+            out[dst..dst + nx].copy_from_slice(&chi[src..src + nx]);
+        }
+    }
+    out
+}
+
+/// `MEDI_L1.m` on an `iMag` and an `N_std`
+#[allow(clippy::too_many_arguments)]
+fn medi_l1(
+    local_field: &[f64],
+    mask: &[u8],
+    magnitude: &[f64],
+    n_std: &[f64],
+    grid: &Grid,
+    bdir: (f64, f64, f64),
+    params: &MediParams,
+    mut progress: impl FnMut(usize, usize),
+) -> Vec<f64> {
+    let n = grid.n_total();
+    let vs = [grid.vsx(), grid.vsy(), grid.vsz()];
+    let mut fft = Fft3dWorkspace::new(grid.nx(), grid.ny(), grid.nz());
+
+    // ppm -> radians over delta_TE; MEDI_L1 converts back with x/(2*pi*delta_TE*CF)*1e6.
+    let cf = 42.576e6 * params.b0;
+    let ppm_to_rad = 2.0 * std::f64::consts::PI * params.te * cf * 1e-6;
+    let mut rdf: Vec<f64> = local_field.iter().map(|&f| f * ppm_to_rad).collect();
+
+    // N_std = N_std.*Mask; tempn = N_std
+    let mut mask: Vec<bool> = mask.iter().map(|&m| m != 0).collect();
+    let mut n_std: Vec<f64> = (0..n)
+        .map(|i| if mask[i] { n_std[i] } else { 0.0 })
+        .collect();
+    let mut tempn = n_std.clone();
+
+    // D = dipole_kernel(...); complex because the SMV step multiplies it by SphereK.
+    let mut d: Vec<Complex64> = dipole_kernel(grid, bdir).iter().map(|&v| Complex64::new(v, 0.0)).collect();
+
+    let sphere_k = if params.smv {
+        let k = sphere_kernel(grid, params.smv_radius, &mut fft);
+        // if opts.smv_shrink_mask, Mask = SMV(Mask, SphereK) > 0.999
+        if params.smv_shrink_mask {
+            let m: Vec<f64> = mask.iter().map(|&b| b as u8 as f64).collect();
+            let sm = smv(&m, &k, &mut fft);
+            for i in 0..n {
+                mask[i] = sm[i].re > 0.999;
+            }
+        }
+        // D = (1-SphereK).*D
+        for i in 0..n {
+            d[i] *= Complex64::new(1.0, 0.0) - k[i];
+        }
+        // RDF = RDF - SMV(RDF, SphereK); RDF = RDF.*Mask
+        let s = smv(&rdf, &k, &mut fft);
+        for i in 0..n {
+            rdf[i] = if mask[i] { rdf[i] - s[i].re } else { 0.0 };
+        }
+        // tempn = sqrt(SMV(tempn.^2, SphereK) + tempn.^2)
+        tempn = smv_noise(&tempn, &k, &mut fft);
+        Some(k)
+    } else {
+        None
+    };
+
+    let mut m = dataterm_mask(params.data_weighting, &tempn, &mask);
+    let mut b0: Vec<Complex64> = (0..n).map(|i| m[i] * Complex64::new(0.0, rdf[i]).exp()).collect();
+    let wg = gradient_mask(magnitude, &mask, grid, params.percentage);
+
+    let lambda2 = 2.0 * params.lambda;
+    let e = 1e-6;
+    let mut x = vec![0.0f64; n];
+    let mut vr = [vec![0.0f64; n], vec![0.0f64; n], vec![0.0f64; n]];
+    let mut w = vec![Complex64::new(0.0, 0.0); n];
+    let mut buf = vec![Complex64::new(0.0, 0.0); n];
+    let total = params.max_iter * params.cg_max_iter;
+
+    let mut res_norm_ratio = f64::INFINITY;
+    let mut iter = 0;
+    while res_norm_ratio > params.tol && iter < params.max_iter {
+        iter += 1;
+        // Vr = 1./sqrt(abs(wG.*grad(real(x))).^2 + e), per direction
+        let g = fgrad(&x, grid, vs);
+        for c in 0..3 {
+            for i in 0..n {
+                let u = wg[c][i] * g[c][i];
+                vr[c][i] = 1.0 / (u * u + e).sqrt();
+            }
+        }
+        // w = W(m, x) = m.*exp(1i*Dconv(x))
+        let dxr = dconv(&x, &d, &mut fft, &mut buf);
+        for i in 0..n {
+            w[i] = m[i] * Complex64::new(0.0, dxr[i]).exp();
+        }
+        let w2: Vec<f64> = w.iter().map(|v| v.norm_sqr()).collect();
+
+        // b = reg(x) + 2*lambda*Dconv(real(conj(w).*conj(1i).*(w-b0)))
+        let mut b = reg(&x, &wg, &vr, grid, vs);
+        let r: Vec<f64> = (0..n)
+            .map(|i| (w[i].conj() * Complex64::new(0.0, -1.0) * (w[i] - b0[i])).re)
+            .collect();
+        let dr = dconv(&r, &d, &mut fft, &mut buf);
+        for i in 0..n {
+            b[i] = -(b[i] + lambda2 * dr[i]);
+        }
+
+        // A = @(dx) reg(dx) + 2*lambda*Dconv(conj(w).*w.*Dconv(dx))
+        let base = (iter - 1) * params.cg_max_iter;
+        let dx = cgsolve(
+            |p: &[f64], out: &mut [f64], fft: &mut Fft3dWorkspace, buf: &mut [Complex64]| {
+                let rg = reg(p, &wg, &vr, grid, vs);
+                let mut t = dconv(p, &d, fft, buf);
+                for i in 0..n {
+                    t[i] *= w2[i];
+                }
+                let f = dconv(&t, &d, fft, buf);
+                for i in 0..n {
+                    out[i] = rg[i] + lambda2 * f[i];
+                }
+            },
+            &b, params.cg_tol, params.cg_max_iter, &mut fft, &mut buf,
+            |k| progress(base + k, total),
+        );
+
+        // res_norm_ratio = norm(dx)/norm(x); x = x + dx
+        let ndx = dx.iter().map(|v| v * v).sum::<f64>().sqrt();
+        let nrm_x = x.iter().map(|v| v * v).sum::<f64>().sqrt();
+        res_norm_ratio = ndx / nrm_x;
+        for i in 0..n {
+            x[i] += dx[i];
+        }
+
+        if params.merit {
+            // wres = m.*exp(1i*real(ifftn(D.*fftn(x)))) - b0
+            let dxr = dconv(&x, &d, &mut fft, &mut buf);
+            let mut wres: Vec<Complex64> = (0..n)
+                .map(|i| m[i] * Complex64::new(0.0, dxr[i]).exp() - b0[i])
+                .collect();
+            let idx: Vec<usize> = (0..n).filter(|&i| mask[i]).collect();
+            let mean = idx.iter().map(|&i| wres[i]).sum::<Complex64>() / idx.len() as f64;
+            for v in wres.iter_mut() {
+                *v -= mean;
+            }
+            // factor = std(abs(a))*6, MATLAB's std (normalised by N-1)
+            let a: Vec<f64> = idx.iter().map(|&i| wres[i].norm()).collect();
+            let am = a.iter().sum::<f64>() / a.len() as f64;
+            let sd = (a.iter().map(|v| (v - am).powi(2)).sum::<f64>() / (a.len() as f64 - 1.0)).sqrt();
+            let factor = sd * 6.0;
+            for &i in &idx {
+                let r = (wres[i].norm() / factor).max(1.0);
+                n_std[i] *= r * r;
+            }
+            tempn = n_std.clone();
+            if let Some(k) = &sphere_k {
+                tempn = smv_noise(&tempn, k, &mut fft);
+            }
+            m = dataterm_mask(params.data_weighting, &tempn, &mask);
+            b0 = (0..n).map(|i| m[i] * Complex64::new(0.0, rdf[i]).exp()).collect();
+        }
+    }
+    progress(total, total);
+
+    // x = x/(2*pi*delta_TE*CF)*1e6.*Mask
+    (0..n).map(|i| if mask[i] { x[i] / ppm_to_rad } else { 0.0 }).collect()
+}
+
+/// `Dconv`: `real(ifftn(D.*fftn(x)))`
+fn dconv(x: &[f64], d: &[Complex64], fft: &mut Fft3dWorkspace, buf: &mut [Complex64]) -> Vec<f64> {
+    for (b, &v) in buf.iter_mut().zip(x) {
+        *b = Complex64::new(v, 0.0);
+    }
+    fft.fft3d(buf);
+    for (b, &k) in buf.iter_mut().zip(d) {
+        *b *= k;
+    }
+    fft.ifft3d(buf);
+    buf.iter().map(|c| c.re).collect()
+}
+
+/// `reg(dx) = div(wG.*(Vr.*(wG.*grad(real(dx)))))`
+fn reg(x: &[f64], wg: &[Vec<f64>; 3], vr: &[Vec<f64>; 3], grid: &Grid, vs: [f64; 3]) -> Vec<f64> {
+    let mut g = fgrad(x, grid, vs);
+    for c in 0..3 {
+        for i in 0..x.len() {
+            g[c][i] *= wg[c][i] * vr[c][i] * wg[c][i];
+        }
+    }
+    bdiv(&g, grid, vs)
+}
+
+/// `fgrad.m`: forward differences, zero at the last voxel along each axis
+fn fgrad(x: &[f64], grid: &Grid, vs: [f64; 3]) -> [Vec<f64>; 3] {
+    let (nx, ny, nz) = grid.dims;
+    let n = x.len();
+    let mut g = [vec![0.0f64; n], vec![0.0f64; n], vec![0.0f64; n]];
+    for k in 0..nz {
+        for j in 0..ny {
+            for i in 0..nx {
+                let p = i + nx * (j + ny * k);
+                if i + 1 < nx {
+                    g[0][p] = (x[p + 1] - x[p]) / vs[0];
+                }
+                if j + 1 < ny {
+                    g[1][p] = (x[p + nx] - x[p]) / vs[1];
+                }
+                if k + 1 < nz {
+                    g[2][p] = (x[p + nx * ny] - x[p]) / vs[2];
+                }
+            }
+        }
+    }
+    g
+}
+
+/// `bdiv.m`: the adjoint of `fgrad` (minus the backward-difference divergence)
+fn bdiv(g: &[Vec<f64>; 3], grid: &Grid, vs: [f64; 3]) -> Vec<f64> {
+    let (nx, ny, nz) = grid.dims;
+    let mut out = vec![0.0f64; nx * ny * nz];
+    // Dx = [Gx(1:end-1); 0] - [0; Gx(1:end-1)]; div = -(Dx/vsx + Dy/vsy + Dz/vsz)
+    let term = |gc: &[f64], p: usize, i: usize, len: usize, stride: usize| -> f64 {
+        let cur = if i + 1 < len { gc[p] } else { 0.0 };
+        let prev = if i > 0 { gc[p - stride] } else { 0.0 };
+        cur - prev
+    };
+    for k in 0..nz {
+        for j in 0..ny {
+            for i in 0..nx {
+                let p = i + nx * (j + ny * k);
+                out[p] = -(term(&g[0], p, i, nx, 1) / vs[0]
+                    + term(&g[1], p, j, ny, nx) / vs[1]
+                    + term(&g[2], p, k, nz, nx * ny) / vs[2]);
+            }
+        }
+    }
+    out
+}
+
+/// `cgsolve.m` from a zero start, returning the last iterate. `progress` receives the
+/// iteration count.
+fn cgsolve(
+    mut a: impl FnMut(&[f64], &mut [f64], &mut Fft3dWorkspace, &mut [Complex64]),
+    b: &[f64],
+    tol: f64,
+    max_iter: usize,
+    fft: &mut Fft3dWorkspace,
+    buf: &mut [Complex64],
+    mut progress: impl FnMut(usize),
+) -> Vec<f64> {
+    let n = b.len();
+    let dot = |u: &[f64], v: &[f64]| u.iter().zip(v).map(|(a, b)| a * b).sum::<f64>();
+    let mut x = vec![0.0f64; n];
+    let mut r = b.to_vec();
+    let mut d = r.clone();
+    let mut q = vec![0.0f64; n];
+    let mut delta = dot(&r, &r);
+    let delta0 = dot(b, b);
+    let mut numiter = 0;
+    while numiter < max_iter && delta > tol * tol * delta0 {
+        a(&d, &mut q, fft, buf);
+        let alpha = delta / dot(&d, &q);
+        for i in 0..n {
+            x[i] += alpha * d[i];
+        }
+        if (numiter + 1) % 50 == 0 {
+            // r = b - A*x, recomputed every 50 iterations
+            a(&x, &mut q, fft, buf);
+            for i in 0..n {
+                r[i] = b[i] - q[i];
+            }
+        } else {
+            for i in 0..n {
+                r[i] -= alpha * q[i];
+            }
+        }
+        let delta_old = delta;
+        delta = dot(&r, &r);
+        let beta = delta / delta_old;
+        for i in 0..n {
+            d[i] = r[i] + beta * d[i];
+        }
+        numiter += 1;
+        progress(numiter);
+    }
+    x
+}
+
+/// `dataterm_mask.m`: 0 gives 1 everywhere; 1 gives `Mask./N_std` (0 where that is not finite)
+/// normalised to mean 1 over the mask.
+fn dataterm_mask(mode: i32, n_std: &[f64], mask: &[bool]) -> Vec<f64> {
+    if mode == 0 {
+        return vec![1.0; n_std.len()];
+    }
+    let mut w: Vec<f64> = n_std
+        .iter()
+        .zip(mask)
+        .map(|(&s, &m)| {
+            let v = (m as u8 as f64) / s;
+            if m && v.is_finite() { v } else { 0.0 }
+        })
+        .collect();
+    let count = mask.iter().filter(|&&m| m).count() as f64;
+    let mean = w.iter().zip(mask).filter(|(_, &m)| m).map(|(v, _)| v).sum::<f64>() / count;
+    for v in w.iter_mut() {
+        *v /= mean;
+    }
+    w
+}
+
+/// `gradient_mask.m` (binary mode): 1 where `|∇(iMag.*Mask)|` is at or below a threshold, per
+/// direction, over the whole volume. The threshold starts at 1% of `max(iMag)` and is scaled by
+/// 1.05 or 0.95 until the number of gradient components above it, over the number of voxels in
+/// the mask, crosses `percentage`.
+fn gradient_mask(mag: &[f64], mask: &[bool], grid: &Grid, percentage: f64) -> [Vec<f64>; 3] {
+    let vs = [grid.vsx(), grid.vsy(), grid.vsz()];
+    let masked: Vec<f64> = mag.iter().zip(mask).map(|(&v, &m)| if m { v } else { 0.0 }).collect();
+    let g = fgrad(&masked, grid, vs);
+    let g = [
+        g[0].iter().map(|v| v.abs()).collect::<Vec<f64>>(),
+        g[1].iter().map(|v| v.abs()).collect::<Vec<f64>>(),
+        g[2].iter().map(|v| v.abs()).collect::<Vec<f64>>(),
+    ];
+    // Counting `wG > level` by binary search over the sorted values gives the same counts as
+    // MATLAB's sum(wG(:) > level).
+    let mut sorted: Vec<f64> = g.iter().flat_map(|c| c.iter().copied()).collect();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let above = |level: f64| sorted.len() - sorted.partition_point(|&v| v <= level);
+    let denominator = mask.iter().filter(|&&m| m).count() as f64;
+    let mut level = 0.01 * mag.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    let mut numerator = above(level) as f64;
+    if numerator / denominator > percentage {
+        while numerator / denominator > percentage {
+            level *= 1.05;
+            numerator = above(level) as f64;
+        }
+    } else {
+        // MATLAB loops forever if the fraction cannot reach `percentage` (e.g. a constant
+        // magnitude, whose only edges are at the mask boundary). Stop once the level is below
+        // the smallest nonzero gradient, where the count can no longer change.
+        let min_positive = sorted.iter().copied().find(|&v| v > 0.0).unwrap_or(0.0);
+        while numerator / denominator < percentage && level >= min_positive && level > 0.0 {
+            level *= 0.95;
+            numerator = above(level) as f64;
+        }
+    }
+    g.map(|c| c.iter().map(|&v| if v <= level { 1.0 } else { 0.0 }).collect())
+}
+
+/// `sphere_kernel.m`: a sphere of `radius` mm with partial-volume edge voxels (each split into
+/// 20³ sub-voxels), normalised to sum 1, returned as its FFT (`fftn(fftshift(Sphere))`).
+fn sphere_kernel(grid: &Grid, radius: f64, fft: &mut Fft3dWorkspace) -> Vec<Complex64> {
+    let (nx, ny, nz) = grid.dims;
+    let vs = [grid.vsx(), grid.vsy(), grid.vsz()];
+    let dims = [nx, ny, nz];
+    let r2 = radius * radius;
+    // MATLAB's -N/2 : N/2-1 grid, then fftshift (circshift by floor(N/2)).
+    let coord = |i: usize, a: usize| (i as f64 - dims[a] as f64 / 2.0) * vs[a];
+    let split = 10usize;
+    let sub: Vec<f64> = (0..2 * split).map(|s| (s as f64 - split as f64 + 0.5) / (2 * split) as f64).collect();
+    let mut sphere = vec![0.0f64; nx * ny * nz];
+    let mut total = 0.0;
+    for k in 0..nz {
+        let z = coord(k, 2);
+        for j in 0..ny {
+            let y = coord(j, 1);
+            for i in 0..nx {
+                let x = coord(i, 0);
+                let out = (x.abs() - 0.5 * vs[0]).max(0.0).powi(2)
+                    + (y.abs() - 0.5 * vs[1]).max(0.0).powi(2)
+                    + (z.abs() - 0.5 * vs[2]).max(0.0).powi(2)
+                    > r2;
+                let inside = (x.abs() + 0.5 * vs[0]).powi(2)
+                    + (y.abs() + 0.5 * vs[1]).powi(2)
+                    + (z.abs() + 0.5 * vs[2]).powi(2)
+                    <= r2;
+                let v = if inside {
+                    1.0
+                } else if out {
+                    0.0
+                } else {
+                    let mut occupied = 0usize;
+                    for &sz in &sub {
+                        for &sy in &sub {
+                            for &sx in &sub {
+                                let (px, py, pz) = (x + sx * vs[0], y + sy * vs[1], z + sz * vs[2]);
+                                if px * px + py * py + pz * pz <= r2 {
+                                    occupied += 1;
+                                }
+                            }
+                        }
+                    }
+                    occupied as f64 / sub.len().pow(3) as f64
+                };
+                if v != 0.0 {
+                    let (si, sj, sk) = ((i + nx / 2) % nx, (j + ny / 2) % ny, (k + nz / 2) % nz);
+                    sphere[si + nx * (sj + ny * sk)] = v;
+                    total += v;
+                }
+            }
+        }
+    }
+    let mut k: Vec<Complex64> = sphere.iter().map(|&v| Complex64::new(v / total, 0.0)).collect();
+    fft.fft3d(&mut k);
+    k
+}
+
+/// `SMV.m` with a precomputed kernel: `ifftn(fftn(x).*K)`
+fn smv(x: &[f64], k: &[Complex64], fft: &mut Fft3dWorkspace) -> Vec<Complex64> {
+    let mut buf: Vec<Complex64> = x.iter().map(|&v| Complex64::new(v, 0.0)).collect();
+    fft.fft3d(&mut buf);
+    for (b, &kv) in buf.iter_mut().zip(k) {
+        *b *= kv;
+    }
+    fft.ifft3d(&mut buf);
+    buf
+}
+
+/// The SMV noise propagation in `MEDI_L1.m`: `sqrt(SMV(tempn.^2, SphereK) + tempn.^2)`
+fn smv_noise(tempn: &[f64], k: &[Complex64], fft: &mut Fft3dWorkspace) -> Vec<f64> {
+    let sq: Vec<f64> = tempn.iter().map(|v| v * v).collect();
+    let s = smv(&sq, k, fft);
+    (0..sq.len()).map(|i| (s[i].re + sq[i]).sqrt()).collect()
+}
+
+// ============================================================================
+// Single-precision MEDI-style helpers shared by TFI and the chi-separation solvers
+// (not used by `medi` above)
+// ============================================================================
 
 /// Workspace for MEDI operations - holds all reusable buffers (f32 version)
 /// Uses single precision for ~2x speedup on WASM
@@ -243,451 +787,6 @@ pub(crate) fn apply_medi_operator_core(
         bufs.dipole_buf[i] = bufs.complex_buf2[i].re;
     }
     combine_terms_f32(out, bufs.div_buf, bufs.dipole_buf, lambda);
-}
-
-/// Conjugate gradient solver with buffer reuse
-/// Solves Ax = b where A is the MEDI operator
-///
-/// The optional progress callback receives (cg_iter, max_iter) for each CG iteration.
-/// Uses per-direction gradient masks (mx, my, mz) matching MATLAB MEDI.
-#[inline]
-fn cg_solve_medi<F>(
-    ws: &mut MediWorkspace,
-    w: &[Complex32],
-    d_kernel: &[f32],
-    mx: &[f32],  // Per-direction gradient mask for x
-    my: &[f32],  // Per-direction gradient mask for y
-    mz: &[f32],  // Per-direction gradient mask for z
-    vr: &[f32],
-    lambda: f32,
-    b: &[f32],
-    x: &mut [f32],
-    tol: f32,
-    max_iter: usize,
-    mut progress_callback: F,
-) where
-    F: FnMut(usize, usize),
-{
-    let n = ws.n_total;
-    let (nx, ny, nz) = (ws.nx, ws.ny, ws.nz);
-    let (vsx, vsy, vsz) = (ws.vsx, ws.vsy, ws.vsz);
-
-    // Initialize x to zero
-    x.fill(0.0);
-
-    // r = b - A*x = b (since x=0)
-    ws.cg_r.copy_from_slice(b);
-
-    // p = r
-    ws.cg_p.copy_from_slice(&ws.cg_r);
-
-    // rsold = r·r (SIMD accelerated)
-    let mut rsold: f32 = norm_squared_f32(&ws.cg_r);
-
-    // b_norm for relative tolerance (SIMD accelerated)
-    let b_norm: f32 = norm_squared_f32(b).sqrt();
-    if b_norm < 1e-10 {
-        return; // b is zero, x=0 is the solution
-    }
-
-    // Buffer for p (to avoid borrow conflict)
-    let mut p_copy = vec![0.0f32; n];
-
-    for cg_iter in 0..max_iter {
-        // Report CG progress
-        progress_callback(cg_iter + 1, max_iter);
-
-        // Copy p to avoid borrow conflict
-        p_copy.copy_from_slice(&ws.cg_p);
-
-        // ap = A*p - use split borrowing
-        {
-            let mut bufs = MediOpBuffers {
-                gx: &mut ws.gx,
-                gy: &mut ws.gy,
-                gz: &mut ws.gz,
-                reg_x: &mut ws.reg_x,
-                reg_y: &mut ws.reg_y,
-                reg_z: &mut ws.reg_z,
-                div_buf: &mut ws.div_buf,
-                dipole_buf: &mut ws.dipole_buf,
-                complex_buf: &mut ws.complex_buf,
-                complex_buf2: &mut ws.complex_buf2,
-            };
-            apply_medi_operator_core(
-                &mut ws.fft_ws, &mut bufs, n, nx, ny, nz, vsx, vsy, vsz,
-                &p_copy, w, d_kernel, mx, my, mz, vr, lambda, &mut ws.cg_ap
-            );
-        }
-
-        // pap = p·ap (SIMD accelerated)
-        let pap: f32 = dot_product_f32(&ws.cg_p, &ws.cg_ap);
-
-        if pap.abs() < 1e-15 {
-            break;
-        }
-
-        let alpha = rsold / pap;
-
-        // x = x + alpha*p (SIMD accelerated)
-        axpy_f32(x, alpha, &ws.cg_p);
-
-        // r = r - alpha*ap (SIMD accelerated)
-        axpy_f32(&mut ws.cg_r, -alpha, &ws.cg_ap);
-
-        // rsnew = r·r (SIMD accelerated)
-        let rsnew: f32 = norm_squared_f32(&ws.cg_r);
-        let residual = rsnew.sqrt();
-
-        // Check convergence
-        if residual < tol * b_norm {
-            break;
-        }
-
-        let beta = rsnew / rsold;
-
-        // p = r + beta*p (SIMD accelerated)
-        xpby_f32(&mut ws.cg_p, &ws.cg_r, beta);
-
-        rsold = rsnew;
-    }
-}
-
-/// MEDI L1 dipole inversion (OPTIMIZED f32 VERSION)
-///
-/// # Arguments
-/// * `local_field` - Local field/phase (RDF) in radians (nx * ny * nz)
-/// * `n_std` - Noise standard deviation map (same size as local_field)
-/// * `magnitude` - Magnitude image for gradient weighting (nx * ny * nz)
-/// * `mask` - Binary mask (nx * ny * nz), 1 = brain
-/// * `grid` - Volume grid (dimensions and voxel sizes)
-/// * `bdir` - B0 field direction
-/// * `params` - MEDI parameters
-/// * `progress` - Progress callback `(current_step, total_steps)`
-///
-/// # Returns
-/// Susceptibility map (in same units as input field)
-pub fn medi(
-    local_field: &[f64],
-    n_std: &[f64],
-    magnitude: &[f64],
-    mask: &[u8],
-    grid: &Grid,
-    bdir: (f64, f64, f64),
-    params: &MediParams,
-    mut progress: impl FnMut(usize, usize),
-) -> Vec<f64> {
-    let (nx, ny, nz) = grid.dims;
-    let n_total = grid.n_total();
-
-    // Convert to f32 for internal computation (much faster on WASM)
-    let vsx_f32 = grid.vsx() as f32;
-    let vsy_f32 = grid.vsy() as f32;
-    let vsz_f32 = grid.vsz() as f32;
-    let lambda_f32 = params.lambda as f32;
-    let bdir_f32 = (bdir.0 as f32, bdir.1 as f32, bdir.2 as f32);
-    let smv_radius_f32 = params.smv_radius as f32;
-    let percentage_f32 = params.percentage as f32;
-    let cg_tol_f32 = params.cg_tol as f32;
-    let tol_f32 = params.tol as f32;
-    let max_iter = params.max_iter;
-    let cg_max_iter = params.cg_max_iter;
-    let data_weighting = params.data_weighting;
-
-    // Convert input arrays to f32
-    let local_field_f32: Vec<f32> = local_field.iter().map(|&v| v as f32).collect();
-    let n_std_f32: Vec<f32> = n_std.iter().map(|&v| v as f32).collect();
-    let magnitude_f32: Vec<f32> = magnitude.iter().map(|&v| v as f32).collect();
-
-    // Create workspace - this allocates all buffers ONCE
-    let mut ws = MediWorkspace::new(grid);
-
-    // Working copies that may be modified by SMV preprocessing
-    let mut rdf: Vec<f32> = local_field_f32.clone();
-    let mut work_mask: Vec<u8> = mask.to_vec();
-    let mut tempn: Vec<f32> = n_std_f32.clone();
-
-    // Apply mask to N_std
-    for i in 0..n_total {
-        if mask[i] == 0 {
-            tempn[i] = 0.0;
-        }
-    }
-    // MATLAB masks N_std once up front (N_std = N_std.*Mask), and MERIT reweights that
-    // masked map, so nothing from outside the brain reaches its SMV-smoothed copy.
-    let n_std_masked = tempn.clone();
-
-    // Generate dipole kernel
-    let mut d_kernel = dipole_kernel_f32(grid, bdir_f32);
-
-    // SMV preprocessing (optional)
-    let sphere_k = if params.smv {
-        let sk = smv_kernel_f32(grid, smv_radius_f32);
-
-        // FFT of sphere kernel for convolution
-        let mut sk_fft: Vec<Complex32> = sk.iter()
-            .map(|&v| Complex32::new(v, 0.0))
-            .collect();
-        ws.fft_ws.fft3d(&mut sk_fft);
-
-        // Erode mask: SMV(mask) > 0.999
-        let mask_f32: Vec<f32> = work_mask.iter().map(|&m| m as f32).collect();
-        let smv_mask = apply_smv_kernel_ws(&mask_f32, &sk_fft, &mut ws);
-        for i in 0..n_total {
-            work_mask[i] = if smv_mask[i] > 0.999 { 1 } else { 0 };
-        }
-
-        // Modify dipole kernel: D = (1 - SphereK) * D, where SphereK is the sphere's
-        // k-space response (MEDI's sphere_kernel returns fftn of the sphere), not the
-        // image-space sphere. The sphere is symmetric, so its FFT is real.
-        smv_filter_dipole_kernel(&mut d_kernel, &sk_fft);
-
-        // Modify RDF: RDF = RDF - SMV(RDF)
-        let smv_rdf = apply_smv_kernel_ws(&rdf, &sk_fft, &mut ws);
-        for i in 0..n_total {
-            rdf[i] -= smv_rdf[i];
-            if work_mask[i] == 0 {
-                rdf[i] = 0.0;
-            }
-        }
-
-        // Modify noise: tempn = sqrt(SMV(tempn^2) + tempn^2)
-        let tempn_sq: Vec<f32> = tempn.iter().map(|&t| t * t).collect();
-        let smv_tempn_sq = apply_smv_kernel_ws(&tempn_sq, &sk_fft, &mut ws);
-        for i in 0..n_total {
-            tempn[i] = (smv_tempn_sq[i] + tempn_sq[i]).sqrt();
-        }
-
-        Some(sk_fft)
-    } else {
-        None
-    };
-
-    // Compute data weighting
-    let mut m = dataterm_mask_f32(data_weighting, &tempn, &work_mask);
-
-    // b0 = m * exp(i * RDF)
-    let mut b0: Vec<Complex32> = rdf.iter()
-        .zip(m.iter())
-        .map(|(&f, &mi)| {
-            let phase = Complex32::new(0.0, f);
-            mi * phase.exp()
-        })
-        .collect();
-
-    // Compute per-direction gradient weighting masks from magnitude edges
-    // Returns (mx, my, mz) - separate masks for each gradient direction (matching MATLAB MEDI)
-    let (w_gx, w_gy, w_gz) = gradient_mask_f32(&magnitude_f32, &work_mask, nx, ny, nz, vsx_f32, vsy_f32, vsz_f32, percentage_f32);
-
-    // Fallback: if any mask is all zeros, use magnitude image (matching MATLAB)
-    let w_gx = if w_gx.iter().any(|&v| v != 0.0) { w_gx } else { magnitude_f32.clone() };
-    let w_gy = if w_gy.iter().any(|&v| v != 0.0) { w_gy } else { magnitude_f32.clone() };
-    let w_gz = if w_gz.iter().any(|&v| v != 0.0) { w_gz } else { magnitude_f32.clone() };
-
-    // Initialize susceptibility
-    let mut chi = vec![0.0f32; n_total];
-    let mut dx = vec![0.0f32; n_total];  // Reusable buffer for CG solution
-    let mut rhs = vec![0.0f32; n_total]; // Reusable buffer for RHS
-    let mut vr = vec![0.0f32; n_total];  // Reusable buffer for Vr (P in MATLAB)
-    let mut w: Vec<Complex32> = vec![Complex32::new(0.0, 0.0); n_total]; // Reusable buffer for w
-    let mut chi_prev = vec![0.0f32; n_total]; // Reusable buffer for convergence check
-    let mut badpoint = vec![0.0f32; n_total];
-    let mut n_std_work: Vec<f32> = n_std_masked;
-
-    // MATLAB: beta = sqrt(eps(class(f))) where eps for f64 ≈ 2.22e-16, so sqrt(eps) ≈ 1.49e-8.
-    // This is a regularization parameter for the P weight denominator, not a precision limit.
-    // Using the same value as MATLAB (1.49e-8) is fine in f32 (representable, well above f32 eps).
-    let beta = 1.49e-8_f32;
-
-    // Total progress = GN iterations * CG iterations per GN
-    let total_steps = max_iter * cg_max_iter;
-
-    // Gauss-Newton iterations
-    for iter in 0..max_iter {
-        // Save chi_prev for convergence check
-        chi_prev.copy_from_slice(&chi);
-
-        // Compute P = 1 / sqrt(|m * grad(chi)|^2 + beta) using per-direction masks (SIMD accelerated)
-        // MATLAB: P = 1 ./ sqrt(ux.*ux + uy.*uy + uz.*uz + beta);
-        // where ux = mx .* grad_x(chi), uy = my .* grad_y(chi), uz = mz .* grad_z(chi)
-        // Uses periodic BCs matching MATLAB's grad_ (which calls gradfp_mex)
-        fgrad_periodic_inplace_f32(
-            &mut ws.gx, &mut ws.gy, &mut ws.gz,
-            &chi, nx, ny, nz, vsx_f32, vsy_f32, vsz_f32,
-        );
-
-        compute_p_weights_f32(&mut vr, &w_gx, &w_gy, &w_gz, &ws.gx, &ws.gy, &ws.gz, beta);
-
-        // Compute w = m * exp(i * D*chi) using workspace
-        apply_dipole_conv(&mut ws.fft_ws, &chi, &d_kernel, &mut ws.dipole_buf, &mut ws.complex_buf);
-        for i in 0..n_total {
-            let phase = Complex32::new(0.0, ws.dipole_buf[i]);
-            w[i] = m[i] * phase.exp();
-        }
-
-        // Compute right-hand side using workspace
-        compute_rhs_inplace(&chi, &w, &b0, &d_kernel, &w_gx, &w_gy, &w_gz, &vr, lambda_f32, &mut rhs, &mut ws);
-
-        // Negate for CG (solving A*dx = -b) (SIMD accelerated)
-        negate_f32(&mut rhs);
-
-        // Solve A*dx = rhs using optimized CG with combined progress reporting
-        let gn_iter = iter;
-        cg_solve_medi(
-            &mut ws, &w, &d_kernel, &w_gx, &w_gy, &w_gz, &vr, lambda_f32, &rhs, &mut dx, cg_tol_f32, cg_max_iter,
-            |cg_iter, cg_total| {
-                let current = gn_iter * cg_total + cg_iter;
-                progress(current, total_steps);
-            }
-        );
-
-        // Update: chi = chi + dx (SIMD accelerated)
-        axpy_f32(&mut chi, 1.0, &dx);
-
-        // Check convergence (SIMD accelerated)
-        let norm_dx_sq = norm_squared_f32(&dx);
-        let norm_chi_sq = norm_squared_f32(&chi_prev);
-        let rel_change = norm_dx_sq.sqrt() / (norm_chi_sq.sqrt() + 1e-6);
-
-        // Merit adjustment (optional)
-        if params.merit {
-            // Compute residual: wres = m * exp(i * D*chi) - b0
-            apply_dipole_conv(&mut ws.fft_ws, &chi, &d_kernel, &mut ws.dipole_buf, &mut ws.complex_buf);
-            let mut wres: Vec<Complex32> = ws.dipole_buf.iter()
-                .zip(m.iter())
-                .zip(b0.iter())
-                .map(|((&dc, &mi), &b0i)| {
-                    let phase = Complex32::new(0.0, dc);
-                    mi * phase.exp() - b0i
-                })
-                .collect();
-
-            // Subtract mean over mask
-            let mask_count = work_mask.iter().filter(|&&m| m != 0).count() as f32;
-            if mask_count > 0.0 {
-                let mean_wres: Complex32 = wres.iter()
-                    .zip(work_mask.iter())
-                    .filter(|(_, &m)| m != 0)
-                    .map(|(w, _)| w)
-                    .sum::<Complex32>() / mask_count;
-
-                for i in 0..n_total {
-                    if work_mask[i] != 0 {
-                        wres[i] -= mean_wres;
-                    }
-                }
-            }
-
-            // Compute factor = std(abs(wres[mask])) * 6
-            let abs_wres: Vec<f32> = wres.iter()
-                .zip(work_mask.iter())
-                .filter(|(_, &m)| m != 0)
-                .map(|(w, _)| w.norm())
-                .collect();
-
-            if !abs_wres.is_empty() {
-                let mean_abs: f32 = abs_wres.iter().sum::<f32>() / abs_wres.len() as f32;
-                let var: f32 = abs_wres.iter()
-                    .map(|&v| (v - mean_abs).powi(2))
-                    .sum::<f32>() / abs_wres.len() as f32;
-                let factor = var.sqrt() * 6.0;
-
-                if factor > 1e-10 {
-                    // Normalize wres by factor
-                    let mut wres_norm: Vec<f32> = wres.iter()
-                        .map(|w| w.norm() / factor)
-                        .collect();
-
-                    // Clamp values < 1 to 1
-                    for v in wres_norm.iter_mut() {
-                        if *v < 1.0 {
-                            *v = 1.0;
-                        }
-                    }
-
-                    // Mark bad points and update noise
-                    for i in 0..n_total {
-                        if wres_norm[i] > 1.0 {
-                            badpoint[i] = 1.0;
-                        }
-                        if work_mask[i] != 0 {
-                            n_std_work[i] *= wres_norm[i].powi(2);
-                        }
-                    }
-
-                    // Recompute tempn
-                    tempn = n_std_work.clone();
-                    if let Some(ref sk_fft) = sphere_k {
-                        let tempn_sq: Vec<f32> = tempn.iter().map(|&t| t * t).collect();
-                        let smv_tempn_sq = apply_smv_kernel_ws(&tempn_sq, sk_fft, &mut ws);
-                        for i in 0..n_total {
-                            tempn[i] = (smv_tempn_sq[i] + tempn_sq[i]).sqrt();
-                        }
-                    }
-
-                    // Recompute data weighting and b0
-                    m = dataterm_mask_f32(data_weighting, &tempn, &work_mask);
-                    b0 = rdf.iter()
-                        .zip(m.iter())
-                        .map(|(&f, &mi)| {
-                            let phase = Complex32::new(0.0, f);
-                            mi * phase.exp()
-                        })
-                        .collect();
-                }
-            }
-        }
-
-        if rel_change < tol_f32 {
-            // Report completion on early convergence
-            progress(total_steps, total_steps);
-            break;
-        }
-    }
-
-    // Suppress unused variable warning
-    let _ = badpoint;
-
-    // Apply mask and convert back to f64
-    chi.iter()
-        .zip(mask.iter())
-        .map(|(&c, &m)| if m == 0 { 0.0 } else { c as f64 })
-        .collect()
-}
-
-/// High-pass the dipole kernel with the SMV kernel in place: `D = (1 - S) * D`.
-///
-/// `sk_fft` is the FFT of the image-space SMV sphere, i.e. its k-space response `S`. This
-/// matches MEDI_L1's `D = (1-SphereK).*D` with `SphereK = sphere_kernel(...)`, which is
-/// already in k-space, so the data model is `(1-S)f = (1-S)Dχ`.
-fn smv_filter_dipole_kernel(d_kernel: &mut [f32], sk_fft: &[Complex32]) {
-    for (d, s) in d_kernel.iter_mut().zip(sk_fft.iter()) {
-        *d *= 1.0 - s.re;
-    }
-}
-
-/// Apply SMV kernel using workspace buffers (f32)
-fn apply_smv_kernel_ws(
-    x: &[f32],
-    sk_fft: &[Complex32],
-    ws: &mut MediWorkspace,
-) -> Vec<f32> {
-    let n_total = ws.n_total;
-
-    // Copy to complex buffer
-    for (c, &r) in ws.complex_buf.iter_mut().zip(x.iter()) {
-        *c = Complex32::new(r, 0.0);
-    }
-
-    ws.fft_ws.fft3d(&mut ws.complex_buf);
-
-    for i in 0..n_total {
-        ws.complex_buf[i] *= sk_fft[i];
-    }
-
-    ws.fft_ws.ifft3d(&mut ws.complex_buf);
-
-    ws.complex_buf.iter().map(|c| c.re).collect()
 }
 
 /// Compute RHS in-place using workspace buffers (f32)
@@ -1066,7 +1165,6 @@ pub(crate) fn bdiv_periodic_inplace_f32(
     });
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1111,655 +1209,177 @@ mod tests {
         }
     }
 
-    fn test_medi_params() -> MediParams {
-        MediParams {
-            lambda: 1000.0, percentage: 0.9, cg_tol: 0.1,
-            cg_max_iter: 10, max_iter: 3, tol: 0.1,
-            ..MediParams::default()
-        }
+    fn small_params() -> MediParams {
+        MediParams { cg_max_iter: 20, max_iter: 3, smv: false, merit: false, ..MediParams::default() }
     }
 
-    #[test]
-    fn test_medi_zero_field() {
-        let n = 8;
-        let field = vec![0.0; n * n * n];
-        let mask = vec![1u8; n * n * n];
-        let mag = vec![1.0; n * n * n];
-        let n_std = vec![1.0; n * n * n];
+    /// A sphere of susceptibility in a cube, its field in ppm, a magnitude with an edge at the
+    /// sphere, and a spherical mask.
+    fn phantom(n: usize) -> (Grid, Vec<f64>, Vec<f64>, Vec<f64>, Vec<u8>) {
         let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
-
-        let chi = medi(
-            &field, &n_std, &mag, &mask, &grid,
-            (0.0, 0.0, 1.0), &test_medi_params(), |_, _| {},
-        );
-
-        for &val in chi.iter() {
-            assert!(val.abs() < 1e-4, "Zero field should give near-zero chi, got {}", val);
-        }
-    }
-
-    #[test]
-    fn test_medi_finite() {
-        let n = 8;
-        let field: Vec<f64> = (0..n*n*n).map(|i| (i as f64) * 0.001).collect();
-        let mask = vec![1u8; n * n * n];
-        let mag = vec![1.0; n * n * n];
-        let n_std = vec![1.0; n * n * n];
-        let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
-
-        let chi = medi(
-            &field, &n_std, &mag, &mask, &grid,
-            (0.0, 0.0, 1.0), &test_medi_params(), |_, _| {},
-        );
-
-        for (i, &val) in chi.iter().enumerate() {
-            assert!(val.is_finite(), "Chi should be finite at index {}", i);
-        }
-    }
-
-    #[test]
-    fn test_medi_with_smv() {
-        let n = 8;
-        let field: Vec<f64> = (0..n*n*n).map(|i| (i as f64) * 0.001).collect();
-        let mask = vec![1u8; n * n * n];
-        let mag = vec![1.0; n * n * n];
-        let n_std = vec![1.0; n * n * n];
-        let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
-
-        // Test with SMV enabled
-        let params = MediParams { smv: true, smv_radius: 2.0, ..test_medi_params() };
-        let chi = medi(
-            &field, &n_std, &mag, &mask, &grid,
-            (0.0, 0.0, 1.0), &params, |_, _| {},
-        );
-
-        for (i, &val) in chi.iter().enumerate() {
-            assert!(val.is_finite(), "Chi with SMV should be finite at index {}", i);
-        }
-    }
-
-    #[test]
-    fn test_medi_mask() {
-        let n = 8;
-        let field: Vec<f64> = (0..n*n*n).map(|i| (i as f64) * 0.001).collect();
-        let mut mask = vec![1u8; n * n * n];
-        let mag = vec![1.0; n * n * n];
-        let n_std = vec![1.0; n * n * n];
-        mask[0] = 0;
-        mask[10] = 0;
-        let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
-
-        let chi = medi(
-            &field, &n_std, &mag, &mask, &grid,
-            (0.0, 0.0, 1.0), &test_medi_params(), |_, _| {},
-        );
-
-        assert_eq!(chi[0], 0.0, "Masked voxel should be zero");
-        assert_eq!(chi[10], 0.0, "Masked voxel should be zero");
-    }
-
-    /// Debug test: run MEDI step-by-step on real data, saving intermediates
-    /// for comparison with Octave reference (other/medi_debug_octave.m).
-    /// Run with: cargo test --release test_medi_debug -- --ignored --nocapture
-    #[test]
-    #[ignore]
-    fn test_medi_debug() {
-        let data_path = "/home/ashley/OUT/2bgRemoved.nii";
-        if !std::path::Path::new(data_path).exists() {
-            eprintln!("Skipping: {} not found", data_path);
-            return;
-        }
-
-        let outdir = "/home/ashley/OUT/debug";
-        std::fs::create_dir_all(outdir).ok();
-
-        // Read NIfTI
-        let bytes = std::fs::read(data_path).unwrap();
-        let nifti_data = crate::io::load_nifti(&bytes).unwrap();
-        let (nx, ny, nz) = nifti_data.dims;
-        let (vsx, vsy, vsz) = nifti_data.voxel_size;
-
-        let n_total = nx * ny * nz;
-        let vsx_f32 = vsx as f32;
-        let vsy_f32 = vsy as f32;
-        let vsz_f32 = vsz as f32;
-
-        eprintln!("Data: {}x{}x{}, voxel: {}x{}x{}", nx, ny, nz, vsx, vsy, vsz);
-
-        // Convert to f32
-        let local_field: Vec<f32> = nifti_data.data.iter().map(|&v| v as f32).collect();
-
-        // Create mask from non-zero voxels
-        let mask: Vec<u8> = local_field.iter()
-            .map(|&v| if v.abs() > 1e-10 { 1 } else { 0 })
-            .collect();
-        let mask_count: usize = mask.iter().filter(|&&m| m != 0).count();
-        eprintln!("Mask voxels: {} / {}", mask_count, n_total);
-
-        // Save inputs
-        save_f32_raw(&local_field, &format!("{}/f_rust.raw", outdir));
-        let mask_f32: Vec<f32> = mask.iter().map(|&m| m as f32).collect();
-        save_f32_raw(&mask_f32, &format!("{}/mask_rust.raw", outdir));
-
-        // Parameters (matching MATLAB defaults)
-        let lambda: f32 = 7.5e-5;
-        let beta: f32 = 1.49e-8;
-        let bdir = (0.0f32, 0.0f32, 1.0f32);
-        let cg_tol: f32 = 0.1;  // Match MATLAB tolcg default
-        let cg_max_iter: usize = 10;
-
-        // Workspace
-        let debug_grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
-
-        // Dipole kernel
-        let d_kernel = crate::kernels::dipole::dipole_kernel_f32(
-            &debug_grid, bdir,
-        );
-        save_f32_raw(&d_kernel, &format!("{}/D_rust.raw", outdir));
-        eprintln!("D: min={} max={} D[0]={}", fmin(&d_kernel), fmax(&d_kernel), d_kernel[0]);
-        let mut ws = MediWorkspace::new(&debug_grid);
-
-        // Data weighting: uniform m = mask (matching w=ones in Octave)
-        let m: Vec<f32> = mask.iter().map(|&m| if m != 0 { 1.0 } else { 0.0 }).collect();
-
-        // b0 = m * exp(i * f)
-        let b0: Vec<Complex32> = local_field.iter().zip(m.iter())
-            .map(|(&f, &mi)| {
-                let phase = Complex32::new(0.0, f);
-                mi * phase.exp()
-            })
-            .collect();
-
-        // Gradient mask: uniform magnitude -> mx=my=mz=mask
-        let w_gx: Vec<f32> = m.clone();
-        let w_gy: Vec<f32> = m.clone();
-        let w_gz: Vec<f32> = m.clone();
-
-        // ===== ITERATION 1 (chi = 0) =====
-        eprintln!("\n=== Iteration 1 ===");
-        let mut chi = vec![0.0f32; n_total];
-        let mut dx = vec![0.0f32; n_total];
-        let mut rhs = vec![0.0f32; n_total];
-        let mut vr = vec![0.0f32; n_total];
-        let mut w: Vec<Complex32> = vec![Complex32::new(0.0, 0.0); n_total];
-
-        // P weights (chi=0 -> gradient=0 -> P = 1/sqrt(beta))
-        fgrad_periodic_inplace_f32(
-            &mut ws.gx, &mut ws.gy, &mut ws.gz,
-            &chi, nx, ny, nz, vsx_f32, vsy_f32, vsz_f32,
-        );
-        compute_p_weights_f32(&mut vr, &w_gx, &w_gy, &w_gz, &ws.gx, &ws.gy, &ws.gz, beta);
-        save_f32_raw(&vr, &format!("{}/P1_rust.raw", outdir));
-        eprintln!("P1: min={} max={} mean={}", fmin(&vr), fmax(&vr), fmean(&vr));
-
-        // w = m * exp(i * D*chi) = m (since chi=0)
-        apply_dipole_conv(&mut ws.fft_ws, &chi, &d_kernel, &mut ws.dipole_buf, &mut ws.complex_buf);
-        for i in 0..n_total {
-            let phase = Complex32::new(0.0, ws.dipole_buf[i]);
-            w[i] = m[i] * phase.exp();
-        }
-
-        // RHS
-        compute_rhs_inplace(
-            &chi, &w, &b0, &d_kernel,
-            &w_gx, &w_gy, &w_gz, &vr, lambda,
-            &mut rhs, &mut ws,
-        );
-        save_f32_raw(&rhs, &format!("{}/rhs1_rust.raw", outdir));
-        eprintln!("RHS1: min={} max={} norm={}", fmin(&rhs), fmax(&rhs), fnorm(&rhs));
-
-        // Negate for CG
-        negate_f32(&mut rhs);
-
-        // CG solve (with iteration-level residual logging)
-        let mut cg_residuals: Vec<f32> = Vec::new();
-        {
-            // Manual CG to capture residuals (matching cg_solve_medi but with logging)
-            let n = ws.n_total;
-            let (nx, ny, nz) = (ws.nx, ws.ny, ws.nz);
-            let (vsx, vsy, vsz) = (ws.vsx, ws.vsy, ws.vsz);
-
-            dx.fill(0.0);
-            ws.cg_r.copy_from_slice(&rhs);
-            ws.cg_p.copy_from_slice(&ws.cg_r);
-            let mut rsold: f32 = norm_squared_f32(&ws.cg_r);
-            let b_norm: f32 = norm_squared_f32(&rhs).sqrt();
-
-            let mut p_copy = vec![0.0f32; n];
-
-            for cg_iter in 0..cg_max_iter {
-                let residual_before = rsold.sqrt();
-                cg_residuals.push(residual_before);
-
-                p_copy.copy_from_slice(&ws.cg_p);
-                {
-                    let mut bufs = MediOpBuffers {
-                        gx: &mut ws.gx, gy: &mut ws.gy, gz: &mut ws.gz,
-                        reg_x: &mut ws.reg_x, reg_y: &mut ws.reg_y, reg_z: &mut ws.reg_z,
-                        div_buf: &mut ws.div_buf, dipole_buf: &mut ws.dipole_buf,
-                        complex_buf: &mut ws.complex_buf, complex_buf2: &mut ws.complex_buf2,
-                    };
-                    apply_medi_operator_core(
-                        &mut ws.fft_ws, &mut bufs, n, nx, ny, nz, vsx, vsy, vsz,
-                        &p_copy, &w, &d_kernel, &w_gx, &w_gy, &w_gz, &vr, lambda, &mut ws.cg_ap,
-                    );
-                }
-
-                let pap: f32 = dot_product_f32(&ws.cg_p, &ws.cg_ap);
-                if pap.abs() < 1e-15 { break; }
-                let alpha = rsold / pap;
-
-                axpy_f32(&mut dx, alpha, &ws.cg_p);
-                axpy_f32(&mut ws.cg_r, -alpha, &ws.cg_ap);
-
-                let rsnew: f32 = norm_squared_f32(&ws.cg_r);
-                let residual = rsnew.sqrt();
-
-                eprintln!("  CG iter {}: res={:.6e}, alpha={:.6e}, pap={:.6e}",
-                    cg_iter + 1, residual, alpha, pap);
-
-                if residual < cg_tol * b_norm { break; }
-
-                // No stall detection in this debug version (matching MATLAB)
-
-                let beta_cg = rsnew / rsold;
-                xpby_f32(&mut ws.cg_p, &ws.cg_r, beta_cg);
-                rsold = rsnew;
-            }
-        }
-        save_f32_raw(&dx, &format!("{}/dx1_rust.raw", outdir));
-        eprintln!("dx1: min={} max={} norm={}", fmin(&dx), fmax(&dx), fnorm(&dx));
-
-        // Update chi
-        axpy_f32(&mut chi, 1.0, &dx);
-        save_f32_raw(&chi, &format!("{}/chi1_rust.raw", outdir));
-        eprintln!("chi1: min={} max={} norm={}", fmin(&chi), fmax(&chi), fnorm(&chi));
-
-        // ===== ITERATION 2 =====
-        eprintln!("\n=== Iteration 2 ===");
-
-        // P weights
-        fgrad_periodic_inplace_f32(
-            &mut ws.gx, &mut ws.gy, &mut ws.gz,
-            &chi, nx, ny, nz, vsx_f32, vsy_f32, vsz_f32,
-        );
-        compute_p_weights_f32(&mut vr, &w_gx, &w_gy, &w_gz, &ws.gx, &ws.gy, &ws.gz, beta);
-        save_f32_raw(&vr, &format!("{}/P2_rust.raw", outdir));
-        eprintln!("P2: min={} max={} mean={}", fmin(&vr), fmax(&vr), fmean(&vr));
-
-        // w = m * exp(i * D*chi)
-        apply_dipole_conv(&mut ws.fft_ws, &chi, &d_kernel, &mut ws.dipole_buf, &mut ws.complex_buf);
-        for i in 0..n_total {
-            let phase = Complex32::new(0.0, ws.dipole_buf[i]);
-            w[i] = m[i] * phase.exp();
-        }
-
-        // RHS
-        compute_rhs_inplace(
-            &chi, &w, &b0, &d_kernel,
-            &w_gx, &w_gy, &w_gz, &vr, lambda,
-            &mut rhs, &mut ws,
-        );
-        save_f32_raw(&rhs, &format!("{}/rhs2_rust.raw", outdir));
-        eprintln!("RHS2: min={} max={} norm={}", fmin(&rhs), fmax(&rhs), fnorm(&rhs));
-
-        negate_f32(&mut rhs);
-
-        // CG solve (no stall detection)
-        {
-            let n = ws.n_total;
-            let (nx, ny, nz) = (ws.nx, ws.ny, ws.nz);
-            let (vsx, vsy, vsz) = (ws.vsx, ws.vsy, ws.vsz);
-
-            dx.fill(0.0);
-            ws.cg_r.copy_from_slice(&rhs);
-            ws.cg_p.copy_from_slice(&ws.cg_r);
-            let mut rsold: f32 = norm_squared_f32(&ws.cg_r);
-            let b_norm: f32 = norm_squared_f32(&rhs).sqrt();
-            let mut p_copy = vec![0.0f32; n];
-
-            for cg_iter in 0..cg_max_iter {
-                p_copy.copy_from_slice(&ws.cg_p);
-                {
-                    let mut bufs = MediOpBuffers {
-                        gx: &mut ws.gx, gy: &mut ws.gy, gz: &mut ws.gz,
-                        reg_x: &mut ws.reg_x, reg_y: &mut ws.reg_y, reg_z: &mut ws.reg_z,
-                        div_buf: &mut ws.div_buf, dipole_buf: &mut ws.dipole_buf,
-                        complex_buf: &mut ws.complex_buf, complex_buf2: &mut ws.complex_buf2,
-                    };
-                    apply_medi_operator_core(
-                        &mut ws.fft_ws, &mut bufs, n, nx, ny, nz, vsx, vsy, vsz,
-                        &p_copy, &w, &d_kernel, &w_gx, &w_gy, &w_gz, &vr, lambda, &mut ws.cg_ap,
-                    );
-                }
-                let pap: f32 = dot_product_f32(&ws.cg_p, &ws.cg_ap);
-                if pap.abs() < 1e-15 { break; }
-                let alpha = rsold / pap;
-                axpy_f32(&mut dx, alpha, &ws.cg_p);
-                axpy_f32(&mut ws.cg_r, -alpha, &ws.cg_ap);
-                let rsnew: f32 = norm_squared_f32(&ws.cg_r);
-                let residual = rsnew.sqrt();
-                eprintln!("  CG iter {}: res={:.6e}", cg_iter + 1, residual);
-                if residual < cg_tol * b_norm { break; }
-                let beta_cg = rsnew / rsold;
-                xpby_f32(&mut ws.cg_p, &ws.cg_r, beta_cg);
-                rsold = rsnew;
-            }
-        }
-        save_f32_raw(&dx, &format!("{}/dx2_rust.raw", outdir));
-        eprintln!("dx2: min={} max={} norm={}", fmin(&dx), fmax(&dx), fnorm(&dx));
-
-        axpy_f32(&mut chi, 1.0, &dx);
-        save_f32_raw(&chi, &format!("{}/chi2_rust.raw", outdir));
-        eprintln!("chi2: min={} max={} norm={}", fmin(&chi), fmax(&chi), fnorm(&chi));
-
-        eprintln!("\nDone. Intermediates saved to {}", outdir);
-    }
-
-    fn save_f32_raw(data: &[f32], path: &str) {
-        use std::io::Write;
-        let mut file = std::fs::File::create(path).unwrap();
-        for &val in data {
-            file.write_all(&val.to_le_bytes()).unwrap();
-        }
-    }
-
-    fn fmin(data: &[f32]) -> f32 { data.iter().cloned().fold(f32::MAX, f32::min) }
-    fn fmax(data: &[f32]) -> f32 { data.iter().cloned().fold(f32::MIN, f32::max) }
-    fn fmean(data: &[f32]) -> f32 { data.iter().sum::<f32>() / data.len() as f32 }
-    fn fnorm(data: &[f32]) -> f32 { data.iter().map(|&v| v * v).sum::<f32>().sqrt() }
-
-    #[test]
-    fn test_medi_small() {
-        // 8x8x8 volume with synthetic local field
-        let n = 8;
-        let n_total = n * n * n;
-
-        // Create a synthetic local field from a dipole-like source
-        let mut field = vec![0.0f64; n_total];
-        let center = n / 2;
-        for z in 0..n {
-            for y in 0..n {
-                for x in 0..n {
-                    let idx = x + y * n + z * n * n;
-                    let dx = (x as f64) - (center as f64);
-                    let dy = (y as f64) - (center as f64);
-                    let dz = (z as f64) - (center as f64);
-                    let r2 = dx*dx + dy*dy + dz*dz;
-                    if r2 > 1.0 {
-                        // Dipole field pattern: (3*cos^2(theta) - 1) / r^3
-                        let r = r2.sqrt();
-                        let cos_theta = dz / r;
-                        field[idx] = (3.0 * cos_theta * cos_theta - 1.0) / (r * r * r) * 0.01;
-                    }
-                }
-            }
-        }
-
-        let mask = vec![1u8; n_total];
-        let mag = vec![1.0f64; n_total];
-        let n_std = vec![1.0f64; n_total];
-
-        let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
-
-        // Run MEDI with few Gauss-Newton iterations to exercise the main loop
-        let params = MediParams {
-            lambda: 1e-4, percentage: 0.3,
-            cg_tol: 0.01, cg_max_iter: 10, max_iter: 5, tol: 0.1,
-            ..MediParams::default()
+        let c = n as f64 / 2.0;
+        let r2 = |i: usize| {
+            let (x, y, z) = ((i % n) as f64 - c, ((i / n) % n) as f64 - c, (i / (n * n)) as f64 - c);
+            x * x + y * y + z * z
         };
-        let chi = medi(
-            &field, &n_std, &mag, &mask, &grid,
-            (0.0, 0.0, 1.0), &params, |_, _| {},
-        );
-
-        // Result should be finite and same size
-        assert_eq!(chi.len(), n_total);
-        for (i, &val) in chi.iter().enumerate() {
-            assert!(val.is_finite(), "MEDI L1 chi should be finite at index {}", i);
-        }
-
-        // Chi should be non-trivial (not all zero) for a dipole field input
-        let chi_norm: f64 = chi.iter().map(|&v| v * v).sum::<f64>().sqrt();
-        assert!(chi_norm > 1e-10, "MEDI L1 should produce non-zero susceptibility for dipole field, got norm={}", chi_norm);
+        let chi: Vec<f64> = (0..n * n * n).map(|i| if r2(i) <= 9.0 { 0.1 } else { 0.0 }).collect();
+        let d = dipole_kernel(&grid, (0.0, 0.0, 1.0));
+        let dc: Vec<Complex64> = d.iter().map(|&v| Complex64::new(v, 0.0)).collect();
+        let mut fft = Fft3dWorkspace::new(n, n, n);
+        let mut buf = vec![Complex64::new(0.0, 0.0); n * n * n];
+        let field = dconv(&chi, &dc, &mut fft, &mut buf);
+        let mag: Vec<f64> = (0..n * n * n).map(|i| if r2(i) <= 9.0 { 0.5 } else { 1.0 }).collect();
+        let mask: Vec<u8> = (0..n * n * n).map(|i| (r2(i) <= 49.0) as u8).collect();
+        (grid, chi, field, mag, mask)
     }
 
     #[test]
-    fn test_medi_weight_types() {
-        let n = 8;
-        let n_total = n * n * n;
-
-        let field: Vec<f64> = (0..n_total).map(|i| (i as f64) * 0.001).collect();
-        let mask = vec![1u8; n_total];
-        let mag = vec![1.0f64; n_total];
-        let n_std = vec![1.0f64; n_total];
-
-        let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
-
-        // Test uniform data weighting (mode 0)
-        let params_uniform = MediParams { data_weighting: 0, ..test_medi_params() };
-        let chi_uniform = medi(
-            &field, &n_std, &mag, &mask, &grid,
-            (0.0, 0.0, 1.0), &params_uniform, |_, _| {},
-        );
-
-        // Test SNR data weighting (mode 1) with varying noise
-        let n_std_varying: Vec<f64> = (0..n_total).map(|i| 0.5 + (i as f64) * 0.01).collect();
-        let params_snr = MediParams { data_weighting: 1, ..test_medi_params() };
-        let chi_snr = medi(
-            &field, &n_std_varying, &mag, &mask, &grid,
-            (0.0, 0.0, 1.0), &params_snr, |_, _| {},
-        );
-
-        // Both should be finite
-        for (i, &val) in chi_uniform.iter().enumerate() {
-            assert!(val.is_finite(), "Uniform weighting chi should be finite at {}", i);
-        }
-        for (i, &val) in chi_snr.iter().enumerate() {
-            assert!(val.is_finite(), "SNR weighting chi should be finite at {}", i);
-        }
-
-        // Uniform and SNR weighting should give different results
-        let diff_norm: f64 = chi_uniform.iter()
-            .zip(chi_snr.iter())
-            .map(|(&a, &b)| (a - b).powi(2))
-            .sum::<f64>()
-            .sqrt();
-        // They may or may not differ depending on input, so just check finiteness
-        assert!(diff_norm.is_finite(), "Difference between weight modes should be finite");
+    fn defaults_are_medi_l1s() {
+        let p = MediParams::default();
+        assert_eq!((p.lambda, p.percentage, p.cg_tol, p.tol), (1000.0, 0.9, 0.01, 0.1));
+        assert_eq!((p.cg_max_iter, p.max_iter, p.data_weighting), (100, 10, 1));
+        assert!(p.smv && p.merit && p.smv_shrink_mask);
+        assert_eq!(p.smv_radius, 5.0);
     }
 
     #[test]
-    fn test_medi_with_progress_small() {
-        let n = 8;
-        let n_total = n * n * n;
-
-        let field: Vec<f64> = (0..n_total).map(|i| (i as f64) * 0.001).collect();
-        let mask = vec![1u8; n_total];
-        let mag = vec![1.0f64; n_total];
-        let n_std = vec![1.0f64; n_total];
-        let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
-
-        let mut progress_calls = 0usize;
-        let chi = medi(
-            &field, &n_std, &mag, &mask, &grid,
-            (0.0, 0.0, 1.0), &test_medi_params(),
-            |_iter, _max| { progress_calls += 1; },
-        );
-
-        assert_eq!(chi.len(), n_total);
-        for &val in &chi {
-            assert!(val.is_finite(), "medi with progress output should be finite");
-        }
-        assert!(progress_calls > 0, "progress callback should be called at least once");
+    fn bdiv_is_the_adjoint_of_fgrad() {
+        let grid = Grid::new(5, 4, 3, 1.0, 0.8, 1.5);
+        let n = grid.n_total();
+        let vs = [grid.vsx(), grid.vsy(), grid.vsz()];
+        let x: Vec<f64> = (0..n).map(|i| ((i * 37) % 11) as f64 - 5.0).collect();
+        let g: [Vec<f64>; 3] = [0, 1, 2].map(|c| (0..n).map(|i| ((i * 13 + c * 7) % 9) as f64 - 4.0).collect());
+        let gx = fgrad(&x, &grid, vs);
+        let lhs: f64 = (0..3).map(|c| gx[c].iter().zip(&g[c]).map(|(a, b)| a * b).sum::<f64>()).sum();
+        let rhs: f64 = x.iter().zip(bdiv(&g, &grid, vs)).map(|(a, b)| a * b).sum::<f64>();
+        assert!((lhs - rhs).abs() < 1e-9, "<fgrad x, g> = {lhs}, <x, bdiv g> = {rhs}");
     }
 
     #[test]
-    fn test_medi_with_merit() {
-        let n = 8;
-        let n_total = n * n * n;
-
-        let mut field = vec![0.0f64; n_total];
-        let center = n / 2;
-        for z in 0..n {
-            for y in 0..n {
-                for x in 0..n {
-                    let idx = x + y * n + z * n * n;
-                    let dx = (x as f64) - (center as f64);
-                    let dy = (y as f64) - (center as f64);
-                    let dz = (z as f64) - (center as f64);
-                    let r2 = dx * dx + dy * dy + dz * dz;
-                    if r2 > 1.0 {
-                        let r = r2.sqrt();
-                        let cos_theta = dz / r;
-                        field[idx] = (3.0 * cos_theta * cos_theta - 1.0) / (r * r * r) * 0.01;
-                    }
-                }
+    fn fgrad_is_zero_at_the_last_voxel() {
+        let grid = Grid::new(4, 4, 4, 1.0, 1.0, 1.0);
+        let x: Vec<f64> = (0..64).map(|i| (i * i) as f64).collect();
+        let g = fgrad(&x, &grid, [1.0; 3]);
+        for j in 0..4 {
+            for k in 0..4 {
+                assert_eq!(g[0][3 + 4 * (j + 4 * k)], 0.0);
             }
         }
-
-        let mask = vec![1u8; n_total];
-        let mag = vec![1.0f64; n_total];
-        let n_std = vec![1.0f64; n_total];
-
-        let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
-        // Test with merit=true to cover the merit adjustment code path
-        let params = MediParams {
-            lambda: 1e-4, merit: true, percentage: 0.3,
-            cg_tol: 0.01, cg_max_iter: 10, max_iter: 5, tol: 0.1,
-            ..MediParams::default()
-        };
-        let chi = medi(
-            &field, &n_std, &mag, &mask, &grid,
-            (0.0, 0.0, 1.0), &params, |_, _| {},
-        );
-
-        assert_eq!(chi.len(), n_total);
-        for &val in &chi {
-            assert!(val.is_finite(), "MEDI with merit should produce finite results");
-        }
+        assert_eq!(g[0][0], x[1] - x[0]);
     }
 
     #[test]
-    fn test_medi_with_smv_final() {
-        let n = 8;
-        let n_total = n * n * n;
-
-        let field: Vec<f64> = (0..n_total).map(|i| (i as f64) * 0.001).collect();
-        let mask = vec![1u8; n_total];
-        let mag = vec![1.0f64; n_total];
-        let n_std = vec![1.0f64; n_total];
-        let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
-
-        // Test with smv=true to cover the SMV-weighted code path
-        let params = MediParams {
-            smv: true, smv_radius: 3.0, percentage: 0.3,
-            cg_tol: 0.01, cg_max_iter: 10, max_iter: 3, tol: 0.1,
-            ..MediParams::default()
-        };
-        let chi = medi(
-            &field, &n_std, &mag, &mask, &grid,
-            (0.0, 0.0, 1.0), &params, |_, _| {},
-        );
-
-        assert_eq!(chi.len(), n_total);
-        for &val in &chi {
-            assert!(val.is_finite(), "MEDI with SMV should produce finite results");
-        }
-    }
-
-    /// SMV-filtered dipole kernel used by MEDI+SMV, built the way `medi` builds it.
-    fn smv_dipole_kernel(grid: &Grid, radius: f32, ws: &mut MediWorkspace) -> (Vec<f32>, Vec<Complex32>) {
-        let mut d = dipole_kernel_f32(grid, (0.0, 0.0, 1.0));
-        let mut sk_fft: Vec<Complex32> = smv_kernel_f32(grid, radius).iter()
-            .map(|&v| Complex32::new(v, 0.0))
-            .collect();
-        ws.fft_ws.fft3d(&mut sk_fft);
-        smv_filter_dipole_kernel(&mut d, &sk_fft);
-        (d, sk_fft)
-    }
-
-    #[test]
-    fn test_smv_dipole_kernel_matches_smv_filtered_field() {
-        // The SMV data model is (1-S)f = (1-S)Dχ: convolving χ with the filtered kernel must
-        // equal the dipole field minus its spherical mean. Applying the image-space sphere as
-        // if it were the k-space response leaves D almost unchanged and fails this.
+    fn gradient_mask_marks_about_percentage_of_mask_voxels_as_edges() {
         let n = 16;
-        let n_total = n * n * n;
         let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
-        let mut ws = MediWorkspace::new(&grid);
-        let (d_smv, sk_fft) = smv_dipole_kernel(&grid, 3.0, &mut ws);
-        let d = dipole_kernel_f32(&grid, (0.0, 0.0, 1.0));
-
-        let chi: Vec<f32> = (0..n_total)
-            .map(|i| ((i * 7919) % 101) as f32 / 101.0 - 0.5)
-            .collect();
-        let mut field = vec![0.0f32; n_total];
-        apply_dipole_conv(&mut ws.fft_ws, &chi, &d, &mut field, &mut ws.complex_buf);
-        let smv_field = apply_smv_kernel_ws(&field, &sk_fft, &mut ws);
-        let mut filtered = vec![0.0f32; n_total];
-        apply_dipole_conv(&mut ws.fft_ws, &chi, &d_smv, &mut filtered, &mut ws.complex_buf);
-
-        let mut max_err = 0.0f32;
-        let mut max_val = 0.0f32;
-        for i in 0..n_total {
-            let expected = field[i] - smv_field[i];
-            max_err = max_err.max((filtered[i] - expected).abs());
-            max_val = max_val.max(expected.abs());
-        }
-        assert!(max_err < 1e-4 * max_val.max(1.0),
-            "(1-S)D χ should equal f - SMV(f): max err {max_err}, max |f - SMV(f)| {max_val}");
+        let mag: Vec<f64> = (0..n * n * n).map(|i| ((i as f64 * 12.9898).sin() * 43758.5453).fract().abs()).collect();
+        let mask = vec![true; n * n * n];
+        let wg = gradient_mask(&mag, &mask, &grid, 0.9);
+        let edges: usize = wg.iter().map(|c| c.iter().filter(|&&v| v == 0.0).count()).sum();
+        let frac = edges as f64 / (n * n * n) as f64;
+        assert!((frac - 0.9).abs() < 0.02, "edge count / mask voxels = {frac}");
     }
 
     #[test]
-    fn test_medi_smv_recovers_source_under_background() {
-        // A susceptibility sphere inside the mask, plus a strong source outside it whose field
-        // is harmonic inside the mask. MEDI+SMV must remove that background and recover the
-        // inner sphere (NRMSE ~0.05; an unfiltered dipole kernel gives ~0.5).
-        let n = 32;
-        let n_total = n * n * n;
-        let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
-        let idx = |x: usize, y: usize, z: usize| x + y * n + z * n * n;
-        let dist2 = |x: usize, y: usize, z: usize, c: (f64, f64, f64)| {
-            (x as f64 - c.0).powi(2) + (y as f64 - c.1).powi(2) + (z as f64 - c.2).powi(2)
-        };
-        let mut chi_true = vec![0.0f32; n_total];
-        let mut chi_all = vec![0.0f32; n_total];
-        let mut mask = vec![0u8; n_total];
-        for z in 0..n { for y in 0..n { for x in 0..n {
-            let i = idx(x, y, z);
-            if dist2(x, y, z, (16.0, 16.0, 16.0)) <= 100.0 { mask[i] = 1; }
-            if dist2(x, y, z, (16.0, 16.0, 16.0)) <= 9.0 { chi_true[i] = 0.1; chi_all[i] = 0.1; }
-            if dist2(x, y, z, (16.0, 16.0, 29.0)) <= 4.0 { chi_all[i] = 1.0; }
-        }}}
+    fn sphere_kernel_is_normalised_and_real() {
+        let grid = Grid::new(16, 16, 16, 1.0, 1.0, 1.0);
+        let mut fft = Fft3dWorkspace::new(16, 16, 16);
+        let k = sphere_kernel(&grid, 3.0, &mut fft);
+        assert!((k[0].re - 1.0).abs() < 1e-12, "DC = sum of the sphere = {}", k[0].re);
+        assert!(k.iter().all(|v| v.im.abs() < 1e-12));
+    }
 
-        let mut ws = MediWorkspace::new(&grid);
-        let d = dipole_kernel_f32(&grid, (0.0, 0.0, 1.0));
-        let mut field = vec![0.0f32; n_total];
-        apply_dipole_conv(&mut ws.fft_ws, &chi_all, &d, &mut field, &mut ws.complex_buf);
-        let field: Vec<f64> = field.iter().map(|&v| v as f64).collect();
+    #[test]
+    fn zero_field_gives_zero() {
+        let (grid, _, field, mag, mask) = phantom(16);
+        let zero = vec![0.0; field.len()];
+        let chi = medi_l1(&zero, &mask, &mag, &vec![1.0; mag.len()], &grid, (0.0, 0.0, 1.0), &small_params(), |_, _| {});
+        assert!(chi.iter().all(|&v| v == 0.0));
+    }
 
-        let params = MediParams {
-            lambda: 1e-4, smv: true, smv_radius: 3.0, percentage: 0.3,
-            cg_tol: 0.01, cg_max_iter: 50, max_iter: 10, tol: 0.01,
-            ..MediParams::default()
-        };
-        let ones = vec![1.0f64; n_total];
-        let chi = medi(&field, &ones, &ones, &mask, &grid, (0.0, 0.0, 1.0), &params, |_, _| {});
-
-        // Score inside the SMV-eroded mask, where MEDI's data term applies.
-        let (_, sk_fft) = smv_dipole_kernel(&grid, 3.0, &mut ws);
-        let mask_f: Vec<f32> = mask.iter().map(|&m| m as f32).collect();
-        let eroded = apply_smv_kernel_ws(&mask_f, &sk_fft, &mut ws);
-        let inside: Vec<usize> = (0..n_total).filter(|&i| eroded[i] > 0.999).collect();
-        let mean = |v: &dyn Fn(usize) -> f64| inside.iter().map(|&i| v(i)).sum::<f64>() / inside.len() as f64;
-        let (mr, mt) = (mean(&|i| chi[i]), mean(&|i| chi_true[i] as f64));
-        let (mut num, mut den) = (0.0, 0.0);
-        for &i in &inside {
-            num += ((chi[i] - mr) - (chi_true[i] as f64 - mt)).powi(2);
-            den += (chi_true[i] as f64 - mt).powi(2);
+    #[test]
+    fn recovers_a_sphere_in_ppm() {
+        let (grid, chi_true, field, mag, mask) = phantom(24);
+        let chi = medi_l1(&field, &mask, &mag, &vec![1.0; mag.len()], &grid, (0.0, 0.0, 1.0), &small_params(), |_, _| {});
+        let c = 12 + 24 * (12 + 24 * 12);
+        assert!((chi[c] - chi_true[c]).abs() < 0.03, "centre: {} vs {}", chi[c], chi_true[c]);
+        for (i, &m) in mask.iter().enumerate() {
+            if m == 0 {
+                assert_eq!(chi[i], 0.0);
+            }
         }
-        let nrmse = (num / den).sqrt();
-        assert!(nrmse < 0.2, "MEDI+SMV should recover the inner source: NRMSE {nrmse:.3}");
+    }
+
+    #[test]
+    fn uniform_noise_map_equals_none() {
+        let (grid, _, field, mag, mask) = phantom(16);
+        let p = small_params();
+        let a = medi_l1(&field, &mask, &mag, &vec![1.0; mag.len()], &grid, (0.0, 0.0, 1.0), &p, |_, _| {});
+        let b = medi_l1(&field, &mask, &mag, &vec![3.0; field.len()], &grid, (0.0, 0.0, 1.0), &p, |_, _| {});
+        let err = a.iter().zip(&b).map(|(x, y)| (x - y).abs()).fold(0.0, f64::max);
+        assert!(err < 1e-9, "max |diff| {err}");
+    }
+
+    #[test]
+    fn smv_and_merit_run() {
+        let (grid, _, field, mag, mask) = phantom(16);
+        let p = MediParams { smv: true, smv_radius: 2.0, merit: true, ..small_params() };
+        let mut calls = 0;
+        let chi = medi_l1(&field, &mask, &mag, &vec![1.0; mag.len()], &grid, (0.0, 0.0, 1.0), &p, |_, _| calls += 1);
+        assert!(chi.iter().all(|v| v.is_finite()));
+        assert!(chi.iter().any(|&v| v != 0.0));
+        assert!(calls > 0);
+    }
+
+    #[test]
+    fn zeropad_pads_at_the_end_and_crops() {
+        let (grid, _, field, mag, mask) = phantom(15);
+        let p = MediParams { zeropad: (1, 0, 1), ..small_params() };
+        let chi = medi(&field, &mask, EchoMagnitudes { data: &mag, n_echoes: 1 }, &grid, (0.0, 0.0, 1.0), &p, |_, _| {});
+        // the same inversion on a volume padded by hand
+        let (n, m) = (15usize, 16usize);
+        let pad = |v: &[f64], nyp: usize| {
+            let mut out = vec![0.0; m * nyp * m];
+            for k in 0..n { for j in 0..n { for i in 0..n {
+                out[i + m * (j + nyp * k)] = v[i + n * (j + n * k)];
+            }}}
+            out
+        };
+        let mask_f: Vec<f64> = mask.iter().map(|&v| v as f64).collect();
+        let mask_p: Vec<u8> = pad(&mask_f, n).iter().map(|&v| v as u8).collect();
+        let pgrid = Grid::new(m, n, m, 1.0, 1.0, 1.0);
+        let padded = medi_l1(&pad(&field, n), &mask_p, &pad(&mag, n), &pad(&crate::utils::fit_ppm_complex_noise(&mag, 1), n), &pgrid, (0.0, 0.0, 1.0), &small_params(), |_, _| {});
+        for k in 0..n { for j in 0..n { for i in 0..n {
+            assert_eq!(chi[i + n * (j + n * k)], padded[i + m * (j + n * k)]);
+        }}}
+    }
+
+    #[test]
+    fn echo_magnitudes_give_rss_and_the_fit_noise() {
+        let (grid, _, field, mag, mask) = phantom(16);
+        let n = mag.len();
+        let echoes: Vec<f64> = mag.iter().copied().chain(mag.iter().map(|v| 0.5 * v)).collect();
+        let p = small_params();
+        let a = medi(&field, &mask, EchoMagnitudes { data: &echoes, n_echoes: 2 }, &grid, (0.0, 0.0, 1.0), &p, |_, _| {});
+        let rss: Vec<f64> = (0..n).map(|i| (echoes[i].powi(2) + echoes[i + n].powi(2)).sqrt()).collect();
+        let n_std = crate::utils::fit_ppm_complex_noise(&echoes, 2);
+        let b = medi_l1(&field, &mask, &rss, &n_std, &grid, (0.0, 0.0, 1.0), &p, |_, _| {});
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn smv_pads_odd_axes_to_even() {
+        let (grid, _, field, mag, mask) = phantom(15);
+        let p = MediParams { smv: true, smv_radius: 2.0, merit: false, ..small_params() };
+        let auto = medi(&field, &mask, EchoMagnitudes { data: &mag, n_echoes: 1 }, &grid, (0.0, 0.0, 1.0), &p, |_, _| {});
+        let explicit = MediParams { zeropad: (1, 1, 1), ..p.clone() };
+        let manual = medi(&field, &mask, EchoMagnitudes { data: &mag, n_echoes: 1 }, &grid, (0.0, 0.0, 1.0), &explicit, |_, _| {});
+        assert_eq!(auto, manual);
+        // an explicit pad that leaves an axis odd gets one more voxel
+        let odd = MediParams { zeropad: (2, 0, 0), ..p.clone() };
+        let more = MediParams { zeropad: (3, 1, 1), ..p };
+        let a = medi(&field, &mask, EchoMagnitudes { data: &mag, n_echoes: 1 }, &grid, (0.0, 0.0, 1.0), &odd, |_, _| {});
+        let b = medi(&field, &mask, EchoMagnitudes { data: &mag, n_echoes: 1 }, &grid, (0.0, 0.0, 1.0), &more, |_, _| {});
+        assert_eq!(a, b);
     }
 }

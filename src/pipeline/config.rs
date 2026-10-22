@@ -520,7 +520,7 @@ impl InversionConfig {
     /// It is a property of the config rather than of [`InversionAlgorithm`] alone, because
     /// two methods depend on more than their name:
     ///
-    /// - **MEDI** with [`MediParams::smv`] (the default) high-pass filters the field and the
+    /// - **MEDI** with [`MediParams::smv`] (the default, as in `MEDI_L1.m`) high-pass filters the field and the
     ///   dipole kernel with a spherical mean value kernel before inverting, `(1−S)f = (1−S)Dχ`.
     ///   That removes the harmonic background, so MEDI+SMV takes the total field. Without SMV,
     ///   MEDI takes the local field.
@@ -1110,7 +1110,7 @@ mod inversion_input_tests {
             assert_eq!(input(InversionAlgorithm::Medi, true, n), InversionInput::TotalField);
             assert_eq!(input(InversionAlgorithm::Medi, false, n), InversionInput::LocalField);
         }
-        // the default MEDI uses SMV
+        // MEDI_L1's default uses SMV
         assert!(MediParams::default().smv);
     }
 

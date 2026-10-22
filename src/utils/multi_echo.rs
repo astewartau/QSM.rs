@@ -1876,8 +1876,50 @@ pub fn field_to_hz(field: &[f64]) -> Vec<f64> {
     field.iter().map(|&f| f / TWO_PI).collect()
 }
 
+/// Noise standard deviation of the field fit, as `Fit_ppm_complex.m` in the MEDI toolbox returns
+/// it (`dp1`, MEDI's `N_std`): the a priori error of the frequency in a magnitude-weighted linear
+/// fit of phase to echo index, `sqrt(a11 / (a11·a22 − a12²))` with `a_jk = Σ_e |S_e|² e^(j+k−2)`
+/// over echo indices `e = 0, 1, …`. It depends only on the echo magnitudes. A single echo is
+/// treated as `Fit_ppm_complex.m` does, as two echoes of the same magnitude. Voxels where the
+/// fit is undefined get 0, as there (MEDI's data weight then ignores them).
+///
+/// `magnitude` holds `n_echoes` volumes of `n` voxels each, echo slowest.
+pub fn fit_ppm_complex_noise(magnitude: &[f64], n_echoes: usize) -> Vec<f64> {
+    assert!(n_echoes > 0 && magnitude.len().is_multiple_of(n_echoes), "magnitude is not n_echoes volumes");
+    let n = magnitude.len() / n_echoes;
+    (0..n)
+        .map(|i| {
+            let (mut a11, mut a12, mut a22) = (0.0f64, 0.0f64, 0.0f64);
+            let echoes = n_echoes.max(2);
+            for e in 0..echoes {
+                let s = magnitude[i + n * e.min(n_echoes - 1)];
+                let w = s * s;
+                let t = e as f64;
+                a11 += w;
+                a12 += w * t;
+                a22 += w * t * t;
+            }
+            let v = (a11 / (a11 * a22 - a12 * a12)).sqrt();
+            if v.is_finite() { v } else { 0.0 }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn fit_ppm_complex_noise_matches_the_closed_form() {
+        // two voxels, three echoes: |S| = (2, 1, 1) and a zero voxel
+        let mag = [2.0, 0.0, 1.0, 0.0, 1.0, 0.0];
+        let s = super::fit_ppm_complex_noise(&mag, 3);
+        // a11 = 4+1+1 = 6, a12 = 0+1+2 = 3, a22 = 0+1+4 = 5; sqrt(6 / (30 - 9))
+        assert!((s[0] - (6.0f64 / 21.0).sqrt()).abs() < 1e-15);
+        assert_eq!(s[1], 0.0);
+        // one echo is two echoes of the same magnitude: a11 = 2|S|², a12 = a22 = |S|², so 2/|S|²
+        let one = super::fit_ppm_complex_noise(&[2.0], 1);
+        assert!((one[0] - (2.0f64 / 4.0).sqrt()).abs() < 1e-15);
+    }
+
     use super::*;
 
     fn grid(nx: usize, ny: usize, nz: usize) -> Grid {
