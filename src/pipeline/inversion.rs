@@ -265,6 +265,7 @@ pub fn run_dipole_inversion(
             crate::inversion::amp_pe(
                 field_ppm, mask, magnitude, None, &grid, bdir, &params, progress,
             )
+            .map_err(|e| PipelineError::InvalidConfig(e.0))?
         }
         InversionAlgorithm::Lsqr => {
             let params = crate::inversion::LsqrQsmParams {

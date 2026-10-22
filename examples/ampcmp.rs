@@ -23,7 +23,7 @@ fn main() {
         mag[idx] = 100.0 + 40.0 * (dy / 16.0) + 10.0 * rnd();
     }}}
     let p = AmpPeParams { max_linearization_ite: 4, ..Default::default() };
-    let chi = amp_pe(&field, &mask, Some(&mag), None, &grid, (0.0, 0.0, 1.0), &p, |_, _| {});
+    let chi = amp_pe(&field, &mask, Some(&mag), None, &grid, (0.0, 0.0, 1.0), &p, |_, _| {}).unwrap();
     // bitwise checksum so any numerical difference at all shows up
     let mut h = 1469598103934665603u64;
     for v in &chi { for b in v.to_bits().to_le_bytes() { h ^= b as u64; h = h.wrapping_mul(1099511628211); } }

@@ -12,6 +12,7 @@
 //! 3. Threshold: vesselness above Otsu's threshold (MATLAB's `graythresh`) = vessel
 //! 4. Return complementary mask (1 = tissue, 0 = vessel)
 
+use crate::error::InputError;
 use crate::Grid;
 use crate::utils::frangi::{FrangiParams, frangi_filter_3d};
 use crate::utils::threshold::graythresh;
@@ -52,13 +53,16 @@ impl Default for VasculatureParams {
 ///
 /// # Returns
 /// Complementary vasculature mask (1 = tissue, 0 = vessel)
+///
+/// # Errors
+/// If the Frangi parameters are invalid (see [`FrangiParams::validate`]).
 pub fn generate_vasculature_mask(
     magnitude: &[f64],
     mask: &[u8],
     grid: &Grid,
     params: &VasculatureParams,
     progress_callback: impl Fn(usize, usize),
-) -> Vec<f64> {
+) -> Result<Vec<f64>, InputError> {
     let (nx, ny, nz) = grid.dims;
     // Step 1: Apply morphological bottom-hat filter to enhance dark structures
     // Bottom-hat = closing(image) - image
@@ -86,7 +90,7 @@ pub fn generate_vasculature_mask(
         black_white: false, // Detect bright structures (after bottom-hat)
     };
 
-    let frangi_result = frangi_filter_3d(&masked_bottom_hat, grid, &frangi_params, |_, _| {});
+    let frangi_result = frangi_filter_3d(&masked_bottom_hat, grid, &frangi_params, |_, _| {})?;
     let enhanced = frangi_result.vesselness;
 
     // Step 4: Otsu threshold, as vasculature_mask.m does: `T = graythresh(enhanced)` over the
@@ -103,7 +107,7 @@ pub fn generate_vasculature_mask(
 
     progress_callback(4, 4);
 
-    vasc_only
+    Ok(vasc_only)
 }
 
 /// Spherical structuring element with pre-computed linear offsets for fast access
@@ -402,7 +406,7 @@ mod tests {
             frangi_c: 100.0,
         };
 
-        let result = generate_vasculature_mask(&magnitude, &mask, &grid(10, 10, 10), &params, |_, _| {});
+        let result = generate_vasculature_mask(&magnitude, &mask, &grid(10, 10, 10), &params, |_, _| {}).unwrap();
         assert_eq!(result.len(), 1000);
     }
 }

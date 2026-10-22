@@ -60,6 +60,7 @@ pub fn run_bg_removal(
             crate::bgremove::vsharp(
                 field_ppm, mask, &grid, &config.vsharp, progress,
             )
+            .map_err(|e| PipelineError::InvalidConfig(e.0))?
         }
         BgRemovalAlgorithm::Pdf => {
             // PDF weights the fit by 1/N_std, the noise of the field, which MEDI's pipeline takes

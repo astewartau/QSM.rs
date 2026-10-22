@@ -17,6 +17,14 @@ impl InputError {
     pub fn new(msg: impl Into<String>) -> Self {
         Self(msg.into())
     }
+
+    /// A parameter outside the range the algorithm accepts, as
+    /// `"{name} = {value} is out of range: must be {allowed}"`. `name` should say whose
+    /// parameter it is (`"V-SHARP min_radius"`), and `allowed` the range with its unit
+    /// (`"finite and > 0 mm"`), so the message stands on its own in a host's error report.
+    pub fn param(name: &str, value: impl std::fmt::Display, allowed: &str) -> Self {
+        Self(format!("{name} = {value} is out of range: must be {allowed}"))
+    }
 }
 
 impl std::fmt::Display for InputError {
@@ -33,5 +41,16 @@ pub(crate) fn check_len(name: &str, len: usize, expected: usize) -> Result<(), I
         Ok(())
     } else {
         Err(InputError(format!("{name} has {len} values, expected {expected}")))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn param_error_names_parameter_value_and_range() {
+        let e = InputError::param("V-SHARP min_radius", 0.0, "finite and > 0 mm");
+        assert_eq!(e.to_string(), "V-SHARP min_radius = 0 is out of range: must be finite and > 0 mm");
     }
 }

@@ -9,7 +9,7 @@
 //! removal**, and that is its intended use:
 //!
 //! ```ignore
-//! let (local, m) = bgremove::vsharp(&total, &mask, &grid, &VsharpParams::default(), |_,_| {});
+//! let (local, m) = bgremove::vsharp(&total, &mask, &grid, &VsharpParams::default(), |_,_| {}).unwrap();
 //! let (refined, _) = bgremove::msmv(&local, &m, &grid, &MsmvParams::refine(), |_,_| {});
 //! ```
 //!

@@ -30,6 +30,24 @@
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
+/// Daubechies orders this module implements (db1–db4). Anything else has no filter.
+pub const SUPPORTED_ORDERS: std::ops::RangeInclusive<usize> = 1..=4;
+
+/// `Ok` if `order` is in [`SUPPORTED_ORDERS`], otherwise an error naming `param` (e.g.
+/// `"AMP-PE wave_order"`), the value and the range. Callers that take a wavelet order check it
+/// with this before building a [`WaveletPlan`], which panics on an unsupported order.
+pub fn check_order(param: &str, order: usize) -> Result<(), crate::error::InputError> {
+    if SUPPORTED_ORDERS.contains(&order) {
+        Ok(())
+    } else {
+        Err(crate::error::InputError::param(
+            param,
+            order,
+            &format!("{}..={} (db1–db4)", SUPPORTED_ORDERS.start(), SUPPORTED_ORDERS.end()),
+        ))
+    }
+}
+
 /// Daubechies analysis low-pass filter `LoD` for the given order (1..=4).
 ///
 /// Coefficients are the PyWavelets `dec_lo` arrays (same ordering as MATLAB's
@@ -570,6 +588,18 @@ mod tests {
             let coef = plan.forward(&img);
             assert_eq!(coef.len(), n, "orthonormal transform preserves length");
             assert!((rms(&coef) - rms(&img)).abs() / rms(&img) < 1e-10, "order {order} norm");
+        }
+    }
+
+    #[test]
+    fn check_order_accepts_db1_to_db4_only() {
+        for o in 1..=4 {
+            assert!(check_order("x", o).is_ok());
+            assert!(!lod_filter(o).is_empty());
+        }
+        for o in [0, 5, 40] {
+            let err = check_order("WaveSep wavelet_order", o).unwrap_err();
+            assert!(err.0.contains(&format!("WaveSep wavelet_order = {o}")) && err.0.contains("1..=4"), "{err}");
         }
     }
 }

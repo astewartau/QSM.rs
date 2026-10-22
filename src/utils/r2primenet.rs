@@ -81,7 +81,7 @@ pub const AUTHORS_PATCH: (usize, usize, usize) = (192, 192, 128);
 pub const WASM_PATCH: (usize, usize, usize) = (128, 128, 64);
 
 /// Four pooling levels, so every patch dimension must be a multiple of this.
-const POOL_MULTIPLE: usize = 16;
+pub const POOL_MULTIPLE: usize = 16;
 
 /// Field strength the published R2PRIMEnet weights were trained at, in Tesla (Kim 2025).
 pub const TRAINED_B0_T: f64 = 3.0;

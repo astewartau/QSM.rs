@@ -36,6 +36,7 @@
 
 use super::DR_SHIN_2021;
 use crate::utils::wavelet::{dwt_max_level, WaveletPlan};
+use crate::error::{check_len, InputError};
 use crate::Grid;
 
 /// Parameters for [`wavesep`].
@@ -56,6 +57,14 @@ pub struct WaveSepParams {
     pub max_iter: usize,
     /// Relative-change early-stop tolerance (repo default 1e-3).
     pub tol: f64,
+}
+
+impl WaveSepParams {
+    /// Checks `wavelet_order`: it must be a supported Daubechies order
+    /// ([`SUPPORTED_ORDERS`](crate::utils::wavelet::SUPPORTED_ORDERS), 1–4).
+    pub fn validate(&self) -> Result<(), InputError> {
+        crate::utils::wavelet::check_order("WaveSep wavelet_order", self.wavelet_order)
+    }
 }
 
 impl Default for WaveSepParams {
@@ -94,12 +103,13 @@ pub fn wavesep(
     grid: &Grid,
     params: &WaveSepParams,
     mut progress: impl FnMut(usize, usize),
-) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
+) -> Result<super::ChiSepMaps, InputError> {
+    params.validate()?;
     let (nx, ny, nz) = grid.dims;
     let n = nx * ny * nz;
-    assert_eq!(chi_total.len(), n, "chi_total length must match grid");
-    assert_eq!(r2prime.len(), n, "r2prime length must match grid");
-    assert_eq!(mask.len(), n, "mask length must match grid");
+    check_len("WaveSep chi_total", chi_total.len(), n)?;
+    check_len("WaveSep r2prime", r2prime.len(), n)?;
+    check_len("WaveSep mask", mask.len(), n)?;
 
     // --- padding so each axis is a multiple of 2^L (periodic wavelet round-trip) ---
     let dec_len = 2 * params.wavelet_order;
@@ -183,7 +193,7 @@ pub fn wavesep(
             chi_out[i] = xp_c[i] + xn_c[i];
         }
     }
-    (chi_pos, chi_neg, chi_out)
+    Ok((chi_pos, chi_neg, chi_out))
 }
 
 /// Wavelet-L1 proximal operator for an orthonormal transform: soft-threshold all
@@ -331,7 +341,7 @@ mod tests {
             max_iter: 300,
             tol: 1e-4,
         };
-        let (para, neg, total) = wavesep(&chi_total, &r2p, &mask, &g, &params, |_, _| {});
+        let (para, neg, total) = wavesep(&chi_total, &r2p, &mask, &g, &params, |_, _| {}).unwrap();
 
         // Correlate recovered vs. truth inside the mask.
         let corr = |a: &[f64], b: &[f64]| {
@@ -363,5 +373,14 @@ mod tests {
                 assert!((total[i] - (para[i] + neg[i])).abs() < 1e-9, "χ_total = χ+ + χ−");
             }
         }
+    }
+
+    /// #199: an unsupported wavelet order panicked in the filter lookup; it is an error now.
+    #[test]
+    fn unsupported_wavelet_order_is_an_error() {
+        let g = Grid::new(4, 4, 4, 1.0, 1.0, 1.0);
+        let params = WaveSepParams { wavelet_order: 5, ..Default::default() };
+        let err = wavesep(&[0.0; 64], &[0.0; 64], &[1u8; 64], &g, &params, |_, _| {}).unwrap_err();
+        assert!(err.0.contains("WaveSep wavelet_order = 5"), "{err}");
     }
 }

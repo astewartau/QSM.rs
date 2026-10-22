@@ -598,7 +598,7 @@ fn test_qsmart_04_vasculature() {
         &grid,
         &vasc_params,
         |_, _| {},
-    );
+    ).unwrap();
 
     let elapsed = start.elapsed();
     println!("[INFO] Vasculature mask generated in {:.2?}", elapsed);
@@ -882,7 +882,7 @@ fn test_qsmart_06_sdf_stage2() {
                 frangi_scale_ratio: FRANGI_SCALE_RATIO,
                 frangi_c: FRANGI_C,
             };
-            generate_vasculature_mask(&data.magnitude, &data.mask_u8, &grid, &vasc_params, |_, _| {})
+            generate_vasculature_mask(&data.magnitude, &data.mask_u8, &grid, &vasc_params, |_, _| {}).unwrap()
         }
     };
 
@@ -1181,7 +1181,7 @@ fn test_qsmart_full_pipeline() {
     };
     let vasc_only = generate_vasculature_mask(
         &data.magnitude, &data.mask_u8, &grid, &vasc_params, |_, _| {},
-    );
+    ).unwrap();
 
     println!("[INFO] Vasculature detection: {:.2?}", step_start.elapsed());
 
@@ -1590,7 +1590,7 @@ fn test_qsmart_04b_frangi_debug() {
 
     let frangi_result = qsm_core::utils::frangi::frangi_filter_3d(
         &masked_bottom_hat, &grid, &frangi_params, |_, _| {},
-    );
+    ).unwrap();
     let enhanced = &frangi_result.vesselness;
 
     println!("[INFO] Frangi filter computed in {:.2?}", step_start.elapsed());
@@ -1729,7 +1729,7 @@ fn test_qsmart_04b_frangi_debug() {
 
         let test_result = qsm_core::utils::frangi::frangi_filter_3d(
             &masked_bottom_hat, &grid, &test_params, |_, _| {},
-        );
+        ).unwrap();
 
         let nz_count = test_result.vesselness.iter()
             .zip(data.mask_u8.iter())

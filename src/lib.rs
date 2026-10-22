@@ -31,7 +31,7 @@
 //!
 //! let mask = bet::run_bet(magnitude, &grid, &BetParams::default(), |_, _| {});
 //! let unwrapped = unwrap::laplacian_unwrap(phase, &mask, &grid, unwrap::LaplacianSolver::Dct);
-//! let (local, eroded) = bgremove::vsharp(&unwrapped, &mask, &grid, &VsharpParams::default(), |_, _| {});
+//! let (local, eroded) = bgremove::vsharp(&unwrapped, &mask, &grid, &VsharpParams::default(), |_, _| {}).unwrap();
 //! let chi = inversion::tv_admm(&local, &eroded, &grid, bdir, &TvParams::default(), |_, _| {});
 //! # let _ = chi;
 //! # }
@@ -199,7 +199,7 @@ pub mod relaxometry {
     #[cfg(feature = "onnx")]
     pub use crate::utils::r2primenet::{
         r2primenet, r2primenet_from_magnitude, R2PrimeNetNorm, R2PrimeNetParams,
-        AUTHORS_PATCH, WASM_PATCH, B0_TOLERANCE_T, TRAINED_B0_T,
+        AUTHORS_PATCH, WASM_PATCH, B0_TOLERANCE_T, TRAINED_B0_T, POOL_MULTIPLE,
     };
 }
 

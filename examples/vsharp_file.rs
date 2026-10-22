@@ -43,7 +43,7 @@ fn main() {
     let grid = Grid::new(f.dims.0, f.dims.1, f.dims.2, f.voxel_size.0, f.voxel_size.1, f.voxel_size.2);
     let mask: Vec<u8> = m.data.iter().map(|&v| (v > 0.5) as u8).collect();
     let t = std::time::Instant::now();
-    let (local, support) = vsharp(&f.data, &mask, &grid, &params, |_, _| {});
+    let (local, support) = vsharp(&f.data, &mask, &grid, &params, |_, _| {}).unwrap();
     eprintln!(
         "vsharp: {:?} vs {:?}, grid {:?}, deconvolve {}, {} support voxels, {:.2}s",
         f.dims, f.voxel_size, params.working_grid(&grid), params.deconvolve,
