@@ -46,14 +46,16 @@ use crate::utils::resample::{resize, resize_axis};
 pub enum HdBetInference {
     /// One network pass over the whole volume, zero-padded (centred) to the next multiple of
     /// `(32, 32, 16)`. Fastest, and every voxel sees the whole head; peak memory grows with the
-    /// head's bounding box (≈1.2 KB per padded voxel: ≈9–13 GB for a 1 mm whole-head volume).
+    /// field of view in mm (natively 5.7 GB for 184×256×128 mm, 9.3 GB for 240×240×160 mm; see
+    /// [`hd_bet_memory_bytes`]).
     FullVolume,
     /// Gaussian-weighted sliding window, as nnU-Net (and the HD-BET v2 CLI) runs it.
     SlidingWindow {
         /// Patch size `(px, py, pz)` in voxels at 1 mm; HD-BET v2 was trained with
         /// `(192, 192, 96)`. Must be multiples of `(32, 32, 16)`. Peak memory follows the patch
-        /// (≈4.5 GB at `(192, 192, 96)`, ≈1.9 GB at `(128, 128, 64)`); below ~`(128, 128, 64)`
-        /// tiles that lie wholly inside the brain start to be labelled background.
+        /// (natively 3.4 GB at `(192, 192, 96)`, 1.3 GB at `(128, 128, 64)`; see
+        /// [`hd_bet_memory_bytes`]); below ~`(128, 128, 64)` tiles that lie wholly inside the
+        /// brain start to be labelled background.
         patch: (usize, usize, usize),
         /// Step between windows as a fraction of the patch (nnU-Net: 0.5).
         tile_step: f64,
@@ -86,9 +88,9 @@ impl Default for HdBetParams {
 
 impl HdBetParams {
     /// Memory-bounded setting for constrained hosts (e.g. 32-bit WASM): `(128, 128, 64)`
-    /// sliding-window patches, peak ≈1.9 GB on a 164×205×205 volume. Agreed with the native
-    /// patch at Dice ≈0.99 in validation (and with nnU-Net run at the same patch size to 2
-    /// voxels).
+    /// sliding-window patches, peak 1.6 GB in a WASM heap on a 184×256×128 mm volume. Agreed
+    /// with the native patch at Dice ≈0.99 in validation (and with nnU-Net run at the same patch
+    /// size to 2 voxels).
     pub fn low_memory() -> Self {
         Self { inference: HdBetInference::LOW_MEMORY, ..Self::default() }
     }
@@ -177,14 +179,75 @@ fn preprocess(magnitude: &[f64], grid: &Grid) -> Option<Preprocessed> {
     let s = std.max(1e-8);
     img.iter_mut().for_each(|v| *v = (*v - mean) / s);
 
-    // compute_new_shape: round(spacing / target * shape), Python round (half to even).
-    let rdims: [usize; 3] =
-        std::array::from_fn(|a| (spacing[a] / TARGET_SPACING[a] * cdims[a] as f64).round_ties_even() as usize);
+    let rdims = resampled_dims(cdims, spacing);
     let data = resample_nnunet(&img, cdims, rdims, spacing, TARGET_SPACING, 3)
         .into_iter()
         .map(|v| v as f32)
         .collect();
     Some(Preprocessed { data, dims: rdims, bbox, full_dims, spacing })
+}
+
+/// nnU-Net `compute_new_shape`: the `(z, y, x)` dims of a `dims` volume with voxel `spacing` at
+/// 1 mm, `round(spacing / target · dims)` with Python's rounding (half to even).
+fn resampled_dims(dims: [usize; 3], spacing: [f64; 3]) -> [usize; 3] {
+    std::array::from_fn(|a| (spacing[a] / TARGET_SPACING[a] * dims[a] as f64).round_ties_even() as usize)
+}
+
+/// The spatial shape `(z, y, x)` of the tensor HD-BET's network sees on a scan on `grid`: with
+/// [`HdBetInference::FullVolume`], the field of view resampled to 1 mm and padded to multiples of
+/// 16×32×32; with a sliding window, its patch.
+///
+/// HD-BET crops to the bounding box of the non-zero voxels before resampling. This takes that box
+/// to be the whole field of view, as it is for any scan with noise in the background, so on an
+/// image whose background was zeroed it is an upper bound.
+pub fn hd_bet_network_input(grid: &Grid, params: &HdBetParams) -> [usize; 3] {
+    match params.inference {
+        HdBetInference::FullVolume => {
+            let (nx, ny, nz) = grid.dims;
+            let (vx, vy, vz) = grid.voxel_size;
+            full_volume_patch(resampled_dims([nz, ny, nx], [vz, vy, vx]))
+        }
+        HdBetInference::SlidingWindow { patch, .. } => [patch.2, patch.1, patch.0],
+    }
+}
+
+/// Peak heap of [`hd_bet`] on a scan on `grid`, in bytes, natively or in a `wasm32` heap.
+///
+/// The network at [`hd_bet_network_input`] ([`crate::models::ModelSpec::peak_bytes`]) plus what
+/// the step allocates around it: the 1 mm volume, the padded volume with its two-channel logit
+/// and weight accumulators, and the window's buffers (Gaussian, input, prediction, the copy handed
+/// to the network). The cropping and resampling before and after the network are counted too,
+/// but never set the peak at the resolutions HD-BET is used at. The magnitude passed in and the
+/// weight file's bytes are the caller's and are not included. Like [`hd_bet_network_input`], it
+/// takes the non-zero bounding box to be the whole field of view.
+///
+/// Within 0.5–1.5 % above the measured native peak of the whole step, whole-volume and sliding
+/// window, at 1 mm, 1.5 mm, 2 mm, 0.6 mm and 0.8×0.8×3 mm (see the [`crate::models`] docs,
+/// "Memory").
+pub fn hd_bet_memory_bytes(grid: &Grid, params: &HdBetParams, heap: crate::models::Heap) -> u64 {
+    let spec = crate::models::find_model("hd-bet").expect("hd-bet is in the registry");
+    let (nx, ny, nz) = grid.dims;
+    let (vx, vy, vz) = grid.voxel_size;
+    let rdims = resampled_dims([nz, ny, nx], [vz, vy, vx]);
+    let patch = hd_bet_network_input(grid, params);
+    let prod = |d: [usize; 3]| d.iter().map(|&v| v as u64).product::<u64>();
+    // The scan, the 1 mm volume, the padded volume, the patch.
+    let c = prod([nz, ny, nx]);
+    let r = prod(rdims);
+    let np = prod(std::array::from_fn(|a| rdims[a].max(patch[a])));
+    let pp = prod(patch);
+    let big = c.max(r);
+    // Cropping and z-scoring in f64, then the spline resize (its copy, and two axis passes alive).
+    let pre = 16 * c + 16 * big + 4 * r;
+    // The network on the 1 mm volume (f32): the volume; the padded volume, logits (2 channels)
+    // and weights on the padded grid; the Gaussian, input, prediction (2) and the network's copy
+    // of the input on the patch, and with mirroring the flipped prediction.
+    let flips = if params.mirror_tta { 4 * pp } else { 0 };
+    let net = spec.peak_bytes(patch, heap) + 4 * r + 16 * np + 20 * pp + flips;
+    // Logits back to the scan: the 1 mm volume and logits, one channel in f64 and its resize,
+    // both channels on the scan in f64, and the mask.
+    let post = spec.resident_bytes() + 20 * r + 16 * big + 16 * c + c;
+    pre.max(net).max(post)
 }
 
 /// Bounding box `[start, end)` of the non-zero voxels of a C-order `(z, y, x)` volume.
@@ -535,6 +598,42 @@ mod tests {
         assert_eq!(separate_z_axis([1.2, 0.9, 0.9], [1.0; 3]), None);
         // two equally coarse axes -> no separate-z (nnU-Net: len(axis) == 2)
         assert_eq!(separate_z_axis([4.0, 4.0, 1.0], [1.0; 3]), None);
+    }
+
+    /// The whole step's peak against [`hd_bet_memory_bytes`]: native peaks of `hd_bet` on a
+    /// synthetic head filling the field of view (`examples/inference_memory.rs hdbet`, counting
+    /// allocator, single-threaded). The estimate must cover each and sit within 5 % of it.
+    #[test]
+    fn memory_estimate_covers_measured_peaks() {
+        use crate::models::Heap;
+        let window = HdBetParams { inference: HdBetInference::SLIDING_WINDOW, ..HdBetParams::default() };
+        let cases = [
+            ((96, 96, 64), (2.0, 2.0, 2.0), HdBetParams::default(), 4_326_663_752u64),
+            ((184, 256, 128), (1.0, 1.0, 1.0), HdBetParams::default(), 5_675_605_064),
+            ((256, 288, 48), (0.8, 0.8, 3.0), HdBetParams::default(), 7_352_436_552),
+            ((240, 240, 160), (1.0, 1.0, 1.0), HdBetParams::default(), 9_257_042_005),
+            ((160, 192, 96), (1.5, 1.5, 1.5), HdBetParams::default(), 9_375_081_688),
+            ((184, 256, 128), (1.0, 1.0, 1.0), window.clone(), 3_371_351_512),
+            ((320, 320, 240), (0.6, 0.6, 0.6), window, 3_352_739_280),
+            ((184, 256, 128), (1.0, 1.0, 1.0), HdBetParams::low_memory(), 1_272_213_986),
+            ((256, 288, 48), (0.8, 0.8, 3.0), HdBetParams::low_memory(), 1_287_419_762),
+            ((320, 320, 240), (0.6, 0.6, 0.6), HdBetParams::low_memory(), 1_257_796_066),
+        ];
+        for (dims, voxel, params, peak) in cases {
+            let grid = Grid::new(dims.0, dims.1, dims.2, voxel.0, voxel.1, voxel.2);
+            let est = hd_bet_memory_bytes(&grid, &params, Heap::Native);
+            let rel = (est as f64 - peak as f64) / peak as f64;
+            assert!((0.0..=0.05).contains(&rel), "{dims:?} at {voxel:?}, {:?}: estimate {est} vs measured {peak}", params.inference);
+            assert!(hd_bet_memory_bytes(&grid, &params, Heap::Wasm32) > est, "{dims:?}: the WASM heap needs more");
+        }
+    }
+
+    #[test]
+    fn network_input_is_the_field_of_view_at_1mm() {
+        // 0.8×0.8×3 mm GRE, 256×288×48: 205×230×144 mm, padded to multiples of 32×32×16 (z, y, x).
+        let grid = Grid::new(256, 288, 48, 0.8, 0.8, 3.0);
+        assert_eq!(hd_bet_network_input(&grid, &HdBetParams::default()), [144, 256, 224]);
+        assert_eq!(hd_bet_network_input(&grid, &HdBetParams::low_memory()), [64, 128, 128]);
     }
 
     #[test]

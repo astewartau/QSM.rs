@@ -63,6 +63,7 @@ ALWAYS = [
     "rust-toolchain",
     "rust-toolchain.toml",
     "tests/wasm_pipeline.rs",
+    "tests/support/*",
     "scripts/fetch_model_weights.py",
     "scripts/wasm_dl_shards.py",
     ".github/workflows/unit-tests.yml",
