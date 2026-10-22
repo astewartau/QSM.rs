@@ -6,11 +6,12 @@
 //! - V-SHARP: Variable kernel SHARP
 //! - PDF: Projection onto dipole fields
 //! - iSMV: Iterative spherical mean value
-//! - mSMV: Maximum spherical mean value — boundary-shadow removal. Best used as a
-//!   refinement after a primary BFR (SHARP/RESHARP/V-SHARP/PDF/LBV) via
-//!   `MsmvParams::refine()`; also runs standalone (SMV prefilter + correction).
 //! - LBV: Laplacian boundary value
 //! - SDF: Spatially Dependent Filtering (QSMART)
+//!
+//! mSMV (maximum spherical mean value) is not here: it is part of MEDI-mSMV, which fits its
+//! SMV-filtered field with the SMV-filtered dipole kernel, so its output is not a local field for
+//! the other inversions. See [`crate::inversion::msmv`](mod@crate::inversion::msmv).
 //!
 //! Note: The `smv` module provides simple spherical mean value filtering,
 //! used internally by SHARP, V-SHARP, and iSMV. It is not recommended as
@@ -65,7 +66,6 @@
 //! [`crate::Grid::require_contiguous_slices`].
 
 pub mod smv;
-pub mod msmv;
 pub mod sharp;
 pub mod resharp;
 pub mod vsharp;
@@ -78,7 +78,6 @@ pub mod iharperella;
 pub mod bfrnet;
 
 pub use smv::smv;
-pub use msmv::{msmv, MsmvParams};
 pub use sharp::{sharp, SharpParams};
 pub use resharp::{resharp, ResharpParams};
 pub use vsharp::{vsharp, VsharpGrid, VsharpParams};

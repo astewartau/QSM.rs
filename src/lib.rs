@@ -45,8 +45,8 @@
 //! **Algorithm building blocks**
 //! - [`bet`] — brain extraction (BET)
 //! - [`unwrap`] — phase unwrapping (ROMEO, Laplacian, best path, PRELUDE)
-//! - [`bgremove`] — background field removal (V-SHARP, SHARP, RESHARP, PDF, iSMV, mSMV, LBV, HARPERELLA)
-//! - [`inversion`] — dipole inversion (TKD, TSVD, Tikhonov, TV, NLTV, RTS, MEDI, iLSQR, STAR-QSM, TGV)
+//! - [`bgremove`] — background field removal (V-SHARP, SHARP, RESHARP, PDF, iSMV, LBV, HARPERELLA)
+//! - [`inversion`] — dipole inversion (TKD, TSVD, Tikhonov, TV, NLTV, RTS, MEDI incl. MEDI-mSMV, iLSQR, STAR-QSM, TGV)
 //! - [`separation`] — paramagnetic/diamagnetic source separation (χ-separation, R2\*-QSM, WaveSep)
 //! - [`swi`] — susceptibility weighted imaging (CLEAR-SWI, SMWI)
 //! - [`complex`] — real/imaginary input to magnitude/phase

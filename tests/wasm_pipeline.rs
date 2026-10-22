@@ -316,13 +316,11 @@ fn bg_removal() {
         if needs_weights(algorithm.dl_model_id()) {
             continue;
         }
-        for msmv_refine in [false, true] {
-            let config = BgRemovalConfig { algorithm, msmv_refine, ..Default::default() };
-            let r = run_bg_removal(&p.total_ppm, &p.mask, &m, &config, Some(&echoes), &mut no_progress())
-                .unwrap_or_else(|e| panic!("{algorithm:?} (mSMV {msmv_refine}): {e}"));
-            check(&format!("{algorithm:?}"), &r.local_field_ppm);
-            check_mask(&format!("{algorithm:?} eroded mask"), &r.eroded_mask);
-        }
+        let config = BgRemovalConfig { algorithm, ..Default::default() };
+        let r = run_bg_removal(&p.total_ppm, &p.mask, &m, &config, Some(&echoes), &mut no_progress())
+            .unwrap_or_else(|e| panic!("{algorithm:?}: {e}"));
+        check(&format!("{algorithm:?}"), &r.local_field_ppm);
+        check_mask(&format!("{algorithm:?} eroded mask"), &r.eroded_mask);
     }
 }
 

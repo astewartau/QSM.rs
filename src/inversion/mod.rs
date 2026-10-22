@@ -10,7 +10,7 @@
 //! - TV: Total variation regularization via ADMM (iterative)
 //! - NLTV: Nonlinear-data-term TV via ADMM (QSM.jl nltv)
 //! - RTS: Rapid two-step method
-//! - MEDI: Morphology-enabled dipole inversion
+//! - MEDI: Morphology-enabled dipole inversion (plain, with SMV, or MEDI-mSMV)
 //! - TGV: Total Generalized Variation (single-step from a field in ppm or one wrapped echo; α in ppm)
 //! - COSMOS: multi-orientation least squares (closed form, well-posed)
 //! - STI: susceptibility tensor imaging (multi-orientation, 6-component tensor)
@@ -25,6 +25,7 @@ pub mod tv;
 pub mod nltv;
 pub mod rts;
 pub mod medi;
+pub mod msmv;
 pub mod tfi;
 pub mod tgv;
 pub mod ilsqr;
@@ -71,6 +72,7 @@ pub use tv::{tv_admm, TvParams};
 pub use nltv::{nltv, NltvParams};
 pub use rts::{rts, RtsParams};
 pub use medi::{extract_csf, medi, EchoMagnitudes, MediParams};
+pub use msmv::{msmv, MsmvOutput, MsmvParams};
 pub use tfi::{tfi, TfiParams};
 pub use tgv::{
     tgv_qsm, TgvInput, TgvParams, get_default_alpha, get_default_iterations, rad_per_ppm,

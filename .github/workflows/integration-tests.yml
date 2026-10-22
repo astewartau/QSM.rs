@@ -114,8 +114,8 @@ jobs:
           # Every #[ignore] test in tests/integration_tests.rs and tests/dl_models.rs is in exactly one
           # of these lists or in `not_in_ci` below; the "Check every test is registered" step fails
           # the run otherwise, so a new test cannot be added without CI ever running it.
-          all_bgremove='["test_bgremove_sharp","test_bgremove_resharp","test_bgremove_vsharp","test_bgremove_vsharp_no_deconvolve","test_bgremove_pdf","test_bgremove_ismv","test_bgremove_lbv","test_bgremove_msmv"]'
-          all_inversion='["test_inversion_tkd","test_inversion_tkd_cropped","test_inversion_tsvd","test_inversion_tikhonov","test_inversion_tv","test_inversion_rts","test_inversion_ilsqr","test_inversion_star","test_inversion_medi","test_inversion_nltv","test_inversion_ndi","test_inversion_fansi","test_inversion_fansi_tgv","test_inversion_l1qsm","test_inversion_whqsm","test_inversion_hdqsm","test_inversion_amp_pe","test_inversion_lsqr","test_inversion_heidi","test_multiorient_cosmos","test_multiorient_sti","test_multiorient_coverage","test_multiorient_noise","test_multiorient_register","test_multiorient_register_capture_range"]'
+          all_bgremove='["test_bgremove_sharp","test_bgremove_resharp","test_bgremove_vsharp","test_bgremove_vsharp_no_deconvolve","test_bgremove_pdf","test_bgremove_ismv","test_bgremove_lbv"]'
+          all_inversion='["test_inversion_tkd","test_inversion_tkd_cropped","test_inversion_tsvd","test_inversion_tikhonov","test_inversion_tv","test_inversion_rts","test_inversion_ilsqr","test_inversion_star","test_inversion_medi","test_inversion_medi_msmv","test_inversion_nltv","test_inversion_ndi","test_inversion_fansi","test_inversion_fansi_tgv","test_inversion_l1qsm","test_inversion_whqsm","test_inversion_hdqsm","test_inversion_amp_pe","test_inversion_lsqr","test_inversion_heidi","test_multiorient_cosmos","test_multiorient_sti","test_multiorient_coverage","test_multiorient_noise","test_multiorient_register","test_multiorient_register_capture_range"]'
           all_combined='["test_combined_tgv","test_combined_tfi"]'
           all_pipeline='["test_pipeline_romeo_b0","test_pipeline_unwrap_bfr_romeo","test_pipeline_unwrap_bfr_laplacian_neumann","test_pipeline_unwrap_bfr_bestpath","test_pipeline_unwrap_bfr_prelude","test_pipeline_unwrap_bfr_stage_laplacian","test_pipeline_tgv","test_pipeline_tgv_single_echo","test_pipeline_qsmart","test_pipeline_qsmart_tikhonov","test_pipeline_harperella","test_pipeline_iharperella","test_bias_correction","test_n4_bias_correction","test_swi","test_smwi","test_r2star_t2star","test_motion_correction","test_robust_echo_combination","test_pipeline_masking","test_pipeline_two_pass"]'
           # χ-separation entries are whole test *binaries* (each runs several methods).
@@ -327,20 +327,19 @@ jobs:
 
               # Background removal
               src/bgremove/smv.rs)
-                bgremove="$bgremove test_bgremove_sharp test_bgremove_vsharp test_bgremove_vsharp_no_deconvolve test_bgremove_ismv test_bgremove_msmv" ;;
+                bgremove="$bgremove test_bgremove_sharp test_bgremove_vsharp test_bgremove_vsharp_no_deconvolve test_bgremove_ismv" ;;
               src/bgremove/sharp.rs)  bgremove="$bgremove test_bgremove_sharp" ;;
               src/bgremove/resharp.rs) bgremove="$bgremove test_bgremove_resharp" ;;
-              src/bgremove/vsharp.rs) bgremove="$bgremove test_bgremove_vsharp test_bgremove_vsharp_no_deconvolve test_bgremove_msmv"; pipeline="$pipeline test_pipeline_two_pass" ;;
+              src/bgremove/vsharp.rs) bgremove="$bgremove test_bgremove_vsharp test_bgremove_vsharp_no_deconvolve"; pipeline="$pipeline test_pipeline_two_pass" ;;
               src/bgremove/pdf.rs)    bgremove="$bgremove test_bgremove_pdf" ;;
               src/bgremove/ismv.rs)   bgremove="$bgremove test_bgremove_ismv" ;;
               src/bgremove/lbv.rs)    bgremove="$bgremove test_bgremove_lbv" ;;
               src/bgremove/sdf.rs)    pipeline="$pipeline test_pipeline_qsmart test_pipeline_qsmart_tikhonov" ;;
-              src/bgremove/msmv.rs)   bgremove="$bgremove test_bgremove_msmv" ;;
               src/bgremove/bfrnet.rs) dl="$dl test_dl_bfrnet" ;;
 
               # Dipole inversion
               src/inversion/admm.rs)
-                inversion="$inversion test_inversion_tkd test_inversion_tsvd test_inversion_tikhonov test_inversion_tv test_inversion_rts test_inversion_ilsqr test_inversion_medi test_inversion_nltv test_inversion_ndi test_inversion_fansi test_inversion_fansi_tgv test_inversion_l1qsm test_inversion_whqsm test_inversion_hdqsm test_inversion_lsqr test_inversion_heidi test_multiorient_cosmos test_multiorient_sti test_multiorient_coverage test_multiorient_noise test_multiorient_register test_multiorient_register_capture_range"
+                inversion="$inversion test_inversion_tkd test_inversion_tsvd test_inversion_tikhonov test_inversion_tv test_inversion_rts test_inversion_ilsqr test_inversion_medi test_inversion_medi_msmv test_inversion_nltv test_inversion_ndi test_inversion_fansi test_inversion_fansi_tgv test_inversion_l1qsm test_inversion_whqsm test_inversion_hdqsm test_inversion_lsqr test_inversion_heidi test_multiorient_cosmos test_multiorient_sti test_multiorient_coverage test_multiorient_noise test_multiorient_register test_multiorient_register_capture_range"
                 combined="$combined test_combined_tfi" ;;
               # oblique_sagittal inverts with TKD, so a change there moves its numbers too.
               src/inversion/tkd.rs)
@@ -350,7 +349,8 @@ jobs:
               src/inversion/tv.rs)        inversion="$inversion test_inversion_tv" ;;
               src/inversion/rts.rs)       inversion="$inversion test_inversion_rts"; pipeline="$pipeline test_pipeline_two_pass" ;;
               src/crop.rs)                inversion="$inversion test_inversion_tkd_cropped" ;;
-              src/inversion/medi.rs)      inversion="$inversion test_inversion_medi"; combined="$combined test_combined_tfi" ;;
+              src/inversion/medi.rs)      inversion="$inversion test_inversion_medi test_inversion_medi_msmv"; combined="$combined test_combined_tfi" ;;
+              src/inversion/msmv.rs|src/utils/fibermetric.rs) inversion="$inversion test_inversion_medi_msmv" ;;
               src/inversion/tfi.rs)       combined="$combined test_combined_tfi" ;;
               src/inversion/nltv.rs)      inversion="$inversion test_inversion_nltv" ;;
               src/inversion/tgv.rs)       combined="$combined test_combined_tgv"; pipeline="$pipeline test_pipeline_tgv test_pipeline_tgv_single_echo" ;;

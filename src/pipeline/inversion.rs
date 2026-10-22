@@ -157,6 +157,15 @@ pub fn run_dipole_inversion(
             // behind MEDI+0's CSF mask).
             let te = &metadata.echo_times;
             let mag = crate::pipeline::inversion::echo_magnitudes("MEDI", magnitude, te, n_voxels)?;
+            // MEDI-mSMV's vessel mask needs ARLO R2* from the echo magnitudes (three or more
+            // echoes); MEDI_L1 errors without R2*, so this is refused rather than run without it.
+            if config.medi.msmv.is_some() {
+                if let Some(problem) = crate::utils::r2star::arlo_echo_times_problem(te) {
+                    return Err(PipelineError::InvalidInput(format!(
+                        "MEDI-mSMV needs R2* for its vessel mask: {problem}"
+                    )));
+                }
+            }
             let params = crate::inversion::MediParams {
                 b0: metadata.field_strength,
                 echo_times: scan_echo_times("MEDI", config.medi.te, metadata)?,
@@ -1155,6 +1164,22 @@ mod tests {
         };
         assert!(run_dipole_inversion(&field, &mask, &meta(vec![0.004, 0.010, 0.016]), &config, Some(&mag), &mut |_, _| {}).is_err());
         assert!(run_dipole_inversion(&field, &mask, &meta(vec![0.004, 0.010, 0.020]), &config, Some(&echoes), &mut |_, _| {}).is_err());
+
+        // MEDI-mSMV needs R2* (three or more echoes) for its vessel mask: refused with one echo,
+        // and with three it is medi() with mSMV on
+        let msmv = InversionConfig {
+            medi: crate::inversion::MediParams { msmv: Some(crate::inversion::MsmvParams::default()), ..medi.clone() },
+            ..config.clone()
+        };
+        let err = run_dipole_inversion(&field, &mask, &meta(vec![0.02]), &msmv, Some(&mag), &mut |_, _| {});
+        assert!(matches!(err, Err(PipelineError::InvalidInput(ref m)) if m.contains("mSMV")), "{err:?}");
+        let m3 = meta(vec![0.004, 0.010, 0.016]);
+        let via_stage = run_dipole_inversion(&field, &mask, &m3, &msmv, Some(&echoes), &mut |_, _| {}).unwrap();
+        let params = crate::inversion::MediParams { b0: 7.0, echo_times: m3.echo_times.clone(), ..msmv.medi.clone() };
+        let direct = crate::inversion::medi(
+            &field, &mask, EchoMagnitudes { data: &echoes, n_echoes: 3 }, &m3.grid(), m3.b0_direction, &params, |_, _| {},
+        );
+        assert_eq!(via_stage, direct);
     }
 
     /// TFI is a total-field method (`InversionConfig::input`): the dispatcher hands `tfi` the
@@ -1177,7 +1202,6 @@ mod tests {
         assert_eq!(c.medi.te, Spacing);
         assert_eq!(c.tfi.te, Spacing);
         assert_eq!(c.heidi.te, Last);
-        assert_eq!(BgRemovalConfig::default().msmv.te, Spacing);
     }
 
     /// The dispatcher hands a method the scan's echo times and the method's own `te` choice,

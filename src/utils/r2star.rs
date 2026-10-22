@@ -57,6 +57,19 @@ pub fn arlo_echo_times_problem(echo_times: &[f64]) -> Option<String> {
 /// See [`arlo_echo_times_problem`]; also a `magnitude` whose length is not
 /// `n_voxels * echo_times.len()`.
 pub fn arlo(magnitude: &[f64], echo_times: &[f64], n_voxels: usize) -> Result<Vec<f64>, InputError> {
+    let mut r2 = arlo_unclipped(magnitude, echo_times, n_voxels)?;
+    // (deviation) no negative R2*
+    for v in r2.iter_mut() {
+        *v = v.max(0.0);
+    }
+    Ok(r2)
+}
+
+/// `arlo.m` exactly, negative estimates included (NaN and infinite results are 0, as in
+/// `arlo.m`). [`arlo`] clips the negatives; this is for ports whose result depends on them, such
+/// as mSMV's vessel mask (`fibermetric` on the R2* map, see [`msmv`](mod@crate::inversion::msmv)).
+/// Same arguments and errors as [`arlo`].
+pub fn arlo_unclipped(magnitude: &[f64], echo_times: &[f64], n_voxels: usize) -> Result<Vec<f64>, InputError> {
     if let Some(problem) = arlo_echo_times_problem(echo_times) {
         return Err(InputError(problem));
     }
@@ -90,9 +103,9 @@ pub fn arlo(magnitude: &[f64], echo_times: &[f64], n_voxels: usize) -> Result<Ve
     }
     Ok((0..n_voxels)
         .map(|v| {
-            // r2(isnan(r2)) = 0; r2(isinf(r2)) = 0; and (deviation) no negative R2*
+            // r2(isnan(r2)) = 0; r2(isinf(r2)) = 0
             let r2 = (yx[v] + beta_xx[v]) / (beta_yx[v] + yy[v]);
-            if r2.is_finite() { r2.max(0.0) } else { 0.0 }
+            if r2.is_finite() { r2 } else { 0.0 }
         })
         .collect())
 }

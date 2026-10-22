@@ -325,41 +325,6 @@ fn test_bgremove_ismv() {
     assert!(res.correlation > 0.7, "iSMV correlation too low: {}", res.correlation);
 }
 
-/// mSMV in the role it is meant for: a boundary-shadow refinement after a primary background
-/// removal (V-SHARP here), on the V-SHARP mask. Its benefit, less downstream shadow on in-vivo
-/// data, does not show in a local-field-vs-ground-truth comparison on a clean simulated phantom,
-/// so this is a regression guard on the method, not a benchmark of it: the gates are what
-/// V-SHARP alone already clears, and the refinement must not take it below them.
-#[test]
-#[ignore]
-fn test_bgremove_msmv() {
-    use qsm_core::bgremove::MsmvParams;
-
-    println!("[INFO] Loading test data...");
-    let data = TestData::load().expect("Failed to load test data");
-    let (nx, ny, nz) = data.dims;
-    let (vsx, vsy, vsz) = data.voxel_size;
-    let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
-
-    let start = Instant::now();
-    let (primary, primary_mask) =
-        bgremove::vsharp(&data.fieldmap, &data.mask, &grid, &VsharpParams::default(), |_, _| {}).unwrap();
-    let params = MsmvParams { b0: data.field_strength, echo_times: data.echo_times.clone(), ..MsmvParams::refine() };
-    let (result, mask) = bgremove::msmv(&primary, &primary_mask, &grid, &params, |_, _| {});
-    let elapsed = start.elapsed();
-
-    let base = TestResult::new("V-SHARP (primary)", &primary, &data.fieldmap_local, &primary_mask, data.dims);
-    base.print();
-    let res = TestResult::new("V-SHARP + mSMV", &result, &data.fieldmap_local, &mask, data.dims);
-    res.print_with_time(elapsed);
-    res.print_ci_metrics(elapsed);
-    common::save_center_slices(&result, &mask, data.dims, "bgremove_msmv");
-
-    assert!(mask.iter().zip(&primary_mask).all(|(a, b)| a == b), "mSMV must not erode the mask");
-    assert!(res.nrmse < 0.5, "V-SHARP + mSMV NRMSE too high: {}", res.nrmse);
-    assert!(res.correlation > 0.7, "V-SHARP + mSMV correlation too low: {}", res.correlation);
-}
-
 #[test]
 #[ignore]
 fn test_bgremove_lbv() {
@@ -705,6 +670,48 @@ fn test_inversion_medi() {
     // an odd grid without padding scores over 100).
     assert!(res.nrmse < 0.8, "MEDI NRMSE too high: {}", res.nrmse);
     assert!(res.correlation > 0.7, "MEDI correlation too low: {}", res.correlation);
+}
+
+/// MEDI-mSMV (`MEDI_L1(..., 'msmv', 5)`, Roberts et al. 2024) on the local field, with MEDI's
+/// other defaults: mSMV filters the field on the full (uneroded) mask, with its vessel mask from
+/// ARLO R2* of the echo magnitudes, and MEDI inverts it with the SMV-filtered dipole kernel. A
+/// regression guard, not a benchmark: the gates are those of `test_inversion_medi`.
+#[test]
+#[ignore]
+fn test_inversion_medi_msmv() {
+    use qsm_core::inversion::MsmvParams;
+    println!("[INFO] Loading test data...");
+    let data = TestData::load().expect("Failed to load test data");
+    let (nx, ny, nz) = data.dims;
+    let (vsx, vsy, vsz) = data.voxel_size;
+    let params = MediParams {
+        b0: data.field_strength,
+        echo_times: data.echo_times.clone(),
+        msmv: Some(MsmvParams::default()),
+        ..MediParams::default()
+    };
+    let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
+    let echoes: Vec<f64> = data.mag_echoes.concat();
+    let (result, elapsed) = run_timed!("MEDI-mSMV", inversion::medi(
+        &data.fieldmap_local,
+        &data.mask,
+        EchoMagnitudes { data: &echoes, n_echoes: data.mag_echoes.len() },
+        &grid,
+        data.b0_dir,
+        &params,
+        |_, _| {},
+    ));
+
+    let res = TestResult::new("MEDI-mSMV", &result, &data.chi, &data.mask, data.dims);
+    res.print_with_time(elapsed);
+    let challenge = ChallengeMetrics::compute("MEDI-mSMV", &result, &data.chi, &data.mask, &data.segmentation, data.dims);
+    challenge.print();
+    challenge.print_ci_metrics(elapsed);
+    common::save_center_slices(&result, &data.mask, data.dims, "inversion_medi_msmv");
+
+    // mSMV keeps the whole mask (no SMV erosion), so the result is nonzero up to the edge.
+    assert!(res.nrmse < 0.8, "MEDI-mSMV NRMSE too high: {}", res.nrmse);
+    assert!(res.correlation > 0.7, "MEDI-mSMV correlation too low: {}", res.correlation);
 }
 
 /// TFI — Preconditioned Total Field Inversion (Z. Liu et al., MRM 2017), the 2024 MEDI toolbox's

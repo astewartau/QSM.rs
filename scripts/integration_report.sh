@@ -148,7 +148,7 @@ echo "- **Tests passed:** ${TESTS_PASSED:-N/A}"
 echo "- **Code coverage:** ${COVERAGE:-N/A}%"
 echo ""
 
-if TABLE=$(emit_table test_bgremove_sharp test_bgremove_resharp test_bgremove_vsharp test_bgremove_vsharp_no_deconvolve test_bgremove_pdf test_bgremove_ismv test_bgremove_lbv test_bgremove_msmv); then
+if TABLE=$(emit_table test_bgremove_sharp test_bgremove_resharp test_bgremove_vsharp test_bgremove_vsharp_no_deconvolve test_bgremove_pdf test_bgremove_ismv test_bgremove_lbv); then
   echo "### Background Field Removal"
   echo "*Compared against ground truth local field map*"
   echo ""
@@ -166,7 +166,7 @@ if TABLE=$(emit_table test_pipeline_harperella test_pipeline_iharperella); then
 fi
 
 rows=$(
-  emit_chi_rows "" test_inversion_tkd test_inversion_tkd_cropped test_inversion_tsvd test_inversion_tikhonov test_inversion_tv test_inversion_rts test_inversion_ilsqr test_inversion_star test_inversion_medi test_inversion_nltv test_inversion_ndi test_inversion_fansi test_inversion_fansi_tgv test_inversion_l1qsm test_inversion_whqsm test_inversion_hdqsm test_inversion_amp_pe test_inversion_lsqr test_inversion_heidi
+  emit_chi_rows "" test_inversion_tkd test_inversion_tkd_cropped test_inversion_tsvd test_inversion_tikhonov test_inversion_tv test_inversion_rts test_inversion_ilsqr test_inversion_star test_inversion_medi test_inversion_medi_msmv test_inversion_nltv test_inversion_ndi test_inversion_fansi test_inversion_fansi_tgv test_inversion_l1qsm test_inversion_whqsm test_inversion_hdqsm test_inversion_amp_pe test_inversion_lsqr test_inversion_heidi
   emit_chi_rows " — BFR + inversion" test_combined_tgv test_combined_tfi
   emit_chi_rows " — full pipeline" test_pipeline_tgv test_pipeline_tgv_single_echo test_pipeline_qsmart test_pipeline_qsmart_tikhonov test_pipeline_two_pass
 )

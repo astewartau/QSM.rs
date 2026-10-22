@@ -7,7 +7,7 @@
 
 use crate::bgremove::{
     IsmvParams, LbvParams, PdfParams, ResharpParams, SharpParams, SdfParams, VsharpParams,
-    HarperellaParams, IharperellaParams, MsmvParams,
+    HarperellaParams, IharperellaParams,
 };
 use crate::inversion::{
     IlsqrParams, MediParams, NltvParams, RtsParams, TgvParams, TikhonovParams, TkdParams, TvParams,
@@ -452,13 +452,6 @@ pub struct BgRemovalConfig {
     pub harperella: HarperellaParams,
     pub iharperella: IharperellaParams,
     pub sdf: SdfParams,
-    /// mSMV refinement parameters (`b0`/`te` are overridden from scan metadata by
-    /// the dispatcher). Used by the `msmv_refine` post-step.
-    pub msmv: MsmvParams,
-    /// Apply mSMV boundary-shadow refinement after the primary BFR (Roberts 2024).
-    /// mSMV is a refinement, not a standalone primary remover, so it is exposed
-    /// only as this post-step (redundant after `Ismv`, which is already SMV-based).
-    pub msmv_refine: bool,
     /// Overlap-tiling for BFRnet, as `(core, halo)` in voxels, as [`InversionConfig::tile`] is
     /// for the inversion networks. `None` (default) runs the whole volume, which on a whole-head
     /// scan does not fit a 32-bit (WASM) heap; `Some` runs it patch by patch, an approximation
@@ -480,8 +473,6 @@ impl Default for BgRemovalConfig {
             harperella: HarperellaParams::default(),
             iharperella: IharperellaParams::default(),
             sdf: SdfParams::default(),
-            msmv: MsmvParams::default(),
-            msmv_refine: false,
             tile: None,
         }
     }
@@ -537,7 +528,9 @@ impl InversionConfig {
     /// - **MEDI** with [`MediParams::smv`] (the default, as in `MEDI_L1.m`) high-pass filters the field and the
     ///   dipole kernel with a spherical mean value kernel before inverting, `(1−S)f = (1−S)Dχ`.
     ///   That removes the harmonic background, so MEDI+SMV takes the total field. Without SMV,
-    ///   MEDI takes the local field.
+    ///   MEDI takes the local field. **MEDI-mSMV** ([`MediParams::msmv`]) takes the local field
+    ///   too: the authors run it on the output of a background removal (PDF, V-SHARP or LBV in
+    ///   their paper), with that method's mask, and mSMV replaces the SMV mask erosion.
     /// - **TGV** ([`run_tgv`](super::run_tgv)) reconstructs multi-echo data from the
     ///   field-mapped total field ([`TgvInput::FieldPpm`](crate::inversion::TgvInput::FieldPpm),
     ///   expressed as phase at the first echo time) and a single echo from its wrapped phase
@@ -554,6 +547,7 @@ impl InversionConfig {
     pub fn input(&self, n_echoes: usize) -> InversionInput {
         use InversionAlgorithm as A;
         match self.algorithm {
+            A::Medi if self.medi.msmv.is_some() => InversionInput::LocalField,
             A::Medi if self.medi.smv => InversionInput::TotalField,
             A::Tgv if n_echoes > 1 => InversionInput::TotalField,
             A::Tgv | A::Iqsm | A::IqsmPlus => InversionInput::WrappedPhase,
@@ -1130,6 +1124,19 @@ mod inversion_input_tests {
         }
         // MEDI_L1's default uses SMV
         assert!(MediParams::default().smv);
+    }
+
+    /// MEDI-mSMV runs on a background removal's local field (the authors used PDF, V-SHARP and
+    /// LBV), with or without MediParams::smv set.
+    #[test]
+    fn medi_msmv_takes_the_local_field() {
+        for smv in [true, false] {
+            let mut c = InversionConfig { algorithm: InversionAlgorithm::Medi, ..Default::default() };
+            c.medi.smv = smv;
+            c.medi.msmv = Some(crate::inversion::MsmvParams::default());
+            assert_eq!(c.input(4), InversionInput::LocalField);
+        }
+        assert!(MediParams::default().msmv.is_none());
     }
 
     #[test]
