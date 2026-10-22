@@ -136,13 +136,14 @@ pub fn run_dipole_inversion(
         InversionAlgorithm::Medi => {
             // MEDI takes ppm like the others and converts to radians itself, over the echo
             // spacing as MEDI's readers set delta_TE: TE(2) - TE(1), or TE for one echo. Field
-            // strength and echo spacing are scan parameters from metadata. It requires the
-            // magnitude of every echo (edge mask and the Fit_ppm_complex noise map).
+            // strength and echo times are scan parameters from metadata. It requires the
+            // magnitude of every echo (edge mask, the Fit_ppm_complex noise map, and the ARLO
+            // R2* behind MEDI+0's CSF mask).
             let te = &metadata.echo_times;
             let mag = crate::pipeline::inversion::medi_echo_magnitudes(magnitude, te, n_voxels)?;
             let params = crate::inversion::MediParams {
                 b0: metadata.field_strength,
-                te: if te.len() == 1 { te[0] } else { te[1] - te[0] },
+                echo_times: te.clone(),
                 ..config.medi.clone()
             };
             crate::inversion::medi(field_ppm, mask, mag, &grid, bdir, &params, progress)
@@ -1051,8 +1052,8 @@ mod tests {
         assert!(seen.last().unwrap().0 <= total);
     }
 
-    /// MEDI gets the ppm field, the field strength and the echo spacing (MEDI's delta_TE:
-    /// TE(2) - TE(1), or TE for one echo), and needs the magnitude.
+    /// MEDI gets the ppm field, the field strength and the echo times, and needs the magnitude
+    /// of every echo.
     #[test]
     fn test_inversion_medi() {
         let (nx, ny, nz) = (8, 8, 8);
@@ -1064,11 +1065,11 @@ mod tests {
         let config = InversionConfig { algorithm: InversionAlgorithm::Medi, medi: medi.clone(), ..Default::default() };
         use crate::inversion::EchoMagnitudes;
         let echoes: Vec<f64> = (0..3 * n).map(|i| 1.0 + ((i * 5) % 9) as f64).collect();
-        let cases: [(Vec<f64>, f64, &[f64], usize); 2] = [
-            (vec![0.004, 0.010, 0.016], 0.006, &echoes, 3),
-            (vec![0.02], 0.02, &mag, 1),
+        let cases: [(Vec<f64>, &[f64], usize); 2] = [
+            (vec![0.004, 0.010, 0.016], &echoes, 3),
+            (vec![0.02], &mag, 1),
         ];
-        for (tes, delta_te, given, n_echoes) in cases {
+        for (tes, given, n_echoes) in cases {
             let meta = ScanMetadata {
                 dims: (nx, ny, nz), voxel_size: (1.0, 1.0, 1.0),
                 echo_times: tes, field_strength: 7.0, b0_direction: (0.0, 0.0, 1.0),
@@ -1076,7 +1077,7 @@ mod tests {
                 affine: None,
             };
             let via_stage = run_dipole_inversion(&field, &mask, &meta, &config, Some(given), &mut |_, _| {}).unwrap();
-            let params = crate::inversion::MediParams { b0: 7.0, te: delta_te, ..medi.clone() };
+            let params = crate::inversion::MediParams { b0: 7.0, echo_times: meta.echo_times.clone(), ..medi.clone() };
             let direct = crate::inversion::medi(
                 &field, &mask, EchoMagnitudes { data: given, n_echoes }, &meta.grid(), meta.b0_direction, &params, |_, _| {},
             );
