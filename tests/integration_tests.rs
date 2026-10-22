@@ -706,10 +706,10 @@ fn test_inversion_medi() {
     assert!(res.correlation > 0.7, "MEDI correlation too low: {}", res.correlation);
 }
 
-/// TFI — Preconditioned Total Field Inversion (Z. Liu et al., MRM 2017).
-/// Single-step (background removal + dipole inversion): fed the TOTAL field, so this is a
-/// COMBINED-stage method (compare with TGV-from-field), not a plain dipole inversion.
-/// Uses TFI's own defaults (λ=7.5e-5 as MEDI, preconditioner=30 as Liu 2017) — not dataset-tuned.
+/// TFI — Preconditioned Total Field Inversion (Z. Liu et al., MRM 2017), the 2024 MEDI toolbox's
+/// MEDI_L1 with a preconditioner. Single-step (background removal + dipole inversion): fed the
+/// TOTAL field, so this is a COMBINED-stage method (compare with TGV-from-field), not a plain
+/// dipole inversion. Uses the shipped defaults (MEDI_L1's, P_B = 30 from Liu 2017).
 #[test]
 #[ignore]
 fn test_combined_tfi() {
@@ -717,19 +717,19 @@ fn test_combined_tfi() {
     let data = TestData::load().expect("Failed to load test data");
     let (nx, ny, nz) = data.dims;
     let (vsx, vsy, vsz) = data.voxel_size;
-    let n_total = nx * ny * nz;
 
-    let n_std = vec![1.0; n_total];
-
+    let te = &data.echo_times;
+    let delta_te = if te.len() > 1 { te[1] - te[0] } else { te[0] };
+    let params = TfiParams { b0: data.field_strength, te: delta_te, ..TfiParams::default() };
     let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
+    let echoes: Vec<f64> = data.mag_echoes.concat();
     let (result, elapsed) = run_timed!("TFI", inversion::tfi(
         &data.fieldmap,          // TOTAL field (before background removal)
-        &n_std,
-        &data.mag_echoes[0],
         &data.mask,
+        EchoMagnitudes { data: &echoes, n_echoes: data.mag_echoes.len() },
         &grid,
         data.b0_dir,
-        &TfiParams::default(),
+        &params,
         |_, _| {},
     ));
 
