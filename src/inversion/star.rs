@@ -1,15 +1,17 @@
 //! STAR-QSM: streaking artifact reduction for QSM
 //!
 //! [`star_qsm`] implements **STI Suite 3.0's `QSM_star`** (Wei et al. 2015), as called with
-//! `QSM_star(phase, mask, 'TE', TE, 'B0', B0, 'H', H, 'padsize', [p p p], 'voxelsize', vs)`
-//! with `p` = [`StarParams::pad`] (STI's default, [`DEFAULT_PAD`] = 12 voxels).
+//! `QSM_star(phase, mask, 'TE', TE, 'B0', B0, 'H', H, 'padsize', pad, 'voxelsize', vs)`
+//! with `pad` = [`StarParams::pad`]. Its default, [`STAR_GUI_PAD`] = [8, 8, 20] voxels, is
+//! what STI Suite's `QSM_GUI` passes (see [`StarParams::pad`]); `QSM_star`'s own default,
+//! without `'padsize'`, is [`QSM_STAR_DEFAULT_PAD`] = [12, 12, 12].
 //! STI Suite ships as protected P-code, so the algorithm was recovered by black-box probing
 //! (call tracing through logging wrappers around the functions it calls, capturing the arrays
 //! it hands them, then a MATLAB re-implementation that reproduces `QSM_star` to within 4e-16
 //! relative on phantoms and an in-vivo field):
 //!
-//! 1. Zero-pad the phase `φ` (radians at the echo time) and the mask `M` by `pad` voxels on
-//!    both sides of every axis. STI's dipole kernel errors on odd extents, so `QSM_star` does
+//! 1. Zero-pad the phase `φ` (radians at the echo time) and the mask `M` by `pad[a]` voxels on
+//!    both sides of axis `a`. STI's dipole kernel errors on odd extents, so `QSM_star` does
 //!    too; here an odd padded extent grows by one more voxel at the high end instead.
 //!    Everything below runs on that grid.
 //! 2. Dipole kernel `D = 1/3 − (k·H)²/|k|²` (`D = 0` at `k = 0`) with `k` in cycles/mm
@@ -48,10 +50,13 @@
 //! # Agreement with STI Suite
 //!
 //! On six 48×56×40 phantoms (3 T and 7 T, TE 5–20 ms, axial and oblique B0, voxels
-//! 0.8×0.9×1.5 mm, `pad` 6, 8 and 12) and an in-vivo 7 T local field (164×206×206), χ agrees
+//! 0.8×0.9×1.5 mm, `pad` 6, 8 and 12 on every axis) and an in-vivo 7 T local field (164×206×206), χ agrees
 //! with STI Suite's output to rounding: relative L2 difference ≤ 1.1e-14, max |Δχ| ≤ 2.6e-15
-//! ppm, with the same iteration counts. `tests/star_sti_parity.rs` checks three of the
-//! phantoms.
+//! ppm, with the same iteration counts. Through STI Suite's GUI (`QSM_GUI`: load, "3D GRE
+//! data", "star QSM", with `QSM_star`'s inputs and output captured) on 64×64×48 at 1×1×1.5 mm,
+//! 80×72×40 at 0.8×0.9×2 mm and 64×64×64 at 1 mm, the default [`STAR_GUI_PAD`] reproduces the
+//! GUI's χ to rounding as well. `tests/star_sti_parity.rs` checks three of the phantoms and the
+//! GUI padding on the anisotropic one.
 //!
 //! # Performance
 //!
@@ -76,12 +81,29 @@ use rayon::prelude::*;
 use crate::fft::{Box3, Fft3dWorkspace, FftOpts};
 use crate::Grid;
 
-/// Parameters for [`star_qsm`]. The defaults are STI Suite's (`QSM_star` without options).
+/// Parameters for [`star_qsm`]. The defaults are STI Suite's: the GUI's padding, and
+/// `QSM_star`'s defaults otherwise.
 #[cfg_attr(feature = "introspection", derive(serde::Serialize))]
 #[derive(Clone, Debug)]
 pub struct StarParams {
-    /// Zero padding per side in voxels, on every axis: STI's `'padsize'` (default 12).
-    pub pad: usize,
+    /// Zero padding per side in voxels, per axis (x, y, z in voxel axes): STI's `'padsize'`.
+    ///
+    /// Default [`STAR_GUI_PAD`] = `[8, 8, 20]`: what STI Suite 3.0's `QSM_GUI` passes to
+    /// `QSM_star`, so the default gives what STI Suite's GUI users get. It is a constant in the
+    /// GUI, not derived from the data. Probed in MATLAB R2023b by driving `QSM_GUI` headless
+    /// (load, "3D GRE data", "star QSM", and the "Single button for QSM" path) with a logging
+    /// wrapper around `QSM_star`: `'padsize'` was `[8 8 20]` on all 14 grid / voxel-size
+    /// combinations tried (32 to 128 voxels per axis, axes permuted; 0.5 to 3 mm voxels,
+    /// isotropic and anisotropic) and with other mask sizes and positions, field strengths,
+    /// B0 directions and V-SHARP radii. The GUI has no padding control. The 20 is on the third
+    /// voxel axis whatever the B0 direction. (The GUI's phase unwrapping fails on odd matrix
+    /// sizes, so it never gives `QSM_star` an odd grid; see step 1 of the module docs for odd
+    /// grids here.)
+    ///
+    /// [`QSM_STAR_DEFAULT_PAD`] (`[12, 12, 12]`) is `QSM_star`'s own default, for scripts that
+    /// call it without `'padsize'`, as in `STI_Templates.m`. Any other padding can be given
+    /// per axis.
+    pub pad: [usize; 3],
     /// Echo time in seconds the field is converted to phase at (default 0.04, STI's 40 ms).
     /// See the module docs, *Units*; the pipeline sets it from the first echo time.
     pub te: f64,
@@ -91,7 +113,7 @@ pub struct StarParams {
 
 impl Default for StarParams {
     fn default() -> Self {
-        Self { pad: DEFAULT_PAD, te: 0.04, b0: 3.0 }
+        Self { pad: STAR_GUI_PAD, te: 0.04, b0: 3.0 }
     }
 }
 
@@ -113,8 +135,12 @@ impl StarParams {
     }
 }
 
-/// STI's default zero padding of `QSM_star`, in voxels per side.
-pub const DEFAULT_PAD: usize = 12;
+/// Zero padding STI Suite 3.0's `QSM_GUI` gives `QSM_star`, in voxels per side on each axis,
+/// and the default of [`StarParams::pad`].
+pub const STAR_GUI_PAD: [usize; 3] = [8, 8, 20];
+
+/// Zero padding `QSM_star` uses when called without `'padsize'`, in voxels per side.
+pub const QSM_STAR_DEFAULT_PAD: [usize; 3] = [12, 12, 12];
 
 /// γ/2π in MHz/T as STI Suite's `ScalingFactor` uses it.
 const STI_GAMMA_MHZ_PER_T: f64 = 42.575;
@@ -168,7 +194,7 @@ pub fn star_qsm(
     let p = params.pad;
     let n = padded_dims([nx, ny, nz], p);
     let nt = n[0] * n[1] * n[2];
-    let src_dst = |i: usize, j: usize, k: usize| (i + j * nx + k * nx * ny, (i + p) + (j + p) * n[0] + (k + p) * n[0] * n[1]);
+    let src_dst = |i: usize, j: usize, k: usize| (i + j * nx + k * nx * ny, (i + p[0]) + (j + p[1]) * n[0] + (k + p[2]) * n[0] * n[1]);
 
     // 1. padded masked phase, mask, and the mask's bounding box on the padded grid
     let rad = params.rad_per_ppm();
@@ -182,7 +208,7 @@ pub fn star_qsm(
                 if mask[s] != 0 {
                     y[d] = field[s] * rad;
                     inside[d] = true;
-                    for (a, c) in [i + p, j + p, k + p].into_iter().enumerate() {
+                    for (a, c) in [i + p[0], j + p[1], k + p[2]].into_iter().enumerate() {
                         lo[a] = lo[a].min(c);
                         hi[a] = hi[a].max(c);
                     }
@@ -264,9 +290,10 @@ fn sti_kernel(n: [usize; 3], vs: [f64; 3], bdir: (f64, f64, f64)) -> Vec<f64> {
     d
 }
 
-/// Padded grid: `pad` voxels on both sides, plus one at the high end where that is odd.
-fn padded_dims(dims: [usize; 3], pad: usize) -> [usize; 3] {
-    dims.map(|c| c + 2 * pad + (c % 2))
+/// Padded grid: `pad[a]` voxels on both sides of axis `a`, plus one at the high end where
+/// that is odd.
+fn padded_dims(dims: [usize; 3], pad: [usize; 3]) -> [usize; 3] {
+    [0, 1, 2].map(|a| dims[a] + 2 * pad[a] + (dims[a] % 2))
 }
 
 /// Step 3: `x₀ = z / max|z|` with `z = M F⁻¹(K F(M F⁻¹(K F(M F⁻¹(D⁺ F y))))))`. `y` is zero
@@ -518,9 +545,10 @@ mod tests {
 
     #[test]
     fn padding_is_symmetric_and_even() {
-        assert_eq!(padded_dims([48, 56, 40], 12), [72, 80, 64]);
-        assert_eq!(padded_dims([47, 56, 39], 6), [60, 68, 52]);
-        assert_eq!(padded_dims([1, 2, 3], 0), [2, 2, 4]);
+        assert_eq!(padded_dims([48, 56, 40], [12; 3]), [72, 80, 64]);
+        assert_eq!(padded_dims([47, 56, 39], [6; 3]), [60, 68, 52]);
+        assert_eq!(padded_dims([1, 2, 3], [0; 3]), [2, 2, 4]);
+        assert_eq!(padded_dims([64, 64, 48], STAR_GUI_PAD), [80, 80, 88]);
     }
 
     #[test]
@@ -701,7 +729,7 @@ mod tests {
         for bad in [StarParams { te: 0.0, ..StarParams::default() }, StarParams { b0: f64::NAN, ..StarParams::default() }] {
             assert!(bad.validate().is_err());
         }
-        assert!((StarParams { te: 0.02, b0: 3.0, pad: 0 }.rad_per_ppm() - 2.0 * PI * 42.575 * 0.06).abs() < 1e-12);
+        assert!((StarParams { te: 0.02, b0: 3.0, pad: [0; 3] }.rad_per_ppm() - 2.0 * PI * 42.575 * 0.06).abs() < 1e-12);
     }
 
     /// A sphere's field on an odd grid: the padded grid grows to even, and χ comes out with
@@ -740,7 +768,7 @@ mod tests {
         }).collect();
 
         let mut iters = 0;
-        let chi = star_qsm(&field, &mask, &grid, (0.0, 0.0, 1.0), &StarParams { pad: 6, ..StarParams::default() }, |i, _| iters = i);
+        let chi = star_qsm(&field, &mask, &grid, (0.0, 0.0, 1.0), &StarParams { pad: [6; 3], ..StarParams::default() }, |i, _| iters = i);
         assert!(iters >= MIN_ITER);
         let centre = chi[7 + 7 * nx + 6 * nx * ny];
         assert!(centre > 0.05 && centre < 0.2, "centre χ {centre}");

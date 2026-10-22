@@ -961,7 +961,7 @@ mod tests {
 
     #[test]
     fn test_inversion_star() {
-        let star = crate::inversion::StarParams { pad: 4, ..Default::default() };
+        let star = crate::inversion::StarParams { pad: [4; 3], ..Default::default() };
         let chi = make_inversion_test_with(InversionConfig { algorithm: InversionAlgorithm::Star, star, ..Default::default() });
         assert_eq!(chi.len(), 8 * 8 * 8);
         assert!(chi.iter().all(|v| v.is_finite()));
