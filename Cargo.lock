@@ -1049,6 +1049,7 @@ dependencies = [
  "flate2",
  "getrandom 0.4.3",
  "js-sys",
+ "libm",
  "ndarray 0.16.1",
  "nifti",
  "num-complex",

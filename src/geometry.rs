@@ -18,6 +18,18 @@
 //! together, interpolates `mag·e^{iφ}` as real and imaginary parts, and recovers magnitude and
 //! phase afterwards, which is well defined across wraps. Use [`resample_to_axial`] only for
 //! quantities that are already continuous (magnitude, an unwrapped field map, χ).
+//!
+//! ## The same result on every target
+//!
+//! The complex resamplers give the same bits natively and in WebAssembly. Their sines, cosines,
+//! `atan2` and `hypot` come from [`crate::utils::portable_math`] rather than the platform's maths
+//! library, which differs between targets in the last bit; the rest is IEEE arithmetic in a
+//! fixed order. That matters beyond the last bit: the empty-corner fill in
+//! [`resample_complex_to_axial`] is seeded from a hash of the whole phase volume, and phase-based
+//! masking thresholds what comes out, so one differing ulp anywhere used to give the browser a
+//! different mask from `qsmxt run`. Where the interpolated value is exactly zero (outside the
+//! source, or where the source magnitude is zero) there is no phase to recover, and the phase is
+//! defined as 0 rather than whatever `atan2` makes of the signs of the zeros.
 
 // ------------------------------------------------------------------ axis orientation
 
@@ -578,13 +590,31 @@ pub fn resample_complex_onto(
     assert_eq!(magnitude.len(), n, "magnitude length does not match source dimensions");
     assert_eq!(phase.len(), n, "phase length does not match source dimensions");
     let map = GridMap::new(src_dims, src_affine, dst_dims, dst_affine)?;
-    let real: Vec<f64> = (0..n).map(|i| magnitude[i] * phase[i].cos()).collect();
-    let imag: Vec<f64> = (0..n).map(|i| magnitude[i] * phase[i].sin()).collect();
-    let (re, im) = (map.sample(&real), map.sample(&imag));
-    Some((
-        (0..re.len()).map(|i| re[i].hypot(im[i])).collect(),
-        (0..re.len()).map(|i| im[i].atan2(re[i])).collect(),
-    ))
+    let (real, imag) = to_complex(magnitude, phase);
+    Some(from_complex(&map.sample(&real), &map.sample(&imag)))
+}
+
+/// `mag·cos φ` and `mag·sin φ`, the same on every target (see the module docs).
+fn to_complex(magnitude: &[f64], phase: &[f64]) -> (Vec<f64>, Vec<f64>) {
+    use crate::utils::portable_math::{cos, sin};
+    magnitude.iter().zip(phase).map(|(&m, &p)| (m * cos(p), m * sin(p))).unzip()
+}
+
+/// Magnitude and phase of interpolated real and imaginary parts, the same on every target (see
+/// the module docs). Phase is 0 where both parts are zero: there is no signal there, and `atan2`
+/// would otherwise return 0 or ±π depending on the signs of the zeros.
+fn from_complex(real: &[f64], imag: &[f64]) -> (Vec<f64>, Vec<f64>) {
+    use crate::utils::portable_math::{atan2, hypot};
+    real.iter()
+        .zip(imag)
+        .map(|(&re, &im)| {
+            if re == 0.0 && im == 0.0 {
+                (0.0, 0.0)
+            } else {
+                (hypot(re, im), atan2(im, re))
+            }
+        })
+        .unzip()
 }
 
 /// The cardinal-aligned grid an oblique volume resamples onto, plus the mapping back to the
@@ -857,20 +887,10 @@ pub fn resample_complex_to_axial(
     assert_eq!(magnitude.len(), n, "magnitude length does not match dimensions");
     assert_eq!(phase.len(), n, "phase length does not match dimensions");
 
-    let real: Vec<f64> = (0..n).map(|i| magnitude[i] * phase[i].cos()).collect();
-    let imag: Vec<f64> = (0..n).map(|i| magnitude[i] * phase[i].sin()).collect();
-
+    let (real, imag) = to_complex(magnitude, phase);
     let grid = axial_grid_for(nx, ny, nz, affine);
-    let real_r = grid.sample(&real);
-    let imag_r = grid.sample(&imag);
-
-    let out_n = real_r.len();
-    let mut mag_out = Vec::with_capacity(out_n);
-    let mut pha_out = Vec::with_capacity(out_n);
-    for i in 0..out_n {
-        mag_out.push(real_r[i].hypot(imag_r[i]));
-        pha_out.push(imag_r[i].atan2(real_r[i]));
-    }
+    let (mag_out, mut pha_out) = from_complex(&grid.sample(&real), &grid.sample(&imag));
+    let out_n = pha_out.len();
 
     if let Some(frac) = params.noise_fill_fraction {
         let zeros = pha_out.iter().filter(|p| **p == 0.0).count();

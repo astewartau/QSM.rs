@@ -93,6 +93,8 @@ tract-onnx = { version = "0.23", optional = true }
 # (resolves to the same version tract-onnx uses; WASM builds without `parallel` stay single-threaded).
 tract-linalg = { version = "0.23", optional = true }
 rustdct = "0.7.1"
+# Elementary functions with the same bits on every target (`utils::portable_math`).
+libm = "0.2"
 
 # tract-onnx pulls getrandom 0.4, which on wasm32-unknown-unknown refuses to build unless a
 # backend is chosen. "wasm_js" (browser/Node `crypto.getRandomValues`) lets
