@@ -436,30 +436,55 @@ fn qform_for(affine: &[f64; 16], pixdim: (f64, f64, f64)) -> Option<QForm> {
     Some(q)
 }
 
-/// Save data as NIfTI bytes
+/// `xyzt_units` for every file this crate writes: `NIFTI_UNITS_MM | NIFTI_UNITS_SEC`.
 ///
-/// Writes an uncompressed .nii file
-pub fn save_nifti(
-    data: &[f64],
+/// The writers take no input header to carry units over from, and everything in the crate works
+/// in millimetres, so the spatial unit is always mm. The time bits say seconds; for a 4D file
+/// whose fourth axis is not time (echoes, tensor components) that is still the conventional
+/// value, and `pixdim[4]` is written as 1. Leaving the field at 0 ("unknown") fails the BIDS
+/// validator's `NIFTI_UNIT` check and leaves readers guessing what the voxel sizes mean.
+pub const NIFTI_XYZT_UNITS: u8 = 2 | 8;
+
+/// Encode `volumes` (each `nx*ny*nz` values, x fastest) as an uncompressed NIfTI-1 file, 3D
+/// (`four_d = false`, exactly one volume) or 4D (`dim[4] = volumes.len()`). Both writers share this, so they cannot disagree
+/// on the header: float32 data, unit scaling, sform plus a matching qform where one exists, and
+/// [`NIFTI_XYZT_UNITS`].
+fn encode_nifti(
+    volumes: &[&[f64]],
     dims: (usize, usize, usize),
     voxel_size: (f64, f64, f64),
     affine: &[f64; 16],
+    four_d: bool,
 ) -> Result<Vec<u8>, String> {
     use std::io::Write;
 
     let (nx, ny, nz) = dims;
     let (vsx, vsy, vsz) = voxel_size;
+    let nt = volumes.len();
+    if nt == 0 {
+        return Err("cannot write a NIfTI with no volumes".to_string());
+    }
+    debug_assert!(four_d || nt == 1, "a 3D file holds exactly one volume");
 
     // The header states a matrix size and every reader trusts it, so writing a buffer that does
     // not match produces a file that opens fine and then fails — or shows nothing — the moment
     // something reads the voxels (QSMxT#211). A wrong length is always a caller bug; the only
     // question is whether it surfaces here or as a damaged file someone opens later.
     let expected = nx * ny * nz;
-    if data.len() != expected {
-        return Err(format!(
-            "cannot write a {}x{}x{} NIfTI ({} voxels) from {} values",
-            nx, ny, nz, expected, data.len(),
-        ));
+    for (t, v) in volumes.iter().enumerate() {
+        if v.len() != expected {
+            let which = if !four_d { String::new() } else { format!(" (volume {t})") };
+            return Err(format!(
+                "cannot write a {}x{}x{} NIfTI ({} voxels) from {} values{}",
+                nx, ny, nz, expected, v.len(), which,
+            ));
+        }
+    }
+    // `dim` is i16 in NIfTI-1; a larger extent would wrap silently.
+    for (name, n) in [("nx", nx), ("ny", ny), ("nz", nz), ("volumes", nt)] {
+        if n > i16::MAX as usize {
+            return Err(format!("{name} = {n} exceeds NIfTI-1's limit of {}", i16::MAX));
+        }
     }
 
     // Create NIfTI-1 header (348 bytes)
@@ -469,7 +494,8 @@ pub fn save_nifti(
     header[0..4].copy_from_slice(&348i32.to_le_bytes());
 
     // dim[0..7]
-    let dim: [i16; 8] = [3, nx as i16, ny as i16, nz as i16, 1, 1, 1, 1];
+    let ndim: i16 = if four_d { 4 } else { 3 };
+    let dim: [i16; 8] = [ndim, nx as i16, ny as i16, nz as i16, nt as i16, 1, 1, 1];
     for (i, &d) in dim.iter().enumerate() {
         let offset = 40 + i * 2;
         header[offset..offset + 2].copy_from_slice(&d.to_le_bytes());
@@ -503,6 +529,9 @@ pub fn save_nifti(
     // scl_inter = 0.0
     header[116..120].copy_from_slice(&0.0f32.to_le_bytes());
 
+    // xyzt_units (a single byte at offset 123)
+    header[123] = NIFTI_XYZT_UNITS;
+
     // qform_code / sform_code = 1 (scanner anat). Both describe the same transform, so they get
     // the same code; a qform we could not make agree with the sform is left absent (code 0),
     // which sends readers to the sform rather than to a transform that contradicts it.
@@ -533,7 +562,7 @@ pub fn save_nifti(
     header[344..348].copy_from_slice(b"n+1\0");
 
     // Build output buffer
-    let mut buffer = Vec::with_capacity(352 + data.len() * 4);
+    let mut buffer = Vec::with_capacity(352 + nt * expected * 4);
 
     // Write header
     buffer.write_all(&header).map_err(|e| format!("Write header failed: {}", e))?;
@@ -541,13 +570,39 @@ pub fn save_nifti(
     // Write extension (4 bytes, all zeros = no extension)
     buffer.write_all(&[0u8; 4]).map_err(|e| format!("Write extension failed: {}", e))?;
 
-    // Write data as float32
-    for &val in data {
-        buffer.write_all(&(val as f32).to_le_bytes())
-            .map_err(|e| format!("Write data failed: {}", e))?;
+    // Write data as float32, volume after volume
+    for v in volumes {
+        for &val in v.iter() {
+            buffer.write_all(&(val as f32).to_le_bytes())
+                .map_err(|e| format!("Write data failed: {}", e))?;
+        }
     }
 
     Ok(buffer)
+}
+
+fn gzip(bytes: &[u8]) -> Result<Vec<u8>, String> {
+    use flate2::write::GzEncoder;
+    use flate2::Compression;
+    use std::io::Write;
+
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+    encoder.write_all(bytes)
+        .map_err(|e| format!("Gzip compression failed: {}", e))?;
+    encoder.finish()
+        .map_err(|e| format!("Gzip finish failed: {}", e))
+}
+
+/// Save data as NIfTI bytes
+///
+/// Writes an uncompressed .nii file
+pub fn save_nifti(
+    data: &[f64],
+    dims: (usize, usize, usize),
+    voxel_size: (f64, f64, f64),
+    affine: &[f64; 16],
+) -> Result<Vec<u8>, String> {
+    encode_nifti(&[data], dims, voxel_size, affine, false)
 }
 
 /// Save data as gzipped NIfTI bytes (.nii.gz)
@@ -557,20 +612,33 @@ pub fn save_nifti_gz(
     voxel_size: (f64, f64, f64),
     affine: &[f64; 16],
 ) -> Result<Vec<u8>, String> {
-    use flate2::write::GzEncoder;
-    use flate2::Compression;
-    use std::io::Write;
+    gzip(&save_nifti(data, dims, voxel_size, affine)?)
+}
 
-    // First create uncompressed NIfTI
-    let uncompressed = save_nifti(data, dims, voxel_size, affine)?;
+/// Save several 3D volumes on one grid as a single uncompressed 4D NIfTI file.
+///
+/// Each of `volumes` holds `nx*ny*nz` values in Fortran order (x fastest) and becomes one entry
+/// along the fourth axis, in order. The header is the 3D writer's — same datatype, scaling,
+/// sform/qform and units — with `dim[0] = 4`, `dim[4] = volumes.len()` and `pixdim[4] = 1`, even
+/// for a single volume. Reading the result back with [`load_nifti_4d`] gives the volumes
+/// concatenated in the same order.
+pub fn save_nifti_4d(
+    volumes: &[&[f64]],
+    dims: (usize, usize, usize),
+    voxel_size: (f64, f64, f64),
+    affine: &[f64; 16],
+) -> Result<Vec<u8>, String> {
+    encode_nifti(volumes, dims, voxel_size, affine, true)
+}
 
-    // Compress with gzip
-    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
-    encoder.write_all(&uncompressed)
-        .map_err(|e| format!("Gzip compression failed: {}", e))?;
-
-    encoder.finish()
-        .map_err(|e| format!("Gzip finish failed: {}", e))
+/// [`save_nifti_4d`], gzipped (.nii.gz).
+pub fn save_nifti_4d_gz(
+    volumes: &[&[f64]],
+    dims: (usize, usize, usize),
+    voxel_size: (f64, f64, f64),
+    affine: &[f64; 16],
+) -> Result<Vec<u8>, String> {
+    gzip(&save_nifti_4d(volumes, dims, voxel_size, affine)?)
 }
 
 /// Read only the dimensions from a NIfTI file header without loading volume data.
@@ -657,6 +725,29 @@ pub fn save_nifti_to_file(
         save_nifti_gz(data, dims, voxel_size, affine)
     } else {
         save_nifti(data, dims, voxel_size, affine)
+    }
+    .map_err(|e| format!("{}: {}", path.display(), e))?;
+
+    std::fs::write(path, &bytes)
+        .map_err(|e| format!("Failed to write file '{}': {}", path.display(), e))
+}
+
+/// Save several 3D volumes as one 4D NIfTI file (see [`save_nifti_4d`]).
+///
+/// If the path ends with .nii.gz, the file is gzip compressed.
+/// Otherwise it is saved as uncompressed .nii.
+pub fn save_nifti_4d_to_file(
+    path: &std::path::Path,
+    volumes: &[&[f64]],
+    dims: (usize, usize, usize),
+    voxel_size: (f64, f64, f64),
+    affine: &[f64; 16],
+) -> Result<(), String> {
+    let path_str = path.to_string_lossy();
+    let bytes = if path_str.ends_with(".nii.gz") {
+        save_nifti_4d_gz(volumes, dims, voxel_size, affine)
+    } else {
+        save_nifti_4d(volumes, dims, voxel_size, affine)
     }
     .map_err(|e| format!("{}: {}", path.display(), e))?;
 
@@ -1363,5 +1454,91 @@ mod tests {
         // Our save sets scl_slope = 1.0 and scl_inter = 0.0
         assert!((loaded.scl_slope - 1.0).abs() < 1e-5);
         assert!((loaded.scl_inter - 0.0).abs() < 1e-5);
+    }
+
+    /// #183: every written header says its voxel sizes are in mm (and time in seconds), so the
+    /// BIDS validator's `NIFTI_UNIT` check passes and readers need not guess.
+    #[test]
+    fn written_headers_carry_mm_and_sec_units() {
+        let id = [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0];
+        let v = [0.0; 8];
+        let three = save_nifti(&v, (2, 2, 2), (1.0, 1.0, 1.0), &id).unwrap();
+        let four = save_nifti_4d(&[&v, &v], (2, 2, 2), (1.0, 1.0, 1.0), &id).unwrap();
+        for bytes in [&three, &four] {
+            assert_eq!(bytes[123], 10, "xyzt_units should be mm | sec");
+            let hdr = InMemNiftiObject::from_reader(Cursor::new(bytes.as_slice())).unwrap();
+            assert_eq!(hdr.header().xyzt_units, 10);
+        }
+    }
+
+    /// #182: N volumes written as one 4D file read back with the same data, dims, pixdim and
+    /// affine — through gzip and the file writer too.
+    #[test]
+    fn save_nifti_4d_round_trips() {
+        let dims = (3, 4, 5);
+        let n = dims.0 * dims.1 * dims.2;
+        let nt = 6;
+        let vols: Vec<Vec<f64>> =
+            (0..nt).map(|t| (0..n).map(|i| (t * 1000 + i) as f64 * 0.25 - 7.0).collect()).collect();
+        let refs: Vec<&[f64]> = vols.iter().map(|v| v.as_slice()).collect();
+
+        for (label, voxel, affine) in [
+            ("oblique left-handed", ISSUE_240_VOXEL, ISSUE_240_AFFINE),
+            ("axial anisotropic", (1.0, 1.0, 2.0), [
+                1.0, 0.0, 0.0, -10.0,
+                0.0, 1.0, 0.0, -20.0,
+                0.0, 0.0, 2.0, -30.0,
+                0.0, 0.0, 0.0, 1.0,
+            ]),
+        ] {
+            let plain = save_nifti_4d(&refs, dims, voxel, &affine).unwrap();
+            let gz = save_nifti_4d_gz(&refs, dims, voxel, &affine).unwrap();
+            assert!(is_gzip(&gz));
+            for bytes in [&plain, &gz] {
+                let (data, d4, vs, aff) = load_nifti_4d(bytes).unwrap();
+                assert_eq!(d4, (3, 4, 5, nt), "{label}");
+                assert!((vs.0 - voxel.0).abs() < 1e-5 && (vs.1 - voxel.1).abs() < 1e-5
+                    && (vs.2 - voxel.2).abs() < 1e-5, "{label}: {vs:?}");
+                assert!(max_abs_diff(&aff, &affine) < 1e-4, "{label}: {aff:?}");
+                let expected: Vec<f64> = vols.concat();
+                assert_eq!(data, expected, "{label}: data (exact in f32)");
+            }
+
+            // The header is the 3D writer's, apart from the fourth axis.
+            let three = save_nifti(&vols[0], dims, voxel, &affine).unwrap();
+            assert_eq!(i16::from_le_bytes([plain[40], plain[41]]), 4);
+            assert_eq!(i16::from_le_bytes([plain[48], plain[49]]), nt as i16);
+            assert_eq!(f32::from_le_bytes(plain[92..96].try_into().unwrap()), 1.0);
+            for (a, b) in [(0, 40), (50, 348)] {
+                assert_eq!(plain[a..b], three[a..b], "{label}: header bytes {a}..{b}");
+            }
+            assert_eq!(&plain[352..352 + n * 4], &three[352..], "{label}: first volume");
+        }
+
+        let dir = std::env::temp_dir().join("qsm-core-4d-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        for name in ["four.nii", "four.nii.gz"] {
+            let path = dir.join(name);
+            save_nifti_4d_to_file(&path, &refs, dims, ISSUE_240_VOXEL, &ISSUE_240_AFFINE).unwrap();
+            let bytes = std::fs::read(&path).unwrap();
+            assert_eq!(is_gzip(&bytes), name.ends_with(".gz"), "{name}");
+            let (data, d4, _, _) = load_nifti_4d(&bytes).unwrap();
+            assert_eq!(d4, (3, 4, 5, nt), "{name}");
+            assert_eq!(data.len(), n * nt, "{name}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn save_nifti_4d_writes_one_volume_as_4d_and_rejects_bad_input() {
+        let id = [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0];
+        let v = [1.0; 8];
+        let one = save_nifti_4d(&[&v], (2, 2, 2), (1.0, 1.0, 1.0), &id).unwrap();
+        assert_eq!(i16::from_le_bytes([one[40], one[41]]), 4);
+        assert_eq!(i16::from_le_bytes([one[48], one[49]]), 1);
+
+        assert!(save_nifti_4d(&[], (2, 2, 2), (1.0, 1.0, 1.0), &id).unwrap_err().contains("no volumes"));
+        let err = save_nifti_4d(&[&v, &v[..7]], (2, 2, 2), (1.0, 1.0, 1.0), &id).unwrap_err();
+        assert!(err.contains("volume 1") && err.contains("7 values"), "{err}");
     }
 }
