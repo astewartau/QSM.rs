@@ -77,6 +77,7 @@ pub(crate) fn wrap(x: f64) -> f64 {
 /// Compute wrapped Laplacian of phase with periodic boundary conditions
 ///
 /// Uses second-order central finite differences on wrapped phase differences.
+#[cfg(test)]
 pub(crate) fn wrapped_laplacian_periodic(
     phase: &[f64],
     nx: usize, ny: usize, nz: usize,
@@ -85,19 +86,9 @@ pub(crate) fn wrapped_laplacian_periodic(
     periodic_laplacian_of_differences(phase, nx, ny, nz, vsx, vsy, vsz, wrap)
 }
 
-/// Ordinary discrete Laplacian with periodic boundary conditions: the same stencil as
-/// [`wrapped_laplacian_periodic`] without wrapping the neighbour differences, for data that is
-/// already unwrapped (a field map).
-pub(crate) fn laplacian_periodic(
-    data: &[f64],
-    nx: usize, ny: usize, nz: usize,
-    vsx: f64, vsy: f64, vsz: f64,
-) -> Vec<f64> {
-    periodic_laplacian_of_differences(data, nx, ny, nz, vsx, vsy, vsz, |d| d)
-}
-
 /// Second-order central Laplacian with periodic boundaries, where each neighbour difference
 /// is passed through `wrap` first (the 2π wrap for phase, the identity for a field).
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 #[inline(always)]
 fn periodic_laplacian_of_differences(

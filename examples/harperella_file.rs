@@ -2,7 +2,8 @@
 //!
 //! usage: harperella_file <h|ih> <field_ppm.nii[.gz]> <mask.nii[.gz]> <local_out.nii[.gz]>
 //!
-//! Default parameters. With `HARPERELLA_RAW=<path>` it also writes the local field as
+//! Default parameters, except `HARPERELLA_ITER=<n>` (max iterations) and `HARPERELLA_PAD=<x,y,z>`
+//! (zero padding in voxels per side). With `HARPERELLA_RAW=<path>` it also writes the local field as
 //! little-endian f64, since the NIfTI output may be single precision.
 use qsm_core::bgremove::{harperella, iharperella, HarperellaInput, HarperellaParams, IharperellaParams};
 use qsm_core::io::{read_nifti_file, save_nifti_to_file};
@@ -22,9 +23,18 @@ fn main() {
     let mask: Vec<u8> = m.data.iter().map(|&v| (v > 0.5) as u8).collect();
     let input = HarperellaInput::FieldPpm(&f.data);
     let t = std::time::Instant::now();
+    let iter = std::env::var("HARPERELLA_ITER").ok().map(|v| v.parse::<usize>().expect("HARPERELLA_ITER"));
+    let pad = std::env::var("HARPERELLA_PAD").ok().map(|v| {
+        let p: Vec<usize> = v.split(',').map(|x| x.parse().expect("HARPERELLA_PAD")).collect();
+        [p[0], p[1], p[2]]
+    });
+    let mut hp = HarperellaParams::default();
+    let mut ip = IharperellaParams::default();
+    if let Some(n) = iter { hp.max_iter = n; ip.max_iter = n; }
+    if let Some(p) = pad { hp.pad = p; ip.pad = p; }
     let (local, _) = match a[1].as_str() {
-        "h" => harperella(input, &mask, &grid, &HarperellaParams::default(), |_, _| {}),
-        "ih" => iharperella(input, &mask, &grid, &IharperellaParams::default(), |_, _| {}),
+        "h" => harperella(input, &mask, &grid, &hp, |_, _| {}),
+        "ih" => iharperella(input, &mask, &grid, &ip, |_, _| {}),
         s => panic!("method must be h or ih, got {s}"),
     }
     .expect("harperella");
