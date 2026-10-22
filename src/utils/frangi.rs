@@ -1,14 +1,54 @@
-//! Frangi Vesselness Filter for 3D tubular structure detection
+//! Frangi vesselness filter for 3D tubular structure detection
 //!
-//! This filter uses eigenvalues of the Hessian matrix to detect tubular (vessel-like) structures.
+//! Uses the eigenvalues of the scale-normalised Hessian to score tubular (vessel-like)
+//! structures, as Frangi et al. (1998) describe.
 //!
-//! Reference:
+//! This is a port of Dirk-Jan Kroon's `FrangiFilter3D` (MATLAB File Exchange 24409:
+//! `FrangiFilter3D.m`, `Hessian3D.m`, `imgaussian.m` and the `eig3volume.c` mex), the
+//! filter QSMART uses for its vessel mask. It follows that code's **single-precision**
+//! path, because that is the path QSMART takes: its magnitude comes from ANTs N4's
+//! float32 output via `load_nii`, and `FrangiFilter3D` keeps single input single. The
+//! precision decides the result: at small scales the vesselness is ~1e-6 and
+//! `1 - exp(-S^2/2c^2)` rounds to exactly 0 in single for most voxels, so on QSMART's
+//! 7T exemplar (scales 0.01:0.01:0.05) single precision gives 137,710 nonzero voxels
+//! (bit-identical to the exemplar) where double gives 523,844.
+//!
+//! Each step does what MATLAB R2023b does for single input (checked against MATLAB):
+//! - `imgaussian`: kernel `exp(-x^2/(2 sigma^2))` over `x = -ceil(3 sigma)..ceil(3 sigma)`,
+//!   normalised in double and then cast to single; three separable `imfilter` passes
+//!   (x, y, then z; z only when there are at least 4 slices) with replicate padding.
+//!   `imfilter` on single input accumulates in single, each product rounded before it
+//!   is added, and stores each pass as single. The order of the sum matters at that
+//!   precision and is MATLAB's: along x the taps go first to last; along y and z the
+//!   taps whose source is inside the volume go last to first, then the replicated
+//!   taps beyond the edge, last to first.
+//! - `gradient3`: central differences in single, one-sided at the edges; the Hessian is
+//!   `Dxx = d/dx(Dx)`, `Dxy = d/dy(Dx)`, `Dxz = d/dz(Dx)`, `Dyy = d/dy(Dy)`,
+//!   `Dyz = d/dz(Dy)`, `Dzz = d/dz(Dz)`, each first derivative stored as single.
+//! - `sigma^2 * D`: a double scalar times a single array is evaluated in double and
+//!   rounded to single (likewise the divisions by `2 alpha^2`, `2 beta^2` and `2 c^2`).
+//! - `eig3volume`: each single Hessian is widened to double, decomposed with JAMA's
+//!   Householder tridiagonalisation and QL iteration, sorted by magnitude, and the
+//!   eigenvalues are rounded back to single.
+//! - `Ra`, `Rb`, `S` and the exponentials are evaluated in single. MATLAB's single `exp`
+//!   is not correctly rounded (it differs from the correctly rounded result by 1 ulp for
+//!   ~6 % of arguments with |x| > 3.6e-6); here `exp` is correctly rounded, so some
+//!   vesselness values differ from MATLAB's in the last bits. Which voxels are zero does
+//!   not change: for |x| below 3.6e-6, where `exp` rounds to 1, the two agree. With
+//!   MATLAB's `exp` swapped for a correctly rounded one, `FrangiFilter3D` and this port
+//!   agree bit for bit (QSMART's 7T exemplar and three 3T cases).
+//! - Scales follow MATLAB's colon operator (`a:r:b`, first half `a + k r`, second half
+//!   counted back from the end), and the output is the maximum over scales.
+//!
+//! References:
 //! Frangi, A.F., Niessen, W.J., Vincken, K.L., Viergever, M.A. (1998).
 //! "Multiscale vessel enhancement filtering." MICCAI'98, LNCS vol 1496, 130-137.
 //! https://doi.org/10.1007/BFb0056195
 //!
 //! Reference implementation: https://www.mathworks.com/matlabcentral/fileexchange/24409-hessian-based-frangi-vesselness-filter
 
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
 
 /// Parameters for Frangi vesselness filter
 #[derive(Clone, Debug)]
@@ -44,13 +84,17 @@ impl Default for FrangiParams {
 
 /// Result of Frangi filter including vesselness and scale information
 pub struct FrangiResult {
-    /// Vesselness response (0 to 1)
+    /// Vesselness response (0 to 1); single-precision values widened to f64
     pub vesselness: Vec<f64>,
     /// Scale at which maximum vesselness was found
     pub scale: Vec<f64>,
 }
 
 /// Apply 3D Frangi vesselness filter
+///
+/// The input is rounded to single precision first, as `FrangiFilter3D` does with
+/// non-double input, and the whole filter then runs in single precision (see the module
+/// docs).
 ///
 /// # Arguments
 /// * `data` - Input 3D volume (nx * ny * nz)
@@ -67,346 +111,375 @@ pub fn frangi_filter_3d(
     progress: impl FnMut(usize, usize),
 ) -> FrangiResult {
     let (nx, ny, nz) = grid.dims;
-    frangi_filter_3d_inner(data, nx, ny, nz, params, progress)
+    let input: Vec<f32> = data.iter().map(|&v| v as f32).collect();
+    frangi_filter_3d_inner(&input, nx, ny, nz, params, progress)
 }
 
-/// Compute vesselness measure from sorted eigenvalues
-/// |lambda1| <= |lambda2| <= |lambda3|
-fn compute_vesselness(l1: f64, l2: f64, l3: f64, a: f64, b: f64, c2: f64, black_white: bool) -> f64 {
-    let abs_l2 = l2.abs();
-    let abs_l3 = l3.abs();
-
-    // Avoid division by zero
-    if abs_l3 < 1e-10 || abs_l2 < 1e-10 {
-        return 0.0;
+/// MATLAB's colon operator `a:d:b` for `d > 0`: the first half of the points is
+/// `a + k d`, the second half `b - (n - k) d`, so both ends are hit exactly.
+fn matlab_colon(a: f64, d: f64, b: f64) -> Vec<f64> {
+    if d.is_nan() || d <= 0.0 || b < a || !a.is_finite() || !b.is_finite() {
+        return Vec::new();
     }
-
-    // Check sign conditions for vessel-like structures
-    // For bright vessels: lambda2 < 0 AND lambda3 < 0
-    // For dark vessels: lambda2 > 0 AND lambda3 > 0
-    if black_white {
-        // Dark vessels (black ridges)
-        if l2 < 0.0 || l3 < 0.0 {
-            return 0.0;
-        }
-    } else {
-        // Bright vessels (white ridges)
-        if l2 > 0.0 || l3 > 0.0 {
-            return 0.0;
-        }
+    let mut n = ((b - a) / d).floor();
+    let tol = 2.0 * f64::EPSILON * a.abs().max(b.abs());
+    if a + (n + 1.0) * d - b <= tol {
+        n += 1.0;
     }
-
-    // Ra: distinguishes plate-like from line-like structures
-    // Ra = |lambda2| / |lambda3|
-    let ra = abs_l2 / abs_l3;
-
-    // Rb: distinguishes blob-like from line-like structures
-    // Rb = |lambda1| / sqrt(|lambda2 * lambda3|)
-    let rb = l1.abs() / (abs_l2 * abs_l3).sqrt();
-
-    // S: second-order structureness (Frobenius norm of Hessian eigenvalues)
-    // S = sqrt(lambda1^2 + lambda2^2 + lambda3^2)
-    let s = (l1 * l1 + l2 * l2 + l3 * l3).sqrt();
-
-    // Vesselness function
-    // V = (1 - exp(-Ra^2/2alpha^2)) * exp(-Rb^2/2beta^2) * (1 - exp(-S^2/2c^2))
-    let exp_ra = 1.0 - (-ra * ra / a).exp();
-    let exp_rb = (-rb * rb / b).exp();
-    let exp_s = 1.0 - (-s * s / c2).exp();
-
-    let v = exp_ra * exp_rb * exp_s;
-
-    // Clamp to valid range
-    if v.is_finite() { v.clamp(0.0, 1.0) } else { 0.0 }
+    let end = if (a + n * d - b).abs() <= tol { b } else { a + n * d };
+    let n = n as usize;
+    (0..=n)
+        .map(|k| if k <= n / 2 { a + k as f64 * d } else { end - (n - k) as f64 * d })
+        .collect()
 }
 
-/// Sort three values by absolute value
-fn sort_by_abs(a: f64, b: f64, c: f64) -> (f64, f64, f64) {
-    let mut vals = [(a.abs(), a), (b.abs(), b), (c.abs(), c)];
-    vals.sort_by(|x, y| x.0.partial_cmp(&y.0).unwrap_or(std::cmp::Ordering::Equal));
-    (vals[0].1, vals[1].1, vals[2].1)
-}
-/// The six independent components of a symmetric 3x3 Hessian field, in the order
-/// `(dxx, dyy, dzz, dxy, dxz, dyz)`, one volume each.
-#[cfg(test)]
-type HessianComponents = (Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>);
-
-#[cfg(test)]
-fn compute_hessian_3d(
-    data: &[f64],
-    nx: usize, ny: usize, nz: usize,
-    sigma: f64,
-) -> HessianComponents {
-    // First, apply Gaussian smoothing
-    let smoothed = if sigma > 0.0 {
-        gaussian_smooth_3d(data, nx, ny, nz, sigma)
-    } else {
-        data.to_vec()
+/// One `imfilter(I, H, 'same', 'replicate')` pass along one axis, single precision.
+fn imfilter_axis(data: &[f32], dims: (usize, usize, usize), kernel: &[f32], axis: usize) -> Vec<f32> {
+    let (nx, ny, nz) = dims;
+    let nxy = nx * ny;
+    let r = (kernel.len() - 1) / 2;
+    let (len, stride) = match axis {
+        0 => (nx, 1),
+        1 => (ny, nx),
+        _ => (nz, nxy),
     };
-
-    // Compute first derivatives
-    let dx = gradient_3d(&smoothed, nx, ny, nz, 'x');
-    let dy = gradient_3d(&smoothed, nx, ny, nz, 'y');
-    let dz = gradient_3d(&smoothed, nx, ny, nz, 'z');
-
-    // Compute second derivatives
-    let dxx = gradient_3d(&dx, nx, ny, nz, 'x');
-    let dxy = gradient_3d(&dx, nx, ny, nz, 'y');
-    let dxz = gradient_3d(&dx, nx, ny, nz, 'z');
-
-    let dyy = gradient_3d(&dy, nx, ny, nz, 'y');
-    let dyz = gradient_3d(&dy, nx, ny, nz, 'z');
-
-    let dzz = gradient_3d(&dz, nx, ny, nz, 'z');
-
-    (dxx, dyy, dzz, dxy, dxz, dyz)
+    let mut out = vec![0f32; data.len()];
+    if out.is_empty() {
+        return out;
+    }
+    crate::maybe_par_chunks_mut!(out, nxy).enumerate().for_each(|(k, slice)| {
+        for j in 0..ny {
+            for i in 0..nx {
+                let pos = [i, j, k][axis];
+                let base = i + j * nx + k * nxy - pos * stride;
+                let tap = |t: usize| kernel[t] * data[base + (pos + t).saturating_sub(r).min(len - 1) * stride];
+                let mut acc = 0f32;
+                if axis == 0 {
+                    for t in 0..kernel.len() {
+                        acc += tap(t);
+                    }
+                } else {
+                    // Taps whose source lies inside the volume, last to first, then the
+                    // replicated ones beyond the edge, last to first.
+                    let inside = |t: usize| pos + t >= r && pos + t - r < len;
+                    for t in (0..kernel.len()).rev().filter(|&t| inside(t)) {
+                        acc += tap(t);
+                    }
+                    for t in (0..kernel.len()).rev().filter(|&t| !inside(t)) {
+                        acc += tap(t);
+                    }
+                }
+                slice[i + j * nx] = acc;
+            }
+        }
+    });
+    out
 }
 
-#[cfg(test)]
-fn gradient_3d(data: &[f64], nx: usize, ny: usize, nz: usize, direction: char) -> Vec<f64> {
-    let n_total = nx * ny * nz;
-    let mut grad = vec![0.0f64; n_total];
-
-    // Index helper: i + j*nx + k*nx*ny
-    let idx = |i: usize, j: usize, k: usize| i + j * nx + k * nx * ny;
-
-    match direction {
-        'x' => {
-            for k in 0..nz {
-                for j in 0..ny {
-                    // Forward difference at left edge
-                    grad[idx(0, j, k)] = data[idx(1, j, k)] - data[idx(0, j, k)];
-
-                    // Central differences in interior
-                    for i in 1..nx-1 {
-                        grad[idx(i, j, k)] = (data[idx(i+1, j, k)] - data[idx(i-1, j, k)]) / 2.0;
-                    }
-
-                    // Backward difference at right edge
-                    if nx > 1 {
-                        grad[idx(nx-1, j, k)] = data[idx(nx-1, j, k)] - data[idx(nx-2, j, k)];
-                    }
-                }
-            }
-        }
-        'y' => {
-            for k in 0..nz {
-                for i in 0..nx {
-                    // Forward difference at bottom edge
-                    grad[idx(i, 0, k)] = data[idx(i, 1, k)] - data[idx(i, 0, k)];
-
-                    // Central differences in interior
-                    for j in 1..ny-1 {
-                        grad[idx(i, j, k)] = (data[idx(i, j+1, k)] - data[idx(i, j-1, k)]) / 2.0;
-                    }
-
-                    // Backward difference at top edge
-                    if ny > 1 {
-                        grad[idx(i, ny-1, k)] = data[idx(i, ny-1, k)] - data[idx(i, ny-2, k)];
-                    }
-                }
-            }
-        }
-        'z' => {
-            for j in 0..ny {
-                for i in 0..nx {
-                    // Forward difference at front edge
-                    grad[idx(i, j, 0)] = data[idx(i, j, 1)] - data[idx(i, j, 0)];
-
-                    // Central differences in interior
-                    for k in 1..nz-1 {
-                        grad[idx(i, j, k)] = (data[idx(i, j, k+1)] - data[idx(i, j, k-1)]) / 2.0;
-                    }
-
-                    // Backward difference at back edge
-                    if nz > 1 {
-                        grad[idx(i, j, nz-1)] = data[idx(i, j, nz-1)] - data[idx(i, j, nz-2)];
-                    }
-                }
-            }
-        }
-        _ => panic!("Invalid gradient direction"),
+/// `imgaussian(I, sigma)` for single `I`.
+fn imgaussian(data: &[f32], dims: (usize, usize, usize), sigma: f64) -> Vec<f32> {
+    let half = (sigma * 6.0 / 2.0).ceil() as i64;
+    let h: Vec<f64> = (-half..=half)
+        .map(|x| {
+            let x = x as f64;
+            (-(x * x / (2.0 * (sigma * sigma)))).exp()
+        })
+        .collect();
+    let sum: f64 = h.iter().sum();
+    let kernel: Vec<f32> = h.iter().map(|&v| (v / sum) as f32).collect();
+    let fx = imfilter_axis(data, dims, &kernel, 0);
+    let fxy = imfilter_axis(&fx, dims, &kernel, 1);
+    if dims.2 < 4 {
+        // imgaussian treats fewer than 4 slices as a stack of 2D images.
+        return fxy;
     }
-
-    grad
+    imfilter_axis(&fxy, dims, &kernel, 2)
 }
 
-/// 3D Gaussian smoothing using separable 1D convolutions
-fn gaussian_smooth_3d(data: &[f64], nx: usize, ny: usize, nz: usize, sigma: f64) -> Vec<f64> {
-    if sigma <= 0.0 {
-        return data.to_vec();
-    }
-
-    // Create 1D Gaussian kernel
-    let kernel_radius = (3.0 * sigma).ceil() as usize;
-    let kernel_size = 2 * kernel_radius + 1;
-    let mut kernel = vec![0.0f64; kernel_size];
-
-    let mut sum = 0.0;
-    for i in 0..kernel_size {
-        let x = i as f64 - kernel_radius as f64;
-        kernel[i] = (-x * x / (2.0 * sigma * sigma)).exp();
-        sum += kernel[i];
-    }
-
-    // Normalize kernel
-    for k in kernel.iter_mut() {
-        *k /= sum;
-    }
-
-    // Apply separable convolution
-    // X direction
-    let smoothed_x = convolve_1d_direction(data, nx, ny, nz, &kernel, 'x');
-
-    // Y direction
-    let smoothed_xy = convolve_1d_direction(&smoothed_x, nx, ny, nz, &kernel, 'y');
-
-    // Z direction
-    convolve_1d_direction(&smoothed_xy, nx, ny, nz, &kernel, 'z')
-}
-
-/// Apply 1D convolution along specified axis with replicate padding
-/// Matches MATLAB's imgaussian which uses 'replicate' boundary handling
-fn convolve_1d_direction(
-    data: &[f64],
-    nx: usize, ny: usize, nz: usize,
-    kernel: &[f64],
-    direction: char,
-) -> Vec<f64> {
-    let n_total = nx * ny * nz;
-    let mut result = vec![0.0f64; n_total];
-    let kernel_radius = (kernel.len() - 1) / 2;
-
-    let idx = |i: usize, j: usize, k: usize| i + j * nx + k * nx * ny;
-
-    // Clamp helpers for replicate padding
-    let clamp_x = |x: isize| -> usize { x.max(0).min(nx as isize - 1) as usize };
-    let clamp_y = |y: isize| -> usize { y.max(0).min(ny as isize - 1) as usize };
-    let clamp_z = |z: isize| -> usize { z.max(0).min(nz as isize - 1) as usize };
-
-    match direction {
-        'x' => {
-            for k in 0..nz {
-                for j in 0..ny {
-                    for i in 0..nx {
-                        let mut sum = 0.0;
-
-                        for ki in 0..kernel.len() {
-                            let offset = ki as isize - kernel_radius as isize;
-                            let ni = clamp_x(i as isize + offset);
-                            sum += data[idx(ni, j, k)] * kernel[ki];
-                        }
-
-                        result[idx(i, j, k)] = sum;
-                    }
-                }
-            }
-        }
-        'y' => {
-            for k in 0..nz {
-                for j in 0..ny {
-                    for i in 0..nx {
-                        let mut sum = 0.0;
-
-                        for ki in 0..kernel.len() {
-                            let offset = ki as isize - kernel_radius as isize;
-                            let nj = clamp_y(j as isize + offset);
-                            sum += data[idx(i, nj, k)] * kernel[ki];
-                        }
-
-                        result[idx(i, j, k)] = sum;
-                    }
-                }
-            }
-        }
-        'z' => {
-            for k in 0..nz {
-                for j in 0..ny {
-                    for i in 0..nx {
-                        let mut sum = 0.0;
-
-                        for ki in 0..kernel.len() {
-                            let offset = ki as isize - kernel_radius as isize;
-                            let nk = clamp_z(k as isize + offset);
-                            sum += data[idx(i, j, nk)] * kernel[ki];
-                        }
-
-                        result[idx(i, j, k)] = sum;
-                    }
-                }
-            }
-        }
-        _ => panic!("Invalid convolution direction"),
-    }
-
-    result
-}
-
-/// Analytical eigenvalues of 3×3 symmetric matrix using Cardano's method
-///
-/// Much faster than Householder+QL since it avoids eigenvector computation
-/// and uses a fixed number of operations (no iteration).
-///
-/// Matrix is:
-/// | a  d  e |
-/// | d  b  f |
-/// | e  f  c |
-///
-/// Returns eigenvalues (not sorted)
+/// `gradient3` at one voxel: `pos` is the coordinate along the axis of length `len`.
 #[inline(always)]
-fn eigenvalues_3x3_cardano(a: f64, b: f64, c: f64, d: f64, e: f64, f: f64) -> (f64, f64, f64) {
-    let p1 = d * d + e * e + f * f;
-    if p1 < 1e-30 {
-        // Matrix is effectively diagonal
-        return (a, b, c);
+fn gradient3_at(f: &[f32], idx: usize, pos: usize, len: usize, stride: usize) -> f32 {
+    if len < 2 {
+        0.0
+    } else if pos == 0 {
+        f[idx + stride] - f[idx]
+    } else if pos == len - 1 {
+        f[idx] - f[idx - stride]
+    } else {
+        (f[idx + stride] - f[idx - stride]) / 2.0
     }
-
-    let q = (a + b + c) / 3.0;
-    let p2 = (a - q) * (a - q) + (b - q) * (b - q) + (c - q) * (c - q) + 2.0 * p1;
-    let p = (p2 / 6.0).sqrt();
-
-    // B = (A - q*I) / p
-    let inv_p = 1.0 / p;
-    let b00 = (a - q) * inv_p;
-    let b11 = (b - q) * inv_p;
-    let b22 = (c - q) * inv_p;
-    let b01 = d * inv_p;
-    let b02 = e * inv_p;
-    let b12 = f * inv_p;
-
-    // det(B) / 2
-    let det_b_half = (b00 * (b11 * b22 - b12 * b12)
-                    - b01 * (b01 * b22 - b12 * b02)
-                    + b02 * (b01 * b12 - b11 * b02)) / 2.0;
-
-    // Clamp for numerical stability (det_b_half should be in [-1, 1]).
-    // Not `clamp`: the two differ on NaN, and here that difference is observable. `p` is
-    // bounded below by the `p1 < 1e-30` guard above, so a NaN can only arrive from a NaN in
-    // the input Hessian -- and then `max`/`min` yields -1.0, so `acos` still returns a finite
-    // angle, where `clamp` would propagate NaN into all three eigenvalues. Preserving the
-    // existing behaviour is deliberate; changing it is a numerical decision, not a lint fix.
-    #[allow(clippy::manual_clamp)]
-    let r = det_b_half.max(-1.0).min(1.0);
-    let phi = r.acos() / 3.0;
-
-    let eig1 = q + 2.0 * p * phi.cos();
-    let eig3 = q + 2.0 * p * (phi + 2.0 * std::f64::consts::PI / 3.0).cos();
-    let eig2 = 3.0 * q - eig1 - eig3; // trace = sum of eigenvalues
-
-    (eig1, eig2, eig3)
 }
 
-// NOTE: eigenvalues_3x3_symmetric (Householder+QL) was removed — it hangs on
-// near-degenerate matrices in real brain data. Use eigenvalues_3x3_cardano instead.
+/// `gradient3(F, axis)` over the whole volume.
+fn gradient3(f: &[f32], dims: (usize, usize, usize), axis: usize) -> Vec<f32> {
+    let (nx, ny, _) = dims;
+    let nxy = nx * ny;
+    let (len, stride) = match axis {
+        0 => (dims.0, 1),
+        1 => (dims.1, nx),
+        _ => (dims.2, nxy),
+    };
+    let mut out = vec![0f32; f.len()];
+    if out.is_empty() {
+        return out;
+    }
+    crate::maybe_par_chunks_mut!(out, nxy).enumerate().for_each(|(k, slice)| {
+        for j in 0..ny {
+            for i in 0..nx {
+                let idx = i + j * nx + k * nxy;
+                slice[i + j * nx] = gradient3_at(f, idx, [i, j, k][axis], len, stride);
+            }
+        }
+    });
+    out
+}
 
-/// Inner implementation of Frangi filter (takes raw dimensions)
+/// JAMA's symmetric Householder reduction to tridiagonal form (`tred2` in eig3volume.c).
+/// The eigenvectors are not needed, but `V` carries the reduction.
+fn tred2(v: &mut [[f64; 3]; 3], d: &mut [f64; 3], e: &mut [f64; 3]) {
+    const N: usize = 3;
+    *d = v[N - 1];
+    for i in (1..N).rev() {
+        let mut scale = 0.0;
+        let mut h = 0.0;
+        for dk in d.iter().take(i) {
+            scale += dk.abs();
+        }
+        if scale == 0.0 {
+            e[i] = d[i - 1];
+            for j in 0..i {
+                d[j] = v[i - 1][j];
+                v[i][j] = 0.0;
+                v[j][i] = 0.0;
+            }
+        } else {
+            for dk in d.iter_mut().take(i) {
+                *dk /= scale;
+                h += *dk * *dk;
+            }
+            let mut f = d[i - 1];
+            let mut g = h.sqrt();
+            if f > 0.0 {
+                g = -g;
+            }
+            e[i] = scale * g;
+            h -= f * g;
+            d[i - 1] = f - g;
+            for ej in e.iter_mut().take(i) {
+                *ej = 0.0;
+            }
+            for j in 0..i {
+                f = d[j];
+                v[j][i] = f;
+                g = e[j] + v[j][j] * f;
+                for k in (j + 1)..i {
+                    g += v[k][j] * d[k];
+                    e[k] += v[k][j] * f;
+                }
+                e[j] = g;
+            }
+            f = 0.0;
+            for j in 0..i {
+                e[j] /= h;
+                f += e[j] * d[j];
+            }
+            let hh = f / (h + h);
+            for j in 0..i {
+                e[j] -= hh * d[j];
+            }
+            for j in 0..i {
+                f = d[j];
+                g = e[j];
+                for k in j..i {
+                    v[k][j] -= f * e[k] + g * d[k];
+                }
+                d[j] = v[i - 1][j];
+                v[i][j] = 0.0;
+            }
+        }
+        d[i] = h;
+    }
+    for i in 0..N - 1 {
+        v[N - 1][i] = v[i][i];
+        v[i][i] = 1.0;
+        let h = d[i + 1];
+        if h != 0.0 {
+            for k in 0..=i {
+                d[k] = v[k][i + 1] / h;
+            }
+            for j in 0..=i {
+                let mut g = 0.0;
+                for k in 0..=i {
+                    g += v[k][i + 1] * v[k][j];
+                }
+                for k in 0..=i {
+                    v[k][j] -= g * d[k];
+                }
+            }
+        }
+        for row in v.iter_mut().take(i + 1) {
+            row[i + 1] = 0.0;
+        }
+    }
+    for j in 0..N {
+        d[j] = v[N - 1][j];
+        v[N - 1][j] = 0.0;
+    }
+    v[N - 1][N - 1] = 1.0;
+    e[0] = 0.0;
+}
+
+/// JAMA's symmetric tridiagonal QL algorithm (`tql2` in eig3volume.c), eigenvalues only:
+/// the eigenvector accumulation does not feed back into them. Ends with the eigenvalues
+/// in ascending order.
+fn tql2(d: &mut [f64; 3], e: &mut [f64; 3]) {
+    const N: usize = 3;
+    for i in 1..N {
+        e[i - 1] = e[i];
+    }
+    e[N - 1] = 0.0;
+    let mut f = 0.0;
+    let mut tst1: f64 = 0.0;
+    let eps = 2f64.powi(-52);
+    for l in 0..N {
+        tst1 = tst1.max(d[l].abs() + e[l].abs());
+        let mut m = l;
+        while m < N {
+            if e[m].abs() <= eps * tst1 {
+                break;
+            }
+            m += 1;
+        }
+        // e[N-1] is 0 and the input is finite, so this stops at m < N.
+        if m > l {
+            loop {
+                let mut g = d[l];
+                let mut p = (d[l + 1] - g) / (2.0 * e[l]);
+                let mut r = (p * p + 1.0).sqrt();
+                if p < 0.0 {
+                    r = -r;
+                }
+                d[l] = e[l] / (p + r);
+                d[l + 1] = e[l] * (p + r);
+                let dl1 = d[l + 1];
+                let mut h = g - d[l];
+                for di in d.iter_mut().skip(l + 2) {
+                    *di -= h;
+                }
+                f += h;
+                p = d[m];
+                let mut c = 1.0;
+                let mut c2 = c;
+                let mut c3 = c;
+                let el1 = e[l + 1];
+                let mut s = 0.0;
+                let mut s2 = 0.0;
+                for i in (l..m).rev() {
+                    c3 = c2;
+                    c2 = c;
+                    s2 = s;
+                    g = c * e[i];
+                    h = c * p;
+                    r = (p * p + e[i] * e[i]).sqrt();
+                    e[i + 1] = s * r;
+                    s = e[i] / r;
+                    c = p / r;
+                    p = c * d[i] - s * g;
+                    d[i + 1] = h + s * (c * g + s * d[i]);
+                }
+                p = -s * s2 * c3 * el1 * e[l] / dl1;
+                e[l] = s * p;
+                d[l] = c * p;
+                if e[l].abs() <= eps * tst1 {
+                    break;
+                }
+            }
+        }
+        d[l] += f;
+        e[l] = 0.0;
+    }
+    for i in 0..N - 1 {
+        let mut k = i;
+        let mut p = d[i];
+        for (j, &dj) in d.iter().enumerate().skip(i + 1) {
+            if dj < p {
+                k = j;
+                p = dj;
+            }
+        }
+        if k != i {
+            d[k] = d[i];
+            d[i] = p;
+        }
+    }
+}
+
+/// `eig3volume` for one voxel of single input: eigenvalues of the symmetric matrix
+/// `[[xx, xy, xz], [xy, yy, yz], [xz, yz, zz]]` in double, sorted as eig3volume.c sorts
+/// them (by magnitude, ascending), rounded to single.
+fn eig3volume_single(xx: f32, xy: f32, xz: f32, yy: f32, yz: f32, zz: f32) -> (f32, f32, f32) {
+    if ![xx, xy, xz, yy, yz, zz].iter().all(|v| v.is_finite()) {
+        // The C code does not handle these (NaN can index past its arrays); the
+        // vesselness would be non-finite, which FrangiFilter3D zeroes.
+        return (f32::NAN, f32::NAN, f32::NAN);
+    }
+    let mut v = [
+        [xx as f64, xy as f64, xz as f64],
+        [xy as f64, yy as f64, yz as f64],
+        [xz as f64, yz as f64, zz as f64],
+    ];
+    let mut d = [0f64; 3];
+    let mut e = [0f64; 3];
+    tred2(&mut v, &mut d, &mut e);
+    tql2(&mut d, &mut e);
+    let mut da = [d[0].abs(), d[1].abs(), d[2].abs()];
+    if da[0] >= da[1] && da[0] > da[2] {
+        d.swap(0, 2);
+        da.swap(0, 2);
+    } else if da[1] >= da[0] && da[1] > da[2] {
+        d.swap(1, 2);
+        da.swap(1, 2);
+    }
+    if da[0] > da[1] {
+        d.swap(0, 1);
+    }
+    (d[0] as f32, d[1] as f32, d[2] as f32)
+}
+
+/// Correctly rounded single-precision `exp` (see the module docs on MATLAB's).
+#[inline(always)]
+fn exp_single(x: f32) -> f32 {
+    (x as f64).exp() as f32
+}
+
+/// `FrangiFilter3D`'s vesselness for one voxel's sorted single eigenvalues, in single.
+/// `a`, `b`, `c` are `2 alpha^2`, `2 beta^2` and `2 c^2` (doubles, as in MATLAB).
+#[inline(always)]
+fn vesselness_single(l1: f32, l2: f32, l3: f32, a: f64, b: f64, c: f64, black_white: bool) -> f32 {
+    let (a1, a2, a3) = (l1.abs(), l2.abs(), l3.abs());
+    let ra = a2 / a3;
+    let rb = a1 / (a2 * a3).sqrt();
+    let s = (a1 * a1 + a2 * a2 + a3 * a3).sqrt();
+    // single ./ double scalar: evaluated in double, rounded to single.
+    let exp_ra = 1.0 - exp_single(-(((ra * ra) as f64 / a) as f32));
+    let exp_rb = exp_single(-(((rb * rb) as f64 / b) as f32));
+    let exp_s = 1.0 - exp_single(((-(s * s)) as f64 / c) as f32);
+    let v = exp_ra * exp_rb * exp_s;
+    let wrong_sign = if black_white { l2 < 0.0 || l3 < 0.0 } else { l2 > 0.0 || l3 > 0.0 };
+    if wrong_sign || !v.is_finite() {
+        0.0
+    } else {
+        v
+    }
+}
+
+/// Inner implementation of the Frangi filter (single-precision input, raw dimensions).
 ///
-/// Uses a fused approach: Hessian components are computed inline from the smoothed
-/// array using composed central-difference stencils, then eigenvalues and vesselness
-/// are computed immediately. This avoids allocating 9 intermediate gradient arrays
-/// (~927 MB per scale for typical brain volumes) and improves cache utilization.
+/// Per scale it keeps the smoothed volume's three first derivatives (single) and computes
+/// the six second derivatives, the eigenvalues and the vesselness voxel by voxel, rather
+/// than storing six Hessian volumes as `Hessian3D` does; the arithmetic is the same.
 fn frangi_filter_3d_inner<F>(
-    data: &[f64],
+    input: &[f32],
     nx: usize, ny: usize, nz: usize,
     params: &FrangiParams,
     mut progress_callback: F,
@@ -415,104 +488,70 @@ where
     F: FnMut(usize, usize),
 {
     let n_total = nx * ny * nz;
+    let dims = (nx, ny, nz);
+    let nxy = nx * ny;
 
-    // Generate sigma values
-    let mut sigmas = Vec::new();
-    let mut sigma = params.scale_range[0];
-    while sigma <= params.scale_range[1] {
-        sigmas.push(sigma);
-        sigma += params.scale_ratio;
-    }
-
+    let mut sigmas = matlab_colon(params.scale_range[0], params.scale_ratio, params.scale_range[1]);
     if sigmas.is_empty() {
         sigmas.push(params.scale_range[0]);
     }
-
     let total_scales = sigmas.len();
 
-    // Initialize output arrays
-    let mut best_vesselness = vec![0.0f64; n_total];
-    let mut best_scale = vec![1.0f64; n_total];
+    let mut best = vec![0f32; n_total];
+    let mut best_scale = vec![sigmas[0]; n_total];
+    let mut voxel = vec![0f32; n_total];
 
-    // Constants for vesselness computation
-    let a = 2.0 * params.alpha * params.alpha;
-    let b = 2.0 * params.beta * params.beta;
-    let c2 = 2.0 * params.c * params.c;
+    let a = 2.0 * (params.alpha * params.alpha);
+    let b = 2.0 * (params.beta * params.beta);
+    let c = 2.0 * (params.c * params.c);
 
-    // Strides for indexing
-    let sx: usize = 1;
-    let sy: usize = nx;
-    let sz: usize = nx * ny;
-
-    // Process each scale
     for (scale_idx, &sigma) in sigmas.iter().enumerate() {
         progress_callback(scale_idx, total_scales);
+        if n_total == 0 {
+            continue;
+        }
 
-        // Gaussian smoothing (only allocation per scale)
-        let smoothed = if sigma > 0.0 {
-            gaussian_smooth_3d(data, nx, ny, nz, sigma)
-        } else {
-            data.to_vec()
+        let (dx, dy, dz) = {
+            let smoothed = if sigma > 0.0 { imgaussian(input, dims, sigma) } else { input.to_vec() };
+            (gradient3(&smoothed, dims, 0), gradient3(&smoothed, dims, 1), gradient3(&smoothed, dims, 2))
+        };
+        // FrangiFilter3D scales by sigma^2 only for sigma > 0.
+        let scale = if sigma > 0.0 { Some(sigma * sigma) } else { None };
+        let mul = |d: f32| match scale {
+            Some(s2) => (s2 * d as f64) as f32,
+            None => d,
         };
 
-        // Scale normalization (sigma^2)
-        let scale_factor = sigma * sigma;
+        crate::maybe_par_chunks_mut!(voxel, nxy).enumerate().for_each(|(k, slice)| {
+            for j in 0..ny {
+                for i in 0..nx {
+                    let idx = i + j * nx + k * nxy;
+                    let dxx = mul(gradient3_at(&dx, idx, i, nx, 1));
+                    let dxy = mul(gradient3_at(&dx, idx, j, ny, nx));
+                    let dxz = mul(gradient3_at(&dx, idx, k, nz, nxy));
+                    let dyy = mul(gradient3_at(&dy, idx, j, ny, nx));
+                    let dyz = mul(gradient3_at(&dy, idx, k, nz, nxy));
+                    let dzz = mul(gradient3_at(&dz, idx, k, nz, nxy));
+                    // An all-zero Hessian gives Ra = 0/0, which FrangiFilter3D zeroes.
+                    slice[i + j * nx] = if dxx == 0.0 && dxy == 0.0 && dxz == 0.0
+                        && dyy == 0.0 && dyz == 0.0 && dzz == 0.0
+                    {
+                        0.0
+                    } else {
+                        let (l1, l2, l3) = eig3volume_single(dxx, dxy, dxz, dyy, dyz, dzz);
+                        vesselness_single(l1, l2, l3, a, b, c, params.black_white)
+                    };
+                }
+            }
+        });
 
-        // Fused: compute Hessian + eigenvalues + vesselness inline
-        // Uses composed central-difference stencils matching gradient(gradient(f)):
-        //   D²f/dx² = (f[i+2] - 2f[i] + f[i-2]) / 4
-        //   D²f/dxdy = (f[i+1,j+1] - f[i-1,j+1] - f[i+1,j-1] + f[i-1,j-1]) / 4
-        // Requires 2-voxel margin for diagonal terms (boundary voxels stay at 0).
-        for k in 2..nz.saturating_sub(2) {
-            for j in 2..ny.saturating_sub(2) {
-                for i in 2..nx.saturating_sub(2) {
-                    let idx = i + j * sy + k * sz;
-                    let s = smoothed[idx];
-
-                    // Diagonal second derivatives (spacing-2 stencil)
-                    let dxx = (smoothed[idx + 2 * sx] - 2.0 * s + smoothed[idx - 2 * sx]) / 4.0;
-                    let dyy = (smoothed[idx + 2 * sy] - 2.0 * s + smoothed[idx - 2 * sy]) / 4.0;
-                    let dzz = (smoothed[idx + 2 * sz] - 2.0 * s + smoothed[idx - 2 * sz]) / 4.0;
-
-                    // Cross derivatives (spacing-1 stencil)
-                    let dxy = (smoothed[idx + sx + sy] - smoothed[idx - sx + sy]
-                             - smoothed[idx + sx - sy] + smoothed[idx - sx - sy]) / 4.0;
-                    let dxz = (smoothed[idx + sx + sz] - smoothed[idx - sx + sz]
-                             - smoothed[idx + sx - sz] + smoothed[idx - sx - sz]) / 4.0;
-                    let dyz = (smoothed[idx + sy + sz] - smoothed[idx - sy + sz]
-                             - smoothed[idx + sy - sz] + smoothed[idx - sy - sz]) / 4.0;
-
-                    // Early exit for near-zero Hessian (outside brain mask)
-                    let hessian_mag = dxx.abs() + dyy.abs() + dzz.abs()
-                                    + dxy.abs() + dxz.abs() + dyz.abs();
-                    if hessian_mag < 1e-20 {
-                        continue;
-                    }
-
-                    // Scale-normalized Hessian
-                    let h_xx = dxx * scale_factor;
-                    let h_yy = dyy * scale_factor;
-                    let h_zz = dzz * scale_factor;
-                    let h_xy = dxy * scale_factor;
-                    let h_xz = dxz * scale_factor;
-                    let h_yz = dyz * scale_factor;
-
-                    // Analytical eigenvalues (Cardano's method, ~5x faster than Householder+QL)
-                    let (lambda1, lambda2, lambda3) = eigenvalues_3x3_cardano(
-                        h_xx, h_yy, h_zz, h_xy, h_xz, h_yz
-                    );
-
-                    // Sort by absolute value: |lambda1| <= |lambda2| <= |lambda3|
-                    let (l1, l2, l3) = sort_by_abs(lambda1, lambda2, lambda3);
-
-                    // Compute vesselness
-                    let vesselness = compute_vesselness(l1, l2, l3, a, b, c2, params.black_white);
-
-                    // Keep maximum across scales
-                    if scale_idx == 0 || vesselness > best_vesselness[idx] {
-                        best_vesselness[idx] = vesselness;
-                        best_scale[idx] = sigma;
-                    }
+        if scale_idx == 0 {
+            best.copy_from_slice(&voxel);
+        } else {
+            for ((bv, bs), &v) in best.iter_mut().zip(best_scale.iter_mut()).zip(voxel.iter()) {
+                if v > *bv {
+                    *bv = v;
+                    *bs = sigma;
                 }
             }
         }
@@ -521,7 +560,7 @@ where
     progress_callback(total_scales, total_scales);
 
     FrangiResult {
-        vesselness: best_vesselness,
+        vesselness: best.iter().map(|&v| v as f64).collect(),
         scale: best_scale,
     }
 }
@@ -535,478 +574,140 @@ mod tests {
         Grid::new(nx, ny, nz, 1.0, 1.0, 1.0)
     }
 
-    #[test]
-    fn test_eigenvalues_diagonal() {
-        // Diagonal matrix: eigenvalues are the diagonal elements
-        let (l1, l2, l3) = eigenvalues_3x3_cardano(1.0, 2.0, 3.0, 0.0, 0.0, 0.0);
-        let mut sorted = [l1, l2, l3];
-        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
-
-        assert!((sorted[0] - 1.0).abs() < 1e-10);
-        assert!((sorted[1] - 2.0).abs() < 1e-10);
-        assert!((sorted[2] - 3.0).abs() < 1e-10);
+    fn sorted(t: (f32, f32, f32)) -> [f32; 3] {
+        let mut v = [t.0, t.1, t.2];
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        v
     }
 
+    /// MATLAB R2023b `FrangiFilter3D` on single input: a 16x18x20 oblique tube with
+    /// integer intensities. Layout (little-endian, column-major): the u16 input, then f32
+    /// volumes for scales 0.01:0.01:0.05 with C = 500 (single-precision underflow decides
+    /// which voxels are nonzero; double gives ~8x as many), first as MATLAB returns it and
+    /// then with MATLAB's single `exp` swapped for a correctly rounded one, and last for
+    /// scales 0.5:0.5:2 with C = 200 (the Gaussian path), also with that `exp`.
     #[test]
-    fn test_eigenvalues_identity() {
-        // Identity matrix: all eigenvalues are 1
-        let (l1, l2, l3) = eigenvalues_3x3_cardano(1.0, 1.0, 1.0, 0.0, 0.0, 0.0);
-
-        assert!((l1 - 1.0).abs() < 1e-10);
-        assert!((l2 - 1.0).abs() < 1e-10);
-        assert!((l3 - 1.0).abs() < 1e-10);
-    }
-
-    #[test]
-    fn test_gradient_constant() {
-        // Gradient of constant field should be zero
-        let data = vec![5.0; 27]; // 3x3x3
-        let grad = gradient_3d(&data, 3, 3, 3, 'x');
-
-        for &v in &grad {
-            assert!(v.abs() < 1e-10);
-        }
-    }
-
-    #[test]
-    fn test_frangi_filter_basic() {
-        // Basic test: filter should run without panic
-        let data = vec![0.0; 1000]; // 10x10x10
-        let params = FrangiParams {
-            scale_range: [1.0, 2.0],
-            scale_ratio: 1.0,
-            ..Default::default()
+    fn matches_matlab_single_precision() {
+        let raw = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/frangi_matlab_single_small.bin"))
+            .expect("fixture");
+        let (nx, ny, nz) = (16, 18, 20);
+        let n = nx * ny * nz;
+        assert_eq!(raw.len(), 2 * n + 12 * n);
+        let input: Vec<f64> = raw[..2 * n].chunks_exact(2).map(|b| u16::from_le_bytes([b[0], b[1]]) as f64).collect();
+        let volume = |i: usize| -> Vec<f32> {
+            raw[2 * n + 4 * n * i..2 * n + 4 * n * (i + 1)]
+                .chunks_exact(4)
+                .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+                .collect()
         };
-
-        let result = frangi_filter_3d(&data, &grid(10, 10, 10), &params, |_, _| {});
-        assert_eq!(result.vesselness.len(), 1000);
-    }
-
-    #[test]
-    fn test_frangi_multi_scale() {
-        // Test multi-scale filtering with several sigma values
-        let n = 10;
-        let mut data = vec![0.0; n * n * n];
-
-        // Create a tube-like structure along the x-axis at center
-        let cy = n / 2;
-        let cz = n / 2;
-        for x in 0..n {
-            for dy in -1i32..=1 {
-                for dz in -1i32..=1 {
-                    let y = (cy as i32 + dy) as usize;
-                    let z = (cz as i32 + dz) as usize;
-                    if y < n && z < n {
-                        data[x + y * n + z * n * n] = 1.0;
-                    }
-                }
-            }
-        }
-
-        let params = FrangiParams {
-            scale_range: [0.5, 3.0],
-            scale_ratio: 0.5, // This gives sigmas: 0.5, 1.0, 1.5, 2.0, 2.5, 3.0
-            alpha: 0.5,
-            beta: 0.5,
-            c: 500.0,
-            black_white: false, // bright vessels
+        let run = |params: FrangiParams| -> Vec<f32> {
+            frangi_filter_3d(&input, &grid(nx, ny, nz), &params, |_, _| {}).vesselness.iter().map(|&v| v as f32).collect()
         };
+        let small = run(FrangiParams { scale_range: [0.01, 0.05], scale_ratio: 0.01, c: 500.0, ..Default::default() });
+        let gauss = run(FrangiParams { scale_range: [0.5, 2.0], scale_ratio: 0.5, c: 200.0, ..Default::default() });
 
-        let result = frangi_filter_3d(&data, &grid(n, n, n), &params, |_, _| {});
-
-        assert_eq!(result.vesselness.len(), n * n * n);
-        assert_eq!(result.scale.len(), n * n * n);
-
-        // All values should be finite and in [0, 1]
-        for &v in &result.vesselness {
-            assert!(v.is_finite(), "Vesselness must be finite");
-            assert!(v >= 0.0, "Vesselness must be >= 0");
-            assert!(v <= 1.0, "Vesselness must be <= 1");
-        }
-
-        for &s in &result.scale {
-            assert!(s.is_finite(), "Scale must be finite");
-            assert!((0.5..=3.0).contains(&s), "Scale must be in range [0.5, 3.0], got {}", s);
+        // Bit-identical to FrangiFilter3D apart from MATLAB's own single `exp`.
+        assert_eq!(small, volume(1));
+        assert_eq!(gauss, volume(2));
+        // Against MATLAB as is: the same nonzero voxels, values a last-bit `exp` apart.
+        let matlab = volume(0);
+        let nonzero = matlab.iter().filter(|&&v| v != 0.0).count();
+        assert!(nonzero > 0 && nonzero < n / 10, "{nonzero}");
+        for (g, e) in small.iter().zip(matlab.iter()) {
+            assert_eq!(*g != 0.0, *e != 0.0, "got {g}, MATLAB {e}");
+            assert!((g - e).abs() <= 1e-2 * e, "got {g}, MATLAB {e}");
         }
     }
 
     #[test]
-    fn test_frangi_different_beta_c() {
-        // Test with non-default beta and c parameters
-        let n = 10;
-        let mut data = vec![0.0; n * n * n];
-
-        // Create a bright tube along y
-        let cx = n / 2;
-        let cz = n / 2;
-        for y in 0..n {
-            data[cx + y * n + cz * n * n] = 10.0;
-        }
-
-        let params_default = FrangiParams {
-            scale_range: [1.0, 2.0],
-            scale_ratio: 1.0,
-            alpha: 0.5,
-            beta: 0.5,
-            c: 500.0,
-            black_white: false,
-        };
-
-        let params_small_c = FrangiParams {
-            scale_range: [1.0, 2.0],
-            scale_ratio: 1.0,
-            alpha: 0.5,
-            beta: 0.5,
-            c: 1.0, // Small c makes filter more sensitive to structure
-            black_white: false,
-        };
-
-        let params_large_beta = FrangiParams {
-            scale_range: [1.0, 2.0],
-            scale_ratio: 1.0,
-            alpha: 0.5,
-            beta: 2.0, // Large beta is less sensitive to blob-like structures
-            c: 500.0,
-            black_white: false,
-        };
-
-        let result_default = frangi_filter_3d(&data, &grid(n, n, n), &params_default, |_, _| {});
-        let result_small_c = frangi_filter_3d(&data, &grid(n, n, n), &params_small_c, |_, _| {});
-        let result_large_beta = frangi_filter_3d(&data, &grid(n, n, n), &params_large_beta, |_, _| {});
-
-        // All should be finite
-        for &v in &result_default.vesselness {
-            assert!(v.is_finite());
-        }
-        for &v in &result_small_c.vesselness {
-            assert!(v.is_finite());
-        }
-        for &v in &result_large_beta.vesselness {
-            assert!(v.is_finite());
-        }
+    fn colon_matches_matlab() {
+        // MATLAB: 0.01:0.01:0.05 hits 0.03 as 0.01 + 2*0.01 and 0.04 as 0.05 - 0.01.
+        assert_eq!(matlab_colon(0.01, 0.01, 0.05), vec![0.01, 0.02, 0.01 + 2.0 * 0.01, 0.05 - 0.01, 0.05]);
+        assert_eq!(matlab_colon(0.5, 0.5, 6.0).len(), 12);
+        assert_eq!(matlab_colon(0.1, 0.1, 0.3).len(), 3);
+        assert!(matlab_colon(5.0, 1.0, 1.0).is_empty());
     }
 
     #[test]
-    fn test_frangi_black_white() {
-        // Test dark vessels (black_white = true) vs bright vessels
-        let n = 10;
-        let mut data = vec![1.0; n * n * n]; // Background is bright
-
-        // Create a dark tube along z
-        let cx = n / 2;
-        let cy = n / 2;
-        for z in 0..n {
-            data[cx + cy * n + z * n * n] = 0.0; // Dark structure
+    fn eig3volume_eigenvalues() {
+        assert_eq!(sorted(eig3volume_single(1.0, 0.0, 0.0, 2.0, 0.0, 3.0)), [1.0, 2.0, 3.0]);
+        // [[2, 1, 0], [1, 2, 0], [0, 0, 1]] has eigenvalues 1, 1, 3.
+        let v = sorted(eig3volume_single(2.0, 1.0, 0.0, 2.0, 0.0, 1.0));
+        for (got, want) in v.iter().zip([1.0, 1.0, 3.0]) {
+            assert!((got - want).abs() < 1e-6);
         }
-
-        let params_bright = FrangiParams {
-            scale_range: [1.0, 2.0],
-            scale_ratio: 1.0,
-            black_white: false, // bright vessels
-            ..Default::default()
-        };
-
-        let params_dark = FrangiParams {
-            scale_range: [1.0, 2.0],
-            scale_ratio: 1.0,
-            black_white: true, // dark vessels
-            ..Default::default()
-        };
-
-        let result_bright = frangi_filter_3d(&data, &grid(n, n, n), &params_bright, |_, _| {});
-        let result_dark = frangi_filter_3d(&data, &grid(n, n, n), &params_dark, |_, _| {});
-
-        // Both should produce valid output
-        for &v in &result_bright.vesselness {
-            assert!(v.is_finite());
-            assert!((0.0..=1.0).contains(&v));
-        }
-        for &v in &result_dark.vesselness {
-            assert!(v.is_finite());
-            assert!((0.0..=1.0).contains(&v));
-        }
-
-        // Dark vessel detection should detect something in the dark tube region
-        // (or at least produce different results than bright vessel mode)
-        let sum_bright: f64 = result_bright.vesselness.iter().sum();
-        let sum_dark: f64 = result_dark.vesselness.iter().sum();
-        // They should generally differ
-        assert!(
-            (sum_bright - sum_dark).abs() >= 0.0,
-            "Bright and dark modes should both work"
-        );
+        // Sorted by magnitude, ascending, signs kept.
+        let (l1, l2, l3) = eig3volume_single(-5.0, 0.0, 0.0, 0.1, 0.0, -2.0);
+        assert_eq!((l1, l2, l3), (0.1, -2.0, -5.0));
+        assert!(eig3volume_single(f32::NAN, 0.0, 0.0, 1.0, 0.0, 1.0).0.is_nan());
     }
 
     #[test]
-    fn test_frangi_vessel_structure() {
-        // Create a volume with an actual tube-like structure that should
-        // trigger non-zero vesselness
+    fn gradient3_edges_and_interior() {
+        let (nx, ny, nz) = (4, 3, 5);
+        let data: Vec<f32> = (0..nx * ny * nz).map(|i| ((i / (nx * ny)) as f32).powi(2)).collect();
+        let g = gradient3(&data, (nx, ny, nz), 2);
+        let at = |k: usize| g[k * nx * ny];
+        assert_eq!([at(0), at(1), at(2), at(3), at(4)], [1.0, 2.0, 4.0, 6.0, 7.0]);
+        assert!(gradient3(&data, (nx, ny, nz), 0).iter().all(|&v| v == 0.0));
+    }
+
+    #[test]
+    fn imgaussian_preserves_constant() {
+        let n = 8;
+        let data = vec![5.0f32; n * n * n];
+        for &v in &imgaussian(&data, (n, n, n), 1.0) {
+            assert!((v - 5.0).abs() < 1e-5);
+        }
+        // Tiny sigma: the kernel is [0, 1, 0] in single, so the volume is unchanged.
+        let ramp: Vec<f32> = (0..n * n * n).map(|i| i as f32 * 0.37).collect();
+        assert_eq!(imgaussian(&ramp, (n, n, n), 0.03), ramp);
+    }
+
+    #[test]
+    fn vesselness_sign_and_degenerate_cases() {
+        let (a, b, c) = (0.5, 0.5, 2.0 * 500.0 * 500.0);
+        assert!(vesselness_single(0.01, -100.0, -100.0, a, b, c, false) > 0.0);
+        assert_eq!(vesselness_single(0.01, 100.0, 100.0, a, b, c, false), 0.0);
+        assert!(vesselness_single(0.01, 100.0, 100.0, a, b, c, true) > 0.0);
+        assert_eq!(vesselness_single(0.01, -100.0, -100.0, a, b, c, true), 0.0);
+        assert_eq!(vesselness_single(0.0, 0.0, 0.0, a, b, c, false), 0.0);
+        // S^2 / 2c^2 below single precision's resolution of 1: exp rounds to 1.
+        assert_eq!(vesselness_single(1e-6, -1e-2, -1e-2, a, b, c, false), 0.0);
+    }
+
+    #[test]
+    fn frangi_detects_tube() {
         let n = 12;
         let mut data = vec![0.0; n * n * n];
-
-        // Gaussian cross-section tube along x-axis at center
-        let cy = n as f64 / 2.0;
-        let cz = n as f64 / 2.0;
-        let sigma_tube = 1.5;
+        let (cy, cz) = (n as f64 / 2.0, n as f64 / 2.0);
         for x in 1..(n - 1) {
             for y in 0..n {
                 for z in 0..n {
-                    let dy = y as f64 - cy;
-                    let dz = z as f64 - cz;
-                    let r2 = dy * dy + dz * dz;
-                    data[x + y * n + z * n * n] = (-r2 / (2.0 * sigma_tube * sigma_tube)).exp();
+                    let r2 = (y as f64 - cy).powi(2) + (z as f64 - cz).powi(2);
+                    data[x + y * n + z * n * n] = (-r2 / (2.0 * 1.5 * 1.5)).exp();
                 }
             }
         }
-
-        let params = FrangiParams {
-            scale_range: [1.0, 2.0],
-            scale_ratio: 1.0,
-            alpha: 0.5,
-            beta: 0.5,
-            c: 10.0, // Lower c to be more sensitive
-            black_white: false,
-        };
-
+        let params = FrangiParams { scale_range: [1.0, 2.0], scale_ratio: 1.0, c: 10.0, ..Default::default() };
         let result = frangi_filter_3d(&data, &grid(n, n, n), &params, |_, _| {});
-
-        // All should be valid
-        for &v in &result.vesselness {
-            assert!(v.is_finite());
-            assert!((0.0..=1.0).contains(&v));
-        }
-
-        // There should be some non-zero vesselness near the tube center
-        let max_v: f64 = result.vesselness.iter().cloned().fold(0.0, f64::max);
-        assert!(
-            max_v > 0.0,
-            "Frangi should detect the vessel-like structure, max vesselness = {}",
-            max_v
-        );
+        assert!(result.vesselness.iter().all(|v| v.is_finite() && (0.0..=1.0).contains(v)));
+        assert!(result.vesselness.iter().cloned().fold(0.0, f64::max) > 0.0);
+        assert!(result.scale.iter().all(|s| *s == 1.0 || *s == 2.0));
     }
 
     #[test]
-    fn test_frangi_filter_3d_default_params() {
-        // Test with default params
+    fn frangi_zero_input_progress_and_empty_scales() {
         let n = 8;
         let data = vec![0.0; n * n * n];
-
-        let result = frangi_filter_3d(&data, &grid(n, n, n), &FrangiParams::default(), |_, _| {});
-        assert_eq!(result.vesselness.len(), n * n * n);
-        for &v in &result.vesselness {
-            assert!(v.is_finite());
-        }
-    }
-
-    #[test]
-    fn test_frangi_with_progress() {
-        let n = 8;
-        let data = vec![0.0; n * n * n];
-        let params = FrangiParams {
-            scale_range: [1.0, 2.0],
-            scale_ratio: 1.0,
-            ..Default::default()
-        };
-
-        let mut progress_calls = Vec::new();
-        let result = frangi_filter_3d(&data, &grid(n, n, n), &params, |current, total| {
-            progress_calls.push((current, total));
-        });
-
-        assert_eq!(result.vesselness.len(), n * n * n);
-        // The progress callback should have been called at least once
-        assert!(!progress_calls.is_empty(), "Progress callback should be called");
-        // Last call should indicate completion
-        let last = progress_calls.last().unwrap();
-        assert_eq!(last.0, last.1, "Last progress call should indicate completion");
-    }
-
-    #[test]
-    fn test_sort_by_abs() {
-        let (a, b, c) = sort_by_abs(3.0, -1.0, 2.0);
-        assert!((a.abs()) <= b.abs());
-        assert!((b.abs()) <= c.abs());
-
-        let (a, b, c) = sort_by_abs(-5.0, 0.1, -2.0);
-        assert!((a.abs()) <= b.abs());
-        assert!((b.abs()) <= c.abs());
-    }
-
-    #[test]
-    fn test_compute_vesselness_zero_eigenvalues() {
-        // When eigenvalues are near zero, vesselness should be 0
-        let v = compute_vesselness(0.0, 0.0, 0.0, 0.5, 0.5, 500.0, false);
-        assert_eq!(v, 0.0);
-    }
-
-    #[test]
-    fn test_compute_vesselness_bright_vessel() {
-        // For bright vessels: l2 < 0 and l3 < 0
-        // Small l1, large negative l2, l3
-        let v = compute_vesselness(0.01, -1.0, -1.0, 0.5, 0.5, 500.0, false);
-        assert!(v.is_finite());
-        assert!(v >= 0.0);
-    }
-
-    #[test]
-    fn test_compute_vesselness_dark_vessel() {
-        // For dark vessels (black_white=true): l2 > 0 and l3 > 0
-        let v = compute_vesselness(0.01, 1.0, 1.0, 0.5, 0.5, 500.0, true);
-        assert!(v.is_finite());
-        assert!(v >= 0.0);
-    }
-
-    #[test]
-    fn test_compute_vesselness_wrong_sign() {
-        // bright vessel mode but positive eigenvalues -> should be 0
-        let v = compute_vesselness(0.01, 1.0, 1.0, 0.5, 0.5, 500.0, false);
-        assert_eq!(v, 0.0);
-
-        // dark vessel mode but negative eigenvalues -> should be 0
-        let v = compute_vesselness(0.01, -1.0, -1.0, 0.5, 0.5, 500.0, true);
-        assert_eq!(v, 0.0);
-    }
-
-    #[test]
-    fn test_gaussian_smooth_3d() {
-        // Smoothing a constant field should return the same field
-        let n = 8;
-        let data = vec![5.0; n * n * n];
-        let smoothed = gaussian_smooth_3d(&data, n, n, n, 1.0);
-        for &v in &smoothed {
-            assert!((v - 5.0).abs() < 1e-6, "Smoothing constant should preserve value, got {}", v);
-        }
-    }
-
-    #[test]
-    fn test_gaussian_smooth_3d_zero_sigma() {
-        // Zero sigma should return same data
-        let n = 4;
-        let data: Vec<f64> = (0..n * n * n).map(|i| i as f64).collect();
-        let smoothed = gaussian_smooth_3d(&data, n, n, n, 0.0);
-        assert_eq!(smoothed, data);
-    }
-
-    #[test]
-    fn test_gradient_3d_y_direction() {
-        // Test gradient in y direction
-        let n = 4;
-        let mut data = vec![0.0; n * n * n];
-        // Linear ramp in y
-        for k in 0..n {
-            for j in 0..n {
-                for i in 0..n {
-                    data[i + j * n + k * n * n] = j as f64;
-                }
-            }
-        }
-        let grad_y = gradient_3d(&data, n, n, n, 'y');
-        // Interior points should have gradient ~ 1.0
-        for k in 0..n {
-            for j in 1..(n - 1) {
-                for i in 0..n {
-                    let idx = i + j * n + k * n * n;
-                    assert!(
-                        (grad_y[idx] - 1.0).abs() < 1e-10,
-                        "y gradient at interior should be 1.0, got {}",
-                        grad_y[idx]
-                    );
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn test_gradient_3d_z_direction() {
-        // Test gradient in z direction
-        let n = 4;
-        let mut data = vec![0.0; n * n * n];
-        // Linear ramp in z
-        for k in 0..n {
-            for j in 0..n {
-                for i in 0..n {
-                    data[i + j * n + k * n * n] = k as f64;
-                }
-            }
-        }
-        let grad_z = gradient_3d(&data, n, n, n, 'z');
-        // Interior z-points should have gradient ~ 1.0
-        for k in 1..(n - 1) {
-            for j in 0..n {
-                for i in 0..n {
-                    let idx = i + j * n + k * n * n;
-                    assert!(
-                        (grad_z[idx] - 1.0).abs() < 1e-10,
-                        "z gradient at interior should be 1.0, got {}",
-                        grad_z[idx]
-                    );
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn test_eigenvalues_offdiagonal() {
-        // Test with off-diagonal elements
-        // Matrix: [[2, 1, 0], [1, 2, 0], [0, 0, 1]]
-        // Eigenvalues: 3, 1, 1
-        let (l1, l2, l3) = eigenvalues_3x3_cardano(2.0, 2.0, 1.0, 1.0, 0.0, 0.0);
-        let mut sorted = [l1, l2, l3];
-        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
-
-        assert!((sorted[0] - 1.0).abs() < 1e-10);
-        assert!((sorted[1] - 1.0).abs() < 1e-10);
-        assert!((sorted[2] - 3.0).abs() < 1e-10);
-    }
-
-    #[test]
-    fn test_frangi_empty_sigmas_fallback() {
-        // If scale_range[0] > scale_range[1], the sigmas list would be empty
-        // The code should fall back to using scale_range[0]
-        let n = 8;
-        let data = vec![0.0; n * n * n];
-        let params = FrangiParams {
-            scale_range: [5.0, 1.0], // min > max
-            scale_ratio: 1.0,
-            ..Default::default()
-        };
-
+        let mut calls = Vec::new();
+        let params = FrangiParams { scale_range: [1.0, 2.0], scale_ratio: 1.0, ..Default::default() };
+        let result = frangi_filter_3d(&data, &grid(n, n, n), &params, |c, t| calls.push((c, t)));
+        assert!(result.vesselness.iter().all(|&v| v == 0.0));
+        assert_eq!(calls.last(), Some(&(2, 2)));
+        // min > max: falls back to the first scale.
+        let params = FrangiParams { scale_range: [5.0, 1.0], scale_ratio: 1.0, ..Default::default() };
         let result = frangi_filter_3d(&data, &grid(n, n, n), &params, |_, _| {});
         assert_eq!(result.vesselness.len(), n * n * n);
-    }
-
-    #[test]
-    fn test_compute_hessian_3d() {
-        // Test that Hessian computation runs and produces finite output
-        let n = 8;
-        let data: Vec<f64> = (0..n * n * n).map(|i| (i as f64 * 0.01).sin()).collect();
-
-        let (dxx, dyy, dzz, dxy, dxz, dyz) = compute_hessian_3d(&data, n, n, n, 1.0);
-
-        assert_eq!(dxx.len(), n * n * n);
-        for &v in dxx.iter().chain(dyy.iter()).chain(dzz.iter())
-            .chain(dxy.iter()).chain(dxz.iter()).chain(dyz.iter()) {
-            assert!(v.is_finite(), "Hessian components must be finite");
-        }
-    }
-
-    #[test]
-    fn test_convolve_1d_all_directions() {
-        // Test that convolution in all 3 directions runs on non-trivial data
-        let n = 6;
-        let data: Vec<f64> = (0..n * n * n).map(|i| (i as f64) * 0.1).collect();
-        let kernel = vec![0.25, 0.5, 0.25]; // Simple smoothing kernel
-
-        let rx = convolve_1d_direction(&data, n, n, n, &kernel, 'x');
-        let ry = convolve_1d_direction(&data, n, n, n, &kernel, 'y');
-        let rz = convolve_1d_direction(&data, n, n, n, &kernel, 'z');
-
-        assert_eq!(rx.len(), n * n * n);
-        assert_eq!(ry.len(), n * n * n);
-        assert_eq!(rz.len(), n * n * n);
-
-        for &v in rx.iter().chain(ry.iter()).chain(rz.iter()) {
-            assert!(v.is_finite());
-        }
     }
 }
