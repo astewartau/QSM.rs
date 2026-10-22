@@ -10,6 +10,7 @@
 //! Prints the iteration count and run time. With `STAR_RAW=<path>` it also writes χ (ppm, f64,
 //! little-endian) for bit-level comparisons, since the NIfTI output may be single precision.
 use qsm_core::inversion::{star_qsm, StarParams};
+use qsm_core::EchoTime;
 use qsm_core::io::{read_nifti_file, save_nifti_to_file};
 use qsm_core::Grid;
 use std::path::Path;
@@ -23,7 +24,7 @@ fn main() {
     let num = |i: usize| -> f64 { a[i].parse().unwrap_or_else(|_| panic!("not a number: {}", a[i])) };
     let f = read_nifti_file(Path::new(&a[1])).expect("read phase");
     let m = read_nifti_file(Path::new(&a[2])).expect("read mask");
-    let mut params = StarParams { te: num(4) * 1e-3, b0: num(5), ..StarParams::default() };
+    let mut params = StarParams { te: EchoTime::Seconds(num(4) * 1e-3), b0: num(5), ..StarParams::default() };
     if a.len() >= 10 {
         let p: Vec<usize> = a[9].split(',').map(|v| v.parse().expect("pad must be whole numbers of voxels")).collect();
         params.pad = p.try_into().expect("pad must be three values, px,py,pz");

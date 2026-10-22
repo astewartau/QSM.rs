@@ -21,7 +21,7 @@ fn main() {
     let grid = Grid::new(f.dims.0, f.dims.1, f.dims.2, f.voxel_size.0, f.voxel_size.1, f.voxel_size.2);
     let (te_s, b0_t) = (num(5), num(6));
     let input = match a[1].as_str() {
-        "field" => TgvInput::FieldPpm { field: &f.data, te_s, b0_t },
+        "field" => TgvInput::FieldPpm { field: &f.data, echo_times: &[te_s], b0_t },
         "phase" => TgvInput::WrappedPhase { phase: &f.data, te_s, b0_t },
         other => panic!("input kind must be field or phase, got {other}"),
     };

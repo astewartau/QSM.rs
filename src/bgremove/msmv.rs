@@ -38,7 +38,9 @@
 //! `0.01·B0/3` rad. The library carries fields in **ppm**, so this port converts
 //! ppm→rad with `rad = ppm · 2π · γ · B0 · TE` (γ in MHz/T), runs the filter,
 //! then converts back. `TE` only sets the operating point of the radian
-//! threshold; the filter is otherwise a (thresholded) linear high-pass.
+//! threshold; the filter is otherwise a (thresholded) linear high-pass. Which echo time
+//! is [`MsmvParams::te`]'s choice; by default the echo spacing, as the authors' code works on
+//! MEDI's field in radians over `delta_TE`.
 //!
 //! The optional vessel-protection step (which needs an R2* map) is omitted, per
 //! the upstream behaviour when R2* is unavailable.
@@ -52,7 +54,7 @@
 
 use crate::fft::{apply_real_kernel, fft_real_kernel};
 use crate::kernels::smv::smv_kernel;
-use crate::Grid;
+use crate::{EchoTime, Grid};
 
 /// Parameters for [`msmv`].
 #[cfg_attr(feature = "introspection", derive(serde::Serialize))]
@@ -64,13 +66,15 @@ pub struct MsmvParams {
     pub maxk: usize,
     /// Main field strength in Tesla — sets the radian shadow-threshold cap `0.01·B0/3`.
     pub b0: f64,
-    /// Echo time in seconds for the ppm↔radian conversion (MEDI-representative default).
-    ///
-    /// The conversion uses the centre frequency `CF = γ̄·B0` with γ̄ =
-    /// [`GAMMA_BAR_HZ_PER_T`](crate::constants::GAMMA_BAR_HZ_PER_T): the mSMV authors take CF
-    /// from the scan header, so there is no reference γ̄ to match, and the crate's own value is
-    /// used.
-    pub te: f64,
+    /// Echo times in seconds, in acquisition order (scan parameter, for the ppm↔radian
+    /// conversion).
+    pub echo_times: Vec<f64>,
+    /// Which echo time the ppm↔radian conversion uses. Default [`EchoTime::Spacing`], MEDI's
+    /// `delta_TE`: the authors run `msmv` on MEDI's `RDF`, the field in radians over `delta_TE`
+    /// (`functions/MEDI_L1.m` line 71 of their MEDI toolbox release,
+    /// `prerelease/MEDI_toolbox-mSMV100125.zip` in agr78/mSMV 42a1f18; their SEPIA patch,
+    /// `patch/sepia_msmv.patch` line 261, converts with `RDF*2*pi*delta_TE`).
+    pub te: EchoTime,
     /// Whether to run mSMV's own SMV primary removal before the boundary
     /// correction. `true` (default) = self-contained total→local BFR; `false` =
     /// refine an already-local field from a primary BFR (see [`MsmvParams::refine`]).
@@ -79,7 +83,7 @@ pub struct MsmvParams {
 
 impl Default for MsmvParams {
     fn default() -> Self {
-        Self { radius: 5.0, maxk: 5, b0: 3.0, te: 0.008, prefilter: true }
+        Self { radius: 5.0, maxk: 5, b0: 3.0, echo_times: vec![0.008], te: EchoTime::Spacing, prefilter: true }
     }
 }
 
@@ -122,8 +126,9 @@ pub fn msmv(
 
     // ppm -> radians: rad = ppm · 1e-6 · 2π · CF · TE, with CF = γ̄ · B0 (the authors read CF
     // from the header; here it comes from the field strength the caller passes).
+    let te = params.te.seconds(&params.echo_times, "mSMV");
     let cf = crate::constants::GAMMA_BAR_HZ_PER_T * params.b0;
-    let ppm2rad = std::f64::consts::TAU * cf * 1e-6 * params.te;
+    let ppm2rad = std::f64::consts::TAU * cf * 1e-6 * te;
     let rdf: Vec<f64> = field.iter().map(|&v| v * ppm2rad).collect();
 
     let maskf: Vec<f64> = mask.iter().map(|&m| m as f64).collect();
@@ -237,7 +242,7 @@ mod tests {
                 }
             }
         }
-        let params = MsmvParams { radius: 4.0, maxk: 5, b0: 3.0, te: 0.008, prefilter: true };
+        let params = MsmvParams { radius: 4.0, maxk: 5, b0: 3.0, echo_times: vec![0.008], te: EchoTime::Spacing, prefilter: true };
         let (local, out_mask) = msmv(&field, &mask, &g, &params, |_, _| {});
 
         // Mask is preserved (mSMV does not erode).
@@ -303,7 +308,7 @@ mod tests {
                 }
             }
         }
-        let p = MsmvParams { b0: 3.0, te: 0.008, ..MsmvParams::default() };
+        let p = MsmvParams { b0: 3.0, echo_times: vec![0.008], ..MsmvParams::default() };
 
         // Refinement mode: no primary SMV, field below threshold → unchanged in mask.
         let (refined, _) = msmv(&field, &mask, &g, &MsmvParams { prefilter: false, ..p.clone() }, |_, _| {});

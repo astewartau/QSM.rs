@@ -44,7 +44,10 @@
 //! (in radians), `τ` is fixed and the solve stops after a handful of iterations, so the same
 //! field in ppm gives a different χ at another `TE` or `B0`. [`StarParams::te`] and
 //! [`StarParams::b0`] are therefore part of the method: the field is converted to the phase
-//! `φ = 2π·42.575·B0·TE · field` it would have at that echo, which is what STI is given. With
+//! `φ = 2π·42.575·B0·TE · field` it would have at the echo time `te` picks from
+//! [`StarParams::echo_times`], which is what STI is given. By default that is the sum of the
+//! echo times: STI Suite's `QSM_GUI` gives `QSM_star` the V-SHARP of the echoes' summed
+//! unwrapped phases with `'TE'` their summed echo times (see [`StarParams::te`]). With
 //! that conversion `star_qsm(field)` is `QSM_star(φ)` exactly (to rounding), 1.1 included.
 //!
 //! # Agreement with STI Suite
@@ -79,7 +82,7 @@ use num_complex::Complex64;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 use crate::fft::{Box3, Fft3dWorkspace, FftOpts};
-use crate::Grid;
+use crate::{EchoTime, Grid};
 
 /// Parameters for [`star_qsm`]. The defaults are STI Suite's: the GUI's padding, and
 /// `QSM_star`'s defaults otherwise.
@@ -112,34 +115,48 @@ pub struct StarParams {
     /// the affine, as for every other inversion), which is correct for oblique acquisitions.
     /// For the GUI's result, pass `(0, 0, 1)` explicitly; for axial scans the two agree.
     pub pad: [usize; 3],
-    /// Echo time in seconds the field is converted to phase at (default 0.04, STI's 40 ms).
-    /// See the module docs, *Units*; the pipeline sets it from the first echo time.
-    pub te: f64,
+    /// Echo times in seconds, in acquisition order (default `[0.04]`, STI's 40 ms). The
+    /// pipeline sets them from the scan metadata.
+    pub echo_times: Vec<f64>,
+    /// Which echo time the field is converted to phase at (see the module docs, *Units*).
+    /// Default [`EchoTime::Sum`], as STI Suite 3.0's multi-echo pipeline (`QSM_GUI`) gives
+    /// `QSM_star` its phase. Probed in MATLAB R2023b with logging wrappers, on 3 synthetic
+    /// echoes: loading the data sets its `sum_TE` field (`TE_value`) to `1000·sum(TEs)`;
+    /// "3D GRE data" (`VSHARPCallBackFcn`) runs `V_SHARP` on the sum of the echoes'
+    /// Laplacian-unwrapped phases (`MRPhaseUnwrap`), bit for bit, and divides that tissue
+    /// phase by `2π·ΣTE` for its frequency map; "star QSM" (`starQSMCallBack`) calls
+    /// `QSM_star(TissuePhase, NewMask, 'TE', sum_TE, ...)`. So the phase is the field over
+    /// `ΣTE`. (`STI_Templates.m` line 107's `TE=40` is that field's default.)
+    pub te: EchoTime,
     /// Field strength in tesla (default 3). The pipeline sets it from the scan metadata.
     pub b0: f64,
 }
 
 impl Default for StarParams {
     fn default() -> Self {
-        Self { pad: STAR_GUI_PAD, te: 0.04, b0: 3.0 }
+        Self { pad: STAR_GUI_PAD, echo_times: vec![0.04], te: EchoTime::Sum, b0: 3.0 }
     }
 }
 
 impl StarParams {
-    /// Checks the parameters: `te` and `b0` must be finite and > 0.
+    /// Checks the parameters: the echo time `te` picks must be finite and > 0, and so must
+    /// `b0`.
     pub fn validate(&self) -> Result<(), String> {
-        if !(self.te.is_finite() && self.te > 0.0) {
-            return Err(format!("STAR-QSM echo time must be finite and > 0 s, got {}", self.te));
-        }
+        self.te.resolve(&self.echo_times).map_err(|e| format!("STAR-QSM: {e}"))?;
         if !(self.b0.is_finite() && self.b0 > 0.0) {
             return Err(format!("STAR-QSM field strength must be finite and > 0 T, got {}", self.b0));
         }
         Ok(())
     }
 
-    /// Radians of phase per ppm of field at this TE and B0, with STI's γ = 42.575 MHz/T.
+    /// Radians of phase per ppm of field at the echo time `te` picks and B0, with STI's
+    /// γ = 42.575 MHz/T.
+    ///
+    /// # Panics
+    /// If `te` cannot be resolved from `echo_times` ([`validate`](Self::validate) checks).
     pub fn rad_per_ppm(&self) -> f64 {
-        2.0 * std::f64::consts::PI * STI_GAMMA_MHZ_PER_T * self.b0 * self.te
+        let te = self.te.seconds(&self.echo_times, "STAR-QSM");
+        2.0 * std::f64::consts::PI * STI_GAMMA_MHZ_PER_T * self.b0 * te
     }
 }
 
@@ -735,10 +752,18 @@ mod tests {
         assert_eq!(star_qsm(&[1.0; 64], &[0; 64], &grid, (0.0, 0.0, 1.0), &p, |_, _| {}), vec![0.0; 64]);
         assert_eq!(star_qsm(&[0.0; 64], &[1; 64], &grid, (0.0, 0.0, 1.0), &p, |_, _| {}), vec![0.0; 64]);
         assert!(p.validate().is_ok());
-        for bad in [StarParams { te: 0.0, ..StarParams::default() }, StarParams { b0: f64::NAN, ..StarParams::default() }] {
+        for bad in [
+            StarParams { te: EchoTime::Seconds(0.0), ..StarParams::default() },
+            StarParams { echo_times: vec![], ..StarParams::default() },
+            StarParams { b0: f64::NAN, ..StarParams::default() },
+        ] {
             assert!(bad.validate().is_err());
         }
-        assert!((StarParams { te: 0.02, b0: 3.0, pad: [0; 3] }.rad_per_ppm() - 2.0 * PI * 42.575 * 0.06).abs() < 1e-12);
+        let p = StarParams { echo_times: vec![0.02], te: EchoTime::First, b0: 3.0, pad: [0; 3] };
+        assert!((p.rad_per_ppm() - 2.0 * PI * 42.575 * 0.06).abs() < 1e-12);
+        // STI Suite's default: the phase summed over the echoes, at ΣTE.
+        let p = StarParams { echo_times: vec![0.004, 0.008, 0.012], ..StarParams::default() };
+        assert!((p.rad_per_ppm() - 2.0 * PI * 42.575 * 3.0 * 0.024).abs() < 1e-12);
     }
 
     /// A sphere's field on an odd grid: the padded grid grows to even, and χ comes out with

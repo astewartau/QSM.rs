@@ -3,6 +3,7 @@
 //!
 //! usage: ndi_file <field_ppm.nii[.gz]> <mask.nii[.gz]> <magnitude.nii[.gz]> <chi_out.nii.gz> <TE_ms> <B0_T> <Hx> <Hy> <Hz> [auto]
 use qsm_core::inversion::{ndi, NdiParams};
+use qsm_core::EchoTime;
 use qsm_core::io::{read_nifti_file, save_nifti_to_file};
 use qsm_core::Grid;
 use std::path::Path;
@@ -20,7 +21,7 @@ fn main() {
     let magnitude = read_nifti_file(Path::new(&a[3])).expect("read magnitude").data;
     let grid = Grid::new(f.dims.0, f.dims.1, f.dims.2, f.voxel_size.0, f.voxel_size.1, f.voxel_size.2);
     let base = if a.len() == 11 && a[10] == "auto" { NdiParams::auto() } else { NdiParams::default() };
-    let params = NdiParams { te: num(5) * 1e-3, b0: num(6), ..base };
+    let params = NdiParams { te: EchoTime::Seconds(num(5) * 1e-3), b0: num(6), ..base };
     let mut last = 0;
     let t = std::time::Instant::now();
     let chi = ndi(&f.data, &mask, &magnitude, &grid, (num(7), num(8), num(9)), &params, |i, _| last = i);

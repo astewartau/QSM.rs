@@ -45,7 +45,7 @@
 //! `CF = γ·B0`. The field is converted with `2π·CF·delta_TE·1e-6` first and the result converted
 //! back at the end, as `MEDI_L1.m` does. The result depends on this scale (the data term is
 //! nonlinear and λ is fixed), so `b0` and `echo_times` are scan parameters that the pipeline
-//! fills from metadata.
+//! fills from metadata, and [`MediParams::te`] picks the echo time (by default `delta_TE`).
 //!
 //! # Magnitude and data weight
 //! `MEDI_L1.m` weights the data by `1/N_std`, the noise standard deviation of the field
@@ -94,7 +94,7 @@ use num_complex::Complex64;
 use rayon::prelude::*;
 use crate::fft::{Box3, Fft3dWorkspace, FftOpts};
 use crate::kernels::dipole::dipole_kernel;
-use crate::Grid;
+use crate::{EchoTime, Grid};
 
 /// MEDI parameters (`MEDI_L1.m` / `parse_QSM_input.m` defaults)
 #[cfg_attr(feature = "introspection", derive(serde::Serialize))]
@@ -127,9 +127,13 @@ pub struct MediParams {
     /// Field strength in Tesla (scan parameter, for the radian conversion)
     pub b0: f64,
     /// Echo times in seconds, one per echo magnitude (scan parameter). The radian conversion
-    /// uses MEDI's `delta_TE`: `TE(2) − TE(1)`, or `TE` for one echo; the CSF mask uses R2*
-    /// from all of them (`arlo.m`).
+    /// picks one with [`te`](Self::te); the CSF mask uses R2* from all of them (`arlo.m`).
     pub echo_times: Vec<f64>,
+    /// Which echo time the radian conversion uses. Default [`EchoTime::Spacing`], MEDI's
+    /// `delta_TE`: `MEDI_L1.m` works on the field in radians over `delta_TE`
+    /// (`x/(2*pi*delta_TE*CF)*1e6`), which its readers set to `TE(2) − TE(1)`, or `TE` for one
+    /// echo (`Read_Siemens_DICOM.m` lines 176-178).
+    pub te: EchoTime,
     /// MEDI+0: zero-reference to the ventricular CSF (`extract_CSF.m` on `arlo.m` R2*, and
     /// `MEDI_L1`'s `lambda_CSF` term). On by default, as in MEDI's pipeline. Needs at least
     /// three echoes; with fewer, MEDI runs without it (see the module docs).
@@ -171,6 +175,7 @@ impl Default for MediParams {
             tol: 0.1,
             b0: 3.0,
             echo_times: vec![0.005],
+            te: EchoTime::Spacing,
             csf: true,
             lambda_csf: 100.0,
             csf_r2s_threshold: 5.0,
@@ -280,10 +285,10 @@ fn medi_l1(
     let mut fft = Fft3dWorkspace::new(grid.nx(), grid.ny(), grid.nz());
     let mut buf = vec![Complex64::new(0.0, 0.0); n];
 
-    // ppm -> radians over delta_TE; MEDI_L1 converts back with x/(2*pi*delta_TE*CF)*1e6.
+    // ppm -> radians over delta_TE (by default); MEDI_L1 converts back with
+    // x/(2*pi*delta_TE*CF)*1e6.
     let cf = crate::constants::GAMMA_BAR_HZ_PER_T * params.b0;
-    let te = &params.echo_times;
-    let delta_te = if te.len() == 1 { te[0] } else { te[1] - te[0] };
+    let delta_te = params.te.seconds(&params.echo_times, "MEDI");
     let ppm_to_rad = 2.0 * std::f64::consts::PI * delta_te * cf * 1e-6;
     let mut rdf = vec![0.0f64; n];
     par_fill(&mut rdf, |i| local_field[i] * ppm_to_rad);

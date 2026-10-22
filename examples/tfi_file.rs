@@ -8,6 +8,7 @@
 //! `<magnitude>` is `<echo1>,<echo2>,...`, the echo magnitudes (RSS edge mask and the
 //! Fit_ppm_complex noise map).
 use qsm_core::inversion::{tfi, EchoMagnitudes, TfiParams};
+use qsm_core::EchoTime;
 use qsm_core::io::{read_nifti_file, save_nifti_to_file};
 use qsm_core::Grid;
 use std::path::Path;
@@ -29,7 +30,7 @@ fn main() {
     let n_echoes = files.split(',').count();
     let magnitude = EchoMagnitudes { data: &mags, n_echoes };
     let grid = Grid::new(f.dims.0, f.dims.1, f.dims.2, f.voxel_size.0, f.voxel_size.1, f.voxel_size.2);
-    let mut params = TfiParams { te: num(5) * 1e-3, b0: num(6), ..TfiParams::default() };
+    let mut params = TfiParams { te: EchoTime::Seconds(num(5) * 1e-3), b0: num(6), ..TfiParams::default() };
     if a.len() > 10 {
         params.merit = a[10] == "merit";
     }

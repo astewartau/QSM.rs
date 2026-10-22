@@ -35,7 +35,9 @@
 //! Like the other inversions, `tfi` takes the field in ppm and returns ppm. `MEDI_L1` works on the
 //! field in radians accumulated over the echo spacing (`delta_TE`) at `CF = γ·B0`; the field is
 //! converted with `2π·CF·delta_TE·1e-6` first and back at the end, as `MEDI_L1.m` does. The
-//! result depends on this scale, so `b0` and `te` are scan parameters filled from metadata.
+//! result depends on this scale, so `b0` and `echo_times` are scan parameters
+//! that the pipeline fills from metadata, and [`TfiParams::te`] picks the echo time the
+//! conversion uses (by default the reference's choice; see there).
 //!
 //! # Magnitude and data weight
 //! As for [`medi`](super::medi), the echo magnitudes ([`EchoMagnitudes`]) are required: the edge
@@ -54,7 +56,7 @@
 use num_complex::Complex64;
 use crate::fft::Fft3dWorkspace;
 use crate::kernels::dipole::dipole_kernel;
-use crate::Grid;
+use crate::{EchoTime, Grid};
 
 use super::medi::{
     bounding_box, cgsolve, dataterm_mask, dconv, dconv_weighted, fgrad, gradient_mask, par_fill,
@@ -89,9 +91,14 @@ pub struct TfiParams {
     pub tol: f64,
     /// Field strength in Tesla (scan parameter, for the radian conversion)
     pub b0: f64,
-    /// Echo spacing in seconds, `TE(2) − TE(1)`, or the echo time for one echo (scan parameter,
-    /// for the radian conversion)
-    pub te: f64,
+    /// Echo times in seconds, in acquisition order (scan parameter, for the radian
+    /// conversion).
+    pub echo_times: Vec<f64>,
+    /// Which echo time the radian conversion uses. Default [`EchoTime::Spacing`]: the MEDI
+    /// toolbox's `MEDI_L1.m` works on the field in radians over `delta_TE`
+    /// (`x/(2*pi*delta_TE*CF)*1e6`), which its readers set to `TE(2) - TE(1)`, or TE for one echo
+    /// (`Read_Siemens_DICOM.m` lines 176-178).
+    pub te: EchoTime,
 }
 
 impl Default for TfiParams {
@@ -108,7 +115,8 @@ impl Default for TfiParams {
             max_iter: 10,
             tol: 0.1,
             b0: 3.0,
-            te: 0.005,
+            echo_times: vec![0.005],
+            te: EchoTime::Spacing,
         }
     }
 }
@@ -166,7 +174,7 @@ fn tfi_l1(
 
     // ppm -> radians over delta_TE; MEDI_L1 converts back with x/(2*pi*delta_TE*CF)*1e6.
     let cf = crate::constants::GAMMA_BAR_HZ_PER_T * params.b0;
-    let ppm_to_rad = 2.0 * std::f64::consts::PI * params.te * cf * 1e-6;
+    let ppm_to_rad = 2.0 * std::f64::consts::PI * params.te.seconds(&params.echo_times, "TFI") * cf * 1e-6;
     let mut rdf = vec![0.0f64; n];
     par_fill(&mut rdf, |i| total_field[i] * ppm_to_rad);
 

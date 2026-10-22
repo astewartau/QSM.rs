@@ -33,8 +33,8 @@
 //! `∇²φ` is formed (see [`TgvInput`]):
 //!
 //! - [`TgvInput::FieldPpm`]: an unwrapped field in ppm (for example a multi-echo field map),
-//!   scaled to phase at `te_s`. `∇²φ` is the ordinary discrete Laplacian: the reference's
-//!   `get_laplace_phase_romeo` with the unwrapping already done.
+//!   scaled to phase at the echo time [`TgvParams::te`] picks. `∇²φ` is the ordinary discrete
+//!   Laplacian: the reference's `get_laplace_phase_romeo` with the unwrapping already done.
 //! - [`TgvInput::WrappedPhase`]: one wrapped echo in rad, the original single-step TGV-QSM.
 //!   `∇²φ` is the wrap-insensitive sin/cos (DEL) Laplacian, the reference's default
 //!   `get_laplace_phase_del`.
@@ -64,12 +64,13 @@ pub fn rad_per_ppm(te_s: f64, b0_t: f64) -> f64 {
 #[derive(Clone, Copy, Debug)]
 pub enum TgvInput<'a> {
     /// Unwrapped total (or local) field in ppm, e.g. a multi-echo field map. It is scaled to
-    /// phase at `te_s`, and its Laplacian is the ordinary discrete Laplacian.
+    /// phase at the echo time [`TgvParams::te`] picks from `echo_times`, and its Laplacian is
+    /// the ordinary discrete Laplacian.
     FieldPpm {
         /// Field in ppm.
         field: &'a [f64],
-        /// Echo time in seconds at which the field is expressed as phase.
-        te_s: f64,
+        /// The scan's echo times in seconds, in acquisition order.
+        echo_times: &'a [f64],
         /// Field strength in Tesla.
         b0_t: f64,
     },
@@ -93,9 +94,11 @@ impl TgvInput<'_> {
         }
     }
 
-    fn te_b0(&self) -> (f64, f64) {
+    /// The echo time the input is phase at (for a field, the one `te` picks) and B0.
+    fn te_b0(&self, te: crate::EchoTime) -> Result<(f64, f64), String> {
         match *self {
-            TgvInput::FieldPpm { te_s, b0_t, .. } | TgvInput::WrappedPhase { te_s, b0_t, .. } => (te_s, b0_t),
+            TgvInput::FieldPpm { echo_times, b0_t, .. } => Ok((te.resolve(echo_times)?, b0_t)),
+            TgvInput::WrappedPhase { te_s, b0_t, .. } => Ok((te_s, b0_t)),
         }
     }
 }
@@ -115,6 +118,13 @@ pub struct TgvParams {
     pub erosions: usize,
     /// Primal step size multiplier (larger = faster but less stable; 1 is the publication)
     pub step_size: f32,
+    /// Which echo time a field ([`TgvInput::FieldPpm`]) is converted to phase at; a wrapped
+    /// echo is at its own. Default [`EchoTime::First`](crate::EchoTime::First):
+    /// QuantitativeSusceptibilityMappingTGV.jl takes the phase of one echo and its `TE`
+    /// (`qsm_tgv(phase, mask, res; TE, ...)`, README, af7650b) and has no rule for a field
+    /// combined over echoes, so the first echo time, the default where the reference does not
+    /// say.
+    pub te: crate::EchoTime,
 }
 
 impl Default for TgvParams {
@@ -122,7 +132,7 @@ impl Default for TgvParams {
         // QuantitativeSusceptibilityMappingTGV.jl defaults: regularization = 2,
         // erosions = 3, step_size = 3, iterations from the voxel size.
         let (alpha0, alpha1) = get_default_alpha(2.0);
-        Self { alpha1, alpha0, iterations: None, erosions: 3, step_size: 3.0 }
+        Self { alpha1, alpha0, iterations: None, erosions: 3, step_size: 3.0, te: crate::EchoTime::First }
     }
 }
 
@@ -1132,8 +1142,9 @@ impl TgvWorkspace {
 /// Returns χ in ppm.
 ///
 /// # Errors
-/// If the input or mask length does not match `grid`, if `te_s` or `b0_t` is not
-/// positive and finite, or if the mask is empty after `params.erosions` erosions.
+/// If the input or mask length does not match `grid`, if the echo time (`te_s`, or the one
+/// [`TgvParams::te`] picks from `echo_times`) or `b0_t` is not positive and finite, or if the
+/// mask is empty after `params.erosions` erosions.
 ///
 /// The reconstruction runs in single precision internally; inputs and
 /// outputs use `f64` to match the rest of the crate's API.
@@ -1149,7 +1160,7 @@ pub fn tgv_qsm(
     let n_total = grid.n_total();
     check_len("TGV input", input.data().len(), n_total)?;
     check_len("TGV mask", mask.len(), n_total)?;
-    let (te_s, b0_t) = input.te_b0();
+    let (te_s, b0_t) = input.te_b0(params.te).map_err(|e| InputError(format!("TGV: {e}")))?;
     if !(te_s.is_finite() && te_s > 0.0 && b0_t.is_finite() && b0_t > 0.0) {
         return Err(InputError(format!(
             "TGV needs te_s > 0 and b0_t > 0, got TE = {te_s} s, B0 = {b0_t} T"
@@ -1666,7 +1677,7 @@ mod tests {
         let grid = crate::Grid::new(n, n, n, 1.0, 1.0, 1.0);
         let progress_iters = std::cell::RefCell::new(Vec::new());
         let result = tgv_qsm(
-            TgvInput::FieldPpm { field: &phase, te_s: 0.02, b0_t: 3.0 }, &mask, &grid, &params, (0.0, 0.0, 1.0),
+            TgvInput::FieldPpm { field: &phase, echo_times: &[0.02], b0_t: 3.0 }, &mask, &grid, &params, (0.0, 0.0, 1.0),
             |iter, _total| { progress_iters.borrow_mut().push(iter); }
         ).unwrap();
 
@@ -1767,7 +1778,7 @@ mod tests {
         let field = test_field(n, 0.1);
         let params = TgvParams { iterations: Some(300), erosions: 1, ..TgvParams::default() };
         let at = |te: f64, p: &TgvParams| {
-            tgv_qsm(TgvInput::FieldPpm { field: &field, te_s: te, b0_t: 3.0 }, &mask, &grid, p, (0.0, 0.0, 1.0), |_, _| {}).unwrap()
+            tgv_qsm(TgvInput::FieldPpm { field: &field, echo_times: &[te], b0_t: 3.0 }, &mask, &grid, p, (0.0, 0.0, 1.0), |_, _| {}).unwrap()
         };
         let chi_2te = at(0.02, &params);
         let half = TgvParams { alpha0: params.alpha0 / 2.0, alpha1: params.alpha1 / 2.0, ..params.clone() };
@@ -1792,7 +1803,7 @@ mod tests {
         let field = test_field(n, 0.02);
         let params = TgvParams { iterations: Some(300), erosions: 1, ..TgvParams::default() };
         for te in [0.005, 0.020] {
-            let chi_f = tgv_qsm(TgvInput::FieldPpm { field: &field, te_s: te, b0_t: 3.0 }, &mask, &grid, &params, (0.0, 0.0, 1.0), |_, _| {}).unwrap();
+            let chi_f = tgv_qsm(TgvInput::FieldPpm { field: &field, echo_times: &[te], b0_t: 3.0 }, &mask, &grid, &params, (0.0, 0.0, 1.0), |_, _| {}).unwrap();
             let norm = chi_f.iter().map(|v| v * v).sum::<f64>().sqrt();
             let c = rad_per_ppm(te, 3.0);
             let wrap = |x: f64| (x + std::f64::consts::PI).rem_euclid(2.0 * std::f64::consts::PI) - std::f64::consts::PI;
@@ -1854,7 +1865,7 @@ mod tests {
 
         let params = TgvParams::default();
         let (te, b0) = (0.010, 3.0);
-        let ppm = tgv_qsm(TgvInput::FieldPpm { field: &field, te_s: te, b0_t: b0 }, &mask, &grid, &params, (0.0, 0.0, 1.0), |_, _| {}).unwrap();
+        let ppm = tgv_qsm(TgvInput::FieldPpm { field: &field, echo_times: &[te], b0_t: b0 }, &mask, &grid, &params, (0.0, 0.0, 1.0), |_, _| {}).unwrap();
         let s_ppm = slope(&ppm, &chi, scored);
         assert!((0.5..1.5).contains(&s_ppm), "FieldPpm slope {s_ppm:.3} against the phantom");
 
@@ -1877,10 +1888,10 @@ mod tests {
         let err = tgv_qsm(input, &mask, &grid, &TgvParams::default(), (0.0, 0.0, 1.0), |_, _| {})
             .unwrap_err();
         assert!(err.to_string().contains("te_s > 0"), "{err}");
-        let input = TgvInput::FieldPpm { field: &phase, te_s: 0.0, b0_t: 3.0 };
+        let input = TgvInput::FieldPpm { field: &phase, echo_times: &[0.0], b0_t: 3.0 };
         assert!(tgv_qsm(input, &mask, &grid, &TgvParams::default(), (0.0, 0.0, 1.0), |_, _| {}).is_err());
         // and a mask of the wrong size is an error, not a panic
-        let input = TgvInput::FieldPpm { field: &phase, te_s: 0.02, b0_t: 3.0 };
+        let input = TgvInput::FieldPpm { field: &phase, echo_times: &[0.02], b0_t: 3.0 };
         assert!(tgv_qsm(input, &mask[1..], &grid, &TgvParams::default(), (0.0, 0.0, 1.0), |_, _| {}).is_err());
     }
 
@@ -1894,10 +1905,10 @@ mod tests {
         let mut mask = vec![0u8; n * n * n];
         mask[3 + 3 * n + 3 * n * n] = 1; // one voxel: gone after a single erosion
         let p = TgvParams { erosions: 1, iterations: Some(1), ..Default::default() };
-        let input = TgvInput::FieldPpm { field: &field, te_s: 0.02, b0_t: 3.0 };
+        let input = TgvInput::FieldPpm { field: &field, echo_times: &[0.02], b0_t: 3.0 };
         let err = tgv_qsm(input, &mask, &grid, &p, (0.0, 0.0, 1.0), |_, _| {}).unwrap_err();
         assert!(err.0.contains("TGV erosions = 1"), "{err}");
-        let input = TgvInput::FieldPpm { field: &field, te_s: 0.02, b0_t: 3.0 };
+        let input = TgvInput::FieldPpm { field: &field, echo_times: &[0.02], b0_t: 3.0 };
         let err = tgv_qsm(input, &[0u8; 512], &grid, &p, (0.0, 0.0, 1.0), |_, _| {}).unwrap_err();
         assert!(err.0.contains("TGV mask is empty"), "{err}");
     }

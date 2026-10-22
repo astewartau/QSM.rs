@@ -19,11 +19,12 @@
 //! (<https://gitlab.com/cmilovic/FANSI-toolbox>).
 //!
 //! # Units and weights
-//! Like the other inversions, these take the local field in ppm and return ppm.
-//! nlTV.m and nlTGV.m work on the phase in radians, so the field is converted
-//! with `2*pi*gamma*b0*te` first and the result converted back at the end; left
-//! in ppm, `sin(x) ~ x` and the data term is not nonlinear. `b0` and `te` are
-//! scan parameters that the pipeline fills from metadata.
+//! Like the other inversions, these take the local field in ppm and return ppm. nlTV.m and nlTGV.m
+//! work on the phase in radians, so the field is converted with `2*pi*gamma*b0*te` first and the
+//! result converted back at the end; left in ppm, `sin(x) ~ x` and the data term is not nonlinear.
+//! `b0` and `echo_times` are scan parameters that the pipeline fills from metadata, and
+//! [`FansiParams::te`] picks the echo time the conversion uses (by default the reference's choice;
+//! see there).
 //!
 //! The data weight is the magnitude, normalised as in FANSI's in vivo example
 //! (`min(2*mask*mag/max(mag), 1)`), and squared as nlTV.m/nlTGV.m square
@@ -36,7 +37,7 @@
 use crate::inversion::admm::{fansi_magnitude_weight, fansi_ppm_to_rad, fansi_unit_ee2, prepare_fansi_spectral};
 use crate::utils::gradient::{bdiv_inplace, fgrad_inplace};
 use crate::utils::{apply_mask_zero, shrink};
-use crate::Grid;
+use crate::{EchoTime, Grid};
 use num_complex::Complex64;
 use std::f64::consts::PI;
 
@@ -63,8 +64,22 @@ pub struct FansiParams {
     pub tol_delta: f64,
     /// Field strength in Tesla (scan parameter, for the radian conversion)
     pub b0: f64,
-    /// Echo time in seconds (scan parameter, for the radian conversion)
-    pub te: f64,
+    /// Echo times in seconds, in acquisition order (scan parameter, for the radian
+    /// conversion).
+    pub echo_times: Vec<f64>,
+    /// Which echo time the radian conversion uses. Default [`EchoTime::Spacing`]: FANSI's
+    /// multi-echo example, `script_DICOM_Philips.m`, scales the field to radians by `deltaTE =
+    /// TE(echo2) - TE(echo1)` (FANSI-toolbox 93044a3, line 364) before `nlTV`/`nlTGV` (lines 370,
+    /// 421). That script's `echo1 = 2`, `echo2 = 4` (lines 224-225) make it twice the spacing of
+    /// its evenly spaced echoes; its comment adds "You may use also any individual echo time".
+    /// On the qsm-forward phantom (echoes 4/12/20/28 ms; XSIM / NRMSE / r), the magnitude weight does better at the echo spacing than
+    /// at the first echo on every metric: nlTV 0.802 / 39.8% / 0.918 vs 0.797 / 43.0% / 0.903,
+    /// nlTGV (50 iterations) 0.767 / 40.1% / 0.916 vs 0.765 / 42.8% / 0.904.
+    ///
+    /// The magnitude weight is required, although `nlTV.m` and `nlTGV.m` weight by ones when
+    /// given none (`nlTV.m` lines 213, 274; `nlTGV.m` lines 350, 365): with a flat weight both
+    /// diverge on that phantom at either echo time.
+    pub te: EchoTime,
     /// Select nlTGV (`true`) or nlTV (`false`).
     pub is_tgv: bool,
 }
@@ -81,7 +96,8 @@ impl Default for FansiParams {
             tol_update: 0.1,
             tol_delta: 1e-6,
             b0: 3.0,
-            te: 0.02,
+            echo_times: vec![0.02],
+            te: EchoTime::Spacing,
             is_tgv: false,
         }
     }
@@ -100,7 +116,7 @@ fn phase_and_weight(
     magnitude: &[f64],
     params: &FansiParams,
 ) -> (f64, Vec<f64>, Vec<f64>) {
-    let ppm_to_rad = fansi_ppm_to_rad(params.b0, params.te);
+    let ppm_to_rad = fansi_ppm_to_rad(params.b0, params.te.seconds(&params.echo_times, "FANSI"));
     let phase = local_field.iter().map(|&f| f * ppm_to_rad).collect();
     let w = fansi_magnitude_weight(mask, magnitude).into_iter().map(|v| v * v).collect();
     (ppm_to_rad, phase, w)

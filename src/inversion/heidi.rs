@@ -45,8 +45,8 @@
 //! thresholding, which is the same quantity. The cone fill is not scale-free: NESTA's
 //! smoothing ends at an absolute μ (machine epsilon) and upstream's χ is in units of the
 //! phase (`ppm · γ·TE·B₀·1e-6`, `γ` in rad/s/T), so the seed is converted to those units
-//! before NESTA and back after, with [`HeidiParams::te`] and [`HeidiParams::b0`] (scan
-//! parameters the pipeline fills from metadata).
+//! before NESTA and back after, with [`HeidiParams::b0`] and [`HeidiParams::echo_times`] (scan
+//! parameters the pipeline fills from metadata) at the echo time [`HeidiParams::te`] picks.
 //!
 //! Reference:
 //! Schweser, F., Sommer, K., Deistung, A., Reichenbach, J.R. (2012).
@@ -67,7 +67,7 @@ use crate::utils::anisotropic_diffusion::{
     gradient_anisotropic_diffusion, AnisotropicDiffusionParams,
 };
 use crate::utils::apply_mask_zero;
-use crate::Grid;
+use crate::{EchoTime, Grid};
 
 use super::lsqr_qsm::{crop_pad, lsqr_qsm_padded, spatial_dipole_kernel, uncrop, LsqrQsmParams};
 #[cfg(feature = "parallel")]
@@ -137,9 +137,14 @@ pub struct HeidiParams {
     pub tol: f64,
     /// Field strength in tesla (scan parameter, for the conversion to upstream's units)
     pub b0: f64,
-    /// Echo time in seconds of the phase the field stands for (scan parameter, for the
-    /// conversion to upstream's units)
-    pub te: f64,
+    /// Echo times in seconds, in acquisition order (scan parameter, for the conversion to
+    /// upstream's units).
+    pub echo_times: Vec<f64>,
+    /// Which echo time the field stands for the phase of, in the conversion to upstream's units. Default [`EchoTime::Last`]: qsm_heidi's
+    /// `phase2susceptibilityfactor.m` uses the last echo time unless an echo is named
+    /// (`heidi/phase2susceptibilityfactor.m` lines 70-71, qsm_heidi 4592631), and
+    /// `inversion_heidi.m` names none (line 58).
+    pub te: EchoTime,
 }
 
 impl Default for HeidiParams {
@@ -163,7 +168,8 @@ impl Default for HeidiParams {
             mu_min: f64::EPSILON,
             tol: f64::EPSILON,
             b0: 3.0,
-            te: 0.02,
+            echo_times: vec![0.02],
+            te: EchoTime::Last,
         }
     }
 }
@@ -235,7 +241,7 @@ fn heidi_on_grid(
     let masks = homogeneity_masks(local_field, mask, grid, params);
     let cone = cone_mask(grid, bdir, params.cone_threshold);
     // ppm -> upstream's phase units for χ (see the module docs, *Units*), and back.
-    let to_phase = GAMMA * params.te * params.b0 * 1e-6;
+    let to_phase = GAMMA * params.te.seconds(&params.echo_times, "HEIDI") * params.b0 * 1e-6;
     let seed: Vec<f64> = chi_init.iter().map(|v| v * to_phase).collect();
     let mut chi = nesta_cone_fill(&seed, &cone, &masks, grid, params, progress);
     for v in &mut chi {
@@ -949,9 +955,9 @@ mod tests {
         let seed: Vec<f64> = (0..nt).map(|i| ((i as f64) * 0.13).sin() * 0.05).collect();
         let field: Vec<f64> = (0..nt).map(|i| ((i as f64) * 0.07).cos() * 0.01).collect();
         let mask = vec![1u8; nt];
-        let p = HeidiParams { denoise: None, continuation_steps: 3, inner_iterations: 30, te: 0.025, b0: 7.0, ..Default::default() };
+        let p = HeidiParams { denoise: None, continuation_steps: 3, inner_iterations: 30, echo_times: vec![0.005, 0.025], b0: 7.0, ..Default::default() };
         let chi = heidi_on_grid(&field, &mask, &seed, &g, (0.0, 0.0, 1.0), &p, |_, _| {});
-        let s = GAMMA * p.te * p.b0 * 1e-6;
+        let s = GAMMA * 0.025 * p.b0 * 1e-6; // the last echo time, HEIDI's default
         let masks = homogeneity_masks(&field, &mask, &g, &p);
         let cone = cone_mask(&g, (0.0, 0.0, 1.0), p.cone_threshold);
         let scaled: Vec<f64> = seed.iter().map(|v| v * s).collect();

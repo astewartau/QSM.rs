@@ -36,13 +36,14 @@
 //! # Units
 //! Like the other inversions, NLTV takes the local field in ppm and returns ppm. The nonlinear
 //! data term needs the phase in radians, so the field is converted with `2*pi*gamma*b0*te`
-//! first and the result converted back at the end. `b0` and `te` are scan parameters that the
-//! pipeline fills from metadata.
+//! first and the result converted back at the end. `b0` and `echo_times` are scan parameters
+//! that the pipeline fills from metadata, and [`NltvParams::te`] picks the echo time the
+//! conversion uses (by default the reference's choice; see there).
 
 use crate::utils::gradient::{bdiv_inplace, fgrad_inplace};
 use crate::utils::padding::{pad3d, unpad3d};
 use crate::utils::apply_mask_zero;
-use crate::Grid;
+use crate::{EchoTime, Grid};
 use super::admm::prepare_fansi_spectral;
 use num_complex::Complex64;
 
@@ -66,8 +67,14 @@ pub struct NltvParams {
     pub max_iter_newton: usize,
     /// Field strength in Tesla (scan parameter, for the radian conversion)
     pub b0: f64,
-    /// Echo time in seconds (scan parameter, for the radian conversion)
-    pub te: f64,
+    /// Echo times in seconds, in acquisition order (scan parameter, for the radian
+    /// conversion).
+    pub echo_times: Vec<f64>,
+    /// Which echo time the radian conversion uses. Default [`EchoTime::First`]: QSM.jl's `nltv`
+    /// (`src/inversion/nltv.jl`, fde4b92) takes the field or phase of each echo separately and
+    /// gives no rule for a field combined over echoes, so the first echo time, the default where
+    /// the reference does not say.
+    pub te: EchoTime,
 }
 
 impl Default for NltvParams {
@@ -81,7 +88,8 @@ impl Default for NltvParams {
             tol_newton: 1e-6,
             max_iter_newton: 10,
             b0: 3.0,
-            te: 0.02,
+            echo_times: vec![0.02],
+            te: EchoTime::First,
         }
     }
 }
@@ -152,7 +160,7 @@ pub fn nltv(
     let tol_newton2 = params.tol_newton * params.tol_newton;
 
     // ppm -> radians, as the nonlinear data term needs.
-    let ppm_to_rad = 2.0 * std::f64::consts::PI * crate::constants::GAMMA_BAR_MHZ_PER_T * params.b0 * params.te;
+    let ppm_to_rad = 2.0 * std::f64::consts::PI * crate::constants::GAMMA_BAR_MHZ_PER_T * params.b0 * params.te.seconds(&params.echo_times, "NLTV");
 
     // Zero padding to a fast FFT size (QSM.jl `pad = (0, 0, 0)`). Every step is
     // shift-equivariant, so placing the data in the corner is the same as centring it.

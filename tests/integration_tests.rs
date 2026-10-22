@@ -344,7 +344,7 @@ fn test_bgremove_msmv() {
     let start = Instant::now();
     let (primary, primary_mask) =
         bgremove::vsharp(&data.fieldmap, &data.mask, &grid, &VsharpParams::default(), |_, _| {}).unwrap();
-    let params = MsmvParams { b0: data.field_strength, ..MsmvParams::refine() };
+    let params = MsmvParams { b0: data.field_strength, echo_times: data.echo_times.clone(), ..MsmvParams::refine() };
     let (result, mask) = bgremove::msmv(&primary, &primary_mask, &grid, &params, |_, _| {});
     let elapsed = start.elapsed();
 
@@ -644,8 +644,9 @@ fn test_inversion_star() {
     let (vsx, vsy, vsz) = data.voxel_size;
 
     let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
-    // STAR-QSM converts the ppm field to phase at TE1 and B0, as the pipeline does.
-    let params = inversion::StarParams { te: data.echo_times[0], b0: data.field_strength, ..Default::default() };
+    // STAR-QSM converts the ppm field to phase at the echo time its `te` picks (by default
+    // the sum of the echo times, as STI Suite's GUI does) and B0, as the pipeline does.
+    let params = inversion::StarParams { echo_times: data.echo_times.clone(), b0: data.field_strength, ..Default::default() };
     let (result, elapsed) = run_timed!("STAR-QSM", inversion::star_qsm(
         &data.fieldmap_local,
         &data.mask,
@@ -718,9 +719,7 @@ fn test_combined_tfi() {
     let (nx, ny, nz) = data.dims;
     let (vsx, vsy, vsz) = data.voxel_size;
 
-    let te = &data.echo_times;
-    let delta_te = if te.len() > 1 { te[1] - te[0] } else { te[0] };
-    let params = TfiParams { b0: data.field_strength, te: delta_te, ..TfiParams::default() };
+    let params = TfiParams { b0: data.field_strength, echo_times: data.echo_times.clone(), ..TfiParams::default() };
     let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
     let echoes: Vec<f64> = data.mag_echoes.concat();
     let (result, elapsed) = run_timed!("TFI", inversion::tfi(
@@ -756,7 +755,7 @@ fn test_inversion_nltv() {
     let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
     let (result, elapsed) = run_timed!("NLTV", inversion::nltv(
         &data.fieldmap_local, &data.mask, &data.mag_echoes[0], &grid, data.b0_dir,
-        &NltvParams { b0: data.field_strength, te: data.echo_times[0], ..Default::default() }, |_, _| {},
+        &NltvParams { b0: data.field_strength, echo_times: data.echo_times.clone(), ..Default::default() }, |_, _| {},
     ));
 
     let res = TestResult::new("NLTV", &result, &data.chi, &data.mask, data.dims);
@@ -782,7 +781,7 @@ fn test_inversion_ndi() {
     let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
     let (result, elapsed) = run_timed!("NDI", inversion::ndi(
         &data.fieldmap_local, &data.mask, &data.mag_echoes[0], &grid, data.b0_dir,
-        &NdiParams { b0: data.field_strength, te: data.echo_times[0], ..Default::default() }, |_, _| {},
+        &NdiParams { b0: data.field_strength, echo_times: data.echo_times.clone(), ..Default::default() }, |_, _| {},
     ));
 
     let res = TestResult::new("NDI", &result, &data.chi, &data.mask, data.dims);
@@ -845,7 +844,7 @@ fn test_inversion_fansi() {
     // the Newton step's denominator W*cos(z2 - phase) + mu2 reaches 0 where the phantom's
     // phase reaches +-pi, and nlTV.m itself diverges.
     let params = FansiParams {
-        is_tgv: false, b0: data.field_strength, te: data.echo_times[0], ..FansiParams::default()
+        is_tgv: false, b0: data.field_strength, echo_times: data.echo_times.clone(), ..FansiParams::default()
     };
     let (result, elapsed) = run_timed!("FANSI-nlTV", inversion::fansi(
         &data.fieldmap_local, &data.mask, &data.mag_echoes[0], &grid, data.b0_dir, &params, |_, _| {},
@@ -876,7 +875,7 @@ fn test_inversion_fansi_tgv() {
     // iterations here to keep the CI job runtime reasonable.
     // Scan b0/te and the magnitude weight, as for nlTV above.
     let params = FansiParams {
-        is_tgv: true, max_iter: 50, b0: data.field_strength, te: data.echo_times[0],
+        is_tgv: true, max_iter: 50, b0: data.field_strength, echo_times: data.echo_times.clone(),
         ..FansiParams::default()
     };
     let (result, elapsed) = run_timed!("FANSI-nlTGV", inversion::fansi(
@@ -906,7 +905,7 @@ fn test_inversion_l1qsm() {
     let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
     let (result, elapsed) = run_timed!("L1-QSM", inversion::l1qsm(
         &data.fieldmap_local, &data.mask, &data.mag_echoes[0], &grid, data.b0_dir,
-        &L1QsmParams { b0: data.field_strength, te: data.echo_times[0], ..L1QsmParams::default() },
+        &L1QsmParams { b0: data.field_strength, echo_times: data.echo_times.clone(), ..L1QsmParams::default() },
         |_, _| {},
     ));
 
@@ -931,9 +930,10 @@ fn test_inversion_whqsm() {
     let (vsx, vsy, vsz) = data.voxel_size;
 
     let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
-    // Cap iterations for CI runtime (the input local field is already clean).
+    // Cap iterations for CI runtime (the input local field is already clean). Defaults: WH_nlTV's
+    // flat weight at the first echo.
     let params = WhQsmParams {
-        max_iter: 100, b0: data.field_strength, te: data.echo_times[0], ..WhQsmParams::default()
+        max_iter: 100, b0: data.field_strength, echo_times: data.echo_times.clone(), ..WhQsmParams::default()
     };
     let (result, elapsed) = run_timed!("WH-QSM", inversion::whqsm(
         &data.fieldmap_local, &data.mask, None, &grid, data.b0_dir, &params, |_, _| {},
@@ -997,7 +997,7 @@ fn test_inversion_heidi() {
     let heidi_params = HeidiParams {
         inner_iterations: 50,
         b0: data.field_strength,
-        te: *data.echo_times.last().expect("echo times"),
+        echo_times: data.echo_times.clone(),
         ..Default::default()
     };
     let (result, elapsed) = run_timed!("HEIDI", inversion::heidi(
@@ -1428,7 +1428,7 @@ fn test_combined_tgv() {
     println!("[INFO] Running TGV (from total field map)...");
     let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
     let result = tgv_qsm(
-        TgvInput::FieldPpm { field: &data.fieldmap, te_s: data.echo_times[0], b0_t: data.field_strength },
+        TgvInput::FieldPpm { field: &data.fieldmap, echo_times: &data.echo_times, b0_t: data.field_strength },
         &data.mask,
         &grid,
         &tgv_params,
@@ -1738,7 +1738,7 @@ fn test_pipeline_tgv() {
     println!("[INFO] Running TGV...");
     let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
     let result = tgv_qsm(
-        TgvInput::FieldPpm { field: &field_ppm, te_s: data.echo_times[0], b0_t: data.field_strength },
+        TgvInput::FieldPpm { field: &field_ppm, echo_times: &data.echo_times, b0_t: data.field_strength },
         &data.mask,
         &grid,
         &tgv_params,
@@ -2178,7 +2178,7 @@ fn test_all_combinations() {
         emit_row(&mut csv, &bfr.name, "TV-ADMM", &c, bt, elapsed.as_secs_f64());
 
         // NLTV
-        let nltv_params = NltvParams { b0: data.field_strength, te: data.echo_times[0], ..Default::default() };
+        let nltv_params = NltvParams { b0: data.field_strength, echo_times: data.echo_times.clone(), ..Default::default() };
         let (result, elapsed) = run_timed!("NLTV", inversion::nltv(
             &bfr.local_field, &bfr.mask, &data.mag_echoes[0], &grid, data.b0_dir, &nltv_params, |_, _| {}
         ));
@@ -2219,7 +2219,7 @@ fn test_all_combinations() {
         // QuantitativeSusceptibilityMappingTGV.jl defaults (α in rad units, iterations from the voxel size)
         let tgv_params = TgvParams::default();
         let result = tgv_qsm(
-            TgvInput::FieldPpm { field: &data.fieldmap, te_s: data.echo_times[0], b0_t: data.field_strength }, &data.mask, &grid,
+            TgvInput::FieldPpm { field: &data.fieldmap, echo_times: &data.echo_times, b0_t: data.field_strength }, &data.mask, &grid,
             &tgv_params,
             data.b0_dir,
             |_, _| {},
