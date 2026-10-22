@@ -10,9 +10,9 @@
 /// Proton reduced gyromagnetic ratio γ̄ = γ/2π, in Hz/T.
 ///
 /// 42.576 MHz/T, the value QSM.rs has always used and the one the QSM-CI contract states for
-/// Hz ↔ ppm. (CODATA 2018's shielded-proton-free value is 42.577 478 MHz/T; the 3e-5 relative
-/// difference is far below anything a field map resolves, and changing it would change every
-/// output.)
+/// Hz ↔ ppm. CODATA 2018 gives 42.577 478 MHz/T for the free proton and 42.576 385 MHz/T for the
+/// proton shielded in water, which is what tissue protons are closer to; the differences are far
+/// below anything a field map resolves, and changing the value would change every output.
 pub const GAMMA_BAR_HZ_PER_T: f64 = 42.576e6;
 
 /// [`GAMMA_BAR_HZ_PER_T`] in MHz/T, for formulas written as `2π · γ̄[MHz/T] · B0 · TE` (ppm → rad).
