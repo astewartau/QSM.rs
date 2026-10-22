@@ -1,16 +1,17 @@
-//! `inversion::star_qsm` against STI Suite 3.0's `QSM_star` on three 48x56x40 phantoms.
+//! `inversion::star_qsm` against STI Suite 3.0's `QSM_star` on 48x56x40 phantoms.
 //!
 //! The inputs are rebuilt here exactly as the MATLAB script that made the references built them
 //! (spheres of four susceptibilities in an ellipsoid mask, forward-modelled with STI's centred
 //! dipole kernel, converted to phase with γ = 42.576 MHz/T), so the fixture only holds STI's
 //! output. `tests/data/star_sti_small.bin` (little-endian): for each case in [`CASES`] order, the
 //! number of mask voxels (u32) and STI's χ there (f64, ppm, column-major), from MATLAB R2023b
-//! `chi = QSM_star(TP, mask, 'TE', TE, 'B0', B0, 'H', H, 'padsize', [p p p], 'voxelsize', vs)`.
+//! `chi = QSM_star(TP, mask, 'TE', TE, 'B0', B0, 'H', H, 'padsize', pad, 'voxelsize', vs)`.
+//! The last case uses `StarParams`' default padding, `[8 8 20]` as STI Suite's `QSM_GUI` passes it.
 //! STI's χ is zero outside the mask.
 
 use num_complex::Complex64;
 use qsm_core::fft::{fft3d, ifft3d};
-use qsm_core::inversion::{star_qsm, StarParams};
+use qsm_core::inversion::{star_qsm, StarParams, STAR_GUI_PAD};
 use qsm_core::Grid;
 
 const DIMS: [usize; 3] = [48, 56, 40];
@@ -20,23 +21,32 @@ struct Case {
     b0: f64,
     te_ms: f64,
     h: [f64; 3],
-    pad: usize,
+    pad: [usize; 3],
     vs: [f64; 3],
     /// SpaRSA iterations STI's run took
     iterations: usize,
 }
 
-const CASES: [Case; 3] = [
-    Case { name: "axial 3 T", b0: 3.0, te_ms: 20.0, h: [0.0, 0.0, 1.0], pad: 12, vs: [1.0, 1.0, 1.0], iterations: 12 },
-    Case { name: "anisotropic voxels", b0: 3.0, te_ms: 20.0, h: [0.0, 0.0, 1.0], pad: 12, vs: [0.8, 0.9, 1.5], iterations: 5 },
+const CASES: [Case; 4] = [
+    Case { name: "axial 3 T", b0: 3.0, te_ms: 20.0, h: [0.0, 0.0, 1.0], pad: [12; 3], vs: [1.0, 1.0, 1.0], iterations: 12 },
+    Case { name: "anisotropic voxels", b0: 3.0, te_ms: 20.0, h: [0.0, 0.0, 1.0], pad: [12; 3], vs: [0.8, 0.9, 1.5], iterations: 5 },
     Case {
         name: "oblique 7 T, pad 8",
         b0: 7.0,
         te_ms: 5.0,
         h: [0.10101525445522108, -0.4040610178208843, 0.9091372900969897],
-        pad: 8,
+        pad: [8; 3],
         vs: [1.0, 1.0, 1.0],
         iterations: 7,
+    },
+    Case {
+        name: "anisotropic voxels, GUI padding",
+        b0: 3.0,
+        te_ms: 20.0,
+        h: [0.0, 0.0, 1.0],
+        pad: STAR_GUI_PAD,
+        vs: [0.8, 0.9, 1.5],
+        iterations: 5,
     },
 ];
 

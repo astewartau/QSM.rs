@@ -961,7 +961,7 @@ mod tests {
 
     #[test]
     fn test_inversion_star() {
-        let star = crate::inversion::StarParams { pad: 4, ..Default::default() };
+        let star = crate::inversion::StarParams { pad: [4; 3], ..Default::default() };
         let chi = make_inversion_test_with(InversionConfig { algorithm: InversionAlgorithm::Star, star, ..Default::default() });
         assert_eq!(chi.len(), 8 * 8 * 8);
         assert!(chi.iter().all(|v| v.is_finite()));
@@ -978,6 +978,32 @@ mod tests {
         let config = InversionConfig { algorithm: InversionAlgorithm::Star, ..Default::default() };
         let r = run_dipole_inversion(&[0.01; 512], &[1u8; 512], &meta, &config, None, &mut |_, _| {});
         assert!(matches!(r, Err(PipelineError::InvalidConfig(_))));
+    }
+
+    /// STAR uses the scan's B0 direction (not STI Suite GUI's default `[0 0 1]`): the
+    /// pipeline's result on an oblique scan is `star_qsm` with that direction.
+    #[test]
+    fn test_inversion_star_uses_metadata_b0_direction() {
+        let (nx, ny, nz) = (12, 12, 12);
+        let n = nx * ny * nz;
+        let field: Vec<f64> = (0..n).map(|l| 0.01 * ((l % nx) as f64 - 5.5) + 0.02 * ((l / (nx * ny)) as f64 - 5.5)).collect();
+        let mask = vec![1u8; n];
+        let bdir = (0.3, -0.2, 0.932);
+        let meta = ScanMetadata {
+            dims: (nx, ny, nz), voxel_size: (1.0, 1.0, 1.0),
+            echo_times: vec![0.005], field_strength: 3.0, b0_direction: bdir,
+            slice_geometry: None,
+            affine: None,
+        };
+        let star = crate::inversion::StarParams { pad: [2; 3], ..Default::default() };
+        let config = InversionConfig { algorithm: InversionAlgorithm::Star, star: star.clone(), ..Default::default() };
+        let chi = run_dipole_inversion(&field, &mask, &meta, &config, None, &mut |_, _| {}).unwrap();
+        let grid = crate::Grid::new(nx, ny, nz, 1.0, 1.0, 1.0);
+        let params = crate::inversion::StarParams { te: 0.005, b0: 3.0, ..star };
+        let want = crate::inversion::star_qsm(&field, &mask, &grid, bdir, &params, |_, _| {});
+        let axial = crate::inversion::star_qsm(&field, &mask, &grid, (0.0, 0.0, 1.0), &params, |_, _| {});
+        assert_eq!(chi, want);
+        assert_ne!(chi, axial, "the direction must matter for this test to mean anything");
     }
 
     #[test]
