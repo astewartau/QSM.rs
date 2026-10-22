@@ -18,7 +18,6 @@ mod common;
 use common::{correlation, save_center_slices};
 use qsm_core::fft::{fft3d_real, ifft3d_real};
 use qsm_core::relaxometry::{epg_cpmg_echoes, r2_epg, r2prime, R2EpgParams};
-use qsm_core::r2star::r2star_arlo;
 use qsm_core::Grid;
 
 const NX: usize = 64;
@@ -26,6 +25,14 @@ const NY: usize = 64;
 const NZ: usize = 40;
 const B1: f64 = 0.75; // imperfect refocusing → mono-exp R2 is biased
 const T1: f64 = 1.0;
+
+/// R2* by ARLO (`arlo.m`) from voxel-major echoes, 0 outside the mask.
+fn r2star_arlo(voxel_major: &[f64], mask: &[u8], te: &[f64], n: usize) -> Vec<f64> {
+    let ne = te.len();
+    let echo_slowest: Vec<f64> = (0..ne).flat_map(|e| (0..n).map(move |v| voxel_major[v * ne + e])).collect();
+    let r2 = qsm_core::r2star::arlo(&echo_slowest, te, n).unwrap();
+    r2.iter().zip(mask).map(|(&r, &m)| if m != 0 { r } else { 0.0 }).collect()
+}
 
 fn idx(x: usize, y: usize, z: usize) -> usize {
     x + y * NX + z * NX * NY
@@ -196,8 +203,8 @@ fn test_relaxometry_demo() {
 
     // --- EPG R2 vs mono-exp R2 (clean) ---
     let (r2_epg, b1_map) = r2_epg(&se, &mask, &se_te, &grid, &R2EpgParams::default(), None).unwrap();
-    let (r2_mono, _) = r2star_arlo(&se, &mask, &se_te, &grid).unwrap();
-    let (r2star, _) = r2star_arlo(&gre, &mask, &gre_te, &grid).unwrap();
+    let r2_mono = r2star_arlo(&se, &mask, &se_te, grid.n_total());
+    let r2star = r2star_arlo(&gre, &mask, &gre_te, grid.n_total());
     let rp_derived = r2prime(&r2star, &r2_epg, &mask, None).unwrap().r2prime;
 
     metric("EPG R2", "corr", correlation(&r2_epg, &r2_true, &mask));
@@ -215,9 +222,9 @@ fn test_relaxometry_demo() {
 
     // --- MP-PCA denoising (noisy GRE → R2*) ---
     let gre_noisy = add_rician(&gre, n_vox, n_gre, 15.0, 1);
-    let (r2star_noisy, _) = r2star_arlo(&gre_noisy, &mask, &gre_te, &grid).unwrap();
+    let r2star_noisy = r2star_arlo(&gre_noisy, &mask, &gre_te, grid.n_total());
     let gre_dn = qsm_core::denoise::mppca_denoise(&gre_noisy, dims, n_gre, 2, Some(&mask));
-    let (r2star_dn, _) = r2star_arlo(&gre_dn, &mask, &gre_te, &grid).unwrap();
+    let r2star_dn = r2star_arlo(&gre_dn, &mask, &gre_te, grid.n_total());
     let corr_noisy = correlation(&r2star_noisy, &r2star_true, &mask);
     let corr_dn = correlation(&r2star_dn, &r2star_true, &mask);
     metric("R2* MP-PCA", "corr_noisy", corr_noisy);
@@ -318,7 +325,7 @@ fn test_r2prime_slab_coverage() {
     }
 
     let (r2_meas, _) = r2_epg(&se, &fit_mask, &se_te, &grid, &R2EpgParams::default(), None).unwrap();
-    let (r2star, _) = r2star_arlo(&gre, &mask, &gre_te, &grid).unwrap();
+    let r2star = r2star_arlo(&gre, &mask, &gre_te, grid.n_total());
 
     // ── Condition 1: EPG-fitted slab MESE ──
     let out = r2prime(&r2star, &r2_meas, &mask, Some(&slab)).unwrap();

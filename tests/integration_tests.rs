@@ -29,7 +29,7 @@ use qsm_core::utils::{
     generate_vasculature_mask, VasculatureParams,
     adjust_offset,
     makehomogeneous,
-    r2star_arlo, t2star_from_r2star, use_arlo,
+    arlo, arlo_echo_times_problem, t2star_from_r2star,
 };
 
 /// Helper macro to run an algorithm with timing and logging
@@ -1307,42 +1307,29 @@ fn test_r2star_t2star() {
     let data = TestData::load().expect("Failed to load test data");
     let (nx, ny, nz) = data.dims;
     let n_total = nx * ny * nz;
-    let n_echoes = data.echo_times.len();
 
     println!("[INFO] Echo times: {:?}", data.echo_times);
-    assert!(use_arlo(&data.echo_times, 0.5e-3), "Echo times should be equi-spaced for ARLO");
+    assert!(arlo_echo_times_problem(&data.echo_times).is_none(), "the phantom's echo times suit ARLO");
 
-    // Interleave magnitude echoes into [voxel0_echo0, voxel0_echo1, ..., voxel1_echo0, ...]
+    // arlo.m on the echoes stacked echo-slowest, as a 4D NIfTI holds them
     let start = Instant::now();
-    let mut magnitude_interleaved = vec![0.0f64; n_total * n_echoes];
-    for (e, mag_echo) in data.mag_echoes.iter().enumerate() {
-        for v in 0..n_total {
-            magnitude_interleaved[v * n_echoes + e] = mag_echo[v];
-        }
-    }
-
-    let grid = Grid::new(nx, ny, nz, data.voxel_size.0, data.voxel_size.1, data.voxel_size.2);
-    let (r2star_map, s0_map) = r2star_arlo(
-        &magnitude_interleaved, &data.mask, &data.echo_times, &grid,
-    ).expect("the phantom's echo times suit ARLO");
+    let echoes: Vec<f64> = data.mag_echoes.concat();
+    let r2star_map = arlo(&echoes, &data.echo_times, n_total).expect("the phantom's echo times suit ARLO");
     let t2star_map = t2star_from_r2star(&r2star_map);
     let elapsed = start.elapsed();
 
     // Statistics within mask
     let mut r2_vals: Vec<f64> = Vec::new();
     let mut t2_vals: Vec<f64> = Vec::new();
-    let mut s0_vals: Vec<f64> = Vec::new();
     for i in 0..n_total {
         if data.mask[i] > 0 && r2star_map[i] > 0.0 {
             r2_vals.push(r2star_map[i]);
             t2_vals.push(t2star_map[i]);
-            s0_vals.push(s0_map[i]);
         }
     }
 
     let r2_mean = r2_vals.iter().sum::<f64>() / r2_vals.len() as f64;
     let t2_mean = t2_vals.iter().sum::<f64>() / t2_vals.len() as f64;
-    let s0_mean = s0_vals.iter().sum::<f64>() / s0_vals.len() as f64;
     let r2_max = r2_vals.iter().cloned().fold(0.0_f64, f64::max);
     let t2_max = t2_vals.iter().cloned().fold(0.0_f64, f64::max);
     let valid_frac = r2_vals.len() as f64 / data.mask.iter().filter(|&&m| m > 0).count() as f64;
@@ -1350,7 +1337,6 @@ fn test_r2star_t2star() {
     println!("[INFO] R2* mapping: {:.1}% valid voxels in mask", valid_frac * 100.0);
     println!("[INFO] R2* (Hz): mean={:.1}, max={:.1}", r2_mean, r2_max);
     println!("[INFO] T2* (ms): mean={:.2}, max={:.2}", t2_mean * 1000.0, t2_max * 1000.0);
-    println!("[INFO] S0: mean={:.1}", s0_mean);
     println!("R2*/T2* (ARLO)  {:>10.2?}", elapsed);
     println!("RESULT:R2*/T2* (ARLO),-,-,-,-,{:.2}", elapsed.as_secs_f64());
 

@@ -233,7 +233,7 @@ Methods marked † need the `onnx` feature and model weights.
 
 | Algorithm | Description | Reference |
 |-----------|-------------|-----------|
-| **R2\*/T2\* (ARLO)** | R2* mapping from multi-echo magnitude (`r2star_arlo`) | Pei, M., et al. (2015). "Algorithm for fast monoexponential fitting based on Auto-Regression on Linear Operations (ARLO) of data." *Magnetic Resonance in Medicine*, 73(2):843-850. [DOI](https://doi.org/10.1002/mrm.25137) |
+| **R2\*/T2\* (ARLO)** | R2* mapping from multi-echo magnitude (`arlo`, a port of the MEDI toolbox's `arlo.m`) | Pei, M., et al. (2015). "Algorithm for fast monoexponential fitting based on Auto-Regression on Linear Operations (ARLO) of data." *Magnetic Resonance in Medicine*, 73(2):843-850. [DOI](https://doi.org/10.1002/mrm.25137) |
 | **R2 (EPG)** | R2 mapping from multi-echo spin echo by extended-phase-graph matching (`r2_epg`) | Weigel, M. (2015). "Extended phase graphs: dephasing, RF pulses, and echoes — pure and simple." *Journal of Magnetic Resonance Imaging*, 41(2):266-295. [DOI](https://doi.org/10.1002/jmri.24619) |
 | **R2′** | R2* − R2 from paired gradient- and spin-echo data (`r2prime`) | Yablonskiy, D.A., Haacke, E.M. (1994). "Theory of NMR signal behavior in magnetically inhomogeneous tissues: the static dephasing regime." *Magnetic Resonance in Medicine*, 32(6):749-763. [DOI](https://doi.org/10.1002/mrm.1910320610) |
 | **R2PRIMEnet** † | Deep-learning R2* → R2′ for GRE-only data (3 T) | Kim, M., et al. (2025). "χ-sepnet: Deep neural network for magnetic susceptibility source separation." *Human Brain Mapping*, 46(4):e70136. [DOI](https://doi.org/10.1002/hbm.70136) |

@@ -33,10 +33,15 @@ fn test_chisep_r2primenet() {
 
     // The network's input is R2*, which a GRE-only dataset gets by fitting the magnitude decay —
     // so fit it here rather than taking a shortcut the real condition does not have.
-    let (r2star, _t2star) = qsm_core::r2star::r2star_arlo(
-        &ph.mag_voxel_major, &ph.mask, &ph.tes, &ph.grid,
-    )
-    .expect("the phantom's echo times suit ARLO");
+    let (n, ne) = (ph.grid.n_total(), ph.tes.len());
+    let vm = &ph.mag_voxel_major;
+    let echo_slowest: Vec<f64> = (0..ne).flat_map(|e| (0..n).map(move |v| vm[v * ne + e])).collect();
+    let r2star: Vec<f64> = qsm_core::r2star::arlo(&echo_slowest, &ph.tes, n)
+        .expect("the phantom's echo times suit ARLO")
+        .iter()
+        .zip(&ph.mask)
+        .map(|(&r, &m)| if m != 0 { r } else { 0.0 })
+        .collect();
 
     let t = Instant::now();
     // This phantom is simulated at 7 T and R2PRIMEnet's weights are 3 T, so the field guard
