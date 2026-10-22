@@ -17,21 +17,47 @@
 //! Magnetic Resonance in Medicine, 81(2):1399-1411.
 //! <https://doi.org/10.1002/mrm.27483>
 //!
-//! Ported from FANSI's `WH_nlTV.m`.
+//! Ported from FANSI's `WH_nlTV.m` (https://gitlab.com/cmilovic/FANSI-toolbox).
 //!
-//! # Units / `phase_scale`
-//! The nonlinear data term operates on a wrapped phase. The input
-//! `local_field` is multiplied by `params.phase_scale` to form the internal
-//! `phase`, and the final susceptibility map is divided by `phase_scale`. For
-//! field data already in ppm-consistent units (as the rest of QSM.rs assumes),
-//! use `phase_scale = 1.0`. When the input is a raw radians phase and a
-//! ppm-scaled output is desired, set `phase_scale` to the radians→ppm factor.
+//! # Units
+//! Like the other inversions, WH-QSM takes the local field in ppm and returns ppm.
+//! `WH_nlTV.m` works on the phase in radians, so the field is converted with
+//! `2*pi*gamma*b0*te` first and the result converted back at the end; left in
+//! ppm, `sin(x) ~ x` and the data term would not be nonlinear. `b0` and `te`
+//! are scan parameters that the pipeline fills from metadata.
+//!
+//! # Data weight
+//! `WH_nlTV.m` squares `params.weight` (recommended: the magnitude). FANSI's WH-QSM example
+//! (`script_DICOM_Philips.m`, the only script that calls `WH_nlTV`) sets
+//! `weight = m0.*mask./cnoise`, divided by its maximum, where `m0` is the proton density
+//! from its nonlinear T2* fit (`nlT2sTV`) and `cnoise` the complex-domain noise from its
+//! nonlinear multi-echo field fit (`nlme_L2gradient`). The dipole stage has neither map, only
+//! the combined magnitude, so the default ([`WhQsmWeight::MaxNormalised`]) is that formula
+//! with the magnitude for `m0` and no noise term: `mask.*mag / max(mask.*mag)`.
+//! [`WhQsmWeight::InVivo`] is FANSI's `script_invivo.m` form, `min(2*mask*mag/max(mag), 1)`,
+//! as NDI uses. Without a magnitude the weight is the mask.
+//!
+//! # Finite differences
+//! As in `WH_nlTV.m`, the gradient and Laplacian are unit-spacing differences whatever the
+//! voxel size; only the dipole kernel uses it.
 
-use crate::inversion::admm::prepare_fansi_spectral;
+use crate::inversion::admm::{fansi_unit_ee2, prepare_fansi_spectral};
 use crate::utils::gradient::{bdiv_inplace, fgrad_inplace};
 use crate::utils::{apply_mask_zero, shrink};
 use crate::Grid;
 use num_complex::Complex64;
+
+/// How the magnitude is normalised into the data weight (see the module docs).
+#[cfg_attr(feature = "introspection", derive(serde::Serialize))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum WhQsmWeight {
+    /// `mask.*mag / max(mask.*mag)`: FANSI's WH-QSM example (`script_DICOM_Philips.m`)
+    /// without its T2*-fit and noise maps.
+    #[default]
+    MaxNormalised,
+    /// `min(2*mask*mag/max(mag), 1)`: FANSI's `script_invivo.m`, as NDI uses.
+    InVivo,
+}
 
 /// WH-QSM parameters.
 #[cfg_attr(feature = "introspection", derive(serde::Serialize))]
@@ -53,22 +79,30 @@ pub struct WhQsmParams {
     pub tol_update: f64,
     /// Inner Newton stopping tolerance.
     pub tol_delta: f64,
-    /// Phase scaling factor (see module docs).
-    pub phase_scale: f64,
+    /// Magnitude normalisation for the data weight.
+    pub weight: WhQsmWeight,
+    /// Field strength in Tesla (scan parameter, for the radian conversion).
+    pub b0: f64,
+    /// Echo time in seconds (scan parameter, for the radian conversion).
+    pub te: f64,
 }
 
 impl Default for WhQsmParams {
+    /// `WH_nlTV.m` defaults (mu2 = 1, muh = 5, beta = 150, 150 iterations, tolUpdate 0.1,
+    /// tolDelta 1e-6). `WH_nlTV.m` has no default for alpha1; mu1 is its default 100*alpha1.
     fn default() -> Self {
         Self {
             alpha1: 2e-4,
             mu1: 2e-2,
             mu2: 1.0,
             beta: 150.0,
-            muh: 3.0,
-            max_iter: 300,
+            muh: 5.0,
+            max_iter: 150,
             tol_update: 0.1,
             tol_delta: 1e-6,
-            phase_scale: 1.0,
+            weight: WhQsmWeight::MaxNormalised,
+            b0: 3.0,
+            te: 0.02,
         }
     }
 }
@@ -85,18 +119,21 @@ fn norm(v: &[f64]) -> f64 {
 /// background field, returning the susceptibility map (`out.x`).
 ///
 /// # Arguments
-/// * `local_field` - Local field values (nx * ny * nz).
+/// * `local_field` - Local field in ppm (nx * ny * nz).
 /// * `mask` - Binary mask (nx * ny * nz), 1 = inside ROI.
+/// * `magnitude` - Magnitude image, the data weight (see module docs); `None` weights every
+///   voxel in the mask by 1.
 /// * `grid` - Volume grid (dimensions and voxel sizes).
 /// * `bdir` - B0 field direction.
 /// * `params` - WH-QSM parameters.
 /// * `progress` - Progress callback `(iteration, max_iter)`.
 ///
 /// # Returns
-/// Susceptibility map.
+/// Susceptibility map in ppm.
 pub fn whqsm(
     local_field: &[f64],
     mask: &[u8],
+    magnitude: Option<&[f64]>,
     grid: &Grid,
     bdir: (f64, f64, f64),
     params: &WhQsmParams,
@@ -111,16 +148,43 @@ pub fn whqsm(
     let muh = params.muh;
     let alpha_over_mu = alpha / mu;
 
-    // Spectral operators: k = real dipole kernel D(k) (DC=0), ee2 = real Laplacian |E|^2.
-    let (mut fft_ws, k, ee2) = prepare_fansi_spectral(grid, bdir);
+    // Spectral operators: k = real dipole kernel D(k) (DC=0), ee2 = FANSI's EE2. WH_nlTV.m's
+    // E1..E3 are unit-spacing differences whatever the voxel size, so the gradient and
+    // divergence below run on a unit-voxel grid too; only the dipole kernel uses the voxel size.
+    let (mut fft_ws, k, _) = prepare_fansi_spectral(grid, bdir);
+    let ee2 = fansi_unit_ee2(grid.dims);
+    let ugrid = Grid::new(grid.nx(), grid.ny(), grid.nz(), 1.0, 1.0, 1.0);
 
-    // Weight W = mask (weight = mask, W = weight^2 = mask since 0/1).
-    // mask_f: floating mask.
-    let mask_f: Vec<f64> = mask.iter().map(|&m| m as f64).collect();
-    let w: Vec<f64> = mask_f.clone();
+    let mask_f: Vec<f64> = mask.iter().map(|&m| if m != 0 { 1.0 } else { 0.0 }).collect();
 
-    // phase = local_field * phase_scale
-    let phase: Vec<f64> = local_field.iter().map(|&f| f * params.phase_scale).collect();
+    // W = weight.^2 (WH_nlTV.m line 75), weight from the magnitude as `params.weight` says; the
+    // mask when there is no magnitude.
+    let mag_max = magnitude.map_or(0.0, |m| match params.weight {
+        WhQsmWeight::MaxNormalised => (0..n)
+            .filter(|&i| mask[i] != 0)
+            .map(|i| m[i])
+            .fold(0.0f64, f64::max),
+        WhQsmWeight::InVivo => m.iter().cloned().fold(0.0f64, f64::max),
+    });
+    let w: Vec<f64> = (0..n)
+        .map(|i| {
+            if mask[i] == 0 {
+                return 0.0;
+            }
+            let v = match magnitude {
+                Some(m) if mag_max > 0.0 => match params.weight {
+                    WhQsmWeight::MaxNormalised => m[i] / mag_max,
+                    WhQsmWeight::InVivo => (2.0 * m[i] / mag_max).min(1.0),
+                },
+                _ => 1.0,
+            };
+            v * v
+        })
+        .collect();
+
+    // ppm -> radians, as WH_nlTV.m expects.
+    let ppm_to_rad = 2.0 * std::f64::consts::PI * 42.576 * params.b0 * params.te;
+    let phase: Vec<f64> = local_field.iter().map(|&f| f * ppm_to_rad).collect();
 
     // Denominator for x-subproblem: 1e-30 + mu2*k^2 + mu*ee2
     let x_denom: Vec<f64> = (0..n)
@@ -173,7 +237,7 @@ pub fn whqsm(
             gy[i] = z_dy[i] - s_dy[i];
             gz[i] = z_dz[i] - s_dz[i];
         }
-        bdiv_inplace(&mut dg, &gx, &gy, &gz, grid);
+        bdiv_inplace(&mut dg, &gx, &gy, &gz, &ugrid);
         for i in 0..n {
             cbuf[i] = Complex64::new(dg[i], 0.0);
         }
@@ -211,13 +275,8 @@ pub fn whqsm(
             diff_norm += d * d;
         }
         let diff_norm = diff_norm.sqrt();
-        let x_norm = norm(&x);
-        let x_update = if x_norm > 0.0 {
-            100.0 * diff_norm / x_norm
-        } else {
-            // If ||x|| == 0, treat as no meaningful update (avoid div by zero).
-            0.0
-        };
+        // As in WH_nlTV.m: 0/0 is NaN when x is all zero, and NaN < tol is false.
+        let x_update = 100.0 * diff_norm / norm(&x);
         if x_update < params.tol_update {
             progress(t + 1, t + 1);
             break;
@@ -231,7 +290,7 @@ pub fn whqsm(
             fft_ws.fft3d(&mut fx);
 
             // Forward gradient of x (== [real(ifft(E1.*Fx)), ...]).
-            fgrad_inplace(&mut gx, &mut gy, &mut gz, &x, grid);
+            fgrad_inplace(&mut gx, &mut gy, &mut gz, &x, &ugrid);
 
             // z_d = shrink(grad + s_d, alpha_over_mu) ; s_d += grad - z_d.
             for i in 0..n {
@@ -346,12 +405,9 @@ pub fn whqsm(
         }
     }
 
-    // Divide out phase_scale and apply mask.
-    if params.phase_scale != 1.0 {
-        let inv = 1.0 / params.phase_scale;
-        for v in x.iter_mut() {
-            *v *= inv;
-        }
+    // Back to ppm.
+    for v in x.iter_mut() {
+        *v /= ppm_to_rad;
     }
     apply_mask_zero(&mut x, mask);
 
@@ -374,7 +430,7 @@ mod tests {
             ..Default::default()
         };
 
-        let chi = whqsm(&field, &mask, &grid, (0.0, 0.0, 1.0), &params, |_, _| {});
+        let chi = whqsm(&field, &mask, None, &grid, (0.0, 0.0, 1.0), &params, |_, _| {});
 
         for &val in chi.iter() {
             assert!(
@@ -397,10 +453,30 @@ mod tests {
             ..Default::default()
         };
 
-        let chi = whqsm(&field, &mask, &grid, (0.0, 0.0, 1.0), &params, |_, _| {});
+        let chi = whqsm(&field, &mask, None, &grid, (0.0, 0.0, 1.0), &params, |_, _| {});
 
         for (i, &val) in chi.iter().enumerate() {
             assert!(val.is_finite(), "Chi should be finite at index {}", i);
+        }
+    }
+
+    #[test]
+    fn test_whqsm_uniform_magnitude_is_mask_weight() {
+        // A uniform magnitude normalises to 1 either way, the same weight as no magnitude.
+        let n = 8;
+        let field: Vec<f64> = (0..n * n * n).map(|i| ((i % 7) as f64 - 3.0) * 0.01).collect();
+        let mask = vec![1u8; n * n * n];
+        let mag = vec![3.0; n * n * n];
+        let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
+        let params = WhQsmParams { max_iter: 10, ..Default::default() };
+
+        let a = whqsm(&field, &mask, None, &grid, (0.0, 0.0, 1.0), &params, |_, _| {});
+        for weight in [WhQsmWeight::MaxNormalised, WhQsmWeight::InVivo] {
+            let p = WhQsmParams { weight, ..params.clone() };
+            let b = whqsm(&field, &mask, Some(&mag), &grid, (0.0, 0.0, 1.0), &p, |_, _| {});
+            for (x, y) in a.iter().zip(&b) {
+                assert!((x - y).abs() < 1e-12);
+            }
         }
     }
 }

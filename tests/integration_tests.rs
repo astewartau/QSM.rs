@@ -916,11 +916,12 @@ fn test_inversion_whqsm() {
     let (vsx, vsy, vsz) = data.voxel_size;
 
     let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
-    // Cap iterations for CI runtime (the default 300 is slow, ~12 min, and does
-    // not improve accuracy here since the input local field is already clean).
-    let params = WhQsmParams { max_iter: 100, ..WhQsmParams::default() };
+    // Cap iterations for CI runtime (the input local field is already clean).
+    let params = WhQsmParams {
+        max_iter: 100, b0: data.field_strength, te: data.echo_times[0], ..WhQsmParams::default()
+    };
     let (result, elapsed) = run_timed!("WH-QSM", inversion::whqsm(
-        &data.fieldmap_local, &data.mask, &grid, data.b0_dir, &params, |_, _| {},
+        &data.fieldmap_local, &data.mask, None, &grid, data.b0_dir, &params, |_, _| {},
     ));
 
     let res = TestResult::new("WH-QSM", &result, &data.chi, &data.mask, data.dims);

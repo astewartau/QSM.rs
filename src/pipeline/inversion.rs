@@ -229,8 +229,16 @@ pub fn run_dipole_inversion(
             }
         }
         InversionAlgorithm::Whqsm => {
+            // Like NDI: ppm in and out, radians inside. Field strength and echo time (the
+            // first) are scan parameters from metadata; the magnitude, when present, is the
+            // data weight.
+            let params = crate::inversion::WhQsmParams {
+                b0: metadata.field_strength,
+                te: metadata.echo_times.first().copied().unwrap_or(config.whqsm.te),
+                ..config.whqsm.clone()
+            };
             crate::inversion::whqsm(
-                field_ppm, mask, &grid, bdir, &config.whqsm, progress,
+                field_ppm, mask, magnitude, &grid, bdir, &params, progress,
             )
         }
         InversionAlgorithm::Hdqsm => {
