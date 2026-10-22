@@ -17,7 +17,7 @@
 //!   sources live in the box plus the padding, and the result is put back into the full volume;
 //! - `W = 1/N_std`, set to 0 where `N_std` is 0, and to 0 outside the mask;
 //! - the normal equations `M_bg D W² D M_bg x = M_bg D W² f` (`dipole_term.m`) are solved by
-//!   conjugate gradients (`cgsolve.m`, starting from 0, at most `n_cg` = 30 iterations, returning
+//!   conjugate gradients (`cgsolve.m`, starting from 0, at most `n_cg` iterations (30 in `PDF.m`, 300 here by default; see [`PdfParams::n_cg`]), returning
 //!   the last iterate), stopping when the relative residual falls below
 //!   `tol · ||D W outside the mask|| / ||M_bg D W² f||` with `tol` = 0.1;
 //! - the dipole kernel is `dipole_kernel.m`'s k-space kernel when B0 is along an axis
@@ -72,14 +72,18 @@ pub enum DipoleKernelSpace {
     KSpace,
 }
 
-/// PDF parameters (`PDF.m` defaults)
+/// PDF parameters (`PDF.m` defaults, except `n_cg`)
 #[cfg_attr(feature = "introspection", derive(serde::Serialize))]
 #[derive(Clone, Debug)]
 pub struct PdfParams {
     /// Tolerance (`tol`): CG stops when its relative residual falls below
     /// `tol · ||D W outside the mask|| / ||M_bg D W² f||`
     pub tol: f64,
-    /// Maximum CG iterations (`n_CG`)
+    /// Maximum CG iterations (`n_CG`). **Deviation:** 300 by default instead of `PDF.m`'s 30.
+    /// At 30 the solve can stop far from convergence: on a Philips 3T travelling-head scan the
+    /// local field kept a large residual background (correlation with V-SHARP 0.54 at 30
+    /// iterations, 0.83 at 300), while a GE scan was unaffected (0.85 / 0.84). Neither reached
+    /// `tol` within 300. Costs about 30 s more per 1 mm whole-brain scan.
     pub n_cg: usize,
     /// Kernel for an oblique B0 (`space`)
     pub space: DipoleKernelSpace,
@@ -90,7 +94,7 @@ pub struct PdfParams {
 
 impl Default for PdfParams {
     fn default() -> Self {
-        Self { tol: 0.1, n_cg: 30, space: DipoleKernelSpace::ImageSpace, n_pad: 40 }
+        Self { tol: 0.1, n_cg: 300, space: DipoleKernelSpace::ImageSpace, n_pad: 40 }
     }
 }
 

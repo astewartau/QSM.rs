@@ -291,10 +291,9 @@ fn test_bgremove_pdf() {
     res.print_ci_metrics(elapsed);
     common::save_center_slices(&result, &data.mask, data.dims, "bgremove_pdf");
 
-    // MEDI's PDF.m, run in MATLAB on these same inputs with its defaults, correlates 0.644 with
-    // the true local field: its 30 CG iterations stop short of convergence on this phantom (0.83
-    // when run to tol 1e-3 / 300 iterations). QSM.rs gives 0.642, so the threshold is set from
-    // the reference's own result rather than from a converged solve.
+    // MEDI's PDF.m with its own defaults (30 CG iterations) correlates 0.644 with the true local
+    // field here, stopping short of convergence (0.83 at 300). QSM.rs defaults to 300 iterations
+    // (see PdfParams::n_cg); the threshold stays at the level the reference's defaults reach.
     assert!(res.nrmse < 0.5, "PDF NRMSE too high: {}", res.nrmse);
     assert!(res.correlation > 0.6, "PDF correlation too low: {}", res.correlation);
 }
