@@ -2,11 +2,15 @@
 //! segmentation (e.g. one produced by the upstream Python implementation).
 //!
 //! cargo run --release --features "parallel onnx download" --example synthseg_run -- \
-//!     <image.nii[.gz]> <synthseg.onnx|auto> <out.nii.gz> [reference.nii.gz] [--v1|--v2] [--fast] [--low-memory]
+//!     <image.nii[.gz]> <synthseg.onnx|auto> <out.nii.gz> [reference.nii.gz] [--v1|--v2] [--fast] \
+//!     [--low-memory] [--patch=N] [--overlap=N] [--head-crop=N] [--f16] [--volumes=out.csv]
+//!
+//! `--low-memory` starts from `SynthSegParams::low_memory()`; `--patch`/`--overlap` set sliding
+//! windows, `--head-crop` the head crop's margin, `--f16` half-precision posteriors.
 //!
 //! Passing `auto` for the model fetches and caches the registry weights (needs `download`).
 use qsm_core::io::{read_nifti_file, save_nifti_gz};
-use qsm_core::segment::{synthseg, SynthSegInference, SynthSegParams, SynthSegVersion};
+use qsm_core::segment::{synthseg, PosteriorPrecision, SynthSegInference, SynthSegParams, SynthSegVersion};
 use qsm_core::Grid;
 use std::path::Path;
 use std::time::Instant;
@@ -15,6 +19,10 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     let positional: Vec<&String> = args[1..].iter().filter(|a| !a.starts_with("--")).collect();
     let flag = |f: &str| args.iter().any(|a| a == f);
+    let value = |f: &str| -> Option<String> {
+        args.iter().find_map(|a| a.strip_prefix(&format!("{f}=")).map(str::to_string))
+    };
+    let number = |f: &str| value(f).map(|v| v.parse::<usize>().unwrap_or_else(|_| panic!("{f} takes a number")));
 
     let img = read_nifti_file(Path::new(positional[0])).expect("read image");
     let onnx = if positional[1] == "auto" {
@@ -27,12 +35,25 @@ fn main() {
         img.dims.0, img.dims.1, img.dims.2,
         img.voxel_size.0, img.voxel_size.1, img.voxel_size.2,
     );
-    let params = SynthSegParams {
+    let base = if flag("--low-memory") { SynthSegParams::low_memory() } else { SynthSegParams::default() };
+    let mut params = SynthSegParams {
         version: if flag("--v1") { SynthSegVersion::V1 } else { SynthSegVersion::V2 },
-        inference: if flag("--low-memory") { SynthSegInference::LOW_MEMORY } else { SynthSegInference::FullVolume },
-        ..if flag("--fast") { SynthSegParams::fast() } else { SynthSegParams::default() }
+        ..base
     };
-    println!("image {:?} @ {:?} mm, {:?}", img.dims, img.voxel_size, params.version);
+    if flag("--fast") {
+        params.flip_averaging = false;
+        params.topology_cleanup = false;
+    }
+    if let Some(patch) = number("--patch") {
+        params.inference = SynthSegInference::SlidingWindow { patch, overlap: number("--overlap").unwrap_or(patch / 2) };
+    }
+    if let Some(margin) = number("--head-crop") {
+        params.head_crop = Some(margin);
+    }
+    if flag("--f16") {
+        params.posteriors = PosteriorPrecision::F16;
+    }
+    println!("image {:?} @ {:?} mm, {:?}", img.dims, img.voxel_size, params);
 
     let t = Instant::now();
     let out = synthseg(&img.data, &grid, &img.affine, &onnx, &params, |d, n| {
@@ -46,6 +67,14 @@ fn main() {
         if out.volumes[c] > 0.0 {
             println!("  {:<32} {:>10.1} mm3", name, out.volumes[c]);
         }
+    }
+
+    if let Some(csv) = value("--volumes") {
+        let mut text = String::from("label,name,volume_mm3\n");
+        for (c, name) in labels.names.iter().enumerate().skip(1) {
+            text += &format!("{},{},{}\n", labels.ids[c], name, out.volumes[c]);
+        }
+        std::fs::write(&csv, text).expect("write volumes");
     }
 
     let as_f64: Vec<f64> = out.labels.iter().map(|&v| v as f64).collect();

@@ -27,7 +27,7 @@ introspection = ["dep:serde"]
 download = ["dep:ureq"]
 # ONNX inference for deep-learning models via the pure-Rust `tract` engine.
 # Byte-buffer based, so it compiles for both native and WASM targets.
-onnx = ["dep:tract-onnx", "dep:tract-linalg", "dep:getrandom"]
+onnx = ["dep:tract-onnx", "dep:tract-linalg", "dep:getrandom", "dep:half"]
 
 # Lint configuration for the clippy gate in `.github/workflows/unit-tests.yml`, which runs
 # `--all-targets -D warnings`. A `[lints]` table is used rather than crate-level `#![allow]`
@@ -92,6 +92,8 @@ tract-onnx = { version = "0.23", optional = true }
 # tract's kernel crate, named directly only so `parallel` can switch on its multithreaded executor
 # (resolves to the same version tract-onnx uses; WASM builds without `parallel` stay single-threaded).
 tract-linalg = { version = "0.23", optional = true }
+# Half-precision posteriors in SynthSeg's low-memory mode (already in the tree through tract).
+half = { version = "2.4", optional = true }
 rustdct = "0.7.1"
 
 # tract-onnx pulls getrandom 0.4, which on wasm32-unknown-unknown refuses to build unless a

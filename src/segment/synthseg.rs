@@ -23,12 +23,21 @@
 //! segmentation); on the echo-combined GRE magnitude the structure volumes come out in the
 //! normal physiological range. For multi-echo data the root-sum-of-squares over echoes works.
 //!
-//! Memory is the practical constraint: the network takes about 0.95 KB per padded voxel at once
-//! (2.2 GB at 128³, 6.0 GB on a 184×256×128 scan padded to 192×256×128, measured natively), more
-//! than a 32-bit WASM heap (4 GB) holds. [`SynthSegInference::SlidingWindow`] bounds it by the
-//! patch instead of the volume: the network runs on overlapping patches whose posteriors are
-//! blended with a Gaussian weight, as nnU-Net does ([`SynthSegParams::low_memory`]). The
-//! posteriors themselves (`n_labels` floats per padded voxel) are kept either way.
+//! Memory is the practical constraint: the network takes about 0.95 KB per voxel of its input at
+//! once (2.2 GB at 128³, 6.0 GB on a 184×256×128 scan padded to 192×256×128, measured natively),
+//! more than a 32-bit WASM heap (4 GB) holds. Three settings bound it:
+//!
+//! - [`SynthSegInference::SlidingWindow`] runs the network on overlapping cubic windows whose
+//!   posteriors are blended with a Gaussian weight, as nnU-Net does, so the network's memory
+//!   follows the window instead of the volume. Window origins sit on the network's max-pooling
+//!   lattice (multiples of 16 voxels from the whole-volume input's origin), so every window pools
+//!   the same voxels together that the whole-volume pass does.
+//! - [`SynthSegParams::head_crop`] runs everything (network, posteriors, post-processing) on the
+//!   head's bounding box plus a margin instead of the padded field of view.
+//! - [`PosteriorPrecision::F16`] keeps the posteriors (`n_labels` values per voxel, the one
+//!   whole-volume buffer the windows cannot bound) at half precision.
+//!
+//! [`SynthSegParams::low_memory`] combines them for the browser.
 //!
 //! Reference:
 //! Billot, B., Greve, D.N., Puonti, O., et al. (2023). "SynthSeg: Segmentation of brain MRI
@@ -45,7 +54,6 @@ use crate::grid::Grid;
 #[cfg(feature = "onnx")]
 use crate::models::onnx::{OnnxError, OnnxModel, Tensor};
 use crate::segment::labels::SynthSegVersion;
-#[cfg(feature = "onnx")]
 use crate::utils::connected::{largest_component, Connectivity};
 use crate::utils::resample::resize;
 use crate::utils::morphology::signal_erosion::gaussian_filter_anisotropic;
@@ -54,10 +62,17 @@ use rayon::prelude::*;
 
 /// Network down-sampling factor: the padded input must be a multiple of this on every axis.
 const DIVISOR: usize = 32;
+/// The U-Net's max-pooling lattice: four 2× poolings, so a window must start on a multiple of 16
+/// voxels from the whole-volume input's origin to pool the same voxels together, and any input
+/// to the network must be a multiple of 16 on every axis.
+const LATTICE: usize = 16;
 /// Minimum padded size per axis, as in the SynthSeg CLI when `--crop` is not given.
 const MIN_PAD: usize = 128;
 /// Target resolution (mm).
 const TARGET_RES: f64 = 1.0;
+/// Normalised intensity (the 0.5–99.5 percentile range mapped to `[0, 1]`) above which a voxel
+/// counts as head when [`SynthSegParams::head_crop`] looks for the head's bounding box.
+const HEAD_THRESHOLD: f32 = 0.1;
 
 /// How the network is applied to the preprocessed (1 mm, RAS, padded) volume.
 #[cfg_attr(feature = "introspection", derive(serde::Serialize))]
@@ -66,26 +81,43 @@ pub enum SynthSegInference {
     /// One network pass over the whole padded volume, as the SynthSeg CLI runs it. Peak memory
     /// grows with the volume (about 0.95 KB per padded voxel).
     FullVolume,
-    /// Gaussian-weighted sliding window: the network runs on overlapping cubes of `patch` voxels
-    /// (at least 64, rounded up to a multiple of 32), stepping `tile_step` of a patch, and each voxel's
-    /// posteriors are the Gaussian-weighted (σ = patch/8) mean over the windows that cover it.
-    /// Peak memory for the network follows the patch. An axis the padded volume does not exceed
-    /// is covered by one window.
+    /// Gaussian-weighted sliding window: the network runs on cubes of `patch` voxels (at least
+    /// 64, rounded up to a multiple of 16) that overlap their neighbours by at least `overlap`
+    /// voxels, and each voxel's posteriors are the Gaussian-weighted (σ = patch/8) mean over the
+    /// windows that cover it. Window origins are on the network's pooling lattice, so the step
+    /// between windows is a multiple of 16 no larger than `patch − overlap`, spread evenly over
+    /// the axis. Peak memory for the network follows the patch. An axis the volume does not
+    /// exceed is covered by one window; a volume one window covers runs as `FullVolume` does.
     SlidingWindow {
         /// Edge of the cubic patch, voxels at 1 mm.
         patch: usize,
-        /// Step between windows as a fraction of the patch (nnU-Net: 0.5).
-        tile_step: f64,
+        /// Minimum overlap between neighbouring windows, voxels (less than `patch`).
+        overlap: usize,
     },
 }
 
 impl SynthSegInference {
-    /// The memory-bounded window, for a 32-bit WASM heap: 96³ patches, half-overlapping. On a
-    /// 184×256×128 1 mm scan with flip averaging it peaks at 2.0 GB natively (the whole volume:
-    /// 6.8 GB) and agrees with the whole volume at Dice 0.985 on average over the labels (lowest
-    /// 0.964); 128³ windows agree better (0.995, lowest 0.983) but peak at 3.25 GB, which took a
-    /// browser run of that scan to 3.97 GB of its 4 GB heap.
-    pub const LOW_MEMORY: Self = Self::SlidingWindow { patch: 96, tile_step: 0.5 };
+    /// The memory-bounded window, for a 32-bit WASM heap (see [`SynthSegParams::low_memory`]):
+    /// 96³ patches overlapping by at least 48. Against FreeSurfer's `mri_synthseg` (which the
+    /// whole volume matches) on three 1 mm scans, mean Dice over the labels 0.984–0.988 (lowest
+    /// label 0.93–0.96); 128³ windows reach 0.993–0.996 (lowest 0.98) but, even with
+    /// half-precision posteriors, took a 184×256×128 scan to 3.8 GB of a 4 GB heap.
+    pub const LOW_MEMORY: Self = Self::SlidingWindow { patch: 96, overlap: 48 };
+}
+
+/// Storage for the posteriors, `n_labels` values per voxel of the network's grid.
+#[cfg_attr(feature = "introspection", derive(serde::Serialize))]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PosteriorPrecision {
+    /// Single precision, as the SynthSeg CLI keeps them.
+    #[default]
+    F32,
+    /// Half precision (IEEE binary16, about 3 significant digits): half the memory. The
+    /// arithmetic stays in single precision; only the stored values are rounded. With
+    /// `FullVolume` and flip averaging, the first pass's posteriors are rounded to half
+    /// precision before the flipped pass runs, so the two passes are never held in full
+    /// precision at once.
+    F16,
 }
 
 /// SynthSeg inference parameters.
@@ -111,6 +143,13 @@ pub struct SynthSegParams {
     pub sigma_smoothing: f64,
     /// Whole-volume (default, the CLI's) or sliding-window inference.
     pub inference: SynthSegInference,
+    /// Crop the padded volume to the head before inference: the bounding box of the largest
+    /// connected region brighter than 10 % of the normalised intensity range, grown by this
+    /// many voxels on every side and rounded out to the pooling lattice. Everything outside it
+    /// is background. `None` (the default, and the CLI's) runs on the whole padded volume.
+    pub head_crop: Option<usize>,
+    /// How the posteriors are stored (the default, single precision, is the CLI's).
+    pub posteriors: PosteriorPrecision,
 }
 
 impl Default for SynthSegParams {
@@ -122,6 +161,8 @@ impl Default for SynthSegParams {
             topology_cleanup: true,
             sigma_smoothing: 0.5,
             inference: SynthSegInference::FullVolume,
+            head_crop: None,
+            posteriors: PosteriorPrecision::F32,
         }
     }
 }
@@ -134,9 +175,15 @@ impl SynthSegParams {
     }
 
     /// Memory-bounded setting for constrained hosts (e.g. 32-bit WASM): the defaults with
-    /// [`SynthSegInference::LOW_MEMORY`] windows.
+    /// [`SynthSegInference::LOW_MEMORY`] windows, a 16-voxel head crop and half-precision
+    /// posteriors.
     pub fn low_memory() -> Self {
-        Self { inference: SynthSegInference::LOW_MEMORY, ..Self::default() }
+        Self {
+            inference: SynthSegInference::LOW_MEMORY,
+            head_crop: Some(16),
+            posteriors: PosteriorPrecision::F16,
+            ..Self::default()
+        }
     }
 }
 
@@ -173,66 +220,135 @@ pub fn synthseg(
     }
     let n_labels = params.version.n_labels();
 
-    if let SynthSegInference::SlidingWindow { patch, tile_step } = params.inference {
-        if patch < 64 {
-            return Err(OnnxError::Shape(format!("the SynthSeg patch must be at least 64 voxels, not {patch}")));
+    let window = match params.inference {
+        SynthSegInference::FullVolume => None,
+        SynthSegInference::SlidingWindow { patch, overlap } => {
+            if patch < 64 {
+                return Err(OnnxError::Shape(format!("the SynthSeg patch must be at least 64 voxels, not {patch}")));
+            }
+            let patch = round_up(patch, LATTICE);
+            if overlap >= patch {
+                return Err(OnnxError::Shape(format!(
+                    "the SynthSeg window overlap must be less than the patch ({patch}), not {overlap}"
+                )));
+            }
+            Some((patch, overlap))
         }
-        if !(tile_step > 0.0 && tile_step <= 1.0) {
-            return Err(OnnxError::Shape(format!("the SynthSeg tile step must be in (0, 1], not {tile_step}")));
-        }
-    }
+    };
 
     let pre = preprocess(magnitude, grid, affine, params);
     let model = OnnxModel::load(model_onnx)?;
+    let flip = params.flip_averaging.then(|| params.version.labels().flip);
+    match params.posteriors {
+        PosteriorPrecision::F32 => infer::<f32>(&model, &pre, n_labels, window, flip, params, &mut progress),
+        PosteriorPrecision::F16 => infer::<half::f16>(&model, &pre, n_labels, window, flip, params, &mut progress),
+    }
+}
 
-    if let SynthSegInference::SlidingWindow { patch, tile_step } = params.inference {
-        // A volume one window covers runs as a whole volume does.
-        if pre.dims.iter().any(|&d| d > round_up(patch, DIVISOR)) {
-            let flip = params.flip_averaging.then(|| params.version.labels().flip);
-            let patch = round_up(patch, DIVISOR);
-            let mut post = run_windows(&model, &pre.data, pre.dims, n_labels, patch, tile_step, flip, &mut progress)?;
-            if params.sigma_smoothing > 0.0 {
-                blur_posteriors(&mut post, pre.dims, n_labels, params.sigma_smoothing);
-            }
-            return Ok(postprocess(post, &pre, params));
+/// Network, flip averaging and post-processing, with the posteriors stored as `T`.
+#[cfg(feature = "onnx")]
+fn infer<T: Posterior>(
+    model: &OnnxModel,
+    pre: &Preprocessed,
+    n_labels: usize,
+    window: Option<(usize, usize)>,
+    flip: Option<&[usize]>,
+    params: &SynthSegParams,
+    progress: &mut impl FnMut(usize, usize),
+) -> Result<SynthSegResult, OnnxError> {
+    // A volume one window covers runs as a whole volume does.
+    if let Some((patch, overlap)) = window.filter(|&(patch, _)| pre.dims.iter().any(|&d| d > patch)) {
+        let mut post: Vec<T> = run_windows(model, &pre.data, pre.dims, n_labels, patch, overlap, flip, progress)?;
+        if params.sigma_smoothing > 0.0 {
+            blur_posteriors(&mut post, pre.dims, n_labels, params.sigma_smoothing);
         }
+        return Ok(postprocess(post, pre, params));
     }
 
-    let passes = 1 + params.flip_averaging as usize;
-    let mut done = 0;
-    let mut post = run_pass(&model, &pre.data, pre.dims, n_labels, false, params)?;
-    done += 1;
-    progress(done, passes);
-
-    if params.flip_averaging {
+    let passes = 1 + flip.is_some() as usize;
+    let post = run_pass(model, &pre.data, pre.dims, n_labels, params)?;
+    progress(1, passes);
+    // At half precision the first pass is rounded (and its single-precision copy freed) before
+    // the second runs.
+    let mut post = T::store(post);
+    if let Some(table) = flip {
         let flipped = flip_axis0(&pre.data, pre.dims, 1);
-        let mut post_f = run_pass(&model, &flipped, pre.dims, n_labels, true, params)?;
-        done += 1;
-        progress(done, passes);
-        // Undo the spatial flip, map each channel back to its left-right partner, and average.
-        post_f = flip_axis0(&post_f, pre.dims, n_labels);
-        let flip_table = params.version.labels().flip;
-        for (out, chunk) in post.chunks_exact_mut(n_labels).zip(post_f.chunks_exact(n_labels)) {
+        let post_f = run_pass(model, &flipped, pre.dims, n_labels, params)?;
+        drop(flipped);
+        progress(2, passes);
+        merge_flipped(&mut post, &post_f, pre.dims, n_labels, table);
+    }
+    Ok(postprocess(post, pre, params))
+}
+
+/// A stored posterior value: `f32`, or `half::f16` for [`PosteriorPrecision::F16`]. Arithmetic
+/// is in `f32` either way.
+trait Posterior: Copy + Default + Send + Sync + 'static {
+    fn get(self) -> f32;
+    fn put(v: f32) -> Self;
+    /// Convert a single-precision buffer (no copy when `Self` is `f32`).
+    fn store(v: Vec<f32>) -> Vec<Self>;
+}
+
+impl Posterior for f32 {
+    #[inline]
+    fn get(self) -> f32 {
+        self
+    }
+    #[inline]
+    fn put(v: f32) -> Self {
+        v
+    }
+    fn store(v: Vec<f32>) -> Vec<Self> {
+        v
+    }
+}
+
+#[cfg(feature = "onnx")]
+impl Posterior for half::f16 {
+    #[inline]
+    fn get(self) -> f32 {
+        self.to_f32()
+    }
+    #[inline]
+    fn put(v: f32) -> Self {
+        half::f16::from_f32(v)
+    }
+    fn store(v: Vec<f32>) -> Vec<Self> {
+        v.into_iter().map(half::f16::from_f32).collect()
+    }
+}
+
+/// Average the posteriors of the left-right flipped pass `flipped` (still mirrored along axis 0)
+/// into `post`, mapping each channel to its left-right partner `table[c]`. In place: the
+/// mirrored copy is never materialised.
+#[cfg(feature = "onnx")]
+fn merge_flipped<T: Posterior>(post: &mut [T], flipped: &[f32], dims: [usize; 3], n_labels: usize, table: &[usize]) {
+    let plane = dims[1] * dims[2] * n_labels;
+    crate::maybe_par_chunks_mut!(post, plane).enumerate().for_each(|(o0, out)| {
+        let src = &flipped[(dims[0] - 1 - o0) * plane..(dims[0] - o0) * plane];
+        for (o, f) in out.chunks_exact_mut(n_labels).zip(src.chunks_exact(n_labels)) {
             for c in 0..n_labels {
-                out[c] = 0.5 * (out[c] + chunk[flip_table[c]]);
+                o[c] = T::put(0.5 * (o[c].get() + f[table[c]]));
             }
         }
-    }
-
-    Ok(postprocess(post, &pre, params))
+    });
 }
 
 /// The network input plus everything needed to map predictions back onto the caller's grid.
 struct Preprocessed {
-    /// Normalised, padded volume in RAS orientation, C-order `[d0, d1, d2]`.
+    /// Normalised network input in RAS orientation, C-order `[d0, d1, d2]`: the padded volume,
+    /// or the head's box in it.
     data: Vec<f32>,
     dims: [usize; 3],
     /// Shape of the RAS-aligned volume before cropping and padding.
     aligned_dims: [usize; 3],
-    /// Where the padded volume's real data sits: `[start, end)` per axis.
-    pad: [(usize, usize); 3],
-    /// Where the crop sits inside `aligned_dims`: `[start, end)` per axis.
-    crop: [(usize, usize); 3],
+    /// Where the network grid's first voxel sits in the RAS-aligned volume, per axis (negative
+    /// where the grid starts in padding).
+    origin: [isize; 3],
+    /// The network-grid range that holds aligned data, `[start, end)` per axis: inside the
+    /// padding, and inside any crop.
+    valid: [(usize, usize); 3],
     /// `perm[i]` is the pre-alignment axis that became RAS axis `i`.
     perm: [usize; 3],
     /// Whether RAS axis `i` was flipped during alignment.
@@ -346,14 +462,30 @@ fn preprocess(
         let start = (padded[i] - dims[i]) / 2;
         pad[i] = (start, start + dims[i]);
     }
-    let data = pad_c_order(&data, dims, padded, pad, 1);
+    let mut data = pad_c_order(&data, dims, padded, pad, 1);
+    let mut net_dims = padded;
+    let mut origin: [isize; 3] = std::array::from_fn(|i| crop[i].0 as isize - pad[i].0 as isize);
+    let mut valid = pad;
+
+    // 6. optionally crop to the head. The box's corners are on the pooling lattice of the
+    //    padded volume, so windows placed from the box's origin stay in phase with it.
+    if let Some(bounds) = params.head_crop.and_then(|margin| head_box(&data, padded, margin)) {
+        data = crop_c_order(&data, padded, bounds, 1);
+        net_dims = std::array::from_fn(|i| bounds[i].1 - bounds[i].0);
+        for i in 0..3 {
+            origin[i] += bounds[i].0 as isize;
+            let start = pad[i].0.max(bounds[i].0);
+            let end = pad[i].1.min(bounds[i].1).max(start);
+            valid[i] = (start - bounds[i].0, end - bounds[i].0);
+        }
+    }
 
     Preprocessed {
         data,
-        dims: padded,
+        dims: net_dims,
         aligned_dims,
-        pad,
-        crop,
+        origin,
+        valid,
         perm,
         flip,
         source_dims: source_dims_cm,
@@ -361,6 +493,36 @@ fn preprocess(
         out_dims,
         resampled: needs_resample,
     }
+}
+
+/// The head's bounding box in the normalised, padded C-order volume `data`: the largest
+/// face-connected region above [`HEAD_THRESHOLD`], grown by `margin` voxels on every side and
+/// rounded out to multiples of [`LATTICE`] (`dims` are multiples of it already). `None` when
+/// nothing is above the threshold or the box is the whole volume.
+fn head_box(data: &[f32], dims: [usize; 3], margin: usize) -> Option<[(usize, usize); 3]> {
+    let above: Vec<u8> = data.iter().map(|&v| (v > HEAD_THRESHOLD) as u8).collect();
+    // 6-connectivity is symmetric under axis permutation: the C-order volume is column-major
+    // with the axes reversed.
+    let head = largest_component(&above, (dims[2], dims[1], dims[0]), Connectivity::Face);
+    drop(above);
+    let mut lo = dims;
+    let mut hi = [0usize; 3];
+    for (l, _) in head.iter().enumerate().filter(|(_, &h)| h != 0) {
+        let at = [l / (dims[1] * dims[2]), (l / dims[2]) % dims[1], l % dims[2]];
+        for i in 0..3 {
+            lo[i] = lo[i].min(at[i]);
+            hi[i] = hi[i].max(at[i] + 1);
+        }
+    }
+    if hi.contains(&0) {
+        return None;
+    }
+    let bounds: [(usize, usize); 3] = std::array::from_fn(|i| {
+        let start = lo[i].saturating_sub(margin) / LATTICE * LATTICE;
+        let end = round_up((hi[i] + margin).min(dims[i]), LATTICE).min(dims[i]);
+        (start, end)
+    });
+    (bounds != [(0, dims[0]), (0, dims[1]), (0, dims[2])]).then_some(bounds)
 }
 
 /// Resample a column-major volume to 1 mm isotropic, matching lab2im's `resample_volume`:
@@ -515,7 +677,6 @@ fn run_pass(
     data: &[f32],
     dims: [usize; 3],
     n_labels: usize,
-    _flipped: bool,
     params: &SynthSegParams,
 ) -> Result<Vec<f32>, OnnxError> {
     let input = Tensor::new(vec![1, dims[0], dims[1], dims[2], 1], data.to_vec());
@@ -534,46 +695,85 @@ fn run_pass(
     Ok(post)
 }
 
-/// Sliding-window posteriors (channels-last, `[d0, d1, d2, n_labels]`) of the padded volume
-/// `data`: the network on each `patch`-cube window (a multiple of 32) (clamped to the volume on an axis it does not
-/// exceed), blended with nnU-Net's Gaussian importance. With `flip` (the label table's
-/// left-right partners), each window is also run mirrored along axis 0 and its posteriors, mirrored
-/// back with each channel mapped to its partner, averaged in, as the whole-volume flip averaging
-/// does. The blur is the caller's, once, on the blended posteriors.
+/// Window origins along an axis of `size` voxels for windows of `p` (both multiples of
+/// [`LATTICE`]): the first at 0, the last at `size − p`, and the fewest windows whose steps — each a
+/// multiple of the lattice, as even as the lattice allows — leave at least `overlap` voxels shared
+/// between neighbours.
+fn lattice_windows(size: usize, p: usize, overlap: usize) -> Vec<usize> {
+    debug_assert!(size.is_multiple_of(LATTICE) && p.is_multiple_of(LATTICE), "{size} {p}");
+    if size <= p {
+        return vec![0];
+    }
+    let span = (size - p) / LATTICE;
+    let max_step = (p.saturating_sub(overlap) / LATTICE).max(1);
+    let steps = span.div_ceil(max_step);
+    (0..=steps).map(|i| i * span / steps * LATTICE).collect()
+}
+
+/// Sliding-window posteriors (channels-last, `[d0, d1, d2, n_labels]`) of the network input
+/// `data` (dims multiples of [`LATTICE`]): the network on each `patch`-cube window (clamped to
+/// the volume on an axis it does not exceed), origins on the pooling lattice
+/// ([`lattice_windows`]), blended with nnU-Net's Gaussian importance. With `flip` (the label
+/// table's left-right partners), each window is also run mirrored along axis 0 and its
+/// posteriors, mirrored back with each channel mapped to its partner, averaged in, as the
+/// whole-volume flip averaging does. The blur is the caller's, once, on the blended posteriors.
+///
+/// The blending weights are summed before any window runs, so each window's posteriors go
+/// straight into the normalised mean: the only whole-volume buffers are the posteriors (as `T`)
+/// and one weight per voxel.
 #[cfg(feature = "onnx")]
 #[allow(clippy::too_many_arguments)]
-fn run_windows(
+fn run_windows<T: Posterior>(
     model: &OnnxModel,
     data: &[f32],
     dims: [usize; 3],
     n_labels: usize,
     patch: usize,
-    tile_step: f64,
+    overlap: usize,
     flip: Option<&[usize]>,
     progress: &mut impl FnMut(usize, usize),
-) -> Result<Vec<f32>, OnnxError> {
-    use crate::bet::hdbet::{gaussian_importance, window_steps};
+) -> Result<Vec<T>, OnnxError> {
+    use crate::bet::hdbet::gaussian_importance;
     let p: [usize; 3] = std::array::from_fn(|a| patch.min(dims[a]));
-    let steps: [Vec<usize>; 3] = std::array::from_fn(|a| window_steps(dims[a], p[a], tile_step));
+    let starts: [Vec<usize>; 3] = std::array::from_fn(|a| lattice_windows(dims[a], p[a], overlap));
+    let mut origins = Vec::new();
+    for &s0 in &starts[0] {
+        for &s1 in &starts[1] {
+            for &s2 in &starts[2] {
+                origins.push([s0, s1, s2]);
+            }
+        }
+    }
     let gauss = gaussian_importance(p);
     let shape = [1, p[0], p[1], p[2], 1];
     let plan = model.plan_for(&[&shape])?;
     let passes = 1 + flip.is_some() as usize;
-    let total = steps.iter().map(Vec::len).product::<usize>() * passes;
+    let total = origins.len() * passes;
     let mut done = 0;
 
-    let n: usize = dims.iter().product();
-    let mut acc = vec![0f32; n * n_labels];
-    let mut weight = vec![0f32; n];
-    let pp: usize = p.iter().product();
-    let mut input = vec![0f32; pp];
-    let rows = |o: [usize; 3], mut f: Box<dyn FnMut(usize, usize) + '_>| {
+    // Calls `f(volume offset, window offset)` for the start of each row of the window at `o`.
+    let rows = |o: [usize; 3], f: &mut dyn FnMut(usize, usize)| {
         for z in 0..p[0] {
             for y in 0..p[1] {
                 f(((o[0] + z) * dims[1] + o[1] + y) * dims[2] + o[2], (z * p[1] + y) * p[2]);
             }
         }
     };
+
+    // 1 / (the summed Gaussian weight of the windows covering each voxel).
+    let n: usize = dims.iter().product();
+    let mut inv_weight = vec![0f32; n];
+    for &o in &origins {
+        rows(o, &mut |v, w| {
+            for k in 0..p[2] {
+                inv_weight[v + k] += gauss[w + k];
+            }
+        });
+    }
+    inv_weight.iter_mut().for_each(|w| *w = if *w > 0.0 { 1.0 / *w } else { 0.0 });
+
+    let mut post = vec![T::default(); n * n_labels];
+    let mut input = vec![0f32; p.iter().product()];
     let run = |x: Vec<f32>| -> Result<Vec<f32>, OnnxError> {
         let out = plan.run_single(&Tensor::new(shape.to_vec(), x))?;
         let expect = [1, p[0], p[1], p[2], n_labels];
@@ -585,41 +785,32 @@ fn run_windows(
         }
         Ok(out.data)
     };
-    for &s0 in &steps[0] {
-        for &s1 in &steps[1] {
-            for &s2 in &steps[2] {
-                let o = [s0, s1, s2];
-                rows(o, Box::new(|v, w| input[w..w + p[2]].copy_from_slice(&data[v..v + p[2]])));
-                let mut pred = run(input.clone())?;
-                done += 1;
-                progress(done, total);
-                if let Some(table) = flip {
-                    let back = flip_axis0(&run(flip_axis0(&input, p, 1))?, p, n_labels);
-                    done += 1;
-                    progress(done, total);
-                    for (out, chunk) in pred.chunks_exact_mut(n_labels).zip(back.chunks_exact(n_labels)) {
-                        for c in 0..n_labels {
-                            out[c] = 0.5 * (out[c] + chunk[table[c]]);
-                        }
-                    }
+    for &o in &origins {
+        rows(o, &mut |v, w| input[w..w + p[2]].copy_from_slice(&data[v..v + p[2]]));
+        let mut pred = run(input.clone())?;
+        done += 1;
+        progress(done, total);
+        if let Some(table) = flip {
+            let back = flip_axis0(&run(flip_axis0(&input, p, 1))?, p, n_labels);
+            done += 1;
+            progress(done, total);
+            for (out, chunk) in pred.chunks_exact_mut(n_labels).zip(back.chunks_exact(n_labels)) {
+                for c in 0..n_labels {
+                    out[c] = 0.5 * (out[c] + chunk[table[c]]);
                 }
-                rows(o, Box::new(|v, w| {
-                    for k in 0..p[2] {
-                        let g = gauss[w + k];
-                        weight[v + k] += g;
-                        let (a, b) = ((v + k) * n_labels, (w + k) * n_labels);
-                        for c in 0..n_labels {
-                            acc[a + c] += g * pred[b + c];
-                        }
-                    }
-                }));
             }
         }
+        rows(o, &mut |v, w| {
+            for k in 0..p[2] {
+                let g = gauss[w + k] * inv_weight[v + k];
+                let (a, b) = ((v + k) * n_labels, (w + k) * n_labels);
+                for c in 0..n_labels {
+                    post[a + c] = T::put(post[a + c].get() + g * pred[b + c]);
+                }
+            }
+        });
     }
-    for (chunk, &w) in acc.chunks_exact_mut(n_labels).zip(&weight) {
-        chunk.iter_mut().for_each(|v| *v /= w);
-    }
-    Ok(acc)
+    Ok(post)
 }
 
 /// Per-channel separable Gaussian blur of a `[d0, d1, d2, n_ch]` posterior map.
@@ -627,7 +818,7 @@ fn run_windows(
 /// Matches lab2im's `GaussianBlur`: kernel width `2·ceil(2.5σ)/2 + 1`, normalised, applied with
 /// zero padding at the borders (TensorFlow's `SAME`) — note that is zero padding, not the
 /// reflection [`gaussian_filter_anisotropic`] uses.
-fn blur_posteriors(post: &mut [f32], dims: [usize; 3], n_ch: usize, sigma: f64) {
+fn blur_posteriors<T: Posterior>(post: &mut [T], dims: [usize; 3], n_ch: usize, sigma: f64) {
     let width = ((2.5 * sigma).ceil() as usize / 2) * 2 + 1;
     if width <= 1 {
         return;
@@ -649,7 +840,7 @@ fn blur_posteriors(post: &mut [f32], dims: [usize; 3], n_ch: usize, sigma: f64) 
 }
 
 /// Convolve `data`, viewed as `[outer, n, inner]`, along the middle axis with zero padding.
-fn blur_along(data: &mut [f32], outer: usize, n: usize, inner: usize, w: &[f32], radius: usize) {
+fn blur_along<T: Posterior>(data: &mut [T], outer: usize, n: usize, inner: usize, w: &[f32], radius: usize) {
     if n <= 1 {
         return;
     }
@@ -662,7 +853,9 @@ fn blur_along(data: &mut [f32], outer: usize, n: usize, inner: usize, w: &[f32],
             // Stash the slot about to be consumed, then write the output for `i - radius`.
             if i < n {
                 let slot = (i % (2 * radius + 1)) * inner;
-                history[slot..slot + inner].copy_from_slice(&line[i * inner..(i + 1) * inner]);
+                for (h, v) in history[slot..slot + inner].iter_mut().zip(&line[i * inner..(i + 1) * inner]) {
+                    *h = v.get();
+                }
                 filled += 1;
             }
             if i < radius || filled == 0 {
@@ -684,10 +877,10 @@ fn blur_along(data: &mut [f32], outer: usize, n: usize, inner: usize, w: &[f32],
                         * if src <= i {
                             history[(src % (2 * radius + 1)) * inner + c]
                         } else {
-                            line[src * inner + c]
+                            line[src * inner + c].get()
                         };
                 }
-                line[o * inner + c] = acc;
+                line[o * inner + c] = T::put(acc);
             }
         }
     });
@@ -696,30 +889,27 @@ fn blur_along(data: &mut [f32], outer: usize, n: usize, inner: usize, w: &[f32],
 // ----------------------------------------------------------------------- postprocessing
 
 #[cfg(feature = "onnx")]
-fn postprocess(
-    mut post: Vec<f32>,
-    pre: &Preprocessed,
-    params: &SynthSegParams,
-) -> SynthSegResult {
+fn postprocess<T: Posterior>(mut post: Vec<T>, pre: &Preprocessed, params: &SynthSegParams) -> SynthSegResult {
     let labels = params.version.labels();
     let n_labels = labels.ids.len();
     let dims = pre.dims;
     let n_vox = dims.iter().product::<usize>();
-    // Connected-component work happens on the padded grid; 6-connectivity is symmetric under
+    // Connected-component work happens on the network's grid; 6-connectivity is symmetric under
     // axis permutation, so the C-order volume can be handed over as column-major reversed.
     let cc_dims = (dims[2], dims[1], dims[0]);
 
     // Foreground: everything but the background channel, thresholded and reduced to one blob.
     let mut fg = vec![0u8; n_vox];
     for (v, chunk) in fg.iter_mut().zip(post.chunks_exact(n_labels)) {
-        *v = (chunk[1..].iter().sum::<f32>() > 0.25) as u8;
+        *v = (chunk[1..].iter().map(|p| p.get()).sum::<f32>() > 0.25) as u8;
     }
     let fg = largest_component(&fg, cc_dims, Connectivity::Face);
     for (keep, chunk) in fg.iter().zip(post.chunks_exact_mut(n_labels)) {
         if *keep == 0 {
-            chunk[1..].fill(0.0);
+            chunk[1..].fill(T::default());
         }
     }
+    drop(fg);
 
     if params.topology_cleanup {
         let max_class = labels.topology.iter().copied().max().unwrap_or(0);
@@ -731,13 +921,13 @@ fn postprocess(
             }
             let mut mask = vec![0u8; n_vox];
             for (v, chunk) in mask.iter_mut().zip(post.chunks_exact(n_labels)) {
-                *v = members.iter().any(|&c| chunk[c] > 0.25) as u8;
+                *v = members.iter().any(|&c| chunk[c].get() > 0.25) as u8;
             }
             let mask = largest_component(&mask, cc_dims, Connectivity::Face);
             for (keep, chunk) in mask.iter().zip(post.chunks_exact_mut(n_labels)) {
                 if *keep == 0 {
                     for &c in &members {
-                        chunk[c] = 0.0;
+                        chunk[c] = T::default();
                     }
                 }
             }
@@ -745,47 +935,67 @@ fn postprocess(
     } else {
         // `--fast` keeps only the posteriors that clear a slightly lower bar.
         for chunk in post.chunks_exact_mut(n_labels) {
-            for c in 1..n_labels {
-                if chunk[c] <= 0.2 {
-                    chunk[c] = 0.0;
+            for c in chunk.iter_mut().skip(1) {
+                if c.get() <= 0.2 {
+                    *c = T::default();
                 }
             }
         }
     }
 
-    // Undo the padding, renormalise, and take the argmax.
-    let cropped_dims: [usize; 3] = std::array::from_fn(|i| pre.pad[i].1 - pre.pad[i].0);
-    post = crop_c_order(&post, dims, pre.pad, n_labels);
-
+    // Over the voxels that hold data (the padding dropped): renormalise, take the argmax, and
+    // sum the soft volumes.
+    let valid = pre.valid;
+    let valid_dims: [usize; 3] = std::array::from_fn(|i| valid[i].1 - valid[i].0);
     let mut volumes = vec![0f64; n_labels];
-    let mut hard = vec![labels.ids[0]; cropped_dims.iter().product::<usize>()];
-    for (voxel, chunk) in hard.iter_mut().zip(post.chunks_exact_mut(n_labels)) {
-        let total: f32 = chunk.iter().sum();
-        if total > 0.0 {
-            chunk.iter_mut().for_each(|v| *v /= total);
-        }
-        let mut best = 0usize;
-        for c in 1..n_labels {
-            if chunk[c] > chunk[best] {
-                best = c;
+    let mut hard = Vec::with_capacity(valid_dims.iter().product::<usize>());
+    let mut p = vec![0f32; n_labels];
+    for o0 in valid[0].0..valid[0].1 {
+        for o1 in valid[1].0..valid[1].1 {
+            let row = ((o0 * dims[1] + o1) * dims[2] + valid[2].0) * n_labels;
+            for chunk in post[row..row + valid_dims[2] * n_labels].chunks_exact(n_labels) {
+                p.iter_mut().zip(chunk).for_each(|(p, c)| *p = c.get());
+                let total: f32 = p.iter().sum();
+                if total > 0.0 {
+                    p.iter_mut().for_each(|v| *v /= total);
+                }
+                let mut best = 0usize;
+                for c in 1..n_labels {
+                    if p[c] > p[best] {
+                        best = c;
+                    }
+                }
+                hard.push(labels.ids[best]);
+                // Accumulate in f64: the reference sums ~10^6 f32 posteriors per structure and
+                // loses about 0.4 % to rounding doing so.
+                for c in 1..n_labels {
+                    volumes[c] += p[c] as f64;
+                }
             }
         }
-        *voxel = labels.ids[best];
-        // Accumulate in f64: the reference sums ~10^6 f32 posteriors per structure and loses
-        // about 0.4 % to rounding doing so.
-        for c in 1..n_labels {
-            volumes[c] += chunk[c] as f64;
-        }
     }
+    drop(post);
     let voxel_volume = pre.res * pre.res * pre.res;
     volumes.iter_mut().for_each(|v| *v *= voxel_volume);
 
-    // Undo the crop, then the RAS alignment.
-    let aligned = if pre.crop == [(0, pre.aligned_dims[0]), (0, pre.aligned_dims[1]), (0, pre.aligned_dims[2])]
-    {
+    // Place the valid block in the RAS-aligned volume (background around it: the crop, and
+    // anything outside a head crop), then undo the alignment.
+    let at: [(usize, usize); 3] = std::array::from_fn(|i| {
+        let start = (valid[i].0 as isize + pre.origin[i]) as usize;
+        (start, start + valid_dims[i])
+    });
+    let aligned = if valid_dims == pre.aligned_dims {
         hard
     } else {
-        pad_c_order(&hard, cropped_dims, pre.aligned_dims, pre.crop, 1)
+        let mut out = vec![labels.ids[0]; pre.aligned_dims.iter().product()];
+        for o0 in 0..valid_dims[0] {
+            for o1 in 0..valid_dims[1] {
+                let src = (o0 * valid_dims[1] + o1) * valid_dims[2];
+                let dst = ((o0 + at[0].0) * pre.aligned_dims[1] + o1 + at[1].0) * pre.aligned_dims[2] + at[2].0;
+                out[dst..dst + valid_dims[2]].copy_from_slice(&hard[src..src + valid_dims[2]]);
+            }
+        }
+        out
     };
 
     let mut source = vec![labels.ids[0]; pre.source_dims.iter().product::<usize>()];
@@ -963,22 +1173,106 @@ mod tests {
 
     #[cfg(feature = "onnx")]
     #[test]
-    fn a_window_under_64_or_a_step_out_of_range_is_refused() {
+    fn a_window_under_64_or_an_overlap_of_the_whole_patch_is_refused() {
         let grid = Grid::new(4, 4, 4, 1.0, 1.0, 1.0);
         let mag = vec![1.0; 64];
         let aff = [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0];
-        for (patch, tile_step) in [(63, 0.5), (32, 0.5), (128, 0.0), (128, 1.5)] {
-            let params = SynthSegParams { inference: SynthSegInference::SlidingWindow { patch, tile_step }, ..SynthSegParams::default() };
+        for (patch, overlap) in [(63, 0), (32, 0), (128, 128), (100, 112)] {
+            let params = SynthSegParams { inference: SynthSegInference::SlidingWindow { patch, overlap }, ..SynthSegParams::default() };
             let err = synthseg(&mag, &grid, &aff, &[], &params, |_, _| {}).err().expect("refused");
-            assert!(matches!(err, OnnxError::Shape(_)), "{patch} {tile_step}: {err:?}");
+            assert!(matches!(err, OnnxError::Shape(_)), "{patch} {overlap}: {err:?}");
         }
     }
 
     #[test]
-    fn low_memory_is_the_defaults_with_windows() {
+    fn low_memory_is_the_defaults_with_windows_a_head_crop_and_half_precision() {
         let p = SynthSegParams::low_memory();
         assert_eq!(p.inference, SynthSegInference::LOW_MEMORY);
-        assert_eq!(SynthSegParams { inference: SynthSegInference::FullVolume, ..p }, SynthSegParams::default());
+        assert_eq!(p.posteriors, PosteriorPrecision::F16);
+        assert!(p.head_crop.is_some());
+        let whole = SynthSegParams { inference: SynthSegInference::FullVolume, head_crop: None, posteriors: PosteriorPrecision::F32, ..p };
+        assert_eq!(whole, SynthSegParams::default());
+    }
+
+    #[test]
+    fn windows_sit_on_the_pooling_lattice_and_keep_the_overlap() {
+        for (size, p, overlap) in [(256, 96, 48), (256, 96, 64), (192, 96, 48), (256, 128, 48), (256, 128, 64), (176, 128, 32), (240, 112, 0)] {
+            let w = lattice_windows(size, p, overlap);
+            assert_eq!(w[0], 0);
+            assert_eq!(*w.last().unwrap(), size - p, "{size} {p} {overlap}: {w:?}");
+            assert!(w.iter().all(|o| o % LATTICE == 0), "{w:?}");
+            for pair in w.windows(2) {
+                assert!(pair[1] > pair[0] && p - (pair[1] - pair[0]) >= overlap, "{size} {p} {overlap}: {w:?}");
+            }
+            // No window could be dropped: one fewer step would have to exceed the largest allowed.
+            let max_step = (p - overlap) / LATTICE * LATTICE;
+            assert!(w.len() == 2 || (size - p) > (w.len() - 2) * max_step, "{size} {p} {overlap}: {w:?}");
+        }
+        assert_eq!(lattice_windows(256, 96, 48), vec![0, 32, 80, 112, 160]);
+        assert_eq!(lattice_windows(192, 96, 48), vec![0, 48, 96]);
+        assert_eq!(lattice_windows(256, 128, 48), vec![0, 64, 128]);
+        assert_eq!(lattice_windows(96, 96, 48), vec![0]);
+        assert_eq!(lattice_windows(64, 96, 48), vec![0]);
+    }
+
+    #[test]
+    fn the_head_box_is_the_largest_bright_region_grown_and_on_the_lattice() {
+        let dims = [64usize, 96, 128];
+        let mut data = vec![0f32; dims.iter().product()];
+        let at = |a: usize, b: usize, c: usize| (a * dims[1] + b) * dims[2] + c;
+        // The head, and a brighter speck elsewhere that is not connected to it.
+        for a in 20..40 {
+            for b in 30..61 {
+                for c in 40..90 {
+                    data[at(a, b, c)] = 0.5;
+                }
+            }
+        }
+        data[at(2, 2, 2)] = 1.0;
+        let bounds = head_box(&data, dims, 4).expect("a box");
+        assert_eq!(bounds, [(16, 48), (16, 80), (32, 96)]);
+        // A margin that reaches the edges is clamped; a box of the whole volume is no crop.
+        assert_eq!(head_box(&data, dims, 40), None);
+        assert_eq!(head_box(&vec![0f32; data.len()], dims, 4), None);
+    }
+
+    #[test]
+    fn blur_at_half_precision_follows_single_precision() {
+        let dims = [6usize, 7, 8];
+        let n_ch = 3;
+        let n = dims.iter().product::<usize>() * n_ch;
+        let src: Vec<f32> = (0..n).map(|i| ((i * 7919) % 101) as f32 / 101.0).collect();
+        let mut single = src.clone();
+        blur_posteriors(&mut single, dims, n_ch, 0.5);
+        #[cfg(feature = "onnx")]
+        {
+            let mut half: Vec<half::f16> = <half::f16 as Posterior>::store(src);
+            blur_posteriors(&mut half, dims, n_ch, 0.5);
+            for (a, b) in single.iter().zip(&half) {
+                assert!((a - b.to_f32()).abs() < 2e-3, "{a} vs {b}");
+            }
+        }
+    }
+
+    #[cfg(feature = "onnx")]
+    #[test]
+    fn merging_the_flipped_pass_in_place_matches_mirroring_it_first() {
+        let dims = [5usize, 3, 2];
+        let n_ch = 3;
+        let table = [0usize, 2, 1];
+        let n = dims.iter().product::<usize>() * n_ch;
+        let post: Vec<f32> = (0..n).map(|i| i as f32 * 0.25).collect();
+        let flipped: Vec<f32> = (0..n).map(|i| (n - i) as f32 * 0.5).collect();
+        let mut expected = post.clone();
+        let mirrored = flip_axis0(&flipped, dims, n_ch);
+        for (out, chunk) in expected.chunks_exact_mut(n_ch).zip(mirrored.chunks_exact(n_ch)) {
+            for c in 0..n_ch {
+                out[c] = 0.5 * (out[c] + chunk[table[c]]);
+            }
+        }
+        let mut got = post;
+        merge_flipped(&mut got, &flipped, dims, n_ch, &table);
+        assert_eq!(got, expected);
     }
 
     #[test]
