@@ -4,6 +4,8 @@
 
 use std::f64::consts::PI;
 
+use crate::constants::GAMMA_BAR_HZ_PER_T;
+
 /// Scale phase data to [-pi, pi] range in-place.
 ///
 /// If data is already approximately in [-pi, pi] (within 10% tolerance),
@@ -54,16 +56,28 @@ pub fn scale_phase_to_pi(data: &mut [f64]) {
 
 /// Convert field from Hz to ppm.
 pub fn hz_to_ppm(field_hz: &[f64], field_strength: f64) -> Vec<f64> {
-    let gamma_hz = 42.576e6; // Hz/T (proton gyromagnetic ratio)
+    let gamma_hz = GAMMA_BAR_HZ_PER_T;
     let scale = 1e6 / (gamma_hz * field_strength);
     field_hz.iter().map(|&v| v * scale).collect()
 }
 
 /// Convert field from rad/s to ppm.
 pub fn rads_to_ppm(field_rads: &[f64], field_strength: f64) -> Vec<f64> {
-    let gamma_hz = 42.576e6;
+    let gamma_hz = GAMMA_BAR_HZ_PER_T;
     let scale = 1e6 / (2.0 * PI * gamma_hz * field_strength);
     field_rads.iter().map(|&v| v * scale).collect()
+}
+
+/// Convert field from ppm to Hz: the inverse of [`hz_to_ppm`].
+pub fn ppm_to_hz(field_ppm: &[f64], field_strength: f64) -> Vec<f64> {
+    let scale = GAMMA_BAR_HZ_PER_T * field_strength * 1e-6;
+    field_ppm.iter().map(|&v| v * scale).collect()
+}
+
+/// Convert field from ppm to rad/s: the inverse of [`rads_to_ppm`].
+pub fn ppm_to_rads(field_ppm: &[f64], field_strength: f64) -> Vec<f64> {
+    let scale = 2.0 * PI * GAMMA_BAR_HZ_PER_T * field_strength * 1e-6;
+    field_ppm.iter().map(|&v| v * scale).collect()
 }
 
 /// Root-sum-of-squares combination of multiple magnitude images.
@@ -156,7 +170,7 @@ mod tests {
 
     #[test]
     fn test_hz_to_ppm_3t() {
-        let gamma_hz = 42.576e6;
+        let gamma_hz = GAMMA_BAR_HZ_PER_T;
         let field = vec![gamma_hz * 3.0];
         let ppm = hz_to_ppm(&field, 3.0);
         assert!((ppm[0] - 1e6).abs() < 1.0);
@@ -164,10 +178,23 @@ mod tests {
 
     #[test]
     fn test_rads_to_ppm_3t() {
-        let gamma_hz = 42.576e6;
+        let gamma_hz = GAMMA_BAR_HZ_PER_T;
         let rads = vec![2.0 * PI * gamma_hz * 3.0];
         let ppm = rads_to_ppm(&rads, 3.0);
         assert!((ppm[0] - 1e6).abs() < 1.0);
+    }
+
+    #[test]
+    fn ppm_hz_rads_round_trip() {
+        let ppm = vec![-0.25, 0.0, 1.5];
+        for (a, b) in hz_to_ppm(&ppm_to_hz(&ppm, 7.0), 7.0).iter().zip(&ppm) {
+            assert!((a - b).abs() < 1e-12);
+        }
+        for (a, b) in rads_to_ppm(&ppm_to_rads(&ppm, 3.0), 3.0).iter().zip(&ppm) {
+            assert!((a - b).abs() < 1e-12);
+        }
+        // 1 ppm at 3 T is 127.728 Hz.
+        assert!((ppm_to_hz(&[1.0], 3.0)[0] - 127.728).abs() < 1e-9);
     }
 
     #[test]

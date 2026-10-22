@@ -64,7 +64,8 @@ pub struct AmpPeParams {
     pub max_linearization_ite: usize,
     /// Field strength (Tesla).
     pub b0: f64,
-    /// Gyromagnetic ratio (MHz/T); matches the reference's `42.58`.
+    /// Gyromagnetic ratio (MHz/T); default `42.58`, the reference implementation's value, not
+    /// `crate::constants`. Keep it.
     pub gyro_ratio: f64,
     /// Damping rate for the GAMP signal updates (`damp_rate`).
     pub damp_rate_sig: f64,

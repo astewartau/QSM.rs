@@ -741,7 +741,7 @@ mod tests {
             &[phase_s], None, &mask, &meta, &config, &mut |_, _| {},
         ).unwrap();
 
-        let gamma = 42.576e6;
+        let gamma = crate::constants::GAMMA_BAR_HZ_PER_T;
         let expected_ppm = freq_hz * 1e6 / (gamma * 3.0);
 
         // ROMEO preserves the constant phase, so B0 should be recovered
@@ -778,7 +778,7 @@ mod tests {
         ).unwrap();
 
         // Expected ppm: slope(rad/s) → ppm via rads_to_ppm
-        let gamma = 42.576e6;
+        let gamma = crate::constants::GAMMA_BAR_HZ_PER_T;
         let expected_ppm = slope * 1e6 / (2.0 * PI * gamma * 3.0);
 
         let masked_values: Vec<f64> = result.b0_field_ppm.iter()
@@ -1031,7 +1031,7 @@ mod tests {
     /// Hand-written weighted combination `Σ w (φ/TE) / Σ w` in ppm, with the weights spelled
     /// out here rather than taken from `B0WeightType::weight`.
     fn hand_combination(uw: &[Vec<f64>], mags: &[Vec<f64>], tes: &[f64], mask: &[u8], wt: B0WeightType, b0_t: f64) -> Vec<f64> {
-        let gamma = 42.576e6;
+        let gamma = crate::constants::GAMMA_BAR_HZ_PER_T;
         (0..mask.len()).map(|i| {
             if mask[i] == 0 { return 0.0; }
             let (mut num, mut den) = (0.0, 0.0);
@@ -1054,7 +1054,7 @@ mod tests {
 
     /// UK Biobank's form of the assumed-decay combination: `Σ Wφ / Σ W·TE`, `W = TE·exp(−TE/T2*)`.
     fn ukb_assumed_decay(uw: &[Vec<f64>], tes: &[f64], mask: &[u8], t2s: f64, b0_t: f64) -> Vec<f64> {
-        let gamma = 42.576e6;
+        let gamma = crate::constants::GAMMA_BAR_HZ_PER_T;
         let w: Vec<f64> = tes.iter().map(|&te| te * (-te / t2s).exp()).collect();
         let den: f64 = w.iter().zip(tes).map(|(w, te)| w * te).sum();
         (0..mask.len()).map(|i| {
@@ -1185,7 +1185,7 @@ mod tests {
         let meta = meta_n(&tes);
         let (ph, mg) = echoes(&tes, omega_cos, 0.0);
         let mask = vec![1u8; N * N * N];
-        let gamma = 42.576e6;
+        let gamma = crate::constants::GAMMA_BAR_HZ_PER_T;
         let mut truth: Vec<f64> = (0..N * N * N)
             .map(|idx| omega_cos(idx % N, (idx / N) % N, idx / (N * N)) / (2.0 * PI) * 1e6 / (gamma * 3.0))
             .collect();
@@ -1244,7 +1244,7 @@ mod tests {
         let meta = meta_n(&tes);
         let (ph, mg) = echoes(&tes, omega_small, 0.3);
         let mask = vec![1u8; N * N * N];
-        let gamma = 42.576e6;
+        let gamma = crate::constants::GAMMA_BAR_HZ_PER_T;
         let base = FieldMappingConfig {
             unwrapping_algorithm: UnwrappingAlgorithm::Romeo,
             phase_offset_removal: false,
@@ -1486,7 +1486,7 @@ mod tests {
         let mut truth = vec![0.0; n];
         let mut slab = vec![0u8; n];
         let mut st = 7u64;
-        let ppm = 1e6 / (2.0 * PI * 42.576e6 * 3.0);
+        let ppm = 1e6 / (2.0 * PI * crate::constants::GAMMA_BAR_HZ_PER_T * 3.0);
         for k in 0..N { for j in 0..N { for i in 0..N {
             let idx = i + j * N + k * N * N;
             let w = omega_small(i, j, k);

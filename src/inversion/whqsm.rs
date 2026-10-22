@@ -183,7 +183,9 @@ pub fn whqsm(
         .collect();
 
     // ppm -> radians, as WH_nlTV.m expects.
-    let ppm_to_rad = 2.0 * std::f64::consts::PI * 42.576 * params.b0 * params.te;
+    // FANSI's own scripts scale with `gyro = 2*pi*42.58` (script_invivo.m); this port has used
+    // the crate-wide value so far. Matching FANSI would change results, so it is left as is.
+    let ppm_to_rad = 2.0 * std::f64::consts::PI * crate::constants::GAMMA_BAR_MHZ_PER_T * params.b0 * params.te;
     let phase: Vec<f64> = local_field.iter().map(|&f| f * ppm_to_rad).collect();
 
     // Denominator for x-subproblem: 1e-30 + mu2*k^2 + mu*ee2

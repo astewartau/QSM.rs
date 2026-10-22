@@ -229,10 +229,12 @@ pub fn fansi_unit_ee2(dims: (usize, usize, usize)) -> Vec<f64> {
     ee2
 }
 
-/// ppm -> radians factor `2*pi*gamma*b0*te` (gamma = 42.576 MHz/T), for the FANSI solvers,
-/// which work on the phase in radians while the crate's inversions take ppm.
+/// ppm -> radians factor `2*pi*gamma*b0*te` (gamma = [`GAMMA_BAR_MHZ_PER_T`](crate::constants::GAMMA_BAR_MHZ_PER_T)),
+/// for the FANSI solvers, which work on the phase in radians while the crate's inversions take
+/// ppm. FANSI's own scripts use `gyro = 2*pi*42.58` (script_invivo.m); matching that would
+/// change results, so the crate-wide value stays for now.
 pub fn fansi_ppm_to_rad(b0: f64, te: f64) -> f64 {
-    2.0 * std::f64::consts::PI * 42.576 * b0 * te
+    2.0 * std::f64::consts::PI * crate::constants::GAMMA_BAR_MHZ_PER_T * b0 * te
 }
 
 /// FANSI's data weight from the magnitude, as in its in vivo example (script_invivo.m):

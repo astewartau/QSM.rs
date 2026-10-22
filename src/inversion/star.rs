@@ -116,7 +116,8 @@ impl StarParams {
 /// STI's default zero padding of `QSM_star`, in voxels per side.
 pub const DEFAULT_PAD: usize = 12;
 
-/// γ/2π in MHz/T as STI Suite's `ScalingFactor` uses it.
+/// γ/2π in MHz/T as STI Suite's `ScalingFactor` uses it: the reference implementation's value,
+/// not `crate::constants`. Keep it.
 const STI_GAMMA_MHZ_PER_T: f64 = 42.575;
 /// The constant STI multiplies the solution by.
 const STI_CHI_FACTOR: f64 = 1.1;

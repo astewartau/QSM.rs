@@ -54,7 +54,8 @@ use crate::fft::{apply_real_kernel, fft_real_kernel};
 use crate::kernels::smv::smv_kernel;
 use crate::Grid;
 
-/// Proton gyromagnetic ratio in MHz/T (matches the QSM-CI `recon.m` constant).
+/// Proton gyromagnetic ratio in MHz/T: the reference implementation's value (the `recon.m`
+/// wrapper this port was validated against), not `crate::constants`. Keep it.
 const GYRO_MHZ_T: f64 = 42.5774;
 
 /// Parameters for [`msmv`].

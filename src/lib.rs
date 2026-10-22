@@ -115,6 +115,9 @@ pub use grid::Grid;
 /// handed input it cannot process.
 pub mod error;
 
+/// Physical constants (gyromagnetic ratio).
+pub mod constants;
+
 // ============================================================================
 // Deep-learning model registry and weight management
 // ============================================================================

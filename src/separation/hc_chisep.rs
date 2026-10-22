@@ -43,7 +43,8 @@ use rayon::prelude::*;
 
 use std::f64::consts::PI;
 
-/// Reduced gyromagnetic ratio (Hz/T) used by the hollow-cylinder model.
+/// Reduced gyromagnetic ratio (Hz/T) used by the hollow-cylinder model: the reference
+/// implementation's value (qsm-forward's `GAMMA_BAR`), not `crate::constants`. Keep it.
 const GAMMA_BAR: f64 = 42.577e6;
 
 // --- Hollow-cylinder white-matter model constants (Wharton & Bowtell Table 3) ---
