@@ -593,11 +593,13 @@ mod tests {
         let (nx, ny, nz) = (16, 18, 20);
         let n = nx * ny * nz;
         assert_eq!(raw.len(), 2 * n + 12 * n);
-        let input: Vec<f64> = raw[..2 * n].chunks_exact(2).map(|b| u16::from_le_bytes([b[0], b[1]]) as f64).collect();
+        let input: Vec<f64> = raw[..2 * n].as_chunks::<2>().0.iter().map(|&b| u16::from_le_bytes(b) as f64).collect();
         let volume = |i: usize| -> Vec<f32> {
             raw[2 * n + 4 * n * i..2 * n + 4 * n * (i + 1)]
-                .chunks_exact(4)
-                .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|&b| f32::from_le_bytes(b))
                 .collect()
         };
         let run = |params: FrangiParams| -> Vec<f32> {
