@@ -217,14 +217,16 @@ pub fn run_dipole_inversion(
         }
         InversionAlgorithm::AmpPe => {
             // AMP-PE takes the local field in ppm (like NDI). `b0` (field strength)
-            // is a scan parameter sourced from metadata, not a user knob; magnitude,
-            // when present, is the data-fidelity weight + morphology mask.
+            // is a scan parameter sourced from metadata, not a user knob. The one magnitude
+            // this stage has serves as both the data weight and the morphology image; upstream
+            // uses the first echo's magnitude for the first and the RSS over echoes for the
+            // second, which a caller holding the echoes can pass to `amp_pe` directly.
             let params = crate::inversion::AmpPeParams {
                 b0: metadata.field_strength,
                 ..config.amp_pe.clone()
             };
             crate::inversion::amp_pe(
-                field_ppm, mask, magnitude, &grid, bdir, &params, progress,
+                field_ppm, mask, magnitude, None, &grid, bdir, &params, progress,
             )
         }
         InversionAlgorithm::Lsqr => {

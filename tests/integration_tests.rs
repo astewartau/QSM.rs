@@ -809,7 +809,7 @@ fn test_inversion_amp_pe() {
         ..AmpPeParams::default()
     };
     let (result, elapsed) = run_timed!("AMP-PE", inversion::amp_pe(
-        &data.fieldmap_local, &data.mask, None, &grid, data.b0_dir, &params, |_, _| {},
+        &data.fieldmap_local, &data.mask, None, None, &grid, data.b0_dir, &params, |_, _| {},
     ));
 
     let res = TestResult::new("AMP-PE", &result, &data.chi, &data.mask, data.dims);
