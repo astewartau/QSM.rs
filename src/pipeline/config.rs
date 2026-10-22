@@ -247,12 +247,13 @@ pub enum B0EstimationMethod {
     /// magnitude-weighted fit of phase against TE through the origin, with no per-echo constant
     /// removed. Also returns QSMART's reliability map `R_0`
     /// ([`FieldMappingResult::reliability`]): voxels whose fit residual, box-filtered over ~1 mm,
-    /// reaches `fit_threshold` ([`QSMART_FIT_THRESHOLD`](crate::utils::QSMART_FIT_THRESHOLD) = 40
-    /// in QSMART). The field is converted to ppm with QSMART's γ = 2.675e8 rad/s/T. Phase-offset
-    /// removal and bipolar correction do not apply.
+    /// reaches `fit_threshold` (by default the 99th percentile of the blurred residual, as
+    /// QSMART's authors run it; see [`QsmartFitThreshold`](crate::utils::QsmartFitThreshold)).
+    /// The field is converted to ppm with QSMART's γ = 2.675e8 rad/s/T. Phase-offset removal and
+    /// bipolar correction do not apply.
     QsmartEchofit {
         /// Residual threshold for `R_0`
-        fit_threshold: f64,
+        fit_threshold: crate::utils::QsmartFitThreshold,
     },
 }
 

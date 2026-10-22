@@ -158,11 +158,7 @@ pub fn run_field_mapping(
                     "QSMART's echo fit has no bipolar correction; turn bipolar correction off".into(),
                 ));
             }
-            if !fit_threshold.is_finite() || *fit_threshold <= 0.0 {
-                return Err(PipelineError::InvalidConfig(format!(
-                    "QSMART's echo-fit threshold must be positive, got {fit_threshold}"
-                )));
-            }
+            fit_threshold.validate().map_err(PipelineError::InvalidConfig)?;
         }
         B0EstimationMethod::WeightedAvg { .. } | B0EstimationMethod::LinearFit(_) => {}
         // Not a combination of unwrapped echoes: the fit runs on the wrapped echoes and is
@@ -432,7 +428,7 @@ fn field_mapping_qsmart(
     mag_slices: &[&[f64]],
     metadata: &ScanMetadata,
     config: &FieldMappingConfig,
-    fit_threshold: f64,
+    fit_threshold: crate::utils::QsmartFitThreshold,
     progress: &mut dyn FnMut(usize, usize),
 ) -> Result<FieldMappingResult, PipelineError> {
     let grid = metadata.grid();
@@ -694,14 +690,14 @@ mod tests {
         let uw: Vec<&[f64]> = uw.iter().map(|v| v.as_slice()).collect();
         let ppm = crate::utils::QSMART_GYRO * 3.0 / 1e6;
         // A threshold at the median residual, so R_0 has both values.
-        let mut blur = crate::utils::qsmart_echofit(&uw, &m, &meta.echo_times, &grid, ppm, 1.0).fit_residual_blur;
+        let mut blur = crate::utils::qsmart_echofit(&uw, &m, &meta.echo_times, &grid, ppm, crate::utils::QsmartFitThreshold::Absolute(1.0)).fit_residual_blur;
         blur.sort_by(f64::total_cmp);
         let thr = blur[n / 2];
-        let want = crate::utils::qsmart_echofit(&uw, &m, &meta.echo_times, &grid, ppm, thr);
+        let want = crate::utils::qsmart_echofit(&uw, &m, &meta.echo_times, &grid, ppm, crate::utils::QsmartFitThreshold::Absolute(thr));
         let config = FieldMappingConfig {
             unwrapping_algorithm: UnwrappingAlgorithm::Laplacian,
             laplacian_solver: LaplacianSolver::Mirror,
-            b0_estimation: B0EstimationMethod::QsmartEchofit { fit_threshold: thr },
+            b0_estimation: B0EstimationMethod::QsmartEchofit { fit_threshold: crate::utils::QsmartFitThreshold::Absolute(thr) },
             ..Default::default()
         };
         let got = run_field_mapping(&p, Some(&m), &mask, &meta, &config, &mut |_, _| {}).unwrap();
@@ -712,7 +708,7 @@ mod tests {
         for bad in [
             FieldMappingConfig { unwrapping_algorithm: UnwrappingAlgorithm::Romeo, ..config.clone() },
             FieldMappingConfig { bipolar_correction: true, ..config.clone() },
-            FieldMappingConfig { b0_estimation: B0EstimationMethod::QsmartEchofit { fit_threshold: 0.0 }, ..config.clone() },
+            FieldMappingConfig { b0_estimation: B0EstimationMethod::QsmartEchofit { fit_threshold: crate::utils::QsmartFitThreshold::Percentile(0.0) }, ..config.clone() },
         ] {
             assert!(run_field_mapping(&p, Some(&m), &mask, &meta, &bad, &mut |_, _| {}).is_err());
         }
