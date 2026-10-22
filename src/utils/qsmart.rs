@@ -129,8 +129,71 @@ pub fn adjust_offset(
 /// QSMART's proton gyromagnetic ratio in rad/s/T (`Demo_QSMART.m`'s `gyro`).
 pub const QSMART_GYRO: f64 = 2.675e8;
 
-/// QSMART's echo-fit residual threshold for `R_0` (`Demo_QSMART.m`'s `fit_threshold`).
+/// QSMART's fixed echo-fit residual threshold for `R_0` (`Demo_QSMART.m`'s `fit_threshold`,
+/// used when its `adaptive_threshold` is off).
 pub const QSMART_FIT_THRESHOLD: f64 = 40.0;
+
+/// QSMART's adaptive echo-fit threshold: the percentile of the blurred residual
+/// (`fit_thresh_percentile`) that its authors use.
+pub const QSMART_FIT_PERCENTILE: f64 = 99.0;
+
+/// How [`qsmart_echofit`] sets the residual threshold for `R_0` (`echofit.m`'s
+/// `adaptive_threshold`).
+#[cfg_attr(feature = "introspection", derive(serde::Serialize))]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum QsmartFitThreshold {
+    /// Adaptive: the given percentile (0–100] of the nonzero blurred residuals over the whole
+    /// volume, as MATLAB's `prctile(fit_residual_blur(fit_residual_blur~=0), p)`. QSMART's authors
+    /// run with [`QSMART_FIT_PERCENTILE`] (99); the default.
+    Percentile(f64),
+    /// A fixed residual threshold ([`QSMART_FIT_THRESHOLD`] = 40 in `Demo_QSMART.m`).
+    Absolute(f64),
+}
+
+impl Default for QsmartFitThreshold {
+    fn default() -> Self {
+        QsmartFitThreshold::Percentile(QSMART_FIT_PERCENTILE)
+    }
+}
+
+impl QsmartFitThreshold {
+    /// Checks the value: a percentile in (0, 100], or a positive, finite threshold.
+    pub fn validate(&self) -> Result<(), String> {
+        match *self {
+            QsmartFitThreshold::Percentile(p) if !(p > 0.0 && p <= 100.0) => {
+                Err(format!("QSMART's echo-fit percentile must be in (0, 100], got {p}"))
+            }
+            QsmartFitThreshold::Absolute(t) if !(t.is_finite() && t > 0.0) => {
+                Err(format!("QSMART's echo-fit threshold must be positive, got {t}"))
+            }
+            _ => Ok(()),
+        }
+    }
+}
+
+/// MATLAB's `prctile(x, p)` (its default method): the sorted values sit at percentiles
+/// `100 * (i - 0.5) / n`, linearly interpolated between and clamped beyond the first and last.
+/// NaNs are left out. `None` when nothing is left.
+fn prctile_matlab(values: impl Iterator<Item = f64>, p: f64) -> Option<f64> {
+    let mut x: Vec<f64> = values.filter(|v| !v.is_nan()).collect();
+    if x.is_empty() {
+        return None;
+    }
+    x.sort_by(f64::total_cmp);
+    let n = x.len() as f64;
+    // Position on the 1-based index scale: p = 100 (i - 0.5) / n  =>  i = n p / 100 + 0.5
+    let i = n * p / 100.0 + 0.5;
+    if i <= 1.0 {
+        return Some(x[0]);
+    }
+    if i >= n {
+        return Some(x[x.len() - 1]);
+    }
+    let lo = i.floor();
+    let f = i - lo;
+    let k = lo as usize - 1;
+    Some(x[k] + f * (x[k + 1] - x[k]))
+}
 
 /// QSMART's echo fit ([`qsmart_echofit`]): the total field and the reliability map `R_0`.
 pub struct QsmartEchofit {
@@ -141,24 +204,27 @@ pub struct QsmartEchofit {
     pub fit_residual: Vec<f64>,
     /// `fit_residual` box-filtered over about 1 mm (`smooth3(res, 'box', round(1./vox)*2+1)`)
     pub fit_residual_blur: Vec<f64>,
+    /// The residual threshold used (the percentile's value when adaptive)
+    pub fit_threshold: f64,
     /// `R_0`: 1 where `fit_residual_blur < fit_threshold`, else 0
     pub reliability: Vec<u8>,
 }
 
-/// QSMART's `echofit.m` (zero intercept, fixed threshold): fits the unwrapped phase of each echo
-/// to its echo time, weighted by magnitude, and marks voxels whose blurred fit residual reaches
-/// `fit_threshold` ([`QSMART_FIT_THRESHOLD`]) as unreliable (`R_0` = 0).
+/// QSMART's `echofit.m` (zero intercept): fits the unwrapped phase of each echo to its echo time,
+/// weighted by magnitude, and marks voxels whose blurred fit residual reaches the threshold as
+/// unreliable (`R_0` = 0). The threshold is `fit_threshold`: by default the 99th percentile of the
+/// blurred residual ([`QsmartFitThreshold::Percentile`], as the authors run it), or a fixed value.
 ///
 /// `phases` are unwrapped phases in radians, `magnitudes` the matching magnitudes, one volume per
 /// echo; `echo_times` in seconds; `ppm` converts rad/s to ppm (QSMART: `gyro * B0 / 1e6` with
-/// `gyro = 2.675e8`). `echofit.m`'s adaptive (percentile) threshold is not provided.
+/// `gyro = 2.675e8`).
 pub fn qsmart_echofit(
     phases: &[&[f64]],
     magnitudes: &[&[f64]],
     echo_times: &[f64],
     grid: &crate::Grid,
     ppm: f64,
-    fit_threshold: f64,
+    fit_threshold: QsmartFitThreshold,
 ) -> QsmartEchofit {
     let (nx, ny, nz) = grid.dims;
     let n = nx * ny * nz;
@@ -189,8 +255,15 @@ pub fn qsmart_echofit(
     let (vx, vy, vz) = grid.voxel_size;
     let half = |vs: f64| (1.0 / vs).round() as usize;
     let fit_residual_blur = box_mean_replicate(&fit_residual, grid.dims, [half(vx), half(vy), half(vz)]);
+    let fit_threshold = match fit_threshold {
+        QsmartFitThreshold::Absolute(t) => t,
+        // With no nonzero residual there is nothing to exclude.
+        QsmartFitThreshold::Percentile(p) => {
+            prctile_matlab(fit_residual_blur.iter().copied().filter(|&b| b != 0.0), p).unwrap_or(f64::INFINITY)
+        }
+    };
     let reliability = fit_residual_blur.iter().map(|&b| u8::from(b < fit_threshold || b.is_nan())).collect();
-    QsmartEchofit { field_ppm, fit_residual, fit_residual_blur, reliability }
+    QsmartEchofit { field_ppm, fit_residual, fit_residual_blur, fit_threshold, reliability }
 }
 
 /// MATLAB's `smooth3(data, 'box', 2*half+1)`: the mean over a box, replicate-padded.
@@ -387,6 +460,40 @@ mod tests {
     }
 
     #[test]
+    fn prctile_matches_matlab() {
+        // MATLAB R2023b prctile([3 1 4 1 5 9 2 6 5 3 5], p).
+        let v = [3.0, 1.0, 4.0, 1.0, 5.0, 9.0, 2.0, 6.0, 5.0, 3.0, 5.0];
+        for (p, want) in [(99.0, 9.0), (50.0, 4.0), (0.0, 1.0), (100.0, 9.0), (3.0, 1.0), (97.0, 9.0)] {
+            assert_eq!(prctile_matlab(v.iter().copied(), p), Some(want), "p = {p}");
+        }
+        // Interpolated: positions 100 (i - 0.5) / 4 = 12.5, 37.5, 62.5, 87.5.
+        assert_eq!(prctile_matlab([10.0, 20.0, 30.0, 40.0].into_iter(), 25.0), Some(15.0));
+        assert_eq!(prctile_matlab([f64::NAN, 2.0].into_iter(), 50.0), Some(2.0));
+        assert_eq!(prctile_matlab(std::iter::empty(), 50.0), None);
+    }
+
+    #[test]
+    fn adaptive_threshold_is_the_percentile_of_the_nonzero_residuals() {
+        let grid = crate::Grid::new(6, 5, 4, 1.0, 1.0, 1.0);
+        let te = [0.004, 0.009, 0.014];
+        let n = 120;
+        let mags: Vec<Vec<f64>> = (0..3).map(|e| (0..n).map(|i| if i % 13 == 0 { 0.0 } else { 1.0 + ((i + e) % 7) as f64 }).collect()).collect();
+        let phases: Vec<Vec<f64>> = (0..3).map(|e| (0..n).map(|i| 30.0 * te[e] + 0.4 * (i as f64 * 1.3 + e as f64).cos()).collect()).collect();
+        let p: Vec<&[f64]> = phases.iter().map(|v| v.as_slice()).collect();
+        let m: Vec<&[f64]> = mags.iter().map(|v| v.as_slice()).collect();
+        let fit = qsmart_echofit(&p, &m, &te, &grid, 1.0, QsmartFitThreshold::Percentile(80.0));
+        let want = prctile_matlab(fit.fit_residual_blur.iter().copied().filter(|&b| b != 0.0), 80.0).unwrap();
+        assert_eq!(fit.fit_threshold, want);
+        let excluded = fit.reliability.iter().filter(|&&r| r == 0).count();
+        assert!(excluded > 0 && excluded < n / 2, "{excluded}");
+        assert_eq!(QsmartFitThreshold::default(), QsmartFitThreshold::Percentile(99.0));
+        assert!(QsmartFitThreshold::Percentile(0.0).validate().is_err());
+        assert!(QsmartFitThreshold::Percentile(101.0).validate().is_err());
+        assert!(QsmartFitThreshold::Absolute(0.0).validate().is_err());
+        assert!(QsmartFitThreshold::Absolute(40.0).validate().is_ok());
+    }
+
+    #[test]
     fn echofit_matches_matlab() {
         // QSMART_toolbox_v1.0/echofit.m (MATLAB R2023b) on the same synthetic data: anisotropic
         // voxels (box 3x5x1) and zero-magnitude voxels (residual 0/0 -> 0).
@@ -401,7 +508,7 @@ mod tests {
             .collect();
         let p: Vec<&[f64]> = phases.iter().map(|v| v.as_slice()).collect();
         let m: Vec<&[f64]> = mags.iter().map(|v| v.as_slice()).collect();
-        let fit = qsmart_echofit(&p, &m, &te, &grid, 2.675e8 * 3.0 / 1e6, 0.19491409729604658);
+        let fit = qsmart_echofit(&p, &m, &te, &grid, 2.675e8 * 3.0 / 1e6, QsmartFitThreshold::Absolute(0.19491409729604658));
         let close = |a: f64, b: f64| assert!((a - b).abs() <= 1e-12 * b.abs().max(1.0), "{a} vs {b}");
         close(fit.field_ppm.iter().sum(), 4.228895044177502);
         close(fit.fit_residual.iter().sum(), 23.334665367421614);
