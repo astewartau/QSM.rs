@@ -126,7 +126,8 @@ pub fn adjust_offset(
     adjusted
 }
 
-/// QSMART's proton gyromagnetic ratio in rad/s/T (`Demo_QSMART.m`'s `gyro`).
+/// QSMART's proton gyromagnetic ratio in rad/s/T (`Demo_QSMART.m`'s `gyro`): the reference
+/// implementation's value, not `crate::constants`. Keep it.
 pub const QSMART_GYRO: f64 = 2.675e8;
 
 /// QSMART's fixed echo-fit residual threshold for `R_0` (`Demo_QSMART.m`'s `fit_threshold`,

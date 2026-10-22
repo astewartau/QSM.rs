@@ -165,7 +165,7 @@ fn tfi_l1(
     let mut buf = vec![Complex64::new(0.0, 0.0); n];
 
     // ppm -> radians over delta_TE; MEDI_L1 converts back with x/(2*pi*delta_TE*CF)*1e6.
-    let cf = 42.576e6 * params.b0;
+    let cf = crate::constants::GAMMA_BAR_HZ_PER_T * params.b0;
     let ppm_to_rad = 2.0 * std::f64::consts::PI * params.te * cf * 1e-6;
     let mut rdf = vec![0.0f64; n];
     par_fill(&mut rdf, |i| total_field[i] * ppm_to_rad);

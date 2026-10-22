@@ -772,7 +772,7 @@ mod tests {
         let n = nx * ny * nz;
         let grid = Grid::new(nx, ny, nz, 1.0, 1.0, 1.0);
         let bdir = (0.0, 0.0, 1.0);
-        let cf: f64 = 42.576e6 * 7.0;
+        let cf: f64 = crate::constants::GAMMA_BAR_HZ_PER_T * 7.0;
         let dr = super::DR_SHIN_2021;
 
         let para = make_sphere(nx, ny, nz, 10.0, 16.0, 16.0, 4.0);

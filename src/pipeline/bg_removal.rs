@@ -69,7 +69,7 @@ pub fn run_bg_removal(
             let te = &metadata.echo_times;
             let mag = super::inversion::echo_magnitudes("PDF", magnitude, te, n_voxels)?;
             let delta_te = if te.len() == 1 { te[0] } else { te[1] - te[0] };
-            let rad_per_ppm = 2.0 * std::f64::consts::PI * 42.576e6 * metadata.field_strength * delta_te * 1e-6;
+            let rad_per_ppm = 2.0 * std::f64::consts::PI * crate::constants::GAMMA_BAR_HZ_PER_T * metadata.field_strength * delta_te * 1e-6;
             let n_std: Vec<f64> = crate::utils::fit_ppm_complex_noise(mag.data, mag.n_echoes)
                 .into_iter()
                 .map(|v| v / rad_per_ppm)
@@ -352,7 +352,7 @@ mod tests {
         };
         let config = BgRemovalConfig { algorithm: BgRemovalAlgorithm::Pdf, ..Default::default() };
         let got = run_bg_removal(&field, &mask, &meta, &config, Some(&mag), &mut |_, _| {}).unwrap();
-        let rad_per_ppm = 2.0 * std::f64::consts::PI * 42.576e6 * 3.0 * 0.004 * 1e-6;
+        let rad_per_ppm = 2.0 * std::f64::consts::PI * crate::constants::GAMMA_BAR_HZ_PER_T * 3.0 * 0.004 * 1e-6;
         let n_std: Vec<f64> = crate::utils::fit_ppm_complex_noise(&mag, 3).iter().map(|v| v / rad_per_ppm).collect();
         let want = crate::bgremove::pdf(&field, &n_std, &mask, &meta.grid(), (0.0, 0.0, 1.0), &config.pdf, |_, _| {}).unwrap();
         assert_eq!(got.local_field_ppm, want);

@@ -183,7 +183,9 @@ pub fn whqsm(
         .collect();
 
     // ppm -> radians, as WH_nlTV.m expects.
-    let ppm_to_rad = 2.0 * std::f64::consts::PI * 42.576 * params.b0 * params.te;
+    // FANSI's scripts use `gyro = 2*pi*42.58`; QSM.rs uses GAMMA_BAR_MHZ_PER_T, which is closer
+    // to the CODATA shielded-proton value (see `crate::constants`).
+    let ppm_to_rad = 2.0 * std::f64::consts::PI * crate::constants::GAMMA_BAR_MHZ_PER_T * params.b0 * params.te;
     let phase: Vec<f64> = local_field.iter().map(|&f| f * ppm_to_rad).collect();
 
     // Denominator for x-subproblem: 1e-30 + mu2*k^2 + mu*ee2

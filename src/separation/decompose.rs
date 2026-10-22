@@ -76,7 +76,8 @@ use rayon::prelude::*;
 
 use std::f64::consts::PI;
 
-/// Gyromagnetic constant used by the DECOMPOSE reference: `42.58 · 2π`.
+/// Gyromagnetic constant used by the DECOMPOSE reference: `42.58 · 2π` — the reference
+/// implementation's value (`signalModel.m`), not `crate::constants`. Keep it.
 const GAMMA: f64 = 42.58 * 2.0 * PI;
 
 /// Parameters for [`decompose`].

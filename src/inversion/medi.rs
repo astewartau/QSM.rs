@@ -281,7 +281,7 @@ fn medi_l1(
     let mut buf = vec![Complex64::new(0.0, 0.0); n];
 
     // ppm -> radians over delta_TE; MEDI_L1 converts back with x/(2*pi*delta_TE*CF)*1e6.
-    let cf = 42.576e6 * params.b0;
+    let cf = crate::constants::GAMMA_BAR_HZ_PER_T * params.b0;
     let te = &params.echo_times;
     let delta_te = if te.len() == 1 { te[0] } else { te[1] - te[0] };
     let ppm_to_rad = 2.0 * std::f64::consts::PI * delta_te * cf * 1e-6;

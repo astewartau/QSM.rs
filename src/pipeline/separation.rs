@@ -14,9 +14,6 @@ use crate::separation::{
     ChiSepIlsqrParams, ChiSepParams, DecomposeParams, HcChisepParams, R2starQsmParams,
 };
 
-/// Proton gyromagnetic ratio in Hz/T (for the central frequency `cf = γ·B0`).
-const GAMMA_HZ_PER_T: f64 = 42.576e6;
-
 /// Inputs for [`run_separation`]. Provide whatever the chosen algorithm needs;
 /// the dispatcher errors if a required input is missing.
 #[derive(Clone, Copy)]
@@ -69,7 +66,7 @@ pub fn run_separation(
     let grid = metadata.grid();
     let n = grid.n_total();
     let bdir = metadata.b0_direction;
-    let cf = GAMMA_HZ_PER_T * metadata.field_strength;
+    let cf = crate::constants::GAMMA_BAR_HZ_PER_T * metadata.field_strength;
     let b0 = metadata.field_strength;
 
     if inputs.qsm.len() != n || inputs.mask.len() != n {

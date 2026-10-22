@@ -73,7 +73,8 @@ use super::lsqr_qsm::{crop_pad, lsqr_qsm_padded, spatial_dipole_kernel, uncrop, 
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
-/// Gyromagnetic ratio of the proton, in rad/s/T.
+/// Gyromagnetic ratio of the proton, in rad/s/T: the reference implementation's value
+/// (`getconstants.m`), not `crate::constants`. Keep it.
 const GAMMA: f64 = 2.67522128e8;
 
 /// Upstream expresses its mask thresholds per unit of `phase / (TE[ms] · B₀[T])`.

@@ -152,7 +152,7 @@ pub fn nltv(
     let tol_newton2 = params.tol_newton * params.tol_newton;
 
     // ppm -> radians, as the nonlinear data term needs.
-    let ppm_to_rad = 2.0 * std::f64::consts::PI * 42.576 * params.b0 * params.te;
+    let ppm_to_rad = 2.0 * std::f64::consts::PI * crate::constants::GAMMA_BAR_MHZ_PER_T * params.b0 * params.te;
 
     // Zero padding to a fast FFT size (QSM.jl `pad = (0, 0, 0)`). Every step is
     // shift-equivariant, so placing the data in the corner is the same as centring it.

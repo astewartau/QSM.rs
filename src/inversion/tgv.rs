@@ -49,7 +49,8 @@ use crate::utils::morphology::erode_mask;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
-/// γ/2π in MHz/T, as used by TGV-QSM (Julia and Python reference implementations).
+/// γ/2π in MHz/T, as used by TGV-QSM (Julia and Python reference implementations): the
+/// reference implementation's value, not `crate::constants`. Keep it.
 pub const TGV_GAMMA_MHZ_PER_T: f64 = 42.5781;
 
 /// Phase (rad) per ppm of field at echo time `te_s` (s) and field strength `b0_t` (T):
