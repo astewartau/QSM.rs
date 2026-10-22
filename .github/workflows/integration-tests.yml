@@ -596,7 +596,7 @@ jobs:
               tests/models_onnx.rs|tests/qsmart_validation.rs|tests/relaxometry_demo.rs|tests/wasm_pipeline.rs) : ;;
               tests/weight_provider.rs|tests/data/*) : ;;
               # Reporting only: how results are drawn and tabled, never what is computed.
-              scripts/render_slices.py|scripts/render_paper_figures.py|scripts/integration_report.sh) : ;;
+              scripts/render_slices.py|scripts/render_paper_figures.py|scripts/integration_report.sh|scripts/post_pr_comment.sh) : ;;
 
               # Anything else under src/ or tests/ has no mapping above — a new file, most likely.
               # Run everything rather than nothing: a change that maps to no test must not pass
@@ -1563,28 +1563,25 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Upload figures
+        # Kept with the run, so the comment can point here if the image host is down.
+        if: github.event_name == 'pull_request'
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: figures
+          path: figures/
+          if-no-files-found: ignore
+
       - name: Post PR comment with results
         if: github.event_name == 'pull_request'
         continue-on-error: true
         env:
           REPO_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           COVERAGE: ${{ needs.unit-tests.outputs.coverage }}
           TESTS_PASSED: ${{ needs.unit-tests.outputs.tests_passed }}
         run: |
           bash scripts/integration_report.sh --figures > report.md
-          # Retry with backoff — `cml comment create` hits the GitHub API and can be
-          # throttled (rate limit shared across concurrent runs). Best-effort: the
-          # step is continue-on-error, so a persistent throttle won't fail the run.
-          for attempt in 1 2 3 4 5; do
-            if cml comment create report.md; then
-              echo "PR comment posted (attempt $attempt)."
-              break
-            fi
-            if [ "$attempt" -lt 5 ]; then
-              wait=$((attempt * 30))
-              echo "cml comment create failed (attempt $attempt); retrying in ${wait}s..."
-              sleep "$wait"
-            else
-              echo "cml comment create still failing after $attempt attempts; giving up (non-fatal)."
-            fi
-          done
+          bash scripts/post_pr_comment.sh report.md
