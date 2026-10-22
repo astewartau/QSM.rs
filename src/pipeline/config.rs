@@ -20,7 +20,7 @@ use crate::separation::{
 };
 use crate::unwrap::romeo::RomeoParams;
 use crate::unwrap::LaplacianSolver;
-use crate::utils::multi_echo::{B0WeightType, EchoQuality, LinearFitParams, RobustFitParams};
+use crate::utils::multi_echo::{B0WeightType, EchoQuality, FitPpmComplexParams, LinearFitParams, RobustFitParams};
 use crate::utils::QsmartParams;
 
 
@@ -204,7 +204,8 @@ pub enum InversionAlgorithm {
 /// fit that ignores it.
 ///
 /// Only multi-echo data is combined. A single echo is `φ/TE` whatever is chosen here, except
-/// that [`Self::RobustFit`] refuses a series too short for it (see [`RobustFitParams::min_echoes`]).
+/// that [`Self::RobustFit`] refuses a series too short for it (see [`RobustFitParams::min_echoes`])
+/// and [`Self::ComplexFit`] needs the echo's magnitude (it is also `φ/TE` there, as in MEDI).
 #[derive(Clone, Debug, PartialEq)]
 pub enum B0EstimationMethod {
     /// Weighted mean of the per-echo frequencies, `B0 = Σ wₑ (φₑ/TEₑ) / Σ wₑ`, with `wₑ` from
@@ -228,6 +229,18 @@ pub enum B0EstimationMethod {
     /// fewer is [`PipelineError::InvalidConfig`] rather than a silent plain fit. The per-echo
     /// report is returned in [`FieldMappingResult::robust_fit`].
     RobustFit(RobustFitParams),
+    /// MEDI's field map: the complex fit of `Fit_ppm_complex.m`
+    /// ([`fit_ppm_complex`](crate::utils::fit_ppm_complex)) to the wrapped echoes, then spatial
+    /// unwrapping of the fitted phase per echo spacing with `unwrapping_algorithm` (MEDI uses its
+    /// region-growing `unwrapPhase`, which is not ported; ROMEO is given MEDI's `iMag`, the
+    /// root-sum-of-squares of the echo magnitudes), then division by the echo spacing.
+    ///
+    /// This replaces the per-echo path rather than combining unwrapped echoes: the fit has its own
+    /// phase offset (`p0`), so `phase_offset_removal` does not apply and is not run;
+    /// `bipolar_correction` is refused (MEDI's `Fit_ppm_complex_bipolar` is not ported). Needs the
+    /// magnitude of every echo and evenly spaced echoes. Also returns the field's noise map
+    /// ([`FieldMappingResult::field_noise_ppm`], MEDI's `N_std`).
+    ComplexFit(FitPpmComplexParams),
     /// QSMART's echo fit (`echofit.m`, [`qsmart_echofit`](crate::utils::qsmart_echofit)): each
     /// echo unwrapped on its own over the whole, unmasked volume (Laplacian unwrapping only; QSMART
     /// uses [`LaplacianSolver::Mirror`](crate::unwrap::LaplacianSolver::Mirror)), then the
@@ -933,6 +946,10 @@ pub struct FieldMappingResult {
     /// combined the echoes; `None` for every other method. Pass it to
     /// [`run_qsmart`](crate::pipeline::run_qsmart).
     pub reliability: Option<Vec<u8>>,
+    /// Standard deviation of `b0_field_ppm` per voxel, in ppm, for the methods that estimate it:
+    /// [`B0EstimationMethod::ComplexFit`] (`Fit_ppm_complex.m`'s `dp1`, MEDI's `N_std`, which
+    /// MEDI passes to PDF and MEDI_L1). `None` for every other method.
+    pub field_noise_ppm: Option<Vec<f64>>,
 }
 
 /// Per-echo evidence from [`B0EstimationMethod::RobustFit`]: which echoes the fit stopped

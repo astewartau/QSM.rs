@@ -2,7 +2,8 @@
 //!
 //! Multi-echo phase → B0 field map in ppm.
 //! Implements the canonical field mapping pipeline:
-//! phase offset removal → bipolar correction → unwrapping → B0 estimation.
+//! phase offset removal → bipolar correction → unwrapping → B0 estimation,
+//! or MEDI's: complex fit of the wrapped echoes → unwrapping.
 
 use super::config::*;
 use super::phase_utils::{hz_to_ppm, rads_to_ppm};
@@ -44,6 +45,23 @@ use crate::utils::B0WeightType;
 ///     ..Default::default()
 /// };
 /// # let _ = ukb;
+/// ```
+///
+/// # MEDI's field map
+///
+/// [`B0EstimationMethod::ComplexFit`] runs MEDI's `Fit_ppm_complex` on the wrapped complex echoes,
+/// unwraps the fitted phase per echo spacing spatially with `unwrapping_algorithm`, and divides
+/// by the echo spacing. It needs `magnitudes` and evenly spaced echoes, and also returns the
+/// field's noise map in [`FieldMappingResult::field_noise_ppm`] (MEDI's `N_std`):
+///
+/// ```
+/// use qsm_core::fieldmap::FitPpmComplexParams;
+/// use qsm_core::pipeline::{B0EstimationMethod, FieldMappingConfig};
+/// let medi = FieldMappingConfig {
+///     b0_estimation: B0EstimationMethod::ComplexFit(FitPpmComplexParams::default()),
+///     ..Default::default()
+/// };
+/// # let _ = medi;
 /// ```
 ///
 /// # Motion-robust echo combination
@@ -147,6 +165,11 @@ pub fn run_field_mapping(
             }
         }
         B0EstimationMethod::WeightedAvg { .. } | B0EstimationMethod::LinearFit(_) => {}
+        // Not a combination of unwrapped echoes: the fit runs on the wrapped echoes and is
+        // unwrapped after, so it has a path of its own.
+        B0EstimationMethod::ComplexFit(params) => {
+            return field_mapping_complex_fit(phases, magnitudes, mask, metadata, config, params, progress);
+        }
     }
 
     let is_laplacian = config.unwrapping_algorithm == UnwrappingAlgorithm::Laplacian;
@@ -259,6 +282,7 @@ fn field_mapping_with_offset(
             crate::utils::field_to_hz(&field_rads)
         }
         B0EstimationMethod::QsmartEchofit { .. } => unreachable!("taken by field_mapping_qsmart"),
+        B0EstimationMethod::ComplexFit(_) => unreachable!("run_field_mapping takes the complex fit's own path"),
     };
 
     progress(4, 4);
@@ -267,6 +291,7 @@ fn field_mapping_with_offset(
         phase_offset: Some(phase_offset),
         robust_fit,
         reliability: None,
+        field_noise_ppm: None,
     })
 }
 
@@ -387,6 +412,7 @@ fn field_mapping_direct(
             rads_to_ppm(&field_rads, metadata.field_strength)
         }
         B0EstimationMethod::QsmartEchofit { .. } => unreachable!("taken by field_mapping_qsmart"),
+        B0EstimationMethod::ComplexFit(_) => unreachable!("run_field_mapping takes the complex fit's own path"),
     };
 
     progress(4, 4);
@@ -394,6 +420,7 @@ fn field_mapping_direct(
         b0_field_ppm,
         phase_offset: None,
         robust_fit,
+        field_noise_ppm: None,
         reliability: None,
     })
 }
@@ -424,6 +451,7 @@ fn field_mapping_qsmart(
         phase_offset: None,
         robust_fit: None,
         reliability: Some(fit.reliability),
+        field_noise_ppm: None,
     })
 }
 
@@ -525,6 +553,79 @@ fn field_mapping_single_echo(
         phase_offset: None,
         robust_fit: None,
         reliability: None,
+        field_noise_ppm: None,
+    })
+}
+
+/// [`B0EstimationMethod::ComplexFit`]: MEDI's field map. `Fit_ppm_complex` on the wrapped
+/// complex echoes gives the phase per echo spacing, wrapped; it is unwrapped spatially, as MEDI's
+/// `iFreq = unwrapPhase(iMag, iFreq_raw, matrix_size)` does, and divided by the echo spacing.
+/// The noise map (`dp1`, MEDI's `N_std`) is converted the same way, to ppm.
+///
+/// MEDI's unwrapper is a region-growing method that is not ported; the configured
+/// `unwrapping_algorithm` is used instead. ROMEO gets MEDI's `iMag` (root-sum-of-squares of the
+/// echo magnitudes) as its magnitude. Laplacian unwrapping is done as on the other paths: phase
+/// zeroed outside the mask first, masked mean removed after (it leaves a constant undetermined).
+fn field_mapping_complex_fit(
+    phases: &[&[f64]],
+    magnitudes: Option<&[&[f64]]>,
+    mask: &[u8],
+    metadata: &ScanMetadata,
+    config: &FieldMappingConfig,
+    params: &crate::utils::FitPpmComplexParams,
+    progress: &mut dyn FnMut(usize, usize),
+) -> Result<FieldMappingResult, PipelineError> {
+    let mags = magnitudes.ok_or_else(|| PipelineError::InvalidInput(
+        "the complex fit (Fit_ppm_complex) needs the magnitude of every echo".into(),
+    ))?;
+    if mags.len() != phases.len() {
+        return Err(PipelineError::DimensionMismatch { expected: phases.len(), got: mags.len() });
+    }
+    if config.bipolar_correction {
+        return Err(PipelineError::InvalidConfig(
+            "bipolar correction is not available with the complex fit (MEDI's \
+             Fit_ppm_complex_bipolar is not ported)".into(),
+        ));
+    }
+    progress(1, 4);
+    let fit = crate::utils::fit_ppm_complex(mags, phases, &metadata.echo_times, params)?;
+
+    progress(2, 4);
+    let (nx, ny, nz) = metadata.dims;
+    let (vsx, vsy, vsz) = metadata.voxel_size;
+    let grid = crate::Grid::new(nx, ny, nz, vsx, vsy, vsz);
+    let unwrapped = match config.unwrapping_algorithm {
+        UnwrappingAlgorithm::Laplacian => {
+            let mut u = crate::unwrap::laplacian_unwrap(
+                &mask_phase(&fit.field, mask), mask, &grid, config.laplacian_solver,
+            );
+            remove_masked_mean(&mut u, mask);
+            u
+        }
+        UnwrappingAlgorithm::Romeo => {
+            // iMag = sqrt(sum(abs(iField).^2, 4))
+            let n = fit.field.len();
+            let imag: Vec<f64> = (0..n)
+                .map(|i| mags.iter().map(|m| m[i] * m[i]).sum::<f64>().sqrt())
+                .collect();
+            crate::unwrap::unwrap_romeo(
+                &fit.field, &imag, None, fit.echo_spacing, 0.0,
+                mask, &config.romeo_params, &grid,
+            )
+        }
+    };
+
+    progress(3, 4);
+    let per_second = |v: &[f64]| -> Vec<f64> { v.iter().map(|&x| x / fit.echo_spacing).collect() };
+    let b0_field_ppm = rads_to_ppm(&per_second(&unwrapped), metadata.field_strength);
+    let field_noise_ppm = rads_to_ppm(&per_second(&fit.noise), metadata.field_strength);
+    progress(4, 4);
+    Ok(FieldMappingResult {
+        b0_field_ppm,
+        phase_offset: None,
+        robust_fit: None,
+        reliability: None,
+        field_noise_ppm: Some(field_noise_ppm),
     })
 }
 
@@ -729,6 +830,58 @@ mod tests {
         for &v in &result.b0_field_ppm {
             assert!(v.is_finite(), "B0 field should be finite");
         }
+    }
+
+    #[test]
+    fn complex_fit_gives_the_field_and_its_noise_in_ppm() {
+        // 4 echoes 5 ms apart, ω = 50·(1 + x) rad/s and an offset of 1 rad: the echo phases wrap
+        // (up to 9 rad), the phase per echo spacing (up to 2 rad) does not.
+        let meta = make_test_metadata(4);
+        let n = 8 * 8 * 8;
+        let mask = vec![1u8; n];
+        let omega: Vec<f64> = (0..n).map(|i| 50.0 * (1.0 + (i % 8) as f64)).collect();
+        let wrap = |x: f64| (x + PI).rem_euclid(2.0 * PI) - PI;
+        let phases: Vec<Vec<f64>> = meta.echo_times.iter()
+            .map(|&te| omega.iter().map(|&w| wrap(1.0 + w * te)).collect())
+            .collect();
+        let phase_refs: Vec<&[f64]> = phases.iter().map(|p| p.as_slice()).collect();
+        let mag = vec![1.0; n];
+        let mag_refs: Vec<&[f64]> = (0..4).map(|_| mag.as_slice()).collect();
+        let fit = B0EstimationMethod::ComplexFit(crate::utils::FitPpmComplexParams::default());
+        for unwrapping_algorithm in [UnwrappingAlgorithm::Romeo, UnwrappingAlgorithm::Laplacian] {
+            let config = FieldMappingConfig { unwrapping_algorithm, b0_estimation: fit.clone(), ..Default::default() };
+            let r = run_field_mapping(&phase_refs, Some(&mag_refs), &mask, &meta, &config, &mut |_, _| {}).unwrap();
+            let want = rads_to_ppm(&omega, 3.0);
+            // ROMEO keeps the absolute field; Laplacian only up to the masked mean
+            let shift = if unwrapping_algorithm == UnwrappingAlgorithm::Laplacian {
+                (want.iter().sum::<f64>() - r.b0_field_ppm.iter().sum::<f64>()) / n as f64
+            } else {
+                0.0
+            };
+            for (got, w) in r.b0_field_ppm.iter().zip(&want) {
+                assert!((got + shift - w).abs() < 1e-6, "{unwrapping_algorithm:?}: {got} vs {w}");
+            }
+            // dp1 for four unit echoes: sqrt(4 / (4·14 − 36)) rad per spacing
+            let noise = r.field_noise_ppm.expect("complex fit returns its noise map");
+            let want_noise = rads_to_ppm(&[(0.2f64).sqrt() / 0.005], 3.0)[0];
+            assert!(noise.iter().all(|v| (v - want_noise).abs() < 1e-12));
+        }
+    }
+
+    #[test]
+    fn complex_fit_needs_magnitudes_and_refuses_bipolar_correction() {
+        let meta = make_test_metadata(3);
+        let n = 8 * 8 * 8;
+        let mask = vec![1u8; n];
+        let p = vec![0.1; n];
+        let phases: Vec<&[f64]> = vec![&p, &p, &p];
+        let fit = B0EstimationMethod::ComplexFit(crate::utils::FitPpmComplexParams::default());
+        let config = FieldMappingConfig { b0_estimation: fit.clone(), ..Default::default() };
+        assert!(matches!(run_field_mapping(&phases, None, &mask, &meta, &config, &mut |_, _| {}),
+            Err(PipelineError::InvalidInput(_))));
+        let config = FieldMappingConfig { b0_estimation: fit, bipolar_correction: true, ..Default::default() };
+        assert!(matches!(run_field_mapping(&phases, Some(&phases), &mask, &meta, &config, &mut |_, _| {}),
+            Err(PipelineError::InvalidConfig(_))));
     }
 
     #[test]
