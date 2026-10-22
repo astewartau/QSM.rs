@@ -103,6 +103,14 @@ pub struct StarParams {
     /// [`QSM_STAR_DEFAULT_PAD`] (`[12, 12, 12]`) is `QSM_star`'s own default, for scripts that
     /// call it without `'padsize'`, as in `STI_Templates.m`. Any other padding can be given
     /// per axis.
+    ///
+    /// **B0 direction (a deliberate deviation from the GUI).** The GUI takes `'H'` from its
+    /// `H_Vector` field, which loading the data does not fill from the scan (the same probe:
+    /// the loader returned an oblique direction and `QSM_star` still got `[0 0 1]`), so GUI
+    /// users get `[0 0 1]` unless they type a direction in. [`star_qsm`] instead takes the
+    /// direction as its `bdir` argument, and the pipeline passes the scan's B0 direction (from
+    /// the affine, as for every other inversion), which is correct for oblique acquisitions.
+    /// For the GUI's result, pass `(0, 0, 1)` explicitly; for axial scans the two agree.
     pub pad: [usize; 3],
     /// Echo time in seconds the field is converted to phase at (default 0.04, STI's 40 ms).
     /// See the module docs, *Units*; the pipeline sets it from the first echo time.
