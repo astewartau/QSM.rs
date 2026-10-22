@@ -67,8 +67,8 @@ pub(crate) fn echo_magnitudes<'a>(
 ///   (total field)
 /// * `metadata` - Scan metadata
 /// * `config` - Inversion configuration
-/// * `magnitude` - Combined magnitude image; MEDI instead requires the magnitude of every echo,
-///   stacked with the echo slowest
+/// * `magnitude` - Combined magnitude image; MEDI and TFI instead require the magnitude of every
+///   echo, stacked with the echo slowest
 /// * `progress` - Progress callback (current_iter, max_iter)
 ///
 /// # Returns
@@ -152,18 +152,19 @@ pub fn run_dipole_inversion(
             crate::inversion::medi(field_ppm, mask, mag, &grid, bdir, &params, progress)
         }
         InversionAlgorithm::Tfi => {
-            // TFI takes the field in ppm (same convention as NDI and the other inversions —
-            // MEDI's). It is single-step: `field_ppm` is the TOTAL field and `mask`
-            // the brain mask (InversionConfig::input). Converting to radians here would wrap
-            // the large total field in exp(i·field) and destroy the result.
-            let uniform_mag = vec![1.0f64; n_voxels];
-            let mag = magnitude.unwrap_or(&uniform_mag);
-            let n_std = vec![1.0f64; n_voxels];
-
-            crate::inversion::tfi(
-                field_ppm, &n_std, mag, mask,
-                &grid, bdir, &config.tfi, progress,
-            )
+            // TFI is single-step: `field_ppm` is the TOTAL field and `mask` the brain mask
+            // (InversionConfig::input). Like MEDI it takes ppm and converts to radians over the
+            // echo spacing itself (TE(2) - TE(1), or TE for one echo); field strength and echo
+            // spacing come from metadata. As for MEDI, the magnitude of every echo is required
+            // (edge mask and the Fit_ppm_complex noise map).
+            let te = &metadata.echo_times;
+            let mag = echo_magnitudes("TFI", magnitude, te, n_voxels)?;
+            let params = crate::inversion::TfiParams {
+                b0: metadata.field_strength,
+                te: if te.len() == 1 { te[0] } else { te[1] - te[0] },
+                ..config.tfi.clone()
+            };
+            crate::inversion::tfi(field_ppm, mask, mag, &grid, bdir, &params, progress)
         }
         InversionAlgorithm::Ilsqr => {
             config.ilsqr.validate().map_err(PipelineError::InvalidConfig)?;
@@ -1104,10 +1105,11 @@ mod tests {
         assert!(run_dipole_inversion(&field, &mask, &meta(vec![0.004, 0.010, 0.020]), &config, Some(&echoes), &mut |_, _| {}).is_err());
     }
 
-    /// TFI is a total-field method (`InversionConfig::input`): the dispatcher must hand the
-    /// field to `tfi` in ppm, untouched (no ppm→rad scaling as for MEDI), with the brain mask.
+    /// TFI is a total-field method (`InversionConfig::input`): the dispatcher hands `tfi` the
+    /// field in ppm with the brain mask, the field strength and the echo spacing from metadata,
+    /// and refuses to run without a magnitude.
     #[test]
-    fn tfi_gets_the_total_field_unchanged() {
+    fn tfi_gets_the_total_field_and_scan_parameters() {
         let (nx, ny, nz) = (10, 10, 10);
         let n = nx * ny * nz;
         // a background ramp plus a local bump: a total field
@@ -1123,9 +1125,10 @@ mod tests {
                 u8::from((2..8).contains(&x) && (2..8).contains(&y) && (2..8).contains(&z))
             })
             .collect();
+        let mag: Vec<f64> = (0..n).map(|i| 1.0 + (i % 3) as f64).collect();
         let meta = ScanMetadata {
             dims: (nx, ny, nz), voxel_size: (1.0, 1.0, 1.0),
-            echo_times: vec![0.005, 0.010], field_strength: 3.0, b0_direction: (0.0, 0.0, 1.0),
+            echo_times: vec![0.004, 0.010, 0.016], field_strength: 7.0, b0_direction: (0.0, 0.0, 1.0),
             slice_geometry: None,
             affine: None,
         };
@@ -1133,12 +1136,19 @@ mod tests {
         assert_eq!(config.input(2), InversionInput::TotalField);
         let tfi = crate::inversion::TfiParams { max_iter: 2, cg_max_iter: 5, ..config.tfi.clone() };
         let config = InversionConfig { tfi: tfi.clone(), ..config };
-        let via_stage = run_dipole_inversion(&field, &mask, &meta, &config, None, &mut |_, _| {}).unwrap();
+        let params = crate::inversion::TfiParams { b0: 7.0, te: 0.006, ..tfi };
+        let echoes: Vec<f64> = (0..3 * n).map(|i| 1.0 + ((i * 5) % 9) as f64).collect();
+        let via_stage = run_dipole_inversion(&field, &mask, &meta, &config, Some(&echoes), &mut |_, _| {}).unwrap();
         let direct = crate::inversion::tfi(
-            &field, &vec![1.0; n], &vec![1.0; n], &mask, &meta.grid(), meta.b0_direction, &tfi, |_, _| {},
+            &field, &mask, crate::inversion::EchoMagnitudes { data: &echoes, n_echoes: 3 },
+            &meta.grid(), meta.b0_direction, &params, |_, _| {},
         );
         assert_eq!(via_stage, direct);
         assert!(via_stage.iter().all(|v| v.is_finite()));
+        // a combined magnitude of multi-echo data is refused
+        assert!(run_dipole_inversion(&field, &mask, &meta, &config, Some(&mag), &mut |_, _| {}).is_err());
+        assert!(run_dipole_inversion(&field, &mask, &meta, &config, Some(&mag[..n - 1]), &mut |_, _| {}).is_err());
+        assert!(run_dipole_inversion(&field, &mask, &meta, &config, None, &mut |_, _| {}).is_err());
     }
 
     #[test]

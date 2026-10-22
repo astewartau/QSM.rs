@@ -84,17 +84,16 @@
 //! Reference implementation: MEDI toolbox release 2024.11.26 (Cornell MRI Research Lab,
 //! `functions/MEDI_L1.m`)
 //!
-//! The single-precision helpers at the end of this file (`MediWorkspace`, `gradient_mask_f32`,
-//! the periodic gradients, ...) are not used by `medi`. They follow the MEDI variant in the
-//! chi-separation toolbox and Cornell's TFI code, and are shared by [`tfi`](super::tfi) and the
-//! chi-separation solvers.
+//! The double-precision helpers below are shared with [`tfi`](super::tfi), which is `MEDI_L1.m`
+//! run with a preconditioner. The single-precision helpers at the end of this file
+//! (`gradient_mask_f32`, the periodic gradients, ...) are not used by `medi`. They follow the
+//! MEDI variant in the chi-separation toolbox and are shared by the chi-separation solvers.
 
-use num_complex::{Complex32, Complex64};
+use num_complex::Complex64;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
-use crate::fft::{Box3, Fft3dWorkspace, Fft3dWorkspaceF32, FftOpts};
+use crate::fft::{Box3, Fft3dWorkspace, FftOpts};
 use crate::kernels::dipole::dipole_kernel;
-use crate::utils::simd_ops::{apply_gradient_weights_f32, combine_terms_f32};
 use crate::Grid;
 
 /// MEDI parameters (`MEDI_L1.m` / `parse_QSM_input.m` defaults)
@@ -451,7 +450,7 @@ fn medi_l1(
 }
 
 /// `out[i] = f(i)` for every `i` (over threads with the `parallel` feature)
-fn par_fill<T: Send>(out: &mut [T], f: impl Fn(usize) -> T + Sync + Send) {
+pub(super) fn par_fill<T: Send>(out: &mut [T], f: impl Fn(usize) -> T + Sync + Send) {
     #[cfg(feature = "parallel")]
     out.par_iter_mut().with_min_len(1 << 14).enumerate().for_each(|(i, v)| *v = f(i));
     #[cfg(not(feature = "parallel"))]
@@ -459,7 +458,7 @@ fn par_fill<T: Send>(out: &mut [T], f: impl Fn(usize) -> T + Sync + Send) {
 }
 
 /// `f(i, &mut out[i])` for every `i` (over threads with the `parallel` feature)
-fn par_update<T: Send>(out: &mut [T], f: impl Fn(usize, &mut T) + Sync + Send) {
+pub(super) fn par_update<T: Send>(out: &mut [T], f: impl Fn(usize, &mut T) + Sync + Send) {
     #[cfg(feature = "parallel")]
     out.par_iter_mut().with_min_len(1 << 14).enumerate().for_each(|(i, v)| f(i, v));
     #[cfg(not(feature = "parallel"))]
@@ -467,7 +466,7 @@ fn par_update<T: Send>(out: &mut [T], f: impl Fn(usize, &mut T) + Sync + Send) {
 }
 
 /// The smallest box holding every `true` voxel (the whole grid if there is none)
-fn bounding_box(mask: &[bool], (nx, ny, nz): (usize, usize, usize)) -> Box3 {
+pub(super) fn bounding_box(mask: &[bool], (nx, ny, nz): (usize, usize, usize)) -> Box3 {
     let (mut lo, mut hi) = ([usize::MAX; 3], [0usize; 3]);
     for (p, _) in mask.iter().enumerate().filter(|(_, &m)| m) {
         let c = [p % nx, (p / nx) % ny, p / (nx * ny)];
@@ -502,7 +501,7 @@ fn mul_kernel(k: &[Complex64]) -> impl Fn(usize, &mut [Complex64]) + Sync + '_ {
 }
 
 /// `Dconv`: `out = real(ifftn(D.*fftn(x)))`
-fn dconv(x: &[f64], d: &[Complex64], fft: &mut Fft3dWorkspace, buf: &mut [Complex64], out: &mut [f64]) {
+pub(super) fn dconv(x: &[f64], d: &[Complex64], fft: &mut Fft3dWorkspace, buf: &mut [Complex64], out: &mut [f64]) {
     let load = load_real(x);
     fft.fft3d_with(buf, &FftOpts { load: Some(&load), ..FftOpts::default() });
     fft.ifft3d_with(buf, &FftOpts { load: Some(&mul_kernel(d)), ..FftOpts::default() });
@@ -512,7 +511,7 @@ fn dconv(x: &[f64], d: &[Complex64], fft: &mut Fft3dWorkspace, buf: &mut [Comple
 /// `Dconv(w2.*Dconv(p))`, left in the real part of `buf`. `w2` is zero outside `mbox`, so the
 /// inner `Dconv` is computed only on `mbox` and the outer one reads input only there; the
 /// values are those of the two plain `Dconv`s (see [`Fft3dWorkspace::fft3d_with`]).
-fn dconv_weighted(
+pub(super) fn dconv_weighted(
     p: &[f64],
     d: &[Complex64],
     w2: &[f64],
@@ -535,7 +534,7 @@ fn dconv_weighted(
 }
 
 /// `fgrad.m`: forward differences, zero at the last voxel along each axis
-fn fgrad(x: &[f64], dims: (usize, usize, usize), vs: [f64; 3], g: &mut [Vec<f64>; 3]) {
+pub(super) fn fgrad(x: &[f64], dims: (usize, usize, usize), vs: [f64; 3], g: &mut [Vec<f64>; 3]) {
     let (nx, ny, nz) = dims;
     let nxy = nx * ny;
     let [g0, g1, g2] = g;
@@ -591,7 +590,7 @@ fn bdiv(g: &[Vec<f64>; 3], dims: (usize, usize, usize), vs: [f64; 3], out: &mut 
 /// `reg(dx) = div(wG.*(Vr.*(wG.*grad(real(dx)))))` into `out`, with `wvw = wG.*Vr.*wG`: `bdiv`
 /// of the weighted `fgrad`, a z plane at a time so the gradients never leave the cache. Each
 /// value is computed with the same operations as `fgrad` followed by `bdiv`.
-fn reg(x: &[f64], wvw: &[Vec<f64>; 3], dims: (usize, usize, usize), vs: [f64; 3], out: &mut [f64]) {
+pub(super) fn reg(x: &[f64], wvw: &[Vec<f64>; 3], dims: (usize, usize, usize), vs: [f64; 3], out: &mut [f64]) {
     let (nx, ny, nz) = dims;
     let nxy = nx * ny;
     // Weighted forward differences of plane k: x and y into gx, gy (when given), z into gz.
@@ -648,22 +647,22 @@ fn reg(x: &[f64], wvw: &[Vec<f64>; 3], dims: (usize, usize, usize), vs: [f64; 3]
 }
 
 /// `cgsolve.m`'s vectors, reused across Gauss-Newton iterations
-struct CgBuffers {
-    x: Vec<f64>,
+pub(super) struct CgBuffers {
+    pub(super) x: Vec<f64>,
     r: Vec<f64>,
     d: Vec<f64>,
     q: Vec<f64>,
 }
 
 impl CgBuffers {
-    fn new(n: usize) -> Self {
+    pub(super) fn new(n: usize) -> Self {
         Self { x: vec![0.0; n], r: vec![0.0; n], d: vec![0.0; n], q: vec![0.0; n] }
     }
 }
 
 /// `cgsolve.m` from a zero start; the last iterate is left in `cg.x`. `progress` receives the
 /// iteration count. The dot products are summed in index order, as before.
-fn cgsolve(
+pub(super) fn cgsolve(
     mut a: impl FnMut(&[f64], &mut [f64]),
     b: &[f64],
     tol: f64,
@@ -711,7 +710,7 @@ fn cgsolve(
 
 /// `dataterm_mask.m` into `w`: 0 gives 1 everywhere; 1 gives `Mask./N_std` (0 where that is
 /// not finite) normalised to mean 1 over the mask.
-fn dataterm_mask(mode: i32, n_std: &[f64], mask: &[bool], w: &mut [f64]) {
+pub(super) fn dataterm_mask(mode: i32, n_std: &[f64], mask: &[bool], w: &mut [f64]) {
     if mode == 0 {
         w.fill(1.0);
         return;
@@ -730,7 +729,7 @@ fn dataterm_mask(mode: i32, n_std: &[f64], mask: &[bool], w: &mut [f64]) {
 /// direction, over the whole volume. The threshold starts at 1% of `max(iMag)` and is scaled by
 /// 1.05 or 0.95 until the number of gradient components above it, over the number of voxels in
 /// the mask, crosses `percentage`.
-fn gradient_mask(mag: &[f64], mask: &[bool], grid: &Grid, percentage: f64) -> [Vec<f64>; 3] {
+pub(super) fn gradient_mask(mag: &[f64], mask: &[bool], grid: &Grid, percentage: f64) -> [Vec<f64>; 3] {
     let vs = [grid.vsx(), grid.vsy(), grid.vsz()];
     let n = mag.len();
     let masked: Vec<f64> = mag.iter().zip(mask).map(|(&v, &m)| if m { v } else { 0.0 }).collect();
@@ -969,286 +968,9 @@ fn label6(fg: &[bool], dims: (usize, usize, usize)) -> (Vec<Option<usize>>, Vec<
 }
 
 // ============================================================================
-// Single-precision MEDI-style helpers shared by TFI and the chi-separation solvers
+// Single-precision MEDI-style helpers shared by the chi-separation solvers
 // (not used by `medi` above)
 // ============================================================================
-
-/// Workspace for MEDI operations - holds all reusable buffers (f32 version)
-/// Uses single precision for ~2x speedup on WASM
-pub struct MediWorkspace {
-    pub n_total: usize,
-    pub nx: usize,
-    pub ny: usize,
-    pub nz: usize,
-    pub vsx: f32,
-    pub vsy: f32,
-    pub vsz: f32,
-
-    // FFT workspace with cached plans (f32)
-    pub fft_ws: Fft3dWorkspaceF32,
-
-    // Gradient buffers (3 components)
-    pub gx: Vec<f32>,
-    pub gy: Vec<f32>,
-    pub gz: Vec<f32>,
-
-    // Weighted gradient buffers
-    pub reg_x: Vec<f32>,
-    pub reg_y: Vec<f32>,
-    pub reg_z: Vec<f32>,
-
-    // Divergence buffer
-    pub div_buf: Vec<f32>,
-
-    // Complex buffer for FFT operations
-    pub complex_buf: Vec<Complex32>,
-    pub complex_buf2: Vec<Complex32>,
-
-    // Real buffer for dipole result
-    pub dipole_buf: Vec<f32>,
-
-    // CG solver buffers
-    pub cg_r: Vec<f32>,
-    pub cg_p: Vec<f32>,
-    pub cg_ap: Vec<f32>,
-}
-
-impl MediWorkspace {
-    /// Create a new MEDI workspace for the given grid
-    pub fn new(grid: &Grid) -> Self {
-        let (nx, ny, nz) = grid.dims;
-        let (vsx, vsy, vsz) = (grid.vsx() as f32, grid.vsy() as f32, grid.vsz() as f32);
-        let n_total = grid.n_total();
-
-        Self {
-            n_total,
-            nx, ny, nz,
-            vsx, vsy, vsz,
-            fft_ws: Fft3dWorkspaceF32::new(nx, ny, nz),
-            gx: vec![0.0; n_total],
-            gy: vec![0.0; n_total],
-            gz: vec![0.0; n_total],
-            reg_x: vec![0.0; n_total],
-            reg_y: vec![0.0; n_total],
-            reg_z: vec![0.0; n_total],
-            div_buf: vec![0.0; n_total],
-            complex_buf: vec![Complex32::new(0.0, 0.0); n_total],
-            complex_buf2: vec![Complex32::new(0.0, 0.0); n_total],
-            dipole_buf: vec![0.0; n_total],
-            cg_r: vec![0.0; n_total],
-            cg_p: vec![0.0; n_total],
-            cg_ap: vec![0.0; n_total],
-        }
-    }
-}
-
-/// Apply dipole convolution: out = real(ifft(D * fft(x)))
-#[inline]
-pub(crate) fn apply_dipole_conv(
-    fft_ws: &mut Fft3dWorkspaceF32,
-    x: &[f32],
-    d_kernel: &[f32],
-    out: &mut [f32],
-    complex_buf: &mut [Complex32],
-) {
-    fft_ws.apply_dipole_inplace(x, d_kernel, out, complex_buf);
-}
-
-/// MEDI operator buffers - separate struct to allow split borrowing
-pub(crate) struct MediOpBuffers<'a> {
-    pub gx: &'a mut [f32],
-    pub gy: &'a mut [f32],
-    pub gz: &'a mut [f32],
-    pub reg_x: &'a mut [f32],
-    pub reg_y: &'a mut [f32],
-    pub reg_z: &'a mut [f32],
-    pub div_buf: &'a mut [f32],
-    pub dipole_buf: &'a mut [f32],
-    pub complex_buf: &'a mut [Complex32],
-    pub complex_buf2: &'a mut [Complex32],
-}
-
-/// Apply MEDI operator in-place: out = fidelity(dx) + lambda*reg(dx)
-/// This is the hot path - called many times per Gauss-Newton iteration
-/// Uses per-direction gradient masks (mx, my, mz) matching MATLAB MEDI
-/// SIMD-accelerated for element-wise operations
-#[inline]
-pub(crate) fn apply_medi_operator_core(
-    fft_ws: &mut Fft3dWorkspaceF32,
-    bufs: &mut MediOpBuffers,
-    n: usize,
-    nx: usize, ny: usize, nz: usize,
-    vsx: f32, vsy: f32, vsz: f32,
-    dx: &[f32],
-    w: &[Complex32],
-    d_kernel: &[f32],
-    mx: &[f32],  // Per-direction gradient mask for x
-    my: &[f32],  // Per-direction gradient mask for y
-    mz: &[f32],  // Per-direction gradient mask for z
-    vr: &[f32],
-    lambda: f32,
-    out: &mut [f32],
-) {
-    // 1. Compute gradient of dx (in-place into gx, gy, gz) - periodic BCs matching MATLAB gradfp_mex
-    fgrad_periodic_inplace_f32(bufs.gx, bufs.gy, bufs.gz, dx, nx, ny, nz, vsx, vsy, vsz);
-
-    // 2. Apply per-direction weights: reg_i = m_i * P * m_i * g_i (SIMD accelerated)
-    // MATLAB: ux = mx .* P .* mx .* ux; uy = my .* P .* my .* uy; uz = mz .* P .* mz .* uz;
-    apply_gradient_weights_f32(
-        bufs.reg_x, bufs.reg_y, bufs.reg_z,
-        mx, my, mz, vr,
-        bufs.gx, bufs.gy, bufs.gz,
-    );
-
-    // 3. Compute divergence (in-place into div_buf) - periodic BCs matching MATLAB gradfp_adj_mex
-    bdiv_periodic_inplace_f32(bufs.div_buf, bufs.reg_x, bufs.reg_y, bufs.reg_z, nx, ny, nz, vsx, vsy, vsz);
-
-    // 4. Fidelity term: D^T(|w|^2 * D(dx))
-    apply_dipole_conv(fft_ws, dx, d_kernel, bufs.dipole_buf, bufs.complex_buf);
-
-    // Multiply by |w|^2 and convert to complex
-    for i in 0..n {
-        let w_mag_sq = w[i].norm_sqr();
-        bufs.complex_buf2[i] = Complex32::new(bufs.dipole_buf[i] * w_mag_sq, 0.0);
-    }
-
-    // Apply D^T (which is D for real symmetric kernel)
-    fft_ws.fft3d(bufs.complex_buf2);
-    for i in 0..n {
-        bufs.complex_buf2[i] *= d_kernel[i];
-    }
-    fft_ws.ifft3d(bufs.complex_buf2);
-
-    // 5. Combine: out = lambda*div_buf + real(complex_buf2) (matching MATLAB: y = D + R)
-    // Extract real parts for SIMD operation
-    for i in 0..n {
-        bufs.dipole_buf[i] = bufs.complex_buf2[i].re;
-    }
-    combine_terms_f32(out, bufs.div_buf, bufs.dipole_buf, lambda);
-}
-
-/// Compute RHS in-place using workspace buffers (f32)
-/// Uses per-direction gradient masks (mx, my, mz) matching MATLAB MEDI
-/// SIMD-accelerated for element-wise operations
-pub(crate) fn compute_rhs_inplace(
-    chi: &[f32],
-    w: &[Complex32],
-    b0: &[Complex32],
-    d_kernel: &[f32],
-    mx: &[f32],  // Per-direction gradient mask for x
-    my: &[f32],  // Per-direction gradient mask for y
-    mz: &[f32],  // Per-direction gradient mask for z
-    vr: &[f32],
-    lambda: f32,
-    rhs: &mut [f32],
-    ws: &mut MediWorkspace,
-) {
-    let n = ws.n_total;
-
-    // Regularization term: div(m * P * m * grad(chi)) for each direction
-    // MATLAB: b = lam .* gradAdj_(ux, uy, uz, vsz);
-    // where ux = mx .* P .* mx .* grad_x(chi), etc.
-    // Uses periodic BCs matching MATLAB's gradfp_mex / gradfp_adj_mex
-    fgrad_periodic_inplace_f32(
-        &mut ws.gx, &mut ws.gy, &mut ws.gz,
-        chi, ws.nx, ws.ny, ws.nz,
-        ws.vsx, ws.vsy, ws.vsz,
-    );
-
-    // Apply per-direction weights: ux = mx * P * mx * gx (SIMD accelerated)
-    apply_gradient_weights_f32(
-        &mut ws.reg_x, &mut ws.reg_y, &mut ws.reg_z,
-        mx, my, mz, vr,
-        &ws.gx, &ws.gy, &ws.gz,
-    );
-
-    bdiv_periodic_inplace_f32(
-        &mut ws.div_buf,
-        &ws.reg_x, &ws.reg_y, &ws.reg_z,
-        ws.nx, ws.ny, ws.nz,
-        ws.vsx, ws.vsy, ws.vsz,
-    );
-
-    // Data term: D^T(conj(w) * (-i) * (w - b0))
-    // MATLAB: b = b + real(ifft3(conj(D) .* fft3(1i .* w2 .* (exp(1i.*(f - Dx)) - 1))));
-    for i in 0..n {
-        let diff = w[i] - b0[i];
-        let conj_w = w[i].conj();
-        let neg_i = Complex32::new(0.0, -1.0);
-        ws.complex_buf2[i] = conj_w * neg_i * diff;
-    }
-
-    // Apply D^T (which is D for real symmetric kernel)
-    ws.fft_ws.fft3d(&mut ws.complex_buf2);
-
-    for i in 0..n {
-        ws.complex_buf2[i] *= d_kernel[i];
-    }
-
-    ws.fft_ws.ifft3d(&mut ws.complex_buf2);
-
-    // Extract real parts for SIMD combine operation
-    for i in 0..n {
-        ws.dipole_buf[i] = ws.complex_buf2[i].re;
-    }
-
-    // Combine terms: rhs = lambda * reg_term + data_term (SIMD accelerated, matching MATLAB)
-    combine_terms_f32(rhs, &ws.div_buf, &ws.dipole_buf, lambda);
-}
-
-/// Generate data weighting mask (f32)
-///
-/// # Arguments
-/// * `mode` - 0 for uniform weighting, 1 for SNR weighting
-/// * `n_std` - Noise standard deviation
-/// * `mask` - Binary mask
-pub(crate) fn dataterm_mask_f32(mode: i32, n_std: &[f32], mask: &[u8]) -> Vec<f32> {
-    let n = n_std.len();
-
-    if mode == 0 {
-        // Uniform weighting
-        mask.iter().map(|&m| if m != 0 { 1.0 } else { 0.0 }).collect()
-    } else {
-        // SNR weighting: w = mask / N_std, normalized so mean over ROI = 1
-        let mut w: Vec<f32> = n_std.iter()
-            .zip(mask.iter())
-            .map(|(&n, &m)| {
-                if m != 0 && n > 1e-10 {
-                    1.0 / n
-                } else {
-                    0.0
-                }
-            })
-            .collect();
-
-        // Compute mean over ROI
-        let mask_count = mask.iter().filter(|&&m| m != 0).count() as f32;
-        if mask_count > 0.0 {
-            let sum: f32 = w.iter()
-                .zip(mask.iter())
-                .filter(|(_, &m)| m != 0)
-                .map(|(&wi, _)| wi)
-                .sum();
-            let mean = sum / mask_count;
-
-            if mean > 1e-10 {
-                // Normalize so mean = 1
-                for i in 0..n {
-                    w[i] /= mean;
-                }
-            }
-        }
-
-        // Ensure zeros outside mask
-        for i in 0..n {
-            if mask[i] == 0 {
-                w[i] = 0.0;
-            }
-        }
-
-        w
-    }
-}
 
 /// Generate per-direction gradient weighting masks (f32)
 ///
@@ -1506,30 +1228,6 @@ pub(crate) fn bdiv_periodic_inplace_f32(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_dataterm_mask_uniform() {
-        let n_std = vec![1.0f32; 27];
-        let mask = vec![1u8; 27];
-
-        let w = dataterm_mask_f32(0, &n_std, &mask);
-
-        for &wi in w.iter() {
-            assert!((wi - 1.0).abs() < 1e-10);
-        }
-    }
-
-    #[test]
-    fn test_dataterm_mask_snr() {
-        let n_std = vec![2.0f32; 27];
-        let mask = vec![1u8; 27];
-
-        let w = dataterm_mask_f32(1, &n_std, &mask);
-
-        // Mean should be 1
-        let mean: f32 = w.iter().sum::<f32>() / 27.0;
-        assert!((mean - 1.0).abs() < 1e-5);
-    }
 
     #[test]
     fn test_gradient_mask_constant() {
