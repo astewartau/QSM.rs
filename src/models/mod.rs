@@ -46,6 +46,50 @@
 //!
 //! On `wasm32-unknown-unknown` steps 2–4 are not compiled; a file that was not provided is an
 //! error naming the file and [`provide_weights`].
+//!
+//! ### Memory
+//!
+//! Every model in the registry carries [`ModelSpec::memory`], measured with tract, so a host can
+//! estimate a run's memory before it starts:
+//!
+//! - [`ModelSpec::resident_bytes`]: the parsed model, held for as long as it is loaded.
+//! - [`ModelSpec::inference_bytes`]: one inference at any input shape, above the resident model
+//!   (native): a fixed part plus bytes per voxel of the network's input.
+//! - [`ModelSpec::peak_bytes`]: loading the model and running it once, for a native process or a
+//!   `wasm32` heap ([`Heap`]).
+//! - [`crate::bet::hd_bet_memory_bytes`]: the whole HD-BET step on a scan, from its field of view.
+//!   HD-BET resamples to 1 mm, so its network input follows the head's size in mm, not the
+//!   acquired matrix ([`crate::bet::hd_bet_network_input`]).
+//!
+//! The bytes of the weight files themselves ([`WeightFile::bytes`]) are not included, nor are a
+//! wrapper's own buffers or further tiles in flight (for those, see
+//! [`ModelSpec::tile_bytes_per_voxel`]).
+//!
+//! **How they were measured.** Natively, `examples/inference_memory.rs` runs each network
+//! single-threaded under a counting global allocator, at 1–8 input shapes per network from 32³ to
+//! 192×256×128 (to 256³ for MindGrab and 176×256×256 for HD-BET; the fixed-patch networks at
+//! their patch). Per shape it takes the larger of a run that plans inside
+//! ([`onnx::OnnxModel::run`]) and a plan built once and then run ([`onnx::OnnxModel::plan_for`]),
+//! since wrappers use both. The figures are the least-squares line through those peaks, with the
+//! intercept raised to cover every one. From 64³ up they sit 0–7 % above the measured peaks
+//! (0–1.3 % from 96³ up); at 32³ up to 28 % above (at most 25 MB), where the fixed part
+//! dominates. MindGrab is fitted from 128³ up: it always runs at 256³, and smaller inputs fall
+//! well below the line. Threads (the `parallel` feature) add 0.1–0.6 % at 8–16 threads. Peak
+//! RSS adds the program, the weight file's bytes and the allocator's slack to these.
+//!
+//! In WASM, the `browser_memory::net_*` cases in `tests/wasm_pipeline.rs` run the same inferences
+//! under Node (`wasm32-unknown-unknown`, SIMD128, single-threaded) at one or two shapes per
+//! network that fit the 4 GiB heap, and read the size of the linear memory, which only grows. The
+//! WASM figures are a line through those points. The WASM heap grows by 0.8–1.6 times the native
+//! peak of the same run (median 1.2). The ratio varies with the network and the shape, because
+//! the allocator cannot always reuse a freed tensor's block for the next, larger one. Two runs of
+//! the same graph (QSMnet and QSMnet+) differed by 7 %, so budget a margin on top.
+//!
+//! `src/models/memory_calibration.rs` holds every measured peak, and its tests check that each
+//! figure covers its measurements and sits within 10 % (or 32 MB) of them. Re-measure after a
+//! tract upgrade or a new export. QSMnet+ shares QSMnet's figures and iQFM shares iQSM's, since
+//! they are the same graphs. SynthSeg 2.0's weights are not hosted, so its figures are SynthSeg
+//! 1.0's plus its 33rd output channel.
 
 use std::collections::BTreeMap;
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
@@ -54,6 +98,9 @@ use std::sync::{Arc, Mutex};
 
 mod registry;
 pub use registry::{all_models, find_model};
+
+#[cfg(test)]
+mod memory_calibration;
 
 #[cfg(all(
     feature = "download",
@@ -181,6 +228,45 @@ pub struct ModelSpec {
     /// `inversion::tile_concurrency` budgets with on WASM, so a host estimating a tiled run's
     /// memory should use this same figure.
     pub tile_bytes_per_voxel: Option<u64>,
+    /// Heap the network takes in tract: the parsed model, and one inference as a function of its
+    /// input shape. See [`ModelSpec::inference_bytes`] and the [module docs](self#memory).
+    pub memory: NetworkMemory,
+}
+
+/// Measured heap of one network in tract (see the [module docs](self#memory) for how).
+///
+/// Bytes of heap allocated by tract and QSM-Core's ONNX layer. The bytes of the weight file itself
+/// ([`WeightFile::bytes`], held by whoever supplied them) are not included.
+#[cfg_attr(feature = "introspection", derive(serde::Serialize))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NetworkMemory {
+    /// Heap the parsed model ([`onnx::OnnxModel::load`]) holds for as long as it is loaded; for
+    /// NeXtQSM, both its networks.
+    pub resident_bytes: u64,
+    /// High-water of parsing the model, from nothing: about twice the resident size, as tract
+    /// holds the decoded protobuf while it builds the graph.
+    pub load_peak_bytes: u64,
+    /// Native: the fixed part of one inference's peak above the resident model.
+    pub inference_fixed_bytes: u64,
+    /// Native: the part of one inference's peak above the resident model that grows with the
+    /// input, per voxel of the network's input (activations, the input and output tensors, the
+    /// plan's per-shape tables and tract's scratch).
+    pub inference_bytes_per_voxel: u64,
+    /// WASM: the fixed part of the heap's growth over loading the model and running it once.
+    pub wasm_fixed_bytes: u64,
+    /// WASM: the part of that growth per voxel of the network's input.
+    pub wasm_bytes_per_voxel: u64,
+}
+
+/// Which heap a memory figure is for.
+#[cfg_attr(feature = "introspection", derive(serde::Serialize))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Heap {
+    /// A native process, measured as live allocations (the resident set adds the program and the
+    /// allocator's slack).
+    Native,
+    /// A `wasm32` linear memory, measured as its size, which only grows: fragmentation included.
+    Wasm32,
 }
 
 /// What one tile of a tiled network costs, for budgeting how many fit in memory at once.
@@ -203,6 +289,55 @@ impl ModelSpec {
             .map(|bytes_per_voxel| TileCost { divisor: self.size_divisor.max(1) as usize, bytes_per_voxel })
     }
 
+    /// Native peak heap of one inference of this network at input spatial shape `shape`, above
+    /// the resident model ([`Self::resident_bytes`]), in bytes:
+    /// [`NetworkMemory::inference_fixed_bytes`] + voxels · [`NetworkMemory::inference_bytes_per_voxel`].
+    ///
+    /// `shape` is the spatial shape of the tensor the network itself sees: a tile's or window's
+    /// patch, or for a whole-volume run the volume after the wrapper's padding (to
+    /// [`Self::size_divisor`]; for HD-BET to multiples of 16×32×32 in its `(z, y, x)` order, see
+    /// [`crate::bet::hd_bet_network_input`]). Only its number of voxels matters. Pass the spatial
+    /// shape even for networks with several input channels (χ-separation, MoDL-QSM) or inputs
+    /// (iQSM): those are counted. Fixed-shape networks (RS2-Net, AutoQSM, QSMGAN) always see their
+    /// patch; pass that.
+    ///
+    /// It covers the plan tract builds for the shape (its copy of the weights and per-shape
+    /// tables), the input and output tensors, the activations and tract's scratch, both for a plan
+    /// built per call ([`onnx::OnnxModel::run`]) and for one built once and reused
+    /// ([`onnx::OnnxModel::plan_for`]). A wrapper's own buffers (the padded volume, overlap
+    /// accumulators, test-time flips, pre- and post-processing) come on top, as do further tiles
+    /// in flight. Measured single-threaded: with the `parallel` feature, 8–16 threads added
+    /// 1–13 MB (0.1–0.6 %) for HD-BET, SynthSeg and xQSM.
+    pub fn inference_bytes(&self, shape: [usize; 3]) -> u64 {
+        let m = &self.memory;
+        m.inference_fixed_bytes + voxels(shape) * m.inference_bytes_per_voxel
+    }
+
+    /// Heap the parsed model holds while loaded, in bytes ([`NetworkMemory::resident_bytes`]).
+    pub fn resident_bytes(&self) -> u64 {
+        self.memory.resident_bytes
+    }
+
+    /// Peak heap of loading this network and running it once at input spatial shape `shape`
+    /// (as for [`Self::inference_bytes`]), in bytes: what one inference needs besides the
+    /// caller's own buffers and the weight file's bytes.
+    ///
+    /// - [`Heap::Native`]: the larger of parsing the model ([`NetworkMemory::load_peak_bytes`])
+    ///   and the resident model plus [`Self::inference_bytes`].
+    /// - [`Heap::Wasm32`]: the growth of a `wasm32` linear memory over the same,
+    ///   [`NetworkMemory::wasm_fixed_bytes`] + voxels · [`NetworkMemory::wasm_bytes_per_voxel`]
+    ///   (at least the load peak). Between 0.8 and 1.6 times the native figure, depending on the
+    ///   network and the shape: the WASM allocator cannot reuse every freed block for the next,
+    ///   larger tensor.
+    pub fn peak_bytes(&self, shape: [usize; 3], heap: Heap) -> u64 {
+        let m = &self.memory;
+        let after_load = match heap {
+            Heap::Native => m.resident_bytes + self.inference_bytes(shape),
+            Heap::Wasm32 => m.wasm_fixed_bytes + voxels(shape) * m.wasm_bytes_per_voxel,
+        };
+        m.load_peak_bytes.max(after_load)
+    }
+
     /// `true` if every weight file has a non-empty URL and hash (i.e. hosted).
     pub fn is_available(&self) -> bool {
         self.status == WeightStatus::Available
@@ -211,6 +346,10 @@ impl ModelSpec {
                 .iter()
                 .all(|f| !f.url.is_empty() && !f.sha256.is_empty())
     }
+}
+
+fn voxels(shape: [usize; 3]) -> u64 {
+    shape.iter().map(|&d| d as u64).product()
 }
 
 /// The bytes of one weight file, shared rather than copied.

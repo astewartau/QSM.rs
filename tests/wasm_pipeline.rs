@@ -21,8 +21,9 @@
 //! `scripts/fetch_model_weights.py <dir> all` (or a list of model ids). Without the variable the
 //! cases skip, except in CI.
 //!
-//! `browser_memory` measures each network's peak WASM memory on a browser-sized scan; it is
-//! ignored, for running by hand.
+//! `browser_memory` measures each network's peak WASM memory on a browser-sized scan, and (the
+//! `net_*` cases) one inference of each network at given input shapes, behind the WASM figures in
+//! `qsm_core::models` ("Memory"); it is ignored, for running by hand.
 
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen_test::wasm_bindgen_test as test;
@@ -458,6 +459,11 @@ fn every_hosted_model_has_a_case() {
         assert!(hosted.contains(id), "{id} has a case but is not a hosted model");
     }
 }
+
+/// The input tensors of each network file, shared with `examples/inference_memory.rs`.
+#[cfg(all(feature = "onnx", target_arch = "wasm32"))]
+#[path = "support/net_inputs.rs"]
+mod net_inputs;
 
 /// The weights directory the cases read from: `$QSM_WEIGHTS_DIR` when this test was compiled,
 /// holding each file under its registry name. CI fetches the files and sets it (see the `wasm`
@@ -1242,6 +1248,30 @@ mod browser_memory {
         );
     }
 
+    /// Heap one inference of network file `file` takes in WASM at spatial shape `s`: the WASM
+    /// counterpart of `examples/inference_memory.rs`, for the WASM/native ratio the figures in
+    /// `models::memory` are documented with. The heap only grows, so after the run it is the
+    /// high-water of parsing the model and running it once (`OnnxModel::run`, which plans for the
+    /// shape), above the weight file's bytes. Natively that is
+    /// `max(load_peak, resident + inference)` in the example's output.
+    fn network(file: &str, s: [usize; 3]) {
+        use qsm_core::models::onnx::OnnxModel;
+        let Some(dir) = weights_dir() else { return };
+        let bytes = read_file(&format!("{dir}/{file}"));
+        let base = heap_mb();
+        let model = OnnxModel::load(&bytes).unwrap_or_else(|e| panic!("{file}: {e}"));
+        let loaded = heap_mb() - base;
+        let t = js_sys::Date::now();
+        let out = model.run(&super::net_inputs::net_inputs(file, s)).unwrap_or_else(|e| panic!("{file}: {e}"));
+        let secs = (js_sys::Date::now() - t) / 1e3;
+        let peak = heap_mb() - base;
+        drop(out);
+        wasm_bindgen_test::console_log!(
+            "NET {file} {}x{}x{}: weights {:.0} MB, load +{loaded:.0} MB, peak +{peak:.0} MB, {secs:.0} s",
+            s[0], s[1], s[2], bytes.len() as f64 / 1e6
+        );
+    }
+
     macro_rules! cases {
         ($($name:ident => $body:expr;)*) => {$(
             #[test]
@@ -1303,5 +1333,42 @@ mod browser_memory {
         tile_cost_iqsm => tile_cost("iqsm");
         tile_cost_iqsm_plus => tile_cost("iqsm-plus");
         tile_cost_iqfm => tile_cost("iqfm");
+        net_bfrnet_64x64x64 => network("bfrnet.onnx", [64, 64, 64]);
+        net_bfrnet_96x96x96 => network("bfrnet.onnx", [96, 96, 96]);
+        net_xqsm_64x64x64 => network("xqsm.onnx", [64, 64, 64]);
+        net_xqsm_128x128x128 => network("xqsm.onnx", [128, 128, 128]);
+        net_qsmnet_64x64x64 => network("qsmnet.onnx", [64, 64, 64]);
+        net_qsmnet_96x96x96 => network("qsmnet.onnx", [96, 96, 96]);
+        net_qsmnet_plus_64x64x64 => network("qsmnet-plus.onnx", [64, 64, 64]);
+        net_qsmgan_64x64x64 => network("qsmgan.onnx", [64, 64, 64]);
+        net_autoqsm_64x64x64 => network("autoqsm.onnx", [64, 64, 64]);
+        net_lpcnn_64x64x64 => network("lpcnn.onnx", [64, 64, 64]);
+        net_lpcnn_128x128x128 => network("lpcnn.onnx", [128, 128, 128]);
+        net_modl_qsm_64x64x64 => network("modl-qsm.onnx", [64, 64, 64]);
+        net_modl_qsm_128x128x128 => network("modl-qsm.onnx", [128, 128, 128]);
+        net_ir2qsm_64x64x64 => network("ir2qsm.onnx", [64, 64, 64]);
+        net_ir2qsm_128x128x128 => network("ir2qsm.onnx", [128, 128, 128]);
+        net_iqsm_64x64x64 => network("iqsm.onnx", [64, 64, 64]);
+        net_iqsm_128x128x128 => network("iqsm.onnx", [128, 128, 128]);
+        net_iqfm_64x64x64 => network("iqfm.onnx", [64, 64, 64]);
+        net_iqsm_plus_64x64x64 => network("iqsm-plus.onnx", [64, 64, 64]);
+        net_iqsm_plus_128x128x128 => network("iqsm-plus.onnx", [128, 128, 128]);
+        net_nextqsm_bf_64x64x64 => network("nextqsm-bf.onnx", [64, 64, 64]);
+        net_nextqsm_bf_128x128x128 => network("nextqsm-bf.onnx", [128, 128, 128]);
+        net_nextqsm_vjp_64x64x64 => network("nextqsm-vjp.onnx", [64, 64, 64]);
+        net_nextqsm_vjp_128x128x128 => network("nextqsm-vjp.onnx", [128, 128, 128]);
+        net_susep_net_64x64x64 => network("susep-net.onnx", [64, 64, 64]);
+        net_susep_net_96x96x96 => network("susep-net.onnx", [96, 96, 96]);
+        net_r2primenet_64x64x64 => network("r2primenet.onnx", [64, 64, 64]);
+        net_r2primenet_128x128x64 => network("r2primenet.onnx", [128, 128, 64]);
+        net_chi_sepnet_64x64x64 => network("chi-sepnet.onnx", [64, 64, 64]);
+        net_chi_sepnet_128x128x64 => network("chi-sepnet.onnx", [128, 128, 64]);
+        net_hd_bet_64x128x128 => network("hd-bet.onnx", [64, 128, 128]);
+        net_hd_bet_96x160x160 => network("hd-bet.onnx", [96, 160, 160]);
+        net_rs2_net_128x96x128 => network("rs2-net.onnx", [128, 96, 128]);
+        net_mindgrab_128x128x128 => network("mindgrab.onnx", [128, 128, 128]);
+        net_mindgrab_192x192x192 => network("mindgrab.onnx", [192, 192, 192]);
+        net_synthseg_96x96x96 => network("synthseg.onnx", [96, 96, 96]);
+        net_synthseg_128x128x128 => network("synthseg.onnx", [128, 128, 128]);
     }
 }

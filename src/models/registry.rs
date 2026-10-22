@@ -12,7 +12,29 @@
 //! 3. flip `status` to [`WeightStatus::Available`],
 //! 4. confirm `inputs`/`outputs`/`size_divisor` match the exported graph.
 
-use super::{Framework, ModelSpec, ModelStage, WeightFile, WeightStatus};
+use super::{Framework, ModelSpec, ModelStage, NetworkMemory, WeightFile, WeightStatus};
+
+/// A [`NetworkMemory`], in the order its fields are listed: resident, load peak, inference fixed
+/// bytes and bytes per input voxel (native), WASM fixed bytes and bytes per input voxel. The
+/// figures come from `examples/inference_memory.rs` and the `browser_memory::net_*` cases in
+/// `tests/wasm_pipeline.rs` (see the [module docs](super#memory)).
+const fn mem(
+    resident_bytes: u64,
+    load_peak_bytes: u64,
+    inference_fixed_bytes: u64,
+    inference_bytes_per_voxel: u64,
+    wasm_fixed_bytes: u64,
+    wasm_bytes_per_voxel: u64,
+) -> NetworkMemory {
+    NetworkMemory {
+        resident_bytes,
+        load_peak_bytes,
+        inference_fixed_bytes,
+        inference_bytes_per_voxel,
+        wasm_fixed_bytes,
+        wasm_bytes_per_voxel,
+    }
+}
 
 /// All models known to QSM-Core, in a stable order.
 pub fn all_models() -> &'static [ModelSpec] {
@@ -55,6 +77,7 @@ const MODELS: &[ModelSpec] = &[
         size_divisor: 8,
         // Measured in WASM: the heap's slope over 48³–80³ patches (`browser_memory::tile_cost_*`).
         tile_bytes_per_voxel: Some(2_054),
+        memory: mem(82_100_000, 164_200_000, 128_000_000, 1738, 245_000_000, 2556),
     },
     // ---- Dipole inversion --------------------------------------------------
     ModelSpec {
@@ -81,6 +104,7 @@ const MODELS: &[ModelSpec] = &[
         size_divisor: 8,
         // Measured in WASM: the heap's slope over 48³–80³ patches (`browser_memory::tile_cost_*`).
         tile_bytes_per_voxel: Some(1_146),
+        memory: mem(21_600_000, 43_800_000, 59_000_000, 913, 243_000_000, 980),
     },
     ModelSpec {
         id: "qsmnet",
@@ -107,6 +131,7 @@ const MODELS: &[ModelSpec] = &[
         // Measured in WASM over 48³–80³ patches: QSMnet 1 680, QSMnet+ 1 694; the one tiled wrapper
         // serves both, so both carry the larger.
         tile_bytes_per_voxel: Some(1_694),
+        memory: mem(398_000_000, 796_200_000, 443_000_000, 842, 1_008_000_000, 1068),
     },
     ModelSpec {
         id: "qsmnet-plus",
@@ -133,6 +158,7 @@ const MODELS: &[ModelSpec] = &[
         // Measured in WASM over 48³–80³ patches: QSMnet 1 680, QSMnet+ 1 694; the one tiled wrapper
         // serves both, so both carry the larger.
         tile_bytes_per_voxel: Some(1_694),
+        memory: mem(398_000_000, 796_200_000, 443_000_000, 842, 1_008_000_000, 1068),
     },
     ModelSpec {
         id: "qsmgan",
@@ -157,6 +183,7 @@ const MODELS: &[ModelSpec] = &[
         outputs: &["chi"],
         size_divisor: 8,
         tile_bytes_per_voxel: None,
+        memory: mem(11_000_000, 22_200_000, 0, 518, 0, 699),
     },
     ModelSpec {
         id: "lpcnn",
@@ -183,6 +210,7 @@ const MODELS: &[ModelSpec] = &[
         // Measured in WASM: a whole 64³ tile per patch voxel, since this wrapper loads its network
         // inside every patch, so each tile in flight also holds a parsed model.
         tile_bytes_per_voxel: Some(964),
+        memory: mem(2_000_000, 4_100_000, 11_000_000, 661, 0, 766),
     },
     ModelSpec {
         id: "ir2qsm",
@@ -210,6 +238,7 @@ const MODELS: &[ModelSpec] = &[
         size_divisor: 8,
         // Measured in WASM: the heap's slope over 48³–80³ patches (`browser_memory::tile_cost_*`).
         tile_bytes_per_voxel: Some(904),
+        memory: mem(41_000_000, 82_900_000, 74_000_000, 704, 147_000_000, 769),
     },
     // ---- Single-step (phase/total field → χ) -------------------------------
     ModelSpec {
@@ -238,6 +267,7 @@ const MODELS: &[ModelSpec] = &[
         outputs: &["chi"],
         size_divisor: 1,
         tile_bytes_per_voxel: None,
+        memory: mem(5_800_000, 11_800_000, 0, 495, 0, 638),
     },
     ModelSpec {
         id: "iqsm",
@@ -262,6 +292,7 @@ const MODELS: &[ModelSpec] = &[
         size_divisor: 16,
         // Measured in WASM: the heap's slope over 48³–80³ patches (`browser_memory::tile_cost_*`).
         tile_bytes_per_voxel: Some(600),
+        memory: mem(17_600_000, 35_300_000, 34_000_000, 476, 55_000_000, 571),
     },
     ModelSpec {
         id: "iqsm-plus",
@@ -286,6 +317,7 @@ const MODELS: &[ModelSpec] = &[
         size_divisor: 16,
         // Measured in WASM: the heap's slope over 48³–80³ patches (`browser_memory::tile_cost_*`).
         tile_bytes_per_voxel: Some(1_149),
+        memory: mem(20_300_000, 41_000_000, 31_000_000, 1055, 65_000_000, 1037),
     },
     ModelSpec {
         id: "iqfm",
@@ -311,6 +343,7 @@ const MODELS: &[ModelSpec] = &[
         size_divisor: 16,
         // Measured in WASM: the heap's slope over 48³–80³ patches (`browser_memory::tile_cost_*`).
         tile_bytes_per_voxel: Some(600),
+        memory: mem(17_600_000, 35_300_000, 34_000_000, 476, 55_000_000, 571),
     },
     ModelSpec {
         id: "nextqsm",
@@ -347,6 +380,7 @@ const MODELS: &[ModelSpec] = &[
         // Measured in WASM: a whole 64³ tile per patch voxel, since this wrapper loads its network
         // inside every patch, so each tile in flight also holds a parsed model.
         tile_bytes_per_voxel: Some(1_952),
+        memory: mem(156_200_000, 226_900_000, 110_000_000, 600, 316_000_000, 753),
     },
     ModelSpec {
         id: "modl-qsm",
@@ -375,6 +409,7 @@ const MODELS: &[ModelSpec] = &[
         // Measured in WASM: a whole 64³ tile per patch voxel, since this wrapper loads its network
         // inside every patch, so each tile in flight also holds a parsed model.
         tile_bytes_per_voxel: Some(909),
+        memory: mem(2_000_000, 4_100_000, 11_000_000, 665, 12_000_000, 629),
     },
     // ---- χ-separation (χ+ / χ−) --------------------------------------------
     ModelSpec {
@@ -399,6 +434,7 @@ const MODELS: &[ModelSpec] = &[
         outputs: &["chi_pos", "chi_neg"],
         size_divisor: 8,
         tile_bytes_per_voxel: None,
+        memory: mem(206_100_000, 412_700_000, 249_000_000, 1960, 553_000_000, 2164),
     },
     ModelSpec {
         id: "r2primenet",
@@ -426,6 +462,7 @@ const MODELS: &[ModelSpec] = &[
         outputs: &["r2prime"],
         size_divisor: 16,
         tile_bytes_per_voxel: None,
+        memory: mem(90_500_000, 181_200_000, 114_000_000, 825, 188_000_000, 1155),
     },
     ModelSpec {
         id: "chi-sepnet",
@@ -452,6 +489,7 @@ const MODELS: &[ModelSpec] = &[
         outputs: &["chi_pos", "chi_neg"],
         size_divisor: 8,
         tile_bytes_per_voxel: None,
+        memory: mem(90_500_000, 181_200_000, 114_000_000, 833, 188_000_000, 1155),
     },
     ModelSpec {
         id: "hd-bet",
@@ -478,6 +516,7 @@ const MODELS: &[ModelSpec] = &[
         outputs: &["logits"],
         size_divisor: 32,
         tile_bytes_per_voxel: None,
+        memory: mem(123_500_000, 247_200_000, 162_000_000, 821, 307_000_000, 1101),
     },
     ModelSpec {
         id: "rs2-net",
@@ -506,6 +545,7 @@ const MODELS: &[ModelSpec] = &[
         outputs: &["logits"],
         size_divisor: 32,
         tile_bytes_per_voxel: None,
+        memory: mem(83_100_000, 159_600_000, 0, 1692, 0, 1697),
     },
     ModelSpec {
         id: "mindgrab",
@@ -534,6 +574,7 @@ const MODELS: &[ModelSpec] = &[
         outputs: &["logits"],
         size_divisor: 1,
         tile_bytes_per_voxel: None,
+        memory: mem(2_000_000, 3_600_000, 206_000_000, 426, 363_000_000, 311),
     },
     // ---- Anatomical segmentation -------------------------------------------
     ModelSpec {
@@ -563,6 +604,7 @@ const MODELS: &[ModelSpec] = &[
         outputs: &["unet_prediction"],
         size_divisor: 32,
         tile_bytes_per_voxel: None,
+        memory: mem(53_400_000, 106_800_000, 87_000_000, 919, 132_000_000, 1187),
     },
     ModelSpec {
         id: "synthseg-2.0",
@@ -583,6 +625,9 @@ const MODELS: &[ModelSpec] = &[
         outputs: &["unet_prediction"],
         size_divisor: 32,
         tile_bytes_per_voxel: None,
+        // Not measured (the weights are not hosted): SynthSeg 1.0's figures, plus its 33rd output
+        // channel (the output tensor and its copies, about 12 B per voxel natively, 16 in WASM).
+        memory: mem(53_400_000, 106_800_000, 87_000_000, 931, 132_000_000, 1203),
     },
 ];
 

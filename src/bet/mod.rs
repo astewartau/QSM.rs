@@ -21,7 +21,7 @@ pub mod rs2net;
 pub use evolution::{run_bet, BetParams};
 #[cfg(feature = "onnx")]
 pub use hdbet::hd_bet;
-pub use hdbet::{HdBetInference, HdBetParams};
+pub use hdbet::{hd_bet_memory_bytes, hd_bet_network_input, HdBetInference, HdBetParams};
 #[cfg(feature = "onnx")]
 pub use rs2net::rs2_net;
 pub use rs2net::{Rs2NetParams, RS2_NET_PATCH};
