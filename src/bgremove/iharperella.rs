@@ -172,11 +172,17 @@ pub fn harperella(
     let (vsx, vsy, vsz) = grid.voxel_size;
     let n_total = nx * ny * nz;
     let (lap, rad_per_ppm) = input.laplacian(mask, grid)?;
-    let (lap_brain, interior_mask, exterior_mask) =
+    let (lap_brain, exterior_mask) =
         prepare_laplacian(lap, mask, nx, ny, nz, vsx, vsy, vsz);
 
     // SMV kernel
     let s_fft = compute_smv_fft(nx, ny, nz, vsx, vsy, vsz, params.radius);
+
+    // The trustable interior I: brain voxels farther than the SMV radius from the boundary.
+    // The paper splits the tissue into I and the boundary region O, "the set of tissue voxels
+    // next to the boundaries that are within a distance of the radius of the spherical mean
+    // value filter", so I is the mask eroded by the SMV radius (the sphere fits in the brain).
+    let interior_mask = erode(mask, nx, ny, nz, vsx, vsy, vsz, params.radius);
 
     // Compute delta = mean of S(nabla^2 phi) over trustable interior I (Eq [4])
     let smv_lap = apply_smv(&lap_brain, &s_fft, nx, ny, nz);
@@ -279,7 +285,7 @@ pub fn iharperella_with_weights(
     let (max_iter, tol) = (params.max_iter, params.tol);
     let (lap, rad_per_ppm) = input.laplacian(mask, grid)?;
     check_len("w_brain", w_brain.len(), n_total)?;
-    let (lap_brain, _interior_mask, exterior_mask) =
+    let (lap_brain, exterior_mask) =
         prepare_laplacian(lap, mask, nx, ny, nz, vsx, vsy, vsz);
 
     // Pre-compute Laplacian eigenvalues for inverse Laplacian
@@ -336,40 +342,46 @@ fn to_local_field(tissue: &[f64], mask: &[u8], rad_per_ppm: Option<f64>) -> Vec<
         .collect()
 }
 
-/// Erode mask, prepare interior/exterior masks, keep the Laplacian (Eq [1], computed by
-/// [`HarperellaInput::laplacian`]) only at trustable interior voxels.
+/// Keep the Laplacian (Eq [1], computed by [`HarperellaInput::laplacian`]) only at brain
+/// voxels at least 3 voxels from the boundary: the paper sets the Laplacian outside the brain
+/// and within 3 voxels of its boundary to zero as inaccurate. Returns that Laplacian and the
+/// exterior mask E (1 outside the brain).
 #[allow(clippy::too_many_arguments)]
 fn prepare_laplacian(
     lap: Vec<f64>, mask: &[u8],
     nx: usize, ny: usize, nz: usize,
     vsx: f64, vsy: f64, vsz: f64,
-) -> (Vec<f64>, Vec<u8>, Vec<f64>) {
+) -> (Vec<f64>, Vec<f64>) {
+    let trusted = erode(mask, nx, ny, nz, vsx, vsy, vsz, 3.0 * vsx.min(vsy).min(vsz));
+    let exterior_mask: Vec<f64> = mask.iter()
+        .map(|&m| if m == 0 { 1.0 } else { 0.0 }).collect();
+    let lap_brain = lap.iter().zip(&trusted)
+        .map(|(&l, &t)| if t == 1 { l } else { 0.0 })
+        .collect();
+    (lap_brain, exterior_mask)
+}
+
+/// Erode `mask` by a sphere of `radius` mm: keep the voxels whose whole sphere lies in the mask.
+///
+/// The radius is widened by one part in 10^6 so that a voxel exactly `radius` away counts as
+/// inside the sphere whatever the rounding of the voxel size: a header voxel size of
+/// 0.99999994 mm must not drop the voxels at exactly 3 or 10 voxels from the sphere.
+#[allow(clippy::too_many_arguments)]
+fn erode(
+    mask: &[u8],
+    nx: usize, ny: usize, nz: usize,
+    vsx: f64, vsy: f64, vsz: f64,
+    radius: f64,
+) -> Vec<u8> {
     let n_total = nx * ny * nz;
-
-    // Erode mask by ~3 voxels
-    let erode_radius = 3.0 * vsx.min(vsy).min(vsz);
-    let erode_fft = compute_smv_fft(nx, ny, nz, vsx, vsy, vsz, erode_radius);
-
-    let mask_f64: Vec<f64> = mask.iter().map(|&m| m as f64).collect();
-    let mut mask_conv: Vec<Complex64> = mask_f64.iter()
-        .map(|&x| Complex64::new(x, 0.0)).collect();
+    let erode_fft = compute_smv_fft(nx, ny, nz, vsx, vsy, vsz, radius * (1.0 + 1e-6));
+    let mut mask_conv: Vec<Complex64> = mask.iter()
+        .map(|&m| Complex64::new(m as f64, 0.0)).collect();
     fft3d(&mut mask_conv, nx, ny, nz);
     for i in 0..n_total { mask_conv[i] *= erode_fft[i]; }
     ifft3d(&mut mask_conv, nx, ny, nz);
-
-    let delta_thresh = 1.0 - 1e-7_f64.sqrt();
-    let interior_mask: Vec<u8> = mask_conv.iter()
-        .map(|c| if c.re > delta_thresh { 1 } else { 0 }).collect();
-    let exterior_mask: Vec<f64> = mask.iter()
-        .map(|&m| if m == 0 { 1.0 } else { 0.0 }).collect();
-
-    // Keep Laplacian only at trustable interior voxels
-    let mut lap_brain = vec![0.0; n_total];
-    for i in 0..n_total {
-        if interior_mask[i] == 1 { lap_brain[i] = lap[i]; }
-    }
-
-    (lap_brain, interior_mask, exterior_mask)
+    let thresh = 1.0 - 1e-7_f64.sqrt();
+    mask_conv.iter().map(|c| u8::from(c.re > thresh)).collect()
 }
 
 /// Compute FFT of SMV kernel (returns real part, since kernel is symmetric)
@@ -647,6 +659,33 @@ mod tests {
             .iter().map(|v| v * 32.0).collect();
         let out = run_ih(HarperellaInput::FieldPpm(&steep), &mask);
         assert!(max_abs_diff(&out, &gentle) / max_abs(&gentle) < 1e-12);
+    }
+
+    /// The erosions do not depend on how the voxel size was rounded: a header voxel size of
+    /// 0.99999994 mm erodes like 1 mm, at the 3-voxel boundary rim and at the SMV radius.
+    #[test]
+    fn erosion_ignores_voxel_size_rounding() {
+        let mask = sphere_mask();
+        for radius in [2.0, 3.0] {
+            let exact = erode(&mask, N, N, N, 1.0, 1.0, 1.0, radius);
+            let rounded = erode(&mask, N, N, N, 1.0, 1.0, 0.999_999_94, radius * 0.999_999_94);
+            assert!(exact.contains(&1), "radius {radius}: nothing left");
+            assert_eq!(exact, rounded, "radius {radius}");
+        }
+    }
+
+    /// HARPERELLA's trustable interior I, where delta is averaged, is the mask eroded by the
+    /// SMV radius. A radius wider than the brain leaves I empty; delta is then 0 and the result
+    /// is still finite.
+    #[test]
+    fn empty_interior_gives_zero_delta() {
+        let mask = sphere_mask();
+        assert!(erode(&mask, N, N, N, 1.0, 1.0, 1.0, 6.5).iter().all(|&v| v == 0));
+        assert!(erode(&mask, N, N, N, 1.0, 1.0, 1.0, 3.0).contains(&1));
+        let field = field_ppm(1.0);
+        let p = HarperellaParams { radius: 6.5, max_iter: 30, tol: 1e-8 };
+        let out = harperella(HarperellaInput::FieldPpm(&field), &mask, &grid(), &p, |_, _| {}).unwrap().0;
+        assert!(out.iter().all(|v| v.is_finite()) && max_abs(&out) > 1e-3);
     }
 
     #[test]
