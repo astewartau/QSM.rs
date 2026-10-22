@@ -92,7 +92,7 @@
 use num_complex::{Complex32, Complex64};
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
-use crate::fft::{Fft3dWorkspace, Fft3dWorkspaceF32};
+use crate::fft::{Box3, Fft3dWorkspace, Fft3dWorkspaceF32, FftOpts};
 use crate::kernels::dipole::dipole_kernel;
 use crate::utils::simd_ops::{apply_gradient_weights_f32, combine_terms_f32};
 use crate::Grid;
@@ -279,13 +279,15 @@ fn medi_l1(
     let n = grid.n_total();
     let vs = [grid.vsx(), grid.vsy(), grid.vsz()];
     let mut fft = Fft3dWorkspace::new(grid.nx(), grid.ny(), grid.nz());
+    let mut buf = vec![Complex64::new(0.0, 0.0); n];
 
     // ppm -> radians over delta_TE; MEDI_L1 converts back with x/(2*pi*delta_TE*CF)*1e6.
     let cf = 42.576e6 * params.b0;
     let te = &params.echo_times;
     let delta_te = if te.len() == 1 { te[0] } else { te[1] - te[0] };
     let ppm_to_rad = 2.0 * std::f64::consts::PI * delta_te * cf * 1e-6;
-    let mut rdf: Vec<f64> = local_field.iter().map(|&f| f * ppm_to_rad).collect();
+    let mut rdf = vec![0.0f64; n];
+    par_fill(&mut rdf, |i| local_field[i] * ppm_to_rad);
 
     // N_std = N_std.*Mask; tempn = N_std
     let mut mask: Vec<bool> = mask.iter().map(|&m| m != 0).collect();
@@ -302,213 +304,272 @@ fn medi_l1(
         // if opts.smv_shrink_mask, Mask = SMV(Mask, SphereK) > 0.999
         if params.smv_shrink_mask {
             let m: Vec<f64> = mask.iter().map(|&b| b as u8 as f64).collect();
-            let sm = smv(&m, &k, &mut fft);
-            for i in 0..n {
-                mask[i] = sm[i].re > 0.999;
-            }
+            smv(&m, &k, &mut fft, &mut buf);
+            par_fill(&mut mask, |i| buf[i].re > 0.999);
         }
         // D = (1-SphereK).*D
-        for i in 0..n {
-            d[i] *= Complex64::new(1.0, 0.0) - k[i];
-        }
+        par_update(&mut d, |i, v| *v *= Complex64::new(1.0, 0.0) - k[i]);
         // RDF = RDF - SMV(RDF, SphereK); RDF = RDF.*Mask
-        let s = smv(&rdf, &k, &mut fft);
-        for i in 0..n {
-            rdf[i] = if mask[i] { rdf[i] - s[i].re } else { 0.0 };
-        }
+        smv(&rdf, &k, &mut fft, &mut buf);
+        par_update(&mut rdf, |i, v| *v = if mask[i] { *v - buf[i].re } else { 0.0 });
         // tempn = sqrt(SMV(tempn.^2, SphereK) + tempn.^2)
-        tempn = smv_noise(&tempn, &k, &mut fft);
+        smv_noise(&mut tempn, &k, &mut fft, &mut buf);
         Some(k)
     } else {
         None
     };
 
-    let mut m = dataterm_mask(params.data_weighting, &tempn, &mask);
-    let mut b0: Vec<Complex64> = (0..n).map(|i| m[i] * Complex64::new(0.0, rdf[i]).exp()).collect();
+    let mut m = vec![0.0f64; n];
+    dataterm_mask(params.data_weighting, &tempn, &mask, &mut m);
+    let mut b0 = vec![Complex64::new(0.0, 0.0); n];
+    par_fill(&mut b0, |i| m[i] * Complex64::new(0.0, rdf[i]).exp());
     let wg = gradient_mask(magnitude, &mask, grid, params.percentage);
+    // The data weight m, and with it w and conj(w).*w, is zero outside the mask, so the
+    // Dconv(dx) in A(dx) is only needed, and the Dconv after the weighting only has input,
+    // inside the mask's bounding box.
+    let mbox = if params.data_weighting == 0 {
+        [0..grid.nx(), 0..grid.ny(), 0..grid.nz()]
+    } else {
+        bounding_box(&mask, grid.dims)
+    };
 
     let lambda2 = 2.0 * params.lambda;
     // reg_CSF.m: opHop(x) = lambda_CSF * LT(LT(x)), LT(x) = Mask_CSF.*(x - mean(x(Mask_CSF)))
     let csf_idx: Vec<usize> = mask_csf.map_or(Vec::new(), |c| (0..n).filter(|&i| c[i]).collect());
-    let lt = |x: &[f64], out: &mut [f64]| {
-        let mean = csf_idx.iter().map(|&i| x[i]).sum::<f64>() / csf_idx.len() as f64;
-        out.iter_mut().for_each(|v| *v = 0.0);
-        for &i in &csf_idx {
-            out[i] = x[i] - mean;
-        }
-    };
     let reg_csf = |x: &[f64], acc: &mut [f64]| {
         if csf_idx.is_empty() {
             return;
         }
-        let mut t1 = vec![0.0; n];
-        let mut t2 = vec![0.0; n];
-        lt(x, &mut t1);
-        lt(&t1, &mut t2);
-        for &i in &csf_idx {
-            acc[i] += params.lambda_csf * t2[i];
+        let len = csf_idx.len() as f64;
+        let mean = csf_idx.iter().map(|&i| x[i]).sum::<f64>() / len;
+        let t1: Vec<f64> = csf_idx.iter().map(|&i| x[i] - mean).collect();
+        let mean = t1.iter().sum::<f64>() / len;
+        for (q, &i) in csf_idx.iter().enumerate() {
+            acc[i] += params.lambda_csf * (t1[q] - mean);
         }
     };
     let e = 1e-6;
+    let dims = grid.dims;
     let mut x = vec![0.0f64; n];
-    let mut vr = [vec![0.0f64; n], vec![0.0f64; n], vec![0.0f64; n]];
+    // wG.*Vr.*wG per direction, Vr = 1./sqrt(abs(wG.*grad(real(x))).^2 + e)
+    let mut wvw = [vec![0.0f64; n], vec![0.0f64; n], vec![0.0f64; n]];
+    let mut g = [vec![0.0f64; n], vec![0.0f64; n], vec![0.0f64; n]];
     let mut w = vec![Complex64::new(0.0, 0.0); n];
-    let mut buf = vec![Complex64::new(0.0, 0.0); n];
+    let mut w2 = vec![0.0f64; n];
+    let mut b = vec![0.0f64; n];
+    let mut t = vec![0.0f64; n];
+    let mut rv = vec![0.0f64; n];
+    let mut cg = CgBuffers::new(n);
+    let mask_idx: Vec<usize> = (0..n).filter(|&i| mask[i]).collect();
     let total = params.max_iter * params.cg_max_iter;
 
     let mut res_norm_ratio = f64::INFINITY;
     let mut iter = 0;
     while res_norm_ratio > params.tol && iter < params.max_iter {
         iter += 1;
-        // Vr = 1./sqrt(abs(wG.*grad(real(x))).^2 + e), per direction
-        let g = fgrad(&x, grid, vs);
+        // Vr = 1./sqrt(abs(wG.*grad(real(x))).^2 + e), per direction; kept as wG.*Vr.*wG
+        fgrad(&x, dims, vs, &mut g);
         for c in 0..3 {
-            for i in 0..n {
-                let u = wg[c][i] * g[c][i];
-                vr[c][i] = 1.0 / (u * u + e).sqrt();
-            }
+            let (wgc, gc) = (&wg[c], &g[c]);
+            par_fill(&mut wvw[c], |i| {
+                let u = wgc[i] * gc[i];
+                let vr = 1.0 / (u * u + e).sqrt();
+                wgc[i] * vr * wgc[i]
+            });
         }
         // w = W(m, x) = m.*exp(1i*Dconv(x))
-        let dxr = dconv(&x, &d, &mut fft, &mut buf);
-        for i in 0..n {
-            w[i] = m[i] * Complex64::new(0.0, dxr[i]).exp();
-        }
-        let w2: Vec<f64> = w.iter().map(|v| v.norm_sqr()).collect();
+        dconv(&x, &d, &mut fft, &mut buf, &mut t);
+        par_fill(&mut w, |i| m[i] * Complex64::new(0.0, t[i]).exp());
+        par_fill(&mut w2, |i| w[i].norm_sqr());
 
         // b = reg(x) + 2*lambda*Dconv(real(conj(w).*conj(1i).*(w-b0)))
-        let mut b = reg(&x, &wg, &vr, grid, vs);
+        reg(&x, &wvw, dims, vs, &mut b);
         reg_csf(&x, &mut b);
-        let r: Vec<f64> = (0..n)
-            .map(|i| (w[i].conj() * Complex64::new(0.0, -1.0) * (w[i] - b0[i])).re)
-            .collect();
-        let dr = dconv(&r, &d, &mut fft, &mut buf);
-        for i in 0..n {
-            b[i] = -(b[i] + lambda2 * dr[i]);
-        }
+        par_fill(&mut rv, |i| (w[i].conj() * Complex64::new(0.0, -1.0) * (w[i] - b0[i])).re);
+        dconv(&rv, &d, &mut fft, &mut buf, &mut t);
+        par_update(&mut b, |i, v| *v = -(*v + lambda2 * t[i]));
 
         // A = @(dx) reg(dx) + 2*lambda*Dconv(conj(w).*w.*Dconv(dx))
         let base = (iter - 1) * params.cg_max_iter;
-        let dx = cgsolve(
-            |p: &[f64], out: &mut [f64], fft: &mut Fft3dWorkspace, buf: &mut [Complex64]| {
-                let mut rg = reg(p, &wg, &vr, grid, vs);
-                reg_csf(p, &mut rg);
-                let mut t = dconv(p, &d, fft, buf);
-                for i in 0..n {
-                    t[i] *= w2[i];
-                }
-                let f = dconv(&t, &d, fft, buf);
-                for i in 0..n {
-                    out[i] = rg[i] + lambda2 * f[i];
-                }
+        cgsolve(
+            |p: &[f64], out: &mut [f64]| {
+                reg(p, &wvw, dims, vs, out);
+                reg_csf(p, out);
+                dconv_weighted(p, &d, &w2, &mbox, &mut fft, &mut buf);
+                par_update(out, |i, v| *v += lambda2 * buf[i].re);
             },
-            &b, params.cg_tol, params.cg_max_iter, &mut fft, &mut buf,
+            &b, params.cg_tol, params.cg_max_iter, &mut cg,
             |k| progress(base + k, total),
         );
+        let dx = &cg.x;
 
         // res_norm_ratio = norm(dx)/norm(x); x = x + dx
         let ndx = dx.iter().map(|v| v * v).sum::<f64>().sqrt();
         let nrm_x = x.iter().map(|v| v * v).sum::<f64>().sqrt();
         res_norm_ratio = ndx / nrm_x;
-        for i in 0..n {
-            x[i] += dx[i];
-        }
+        par_update(&mut x, |i, v| *v += dx[i]);
 
         if params.merit {
-            // wres = m.*exp(1i*real(ifftn(D.*fftn(x)))) - b0
-            let dxr = dconv(&x, &d, &mut fft, &mut buf);
-            let mut wres: Vec<Complex64> = (0..n)
-                .map(|i| m[i] * Complex64::new(0.0, dxr[i]).exp() - b0[i])
+            // wres = m.*exp(1i*real(ifftn(D.*fftn(x)))) - b0, used inside the mask only
+            dconv(&x, &d, &mut fft, &mut buf, &mut t);
+            let wres: Vec<Complex64> = mask_idx
+                .iter()
+                .map(|&i| m[i] * Complex64::new(0.0, t[i]).exp() - b0[i])
                 .collect();
-            let idx: Vec<usize> = (0..n).filter(|&i| mask[i]).collect();
-            let mean = idx.iter().map(|&i| wres[i]).sum::<Complex64>() / idx.len() as f64;
-            for v in wres.iter_mut() {
-                *v -= mean;
-            }
+            let mean = wres.iter().copied().sum::<Complex64>() / mask_idx.len() as f64;
             // factor = std(abs(a))*6, MATLAB's std (normalised by N-1)
-            let a: Vec<f64> = idx.iter().map(|&i| wres[i].norm()).collect();
+            let a: Vec<f64> = wres.iter().map(|&v| (v - mean).norm()).collect();
             let am = a.iter().sum::<f64>() / a.len() as f64;
             let sd = (a.iter().map(|v| (v - am).powi(2)).sum::<f64>() / (a.len() as f64 - 1.0)).sqrt();
             let factor = sd * 6.0;
-            for &i in &idx {
-                let r = (wres[i].norm() / factor).max(1.0);
+            for (q, &i) in mask_idx.iter().enumerate() {
+                let r = (a[q] / factor).max(1.0);
                 n_std[i] *= r * r;
             }
-            tempn = n_std.clone();
+            tempn.copy_from_slice(&n_std);
             if let Some(k) = &sphere_k {
-                tempn = smv_noise(&tempn, k, &mut fft);
+                smv_noise(&mut tempn, k, &mut fft, &mut buf);
             }
-            m = dataterm_mask(params.data_weighting, &tempn, &mask);
-            b0 = (0..n).map(|i| m[i] * Complex64::new(0.0, rdf[i]).exp()).collect();
+            dataterm_mask(params.data_weighting, &tempn, &mask, &mut m);
+            par_fill(&mut b0, |i| m[i] * Complex64::new(0.0, rdf[i]).exp());
         }
     }
     progress(total, total);
 
     // x = x/(2*pi*delta_TE*CF)*1e6.*Mask
-    let mut x: Vec<f64> = (0..n).map(|i| if mask[i] { x[i] / ppm_to_rad } else { 0.0 }).collect();
+    par_update(&mut x, |i, v| *v = if mask[i] { *v / ppm_to_rad } else { 0.0 });
     // if flag_CSF, x = x - mean(x(Mask_CSF)); kept zero outside the mask (see the module docs)
     if !csf_idx.is_empty() {
         let mean = csf_idx.iter().map(|&i| x[i]).sum::<f64>() / csf_idx.len() as f64;
-        for i in 0..n {
+        par_update(&mut x, |i, v| {
             if mask[i] {
-                x[i] -= mean;
+                *v -= mean;
             }
-        }
+        });
     }
     x
 }
 
-/// `Dconv`: `real(ifftn(D.*fftn(x)))`
-fn dconv(x: &[f64], d: &[Complex64], fft: &mut Fft3dWorkspace, buf: &mut [Complex64]) -> Vec<f64> {
-    for (b, &v) in buf.iter_mut().zip(x) {
-        *b = Complex64::new(v, 0.0);
-    }
-    fft.fft3d(buf);
-    for (b, &k) in buf.iter_mut().zip(d) {
-        *b *= k;
-    }
-    fft.ifft3d(buf);
-    buf.iter().map(|c| c.re).collect()
+/// `out[i] = f(i)` for every `i` (over threads with the `parallel` feature)
+fn par_fill<T: Send>(out: &mut [T], f: impl Fn(usize) -> T + Sync + Send) {
+    #[cfg(feature = "parallel")]
+    out.par_iter_mut().with_min_len(1 << 14).enumerate().for_each(|(i, v)| *v = f(i));
+    #[cfg(not(feature = "parallel"))]
+    out.iter_mut().enumerate().for_each(|(i, v)| *v = f(i));
 }
 
-/// `reg(dx) = div(wG.*(Vr.*(wG.*grad(real(dx)))))`
-fn reg(x: &[f64], wg: &[Vec<f64>; 3], vr: &[Vec<f64>; 3], grid: &Grid, vs: [f64; 3]) -> Vec<f64> {
-    let mut g = fgrad(x, grid, vs);
-    for c in 0..3 {
-        for i in 0..x.len() {
-            g[c][i] *= wg[c][i] * vr[c][i] * wg[c][i];
+/// `f(i, &mut out[i])` for every `i` (over threads with the `parallel` feature)
+fn par_update<T: Send>(out: &mut [T], f: impl Fn(usize, &mut T) + Sync + Send) {
+    #[cfg(feature = "parallel")]
+    out.par_iter_mut().with_min_len(1 << 14).enumerate().for_each(|(i, v)| f(i, v));
+    #[cfg(not(feature = "parallel"))]
+    out.iter_mut().enumerate().for_each(|(i, v)| f(i, v));
+}
+
+/// The smallest box holding every `true` voxel (the whole grid if there is none)
+fn bounding_box(mask: &[bool], (nx, ny, nz): (usize, usize, usize)) -> Box3 {
+    let (mut lo, mut hi) = ([usize::MAX; 3], [0usize; 3]);
+    for (p, _) in mask.iter().enumerate().filter(|(_, &m)| m) {
+        let c = [p % nx, (p / nx) % ny, p / (nx * ny)];
+        for a in 0..3 {
+            lo[a] = lo[a].min(c[a]);
+            hi[a] = hi[a].max(c[a] + 1);
         }
     }
-    bdiv(&g, grid, vs)
+    if lo[0] == usize::MAX {
+        return [0..nx, 0..ny, 0..nz];
+    }
+    [lo[0]..hi[0], lo[1]..hi[1], lo[2]..hi[2]]
+}
+
+/// Loads a real array into the transform's rows as `complex(x, 0)`
+fn load_real(x: &[f64]) -> impl Fn(usize, &mut [Complex64]) + Sync + '_ {
+    move |l, row| {
+        for (c, &v) in row.iter_mut().zip(&x[l..]) {
+            *c = Complex64::new(v, 0.0);
+        }
+    }
+}
+
+/// Multiplies the transform's rows by `k` as they are loaded (`K.*buf`, fused into the first
+/// pass of the next transform)
+fn mul_kernel(k: &[Complex64]) -> impl Fn(usize, &mut [Complex64]) + Sync + '_ {
+    move |l, row| {
+        for (c, &kv) in row.iter_mut().zip(&k[l..]) {
+            *c *= kv;
+        }
+    }
+}
+
+/// `Dconv`: `out = real(ifftn(D.*fftn(x)))`
+fn dconv(x: &[f64], d: &[Complex64], fft: &mut Fft3dWorkspace, buf: &mut [Complex64], out: &mut [f64]) {
+    let load = load_real(x);
+    fft.fft3d_with(buf, &FftOpts { load: Some(&load), ..FftOpts::default() });
+    fft.ifft3d_with(buf, &FftOpts { load: Some(&mul_kernel(d)), ..FftOpts::default() });
+    par_fill(out, |i| buf[i].re);
+}
+
+/// `Dconv(w2.*Dconv(p))`, left in the real part of `buf`. `w2` is zero outside `mbox`, so the
+/// inner `Dconv` is computed only on `mbox` and the outer one reads input only there; the
+/// values are those of the two plain `Dconv`s (see [`Fft3dWorkspace::fft3d_with`]).
+fn dconv_weighted(
+    p: &[f64],
+    d: &[Complex64],
+    w2: &[f64],
+    mbox: &Box3,
+    fft: &mut Fft3dWorkspace,
+    buf: &mut [Complex64],
+) {
+    let load = load_real(p);
+    fft.fft3d_with(buf, &FftOpts { load: Some(&load), ..FftOpts::default() });
+    // t = real(ifftn(D.*...)).*w2 on the box (the imaginary part is dropped on the way back in)
+    let mul_d = mul_kernel(d);
+    fft.ifft3d_with(buf, &FftOpts { needed: Some(mbox), post: Some(w2), load: Some(&mul_d), ..FftOpts::default() });
+    let drop_imag = |_: usize, row: &mut [Complex64]| {
+        for c in row.iter_mut() {
+            c.im = 0.0;
+        }
+    };
+    fft.fft3d_with(buf, &FftOpts { support: Some(mbox), load: Some(&drop_imag), ..FftOpts::default() });
+    fft.ifft3d_with(buf, &FftOpts { load: Some(&mul_d), ..FftOpts::default() });
 }
 
 /// `fgrad.m`: forward differences, zero at the last voxel along each axis
-fn fgrad(x: &[f64], grid: &Grid, vs: [f64; 3]) -> [Vec<f64>; 3] {
-    let (nx, ny, nz) = grid.dims;
-    let n = x.len();
-    let mut g = [vec![0.0f64; n], vec![0.0f64; n], vec![0.0f64; n]];
-    for k in 0..nz {
+fn fgrad(x: &[f64], dims: (usize, usize, usize), vs: [f64; 3], g: &mut [Vec<f64>; 3]) {
+    let (nx, ny, nz) = dims;
+    let nxy = nx * ny;
+    let [g0, g1, g2] = g;
+    let plane = |k: usize, ((a, b), c): ((&mut [f64], &mut [f64]), &mut [f64])| {
         for j in 0..ny {
             for i in 0..nx {
-                let p = i + nx * (j + ny * k);
-                if i + 1 < nx {
-                    g[0][p] = (x[p + 1] - x[p]) / vs[0];
-                }
-                if j + 1 < ny {
-                    g[1][p] = (x[p + nx] - x[p]) / vs[1];
-                }
-                if k + 1 < nz {
-                    g[2][p] = (x[p + nx * ny] - x[p]) / vs[2];
-                }
+                let q = i + nx * j;
+                let p = q + nxy * k;
+                a[q] = if i + 1 < nx { (x[p + 1] - x[p]) / vs[0] } else { 0.0 };
+                b[q] = if j + 1 < ny { (x[p + nx] - x[p]) / vs[1] } else { 0.0 };
+                c[q] = if k + 1 < nz { (x[p + nxy] - x[p]) / vs[2] } else { 0.0 };
             }
         }
-    }
-    g
+    };
+    #[cfg(feature = "parallel")]
+    g0.par_chunks_mut(nxy)
+        .zip(g1.par_chunks_mut(nxy))
+        .zip(g2.par_chunks_mut(nxy))
+        .enumerate()
+        .for_each(|(k, s)| plane(k, s));
+    #[cfg(not(feature = "parallel"))]
+    g0.chunks_mut(nxy)
+        .zip(g1.chunks_mut(nxy))
+        .zip(g2.chunks_mut(nxy))
+        .enumerate()
+        .for_each(|(k, s)| plane(k, s));
 }
 
-/// `bdiv.m`: the adjoint of `fgrad` (minus the backward-difference divergence)
-fn bdiv(g: &[Vec<f64>; 3], grid: &Grid, vs: [f64; 3]) -> Vec<f64> {
-    let (nx, ny, nz) = grid.dims;
-    let mut out = vec![0.0f64; nx * ny * nz];
+/// `bdiv.m`: the adjoint of `fgrad` (minus the backward-difference divergence). [`reg`] computes
+/// the same with the gradients fused in; this is its reference in the tests.
+#[cfg(test)]
+fn bdiv(g: &[Vec<f64>; 3], dims: (usize, usize, usize), vs: [f64; 3], out: &mut [f64]) {
+    let (nx, ny, nz) = dims;
+    let nxy = nx * ny;
     // Dx = [Gx(1:end-1); 0] - [0; Gx(1:end-1)]; div = -(Dx/vsx + Dy/vsy + Dz/vsz)
     let term = |gc: &[f64], p: usize, i: usize, len: usize, stride: usize| -> f64 {
         let cur = if i + 1 < len { gc[p] } else { 0.0 };
@@ -518,85 +579,151 @@ fn bdiv(g: &[Vec<f64>; 3], grid: &Grid, vs: [f64; 3]) -> Vec<f64> {
     for k in 0..nz {
         for j in 0..ny {
             for i in 0..nx {
-                let p = i + nx * (j + ny * k);
+                let p = i + nx * j + nxy * k;
                 out[p] = -(term(&g[0], p, i, nx, 1) / vs[0]
                     + term(&g[1], p, j, ny, nx) / vs[1]
-                    + term(&g[2], p, k, nz, nx * ny) / vs[2]);
+                    + term(&g[2], p, k, nz, nxy) / vs[2]);
             }
         }
     }
-    out
 }
 
-/// `cgsolve.m` from a zero start, returning the last iterate. `progress` receives the
-/// iteration count.
+/// `reg(dx) = div(wG.*(Vr.*(wG.*grad(real(dx)))))` into `out`, with `wvw = wG.*Vr.*wG`: `bdiv`
+/// of the weighted `fgrad`, a z plane at a time so the gradients never leave the cache. Each
+/// value is computed with the same operations as `fgrad` followed by `bdiv`.
+fn reg(x: &[f64], wvw: &[Vec<f64>; 3], dims: (usize, usize, usize), vs: [f64; 3], out: &mut [f64]) {
+    let (nx, ny, nz) = dims;
+    let nxy = nx * ny;
+    // Weighted forward differences of plane k: x and y into gx, gy (when given), z into gz.
+    let grad = |k: usize, gx: Option<(&mut [f64], &mut [f64])>, gz: &mut [f64]| {
+        let base = nxy * k;
+        for q in 0..nxy {
+            let p = base + q;
+            gz[q] = (if k + 1 < nz { (x[p + nxy] - x[p]) / vs[2] } else { 0.0 }) * wvw[2][p];
+        }
+        if let Some((gx, gy)) = gx {
+            for j in 0..ny {
+                for i in 0..nx {
+                    let q = i + nx * j;
+                    let p = base + q;
+                    gx[q] = (if i + 1 < nx { (x[p + 1] - x[p]) / vs[0] } else { 0.0 }) * wvw[0][p];
+                    gy[q] = (if j + 1 < ny { (x[p + nx] - x[p]) / vs[1] } else { 0.0 }) * wvw[1][p];
+                }
+            }
+        }
+    };
+    // Dx = [Gx(1:end-1); 0] - [0; Gx(1:end-1)]; div = -(Dx/vsx + Dy/vsy + Dz/vsz)
+    let planes = |k0: usize, o: &mut [f64], bufs: &mut [Vec<f64>; 4]| {
+        let [gx, gy, gz, gz_prev] = bufs;
+        if k0 > 0 {
+            grad(k0 - 1, None, gz_prev);
+        }
+        for (dk, op) in o.chunks_mut(nxy).enumerate() {
+            let k = k0 + dk;
+            grad(k, Some((gx, gy)), gz);
+            for j in 0..ny {
+                for i in 0..nx {
+                    let q = i + nx * j;
+                    let tx = (if i + 1 < nx { gx[q] } else { 0.0 }) - (if i > 0 { gx[q - 1] } else { 0.0 });
+                    let ty = (if j + 1 < ny { gy[q] } else { 0.0 }) - (if j > 0 { gy[q - nx] } else { 0.0 });
+                    let tz = (if k + 1 < nz { gz[q] } else { 0.0 }) - (if k > 0 { gz_prev[q] } else { 0.0 });
+                    op[q] = -(tx / vs[0] + ty / vs[1] + tz / vs[2]);
+                }
+            }
+            std::mem::swap(gz, gz_prev);
+        }
+    };
+    let new_bufs = || [vec![0.0f64; nxy], vec![0.0f64; nxy], vec![0.0f64; nxy], vec![0.0f64; nxy]];
+    // A few planes per task: each task recomputes one plane of z differences.
+    const PLANES: usize = 4;
+    #[cfg(feature = "parallel")]
+    out.par_chunks_mut(nxy * PLANES)
+        .enumerate()
+        .for_each_init(new_bufs, |bufs, (c, o)| planes(c * PLANES, o, bufs));
+    #[cfg(not(feature = "parallel"))]
+    {
+        let mut bufs = new_bufs();
+        out.chunks_mut(nxy * PLANES).enumerate().for_each(|(c, o)| planes(c * PLANES, o, &mut bufs));
+    }
+}
+
+/// `cgsolve.m`'s vectors, reused across Gauss-Newton iterations
+struct CgBuffers {
+    x: Vec<f64>,
+    r: Vec<f64>,
+    d: Vec<f64>,
+    q: Vec<f64>,
+}
+
+impl CgBuffers {
+    fn new(n: usize) -> Self {
+        Self { x: vec![0.0; n], r: vec![0.0; n], d: vec![0.0; n], q: vec![0.0; n] }
+    }
+}
+
+/// `cgsolve.m` from a zero start; the last iterate is left in `cg.x`. `progress` receives the
+/// iteration count. The dot products are summed in index order, as before.
 fn cgsolve(
-    mut a: impl FnMut(&[f64], &mut [f64], &mut Fft3dWorkspace, &mut [Complex64]),
+    mut a: impl FnMut(&[f64], &mut [f64]),
     b: &[f64],
     tol: f64,
     max_iter: usize,
-    fft: &mut Fft3dWorkspace,
-    buf: &mut [Complex64],
+    cg: &mut CgBuffers,
     mut progress: impl FnMut(usize),
-) -> Vec<f64> {
-    let n = b.len();
+) {
     let dot = |u: &[f64], v: &[f64]| u.iter().zip(v).map(|(a, b)| a * b).sum::<f64>();
-    let mut x = vec![0.0f64; n];
-    let mut r = b.to_vec();
-    let mut d = r.clone();
-    let mut q = vec![0.0f64; n];
-    let mut delta = dot(&r, &r);
+    let CgBuffers { x, r, d, q } = cg;
+    x.fill(0.0);
+    r.copy_from_slice(b);
+    d.copy_from_slice(b);
+    let mut delta = dot(r, r);
     let delta0 = dot(b, b);
     let mut numiter = 0;
     while numiter < max_iter && delta > tol * tol * delta0 {
-        a(&d, &mut q, fft, buf);
-        let alpha = delta / dot(&d, &q);
-        for i in 0..n {
-            x[i] += alpha * d[i];
-        }
+        a(d, q);
+        let alpha = delta / dot(d, q);
         if (numiter + 1) % 50 == 0 {
+            par_update(x, |i, v| *v += alpha * d[i]);
             // r = b - A*x, recomputed every 50 iterations
-            a(&x, &mut q, fft, buf);
-            for i in 0..n {
-                r[i] = b[i] - q[i];
-            }
+            a(x, q);
+            par_fill(r, |i| b[i] - q[i]);
         } else {
-            for i in 0..n {
-                r[i] -= alpha * q[i];
-            }
+            #[cfg(feature = "parallel")]
+            x.par_iter_mut().zip(r.par_iter_mut()).with_min_len(1 << 14).enumerate().for_each(|(i, (xv, rv))| {
+                *xv += alpha * d[i];
+                *rv -= alpha * q[i];
+            });
+            #[cfg(not(feature = "parallel"))]
+            x.iter_mut().zip(r.iter_mut()).enumerate().for_each(|(i, (xv, rv))| {
+                *xv += alpha * d[i];
+                *rv -= alpha * q[i];
+            });
         }
         let delta_old = delta;
-        delta = dot(&r, &r);
+        delta = dot(r, r);
         let beta = delta / delta_old;
-        for i in 0..n {
-            d[i] = r[i] + beta * d[i];
-        }
+        let rr = &*r;
+        par_update(d, |i, v| *v = rr[i] + beta * *v);
         numiter += 1;
         progress(numiter);
     }
-    x
 }
 
-/// `dataterm_mask.m`: 0 gives 1 everywhere; 1 gives `Mask./N_std` (0 where that is not finite)
-/// normalised to mean 1 over the mask.
-fn dataterm_mask(mode: i32, n_std: &[f64], mask: &[bool]) -> Vec<f64> {
+/// `dataterm_mask.m` into `w`: 0 gives 1 everywhere; 1 gives `Mask./N_std` (0 where that is
+/// not finite) normalised to mean 1 over the mask.
+fn dataterm_mask(mode: i32, n_std: &[f64], mask: &[bool], w: &mut [f64]) {
     if mode == 0 {
-        return vec![1.0; n_std.len()];
+        w.fill(1.0);
+        return;
     }
-    let mut w: Vec<f64> = n_std
-        .iter()
-        .zip(mask)
-        .map(|(&s, &m)| {
-            let v = (m as u8 as f64) / s;
-            if m && v.is_finite() { v } else { 0.0 }
-        })
-        .collect();
+    par_fill(w, |i| {
+        let (s, m) = (n_std[i], mask[i]);
+        let v = (m as u8 as f64) / s;
+        if m && v.is_finite() { v } else { 0.0 }
+    });
     let count = mask.iter().filter(|&&m| m).count() as f64;
     let mean = w.iter().zip(mask).filter(|(_, &m)| m).map(|(v, _)| v).sum::<f64>() / count;
-    for v in w.iter_mut() {
-        *v /= mean;
-    }
-    w
+    par_update(w, |_, v| *v /= mean);
 }
 
 /// `gradient_mask.m` (binary mode): 1 where `|∇(iMag.*Mask)|` is at or below a threshold, per
@@ -605,17 +732,21 @@ fn dataterm_mask(mode: i32, n_std: &[f64], mask: &[bool]) -> Vec<f64> {
 /// the mask, crosses `percentage`.
 fn gradient_mask(mag: &[f64], mask: &[bool], grid: &Grid, percentage: f64) -> [Vec<f64>; 3] {
     let vs = [grid.vsx(), grid.vsy(), grid.vsz()];
+    let n = mag.len();
     let masked: Vec<f64> = mag.iter().zip(mask).map(|(&v, &m)| if m { v } else { 0.0 }).collect();
-    let g = fgrad(&masked, grid, vs);
-    let g = [
-        g[0].iter().map(|v| v.abs()).collect::<Vec<f64>>(),
-        g[1].iter().map(|v| v.abs()).collect::<Vec<f64>>(),
-        g[2].iter().map(|v| v.abs()).collect::<Vec<f64>>(),
-    ];
+    let mut g = [vec![0.0f64; n], vec![0.0f64; n], vec![0.0f64; n]];
+    fgrad(&masked, grid.dims, vs, &mut g);
+    for c in g.iter_mut() {
+        par_update(c, |_, v| *v = v.abs());
+    }
     // Counting `wG > level` by binary search over the sorted values gives the same counts as
     // MATLAB's sum(wG(:) > level).
     let mut sorted: Vec<f64> = g.iter().flat_map(|c| c.iter().copied()).collect();
-    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let cmp = |a: &f64, b: &f64| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal);
+    #[cfg(feature = "parallel")]
+    sorted.par_sort_unstable_by(cmp);
+    #[cfg(not(feature = "parallel"))]
+    sorted.sort_unstable_by(cmp);
     let above = |level: f64| sorted.len() - sorted.partition_point(|&v| v <= level);
     let denominator = mask.iter().filter(|&&m| m).count() as f64;
     let mut level = 0.01 * mag.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
@@ -635,7 +766,10 @@ fn gradient_mask(mag: &[f64], mask: &[bool], grid: &Grid, percentage: f64) -> [V
             numerator = above(level) as f64;
         }
     }
-    g.map(|c| c.iter().map(|&v| if v <= level { 1.0 } else { 0.0 }).collect())
+    for c in g.iter_mut() {
+        par_update(c, |_, v| *v = if *v <= level { 1.0 } else { 0.0 });
+    }
+    g
 }
 
 /// `sphere_kernel.m`: a sphere of `radius` mm with partial-volume edge voxels (each split into
@@ -696,22 +830,24 @@ fn sphere_kernel(grid: &Grid, radius: f64, fft: &mut Fft3dWorkspace) -> Vec<Comp
     k
 }
 
-/// `SMV.m` with a precomputed kernel: `ifftn(fftn(x).*K)`
-fn smv(x: &[f64], k: &[Complex64], fft: &mut Fft3dWorkspace) -> Vec<Complex64> {
-    let mut buf: Vec<Complex64> = x.iter().map(|&v| Complex64::new(v, 0.0)).collect();
-    fft.fft3d(&mut buf);
-    for (b, &kv) in buf.iter_mut().zip(k) {
-        *b *= kv;
-    }
-    fft.ifft3d(&mut buf);
-    buf
+/// `SMV.m` with a precomputed kernel: `ifftn(fftn(x).*K)`, left in `buf`
+fn smv(x: &[f64], k: &[Complex64], fft: &mut Fft3dWorkspace, buf: &mut [Complex64]) {
+    let load = load_real(x);
+    fft.fft3d_with(buf, &FftOpts { load: Some(&load), ..FftOpts::default() });
+    fft.ifft3d_with(buf, &FftOpts { load: Some(&mul_kernel(k)), ..FftOpts::default() });
 }
 
-/// The SMV noise propagation in `MEDI_L1.m`: `sqrt(SMV(tempn.^2, SphereK) + tempn.^2)`
-fn smv_noise(tempn: &[f64], k: &[Complex64], fft: &mut Fft3dWorkspace) -> Vec<f64> {
-    let sq: Vec<f64> = tempn.iter().map(|v| v * v).collect();
-    let s = smv(&sq, k, fft);
-    (0..sq.len()).map(|i| (s[i].re + sq[i]).sqrt()).collect()
+/// The SMV noise propagation in `MEDI_L1.m`, in place: `tempn = sqrt(SMV(tempn.^2, SphereK) + tempn.^2)`
+fn smv_noise(tempn: &mut [f64], k: &[Complex64], fft: &mut Fft3dWorkspace, buf: &mut [Complex64]) {
+    let t = &*tempn;
+    let load = |l: usize, row: &mut [Complex64]| {
+        for (c, &v) in row.iter_mut().zip(&t[l..]) {
+            *c = Complex64::new(v * v, 0.0);
+        }
+    };
+    fft.fft3d_with(buf, &FftOpts { load: Some(&load), ..FftOpts::default() });
+    fft.ifft3d_with(buf, &FftOpts { load: Some(&mul_kernel(k)), ..FftOpts::default() });
+    par_update(tempn, |i, v| *v = (buf[i].re + *v * *v).sqrt());
 }
 
 /// `extract_CSF.m` (MEDI toolbox 2024.11.26): the ventricular CSF mask for MEDI+0.
@@ -762,7 +898,9 @@ pub fn extract_csf(r2s: &[f64], mask: &[u8], grid: &Grid, r2s_threshold: f64, er
         let mut fft = Fft3dWorkspace::new(nx, ny, nz);
         let k = sphere_kernel(grid, 10.0, &mut fft);
         let m: Vec<f64> = mask.iter().map(|&v| v as f64).collect();
-        smv(&m, &k, &mut fft).iter().map(|v| v.re > 0.999).collect()
+        let mut buf = vec![Complex64::new(0.0, 0.0); n];
+        smv(&m, &k, &mut fft, &mut buf);
+        buf.iter().map(|v| v.re > 0.999).collect()
     } else {
         mask.iter().map(|&v| v != 0).collect()
     };
@@ -1427,7 +1565,8 @@ mod tests {
         let dc: Vec<Complex64> = d.iter().map(|&v| Complex64::new(v, 0.0)).collect();
         let mut fft = Fft3dWorkspace::new(n, n, n);
         let mut buf = vec![Complex64::new(0.0, 0.0); n * n * n];
-        let field = dconv(&chi, &dc, &mut fft, &mut buf);
+        let mut field = vec![0.0; n * n * n];
+        dconv(&chi, &dc, &mut fft, &mut buf, &mut field);
         let mag: Vec<f64> = (0..n * n * n).map(|i| if r2(i) <= 9.0 { 0.5 } else { 1.0 }).collect();
         let mask: Vec<u8> = (0..n * n * n).map(|i| (r2(i) <= 49.0) as u8).collect();
         (grid, chi, field, mag, mask)
@@ -1452,17 +1591,72 @@ mod tests {
         let vs = [grid.vsx(), grid.vsy(), grid.vsz()];
         let x: Vec<f64> = (0..n).map(|i| ((i * 37) % 11) as f64 - 5.0).collect();
         let g: [Vec<f64>; 3] = [0, 1, 2].map(|c| (0..n).map(|i| ((i * 13 + c * 7) % 9) as f64 - 4.0).collect());
-        let gx = fgrad(&x, &grid, vs);
+        let mut gx = [vec![0.0; n], vec![0.0; n], vec![0.0; n]];
+        fgrad(&x, grid.dims, vs, &mut gx);
         let lhs: f64 = (0..3).map(|c| gx[c].iter().zip(&g[c]).map(|(a, b)| a * b).sum::<f64>()).sum();
-        let rhs: f64 = x.iter().zip(bdiv(&g, &grid, vs)).map(|(a, b)| a * b).sum::<f64>();
+        let mut div = vec![0.0; n];
+        bdiv(&g, grid.dims, vs, &mut div);
+        let rhs: f64 = x.iter().zip(&div).map(|(a, b)| a * b).sum::<f64>();
         assert!((lhs - rhs).abs() < 1e-9, "<fgrad x, g> = {lhs}, <x, bdiv g> = {rhs}");
+    }
+
+    #[test]
+    fn dconv_weighted_equals_two_plain_dconvs() {
+        // The pruned Dconv(w2.*Dconv(p)) of A(dx) gives the values of the two plain Dconvs.
+        let grid = Grid::new(12, 10, 8, 1.0, 1.0, 1.2);
+        let n = grid.n_total();
+        let (nx, ny) = (12, 10);
+        let d: Vec<Complex64> = dipole_kernel(&grid, (0.1, 0.2, 0.97))
+            .iter()
+            .enumerate()
+            .map(|(i, &v)| Complex64::new(v, 0.01 * ((i % 7) as f64 - 3.0)))
+            .collect();
+        let p: Vec<f64> = (0..n).map(|i| ((i as f64 * 12.9898).sin() * 43758.5453).fract()).collect();
+        let mask: Vec<bool> = (0..n)
+            .map(|i| (2..9).contains(&(i % nx)) && (3..8).contains(&((i / nx) % ny)) && (1..6).contains(&(i / (nx * ny))))
+            .collect();
+        let w2: Vec<f64> = (0..n).map(|i| if mask[i] { 1.0 + (i % 5) as f64 } else { 0.0 }).collect();
+        let mut fft = Fft3dWorkspace::new(12, 10, 8);
+        let mut buf = vec![Complex64::new(0.0, 0.0); n];
+        let (mut t, mut f) = (vec![0.0; n], vec![0.0; n]);
+        dconv(&p, &d, &mut fft, &mut buf, &mut t);
+        let t: Vec<f64> = (0..n).map(|i| t[i] * w2[i]).collect();
+        dconv(&t, &d, &mut fft, &mut buf, &mut f);
+        let mbox = bounding_box(&mask, grid.dims);
+        assert_eq!(mbox, [2..9, 3..8, 1..6]);
+        dconv_weighted(&p, &d, &w2, &mbox, &mut fft, &mut buf);
+        for i in 0..n {
+            assert_eq!(buf[i].re, f[i], "voxel {i}");
+        }
+    }
+
+    #[test]
+    fn reg_equals_bdiv_of_weighted_fgrad() {
+        // 9 z planes: tasks of 4 planes, so plane boundaries inside and between tasks
+        let grid = Grid::new(7, 6, 9, 1.0, 0.8, 1.5);
+        let n = grid.n_total();
+        let vs = [grid.vsx(), grid.vsy(), grid.vsz()];
+        let x: Vec<f64> = (0..n).map(|i| ((i as f64 * 12.9898).sin() * 43758.5453).fract()).collect();
+        let wvw: [Vec<f64>; 3] = [0, 1, 2].map(|c| (0..n).map(|i| ((i * 13 + c * 7) % 5) as f64 * 0.3).collect());
+        let mut g = [vec![0.0; n], vec![0.0; n], vec![0.0; n]];
+        fgrad(&x, grid.dims, vs, &mut g);
+        for c in 0..3 {
+            for i in 0..n {
+                g[c][i] *= wvw[c][i];
+            }
+        }
+        let (mut want, mut got) = (vec![0.0; n], vec![0.0; n]);
+        bdiv(&g, grid.dims, vs, &mut want);
+        reg(&x, &wvw, grid.dims, vs, &mut got);
+        assert_eq!(want, got);
     }
 
     #[test]
     fn fgrad_is_zero_at_the_last_voxel() {
         let grid = Grid::new(4, 4, 4, 1.0, 1.0, 1.0);
         let x: Vec<f64> = (0..64).map(|i| (i * i) as f64).collect();
-        let g = fgrad(&x, &grid, [1.0; 3]);
+        let mut g = [vec![1.0; 64], vec![1.0; 64], vec![1.0; 64]];
+        fgrad(&x, grid.dims, [1.0; 3], &mut g);
         for j in 0..4 {
             for k in 0..4 {
                 assert_eq!(g[0][3 + 4 * (j + 4 * k)], 0.0);
