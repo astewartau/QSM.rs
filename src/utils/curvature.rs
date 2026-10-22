@@ -15,12 +15,19 @@
 //! Visualization and Mathematics III, 35-57. https://doi.org/10.1007/978-3-662-05105-4_2
 //!
 //! Reference implementation: https://www.mathworks.com/matlabcentral/fileexchange/61136-curvatures
+//!
+//! The angles and the smoothing kernels use [`portable_math`](crate::utils::portable_math), so
+//! the result is the same on every target. A vertex on a flat patch has an angle sum of 2π up to
+//! rounding, and the sign of `2π - Σθ` decides whether it gets a curvature weight of 1 or
+//! (nearly) 0; with the platform's `acos` that sign, and SDF's smoothing widths after it, could
+//! differ between the browser and `qsmxt run`.
 
 use std::collections::HashMap;
 use std::f64::consts::PI;
 use delaunator::{triangulate, Point};
 use crate::Grid;
 use crate::utils::morphology::{dilate_ball, erode_ball};
+use crate::utils::portable_math as pm;
 
 /// Result of curvature calculation
 pub struct CurvatureResult {
@@ -207,9 +214,9 @@ fn compute_curvatures_from_mesh(
         let cos_a1 = e01.scale(-1.0).normalize().dot(&e12.normalize());
         let cos_a2 = e12.scale(-1.0).normalize().dot(&e20.normalize());
 
-        let a0 = cos_a0.clamp(-1.0, 1.0).acos();
-        let a1 = cos_a1.clamp(-1.0, 1.0).acos();
-        let a2 = cos_a2.clamp(-1.0, 1.0).acos();
+        let a0 = pm::acos(cos_a0.clamp(-1.0, 1.0));
+        let a1 = pm::acos(cos_a1.clamp(-1.0, 1.0));
+        let a2 = pm::acos(cos_a2.clamp(-1.0, 1.0));
 
         // Accumulate angle sums for Gaussian curvature
         angle_sum[tri.v0] += a0;
@@ -536,7 +543,7 @@ fn convolve_1d_direction_masked(
     let mut sum = 0.0;
     for i in 0..kernel_size {
         let x = (i - kernel_radius) as f64;
-        kernel[i as usize] = (-x * x / (2.0 * sigma * sigma)).exp();
+        kernel[i as usize] = pm::exp(-x * x / (2.0 * sigma * sigma));
         sum += kernel[i as usize];
     }
 

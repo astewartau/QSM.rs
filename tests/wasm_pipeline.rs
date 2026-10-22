@@ -415,6 +415,123 @@ fn referencing_and_two_pass() {
 }
 
 // ---------------------------------------------------------------------------------------------
+// The same bits on every target
+// ---------------------------------------------------------------------------------------------
+//
+// Where a computation makes a discrete choice, a last-bit difference between the platform's
+// maths library natively and in WASM can change the choice, and the browser's output then
+// differs visibly from `qsmxt run`'s (QSM.rs #201). The two cases below pin the exact output
+// bits of the two places that did that, so this file fails on whichever target disagrees. Their
+// inputs use arithmetic only (the phantom above uses `powf`, which itself differs between
+// targets). If a deliberate change to the algorithm (or to the `libm` crate) moves a hash, take
+// the new value from one target and check the other gives it too.
+
+/// FNV-1a over the bit patterns.
+fn bits_hash(v: &[f64]) -> u64 {
+    v.iter().flat_map(|x| x.to_bits().to_le_bytes()).fold(0xcbf2_9ce4_8422_2325, |h, b| {
+        (h ^ b as u64).wrapping_mul(0x0000_0100_0000_01b3)
+    })
+}
+
+#[test]
+fn complex_resampling_is_the_same_on_every_target() {
+    use qsm_core::geometry::{resample_complex_onto, resample_complex_to_axial, AxialResampleParams};
+    let dims = (20, 18, 16);
+    let n = dims.0 * dims.1 * dims.2;
+    // tilted 20 degrees about x, as an oblique acquisition is
+    let (c, s) = (0.939_692_620_785_908_4, 0.342_020_143_325_668_7);
+    let affine = [
+        1.0, 0.0, 0.0, -10.0, //
+        0.0, c, -s, -9.0, //
+        0.0, s, c, -8.0, //
+        0.0, 0.0, 0.0, 1.0,
+    ];
+    // signal in an ellipsoid, exact zeros outside it; wrapped quadratic phase
+    let mut magnitude = vec![0.0; n];
+    let mut phase = vec![0.0; n];
+    for k in 0..dims.2 {
+        for j in 0..dims.1 {
+            for i in 0..dims.0 {
+                let l = i + j * dims.0 + k * dims.0 * dims.1;
+                let (x, y, z) = (i as f64 - 9.5, j as f64 - 8.5, k as f64 - 7.5);
+                let r2 = x * x / 64.0 + y * y / 49.0 + z * z / 36.0;
+                if r2 < 1.0 {
+                    magnitude[l] = 100.0 * (1.2 - r2);
+                }
+                let p = 0.05 * (x * x + 2.0 * y * y - z * z) + 0.3 * x;
+                phase[l] = p - 2.0 * PI * ((p + PI) / (2.0 * PI)).floor();
+            }
+        }
+    }
+
+    // where there is no signal (outside the source, or zero magnitude) the phase is 0
+    let plain = resample_complex_to_axial(
+        &magnitude, &phase, dims.0, dims.1, dims.2, &affine, &AxialResampleParams { noise_fill_fraction: None },
+    );
+    for (m, p) in plain.magnitude.iter().zip(&plain.phase) {
+        assert!(*m != 0.0 || p.to_bits() == 0, "phase {p} where there is no signal");
+    }
+
+    // the default fills the empty corners with noise seeded from a hash of the phase, so one
+    // differing bit anywhere changes the whole fill
+    let axial = resample_complex_to_axial(
+        &magnitude, &phase, dims.0, dims.1, dims.2, &affine, &AxialResampleParams::default(),
+    );
+    assert_ne!(axial.phase, plain.phase, "the noise fill should have run");
+    let (back_mag, back_phase) =
+        resample_complex_onto(&axial.magnitude, &axial.phase, axial.dims, &axial.affine, dims, &affine).unwrap();
+    let hashes = [
+        bits_hash(&axial.magnitude),
+        bits_hash(&axial.phase),
+        bits_hash(&back_mag),
+        bits_hash(&back_phase),
+    ];
+    assert_eq!(
+        hashes,
+        [11627638051402422823, 11846410420065866111, 8841409924612147313, 1102824134785213823],
+        "complex resampling differs from the pinned bits"
+    );
+}
+
+#[test]
+fn sdf_is_the_same_on_every_target() {
+    use qsm_core::bgremove::{sdf, SdfParams};
+    const M: usize = 24;
+    let grid = qsm_core::Grid::new(M, M, M, 1.0, 1.0, 1.0);
+    let n = M * M * M;
+    let (mut mask, mut tissue, mut field) = (vec![0.0; n], vec![1.0; n], vec![0.0; n]);
+    for k in 0..M {
+        for j in 0..M {
+            for i in 0..M {
+                let l = i + j * M + k * M * M;
+                let (x, y, z) = (i as f64 - 11.3, j as f64 - 11.6, k as f64 - 11.8);
+                if x * x / 81.0 + y * y / 72.0 + z * z / 64.0 < 1.0 {
+                    mask[l] = 1.0;
+                }
+                // a "vessel" along y, for the second stage
+                if (x - 2.0).abs() < 1.0 && (z + 1.0).abs() < 1.0 {
+                    tissue[l] = 0.0;
+                }
+                field[l] = 0.01 * x + 0.002 * (y * y - z * z) + 0.0005 * x * y * z;
+            }
+        }
+    }
+    // narrow widths, so that on this small grid the rounded proximity takes many values
+    let stage1 = SdfParams { sigma1: 2.0, sigma2: 2.0, ..SdfParams::stage1() };
+    let stage2 = SdfParams { sigma1: 2.0, sigma2: 1.0, ..SdfParams::stage2() };
+    let local1 = sdf(&field, &mask, &vec![1.0; n], &grid, &stage1, |_, _| {});
+    let local2 = sdf(&field, &mask, &tissue, &grid, &stage2, |_, _| {});
+    for (what, local) in [("stage 1", &local1), ("stage 2", &local2)] {
+        assert!(local.iter().all(|x| x.is_finite()) && local.iter().any(|&x| x != 0.0), "{what}");
+    }
+    assert_eq!(
+        [bits_hash(&local1), bits_hash(&local2)],
+        [15377585884355703301, 17213865556281589603],
+        "SDF differs from the pinned bits"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
 // Deep-learning models, on weights provided in memory
 // ---------------------------------------------------------------------------------------------
 

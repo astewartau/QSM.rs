@@ -17,6 +17,7 @@
 
 use crate::Grid;
 use crate::utils::curvature::calculate_curvature_proximity;
+use crate::utils::portable_math as pm;
 
 /// Parameters for SDF background field removal
 ///
@@ -106,7 +107,7 @@ pub fn sdf(
 
     // Combined sigma for n calculation
     let sigma = (params.sigma1 * params.sigma1 + params.sigma2 * params.sigma2).sqrt();
-    let n = if sigma > 0.0 { -sigma.ln() / 0.5_f64.ln() } else { 0.0 };
+    let n = if sigma > 0.0 { -pm::ln(sigma) / pm::ln(0.5) } else { 0.0 };
 
     // Calculate initial proximity map (prox1)
     // Gaussian smoothing of mask with anisotropic kernel [sigma1, 2*sigma1, 2*sigma1]
@@ -152,17 +153,10 @@ pub fn sdf(
         prox
     };
 
-    // Calculate alpha = sigma * round(prox^n, 2)
-    // Alpha determines the local smoothing kernel size
+    // alpha = sigma*round(prox.^n,2).*mask (sdf_curvature.m): each voxel's smoothing width
     let mut alpha: Vec<f64> = prox_final.iter()
         .zip(mask.iter())
-        .map(|(&p, &m)| {
-            if m > 0.0 {
-                sigma * (p.powf(n) * 100.0).round() / 100.0
-            } else {
-                0.0
-            }
-        })
+        .map(|(&p, &m)| if m > 0.0 { smoothing_width(p, n, sigma) } else { 0.0 })
         .collect();
 
     // Set alpha=1 for vessel regions within mask
@@ -252,6 +246,31 @@ pub fn sdf(
     local_field
 }
 
+/// The Gaussian width SDF smooths a voxel with: `sigma*round(prox^n, 2)`, as `sdf_curvature.m`
+/// computes it.
+///
+/// Rounding to two decimals makes the width a discrete choice, which has to come out the same on
+/// every target (or the browser and `qsmxt run` smooth a voxel on a rounding boundary with
+/// different widths, and the inner inversion spreads the difference) and the same as MATLAB's:
+///
+/// - `prox^n` comes from [`portable_math::pow`](crate::utils::portable_math::pow), and the
+///   proximity map it is computed from uses only portable functions too (the Gaussian kernels
+///   here and the curvature's angles). The platform's `powf` differs between targets in the last
+///   bit for about one input in ten, and a one-ulp difference flips the rounding whenever the
+///   value sits within an ulp of a hundredth's midpoint.
+/// - The operations are MATLAB's, in MATLAB's order: `round(x, 2)` is `round(x*100)/100`, with
+///   halves rounded away from zero (as [`f64::round`] does), then multiplied by `sigma`. With
+///   QSMART's own proximity map (`prox.nii` from its 3 T reference run) as input, this gives its
+///   `alpha.nii` bit for bit, for both stages. `sigma*round(x*100)/100` evaluated left to right
+///   (as before) differs in the last bit in a quarter of the brain.
+///
+/// No libm is correctly rounded, MATLAB's included, so a value within an ulp of a midpoint can
+/// still round differently from MATLAB; away from midpoints every `pow` within an ulp of the
+/// exact value gives MATLAB's width.
+fn smoothing_width(prox: f64, n: f64, sigma: f64) -> f64 {
+    sigma * ((pm::pow(prox, n) * 100.0).round() / 100.0)
+}
+
 /// SDF with curvature-based weighting (full QSMART pipeline)
 ///
 /// This is the main entry point matching QSMART's sdf_curvature function.
@@ -289,7 +308,7 @@ fn gaussian_smooth_3d_with_filter_size(
     let mut sum = 0.0;
     for i in 0..filter_size {
         let x = i as f64 - kernel_radius as f64;
-        kernel[i] = (-x * x / (2.0 * sigma * sigma)).exp();
+        kernel[i] = pm::exp(-x * x / (2.0 * sigma * sigma));
         sum += kernel[i];
     }
 
@@ -420,7 +439,7 @@ fn convolve_1d_direction_sigma(
     let mut sum = 0.0;
     for i in 0..kernel_size {
         let x = i as f64 - kernel_radius as f64;
-        kernel[i] = (-x * x / (2.0 * sigma * sigma)).exp();
+        kernel[i] = pm::exp(-x * x / (2.0 * sigma * sigma));
         sum += kernel[i];
     }
 
