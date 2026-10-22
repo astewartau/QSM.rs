@@ -2183,7 +2183,11 @@ mod tests {
             assert!(wrap_to_pi(r.phase0[i] - (0.7 + w * tes[0])).abs() < 1e-9);
             assert!(r.relres[i] < 1e-20);
         }
-        assert_eq!(r.noise, fit_ppm_complex_noise(&m.concat(), tes.len()));
+        // the same noise map as fit_ppm_complex_noise, to rounding (the two paths can differ in
+        // the last bit between builds)
+        for (a, b) in r.noise.iter().zip(fit_ppm_complex_noise(&m.concat(), tes.len())) {
+            assert!((a - b).abs() <= 1e-14 * b.abs(), "{a} vs {b}");
+        }
         // 0.25 rad per spacing over 5 ms: positive phase slope, positive field
         assert!(r.field[0] > 0.0 && r.field[1] < 0.0);
     }
