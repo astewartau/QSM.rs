@@ -717,10 +717,11 @@ fn host_weight_bytes(id: &str, file: &WeightFile) -> Result<WeightBytes, String>
             .map(WeightBytes::new)
             .map_err(|e| format!("reading {}: {e}", p.display()))
     };
-    if let Some(path) = resolve_local(file) {
-        return read(&path);
-    }
-
+    // With `download`, every path goes through `ensure_file`, which checks a local or cached
+    // file's SHA-256 and re-fetches a cache entry that doesn't match. Reading the cache directly
+    // trusted whatever was there: a truncated entry (left by an interrupted or racing write, or
+    // restored from a CI cache) then failed at model load ("buffer underflow", "model proto does
+    // not contain a graph") instead of being replaced.
     #[cfg(feature = "download")]
     {
         download::ensure_file(id, file)
@@ -729,7 +730,10 @@ fn host_weight_bytes(id: &str, file: &WeightFile) -> Result<WeightBytes, String>
     }
     #[cfg(not(feature = "download"))]
     {
-        Err(missing_weights_message(id, file, HOST_FS))
+        match resolve_local(file) {
+            Some(path) => read(&path),
+            None => Err(missing_weights_message(id, file, HOST_FS)),
+        }
     }
 }
 
@@ -837,6 +841,34 @@ mod tests {
             &*primary_weight("synthseg-2.0").unwrap(),
             b"from the model dir"
         );
+
+        match old {
+            Some(v) => std::env::set_var("QSM_MODEL_DIR", v),
+            None => std::env::remove_var("QSM_MODEL_DIR"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A corrupt local copy (wrong SHA-256) must not be loaded: it is re-fetched, or, with no
+    /// URL to fetch from, refused. Before, a truncated cache entry was read as-is and failed at
+    /// model load.
+    #[cfg(feature = "download")]
+    #[test]
+    fn corrupt_local_weights_are_not_loaded() {
+        let _g = lock();
+        let dir = std::env::temp_dir().join(format!("qsm-corrupt-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let name = "corrupt-test.onnx";
+        let good = b"the real weights";
+        let sha = Box::leak(sha256_hex(good).into_boxed_str());
+        let file = WeightFile { name, url: "", sha256: sha, bytes: good.len() as u64 };
+        let old = std::env::var_os("QSM_MODEL_DIR");
+        std::env::set_var("QSM_MODEL_DIR", &dir);
+
+        std::fs::write(dir.join(name), b"the real wei").unwrap(); // truncated
+        assert!(host_weight_bytes("corrupt-test", &file).is_err());
+        std::fs::write(dir.join(name), good).unwrap();
+        assert_eq!(&*host_weight_bytes("corrupt-test", &file).unwrap(), good);
 
         match old {
             Some(v) => std::env::set_var("QSM_MODEL_DIR", v),
