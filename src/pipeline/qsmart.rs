@@ -5,6 +5,49 @@
 //! with STI Suite's `QSM_iLSQR`.
 //! Stage 1: whole-ROI reconstruction. Stage 2: tissue-only reconstruction
 //! with vasculature excluded. Final offset adjustment combines both.
+//!
+//! # Reference pipeline
+//!
+//! What the authors' toolbox (`QSMART_toolbox_v1.0`, wtsyeda/QSMART; "toolbox" below) and paper
+//! (Yaghmaie et al. 2021, NeuroImage 231:117701) run before and around the two stages:
+//!
+//! - **Brain mask: FSL BET**, not HD-BET. Paper §3.1: "a brain mask … is constructed using FSL's
+//!   Brain Extraction Tool". Toolbox `brainmask.m` l. 7–33: root-sum-of-squares over coils of
+//!   the **first echo** magnitude, ANTs `N4BiasFieldCorrection` (defaults), `bet2 … -f 0.2 -m`;
+//!   then voxels whose BET-extracted magnitude is below `mag_threshold` are removed (100 in
+//!   `Demo_QSMART.m`; the authors' October 2020 human demo uses the adaptive 2nd percentile),
+//!   `bwmorph3(mask, 'majority')`, and `imclose` with `strel('sphere', 2)` (`sph_radius1`,
+//!   voxels). No erosion: avoiding it is the point of SDF (paper §1, §5). Rodent masks were
+//!   made by non-linear registration to the Waxholm atlases plus manual correction (paper §3.4).
+//! - **Coil combination**: POEM (`coil_comb.m`, `'smooth3'`), before anything QSM.rs takes.
+//! - **Unwrapping**: Laplacian (`Demo_QSMART.m` l. 32), Hongfu Sun's `lapunwrap.m` per echo on
+//!   the unmasked phase (`unwrap_phase.m` l. 5–10):
+//!   [`LaplacianSolver::Mirror`](crate::unwrap::LaplacianSolver::Mirror).
+//! - **Total field**: `echofit.m`, magnitude-weighted zero-intercept fit of phase against TE,
+//!   divided by `γ·B0/1e6` with γ = 2.675e8 rad/s/T and B0 = `qsm_params.field` (7 in the demo);
+//!   the reliability map `R_0` from the box-blurred residual (`fit_threshold` 40 in
+//!   `Demo_QSMART.m` with `adaptive_threshold` 0; the 99th percentile in the October 2020 demo
+//!   and the authors' 7T run): [`B0EstimationMethod::QsmartEchofit`].
+//! - **Vessel magnitude**: mean over echoes of the coil-combined magnitude, then N4
+//!   (`vasculature_mask.m` l. 8–14): [`qsmart_vessel_magnitude`](crate::utils::qsmart_vessel_magnitude).
+//! - **Inversion**: STI Suite **v2.2**'s `QSM_iLSQR` (paper §3.4, "number of iterations = 50"),
+//!   called on `mask·R_0` (stage 1) and `mask·vessels·R_0` (stage 2); see the comment in
+//!   [`run_qsmart`] for the call.
+//! - **Data and field strength**: tuned on 7T Siemens human 3D unipolar multi-echo GRE, 0.6 mm
+//!   isotropic, TE 4.80/8.35/11.90/15.45 ms (paper §3.3; README: "parameter settings have been
+//!   optimized for multiecho gradient echo data from Siemens 7T"). Also run on 9.4T ex vivo
+//!   mouse (125 µm) and 4.7T rat (150 µm) with other settings: Frangi scales 0.01–0.5 in steps
+//!   of 0.1, c = 50, σ_C = σ_V = 5 (paper §3.4). No 3T settings are published. The radii of
+//!   the morphology (mask closing 2, bottom-hat 8, indent closing 8) are in voxels.
+//! - **SDF widths, code vs paper**: the paper gives σ_C = 10, σ_V = 2, σ_I = 10, σ = 10, C_s = 500
+//!   (§3.4). The toolbox passes `s1.sdf_sigma1` (10) for both widths in stage 1, so stage 1's σ
+//!   is √(10² + 10²) ≈ 14.1, and stage 2 uses σ1 = 8, σ2 = 2 (σ = √68 ≈ 8.2)
+//!   (`QSMART_SDF.m` l. 12–13, 20–21; `sdf_curvature.m` l. 8). QSM.rs follows the toolbox.
+//!
+//! # Pipeline rules
+//!
+//! The facts above that a configuration can depart from are published as rules in
+//! [`crate::pipeline::rules::RULES`] (each with its reason and source): `qsmart.mask-bet`, `qsmart.unwrap-laplacian`, `qsmart.laplacian-solver`, `qsmart.field-echofit`, `qsmart.inner-inversion`, `qsmart.ilsqr-iterations`, `qsmart.ilsqr-pad`.
 
 use super::config::*;
 use super::observer::{Observer, VolumeRef};

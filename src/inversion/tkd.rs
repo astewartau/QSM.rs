@@ -10,6 +10,12 @@
 //! Magnetic Resonance in Medicine, 62(6):1510-1522. https://doi.org/10.1002/mrm.22135
 //!
 //! Reference implementation: https://github.com/kamesy/QSM.jl
+//!
+//! # Reference pipeline
+//! QSM.jl (commit fde4b92) `tkd`/`tsvd` (`src/inversion/direct.jl` L1-96), threshold 0.15 for
+//! both: TKD replaces `1/D` by `sign(D)/thr` where `|D| <= thr`, TSVD by 0. QSM.jl's README
+//! pipeline (L35-52: BET on the last echo, 5-voxel erosion, Laplacian unwrapping, V-SHARP) is the
+//! one its inversions are shown with; see [`super::rts`](mod@super::rts).
 
 use num_complex::Complex64;
 use crate::fft::{fft3d, ifft3d};

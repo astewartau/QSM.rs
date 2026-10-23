@@ -39,6 +39,15 @@
 //! first and the result converted back at the end. `b0` and `echo_times` are scan parameters
 //! that the pipeline fills from metadata, and [`NltvParams::te`] picks the echo time the
 //! conversion uses (by default the reference's choice; see there).
+//!
+//! # Reference pipeline
+//! QSM.jl's README example (commit fde4b92, L35-52), the pipeline its author ships for all its
+//! inversions: brain mask by FSL BET on the last echo's magnitude (`-f 0.5`), eroded by 5
+//! voxels; Laplacian unwrapping of each echo (which also removes harmonic background), each echo
+//! scaled to ppm by its own TE; V-SHARP with QSM.jl's defaults (radii `18*min(vsz)` down to
+//! `2*max(vsz)` mm in steps of `2*max(vsz)`, threshold 0.05; `src/bgremove/sharp.jl` L136-137).
+//! QSM.jl's inversions take 3D or 4D (per-echo) fields; the pipeline here inverts one combined
+//! field.
 
 use crate::utils::gradient::{bdiv_inplace, fgrad_inplace};
 use crate::utils::padding::{pad3d, unpad3d};

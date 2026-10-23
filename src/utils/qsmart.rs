@@ -5,6 +5,15 @@
 //! - Offset adjustment for combining the two stages
 //! - Integration of SDF background removal with iLSQR inversion
 //!
+//! # Reference pipeline
+//!
+//! The authors' masking (FSL BET), unwrapping, echo fit, data and field strengths are recorded
+//! in [`crate::pipeline::qsmart`]. [`QsmartParams::default`] is `Demo_QSMART.m`'s 7T human
+//! setting (B0 = 7 T, γ = 2.675e8 rad/s/T, SDF and Frangi values, iLSQR `niter` 50, no
+//! `padsize`). The paper's rodent runs used Frangi scales 0.01–0.5 in steps of 0.1 and c = 50,
+//! and σ_C = σ_V = 5 (Yaghmaie et al. 2021, §3.4); [`QsmartParams::for_field_strength`] changes
+//! only the ppm factor, not these.
+//!
 //! Reference:
 //! Yaghmaie, N., Syeda, W., et al. (2021).
 //! "QSMART: Quantitative Susceptibility Mapping Artifact Reduction Technique."

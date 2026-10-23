@@ -16,6 +16,10 @@
 //! field is in ppm and the first x-update starts from the scaled split variable set to the
 //! gradient of the field. QSM.jl's optional data and TV weights (`W`, `Wtv`) are not ported;
 //! their default (`nothing`) is what this function computes.
+//!
+//! # Reference pipeline
+//! QSM.jl's README pipeline (commit fde4b92, L35-52: BET on the last echo, 5-voxel erosion,
+//! Laplacian unwrapping, V-SHARP), as for [`super::rts`](mod@super::rts).
 
 use crate::utils::{shrink, apply_mask_zero};
 use crate::utils::gradient::fgrad_inplace;

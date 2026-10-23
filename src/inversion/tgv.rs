@@ -44,6 +44,28 @@
 //! Optimizations:
 //! - Bounding box reduction: only process the region containing the mask
 //! - Pre-allocated buffers: all temporary arrays allocated once outside the loop
+//!
+//! # Reference pipeline
+//! QuantitativeSusceptibilityMappingTGV.jl, commit 6c0886a:
+//! - Input: one echo's phase in rad, its `TE` and the field strength, plus a brain mask
+//!   (README "Example to run TGV"; `qsm_tgv(phase, mask, res; TE, fieldstrength, ...)`,
+//!   `src/tgv.jl` L10). No unwrapping or background removal beforehand: the Laplacian of the
+//!   phase does both (default `get_laplace_phase_del`; `get_laplace_phase_romeo` is the option
+//!   for an unwrapped phase). χ is scaled by `1/(2π·TE·B0·42.5781)` at the end (L224-228).
+//! - Mask: `erosions = 3` erosions of the given mask with a diamond (6-neighbour) element, then
+//!   one more for the data-term mask `mask0` (L14-20, L218-222). The README's "Masking for QSM"
+//!   points to phase-quality masking (ROMEO voxel quality, `robustmask(romeovoxelquality(...))`)
+//!   combined with a brain mask.
+//! - Resolution and orientation: no resampling; anisotropic voxels and oblique `B0_dir` are
+//!   handled directly (README intro; the 27-point oblique stencil, L160). The default iteration
+//!   count scales with the voxel volume (`get_default_iterations`, L108-115), and the README says
+//!   the defaults "should lead to good results independently of the acquired resolution".
+//!   `dedimensionalize = false` by default.
+//! - Defaults: `regularization = 2` (α₀ = 0.002, α₁ = 0.003), `step_size = 3`,
+//!   `correct_laplacian = true`. The settings that reproduce the original Python version are
+//!   `step_size = 1`, `iterations = 1000`, `alpha = [0.003, 0.001]`, `erosions = 5`,
+//!   `laplacian = get_laplace_phase3`, `correct_laplacian = false` (README).
+//! - Langkammer et al. 2015 (abstract): 3D EPI at 3T and 7T, 1 mm isotropic at 3T.
 
 use crate::utils::morphology::erode_mask;
 #[cfg(feature = "parallel")]

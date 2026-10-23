@@ -65,11 +65,36 @@
 //! (χ+ = |PSC|, from the paramagnetic sub-model) correlates strongly. We therefore
 //! do not replicate the reference's swap.
 //!
+//! # Reference pipeline
+//!
+//! Chen et al. 2021 (NeuroImage 242:118735, §3 "Material and methods"; PMC8720043):
+//!
+//! - **Data:** in vivo at 3 T (GE MR750w), 0.86 × 0.86 × 1.0 mm, 16 echoes,
+//!   TE1/ΔTE/TE16 = 2.7/2.9/46.2 ms. The phantom was 1 mm iso, 16 echoes 1.47–25.9 ms; the ex
+//!   vivo data were 7 T.
+//! - **Mask:** FSL BET. **Unwrapping:** Laplacian. **Background removal:** V-SHARP.
+//! - **QSM input:** STAR-QSM computed **for each echo**. The signal model (Eq. 4) is
+//!   `y(t) = M(t)·exp(−i·(2/3)·χ(t)·γ·B0·t)` with the per-echo χ(t), not one echo-combined χ.
+//!   This function takes a single χ_total and repeats it for every echo, which deviates from the
+//!   authors' input.
+//! - **Referencing:** χ referenced to the whole-brain mean.
+//! - **Constants:** `0.5 > |χ+|, |χ−| > 0` (§2.2, [`DecomposeParams::chi_bound`]), and
+//!   `a = 323.5 Hz/ppm` at 3 T (§2.1), which the formula above reproduces and which scales with
+//!   B0 by construction.
+//!
+//! [`DecomposeParams`]'s `b0` defaults to 7 T. The pipeline dispatcher overrides it from the scan
+//! metadata.
+//!
 //! Reference:
 //! Chen, J., et al. (2021). "Decompose quantitative susceptibility mapping (QSM)
 //! to sub-voxel diamagnetic and paramagnetic components based on gradient-echo MRI
 //! data." NeuroImage 242:118735. https://doi.org/10.1016/j.neuroimage.2021.118735
 //! Reference implementation (QSM-CI port of Tim Ho's open MATLAB DECOMPOSE-QSM).
+//!
+//! # Pipeline rules
+//!
+//! The facts above that a configuration can depart from are published as rules in
+//! [`crate::pipeline::rules::RULES`] (each with its reason and source): `decompose.mask-bet`, `decompose.unwrap-laplacian`, `decompose.bg-vsharp`, `decompose.qsm-star`, `decompose.reference-mean`.
 
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;

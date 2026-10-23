@@ -842,6 +842,127 @@ impl SeparationAlgorithm {
     ];
 }
 
+// ─── Stable choice ids ───
+//
+// Each selection enum names its variants by a stable kebab-case id, used by the pipeline rules
+// ([`super::rules`]) to name a choice in data and JSON. They are the names QSMxT's config uses for
+// the same choices, so a host's mapping is the identity wherever the two agree.
+
+impl UnwrappingAlgorithm {
+    /// Stable id (`"romeo"`, `"laplacian"`).
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::Romeo => "romeo",
+            Self::Laplacian => "laplacian",
+        }
+    }
+}
+
+impl B0EstimationMethod {
+    /// Stable id of the method (its settings are not part of it).
+    pub fn id(&self) -> &'static str {
+        match self {
+            Self::WeightedAvg { .. } => "weighted-avg",
+            Self::LinearFit(_) => "linear-fit",
+            Self::RobustFit(_) => "robust-fit",
+            Self::ComplexFit(_) => "complex-fit",
+            Self::QsmartEchofit { .. } => "qsmart-echofit",
+        }
+    }
+}
+
+impl MaskOp {
+    /// Stable id of the operation (its parameters are not part of it).
+    pub fn id(&self) -> &'static str {
+        match self {
+            Self::Threshold { .. } => "threshold",
+            Self::Bet(_) => "bet",
+            Self::Erode { .. } => "erode",
+            Self::Dilate { .. } => "dilate",
+            Self::Close { .. } => "close",
+            Self::FillHoles { .. } => "fill-holes",
+            Self::GaussianSmooth { .. } => "gaussian-smooth",
+            Self::SignalErode(_) => "signal-erode",
+            Self::HdBet(_) => "hd-bet",
+            Self::Rs2Net(_) => "rs2-net",
+            Self::MindGrab(_) => "mindgrab",
+        }
+    }
+}
+
+impl BgRemovalAlgorithm {
+    /// Stable id (`"vsharp"`, `"pdf"`, …).
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::Vsharp => "vsharp",
+            Self::Pdf => "pdf",
+            Self::Lbv => "lbv",
+            Self::Ismv => "ismv",
+            Self::Sharp => "sharp",
+            Self::Resharp => "resharp",
+            Self::Harperella => "harperella",
+            Self::Iharperella => "iharperella",
+            Self::Bfrnet => "bfrnet",
+        }
+    }
+}
+
+impl InversionAlgorithm {
+    /// Stable id (`"rts"`, `"medi"`, `"fansi-tgv"`, …).
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::Tkd => "tkd",
+            Self::Tsvd => "tsvd",
+            Self::Tikhonov => "tikhonov",
+            Self::Tv => "tv",
+            Self::Rts => "rts",
+            Self::Nltv => "nltv",
+            Self::Medi => "medi",
+            Self::Tfi => "tfi",
+            Self::Ilsqr => "ilsqr",
+            Self::Star => "star",
+            Self::Tgv => "tgv",
+            Self::Qsmart => "qsmart",
+            Self::Ndi => "ndi",
+            Self::Fansi => "fansi",
+            Self::FansiTgv => "fansi-tgv",
+            Self::L1qsm => "l1qsm",
+            Self::Whqsm => "whqsm",
+            Self::Hdqsm => "hdqsm",
+            Self::AmpPe => "amp-pe",
+            Self::Lsqr => "lsqr",
+            Self::Heidi => "heidi",
+            Self::Xqsm => "xqsm",
+            Self::Qsmnet => "qsmnet",
+            Self::QsmnetPlus => "qsmnet-plus",
+            Self::Autoqsm => "autoqsm",
+            Self::Qsmgan => "qsmgan",
+            Self::Ir2qsm => "ir2qsm",
+            Self::Lpcnn => "lpcnn",
+            Self::ModlQsm => "modl-qsm",
+            Self::Nextqsm => "nextqsm",
+            Self::Iqsm => "iqsm",
+            Self::IqsmPlus => "iqsm-plus",
+        }
+    }
+}
+
+impl SeparationAlgorithm {
+    /// Stable id (`"chi-sep-ilsqr"`, `"decompose"`, …).
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::ChiSepIlsqr => "chi-sep-ilsqr",
+            Self::ChiSepMedi => "chi-sep-medi",
+            Self::R2starQsm => "r2star-qsm",
+            Self::WaveSep => "wavesep",
+            Self::Decompose => "decompose",
+            Self::HcChisep => "hc-chisep",
+            Self::SusepNet => "susep-net",
+            Self::ChiSepNet => "chi-sepnet",
+        }
+    }
+}
+
 /// Configuration for the χ-separation stage.
 #[derive(Clone, Debug)]
 pub struct SeparationConfig {

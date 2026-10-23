@@ -4,6 +4,15 @@
 //! Uses the spherical mean value property of harmonic functions to
 //! separate local from background fields.
 //!
+//! ## Reference pipeline
+//!
+//! The SHARP authors (Schweser et al.) have no public code; this port follows QSM.jl, a
+//! third-party implementation, and its defaults are not the authors'. For comparison, Hongfu
+//! Sun's `sharp.m` (github sunhongfu/QSM, also third-party) defaults to a 4 mm kernel (rounded
+//! to voxels per axis, at least 1), keeps voxels where the normalised SMV of the mask exceeds
+//! `1 − 1/|ball|`, and its driver `Siemens_3T/qsm_r2s_prisma.m` runs it on a BET mask
+//! (`bet2 -f 0.4 -w 2`) times its echo-fit reliability map.
+//!
 //! Reference:
 //! Schweser, F., Deistung, A., Lehr, B.W., Reichenbach, J.R. (2011).
 //! "Quantitative imaging of intrinsic magnetic tissue properties using MRI signal phase."

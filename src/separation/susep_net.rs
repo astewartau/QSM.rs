@@ -32,6 +32,30 @@
 //!
 //! Weights are not bundled; the caller passes the exported `susep-net.onnx` bytes
 //! (see [`crate::models`]).
+//!
+//! # Reference pipeline
+//!
+//! Li M., …, Sun H., Gao Y. 2025 (arXiv:2506.13293):
+//!
+//! - **Training (§2.3):** 3 T (Philips Ingenia Elition X), 0.9 × 0.9 × 1 mm, 8 echoes,
+//!   TE1/ΔTE = 4.1/4.0 ms, with 64³ patches. The training inputs are *simulated* by the forward
+//!   model (Eq. 1) from APART-QSM-reconstructed χ+/χ− and decay-kernel maps, so the network was
+//!   never fit to one particular field-mapping chain.
+//! - **In-vivo inputs (§3.2):** the local field from iQFM and the QSM from iQSM+, both computed
+//!   directly from the multi-echo GRE phase. R2* and R2 come from mono-exponential fits in
+//!   STI Suite (multi-echo GRE and multi-echo SE), and R2' = R2* − R2.
+//! - R2' enters in Hz with no D_r scaling (the input normalisation in [`SusepNetNorm`]).
+//!
+//! Reference:
+//! Li, M., Chen, C., Li, Z., …, Sun, H., Gao, Y. (2025). "SUSEP-Net: Simulation-Supervised and
+//! Contrastive Learning-based Deep Neural Networks for Susceptibility Source Separation."
+//! arXiv:2506.13293.
+//! Code: <https://github.com/YangGaoUQ/SUSEP-Net>
+//!
+//! # Pipeline rules
+//!
+//! The facts above that a configuration can depart from are published as rules in
+//! [`crate::pipeline::rules::RULES`] (each with its reason and source): `susep-net.qsm-iqsm-plus`.
 
 // The parameters are plain Rust, so configs can carry them; only inference needs `onnx`.
 #![cfg_attr(not(feature = "onnx"), allow(dead_code))]

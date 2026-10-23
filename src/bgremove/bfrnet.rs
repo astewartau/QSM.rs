@@ -12,6 +12,25 @@
 //!
 //! Weights are not bundled; the caller passes the exported `bfrnet.onnx` bytes
 //! (see [`crate::models`]).
+//!
+//! # Reference pipeline
+//!
+//! From Zhu et al., Z Med Phys 2023 (doi:10.1016/j.zemedi.2022.08.001), Methods:
+//!
+//! - **Training data:** 1 mm isotropic 3T (96 subjects, 64³ patches) with simulated healthy and
+//!   hemorrhage sources.
+//! - **In-vivo test inputs:** best-path unwrapping (Laplacian unwrapping for the hemorrhage
+//!   patient), FSL `bet2 -f 0.2` (`-w 2`) mask eroded by 3 voxels, total field from a fit of the
+//!   unwrapped phase against TE; iLSQR after BFRnet.
+//! - **Resolution:** "we have only evaluated testing datasets with 1 mm³ isotropic image resolution
+//!   since this matches the training datasets. BFRnet's application on total field maps of other
+//!   image resolutions may need retraining" (Discussion). The authors' `BFRnet_demo.m` does not
+//!   resample.
+//!
+//! # Pipeline rules
+//!
+//! The facts above that a configuration can depart from are published as rules in
+//! [`crate::pipeline::rules::RULES`] (each with its reason and source): `bfrnet.mask-bet`.
 
 use crate::grid::Grid;
 use crate::inversion::TileConfig;

@@ -84,6 +84,13 @@
 //! direction, so other geometries cannot be reproduced; the difference is a one-voxel shift of
 //! the samples the bias field is fitted to.
 //!
+//! # Reference pipeline
+//!
+//! In QSM, QSMART runs `N4BiasFieldCorrection -i mag1_sos.nii -o mag1_sos_n4.nii` (ANTs defaults,
+//! no mask) on the first echo's coil-RSS magnitude before `bet2 -f 0.2`
+//! (`QSMART_toolbox_v1.0/brainmask.m:7-14`), and on the echo-averaged magnitude for vessel
+//! detection (the comparison above). Nothing in N4 assumes a field strength or orientation.
+//!
 //! References:
 //! Tustison, N.J., Avants, B.B., Cook, P.A., Zheng, Y., Egan, A., Yushkevich, P.A., Gee, J.C.
 //! (2010). "N4ITK: Improved N3 Bias Correction." IEEE Trans. Med. Imaging 29(6):1310-1320.

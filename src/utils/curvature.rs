@@ -21,6 +21,17 @@
 //! rounding, and the sign of `2π - Σθ` decides whether it gets a curvature weight of 1 or
 //! (nearly) 0; with the platform's `acos` that sign, and SDF's smoothing widths after it, could
 //! differ between the browser and `qsmxt run`.
+//!
+//! ## Reference pipeline
+//!
+//! QSMART's `calculate_curvature.m` (Syeda, October 2020) takes the surface as the brain mask
+//! minus its erosion by `strel('sphere', 1)`, triangulates it with `delaunay(x, y)`, scales the
+//! negative Gaussian curvatures by `curvConstant / max|GC<0|` (500 in `Demo_QSMART.m`) and sets
+//! positive ones to 1; the curvature map is smoothed with widths `[σ, 2σ, 2σ]` voxels (σ = SDF's
+//! σ1; the first voxel axis gets half the width of the other two, whatever the orientation),
+//! clamped at 0.5, and edge-refined with a `[5, 10, 10]`-voxel Gaussian (l. 21–48). The
+//! October 2020 toolbox version differs (curvature constant 250 hard-coded, no edge refinement);
+//! QSM.rs follows the GitHub v1.0 code.
 
 use std::collections::HashMap;
 use std::f64::consts::PI;

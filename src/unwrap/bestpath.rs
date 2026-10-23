@@ -3,8 +3,21 @@
 //! Sorting by reliability following a non-continuous path, after
 //! H. Abdul-Rahman, M. Gdeisat, D. Burton and M. Lalor, "Fast three-dimensional
 //! phase-unwrapping algorithm based on sorting by reliability following a
-//! non-continuous path", Proc. SPIE 5856 (2005) 32–40,
-//! <https://doi.org/10.1364/AO.46.006623>.
+//! non-continuous path", Proc. SPIE 5856 (2005) 32–40, and the journal version,
+//! H.S. Abdul-Rahman, M.A. Gdeisat, D.R. Burton, M.J. Lalor, F. Lilley, C.J. Moore, "Fast and
+//! robust three-dimensional best path phase unwrapping algorithm", Applied Optics 46(26) (2007)
+//! 6623–6635, <https://doi.org/10.1364/AO.46.006623>.
+//!
+//! # Reference pipeline
+//!
+//! The authors' C code is distributed by scikit-image (`skimage.restoration.unwrap_phase`, see
+//! below); it takes a wrapped volume and an optional mask and has no parameters besides the
+//! periodic-boundary flags, so there are no reference defaults to match beyond those
+//! [`BestPathParams`] documents. It assumes nothing about voxel size, field strength or
+//! orientation (reliabilities are unscaled second differences). It is not selectable in the
+//! QSM pipeline's `field_mapping.unwrapping_algorithm` (ROMEO or Laplacian); it is available as
+//! [`UnwrapMethod::BestPath`](super::UnwrapMethod::BestPath) to the slice-wise unwrapper and to
+//! MCPC-3D-S's HIP unwrapping, and its reliabilities as ROMEO's `:bestpath` weights.
 //!
 //! The method is a path-following unwrapper that never actually follows a path
 //! through the volume. Instead:

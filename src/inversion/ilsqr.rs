@@ -76,6 +76,35 @@
 //! for the artefacts, other weights). It was removed: STI Suite's algorithm is the reference
 //! iLSQR, and it is also what the original QSMART calls (see [`crate::pipeline::run_qsmart`]).
 //!
+//! # Reference pipeline
+//!
+//! What STI Suite 3.0 runs around `QSM_iLSQR`. Its GUI and functions are P-code; these facts
+//! were probed in MATLAB R2023b by driving `QSM_GUI` headless with logging wrappers on the
+//! functions it calls (3-echo synthetic head, TE 4/10/16 ms, 1×1×1.5 mm):
+//!
+//! - **Chain** (the GUI's "3D GRE data" then "iLSQR" buttons): `MRPhaseUnwrap` on the raw,
+//!   unmasked phase of every echo (default `padsize`, 12 voxels), the unwrapped echoes
+//!   **summed**, `V_SHARP(Σφ, mask, 'smvsize', 12)` (12 is the GUI's "Radius" field default),
+//!   then `QSM_iLSQR` on V-SHARP's eroded mask. See [`crate::unwrap::laplacian`] and
+//!   [`crate::bgremove::vsharp`](mod@crate::bgremove::vsharp) for those stages.
+//! - **TE**: the GUI passes `TE` = the **sum** of the echo times (its "sum_TE" field: 30 ms for
+//!   4 + 10 + 16), matching the summed phase. For iLSQR this only sets the unit of χ.
+//! - **Parameters the GUI passes** (as a `params` struct): `niter` 40, `padsize` [12 12 12],
+//!   `tol_step1` 0.01, `tol_step2` 0.001, `Kthreshold` 0.1. The struct call is bitwise equal to
+//!   `QSM_iLSQR(..., 'padsize', [12 12 12], 'niter', 40)`. Called without them, `QSM_iLSQR`
+//!   uses `niter` 100 (bitwise equal to an explicit 100) and `padsize` 6 mm (see *Padding*).
+//!   [`IlsqrParams::default`] follows the function, not the GUI. (`STI_Templates.m` lists
+//!   `padsize = [12 12 12]` as the default; the function's own default is 6.)
+//! - **Masking**: the GUI's "Single button for QSM" path builds the mask by thresholding the
+//!   magnitude (`Support_Functions/CreateMask.m`: rescale, threshold, largest connected
+//!   component, fill holes; then the P-coded `Getmasking`/`PolishMask`), not with BET.
+//! - **B0 direction**: the GUI's `H` field defaults to `[0 0 1]` and is not filled from the
+//!   data; the v3.0 manual says to compute it from the DICOM for oblique scans.
+//! - **Other callers**: QSMART (`QSMART.m` l. 32–39), like Hongfu Sun's `qsm_r2s_prisma.m`
+//!   whose call it copies, passes the field in rad/s with `'niter', 50, 'TE', 1000` and no
+//!   `'padsize'`. QSMART used STI Suite v2.2 (paper §3.4); v2.2's `QSM_iLSQR` agrees with
+//!   v3.0's to 8e-5 relative on two synthetic cases. UK Biobank passes `'padsize', [64 64 64]`.
+//!
 //! References:
 //! Li, W., Wang, N., Yu, F., Han, H., Cao, W., Romero, R., Tantiwongkosi, B.,
 //! Duong, T.Q., Liu, C. (2015). "A method for estimating and removing streaking
@@ -84,6 +113,11 @@
 //!
 //! Paige, C.C., Saunders, M.A. (1982). "LSQR: An algorithm for sparse linear equations and
 //! sparse least squares." ACM Trans. Math. Softw. 8(1):43-71.
+//!
+//! # Pipeline rules
+//!
+//! The facts above that a configuration can depart from are published as rules in
+//! [`crate::pipeline::rules::RULES`] (each with its reason and source): `sti.unwrap-laplacian`, `sti.laplacian-solver`, `sti.echo-combination`, `sti.echo-weights`, `sti.bg-vsharp`, `sti.vsharp-no-deconvolve`, `sti.vsharp-radius`, `sti.vsharp-grid`.
 
 /// Parameters for the iLSQR algorithm.
 ///

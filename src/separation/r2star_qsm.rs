@@ -27,11 +27,28 @@
 //! data-consistency term (auto-satisfied when χ_total is supplied) and an
 //! edge-masked L1 regularisation, both omitted here.
 //!
+//! # Reference pipeline
+//!
+//! Dimov et al., Tomography 2022 (doi:10.3390/tomography8030127, Methods): ex-vivo brain
+//! tissue at 3 T (GE), 0.5 mm isotropic, 8 echoes (TE1 = ΔTE = 5.9 ms). The field was a nonlinear
+//! fit of the multi-echo complex data followed by spatial unwrapping, background removal was
+//! PDF, χ_total was MEDI, and R2* was fitted with ARLO. The full method is a joint minimisation
+//! with magnitude- and R2*-derived edge masks at λ1 = 1500, initialised from the voxelwise solve
+//! implemented here. 𝓇 = 274 Hz/ppm was calibrated at 3 T (against a theoretical 321 Hz/ppm).
+//! The paper gives no value at any other field: the `B0/3` scaling above is QSM.rs's (and the
+//! QSM-CI submission's) assumption from static-dephasing theory, not the authors' (open
+//! question).
+//!
 //! Reference:
 //! Dimov, A.V., et al. (2022). "Magnetic susceptibility source separation solely
 //! from gradient echo data: histological validation." Tomography, 8(3):1544-1551
 //! (and J. Neuroimaging 2022, https://doi.org/10.1111/jon.13014). R2*
 //! susceptibility model: Yablonskiy & Haacke, Magn. Reson. Med. 1994.
+//!
+//! # Pipeline rules
+//!
+//! The facts above that a configuration can depart from are published as rules in
+//! [`crate::pipeline::rules::RULES`] (each with its reason and source): `r2star-qsm.field-complex-fit`, `r2star-qsm.bg-pdf`, `r2star-qsm.qsm-medi`.
 
 /// Parameters for [`r2star_qsm`] / [`r2star_qsm_from_magnitude`].
 #[cfg_attr(feature = "introspection", derive(serde::Serialize))]

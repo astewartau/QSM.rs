@@ -27,6 +27,15 @@
 //! Input is the background-removed local field in ppm (single orientation; the net is
 //! orientation-agnostic — no dipole kernel, no `b_vec`). Weights are not bundled; the
 //! caller passes `ir2qsm.onnx`.
+//!
+//! # Reference pipeline
+//!
+//! From Li et al., arXiv:2406.12300, "Experimental Setup":
+//!
+//! - **Training data:** 14,400 64³ patches of 1 mm isotropic 3T χ maps (best-path unwrapping,
+//!   RESHARP, iLSQR), with local fields simulated by the forward model, as for xQSM.
+//! - **Testing:** only 1 mm isotropic 3T data; the authors state other resolutions are untested
+//!   (Discussion). The authors' `Evaluate/test_util.py` does not resample.
 
 use crate::grid::Grid;
 use crate::models::onnx::{OnnxError, OnnxModel, Tensor};

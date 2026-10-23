@@ -14,6 +14,26 @@
 //!
 //! The input is the SEPIA-style **local field in ppm** (already background-removed).
 //! Weights are not bundled; the caller passes the exported `qsmgan.onnx` bytes.
+//!
+//! # Reference pipeline
+//!
+//! From Chen et al., NeuroImage 2020 (doi:10.1016/j.neuroimage.2019.116389), Methods, and the
+//! authors' code (`mmorri10/QSMGAN-LupoLab` `code_pytorch_v3.zip`):
+//!
+//! - **Training data:** 7T GE, 4-echo GRE (TE 6/9.5/13/16.5 ms), 0.8 mm isotropic; COSMOS labels
+//!   (checkpoint `WGAN_i64o48/config.json`: `data_path: 7T_cosmos`, `input_algo: vsharp`).
+//! - **Phase processing:** Laplacian unwrapping, FSL BET mask from magnitude, V-SHARP.
+//! - **Resampling:** patient data acquired at 0.8×0.8×1 mm were resampled to 0.8 mm isotropic
+//!   (paper); the authors' `utils/data.py:201,221` (`QsmPatchDataHD`) zooms those scans to 0.8 mm
+//!   isotropic before the net and `predict.py:112` zooms the result back. This crate does not
+//!   resample.
+//! - **Input unit:** the README feeds SEPIA's local field; the paper and code scale it by 100
+//!   without stating its unit. This crate passes ppm (as the QSM-CI runner does).
+//!
+//! # Pipeline rules
+//!
+//! The facts above that a configuration can depart from are published as rules in
+//! [`crate::pipeline::rules::RULES`] (each with its reason and source): `qsmgan.mask-bet`, `qsmgan.unwrap-laplacian`, `qsmgan.bg-vsharp`.
 
 use crate::grid::Grid;
 use crate::models::onnx::{OnnxError, OnnxModel, Tensor};

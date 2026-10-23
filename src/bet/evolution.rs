@@ -4,6 +4,25 @@
 //! Human Brain Mapping, 17(3):143-155
 //!
 //! Aligned with FSL-BET2 implementation.
+//!
+//! # Reference pipeline
+//!
+//! - **Defaults.** FSL BET2 (Bostrix/FSL-BET2 d5acd7f, `bet2.cpp`): `-f 0.5` (`:133`), `-g 0`
+//!   (`:136`), smoothness `-w 1` (`:139`), 1000 iterations (`:792`), curvature radii
+//!   3.33–10 mm scaled by the smoothness (`:788-789`), surface from `make_mesh_from_icosa(5, m)`
+//!   (`:772`). [`BetParams::default`] has the same `f`, `g`, smoothness and iterations, and
+//!   `subdivisions: 4` (2562 vertices; whether that is BET2's `icosa(5)` depends on
+//!   `make_mesh_from_icosa`'s level convention, which is not in that repository).
+//! - **Input.** BET was developed on structural (T1-, T2-, PD-weighted) head images (Smith
+//!   2002) and works in mm
+//!   (the search distances and curvature limits above), so it assumes human-scale anatomy; see
+//!   [`BetParams::voxel_scale`] for rodents. It needs no orientation: the initial sphere comes
+//!   from the image's intensity centre of gravity. `-g` is a gradient along the voxel z axis.
+//! - **In QSM pipelines.** MEDI runs BET on `iMag = sqrt(sum(abs(iField).^2,4))`, the RSS over
+//!   echoes, with `f = 0.5` (MEDI_toolbox `README.m:92,111`) or `f = 0.1`
+//!   (`MEDI_full_process.m:109,128`). QSMART runs `bet2 -f 0.2 -m` on the first echo's
+//!   coil-RSS magnitude after N4 (`QSMART_toolbox_v1.0/brainmask.m:7-14`). QSM.jl's README runs
+//!   `bet` on the last echo with `-f 0.5` and erodes the mask by 5 voxels (`README.md:34-38`).
 
 use crate::Grid;
 use super::icosphere::create_icosphere;

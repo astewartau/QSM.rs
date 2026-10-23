@@ -8,6 +8,20 @@
 //! The algorithm includes optional curvature-based weighting to further reduce artifacts
 //! at highly curved brain regions.
 //!
+//! ## Reference pipeline
+//!
+//! QSMART runs SDF twice on its echo-fit total field (`QSMART_SDF.m`): stage 1 on the BET mask
+//! × `R_0` with no vessels and `sdf_sigma1` (10) passed as **both** widths (l. 12), so σ =
+//! √(10² + 10²) ≈ 14.1 (`sdf_curvature.m` l. 8); stage 2 on the field × mask × `R_0` with the
+//! vessel mask, σ1 = 8, σ2 = 2 (l. 20). Both use `lowerLim` 0.6, curvature constant 500 and
+//! an indent mask from closing the brain mask with `strel('sphere', 8)` voxels
+//! (`Demo_QSMART.m` l. 51–57). The paper instead lists σ_C = 10, σ_V = 2, σ_I = 10, σ = 10,
+//! C_s = 500 (Yaghmaie et al. 2021, §3.4); [`SdfParams`] follows the toolbox. The mask is not
+//! eroded first (paper §1, §5). Parameters were tuned on 7T human data at 0.6 mm; the Gaussian
+//! widths are in voxels (`imgaussfilt3`), so they are not rescaled for other voxel sizes, and
+//! the cortical proximity map uses `[σ1, 2σ1, 2σ1]` (`sdf_curvature.m` l. 12): half the width
+//! along the first voxel axis, whatever the orientation.
+//!
 //! Reference:
 //! Yaghmaie, N., Syeda, W., et al. (2021).
 //! "QSMART: Quantitative Susceptibility Mapping Artifact Reduction Technique."

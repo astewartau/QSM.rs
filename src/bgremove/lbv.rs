@@ -5,6 +5,20 @@
 //!
 //! The method exploits that background fields satisfy nabla^2 b = 0 inside the ROI.
 //!
+//! # Reference pipeline
+//! The authors' code is `functions/_LBV/LBV.m` with the `mexMGv6` full-multigrid solver in the
+//! MEDI toolbox (release 2024.11.26). Its defaults are `tol` 0.01 (stopping criterion on the
+//! coarsest grid), `depth` −1 (automatic: `log2` of the smallest dimension minus 3,
+//! `mexMGv6.cpp:760-780`), `peel` 0 (boundary layers removed beyond the one boundary layer), and
+//! 30/100/100 smoothing iterations (`LBV.m:29-46`). MEDI's pipeline script (`README.m:129`, a
+//! commented alternative to PDF) calls `LBV(iFreq, Mask, matrix_size, voxel_size, 0.005)` on the
+//! `Fit_ppm_complex` field inside the BET mask, then `MEDI_L1`.
+//!
+//! This module is not a port of that solver: it solves the same boundary value problem by
+//! successive over-relaxation (ω = 1.5) to a relative tolerance, so `tol` here is not `LBV.m`'s
+//! `tol`, and `depth`/`peel` have no counterpart. The returned mask is the interior (mask minus
+//! its one-voxel boundary layer), which is `LBV.m`'s `interior` with `peel` 0.
+//!
 //! Reference:
 //! Zhou, D., Liu, T., Spincemaille, P., Wang, Y. (2014).
 //! "Background field removal by solving the Laplacian boundary value problem."

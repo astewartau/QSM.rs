@@ -11,6 +11,17 @@
 //!    `FrangiFilter3D` runs on its single-precision magnitude; see `frangi`)
 //! 3. Threshold: vesselness above Otsu's threshold (MATLAB's `graythresh`) = vessel
 //! 4. Return complementary mask (1 = tissue, 0 = vessel)
+//!
+//! ## Reference pipeline
+//!
+//! QSMART's `vasculature_mask.m` runs this on the mean over echoes of the coil-combined
+//! magnitude after ANTs N4 (l. 8–14; [`crate::utils::qsmart_vessel_magnitude`]), restricted to
+//! the BET brain mask (`FrangiFilter3D(test.*mask, …)`, l. 27), with `FrangiAlpha` = `FrangiBeta`
+//! = 0.5, `BlackWhite` false and the demo's scales 0.5:0.5:6 and c = 500 (`Demo_QSMART.m`
+//! l. 41–43; paper §3.4, 7T human, 0.6 mm). The paper's rodent runs used scales 0.01–0.5 in
+//! steps of 0.1 and c = 50. The bottom-hat radius (8) and Frangi scales are in voxels, and
+//! Otsu's threshold depends on the magnitude's intensity distribution, so the vessel mask
+//! depends on that magnitude being the one QSMART uses.
 
 use crate::error::InputError;
 use crate::Grid;

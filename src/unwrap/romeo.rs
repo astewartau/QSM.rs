@@ -13,6 +13,51 @@
 //! https://doi.org/10.1002/mrm.28563
 //!
 //! Reference implementation: https://github.com/korbinian90/MriResearchTools.jl
+//! (`romeo`/`unwrap` re-exported from <https://github.com/korbinian90/ROMEO.jl>).
+//!
+//! # Reference pipeline
+//!
+//! Facts from ROMEO.jl (commit 08776d4, 2026-09-02) and MriResearchTools.jl (771eadf), the
+//! authors' code; file:line refer to those trees.
+//!
+//! - **Weights.** `:romeo` (phase coherence, phase gradient coherence, phase linearity,
+//!   magnitude coherence) is the default of both the API and the `romeo` CLI
+//!   (`src/weights.jl:56,75-76`; `ext/RomeoApp/argparse.jl:51-58`). [`RomeoParams::default`]
+//!   matches. `:romeo4` sets the same four flags as `:romeo` (`src/weights.jl:81-82`).
+//! - **Multi-echo mode.** Temporal (template) unwrapping is the default: the template echo
+//!   (`template=1`, i.e. index 0 here) is unwrapped spatially, with the echo after it (or before
+//!   it, for a later template) as `phase2` for the gradient-coherence weight, and the others
+//!   temporally outward from it (`src/unwrapping.jl:68-93`). Individual unwrapping is opt-in,
+//!   and the CLI says it "might be necessary if there is large movement (timeseries) or
+//!   phase-offset-correction is not applicable" (`argparse.jl:95-100`). Both match
+//!   [`RomeoParams::default`] (`template: 0`, `individual: false`).
+//! - **`temporal_uncertain_unwrapping`.** 0.5 in the API (`src/unwrapping.jl:52,70`), which
+//!   QSM.rs and CLEAR-SWI's `romeo_combine` use; the CLI's default is 0 and it marks the option
+//!   EXPERIMENTAL (`argparse.jl:165-172`).
+//! - **`correct_global`** is off by default in both the API and the CLI (`src/unwrapping.jl:43`,
+//!   `argparse.jl:129-135`). (QSMxT's Python releases ran the CLI with
+//!   `--individual-unwrapping --correct-global`, `qsmxt/interfaces/nipype_interface_romeo.py:66`;
+//!   that is QSMxT's choice, not ROMEO's default.)
+//! - **Mask.** The CLI unwraps inside `robustmask` of the template echo's magnitude by default
+//!   (`argparse.jl:38-42`, `caller.jl:201-204`), a magnitude threshold with hole filling
+//!   (MriResearchTools `src/masking.jl:7-29`), not a brain mask; with no magnitude it unwraps
+//!   unmasked. CLEAR-SWI calls ROMEO with no mask at all
+//!   (CLEARSWI.jl `src/phase_processing.jl:122`). The QSM.rs pipeline passes its brain mask.
+//! - **Phase offsets.** When the CLI computes a B0 map from multi-echo data it turns MCPC-3D-S
+//!   phase-offset correction on (monopolar) unless told otherwise (`caller.jl:80-91`), with
+//!   smoothing sigma 7 mm converted to voxels (`argparse.jl:79-91`, `caller.jl:137-141`);
+//!   bipolar correction is opt-in and needs ≥ 3 echoes (`argparse.jl:71-76`). MCPC-3D-S itself
+//!   is in [`crate::utils::phase_offset_removal`]; its defaults are in the module docs of
+//!   `utils::multi_echo`. `calculateB0_unwrapped` states that "the phase offsets have to be
+//!   removed prior" (MriResearchTools `src/romeofunctions.jl:3-7`).
+//! - **Seed.** ROMEO.jl seeds at the voxel whose three edges have the best summed weight and,
+//!   with multi-echo input, corrects the seed's 2π count from `phase2` (`src/seed.jl:2-60`). The
+//!   multi-seed path here (`max_seeds > 1`, or any of `wrap_addition`, `merge_regions`,
+//!   `correct_regions`) does the same; the default single-seed path seeds at the mask's centre
+//!   of mass ([`find_seed_point`]) instead, which can change the result's global 2π offset and
+//!   the growth order.
+//! - **Resolution, field strength, orientation.** Nothing in ROMEO depends on them: the weights
+//!   use phase differences between 6-connected neighbours and echo-time ratios only.
 
 use std::f64::consts::PI;
 
@@ -26,8 +71,8 @@ use rayon::prelude::*;
 /// Matches ROMEO.jl weight type options. See Dymerska et al. (2021) for details.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum RomeoWeightType {
-    /// Phase coherence + phase gradient coherence + mag coherence.
-    /// Note: phaselinearity component not yet implemented; currently equivalent to Romeo3.
+    /// Phase coherence + phase gradient coherence + phase linearity + mag coherence
+    /// (ROMEO.jl's default `:romeo`, `src/weights.jl:75-76`).
     Romeo,
     /// Phase coherence + mag coherence only (no multi-echo temporal info).
     Romeo2,

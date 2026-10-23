@@ -31,6 +31,26 @@
 //! seconds, B0 in Tesla — and outputs follow the χ-separation sign convention
 //! (χ+ ≥ 0, χ− ≤ 0, χ_total = χ+ + χ−).
 //!
+//! # Reference pipeline
+//!
+//! There is no published paper. The reference is the QSM-CI submission
+//! (`algorithms/hc-chisep-qsmci/recon.py` and `algorithm.yml` in QSMxT/QSM-CI), which runs in
+//! QSM-CI's isolated χ-separation stage on a provided χ_total, R2' and multi-echo magnitude.
+//! That stage prescribes no masking, unwrapping, background removal or QSM method.
+//!
+//! **This port predates a change to the reference.** QSM-CI `db79def` (2026-09-14, "declare
+//! Dr+/Dr- and gate the WM branch on protocol adequacy") changed the reference in three ways that
+//! this module does not yet follow:
+//! - Dr+ defaults to the fixed `137·B0/3` Hz/ppm. Self-calibration is now opt-in
+//!   (`HCCHISEP_DRP=auto`), because on noiseless phantoms the 5th-percentile estimator returns
+//!   the generator's constant exactly, and with an estimated R2' it spans 241–755 Hz/ppm. Here
+//!   (stage 1 above) self-calibration is always on.
+//! - Dr− defaults to Dr+, with closed form `χ+ = (R2' + Dr−·χ_total)/(Dr+ + Dr−)`. The Ridani
+//!   convention used here (Dr− = 0, stage 2) is now the opt-in `HCCHISEP_DRN=0`.
+//! - The WM branch runs only when the echo train can resolve a multi-compartment signature,
+//!   `TE_max − TE_min ≥ 30 ms` and `TE_max ≥ 35 ms` (`recon.py`, `SPAN_MIN_T2M`). Otherwise the
+//!   method reduces to the closed form. This port has no such gate.
+//!
 //! Reference:
 //! Wharton, S. & Bowtell, R. (2012). "Fiber orientation-dependent white matter
 //! contrast in gradient echo MRI." PNAS 109(45):18559-18564. HC-ChiSep is the

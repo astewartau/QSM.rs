@@ -14,6 +14,12 @@
 //! runs iQSM's exact pipeline with the `iqfm.onnx` bytes.
 //!
 //! Weights are not bundled; the caller passes the exported `iqfm.onnx` bytes.
+//!
+//! # Reference pipeline
+//!
+//! Identical to [iQSM](mod@crate::inversion::iqsm#reference-pipeline): the authors run iQFM through the
+//! same `run_iqsm` (`sunhongfu/iQSM` `inference.py:139-237`), which requires a brain mask for the
+//! iQFM output (README).
 
 use crate::grid::Grid;
 use crate::inversion::TileConfig;

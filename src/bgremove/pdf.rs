@@ -41,6 +41,15 @@
 //! `pdf` uses the kernel centred on the voxel grid instead. With `n_pad > 0` (the default)
 //! every axis is even and the kernels are `dipole_kernel.m`'s.
 //!
+//! # Reference pipeline
+//! MEDI's pipeline script (`README.m` of the 2024.11.26 release, line 124) runs
+//! `PDF(iFreq, N_std, Mask, matrix_size, voxel_size, B0_dir)` with `PDF.m`'s defaults (`tol`
+//! 0.1, `n_CG` 30, `'imagespace'`, `n_pad` 40) on the field from `Fit_ppm_complex` unwrapped by
+//! `unwrapPhase`, inside the BET mask of the root-sum-of-squares magnitude (README.m:118, BET
+//! defaults), and passes the local field to `MEDI_L1`. The mSMV authors (same group) run
+//! `PDF(..., tol = 0, n_CG = 100)` after ROMEO unwrapping (github.com/agr78/mSMV, README.md
+//! and `data/healthy_subjects/proc.m:15`). Nothing in `PDF.m` depends on the field strength.
+//!
 //! Reference:
 //! Liu, T., Khalidov, I., de Rochefort, L., Spincemaille, P., Liu, J., Tsiouris, A.J.,
 //! Wang, Y. (2011). "A novel background field removal method for MRI using projection
@@ -53,6 +62,11 @@
 //!
 //! Reference implementation: MEDI toolbox release 2024.11.26 (Cornell MRI Research Lab,
 //! `functions/PDF.m`, `dipole_term.m`, `cgsolve.m`, `dipole_kernel.m`)
+//!
+//! # Pipeline rules
+//!
+//! The facts above that a configuration can depart from are published as rules in
+//! [`crate::pipeline::rules::RULES`] (each with its reason and source): `pdf.mask-bet`, `pdf.field-complex-fit`.
 
 use num_complex::Complex64;
 use crate::error::{check_len, InputError};

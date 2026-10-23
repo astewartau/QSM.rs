@@ -156,6 +156,29 @@
 //! that is still odd after `zeropad` by one more voxel and crops the result back. On grids that
 //! are even after `zeropad`, and with SMV off, nothing changes and the result is `MEDI_L1`'s.
 //!
+//! # Reference pipeline
+//! What MEDI's own pipeline script (`README.m` of the 2024.11.26 release; the release has no
+//! `MEDI_full_process.m`) runs around `MEDI_L1`. Inputs, units and the CSF term are above.
+//! - Field map: `Fit_ppm_complex(iField)` on the complex echoes (evenly spaced; README.m:87),
+//!   which also gives `N_std`; `Fit_ppm_complex_bipolar` for bipolar readouts (README.m:98).
+//!   Unwrapping: `unwrapPhase(iMag, iFreq_raw, matrix_size)`, MEDI's region-growing unwrapper
+//!   (README.m:93; graph-cut and Laplacian unwrapping are commented alternatives).
+//! - Brain mask: FSL BET via the bundled `bet2` MEX, `BET(iMag, matrix_size, voxel_size)` on the
+//!   root-sum-of-squares magnitude (README.m:118), with BET's defaults (fractional threshold 0.5,
+//!   gradient threshold 0; `functions/bet2/bet2.cpp:136`). `genMask.m` (magnitude threshold) is a
+//!   commented alternative.
+//! - Background removal: PDF, `PDF(iFreq, N_std, Mask, matrix_size, voxel_size, B0_dir)` with
+//!   `PDF.m`'s defaults (README.m:124). LBV with `tol` 0.005 is the commented alternative
+//!   (README.m:129). `MEDI_L1` then inverts this local field (`RDF`), so with SMV on, the SMV
+//!   high-pass is applied on top of the PDF local field, not to the total field.
+//! - Inversion: `MEDI_L1('lambda',1000,'lambda_CSF',100,'merit','smv',5)` (README.m:144), which
+//!   equals the 2024 defaults (`parse_QSM_input.m:10-20`: MERIT and SMV on, radius 5 mm). The
+//!   2020 release's `parse_QSM_input.m` defaulted to MERIT and SMV off.
+//! - ppm conversion: `delta_TE` is `TE(2) − TE(1)`, or `TE` for one echo (`Read_DICOM.m:166-168`),
+//!   and `CF` is read from the DICOM header; QSM.rs uses `CF = γ·B0`.
+//! - Field strength: nothing in `MEDI_L1`, `PDF`, `extract_CSF` or `arlo` depends on it beyond
+//!   `CF`; λ = 1000 and `extract_CSF`'s 5 Hz R2* threshold are the same at 3 T and 7 T.
+//!
 //! Reference:
 //! Liu, T., Liu, J., de Rochefort, L., Spincemaille, P., Khalidov, I., Ledoux, J.R.,
 //! Wang, Y. (2011). "Morphology enabled dipole inversion (MEDI) from a single-angle
@@ -175,6 +198,11 @@
 //! run with a preconditioner. The single-precision helpers at the end of this file
 //! (`gradient_mask_f32`, the periodic gradients, ...) are not used by `medi`. They follow the
 //! MEDI variant in the chi-separation toolbox and are shared by the chi-separation solvers.
+//!
+//! # Pipeline rules
+//!
+//! The facts above that a configuration can depart from are published as rules in
+//! [`crate::pipeline::rules::RULES`] (each with its reason and source): `medi.mask-bet`, `medi.field-complex-fit`.
 
 use num_complex::Complex64;
 #[cfg(feature = "parallel")]

@@ -21,6 +21,9 @@
 //! χ) to an [`Observer`] as borrowed slices, so a host can show or save them without the stage
 //! keeping copies.
 //!
+//! [`rules`] says what each method requires, recommends and discourages of the rest of the
+//! configuration, with sources, and checks a configuration against it ([`rules::evaluate`]).
+//!
 //! ## Combined algorithms
 //!
 //! - HARPERELLA: SMV-based exterior Laplacian estimation (Li et al., 2014)
@@ -42,6 +45,7 @@ pub mod separation;
 pub mod observer;
 pub mod qsmart;
 pub mod two_pass;
+pub mod rules;
 
 pub use config::*;
 pub use phase_utils::{

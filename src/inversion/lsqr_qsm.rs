@@ -50,6 +50,21 @@
 //! "Differentiation between diamagnetic and paramagnetic cerebral lesions based
 //! on magnetic susceptibility mapping." Medical Physics, 37(10):5165-5178.
 //! https://doi.org/10.1118/1.3481505
+//!
+//! # Reference pipeline
+//! qsm_heidi (<https://gitlab.com/R01NS114227/qsm_heidi>, commit 4592631): the `makefile`
+//! (L14-20) and `def.sh` feed `inversion_lsqr.m` a SHARP-corrected local field
+//! (`background_correction_sharp.mat`, phase in rad), the magnitude, and masks made by an
+//! upstream step not in the repository (`create_masks.mat`). The mask the inversion uses is the
+//! product of a tissue mask, a phase mask and the background-removal mask
+//! (`inversion_lsqr.m`, `suscCompMask = mask_tissue .* mask_phase .* phsInput.mask`). The SHARP
+//! settings are not in the repository. The phase-to-ppm factor uses the last echo time
+//! (`phase2susceptibilityfactor.m` L70-71), which does not change the LSQR solution (see Units).
+//!
+//! # Pipeline rules
+//!
+//! The facts above that a configuration can depart from are published as rules in
+//! [`crate::pipeline::rules::RULES`] (each with its reason and source): `lsqr.bg-sharp`.
 
 use num_complex::Complex64;
 

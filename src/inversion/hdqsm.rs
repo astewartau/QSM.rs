@@ -30,6 +30,20 @@
 //! https://doi.org/10.1002/mrm.29218
 //!
 //! Reference implementation: HDQSM.m, https://github.com/mglambert/HD-QSM (MIT).
+//!
+//! # Reference pipeline
+//! Lambert et al. 2022, Section 3.3 (in vivo): Siemens 3T, 6 echoes, TE1 = spacing = 4.92 ms,
+//! 0.8x0.8x2 mm; SEGUE unwrapping, PDF background removal, a magnitude-weighted least-squares
+//! echo fit for the local field, and the residual background removed with WH-QSM's harmonic
+//! estimate. For the 2019-challenge simulations the field was the magnitude-weighted
+//! least-squares fit, zero-padded to 256^3, with 300 iterations (Section 3.2); this port does not
+//! pad. HDQSM.m's header says `tol_update` defaults to 1.0, its code to 1e-2 (L68-72); the code
+//! value is used here.
+//!
+//! # Pipeline rules
+//!
+//! The facts above that a configuration can depart from are published as rules in
+//! [`crate::pipeline::rules::RULES`] (each with its reason and source): `hdqsm.bg-pdf`.
 
 use num_complex::Complex64;
 use crate::inversion::admm::{fansi_unit_ee2, prepare_fansi_spectral};

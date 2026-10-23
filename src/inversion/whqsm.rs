@@ -43,6 +43,20 @@
 //! # Finite differences
 //! As in `WH_nlTV.m`, the gradient and Laplacian are unit-spacing differences whatever the
 //! voxel size; only the dipole kernel uses it.
+//!
+//! # Reference pipeline
+//! FANSI `script_DICOM_Philips.m` (commit 93044a3) runs `WH_nlTV` on the same local field and
+//! TE scaling as nlTV (see [`super::fansi`](mod@super::fansi): SEGUE, multi-echo fit, MSMV background removal,
+//! `deltaTE` with "any individual echo time" allowed, L364), with `mask = mask2`, `beta = 200`,
+//! `muh = 5` and the advice that beta is "usually ... 20 to 50 times larger than muh" and that
+//! alpha1 may be slightly lower than FANSI's (L425-436). This port uses `WH_nlTV.m`'s own
+//! defaults for beta (150) and muh (5), not the script's beta of 200. Without `params.mask`,
+//! `WH_nlTV.m` takes the mask as `W > 0`; here the mask is always given.
+//!
+//! # Pipeline rules
+//!
+//! The facts above that a configuration can depart from are published as rules in
+//! [`crate::pipeline::rules::RULES`] (each with its reason and source): `fansi.no-laplacian-multi-echo`.
 
 use crate::inversion::admm::{fansi_unit_ee2, prepare_fansi_spectral};
 use crate::utils::gradient::{bdiv_inplace, fgrad_inplace};

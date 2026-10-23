@@ -357,8 +357,8 @@ const MODELS: &[ModelSpec] = &[
                       `nextqsm-vjp` = the regularizer gradient ∇ₓ mean|VarNet(x)| written \
                       as a forward graph) plus the FFT data-consistency gradient and unroll \
                       in Rust. Order the files BFR-first, VJP-second.",
-        paper: "Cognolato et al., NeuroImage 2023; doi:10.1016/j.neuroimage.2022.119729",
-        source: "https://github.com/wayne1123/NeXtQSM",
+        paper: "Cognolato et al., Medical Image Analysis 84:102700 (2023); doi:10.1016/j.media.2022.102700",
+        source: "https://github.com/QSMxT/NeXtQSM",
         license: "MIT",
         files: &[
             WeightFile {

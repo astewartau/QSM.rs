@@ -36,6 +36,18 @@
 //! nonlinear data term can diverge where the phase nears +-pi.
 //!
 //! The finite differences are FANSI's, on unit spacing whatever the voxel size.
+//!
+//! # Reference pipeline
+//! FANSI `script_DICOM_Philips.m` (commit 93044a3) runs `nlL1TV` on the same local field and
+//! TE scaling as nlTV (see [`super::fansi`](mod@super::fansi)), with weight `lambda*m0.*mask./cnoise / max`,
+//! `lambda = 0.8` (L443-450), and says the regularisation weight must be re-tuned for L1-QSM,
+//! not reused from FANSI or WH-QSM (L442-443). `nlL1TV.m` defaults: mu1 = 100*alpha1, mu2 = mu3
+//! = 1, 50 iterations, tolUpdate 1, weight ones (L48-112).
+//!
+//! # Pipeline rules
+//!
+//! The facts above that a configuration can depart from are published as rules in
+//! [`crate::pipeline::rules::RULES`] (each with its reason and source): `fansi.no-laplacian-multi-echo`.
 
 use crate::inversion::admm::{fansi_magnitude_weight, fansi_ppm_to_rad, fansi_unit_ee2, prepare_fansi_spectral};
 use crate::utils::gradient::{bdiv_inplace, fgrad_inplace};

@@ -26,6 +26,27 @@
 //! periodic max decomposition level, [`dwt_max_level`]), matching PyWavelets'
 //! `periodization` round-trip, then cropped back.
 //!
+//! # Reference pipeline
+//!
+//! - **Data:** in-vivo 3 T, 1 mm isotropic, six head orientations per subject (Fang et al. 2023,
+//!   in-vivo experiments). The reference χ+/χ− were χ-separation from all six orientations.
+//! - **QSM input:** an LPCNN reconstruction. The repo's example feeds
+//!   `LPCNN_data/test_results/3ori/..._Ori001-Ori002-Ori003.nii.gz`
+//!   (`data/yml/example_qsm.yml:27`), and the paper tests with 1 to 3 orientations. No
+//!   single-orientation, conventional-QSM input appears in the authors' pipeline.
+//! - **R2':** one R2' map per orientation (`R2p_fn_list`, `data/yml/template_qsm.yml:5-8`). The
+//!   R2' gradient is averaged over them (`wavesep/utils/solver_wavesep_qsm.py:202-204`).
+//! - **D_r:** read per dataset from `params.json` (`Dr_pos`, `Dr_neg`;
+//!   `wavesep/utils/run_wavesep_qsm.py:18`). The repo ships no value, and `Dr_pos ≠ Dr_neg` has
+//!   been supported only since the 2025-04-23 update (README), with a warning. The QSM.rs default
+//!   [`DR_SHIN_2021`] is not taken from WaveSep (open question).
+//! - **Defaults:** `alpha = 0.2`, `wavelet = db4`, `level = None` (maximum), `Lambda = 0.02`
+//!   (`wavesep/qsm_sep.py:14-18`), `maxit = 100` (`run_wavesep_qsm.py:32`). These match
+//!   [`WaveSepParams`].
+//! - **Orientation:** "All images should be in the LPS orientation"
+//!   (`data/yml/template_qsm.yml:19`). The QSM path uses no B0 direction, so this only fixes
+//!   the wavelet axes.
+//!
 //! Reference:
 //! Fang, Z., Shin, H.-G., van Zijl, P., Li, X., Sulam, J. (2023). "WaveSep: A
 //! flexible wavelet-based approach for source separation in susceptibility

@@ -13,4 +13,4 @@ pub mod synthseg;
 pub use labels::{SynthSegLabels, SynthSegVersion};
 #[cfg(feature = "onnx")]
 pub use synthseg::synthseg;
-pub use synthseg::{PosteriorPrecision, SynthSegInference, SynthSegParams, SynthSegResult};
+pub use synthseg::{synthseg_network_grid, PosteriorPrecision, SynthSegInference, SynthSegParams, SynthSegResult};

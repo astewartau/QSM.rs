@@ -30,9 +30,46 @@
 //! not supplied externally. Iteration is Gauss-Newton/CG with sign projection
 //! each step; it stops when ‖χⁿ⁺¹ − χⁿ‖/‖χⁿ‖ < tol on χ_total or at max_iter.
 //!
+//! # Reference pipeline
+//!
+//! What the SNU-LIST toolbox's own driver, `Chisep_script.m` (toolbox v1.2.x, obtained via the
+//! authors' Google Form; the GitHub repo now carries only the README), runs before
+//! `chi_sep_iLSQR`:
+//!
+//! - **Mask:** `BET` from the MEDI toolbox on the root-sum-of-squares magnitude
+//!   (`Chisep_script.m:79-82`), after a Tukey k-space window, factor 0.4 for Siemens/GE, 0 for
+//!   Philips (`:69-73`).
+//! - **Unwrapping and echo combination:** ROMEO per echo with phase-offset correction on
+//!   (`:99-111`), then weighted echo averaging `W = TE·exp(−TE/40 ms)`,
+//!   `field = Σ W·φ / Σ W·TE` (`:113-123`), which is the weighting QSM.rs calls
+//!   `B0WeightType::AssumedDecay { t2star_s: 0.04 }`. The script's alternative is MEDI's
+//!   nonlinear complex fit + SEGUE (`:126-133`, commented out); SEGUE is not in QSM.rs.
+//! - **Background removal:** STI Suite `V_SHARP` with `smvsize = 12` on the echo-combined field
+//!   (`:136-139`).
+//! - **QSM input:** STI Suite `QSM_iLSQR` of that local field, `padsize [12 12 12]` (`:142-145`),
+//!   passed as `option_data.qsm` (`:170`); the text above records why it must be this QSM.
+//! - **R2':** R2* by ARLO when there are more than three equally spaced echoes, NNLS otherwise
+//!   (`:87-93`); R2' = R2* − R2 is supplied by the user (`:56-57`). The README offers a pseudo-R2
+//!   map when R2 is not measured; that option is not in QSM.rs.
+//! - **Field strength:** the README says the toolbox is "developed for in-vivo human 3T and 7T";
+//!   Shin 2021 calibrated D_r = 137 Hz/ppm at 3 T only ([`DR_SHIN_2021`]). QSM.rs uses 137 at
+//!   every field strength. No published 7 T value exists for this method (open question).
+//!
+//! **Open question: which algorithm the toolbox runs.** The compiled `chi_sep_iLSQR.p` logs
+//! "Step 1: Calculating LSQR solution / Step 2: Calculating streaking artifacts / Step 3:
+//! Calculating NNLS solution" (Bunya diagnostic run of the toolbox,
+//! `chisep_ilsqr/chisep-ilsqr-26657529.out`), i.e. an iLSQR-structured (Li 2015) three-step
+//! solve, while this module ports the Supplementary-Methods edge-masked-TV algorithm. The two
+//! have not been compared.
+//!
 //! Reference: Shin, H., et al. (2021). "χ-separation: Magnetic susceptibility
 //! source separation toward iron and myelin mapping in the brain." NeuroImage,
 //! 240:118371 (Supplementary Methods, "Algorithm for χ-separation").
+//!
+//! # Pipeline rules
+//!
+//! The facts above that a configuration can depart from are published as rules in
+//! [`crate::pipeline::rules::RULES`] (each with its reason and source): `chi-sep.mask-bet`, `chi-sep.unwrap-romeo`, `chi-sep.echo-combination`, `chi-sep.echo-weights`, `chi-sep.bg-vsharp`, `chi-sep-ilsqr.qsm-ilsqr`.
 
 use crate::inversion::{IlsqrParams, STI_GUI_PAD_MM};
 use crate::fft::Fft3dWorkspaceF32;

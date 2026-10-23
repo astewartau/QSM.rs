@@ -9,14 +9,42 @@
 //! Proc. ISMRM 27th Annual Meeting.
 //!
 //! Reference implementation: https://github.com/korbinian90/MriResearchTools.jl
+//!
+//! # Reference pipeline
+//!
+//! MriResearchTools.jl (commit 771eadf, `src/intensitycorrection.jl`):
+//!
+//! - `makehomogeneous(mag::NIVolume; sigma_mm=7, nbox=15)` (`:1-14`): sigma 7 mm converted to
+//!   voxels with the NIfTI voxel size, and `nbox` = 15 boxes per dimension for the `boxsegment`
+//!   tissue segmentation. The masked smoothing uses 8 box-filter passes (`nbox_smoother=8`,
+//!   `:85-99`), the sigma is split 0.7 / √(1−0.7²) between the final and the masked smoothing
+//!   (`getsigma`), and the bias field is estimated from the first echo inside `robustmask`
+//!   (`:92-96`). [`get_sensitivity`] / [`makehomogeneous`] follow this; the pipeline config's
+//!   `masking.homogeneity_sigma_mm` 7.0 and `masking.homogeneity_nbox` 15 (applied by the host,
+//!   not by qsm-core's masking stage) are these defaults.
+//! - `getsensitivity` without a `sigma_mm` uses `get_default_sigma_mm`, commented "7mm, but a
+//!   maximum of 10% FoV" but computing `min(median(voxel size × matrix size), 7)` — the whole
+//!   field of view, not 10 % of it (`:104-113`). Neither cap is applied here; `makehomogeneous`
+//!   with an explicit `sigma_mm` (as above) applies none either.
+//! - Published with CLEAR-SWI (Eckstein et al. 2021, *NeuroImage* 237:118175,
+//!   <https://doi.org/10.1016/j.neuroimage.2021.118175>; `intensitycorrection.jl:78`), which uses
+//!   it as the magnitude sensitivity correction. QSMxT's Python releases called
+//!   `makehomogeneous(mag; sigma=[20, 20, 10])` (voxels; `qsmxt/scripts/makehomogeneous.jl`).
+//! - It assumes one dominant tissue present across the object ("main tissue", `:75`); it uses
+//!   the voxel size but no field strength or orientation.
 
 /// Parameters for inhomogeneity correction (bias field removal).
+///
+/// Not used by [`makehomogeneous`], which takes `sigma_mm` and `nbox` directly; the pipeline
+/// config carries them as `masking.homogeneity_sigma_mm` / `masking.homogeneity_nbox` (defaults
+/// 7.0 and 15, MriResearchTools' defaults) for the host to apply.
 #[cfg_attr(feature = "introspection", derive(serde::Serialize))]
 #[derive(Clone, Debug)]
 pub struct HomogeneityParams {
     /// Gaussian smoothing sigma in mm (default: 7.0)
     pub sigma_mm: f64,
-    /// Number of box filter passes for Gaussian approximation (default: 3)
+    /// Boxes per dimension for the `boxsegment` tissue segmentation, `makehomogeneous`'s `nbox`
+    /// (default here: 3; MriResearchTools' default is 15).
     pub nbox: usize,
 }
 
@@ -840,10 +868,10 @@ pub fn get_sensitivity(
 ///
 /// # Arguments
 /// * `mag` - Input magnitude data (nx * ny * nz)
-/// * `nx`, `ny`, `nz` - Dimensions
-/// * `vx`, `vy`, `vz` - Voxel sizes in mm
-/// * `sigma_mm` - Smoothing sigma in mm (default 7, will be clamped to 10% FOV)
-/// * `nbox` - Number of boxes per dimension for segmentation (default 15)
+/// * `grid` - Dimensions and voxel sizes in mm
+/// * `sigma_mm` - Smoothing sigma in mm, used as given (MriResearchTools' default is 7; no
+///   field-of-view cap is applied, see the module docs)
+/// * `nbox` - Number of boxes per dimension for segmentation (MriResearchTools' default 15)
 ///
 /// # Returns
 /// Bias-corrected magnitude

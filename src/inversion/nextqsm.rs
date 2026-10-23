@@ -13,6 +13,25 @@
 //! in Rust (`rustfft`), since tract can't do in-graph FFT.
 //!
 //! Weights are not bundled; the caller passes both ONNX byte buffers.
+//!
+//! # Reference pipeline
+//!
+//! From Cognolato et al., *Medical Image Analysis* 84:102700 (2023; arXiv:2107.07752) and the
+//! authors' package (`QSMxT/NeXtQSM`):
+//!
+//! - **Training data:** hybrid 1 mm isotropic brains from 3T MP2RAGE segmentations with simulated
+//!   susceptibilities (paper §3.1); tested on QSM challenge 2.0 data and 0.75 mm 7T data, with an
+//!   FSL BET mask (paper §3.2); the paper reports robustness at 0.64 and 0.95 mm (§4.2).
+//! - **Input:** "an unwrapped frequency map (unitless and scaled to ppm) and brain mask"
+//!   (README) — a total field in ppm; the package masks it and zero-pads to a multiple of 64
+//!   (`processing/data_loader.py`). The unwrapping method is not specified.
+//! - **Resampling:** none; the data-consistency dipole kernel uses the NIfTI voxel size
+//!   (`predict_all.py:60-61`).
+//!
+//! # Pipeline rules
+//!
+//! The facts above that a configuration can depart from are published as rules in
+//! [`crate::pipeline::rules::RULES`] (each with its reason and source): `nextqsm.mask-bet`.
 
 use num_complex::Complex64;
 

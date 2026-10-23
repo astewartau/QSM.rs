@@ -34,6 +34,14 @@
 //! The SNU-LIST group also publishes a **7 T** variant that maps 7 T R2* to *3 T-equivalent* R2',
 //! which is what χ-sepnet expects downstream. It needs its own weights in the model registry and
 //! its own validation, so it is not here yet; the guard refuses 7 T input rather than pretending.
+//! That variant (Kim J. et al., arXiv:2410.12239, §2.2.1) was trained on 7 T R2* registered to
+//! 3 T R2' from the same subjects. The same paper's linear alternative, 3 T R2' ≈ 0.190 × 7 T R2*
+//! (§2.2.3, ROI regression, Fig. S2), was evaluated only as a comparison arm.
+//!
+//! **Training R2.** The R2' labels are R2* (ARLO) minus an R2 from StimFit dictionary matching
+//! of a 2D multi-echo SE with stimulated-echo correction, with negatives set to 0 (Kim et al.
+//! 2025, arXiv:2409.14030, §2.1.1). In QSM.rs the measured-R2 counterpart is
+//! [`r2_epg`](super::epg::r2_epg) followed by [`r2prime`](super::epg::r2prime).
 //!
 //! **R2\* fitting.** The training pipeline fitted R2* with ARLO, so
 //! [`r2primenet_from_magnitude`] uses [`arlo`](super::r2star::arlo). Supplying

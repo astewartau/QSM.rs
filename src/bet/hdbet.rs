@@ -25,12 +25,41 @@
 //! HD-BET was trained on MNI-aligned data. HD-BET applies no post-processing; combine with
 //! [`crate::utils::morphology::fill_holes`] / erosion refinements as needed.
 //!
+//! # Reference pipeline
+//!
+//! From the HD-BET repository (MIC-DKFZ/HD-BET 678e44d, v2):
+//!
+//! - **Contrast.** Trained on pre- and post-contrast T1-w, T2-w and FLAIR; "other sequences will
+//!   most likely work as well" (`readme.md:25-28,79-80`). No GRE was in training, and QSM.rs has
+//!   no Dice against a reference brain mask on GRE recorded; its validation is agreement with the
+//!   `hd-bet` CLI (Dice ≥ 0.99998, `docs/DL_ONNX_SCOPING.md`).
+//! - **Orientation.** "Input images must match the orientation of standard MNI152 template! Use
+//!   fslreorient2std upfront" (`readme.md:80-82`). Neither HD-BET nor this port reorients: the
+//!   array is used in its stored voxel order, and `hd_bet` takes no affine. A host must pass a
+//!   volume already in that orientation.
+//! - **Resolution.** Any; nnU-Net resamples to 1 mm (step 3 above), so the network's memory
+//!   follows the field of view in mm ([`hd_bet_memory_bytes`]).
+//! - **Inference.** The v2 CLI uses nnU-Net's sliding window (`tile_step_size=0.5`, Gaussian)
+//!   with mirroring test-time augmentation on unless `--disable_tta`
+//!   (`HD_BET/hd_bet_prediction.py:28-35`, `HD_BET/entry_point.py:30,48`); the readme
+//!   recommends `--disable_tta` on CPU (`readme.md:100-114`). [`HdBetParams::default`] is
+//!   whole-volume without TTA.
+//! - **WASM.** On a 32-bit WASM heap (4 GiB) the whole-volume default does not fit a typical head
+//!   scan; [`HdBetParams::low_memory`] does (1.6 GB on a 184×256×128 mm volume).
+//!   [`hd_bet_memory_bytes`] with [`crate::models::Heap::Wasm32`] gives the peak for a grid and
+//!   setting.
+//!
 //! Reference:
 //! Isensee, F., Schell, M., Pflueger, I., et al. (2019). "Automated brain extraction of
 //! multisequence MRI using artificial neural networks." Human Brain Mapping, 40(17):4952-4964.
 //! https://doi.org/10.1002/hbm.24750
 //!
 //! Reference implementation: https://github.com/MIC-DKFZ/HD-BET (Apache-2.0; weights CC-BY-NC-4.0).
+//!
+//! # Pipeline rules
+//!
+//! The facts above that a configuration can depart from are published as rules in
+//! [`crate::pipeline::rules::RULES`] (each with its reason and source): `hd-bet.wasm-heap`.
 
 // The pre/post-processing is plain Rust; only inference needs `onnx`.
 #![cfg_attr(not(feature = "onnx"), allow(dead_code))]

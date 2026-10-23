@@ -30,6 +30,13 @@
 //! The input should be a magnitude image (the first echo of a multi-echo GRE works well), in the
 //! scanner's native orientation. RS2-Net applies no post-processing.
 //!
+//! # Reference pipeline
+//!
+//! Rodent (rat, mouse) brains only, at preclinical resolution (the plans resample to
+//! 0.25 × 0.2 × 0.16 mm); for human data use BET, HD-BET or MindGrab. No affine is used. The
+//! fixed 128 × 96 × 128 patch peaks at ≈2.7 GB, so the network fits a 32-bit WASM heap; larger
+//! volumes are tiled with it.
+//!
 //! Reference:
 //! Lin, Y., Ding, Y., Chang, S., Ge, X., Sui, X., Jiang, Y. (2024). "RS2-Net: An end-to-end deep
 //! learning framework for rodent skull stripping in multi-center brain MRI." NeuroImage,

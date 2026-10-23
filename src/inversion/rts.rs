@@ -18,6 +18,19 @@
 //! QSM.jl. QSM.jl works on real-to-complex FFTs; here the full complex FFT is used, and the
 //! LSMR inner products are taken over the half spectrum QSM.jl stores (`kx` index
 //! `0..=nx/2`) so its scalars are the same.
+//!
+//! # Reference pipeline
+//! QSM.jl's README example (commit fde4b92, L35-52) ends in `rts`: FSL BET on the last echo's
+//! magnitude (`-f 0.5`), eroded by 5 voxels; Laplacian unwrapping of each echo, each scaled to
+//! ppm by its own TE; V-SHARP with QSM.jl's defaults (radii `18*min(vsz)` down to `2*max(vsz)`
+//! mm in steps of `2*max(vsz)`, threshold 0.05; `src/bgremove/sharp.jl` L136-137); then `rts` on
+//! the (per-echo) local field. QSM.jl's `pad = (0, 0, 0)` pads to a fast FFT size only; this
+//! port does not pad.
+//!
+//! # Pipeline rules
+//!
+//! The facts above that a configuration can depart from are published as rules in
+//! [`crate::pipeline::rules::RULES`] (each with its reason and source): `rts.bg-vsharp`.
 
 use num_complex::Complex64;
 use crate::fft::Fft3dWorkspace;

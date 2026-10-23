@@ -15,6 +15,24 @@
 //! axis-permutation for strongly oblique fields (`|dir_y| > |dir_z|`) is not applied.
 //!
 //! Weights are not bundled; the caller passes the exported `iqsm-plus.onnx` bytes.
+//!
+//! # Reference pipeline
+//!
+//! As for [iQSM](mod@crate::inversion::iqsm) (normalisation, `bet2 -f 0.5` default mask), with two
+//! differences in the authors' `sunhongfu/iQSM_Plus` code:
+//!
+//! - **Resampling:** `inference.py:443-471` (and `legacy/matlab/iQSM_plus.m:175-210`) interpolates
+//!   anisotropic phase to an isotropic grid at the finest voxel size in the complex domain whenever
+//!   the rounded grid would change. This crate does not resample.
+//! - **Phase masking:** `inference.py:425` and `legacy/matlab/fcns/Save_Input_iQSMplus.m` multiply
+//!   the phase by the *unmodified* mask before erosion. This crate does not; with an erosion radius
+//!   of at least 1 that cannot change the result, since the 3×3×3 LoT stencil only reaches voxels
+//!   inside the unmodified mask wherever its output survives the eroded mask.
+//!
+//! # Pipeline rules
+//!
+//! The facts above that a configuration can depart from are published as rules in
+//! [`crate::pipeline::rules::RULES`] (each with its reason and source): `iqsm.mask-bet`.
 
 use crate::grid::Grid;
 use crate::inversion::iqsm::{combine_echoes, sphere_erode, tiled_echo, Net};
@@ -44,7 +62,9 @@ pub fn iqsm_plus(
     iqsm_plus_with(&|i| model.run(i), phase_rad, mask, grid, te, b0, b0_dir, phase_sign, eroded_rad, true)
 }
 
-/// Multi-echo iQSM+: reconstruct each echo and combine with magnitude·TE² weights.
+/// Multi-echo iQSM+: reconstruct each echo and combine with magnitude·TE² weights, as
+/// [`iqsm_multi_echo`](super::iqsm::iqsm_multi_echo) does (see there for how the authors' MATLAB and
+/// Python drivers differ).
 ///
 /// `tile: None` runs each echo on the brain's bounding box in one pass; `Some` runs it patch by
 /// patch, with memory bounded by the patch (an approximation; see [`super::iqsm`]).

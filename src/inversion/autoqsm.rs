@@ -24,6 +24,23 @@
 //! would not be equivalent.
 //!
 //! Weights are not bundled; the caller passes the exported `autoqsm.onnx` bytes.
+//!
+//! # Reference pipeline
+//!
+//! From Wei et al., NeuroImage 2019 (doi:10.1016/j.neuroimage.2019.116064), Methods:
+//!
+//! - **Training data:** 3T GE MR750, 0.86×0.86×1 mm (reconstructed), 256×256 matrix, 8 echoes.
+//! - **Input:** Laplacian-unwrapped total phase of every echo, combined as
+//!   `ψ = Σφᵢ / (γ·B0·ΣTEᵢ)` (a TE-weighted mean of `φ/TE`) — a total field in ppm over the whole
+//!   FOV, no brain mask. Labels were STAR-QSM after SMV background removal, masked with FSL BET.
+//! - **Orientation:** training inputs are axial; sagittal/coronal data "should be resliced to the
+//!   axial orientation".
+//! - **Resampling:** the authors' `code/test.py` and `util.data_predict` do not resample.
+//!
+//! # Pipeline rules
+//!
+//! The facts above that a configuration can depart from are published as rules in
+//! [`crate::pipeline::rules::RULES`] (each with its reason and source): `autoqsm.unwrap-laplacian`, `autoqsm.echo-combination`, `autoqsm.echo-weights`.
 
 use crate::grid::Grid;
 use crate::models::onnx::{OnnxModel, OnnxError, Tensor};

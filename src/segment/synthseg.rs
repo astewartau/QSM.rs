@@ -45,12 +45,39 @@
 //!
 //! [`SynthSegParams::low_memory`] combines them for the browser.
 //!
+//! # Reference pipeline
+//!
+//! From the SynthSeg repository (BBillot/SynthSeg 2a2aa3b):
+//!
+//! - **Contrast and resolution.** Any contrast, "any resolution up to 10mm slice spacing"
+//!   (`README.md:5-7`); inputs are resampled to 1 mm (step 1). The reference returns its
+//!   segmentation at 1 mm isotropic (`README.md:105-106,122`); this port maps it back onto the
+//!   input grid (nearest neighbour), and on 1 mm scans matches `mri_synthseg` as above.
+//! - **Orientation.** Needs the image's affine to reorient to RAS (step 2); `synthseg` takes it
+//!   as an argument (the NIfTI sform/qform, as carried by `ScanMetadata::affine`). It does not
+//!   use the B0 direction.
+//! - **Robust model not ported.** `--robust` (SynthSeg-robust) is the authors' variant for scans
+//!   with low SNR or tissue contrast, or clinical data with large slice spacing
+//!   (`README.md:67-70,96-97`; `scripts/commands/SynthSeg_predict.py:38`). Only the non-robust
+//!   network is ported, so thick-slice or low-SNR GRE magnitudes get the model the authors
+//!   suggest replacing for them.
+//! - **Defaults.** Non-robust, flip averaging and topology cleanup on (`--fast` turns both off),
+//!   posterior smoothing 0.5, no crop: [`SynthSegParams::default`] matches.
+//! - **WASM** (4 GiB heap). No whole-volume setting fits (see above); [`SynthSegParams::low_memory`]
+//!   (96³ windows) does. 128³ windows fit only network grids up to about 192×256×128
+//!   ([`SynthSegInference::LOW_MEMORY`]); [`synthseg_network_grid`] gives the grid for a scan.
+//!
 //! Reference:
 //! Billot, B., Greve, D.N., Puonti, O., et al. (2023). "SynthSeg: Segmentation of brain MRI
 //! scans of any contrast and resolution without retraining." Medical Image Analysis, 86:102789.
 //! <https://doi.org/10.1016/j.media.2023.102789>
 //!
 //! Reference implementation: <https://github.com/BBillot/SynthSeg> (Apache-2.0).
+//!
+//! # Pipeline rules
+//!
+//! The facts above that a configuration can depart from are published as rules in
+//! [`crate::pipeline::rules::RULES`] (each with its reason and source): `synthseg.wasm-windows`, `synthseg.wasm-128-window`.
 
 // The pre/post-processing is plain Rust; only inference needs `onnx`.
 #![cfg_attr(not(feature = "onnx"), allow(dead_code))]
@@ -460,6 +487,24 @@ fn ras_alignment(affine: &[f64; 16]) -> ([usize; 3], [bool; 3]) {
 
 fn round_up(n: usize, m: usize) -> usize {
     if n.is_multiple_of(m) { n } else { (n / m + 1) * m }
+}
+
+/// The padded 1 mm grid SynthSeg's network runs on for a scan on `grid`, in the scan's voxel axis
+/// order: resampled to 1 mm (unless within 0.05 mm already), centre-cropped by
+/// [`SynthSegParams::crop`], and padded to a multiple of 32 and at least 128 per axis, as
+/// `preprocess` does. [`SynthSegParams::head_crop`] can only shrink it, so with a head crop this
+/// is an upper bound. This is the grid the memory figures in [`SynthSegInference::LOW_MEMORY`]
+/// refer to (e.g. 192×256×128 for a 184×256×128 1 mm scan).
+pub fn synthseg_network_grid(grid: &Grid, params: &SynthSegParams) -> [usize; 3] {
+    let vs = [grid.vsx(), grid.vsy(), grid.vsz()];
+    let dims = [grid.nx(), grid.ny(), grid.nz()];
+    let resample = vs.iter().any(|&v| (v - TARGET_RES).abs() > 0.05);
+    let min_pad = params.crop.map(|c| round_up(c, DIVISOR)).unwrap_or(MIN_PAD);
+    std::array::from_fn(|i| {
+        let n = if resample { ((dims[i] as f64) * vs[i] / TARGET_RES).ceil().max(1.0) as usize } else { dims[i] };
+        let n = params.crop.map_or(n, |c| round_up(c, DIVISOR).min(n));
+        round_up(n, DIVISOR).max(round_up(min_pad, DIVISOR))
+    })
 }
 
 /// `np.percentile(sorted, q)` with linear interpolation between order statistics.

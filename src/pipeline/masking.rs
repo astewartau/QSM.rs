@@ -21,6 +21,22 @@
 //! when unwrapping multi-echo data. With one echo the RSS is that echo.
 //!
 //! Any homogeneity correction is the caller's, applied to all echoes before they are passed in.
+//!
+//! ## Reference pipeline
+//!
+//! The default section (ROMEO phase quality → Otsu threshold → dilate 1, fill holes, erode 1;
+//! [`MaskingConfig::default`]) is QSMxT's phase-based masking: Stewart, A.W., Robinson, S.D.,
+//! O'Brien, K., et al. (2022). "QSMxT: Robust masking and artifact reduction for quantitative
+//! susceptibility mapping." *Magn Reson Med* 87(3):1289-1300,
+//! <https://doi.org/10.1002/mrm.29048>. The Python QSMxT releases' defaults
+//! (`qsmxt/qsm_pipelines.json:31-45,53`, local copy 75d537c) differ from this one: Otsu scaled by
+//! `threshold_algorithm_factor` 1.5 (and 1.3 for the second pass), hole filling `both`
+//! (morphological and Gaussian), 2 erosions, two-pass masking, and no inhomogeneity correction
+//! (`MaskingConfig::default` has it on). The ROMEO authors' own quality mask is a threshold of
+//! 0.1 on ROMEO's voxel quality (ROMEO.jl `ext/RomeoApp/argparse.jl:38-40`, `caller.jl:205-215`).
+//! The brain-extraction generators (BET, HD-BET, RS2-Net, MindGrab) document their own reference
+//! inputs in their modules; of them only MindGrab needs [`ScanMetadata::affine`], and HD-BET
+//! expects a volume already in MNI-like orientation.
 
 use super::config::*;
 use super::phase_utils::rss_combine;

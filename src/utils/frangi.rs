@@ -40,6 +40,15 @@
 //! - Scales follow MATLAB's colon operator (`a:r:b`, first half `a + k r`, second half
 //!   counted back from the end), and the output is the maximum over scales.
 //!
+//! ## Reference pipeline
+//!
+//! QSMART calls `FrangiFilter3D` with `FrangiAlpha` 0.5, `FrangiBeta` 0.5, `BlackWhite` false
+//! and the demo's `FrangiScaleRange` [0.5 6], `FrangiScaleRatio` 0.5, `FrangiC` 500
+//! (`vasculature_mask.m` l. 25–27, `Demo_QSMART.m` l. 41–43), which the paper calls Kroon's
+//! defaults for vessels (7T human, 0.6 mm; Yaghmaie et al. 2021, §3.4). Its rodent runs used
+//! scales 0.01–0.5 in steps of 0.1 and c = 50; the authors' 7T exemplar run used scales
+//! 0.01:0.01:0.05 (the exemplar above). Scales are in voxels.
+//!
 //! References:
 //! Frangi, A.F., Niessen, W.J., Vincken, K.L., Viergever, M.A. (1998).
 //! "Multiscale vessel enhancement filtering." MICCAI'98, LNCS vol 1496, 130-137.

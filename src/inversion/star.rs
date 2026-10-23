@@ -69,6 +69,31 @@
 //! array on the padded grid. On the in-vivo field above (188×230×230 padded, 5 iterations)
 //! it takes 1.2–1.7 s on 16 cores; iLSQR takes 9 s on the same field and cores.
 //!
+//! # Reference pipeline
+//!
+//! What STI Suite 3.0's `QSM_GUI` runs around `QSM_star`, probed headless in MATLAB R2023b
+//! with logging wrappers (3-echo synthetic head, TE 4/10/16 ms, 1×1×1.5 mm). The "3D GRE data"
+//! + "star QSM" buttons and the "Single button for QSM" path call the same functions:
+//!
+//! - **Chain**: `MRPhaseUnwrap` on the raw, unmasked phase of every echo (default `padsize`,
+//!   12 voxels); the unwrapped echoes **summed** (V-SHARP's input is bitwise `sum(φ, 4)`);
+//!   `V_SHARP(Σφ, mask, 'smvsize', 12)` (no deconvolution; see [`crate::bgremove::vsharp`](mod@crate::bgremove::vsharp));
+//!   then `QSM_star` on V-SHARP's eroded mask.
+//! - **TE**: `QSM_star` gets `'TE'` = the **sum** of the echo times (the GUI's "sum_TE" field:
+//!   30 ms for 4 + 10 + 16; the GUI's "Frequency" output is `TissuePhase/(2π·ΣTE)`), so the
+//!   phase it inverts is the summed phase. STAR's result depends on the phase scale (see
+//!   *Units*), so this matters; [`StarParams::te`] defaults to [`EchoTime::Sum`] for this.
+//! - **Padding**: `[8, 8, 20]` from the GUI ([`STAR_GUI_PAD`]). Called **without** `'padsize'`,
+//!   `QSM_star` pads **0**: its output is bitwise equal to `'padsize', [0 0 0]`, and differs from
+//!   `[12 12 12]` by 8–15 % relative, on three grids (64×64×48 at 1×1×1.5 mm and at 1 mm,
+//!   54×60×40 at 0.8×0.9×2 mm). `[12, 12, 12]` ([`STI_TEMPLATES_STAR_PAD`]) is the default that
+//!   `STI_Templates.m` lists, not what the function does.
+//! - **Masking**: the GUI thresholds the magnitude (`Support_Functions/CreateMask.m`: rescale,
+//!   threshold, largest connected component, fill holes; then the P-coded
+//!   `Getmasking`/`PolishMask`), not BET.
+//! - **Data**: the v3.0 manual's test data are 3T multi-echo human brain GRE (0.9×0.9×2 mm,
+//!   3 echoes), single-echo human and mouse brain, and 2D GRE-EPI.
+//!
 //! Reference:
 //! Wei, H., Dibb, R., Zhou, Y., Sun, Y., Xu, J., Wang, N., Liu, C. (2015). "Streaking artifact
 //! reduction for quantitative susceptibility mapping of sources with large dynamic range."
@@ -77,6 +102,11 @@
 //! Wright, S.J., Nowak, R.D., Figueiredo, M.A.T. (2009). "Sparse reconstruction by separable
 //! approximation." IEEE Trans. Signal Process. 57(7):2479-2493.
 //! <https://doi.org/10.1109/TSP.2009.2016892>
+//!
+//! # Pipeline rules
+//!
+//! The facts above that a configuration can depart from are published as rules in
+//! [`crate::pipeline::rules::RULES`] (each with its reason and source): `sti.unwrap-laplacian`, `sti.laplacian-solver`, `sti.echo-combination`, `sti.echo-weights`, `sti.bg-vsharp`, `sti.vsharp-no-deconvolve`, `sti.vsharp-radius`, `sti.vsharp-grid`, `star.padding`.
 
 use num_complex::Complex64;
 #[cfg(feature = "parallel")]

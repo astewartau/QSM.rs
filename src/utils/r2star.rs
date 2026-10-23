@@ -4,6 +4,14 @@
 //! Research Lab), the ARLO estimator of Pei et al. (2015) as its authors' group implements it.
 //! T2* maps are the reciprocal of R2* ([`t2star_from_r2star`]).
 //!
+//! # Reference pipeline
+//! MEDI's pipeline script (`README.m:133` of the 2024.11.26 release) runs `arlo(TE, abs(iField))`
+//! on the magnitudes of all echoes, unmasked, and uses the result only for the ventricular CSF
+//! mask (`extract_CSF(R2s, Mask, voxel_size)`, R2* < 5 Hz within 30 mm of the mask centroid,
+//! after a 10 mm SMV erosion; `extract_CSF.m:8-37`) and, in the 2024 release, for the
+//! source-separation initialisation. `arlo.m` returns no map for one echo (`arlo.m:22-26`).
+//! Nothing in it depends on the field strength.
+//!
 //! Reference:
 //! Pei, M., Nguyen, T.D., Thimmappa, N.D., Salustri, C., Dong, F., Cooper, M.A., Li, J.,
 //! Prince, M.R., Wang, Y. (2015). "Algorithm for fast monoexponential fitting based on
