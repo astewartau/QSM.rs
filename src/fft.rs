@@ -4,6 +4,10 @@
 //! Uses Fortran (column-major) order indexing to match NIfTI convention.
 
 use num_complex::{Complex32, Complex64};
+#[cfg(feature = "parallel")]
+use num_complex::Complex;
+#[cfg(feature = "parallel")]
+use rustfft::FftNum;
 use rustfft::{Fft, FftPlanner, FftDirection};
 use std::f64::consts::PI;
 use std::sync::Arc;
@@ -28,13 +32,14 @@ unsafe impl Sync for SendPtr {}
 #[cfg(feature = "parallel")]
 #[allow(clippy::mut_from_ref)]
 impl SendPtr {
-    fn new(data: &mut [Complex64]) -> Self {
+    fn new<T>(data: &mut [T]) -> Self {
         Self { ptr: data.as_mut_ptr() as usize, len: data.len() }
     }
-    // SAFETY: Caller must guarantee non-overlapping access patterns across threads.
+    // SAFETY: Caller must guarantee non-overlapping access patterns across threads, and `T`
+    // must be the element type the pointer was made from.
     // Each (k, i) or (j, i) pair accesses a unique strided column of the 3D array.
-    unsafe fn as_slice(&self) -> &mut [Complex64] {
-        std::slice::from_raw_parts_mut(self.ptr as *mut Complex64, self.len)
+    unsafe fn as_slice<T>(&self) -> &mut [T] {
+        std::slice::from_raw_parts_mut(self.ptr as *mut T, self.len)
     }
 }
 
@@ -359,9 +364,26 @@ impl Fft3dWorkspaceF32 {
         }
     }
 
-    /// In-place forward 3D FFT
-    #[inline]
+    /// In-place forward 3D FFT.
+    ///
+    /// With the `parallel` feature the transform runs on rayon threads (the shared
+    /// `transform_3d_par`), otherwise sequentially on the workspace's scratch. Each 1-D
+    /// transform is the same rustfft call on the same values either way, so both paths give
+    /// the same bits.
     pub fn fft3d(&mut self, data: &mut [Complex32]) {
+        #[cfg(feature = "parallel")]
+        {
+            let full = [0..self.nx, 0..self.ny, 0..self.nz];
+            let pass = Pass { scale: None, post: None, load: None, support: full.clone(), needed: full };
+            transform_3d_par(data, self.nx, self.ny, self.nz, &self.fft_x, &self.fft_y, &self.fft_z, &pass);
+        }
+        #[cfg(not(feature = "parallel"))]
+        self.fft3d_seq(data);
+    }
+
+    /// Sequential forward 3D FFT (reuses pre-allocated scratch).
+    #[allow(dead_code)]
+    fn fft3d_seq(&mut self, data: &mut [Complex32]) {
         let (nx, ny, nz) = (self.nx, self.ny, self.nz);
 
         // Transform along x-axis
@@ -399,9 +421,22 @@ impl Fft3dWorkspaceF32 {
         }
     }
 
-    /// In-place inverse 3D FFT (with normalization)
-    #[inline]
+    /// In-place inverse 3D FFT (with normalization); parallel under the `parallel` feature,
+    /// with the same bits as the sequential path (see [`Self::fft3d`]).
     pub fn ifft3d(&mut self, data: &mut [Complex32]) {
+        #[cfg(feature = "parallel")]
+        {
+            let full = [0..self.nx, 0..self.ny, 0..self.nz];
+            let pass = Pass { scale: Some(self.n_total as f32), post: None, load: None, support: full.clone(), needed: full };
+            transform_3d_par(data, self.nx, self.ny, self.nz, &self.ifft_x, &self.ifft_y, &self.ifft_z, &pass);
+        }
+        #[cfg(not(feature = "parallel"))]
+        self.ifft3d_seq(data);
+    }
+
+    /// Sequential inverse 3D FFT (reuses pre-allocated scratch).
+    #[allow(dead_code)]
+    fn ifft3d_seq(&mut self, data: &mut [Complex32]) {
         let (nx, ny, nz) = (self.nx, self.ny, self.nz);
         let n_total = self.n_total as f32;
 
@@ -446,21 +481,47 @@ impl Fft3dWorkspaceF32 {
     }
 
     /// Apply dipole convolution in-place: out = real(ifft(D * fft(x)))
+    ///
+    /// Any real kernel works (e.g. D² for D applied twice). Under `parallel` the real-to-complex
+    /// load is fused into the forward transform's first pass and the kernel multiply into its
+    /// last, and the steps run on rayon threads; every value is computed with the same
+    /// operations as the sequential path, so the output bits are the same.
     #[inline]
     pub fn apply_dipole_inplace(&mut self, x: &[f32], d_kernel: &[f32], out: &mut [f32], complex_buf: &mut [Complex32]) {
+        #[cfg(feature = "parallel")]
+        {
+            let (nx, ny, nz) = (self.nx, self.ny, self.nz);
+            let full = [0..nx, 0..ny, 0..nz];
+            let load = |l: usize, row: &mut [Complex32]| {
+                for (c, &r) in row.iter_mut().zip(&x[l..]) {
+                    *c = Complex32::new(r, 0.0);
+                }
+            };
+            let fwd = Pass { scale: None, post: Some(d_kernel), load: Some(&load), support: full.clone(), needed: full.clone() };
+            transform_3d_par(complex_buf, nx, ny, nz, &self.fft_x, &self.fft_y, &self.fft_z, &fwd);
+            let inv = Pass { scale: Some(self.n_total as f32), post: None, load: None, support: full.clone(), needed: full };
+            transform_3d_par(complex_buf, nx, ny, nz, &self.ifft_x, &self.ifft_y, &self.ifft_z, &inv);
+            out.par_iter_mut().zip(complex_buf.par_iter()).for_each(|(o, c)| *o = c.re);
+        }
+        #[cfg(not(feature = "parallel"))]
+        self.apply_dipole_seq(x, d_kernel, out, complex_buf);
+    }
+
+    #[allow(dead_code)]
+    fn apply_dipole_seq(&mut self, x: &[f32], d_kernel: &[f32], out: &mut [f32], complex_buf: &mut [Complex32]) {
         // Copy real to complex buffer
         for (c, &r) in complex_buf.iter_mut().zip(x.iter()) {
             *c = Complex32::new(r, 0.0);
         }
 
-        self.fft3d(complex_buf);
+        self.fft3d_seq(complex_buf);
 
         // Multiply by kernel
         for (c, &d) in complex_buf.iter_mut().zip(d_kernel.iter()) {
             *c *= d;
         }
 
-        self.ifft3d(complex_buf);
+        self.ifft3d_seq(complex_buf);
 
         // Extract real part
         for (o, c) in out.iter_mut().zip(complex_buf.iter()) {
@@ -502,15 +563,19 @@ fn seq_prepare(data: &mut [Complex64], nx: usize, ny: usize, load: Option<RowLoa
 #[cfg(feature = "parallel")]
 const COL_BLOCK: usize = 16;
 
+/// [`RowLoader`] for either precision
+#[cfg(feature = "parallel")]
+type RowLoaderOf<'a, T> = &'a (dyn Fn(usize, &mut [Complex<T>]) + Sync);
+
 /// What a [`transform_3d_par`] call computes besides the three passes of 1-D transforms.
 #[cfg(feature = "parallel")]
-struct Pass<'a> {
+struct Pass<'a, T: FftNum> {
     /// divide by this in the last pass's write-back (the inverse transform's N)
-    scale: Option<f64>,
+    scale: Option<T>,
     /// then multiply by this real array
-    post: Option<&'a [f64]>,
+    post: Option<&'a [T]>,
     /// x lines come from this instead of the buffer
-    load: Option<RowLoader<'a>>,
+    load: Option<RowLoaderOf<'a, T>>,
     /// the input is zero outside this box
     support: Box3,
     /// only this box of the output is needed
@@ -533,23 +598,23 @@ struct Pass<'a> {
 /// input or not needed on output. `scale` and `post` are applied in the z pass's write-back.
 #[cfg(feature = "parallel")]
 #[allow(clippy::too_many_arguments)]
-fn transform_3d_par(
-    data: &mut [Complex64],
+fn transform_3d_par<T: FftNum>(
+    data: &mut [Complex<T>],
     nx: usize, ny: usize, nz: usize,
-    plan_x: &Arc<dyn Fft<f64>>,
-    plan_y: &Arc<dyn Fft<f64>>,
-    plan_z: &Arc<dyn Fft<f64>>,
-    pass: &Pass,
+    plan_x: &Arc<dyn Fft<T>>,
+    plan_y: &Arc<dyn Fft<T>>,
+    plan_z: &Arc<dyn Fft<T>>,
+    pass: &Pass<T>,
 ) {
     let nxy = nx * ny;
-    let zero = Complex64::new(0.0, 0.0);
+    let zero = Complex::new(T::zero(), T::zero());
     let (s, r) = (&pass.support, &pass.needed);
 
     // x-axis: contiguous rows of length nx, ~64 KiB of rows per task.
     {
         let slen = plan_x.get_inplace_scratch_len();
         let s0_full = s[0].len() == nx;
-        let prep = |l: usize, row: &mut [Complex64]| {
+        let prep = |l: usize, row: &mut [Complex<T>]| {
             if let Some(load) = pass.load {
                 load(l, row);
             }
@@ -601,7 +666,7 @@ fn transform_3d_par(
                 let (k, i0) = (kr.start + t / nb, ir.start + (t % nb) * COL_BLOCK);
                 let w = COL_BLOCK.min(ir.end - i0);
                 // SAFETY: distinct (k, block) → disjoint sets of (i, k) columns.
-                let slice = unsafe { data_send.as_slice() };
+                let slice = unsafe { data_send.as_slice::<Complex<T>>() };
                 let buf = &mut buffer[..w * ny];
                 for j in 0..ny {
                     if s[1].contains(&j) {
@@ -632,7 +697,7 @@ fn transform_3d_par(
                 let (j, i0) = (jr.start + t / nb, ir.start + (t % nb) * COL_BLOCK);
                 let w = COL_BLOCK.min(ir.end - i0);
                 // SAFETY: distinct (j, block) → disjoint sets of (i, j) columns.
-                let slice = unsafe { data_send.as_slice() };
+                let slice = unsafe { data_send.as_slice::<Complex<T>>() };
                 let buf = &mut buffer[..w * nz];
                 for k in 0..nz {
                     if s[2].contains(&k) {
@@ -1075,6 +1140,36 @@ mod tests {
             ws.ifft3d_seq(&mut a);
             ws.ifft3d_par(&mut b);
             assert_eq!(a, b, "ifft {:?}", (nx, ny, nz));
+        }
+    }
+
+    /// The same for the f32 workspace, and for its fused `apply_dipole_inplace`.
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn test_workspace_f32_parallel_bitwise_equals_sequential() {
+        use num_complex::Complex32;
+        for &(nx, ny, nz) in &[(44, 50, 12), (33, 7, 5), (1, 9, 6), (20, 1, 3), (352, 4, 6)] {
+            let n = nx * ny * nz;
+            let input: Vec<Complex32> = (0..n)
+                .map(|i| Complex32::new((i as f32 * 0.37).sin(), (i as f32 * 0.71).cos()))
+                .collect();
+            let mut ws = super::Fft3dWorkspaceF32::new(nx, ny, nz);
+            let (mut a, mut b) = (input.clone(), input.clone());
+            ws.fft3d_seq(&mut a);
+            ws.fft3d(&mut b);
+            assert_eq!(a, b, "fft {:?}", (nx, ny, nz));
+            ws.ifft3d_seq(&mut a);
+            ws.ifft3d(&mut b);
+            assert_eq!(a, b, "ifft {:?}", (nx, ny, nz));
+
+            let x: Vec<f32> = (0..n).map(|i| (i as f32 * 0.23).sin()).collect();
+            let k: Vec<f32> = (0..n).map(|i| (i as f32 * 0.11).cos()).collect();
+            let (mut oa, mut ob) = (vec![0.0f32; n], vec![0.0f32; n]);
+            let mut buf = vec![Complex32::new(f32::NAN, 1.0); n];
+            ws.apply_dipole_seq(&x, &k, &mut oa, &mut buf);
+            buf.fill(Complex32::new(f32::NAN, 1.0));
+            ws.apply_dipole_inplace(&x, &k, &mut ob, &mut buf);
+            assert_eq!(oa, ob, "apply_dipole {:?}", (nx, ny, nz));
         }
     }
 
