@@ -76,6 +76,8 @@ use rayon::prelude::*;
 
 use std::f64::consts::PI;
 
+use crate::error::{check_len, InputError};
+
 /// Gyromagnetic constant used by the DECOMPOSE reference: `42.58 · 2π` — the reference
 /// implementation's value (`signalModel.m`), not `crate::constants`. Keep it.
 const GAMMA: f64 = 42.58 * 2.0 * PI;
@@ -93,6 +95,17 @@ pub struct DecomposeParams {
     /// Max Levenberg–Marquardt iterations per fit stage (reference lsqcurvefit
     /// defaults to a trust-region solve; 30 is ample for these 1–3 parameter fits).
     pub max_lm_iter: usize,
+}
+
+impl DecomposeParams {
+    /// Checks `chi_bound`, the upper bound on |χ| in the fit: it must be ≥ 0 (a negative bound
+    /// leaves the fit's lower bound above its upper one).
+    pub fn validate(&self) -> Result<(), InputError> {
+        if self.chi_bound.is_nan() || self.chi_bound < 0.0 {
+            return Err(InputError::param("DECOMPOSE chi_bound", self.chi_bound, ">= 0 ppm"));
+        }
+        Ok(())
+    }
 }
 
 impl Default for DecomposeParams {
@@ -133,16 +146,15 @@ pub fn decompose(
     mask: &[u8],
     params: &DecomposeParams,
     mut progress: impl FnMut(usize, usize),
-) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
+) -> Result<super::ChiSepMaps, InputError> {
+    params.validate()?;
     let n = chi_total.len();
     let ne = echo_times.len();
-    assert_eq!(
-        magnitude.len(),
-        n * ne,
-        "magnitude must be n_voxels * n_echoes"
-    );
-    assert_eq!(mask.len(), n, "mask length must match chi_total");
-    assert!(ne >= 3, "DECOMPOSE needs at least 3 echoes");
+    if ne < 3 {
+        return Err(InputError::new(format!("DECOMPOSE needs at least 3 echoes, got {ne}")));
+    }
+    check_len("DECOMPOSE magnitude (n_voxels * n_echoes)", magnitude.len(), n * ne)?;
+    check_len("DECOMPOSE mask", mask.len(), n)?;
 
     let b0 = params.b0;
     let te = echo_times;
@@ -219,7 +231,7 @@ pub fn decompose(
         chi_out[i] = pos + neg;
     }
     progress(total, total);
-    (chi_pos, chi_neg, chi_out)
+    Ok((chi_pos, chi_neg, chi_out))
 }
 
 /// Reusable scratch for one voxel's fit. Every buffer is fully overwritten
@@ -716,7 +728,7 @@ mod tests {
         }
         let chi_total = vec![chi_total_val; n];
         let mask = vec![1u8; n];
-        let (pos, neg, tot) = decompose(&chi_total, &mag, &te, &mask, &params, |_, _| {});
+        let (pos, neg, tot) = decompose(&chi_total, &mag, &te, &mask, &params, |_, _| {}).unwrap();
         // Sign convention + invariant.
         assert!(pos[0] >= 0.0, "χ+ must be ≥ 0");
         assert!(neg[0] <= 0.0, "χ− must be ≤ 0");
@@ -772,7 +784,7 @@ mod tests {
                 })
                 .collect();
             let (pos, _neg, _tot) =
-                decompose(&[chip + chim], &mag, &te, &[1u8], &params, |_, _| {});
+                decompose(&[chip + chim], &mag, &te, &[1u8], &params, |_, _| {}).unwrap();
             assert!(
                 pos[0] > 0.0,
                 "χ+ collapsed to zero at χ+={chip} (χ_total={}, threshold {threshold:.4})",
@@ -815,7 +827,7 @@ mod tests {
             let r2s = r2 + dr_pos * chip + dr_neg * chim.abs();
             let mag: Vec<f64> = te.iter().map(|&t| (-r2s * t).exp()).collect();
             let (pos, _neg, _tot) =
-                decompose(&[chip + chim], &mag, &te, &[1u8], &params, |_, _| {});
+                decompose(&[chip + chim], &mag, &te, &[1u8], &params, |_, _| {}).unwrap();
             assert!(
                 pos[0] > 0.3 * chip,
                 "dropout at χ+={chip:.2}: recovered {:.5} (gain {:.3})",
@@ -853,7 +865,7 @@ mod tests {
 
         let mut last = (0usize, 0usize);
         let (pos, neg, tot) =
-            decompose(&chi_total, &mag, &te, &mask, &params, |i, t| last = (i, t));
+            decompose(&chi_total, &mag, &te, &mask, &params, |i, t| last = (i, t)).unwrap();
 
         // Masked-out and all-zero voxels stay at zero.
         assert_eq!((pos[0], neg[0], tot[0]), (0.0, 0.0, 0.0), "masked voxel");
@@ -865,5 +877,22 @@ mod tests {
         }
         // Progress reported completion over the 3 masked voxels.
         assert_eq!(last, (3, 3), "final progress");
+    }
+
+    /// #199: a negative `chi_bound` panicked inside the fit; it is an error now, as are the
+    /// shape problems that used to be asserts.
+    #[test]
+    fn negative_chi_bound_and_bad_shapes_are_errors() {
+        let te = [0.004, 0.008, 0.012];
+        let mag = [1.0, 0.9, 0.8];
+        for bad in [-0.1, f64::NAN] {
+            let params = DecomposeParams { chi_bound: bad, ..Default::default() };
+            let err = decompose(&[0.0], &mag, &te, &[1u8], &params, |_, _| {}).unwrap_err();
+            assert!(err.0.contains("DECOMPOSE chi_bound") && err.0.contains(">= 0"), "{err}");
+        }
+        let ok = DecomposeParams::default();
+        assert!(decompose(&[0.0], &mag[..2], &te[..2], &[1u8], &ok, |_, _| {}).is_err());
+        assert!(decompose(&[0.0], &mag[..2], &te, &[1u8], &ok, |_, _| {}).is_err());
+        assert!(decompose(&[0.0], &mag, &te, &[1u8, 1], &ok, |_, _| {}).is_err());
     }
 }

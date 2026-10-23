@@ -336,7 +336,7 @@ pub fn swi_magnitude<M: AsRef<[f64]>>(
     let mut combined = combine_magnitude(mags, params.mag_combine)?;
     if let Sensitivity::Estimate { sigma_mm } = params.sensitivity {
         let sigma_mm = sigma_mm.unwrap_or_else(|| default_sensitivity_sigma_mm(grid));
-        let sensitivity = get_sensitivity(mags[0].as_ref(), grid, sigma_mm, 15);
+        let sensitivity = get_sensitivity(mags[0].as_ref(), grid, sigma_mm, 15)?;
         for (c, &s) in combined.iter_mut().zip(&sensitivity) {
             if s.is_finite() && s > 0.0 {
                 *c /= s;

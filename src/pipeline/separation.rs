@@ -109,14 +109,14 @@ pub fn run_separation(
             let r2prime = need(inputs.r2prime, "r2prime")?;
             crate::separation::wavesep(
                 inputs.qsm, r2prime, mask, &grid, &config.wavesep, progress,
-            )
+            )?
         }
         SeparationAlgorithm::Decompose => {
             let magnitude = need(inputs.magnitude_multi, "magnitude_multi")?;
             let params = DecomposeParams { b0, ..config.decompose.clone() };
             crate::separation::decompose(
                 inputs.qsm, magnitude, &metadata.echo_times, mask, &params, progress,
-            )
+            )?
         }
         SeparationAlgorithm::HcChisep => {
             let r2prime = need(inputs.r2prime, "r2prime")?;

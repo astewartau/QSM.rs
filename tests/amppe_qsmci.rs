@@ -65,7 +65,7 @@ fn amp_pe_bids_quality() {
     };
 
     let t = Instant::now();
-    let chi = amp_pe(&lf.data, &mask, None, None, &grid, (0.0, 0.0, 1.0), &params, |_, _| {});
+    let chi = amp_pe(&lf.data, &mask, None, None, &grid, (0.0, 0.0, 1.0), &params, |_, _| {}).unwrap();
     let elapsed = t.elapsed();
 
     let corr = correlation(&chi, &gt.data, &mask);

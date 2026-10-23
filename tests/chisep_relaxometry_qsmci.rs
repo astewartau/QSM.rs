@@ -84,7 +84,7 @@ fn test_wavesep_qsmci() {
                 println!("  iter {}/{}", i, tot);
             }
         },
-    );
+    ).unwrap();
     let secs = t.elapsed().as_secs_f64();
     println!("[INFO] WaveSep done in {:.2?}", t.elapsed());
 
@@ -121,7 +121,7 @@ fn test_decompose_qsmci() {
         &ph.mask,
         &params,
         |_, _| {},
-    );
+    ).unwrap();
     let secs = t.elapsed().as_secs_f64();
     println!("[INFO] DECOMPOSE done in {:.2?}", t.elapsed());
 

@@ -36,6 +36,7 @@
 use crate::fft::Fft3dWorkspace;
 use crate::inversion::admm::prepare_fansi_spectral;
 use crate::utils::special::{erfc, erfcx};
+use crate::error::InputError;
 use crate::utils::wavelet::WaveletPlan;
 use crate::Grid;
 use num_complex::Complex64;
@@ -105,6 +106,25 @@ impl Default for AmpPeParams {
         }
     }
 }
+
+impl AmpPeParams {
+    /// Checks the parameters AMP-PE cannot run with: `wave_order` must be a supported
+    /// Daubechies order ([`SUPPORTED_ORDERS`](crate::utils::wavelet::SUPPORTED_ORDERS), 1–4) and
+    /// `nlevel` at most [`MAX_NLEVEL`], since the grid is padded to a multiple of `2^nlevel`.
+    /// [`amp_pe`] also refuses an `nlevel` whose padded grid would not fit in memory's address
+    /// range.
+    pub fn validate(&self) -> Result<(), InputError> {
+        crate::utils::wavelet::check_order("AMP-PE wave_order", self.wave_order)?;
+        if self.nlevel > MAX_NLEVEL {
+            return Err(InputError::param("AMP-PE nlevel", self.nlevel, &format!("<= {MAX_NLEVEL}")));
+        }
+        Ok(())
+    }
+}
+
+/// Largest `nlevel` whose padding multiple `2^nlevel` fits in a `usize`: 63 on 64-bit targets,
+/// 31 on wasm32.
+pub const MAX_NLEVEL: usize = usize::BITS as usize - 1;
 
 /// Sample variance (MATLAB `var`, normalized by `n-1`).
 fn var(v: &[f64]) -> f64 {
@@ -218,14 +238,20 @@ pub fn amp_pe(
     bdir: (f64, f64, f64),
     params: &AmpPeParams,
     mut progress: impl FnMut(usize, usize),
-) -> Vec<f64> {
+) -> Result<Vec<f64>, InputError> {
+    params.validate()?;
     let orig = (grid.nx(), grid.ny(), grid.nz());
     let pad_mult = 1usize << params.nlevel;
-    let pad = (
-        orig.0.div_ceil(pad_mult) * pad_mult,
-        orig.1.div_ceil(pad_mult) * pad_mult,
-        orig.2.div_ceil(pad_mult) * pad_mult,
-    );
+    let up = |n: usize| n.div_ceil(pad_mult).checked_mul(pad_mult);
+    let pad = match (up(orig.0), up(orig.1), up(orig.2)) {
+        (Some(a), Some(b), Some(c)) if a.checked_mul(b).and_then(|ab| ab.checked_mul(c)).is_some() => (a, b, c),
+        _ => {
+            return Err(InputError(format!(
+                "AMP-PE nlevel = {} pads the {}x{}x{} grid past the addressable size",
+                params.nlevel, orig.0, orig.1, orig.2,
+            )))
+        }
+    };
     let pgrid = Grid::new(
         pad.0,
         pad.1,
@@ -374,7 +400,7 @@ pub fn amp_pe(
             x_curr[i] = 0.0;
         }
     }
-    crop_volume(&x_curr, pad, orig)
+    Ok(crop_volume(&x_curr, pad, orig))
 }
 
 /// Persistent GAMP state carried across linearization iterations.
@@ -1070,7 +1096,7 @@ mod tests {
         }
         let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
         let params = AmpPeParams { max_linearization_ite: 3, ..Default::default() };
-        let chi = amp_pe(&field, &mask, None, None, &grid, (0.0, 0.0, 1.0), &params, |_, _| {});
+        let chi = amp_pe(&field, &mask, None, None, &grid, (0.0, 0.0, 1.0), &params, |_, _| {}).unwrap();
         assert_eq!(chi.len(), n * n * n);
         for (i, &v) in chi.iter().enumerate() {
             assert!(v.is_finite(), "chi[{i}] not finite: {v}");
@@ -1112,8 +1138,8 @@ mod tests {
 
         let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
         let params = AmpPeParams { max_linearization_ite: 4, ..Default::default() };
-        let a = amp_pe(&with_bg, &mask, None, None, &grid, (0.0, 0.0, 1.0), &params, |_, _| {});
-        let b = amp_pe(&masked, &mask, None, None, &grid, (0.0, 0.0, 1.0), &params, |_, _| {});
+        let a = amp_pe(&with_bg, &mask, None, None, &grid, (0.0, 0.0, 1.0), &params, |_, _| {}).unwrap();
+        let b = amp_pe(&masked, &mask, None, None, &grid, (0.0, 0.0, 1.0), &params, |_, _| {}).unwrap();
         let maxerr = a.iter().zip(&b).map(|(x, y)| (x - y).abs()).fold(0.0, f64::max);
         assert!(maxerr < 1e-9, "out-of-mask field leaked into result: maxerr={maxerr}");
     }
@@ -1155,7 +1181,7 @@ mod tests {
         let params = AmpPeParams { max_linearization_ite: 4, ..Default::default() };
 
         GUARD_FIRINGS.with(|c| c.set(0));
-        let chi = amp_pe(&field, &mask, Some(&mag), None, &grid, (0.0, 0.0, 1.0), &params, |_, _| {});
+        let chi = amp_pe(&field, &mask, Some(&mag), None, &grid, (0.0, 0.0, 1.0), &params, |_, _| {}).unwrap();
         let fired = GUARD_FIRINGS.with(|c| c.get());
 
         assert_eq!(
@@ -1173,9 +1199,25 @@ mod tests {
         let mask = vec![1u8; n * n * n];
         let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
         let params = AmpPeParams { max_linearization_ite: 3, ..Default::default() };
-        let chi = amp_pe(&field, &mask, None, None, &grid, (0.0, 0.0, 1.0), &params, |_, _| {});
+        let chi = amp_pe(&field, &mask, None, None, &grid, (0.0, 0.0, 1.0), &params, |_, _| {}).unwrap();
         for &v in &chi {
             assert!(v.is_finite());
         }
+    }
+
+    /// #199: an unsupported wavelet order panicked in the filter lookup, and `nlevel > 63`
+    /// overflowed the padding shift. Both are errors now.
+    #[test]
+    fn bad_wave_order_and_nlevel_are_errors() {
+        let grid = Grid::new(4, 4, 4, 1.0, 1.0, 1.0);
+        let run = |p: AmpPeParams| amp_pe(&[0.0; 64], &[1u8; 64], None, None, &grid, (0.0, 0.0, 1.0), &p, |_, _| {});
+        for o in [0, 5] {
+            let err = run(AmpPeParams { wave_order: o, ..Default::default() }).unwrap_err();
+            assert!(err.0.contains("AMP-PE wave_order") && err.0.contains("1..=4"), "{err}");
+        }
+        let err = run(AmpPeParams { nlevel: 64, ..Default::default() }).unwrap_err();
+        assert!(err.0.contains("AMP-PE nlevel = 64") && err.0.contains("<= 63"), "{err}");
+        let err = run(AmpPeParams { nlevel: 63, ..Default::default() }).unwrap_err();
+        assert!(err.0.contains("past the addressable size"), "{err}");
     }
 }

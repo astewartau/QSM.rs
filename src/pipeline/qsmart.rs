@@ -120,7 +120,8 @@ pub fn run_qsmart(
     };
     let vasc_mask = crate::utils::generate_vasculature_mask(
         mag, mask, &grid, &vasc_params, |_, _| {},
-    );
+    )
+    .map_err(|e| PipelineError::InvalidConfig(format!("QSMART: {e}")))?;
     {
         let vessel_mask: Vec<u8> = vasc_mask.iter().map(|&v| u8::from(v < 0.5)).collect();
         observer.output(outputs::VESSEL_MASK, VolumeRef::Mask(&vessel_mask));

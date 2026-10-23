@@ -47,6 +47,7 @@
 //! Reference implementation: https://github.com/kamesy/QSM.jl
 
 use num_complex::Complex64;
+use crate::error::InputError;
 use crate::Grid;
 use crate::fft::{fft3d, ifft3d};
 use crate::kernels::smv::{smv_kernel, erode_mask_smv};
@@ -124,6 +125,23 @@ pub struct VsharpParams {
 }
 
 impl VsharpParams {
+    /// Checks the parameters V-SHARP cannot run with: `min_radius` (the step between radii)
+    /// must be finite and > 0 — at 0 the radius list never ends — and an
+    /// [`Isotropic`](VsharpGrid::Isotropic) working grid needs a spacing that is finite and > 0.
+    pub fn validate(&self) -> Result<(), InputError> {
+        if !(self.min_radius.is_finite() && self.min_radius > 0.0) {
+            return Err(InputError::param("V-SHARP min_radius", self.min_radius, "finite and > 0 mm"));
+        }
+        if let VsharpGrid::Isotropic { spacing_mm } = self.grid {
+            if !(spacing_mm.is_finite() && spacing_mm > 0.0) {
+                return Err(InputError::param(
+                    "V-SHARP isotropic working grid spacing_mm", spacing_mm, "finite and > 0 mm",
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// The working grid V-SHARP will use on `grid`: [`Self::grid`] resolved by
     /// [`VsharpGrid::resolve`]; never [`VsharpGrid::IsotropicFinest`].
     pub fn working_grid(&self, grid: &Grid) -> VsharpGrid {
@@ -164,28 +182,25 @@ impl Default for VsharpParams {
 /// # Returns
 /// (local_field, eroded_mask)
 ///
-/// # Panics
-/// If the working grid is [`VsharpGrid::Isotropic`] with a spacing that is not finite and > 0.
+/// # Errors
+/// If [`VsharpParams::validate`] rejects `params`.
 pub fn vsharp(
     field: &[f64],
     mask: &[u8],
     grid: &Grid,
     params: &VsharpParams,
     progress: impl FnMut(usize, usize),
-) -> (Vec<f64>, Vec<u8>) {
+) -> Result<(Vec<f64>, Vec<u8>), InputError> {
+    params.validate()?;
     let radii = vsharp_radii(params);
     let deconvolve = params.deconvolve.then_some(params.threshold);
-    match params.working_grid(grid) {
+    Ok(match params.working_grid(grid) {
         VsharpGrid::Native => vsharp_with_radii(field, mask, grid, &radii, deconvolve, progress),
         VsharpGrid::Isotropic { spacing_mm } => {
-            assert!(
-                spacing_mm.is_finite() && spacing_mm > 0.0,
-                "V-SHARP isotropic working grid spacing must be finite and > 0, got {spacing_mm}"
-            );
             vsharp_isotropic(field, mask, grid, spacing_mm, &radii, deconvolve, progress)
         }
         VsharpGrid::IsotropicFinest => unreachable!("working_grid resolves IsotropicFinest"),
-    }
+    })
 }
 
 /// V-SHARP with the background estimated on an isotropic grid of spacing `h` mm anchored at the
@@ -814,14 +829,14 @@ mod tests {
         let (field, mask) = sphere_case(n, 8.0);
         let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
         let base = VsharpParams { max_radius: 4.0, min_radius: 1.0, ..Default::default() };
-        let (dec, dec_mask) = vsharp(&field, &mask, &grid, &base, |_, _| {});
+        let (dec, dec_mask) = vsharp(&field, &mask, &grid, &base, |_, _| {}).unwrap();
         let off = VsharpParams { deconvolve: false, ..base.clone() };
-        let (hp, hp_mask) = vsharp(&field, &mask, &grid, &off, |_, _| {});
+        let (hp, hp_mask) = vsharp(&field, &mask, &grid, &off, |_, _| {}).unwrap();
         // Same voxels either way; the deconvolution changes the values.
         assert_eq!(dec_mask, hp_mask);
         assert!(dec.iter().zip(&hp).any(|(a, b)| (a - b).abs() > 1e-6));
         // The threshold only applies to the deconvolution.
-        let (hp2, _) = vsharp(&field, &mask, &grid, &VsharpParams { threshold: 0.9, ..off }, |_, _| {});
+        let (hp2, _) = vsharp(&field, &mask, &grid, &VsharpParams { threshold: 0.9, ..off }, |_, _| {}).unwrap();
         assert_eq!(hp, hp2);
         for i in 0..n * n * n {
             if hp_mask[i] == 0 { assert_eq!(hp[i], 0.0); }
@@ -891,16 +906,16 @@ mod tests {
             let base = VsharpParams { max_radius: 4.0, deconvolve, ..Default::default() };
             let radii = vsharp_radii(&base);
             let expected = vsharp_with_radii(&field, &mask, &grid, &radii, deconvolve.then_some(base.threshold), |_, _| {});
-            assert_eq!(vsharp(&field, &mask, &grid, &base, |_, _| {}), expected);
+            assert_eq!(vsharp(&field, &mask, &grid, &base, |_, _| {}).unwrap(), expected);
             let finest = VsharpParams { grid: VsharpGrid::IsotropicFinest, ..base.clone() };
-            assert_eq!(vsharp(&field, &mask, &grid, &finest, |_, _| {}), expected);
+            assert_eq!(vsharp(&field, &mask, &grid, &finest, |_, _| {}).unwrap(), expected);
         }
         // anisotropic voxels, default (native)
         let ag = Grid::new(24, 24, 10, 0.8, 0.8, 3.0);
         let (af, am) = ellipsoid_case(ag.dims, ag.voxel_size, [8.0, 8.0, 12.0]);
         let p = VsharpParams { max_radius: 4.0, ..Default::default() };
         let expected = vsharp_with_radii(&af, &am, &ag, &vsharp_radii(&p), Some(p.threshold), |_, _| {});
-        assert_eq!(vsharp(&af, &am, &ag, &p, |_, _| {}), expected);
+        assert_eq!(vsharp(&af, &am, &ag, &p, |_, _| {}).unwrap(), expected);
     }
 
     #[test]
@@ -908,14 +923,14 @@ mod tests {
         let grid = Grid::new(30, 30, 12, 0.8, 0.8, 3.0);
         let (field, mask) = ellipsoid_case(grid.dims, grid.voxel_size, [10.0, 10.0, 14.0]);
         let native = VsharpParams { max_radius: 4.0, deconvolve: false, ..Default::default() };
-        let (ln, mn) = vsharp(&field, &mask, &grid, &native, |_, _| {});
+        let (ln, mn) = vsharp(&field, &mask, &grid, &native, |_, _| {}).unwrap();
         let finest = VsharpParams { grid: VsharpGrid::IsotropicFinest, ..native.clone() };
         assert_eq!(finest.working_grid(&grid), VsharpGrid::Isotropic { spacing_mm: 0.8 });
         let at_finest = VsharpParams { grid: VsharpGrid::Isotropic { spacing_mm: 0.8 }, ..native.clone() };
         let iso1 = VsharpParams { grid: VsharpGrid::Isotropic { spacing_mm: 1.0 }, ..native.clone() };
-        let (lf, mf) = vsharp(&field, &mask, &grid, &finest, |_, _| {});
-        assert_eq!((lf.clone(), mf.clone()), vsharp(&field, &mask, &grid, &at_finest, |_, _| {}));
-        let (l1, m1) = vsharp(&field, &mask, &grid, &iso1, |_, _| {});
+        let (lf, mf) = vsharp(&field, &mask, &grid, &finest, |_, _| {}).unwrap();
+        assert_eq!((lf.clone(), mf.clone()), vsharp(&field, &mask, &grid, &at_finest, |_, _| {}).unwrap());
+        let (l1, m1) = vsharp(&field, &mask, &grid, &iso1, |_, _| {}).unwrap();
         for (l, m) in [(&lf, &mf), (&l1, &m1)] {
             assert!(m.contains(&1));
             assert!(*m != mn || l.iter().zip(&ln).any(|(a, b)| (a - b).abs() > 1e-6));
@@ -929,11 +944,23 @@ mod tests {
     fn test_isotropic_grid_empty_mask_and_bad_spacing() {
         let grid = Grid::new(8, 8, 4, 0.8, 0.8, 3.0);
         let iso1 = VsharpParams { grid: VsharpGrid::Isotropic { spacing_mm: 1.0 }, ..Default::default() };
-        let (l, m) = vsharp(&vec![1.0; 256], &[0u8; 256], &grid, &iso1, |_, _| {});
+        let (l, m) = vsharp(&vec![1.0; 256], &[0u8; 256], &grid, &iso1, |_, _| {}).unwrap();
         assert!(l.iter().all(|&v| v == 0.0) && m.iter().all(|&v| v == 0));
         let bad = VsharpParams { grid: VsharpGrid::Isotropic { spacing_mm: 0.0 }, ..Default::default() };
-        let r = std::panic::catch_unwind(|| vsharp(&vec![1.0; 256], &[1u8; 256], &grid, &bad, |_, _| {}));
-        assert!(r.is_err());
+        let err = vsharp(&vec![1.0; 256], &[1u8; 256], &grid, &bad, |_, _| {}).unwrap_err();
+        assert!(err.0.contains("spacing_mm = 0") && err.0.contains("> 0 mm"), "{err}");
+    }
+
+    /// #199: `min_radius` is also the step between radii, so at 0 (or below, or NaN) the radius
+    /// list never ended and V-SHARP hung. It is an error now.
+    #[test]
+    fn min_radius_that_is_not_positive_is_an_error() {
+        let grid = Grid::new(4, 4, 4, 1.0, 1.0, 1.0);
+        for bad in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            let p = VsharpParams { min_radius: bad, ..Default::default() };
+            let err = vsharp(&[0.0; 64], &[1u8; 64], &grid, &p, |_, _| {}).unwrap_err();
+            assert!(err.0.contains("V-SHARP min_radius") && err.0.contains("> 0 mm"), "{err}");
+        }
     }
 
     /// The QSM.rs V-SHARP ablation prototype's isotropic-grid path (`exp/vsharp-ablation`,
@@ -1057,7 +1084,7 @@ mod tests {
                 ..Default::default()
             };
             let (want, want_mask) = prototype_iso(&field, &mask, &grid, &p);
-            let (got, got_mask) = vsharp(&field, &mask, &grid, &p, |_, _| {});
+            let (got, got_mask) = vsharp(&field, &mask, &grid, &p, |_, _| {}).unwrap();
             assert_eq!(got_mask, want_mask, "support (deconvolve {deconvolve})");
             assert!(got_mask.contains(&1));
             let scale = want.iter().map(|v| v.abs()).fold(0.0, f64::max);

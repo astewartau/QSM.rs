@@ -50,6 +50,8 @@
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
+use crate::error::InputError;
+
 /// Parameters for Frangi vesselness filter
 #[derive(Clone, Debug)]
 pub struct FrangiParams {
@@ -66,6 +68,18 @@ pub struct FrangiParams {
     pub c: f64,
     /// Detect black vessels (true) or white vessels (false)
     pub black_white: bool,
+}
+
+impl FrangiParams {
+    /// Checks `scale_ratio`, the step between scales: it must be finite and > 0. MATLAB's
+    /// `a:0:b` is empty and the reference then fails; a tiny or zero step used to leave the
+    /// scale loop running indefinitely.
+    pub fn validate(&self) -> Result<(), InputError> {
+        if !(self.scale_ratio.is_finite() && self.scale_ratio > 0.0) {
+            return Err(InputError::param("Frangi scale_ratio", self.scale_ratio, "finite and > 0"));
+        }
+        Ok(())
+    }
 }
 
 impl Default for FrangiParams {
@@ -104,15 +118,19 @@ pub struct FrangiResult {
 ///
 /// # Returns
 /// FrangiResult with vesselness map and optimal scale map
+///
+/// # Errors
+/// If [`FrangiParams::validate`] rejects `params`.
 pub fn frangi_filter_3d(
     data: &[f64],
     grid: &crate::Grid,
     params: &FrangiParams,
     progress: impl FnMut(usize, usize),
-) -> FrangiResult {
+) -> Result<FrangiResult, InputError> {
+    params.validate()?;
     let (nx, ny, nz) = grid.dims;
     let input: Vec<f32> = data.iter().map(|&v| v as f32).collect();
-    frangi_filter_3d_inner(&input, nx, ny, nz, params, progress)
+    Ok(frangi_filter_3d_inner(&input, nx, ny, nz, params, progress))
 }
 
 /// MATLAB's colon operator `a:d:b` for `d > 0`: the first half of the points is
@@ -603,7 +621,7 @@ mod tests {
                 .collect()
         };
         let run = |params: FrangiParams| -> Vec<f32> {
-            frangi_filter_3d(&input, &grid(nx, ny, nz), &params, |_, _| {}).vesselness.iter().map(|&v| v as f32).collect()
+            frangi_filter_3d(&input, &grid(nx, ny, nz), &params, |_, _| {}).unwrap().vesselness.iter().map(|&v| v as f32).collect()
         };
         let small = run(FrangiParams { scale_range: [0.01, 0.05], scale_ratio: 0.01, c: 500.0, ..Default::default() });
         let gauss = run(FrangiParams { scale_range: [0.5, 2.0], scale_ratio: 0.5, c: 200.0, ..Default::default() });
@@ -692,7 +710,7 @@ mod tests {
             }
         }
         let params = FrangiParams { scale_range: [1.0, 2.0], scale_ratio: 1.0, c: 10.0, ..Default::default() };
-        let result = frangi_filter_3d(&data, &grid(n, n, n), &params, |_, _| {});
+        let result = frangi_filter_3d(&data, &grid(n, n, n), &params, |_, _| {}).unwrap();
         assert!(result.vesselness.iter().all(|v| v.is_finite() && (0.0..=1.0).contains(v)));
         assert!(result.vesselness.iter().cloned().fold(0.0, f64::max) > 0.0);
         assert!(result.scale.iter().all(|s| *s == 1.0 || *s == 2.0));
@@ -704,12 +722,26 @@ mod tests {
         let data = vec![0.0; n * n * n];
         let mut calls = Vec::new();
         let params = FrangiParams { scale_range: [1.0, 2.0], scale_ratio: 1.0, ..Default::default() };
-        let result = frangi_filter_3d(&data, &grid(n, n, n), &params, |c, t| calls.push((c, t)));
+        let result = frangi_filter_3d(&data, &grid(n, n, n), &params, |c, t| calls.push((c, t))).unwrap();
         assert!(result.vesselness.iter().all(|&v| v == 0.0));
         assert_eq!(calls.last(), Some(&(2, 2)));
         // min > max: falls back to the first scale.
         let params = FrangiParams { scale_range: [5.0, 1.0], scale_ratio: 1.0, ..Default::default() };
-        let result = frangi_filter_3d(&data, &grid(n, n, n), &params, |_, _| {});
+        let result = frangi_filter_3d(&data, &grid(n, n, n), &params, |_, _| {}).unwrap();
         assert_eq!(result.vesselness.len(), n * n * n);
+    }
+
+    /// #199: a `scale_ratio` that is not > 0 is an error, not an endless (or silently
+    /// single-scale) scale loop.
+    #[test]
+    fn scale_ratio_that_is_not_positive_is_an_error() {
+        let n = 4;
+        for bad in [0.0, -0.5, f64::NAN] {
+            let params = FrangiParams { scale_ratio: bad, ..Default::default() };
+            let err = frangi_filter_3d(&vec![0.0; n * n * n], &grid(n, n, n), &params, |_, _| {})
+                .err()
+                .expect("a scale_ratio <= 0 should be refused");
+            assert!(err.0.contains("Frangi scale_ratio") && err.0.contains("> 0"), "{err}");
+        }
     }
 }

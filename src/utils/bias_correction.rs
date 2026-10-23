@@ -30,6 +30,7 @@ impl Default for HomogeneityParams {
 }
 
 use std::collections::VecDeque;
+use crate::error::InputError;
 use crate::Grid;
 use crate::utils::morphology::fill_holes;
 
@@ -775,12 +776,18 @@ fn fill_and_smooth(
 ///
 /// This estimates the RF receive field inhomogeneity (sensitivity map)
 /// that can be divided out to correct the image.
+///
+/// # Errors
+/// If `nbox` (boxes per dimension for the tissue segmentation) is 0.
 pub fn get_sensitivity(
     mag: &[f64],
     grid: &Grid,
     sigma_mm: f64,
     nbox: usize,
-) -> Vec<f64> {
+) -> Result<Vec<f64>, InputError> {
+    if nbox == 0 {
+        return Err(InputError::param("homogeneity nbox", nbox, ">= 1"));
+    }
     let (nx, ny, nz) = grid.dims;
     let (vx, vy, vz) = grid.voxel_size;
     let n_total = check_volume("get_sensitivity: magnitude", mag.len(), grid);
@@ -824,7 +831,7 @@ pub fn get_sensitivity(
     // Fill holes and apply weighted second smoothing
     fill_and_smooth(&mut lowpass, stable_mean, sigma2, grid);
 
-    lowpass
+    Ok(lowpass)
 }
 
 /// Make magnitude homogeneous by dividing by bias field
@@ -840,14 +847,17 @@ pub fn get_sensitivity(
 ///
 /// # Returns
 /// Bias-corrected magnitude
+///
+/// # Errors
+/// If `nbox` is 0 (see [`get_sensitivity`]).
 pub fn makehomogeneous(
     mag: &[f64],
     grid: &Grid,
     sigma_mm: f64,
     nbox: usize,
-) -> Vec<f64> {
+) -> Result<Vec<f64>, InputError> {
     let n_total = check_volume("makehomogeneous: magnitude", mag.len(), grid);
-    let sensitivity = get_sensitivity(mag, grid, sigma_mm, nbox);
+    let sensitivity = get_sensitivity(mag, grid, sigma_mm, nbox)?;
 
     let mut result = vec![0.0; n_total];
     for i in 0..n_total {
@@ -858,7 +868,7 @@ pub fn makehomogeneous(
         }
     }
 
-    result
+    Ok(result)
 }
 
 /// RSS (Root Sum of Squares) magnitude combination
@@ -1404,7 +1414,7 @@ mod tests {
     fn test_get_sensitivity_sphere() {
         let n = 12;
         let (mag, _) = make_sphere_phantom(n, true);
-        let sensitivity = get_sensitivity(&mag, &grid(n, n, n), 4.0, 5);
+        let sensitivity = get_sensitivity(&mag, &grid(n, n, n), 4.0, 5).unwrap();
         assert_eq!(sensitivity.len(), n * n * n);
         // Sensitivity should be finite and mostly positive in the sphere
         let center = n / 2 + (n / 2) * n + (n / 2) * n * n;
@@ -1423,7 +1433,7 @@ mod tests {
     fn test_get_sensitivity_output_size() {
         let n = 10;
         let (mag, _) = make_sphere_phantom(n, false);
-        let sensitivity = get_sensitivity(&mag, &grid(n, n, n), 3.0, 3);
+        let sensitivity = get_sensitivity(&mag, &grid(n, n, n), 3.0, 3).unwrap();
         assert_eq!(sensitivity.len(), n * n * n);
     }
 
@@ -1435,7 +1445,7 @@ mod tests {
     fn test_makehomogeneous_output_size_and_finite() {
         let n = 12;
         let (mag, _) = make_sphere_phantom(n, true);
-        let result = makehomogeneous(&mag, &grid(n, n, n), 4.0, 5);
+        let result = makehomogeneous(&mag, &grid(n, n, n), 4.0, 5).unwrap();
         assert_eq!(result.len(), n * n * n);
         // All output values should be finite
         for (i, &v) in result.iter().enumerate() {
@@ -1447,7 +1457,7 @@ mod tests {
     fn test_makehomogeneous_reduces_bias() {
         let n = 12;
         let (mag_biased, mask) = make_sphere_phantom(n, true);
-        let result = makehomogeneous(&mag_biased, &grid(n, n, n), 4.0, 5);
+        let result = makehomogeneous(&mag_biased, &grid(n, n, n), 4.0, 5).unwrap();
 
         // Collect values inside the sphere
         let mut original_vals = Vec::new();
@@ -1490,7 +1500,7 @@ mod tests {
     fn test_makehomogeneous_no_bias_preserves() {
         let n = 12;
         let (mag, mask) = make_sphere_phantom(n, false);
-        let result = makehomogeneous(&mag, &grid(n, n, n), 4.0, 5);
+        let result = makehomogeneous(&mag, &grid(n, n, n), 4.0, 5).unwrap();
 
         // With no bias, corrected values should still be positive inside sphere
         for i in 0..(n * n * n) {
@@ -1510,7 +1520,7 @@ mod tests {
         let n = 12;
         let (mag, _) = make_sphere_phantom(n, true);
         // Use anisotropic voxel sizes
-        let result = makehomogeneous(&mag, &Grid::new(n, n, n, 0.5, 0.5, 2.0), 4.0, 5);
+        let result = makehomogeneous(&mag, &Grid::new(n, n, n, 0.5, 0.5, 2.0), 4.0, 5).unwrap();
         assert_eq!(result.len(), n * n * n);
         for &v in &result {
             assert!(v.is_finite(), "All output values should be finite");
@@ -1557,7 +1567,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "makehomogeneous: magnitude has 216 voxels but the grid is 8x8x8 (512 voxels)")]
     fn makehomogeneous_refuses_magnitude_shorter_than_grid() {
-        makehomogeneous(&vec![1.0; 6 * 6 * 6], &grid(8, 8, 8), 4.0, 5);
+        let _ = makehomogeneous(&vec![1.0; 6 * 6 * 6], &grid(8, 8, 8), 4.0, 5);
     }
 
     #[test]
@@ -1565,7 +1575,7 @@ mod tests {
     fn makehomogeneous_refuses_magnitude_longer_than_grid() {
         // The over-long case never panicked - it silently corrected the first
         // 512 voxels and discarded the rest, which is worse than a crash.
-        makehomogeneous(&vec![1.0; 10 * 10 * 10], &grid(8, 8, 8), 4.0, 5);
+        let _ = makehomogeneous(&vec![1.0; 10 * 10 * 10], &grid(8, 8, 8), 4.0, 5);
     }
 
     #[test]
@@ -1608,7 +1618,17 @@ mod tests {
     fn makehomogeneous_accepts_a_matching_volume() {
         // The guard must not reject the ordinary case.
         let n = 8;
-        let out = makehomogeneous(&vec![1.0; n * n * n], &grid(n, n, n), 4.0, 5);
+        let out = makehomogeneous(&vec![1.0; n * n * n], &grid(n, n, n), 4.0, 5).unwrap();
         assert_eq!(out.len(), n * n * n);
+    }
+
+    /// #199: `nbox = 0` divided by zero in the box segmentation; it is an error now.
+    #[test]
+    fn zero_nbox_is_an_error() {
+        let n = 8;
+        let mag = vec![1.0; n * n * n];
+        let err = makehomogeneous(&mag, &grid(n, n, n), 4.0, 0).unwrap_err();
+        assert!(err.0.contains("homogeneity nbox = 0") && err.0.contains(">= 1"), "{err}");
+        assert!(get_sensitivity(&mag, &grid(n, n, n), 4.0, 0).is_err());
     }
 }

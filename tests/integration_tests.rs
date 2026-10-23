@@ -212,7 +212,7 @@ fn test_bgremove_vsharp() {
         &grid,
         &VsharpParams::default(),
         |_, _| {},
-    ));
+    ).unwrap());
 
     let res = TestResult::new("V-SHARP", &result, &data.fieldmap_local, &data.mask, data.dims);
     res.print_with_time(elapsed);
@@ -242,7 +242,7 @@ fn test_bgremove_vsharp_no_deconvolve() {
         &grid,
         &params,
         |_, _| {},
-    ));
+    ).unwrap());
 
     let res = TestResult::new("V-SHARP (no deconv.)", &result, &data.fieldmap_local, &data.mask, data.dims);
     res.print_with_time(elapsed);
@@ -343,7 +343,7 @@ fn test_bgremove_msmv() {
 
     let start = Instant::now();
     let (primary, primary_mask) =
-        bgremove::vsharp(&data.fieldmap, &data.mask, &grid, &VsharpParams::default(), |_, _| {});
+        bgremove::vsharp(&data.fieldmap, &data.mask, &grid, &VsharpParams::default(), |_, _| {}).unwrap();
     let params = MsmvParams { b0: data.field_strength, ..MsmvParams::refine() };
     let (result, mask) = bgremove::msmv(&primary, &primary_mask, &grid, &params, |_, _| {});
     let elapsed = start.elapsed();
@@ -817,7 +817,7 @@ fn test_inversion_amp_pe() {
     };
     let (result, elapsed) = run_timed!("AMP-PE", inversion::amp_pe(
         &data.fieldmap_local, &data.mask, None, None, &grid, data.b0_dir, &params, |_, _| {},
-    ));
+    ).unwrap());
 
     let res = TestResult::new("AMP-PE", &result, &data.chi, &data.mask, data.dims);
     res.print_with_time(elapsed);
@@ -1060,7 +1060,7 @@ fn test_bias_correction() {
         &grid,
         7.0,  // sigma_mm
         6,    // nbox
-    ));
+    ).unwrap());
 
     println!("Makehomogeneous {:>10.2?}", elapsed);
     println!("RESULT:Makehomogeneous,-,-,-,-,{:.2}", elapsed.as_secs_f64());
@@ -1557,7 +1557,7 @@ fn unwrap_then_bfr(data: &common::TestData, unwrapper: Unwrapper) -> (Vec<f64>, 
 
     let (local, eroded) = bgremove::vsharp(
         &b0_ppm, &data.mask, &grid, &VsharpParams::default(), |_, _| {},
-    );
+    ).unwrap();
     (b0_ppm, local, eroded)
 }
 
@@ -1690,7 +1690,7 @@ fn test_pipeline_unwrap_bfr_stage_laplacian() {
 
     let (local, eroded_mask) = bgremove::vsharp(
         &field.b0_field_ppm, &data.mask, &grid, &VsharpParams::default(), |_, _| {},
-    );
+    ).unwrap();
     let elapsed = start.elapsed();
 
     let res = TestResult::new(
@@ -1934,7 +1934,7 @@ fn benchmark_all_algorithms() {
         &data.fieldmap, &data.mask, &grid,
         &VsharpParams::default(),
         |_, _| {}
-    ));
+    ).unwrap());
     TestResult::new("V-SHARP", &result, &data.fieldmap_local, &data.mask, data.dims).print_with_time(elapsed);
 
     // PDF (PDF.m defaults, Fit_ppm_complex noise map)
@@ -2095,7 +2095,7 @@ fn test_all_combinations() {
         &data.fieldmap, &data.mask, &grid,
         &VsharpParams::default(),
         |_, _| {}
-    ));
+    ).unwrap());
     TestResult::new("V-SHARP", &result, &data.fieldmap_local, &data.mask, data.dims).print_with_time(elapsed);
     bfr_results.push(BfrResult { name: "V-SHARP".into(), local_field: result, mask, elapsed });
 
@@ -2250,7 +2250,7 @@ fn test_all_combinations() {
         let vasc_mask = generate_vasculature_mask(
             &data.mag_echoes[0], &data.mask, &grid,
             &VasculatureParams::default(), |_, _| {},
-        );
+        ).unwrap();
 
         let mask_f64: Vec<f64> = data.mask.iter().map(|&v| v as f64).collect();
         let weighted_mask: Vec<f64> = mask_f64.iter()

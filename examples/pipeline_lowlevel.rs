@@ -47,7 +47,7 @@ fn main() {
 
     // 3. Background field removal (V-SHARP)
     let (local_field, eroded_mask) =
-        bgremove::vsharp(&unwrapped, &mask, &grid, &VsharpParams::default(), |_, _| {});
+        bgremove::vsharp(&unwrapped, &mask, &grid, &VsharpParams::default(), |_, _| {}).unwrap();
 
     // 4. Dipole inversion (Total Variation via ADMM)
     let chi = inversion::tv_admm(

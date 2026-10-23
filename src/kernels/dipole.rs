@@ -10,6 +10,13 @@
 use crate::fft::fftfreq;
 use crate::Grid;
 
+/// Largest |D(k)| the dipole kernel takes: `D = 1/3 − cos²θ` spans `[−2/3, 1/3]`, so |D| ≤ 2/3.
+///
+/// A k-space truncation threshold on |D| (TKD, TSVD, RTS's well-conditioned set, HEIDI's
+/// cone) at or above this value truncates every frequency, and the result is all zero or all
+/// regularisation. Hosts bounding such a threshold should take the limit from here.
+pub const MAX_ABS_DIPOLE: f64 = 2.0 / 3.0;
+
 /// Generate dipole kernel in k-space
 ///
 /// Creates the dipole kernel D(k) = 1/3 - (kz)²/|k|² (for B = [0,0,1])
@@ -182,6 +189,16 @@ mod tests {
                         i, j, k, i_neg, j_neg, k_neg, d[idx1], d[idx2]);
                 }
             }
+        }
+    }
+
+    #[test]
+    fn max_abs_dipole_bounds_the_kernel() {
+        let grid = Grid::new(9, 8, 7, 1.0, 1.2, 0.8);
+        for bdir in [(0.0, 0.0, 1.0), (0.3, 0.2, 0.93)] {
+            let d = dipole_kernel(&grid, bdir);
+            let max = d.iter().fold(0.0f64, |m, v| m.max(v.abs()));
+            assert!(max <= MAX_ABS_DIPOLE + 1e-12, "{max}");
         }
     }
 }

@@ -1132,8 +1132,8 @@ impl TgvWorkspace {
 /// Returns χ in ppm.
 ///
 /// # Errors
-/// If the input or mask length does not match `grid`, or if `te_s` or `b0_t` is not
-/// positive and finite.
+/// If the input or mask length does not match `grid`, if `te_s` or `b0_t` is not
+/// positive and finite, or if the mask is empty after `params.erosions` erosions.
 ///
 /// The reconstruction runs in single precision internally; inputs and
 /// outputs use `f64` to match the rest of the crate's API.
@@ -1178,6 +1178,18 @@ pub fn tgv_qsm(
     let mut mask_eroded = mask.to_vec();
     for _ in 0..params.erosions {
         mask_eroded = erode_mask(&mask_eroded, &full_grid, 1);
+    }
+    // The bounding box below has no extent for an empty mask (its size underflowed).
+    if !mask_eroded.iter().any(|&m| m != 0) {
+        return Err(if mask.iter().any(|&m| m != 0) {
+            InputError::param(
+                "TGV erosions",
+                params.erosions,
+                "small enough to leave part of the mask (this mask erodes away)",
+            )
+        } else {
+            InputError::new("TGV mask is empty")
+        });
     }
 
     // Create mask0 (one more erosion for internal computations)
@@ -1870,5 +1882,23 @@ mod tests {
         // and a mask of the wrong size is an error, not a panic
         let input = TgvInput::FieldPpm { field: &phase, te_s: 0.02, b0_t: 3.0 };
         assert!(tgv_qsm(input, &mask[1..], &grid, &TgvParams::default(), (0.0, 0.0, 1.0), |_, _| {}).is_err());
+    }
+
+    /// #199: erosions that empty the mask underflowed the bounding-box size; an empty mask, or
+    /// one eroded away, is an error now.
+    #[test]
+    fn mask_eroded_away_is_an_error() {
+        let n = 8;
+        let grid = crate::Grid::new(n, n, n, 1.0, 1.0, 1.0);
+        let field = vec![0.0; n * n * n];
+        let mut mask = vec![0u8; n * n * n];
+        mask[3 + 3 * n + 3 * n * n] = 1; // one voxel: gone after a single erosion
+        let p = TgvParams { erosions: 1, iterations: Some(1), ..Default::default() };
+        let input = TgvInput::FieldPpm { field: &field, te_s: 0.02, b0_t: 3.0 };
+        let err = tgv_qsm(input, &mask, &grid, &p, (0.0, 0.0, 1.0), |_, _| {}).unwrap_err();
+        assert!(err.0.contains("TGV erosions = 1"), "{err}");
+        let input = TgvInput::FieldPpm { field: &field, te_s: 0.02, b0_t: 3.0 };
+        let err = tgv_qsm(input, &[0u8; 512], &grid, &p, (0.0, 0.0, 1.0), |_, _| {}).unwrap_err();
+        assert!(err.0.contains("TGV mask is empty"), "{err}");
     }
 }
