@@ -8,7 +8,7 @@
 //! - Real/imaginary to magnitude/phase conversion with slice-chopping correction
 //! - Multi-echo field mapping (phase offset removal, B0 estimation)
 //! - Bias field correction (makehomogeneous; N4 as in ANTs)
-//! - Frangi vesselness filter for vessel detection
+//! - Frangi vesselness filter for vessel detection, and MATLAB's `fibermetric`
 //! - Surface curvature calculation
 //! - Vasculature mask generation
 //! - QSMART offset adjustment and utilities
@@ -22,6 +22,7 @@ pub mod multi_echo;
 pub mod bias_correction;
 pub mod n4;
 pub mod frangi;
+pub mod fibermetric;
 pub mod curvature;
 pub mod vasculature;
 pub mod qsmart;
@@ -52,6 +53,7 @@ pub use multi_echo::*;
 pub use bias_correction::*;
 pub use n4::{n4_bias_correction, N4Output, N4Params};
 pub use frangi::*;
+pub use fibermetric::{fibermetric, FiberPolarity, FIBERMETRIC_DEFAULT_C};
 pub use curvature::*;
 pub use vasculature::*;
 pub use qsmart::*;

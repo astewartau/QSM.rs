@@ -62,6 +62,22 @@
 //! `zeropad` pads the volume at the end of each axis before the inversion and crops the result,
 //! as `MEDI_L1`'s `'zeropad'` option does.
 //!
+//! # MEDI-mSMV
+//! [`MediParams::msmv`] is `MEDI_L1(..., 'msmv', radius)` from the mSMV authors' MEDI toolbox
+//! (agr78/mSMV, `prerelease/MEDI_toolbox-mSMV100125.zip`; Roberts et al. 2024, Eq. 12): SMV is
+//! on with radius [`MediParams::smv_radius`], but instead of eroding the mask and high-passing
+//! the field, `MEDI_L1` passes the local field and the full mask to `msmv.m`
+//! ([`msmv`](super::msmv::msmv)), then inverts the result with the SMV-filtered dipole kernel
+//! `(1 − SphereK)·D` and the SMV-propagated noise, as MEDI-SMV does. The mask stays whole, so the
+//! result reaches the brain edge. `msmv.m` needs R2* for its vessel mask, and `MEDI_L1` errors
+//! without it; `medi` computes it from the echo magnitudes with `arlo.m`
+//! ([`arlo_unclipped`](crate::utils::arlo_unclipped)), as MEDI's pipeline and the authors' SEPIA
+//! patch do, so MEDI-mSMV needs at least three echoes (and panics with fewer; the pipeline
+//! returns an error). `msmv.m`'s field strength `B0_mag` is [`MediParams::b0`]. MEDI-mSMV takes
+//! the local field from a background removal (the paper: PDF, V-SHARP and LBV), not the total
+//! field. See [`msmv`](mod@super::msmv) for what the filter does and how it compares with the
+//! authors' MATLAB.
+//!
 //! **Deliberate deviation from `MEDI_L1.m`:** with SMV on, `sphere_kernel.m` builds its grid as
 //! `-N/2:N/2-1`, which along an axis with an odd number of voxels centres the sphere half a voxel
 //! off the grid. The SMV operator is then not symmetric, and `MEDI_L1` diverges (in MATLAB as
@@ -108,8 +124,17 @@ pub struct MediParams {
     pub smv: bool,
     /// SMV radius in mm
     pub smv_radius: f64,
-    /// With SMV, erode the mask to where the SMV of the mask exceeds 0.999 (`smv_shrink_mask`)
+    /// With SMV, erode the mask to where the SMV of the mask exceeds 0.999 (`smv_shrink_mask`).
+    /// Ignored with [`msmv`](Self::msmv), which keeps the mask, as `MEDI_L1` does.
     pub smv_shrink_mask: bool,
+    /// MEDI-mSMV (`MEDI_L1(..., 'msmv', smv_radius)`): replace the SMV step's mask erosion and
+    /// field high-pass with [`msmv`](super::msmv::msmv) on the full mask, keeping the
+    /// SMV-filtered dipole kernel and noise. Takes the local field from a background removal
+    /// (the authors used PDF, V-SHARP and LBV) on its mask; implies SMV (radius
+    /// [`smv_radius`](Self::smv_radius)). Needs at least three echoes: the vessel mask uses R2*
+    /// from `arlo.m` on the echo magnitudes, as MEDI's pipeline computes it. `None` (default) is
+    /// plain MEDI or MEDI-SMV. See the module docs.
+    pub msmv: Option<super::msmv::MsmvParams>,
     /// Data weighting: 0 uniform (1 everywhere), 1 SNR (`mask / n_std`, mean 1 in the mask)
     pub data_weighting: i32,
     /// Edge fraction for the gradient mask (`'percentage'`): the threshold is set so that the
@@ -167,6 +192,7 @@ impl Default for MediParams {
             smv: true,
             smv_radius: 5.0,
             smv_shrink_mask: true,
+            msmv: None,
             data_weighting: 1,
             percentage: 0.9,
             cg_tol: 0.01,
@@ -197,7 +223,8 @@ impl Default for MediParams {
 /// * `progress` - Progress callback `(current_step, total_steps)` over CG iterations
 ///
 /// # Returns
-/// Susceptibility in ppm, zero outside the mask (the SMV-eroded mask when `smv` is on)
+/// Susceptibility in ppm, zero outside the mask (the SMV-eroded mask when `smv` is on without
+/// `msmv`)
 pub fn medi(
     local_field: &[f64],
     mask: &[u8],
@@ -217,6 +244,12 @@ pub fn medi(
     let n_std = crate::utils::fit_ppm_complex_noise(m, n_echoes);
     let te = &params.echo_times;
     assert_eq!(te.len(), n_echoes, "echo_times does not match the echo magnitudes");
+    // MEDI-mSMV's vessel mask needs R2s (MEDI_L1 errors without it); MEDI's pipeline and the
+    // authors' SEPIA patch compute it as arlo(TE, abs(iField)), negative values and all.
+    let r2s_msmv: Option<Vec<f64>> = params.msmv.as_ref().map(|_| {
+        crate::utils::r2star::arlo_unclipped(m, te, n)
+            .unwrap_or_else(|e| panic!("MEDI-mSMV needs R2* from three or more echoes: {e}"))
+    });
     // R2s = arlo(TE, abs(iField)); Mask_CSF = extract_CSF(R2s, Mask, voxel_size)
     let csf: Option<Vec<bool>> = if params.csf && n_echoes >= 3 {
         let r2s = crate::utils::r2star::arlo(m, te, n).expect("three or more increasing echo times");
@@ -229,10 +262,13 @@ pub fn medi(
     let (nx, ny, nz) = grid.dims;
     let (zx, zy, zz) = params.zeropad;
     // Deviation (see module docs): with SMV, pad axes that are still odd by one voxel.
-    let even = |n: usize, z: usize| z + usize::from(params.smv && (n + z) % 2 == 1);
+    let smv_on = params.smv || params.msmv.is_some();
+    let even = |n: usize, z: usize| z + usize::from(smv_on && (n + z) % 2 == 1);
     let (px, py, pz) = (even(nx, zx), even(ny, zy), even(nz, zz));
     if (px, py, pz) == (0, 0, 0) {
-        return medi_l1(local_field, mask, &imag, &n_std, csf.as_deref(), grid, bdir, params, progress);
+        return medi_l1(
+            local_field, mask, &imag, &n_std, csf.as_deref(), r2s_msmv.as_deref(), grid, bdir, params, progress,
+        );
     }
     // padarray(..., pad, 'post'), then x = x(1:matrix_size0(1), ...)
     let (mx, my, mz) = (nx + px, ny + py, nz + pz);
@@ -253,8 +289,9 @@ pub fn medi(
         let f: Vec<f64> = c.iter().map(|&b| b as u8 as f64).collect();
         pad(&f).iter().map(|&v| v != 0.0).collect()
     });
+    let r2s_p = r2s_msmv.as_deref().map(pad);
     let chi = medi_l1(
-        &pad(local_field), &mask_p, &pad(&imag), &pad(&n_std), csf_p.as_deref(),
+        &pad(local_field), &mask_p, &pad(&imag), &pad(&n_std), csf_p.as_deref(), r2s_p.as_deref(),
         &pgrid, bdir, params, progress,
     );
     let mut out = vec![0.0; n];
@@ -275,6 +312,7 @@ fn medi_l1(
     magnitude: &[f64],
     n_std: &[f64],
     mask_csf: Option<&[bool]>,
+    r2s: Option<&[f64]>,
     grid: &Grid,
     bdir: (f64, f64, f64),
     params: &MediParams,
@@ -303,19 +341,28 @@ fn medi_l1(
     // D = dipole_kernel(...); complex because the SMV step multiplies it by SphereK.
     let mut d: Vec<Complex64> = dipole_kernel(grid, bdir).iter().map(|&v| Complex64::new(v, 0.0)).collect();
 
-    let sphere_k = if params.smv {
+    let sphere_k = if params.smv || params.msmv.is_some() {
         let k = sphere_kernel(grid, params.smv_radius, &mut fft);
-        // if opts.smv_shrink_mask, Mask = SMV(Mask, SphereK) > 0.999
-        if params.smv_shrink_mask {
-            let m: Vec<f64> = mask.iter().map(|&b| b as u8 as f64).collect();
-            smv(&m, &k, &mut fft, &mut buf);
-            par_fill(&mut mask, |i| buf[i].re > 0.999);
+        if let Some(mp) = &params.msmv {
+            // if opts.msmv: RDF = msmv(RDF, Mask, opts.R2s, voxel_size, radius, B0_mag, ...),
+            // on the full mask (smv_shrink_mask is off). B0_mag: the scan's field strength
+            // (see the msmv module docs).
+            let r2s = r2s.expect("MEDI-mSMV needs R2*");
+            let mask_u8: Vec<u8> = mask.iter().map(|&b| u8::from(b)).collect();
+            rdf = super::msmv::msmv(&rdf, &mask_u8, r2s, grid, params.smv_radius, params.b0, mp).field;
+        } else {
+            // if opts.smv_shrink_mask, Mask = SMV(Mask, SphereK) > 0.999
+            if params.smv_shrink_mask {
+                let m: Vec<f64> = mask.iter().map(|&b| b as u8 as f64).collect();
+                smv(&m, &k, &mut fft, &mut buf);
+                par_fill(&mut mask, |i| buf[i].re > 0.999);
+            }
+            // RDF = RDF - SMV(RDF, SphereK); RDF = RDF.*Mask
+            smv(&rdf, &k, &mut fft, &mut buf);
+            par_update(&mut rdf, |i, v| *v = if mask[i] { *v - buf[i].re } else { 0.0 });
         }
         // D = (1-SphereK).*D
         par_update(&mut d, |i, v| *v *= Complex64::new(1.0, 0.0) - k[i]);
-        // RDF = RDF - SMV(RDF, SphereK); RDF = RDF.*Mask
-        smv(&rdf, &k, &mut fft, &mut buf);
-        par_update(&mut rdf, |i, v| *v = if mask[i] { *v - buf[i].re } else { 0.0 });
         // tempn = sqrt(SMV(tempn.^2, SphereK) + tempn.^2)
         smv_noise(&mut tempn, &k, &mut fft, &mut buf);
         Some(k)
@@ -776,26 +823,37 @@ pub(super) fn gradient_mask(mag: &[f64], mask: &[bool], grid: &Grid, percentage:
     g
 }
 
-/// `sphere_kernel.m`: a sphere of `radius` mm with partial-volume edge voxels (each split into
-/// 20³ sub-voxels), normalised to sum 1, returned as its FFT (`fftn(fftshift(Sphere))`).
-fn sphere_kernel(grid: &Grid, radius: f64, fft: &mut Fft3dWorkspace) -> Vec<Complex64> {
+/// `sphere_kernel.m`'s sphere in image space: a sphere of `radius` mm with partial-volume edge
+/// voxels (each split into 20³ sub-voxels), on MATLAB's `-N/2:N/2-1` grid, `fftshift`ed
+/// (circshift by `floor(N/2)`) and normalised to sum 1. Returned sparsely as `(flat index,
+/// value)` for the nonzero voxels, in column-major order. Only voxels within one voxel of the
+/// sphere are visited, so small radii (mSMV's `kernel_lim.m` and its minimum-radius kernel) are
+/// cheap; the values are those of the full-grid loop.
+pub(crate) fn sphere_kernel_sparse(grid: &Grid, radius: f64) -> Vec<(usize, f64)> {
     let (nx, ny, nz) = grid.dims;
     let vs = [grid.vsx(), grid.vsy(), grid.vsz()];
     let dims = [nx, ny, nz];
     let r2 = radius * radius;
     // MATLAB's -N/2 : N/2-1 grid, then fftshift (circshift by floor(N/2)).
     let coord = |i: usize, a: usize| (i as f64 - dims[a] as f64 / 2.0) * vs[a];
+    // Voxels whose centre is further than radius + one voxel from the origin are outside.
+    let range = |a: usize| {
+        let reach = (radius / vs[a]).ceil() + 2.0;
+        let c = dims[a] as f64 / 2.0;
+        let lo = (c - reach).floor().max(0.0) as usize;
+        let hi = ((c + reach).ceil() as usize).min(dims[a] - 1);
+        lo..=hi
+    };
     let split = 10usize;
     let sub: Vec<f64> = (0..2 * split).map(|s| (s as f64 - split as f64 + 0.5) / (2 * split) as f64).collect();
-    let mut sphere = vec![0.0f64; nx * ny * nz];
-    let mut total = 0.0;
-    for k in 0..nz {
+    let mut out = Vec::new();
+    for k in range(2) {
         let z = coord(k, 2);
-        for j in 0..ny {
+        for j in range(1) {
             let y = coord(j, 1);
-            for i in 0..nx {
+            for i in range(0) {
                 let x = coord(i, 0);
-                let out = (x.abs() - 0.5 * vs[0]).max(0.0).powi(2)
+                let outside = (x.abs() - 0.5 * vs[0]).max(0.0).powi(2)
                     + (y.abs() - 0.5 * vs[1]).max(0.0).powi(2)
                     + (z.abs() - 0.5 * vs[2]).max(0.0).powi(2)
                     > r2;
@@ -805,7 +863,7 @@ fn sphere_kernel(grid: &Grid, radius: f64, fft: &mut Fft3dWorkspace) -> Vec<Comp
                     <= r2;
                 let v = if inside {
                     1.0
-                } else if out {
+                } else if outside {
                     0.0
                 } else {
                     let mut occupied = 0usize;
@@ -823,13 +881,43 @@ fn sphere_kernel(grid: &Grid, radius: f64, fft: &mut Fft3dWorkspace) -> Vec<Comp
                 };
                 if v != 0.0 {
                     let (si, sj, sk) = ((i + nx / 2) % nx, (j + ny / 2) % ny, (k + nz / 2) % nz);
-                    sphere[si + nx * (sj + ny * sk)] = v;
-                    total += v;
+                    out.push((si + nx * (sj + ny * sk), v));
                 }
             }
         }
     }
-    let mut k: Vec<Complex64> = sphere.iter().map(|&v| Complex64::new(v / total, 0.0)).collect();
+    let total: f64 = out.iter().map(|&(_, v)| v).sum();
+    for e in out.iter_mut() {
+        e.1 /= total;
+    }
+    out
+}
+
+/// `sphere_kernel(matrix_size, voxel_size, radius)` with the mSMV release's `sphere_kernel.m`
+/// (`real(fftn(fftshift(Sphere)))`): the real part of the FFT of [`sphere_kernel_sparse`], in
+/// double, as `SMV.m` builds it from a radius (`SMV(x, matrix_size, voxel_size, r)`).
+pub(crate) fn sphere_kernel_real(grid: &Grid, radius: f64) -> Vec<f64> {
+    let mut full = vec![0.0f64; grid.n_total()];
+    for (p, v) in sphere_kernel_sparse(grid, radius) {
+        full[p] = v;
+    }
+    crate::fft::fft_real_kernel(&full, grid.nx(), grid.ny(), grid.nz())
+}
+
+/// [`sphere_kernel_real`] rounded to single precision: `single(sphere_kernel(...))`, as
+/// `msmv.m` (and `MEDI_L1.m`) store the prefilter kernel `SphereK`.
+pub(crate) fn sphere_kernel_single(grid: &Grid, radius: f64) -> Vec<f64> {
+    sphere_kernel_real(grid, radius).into_iter().map(|v| v as f32 as f64).collect()
+}
+
+/// `sphere_kernel.m` as `MEDI_L1.m` and `extract_CSF.m` use it here: `fftn(fftshift(Sphere))`
+/// in double, complex (the MEDI toolbox's `sphere_kernel.m` before the mSMV release added
+/// `real(...)`; the two differ only on odd grids, which `medi` pads away)
+fn sphere_kernel(grid: &Grid, radius: f64, fft: &mut Fft3dWorkspace) -> Vec<Complex64> {
+    let mut k = vec![Complex64::new(0.0, 0.0); grid.n_total()];
+    for (p, v) in sphere_kernel_sparse(grid, radius) {
+        k[p] = Complex64::new(v, 0.0);
+    }
     fft.fft3d(&mut k);
     k
 }
@@ -1393,14 +1481,14 @@ mod tests {
     fn zero_field_gives_zero() {
         let (grid, _, field, mag, mask) = phantom(16);
         let zero = vec![0.0; field.len()];
-        let chi = medi_l1(&zero, &mask, &mag, &vec![1.0; mag.len()], None, &grid, (0.0, 0.0, 1.0), &small_params(), |_, _| {});
+        let chi = medi_l1(&zero, &mask, &mag, &vec![1.0; mag.len()], None, None, &grid, (0.0, 0.0, 1.0), &small_params(), |_, _| {});
         assert!(chi.iter().all(|&v| v == 0.0));
     }
 
     #[test]
     fn recovers_a_sphere_in_ppm() {
         let (grid, chi_true, field, mag, mask) = phantom(24);
-        let chi = medi_l1(&field, &mask, &mag, &vec![1.0; mag.len()], None, &grid, (0.0, 0.0, 1.0), &small_params(), |_, _| {});
+        let chi = medi_l1(&field, &mask, &mag, &vec![1.0; mag.len()], None, None, &grid, (0.0, 0.0, 1.0), &small_params(), |_, _| {});
         let c = 12 + 24 * (12 + 24 * 12);
         assert!((chi[c] - chi_true[c]).abs() < 0.03, "centre: {} vs {}", chi[c], chi_true[c]);
         for (i, &m) in mask.iter().enumerate() {
@@ -1414,8 +1502,8 @@ mod tests {
     fn uniform_noise_map_equals_none() {
         let (grid, _, field, mag, mask) = phantom(16);
         let p = small_params();
-        let a = medi_l1(&field, &mask, &mag, &vec![1.0; mag.len()], None, &grid, (0.0, 0.0, 1.0), &p, |_, _| {});
-        let b = medi_l1(&field, &mask, &mag, &vec![3.0; field.len()], None, &grid, (0.0, 0.0, 1.0), &p, |_, _| {});
+        let a = medi_l1(&field, &mask, &mag, &vec![1.0; mag.len()], None, None, &grid, (0.0, 0.0, 1.0), &p, |_, _| {});
+        let b = medi_l1(&field, &mask, &mag, &vec![3.0; field.len()], None, None, &grid, (0.0, 0.0, 1.0), &p, |_, _| {});
         let err = a.iter().zip(&b).map(|(x, y)| (x - y).abs()).fold(0.0, f64::max);
         assert!(err < 1e-9, "max |diff| {err}");
     }
@@ -1425,7 +1513,7 @@ mod tests {
         let (grid, _, field, mag, mask) = phantom(16);
         let p = MediParams { smv: true, smv_radius: 2.0, merit: true, ..small_params() };
         let mut calls = 0;
-        let chi = medi_l1(&field, &mask, &mag, &vec![1.0; mag.len()], None, &grid, (0.0, 0.0, 1.0), &p, |_, _| calls += 1);
+        let chi = medi_l1(&field, &mask, &mag, &vec![1.0; mag.len()], None, None, &grid, (0.0, 0.0, 1.0), &p, |_, _| calls += 1);
         assert!(chi.iter().all(|v| v.is_finite()));
         assert!(chi.iter().any(|&v| v != 0.0));
         assert!(calls > 0);
@@ -1448,7 +1536,7 @@ mod tests {
         let mask_f: Vec<f64> = mask.iter().map(|&v| v as f64).collect();
         let mask_p: Vec<u8> = pad(&mask_f, n).iter().map(|&v| v as u8).collect();
         let pgrid = Grid::new(m, n, m, 1.0, 1.0, 1.0);
-        let padded = medi_l1(&pad(&field, n), &mask_p, &pad(&mag, n), &pad(&crate::utils::fit_ppm_complex_noise(&mag, 1), n), None, &pgrid, (0.0, 0.0, 1.0), &small_params(), |_, _| {});
+        let padded = medi_l1(&pad(&field, n), &mask_p, &pad(&mag, n), &pad(&crate::utils::fit_ppm_complex_noise(&mag, 1), n), None, None, &pgrid, (0.0, 0.0, 1.0), &small_params(), |_, _| {});
         for k in 0..n { for j in 0..n { for i in 0..n {
             assert_eq!(chi[i + n * (j + n * k)], padded[i + m * (j + n * k)]);
         }}}
@@ -1463,7 +1551,7 @@ mod tests {
         let a = medi(&field, &mask, EchoMagnitudes { data: &echoes, n_echoes: 2 }, &grid, (0.0, 0.0, 1.0), &p, |_, _| {});
         let rss: Vec<f64> = (0..n).map(|i| (echoes[i].powi(2) + echoes[i + n].powi(2)).sqrt()).collect();
         let n_std = crate::utils::fit_ppm_complex_noise(&echoes, 2);
-        let b = medi_l1(&field, &mask, &rss, &n_std, None, &grid, (0.0, 0.0, 1.0), &p, |_, _| {});
+        let b = medi_l1(&field, &mask, &rss, &n_std, None, None, &grid, (0.0, 0.0, 1.0), &p, |_, _| {});
         assert_eq!(a, b);
     }
 
@@ -1554,8 +1642,8 @@ mod tests {
         let n = mag.len();
         let csf: Vec<bool> = (0..n).map(|i| mask[i] == 1 && i % 7 == 0).collect();
         let p = small_params();
-        let off = medi_l1(&field, &mask, &mag, &vec![1.0; n], None, &grid, (0.0, 0.0, 1.0), &p, |_, _| {});
-        let on = medi_l1(&field, &mask, &mag, &vec![1.0; n], Some(&csf), &grid, (0.0, 0.0, 1.0), &p, |_, _| {});
+        let off = medi_l1(&field, &mask, &mag, &vec![1.0; n], None, None, &grid, (0.0, 0.0, 1.0), &p, |_, _| {});
+        let on = medi_l1(&field, &mask, &mag, &vec![1.0; n], Some(&csf), None, &grid, (0.0, 0.0, 1.0), &p, |_, _| {});
         let mean = |x: &[f64]| (0..n).filter(|&i| csf[i]).map(|i| x[i]).sum::<f64>() / csf.iter().filter(|&&c| c).count() as f64;
         assert!(mean(&on).abs() < 1e-12, "CSF mean {}", mean(&on));
         assert!(mean(&off).abs() > 1e-6);
@@ -1566,7 +1654,7 @@ mod tests {
         }
         // with lambda_CSF = 0 the result is the plain result shifted by its CSF mean
         let p0 = MediParams { lambda_csf: 0.0, ..p };
-        let shifted = medi_l1(&field, &mask, &mag, &vec![1.0; n], Some(&csf), &grid, (0.0, 0.0, 1.0), &p0, |_, _| {});
+        let shifted = medi_l1(&field, &mask, &mag, &vec![1.0; n], Some(&csf), None, &grid, (0.0, 0.0, 1.0), &p0, |_, _| {});
         let m = mean(&off);
         for i in 0..n {
             let want = if mask[i] == 1 { off[i] - m } else { 0.0 };

@@ -254,7 +254,7 @@ fn gradient3(f: &[f32], dims: (usize, usize, usize), axis: usize) -> Vec<f32> {
 
 /// JAMA's symmetric Householder reduction to tridiagonal form (`tred2` in eig3volume.c).
 /// The eigenvectors are not needed, but `V` carries the reduction.
-fn tred2(v: &mut [[f64; 3]; 3], d: &mut [f64; 3], e: &mut [f64; 3]) {
+pub(crate) fn tred2(v: &mut [[f64; 3]; 3], d: &mut [f64; 3], e: &mut [f64; 3]) {
     const N: usize = 3;
     *d = v[N - 1];
     for i in (1..N).rev() {
@@ -350,7 +350,7 @@ fn tred2(v: &mut [[f64; 3]; 3], d: &mut [f64; 3], e: &mut [f64; 3]) {
 /// JAMA's symmetric tridiagonal QL algorithm (`tql2` in eig3volume.c), eigenvalues only:
 /// the eigenvector accumulation does not feed back into them. Ends with the eigenvalues
 /// in ascending order.
-fn tql2(d: &mut [f64; 3], e: &mut [f64; 3]) {
+pub(crate) fn tql2(d: &mut [f64; 3], e: &mut [f64; 3]) {
     const N: usize = 3;
     for i in 1..N {
         e[i - 1] = e[i];
