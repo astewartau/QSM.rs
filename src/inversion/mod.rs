@@ -77,11 +77,11 @@ pub use tfi::{tfi, TfiParams};
 pub use tgv::{
     tgv_qsm, TgvInput, TgvParams, get_default_alpha, get_default_iterations, rad_per_ppm,
 };
-pub use ilsqr::{ilsqr, IlsqrParams, STI_DEFAULT_PAD_MM, STI_PAD_MM};
+pub use ilsqr::{ilsqr, IlsqrParams, STI_DEFAULT_PAD_MM, STI_GUI_NITER, STI_GUI_PAD_MM, STI_PAD_MM};
 #[cfg(not(target_arch = "wasm32"))]
 #[doc(hidden)]
 pub use ilsqr::{ilsqr_traced, IlsqrTrace};
-pub use star::{star_qsm, StarParams, STAR_GUI_PAD, QSM_STAR_DEFAULT_PAD};
+pub use star::{star_qsm, StarParams, STAR_GUI_PAD, QSM_STAR_DEFAULT_PAD, STI_TEMPLATES_STAR_PAD};
 pub use lsqr_qsm::{lsqr_qsm, LsqrQsmParams, RESIDUAL_WEIGHTING_PER_TESLA};
 pub use heidi::{heidi, homogeneity_masks, HeidiParams, HomogeneityMasks};
 pub use ndi::{ndi, NdiParams};

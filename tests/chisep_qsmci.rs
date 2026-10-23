@@ -22,7 +22,7 @@
 mod common;
 
 use common::{assert_chisep_separated, chisep_score, load_chisep_phantom, save_center_slices};
-use qsm_core::inversion::{ilsqr, IlsqrParams};
+use qsm_core::inversion::{ilsqr, IlsqrParams, STI_GUI_PAD_MM};
 use qsm_core::separation::{chi_sep_ilsqr, chi_sep_medi, ChiSepIlsqrParams, ChiSepParams};
 use std::time::Instant;
 
@@ -40,7 +40,9 @@ fn test_chi_sep_ilsqr_qsmci() {
         &ph.mask,
         &ph.grid,
         ph.bdir,
-        &IlsqrParams::default(),
+        // As the χ-separation toolbox's Chisep_script.m calls QSM_iLSQR: 'padsize' [12 12 12]
+        // and no 'niter', so STI's function default of 100 (not the GUI's 40, the default here).
+        &IlsqrParams { max_iter: 100, pad_mm: STI_GUI_PAD_MM, ..IlsqrParams::default() },
         |_, _| {},
     );
     println!("[INFO] iLSQR QSM in {:.1?}", t.elapsed());

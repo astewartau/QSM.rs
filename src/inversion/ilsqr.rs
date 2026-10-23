@@ -2,9 +2,10 @@
 //!
 //! [`ilsqr`] implements **STI Suite 3.0's `QSM_iLSQR`** (Li et al. 2015), as called with
 //! `QSM_iLSQR(phase, mask, 'TE', TE, 'B0', B0, 'H', H, 'padsize', [p p p], 'voxelsize', vs)`
-//! with `p` = [`IlsqrParams::pad_mm`]. The default, [`STI_DEFAULT_PAD_MM`] = 6, is what
-//! `QSM_iLSQR` does when called without `'padsize'`; UK Biobank and STI Suite's examples pass 64,
-//! [`STI_PAD_MM`].
+//! with `p` = [`IlsqrParams::pad_mm`]. The defaults are what STI Suite 3.0's `QSM_GUI` passes:
+//! [`STI_GUI_PAD_MM`] = 12 mm of padding and [`STI_GUI_NITER`] = 40 iterations (see
+//! [`IlsqrParams`]). Called without `'padsize'`, `QSM_iLSQR` pads [`STI_DEFAULT_PAD_MM`] = 6;
+//! UK Biobank and STI Suite's examples pass 64, [`STI_PAD_MM`].
 //! STI Suite ships as protected P-code, so the algorithm was recovered by black-box probing
 //! (call tracing, capturing the operators and right-hand sides it hands to MATLAB's `lsqr`, and
 //! fitting every stage until a MATLAB re-implementation reproduced STI to its own
@@ -12,7 +13,7 @@
 //!
 //! 1. Crop field and mask to the mask's bounding box (odd extents grown by one voxel to make
 //!    them even), then zero-pad each axis to the next multiple of 16 strictly above
-//!    `crop + 2·pad_mm/voxel_size` (default `pad_mm` = 6). Everything below runs on that grid.
+//!    `crop + 2·pad_mm/voxel_size` (default `pad_mm` = 12). Everything below runs on that grid.
 //! 2. **Laplacian weights** `W`: `L = |F⁻¹(k²·F φ)|` with `k²` in (cycles/mm)² and the DC term
 //!    set to 10⁶ (STI's value, which adds `10⁶·mean(φ)` to every voxel, so the `|·|` decides
 //!    which tail of the Laplacian is down-weighted). Ranked inside the mask:
@@ -55,10 +56,12 @@
 //!
 //! [`IlsqrParams::pad_mm`] is STI's `'padsize'`: millimetres of zero padding per side, the same
 //! on every axis. It sets the grid that both LSQR solves run on, so for small or thin volumes it
-//! dominates the cost: an 8³ volume at 1 mm is solved on 144³ with 64 mm, on 32³ with the
-//! default 6 mm. The default, [`STI_DEFAULT_PAD_MM`] (6), is what `QSM_iLSQR` uses when called
-//! without `'padsize'` (as QSMART calls it). [`STI_PAD_MM`] (64) is what UK Biobank's pipeline
-//! and STI Suite's examples pass (set it to reproduce them exactly). 0 is allowed (the grid is
+//! dominates the cost: an 8³ volume at 1 mm is solved on 144³ with 64 mm, on 32³ with 6 mm.
+//! The default, [`STI_GUI_PAD_MM`] (12), is what STI Suite's `QSM_GUI` passes (and what
+//! `STI_Templates.m` and the χ-separation toolbox's `Chisep_script.m` use).
+//! [`STI_DEFAULT_PAD_MM`] (6) is what `QSM_iLSQR` uses when called without `'padsize'` (as
+//! QSMART calls it). [`STI_PAD_MM`] (64) is what UK Biobank's pipeline and STI Suite's examples
+//! pass (set it to reproduce them exactly). 0 is allowed (the grid is
 //! still rounded up past the crop to a multiple of 16) but wraps thin volumes onto themselves.
 //! The padding changes χ because the dipole convolution is circular on the padded grid and the
 //! Laplacian and gradient weights are ranked over it.
@@ -84,19 +87,34 @@
 
 /// Parameters for the iLSQR algorithm.
 ///
-/// STI Suite defaults: `tol = 1e-3`, `max_iter = 100`. The initial LSQR solve always uses
-/// STI's tolerance of 0.01. `max_iter` is STI's `'niter'` argument (it caps both solves).
+/// The defaults are what STI Suite 3.0's `QSM_GUI` passes to `QSM_iLSQR`, since that is what
+/// STI Suite users run (as for STAR-QSM's padding, [`crate::inversion::StarParams::pad`]).
+/// Probed in MATLAB R2023b by driving `QSM_GUI` headless ("3D GRE data", then "iLSQR") with a
+/// logging wrapper around `QSM_iLSQR`: the GUI passes a `params` struct with `niter` 40,
+/// `padsize` [12 12 12], `tol_step1` 0.01, `tol_step2` 0.001 and `Kthreshold` 0.1, bitwise
+/// equal to `QSM_iLSQR(..., 'padsize', [12 12 12], 'niter', 40)`. Called without them,
+/// `QSM_iLSQR` uses `niter` 100 and `padsize` 6. The initial LSQR solve always uses STI's
+/// tolerance of 0.01. `max_iter` is STI's `'niter'` argument (it caps both solves).
 /// `pad_mm` is STI's `'padsize'` (see the module docs, *Padding*).
+///
+/// Measured against the function's defaults (100 iterations, 6 mm): on the qsm-forward
+/// phantom's true local field χ XSIM 0.686 → 0.671, NRMSE 40.3 → 42.0 %, r 0.916 → 0.908 (the
+/// fewer iterations; 12 mm alone changes little), at under half the run time; behind the
+/// pipeline's V-SHARP the differences are ≤ 0.01 XSIM. On an in-vivo 3T scan the agreement
+/// with the UK Biobank pipeline's χ is unchanged (XSIM 0.736 → 0.732, NRMSE 82.8 → 79.9 %).
 #[cfg_attr(feature = "introspection", derive(serde::Serialize))]
 #[derive(Clone, Debug)]
 pub struct IlsqrParams {
     /// Tolerance of the streaking-artefact solve (default: 1e-3)
     pub tol: f64,
-    /// Maximum iterations of each LSQR solve (default: 100)
+    /// Maximum iterations of each LSQR solve: STI's `'niter'` (default [`STI_GUI_NITER`] = 40,
+    /// what `QSM_GUI` passes; `QSM_iLSQR`'s own default is 100, which the χ-separation
+    /// toolbox's `Chisep_script.m` leaves in place, and QSMART passes 50)
     pub max_iter: usize,
-    /// Zero padding per side in mm, on every axis: STI's `'padsize'` (default:
-    /// [`STI_DEFAULT_PAD_MM`] = 6, STI's own default; [`STI_PAD_MM`] reproduces UK Biobank /
-    /// STI Suite's examples). Must be finite and ≥ 0.
+    /// Zero padding per side in mm, on every axis: STI's `'padsize'` (default
+    /// [`STI_GUI_PAD_MM`] = 12, what `QSM_GUI` passes; [`STI_DEFAULT_PAD_MM`] = 6 is
+    /// `QSM_iLSQR`'s own default and [`STI_PAD_MM`] reproduces UK Biobank / STI Suite's
+    /// examples). Must be finite and ≥ 0.
     pub pad_mm: f64,
 }
 
@@ -104,8 +122,8 @@ impl Default for IlsqrParams {
     fn default() -> Self {
         Self {
             tol: 1e-3,
-            max_iter: 100,
-            pad_mm: STI_DEFAULT_PAD_MM,
+            max_iter: STI_GUI_NITER,
+            pad_mm: STI_GUI_PAD_MM,
         }
     }
 }
@@ -123,8 +141,17 @@ impl IlsqrParams {
 /// Zero padding STI's `QSM_iLSQR` is given by UK Biobank and in STI Suite's examples, in mm.
 pub const STI_PAD_MM: f64 = 64.0;
 
+/// Zero padding STI Suite 3.0's `QSM_GUI` passes to `QSM_iLSQR` (`padsize` [12 12 12]), in mm,
+/// and the default of [`IlsqrParams::pad_mm`]. `STI_Templates.m` and the χ-separation
+/// toolbox's `Chisep_script.m` use the same value.
+pub const STI_GUI_PAD_MM: f64 = 12.0;
+
+/// Iteration cap (`niter`) STI Suite 3.0's `QSM_GUI` passes to `QSM_iLSQR`, and the default of
+/// [`IlsqrParams::max_iter`]. `QSM_iLSQR`'s own default is 100.
+pub const STI_GUI_NITER: usize = 40;
+
 /// Zero padding STI's `QSM_iLSQR` uses when called without `'padsize'` (as QSMART calls it),
-/// in mm, and the default of [`ilsqr`]. Probed in STI Suite 3.0: output bitwise equal to an explicit `padsize` of 6 mm
+/// in mm. Probed in STI Suite 3.0: output bitwise equal to an explicit `padsize` of 6 mm
 /// (and different at 5.5 and 6.5) on five crop / voxel-size combinations.
 pub const STI_DEFAULT_PAD_MM: f64 = 6.0;
 
@@ -1403,7 +1430,9 @@ mod tests {
     #[test]
     fn test_ilsqr_params_defaults() {
         let p = IlsqrParams::default();
-        assert_eq!((p.tol, p.max_iter, p.pad_mm), (1e-3, 100, STI_DEFAULT_PAD_MM));
+        // STI Suite 3.0's QSM_GUI: niter 40, padsize 12
+        assert_eq!((p.tol, p.max_iter, p.pad_mm), (1e-3, STI_GUI_NITER, STI_GUI_PAD_MM));
+        assert_eq!((STI_GUI_NITER, STI_GUI_PAD_MM), (40, 12.0));
         assert_eq!((STI_PAD_MM, STI_DEFAULT_PAD_MM), (64.0, 6.0));
         assert!(p.validate().is_ok());
     }
@@ -1423,10 +1452,11 @@ mod tests {
         let iso = (2.0, 2.0, 2.0);
         let with_pad = |pad_mm: f64| IlsqrParams { max_iter: 2, pad_mm, ..IlsqrParams::default() };
         let (d_default, x_default) = run(iso, &IlsqrParams { max_iter: 2, ..IlsqrParams::default() });
-        let (d6, x6) = run(iso, &with_pad(STI_DEFAULT_PAD_MM));
-        assert_eq!((d_default, d6), ([16; 3], [16; 3]));
-        // the default is exactly an explicit 6 mm (STI's own default)
-        assert!(x_default.iter().zip(&x6).all(|(a, b)| a.to_bits() == b.to_bits()));
+        let (d12, x12) = run(iso, &with_pad(STI_GUI_PAD_MM));
+        assert_eq!((d_default, d12), ([32; 3], [32; 3]));
+        // the default is exactly an explicit 12 mm (STI Suite GUI's padding)
+        assert!(x_default.iter().zip(&x12).all(|(a, b)| a.to_bits() == b.to_bits()));
+        assert_eq!(run(iso, &with_pad(STI_DEFAULT_PAD_MM)).0, [16; 3]);
         let (d16, x16) = run(iso, &with_pad(16.0));
         assert_eq!(d16, [32; 3]);
         let (d64, x64) = run(iso, &with_pad(STI_PAD_MM));

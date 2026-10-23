@@ -76,7 +76,8 @@ fn ilsqr_matches_the_reverse_engineered_algorithm() {
 #[test]
 fn ilsqr_matches_sti_suite() {
     let fx = load();
-    let (chi, x1) = run(&fx, IlsqrParams::default().max_iter);
+    // The fixture is QSM_iLSQR without 'niter', i.e. STI's function default of 100.
+    let (chi, x1) = run(&fx, 100);
     let (r, r1) = (corr(&chi, &fx.sti.0), corr(&x1, &fx.sti.1));
     println!("vs STI: chi r {:.6} max|d| {:.2e}; initial r {:.8} max|d| {:.2e} (rms chi {:.2e})",
              r, maxd(&chi, &fx.sti.0), r1, maxd(&x1, &fx.sti.1), rms(&fx.sti.0));

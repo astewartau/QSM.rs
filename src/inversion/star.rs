@@ -3,8 +3,8 @@
 //! [`star_qsm`] implements **STI Suite 3.0's `QSM_star`** (Wei et al. 2015), as called with
 //! `QSM_star(phase, mask, 'TE', TE, 'B0', B0, 'H', H, 'padsize', pad, 'voxelsize', vs)`
 //! with `pad` = [`StarParams::pad`]. Its default, [`STAR_GUI_PAD`] = [8, 8, 20] voxels, is
-//! what STI Suite's `QSM_GUI` passes (see [`StarParams::pad`]); `QSM_star`'s own default,
-//! without `'padsize'`, is [`QSM_STAR_DEFAULT_PAD`] = [12, 12, 12].
+//! what STI Suite's `QSM_GUI` passes (see [`StarParams::pad`]); `QSM_star` called without
+//! `'padsize'` pads [`QSM_STAR_DEFAULT_PAD`] = [0, 0, 0].
 //! STI Suite ships as protected P-code, so the algorithm was recovered by black-box probing
 //! (call tracing through logging wrappers around the functions it calls, capturing the arrays
 //! it hands them, then a MATLAB re-implementation that reproduces `QSM_star` to within 4e-16
@@ -103,9 +103,10 @@ pub struct StarParams {
     /// sizes, so it never gives `QSM_star` an odd grid; see step 1 of the module docs for odd
     /// grids here.)
     ///
-    /// [`QSM_STAR_DEFAULT_PAD`] (`[12, 12, 12]`) is `QSM_star`'s own default, for scripts that
-    /// call it without `'padsize'`, as in `STI_Templates.m`. Any other padding can be given
-    /// per axis.
+    /// [`QSM_STAR_DEFAULT_PAD`] (`[0, 0, 0]`) is what `QSM_star` does when called without
+    /// `'padsize'`. `STI_Templates.m` lists `[12 12 12]` as the default
+    /// ([`STI_TEMPLATES_STAR_PAD`]), but that is not what the function does. Any other padding
+    /// can be given per axis.
     ///
     /// **B0 direction (a deliberate deviation from the GUI).** The GUI takes `'H'` from its
     /// `H_Vector` field, which loading the data does not fill from the scan (the same probe:
@@ -164,8 +165,15 @@ impl StarParams {
 /// and the default of [`StarParams::pad`].
 pub const STAR_GUI_PAD: [usize; 3] = [8, 8, 20];
 
-/// Zero padding `QSM_star` uses when called without `'padsize'`, in voxels per side.
-pub const QSM_STAR_DEFAULT_PAD: [usize; 3] = [12, 12, 12];
+/// Zero padding `QSM_star` uses when called without `'padsize'`, in voxels per side: none.
+/// Probed in MATLAB R2023b on STI Suite 3.0: `QSM_star` without `'padsize'` is bitwise equal to
+/// `'padsize', [0 0 0]` and differs from `[12 12 12]` by 8-15 % relative, on 64×64×48 at
+/// 1×1×1.5 mm and at 1 mm and on 54×60×40 at 0.8×0.9×2 mm.
+pub const QSM_STAR_DEFAULT_PAD: [usize; 3] = [0, 0, 0];
+
+/// Zero padding `STI_Templates.m` lists as `QSM_star`'s default (`padsize = [12 12 12]`), in
+/// voxels per side. Not what the function does without `'padsize'` ([`QSM_STAR_DEFAULT_PAD`]).
+pub const STI_TEMPLATES_STAR_PAD: [usize; 3] = [12, 12, 12];
 
 /// γ/2π in MHz/T as STI Suite's `ScalingFactor` uses it: the reference implementation's value,
 /// not `crate::constants`. Keep it.

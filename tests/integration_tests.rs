@@ -204,8 +204,9 @@ fn test_bgremove_vsharp() {
     let (vsx, vsy, vsz) = data.voxel_size;
 
     let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
-    // The default working grid is the native one.
-    assert_eq!(VsharpParams::default().working_grid(&grid), VsharpGrid::Native);
+    // The defaults are STI Suite's V_SHARP: a 1 mm working grid, no deconvolution.
+    assert_eq!(VsharpParams::default().working_grid(&grid), VsharpGrid::Isotropic { spacing_mm: 1.0 });
+    assert!(!VsharpParams::default().deconvolve);
     let ((result, eroded_mask), elapsed) = run_timed!("V-SHARP", bgremove::vsharp(
         &data.fieldmap,
         &data.mask,
@@ -224,19 +225,20 @@ fn test_bgremove_vsharp() {
     assert!(res.correlation > 0.7, "V-SHARP correlation too low: {}", res.correlation);
 }
 
-/// V-SHARP with `deconvolve: false`: the SMV high-passed field φ − S_r∗φ (largest fitting
-/// ball per voxel), as STI Suite's V_SHARP returns it.
+/// V-SHARP with the papers' deconvolution by the largest kernel (`1/(1 − Ŝ)`, TSVD at
+/// `threshold`) on the native grid, as QSM.jl implements it. Not the default: STI Suite's
+/// V_SHARP does not deconvolve.
 #[test]
 #[ignore]
-fn test_bgremove_vsharp_no_deconvolve() {
+fn test_bgremove_vsharp_deconvolve() {
     println!("[INFO] Loading test data...");
     let data = TestData::load().expect("Failed to load test data");
     let (nx, ny, nz) = data.dims;
     let (vsx, vsy, vsz) = data.voxel_size;
 
     let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
-    let params = VsharpParams { deconvolve: false, ..VsharpParams::default() };
-    let ((result, eroded_mask), elapsed) = run_timed!("V-SHARP (no deconvolution)", bgremove::vsharp(
+    let params = VsharpParams { deconvolve: true, grid: VsharpGrid::Native, ..VsharpParams::default() };
+    let ((result, eroded_mask), elapsed) = run_timed!("V-SHARP (deconvolved)", bgremove::vsharp(
         &data.fieldmap,
         &data.mask,
         &grid,
@@ -244,13 +246,13 @@ fn test_bgremove_vsharp_no_deconvolve() {
         |_, _| {},
     ).unwrap());
 
-    let res = TestResult::new("V-SHARP (no deconv.)", &result, &data.fieldmap_local, &data.mask, data.dims);
+    let res = TestResult::new("V-SHARP (deconv.)", &result, &data.fieldmap_local, &data.mask, data.dims);
     res.print_with_time(elapsed);
     res.print_ci_metrics(elapsed);
-    common::save_center_slices(&result, &eroded_mask, data.dims, "bgremove_vsharp_no_deconvolve");
+    common::save_center_slices(&result, &eroded_mask, data.dims, "bgremove_vsharp_deconvolve");
 
-    assert!(res.nrmse < 0.8, "V-SHARP (no deconvolution) NRMSE too high: {}", res.nrmse);
-    assert!(res.correlation > 0.7, "V-SHARP (no deconvolution) correlation too low: {}", res.correlation);
+    assert!(res.nrmse < 0.5, "V-SHARP (deconvolved) NRMSE too high: {}", res.nrmse);
+    assert!(res.correlation > 0.7, "V-SHARP (deconvolved) correlation too low: {}", res.correlation);
 }
 
 /// PDF's data weight as MEDI's pipeline makes it: `Fit_ppm_complex`'s noise map of the echoes
@@ -362,7 +364,7 @@ fn test_bgremove_resharp() {
     let (vsx, vsy, vsz) = data.voxel_size;
 
     let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
-    let resharp_params = ResharpParams { radius: 6.0, tik_reg: 1e-4, tol: 1e-6, max_iter: 200 };
+    let resharp_params = ResharpParams::default();
     let ((result, eroded_mask), elapsed) = run_timed!("RESHARP", bgremove::resharp(
         &data.fieldmap,
         &data.mask,
@@ -2129,7 +2131,7 @@ fn test_all_combinations() {
     bfr_results.push(BfrResult { name: "LBV".into(), local_field: result, mask, elapsed });
 
     // RESHARP
-    let resharp_params = ResharpParams { radius: 6.0, tik_reg: 1e-4, tol: 1e-6, max_iter: 200 };
+    let resharp_params = ResharpParams::default();
     let ((result, mask), elapsed) = run_timed!("RESHARP", bgremove::resharp(
         &data.fieldmap, &data.mask, &grid, &resharp_params, |_, _| {}
     ));

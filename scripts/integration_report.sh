@@ -148,7 +148,7 @@ echo "- **Tests passed:** ${TESTS_PASSED:-N/A}"
 echo "- **Code coverage:** ${COVERAGE:-N/A}%"
 echo ""
 
-if TABLE=$(emit_table test_bgremove_sharp test_bgremove_resharp test_bgremove_vsharp test_bgremove_vsharp_no_deconvolve test_bgremove_pdf test_bgremove_ismv test_bgremove_lbv); then
+if TABLE=$(emit_table test_bgremove_sharp test_bgremove_resharp test_bgremove_vsharp test_bgremove_vsharp_deconvolve test_bgremove_pdf test_bgremove_ismv test_bgremove_lbv); then
   echo "### Background Field Removal"
   echo "*Compared against ground truth local field map*"
   echo ""
