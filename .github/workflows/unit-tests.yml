@@ -49,9 +49,13 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: ${{ runner.os }}-cargo-llvm-cov-${{ hashFiles('**/Cargo.lock') }}
+          # `opt1`: the coverage build's opt-level (see the test step); a cache saved under the
+          # old key holds the unoptimised build, and as a cache with an existing key is never
+          # saved again, keeping that key would recompile every dependency on every run.
+          key: ${{ runner.os }}-cargo-llvm-cov-opt1-${{ hashFiles('**/Cargo.lock') }}
           # Falls back to the old tarpaulin-era cache for the registry and the plain debug build.
           restore-keys: |
+            ${{ runner.os }}-cargo-llvm-cov-opt1-
             ${{ runner.os }}-cargo-
 
       # Typechecks every target, including examples/ and the integration tests
@@ -143,6 +147,16 @@ jobs:
           COVERAGE=$(printf '%.1f' "$PCT")
           echo "coverage=$COVERAGE" >> "$GITHUB_OUTPUT"
           echo "Code coverage: ${COVERAGE}% (${COVERED}/${COVERABLE} lines)"
+
+      # The line data behind the figure, to compare one run's coverage with another's.
+      - name: Upload coverage data
+        if: ${{ !inputs.warm_only && always() && steps.tests.outcome != 'skipped' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-lcov
+          path: coverage/lcov.info
+          retention-days: 7
+          if-no-files-found: ignore
 
       - name: Enforce 90% coverage threshold
         if: ${{ !inputs.warm_only && steps.coverage.outcome == 'success' }}
