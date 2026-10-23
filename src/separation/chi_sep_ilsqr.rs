@@ -34,6 +34,7 @@
 //! source separation toward iron and myelin mapping in the brain." NeuroImage,
 //! 240:118371 (Supplementary Methods, "Algorithm for χ-separation").
 
+use crate::inversion::{IlsqrParams, STI_GUI_PAD_MM};
 use crate::fft::Fft3dWorkspaceF32;
 use crate::inversion::medi::{
     bdiv_periodic_inplace_f32, fgrad_periodic_inplace_f32, gradient_mask_f32,
@@ -76,6 +77,23 @@ pub struct ChiSepIlsqrParams {
     pub cg_max_iter: usize,
     /// Inner conjugate-gradient relative tolerance
     pub cg_tol: f64,
+    /// iLSQR settings for the conventional QSM (`qsm`) that χ-separation is initialised with,
+    /// for hosts that reconstruct it (the pipeline takes the QSM as an input). Default
+    /// [`chisep_toolbox_ilsqr`]: 100 iterations, 12 mm padding, as the χ-separation toolbox's
+    /// `Chisep_script.m` (l. 142-145) calls STI Suite's `QSM_iLSQR`: `'padsize', [12 12 12]`
+    /// and no `'niter'`, so the function's default of 100. This differs from
+    /// [`IlsqrParams::default`] (the STI Suite GUI's 40 iterations).
+    pub qsm_ilsqr: IlsqrParams,
+}
+
+/// Iteration cap STI Suite's `QSM_iLSQR` uses when called without `'niter'` (probed: bitwise
+/// equal to an explicit 100), which is how the χ-separation toolbox calls it.
+pub const STI_FUNCTION_NITER: usize = 100;
+
+/// The iLSQR call of the χ-separation toolbox (`Chisep_script.m` l. 142-145):
+/// [`STI_FUNCTION_NITER`] iterations, [`STI_GUI_PAD_MM`] padding, STI's tolerances.
+pub fn chisep_toolbox_ilsqr() -> IlsqrParams {
+    IlsqrParams { max_iter: STI_FUNCTION_NITER, pad_mm: STI_GUI_PAD_MM, ..IlsqrParams::default() }
 }
 
 impl Default for ChiSepIlsqrParams {
@@ -92,6 +110,7 @@ impl Default for ChiSepIlsqrParams {
             tol: 0.01,
             cg_max_iter: 30,
             cg_tol: 0.05,
+            qsm_ilsqr: chisep_toolbox_ilsqr(),
         }
     }
 }

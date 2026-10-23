@@ -411,7 +411,16 @@ impl Default for MaskingConfig {
 pub struct FieldMappingConfig {
     pub unwrapping_algorithm: UnwrappingAlgorithm,
     pub phase_offset_removal: bool,
-    pub phase_offset_sigma: [f64; 3],
+    /// Gaussian smoothing sigma of the MCPC-3D-S phase offsets, in **mm** per axis (default
+    /// [7, 7, 7]); divided by the voxel size to give the smoothing in voxels
+    /// ([`Self::phase_offset_sigma_voxels`]). The default is the ROMEO command line's (what
+    /// users run, `romeo -B`): `--phase-offset-smoothing-sigma-mm`, "default: [7,7,7]", divided
+    /// by the NIfTI voxel size (ROMEO.jl 08776d4, `ext/RomeoApp/argparse.jl` l. 79-84 and
+    /// 217-224, `caller.jl` l. 137-138). The same physical width at every resolution.
+    /// MriResearchTools' `mcpc3ds` function itself defaults to `sigma = [10, 10, 5]` in voxels
+    /// (`src/mcpc3ds.jl` l. 39), which QSM.rs used before; that is 10/10/5 mm at 1 mm voxels but
+    /// a different width at any other resolution.
+    pub phase_offset_sigma_mm: [f64; 3],
     pub bipolar_correction: bool,
     /// How the unwrapped echoes are combined, with that method's own settings (default
     /// [`B0EstimationMethod::WeightedAvg`] with [`B0WeightType::PhaseSNR`]).
@@ -425,12 +434,25 @@ pub struct FieldMappingConfig {
     pub romeo_params: RomeoParams,
 }
 
+/// The ROMEO command line's default phase-offset smoothing sigma, in mm (the default of
+/// [`FieldMappingConfig::phase_offset_sigma_mm`]).
+pub const ROMEO_CLI_PHASE_OFFSET_SIGMA_MM: [f64; 3] = [7.0, 7.0, 7.0];
+
+impl FieldMappingConfig {
+    /// [`phase_offset_sigma_mm`](Self::phase_offset_sigma_mm) in voxels of `voxel_size`
+    /// (mm), as the ROMEO command line converts it.
+    pub fn phase_offset_sigma_voxels(&self, voxel_size: (f64, f64, f64)) -> [f64; 3] {
+        let s = self.phase_offset_sigma_mm;
+        [s[0] / voxel_size.0, s[1] / voxel_size.1, s[2] / voxel_size.2]
+    }
+}
+
 impl Default for FieldMappingConfig {
     fn default() -> Self {
         Self {
             unwrapping_algorithm: UnwrappingAlgorithm::Romeo,
             phase_offset_removal: true,
-            phase_offset_sigma: [10.0, 10.0, 5.0],
+            phase_offset_sigma_mm: ROMEO_CLI_PHASE_OFFSET_SIGMA_MM,
             bipolar_correction: false,
             b0_estimation: B0EstimationMethod::default(),
             laplacian_solver: LaplacianSolver::Dct,

@@ -237,7 +237,10 @@ fn test_bgremove_vsharp_deconvolve() {
     let (vsx, vsy, vsz) = data.voxel_size;
 
     let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
-    let params = VsharpParams { deconvolve: true, grid: VsharpGrid::Native, ..VsharpParams::default() };
+    // QSM.rs's V-SHARP before the STI defaults: 12 → 1 mm, native grid, deconvolved.
+    let params = VsharpParams {
+        deconvolve: true, grid: VsharpGrid::Native, min_radius: 1.0, radius_step: 1.0, ..VsharpParams::default()
+    };
     let ((result, eroded_mask), elapsed) = run_timed!("V-SHARP (deconvolved)", bgremove::vsharp(
         &data.fieldmap,
         &data.mask,

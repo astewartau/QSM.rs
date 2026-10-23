@@ -58,7 +58,10 @@ pub struct L1QsmParams {
     /// L1 proximal ADMM weight.
     pub mu3: f64,
     /// Phase-rejection strength: the data weight is `lambda` times the normalised
-    /// magnitude. Smaller values reject more inconsistent voxels.
+    /// magnitude. Smaller values reject more inconsistent voxels. Default 0.8, the value of
+    /// FANSI's in-vivo demo (`script_DICOM_Philips.m` l. 445-447: `lambda = 0.8;
+    /// params.weight = lambda*params.weight/max(params.weight(:))`); `nlL1TV.m` itself has no
+    /// default ("recommended = lambda*magnitude_data", l. 18-19). QSM.rs previously used 1.0.
     pub lambda: f64,
     /// Number of outer ADMM iterations.
     pub max_iter: usize,
@@ -91,7 +94,7 @@ impl Default for L1QsmParams {
             mu1: None,
             mu2: 1.0,
             mu3: 1.0,
-            lambda: 1.0,
+            lambda: 0.8,
             max_iter: 50,
             tol_update: 1.0,
             tol_delta: 1e-6,

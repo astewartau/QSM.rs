@@ -673,7 +673,7 @@ pub struct CoilCombinationResult {
 /// 2. The HIP phase is unwrapped once (weighted by √|HIP|, on a robust mask of that weight).
 /// 3. Per coil, `po_c = φ_{1,c} − (TE₁/ΔTE)·unwrapped_HIP`, smoothed in the complex domain
 ///    with the same masked box-filter Gaussian approximation as MriResearchTools
-///    ([`nan_box_smooth_3d_phase`]; `sigma` in voxels, the reference default is [10, 10, 5]).
+///    ([`nan_box_smooth_3d_phase`]; `sigma` in voxels, `mcpc3ds`'s default is [10, 10, 5]; the pipeline passes the ROMEO command line's 7 mm, see [`crate::pipeline::FieldMappingConfig::phase_offset_sigma_mm`]).
 /// 4. Per echo, `S_e = Σ_c |S_{e,c}|² exp(i(φ_{e,c} − po_c))`; output phase `arg(S_e)` and
 ///    magnitude `sqrt(|S_e|)`.
 ///

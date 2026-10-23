@@ -82,7 +82,7 @@ pub mod wavesep;
 pub mod susep_net;
 pub mod chisepnet;
 
-pub use chi_sep_ilsqr::{chi_sep_ilsqr, ChiSepIlsqrParams};
+pub use chi_sep_ilsqr::{chi_sep_ilsqr, chisep_toolbox_ilsqr, ChiSepIlsqrParams, STI_FUNCTION_NITER};
 pub use chi_sep_medi::{chi_sep_medi, ChiSepParams};
 pub use decompose::{decompose, DecomposeParams};
 pub use hc_chisep::{hc_chisep, HcChisepParams};

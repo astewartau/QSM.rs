@@ -21,10 +21,10 @@
 //! (centre excluded) for r = 1…`smvsize` mm, the largest fitting ball's background per voxel,
 //! **no deconvolution**, the background interpolated back; `smvsize` defaults to 12 mm. Here
 //! that is `deconvolve: false`, an [`Isotropic`](VsharpGrid::Isotropic) 1 mm grid (same 12-voxel
-//! crop margin, [`CROP_MARGIN`]) and `max_radius` 12. What remains different from STI: this
-//! module's ball (voxel centres within r, centre included), its radii (12 → 1 mm, where STI
-//! drops voxels only a 1 mm ball fits, so its mask is smaller) and STI's mask
-//! back-interpolation. The papers and the code disagree on the deconvolution:
+//! crop margin, [`CROP_MARGIN`]), `max_radius` 12 and STI's radius schedule, 12 → 2 mm in 1 mm
+//! steps ([`VsharpParams::radius_step`]). What remains different from STI: this module's ball
+//! (voxel centres within r, centre included, where STI's is `|x| ≤ r + 1/6` without the
+//! centre) and STI's mask back-interpolation. The papers and the code disagree on the deconvolution:
 //! Li et al. 2011 (NeuroImage 55:1645, *Image Analysis* and *Results*) and Wu et al. 2012
 //! (*Background phase removal*: "a deconvolution is carried out to restore the local phase",
 //! with the kernel of the largest diameter used) both deconvolve the SMV-filtered phase,
@@ -81,6 +81,13 @@ use crate::kernels::smv::{smv_kernel, erode_mask_smv};
 /// Zero margin (native voxels per side) around the mask's bounding box when V-SHARP runs on an
 /// isotropic working grid. See the [module docs](self).
 pub const CROP_MARGIN: usize = 12;
+
+/// Smallest radius in effect in STI Suite's `V_SHARP`, in mm (it drops voxels only r = 1 fits):
+/// the default of [`VsharpParams::min_radius`].
+pub const STI_MIN_RADIUS_MM: f64 = 2.0;
+
+/// Step between STI Suite `V_SHARP`'s radii, in mm: the default of [`VsharpParams::radius_step`].
+pub const STI_RADIUS_STEP_MM: f64 = 1.0;
 
 /// Working-grid spacing of STI Suite's `V_SHARP`, in mm: the default of [`VsharpParams::grid`].
 pub const STI_GRID_MM: f64 = 1.0;
@@ -140,8 +147,24 @@ pub struct VsharpParams {
     /// Maximum (starting) SMV kernel radius in mm (default: 12.0, STI Suite's `V_SHARP`
     /// `smvsize` default, also what its `QSM_GUI` and the χ-separation toolbox pass)
     pub max_radius: f64,
-    /// Minimum SMV kernel radius in mm — also the step between successive radii (default: 1.0)
+    /// Smallest SMV kernel radius in mm (default: 2.0, STI Suite's schedule; see
+    /// [`radius_step`](Self::radius_step)). Voxels where no ball of at least this radius fits
+    /// are dropped from the output mask.
     pub min_radius: f64,
+    /// Step between successive radii in mm (default: 1.0). The radii are `max_radius`,
+    /// `max_radius − radius_step`, … down to `min_radius`, largest first; each voxel takes the
+    /// largest that fits.
+    ///
+    /// The default schedule, 12, 11, …, 2 mm, is STI Suite's `V_SHARP`: it computes balls for
+    /// r = 1 … `smvsize` mm in 1 mm steps (ascending, larger radii overwriting, so each voxel
+    /// ends with the largest ball that fits) and then drops the voxels where only r = 1 fits,
+    /// so the radii in effect are 2 … 12 mm (black-box probe, ukb-qsmxt
+    /// `docs/08_vsharp_sti.md` step 4). Before this parameter existed `min_radius` was also
+    /// the step, which cannot express that schedule; the previous default, 12 → 1 mm in 1 mm
+    /// steps, is `min_radius: 1.0, radius_step: 1.0`. STI's ball is `|x| ≤ r + 1/6` without its
+    /// centre voxel; this module's is the voxel centres within `r`, centre included, so the
+    /// kernels themselves still differ slightly from STI's.
+    pub radius_step: f64,
     /// Deconvolve the SMV high-passed field by the largest kernel, `1/(1 − Ŝ)` with TSVD at
     /// [`threshold`](Self::threshold). Default false: return the high-passed field
     /// `φ − S_r∗φ` itself, each voxel with the largest radius whose ball fits in the mask, as
@@ -161,12 +184,15 @@ pub struct VsharpParams {
 }
 
 impl VsharpParams {
-    /// Checks the parameters V-SHARP cannot run with: `min_radius` (the step between radii)
-    /// must be finite and > 0 — at 0 the radius list never ends — and an
+    /// Checks the parameters V-SHARP cannot run with: `min_radius` and `radius_step` must be
+    /// finite and > 0 — at a step of 0 the radius list never ends — and an
     /// [`Isotropic`](VsharpGrid::Isotropic) working grid needs a spacing that is finite and > 0.
     pub fn validate(&self) -> Result<(), InputError> {
         if !(self.min_radius.is_finite() && self.min_radius > 0.0) {
             return Err(InputError::param("V-SHARP min_radius", self.min_radius, "finite and > 0 mm"));
+        }
+        if !(self.radius_step.is_finite() && self.radius_step > 0.0) {
+            return Err(InputError::param("V-SHARP radius_step", self.radius_step, "finite and > 0 mm"));
         }
         if let VsharpGrid::Isotropic { spacing_mm } = self.grid {
             if !(spacing_mm.is_finite() && spacing_mm > 0.0) {
@@ -194,7 +220,8 @@ impl Default for VsharpParams {
             // (which BFR is never run on in practice). See the PR for the benchmark.
             threshold: 0.2,
             max_radius: 12.0,
-            min_radius: 1.0,
+            min_radius: STI_MIN_RADIUS_MM,
+            radius_step: STI_RADIUS_STEP_MM,
             deconvolve: false,
             grid: VsharpGrid::Isotropic { spacing_mm: STI_GRID_MM },
         }
@@ -404,15 +431,19 @@ fn trilinear(src: &[f64], n: [usize; 3], coords: &[Vec<f64>; 3]) -> Vec<f64> {
 
 /// Build the descending list of SMV kernel radii (mm) from the params.
 ///
-/// Starts at `max_radius` (mm) and steps down by `min_radius` (mm), which is
-/// also the smallest kernel used.
+/// Starts at `max_radius` (mm) and steps down by `radius_step` (mm) while the radius is at
+/// least `min_radius` (with a tolerance of 1e-9 mm for the floating-point steps).
 fn vsharp_radii(params: &VsharpParams) -> Vec<f64> {
     let mut radii = Vec::new();
-    let mut r = params.max_radius;
-    let step = params.min_radius;
-    while r >= step {
+    let step = params.radius_step;
+    let mut k = 0usize;
+    loop {
+        let r = params.max_radius - k as f64 * step;
+        if r < params.min_radius - 1e-9 {
+            break;
+        }
         radii.push(r);
-        r -= step;
+        k += 1;
     }
     if radii.is_empty() {
         radii.push(params.max_radius);
@@ -825,6 +856,7 @@ mod tests {
         assert!(!p.deconvolve);
         assert_eq!(p.grid, VsharpGrid::Isotropic { spacing_mm: STI_GRID_MM });
         assert_eq!(p.max_radius, 12.0);
+        assert_eq!((p.min_radius, p.radius_step), (2.0, 1.0));
     }
 
     #[test]
@@ -992,8 +1024,8 @@ mod tests {
         assert!(err.0.contains("spacing_mm = 0") && err.0.contains("> 0 mm"), "{err}");
     }
 
-    /// #199: `min_radius` is also the step between radii, so at 0 (or below, or NaN) the radius
-    /// list never ended and V-SHARP hung. It is an error now.
+    /// #199: `min_radius` used to be the step between radii too, so at 0 (or below, or NaN) the
+    /// radius list never ended and V-SHARP hung. It is an error now, as is such a `radius_step`.
     #[test]
     fn min_radius_that_is_not_positive_is_an_error() {
         let grid = Grid::new(4, 4, 4, 1.0, 1.0, 1.0);
@@ -1002,6 +1034,31 @@ mod tests {
             let err = vsharp(&[0.0; 64], &[1u8; 64], &grid, &p, |_, _| {}).unwrap_err();
             assert!(err.0.contains("V-SHARP min_radius") && err.0.contains("> 0 mm"), "{err}");
         }
+    }
+
+    #[test]
+    fn radius_step_that_is_not_positive_is_an_error() {
+        let grid = Grid::new(4, 4, 4, 1.0, 1.0, 1.0);
+        for bad in [0.0, -1.0, f64::NAN] {
+            let p = VsharpParams { radius_step: bad, ..Default::default() };
+            let err = vsharp(&[0.0; 64], &[1u8; 64], &grid, &p, |_, _| {}).unwrap_err();
+            assert!(err.0.contains("V-SHARP radius_step"), "{err}");
+        }
+    }
+
+    #[test]
+    fn radius_schedules() {
+        // STI Suite's V_SHARP: 12 → 2 mm in 1 mm steps (r = 1 is dropped)
+        let sti: Vec<f64> = (2..=12).rev().map(|r| r as f64).collect();
+        assert_eq!(vsharp_radii(&VsharpParams::default()), sti);
+        // the previous default, 12 → 1 mm
+        let old = VsharpParams { min_radius: 1.0, radius_step: 1.0, ..Default::default() };
+        assert_eq!(vsharp_radii(&old), (1..=12).rev().map(|r| r as f64).collect::<Vec<_>>());
+        // a step independent of the smallest radius
+        let p = VsharpParams { max_radius: 10.0, min_radius: 3.0, radius_step: 2.5, ..Default::default() };
+        assert_eq!(vsharp_radii(&p), vec![10.0, 7.5, 5.0]);
+        let p = VsharpParams { max_radius: 1.0, min_radius: 2.0, ..Default::default() };
+        assert_eq!(vsharp_radii(&p), vec![1.0]);
     }
 
     /// The QSM.rs V-SHARP ablation prototype's isotropic-grid path (`exp/vsharp-ablation`,
