@@ -8,6 +8,7 @@
 use std::fs;
 use std::io::{Read, Write};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::{cache_dir, cache_path, resolve_local, sha256_hex, ModelSpec, WeightFile};
 
@@ -97,19 +98,48 @@ pub fn ensure_file_with_progress(
         }
     }
 
-    // 4. Write atomically into the cache (temp file + rename).
-    let dir = cache_dir();
-    fs::create_dir_all(&dir)?;
-    let final_path = cache_path(file);
-    let tmp = dir.join(format!("{}.part", file.name));
-    {
-        let mut f = fs::File::create(&tmp)?;
-        f.write_all(&bytes)?;
-        f.sync_all()?;
-    }
-    fs::rename(&tmp, &final_path)?;
-    Ok(final_path)
+    // 4. Write atomically into the cache.
+    write_cached(file, &bytes)
 }
+
+/// Write `bytes` into the cache as `file`, atomically: a temp file unique to this writer,
+/// then a rename over the final name.
+///
+/// The temp name must be unique per writer, not just per file. Several threads or processes
+/// can fetch the same weights at once (a test binary runs its tests in parallel; CI jobs share
+/// a cache), and with one shared `<name>.part` a second writer's `File::create` truncated the
+/// first writer's temp file mid-write: the first then renamed a partial model into place
+/// ("model proto does not contain a graph") and the second's rename found no temp file
+/// ("No such file or directory"). With a unique temp file each rename installs a complete,
+/// verified file; the last one wins, and all of them hold the same bytes.
+fn write_cached(file: &WeightFile, bytes: &[u8]) -> Result<PathBuf, DownloadError> {
+    let path = cache_path(file);
+    write_atomically(&cache_dir(), &path, file.name, bytes)?;
+    Ok(path)
+}
+
+fn write_atomically(dir: &std::path::Path, final_path: &std::path::Path, name: &str, bytes: &[u8]) -> Result<(), DownloadError> {
+    static WRITER: AtomicU64 = AtomicU64::new(0);
+    fs::create_dir_all(dir)?;
+    let tmp = dir.join(format!(
+        "{}.{}.{}.part",
+        name,
+        std::process::id(),
+        WRITER.fetch_add(1, Ordering::Relaxed)
+    ));
+    let written = (|| {
+        let mut f = fs::File::create(&tmp)?;
+        f.write_all(bytes)?;
+        f.sync_all()?;
+        fs::rename(&tmp, final_path)
+    })();
+    if let Err(e) = written {
+        let _ = fs::remove_file(&tmp);
+        return Err(e.into());
+    }
+    Ok(())
+}
+
 
 /// Ensure every weight file for a model is present, returning their paths in
 /// [`ModelSpec::files`] order.
@@ -196,5 +226,34 @@ fn http_get_once(
         }
         // Connection resets / timeouts / DNS blips — retry.
         Err(e @ ureq::Error::Transport(_)) => Err((e.to_string(), true)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Concurrent writers of one cache entry must each succeed and leave a complete file:
+    /// with a shared `<name>.part`, one writer truncated another's temp file mid-write.
+    #[test]
+    fn concurrent_writers_leave_a_complete_file() {
+        let dir = std::env::temp_dir().join(format!("qsm-cache-race-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let final_path = dir.join("model.onnx");
+        let payload: Vec<u8> = (0..4_000_000u32).map(|i| (i % 251) as u8).collect();
+        std::thread::scope(|s| {
+            for _ in 0..8 {
+                s.spawn(|| {
+                    for _ in 0..5 {
+                        write_atomically(&dir, &final_path, "model.onnx", &payload).unwrap();
+                        assert_eq!(fs::read(&final_path).unwrap(), payload);
+                    }
+                });
+            }
+        });
+        let leftovers: Vec<_> = fs::read_dir(&dir).unwrap().filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".part")).collect();
+        assert!(leftovers.is_empty(), "temp files left behind: {leftovers:?}");
+        fs::remove_dir_all(&dir).unwrap();
     }
 }
