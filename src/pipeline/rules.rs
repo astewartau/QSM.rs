@@ -416,6 +416,8 @@ pub const SETTINGS: &[(&str, &str)] = &[
     ("inversion.ndi.te", "Echo time NDI converts at (EchoTime); only with NDI"),
     ("inversion.l1qsm.te", "Echo time L1-QSM converts at (EchoTime); only with L1-QSM"),
     ("inversion.whqsm.te", "Echo time WH-QSM converts at (EchoTime); only with WH-QSM"),
+    ("inversion.medi.msmv", "MEDI-mSMV: MediParams::msmv is set (bool); only with MEDI"),
+    ("inversion.medi.msmv.prefilter", "MEDI-mSMV's SMV prefilter (MsmvParams::prefilter, bool); only with MEDI-mSMV"),
     ("inversion.medi.te", "Echo time MEDI converts at (EchoTime); only with MEDI"),
     ("inversion.tfi.te", "Echo time TFI converts at (EchoTime); only with TFI"),
     ("inversion.heidi.te", "Echo time HEIDI converts at (EchoTime); only with HEIDI"),
@@ -563,6 +565,11 @@ pub fn current(input: &RuleInput, facts: &ScanFacts, setting: &str) -> Option<Ve
         "inversion.ndi.te" => gated(alg(&[A::Ndi]), Current::Choice(echo_time_id(c.inversion.ndi.te))),
         "inversion.l1qsm.te" => gated(alg(&[A::L1qsm]), Current::Choice(echo_time_id(c.inversion.l1qsm.te))),
         "inversion.whqsm.te" => gated(alg(&[A::Whqsm]), Current::Choice(echo_time_id(c.inversion.whqsm.te))),
+        "inversion.medi.msmv" => gated(alg(&[A::Medi]), Current::Bool(c.inversion.medi.msmv.is_some())),
+        "inversion.medi.msmv.prefilter" => match &c.inversion.medi.msmv {
+            Some(m) if alg(&[A::Medi]) => one(Current::Bool(m.prefilter)),
+            _ => vec![],
+        },
         "inversion.medi.te" => gated(alg(&[A::Medi]), Current::Choice(echo_time_id(c.inversion.medi.te))),
         "inversion.tfi.te" => gated(alg(&[A::Tfi]), Current::Choice(echo_time_id(c.inversion.tfi.te))),
         "inversion.heidi.te" => gated(alg(&[A::Heidi]), Current::Choice(echo_time_id(c.inversion.heidi.te))),
@@ -1106,6 +1113,35 @@ pub static RULES: &[Rule] = &[
         reason: "QSMART calls QSM_iLSQR without 'padsize', so STI Suite's default padding applies",
         source: "QSMART QSMART.m l. 32; STI Suite QSM_iLSQR default, probed (QSM.rs ilsqr.rs docs)",
     },
+    // ---------------------------------------------------------------- MEDI-mSMV (#285)
+    Rule {
+        id: "medi-msmv.three-echoes",
+        when: &[inv(&[Choice("medi")]), method("inversion.medi.msmv", &[Bool(true)]),
+                fact_at_most(Fact::EchoCount, 2.0)],
+        setting: "inversion.medi.msmv",
+        expect: Test::OneOf { values: &[Bool(false)] },
+        default: Bool(false),
+        unit: Unit::None,
+        strength: Strength::Required,
+        basis: Basis::Implementation,
+        reason: "MEDI-mSMV's vessel mask needs R2* from arlo.m, which needs at least three echoes; \
+                 the pipeline refuses fewer",
+        source: "MEDI toolbox arlo.m:22-26; QSM.rs MediParams::msmv docs (#285)",
+    },
+    one_of("medi-msmv.bg-removal",
+        &[inv(&[Choice("medi")]), method("inversion.medi.msmv", &[Bool(true)])],
+        "bg_removal.algorithm", &[Choice("pdf"), Choice("vsharp"), Choice("lbv")],
+        Strength::Reference, Basis::ReferenceChoice,
+        "The mSMV authors run it on a local field from PDF, V-SHARP or LBV (their README's \
+         example uses PDF; it lists these as examples, \"by PDF, VSHARP, LBV, etc.\", without \
+         recommending one)",
+        "agr78/mSMV README (in_file; MEDI example: PDF(...,0,100)); Roberts et al. 2024 MRM, Methods"),
+    discourage("medi-msmv.prefilter",
+        &[inv(&[Choice("medi")]), method("inversion.medi.msmv", &[Bool(true)])],
+        "inversion.medi.msmv.prefilter", &[Bool(false)], Bool(true), Basis::Measured,
+        "With the prefilter off, MEDI fits the unfiltered field with the SMV-filtered kernel: \
+         NRMSE 280-740 % on the phantom after PDF, V-SHARP or LBV, and 481 % in the authors' MATLAB",
+        "QSM.rs inversion::msmv docs and MsmvParams::prefilter (#285)"),
     // ---------------------------------------------------------------- Echo time of the ppm↔rad conversion (#276)
     // With one echo every choice is the same time, so these need several.
     measured_better("fansi.te-spacing", &[inv(&[Choice("fansi"), Choice("fansi-tgv")]), MULTI_ECHO],
@@ -1312,6 +1348,21 @@ mod tests {
                 c.cfg.inversion.star.pad = [12; 3];
             })),
             ("chi-sep-ilsqr.qsm-ilsqr", Case::new(separation(S::ChiSepIlsqr))),
+            ("medi-msmv.three-echoes", Case::new(|c| {
+                inversion(I::Medi)(c);
+                c.cfg.inversion.medi.msmv = Some(Default::default());
+                c.facts.echo_count = Some(2);
+            })),
+            ("medi-msmv.bg-removal", Case::new(|c| {
+                inversion(I::Medi)(c);
+                c.cfg.inversion.medi.msmv = Some(Default::default());
+                background(B::Sharp)(c);
+            })),
+            ("medi-msmv.prefilter", Case::new(|c| {
+                inversion(I::Medi)(c);
+                c.cfg.inversion.medi.msmv =
+                    Some(crate::inversion::MsmvParams { prefilter: false, ..Default::default() });
+            })),
             ("fansi.te-spacing", Case::new(|c| { inversion(I::FansiTgv)(c); c.cfg.inversion.fansi.te = crate::EchoTime::First })),
             ("ndi.te-first", Case::new(|c| { inversion(I::Ndi)(c); c.cfg.inversion.ndi.te = crate::EchoTime::Spacing })),
             ("l1qsm.te-first", Case::new(|c| { inversion(I::L1qsm)(c); c.cfg.inversion.l1qsm.te = crate::EchoTime::Sum })),

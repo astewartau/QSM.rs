@@ -202,7 +202,7 @@
 //! # Pipeline rules
 //!
 //! The facts above that a configuration can depart from are published as rules in
-//! [`crate::pipeline::rules::RULES`] (each with its strength, basis, reason and source): `medi.mask-bet`, `medi.field-complex-fit`, `medi.te-spacing`.
+//! [`crate::pipeline::rules::RULES`] (each with its strength, basis, reason and source): `medi.mask-bet`, `medi.field-complex-fit`, `medi.te-spacing`, `medi-msmv.three-echoes`, `medi-msmv.bg-removal`, `medi-msmv.prefilter`.
 
 use num_complex::Complex64;
 #[cfg(feature = "parallel")]
