@@ -63,7 +63,7 @@ pub(crate) fn scan_echo_times(
 /// - [`InversionInput::LocalField`] (most methods): the local field after background removal,
 ///   with the eroded mask background removal returned.
 /// - [`InversionInput::TotalField`]: the total field straight from field mapping, with the
-///   brain mask and no background removal. Through this function that is TFI, MEDI with SMV,
+///   brain mask and no background removal. Through this function that is TFI,
 ///   AutoQSM and NeXtQSM. TFI solves over the whole FOV under its preconditioner (1 inside
 ///   `mask`, `precond` outside) and weights the data by the magnitude inside the mask, so the
 ///   total field and the brain mask are exactly what it needs; given a local field and an

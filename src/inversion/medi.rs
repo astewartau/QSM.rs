@@ -62,6 +62,77 @@
 //! `zeropad` pads the volume at the end of each axis before the inversion and crops the result,
 //! as `MEDI_L1`'s `'zeropad'` option does.
 //!
+//! # Input: the local field
+//! `medi` takes the local field from a background removal, with or without SMV or mSMV. The
+//! MEDI toolbox's pipeline (`README.m`) runs `RDF = PDF(iFreq, N_std, Mask, ...)` and then
+//! `MEDI_L1('lambda',1000,'lambda_CSF',100,'merit','smv',5)` on `RDF`. Its naming convention
+//! calls `RDF` the "Relative Difference Field, aka local field", and `MEDI_L1` reads `iFreq`
+//! (the total field) without using it. The mSMV paper (Roberts et al. 2024, Eqs. 4 and 13)
+//! defines MEDI-SMV on the local field after PDF, `b_L0 = b̂_L − S·M·b̂_L` on the eroded mask,
+//! and SEPIA's MEDI wrapper passes MEDI its local field. MEDI's SMV step only removes the
+//! residual background that a background removal leaves near the edge. The pipeline therefore
+//! routes MEDI through a background removal
+//! ([`InversionConfig::input`](crate::pipeline::InversionConfig::input)), PDF in the authors'
+//! pipeline ([`reference_bg_removal`](crate::pipeline::InversionConfig::reference_bg_removal)).
+//!
+//! Until #287, QSM.rs gave MEDI-SMV the total field and the brain mask instead. The two routes
+//! were compared with MEDI's defaults (λ 1000, MERIT, MEDI+0) and QSM.rs's PDF. Data: the
+//! qsm-forward 7 T head phantom (TE 4/12/20/28 ms), noise-free from its true total field and at
+//! SNR 50 through QSM.rs's field mapping, scored over the brain mask; and four 3 T EMTP
+//! travelling-head scans in QSM-CI (Philips Achieva, Siemens Skyra, Siemens Prisma, Philips
+//! Ingenia), scored by the χ variance in the SynthSeg cortex (the mSMV paper's shadow score):
+//!
+//! | input → MEDI | phantom, noise-free: XSIM / NRMSE / corr | phantom, SNR 50 | in vivo cortex χ variance (×1e-4 ppm²), 4 scans |
+//! |---|---|---|---|
+//! | total field → MEDI-SMV (before #287) | 0.563 / 62.6 % / 0.780 | 0.352 / 76.2 % / 0.657 | 4.76 / 8.99 / 4.12 / 5.71 |
+//! | PDF → MEDI-SMV (authors) | 0.563 / 62.6 % / 0.780 | 0.352 / 76.2 % / 0.658 | 4.86 / 9.09 / 4.14 / 5.76 |
+//! | total field → MEDI-SMV, no shrinking | 0.233 / 140.6 % / 0.458 | 0.079 / 315.0 % / 0.207 | 850 / 383 / 875 / 983 |
+//! | PDF → MEDI-SMV, no shrinking | 0.558 / 65.1 % / 0.760 | 0.292 / 94.0 % / 0.511 | 6.9 / 12.7 / 9.1 / 11.4 |
+//!
+//! With the default mask shrinking the two routes give nearly the same χ: the SMV high-pass
+//! removes any harmonic field inside the eroded mask, and the total field differs from PDF's
+//! local field by a field that is harmonic there. The maps differ by 0.5 ppb RMS on the phantom
+//! (relative L2 1.3 %) and 1.5–4.9 ppb in vivo (4–14 %). Without shrinking, the edge band keeps
+//! the background field on the total-field route, and the result is unusable. The authors'
+//! route costs a PDF run, 10–80 s on these volumes.
+//!
+//! # SMV options
+//! What `MEDI_L1.m` does with each combination of `'smv'`/`'nosmv'`, `smv_shrink_mask` and
+//! `'msmv'` (`SphereK` is `sphere_kernel.m`'s kernel, `SMV(x) = ifftn(SphereK·fftn(x))`):
+//!
+//! | options | mask | field `RDF` | kernel `D` | noise `tempn` |
+//! |---|---|---|---|---|
+//! | `'nosmv'` | unchanged | unchanged | `D` | `N_std` |
+//! | `'smv'`, shrink on (default) | `SMV(Mask) > 0.999` | `Mask·(RDF − SMV(RDF))` | `(1 − SphereK)·D` | `sqrt(SMV(tempn²) + tempn²)` |
+//! | `'smv'`, shrink off, release 2024.11.26 | unchanged | `Mask·(RDF − SMV(RDF))` | `(1 − SphereK)·D` | `sqrt(SMV(tempn²) + tempn²)` |
+//! | `'smv'`, shrink off, mSMV prerelease | unchanged | **unchanged** | `(1 − SphereK)·D` | `sqrt(SMV(tempn²) + tempn²)` |
+//! | `'msmv'` (prerelease only; forces shrink off) | unchanged | `msmv(RDF, Mask, R2s, ...)` | `(1 − SphereK)·D` | `sqrt(SMV(tempn²) + tempn²)` |
+//!
+//! `medi` follows the 2024.11.26 release for the first three rows ([`MediParams::smv`],
+//! [`MediParams::smv_shrink_mask`]) and the prerelease for `'msmv'` ([`MediParams::msmv`]),
+//! which only the prerelease has. The prerelease (`MEDI_toolbox-mSMV100125.zip`) moved the
+//! field high-pass inside `if opts.smv_shrink_mask && ~opts.msmv`, so with SMV on and shrinking
+//! off it fits the unfiltered field with the SMV-filtered kernel. Its comments and the mSMV
+//! paper do not describe this case: the paper's MEDI-SMV (Eq. 13) is the shrinking one. The
+//! two releases agree in every other row and, apart from the mSMV code, in the rest of
+//! `MEDI_L1.m`. In both, `'msmv'`/`'smv'` set `smv = 1`. In the prerelease, `'nosmv'` given
+//! after `'msmv'` turns SMV off and with it mSMV, a combination `medi` does not have:
+//! [`MediParams::msmv`] implies SMV.
+//!
+//! Checked against both toolboxes in MATLAB R2023b (`tests/medi_smv_parity.rs`, a 32×36×28
+//! phantom, no CSF term). The two `MEDI_L1.m` versions give identical χ with `'nosmv'` and with
+//! `'smv'` and shrinking. With shrinking off they differ by 101 % relative L2 after one step
+//! and 176 % with all defaults. `medi` against the release, χ over the mask:
+//!
+//! | options | one Gauss-Newton step: max abs diff (ppm), rel. L2 | all defaults (10 steps) |
+//! |---|---|---|
+//! | `'nosmv'` | 2.5e-7, 1.1e-6 | 1.4e-3, 1.9e-3 |
+//! | `'smv'`, shrink on | 1.1e-8, 2.1e-6 | 2.9e-8, 5.8e-7 |
+//! | `'smv'`, shrink off | 1.7e-7, 5.7e-7 | 2.0e-4, 2.1e-4 |
+//!
+//! After one step the differences are single (MATLAB) against double (here) rounding. Over
+//! ten steps they also include CG stopping one iteration apart at `cg_tol` 0.01.
+//!
 //! # MEDI-mSMV
 //! [`MediParams::msmv`] is `MEDI_L1(..., 'msmv', radius)` from the mSMV authors' MEDI toolbox
 //! (agr78/mSMV, `prerelease/MEDI_toolbox-mSMV100125.zip`; Roberts et al. 2024, Eq. 12): SMV is
@@ -120,12 +191,22 @@ pub struct MediParams {
     pub lambda: f64,
     /// MERIT: reweight the noise by the data residual after each iteration (`'merit'`)
     pub merit: bool,
-    /// Apply the spherical mean value high-pass to the field and the dipole kernel (`'smv'`)
+    /// MEDI-SMV (`'smv'`; `false` is `'nosmv'`): high-pass the local field with the spherical
+    /// mean value kernel, `RDF − SMV(RDF)`, and fit it with the SMV-filtered dipole kernel
+    /// `(1 − SphereK)·D` and the SMV-propagated noise `sqrt(SMV(N²) + N²)`. This removes the
+    /// residual background a background removal leaves near the edge. It is applied to the
+    /// local field, not the total field (see the module docs). On by default, as in
+    /// `MEDI_L1.m`.
     pub smv: bool,
     /// SMV radius in mm
     pub smv_radius: f64,
-    /// With SMV, erode the mask to where the SMV of the mask exceeds 0.999 (`smv_shrink_mask`).
-    /// Ignored with [`msmv`](Self::msmv), which keeps the mask, as `MEDI_L1` does.
+    /// With SMV, erode the mask to where the SMV of the mask exceeds 0.999 (`smv_shrink_mask`,
+    /// default on). With it off, the field is still high-passed, the kernel filtered and the
+    /// noise propagated, on the full mask, as the 2024.11.26 `MEDI_L1.m` does. The mSMV
+    /// prerelease's `MEDI_L1.m` skips the field high-pass in this case and keeps the rest; `medi`
+    /// follows the release (table in the module docs). The edge band within the SMV radius then
+    /// holds `RDF − SMV(RDF)` of a sphere that reaches outside the mask. Ignored without SMV,
+    /// and with [`msmv`](Self::msmv), which keeps the mask, as `MEDI_L1` does.
     pub smv_shrink_mask: bool,
     /// MEDI-mSMV (`MEDI_L1(..., 'msmv', smv_radius)`): replace the SMV step's mask erosion and
     /// field high-pass with [`msmv`](super::msmv::msmv) on the full mask, keeping the
@@ -357,7 +438,9 @@ fn medi_l1(
                 smv(&m, &k, &mut fft, &mut buf);
                 par_fill(&mut mask, |i| buf[i].re > 0.999);
             }
-            // RDF = RDF - SMV(RDF, SphereK); RDF = RDF.*Mask
+            // RDF = RDF - SMV(RDF, SphereK); RDF = RDF.*Mask, with or without shrinking, as
+            // in the 2024.11.26 release. The mSMV prerelease does this only when shrinking
+            // (see the SMV options table in the module docs).
             smv(&rdf, &k, &mut fft, &mut buf);
             par_update(&mut rdf, |i, v| *v = if mask[i] { *v - buf[i].re } else { 0.0 });
         }

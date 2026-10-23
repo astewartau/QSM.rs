@@ -550,14 +550,8 @@ impl InversionConfig {
     /// [`InversionInput`].
     ///
     /// It is a property of the config rather than of [`InversionAlgorithm`] alone, because
-    /// two methods depend on more than their name:
+    /// **TGV** depends on more than its name:
     ///
-    /// - **MEDI** with [`MediParams::smv`] (the default, as in `MEDI_L1.m`) high-pass filters the field and the
-    ///   dipole kernel with a spherical mean value kernel before inverting, `(1−S)f = (1−S)Dχ`.
-    ///   That removes the harmonic background, so MEDI+SMV takes the total field. Without SMV,
-    ///   MEDI takes the local field. **MEDI-mSMV** ([`MediParams::msmv`]) takes the local field
-    ///   too: the authors run it on the output of a background removal (PDF, V-SHARP or LBV in
-    ///   their paper), with that method's mask, and mSMV replaces the SMV mask erosion.
     /// - **TGV** ([`run_tgv`](super::run_tgv)) reconstructs multi-echo data from the
     ///   field-mapped total field ([`TgvInput::FieldPpm`](crate::inversion::TgvInput::FieldPpm),
     ///   expressed as phase at the first echo time) and a single echo from its wrapped phase
@@ -571,11 +565,22 @@ impl InversionConfig {
     /// ([`run_iqsm`](super::run_iqsm), [`run_iqsm_plus`](super::run_iqsm_plus)) take wrapped
     /// phase. Every other method, including WH-QSM (which models only a *residual* harmonic
     /// field) and LSQR (a residual-field term), takes the local field.
+    ///
+    /// **MEDI** takes the local field with every option: plain MEDI, MEDI-SMV
+    /// ([`MediParams::smv`]) and MEDI-mSMV ([`MediParams::msmv`]). That is how the MEDI authors
+    /// run it. MEDI toolbox `README.m` runs `RDF = PDF(iFreq, N_std, Mask, ...)` and then
+    /// `MEDI_L1('lambda',1000,'lambda_CSF',100,'merit','smv',5)` on `RDF`, which its naming
+    /// convention defines as the local field. `MEDI_L1` reads `iFreq` but never uses it. The
+    /// mSMV paper (Roberts et al. 2024, Eqs. 4 and 13) defines MEDI-SMV as the SMV high-pass of
+    /// the *local* field after PDF, and SEPIA passes MEDI its local field. The SMV step removes
+    /// the residual background that a background removal leaves near the brain edge. It is not
+    /// a background removal itself. On the total field, MEDI-SMV is a different pipeline. With
+    /// the default mask shrinking it gives nearly the same χ, but without shrinking it fails
+    /// (see the MEDI module docs). The authors' pipeline uses PDF for the background removal
+    /// ([`reference_bg_removal`](Self::reference_bg_removal)).
     pub fn input(&self, n_echoes: usize) -> InversionInput {
         use InversionAlgorithm as A;
         match self.algorithm {
-            A::Medi if self.medi.msmv.is_some() => InversionInput::LocalField,
-            A::Medi if self.medi.smv => InversionInput::TotalField,
             A::Tgv if n_echoes > 1 => InversionInput::TotalField,
             A::Tgv | A::Iqsm | A::IqsmPlus => InversionInput::WrappedPhase,
             A::Tfi | A::Qsmart | A::Autoqsm | A::Nextqsm => InversionInput::TotalField,
@@ -604,6 +609,23 @@ impl InversionConfig {
             | A::Ir2qsm
             | A::Lpcnn
             | A::ModlQsm => InversionInput::LocalField,
+        }
+    }
+
+    /// The background removal the selected method's authors run in front of it, for a
+    /// [`InversionInput::LocalField`] method whose authors' pipeline QSM.rs ports. Hosts can use
+    /// it as the default background removal for that method.
+    ///
+    /// - MEDI (with or without SMV or mSMV): [`BgRemovalAlgorithm::Pdf`]. The MEDI toolbox's
+    ///   `README.m` runs `PDF.m` (ported as [`BgRemovalAlgorithm::Pdf`], with the same
+    ///   `Fit_ppm_complex` noise weighting) and gives `MEDI_L1` its result. The mSMV paper
+    ///   (Roberts et al. 2024) also runs MEDI-SMV and MEDI-mSMV after PDF.
+    ///
+    /// `None` when no such pipeline is recorded for the method. It is then the host's choice.
+    pub fn reference_bg_removal(&self) -> Option<BgRemovalAlgorithm> {
+        match self.algorithm {
+            InversionAlgorithm::Medi => Some(BgRemovalAlgorithm::Pdf),
+            _ => None,
         }
     }
 }
@@ -1124,10 +1146,10 @@ mod inversion_input_tests {
             (A::Xqsm, LocalField), (A::Qsmnet, LocalField), (A::QsmnetPlus, LocalField),
             (A::Autoqsm, TotalField), (A::Qsmgan, LocalField), (A::Ir2qsm, LocalField),
             (A::Lpcnn, LocalField), (A::ModlQsm, LocalField), (A::Nextqsm, TotalField),
-            (A::Iqsm, WrappedPhase), (A::IqsmPlus, WrappedPhase),
+            (A::Iqsm, WrappedPhase), (A::IqsmPlus, WrappedPhase), (A::Medi, LocalField),
         ];
-        // MEDI and TGV depend on more than the name; checked below.
-        let special = [A::Medi, A::Tgv];
+        // TGV depends on more than the name; checked below.
+        let special = [A::Tgv];
         for v in A::VARIANTS {
             if special.contains(v) {
                 continue;
@@ -1143,27 +1165,32 @@ mod inversion_input_tests {
         assert_eq!(expected.len() + special.len(), A::VARIANTS.len());
     }
 
+    /// MEDI takes a background removal's local field with every SMV option, as the MEDI
+    /// toolbox's README.m pipeline and the mSMV paper run it (#287).
     #[test]
-    fn medi_takes_the_total_field_only_with_smv() {
-        for n in [1, 4] {
-            assert_eq!(input(InversionAlgorithm::Medi, true, n), InversionInput::TotalField);
-            assert_eq!(input(InversionAlgorithm::Medi, false, n), InversionInput::LocalField);
+    fn medi_takes_the_local_field_with_every_smv_option() {
+        for smv in [true, false] {
+            for shrink in [true, false] {
+                for msmv in [None, Some(crate::inversion::MsmvParams::default())] {
+                    let mut c = InversionConfig { algorithm: InversionAlgorithm::Medi, ..Default::default() };
+                    c.medi.smv = smv;
+                    c.medi.smv_shrink_mask = shrink;
+                    c.medi.msmv = msmv;
+                    for n in [1, 4] {
+                        assert_eq!(c.input(n), InversionInput::LocalField);
+                    }
+                }
+            }
         }
-        // MEDI_L1's default uses SMV
-        assert!(MediParams::default().smv);
     }
 
-    /// MEDI-mSMV runs on a background removal's local field (the authors used PDF, V-SHARP and
-    /// LBV), with or without MediParams::smv set.
+    /// The MEDI toolbox's pipeline runs PDF before MEDI_L1.
     #[test]
-    fn medi_msmv_takes_the_local_field() {
-        for smv in [true, false] {
-            let mut c = InversionConfig { algorithm: InversionAlgorithm::Medi, ..Default::default() };
-            c.medi.smv = smv;
-            c.medi.msmv = Some(crate::inversion::MsmvParams::default());
-            assert_eq!(c.input(4), InversionInput::LocalField);
-        }
-        assert!(MediParams::default().msmv.is_none());
+    fn medi_reference_bg_removal_is_pdf() {
+        let c = InversionConfig { algorithm: InversionAlgorithm::Medi, ..Default::default() };
+        assert_eq!(c.reference_bg_removal(), Some(BgRemovalAlgorithm::Pdf));
+        let c = InversionConfig { algorithm: InversionAlgorithm::Rts, ..Default::default() };
+        assert_eq!(c.reference_bg_removal(), None);
     }
 
     #[test]
