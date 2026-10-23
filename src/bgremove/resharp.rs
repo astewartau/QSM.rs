@@ -19,27 +19,49 @@ use crate::fft::{fft3d, ifft3d, fft_real_kernel};
 use crate::kernels::smv::{smv_kernel, erode_mask_smv};
 use crate::solvers::cg_solve_with_progress;
 
-/// RESHARP algorithm parameters
+/// RESHARP algorithm parameters.
+///
+/// The defaults are the first author's code: `background_field_removal/resharp.m` in
+/// github.com/sunhongfu/QSM (c75b138), whose own defaults are `ker_rad = 3`, `tik_reg = 1e-4`,
+/// `iter_num = 200` (l. 24-34) and `cgs(@Afun, b, 1e-6, iter_num)` (l. 92). Hongfu Sun's
+/// scanner drivers in the same repository override them inconsistently (3T Siemens drivers
+/// 3 mm / 1e-3 / 500, Philips 3T 3 mm / 1e-4 / 200, 1.5T and 4.7T drivers 4-5 mm / 5e-4, GE
+/// variants 2-4 mm), so the function's defaults are the reference here; the radius, 3 mm, is
+/// also what every 3T driver uses.
+///
+/// Measured against the previous defaults (6 mm, 30 iterations), ROMEO field then RTS, on
+/// the voxels both keep: on the qsm-forward phantom χ XSIM 0.283 → 0.303, NRMSE 80.4 → 79.7 %,
+/// r 0.597 → 0.606; on an in-vivo 3T Philips scan, agreement with the UK Biobank pipeline's
+/// χ (STI Suite V-SHARP + iLSQR) XSIM 0.647 → 0.688, NRMSE 63.2 → 62.2 %, r 0.833 → 0.838. The
+/// 3 mm kernel also keeps ~18 % more voxels at the brain edge, where agreement is lower (in
+/// vivo on its own mask, XSIM 0.653, NRMSE 71.1 %). The radius drives the in-vivo gain
+/// (3 mm / 30 iterations: 0.727) and the iterations the phantom gain (6 mm / 200: 0.302).
 #[cfg_attr(feature = "introspection", derive(serde::Serialize))]
 #[derive(Clone, Debug)]
 pub struct ResharpParams {
-    /// SMV kernel radius in mm
+    /// SMV kernel radius in mm (default 3, `resharp.m`'s `ker_rad`). QSM.rs previously used 6 mm,
+    /// which had no source.
     pub radius: f64,
-    /// Tikhonov regularization parameter
+    /// Tikhonov regularization parameter (default 1e-4, `resharp.m`'s `tik_reg`)
     pub tik_reg: f64,
-    /// CG convergence tolerance
+    /// Relative residual tolerance of the solve (default 1e-6, as `resharp.m` passes to `cgs`)
     pub tol: f64,
-    /// Maximum CG iterations
+    /// Maximum solver iterations (default 200, `resharp.m`'s `iter_num`). `resharp.m` solves the
+    /// same normal equations `(H'H + λ)x = H'H y` with MATLAB's `cgs`; this runs conjugate
+    /// gradients (the matrix is symmetric positive definite), one operator call per iteration
+    /// where `cgs` makes two, so the cap is the author's count, not the same amount of work.
+    /// QSM.rs previously defaulted to 30, which had no source and stopped well short of the
+    /// tolerance.
     pub max_iter: usize,
 }
 
 impl Default for ResharpParams {
     fn default() -> Self {
         Self {
-            radius: 6.0,
+            radius: 3.0,
             tik_reg: 1e-4,
             tol: 1e-6,
-            max_iter: 30,
+            max_iter: 200,
         }
     }
 }

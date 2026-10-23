@@ -83,7 +83,10 @@ pub struct WhQsmParams {
     pub mu1: f64,
     /// ADMM penalty for the data-fidelity splitting.
     pub mu2: f64,
-    /// Weak-harmonic ROI penalty (constrains the harmonic field inside the mask).
+    /// Weak-harmonic ROI penalty (constrains the harmonic field inside the mask). Default 150,
+    /// `WH_nlTV.m`'s own default. FANSI's demo (`script_DICOM_Philips.m` l. 432-433) sets
+    /// `beta = 200`, `muh = 5`, as a starting point to "fine tune" ("usually, beta is between 20
+    /// to 50 times larger than muh"); the function's default is kept.
     pub beta: f64,
     /// ADMM penalty for the harmonic-field splitting.
     pub muh: f64,

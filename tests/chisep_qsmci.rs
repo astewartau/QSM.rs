@@ -22,7 +22,7 @@
 mod common;
 
 use common::{assert_chisep_separated, chisep_score, load_chisep_phantom, save_center_slices};
-use qsm_core::inversion::{ilsqr, IlsqrParams};
+use qsm_core::inversion::ilsqr;
 use qsm_core::separation::{chi_sep_ilsqr, chi_sep_medi, ChiSepIlsqrParams, ChiSepParams};
 use std::time::Instant;
 
@@ -40,7 +40,8 @@ fn test_chi_sep_ilsqr_qsmci() {
         &ph.mask,
         &ph.grid,
         ph.bdir,
-        &IlsqrParams::default(),
+        // As the χ-separation toolbox's Chisep_script.m calls QSM_iLSQR (100 iterations, 12 mm).
+        &ChiSepIlsqrParams::default().qsm_ilsqr,
         |_, _| {},
     );
     println!("[INFO] iLSQR QSM in {:.1?}", t.elapsed());

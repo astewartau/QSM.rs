@@ -221,7 +221,7 @@ fn field_mapping_with_offset(
     let grid = crate::Grid::new(nx, ny, nz, vsx, vsy, vsz);
     let (mut corrected, phase_offset) = crate::utils::phase_offset_removal(
         phases, mag_slices, tes, mask,
-        config.phase_offset_sigma, [0, 1],
+        config.phase_offset_sigma_voxels((vsx, vsy, vsz)), [0, 1],
         crate::unwrap::UnwrapMethod::Romeo,
         &grid,
     );
@@ -230,7 +230,7 @@ fn field_mapping_with_offset(
     if config.bipolar_correction && n_echoes >= 3 {
         crate::utils::bipolar_correction(
             &mut corrected, mag_slices, tes, mask,
-            config.phase_offset_sigma, &grid,
+            config.phase_offset_sigma_voxels((vsx, vsy, vsz)), &grid,
         );
     }
 
@@ -1554,7 +1554,7 @@ mod tests {
         let cfg = robust_cfg(UnwrappingAlgorithm::Romeo, true);
         let got = run(&cfg);
         let (corrected, _) = crate::utils::phase_offset_removal(
-            &ph, &mg, &TES4, &mask, cfg.phase_offset_sigma, [0, 1],
+            &ph, &mg, &TES4, &mask, cfg.phase_offset_sigma_voxels((1.0, 1.0, 1.0)), [0, 1],
             crate::unwrap::UnwrapMethod::Romeo, &grid,
         );
         let uw = crate::unwrap::unwrap_romeo_multi_echo(&corrected, &refs(&mg), &TES4, &mask, &cfg.romeo_params, &grid);
