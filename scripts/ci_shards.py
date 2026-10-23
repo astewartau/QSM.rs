@@ -82,8 +82,9 @@ DEFAULT_SECONDS = 120
 # A shard's share of test time, in seconds. A job costs about a minute before its first test
 # (checkout, artifacts, data), so shards much shorter than this mostly pay for that; much longer
 # and the run waits on them. A unit longer than this gets a shard to itself, and its group's
-# shards are filled up to its length.
+# shards are filled up to FILL of its length.
 TARGET_SECONDS = 480
+FILL = 0.75
 
 
 def family(unit):
@@ -147,9 +148,11 @@ def pack(units, target=TARGET_SECONDS):
         return []
     units = sorted(set(units), key=lambda u: (-SECONDS.get(u, DEFAULT_SECONDS), u))
     total = sum(SECONDS.get(u, DEFAULT_SECONDS) for u in units)
-    # The longest unit bounds the group's wall time whatever the packing, so shards up to its
-    # length cost no wall time and save jobs.
-    target = max(target, SECONDS.get(units[0], DEFAULT_SECONDS))
+    # The longest unit bounds the group's wall time whatever the packing, so shards nearly as
+    # long cost no wall time and save jobs. Not quite as long: a runner can be twice as slow as
+    # the table on the day, and a full shard then outlasts the longest unit (seen: the other
+    # χ-separation binaries packed to chisep_qsmci's 17 min took 20).
+    target = max(target, FILL * SECONDS.get(units[0], DEFAULT_SECONDS))
     n = max(1, min(len(units), math.ceil(total / target)))
     shards = [[0, []] for _ in range(n)]
     for u in units:
