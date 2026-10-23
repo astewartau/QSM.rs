@@ -19,8 +19,8 @@
 //! magnitude, unwraps each echo (bestpath by default), takes the total field from
 //! `echofit.m` (magnitude-weighted, zero-intercept), multiplies the mask by the echo-fit
 //! reliability map (`fit_thr` 40), and calls RESHARP with 3 mm, λ = 1e-3 and 500 iterations,
-//! followed by TV (`tvdi`) or iLSQR. These differ from [`ResharpParams::default`] (6 mm,
-//! λ = 1e-4, CG at most 30 iterations).
+//! followed by TV (`tvdi`) or iLSQR. [`ResharpParams::default`] follows `resharp.m`'s own
+//! defaults (3 mm, λ = 1e-4, at most 200 iterations), not this driver's λ and iterations.
 //!
 //! Reference:
 //! Sun, H. and Wilman, A.H. (2013).

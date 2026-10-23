@@ -19,9 +19,9 @@
 //!   `robustmask` of that weight, scales by `TE₁/ΔTE`, smooths the offset with
 //!   `gaussiansmooth3d_phase` at `sigma=[10,10,5]` *voxels*, and removes it from every echo
 //!   (`src/mcpc3ds.jl:16-17,39-52`). [`phase_offset_removal`] takes the caller's mask instead of
-//!   making a `robustmask`. The pipeline's default sigma (`field_mapping.phase_offset_sigma`)
-//!   is `mcpc3ds`'s `[10, 10, 5]` voxels; the ROMEO CLI passes 7 mm per axis divided by the
-//!   voxel size instead, reduced "to a few voxels" on a small field of view and 0 along a
+//!   making a `robustmask`. The pipeline's default sigma (`field_mapping.phase_offset_sigma_mm`)
+//!   is the ROMEO CLI's 7 mm per axis divided by the voxel size (not `mcpc3ds`'s `[10, 10, 5]`
+//!   voxels); the CLI says to reduce it "to a few voxels" on a small field of view and 0 along a
 //!   single-slice axis (ROMEO.jl `ext/RomeoApp/argparse.jl:79-91`, `caller.jl:137-141`).
 //!   [`PhaseOffsetParams::default`]'s `[4, 4, 4]` matches neither and is not used by the
 //!   pipeline. TE₁ must differ from TE₂ (`caller.jl:118-120`).

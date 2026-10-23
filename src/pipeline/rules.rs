@@ -54,6 +54,12 @@
 //!   - `Reference`: **never a modal**, only an info marker on the setting. Still recorded in
 //!     the run record, and listed in the methods' Note section in a softer form ("differs from
 //!     the reference pipeline"), separately from departures from recommendations.
+//! - **Rules that restate a default.** Since #293 most methods' own defaults are their reference
+//!   values, so many `Reference` rules (STAR's padding and TE, RESHARP's radius and iterations,
+//!   iLSQR's iterations and padding, QSMART's iLSQR settings, the reference echo times) hold on
+//!   the default config and fire only when a user departs from it. They are kept: they say what
+//!   the departure is from and why, which the methods Note needs. A host that also shows
+//!   "differs from default" should show one or the other for these, not both.
 //! - **Data, not code.** Conditions and expectations are values ([`Condition`], [`Test`],
 //!   [`Value`]) over named settings and scan facts, not closures, so the JSON form says
 //!   everything the Rust evaluation does. The only code is [`current`] (a setting's value in a
@@ -400,16 +406,21 @@ pub const SETTINGS: &[(&str, &str)] = &[
     ("field_mapping.b0_estimation", "Echo combination (B0EstimationMethod::id)"),
     ("field_mapping.b0_estimation.weighting", "Weighted average's per-echo weight (B0WeightType, by `weight_id`); only with weighted-avg"),
     ("field_mapping.phase_offset_removal", "MCPC-3D-S phase-offset removal before unwrapping (bool)"),
+    ("field_mapping.phase_offset_sigma_mm", "MCPC-3D-S smoothing sigma per axis, mm; only with phase-offset removal"),
     ("field_mapping.bipolar_correction", "Bipolar readout correction (bool)"),
     ("field_mapping.laplacian_solver", "Laplacian unwrapping's solver: dct, fft-12 (LaplacianSolver::FFT_DEFAULT_PAD), fft (other padding) or mirror; only with Laplacian unwrapping"),
     ("bg_removal.algorithm", "Background field removal (BgRemovalAlgorithm::id)"),
     ("bg_removal.vsharp.deconvolve", "V-SHARP's TSVD deconvolution (bool); only with V-SHARP"),
     ("bg_removal.vsharp.max_radius", "V-SHARP's largest kernel radius, mm; only with V-SHARP"),
+    ("bg_removal.vsharp.min_radius", "V-SHARP's smallest kernel radius, mm; only with V-SHARP"),
+    ("bg_removal.vsharp.radius_step", "V-SHARP's step between kernel radii, mm; only with V-SHARP"),
     ("bg_removal.vsharp.grid", "V-SHARP's working grid: native, isotropic-finest, isotropic-1mm or isotropic (other spacing); only with V-SHARP"),
     ("bg_removal.resharp.radius", "RESHARP's kernel radius, mm; only with RESHARP"),
     ("bg_removal.resharp.max_iter", "RESHARP's CG iteration cap; only with RESHARP"),
     ("inversion.algorithm", "Dipole inversion (InversionAlgorithm::id)"),
     ("inversion.star.pad", "STAR-QSM padding per side, voxels (StarParams::pad)"),
+    ("inversion.ilsqr.max_iter", "iLSQR's LSQR iteration cap (IlsqrParams::max_iter); only with iLSQR"),
+    ("inversion.ilsqr.pad_mm", "iLSQR's padding, mm (IlsqrParams::pad_mm); only with iLSQR"),
     ("inversion.whqsm.weight", "WH-QSM's data weight: flat, max-normalised or in-vivo (WhQsmWeight); only with WH-QSM"),
     ("inversion.star.te", "Echo time STAR-QSM converts at (EchoTime: first, last, spacing, sum, seconds); only with STAR"),
     ("inversion.fansi.te", "Echo time FANSI nlTV/nlTGV convert at (EchoTime); only with fansi or fansi-tgv"),
@@ -539,6 +550,14 @@ pub fn current(input: &RuleInput, facts: &ScanFacts, setting: &str) -> Option<Ve
         }
         "bg_removal.vsharp.deconvolve" => gated(vsharp, Current::Bool(c.bg_removal.vsharp.deconvolve)),
         "bg_removal.vsharp.max_radius" => gated(vsharp, Current::Number(c.bg_removal.vsharp.max_radius)),
+        "bg_removal.vsharp.min_radius" => gated(vsharp, Current::Number(c.bg_removal.vsharp.min_radius)),
+        "bg_removal.vsharp.radius_step" => gated(vsharp, Current::Number(c.bg_removal.vsharp.radius_step)),
+        "field_mapping.phase_offset_sigma_mm" => gated(
+            inv_input.needs_field_mapping() && c.field_mapping.phase_offset_removal,
+            Current::Vector(c.field_mapping.phase_offset_sigma_mm.to_vec()),
+        ),
+        "inversion.ilsqr.max_iter" => gated(alg(&[A::Ilsqr]), Current::Number(c.inversion.ilsqr.max_iter as f64)),
+        "inversion.ilsqr.pad_mm" => gated(alg(&[A::Ilsqr]), Current::Number(c.inversion.ilsqr.pad_mm)),
         "bg_removal.vsharp.grid" => gated(
             vsharp,
             Current::Choice(match c.bg_removal.vsharp.grid {
@@ -943,6 +962,18 @@ pub static RULES: &[Rule] = &[
         "The B0 calculation's authors state that phase offsets have to be removed before it; \
          ROMEO removes them (MCPC-3D-S) whenever it computes B0 from multi-echo data",
         "MriResearchTools.jl romeofunctions.jl:3-7; ROMEO.jl caller.jl:80-91"),
+    Rule {
+        id: "field-mapping.phase-offset-sigma",
+        when: &[method("field_mapping.phase_offset_removal", &[Bool(true)])],
+        setting: "field_mapping.phase_offset_sigma_mm",
+        expect: Test::OneOf { values: &[Value::Vector(&super::config::ROMEO_CLI_PHASE_OFFSET_SIGMA_MM)] },
+        default: Value::Vector(&super::config::ROMEO_CLI_PHASE_OFFSET_SIGMA_MM),
+        unit: Unit::Mm,
+        strength: Strength::Reference,
+        basis: Basis::ReferenceChoice,
+        reason: "The ROMEO command line smooths the MCPC-3D-S phase offsets with σ = 7 mm per axis",
+        source: "ROMEO.jl 08776d4 argparse.jl l. 79-84, 217-224; caller.jl l. 137-138 (#293)",
+    },
     discourage("field-mapping.bipolar-needs-three-echoes",
         &[method("field_mapping.bipolar_correction", &[Bool(true)]), fact_at_most(Fact::EchoCount, 2.0)],
         "field_mapping.bipolar_correction", &[Bool(true)], Bool(false), Basis::Stated,
@@ -1056,6 +1087,55 @@ pub static RULES: &[Rule] = &[
         &[Choice("isotropic-1mm")],
         "STI Suite's V_SHARP estimates the background on a 1 mm grid",
         "STI Suite 3.0 V_SHARP (recorded in QSM.rs vsharp.rs docs)"),
+    Rule {
+        id: "sti.vsharp-min-radius",
+        when: &[inv(STI), bg(VSHARP)],
+        setting: "bg_removal.vsharp.min_radius",
+        expect: Test::OneOf { values: &[Number(crate::bgremove::vsharp::STI_MIN_RADIUS_MM)] },
+        default: Number(crate::bgremove::vsharp::STI_MIN_RADIUS_MM),
+        unit: Unit::Mm,
+        strength: Strength::Reference,
+        basis: Basis::ReferenceChoice,
+        reason: "STI Suite's V_SHARP drops the voxels only its 1 mm ball fits, so its radii in \
+                 effect run down to 2 mm",
+        source: "STI Suite 3.0 V_SHARP, probed (ukb-qsmxt docs/08 step 4; QSM.rs VsharpParams, #293)",
+    },
+    Rule {
+        id: "sti.vsharp-radius-step",
+        when: &[inv(STI), bg(VSHARP)],
+        setting: "bg_removal.vsharp.radius_step",
+        expect: Test::OneOf { values: &[Number(crate::bgremove::vsharp::STI_RADIUS_STEP_MM)] },
+        default: Number(crate::bgremove::vsharp::STI_RADIUS_STEP_MM),
+        unit: Unit::Mm,
+        strength: Strength::Reference,
+        basis: Basis::ReferenceChoice,
+        reason: "STI Suite's V_SHARP steps its kernel radius by 1 mm",
+        source: "STI Suite 3.0 V_SHARP, probed (ukb-qsmxt docs/08; QSM.rs VsharpParams, #293)",
+    },
+    Rule {
+        id: "sti.ilsqr-iterations",
+        when: &[inv(&[Choice("ilsqr")])],
+        setting: "inversion.ilsqr.max_iter",
+        expect: Test::OneOf { values: &[Number(crate::inversion::STI_GUI_NITER as f64)] },
+        default: Number(crate::inversion::STI_GUI_NITER as f64),
+        unit: Unit::None,
+        strength: Strength::Reference,
+        basis: Basis::ReferenceChoice,
+        reason: "STI Suite's QSM_GUI calls QSM_iLSQR with niter 40",
+        source: "STI Suite 3.0 QSM_GUI, probed headless (QSM.rs IlsqrParams::max_iter, #293)",
+    },
+    Rule {
+        id: "sti.ilsqr-pad",
+        when: &[inv(&[Choice("ilsqr")])],
+        setting: "inversion.ilsqr.pad_mm",
+        expect: Test::OneOf { values: &[Number(crate::inversion::STI_GUI_PAD_MM)] },
+        default: Number(crate::inversion::STI_GUI_PAD_MM),
+        unit: Unit::Mm,
+        strength: Strength::Reference,
+        basis: Basis::ReferenceChoice,
+        reason: "STI Suite's QSM_GUI calls QSM_iLSQR with padsize [12 12 12]",
+        source: "STI Suite 3.0 QSM_GUI, probed headless (QSM.rs IlsqrParams::pad_mm, #293)",
+    },
     reference("resharp.radius", &[bg(&[Choice("resharp")])], "bg_removal.resharp.radius",
         &[Number(3.0)],
         "RESHARP's author's code defaults to a 3 mm kernel",
@@ -1113,6 +1193,12 @@ pub static RULES: &[Rule] = &[
         reason: "QSMART calls QSM_iLSQR without 'padsize', so STI Suite's default padding applies",
         source: "QSMART QSMART.m l. 32; STI Suite QSM_iLSQR default, probed (QSM.rs ilsqr.rs docs)",
     },
+    // ---------------------------------------------------------------- MEDI (#288)
+    reference("medi.bg-pdf",
+        &[inv(&[Choice("medi")]), method("inversion.medi.msmv", &[Bool(false)])],
+        "bg_removal.algorithm", PDF,
+        "MEDI's pipeline inverts the PDF local field (also InversionConfig::reference_bg_removal)",
+        "MEDI toolbox 2024.11.26 README.m:124,144"),
     // ---------------------------------------------------------------- MEDI-mSMV (#285)
     Rule {
         id: "medi-msmv.three-echoes",
@@ -1348,6 +1434,12 @@ mod tests {
                 c.cfg.inversion.star.pad = [12; 3];
             })),
             ("chi-sep-ilsqr.qsm-ilsqr", Case::new(separation(S::ChiSepIlsqr))),
+            ("medi.bg-pdf", Case::new(inversion(I::Medi))),
+            ("sti.vsharp-min-radius", Case::new(|c| { inversion(I::Ilsqr)(c); c.cfg.bg_removal.vsharp.min_radius = 1.0 })),
+            ("sti.vsharp-radius-step", Case::new(|c| { inversion(I::Star)(c); c.cfg.bg_removal.vsharp.radius_step = 2.0 })),
+            ("sti.ilsqr-iterations", Case::new(|c| { inversion(I::Ilsqr)(c); c.cfg.inversion.ilsqr.max_iter = 100 })),
+            ("sti.ilsqr-pad", Case::new(|c| { inversion(I::Ilsqr)(c); c.cfg.inversion.ilsqr.pad_mm = 6.0 })),
+            ("field-mapping.phase-offset-sigma", Case::new(|c| c.cfg.field_mapping.phase_offset_sigma_mm = [10.0, 10.0, 5.0])),
             ("medi-msmv.three-echoes", Case::new(|c| {
                 inversion(I::Medi)(c);
                 c.cfg.inversion.medi.msmv = Some(Default::default());
@@ -1376,11 +1468,11 @@ mod tests {
             ("tfi.te-spacing", Case::new(|c| { inversion(I::Tfi)(c); c.cfg.inversion.tfi.te = crate::EchoTime::Last })),
             ("heidi.te-last", Case::new(|c| { inversion(I::Heidi)(c); c.cfg.inversion.heidi.te = crate::EchoTime::First })),
             ("sti.bg-vsharp", Case::new(|c| { inversion(I::Star)(c); background(B::Pdf)(c) })),
-            ("sti.vsharp-no-deconvolve", Case::new(inversion(I::Ilsqr))),
+            ("sti.vsharp-no-deconvolve", Case::new(|c| { inversion(I::Ilsqr)(c); c.cfg.bg_removal.vsharp.deconvolve = true })),
             ("sti.vsharp-radius", Case::new(|c| { inversion(I::Ilsqr)(c); c.cfg.bg_removal.vsharp.max_radius = 8.0 })),
-            ("sti.vsharp-grid", Case::new(inversion(I::Star))),
-            ("resharp.radius", Case::new(background(B::Resharp))),
-            ("resharp.iterations", Case::new(background(B::Resharp))),
+            ("sti.vsharp-grid", Case::new(|c| { inversion(I::Star)(c); c.cfg.bg_removal.vsharp.grid = crate::bgremove::VsharpGrid::Native })),
+            ("resharp.radius", Case::new(|c| { background(B::Resharp)(c); c.cfg.bg_removal.resharp.radius = 6.0 })),
+            ("resharp.iterations", Case::new(|c| { background(B::Resharp)(c); c.cfg.bg_removal.resharp.max_iter = 30 })),
             ("sti.unwrap-laplacian", Case::new(inversion(I::Ilsqr))),
             ("sti.laplacian-solver", Case::new(|c| {
                 inversion(I::Star)(c);

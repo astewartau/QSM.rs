@@ -93,7 +93,7 @@
 //!   `tol_step1` 0.01, `tol_step2` 0.001, `Kthreshold` 0.1. The struct call is bitwise equal to
 //!   `QSM_iLSQR(..., 'padsize', [12 12 12], 'niter', 40)`. Called without them, `QSM_iLSQR`
 //!   uses `niter` 100 (bitwise equal to an explicit 100) and `padsize` 6 mm (see *Padding*).
-//!   [`IlsqrParams::default`] follows the function, not the GUI. (`STI_Templates.m` lists
+//!   [`IlsqrParams::default`] follows the GUI (40, 12 mm). (`STI_Templates.m` lists
 //!   `padsize = [12 12 12]` as the default; the function's own default is 6.)
 //! - **Masking**: the GUI's "Single button for QSM" path builds the mask by thresholding the
 //!   magnitude (`Support_Functions/CreateMask.m`: rescale, threshold, largest connected
@@ -117,7 +117,7 @@
 //! # Pipeline rules
 //!
 //! The facts above that a configuration can depart from are published as rules in
-//! [`crate::pipeline::rules::RULES`] (each with its strength, basis, reason and source): `sti.unwrap-laplacian`, `sti.laplacian-solver`, `sti.echo-combination`, `sti.echo-weights`, `sti.bg-vsharp`, `sti.vsharp-no-deconvolve`, `sti.vsharp-radius`, `sti.vsharp-grid`.
+//! [`crate::pipeline::rules::RULES`] (each with its strength, basis, reason and source): `sti.unwrap-laplacian`, `sti.laplacian-solver`, `sti.echo-combination`, `sti.echo-weights`, `sti.bg-vsharp`, `sti.vsharp-no-deconvolve`, `sti.vsharp-radius`, `sti.vsharp-grid`, `sti.ilsqr-iterations`, `sti.ilsqr-pad`.
 
 /// Parameters for the iLSQR algorithm.
 ///
