@@ -1,0 +1,61 @@
+name: Warm caches
+
+# Saves the CI caches on main. A cache saved by a pull-request run is visible to that pull request
+# only, so before this every new pull request compiled everything cold and fetched every dataset
+# and weight file again, and each one's copies pushed the repository past its 10 GB cache limit,
+# evicting the others'. A cache saved here is restored by every pull request; one that finds its
+# exact key here saves nothing of its own.
+#
+# Each job calls the workflow that uses the cache, in a build-only mode, so the keys and paths are
+# the ones the pull-request jobs look up, by construction. Runs on every push to main (the
+# lockfile and the sources move on), weekly (GitHub drops a cache not used for a week), and by
+# hand.
+
+on:
+  push:
+    branches: [main, master]
+  schedule:
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: warm-caches-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test-data:
+    uses: ./.github/workflows/test-data.yml
+    with:
+      dataset: bids
+      upload: false
+    secrets: inherit
+
+  chisep-data:
+    uses: ./.github/workflows/test-data.yml
+    with:
+      dataset: chisep
+      upload: false
+    secrets: inherit
+
+  release-plain:
+    uses: ./.github/workflows/test-binaries.yml
+    with:
+      name: plain
+      upload: false
+
+  release-onnx:
+    uses: ./.github/workflows/test-binaries.yml
+    with:
+      name: onnx
+      upload: false
+
+  unit-tests:
+    uses: ./.github/workflows/unit-tests.yml
+    with:
+      warm_only: true
+      # One shard per wasm cache: `classical`, and `stages` for the onnx-simd cache the three
+      # deep-learning shards share.
+      wasm_shards: '["classical","stages"]'

@@ -1,0 +1,138 @@
+name: Test binaries
+
+# Builds release test binaries once, for the shard jobs in integration-tests.yml to download and
+# run, so that each of them does not compile the crate itself. Also called by warm-caches.yml on
+# main, with `upload: false`, so the cargo cache it keys here exists on the default branch, where
+# every pull request can restore it (a cache saved by a pull request is visible to that pull
+# request only).
+
+on:
+  workflow_call:
+    inputs:
+      # Which build (see "Build settings"); names the artifact (`test-bins-<name>`) and the
+      # cargo cache.
+      name:
+        type: string
+        required: true
+      upload:
+        type: boolean
+        default: true
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The test binaries each build holds, and its features. `onnx` adds the deep-learning stack
+      # and `download` for the models and the χ-sepnet binaries, which fetch their weights from
+      # the registry (the classical χ-separation binaries ignore them), and makes sure the hosted
+      # weights are in the shared weights cache (below).
+      - name: Build settings
+        id: settings
+        env:
+          NAME: ${{ inputs.name }}
+        run: |
+          case "$NAME" in
+            plain)
+              features="parallel"; weights=false
+              tests="integration_tests oblique_sagittal multislice_2d" ;;
+            onnx)
+              features="parallel onnx download"; weights=true
+              tests="dl_models chisep_qsmci chisep_relaxometry_qsmci chisep_xsepnet chisep_r2primenet chisep_orientation" ;;
+            *)
+              echo "::error::unknown test-binaries build '$NAME'"; exit 1 ;;
+          esac
+          {
+            echo "features=$features"
+            echo "tests=$tests"
+            echo "weights=$weights"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-release-${{ inputs.name }}-${{ hashFiles('**/Cargo.lock') }}
+          # The last fallback is the cache every integration job used to share, so the first run
+          # after this layout landed did not start cold.
+          restore-keys: |
+            ${{ runner.os }}-cargo-release-${{ inputs.name }}-
+            ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build
+        env:
+          FEATURES: ${{ steps.settings.outputs.features }}
+          TESTS: ${{ steps.settings.outputs.tests }}
+        run: |
+          args=()
+          for t in $TESTS; do args+=(--test "$t"); done
+          cargo test --release --features "$FEATURES" --no-run "${args[@]}" \
+            --message-format=json-render-diagnostics > build.json
+          mkdir -p bins
+          jq -r 'select(.reason == "compiler-artifact" and .executable != null and .profile.test)
+                 | "\(.target.name) \(.executable)"' build.json |
+          while read -r name exe; do
+            cp "$exe" "bins/$name"
+            echo "bins/$name  <- $exe ($(du -h "$exe" | cut -f1))"
+          done
+          for t in $TESTS; do
+            [ -x "bins/$t" ] || { echo "::error::no binary for --test $t"; exit 1; }
+          done
+          # A tarball keeps the executable bit, which upload-artifact drops.
+          tar -cf test-bins.tar bins
+
+      - name: Upload test binaries
+        if: inputs.upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-bins-${{ inputs.name }}
+          path: test-bins.tar
+          retention-days: 1
+          compression-level: 1
+
+      # One cache of every hosted weight file, keyed on their registry checksums
+      # (scripts/fetch_model_weights.py), which the deep-learning and χ-separation shards
+      # restore as their model cache. Fetched here only when the cache does not exist yet. Not
+      # a gate: on a failed fetch the tests download what they need themselves.
+      - name: Weights cache key
+        id: weights
+        if: steps.settings.outputs.weights == 'true'
+        run: echo "key=qsm-weights-$(python3 scripts/fetch_model_weights.py --key all)" >> "$GITHUB_OUTPUT"
+
+      - name: Look up the weights cache
+        id: weights-cache
+        if: steps.settings.outputs.weights == 'true'
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/qsm-weights
+          key: ${{ steps.weights.outputs.key }}
+          lookup-only: true
+
+      - name: Fetch weights
+        id: fetch
+        if: steps.settings.outputs.weights == 'true' && steps.weights-cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        run: python3 scripts/fetch_model_weights.py ~/qsm-weights all
+
+      - name: Save the weights cache
+        if: steps.settings.outputs.weights == 'true' && steps.weights-cache.outputs.cache-hit != 'true' && steps.fetch.outcome == 'success'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/qsm-weights
+          key: ${{ steps.weights.outputs.key }}
