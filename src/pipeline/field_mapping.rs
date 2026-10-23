@@ -4,6 +4,42 @@
 //! Implements the canonical field mapping pipeline:
 //! phase offset removal → bipolar correction → unwrapping → B0 estimation,
 //! or MEDI's: complex fit of the wrapped echoes → unwrapping.
+//!
+//! # Reference pipeline
+//!
+//! The default ([`FieldMappingConfig::default`]: MCPC-3D-S offset removal, ROMEO template
+//! unwrapping, `:phase_snr` weighted average) is the ROMEO authors' B0 pipeline: the `romeo` CLI
+//! with `--compute-B0` turns MCPC-3D-S on for multi-echo data (ROMEO.jl 08776d4,
+//! `ext/RomeoApp/caller.jl:80-91`), unwraps temporally from echo 1 (`argparse.jl:101-105`) and
+//! combines with `phase_snr` (`argparse.jl:67-70`; MriResearchTools 771eadf
+//! `src/romeofunctions.jl:13-24`), whose docstring requires the phase offsets to have been
+//! removed first (`romeofunctions.jl:3-7`). Where QSM.rs differs:
+//!
+//! - **Smoothing sigma.** `phase_offset_sigma_mm` defaults to the ROMEO command line's 7 mm per
+//!   axis, divided by the voxel size (`argparse.jl:79-91`, `caller.jl:137-141`); MriResearchTools'
+//!   `mcpc3ds` function itself defaults to `[10, 10, 5]` voxels (`src/mcpc3ds.jl:17,39`). The
+//!   command line says to reduce it on a small field of view and to use 0 along an axis with a
+//!   single slice; that is left to the caller.
+//! - **Masks.** MCPC-3D-S, ROMEO and the bipolar fit all use the brain mask passed in. The
+//!   reference `mcpc3ds` makes its own `robustmask` of `sqrt(|HIP|)` (`mcpc3ds.jl:44-46`), and the
+//!   CLI unwraps inside `robustmask` of the template magnitude (`caller.jl:201-204`).
+//! - **Offset removal off, or Laplacian unwrapping.** Phase-offset removal and bipolar correction
+//!   run only with ROMEO (`do_offset` below); with Laplacian they are skipped whatever the
+//!   config says. Without them each echo is unwrapped on its own (the template and `individual`
+//!   settings of `romeo_params` are not used), with echo 1's magnitude and the next echo as
+//!   `phase2` (none for the last echo), and the per-echo constants aligned before combining (see
+//!   `field_mapping_direct`). ROMEO.jl's individual mode uses each echo's own magnitude and the
+//!   previous echo as `phase2` (echo 2 for echo 1) (`src/unwrapping.jl:151-160`).
+//! - **Bipolar correction** is opt-in in the reference too (`argparse.jl:71-76`, "requires ≥ 3
+//!   echoes"); with fewer than 3 echoes it is skipped here silently.
+//!
+//! Field strength enters only in the conversion to ppm; nothing assumes a resolution or B0
+//! direction.
+//!
+//! # Pipeline rules
+//!
+//! The facts above that a configuration can depart from are published as rules in
+//! [`crate::pipeline::rules::RULES`] (each with its strength, basis, reason and source): `field-mapping.phase-offsets`, `field-mapping.bipolar-needs-three-echoes`, `field-mapping.bipolar-not-with-laplacian`, `field-mapping.phase-offset-sigma`.
 
 use super::config::*;
 use super::phase_utils::{hz_to_ppm, rads_to_ppm};

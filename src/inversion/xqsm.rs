@@ -9,6 +9,27 @@
 //!
 //! Weights are not bundled; the caller passes the exported `xqsm.onnx` bytes
 //! (see [`crate::models`]).
+//!
+//! # Reference pipeline
+//!
+//! - **Training data:** local fields simulated from 1 mm isotropic χ maps (`xQSM_invivo`: 90
+//!   LN-QSM subjects, 48³ patches) by the forward dipole model; no field strength or TE enters
+//!   (Gao et al., NMR Biomed 2021, "Data Preparation").
+//! - **Inputs fed in the paper's in-vivo tests:** best-path unwrapping, then RESHARP background
+//!   removal (paper, in-vivo experiments paragraph); tested at 1 mm (3T) and 0.6 mm (7T) isotropic.
+//!   The paper's resolution study found all networks degrade on anisotropic voxels (NRMSE 22–47 %)
+//!   and on voxels finer than the training data ("Generalization Evaluation").
+//! - **Resampling:** the authors' MATLAB wrapper (`sunhongfu/iQSM_Plus`
+//!   `legacy/matlab/xQSM.m:104-127,170-176`) interpolates anisotropic data to an isotropic grid at
+//!   the finest voxel size (`imresize3`) before the net and back afterwards. Their Python
+//!   `sunhongfu/xQSM` `inference.py` does not resample. This crate does not resample either; the
+//!   caller must supply an isotropic grid to match the MATLAB wrapper.
+//! - **Orientation:** axial (B0 along the third axis; `matlab/eval/run_demo.m:8`).
+//!
+//! # Pipeline rules
+//!
+//! The facts above that a configuration can depart from are published as rules in
+//! [`crate::pipeline::rules::RULES`] (each with its strength, basis, reason and source): `xqsm.bg-resharp`.
 
 use crate::grid::Grid;
 use crate::models::onnx::{OnnxModel, OnnxError, Tensor};

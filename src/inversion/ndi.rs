@@ -35,6 +35,21 @@
 //! nonlinear. `b0` and `echo_times` are scan parameters that the pipeline fills from metadata, and
 //! [`NdiParams::te`] picks the echo time the conversion uses (by default the reference's choice;
 //! see there).
+//!
+//! # Reference pipeline
+//! - Paper (Polak et al. 2020, Methods): 3T data at 1 mm isotropic, single TE 25 ms, and 7T
+//!   Wave-CAIPI at 0.5 mm isotropic, TE 19 ms; BET brain masking, Laplacian unwrapping and SMV
+//!   background filtering; a small Tikhonov term ("lambda = 0.1%") to stop over-fitting.
+//! - FANSI `script_DICOM_Philips.m` (commit 93044a3) runs `ndi` at the end of the same chain as
+//!   nlTV (see [`super::fansi`](mod@super::fansi) for its masking, SEGUE unwrapping, multi-echo fit and MSMV
+//!   background removal): input `local*deltaTE` and weight `m0.*mask./cnoise`, normalised
+//!   (L457-461), 300 iterations (L463). `ndi.m` itself defaults the weight to ones (L51-56).
+//! - The defaults here are `ndi.m`'s (tau 2, alpha 1e-5, 100 iterations).
+//!
+//! # Pipeline rules
+//!
+//! The facts above that a configuration can depart from are published as rules in
+//! [`crate::pipeline::rules::RULES`] (each with its strength, basis, reason and source): `fansi.no-laplacian-multi-echo`, `ndi.te-first`.
 
 use crate::fft::Fft3dWorkspace;
 use crate::utils::apply_mask_zero;

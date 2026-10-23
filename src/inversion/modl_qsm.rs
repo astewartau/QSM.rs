@@ -38,6 +38,13 @@
 //! Rust glue therefore assumes 1 mm even-dimension input (the QSM-CI/dev grid);
 //! callers needing resampling should do so upstream. Weights are not bundled; the
 //! caller passes `modl-qsm.onnx`.
+//!
+//! # Reference pipeline
+//!
+//! The authors' `test/test_tools.py:210-249` (`model_test`) is what the grid requirements above
+//! paraphrase: `inter_data` zero-pads/truncates k-space to 1 mm before the net and back to the
+//! input voxel size afterwards, then masks. The README describes the input as the "tissue phase";
+//! `test/test_demo.py` feeds the shipped `phi` with voxel size `[1,1,1]` and B0 `[0,0,1]`.
 
 use num_complex::Complex64;
 

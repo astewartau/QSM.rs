@@ -12,6 +12,12 @@
 //! Journal of Magnetic Resonance Imaging, 40(1):181-191. https://doi.org/10.1002/jmri.24365
 //!
 //! Reference implementation: https://github.com/kamesy/QSM.jl
+//!
+//! # Reference pipeline
+//! QSM.jl (commit fde4b92) `tikh` (`src/inversion/direct.jl` L100-155): lambda 1e-2 and
+//! `reg = :identity` in the code (L149-150); its docstring's signature line says `:gradient`
+//! (L109) but its keyword list says `:identity` (L131). Same README pipeline as
+//! [`super::rts`](mod@super::rts).
 
 use num_complex::Complex64;
 use crate::fft::{fft3d, ifft3d};

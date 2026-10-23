@@ -29,6 +29,16 @@
 //! than a ranking. So treat this module as a baseline because of what it is, not
 //! because it is slow; on this data it is not.
 //!
+//! # Reference pipeline
+//!
+//! The report's only parameter is the number of phase partitions (§2.4), 6 here as in its
+//! example ([`PreludeParams::default`]). FSL's command-line defaults (its own masking, 2D or 3D
+//! mode) are not reproduced, since FSL's code was not consulted (see below). Nothing in the
+//! algorithm depends on voxel size, field strength or orientation. It is not selectable in the
+//! QSM pipeline's `field_mapping.unwrapping_algorithm`; it is available as
+//! [`UnwrapMethod::Prelude`](super::UnwrapMethod::Prelude) to the slice-wise unwrapper and to
+//! MCPC-3D-S's HIP unwrapping.
+//!
 //! # Provenance
 //!
 //! This is a **clean-room implementation written from the technical report alone**.

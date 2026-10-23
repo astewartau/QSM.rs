@@ -31,6 +31,17 @@
 //!
 //! Not ported: the R2*-based preconditioner (eq. 4), zero padding and the CSF zero reference.
 //!
+//! # Reference pipeline
+//! From Liu et al. 2017 (Methods, in-vivo experiments); not stated above:
+//! - Brain mask (the `M` where `P = 1`): BET. Field map: nonlinear (complex) field estimation
+//!   followed by graph-cut phase unwrapping. No background removal or high-pass before TFI.
+//! - In vivo the paper uses the R2*-based preconditioner of eq. 4, `P = 1` in `M ∩ {R2* < 30 s⁻¹}`
+//!   and `P_B` elsewhere, with `P_B` = 30 (10 for the phantom). Only eq. 3 is ported here.
+//! - Data: 3 T, 6 echoes, TE₁ 3.5 ms, ΔTE 3.6 ms, 1×1×3 mm³, monopolar readout.
+//! - The paper's solver settings differ from `MEDI_L1`'s defaults, which this port uses: λ = 1e-3
+//!   on the L1 term (not the data term), Gauss-Newton stop `||dy||/||y|| < 0.01`, up to 300 CG
+//!   iterations. CSF is the reference for reported values.
+//!
 //! # Units
 //! Like the other inversions, `tfi` takes the field in ppm and returns ppm. `MEDI_L1` works on the
 //! field in radians accumulated over the echo spacing (`delta_TE`) at `CF = γ·B0`; the field is
@@ -52,6 +63,11 @@
 //! Medicine, 78(1):303-315. https://doi.org/10.1002/mrm.26331
 //!
 //! Reference implementation: MEDI toolbox 2024.11.26 (Weill Cornell), `functions/MEDI_L1.m`.
+//!
+//! # Pipeline rules
+//!
+//! The facts above that a configuration can depart from are published as rules in
+//! [`crate::pipeline::rules::RULES`] (each with its strength, basis, reason and source): `tfi.mask-bet`, `tfi.te-spacing`.
 
 use num_complex::Complex64;
 use crate::fft::Fft3dWorkspace;

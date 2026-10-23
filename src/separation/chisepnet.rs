@@ -65,6 +65,39 @@
 //! of 16 (four pooling levels) or the skip-connection concatenations misalign.
 //!
 //! Weights are not bundled; the caller passes the exported `chi-sepnet.onnx` bytes.
+//!
+//! # Reference pipeline
+//!
+//! Kim et al. 2025 (arXiv:2409.14030, §2.1.1 and §2.2):
+//!
+//! - **Training data:** 3 T (Siemens Tim Trio), 1 × 1 × 1 mm, 6 echoes, TE 7.70–32.85 ms
+//!   (ΔTE ≈ 5 ms), six head orientations, with 64³ training patches.
+//! - **Field chain:** magnitude by sum of squares, phase by MCPC-3D. Mask by FSL BET on the
+//!   combined magnitude. Each echo unwrapped with ROMEO, background removal by V-SHARP with "a
+//!   spherical mean value size of 20" per echo, then weighted echo averaging (Wu 2012) into the
+//!   local field. The toolbox driver instead runs V-SHARP `smvsize = 12` after echo averaging
+//!   (`Chisep_script.m:113-139`); the two disagree (open question).
+//! - **QSM channel:** QSMnetME, a QSMnet trained on multi-echo data, applied to the local field
+//!   (§2.2.2). QSMnetME is not in QSM.rs.
+//! - **R2' channel:** R2* by ARLO; R2 by StimFit dictionary matching of a 2D multi-echo SE with
+//!   stimulated-echo correction (QSM.rs: `r2_epg`); R2' = R2* − R2 with negatives set to 0. With
+//!   GRE only, R2PRIMEnet ([`crate::relaxometry`]) predicts R2'.
+//! - **Resolution:** trained at 1 mm isotropic. The toolbox either interpolates the inputs to
+//!   1 mm and returns 1 mm maps, or runs a resolution-generalisation pipeline for QSMnetME
+//!   (`Chisep_script.m:188-195`, `chi_sepnet_general` vs `..._wResolGen`). The README says the
+//!   networks handle resolutions above 0.6 mm. This function runs on the native grid with
+//!   neither.
+//! - **Field strength:** 3 T only. At 7 T the authors keep this 3 T network and feed it the 7 T
+//!   local field, a QSMnetME QSM and a *3 T-equivalent* R2' from R2PRIMEnet7T (Kim J. et al.,
+//!   arXiv:2410.12239, §2.2.1). They name the choice of D_r at 7 T as unresolved (§4). Feeding a
+//!   7 T measured R2' here is off-distribution.
+//! - **Orientation:** "For non-axial input data, the orientation was rotated such that the B0
+//!   orientation is along the z-direction" (§2.1.2), as covered above.
+//!
+//! # Pipeline rules
+//!
+//! The facts above that a configuration can depart from are published as rules in
+//! [`crate::pipeline::rules::RULES`] (each with its strength, basis, reason and source): `chi-sep.mask-bet`, `chi-sep.unwrap-romeo`, `chi-sep.echo-combination`, `chi-sep.echo-weights`, `chi-sep.bg-vsharp`, `chi-sepnet.min-resolution`.
 
 // The parameters are plain Rust, so configs can carry them; only inference needs `onnx`.
 #![cfg_attr(not(feature = "onnx"), allow(dead_code))]

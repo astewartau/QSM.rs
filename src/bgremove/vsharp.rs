@@ -65,6 +65,27 @@
 //! working grid whatever the acquisition resolution, but coarsens axes finer than it,
 //! including the mask edge the background is estimated from.
 //!
+//! ## Reference pipeline
+//!
+//! STI Suite 3.0's `V_SHARP(φ, mask, 'voxelsize', vs, 'smvsize', R)` (Liu lab, the authors of
+//! the V-SHARP papers) is P-code; black-box probing (ukb-qsmxt `docs/08_vsharp_sti.md`, scripts
+//! in `vsharp_probe/`) found: crop to the mask's bounding box, zero-pad 12 voxels per side,
+//! resample linearly to a **1 mm** grid, ball `|x| ≤ r + 1/6` without its centre for
+//! r = 1…R mm, each voxel takes the background `S_r∗φ` of the largest ball that fits,
+//! **no deconvolution**, background interpolated back and subtracted from the native field.
+//! Voxels where only r = 1 fits are dropped, so the radii in effect are 2…R mm and the output
+//! mask is the voxels a 2 mm (+1/6) ball fits around, back-interpolated `> 0.5`; this module's
+//! mask is the union down to [`VsharpParams::min_radius`], which by default is the same 2 mm
+//! (see *Defaults*); the ball shape still differs.
+//! `smvsize` defaults to 12 (probed: bitwise equal to an explicit 12), which is also what STI
+//! Suite's GUI passes (its "Radius" field) and what QSMART's paper used for its V-SHARP
+//! comparison (Yaghmaie et al. 2021, §3.4).
+//!
+//! In STI Suite's GUI (probed headless; see [`crate::inversion::star`]), V-SHARP's input is the
+//! **sum** of the echoes' unwrapped phases from `MRPhaseUnwrap` on the raw, unmasked phase, its
+//! mask is the GUI's magnitude-threshold mask (not BET), and its eroded mask and output go to
+//! `QSM_star` or `QSM_iLSQR` with `TE` = the sum of the echo times.
+//!
 //! Reference:
 //! Wu, B., Li, W., Guidon, A., Liu, C. (2012).
 //! "Whole brain susceptibility mapping using compressed sensing."
@@ -72,6 +93,11 @@
 //!
 //! Implementation follows QSM.jl (https://github.com/kamesy/QSM.jl); defaults follow STI Suite
 //! 3.0's `V_SHARP` (see *Defaults*).
+//!
+//! # Pipeline rules
+//!
+//! The facts above that a configuration can depart from are published as rules in
+//! [`crate::pipeline::rules::RULES`] (each with its strength, basis, reason and source): `sti.unwrap-laplacian`, `sti.laplacian-solver`, `sti.echo-combination`, `sti.echo-weights`, `sti.bg-vsharp`, `sti.vsharp-no-deconvolve`, `sti.vsharp-radius`, `sti.vsharp-grid`, `sti.vsharp-min-radius`, `sti.vsharp-radius-step`.
 
 use num_complex::Complex64;
 use crate::error::InputError;

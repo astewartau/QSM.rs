@@ -8,6 +8,41 @@
 //! Eckstein, K., et al. (2018). "Computationally Efficient Combination of
 //! Multi-channel Phase Data From Multi-echo Acquisitions (ASPIRE)."
 //! Magnetic Resonance in Medicine, 79:2996-3006. https://doi.org/10.1002/mrm.26963
+//!
+//! # Reference pipeline
+//!
+//! The reference implementations are the authors' MriResearchTools.jl (korbinian90, commit
+//! 771eadf) and the `romeo` CLI in ROMEO.jl (08776d4); file:line refer to those trees.
+//!
+//! - **MCPC-3D-S** ([`phase_offset_removal`]): `mcpc3ds` uses echoes 1 and 2 for the HIP
+//!   (`echoes=[1,2]`), unwraps the HIP with ROMEO weighted by `sqrt(|HIP|)` inside its own
+//!   `robustmask` of that weight, scales by `TE₁/ΔTE`, smooths the offset with
+//!   `gaussiansmooth3d_phase` at `sigma=[10,10,5]` *voxels*, and removes it from every echo
+//!   (`src/mcpc3ds.jl:16-17,39-52`). [`phase_offset_removal`] takes the caller's mask instead of
+//!   making a `robustmask`. The pipeline's default sigma (`field_mapping.phase_offset_sigma_mm`)
+//!   is the ROMEO CLI's 7 mm per axis divided by the voxel size (not `mcpc3ds`'s `[10, 10, 5]`
+//!   voxels); the CLI says to reduce it "to a few voxels" on a small field of view and 0 along a
+//!   single-slice axis (ROMEO.jl `ext/RomeoApp/argparse.jl:79-91`, `caller.jl:137-141`).
+//!   [`PhaseOffsetParams::default`]'s `[4, 4, 4]` matches neither and is not used by the
+//!   pipeline. TE₁ must differ from TE₂ (`caller.jl:118-120`).
+//! - **Bipolar correction** ([`bipolar_correction`]): MriResearchTools' `bipolar_correction!`,
+//!   after Eckstein's thesis §3.1.3 (`src/mcpc3ds.jl:97-129`): needs ≥ 3 echoes, uses echoes
+//!   1–3, smooths the artefact with the MCPC-3D-S sigma and unwraps it with ROMEO
+//!   (`correctglobal=true`). Off by default in `mcpc3ds` and the CLI.
+//! - **Weighted average** ([`calculate_b0_weighted`]): `calculateB0_unwrapped` with
+//!   `:phase_snr` (`mag·TE`) by default (`src/romeofunctions.jl:13-24`; CLI
+//!   `--B0-phase-weighting`, `argparse.jl:67-70`); "the phase offsets have to be removed prior"
+//!   (`romeofunctions.jl:3-7`). MriResearchTools' `:simulated_mag` (`exp(−TE/20)·TE`,
+//!   `romeofunctions.jl:33-35`) is not ported; [`B0WeightType::AssumedDecay`] is UK Biobank's.
+//! - **Linear fit** ([`multi_echo_linear_fit`]): after QSM.jl's `multi_echo_linear_fit`
+//!   (kamesy/QSM.jl fde4b92, `src/utils/multi_echo.jl:209-260`; phase offset modelled by
+//!   default, `W` the square root of the weights, e.g. `mag/σ`) and QSMART's `echofit.m`.
+//! - **Robust fit** ([`multi_echo_robust_fit`]) is QSM.rs's own (IRLS with Tukey/Huber loss);
+//!   it has no external reference, and its defaults rest on the measurements recorded on
+//!   [`RobustLoss`] and [`RobustFitParams`].
+//!
+//! None of these assumes a field strength, resolution or B0 direction; the smoothing sigmas are
+//! in voxels.
 
 /// Parameters for phase offset removal.
 #[cfg_attr(feature = "introspection", derive(serde::Serialize))]
@@ -1989,6 +2024,16 @@ pub fn fit_ppm_complex_noise(magnitude: &[f64], n_echoes: usize) -> Vec<f64> {
 /// [`FitPpmComplexResult::phase0`]. Here the conjugate is taken as the first step and undone as
 /// the last, so every intermediate is MATLAB's and the outputs follow QSM.rs's convention (the
 /// sign of the input phase, as the ROMEO and Laplacian field maps).
+///
+/// # Reference pipeline
+/// MEDI's pipeline script (`README.m:80-103` of the 2024.11.26 release) computes
+/// `iMag = sqrt(sum(abs(iField).^2,4))`, then `[iFreq_raw, N_std] = Fit_ppm_complex(iField)` on
+/// the complex (coil-combined or per-channel) echoes with the default `opts`, unwraps `iFreq_raw`
+/// with `unwrapPhase(iMag, iFreq_raw, matrix_size)` (region-growing), and hands the field and
+/// `N_std` (both in radians per `delta_TE`) to `PDF` and `MEDI_L1`. For uneven echo spacing the
+/// toolbox has `Fit_ppm_complex_TE(iField, TE)` and for bipolar readouts
+/// `Fit_ppm_complex_bipolar` (unwrapped at twice the phase and halved, README.m:98-102); neither
+/// is ported. Nothing in the fit depends on the field strength.
 ///
 /// `magnitudes[e]` and `phases[e]` are echo `e` (phase in radians, wrapped or not).
 pub fn fit_ppm_complex(

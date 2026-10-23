@@ -8,10 +8,29 @@
 //! Where C = (1 - S) is the high-pass (delta minus SMV) kernel in k-space,
 //! M is the eroded mask, and λ is the Tikhonov regularization parameter.
 //!
+//! ## Reference pipeline
+//!
+//! The first author's code, `background_field_removal/resharp.m` in github sunhongfu/QSM
+//! (also shipped in QSMART's toolbox), defaults to a 3 mm kernel (`round(r/vox)` per axis, at
+//! least 2 voxels, so ellipsoidal on anisotropic voxels), λ = 1e-4, and MATLAB `cgs` at
+//! tolerance 1e-6 for at most 200 iterations. It zero-pads by the kernel radius and keeps
+//! voxels where the normalised SMV of the mask exceeds 0.999999. Its driver
+//! `Siemens_3T/qsm_r2s_prisma.m` masks with FSL `bet2 -f 0.4 -w 2` on the first-echo
+//! magnitude, unwraps each echo (bestpath by default), takes the total field from
+//! `echofit.m` (magnitude-weighted, zero-intercept), multiplies the mask by the echo-fit
+//! reliability map (`fit_thr` 40), and calls RESHARP with 3 mm, λ = 1e-3 and 500 iterations,
+//! followed by TV (`tvdi`) or iLSQR. [`ResharpParams::default`] follows `resharp.m`'s own
+//! defaults (3 mm, λ = 1e-4, at most 200 iterations), not this driver's λ and iterations.
+//!
 //! Reference:
 //! Sun, H. and Wilman, A.H. (2013).
 //! "Background field removal using spherical mean value filtering and Tikhonov regularization."
 //! Magn Reson Med, 71(3):1151-1157. https://doi.org/10.1002/mrm.24765
+//!
+//! # Pipeline rules
+//!
+//! The facts above that a configuration can depart from are published as rules in
+//! [`crate::pipeline::rules::RULES`] (each with its strength, basis, reason and source): `resharp.radius`, `resharp.iterations`.
 
 use num_complex::Complex64;
 use crate::Grid;

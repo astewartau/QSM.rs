@@ -23,6 +23,22 @@
 //! Instance normalisation runs over the whole volume, so the network cannot be tiled: one pass
 //! holds a few 15-channel 256³ activations (≈1 GB each in `f32`).
 //!
+//! # Reference pipeline
+//!
+//! - **Contrast and resolution.** Any: the image is conformed to 256³ at 1 mm whatever its
+//!   resolution, and the network was trained on synthetic data of random contrast. QSM.rs has
+//!   no Dice against a reference brain mask on GRE recorded.
+//! - **Orientation.** Needs the voxel→world affine (`ScanMetadata::affine` in the pipeline,
+//!   which refuses to run MindGrab without it); a wrong affine gives the network a wrongly
+//!   oriented head.
+//! - **Defaults.** brainchop `--skull-strip` without `--tta`; [`MindGrabParams::default`]
+//!   matches.
+//! - **WASM.** The network always runs on the whole 256³ grid ([`CONFORM_DIM`]) and cannot be
+//!   tiled. Its registry figures (`models::registry`, `mem(…, 363_000_000, 311)` for WASM) give
+//!   `find_model("mindgrab").peak_bytes([256; 3], Heap::Wasm32)` = 363 MB + 311 B × 256³ ≈
+//!   5.58 GB, above the 4 GiB a `wasm32` heap can hold (natively ≈7.3 GB measured at 256³,
+//!   `models::memory_calibration`). MindGrab therefore does not run in a 32-bit WASM host.
+//!
 //! Reference:
 //! Fani, A., Masoud, M., Rorden, C., Plis, S. (2025). "MindGrab for BrainChop: Fast and
 //! Accurate Skull Stripping for Command Line and Browser." arXiv:2506.11860.
@@ -30,6 +46,11 @@
 //!
 //! Reference implementation: https://github.com/neuroneural/brainchop-cli (MIT), with niimath
 //! (https://github.com/rordenlab/niimath, BSD-2-Clause) for conform, labelling and reslicing.
+//!
+//! # Pipeline rules
+//!
+//! The facts above that a configuration can depart from are published as rules in
+//! [`crate::pipeline::rules::RULES`] (each with its strength, basis, reason and source): `mindgrab.wasm-heap`.
 
 // The pre/post-processing is plain Rust; only inference needs `onnx`.
 #![cfg_attr(not(feature = "onnx"), allow(dead_code))]

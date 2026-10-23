@@ -10,6 +10,25 @@
 //! Input is the background-removed **local field in ppm** (single orientation). The
 //! authors' Hz↔ppm round-trip (`×tesla·γ` then `÷tesla·γ`) cancels, so the field is
 //! consumed directly in ppm. Weights are not bundled; the caller passes `lpcnn.onnx`.
+//!
+//! # Reference pipeline
+//!
+//! From Lai et al., MICCAI 2020 (arXiv:2008.05024), "Dataset Acquisition and Preprocessing", and
+//! `Sulam-Group/LPCNN`:
+//!
+//! - **Training data:** 7T Philips, 1×1×1 mm, multi-echo GRE (TE1/ΔTE 5/5 or 2/2 ms), 4–5
+//!   orientations per subject, COSMOS labels; 64³ patches with a zero-padded full-size dipole.
+//! - **Phase processing:** best-path unwrapping, FSL BET, V-SHARP, then averaging of the echoes
+//!   with TE between 10 and 30 ms.
+//! - **Units:** `LPCNN/inference.py:50` divides the local phase (Hz) by `tesla · γ` (γ =
+//!   42.57747892 MHz/T), i.e. the network sees ppm; `--tesla` takes only 3 or 7.
+//! - **Resampling:** none in the authors' code; the dipole kernel is built for the input's voxel
+//!   size.
+//!
+//! # Pipeline rules
+//!
+//! The facts above that a configuration can depart from are published as rules in
+//! [`crate::pipeline::rules::RULES`] (each with its strength, basis, reason and source): `lpcnn.mask-bet`, `lpcnn.bg-vsharp`.
 
 use num_complex::Complex64;
 

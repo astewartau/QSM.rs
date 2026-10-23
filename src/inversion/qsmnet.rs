@@ -12,6 +12,28 @@
 //!
 //! Weights are not bundled; the caller passes the exported `qsmnet.onnx` bytes
 //! (see [`crate::models`]).
+//!
+//! # Reference pipeline
+//!
+//! From the authors' README (`SNU-LIST/QSMnet` `README.md:34-72`) unless noted:
+//!
+//! - **Training data:** 3T (Siemens), single-echo 3D GRE, 1 mm isotropic, TE = 25 ms; COSMOS
+//!   labels.
+//! - **Phase processing:** FSL BET brain extraction, STI Suite Laplacian unwrapping, STI Suite
+//!   3D V-SHARP background removal.
+//! - **Resolution:** data at another resolution "need to" be interpolated to 1 mm isotropic
+//!   (e.g. Fourier zero-padding/truncation) *before* phase processing. This crate does not
+//!   resample; the caller must.
+//! - **Units:** the V-SHARP tissue phase is converted to ppm as `phase / (ΣTE · B0 · γ)`
+//!   (`save_input_data_for_QSMnet.m:22`), i.e. the field in ppm this module takes.
+//! - **Output:** `Code/inference.py` crops but does not multiply by the mask; this crate does.
+//! - **Orientation:** inputs must match the orientation/polarity of the shipped `val_input.mat`
+//!   (`README.md:86`): axial, B0 along the third axis.
+//!
+//! # Pipeline rules
+//!
+//! The facts above that a configuration can depart from are published as rules in
+//! [`crate::pipeline::rules::RULES`] (each with its strength, basis, reason and source): `qsmnet.mask-bet`, `qsmnet.unwrap-laplacian`, `qsmnet.echo-combination`, `qsmnet.echo-weights`, `qsmnet.bg-vsharp`.
 
 use crate::grid::Grid;
 use crate::models::onnx::{OnnxModel, OnnxError, Tensor};

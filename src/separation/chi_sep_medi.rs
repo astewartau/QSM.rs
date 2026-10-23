@@ -21,9 +21,32 @@
 //! chi_pos = 0 or chi_neg = 0, which pins one variable to its constraint
 //! boundary and prevents correlated drift.
 //!
+//! # Reference pipeline
+//!
+//! The SNU-LIST toolbox's `chi_sep_MEDI` is driven by the same script as `chi_sep_iLSQR`
+//! (`Chisep_script.m`), so the preprocessing is the one listed in
+//! [`chi_sep_ilsqr`](mod@super::chi_sep_ilsqr): BET mask, ROMEO + weighted echo averaging, V-SHARP
+//! `smvsize = 12`, STI Suite iLSQR QSM. How this function differs from the toolbox call:
+//!
+//! - The toolbox call is `chi_sep_MEDI(mag, local_field_hz, r2prime, N_std, mask, params,
+//!   option_data)` with `params.lambda = 1`, `params.lambda_CSF = 1`, `option_data.qsm = QSM`
+//!   (the iLSQR QSM) and `option_data.mask_CSF` (`Chisep_script.m:150-161`). Kim et al. 2025
+//!   (Hum Brain Mapp 46(4):e70136, §2.3) also ran it with "MEDI regularization with a
+//!   regularization parameter of 1". This function takes no QSM, no CSF mask and no noise map
+//!   `N_std` (its SNR weight comes from the magnitude). Its λ defaults (30/30/100) were measured
+//!   on the QSM-CI phantom (see the comment in `ChiSepParams`'s `Default`), not taken from the
+//!   toolbox.
+//! - D_r: the toolbox's value is inside the compiled `.p`. QSM.rs uses [`DR_SHIN_2021`] at every
+//!   field strength (see [`chi_sep_ilsqr`](mod@super::chi_sep_ilsqr) for the 7 T question).
+//!
 //! Reference:
 //! Shin, H., et al. (2021). "chi-separation: Magnetic susceptibility source
 //! separation toward iron and myelin mapping in the brain." NeuroImage, 240:118371.
+//!
+//! # Pipeline rules
+//!
+//! The facts above that a configuration can depart from are published as rules in
+//! [`crate::pipeline::rules::RULES`] (each with its strength, basis, reason and source): `chi-sep.mask-bet`, `chi-sep.unwrap-romeo`, `chi-sep.echo-combination`, `chi-sep.echo-weights`, `chi-sep.bg-vsharp`.
 
 use num_complex::Complex32;
 use crate::Grid;

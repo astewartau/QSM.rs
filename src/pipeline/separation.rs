@@ -8,6 +8,18 @@
 //!
 //! Units follow the library convention: local field & QSM in ppm, R2'/R2* in Hz,
 //! echo times in seconds. Output is `(chi_pos ≥ 0, chi_neg ≤ 0, chi_total)` in ppm.
+//!
+//! # Reference pipelines
+//!
+//! Each method's module docs have a "Reference pipeline" section: the masking, unwrapping,
+//! background removal and QSM method its authors fed it, and where this stage's inputs differ
+//! from theirs. The main differences, all recorded there with sources:
+//! - `Decompose` takes one χ_total, where the authors fed a STAR-QSM per echo.
+//! - The analytic methods' D_r is calibrated at 3 T only. `ChiSepIlsqr`, `ChiSepMedi` and
+//!   `WaveSep` keep 137 Hz/ppm at every field, while `R2starQsm` and `HcChisep` scale theirs by
+//!   B0/3. Neither choice comes from the authors.
+//! - `ChiSepNet` is trained at 3 T and 1 mm, and its authors' QSM channel is QSMnetME, which
+//!   QSM.rs does not have.
 
 use super::config::*;
 use crate::separation::{

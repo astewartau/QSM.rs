@@ -143,8 +143,14 @@ WIRING = {
     "masking": [
         "src/pipeline/config.rs",
         "src/pipeline/masking.rs",
+        # Reads HD-BET's and MindGrab's memory figures (crate::models) to check a config; it runs
+        # no network, so it has no onnx items and adds nothing to the shard's reach.
+        "src/pipeline/rules.rs",
     ],
-    "segmentation": [],
+    "segmentation": [
+        # Reads SynthSeg's network grid to check a config; runs no network.
+        "src/pipeline/rules.rs",
+    ],
 }
 
 CLASSICAL = [

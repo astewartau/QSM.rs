@@ -29,6 +29,16 @@
 //! `(d0, d1, 1)`; the ±z neighbours then fall outside the volume and are skipped by the
 //! existing bounds checks, so the unwrappers themselves are untouched.
 //!
+//! # Reference pipeline
+//!
+//! There is no single published reference for this module; the measurements below are QSM.rs's
+//! own. Related options in the ROMEO authors' tools: CLEAR-SWI's `laplacianslice` unwrapping runs
+//! Laplacian unwrapping and its high-pass filter per 2D slice (CLEARSWI.jl 0949bc5,
+//! `src/phase_processing.jl:106-116`; `ext/ClearswiApp/argparse.jl:55-57`), and the ROMEO CLI
+//! has `--fix-ge-phase` for GE phase with slice jumps (ROMEO.jl 08776d4,
+//! `ext/RomeoApp/argparse.jl:116-119`). The QSM pipeline's `field_mapping.unwrapping_algorithm`
+//! does not offer slice-wise unwrapping.
+//!
 //! # What this costs
 //!
 //! Unwrapping a slice on its own fixes it only up to a multiple of 2π: nothing in the slice

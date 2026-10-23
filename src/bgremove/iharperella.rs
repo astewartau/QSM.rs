@@ -42,6 +42,19 @@
 //!
 //! Either way the output is the local field in **ppm**, inside the mask.
 //!
+//! ## Reference pipeline
+//!
+//! - **Input**: STI's help text and `STI_Templates.m` call it on the "raw phase", but probed
+//!   in MATLAB R2023b, STI 3.0's `iHARPERELLA` does not unwrap: on a synthetic head whose
+//!   phase wraps in 59 % of the brain, its output from the wrapped phase correlates −0.03 with
+//!   the true local phase, from the unwrapped phase 0.98. Hence [`HarperellaInput::FieldPpm`].
+//! - **Defaults**: `niter` 40; `padsize` 0 (probed: bitwise equal to `[0 0 0]`, while
+//!   `STI_Templates.m` lists `[12 12 12]`). [`IharperellaParams::default`] matches the function.
+//! - **Chain**: STI Suite 2.01's manual has the GUI combine the Laplacians of all echoes
+//!   ("Combine Laplacian") and then run iHARPERELLA, as the alternative to "Unwrapping" +
+//!   V-SHARP, before iLSQR; the mask is the GUI's magnitude threshold of the 3rd or 4th echo.
+//!   STI Suite 3.0's GUI has no iHARPERELLA button (only the function).
+//!
 //! References:
 //! - HARPERELLA: Li, W., Avram, A. V., Wu, B., Xiao, X., Liu, C. (2014). "Integrated
 //!   Laplacian-based phase unwrapping and background phase removal for quantitative

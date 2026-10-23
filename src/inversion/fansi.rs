@@ -33,6 +33,41 @@
 //! and the solver diverges (as nlTV.m does).
 //!
 //! The finite differences are FANSI's, on unit spacing whatever the voxel size.
+//!
+//! # Reference pipeline
+//! FANSI-toolbox at commit 93044a3 (<https://gitlab.com/cmilovic/FANSI-toolbox>). Its only
+//! full pipeline is `script_DICOM_Philips.m` (3T Philips, 5 echoes, TE1 4.0 ms, spacing 3.7 ms,
+//! 0.73x0.73x1 mm, B0 along z; header L1-6), which says it is "NOT an optimized pipeline":
+//! - Mask: magnitude (M0) threshold plus an R2* range, then morphology, ending with a 2-voxel
+//!   erosion "to avoid data corruption in the cortical areas" (L125-170); L126 "We encourage to
+//!   use dedicated tools as BET2".
+//! - Unwrapping: SEGUE per echo (L190-194); L183-187 also recommend ROMEO, and L196-197 say
+//!   "Avoid Laplacian-based unwrapping for multiecho processing, as they remove harmonic
+//!   components of the phase".
+//! - Echo combination: a nonlinear multi-echo fit (`nlme_L2gradient`, weight `mag*TE`,
+//!   L259-276), which also gives the noise map `cnoise`.
+//! - Background removal: FANSI's own multiscale SMV, `msmv_noextrapolation(..., 5)` (L335);
+//!   L290 allows LBV, PDF or V-SHARP instead. (This MSMV is not the mSMV of
+//!   `bg_removal.msmv_refine`.)
+//! - Input: `local*deltaTE`, `deltaTE = TE(4) - TE(2)` with the comment "You may use also any
+//!   individual echo time" (L364, L370). Weight `m0.*mask./cnoise`, divided by its maximum
+//!   (L371-372). nlTGV is run with the same parameters as wTV (L421).
+//! - alpha1: no default in `nlTV.m`/`nlTGV.m` (required field); the toolbox's demos use 2e-4
+//!   (`script_fansi_phantom.m` L196, `script_qsmchallenge.m` L73) and 3e-4 with mu1 = 1e-2 for
+//!   nlTV on the 2016 challenge data (`script_qsmchallenge.m` L111-112), which is the
+//!   challenge's own LBV local field and BET mask eroded by 5 voxels (L22-24). The default
+//!   here is that 2e-4; the in vivo pipeline picks alpha1 by L-curve / frequency analysis
+//!   (L374-410).
+//! - Default weight in `nlTV.m`/`nlTGV.m` is ones (`defaultW = ones(N)`, with a warning).
+//!   Every demo call of `nlTV`/`nlTGV` passes a magnitude-derived weight
+//!   (`script_fansi_phantom.m` L199 "Recommended for nonlinear algorithms",
+//!   `script_cosmos_phantom.m` L88, `script_qsmchallenge.m` L106-108); the mask-only weights in
+//!   the demos go to the linear `wTV`/`wTGV`.
+//!
+//! # Pipeline rules
+//!
+//! The facts above that a configuration can depart from are published as rules in
+//! [`crate::pipeline::rules::RULES`] (each with its strength, basis, reason and source): `fansi.no-laplacian-multi-echo`, `fansi.te-spacing`.
 
 use crate::inversion::admm::{fansi_magnitude_weight, fansi_ppm_to_rad, fansi_unit_ee2, prepare_fansi_spectral};
 use crate::utils::gradient::{bdiv_inplace, fgrad_inplace};

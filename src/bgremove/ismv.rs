@@ -3,6 +3,17 @@
 //! Iterative approach that avoids mask erosion by iteratively
 //! correcting boundary values.
 //!
+//! # Reference pipeline
+//! - Wen et al. 2014 (Methods): the iteration stops when the relative change between successive
+//!   iterates falls below 5 × 10⁻⁵; radii of 1 and 6 voxels were compared, and a small radius is
+//!   the point of the method (it keeps more of the ROI than SHARP). The in-vivo ROI was
+//!   segmented by signal thresholding (3 T, TE/ΔTE/#TE 5 ms/5 ms/8). No deconvolution follows.
+//! - The authors' group's `iSMV.m` (shipped in github.com/agr78/mSMV,
+//!   `code/dependencies/MEDI_functions/iSMV.m`) iterates `F ← SMV(F)·M + BV` until
+//!   `||ΔF||/||F|| < 0.001`, with no iteration cap and the radius given by the caller.
+//! - This module follows QSM.jl instead (a residual-based stop, `tol` 1e-6 of the initial
+//!   residual, capped at `max_iter` 50, radius 5 mm), so its defaults are neither of the above.
+//!
 //! Reference:
 //! Wen, Y., Zhou, D., Liu, T., Spincemaille, P., Wang, Y. (2014).
 //! "An iterative spherical mean value method for background field removal in MRI."

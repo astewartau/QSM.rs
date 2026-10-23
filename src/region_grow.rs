@@ -1,3 +1,22 @@
+//! Quality-guided region growing (minimum spanning tree) for ROMEO phase unwrapping.
+//!
+//! The engine behind [`crate::unwrap::unwrap_romeo`]: starting from a seed, the edge with the
+//! best quantised weight (1–255, 0 = no edge) is taken from a bucket queue, the voxel it reaches
+//! is unwrapped against the one it came from (`new − 2π·round((new − old)/2π)`), and that voxel's
+//! 6-connected edges are queued. Weights come from [`crate::unwrap::romeo`].
+//!
+//! # Reference pipeline
+//!
+//! This is ROMEO.jl's `grow_region_unwrap!` (ROMEO.jl commit 08776d4, `src/algorithm.jl:1-44`,
+//! with `src/seed.jl` for seeding and `src/region_handling.jl` for merging), from Dymerska et al.
+//! (2021), *Magn Reson Med* 85(4):2294-2308, <https://doi.org/10.1002/mrm.28563>. Its defaults —
+//! one seed, no region merging or correction, `wrap_addition = 0` (`src/algorithm.jl:3`) — are
+//! [`crate::unwrap::RomeoParams::default`]'s. [`grow_region_unwrap_full`] follows ROMEO.jl's
+//! seeding (best summed edge weight first, extra seeds while the queue's best weight is worse
+//! than the last seed's threshold, multi-echo seed correction); [`grow_region_unwrap`] takes its
+//! seed from the caller (the mask's centre of mass in `unwrap_romeo`), which ROMEO.jl does not do.
+//! Nothing here depends on voxel size, field strength or orientation.
+
 use crate::priority_queue::BucketQueue;
 use std::f64::consts::PI;
 

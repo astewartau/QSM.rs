@@ -5,6 +5,13 @@
 //!
 //! local_field = field - SMV(field)
 //!
+//! # Reference pipeline
+//! Not offered as a pipeline background removal. In the MEDI toolbox the same high-pass is
+//! applied inside `MEDI_L1` with `'smv', radius` (radius 5 mm by default, `parse_QSM_input.m:13`),
+//! together with the SMV-filtered dipole kernel `(1 − S)·D` and the mask eroded to where the
+//! SMV of the mask exceeds 0.999 (`MEDI_L1.m:57-67`), and on the PDF local field, not the total
+//! field (MEDI `README.m:124,144`). That is `MediParams::smv`, not this function.
+//!
 //! Reference:
 //! Schweser, F., Deistung, A., Lehr, B.W., Reichenbach, J.R. (2011).
 //! "Quantitative imaging of intrinsic magnetic tissue properties using MRI signal phase."

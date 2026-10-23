@@ -58,6 +58,17 @@
 //! Becker, S., Bobin, J., Candès, E.J. (2011). "NESTA: A fast and accurate
 //! first-order method for sparse recovery." SIAM Journal on Imaging Sciences,
 //! 4(1):1-39. https://doi.org/10.1137/090756855
+//!
+//! # Reference pipeline
+//! Same inputs as [`super::lsqr_qsm`](mod@super::lsqr_qsm) (qsm_heidi commit 4592631): a SHARP-corrected local field
+//! (`makefile` L14-20, `background_correction_sharp.mat`), the magnitude, the LSQR result, and
+//! the mask `mask_tissue .* mask_phase .* phsInput.mask` (`inversion_heidi.m`). The echo time for
+//! the phase units is the last one (`phase2susceptibilityfactor.m` L70-71), as the pipeline sets.
+//!
+//! # Pipeline rules
+//!
+//! The facts above that a configuration can depart from are published as rules in
+//! [`crate::pipeline::rules::RULES`] (each with its strength, basis, reason and source): `lsqr.bg-sharp`, `heidi.te-last`.
 
 use num_complex::Complex64;
 

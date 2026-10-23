@@ -40,6 +40,45 @@
 //! [`UnwrapMethod::Laplacian`](super::UnwrapMethod::Laplacian) selects [`laplacian_unwrap`] with
 //! [`LaplacianSolver::Dct`], since the pipeline removes background as a later stage.
 //!
+//! # Reference pipeline (STI Suite)
+//!
+//! Probed in MATLAB R2023b by driving STI Suite 3.0's `QSM_GUI` headless with logging wrappers
+//! (3-echo synthetic head, TE 4/10/16 ms, 1×1×1.5 mm):
+//!
+//! - `MRPhaseUnwrap`'s default `padsize` is 12 voxels (bitwise equal to an explicit
+//!   `[12 12 12]`; [`LaplacianSolver::FFT_DEFAULT_PAD`]), as `STI_Templates.m` says.
+//! - The GUI ("3D GRE data" and "Single button for QSM") calls it once on all echoes,
+//!   `MRPhaseUnwrap(φ, 'voxelsize', vs)` with the **raw, unmasked** wrapped phase (the input
+//!   is bitwise the loaded phase, nonzero outside the mask), so the GUI does not do the
+//!   `mask · φ` that [`run_field_mapping`](crate::pipeline::run_field_mapping) and UK Biobank
+//!   do. It then **sums** the unwrapped echoes (no per-echo offset removal, no weighting) and
+//!   gives `Σφ` to V-SHARP, with `TE` = `ΣTE` for the inversion: in `φ/TE` form, the
+//!   [`B0WeightType::TEs`](crate::utils::B0WeightType::TEs) weighting (`Σφₑ/ΣTEₑ`).
+//! - STI Suite 2.01's GUI also offered "Combine Laplacian" (the Laplacians of all echoes,
+//!   combined) followed by iHARPERELLA (see [`crate::bgremove::iharperella`](mod@crate::bgremove::iharperella)).
+//! - QSMART does not use `MRPhaseUnwrap` but Hongfu Sun's `lapunwrap.m` (mirror extension):
+//!   [`LaplacianSolver::Mirror`], per echo on the unmasked phase (`unwrap_phase.m` l. 5–10).
+//!
+//! # Reference pipeline (other than STI Suite)
+//!
+//! - **QSM.jl** (kamesy/QSM.jl, local copy fde4b92): `unwrap_laplacian`'s default solver is
+//!   `:mgpcg`, a Dirichlet condition on the ROI (`uphas[!mask] = 0`) that "combines phase
+//!   unwrapping and harmonic background field removing"; `:dct` and `:fft` are the
+//!   array-boundary options (`src/unwrap/laplacian.jl:6,14-19,28-32`). `:mgpcg` is not ported;
+//!   the default here is `:dct`, which unwraps only. The README's pipeline masks with FSL BET on
+//!   the last echo (`-f 0.5`), erodes the mask by 5 voxels, unwraps every echo with
+//!   `unwrap_laplacian(phas, mask1, vsz)` (so `:mgpcg`), scales echo `e` by `1/(B0·γ·TEₑ)` and
+//!   runs V-SHARP (`README.md:34-49`).
+//! - **MriResearchTools.jl / CLEAR-SWI** (korbinian90, 771eadf / 0949bc5): `laplacianunwrap` is
+//!   the Schofield & Zhu sin/cos method with DCT transforms (Neumann, unpadded, no mask, no voxel
+//!   size; `src/laplacianunwrapping.jl:1-20`), so it is neither of the solvers above exactly.
+//!   CLEAR-SWI's default unwrapping is `laplacian` (`ext/ClearswiApp/argparse.jl:55-57`),
+//!   applied per echo to the unmasked phase, and it also offers `laplacianslice`, the same per
+//!   2D slice (`src/phase_processing.jl:88-116`); it does no MCPC-3D-S before combining the
+//!   echoes with `calculateB0_unwrapped` (`:phase_snr`).
+//! - Nothing in the method assumes a field strength or B0 direction; `Dct` and `Fft` take the
+//!   voxel size into the Laplacian, so isotropic voxels are not required.
+//!
 //! # References
 //!
 //! Ghiglia, D.C., Romero, L.A. (1994). "Robust two-dimensional weighted and unweighted phase

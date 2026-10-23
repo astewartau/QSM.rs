@@ -18,6 +18,29 @@
 //! (see [`super::tiled`]).
 //!
 //! Weights are not bundled; the caller passes the exported `iqsm.onnx` bytes.
+//!
+//! # Reference pipeline
+//!
+//! From the authors' code (`sunhongfu/iQSM`):
+//!
+//! - **Normalisation:** the LoT layer scales its output by `3 · 20e-3 / (B0 · TE)`
+//!   (`models/unet_blocks.py:21-22`), i.e. to the 3 T, TE = 20 ms reference, so any field strength
+//!   and TE are handled through the `te`/`b0` inputs.
+//! - **Masking:** with no mask supplied, `run.py:499-506` runs FSL `bet2 -m -f 0.5` on the first
+//!   magnitude volume (`bet2_utils.py:47,64`).
+//! - **Resolution:** "for data with resolution finer than 0.7 mm isotropic, interpolate to 1 mm
+//!   before reconstruction" (`README.md:9`; also `legacy/matlab/demo_single_echo.m:21-23`). The
+//!   MATLAB demo interpolates anisotropic data to an isotropic grid at the finest voxel size in the
+//!   complex domain (`demo_single_echo.m:52-60`). The Python `inference.py` accepts `voxel_size`
+//!   but does not resample. This crate does not resample.
+//! - **Phase masking:** the MATLAB `Save_Input.m:25` multiplies the phase by the *eroded* mask; the
+//!   Python `inference.py` does not, and neither does this crate. The 3×3×3 LoT stencil output is
+//!   multiplied by the eroded mask, so only the outermost shell of the eroded mask can differ.
+//!
+//! # Pipeline rules
+//!
+//! The facts above that a configuration can depart from are published as rules in
+//! [`crate::pipeline::rules::RULES`] (each with its strength, basis, reason and source): `iqsm.mask-bet`.
 
 use super::tiled::{tile_cost_of, tile_patch_size, tiled_volume_algorithm, TileConfig};
 use crate::models::TileCost;
@@ -53,9 +76,15 @@ pub fn iqsm(
     iqsm_with(&|i| model.run(i), phase_rad, mask, grid, te, b0, phase_sign, eroded_rad)
 }
 
-/// Multi-echo iQSM: reconstruct each echo and combine with magnitude·TE² weights
-/// (the authors' `--echo_4d` path). `phases`/`magnitudes` are per-echo volumes;
-/// `tes` the echo times (s). Falls back to uniform weights if `magnitudes` is empty.
+/// Multi-echo iQSM: reconstruct each echo and combine with magnitude·TE² weights.
+/// `phases`/`magnitudes` are per-echo volumes; `tes` the echo times (s). Without
+/// `magnitudes` the weights are TE² alone (uniform magnitude).
+///
+/// The weights are those of the authors' MATLAB echo fit: `sunhongfu/iQSM_Plus`
+/// `legacy/matlab/iQSM.m:262-267` fits `TE·χ` against TE with `echofit.m`
+/// (`sunhongfu/iQSM` `legacy/matlab/iQSM_fcns/echofit.m`), which is `Σ mag·TE²·χ / Σ mag·TE²`.
+/// The authors' current Python drivers (`sunhongfu/iQSM` `run.py:170`, the `--echo_4d` path, and
+/// `app.py`) weight by `(mag·TE)²` instead, i.e. magnitude squared; this crate does not.
 ///
 /// `tile: None` runs each echo on the whole volume; `Some` runs it patch by patch (see the
 /// module docs), the mask eroded once on the whole volume first.

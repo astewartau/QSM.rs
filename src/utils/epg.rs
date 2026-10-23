@@ -18,6 +18,12 @@
 //! train reduces exactly to the mono-exponential `S(TE_n) = exp(-TE_n / T2)`,
 //! so on perfectly-refocused data EPG and ARLO agree (see the unit tests).
 //!
+//! **What the χ-separation references used for R2.** χ-sepnet and R2PRIMEnet (Kim et al. 2025,
+//! arXiv:2409.14030, §2.1.1–2.1.2) matched multi-echo SE (or dual-echo TSE) magnitude against a
+//! StimFit dictionary with stimulated-echo correction, the approach [`r2_epg`] takes, assuming
+//! B1+ = 1 for the patient data. R2' = R2* − R2 was then clamped at 0, as [`r2prime`] does.
+//! SUSEP-Net's in-vivo R2 was a plain mono-exponential STI Suite fit (arXiv:2506.13293, §3.2).
+//!
 //! References:
 //! - Weigel, M. (2015). "Extended phase graphs: dephasing, RF pulses, and echoes
 //!   — pure and simple." JMRI 41(2):266-295.

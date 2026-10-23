@@ -32,6 +32,30 @@
 //!   phase-wrapping regions (|phase|>pi) the nonlinear solve is multistable, so
 //!   that ~1e-7 seed perturbation can select a different local solution there.
 //!   This crate uses full double precision (a strict improvement).
+//!
+//! # Reference pipeline
+//! The authors' scripts (<https://github.com/EmoryCN2L/QSM_AMP_PE>, commit 15bf8dc; README
+//! "Overview of the pipeline", and `qsm_multi_echo_combined.m`, which the README says to try
+//! first):
+//! - Mask: BET (MEDI-toolbox wrapper, default threshold 0.5) on the root-sum-of-squares
+//!   magnitude over echoes, eroded by 2 mm (`MaskErode`, an SMV erosion in mm), and by another
+//!   2 mm after background removal (L71-81, L145-147, `erosion_width_1/2 = 2`).
+//! - Unwrapping: MEDI's `Fit_ppm_complex_TE` for the initial phase, which is removed, then 3D
+//!   best-path unwrapping of each echo (L72, L83-96).
+//! - Echo combination: the plain mean over echoes of `phase_e / TE_e` (L100-104), multiplied by
+//!   `simulated_TE = 8 ms` to give one simulated phase (L33, L107); the input here mirrors that.
+//! - Background removal: PDF (their zero-padding implementation by default, `pdf_method = 1`,
+//!   100 iterations, tolerance 1e-3; L37-39, L112-139).
+//! - Data weight: the first echo's magnitude in the combined script (L161-169), as the
+//!   pipeline note in `run_dipole_inversion` says.
+//! - Scan assumptions in the script's comments: "Ideally, the voxel size should be isotropic"
+//!   (L31) and a straight acquisition (B0 along z) is recommended (L34); the README advises
+//!   trying both db1 and db2 wavelets, db1 being at risk of pixelation when B0 is tilted.
+//!
+//! # Pipeline rules
+//!
+//! The facts above that a configuration can depart from are published as rules in
+//! [`crate::pipeline::rules::RULES`] (each with its strength, basis, reason and source): `amp-pe.mask-bet`, `amp-pe.echo-combination`, `amp-pe.echo-weights`, `amp-pe.bg-pdf`.
 
 use crate::fft::Fft3dWorkspace;
 use crate::inversion::admm::prepare_fansi_spectral;
