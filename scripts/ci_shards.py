@@ -51,7 +51,7 @@ SECONDS = {
     "multislice_2d": 1, "oblique_sagittal": 1,
     "test_bet": 2, "test_bgremove_ismv": 11, "test_bgremove_lbv": 12,
     "test_bgremove_pdf": 20, "test_bgremove_resharp": 80, "test_bgremove_sharp": 2,
-    "test_bgremove_vsharp": 6, "test_bgremove_vsharp_no_deconvolve": 6,
+    "test_bgremove_vsharp": 6, "test_bgremove_vsharp_deconvolve": 6,
     "test_bias_correction": 4, "test_combined_tfi": 100, "test_combined_tgv": 195,
     "test_dl_autoqsm": 295, "test_dl_bfrnet": 281, "test_dl_hdbet": 58, "test_dl_iqfm": 21,
     "test_dl_iqsm": 79, "test_dl_iqsm_plus": 108, "test_dl_ir2qsm": 112, "test_dl_lpcnn": 170,
