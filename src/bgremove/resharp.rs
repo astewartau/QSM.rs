@@ -30,10 +30,12 @@ use crate::solvers::cg_solve_with_progress;
 /// also what every 3T driver uses.
 ///
 /// Measured against the previous defaults (6 mm, 30 iterations), ROMEO field then RTS, on
-/// the voxels both keep: on the qsm-forward phantom χ XSIM 0.276 → 0.296, NRMSE 81.2 → 80.4 %,
-/// r 0.588 → 0.598; on an in-vivo 3T Philips scan, agreement with the UK Biobank pipeline's
-/// χ (STI Suite V-SHARP + iLSQR) XSIM 0.630 → 0.672, NRMSE 64.4 → 63.2 %. The 3 mm kernel
-/// also keeps ~19 % more voxels at the brain edge.
+/// the voxels both keep: on the qsm-forward phantom χ XSIM 0.283 → 0.303, NRMSE 80.4 → 79.7 %,
+/// r 0.597 → 0.606; on an in-vivo 3T Philips scan, agreement with the UK Biobank pipeline's
+/// χ (STI Suite V-SHARP + iLSQR) XSIM 0.647 → 0.688, NRMSE 63.2 → 62.2 %, r 0.833 → 0.838. The
+/// 3 mm kernel also keeps ~18 % more voxels at the brain edge, where agreement is lower (in
+/// vivo on its own mask, XSIM 0.653, NRMSE 71.1 %). The radius drives the in-vivo gain
+/// (3 mm / 30 iterations: 0.727) and the iterations the phantom gain (6 mm / 200: 0.302).
 #[cfg_attr(feature = "introspection", derive(serde::Serialize))]
 #[derive(Clone, Debug)]
 pub struct ResharpParams {

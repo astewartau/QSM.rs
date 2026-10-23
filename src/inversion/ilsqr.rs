@@ -100,8 +100,9 @@
 /// Measured against the function's defaults (100 iterations, 6 mm): on the qsm-forward
 /// phantom's true local field χ XSIM 0.686 → 0.671, NRMSE 40.3 → 42.0 %, r 0.916 → 0.908 (the
 /// fewer iterations; 12 mm alone changes little), at under half the run time; behind the
-/// pipeline's V-SHARP the differences are ≤ 0.01 XSIM. On an in-vivo 3T scan the agreement
-/// with the UK Biobank pipeline's χ is unchanged (XSIM 0.736 → 0.732, NRMSE 82.8 → 79.9 %).
+/// pipeline's V-SHARP the differences are ≤ 0.01 XSIM (phantom 0.308 → 0.301). On an
+/// in-vivo 3T scan behind the default V-SHARP, agreement with the UK Biobank pipeline's χ
+/// is XSIM 0.772 → 0.764, NRMSE 75.5 → 73.5 %, r 0.814 → 0.820.
 #[cfg_attr(feature = "introspection", derive(serde::Serialize))]
 #[derive(Clone, Debug)]
 pub struct IlsqrParams {

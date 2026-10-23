@@ -420,6 +420,11 @@ pub struct FieldMappingConfig {
     /// MriResearchTools' `mcpc3ds` function itself defaults to `sigma = [10, 10, 5]` in voxels
     /// (`src/mcpc3ds.jl` l. 39), which QSM.rs used before; that is 10/10/5 mm at 1 mm voxels but
     /// a different width at any other resolution.
+    ///
+    /// Measured on 1 mm data (ROMEO field, default V-SHARP, RTS), where the old default is
+    /// 10/10/5 mm: χ moves by at most 0.003 XSIM, on the qsm-forward phantom XSIM 0.254 → 0.256,
+    /// NRMSE 85.9 → 85.7 %, and on an in-vivo 3T Philips scan, agreement with the UK Biobank
+    /// pipeline's χ, XSIM 0.714 → 0.714, NRMSE 69.7 → 69.4 %.
     pub phase_offset_sigma_mm: [f64; 3],
     pub bipolar_correction: bool,
     /// How the unwrapped echoes are combined, with that method's own settings (default

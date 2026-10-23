@@ -34,10 +34,11 @@
 //! test-retest ICC (0.922 → 0.915) and removed the detectable longitudinal change (SRM
 //! putamen + caudate 0.161 → −0.019); on the noise-free CI phantom it is closer to the true
 //! local field, since there the low frequencies are tissue. Measured with the pipeline's ROMEO
-//! field and RTS against the previous defaults (deconvolution, native grid): qsm-forward
-//! phantom χ XSIM 0.246 → 0.244, NRMSE 85.8 → 86.9 %, r 0.527 → 0.502; in-vivo 3T Philips scan,
-//! agreement with the UK Biobank pipeline's χ (STI Suite V-SHARP + iLSQR) XSIM 0.626 → 0.690,
-//! NRMSE 78.5 → 73.4 %. On these 1 mm isotropic inputs the 1 mm grid only adds the crop.
+//! field and RTS against the previous defaults (deconvolution, native grid, radii 12 → 1 mm),
+//! on the voxels both keep: qsm-forward phantom χ XSIM 0.261 → 0.256, NRMSE 84.4 → 85.7 %,
+//! r 0.546 → 0.521; in-vivo 3T Philips scan, agreement with the UK Biobank pipeline's χ
+//! (STI Suite V-SHARP + iLSQR) XSIM 0.641 → 0.714, NRMSE 75.2 → 69.4 %, r 0.781 → 0.790. On
+//! these 1 mm isotropic inputs the 1 mm grid only adds the crop.
 //!
 //! ## Working grid
 //!
@@ -164,6 +165,12 @@ pub struct VsharpParams {
     /// steps, is `min_radius: 1.0, radius_step: 1.0`. STI's ball is `|x| ≤ r + 1/6` without its
     /// centre voxel; this module's is the voxel centres within `r`, centre included, so the
     /// kernels themselves still differ slightly from STI's.
+    ///
+    /// Measured against 12 → 1 mm (no deconvolution, 1 mm grid, ROMEO field, then RTS): the
+    /// output mask loses ~5 % of its voxels, all at the rim. On the voxels both keep, χ on the
+    /// qsm-forward phantom is unchanged (XSIM 0.257 → 0.256, NRMSE 85.8 → 85.7 %); on an
+    /// in-vivo 3T Philips scan its agreement with the UK Biobank pipeline's χ (STI Suite
+    /// V-SHARP + iLSQR) improves slightly, XSIM 0.704 → 0.714, NRMSE 70.4 → 69.4 %.
     pub radius_step: f64,
     /// Deconvolve the SMV high-passed field by the largest kernel, `1/(1 − Ŝ)` with TSVD at
     /// [`threshold`](Self::threshold). Default false: return the high-passed field
