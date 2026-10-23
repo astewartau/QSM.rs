@@ -262,11 +262,13 @@ impl Default for ChiSepParams {
 /// # Performance
 ///
 /// On the QSM-CI χ-separation phantom (164×205×205, padded to 180×216×216; 30 Gauss-Newton
-/// iterations, ~1900 CG steps), AMD EPYC 9454: 4 threads 720 s → 432 s, 16 threads
-/// 839 s → 178 s, without `parallel` 883 s → 688 s, WASM (Node, one thread) 2584 s → 2316 s
-/// (QSM.rs#296). The output is bit-for-bit what it was before. Most of the time is the CG
-/// operator's two dipole FFT pairs, its two TV terms and CG's two dot products, which stay
-/// sequential so their sums do not change.
+/// iterations, ~1900 CG steps), AMD EPYC 9454: 4 threads 720 s → 295 s, 16 threads
+/// 839 s → 150 s, without `parallel` 883 s → 461 s, WASM (Node, one thread) 2584 s → 1534 s
+/// (QSM.rs#296). Applying the CG field term as one transform pair (`doubled_dipole_kernel`)
+/// rounds differently from the two passes it replaced; on that phantom the maps then differ
+/// from the earlier ones as much as the earlier code's own maps move when the field is scaled
+/// by 1 + 10⁻⁷ (median 2·10⁻⁵ ppm, a few voxels up to ~0.1 ppm). Most of the remaining time
+/// is the dipole FFT pair, the two TV terms and CG's two dot products, which stay sequential.
 pub fn chi_sep_medi<F>(
     local_field: &[f64],
     r2prime: &[f64],
@@ -381,6 +383,9 @@ where
 
     let mut ws = ChiSepWorkspace::new(nx, ny, nz, vsx_f32, vsy_f32, vsz_f32);
     let d_kernel = dipole_kernel_f32(grid, bdir_f32);
+    // The CG operator's field term is D applied twice, each time as real(ifft(D·fft(·))), with
+    // nothing in between, so one transform pair does it (see `doubled_dipole_kernel`).
+    let d2_kernel = doubled_dipole_kernel(&d_kernel, nx, ny, nz);
     let (mx, my, mz) = gradient_mask_f32(
         &mag_f32, mask, nx, ny, nz, vsx_f32, vsy_f32, vsz_f32, percentage as f32,
     );
@@ -487,7 +492,7 @@ where
 
         // --- CG solve ---
         let op = ChiSepOperator {
-            d_kernel: &d_kernel,
+            d2_kernel: &d2_kernel,
             w_pos: &w_pos, w_neg: &w_neg, w_sum: w_sum.as_ref(),
             lambda_para: lambda_para_f32, lambda_dia: lambda_dia_f32,
             lambda_sum: lambda_sum_f32, lambda_cpl: lambda_cpl_f32,
@@ -535,6 +540,32 @@ where
     (chi_pos_out, chi_neg_out, chi_total)
 }
 
+/// The kernel K with `real(ifft(K·fft(x))) = real(ifft(D·fft(real(ifft(D·fft(x))))))` for real
+/// `x`: K = D_s², with D_s(k) = (D(k) + D(−k))/2.
+///
+/// Taking the real part of `ifft(D·X)` for real `x` (Hermitian `X`) is the same as using D's
+/// even part D_s, and D_s·X is Hermitian, so the second pass sees D_s·X exactly and gives
+/// D_s²·X. D_s = D wherever D(k) = D(−k), which is everywhere except on the Nyquist planes of
+/// even-sized axes when B0 is oblique to that axis (there −k aliases to a different frequency
+/// than the one D is evaluated at). Only the rounding differs from the two passes.
+fn doubled_dipole_kernel(d: &[f32], nx: usize, ny: usize, nz: usize) -> Vec<f32> {
+    let mut k2 = vec![0.0f32; d.len()];
+    maybe_par_chunks_mut!(k2, nx * ny).enumerate().for_each(|(k, plane)| {
+        let km = (nz - k) % nz;
+        for j in 0..ny {
+            let jm = (ny - j) % ny;
+            for i in 0..nx {
+                let im = (nx - i) % nx;
+                let a = d[i + nx * (j + ny * k)];
+                let b = d[im + nx * (jm + ny * km)];
+                let ds = if a == b { a } else { 0.5 * (a + b) };
+                plane[i + nx * j] = ds * ds;
+            }
+        }
+    });
+    k2
+}
+
 /// `a += t`, `b += t` elementwise
 fn add_to_both(a: &mut [f32], b: &mut [f32], t: &[f32]) {
     maybe_par_iter_mut!(a).zip(maybe_par_iter_mut!(b)).enumerate().for_each(|(i, (a, b))| {
@@ -545,8 +576,8 @@ fn add_to_both(a: &mut [f32], b: &mut [f32], t: &[f32]) {
 
 /// The fixed parts of the chi-sep Hessian operator for one Gauss-Newton iteration.
 struct ChiSepOperator<'a> {
-    /// The dipole kernel D
-    d_kernel: &'a [f32],
+    /// The field term's kernel, D applied twice ([`doubled_dipole_kernel`])
+    d2_kernel: &'a [f32],
     w_pos: &'a TvWeights,
     w_neg: &'a TvWeights,
     /// `None` while `lambda_sum` is 0
@@ -568,7 +599,7 @@ struct ChiSepOperator<'a> {
 ///       + λ_cpl * D²(d_pos + d_neg) - λ_cpl * dr_q * (dr_p * d_pos - dr_q * d_neg)
 ///
 /// TV_hessian uses IRLS: bdiv(wG*Vr*wG*fgrad(.)), positive semi-definite.
-/// Field fidelity: D², same for both, positive semi-definite.
+/// Field fidelity: D², same for both, positive semi-definite; one FFT pair (`doubled_dipole_kernel`).
 /// R2': rank-1 structure [dr_p, -dr_q]^T * [dr_p, -dr_q], positive semi-definite.
 /// The λ_sum term is skipped while λ_sum is 0.
 fn apply_chisep_operator(ws: &mut ChiSepWorkspace, op: &ChiSepOperator, dx: &[f32], out: &mut [f32]) {
@@ -595,9 +626,7 @@ fn apply_chisep_operator(ws: &mut ChiSepWorkspace, op: &ChiSepOperator, dx: &[f3
     }
 
     // Field fidelity: λ_cpl * D²(d_pos + d_neg), SAME for both
-    ws.fft_ws.apply_dipole_inplace(&ws.stage, op.d_kernel, &mut ws.dipole_buf, &mut ws.complex_buf);
-    ws.stage.copy_from_slice(&ws.dipole_buf);
-    ws.fft_ws.apply_dipole_inplace(&ws.stage, op.d_kernel, &mut ws.dipole_buf, &mut ws.complex_buf);
+    ws.fft_ws.apply_dipole_inplace(&ws.stage, op.d2_kernel, &mut ws.dipole_buf, &mut ws.complex_buf);
 
     // R2' fidelity: rank-1 Hessian [dr_p, -dr_q]^T * [dr_p, -dr_q]
     // r2_lin = dr_p * d_pos - dr_q * d_neg
@@ -815,6 +844,32 @@ mod tests {
             tv_term(&x, &w, lambda, nx, ny, nz, vsx, vsy, vsz, &mut got);
             assert_eq!(got, want, "{:?}", (nx, ny, nz));
         }
+    }
+
+    /// One pass with `doubled_dipole_kernel` is the two dipole passes it replaces, up to f32
+    /// rounding, on even-sized axes with B0 oblique to them (where D is not even, so the plain
+    /// D² would not be).
+    #[test]
+    fn doubled_dipole_kernel_equals_two_passes() {
+        let (nx, ny, nz) = (12, 10, 8);
+        let n = nx * ny * nz;
+        let grid = Grid::new(nx, ny, nz, 1.0, 1.1, 1.3);
+        let d = dipole_kernel_f32(&grid, (0.3, -0.2, 0.93));
+        let x: Vec<f32> = (0..n).map(|i| (i as f32 * 0.37).sin() + (i as f32 * 0.05).cos()).collect();
+        let mut ws = Fft3dWorkspaceF32::new(nx, ny, nz);
+        let mut buf = vec![Complex32::new(0.0, 0.0); n];
+        let (mut once, mut twice) = (vec![0.0f32; n], vec![0.0f32; n]);
+        ws.apply_dipole_inplace(&x, &d, &mut once, &mut buf);
+        let first = once.clone();
+        ws.apply_dipole_inplace(&first, &d, &mut twice, &mut buf);
+        ws.apply_dipole_inplace(&x, &doubled_dipole_kernel(&d, nx, ny, nz), &mut once, &mut buf);
+        let scale = twice.iter().fold(0.0f32, |a, &v| a.max(v.abs()));
+        let diff = once.iter().zip(&twice).fold(0.0f32, |a, (&p, &q)| a.max((p - q).abs()));
+        assert!(diff <= 1e-5 * scale, "max |Δ| {diff:e} vs max {scale}");
+        let plain: Vec<f32> = d.iter().map(|&v| v * v).collect();
+        ws.apply_dipole_inplace(&x, &plain, &mut once, &mut buf);
+        let diff_plain = once.iter().zip(&twice).fold(0.0f32, |a, (&p, &q)| a.max((p - q).abs()));
+        assert!(diff_plain > 1e-3 * scale, "D is even here after all: {diff_plain:e}");
     }
 
     fn corr(a: &[f64], b: &[f64], mask: &[u8]) -> f64 {
