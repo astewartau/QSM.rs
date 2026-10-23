@@ -76,43 +76,30 @@ jobs:
           fi
 
       - name: Upload figures
+        # The PR comment links here: an artifact cannot be shown inline.
+        id: figures
         if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: relaxometry-figures
-          path: figures/
-
-      - name: Setup Node.js (canvas@2 needs prebuilt binary)
-        uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-
-      - name: Setup CML
-        uses: iterative/setup-cml@v3
-        continue-on-error: true
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Upload figures
-        # Kept with the run, so the comment can point here if the image host is down.
-        if: github.event_name == 'pull_request'
         continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: figures
           path: figures/
           if-no-files-found: ignore
+          retention-days: 30
 
       - name: Post PR comment with results
         if: github.event_name == 'pull_request'
         continue-on-error: true
         env:
-          REPO_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          FIGURES_URL: ${{ steps.figures.outputs.artifact-url }}
+          FIGURES_RETENTION_DAYS: 30
         run: |
-          fig() {  # emit an image only if it was rendered
-            [ -f "figures/$1.png" ] && echo "![$1](figures/$1.png)"
+          fig() {  # name a figure only if it was rendered; the PNGs are in the figures artifact
+            [ -f "figures/$1.png" ] && echo "- \`$1.png\`"
             return 0   # a missing figure must not fail the block: a non-zero status from the
                        # last statement in `{ ... } > report.md` would abort the step before
                        # the comment is ever posted.
@@ -134,7 +121,7 @@ jobs:
             # Figures collapsed: the table is what a reviewer reads, and three montages
             # of a synthetic phantom pushed everything else in the PR off the screen.
             echo "<details>"
-            echo "<summary>Maps and slab coverage</summary>"
+            echo "<summary>Maps and slab coverage (figures artifact, linked below)</summary>"
             echo ""
             echo "EPG recovers the true R2 (bias ≈ 0) and the refocusing B1; a mono-exponential fit is biased low. The denoising and unringing rows carry a difference panel: before/after are near-identical by eye, and what was removed is the point."
             echo ""
@@ -147,4 +134,4 @@ jobs:
             echo ""
             echo "</details>"
           } > report.md
-          bash scripts/post_pr_comment.sh report.md
+          bash scripts/post_pr_comment.sh report.md relaxometry-demo

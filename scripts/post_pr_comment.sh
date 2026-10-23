@@ -1,51 +1,56 @@
 #!/usr/bin/env bash
-# Post a markdown report as a PR comment.
+# Post a markdown report as a PR comment, or update the one an earlier run of the same workflow
+# posted.
 #
-# usage: post_pr_comment.sh <report.md>
-# env:   REPO_TOKEN / GH_TOKEN (GITHUB_TOKEN), PR_NUMBER, RUN_URL
+# usage: post_pr_comment.sh <report.md> <key>
+#   <key> names the comment (e.g. `integration-tests`). It goes into a hidden marker, and a later
+#   run finds the comment by that marker and edits it, so a PR carries one results comment per
+#   workflow rather than one per push.
+# env:   GH_TOKEN (GITHUB_TOKEN), GITHUB_REPOSITORY, PR_NUMBER, RUN_URL, HEAD_SHA,
+#        FIGURES_URL (the figures artifact's download link; empty if none was uploaded),
+#        FIGURES_RETENTION_DAYS (how long the artifact is kept)
 #
-# First through CML, which uploads the report's local images (figures/*.png) to its asset host
-# and posts the comment, retried with backoff (the GitHub API is rate limited across concurrent
-# runs). If CML keeps failing (for example its asset host is down), the report goes out through
-# the GitHub CLI without the images, each replaced by a pointer to the run's `figures` artifact,
-# so an image-host outage costs the pictures, not the whole comment. Never fails the step:
-# the comment is informational and the run's pass/fail gate is elsewhere.
+# The figures are not in the comment: a workflow artifact cannot be embedded as an image, so the
+# comment links to it instead. Never fails the step: the comment is informational and the run's
+# pass/fail gate is elsewhere.
 set -uo pipefail
 report="$1"
-
-if command -v cml >/dev/null 2>&1; then
-  for attempt in 1 2 3 4 5; do
-    if cml comment create "$report"; then
-      echo "PR comment posted through CML (attempt $attempt)."
-      exit 0
-    fi
-    if [ "$attempt" -lt 5 ]; then
-      wait=$((attempt * 30))
-      echo "cml comment create failed (attempt $attempt); retrying in ${wait}s..."
-      sleep "$wait"
-    fi
-  done
-  echo "cml comment create still failing after 5 attempts; posting without figures."
-else
-  echo "CML is not available; posting without figures."
-fi
+key="$2"
 
 if [ -z "${PR_NUMBER:-}" ]; then
   echo "No PR number; nothing posted."
   exit 0
 fi
-export GH_TOKEN="${GH_TOKEN:-${REPO_TOKEN:-}}"
-fallback="$(mktemp)"
-note="*Figures not shown: the image host was unavailable. They are in the \`figures\` artifact of [this run](${RUN_URL:-})."
-note="${note}*"
-# Each local image line becomes the note (the first one only; the rest are dropped).
-awk -v note="$note" '
-  /^!\[[^]]*\]\(figures\/[^)]*\)[[:space:]]*$/ { if (!shown) { print note; shown = 1 } next }
-  { print }
-' "$report" > "$fallback"
+repo="${GITHUB_REPOSITORY:?}"
+marker="<!-- qsmrs-ci:${key} -->"
+
+body="$(mktemp)"
+{
+  echo "$marker"
+  cat "$report"
+  echo ""
+  echo "---"
+  if [ -n "${FIGURES_URL:-}" ]; then
+    echo "**Figures:** [download the \`figures\` artifact](${FIGURES_URL}) (a zip of the PNG montages named above; kept for ${FIGURES_RETENTION_DAYS:-30} days)."
+  else
+    echo "**Figures:** none were rendered for this run."
+  fi
+  echo ""
+  echo "**Run:** ${RUN_URL:-} (commit \`${HEAD_SHA:-unknown}\`)"
+} > "$body"
+
 for attempt in 1 2 3; do
-  if gh pr comment "$PR_NUMBER" --body-file "$fallback"; then
-    echo "PR comment posted through the GitHub CLI, without figures (attempt $attempt)."
+  # The newest earlier comment from this workflow carrying the marker, if any.
+  existing=$(gh api "repos/${repo}/issues/${PR_NUMBER}/comments" --paginate \
+    --jq ".[] | select(.user.login == \"github-actions[bot]\" and (.body | startswith(\"${marker}\"))) | .id" \
+    | tail -n 1) || existing=""
+  if [ -n "$existing" ]; then
+    if gh api -X PATCH "repos/${repo}/issues/comments/${existing}" -F "body=@${body}" --jq .html_url; then
+      echo "PR comment ${existing} updated (attempt $attempt)."
+      exit 0
+    fi
+  elif gh pr comment "$PR_NUMBER" -R "$repo" --body-file "$body"; then
+    echo "PR comment posted (attempt $attempt)."
     exit 0
   fi
   sleep $((attempt * 20))
