@@ -49,7 +49,7 @@
 //! # Pipeline rules
 //!
 //! The facts above that a configuration can depart from are published as rules in
-//! [`crate::pipeline::rules::RULES`] (each with its reason and source): `fansi.no-laplacian-multi-echo`.
+//! [`crate::pipeline::rules::RULES`] (each with its strength, basis, reason and source): `fansi.no-laplacian-multi-echo`, `ndi.te-first`.
 
 use crate::fft::Fft3dWorkspace;
 use crate::utils::apply_mask_zero;

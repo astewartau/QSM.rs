@@ -40,7 +40,7 @@
 //! # Pipeline rules
 //!
 //! The facts above that a configuration can depart from are published as rules in
-//! [`crate::pipeline::rules::RULES`] (each with its reason and source): `autoqsm.unwrap-laplacian`, `autoqsm.echo-combination`, `autoqsm.echo-weights`.
+//! [`crate::pipeline::rules::RULES`] (each with its strength, basis, reason and source): `autoqsm.unwrap-laplacian`, `autoqsm.echo-combination`, `autoqsm.echo-weights`.
 
 use crate::grid::Grid;
 use crate::models::onnx::{OnnxModel, OnnxError, Tensor};

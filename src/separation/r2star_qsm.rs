@@ -48,7 +48,7 @@
 //! # Pipeline rules
 //!
 //! The facts above that a configuration can depart from are published as rules in
-//! [`crate::pipeline::rules::RULES`] (each with its reason and source): `r2star-qsm.field-complex-fit`, `r2star-qsm.bg-pdf`, `r2star-qsm.qsm-medi`.
+//! [`crate::pipeline::rules::RULES`] (each with its strength, basis, reason and source): `r2star-qsm.field-complex-fit`, `r2star-qsm.bg-pdf`, `r2star-qsm.qsm-medi`.
 
 /// Parameters for [`r2star_qsm`] / [`r2star_qsm_from_magnitude`].
 #[cfg_attr(feature = "introspection", derive(serde::Serialize))]

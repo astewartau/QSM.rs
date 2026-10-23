@@ -30,7 +30,7 @@
 //! # Pipeline rules
 //!
 //! The facts above that a configuration can depart from are published as rules in
-//! [`crate::pipeline::rules::RULES`] (each with its reason and source): `bfrnet.mask-bet`.
+//! [`crate::pipeline::rules::RULES`] (each with its strength, basis, reason and source): `bfrnet.mask-bet`.
 
 use crate::grid::Grid;
 use crate::inversion::TileConfig;

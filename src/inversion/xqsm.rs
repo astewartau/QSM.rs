@@ -29,7 +29,7 @@
 //! # Pipeline rules
 //!
 //! The facts above that a configuration can depart from are published as rules in
-//! [`crate::pipeline::rules::RULES`] (each with its reason and source): `xqsm.bg-resharp`.
+//! [`crate::pipeline::rules::RULES`] (each with its strength, basis, reason and source): `xqsm.bg-resharp`.
 
 use crate::grid::Grid;
 use crate::models::onnx::{OnnxModel, OnnxError, Tensor};

@@ -28,7 +28,7 @@
 //! # Pipeline rules
 //!
 //! The facts above that a configuration can depart from are published as rules in
-//! [`crate::pipeline::rules::RULES`] (each with its reason and source): `lpcnn.mask-bet`, `lpcnn.bg-vsharp`.
+//! [`crate::pipeline::rules::RULES`] (each with its strength, basis, reason and source): `lpcnn.mask-bet`, `lpcnn.bg-vsharp`.
 
 use num_complex::Complex64;
 

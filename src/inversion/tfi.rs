@@ -67,7 +67,7 @@
 //! # Pipeline rules
 //!
 //! The facts above that a configuration can depart from are published as rules in
-//! [`crate::pipeline::rules::RULES`] (each with its reason and source): `tfi.mask-bet`.
+//! [`crate::pipeline::rules::RULES`] (each with its strength, basis, reason and source): `tfi.mask-bet`, `tfi.te-spacing`.
 
 use num_complex::Complex64;
 use crate::fft::Fft3dWorkspace;

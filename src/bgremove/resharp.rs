@@ -30,7 +30,7 @@
 //! # Pipeline rules
 //!
 //! The facts above that a configuration can depart from are published as rules in
-//! [`crate::pipeline::rules::RULES`] (each with its reason and source): `resharp.radius`, `resharp.iterations`.
+//! [`crate::pipeline::rules::RULES`] (each with its strength, basis, reason and source): `resharp.radius`, `resharp.iterations`.
 
 use num_complex::Complex64;
 use crate::Grid;

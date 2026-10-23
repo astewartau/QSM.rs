@@ -43,7 +43,7 @@
 //! # Pipeline rules
 //!
 //! The facts above that a configuration can depart from are published as rules in
-//! [`crate::pipeline::rules::RULES`] (each with its reason and source): `hdqsm.bg-pdf`.
+//! [`crate::pipeline::rules::RULES`] (each with its strength, basis, reason and source): `hdqsm.bg-pdf`.
 
 use num_complex::Complex64;
 use crate::inversion::admm::{fansi_unit_ee2, prepare_fansi_spectral};

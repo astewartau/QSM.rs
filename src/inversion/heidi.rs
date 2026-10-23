@@ -68,7 +68,7 @@
 //! # Pipeline rules
 //!
 //! The facts above that a configuration can depart from are published as rules in
-//! [`crate::pipeline::rules::RULES`] (each with its reason and source): `lsqr.bg-sharp`.
+//! [`crate::pipeline::rules::RULES`] (each with its strength, basis, reason and source): `lsqr.bg-sharp`, `heidi.te-last`.
 
 use num_complex::Complex64;
 

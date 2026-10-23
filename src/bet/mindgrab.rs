@@ -50,7 +50,7 @@
 //! # Pipeline rules
 //!
 //! The facts above that a configuration can depart from are published as rules in
-//! [`crate::pipeline::rules::RULES`] (each with its reason and source): `mindgrab.wasm-heap`.
+//! [`crate::pipeline::rules::RULES`] (each with its strength, basis, reason and source): `mindgrab.wasm-heap`.
 
 // The pre/post-processing is plain Rust; only inference needs `onnx`.
 #![cfg_attr(not(feature = "onnx"), allow(dead_code))]

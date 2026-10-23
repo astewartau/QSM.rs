@@ -29,11 +29,31 @@
 //!   statement about background removal. This keeps two rules from disagreeing about one setting
 //!   except where two chosen methods genuinely want different things, and then the host sees both
 //!   findings with their triggers.
-//! - **Strength.** [`Strength::Required`]: the method cannot run correctly otherwise.
-//!   [`Strength::Recommended`]: the reference pipeline's choice. [`Strength::Discouraged`]: a
-//!   combination known to fail. They order `Required > Recommended > Discouraged`
-//!   (`Strength: Ord`), which is the precedence when findings on one setting disagree; this
-//!   module reports every finding and leaves resolving them to the host.
+//! - **Strength**, and the basis it rests on ([`Rule::basis`], a [`Basis`]):
+//!   - [`Strength::Required`]: the method cannot run correctly otherwise (e.g. it does not fit
+//!     the heap). Usually measured.
+//!   - [`Strength::Recommended`]: the authors explicitly recommend it (their paper, README or a
+//!     comment in their code says so; [`Basis::Stated`]), or QSM.rs measured a benefit and
+//!     recorded it in the method's docs ([`Basis::Measured`]).
+//!   - [`Strength::Discouraged`]: a combination known to fail, stated by the authors or measured
+//!     (or a setting QSM.rs ignores in that combination, [`Basis::Implementation`]).
+//!   - [`Strength::Reference`]: what the reference pipeline used, where the authors never said
+//!     it is needed or better: their code or paper simply does it
+//!     ([`Basis::ReferenceChoice`]), e.g. QSMART's `bet2 -f 0.2` in `brainmask.m`, or a network
+//!     trained on V-SHARP fields.
+//!
+//!   Precedence is `Required > Recommended > Discouraged > Reference` (`Strength: Ord`). A
+//!   statement or measurement outranks a bare reference choice; a recommendation outranks a
+//!   discouragement because a recommendation names the value to use, while a discouragement
+//!   only names one to avoid. This module reports every finding and leaves resolving them to
+//!   the host.
+//! - **Intended front-end handling** (QSMxT/QSMxT#419, astewartau/qsmbly#194):
+//!   - `Required`: keeps the host's "forces" behaviour; the run does not proceed as configured.
+//!   - `Recommended` and `Discouraged`: a modal when a change creates the finding (apply the
+//!     default, choose another allowed value, or ignore), a badge on the setting afterwards.
+//!   - `Reference`: **never a modal**, only an info marker on the setting. Still recorded in
+//!     the run record, and listed in the methods' Note section in a softer form ("differs from
+//!     the reference pipeline"), separately from departures from recommendations.
 //! - **Data, not code.** Conditions and expectations are values ([`Condition`], [`Test`],
 //!   [`Value`]) over named settings and scan facts, not closures, so the JSON form says
 //!   everything the Rust evaluation does. The only code is [`current`] (a setting's value in a
@@ -71,17 +91,36 @@ use crate::segment::synthseg::{synthseg_network_grid, SynthSegInference, SynthSe
 // Types
 // =========================================================================
 
-/// How strongly a rule applies. Ordered `Discouraged < Recommended < Required`, so `max` is the
-/// finding that takes precedence on a setting.
+/// How strongly a rule applies. Ordered `Reference < Discouraged < Recommended < Required`, so
+/// `max` is the finding that takes precedence on a setting (see the module docs, *Strength*).
 #[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum Strength {
+    /// What the method's reference pipeline used, where the authors never said it is needed or
+    /// better (their code or paper simply does it). Informational.
+    Reference,
     /// A combination known to fail (measured, or stated by the authors).
     Discouraged,
-    /// What the method's reference pipeline uses.
+    /// The authors explicitly recommend it (paper, README or code comment), or QSM.rs measured a
+    /// benefit and recorded it in the method's docs.
     Recommended,
     /// The method cannot run correctly otherwise.
     Required,
+}
+
+/// What a rule rests on.
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum Basis {
+    /// The authors say so: their paper, README or a comment in their code.
+    Stated,
+    /// QSM.rs measured it (memory, accuracy), and the measurement is in the method's docs.
+    Measured,
+    /// The authors' code or paper does it, without saying it is needed or better.
+    ReferenceChoice,
+    /// What QSM.rs's own implementation does (recorded in its docs), e.g. a setting it ignores
+    /// in some combination.
+    Implementation,
 }
 
 /// A setting's (or a scan fact's) value. Serialised untagged: `true`, `3.0`, `"pdf"`,
@@ -220,6 +259,9 @@ pub struct Rule {
     /// Unit of `default` and of any range in `expect`.
     pub unit: Unit,
     pub strength: Strength,
+    /// What the rule rests on: a statement by the authors, a QSM.rs measurement, the reference's
+    /// choice, or QSM.rs's implementation.
+    pub basis: Basis,
     /// One line: why.
     pub reason: &'static str,
     /// The authors' code (file, line) or paper (section), or the QSM.rs docs recording the
@@ -368,6 +410,15 @@ pub const SETTINGS: &[(&str, &str)] = &[
     ("bg_removal.resharp.max_iter", "RESHARP's CG iteration cap; only with RESHARP"),
     ("inversion.algorithm", "Dipole inversion (InversionAlgorithm::id)"),
     ("inversion.star.pad", "STAR-QSM padding per side, voxels (StarParams::pad)"),
+    ("inversion.whqsm.weight", "WH-QSM's data weight: flat, max-normalised or in-vivo (WhQsmWeight); only with WH-QSM"),
+    ("inversion.star.te", "Echo time STAR-QSM converts at (EchoTime: first, last, spacing, sum, seconds); only with STAR"),
+    ("inversion.fansi.te", "Echo time FANSI nlTV/nlTGV convert at (EchoTime); only with fansi or fansi-tgv"),
+    ("inversion.ndi.te", "Echo time NDI converts at (EchoTime); only with NDI"),
+    ("inversion.l1qsm.te", "Echo time L1-QSM converts at (EchoTime); only with L1-QSM"),
+    ("inversion.whqsm.te", "Echo time WH-QSM converts at (EchoTime); only with WH-QSM"),
+    ("inversion.medi.te", "Echo time MEDI converts at (EchoTime); only with MEDI"),
+    ("inversion.tfi.te", "Echo time TFI converts at (EchoTime); only with TFI"),
+    ("inversion.heidi.te", "Echo time HEIDI converts at (EchoTime); only with HEIDI"),
     ("inversion.qsmart.inversion", "QSMART's inner inversion (InversionAlgorithm::id); only with QSMART"),
     ("inversion.qsmart.ilsqr_max_iter", "QSMART's iLSQR iteration count; only with QSMART"),
     ("inversion.qsmart.ilsqr_pad_mm", "QSMART's iLSQR padding, mm; only with QSMART"),
@@ -376,6 +427,18 @@ pub const SETTINGS: &[(&str, &str)] = &[
     ("segmentation.inference", "SynthSeg inference: full-volume, low-memory (SynthSegInference::LOW_MEMORY) or sliding-window"),
     ("segmentation.inference.patch", "SynthSeg window edge, voxels at 1 mm (SlidingWindow::patch)"),
 ];
+
+/// Stable id of an [`EchoTime`](crate::EchoTime) choice (`Seconds` is `"seconds"`, whatever its
+/// value).
+pub fn echo_time_id(t: crate::EchoTime) -> &'static str {
+    match t {
+        crate::EchoTime::First => "first",
+        crate::EchoTime::Last => "last",
+        crate::EchoTime::Spacing => "spacing",
+        crate::EchoTime::Sum => "sum",
+        crate::EchoTime::Seconds(_) => "seconds",
+    }
+}
 
 /// Stable id of a weighted average's per-echo weight.
 pub fn weight_id(w: &crate::utils::multi_echo::B0WeightType) -> &'static str {
@@ -416,7 +479,9 @@ pub fn current(input: &RuleInput, facts: &ScanFacts, setting: &str) -> Option<Ve
     let bg = |a: super::config::BgRemovalAlgorithm| inv_input.needs_bg_removal() && c.bg_removal.algorithm == a;
     let vsharp = bg(super::config::BgRemovalAlgorithm::Vsharp);
     let resharp = bg(super::config::BgRemovalAlgorithm::Resharp);
-    let qsmart = c.inversion.algorithm == super::config::InversionAlgorithm::Qsmart;
+    use super::config::InversionAlgorithm as A;
+    let alg = |a: &[A]| a.contains(&c.inversion.algorithm);
+    let qsmart = alg(&[A::Qsmart]);
     Some(match setting {
         "masking.generator" => {
             c.masking.sections.iter().map(|s| Current::Choice(s.generator.id())).collect()
@@ -483,6 +548,24 @@ pub fn current(input: &RuleInput, facts: &ScanFacts, setting: &str) -> Option<Ve
         ),
         "bg_removal.resharp.radius" => gated(resharp, Current::Number(c.bg_removal.resharp.radius)),
         "bg_removal.resharp.max_iter" => gated(resharp, Current::Number(c.bg_removal.resharp.max_iter as f64)),
+        "inversion.whqsm.weight" => gated(
+            alg(&[A::Whqsm]),
+            Current::Choice(match c.inversion.whqsm.weight {
+                crate::inversion::WhQsmWeight::Flat => "flat",
+                crate::inversion::WhQsmWeight::MaxNormalised => "max-normalised",
+                crate::inversion::WhQsmWeight::InVivo => "in-vivo",
+            }),
+        ),
+        "inversion.star.te" => gated(alg(&[A::Star]), Current::Choice(echo_time_id(c.inversion.star.te))),
+        "inversion.fansi.te" => {
+            gated(alg(&[A::Fansi, A::FansiTgv]), Current::Choice(echo_time_id(c.inversion.fansi.te)))
+        }
+        "inversion.ndi.te" => gated(alg(&[A::Ndi]), Current::Choice(echo_time_id(c.inversion.ndi.te))),
+        "inversion.l1qsm.te" => gated(alg(&[A::L1qsm]), Current::Choice(echo_time_id(c.inversion.l1qsm.te))),
+        "inversion.whqsm.te" => gated(alg(&[A::Whqsm]), Current::Choice(echo_time_id(c.inversion.whqsm.te))),
+        "inversion.medi.te" => gated(alg(&[A::Medi]), Current::Choice(echo_time_id(c.inversion.medi.te))),
+        "inversion.tfi.te" => gated(alg(&[A::Tfi]), Current::Choice(echo_time_id(c.inversion.tfi.te))),
+        "inversion.heidi.te" => gated(alg(&[A::Heidi]), Current::Choice(echo_time_id(c.inversion.heidi.te))),
         "inversion.qsmart.inversion" => gated(qsmart, Current::Choice(c.inversion.qsmart.inversion.id())),
         "inversion.qsmart.ilsqr_max_iter" => {
             gated(qsmart, Current::Number(c.inversion.qsmart.ilsqr_max_iter as f64))
@@ -582,12 +665,15 @@ const fn fact_at_most(fact: Fact, max: f64) -> Condition {
 const ON_WASM: Condition = C::Fact { fact: Fact::Target, is: Test::OneOf { values: &[Choice("wasm")] } };
 const MULTI_ECHO: Condition = fact_at_least(Fact::EchoCount, 2.0);
 
-/// A recommended choice: `setting` should be one of `values`, the first being the default.
-const fn recommend(
+/// A choice of `strength` on `basis`: `setting` should be one of `values`, the first being the
+/// default.
+const fn one_of(
     id: &'static str,
     when: &'static [Condition],
     setting: &'static str,
     values: &'static [Value],
+    strength: Strength,
+    basis: Basis,
     reason: &'static str,
     source: &'static str,
 ) -> Rule {
@@ -598,10 +684,47 @@ const fn recommend(
         expect: Test::OneOf { values },
         default: values[0],
         unit: Unit::None,
-        strength: Strength::Recommended,
+        strength,
+        basis,
         reason,
         source,
     }
+}
+
+/// What the authors explicitly recommend.
+const fn recommend(
+    id: &'static str,
+    when: &'static [Condition],
+    setting: &'static str,
+    values: &'static [Value],
+    reason: &'static str,
+    source: &'static str,
+) -> Rule {
+    one_of(id, when, setting, values, Strength::Recommended, Basis::Stated, reason, source)
+}
+
+/// What QSM.rs measured to be better (recorded in the method's docs).
+const fn measured_better(
+    id: &'static str,
+    when: &'static [Condition],
+    setting: &'static str,
+    values: &'static [Value],
+    reason: &'static str,
+    source: &'static str,
+) -> Rule {
+    one_of(id, when, setting, values, Strength::Recommended, Basis::Measured, reason, source)
+}
+
+/// What the reference pipeline used, without the authors saying it is needed or better.
+const fn reference(
+    id: &'static str,
+    when: &'static [Condition],
+    setting: &'static str,
+    values: &'static [Value],
+    reason: &'static str,
+    source: &'static str,
+) -> Rule {
+    one_of(id, when, setting, values, Strength::Reference, Basis::ReferenceChoice, reason, source)
 }
 
 /// A discouraged choice: `setting` should be none of `avoid`; `default` replaces it.
@@ -611,6 +734,7 @@ const fn discourage(
     setting: &'static str,
     avoid: &'static [Value],
     default: Value,
+    basis: Basis,
     reason: &'static str,
     source: &'static str,
 ) -> Rule {
@@ -622,6 +746,7 @@ const fn discourage(
         default,
         unit: Unit::None,
         strength: Strength::Discouraged,
+        basis,
         reason,
         source,
     }
@@ -644,43 +769,43 @@ const FANSI_FAMILY: &[Value] =
 /// listed in issue #289, not here.
 pub static RULES: &[Rule] = &[
     // ---------------------------------------------------------------- Brain masking
-    recommend("medi.mask-bet", &[inv(&[Choice("medi")])], "masking.generator", BET,
+    reference("medi.mask-bet", &[inv(&[Choice("medi")])], "masking.generator", BET,
         "MEDI's pipeline masks with FSL BET (bet2, f 0.5) on the root-sum-of-squares magnitude",
         "MEDI toolbox 2024.11.26 README.m:80,118; functions/bet2/bet2.cpp:136"),
-    recommend("tfi.mask-bet", &[inv(&[Choice("tfi")])], "masking.generator", BET,
+    reference("tfi.mask-bet", &[inv(&[Choice("tfi")])], "masking.generator", BET,
         "TFI's in-vivo ROI is a BET brain mask",
         "Liu et al. 2017 MRM 79:2950 (TFI), Methods"),
-    recommend("pdf.mask-bet", &[bg(PDF)], "masking.generator", BET,
+    reference("pdf.mask-bet", &[bg(PDF)], "masking.generator", BET,
         "MEDI's PDF runs inside the BET mask",
         "MEDI toolbox 2024.11.26 README.m:118,124"),
-    recommend("amp-pe.mask-bet", &[inv(&[Choice("amp-pe")])], "masking.generator", BET,
+    reference("amp-pe.mask-bet", &[inv(&[Choice("amp-pe")])], "masking.generator", BET,
         "AMP-PE's pipeline masks with BET (0.5) on the RSS magnitude, then erodes 2 mm",
         "QSM_AMP_PE qsm_multi_echo_combined.m L71-81"),
     recommend("qsmnet.mask-bet", &[inv(&[Choice("qsmnet"), Choice("qsmnet-plus")])], "masking.generator", BET,
-        "QSMnet's inputs were masked with FSL BET",
-        "SNU-LIST/QSMnet README.md:66"),
-    recommend("qsmgan.mask-bet", &[inv(&[Choice("qsmgan")])], "masking.generator", BET,
+        "QSMnet's README instructs BET (FSL) brain extraction before its input is made",
+        "SNU-LIST/QSMnet README.md:64-68 (Process flow)"),
+    reference("qsmgan.mask-bet", &[inv(&[Choice("qsmgan")])], "masking.generator", BET,
         "QSMGAN's training inputs were masked with FSL BET",
         "Chen et al. 2020 NeuroImage 207:116389 (QSMGAN), Methods"),
-    recommend("lpcnn.mask-bet", &[inv(&[Choice("lpcnn")])], "masking.generator", BET,
+    reference("lpcnn.mask-bet", &[inv(&[Choice("lpcnn")])], "masking.generator", BET,
         "LPCNN's data were masked with FSL BET",
         "Lai et al. MICCAI 2020 (LPCNN, arXiv:2008.05024), Dataset Acquisition and Preprocessing"),
-    recommend("nextqsm.mask-bet", &[inv(&[Choice("nextqsm")])], "masking.generator", BET,
+    reference("nextqsm.mask-bet", &[inv(&[Choice("nextqsm")])], "masking.generator", BET,
         "NeXtQSM's in-vivo pipeline masks with FSL BET",
         "Cognolato et al. 2023 Med. Image Anal. 84:102700 (NeXtQSM), §3.2"),
-    recommend("iqsm.mask-bet", &[inv(&[Choice("iqsm"), Choice("iqsm-plus")])], "masking.generator", BET,
+    reference("iqsm.mask-bet", &[inv(&[Choice("iqsm"), Choice("iqsm-plus")])], "masking.generator", BET,
         "iQSM's default mask is bet2 -f 0.5 on the first-echo magnitude",
         "sunhongfu/iQSM run.py:499-506, bet2_utils.py:47,64"),
-    recommend("bfrnet.mask-bet", &[bg(&[Choice("bfrnet")])], "masking.generator", BET,
+    reference("bfrnet.mask-bet", &[bg(&[Choice("bfrnet")])], "masking.generator", BET,
         "BFRnet's in-vivo masks are bet2 -f 0.2 -w 2, eroded 3 voxels",
         "Zhu et al. 2023 Z. Med. Phys. (BFRnet), Methods"),
-    recommend("chi-sep.mask-bet", &[sep(CHI_SEP_TOOLBOX)], "masking.generator", BET,
+    reference("chi-sep.mask-bet", &[sep(CHI_SEP_TOOLBOX)], "masking.generator", BET,
         "The χ-separation toolbox and χ-sepnet mask with BET",
         "χ-separation toolbox Chisep_script.m:79-82; Kim et al. 2025 (χ-sepnet, arXiv:2409.14030) §2.1.1"),
-    recommend("qsmart.mask-bet", &[inv(&[Choice("qsmart")])], "masking.generator", BET,
+    reference("qsmart.mask-bet", &[inv(&[Choice("qsmart")])], "masking.generator", BET,
         "QSMART's authors mask with FSL bet2 -f 0.2 on the N4-corrected first-echo magnitude",
         "Yaghmaie et al. 2021 NeuroImage 231:117701 (QSMART) §3.1; QSMART brainmask.m l. 7-33"),
-    recommend("decompose.mask-bet", &[sep(&[Choice("decompose")])], "masking.generator", BET,
+    reference("decompose.mask-bet", &[sep(&[Choice("decompose")])], "masking.generator", BET,
         "DECOMPOSE's pipeline masks with FSL BET",
         "Chen et al. 2021 NeuroImage 242:118735 (DECOMPOSE), §3"),
     Rule {
@@ -691,6 +816,7 @@ pub static RULES: &[Rule] = &[
         default: Choice("bet"),
         unit: Unit::None,
         strength: Strength::Required,
+        basis: Basis::Measured,
         reason: "MindGrab always runs a whole 256³ volume and cannot be tiled; its WASM peak \
                  (about 5.6 GB) exceeds a 4 GiB heap",
         source: "QSM.rs models registry (mindgrab memory figures) and bet::mindgrab docs",
@@ -707,6 +833,7 @@ pub static RULES: &[Rule] = &[
         default: Choice("low-memory"),
         unit: Unit::None,
         strength: Strength::Required,
+        basis: Basis::Measured,
         reason: "The configured HD-BET step needs more than a 4 GiB WASM heap on this scan; \
                  (128, 128, 64) sliding windows peak at about 1.6 GB and agree with the trained \
                  patch at Dice ≈0.99",
@@ -721,6 +848,7 @@ pub static RULES: &[Rule] = &[
         default: Choice("low-memory"),
         unit: Unit::None,
         strength: Strength::Required,
+        basis: Basis::Measured,
         reason: "SynthSeg's whole-volume pass needs 6–12 GB on 1 mm head scans; no whole-volume \
                  setting fits a 4 GB WASM heap",
         source: "QSM.rs segment::synthseg module docs and SynthSegInference::LOW_MEMORY (#281)",
@@ -740,63 +868,64 @@ pub static RULES: &[Rule] = &[
         default: Number(96.0),
         unit: Unit::Voxels,
         strength: Strength::Required,
+        basis: Basis::Measured,
         reason: "128³ SynthSeg windows took a 192×256×128 grid to 3.83 GB of the 4 GB WASM heap; \
                  a larger grid does not fit, 96³ windows do",
         source: "QSM.rs SynthSegInference::LOW_MEMORY docs (#281)",
     },
     // ---------------------------------------------------------------- Phase unwrapping
     discourage("fansi.no-laplacian-multi-echo", &[inv(FANSI_FAMILY), MULTI_ECHO],
-        "field_mapping.unwrapping_algorithm", LAPLACIAN, Choice("romeo"),
+        "field_mapping.unwrapping_algorithm", LAPLACIAN, Choice("romeo"), Basis::Stated,
         "FANSI's authors advise against Laplacian unwrapping for multi-echo data: it removes \
          harmonic components of the phase",
         "FANSI-toolbox script_DICOM_Philips.m L196-197 (93044a3)"),
     recommend("qsmnet.unwrap-laplacian", &[inv(&[Choice("qsmnet"), Choice("qsmnet-plus")])],
         "field_mapping.unwrapping_algorithm", LAPLACIAN,
-        "QSMnet's inputs were unwrapped with STI Suite's Laplacian unwrapping",
-        "SNU-LIST/QSMnet README.md:67"),
-    recommend("autoqsm.unwrap-laplacian", &[inv(&[Choice("autoqsm")])],
+        "QSMnet's README instructs Laplacian phase unwrapping (STI Suite)",
+        "SNU-LIST/QSMnet README.md:64-68 (Process flow)"),
+    reference("autoqsm.unwrap-laplacian", &[inv(&[Choice("autoqsm")])],
         "field_mapping.unwrapping_algorithm", LAPLACIAN,
         "AutoQSM was trained on Laplacian-unwrapped total phase",
         "Wei et al. 2019 NeuroImage 201:116064 (AutoQSM), Methods"),
-    recommend("qsmgan.unwrap-laplacian", &[inv(&[Choice("qsmgan")])],
+    reference("qsmgan.unwrap-laplacian", &[inv(&[Choice("qsmgan")])],
         "field_mapping.unwrapping_algorithm", LAPLACIAN,
         "QSMGAN's training inputs were Laplacian-unwrapped",
         "Chen et al. 2020 NeuroImage 207:116389 (QSMGAN), Methods"),
-    recommend("decompose.unwrap-laplacian", &[sep(&[Choice("decompose")])],
+    reference("decompose.unwrap-laplacian", &[sep(&[Choice("decompose")])],
         "field_mapping.unwrapping_algorithm", LAPLACIAN,
         "DECOMPOSE's pipeline uses Laplacian unwrapping",
         "Chen et al. 2021 NeuroImage 242:118735 (DECOMPOSE), §3"),
-    recommend("chi-sep.unwrap-romeo", &[sep(CHI_SEP_TOOLBOX)],
+    reference("chi-sep.unwrap-romeo", &[sep(CHI_SEP_TOOLBOX)],
         "field_mapping.unwrapping_algorithm", ROMEO,
         "The χ-separation toolbox and χ-sepnet unwrap each echo with ROMEO",
         "χ-separation toolbox Chisep_script.m:99-111; Kim et al. 2025 (χ-sepnet) §2.1.1"),
-    recommend("sti.unwrap-laplacian", &[inv(STI)], "field_mapping.unwrapping_algorithm", LAPLACIAN,
+    reference("sti.unwrap-laplacian", &[inv(STI)], "field_mapping.unwrapping_algorithm", LAPLACIAN,
         "STI Suite's QSM_GUI unwraps each echo with MRPhaseUnwrap (Laplacian)",
         "STI Suite 3.0 QSM_GUI, probed headless (recorded in QSM.rs laplacian.rs docs)"),
-    recommend("sti.laplacian-solver",
+    reference("sti.laplacian-solver",
         &[inv(STI), method("field_mapping.unwrapping_algorithm", LAPLACIAN)],
         "field_mapping.laplacian_solver", &[Choice("fft-12")],
         "MRPhaseUnwrap is the FFT Schofield-Zhu solver with 12 voxels of padding",
         "STI Suite 3.0 MRPhaseUnwrap, probed (recorded in QSM.rs LaplacianSolver::Fft docs)"),
-    recommend("qsmart.unwrap-laplacian", &[inv(&[Choice("qsmart")])],
+    reference("qsmart.unwrap-laplacian", &[inv(&[Choice("qsmart")])],
         "field_mapping.unwrapping_algorithm", LAPLACIAN,
         "QSMART unwraps each echo with Laplacian unwrapping (lapunwrap.m)",
         "QSMART Demo_QSMART.m l. 32; unwrap_phase.m l. 5-10"),
-    recommend("qsmart.laplacian-solver",
+    reference("qsmart.laplacian-solver",
         &[inv(&[Choice("qsmart")]), method("field_mapping.unwrapping_algorithm", LAPLACIAN)],
         "field_mapping.laplacian_solver", &[Choice("mirror")],
         "QSMART's lapunwrap.m solves on the mirrored volume",
         "QSMART unwrap_phase.m l. 5-10, lapunwrap.m"),
     // ---------------------------------------------------------------- Field mapping
-    recommend("qsmart.field-echofit", &[inv(&[Choice("qsmart")])],
+    reference("qsmart.field-echofit", &[inv(&[Choice("qsmart")])],
         "field_mapping.b0_estimation", &[Choice("qsmart-echofit")],
         "QSMART's total field and reliability map R_0 come from echofit.m",
         "QSMART QSMART.m l. 26; echofit.m"),
-    recommend("sti.echo-combination", &[inv(STI), MULTI_ECHO],
+    reference("sti.echo-combination", &[inv(STI), MULTI_ECHO],
         "field_mapping.b0_estimation", WEIGHTED_AVG,
         "STI Suite's QSM_GUI sums the unwrapped echoes and divides by the summed echo times",
         "STI Suite 3.0 QSM_GUI, probed headless (recorded in QSM.rs star.rs docs)"),
-    recommend("sti.echo-weights", &[inv(STI), MULTI_ECHO],
+    reference("sti.echo-weights", &[inv(STI), MULTI_ECHO],
         "field_mapping.b0_estimation.weighting", &[Choice("tes")],
         "Σφ/ΣTE is the TE-weighted mean of φ/TE",
         "STI Suite 3.0 QSM_GUI, probed headless (recorded in QSM.rs star.rs docs)"),
@@ -804,103 +933,103 @@ pub static RULES: &[Rule] = &[
         &[method("field_mapping.b0_estimation", WEIGHTED_AVG),
           method("field_mapping.unwrapping_algorithm", ROMEO), MULTI_ECHO],
         "field_mapping.phase_offset_removal", &[Bool(true)],
-        "The weighted mean of φ/TE assumes offset-free echoes; ROMEO removes phase offsets \
-         (MCPC-3D-S) whenever it computes B0 from multi-echo data",
+        "The B0 calculation's authors state that phase offsets have to be removed before it; \
+         ROMEO removes them (MCPC-3D-S) whenever it computes B0 from multi-echo data",
         "MriResearchTools.jl romeofunctions.jl:3-7; ROMEO.jl caller.jl:80-91"),
     discourage("field-mapping.bipolar-needs-three-echoes",
         &[method("field_mapping.bipolar_correction", &[Bool(true)]), fact_at_most(Fact::EchoCount, 2.0)],
-        "field_mapping.bipolar_correction", &[Bool(true)], Bool(false),
+        "field_mapping.bipolar_correction", &[Bool(true)], Bool(false), Basis::Stated,
         "Bipolar correction needs echoes 1–3; with fewer it is skipped",
         "ROMEO.jl argparse.jl:71-76; MriResearchTools.jl mcpc3ds.jl:110-119"),
     discourage("field-mapping.bipolar-not-with-laplacian",
         &[method("field_mapping.bipolar_correction", &[Bool(true)]),
           method("field_mapping.unwrapping_algorithm", LAPLACIAN)],
-        "field_mapping.bipolar_correction", &[Bool(true)], Bool(false),
+        "field_mapping.bipolar_correction", &[Bool(true)], Bool(false), Basis::Implementation,
         "Bipolar correction is not applied on the Laplacian path",
         "QSM.rs pipeline::field_mapping docs"),
-    recommend("medi.field-complex-fit", &[inv(&[Choice("medi")])],
+    reference("medi.field-complex-fit", &[inv(&[Choice("medi")])],
         "field_mapping.b0_estimation", COMPLEX_FIT,
         "MEDI's field map and its noise weight N_std come from Fit_ppm_complex",
         "MEDI toolbox 2024.11.26 README.m:87,140; dataterm_mask.m:23-27"),
-    recommend("pdf.field-complex-fit", &[bg(PDF)],
+    reference("pdf.field-complex-fit", &[bg(PDF)],
         "field_mapping.b0_estimation", COMPLEX_FIT,
         "PDF is weighted by Fit_ppm_complex's noise map N_std",
         "MEDI toolbox 2024.11.26 README.m:87,124; PDF.m:74-76"),
-    recommend("r2star-qsm.field-complex-fit", &[sep(&[Choice("r2star-qsm")])],
+    reference("r2star-qsm.field-complex-fit", &[sep(&[Choice("r2star-qsm")])],
         "field_mapping.b0_estimation", COMPLEX_FIT,
         "R2*-QSM's field was a nonlinear complex fit",
         "Dimov et al. 2022 Tomography 8:1544, Methods"),
-    recommend("amp-pe.echo-combination", &[inv(&[Choice("amp-pe")]), MULTI_ECHO],
+    reference("amp-pe.echo-combination", &[inv(&[Choice("amp-pe")]), MULTI_ECHO],
         "field_mapping.b0_estimation", WEIGHTED_AVG,
         "AMP-PE's pipeline averages φ/TE over the echoes",
         "QSM_AMP_PE qsm_multi_echo_combined.m L100-104"),
-    recommend("amp-pe.echo-weights", &[inv(&[Choice("amp-pe")]), MULTI_ECHO],
+    reference("amp-pe.echo-weights", &[inv(&[Choice("amp-pe")]), MULTI_ECHO],
         "field_mapping.b0_estimation.weighting", &[Choice("average")],
         "AMP-PE's average of φ/TE is unweighted",
         "QSM_AMP_PE qsm_multi_echo_combined.m L100-104"),
-    recommend("qsmnet.echo-combination", &[inv(&[Choice("qsmnet"), Choice("qsmnet-plus")]), MULTI_ECHO],
+    reference("qsmnet.echo-combination", &[inv(&[Choice("qsmnet"), Choice("qsmnet-plus")]), MULTI_ECHO],
         "field_mapping.b0_estimation", WEIGHTED_AVG,
         "QSMnet's input is the summed phase over the summed echo times",
         "SNU-LIST/QSMnet save_input_data_for_QSMnet.m:22"),
-    recommend("qsmnet.echo-weights", &[inv(&[Choice("qsmnet"), Choice("qsmnet-plus")]), MULTI_ECHO],
+    reference("qsmnet.echo-weights", &[inv(&[Choice("qsmnet"), Choice("qsmnet-plus")]), MULTI_ECHO],
         "field_mapping.b0_estimation.weighting", &[Choice("tes")],
         "Σφ/ΣTE is the TE-weighted mean of φ/TE",
         "SNU-LIST/QSMnet save_input_data_for_QSMnet.m:22"),
-    recommend("autoqsm.echo-combination", &[inv(&[Choice("autoqsm")]), MULTI_ECHO],
+    reference("autoqsm.echo-combination", &[inv(&[Choice("autoqsm")]), MULTI_ECHO],
         "field_mapping.b0_estimation", WEIGHTED_AVG,
         "AutoQSM's input is ψ = Σφ/(γB0ΣTE)",
         "Wei et al. 2019 NeuroImage 201:116064 (AutoQSM), Methods"),
-    recommend("autoqsm.echo-weights", &[inv(&[Choice("autoqsm")]), MULTI_ECHO],
+    reference("autoqsm.echo-weights", &[inv(&[Choice("autoqsm")]), MULTI_ECHO],
         "field_mapping.b0_estimation.weighting", &[Choice("tes")],
         "Σφ/ΣTE is the TE-weighted mean of φ/TE",
         "Wei et al. 2019 NeuroImage 201:116064 (AutoQSM), Methods"),
-    recommend("chi-sep.echo-combination", &[sep(CHI_SEP_TOOLBOX), MULTI_ECHO],
+    reference("chi-sep.echo-combination", &[sep(CHI_SEP_TOOLBOX), MULTI_ECHO],
         "field_mapping.b0_estimation", WEIGHTED_AVG,
         "The χ-separation toolbox combines the unwrapped echoes by a weighted average",
         "χ-separation toolbox Chisep_script.m:113-123; Kim et al. 2025 (χ-sepnet) §2.1.1"),
-    recommend("chi-sep.echo-weights", &[sep(CHI_SEP_TOOLBOX), MULTI_ECHO],
+    reference("chi-sep.echo-weights", &[sep(CHI_SEP_TOOLBOX), MULTI_ECHO],
         "field_mapping.b0_estimation.weighting", &[Choice("assumed-decay")],
         "The toolbox weights the echoes by TE·exp(−TE/T2*) with T2* = 40 ms (AssumedDecay, 0.04 s)",
         "χ-separation toolbox Chisep_script.m:113-123"),
     // ---------------------------------------------------------------- Background field removal
-    recommend("hdqsm.bg-pdf", &[inv(&[Choice("hdqsm")])], "bg_removal.algorithm", PDF,
+    reference("hdqsm.bg-pdf", &[inv(&[Choice("hdqsm")])], "bg_removal.algorithm", PDF,
         "HD-QSM's in-vivo pipeline removes the background with PDF",
         "Lambert et al. 2022 MRM 88:1600 (HD-QSM), §3.3"),
-    recommend("amp-pe.bg-pdf", &[inv(&[Choice("amp-pe")])], "bg_removal.algorithm", PDF,
+    reference("amp-pe.bg-pdf", &[inv(&[Choice("amp-pe")])], "bg_removal.algorithm", PDF,
         "AMP-PE's pipeline removes the background with PDF",
         "QSM_AMP_PE README (Overview, step 4); qsm_multi_echo_combined.m L112-139"),
-    recommend("lsqr.bg-sharp", &[inv(&[Choice("lsqr"), Choice("heidi")])], "bg_removal.algorithm",
+    reference("lsqr.bg-sharp", &[inv(&[Choice("lsqr"), Choice("heidi")])], "bg_removal.algorithm",
         &[Choice("sharp")],
         "The authors' LSQR/HEIDI pipeline inverts a SHARP local field",
         "qsm_heidi makefile L14-20, def.sh (4592631)"),
-    recommend("rts.bg-vsharp", &[inv(&[Choice("rts")])], "bg_removal.algorithm", VSHARP,
+    reference("rts.bg-vsharp", &[inv(&[Choice("rts")])], "bg_removal.algorithm", VSHARP,
         "RTS's author's toolbox (QSM.jl) runs V-SHARP before it",
         "QSM.jl README.md:49 (fde4b92)"),
-    recommend("xqsm.bg-resharp", &[inv(&[Choice("xqsm")])], "bg_removal.algorithm", &[Choice("resharp")],
+    reference("xqsm.bg-resharp", &[inv(&[Choice("xqsm")])], "bg_removal.algorithm", &[Choice("resharp")],
         "xQSM's in-vivo pipeline removes the background with RESHARP",
         "Gao et al. 2021 NMR Biomed 34:e4461 (xQSM), in-vivo experiments"),
     recommend("qsmnet.bg-vsharp", &[inv(&[Choice("qsmnet"), Choice("qsmnet-plus")])], "bg_removal.algorithm",
-        VSHARP, "QSMnet's inputs were processed with STI Suite's 3D V-SHARP",
-        "SNU-LIST/QSMnet README.md:68"),
-    recommend("qsmgan.bg-vsharp", &[inv(&[Choice("qsmgan")])], "bg_removal.algorithm", VSHARP,
+        VSHARP, "QSMnet's README instructs 3D V-SHARP (STI Suite) background removal",
+        "SNU-LIST/QSMnet README.md:64-68 (Process flow), :75"),
+    reference("qsmgan.bg-vsharp", &[inv(&[Choice("qsmgan")])], "bg_removal.algorithm", VSHARP,
         "QSMGAN was trained on V-SHARP local fields",
         "Chen et al. 2020 NeuroImage 207:116389 (QSMGAN), Methods; checkpoint config input_algo"),
-    recommend("lpcnn.bg-vsharp", &[inv(&[Choice("lpcnn")])], "bg_removal.algorithm", VSHARP,
+    reference("lpcnn.bg-vsharp", &[inv(&[Choice("lpcnn")])], "bg_removal.algorithm", VSHARP,
         "LPCNN's local fields were from V-SHARP",
         "Lai et al. MICCAI 2020 (LPCNN), Dataset Acquisition and Preprocessing"),
-    recommend("chi-sep.bg-vsharp", &[sep(CHI_SEP_TOOLBOX)], "bg_removal.algorithm", VSHARP,
+    reference("chi-sep.bg-vsharp", &[sep(CHI_SEP_TOOLBOX)], "bg_removal.algorithm", VSHARP,
         "The χ-separation toolbox and χ-sepnet remove the background with V-SHARP",
         "χ-separation toolbox Chisep_script.m:136-139; Kim et al. 2025 (χ-sepnet) §2.1.1"),
-    recommend("r2star-qsm.bg-pdf", &[sep(&[Choice("r2star-qsm")])], "bg_removal.algorithm", PDF,
+    reference("r2star-qsm.bg-pdf", &[sep(&[Choice("r2star-qsm")])], "bg_removal.algorithm", PDF,
         "R2*-QSM's local field was from PDF",
         "Dimov et al. 2022 Tomography 8:1544, Methods"),
-    recommend("decompose.bg-vsharp", &[sep(&[Choice("decompose")])], "bg_removal.algorithm", VSHARP,
+    reference("decompose.bg-vsharp", &[sep(&[Choice("decompose")])], "bg_removal.algorithm", VSHARP,
         "DECOMPOSE's pipeline removes the background with V-SHARP",
         "Chen et al. 2021 NeuroImage 242:118735 (DECOMPOSE), §3"),
-    recommend("sti.bg-vsharp", &[inv(STI)], "bg_removal.algorithm", VSHARP,
+    reference("sti.bg-vsharp", &[inv(STI)], "bg_removal.algorithm", VSHARP,
         "STI Suite's QSM_GUI feeds iLSQR and STAR-QSM the V-SHARP local field",
         "STI Suite 3.0 QSM_GUI, probed headless (recorded in QSM.rs star.rs and ilsqr.rs docs)"),
-    recommend("sti.vsharp-no-deconvolve", &[inv(STI), bg(VSHARP)], "bg_removal.vsharp.deconvolve",
+    reference("sti.vsharp-no-deconvolve", &[inv(STI), bg(VSHARP)], "bg_removal.vsharp.deconvolve",
         &[Bool(false)],
         "STI Suite's V_SHARP does not deconvolve",
         "STI Suite 3.0 V_SHARP, probed (recorded in QSM.rs vsharp.rs docs)"),
@@ -911,15 +1040,16 @@ pub static RULES: &[Rule] = &[
         expect: Test::OneOf { values: &[Number(12.0)] },
         default: Number(12.0),
         unit: Unit::Mm,
-        strength: Strength::Recommended,
+        strength: Strength::Reference,
+        basis: Basis::ReferenceChoice,
         reason: "STI Suite's QSM_GUI runs V_SHARP with smvsize 12 mm (also V_SHARP's default)",
         source: "STI Suite 3.0 QSM_GUI and V_SHARP, probed (recorded in QSM.rs vsharp.rs docs)",
     },
-    recommend("sti.vsharp-grid", &[inv(STI), bg(VSHARP)], "bg_removal.vsharp.grid",
+    reference("sti.vsharp-grid", &[inv(STI), bg(VSHARP)], "bg_removal.vsharp.grid",
         &[Choice("isotropic-1mm")],
         "STI Suite's V_SHARP estimates the background on a 1 mm grid",
         "STI Suite 3.0 V_SHARP (recorded in QSM.rs vsharp.rs docs)"),
-    recommend("resharp.radius", &[bg(&[Choice("resharp")])], "bg_removal.resharp.radius",
+    reference("resharp.radius", &[bg(&[Choice("resharp")])], "bg_removal.resharp.radius",
         &[Number(3.0)],
         "RESHARP's author's code defaults to a 3 mm kernel",
         "sunhongfu/QSM background_field_removal/resharp.m l. 24-26"),
@@ -930,7 +1060,8 @@ pub static RULES: &[Rule] = &[
         expect: Test::Range { min: Some(200.0), max: None },
         default: Number(200.0),
         unit: Unit::None,
-        strength: Strength::Recommended,
+        strength: Strength::Reference,
+        basis: Basis::ReferenceChoice,
         reason: "RESHARP's author's code allows its CG solve up to 200 iterations",
         source: "sunhongfu/QSM background_field_removal/resharp.m l. 32-34, 92",
     },
@@ -942,11 +1073,12 @@ pub static RULES: &[Rule] = &[
         expect: Test::OneOf { values: &[Value::Vector(&[8.0, 8.0, 20.0])] },
         default: Value::Vector(&[8.0, 8.0, 20.0]),
         unit: Unit::Voxels,
-        strength: Strength::Recommended,
+        strength: Strength::Reference,
+        basis: Basis::ReferenceChoice,
         reason: "STI Suite 3.0's QSM_GUI passes padsize [8 8 20] to QSM_star on every grid",
         source: "STI Suite 3.0 QSM_GUI (probed headless, recorded in QSM.rs StarParams::pad, #283)",
     },
-    recommend("qsmart.inner-inversion", &[inv(&[Choice("qsmart")])], "inversion.qsmart.inversion",
+    reference("qsmart.inner-inversion", &[inv(&[Choice("qsmart")])], "inversion.qsmart.inversion",
         &[Choice("ilsqr")],
         "QSMART's two stages invert with STI Suite's iLSQR",
         "Yaghmaie et al. 2021 §3.4; QSMART QSMART.m l. 32-39"),
@@ -957,7 +1089,8 @@ pub static RULES: &[Rule] = &[
         expect: Test::OneOf { values: &[Number(50.0)] },
         default: Number(50.0),
         unit: Unit::None,
-        strength: Strength::Recommended,
+        strength: Strength::Reference,
+        basis: Basis::ReferenceChoice,
         reason: "QSMART calls QSM_iLSQR with 'niter', 50",
         source: "QSMART QSMART.m l. 32-33; Yaghmaie et al. 2021 §3.4",
     },
@@ -968,34 +1101,77 @@ pub static RULES: &[Rule] = &[
         expect: Test::OneOf { values: &[Number(crate::inversion::STI_DEFAULT_PAD_MM)] },
         default: Number(crate::inversion::STI_DEFAULT_PAD_MM),
         unit: Unit::Mm,
-        strength: Strength::Recommended,
+        strength: Strength::Reference,
+        basis: Basis::ReferenceChoice,
         reason: "QSMART calls QSM_iLSQR without 'padsize', so STI Suite's default padding applies",
         source: "QSMART QSMART.m l. 32; STI Suite QSM_iLSQR default, probed (QSM.rs ilsqr.rs docs)",
     },
+    // ---------------------------------------------------------------- Echo time of the ppm↔rad conversion (#276)
+    // With one echo every choice is the same time, so these need several.
+    measured_better("fansi.te-spacing", &[inv(&[Choice("fansi"), Choice("fansi-tgv")]), MULTI_ECHO],
+        "inversion.fansi.te", &[Choice("spacing")],
+        "FANSI's multi-echo script converts at a TE difference; at the echo spacing nlTV and nlTGV \
+         did better than at the first echo on every metric on the phantom",
+        "FANSI-toolbox script_DICOM_Philips.m L364, L370; QSM.rs FansiParams::te docs (#276)"),
+    measured_better("ndi.te-first", &[inv(&[Choice("ndi")]), MULTI_ECHO],
+        "inversion.ndi.te", &[Choice("first")],
+        "FANSI's script allows any single echo time; the first echo gave NDI its best NRMSE and \
+         correlation on the phantom",
+        "FANSI-toolbox script_DICOM_Philips.m L364; QSM.rs NdiParams::te docs (#276)"),
+    measured_better("l1qsm.te-first", &[inv(&[Choice("l1qsm")]), MULTI_ECHO],
+        "inversion.l1qsm.te", &[Choice("first")],
+        "FANSI's script allows any single echo time; the first echo did better than the spacing \
+         on the phantom (XSIM 0.782 vs 0.776, NRMSE 37.4 vs 40.2 %)",
+        "FANSI-toolbox script_DICOM_Philips.m L364; QSM.rs L1QsmParams::te docs (#276)"),
+    discourage("whqsm.flat-weight-te-spacing",
+        &[inv(&[Choice("whqsm")]), method("inversion.whqsm.weight", &[Choice("flat")]), MULTI_ECHO],
+        "inversion.whqsm.te", &[Choice("spacing")], Choice("first"), Basis::Measured,
+        "With the flat weight, WH-QSM at the echo spacing diverges (r 0.07 on the phantom): its \
+         Newton step fails once the phase nears ±π",
+        "QSM.rs WhQsmParams::te docs (#276)"),
+    measured_better("whqsm.magnitude-weight-te-spacing",
+        &[inv(&[Choice("whqsm")]),
+          method("inversion.whqsm.weight", &[Choice("max-normalised"), Choice("in-vivo")]), MULTI_ECHO],
+        "inversion.whqsm.te", &[Choice("spacing")],
+        "With a magnitude weight, the echo spacing did better than the first echo on the phantom \
+         (XSIM 0.673 vs 0.637); FANSI's script converts at a TE difference with a magnitude-derived weight",
+        "QSM.rs WhQsmParams::te docs (#276); FANSI-toolbox script_DICOM_Philips.m L364, L436"),
+    reference("star.te-sum", &[inv(&[Choice("star")]), MULTI_ECHO], "inversion.star.te", &[Choice("sum")],
+        "STI Suite's QSM_GUI gives QSM_star the summed phase with TE = ΣTE",
+        "STI Suite 3.0 QSM_GUI, probed (recorded in QSM.rs StarParams::te, #276)"),
+    reference("medi.te-spacing", &[inv(&[Choice("medi")]), MULTI_ECHO], "inversion.medi.te", &[Choice("spacing")],
+        "MEDI_L1 converts with delta_TE = TE(2) − TE(1)",
+        "MEDI toolbox 2024.11.26 MEDI_L1.m:202; Read_DICOM.m:166-168"),
+    reference("tfi.te-spacing", &[inv(&[Choice("tfi")]), MULTI_ECHO], "inversion.tfi.te", &[Choice("spacing")],
+        "TFI runs through MEDI_L1, which converts with delta_TE",
+        "MEDI toolbox 2024.11.26 MEDI_L1.m:202 (QSM.rs TfiParams::te, #276)"),
+    reference("heidi.te-last", &[inv(&[Choice("heidi")]), MULTI_ECHO], "inversion.heidi.te", &[Choice("last")],
+        "The authors' HEIDI pipeline converts at the last echo time",
+        "qsm_heidi phase2susceptibilityfactor.m L70-71 (QSM.rs HeidiParams::te, #276)"),
     // ---------------------------------------------------------------- χ-separation inputs
-    recommend("chi-sep-ilsqr.qsm-ilsqr", &[sep(&[Choice("chi-sep-ilsqr")])], "inversion.algorithm",
+    reference("chi-sep-ilsqr.qsm-ilsqr", &[sep(&[Choice("chi-sep-ilsqr")])], "inversion.algorithm",
         &[Choice("ilsqr")],
         "The χ-separation toolbox feeds it STI Suite iLSQR QSM",
         "χ-separation toolbox Chisep_script.m:142-145,170"),
-    recommend("r2star-qsm.qsm-medi", &[sep(&[Choice("r2star-qsm")])], "inversion.algorithm",
+    reference("r2star-qsm.qsm-medi", &[sep(&[Choice("r2star-qsm")])], "inversion.algorithm",
         &[Choice("medi")],
         "R2*-QSM's χ was reconstructed with MEDI",
         "Dimov et al. 2022 Tomography 8:1544, Methods"),
-    recommend("decompose.qsm-star", &[sep(&[Choice("decompose")])], "inversion.algorithm",
+    reference("decompose.qsm-star", &[sep(&[Choice("decompose")])], "inversion.algorithm",
         &[Choice("star")],
         "DECOMPOSE's χ was reconstructed with STAR-QSM",
         "Chen et al. 2021 NeuroImage 242:118735 (DECOMPOSE), §3"),
-    recommend("decompose.reference-mean", &[sep(&[Choice("decompose")])], "reference",
+    reference("decompose.reference-mean", &[sep(&[Choice("decompose")])], "reference",
         &[Choice("mean")],
         "DECOMPOSE's χ is referenced to the whole-brain mean",
         "Chen et al. 2021 NeuroImage 242:118735 (DECOMPOSE), §3"),
-    recommend("susep-net.qsm-iqsm-plus", &[sep(&[Choice("susep-net")])], "inversion.algorithm",
+    reference("susep-net.qsm-iqsm-plus", &[sep(&[Choice("susep-net")])], "inversion.algorithm",
         &[Choice("iqsm-plus")],
         "SUSEP-Net's in-vivo QSM input is from iQSM+",
         "SUSEP-Net (arXiv:2506.13293) §3.2"),
     discourage("chi-sepnet.min-resolution",
         &[sep(&[Choice("chi-sepnet")]), fact_at_most(Fact::MinVoxelSize, 0.6)],
-        "separation.algorithm", &[Choice("chi-sepnet")], Choice("chi-sep-ilsqr"),
+        "separation.algorithm", &[Choice("chi-sepnet")], Choice("chi-sep-ilsqr"), Basis::Stated,
         "χ-sepnet's authors state the networks process resolutions coarser than 0.6 mm",
         "SNU-LIST/chi-separation README; Kim et al. 2024 (arXiv:2410.12239) §4"),
 ];
@@ -1136,6 +1312,18 @@ mod tests {
                 c.cfg.inversion.star.pad = [12; 3];
             })),
             ("chi-sep-ilsqr.qsm-ilsqr", Case::new(separation(S::ChiSepIlsqr))),
+            ("fansi.te-spacing", Case::new(|c| { inversion(I::FansiTgv)(c); c.cfg.inversion.fansi.te = crate::EchoTime::First })),
+            ("ndi.te-first", Case::new(|c| { inversion(I::Ndi)(c); c.cfg.inversion.ndi.te = crate::EchoTime::Spacing })),
+            ("l1qsm.te-first", Case::new(|c| { inversion(I::L1qsm)(c); c.cfg.inversion.l1qsm.te = crate::EchoTime::Sum })),
+            ("whqsm.flat-weight-te-spacing", Case::new(|c| { inversion(I::Whqsm)(c); c.cfg.inversion.whqsm.te = crate::EchoTime::Spacing })),
+            ("whqsm.magnitude-weight-te-spacing", Case::new(|c| {
+                inversion(I::Whqsm)(c);
+                c.cfg.inversion.whqsm.weight = crate::inversion::WhQsmWeight::InVivo;
+            })),
+            ("star.te-sum", Case::new(|c| { inversion(I::Star)(c); c.cfg.inversion.star.te = crate::EchoTime::First })),
+            ("medi.te-spacing", Case::new(|c| { inversion(I::Medi)(c); c.cfg.inversion.medi.te = crate::EchoTime::First })),
+            ("tfi.te-spacing", Case::new(|c| { inversion(I::Tfi)(c); c.cfg.inversion.tfi.te = crate::EchoTime::Last })),
+            ("heidi.te-last", Case::new(|c| { inversion(I::Heidi)(c); c.cfg.inversion.heidi.te = crate::EchoTime::First })),
             ("sti.bg-vsharp", Case::new(|c| { inversion(I::Star)(c); background(B::Pdf)(c) })),
             ("sti.vsharp-no-deconvolve", Case::new(inversion(I::Ilsqr))),
             ("sti.vsharp-radius", Case::new(|c| { inversion(I::Ilsqr)(c); c.cfg.bg_removal.vsharp.max_radius = 8.0 })),
@@ -1234,6 +1422,20 @@ mod tests {
         }
     }
 
+    /// Precedence, and the basis matching each strength.
+    #[test]
+    fn strengths_order_and_rest_on_their_basis() {
+        use Strength::*;
+        assert!(Required > Recommended && Recommended > Discouraged && Discouraged > Reference);
+        for r in RULES {
+            match r.strength {
+                Reference => assert_eq!(r.basis, Basis::ReferenceChoice, "{}", r.id),
+                Recommended => assert!(matches!(r.basis, Basis::Stated | Basis::Measured), "{}", r.id),
+                Required | Discouraged => assert_ne!(r.basis, Basis::ReferenceChoice, "{}", r.id),
+            }
+        }
+    }
+
     /// Scan-dependent rules stay silent until the scan is known.
     #[test]
     fn unknown_facts_do_not_fire() {
@@ -1297,7 +1499,8 @@ mod tests {
     fn serialises_to_json() {
         let json = serde_json::to_value(RULES).unwrap();
         let star = json.as_array().unwrap().iter().find(|r| r["id"] == "star.padding").unwrap();
-        assert_eq!(star["strength"], "recommended");
+        assert_eq!(star["strength"], "reference");
+        assert_eq!(star["basis"], "reference_choice");
         assert_eq!(star["setting"], "inversion.star.pad");
         assert_eq!(star["unit"], "voxels");
         assert_eq!(star["when"][0]["on"], "setting");

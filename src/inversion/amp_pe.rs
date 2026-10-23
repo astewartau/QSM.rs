@@ -55,7 +55,7 @@
 //! # Pipeline rules
 //!
 //! The facts above that a configuration can depart from are published as rules in
-//! [`crate::pipeline::rules::RULES`] (each with its reason and source): `amp-pe.mask-bet`, `amp-pe.echo-combination`, `amp-pe.echo-weights`, `amp-pe.bg-pdf`.
+//! [`crate::pipeline::rules::RULES`] (each with its strength, basis, reason and source): `amp-pe.mask-bet`, `amp-pe.echo-combination`, `amp-pe.echo-weights`, `amp-pe.bg-pdf`.
 
 use crate::fft::Fft3dWorkspace;
 use crate::inversion::admm::prepare_fansi_spectral;

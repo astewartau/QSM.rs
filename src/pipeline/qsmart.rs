@@ -47,7 +47,7 @@
 //! # Pipeline rules
 //!
 //! The facts above that a configuration can depart from are published as rules in
-//! [`crate::pipeline::rules::RULES`] (each with its reason and source): `qsmart.mask-bet`, `qsmart.unwrap-laplacian`, `qsmart.laplacian-solver`, `qsmart.field-echofit`, `qsmart.inner-inversion`, `qsmart.ilsqr-iterations`, `qsmart.ilsqr-pad`.
+//! [`crate::pipeline::rules::RULES`] (each with its strength, basis, reason and source): `qsmart.mask-bet`, `qsmart.unwrap-laplacian`, `qsmart.laplacian-solver`, `qsmart.field-echofit`, `qsmart.inner-inversion`, `qsmart.ilsqr-iterations`, `qsmart.ilsqr-pad`.
 
 use super::config::*;
 use super::observer::{Observer, VolumeRef};

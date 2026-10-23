@@ -55,7 +55,7 @@
 //! # Pipeline rules
 //!
 //! The facts above that a configuration can depart from are published as rules in
-//! [`crate::pipeline::rules::RULES`] (each with its reason and source): `susep-net.qsm-iqsm-plus`.
+//! [`crate::pipeline::rules::RULES`] (each with its strength, basis, reason and source): `susep-net.qsm-iqsm-plus`.
 
 // The parameters are plain Rust, so configs can carry them; only inference needs `onnx`.
 #![cfg_attr(not(feature = "onnx"), allow(dead_code))]

@@ -33,7 +33,7 @@
 //! # Pipeline rules
 //!
 //! The facts above that a configuration can depart from are published as rules in
-//! [`crate::pipeline::rules::RULES`] (each with its reason and source): `qsmnet.mask-bet`, `qsmnet.unwrap-laplacian`, `qsmnet.echo-combination`, `qsmnet.echo-weights`, `qsmnet.bg-vsharp`.
+//! [`crate::pipeline::rules::RULES`] (each with its strength, basis, reason and source): `qsmnet.mask-bet`, `qsmnet.unwrap-laplacian`, `qsmnet.echo-combination`, `qsmnet.echo-weights`, `qsmnet.bg-vsharp`.
 
 use crate::grid::Grid;
 use crate::models::onnx::{OnnxModel, OnnxError, Tensor};

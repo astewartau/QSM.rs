@@ -32,7 +32,7 @@
 //! # Pipeline rules
 //!
 //! The facts above that a configuration can depart from are published as rules in
-//! [`crate::pipeline::rules::RULES`] (each with its reason and source): `iqsm.mask-bet`.
+//! [`crate::pipeline::rules::RULES`] (each with its strength, basis, reason and source): `iqsm.mask-bet`.
 
 use crate::grid::Grid;
 use crate::inversion::iqsm::{combine_echoes, sphere_erode, tiled_echo, Net};
