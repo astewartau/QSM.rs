@@ -258,6 +258,15 @@ impl Default for ChiSepParams {
 /// Volumes whose dimensions are not FFT-friendly (2ᵃ·3ᵇ·5ᶜ) are transparently
 /// zero-padded to the next fast size for the internal FFTs and cropped back
 /// (see [`chi_sep_ilsqr`](crate::separation::chi_sep_ilsqr) for details).
+///
+/// # Performance
+///
+/// On the QSM-CI χ-separation phantom (164×205×205, padded to 180×216×216; 30 Gauss-Newton
+/// iterations, ~1900 CG steps), AMD EPYC 9454: 4 threads 720 s → 432 s, 16 threads
+/// 839 s → 178 s, without `parallel` 883 s → 688 s, WASM (Node, one thread) 2584 s → 2316 s
+/// (QSM.rs#296). The output is bit-for-bit what it was before. Most of the time is the CG
+/// operator's two dipole FFT pairs, its two TV terms and CG's two dot products, which stay
+/// sequential so their sums do not change.
 pub fn chi_sep_medi<F>(
     local_field: &[f64],
     r2prime: &[f64],
