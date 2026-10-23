@@ -3535,7 +3535,8 @@ fn test_robust_echo_combination() {
     let unwrap = |phases: &[Vec<f64>], mags: &[Vec<f64>]| -> Vec<Vec<f64>> {
         let (corrected, _) = phase_offset_removal(
             phases, mags, &data.echo_times, &data.mask,
-            [10.0, 10.0, 5.0], [0, 1], UnwrapMethod::Romeo, &grid,
+            pipeline::FieldMappingConfig::default().phase_offset_sigma_voxels(data.voxel_size),
+            [0, 1], UnwrapMethod::Romeo, &grid,
         );
         let mag_refs: Vec<&[f64]> = mags.iter().map(|m| m.as_slice()).collect();
         unwrap_romeo_multi_echo(
