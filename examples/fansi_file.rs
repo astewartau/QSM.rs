@@ -3,6 +3,7 @@
 //!
 //! usage: fansi_file <nltv|nltgv|l1qsm> <field_ppm.nii[.gz]> <mask.nii[.gz]> <magnitude.nii[.gz]> <chi_out.nii.gz> <TE_ms> <B0_T> <Hx> <Hy> <Hz> [alpha1] [lambda]
 use qsm_core::inversion::{fansi, l1qsm, FansiParams, L1QsmParams};
+use qsm_core::EchoTime;
 use qsm_core::io::{read_nifti_file, save_nifti_to_file};
 use qsm_core::Grid;
 use std::path::Path;
@@ -19,7 +20,7 @@ fn main() {
     let mask: Vec<u8> = m.data.iter().map(|&v| (v > 0.5) as u8).collect();
     let magnitude = read_nifti_file(Path::new(&a[4])).expect("read magnitude").data;
     let grid = Grid::new(f.dims.0, f.dims.1, f.dims.2, f.voxel_size.0, f.voxel_size.1, f.voxel_size.2);
-    let (te, b0, bdir) = (num(6) * 1e-3, num(7), (num(8), num(9), num(10)));
+    let (te, b0, bdir) = (EchoTime::Seconds(num(6) * 1e-3), num(7), (num(8), num(9), num(10)));
     let mut last = 0;
     let t = std::time::Instant::now();
     let chi = match a[1].as_str() {

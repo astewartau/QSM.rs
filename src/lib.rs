@@ -110,6 +110,7 @@ pub mod utils;
 // produces it rather than accumulating at the crate root. The one shared by every
 // algorithm entry point, for input it cannot process, is `qsm_core::error::InputError`.
 pub use grid::Grid;
+pub use utils::echo_time::EchoTime;
 
 /// [`InputError`](error::InputError): what an algorithm returns instead of panicking when it is
 /// handed input it cannot process.

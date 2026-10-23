@@ -5,6 +5,7 @@
 //! (H = B0 direction in voxel axes; `LSQR_MAX_ITER` / `LSQR_TOL` override the LSQR defaults,
 //! `HEIDI_FLOOR` HEIDI's `gradient_mask_floor`)
 use qsm_core::inversion::{heidi, lsqr_qsm, HeidiParams, LsqrQsmParams};
+use qsm_core::EchoTime;
 use qsm_core::io::{read_nifti_file, save_nifti_to_file};
 use qsm_core::Grid;
 use std::path::Path;
@@ -32,7 +33,7 @@ fn main() {
     }
     let mut heidi_params = HeidiParams { b0: num(6), ..HeidiParams::default() };
     if a.len() == 11 {
-        heidi_params.te = num(10) * 1e-3;
+        heidi_params.te = EchoTime::Seconds(num(10) * 1e-3);
     }
     if let Ok(v) = std::env::var("HEIDI_FLOOR") {
         heidi_params.gradient_mask_floor = v.parse().expect("HEIDI_FLOOR");

@@ -3,6 +3,7 @@
 //!
 //! usage: nltv_file <field_ppm.nii[.gz]> <mask.nii[.gz]> <magnitude.nii[.gz]> <chi_out.nii.gz> <TE_ms> <B0_T> <Hx> <Hy> <Hz> [lambda] [max_iter]
 use qsm_core::inversion::{nltv, NltvParams};
+use qsm_core::EchoTime;
 use qsm_core::io::{read_nifti_file, save_nifti_to_file};
 use qsm_core::Grid;
 use std::path::Path;
@@ -19,7 +20,7 @@ fn main() {
     let mask: Vec<u8> = m.data.iter().map(|&v| (v > 0.5) as u8).collect();
     let magnitude = read_nifti_file(Path::new(&a[3])).expect("read magnitude").data;
     let grid = Grid::new(f.dims.0, f.dims.1, f.dims.2, f.voxel_size.0, f.voxel_size.1, f.voxel_size.2);
-    let mut params = NltvParams { te: num(5) * 1e-3, b0: num(6), ..NltvParams::default() };
+    let mut params = NltvParams { te: EchoTime::Seconds(num(5) * 1e-3), b0: num(6), ..NltvParams::default() };
     if a.len() >= 11 {
         params.lambda = num(10);
     }

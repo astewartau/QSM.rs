@@ -44,6 +44,18 @@ pub(crate) fn echo_magnitudes<'a>(
     }
 }
 
+/// The scan's echo times for a method that converts ppm to radians at the echo time its `te`
+/// choice picks, checked here so the method itself does not panic on them.
+pub(crate) fn scan_echo_times(
+    method: &str,
+    te: crate::EchoTime,
+    metadata: &ScanMetadata,
+) -> Result<Vec<f64>, PipelineError> {
+    te.resolve(&metadata.echo_times)
+        .map_err(|e| PipelineError::InvalidInput(format!("{method}: {e}")))?;
+    Ok(metadata.echo_times.clone())
+}
+
 /// Run a dipole inversion on the field its method takes.
 ///
 /// Which field that is comes from [`InversionConfig::input`]:
@@ -122,14 +134,15 @@ pub fn run_dipole_inversion(
         }
         InversionAlgorithm::Nltv => {
             // NLTV takes ppm and converts to radians itself, like NDI; field strength and echo
-            // time (the first) come from metadata. The magnitude is the data weight and is
-            // required: without it the method can diverge (see the module docs).
+            // times come from metadata, and config.nltv.te picks the echo time. The magnitude
+            // is the data weight and is required: without it the method can diverge (see the
+            // module docs).
             let mag = magnitude.ok_or_else(|| PipelineError::InvalidInput(
                 "NLTV needs the magnitude (its data weight)".into(),
             ))?;
             let params = crate::inversion::NltvParams {
                 b0: metadata.field_strength,
-                te: metadata.echo_times.first().copied().unwrap_or(config.nltv.te),
+                echo_times: scan_echo_times("NLTV", config.nltv.te, metadata)?,
                 ..config.nltv.clone()
             };
             crate::inversion::nltv(
@@ -137,31 +150,32 @@ pub fn run_dipole_inversion(
             )
         }
         InversionAlgorithm::Medi => {
-            // MEDI takes ppm like the others and converts to radians itself, over the echo
-            // spacing as MEDI's readers set delta_TE: TE(2) - TE(1), or TE for one echo. Field
-            // strength and echo times are scan parameters from metadata. It requires the
-            // magnitude of every echo (edge mask, the Fit_ppm_complex noise map, and the ARLO
-            // R2* behind MEDI+0's CSF mask).
+            // MEDI takes ppm like the others and converts to radians itself, at the echo time
+            // config.medi.te picks (by default MEDI's delta_TE: TE(2) - TE(1), or TE for one echo).
+            // Field strength and echo times are scan parameters from metadata. It requires the
+            // magnitude of every echo (edge mask, the Fit_ppm_complex noise map, and the ARLO R2*
+            // behind MEDI+0's CSF mask).
             let te = &metadata.echo_times;
             let mag = crate::pipeline::inversion::echo_magnitudes("MEDI", magnitude, te, n_voxels)?;
             let params = crate::inversion::MediParams {
                 b0: metadata.field_strength,
-                echo_times: te.clone(),
+                echo_times: scan_echo_times("MEDI", config.medi.te, metadata)?,
                 ..config.medi.clone()
             };
             crate::inversion::medi(field_ppm, mask, mag, &grid, bdir, &params, progress)
         }
         InversionAlgorithm::Tfi => {
             // TFI is single-step: `field_ppm` is the TOTAL field and `mask` the brain mask
-            // (InversionConfig::input). Like MEDI it takes ppm and converts to radians over the
-            // echo spacing itself (TE(2) - TE(1), or TE for one echo); field strength and echo
-            // spacing come from metadata. As for MEDI, the magnitude of every echo is required
-            // (edge mask and the Fit_ppm_complex noise map).
+            // (InversionConfig::input). Like MEDI it takes ppm and converts to radians itself,
+            // at the echo time config.tfi.te picks (by default the echo spacing, TE(2) - TE(1),
+            // or TE for one echo); field strength and echo times come from metadata. As for
+            // MEDI, the magnitude of every echo is required (edge mask and the Fit_ppm_complex
+            // noise map).
             let te = &metadata.echo_times;
             let mag = echo_magnitudes("TFI", magnitude, te, n_voxels)?;
             let params = crate::inversion::TfiParams {
                 b0: metadata.field_strength,
-                te: if te.len() == 1 { te[0] } else { te[1] - te[0] },
+                echo_times: scan_echo_times("TFI", config.tfi.te, metadata)?,
                 ..config.tfi.clone()
             };
             crate::inversion::tfi(field_ppm, mask, mag, &grid, bdir, &params, progress)
@@ -175,10 +189,11 @@ pub fn run_dipole_inversion(
         }
         InversionAlgorithm::Star => {
             // STAR-QSM's result depends on the field's scale in radians (see the module docs),
-            // so it converts the ppm field to phase at the first echo time and this field
-            // strength, as STI Suite is given the phase of one echo.
+            // so it converts the ppm field to phase at the echo time config.star.te picks (by
+            // default the sum of the echo times, as STI Suite's GUI gives it the phase summed
+            // over the echoes) and this field strength.
             let params = crate::inversion::StarParams {
-                te: metadata.echo_times.first().copied().unwrap_or(config.star.te),
+                echo_times: scan_echo_times("STAR-QSM", config.star.te, metadata)?,
                 b0: metadata.field_strength,
                 ..config.star.clone()
             };
@@ -186,14 +201,14 @@ pub fn run_dipole_inversion(
             crate::inversion::star_qsm(field_ppm, mask, &grid, bdir, &params, &mut *progress)
         }
         InversionAlgorithm::Ndi => {
-            // NDI takes ppm like the others and converts to radians itself. Field strength and
-            // echo time (the first, as for MEDI) are scan parameters from metadata, not user
-            // knobs; the magnitude is the data weight and is required.
+            // NDI takes ppm like the others and converts to radians itself, at the echo time
+            // config.ndi.te picks. Field strength and echo times are scan parameters from
+            // metadata, not user knobs; the magnitude is the data weight and is required.
             let magnitude = magnitude.ok_or_else(|| PipelineError::InvalidConfig(
                 "NDI needs the magnitude as its data weight".into()))?;
             let params = crate::inversion::NdiParams {
                 b0: metadata.field_strength,
-                te: metadata.echo_times.first().copied().unwrap_or(config.ndi.te),
+                echo_times: scan_echo_times("NDI", config.ndi.te, metadata)?,
                 ..config.ndi.clone()
             };
             crate::inversion::ndi(
@@ -202,8 +217,8 @@ pub fn run_dipole_inversion(
         }
         InversionAlgorithm::Fansi | InversionAlgorithm::FansiTgv | InversionAlgorithm::L1qsm => {
             // FANSI nlTV/nlTGV and L1-QSM take ppm like the others and convert to radians
-            // themselves. Field strength and echo time (the first, as for NDI) are scan
-            // parameters from metadata. The magnitude is the data weight and is required:
+            // themselves, at the echo time their `te` picks. Field strength and echo times are
+            // scan parameters from metadata. The magnitude is the data weight and is required:
             // with a flat weight these solvers can diverge.
             let magnitude = magnitude.ok_or_else(|| {
                 PipelineError::InvalidInput(format!(
@@ -211,11 +226,10 @@ pub fn run_dipole_inversion(
                 ))
             })?;
             let b0 = metadata.field_strength;
-            let te = metadata.echo_times.first().copied();
             if config.algorithm == InversionAlgorithm::L1qsm {
                 let params = crate::inversion::L1QsmParams {
                     b0,
-                    te: te.unwrap_or(config.l1qsm.te),
+                    echo_times: scan_echo_times("L1-QSM", config.l1qsm.te, metadata)?,
                     ..config.l1qsm.clone()
                 };
                 crate::inversion::l1qsm(
@@ -224,7 +238,7 @@ pub fn run_dipole_inversion(
             } else {
                 let params = crate::inversion::FansiParams {
                     b0,
-                    te: te.unwrap_or(config.fansi.te),
+                    echo_times: scan_echo_times("FANSI", config.fansi.te, metadata)?,
                     is_tgv: config.algorithm == InversionAlgorithm::FansiTgv,
                     ..config.fansi.clone()
                 };
@@ -234,12 +248,18 @@ pub fn run_dipole_inversion(
             }
         }
         InversionAlgorithm::Whqsm => {
-            // Like NDI: ppm in and out, radians inside. Field strength and echo time (the
-            // first) are scan parameters from metadata; the magnitude, when present, is the
-            // data weight.
+            // Like NDI: ppm in and out, radians inside at the echo time config.whqsm.te picks.
+            // Field strength and echo times are scan parameters from metadata. The default
+            // weight is WH_nlTV's flat one; a magnitude weight (config.whqsm.weight) needs the
+            // magnitude.
+            if config.whqsm.weight.needs_magnitude() && magnitude.is_none() {
+                return Err(PipelineError::InvalidInput(format!(
+                    "WH-QSM's {:?} weight needs magnitude data", config.whqsm.weight
+                )));
+            }
             let params = crate::inversion::WhQsmParams {
                 b0: metadata.field_strength,
-                te: metadata.echo_times.first().copied().unwrap_or(config.whqsm.te),
+                echo_times: scan_echo_times("WH-QSM", config.whqsm.te, metadata)?,
                 ..config.whqsm.clone()
             };
             crate::inversion::whqsm(
@@ -285,12 +305,12 @@ pub fn run_dipole_inversion(
                 ..config.lsqr.clone()
             };
             // NESTA's result depends on χ's scale in upstream's phase units (see the HEIDI
-            // module docs): field strength and the echo time of the field (the last, as
-            // qsm_heidi's phase2susceptibilityfactor and SEPIA's wrapper use) are scan
-            // parameters from metadata.
+            // module docs): field strength and echo times are scan parameters from metadata,
+            // and config.heidi.te picks the echo time of the field (by default the last, as
+            // qsm_heidi's phase2susceptibilityfactor uses).
             let heidi_params = crate::inversion::HeidiParams {
                 b0: metadata.field_strength,
-                te: metadata.echo_times.last().copied().unwrap_or(config.heidi.te),
+                echo_times: scan_echo_times("HEIDI", config.heidi.te, metadata)?,
                 ..config.heidi.clone()
             };
             crate::inversion::heidi(
@@ -700,7 +720,8 @@ pub fn run_iqfm(
 ///
 /// Multi-echo data goes through field mapping first and TGV runs on the field in ppm
 /// ([`TgvInput::FieldPpm`](crate::inversion::TgvInput::FieldPpm)), expressed as phase at the
-/// first echo time. Single-echo data goes in as the wrapped phase with its echo time
+/// echo time [`TgvParams::te`](crate::inversion::TgvParams::te) picks (by default the first).
+/// Single-echo data goes in as the wrapped phase with its echo time
 /// ([`TgvInput::WrappedPhase`](crate::inversion::TgvInput::WrappedPhase)), and TGV handles
 /// unwrapping as well. Either way the scan's field strength is passed, α are in the
 /// reference's rad units at that TE and B0, and TGV also does background removal and
@@ -724,15 +745,19 @@ pub fn run_tgv(
     let grid = metadata.grid();
     let (bx, by, bz) = metadata.b0_direction;
 
-    // The reference (QuantitativeSusceptibilityMappingTGV.jl) takes one echo and its TE; for
-    // a multi-echo field map the first echo time is used.
-    let te_s = *metadata.echo_times.first().ok_or_else(|| {
-        PipelineError::InvalidInput("TGV needs the echo time of the phase".into())
-    })?;
+    // The reference (QuantitativeSusceptibilityMappingTGV.jl) takes one echo and its TE; a
+    // multi-echo field map is converted at the echo time tgv_params.te picks.
+    let echo_times = &metadata.echo_times;
+    let te_s = if phases.len() > 1 {
+        tgv_params.te.resolve(echo_times)
+    } else {
+        crate::EchoTime::First.resolve(echo_times)
+    }
+    .map_err(|e| PipelineError::InvalidInput(format!("TGV: {e}")))?;
     let b0_t = metadata.field_strength;
-    if !(te_s.is_finite() && te_s > 0.0 && b0_t.is_finite() && b0_t > 0.0) {
+    if !(b0_t.is_finite() && b0_t > 0.0) {
         return Err(PipelineError::InvalidInput(format!(
-            "TGV needs a positive echo time and field strength, got TE = {te_s} s, B0 = {b0_t} T"
+            "TGV needs a positive field strength, got B0 = {b0_t} T"
         )));
     }
 
@@ -742,7 +767,7 @@ pub fn run_tgv(
             field_mapping_config, &mut |_, _| {},
         )?;
         crate::inversion::tgv_qsm(
-            TgvInput::FieldPpm { field: &field_result.b0_field_ppm, te_s, b0_t },
+            TgvInput::FieldPpm { field: &field_result.b0_field_ppm, echo_times, b0_t },
             mask, &grid, tgv_params, (bx, by, bz), &mut *progress,
         )?
     } else {
@@ -1000,7 +1025,7 @@ mod tests {
         let config = InversionConfig { algorithm: InversionAlgorithm::Star, star: star.clone(), ..Default::default() };
         let chi = run_dipole_inversion(&field, &mask, &meta, &config, None, &mut |_, _| {}).unwrap();
         let grid = crate::Grid::new(nx, ny, nz, 1.0, 1.0, 1.0);
-        let params = crate::inversion::StarParams { te: 0.005, b0: 3.0, ..star };
+        let params = crate::inversion::StarParams { echo_times: vec![0.005], b0: 3.0, ..star };
         let want = crate::inversion::star_qsm(&field, &mask, &grid, bdir, &params, |_, _| {});
         let axial = crate::inversion::star_qsm(&field, &mask, &grid, (0.0, 0.0, 1.0), &params, |_, _| {});
         assert_eq!(chi, want);
@@ -1135,6 +1160,76 @@ mod tests {
     /// TFI is a total-field method (`InversionConfig::input`): the dispatcher hands `tfi` the
     /// field in ppm with the brain mask, the field strength and the echo spacing from metadata,
     /// and refuses to run without a magnitude.
+    /// Each method's echo time for the ppm→rad conversion defaults to its reference's choice
+    /// (sources on the parameters).
+    #[test]
+    fn echo_time_defaults_are_the_references() {
+        use crate::EchoTime::{First, Last, Spacing, Sum};
+        let c = InversionConfig::default();
+        assert_eq!(c.ndi.te, First);
+        assert_eq!(c.fansi.te, Spacing);
+        assert_eq!(c.l1qsm.te, First);
+        assert_eq!(c.whqsm.te, First);
+        assert_eq!(c.whqsm.weight, crate::inversion::WhQsmWeight::Flat);
+        assert_eq!(c.nltv.te, First);
+        assert_eq!(c.tgv.te, First);
+        assert_eq!(c.star.te, Sum);
+        assert_eq!(c.medi.te, Spacing);
+        assert_eq!(c.tfi.te, Spacing);
+        assert_eq!(c.heidi.te, Last);
+        assert_eq!(BgRemovalConfig::default().msmv.te, Spacing);
+    }
+
+    /// The dispatcher hands a method the scan's echo times and the method's own `te` choice,
+    /// and refuses echo times the choice cannot use.
+    #[test]
+    fn dispatcher_converts_at_the_chosen_echo_time() {
+        let (nx, ny, nz) = (8, 8, 8);
+        let n = nx * ny * nz;
+        let field: Vec<f64> = (0..n).map(|i| 0.05 * ((i as f64) * 0.37).sin()).collect();
+        let mask = vec![1u8; n];
+        let mag = vec![1.0; n];
+        let meta = ScanMetadata {
+            dims: (nx, ny, nz), voxel_size: (1.0, 1.0, 1.0),
+            echo_times: vec![0.004, 0.012, 0.020], field_strength: 3.0, b0_direction: (0.0, 0.0, 1.0),
+            slice_geometry: None,
+            affine: None,
+        };
+        let ndi = crate::inversion::NdiParams { max_iter: 3, ..Default::default() };
+        let run = |te| {
+            let config = InversionConfig {
+                algorithm: InversionAlgorithm::Ndi,
+                ndi: crate::inversion::NdiParams { te, ..ndi.clone() },
+                ..Default::default()
+            };
+            run_dipole_inversion(&field, &mask, &meta, &config, Some(&mag), &mut |_, _| {})
+        };
+        let direct = |te_s: f64| crate::inversion::ndi(
+            &field, &mask, &mag, &meta.grid(), meta.b0_direction,
+            &crate::inversion::NdiParams { echo_times: vec![te_s], te: crate::EchoTime::First, ..ndi.clone() },
+            |_, _| {},
+        );
+        // the echo spacing, 8 ms, and the last echo
+        assert_eq!(run(crate::EchoTime::Spacing).unwrap(), direct(0.012 - 0.004));
+        assert_eq!(run(crate::EchoTime::Last).unwrap(), direct(0.020));
+        assert_ne!(direct(0.004), direct(0.012 - 0.004));
+        let meta_none = ScanMetadata { echo_times: vec![], ..meta.clone() };
+        let config = InversionConfig { algorithm: InversionAlgorithm::Ndi, ndi, ..Default::default() };
+        let err = run_dipole_inversion(&field, &mask, &meta_none, &config, Some(&mag), &mut |_, _| {})
+            .unwrap_err();
+        assert!(err.to_string().contains("first echo time"), "{err}");
+        // WH-QSM's default flat weight needs no magnitude; a magnitude weight does
+        let whqsm = crate::inversion::WhQsmParams { max_iter: 2, ..Default::default() };
+        let config = InversionConfig { algorithm: InversionAlgorithm::Whqsm, whqsm: whqsm.clone(), ..Default::default() };
+        assert!(run_dipole_inversion(&field, &mask, &meta, &config, None, &mut |_, _| {}).is_ok());
+        let config = InversionConfig {
+            whqsm: crate::inversion::WhQsmParams { weight: crate::inversion::WhQsmWeight::MaxNormalised, ..whqsm },
+            ..config
+        };
+        let err = run_dipole_inversion(&field, &mask, &meta, &config, None, &mut |_, _| {}).unwrap_err();
+        assert!(err.to_string().contains("needs magnitude data"), "{err}");
+    }
+
     #[test]
     fn tfi_gets_the_total_field_and_scan_parameters() {
         let (nx, ny, nz) = (10, 10, 10);
@@ -1163,7 +1258,10 @@ mod tests {
         assert_eq!(config.input(2), InversionInput::TotalField);
         let tfi = crate::inversion::TfiParams { max_iter: 2, cg_max_iter: 5, ..config.tfi.clone() };
         let config = InversionConfig { tfi: tfi.clone(), ..config };
-        let params = crate::inversion::TfiParams { b0: 7.0, te: 0.006, ..tfi };
+        // the echo spacing, TE(2) - TE(1), as MEDI's readers set delta_TE
+        let params = crate::inversion::TfiParams {
+            b0: 7.0, echo_times: vec![0.006], te: crate::EchoTime::First, ..tfi
+        };
         let echoes: Vec<f64> = (0..3 * n).map(|i| 1.0 + ((i * 5) % 9) as f64).collect();
         let via_stage = run_dipole_inversion(&field, &mask, &meta, &config, Some(&echoes), &mut |_, _| {}).unwrap();
         let direct = crate::inversion::tfi(

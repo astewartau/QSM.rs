@@ -29,15 +29,16 @@
 //! (https://gitlab.com/cmilovic/FANSI-toolbox).
 //!
 //! # Units
-//! Like the other inversions, NDI takes the local field in ppm and returns ppm.
-//! FANSI's solver works on the phase in radians, so the field is converted with
-//! `2*pi*gamma*b0*te` first and the result converted back at the end; left in
-//! ppm, `sin(x) ~ x` and the data term would not be nonlinear. `b0` and `te`
-//! are scan parameters that the pipeline fills from metadata.
+//! Like the other inversions, NDI takes the local field in ppm and returns ppm. FANSI's solver
+//! works on the phase in radians, so the field is converted with `2*pi*gamma*b0*te` first and the
+//! result converted back at the end; left in ppm, `sin(x) ~ x` and the data term would not be
+//! nonlinear. `b0` and `echo_times` are scan parameters that the pipeline fills from metadata, and
+//! [`NdiParams::te`] picks the echo time the conversion uses (by default the reference's choice;
+//! see there).
 
 use crate::fft::Fft3dWorkspace;
 use crate::utils::apply_mask_zero;
-use crate::Grid;
+use crate::{EchoTime, Grid};
 use super::admm::prepare_fansi_spectral;
 use num_complex::Complex64;
 
@@ -56,8 +57,20 @@ pub struct NdiParams {
     pub auto_stop: bool,
     /// Field strength in Tesla (scan parameter, for the radian conversion)
     pub b0: f64,
-    /// Echo time in seconds (scan parameter, for the radian conversion)
-    pub te: f64,
+    /// Echo times in seconds, in acquisition order (scan parameter, for the radian
+    /// conversion).
+    pub echo_times: Vec<f64>,
+    /// Which echo time the radian conversion uses. Default [`EchoTime::First`]. FANSI's
+    /// multi-echo example, `script_DICOM_Philips.m`, scales the field by `deltaTE = TE(echo2) -
+    /// TE(echo1)` (FANSI-toolbox 93044a3, line 364) before `ndi` (lines 459, 465), and its comment
+    /// on that line says "You may use also any individual echo time". On the qsm-forward phantom (echoes 4/12/20/28 ms; XSIM / NRMSE / r),
+    /// the magnitude weight at the first echo gives the best NRMSE and r (0.636 / 51.4% / 0.858)
+    /// against 0.637 / 53.3% / 0.846 at the echo spacing.
+    ///
+    /// The magnitude weight is required, although `ndi.m` weights by ones when given none
+    /// (lines 51-56): with a flat weight NDI is worse on that phantom (0.628 / 57.5% / 0.822 at
+    /// the first echo).
+    pub te: EchoTime,
 }
 
 impl Default for NdiParams {
@@ -69,7 +82,8 @@ impl Default for NdiParams {
             max_iter: 100,
             auto_stop: false,
             b0: 3.0,
-            te: 0.02,
+            echo_times: vec![0.02],
+            te: EchoTime::First,
         }
     }
 }
@@ -177,7 +191,7 @@ pub fn ndi(
     // ppm -> radians, as FANSI expects.
     // FANSI's scripts use `gyro = 2*pi*42.58`; QSM.rs uses GAMMA_BAR_MHZ_PER_T, which is closer
     // to the CODATA shielded-proton value (see `crate::constants`).
-    let ppm_to_rad = 2.0 * std::f64::consts::PI * crate::constants::GAMMA_BAR_MHZ_PER_T * params.b0 * params.te;
+    let ppm_to_rad = 2.0 * std::f64::consts::PI * crate::constants::GAMMA_BAR_MHZ_PER_T * params.b0 * params.te.seconds(&params.echo_times, "NDI");
     let phase: Vec<f64> = local_field.iter().map(|&f| f * ppm_to_rad).collect();
 
     // W = min(2*mask*mag/max(mag), 1) (FANSI script_invivo.m), squared as in ndi.m.

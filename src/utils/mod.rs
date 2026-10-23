@@ -15,6 +15,7 @@
 //! - SIMD-accelerated operations (optional, with `simd` feature)
 
 pub mod gradient;
+pub mod echo_time;
 pub mod padding;
 pub mod complex;
 pub mod multi_echo;

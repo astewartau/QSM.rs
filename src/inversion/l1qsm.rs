@@ -26,8 +26,9 @@
 //! `2*pi*gamma*b0*te` first and the result converted back at the end. The
 //! scale matters here: the L1 proximal step thresholds `|exp(i*Dx) - exp(i*phi)|`
 //! at `W/mu3`, so in ppm every residual falls below it and the data are fitted
-//! exactly. `b0` and `te` are scan parameters that the pipeline fills from
-//! metadata.
+//! exactly. `b0` and `echo_times` are scan parameters
+//! that the pipeline fills from metadata, and [`L1QsmParams::te`] picks the echo time the
+//! conversion uses (by default the reference's choice; see there).
 //!
 //! `W = lambda * min(2*mask*mag/max(mag), 1)`: the magnitude in [0, 1] as in
 //! FANSI's in vivo example, scaled by lambda (nlL1TV.m: "lambda*magnitude_data
@@ -39,7 +40,7 @@
 use crate::inversion::admm::{fansi_magnitude_weight, fansi_ppm_to_rad, fansi_unit_ee2, prepare_fansi_spectral};
 use crate::utils::gradient::{bdiv_inplace, fgrad_inplace};
 use crate::utils::{apply_mask_zero, shrink};
-use crate::Grid;
+use crate::{EchoTime, Grid};
 use num_complex::Complex64;
 
 /// L1-QSM algorithm parameters (FANSI `nlL1TV.m` defaults where it has them).
@@ -67,8 +68,20 @@ pub struct L1QsmParams {
     pub tol_delta: f64,
     /// Field strength in Tesla (scan parameter, for the radian conversion)
     pub b0: f64,
-    /// Echo time in seconds (scan parameter, for the radian conversion)
-    pub te: f64,
+    /// Echo times in seconds, in acquisition order (scan parameter, for the radian
+    /// conversion).
+    pub echo_times: Vec<f64>,
+    /// Which echo time the radian conversion uses. Default [`EchoTime::First`]. FANSI's
+    /// multi-echo example, `script_DICOM_Philips.m`, scales the field by `deltaTE = TE(echo2) -
+    /// TE(echo1)` (FANSI-toolbox 93044a3, line 364) before `nlL1TV` (line 450), and its comment
+    /// on that line says "You may use also any individual echo time". On the qsm-forward phantom (echoes 4/12/20/28 ms; XSIM / NRMSE / r),
+    /// the magnitude weight at the first echo does best (0.782 / 37.4% / 0.928), against
+    /// 0.776 / 40.2% / 0.916 at the echo spacing.
+    ///
+    /// The magnitude weight is required, although `nlL1TV.m` weights by ones when given none
+    /// (lines 109-113): with a flat weight its NRMSE on that phantom exceeds 100% at either
+    /// echo time (0.738 / 108% / 0.636 at the first echo).
+    pub te: EchoTime,
 }
 
 impl Default for L1QsmParams {
@@ -83,7 +96,8 @@ impl Default for L1QsmParams {
             tol_update: 1.0,
             tol_delta: 1e-6,
             b0: 3.0,
-            te: 0.02,
+            echo_times: vec![0.02],
+            te: EchoTime::First,
         }
     }
 }
@@ -124,7 +138,7 @@ pub fn l1qsm(
     let grid = &ugrid;
 
     // ppm -> radians, as nlL1TV.m expects; W = lambda * normalised magnitude (or mask).
-    let ppm_to_rad = fansi_ppm_to_rad(params.b0, params.te);
+    let ppm_to_rad = fansi_ppm_to_rad(params.b0, params.te.seconds(&params.echo_times, "L1-QSM"));
     let phase: Vec<f64> = local_field.iter().map(|&f| f * ppm_to_rad).collect();
     let w: Vec<f64> = fansi_magnitude_weight(mask, magnitude)
         .into_iter()

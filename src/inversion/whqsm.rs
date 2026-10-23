@@ -20,22 +20,25 @@
 //! Ported from FANSI's `WH_nlTV.m` (https://gitlab.com/cmilovic/FANSI-toolbox).
 //!
 //! # Units
-//! Like the other inversions, WH-QSM takes the local field in ppm and returns ppm.
-//! `WH_nlTV.m` works on the phase in radians, so the field is converted with
-//! `2*pi*gamma*b0*te` first and the result converted back at the end; left in
-//! ppm, `sin(x) ~ x` and the data term would not be nonlinear. `b0` and `te`
-//! are scan parameters that the pipeline fills from metadata.
+//! Like the other inversions, WH-QSM takes the local field in ppm and returns ppm. `WH_nlTV.m`
+//! works on the phase in radians, so the field is converted with `2*pi*gamma*b0*te` first and the
+//! result converted back at the end; left in ppm, `sin(x) ~ x` and the data term would not be
+//! nonlinear. `b0` and `echo_times` are scan parameters that the pipeline fills from metadata, and
+//! [`WhQsmParams::te`] picks the echo time the conversion uses (by default the reference's choice;
+//! see there).
 //!
 //! # Data weight
 //! `WH_nlTV.m` squares `params.weight` (recommended: the magnitude). FANSI's WH-QSM example
 //! (`script_DICOM_Philips.m`, the only script that calls `WH_nlTV`) sets
 //! `weight = m0.*mask./cnoise`, divided by its maximum, where `m0` is the proton density
 //! from its nonlinear T2* fit (`nlT2sTV`) and `cnoise` the complex-domain noise from its
-//! nonlinear multi-echo field fit (`nlme_L2gradient`). The dipole stage has neither map, only
-//! the combined magnitude, so the default ([`WhQsmWeight::MaxNormalised`]) is that formula
-//! with the magnitude for `m0` and no noise term: `mask.*mag / max(mask.*mag)`.
-//! [`WhQsmWeight::InVivo`] is FANSI's `script_invivo.m` form, `min(2*mask*mag/max(mag), 1)`,
-//! as NDI uses. Without a magnitude the weight is the mask.
+//! nonlinear multi-echo field fit (`nlme_L2gradient`). The dipole stage has neither map. The
+//! default ([`WhQsmWeight::Flat`]) is `WH_nlTV.m`'s own default when no weight is given: 1 in
+//! the mask (`W = ones(N)`, lines 70-75). The magnitude weights are options:
+//! [`WhQsmWeight::MaxNormalised`] is the example's formula with the magnitude for `m0` and no
+//! noise term, `mask.*mag / max(mask.*mag)`, and [`WhQsmWeight::InVivo`] FANSI's
+//! `script_invivo.m` form, `min(2*mask*mag/max(mag), 1)`, as NDI uses. How the weight and the
+//! echo time ([`WhQsmParams::te`]) interact on the phantom is noted there.
 //!
 //! # Finite differences
 //! As in `WH_nlTV.m`, the gradient and Laplacian are unit-spacing differences whatever the
@@ -44,19 +47,30 @@
 use crate::inversion::admm::{fansi_unit_ee2, prepare_fansi_spectral};
 use crate::utils::gradient::{bdiv_inplace, fgrad_inplace};
 use crate::utils::{apply_mask_zero, shrink};
-use crate::Grid;
+use crate::{EchoTime, Grid};
 use num_complex::Complex64;
 
-/// How the magnitude is normalised into the data weight (see the module docs).
+/// The data weight (see the module docs).
 #[cfg_attr(feature = "introspection", derive(serde::Serialize))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum WhQsmWeight {
-    /// `mask.*mag / max(mask.*mag)`: FANSI's WH-QSM example (`script_DICOM_Philips.m`)
-    /// without its T2*-fit and noise maps.
+    /// 1 in the mask, no magnitude: `WH_nlTV.m`'s own default when `params.weight` is not
+    /// given (`W = ones(N)`, then squared; lines 70-75).
     #[default]
+    Flat,
+    /// `mask.*mag / max(mask.*mag)`: FANSI's WH-QSM example (`script_DICOM_Philips.m`)
+    /// without its T2*-fit and noise maps. Needs the magnitude.
     MaxNormalised,
-    /// `min(2*mask*mag/max(mag), 1)`: FANSI's `script_invivo.m`, as NDI uses.
+    /// `min(2*mask*mag/max(mag), 1)`: FANSI's `script_invivo.m`, as NDI uses. Needs the
+    /// magnitude.
     InVivo,
+}
+
+impl WhQsmWeight {
+    /// Whether this weight is made from the magnitude.
+    pub fn needs_magnitude(self) -> bool {
+        !matches!(self, WhQsmWeight::Flat)
+    }
 }
 
 /// WH-QSM parameters.
@@ -83,8 +97,19 @@ pub struct WhQsmParams {
     pub weight: WhQsmWeight,
     /// Field strength in Tesla (scan parameter, for the radian conversion).
     pub b0: f64,
-    /// Echo time in seconds (scan parameter, for the radian conversion).
-    pub te: f64,
+    /// Echo times in seconds, in acquisition order (scan parameter, for the radian
+    /// conversion).
+    pub echo_times: Vec<f64>,
+    /// Which echo time the radian conversion uses. Default [`EchoTime::First`]. FANSI's
+    /// multi-echo example, `script_DICOM_Philips.m`, scales the field by `deltaTE =
+    /// TE(echo2) - TE(echo1)` (FANSI-toolbox 93044a3, line 364) before `WH_nlTV` (line 436), but
+    /// with a weight from M0 and the fit noise, and its comment on that line says "You may use
+    /// also any individual echo time". With the default flat weight ([`WhQsmWeight::Flat`]),
+    /// a field at the echo spacing diverges on the qsm-forward phantom (echoes 4/12/20/28 ms:
+    /// r 0.07), as `WH_nlTV`'s Newton step does once the phase nears ±π; at the first echo it
+    /// gives XSIM 0.754, NRMSE 35.5%. With a magnitude weight the echo spacing does better than
+    /// the first echo (echo-1 magnitude, [`WhQsmWeight::MaxNormalised`]: XSIM 0.673 vs 0.637).
+    pub te: EchoTime,
 }
 
 impl Default for WhQsmParams {
@@ -100,9 +125,10 @@ impl Default for WhQsmParams {
             max_iter: 150,
             tol_update: 0.1,
             tol_delta: 1e-6,
-            weight: WhQsmWeight::MaxNormalised,
+            weight: WhQsmWeight::Flat,
             b0: 3.0,
-            te: 0.02,
+            echo_times: vec![0.02],
+            te: EchoTime::First,
         }
     }
 }
@@ -121,8 +147,8 @@ fn norm(v: &[f64]) -> f64 {
 /// # Arguments
 /// * `local_field` - Local field in ppm (nx * ny * nz).
 /// * `mask` - Binary mask (nx * ny * nz), 1 = inside ROI.
-/// * `magnitude` - Magnitude image, the data weight (see module docs); `None` weights every
-///   voxel in the mask by 1.
+/// * `magnitude` - Magnitude image, for a magnitude data weight ([`WhQsmParams::weight`]);
+///   ignored by the default flat weight, which weights every voxel in the mask by 1.
 /// * `grid` - Volume grid (dimensions and voxel sizes).
 /// * `bdir` - B0 field direction.
 /// * `params` - WH-QSM parameters.
@@ -130,6 +156,10 @@ fn norm(v: &[f64]) -> f64 {
 ///
 /// # Returns
 /// Susceptibility map in ppm.
+///
+/// # Panics
+/// If `params.weight` needs the magnitude and `magnitude` is `None`, or if `params.te` cannot
+/// be resolved from `params.echo_times`.
 pub fn whqsm(
     local_field: &[f64],
     mask: &[u8],
@@ -157,9 +187,15 @@ pub fn whqsm(
 
     let mask_f: Vec<f64> = mask.iter().map(|&m| if m != 0 { 1.0 } else { 0.0 }).collect();
 
-    // W = weight.^2 (WH_nlTV.m line 75), weight from the magnitude as `params.weight` says; the
-    // mask when there is no magnitude.
+    // W = weight.^2 (WH_nlTV.m line 75), weight as `params.weight` says: the mask
+    // (WH_nlTV.m's ones), or from the magnitude.
+    assert!(
+        !params.weight.needs_magnitude() || magnitude.is_some(),
+        "WH-QSM: the {:?} weight needs the magnitude", params.weight
+    );
+    let magnitude = if params.weight.needs_magnitude() { magnitude } else { None };
     let mag_max = magnitude.map_or(0.0, |m| match params.weight {
+        WhQsmWeight::Flat => 0.0,
         WhQsmWeight::MaxNormalised => (0..n)
             .filter(|&i| mask[i] != 0)
             .map(|i| m[i])
@@ -173,6 +209,7 @@ pub fn whqsm(
             }
             let v = match magnitude {
                 Some(m) if mag_max > 0.0 => match params.weight {
+                    WhQsmWeight::Flat => 1.0,
                     WhQsmWeight::MaxNormalised => m[i] / mag_max,
                     WhQsmWeight::InVivo => (2.0 * m[i] / mag_max).min(1.0),
                 },
@@ -185,7 +222,7 @@ pub fn whqsm(
     // ppm -> radians, as WH_nlTV.m expects.
     // FANSI's scripts use `gyro = 2*pi*42.58`; QSM.rs uses GAMMA_BAR_MHZ_PER_T, which is closer
     // to the CODATA shielded-proton value (see `crate::constants`).
-    let ppm_to_rad = 2.0 * std::f64::consts::PI * crate::constants::GAMMA_BAR_MHZ_PER_T * params.b0 * params.te;
+    let ppm_to_rad = 2.0 * std::f64::consts::PI * crate::constants::GAMMA_BAR_MHZ_PER_T * params.b0 * params.te.seconds(&params.echo_times, "WH-QSM");
     let phase: Vec<f64> = local_field.iter().map(|&f| f * ppm_to_rad).collect();
 
     // Denominator for x-subproblem: 1e-30 + mu2*k^2 + mu*ee2
@@ -464,7 +501,7 @@ mod tests {
 
     #[test]
     fn test_whqsm_uniform_magnitude_is_mask_weight() {
-        // A uniform magnitude normalises to 1 either way, the same weight as no magnitude.
+        // A uniform magnitude normalises to 1 either way, the same weight as the flat default.
         let n = 8;
         let field: Vec<f64> = (0..n * n * n).map(|i| ((i % 7) as f64 - 3.0) * 0.01).collect();
         let mask = vec![1u8; n * n * n];
@@ -480,5 +517,18 @@ mod tests {
                 assert!((x - y).abs() < 1e-12);
             }
         }
+        // the flat default ignores a magnitude it is given
+        let mag_varied: Vec<f64> = (0..n * n * n).map(|i| 1.0 + (i % 5) as f64).collect();
+        let c = whqsm(&field, &mask, Some(&mag_varied), &grid, (0.0, 0.0, 1.0), &params, |_, _| {});
+        assert_eq!(a, c);
+    }
+
+    #[test]
+    #[should_panic(expected = "needs the magnitude")]
+    fn test_whqsm_magnitude_weight_needs_magnitude() {
+        let n = 4;
+        let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
+        let p = WhQsmParams { weight: WhQsmWeight::MaxNormalised, max_iter: 1, ..Default::default() };
+        whqsm(&[0.0; 64], &[1u8; 64], None, &grid, (0.0, 0.0, 1.0), &p, |_, _| {});
     }
 }

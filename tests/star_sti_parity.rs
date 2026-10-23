@@ -12,7 +12,7 @@
 use num_complex::Complex64;
 use qsm_core::fft::{fft3d, ifft3d};
 use qsm_core::inversion::{star_qsm, StarParams, STAR_GUI_PAD};
-use qsm_core::Grid;
+use qsm_core::{EchoTime, Grid};
 
 const DIMS: [usize; 3] = [48, 56, 40];
 
@@ -134,7 +134,7 @@ fn star_matches_sti_suite_to_rounding() {
         assert_eq!(inside.len(), want.len(), "{}: phantom mask", case.name);
         let phase = tissue_phase(&chi0, &mask, case);
 
-        let params = StarParams { pad: case.pad, te: case.te_ms * 1e-3, b0: case.b0 };
+        let params = StarParams { pad: case.pad, echo_times: vec![case.te_ms * 1e-3], te: EchoTime::First, b0: case.b0 };
         let field: Vec<f64> = phase.iter().map(|&v| v / params.rad_per_ppm()).collect();
         let grid = Grid::new(DIMS[0], DIMS[1], DIMS[2], case.vs[0], case.vs[1], case.vs[2]);
         let mut iterations = 0;

@@ -41,11 +41,14 @@ pub fn run_bg_removal(
         });
     }
 
-    // mSMV needs the scan's field strength and echo time for its ppm↔radian cap.
-    let msmv_scan = |base: crate::bgremove::MsmvParams| crate::bgremove::MsmvParams {
-        b0: metadata.field_strength,
-        te: metadata.echo_times.first().copied().unwrap_or(base.te),
-        ..base
+    // mSMV needs the scan's field strength and echo times for its ppm↔radian cap (at the echo
+    // time its `te` picks, by default the echo spacing).
+    let msmv_scan = |base: crate::bgremove::MsmvParams| -> Result<crate::bgremove::MsmvParams, PipelineError> {
+        Ok(crate::bgremove::MsmvParams {
+            b0: metadata.field_strength,
+            echo_times: super::inversion::scan_echo_times("mSMV", base.te, metadata)?,
+            ..base
+        })
     };
 
     let (mut local_field, eroded_mask) = match config.algorithm {
@@ -66,7 +69,10 @@ pub fn run_bg_removal(
             // PDF weights the fit by 1/N_std, the noise of the field, which MEDI's pipeline takes
             // from Fit_ppm_complex (radians over the echo spacing, from the echo magnitudes). PDF
             // takes ppm like the others, and N_std must be in the field's unit (it sets the CG
-            // tolerance), so it is converted with the factor that converts the field.
+            // tolerance), so it is converted with the factor that converts the field. That is
+            // the echo spacing by the noise map's unit, not a choice of echo time: the noise is
+            // that of the phase accrued over one echo spacing, and PDF itself is linear in the
+            // field, so it has no radian conversion of its own to choose.
             let te = &metadata.echo_times;
             let mag = super::inversion::echo_magnitudes("PDF", magnitude, te, n_voxels)?;
             let delta_te = if te.len() == 1 { te[0] } else { te[1] - te[0] };
@@ -133,7 +139,7 @@ pub fn run_bg_removal(
         let params = msmv_scan(crate::bgremove::MsmvParams {
             prefilter: false,
             ..config.msmv.clone()
-        });
+        })?;
         let (refined, _) = crate::bgremove::msmv(&local_field, &eroded_mask, &grid, &params, |_, _| {});
         local_field = refined;
     }
