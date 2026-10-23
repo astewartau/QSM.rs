@@ -53,18 +53,19 @@ use crate::Grid;
 use super::DR_SHIN_2021;
 use crate::fft::Fft3dWorkspaceF32;
 use crate::kernels::dipole::dipole_kernel_f32;
-use crate::inversion::medi::{
-    gradient_mask_f32,
-    fgrad_periodic_inplace_f32,
-    bdiv_periodic_inplace_f32,
-};
+use crate::inversion::medi::{gradient_mask_f32, fgrad_periodic_inplace_f32};
+#[cfg(any(test, doc))]
+use crate::inversion::medi::bdiv_periodic_inplace_f32;
 use crate::utils::padding::{next_fast_fft_size, pad3d, unpad3d};
-use crate::utils::simd_ops::{
-    dot_product_f32, norm_squared_f32, axpy_f32, xpby_f32,
-    apply_gradient_weights_f32, compute_p_weights_f32,
-};
+use crate::utils::simd_ops::{dot_product_f32, norm_squared_f32, compute_p_weights_f32};
+#[cfg(any(test, doc))]
+use crate::utils::simd_ops::apply_gradient_weights_f32;
+#[cfg(doc)]
+use crate::utils::simd_ops::{axpy_f32, xpby_f32};
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
 
-/// Workspace for chi-separation — holds all reusable buffers (f32).
+/// Workspace for chi-separation — holds all reusable buffers (f32), allocated once per call.
 struct ChiSepWorkspace {
     n: usize,
     nx: usize, ny: usize, nz: usize,
@@ -76,14 +77,16 @@ struct ChiSepWorkspace {
     gy: Vec<f32>,
     gz: Vec<f32>,
 
-    reg_x: Vec<f32>,
-    reg_y: Vec<f32>,
-    reg_z: Vec<f32>,
-
     div_buf: Vec<f32>,
 
     complex_buf: Vec<Complex32>,
     dipole_buf: Vec<f32>,
+    /// d_pos + d_neg inside the operator
+    stage: Vec<f32>,
+
+    cg_r: Vec<f32>,
+    cg_p: Vec<f32>,
+    cg_ap: Vec<f32>,
 }
 
 impl ChiSepWorkspace {
@@ -95,14 +98,107 @@ impl ChiSepWorkspace {
             gx: vec![0.0; n],
             gy: vec![0.0; n],
             gz: vec![0.0; n],
-            reg_x: vec![0.0; n],
-            reg_y: vec![0.0; n],
-            reg_z: vec![0.0; n],
             div_buf: vec![0.0; n],
             complex_buf: vec![Complex32::new(0.0, 0.0); n],
             dipole_buf: vec![0.0; n],
+            stage: vec![0.0; n],
+            cg_r: vec![0.0; 2 * n],
+            cg_p: vec![0.0; 2 * n],
+            cg_ap: vec![0.0; 2 * n],
         }
     }
+}
+
+/// Per-axis TV weights `wG·Vr·wG` (`m·p·m` in [`apply_gradient_weights_f32`]'s terms), formed
+/// once per Gauss-Newton iteration and multiplied in the same order, so `w·∇x` has the bits of
+/// `m·p·m·∇x`.
+type TvWeights = [Vec<f32>; 3];
+
+fn tv_weights(mx: &[f32], my: &[f32], mz: &[f32], vr: &[f32], w: &mut TvWeights) {
+    let [wx, wy, wz] = w;
+    maybe_par_iter_mut!(wx)
+        .zip(maybe_par_iter_mut!(wy))
+        .zip(maybe_par_iter_mut!(wz))
+        .enumerate()
+        .for_each(|(i, ((a, b), c))| {
+            *a = mx[i] * vr[i] * mx[i];
+            *b = my[i] * vr[i] * my[i];
+            *c = mz[i] * vr[i] * mz[i];
+        });
+}
+
+/// `out = λ · bdiv(w ⊙ fgrad(x))` with periodic boundaries: the IRLS TV term, the same values
+/// as [`fgrad_periodic_inplace_f32`], the weighting and [`bdiv_periodic_inplace_f32`] in turn
+/// (bitwise; see the test), but a few z planes at a time so the gradients stay in cache and no
+/// full-volume temporaries are written.
+#[allow(clippy::too_many_arguments)]
+fn tv_term(
+    x: &[f32],
+    w: &TvWeights,
+    lambda: f32,
+    nx: usize, ny: usize, nz: usize,
+    vsx: f32, vsy: f32, vsz: f32,
+    out: &mut [f32],
+) {
+    let nxy = nx * ny;
+    let (hx, hy, hz) = (1.0 / vsx, 1.0 / vsy, 1.0 / vsz);
+    let (ax, ay, az) = (-1.0 / vsx, -1.0 / vsy, -1.0 / vsz);
+    // Weighted periodic forward differences of plane k: z into gz, and x, y when asked.
+    let grad = |k: usize, gxy: Option<(&mut [f32], &mut [f32])>, gz: &mut [f32]| {
+        let base = k * nxy;
+        let znext = if k + 1 < nz { base + nxy } else { 0 };
+        for q in 0..nxy {
+            let p = base + q;
+            gz[q] = w[2][p] * ((x[znext + q] - x[p]) * hz);
+        }
+        if let Some((gx, gy)) = gxy {
+            for j in 0..ny {
+                let row = base + j * nx;
+                let yrow = if j + 1 < ny { row + nx } else { base };
+                for i in 0..nx {
+                    let q = i + j * nx;
+                    let p = row + i;
+                    let xn = if i + 1 < nx { x[p + 1] } else { x[row] };
+                    gx[q] = w[0][p] * ((xn - x[p]) * hx);
+                    gy[q] = w[1][p] * ((x[yrow + i] - x[p]) * hy);
+                }
+            }
+        }
+    };
+    let planes = |k0: usize, o: &mut [f32], bufs: &mut [Vec<f32>; 4]| {
+        let [gx, gy, gz, gz_prev] = bufs;
+        grad(if k0 > 0 { k0 - 1 } else { nz - 1 }, None, gz_prev);
+        for (dk, op) in o.chunks_mut(nxy).enumerate() {
+            grad(k0 + dk, Some((gx, gy)), gz);
+            for j in 0..ny {
+                for i in 0..nx {
+                    let q = i + j * nx;
+                    let gx_prev = if i > 0 { gx[q - 1] } else { gx[nx - 1 + j * nx] };
+                    let gy_prev = if j > 0 { gy[q - nx] } else { gy[i + (ny - 1) * nx] };
+                    let div = (gx[q] - gx_prev) * ax + (gy[q] - gy_prev) * ay + (gz[q] - gz_prev[q]) * az;
+                    op[q] = lambda * div;
+                }
+            }
+            std::mem::swap(gz, gz_prev);
+        }
+    };
+    let new_bufs = || [vec![0.0f32; nxy], vec![0.0f32; nxy], vec![0.0f32; nxy], vec![0.0f32; nxy]];
+    // A few planes per task: each task recomputes one plane of z differences.
+    const PLANES: usize = 4;
+    #[cfg(feature = "parallel")]
+    out.par_chunks_mut(nxy * PLANES)
+        .enumerate()
+        .for_each_init(new_bufs, |bufs, (c, o)| planes(c * PLANES, o, bufs));
+    #[cfg(not(feature = "parallel"))]
+    {
+        let mut bufs = new_bufs();
+        out.chunks_mut(nxy * PLANES).enumerate().for_each(|(c, o)| planes(c * PLANES, o, &mut bufs));
+    }
+}
+
+/// `a = b + beta·a` elementwise ([`xpby_f32`]'s values, on rayon threads under `parallel`)
+fn xpby(a: &mut [f32], b: &[f32], beta: f32) {
+    maybe_par_iter_mut!(a).zip(maybe_par_iter!(b)).for_each(|(a, &b)| *a = b + beta * *a);
 }
 
 /// Chi-separation algorithm parameters.
@@ -185,6 +281,15 @@ impl Default for ChiSepParams {
 /// Volumes whose dimensions are not FFT-friendly (2ᵃ·3ᵇ·5ᶜ) are transparently
 /// zero-padded to the next fast size for the internal FFTs and cropped back
 /// (see [`chi_sep_ilsqr`](crate::separation::chi_sep_ilsqr) for details).
+///
+/// # Performance
+///
+/// On the QSM-CI χ-separation phantom (164×205×205, padded to 180×216×216; 30 Gauss-Newton
+/// iterations, ~1900 CG steps), AMD EPYC 9454: 4 threads 720 s → 432 s, 16 threads
+/// 839 s → 178 s, without `parallel` 883 s → 688 s, WASM (Node, one thread) 2584 s → 2316 s
+/// (QSM.rs#296). The output is bit-for-bit what it was before. Most of the time is the CG
+/// operator's two dipole FFT pairs, its two TV terms and CG's two dot products, which stay
+/// sequential so their sums do not change.
 pub fn chi_sep_medi<F>(
     local_field: &[f64],
     r2prime: &[f64],
@@ -307,56 +412,52 @@ where
     let mut chi_pos = vec![0.0f32; n];
     let mut chi_neg = vec![0.0f32; n];
 
-    let mut vr_pos = vec![0.0f32; n];
-    let mut vr_neg = vec![0.0f32; n];
-    let mut vr_sum = vec![0.0f32; n];
+    let mut vr = vec![0.0f32; n];
+    let new_w = || -> TvWeights { [vec![0.0f32; n], vec![0.0f32; n], vec![0.0f32; n]] };
+    let mut w_pos = new_w();
+    let mut w_neg = new_w();
     let n2 = 2 * n;
     let mut dx = vec![0.0f32; n2];
     let mut rhs = vec![0.0f32; n2];
     let mut chi_sum_buf = vec![0.0f32; n];
     let mut field_residual = vec![0.0f32; n];
-    let mut r2_residual = vec![0.0f32; n];
-    // Scratch for the CG operator (avoids per-iteration buffer clones).
-    let mut stage = vec![0.0f32; n];
 
     // TV weight on (chi+ + chi-) sum — paper uses 2*lambda for sum term
-    // Disabled for now (0.0) pending parameter tuning; the sum TV can over-couple components
+    // Disabled for now (0.0) pending parameter tuning; the sum TV can over-couple components.
+    // Every use of the term is skipped while its weight is exactly 0 (it would add 0).
     let lambda_sum_f32 = 0.0_f32;
+    let mut w_sum = (lambda_sum_f32 != 0.0).then(new_w);
 
     let eps = 1.0e-6_f32;
 
     for iter in 0..max_iter {
         progress(iter + 1, max_iter);
 
-        // --- TV reweighting ---
+        // --- TV reweighting: Vr = 1/sqrt(|wG∇χ|² + ε), then the weights wG·Vr·wG ---
         fgrad_periodic_inplace_f32(&mut ws.gx, &mut ws.gy, &mut ws.gz,
             &chi_pos, nx, ny, nz, vsx_f32, vsy_f32, vsz_f32);
-        compute_p_weights_f32(&mut vr_pos, &mx, &my, &mz, &ws.gx, &ws.gy, &ws.gz, eps);
+        compute_p_weights_f32(&mut vr, &mx, &my, &mz, &ws.gx, &ws.gy, &ws.gz, eps);
+        tv_weights(&mx, &my, &mz, &vr, &mut w_pos);
 
         fgrad_periodic_inplace_f32(&mut ws.gx, &mut ws.gy, &mut ws.gz,
             &chi_neg, nx, ny, nz, vsx_f32, vsy_f32, vsz_f32);
-        compute_p_weights_f32(&mut vr_neg, &mx, &my, &mz, &ws.gx, &ws.gy, &ws.gz, eps);
+        compute_p_weights_f32(&mut vr, &mx, &my, &mz, &ws.gx, &ws.gy, &ws.gz, eps);
+        tv_weights(&mx, &my, &mz, &vr, &mut w_neg);
+
+        maybe_par_iter_mut!(chi_sum_buf).enumerate().for_each(|(i, s)| *s = chi_pos[i] + chi_neg[i]);
 
         // TV weights for the sum (chi+ + chi-)
-        for i in 0..n {
-            chi_sum_buf[i] = chi_pos[i] + chi_neg[i];
+        if let Some(w_sum) = w_sum.as_mut() {
+            fgrad_periodic_inplace_f32(&mut ws.gx, &mut ws.gy, &mut ws.gz,
+                &chi_sum_buf, nx, ny, nz, vsx_f32, vsy_f32, vsz_f32);
+            compute_p_weights_f32(&mut vr, &mx, &my, &mz, &ws.gx, &ws.gy, &ws.gz, eps);
+            tv_weights(&mx, &my, &mz, &vr, w_sum);
         }
-        fgrad_periodic_inplace_f32(&mut ws.gx, &mut ws.gy, &mut ws.gz,
-            &chi_sum_buf, nx, ny, nz, vsx_f32, vsy_f32, vsz_f32);
-        compute_p_weights_f32(&mut vr_sum, &mx, &my, &mz, &ws.gx, &ws.gy, &ws.gz, eps);
 
-        // --- Residuals (chi_sum_buf still holds chi_pos + chi_neg) ---
+        // --- Residuals (chi_sum_buf holds chi_pos + chi_neg) ---
         // field_residual = field - D*(chi_pos + chi_neg)
         ws.fft_ws.apply_dipole_inplace(&chi_sum_buf, &d_kernel, &mut ws.dipole_buf, &mut ws.complex_buf);
-        for i in 0..n {
-            field_residual[i] = field_f32[i] - ws.dipole_buf[i];
-        }
-
-        // R2' residual, scaled by r2_scale: R2'·s - dr_p_use * chi_pos + dr_q_use * chi_neg
-        // where dr_*_use = dr_*_eff·s
-        for i in 0..n {
-            r2_residual[i] = r2p_f32[i] - dr_p_use * chi_pos[i] + dr_q_use * chi_neg[i];
-        }
+        maybe_par_iter_mut!(field_residual).enumerate().for_each(|(i, r)| *r = field_f32[i] - ws.dipole_buf[i]);
 
         // --- Build gradient (MEDI convention: b_orig = gradient, then negate) ---
         //
@@ -375,96 +476,60 @@ where
         // R2': r2_res = R2' - dr_p*χ+ + dr_q*χ- (since |χ-| = -χ-)
         //   ∂r2_res/∂χ+ = -dr_p → ∂||r2_res||²/∂χ+ = -2*r2_res*dr_p, with 1/2 → -r2_res*dr_p
         //   ∂r2_res/∂χ- = +dr_q → ∂||r2_res||²/∂χ- = +2*r2_res*dr_q, with 1/2 → +r2_res*dr_q
-
-        // TV gradient for chi_pos
-        fgrad_periodic_inplace_f32(&mut ws.gx, &mut ws.gy, &mut ws.gz,
-            &chi_pos, nx, ny, nz, vsx_f32, vsy_f32, vsz_f32);
-        apply_gradient_weights_f32(&mut ws.reg_x, &mut ws.reg_y, &mut ws.reg_z,
-            &mx, &my, &mz, &vr_pos, &ws.gx, &ws.gy, &ws.gz);
-        bdiv_periodic_inplace_f32(&mut ws.div_buf,
-            &ws.reg_x, &ws.reg_y, &ws.reg_z, nx, ny, nz, vsx_f32, vsy_f32, vsz_f32);
-        for i in 0..n {
-            rhs[i] = lambda_para_f32 * ws.div_buf[i];
-        }
-
-        // TV gradient for chi_neg
-        fgrad_periodic_inplace_f32(&mut ws.gx, &mut ws.gy, &mut ws.gz,
-            &chi_neg, nx, ny, nz, vsx_f32, vsy_f32, vsz_f32);
-        apply_gradient_weights_f32(&mut ws.reg_x, &mut ws.reg_y, &mut ws.reg_z,
-            &mx, &my, &mz, &vr_neg, &ws.gx, &ws.gy, &ws.gz);
-        bdiv_periodic_inplace_f32(&mut ws.div_buf,
-            &ws.reg_x, &ws.reg_y, &ws.reg_z, nx, ny, nz, vsx_f32, vsy_f32, vsz_f32);
-        for i in 0..n {
-            rhs[n + i] = lambda_dia_f32 * ws.div_buf[i];
-        }
+        let (rhs_pos, rhs_neg) = rhs.split_at_mut(n);
+        tv_term(&chi_pos, &w_pos, lambda_para_f32, nx, ny, nz, vsx_f32, vsy_f32, vsz_f32, rhs_pos);
+        tv_term(&chi_neg, &w_neg, lambda_dia_f32, nx, ny, nz, vsx_f32, vsy_f32, vsz_f32, rhs_neg);
 
         // TV gradient for (chi+ + chi-) sum — applied equally to both components
-        for i in 0..n {
-            chi_sum_buf[i] = chi_pos[i] + chi_neg[i];
-        }
-        fgrad_periodic_inplace_f32(&mut ws.gx, &mut ws.gy, &mut ws.gz,
-            &chi_sum_buf, nx, ny, nz, vsx_f32, vsy_f32, vsz_f32);
-        apply_gradient_weights_f32(&mut ws.reg_x, &mut ws.reg_y, &mut ws.reg_z,
-            &mx, &my, &mz, &vr_sum, &ws.gx, &ws.gy, &ws.gz);
-        bdiv_periodic_inplace_f32(&mut ws.div_buf,
-            &ws.reg_x, &ws.reg_y, &ws.reg_z, nx, ny, nz, vsx_f32, vsy_f32, vsz_f32);
-        for i in 0..n {
-            let tv_sum = lambda_sum_f32 * ws.div_buf[i];
-            rhs[i] += tv_sum;
-            rhs[n + i] += tv_sum;
+        if let Some(w_sum) = w_sum.as_ref() {
+            tv_term(&chi_sum_buf, w_sum, lambda_sum_f32, nx, ny, nz, vsx_f32, vsy_f32, vsz_f32, &mut ws.div_buf);
+            add_to_both(rhs_pos, rhs_neg, &ws.div_buf);
         }
 
         // Field fidelity gradient: -λ_cpl * D(field_res), SAME sign for both
         ws.fft_ws.apply_dipole_inplace(&field_residual, &d_kernel,
             &mut ws.dipole_buf, &mut ws.complex_buf);
-        for i in 0..n {
-            let fg = lambda_cpl_f32 * ws.dipole_buf[i];
-            rhs[i] -= fg;
-            rhs[n + i] -= fg;
-        }
 
-        // R2' fidelity gradient (normalized):
+        // Then the R2' fidelity gradient on the mask, with the R2' residual scaled by r2_scale:
+        //   r2_res = R2'·s - dr_p_use * chi_pos + dr_q_use * chi_neg   (dr_*_use = dr_*_eff·s)
         //   ∂J/∂χ+ contribution: -λ_cpl * r2_res * dr_p_use
         //   ∂J/∂χ- contribution: +λ_cpl * r2_res * dr_q_use
-        for i in 0..n {
-            if mask[i] == 0 { continue; }
-            rhs[i] -= lambda_cpl_f32 * r2_residual[i] * dr_p_use;
-            rhs[n + i] += lambda_cpl_f32 * r2_residual[i] * dr_q_use;
-        }
-
-        // Negate for CG: b = -gradient
-        for v in rhs.iter_mut() {
-            *v = -*v;
-        }
+        // and the negation for CG: b = -gradient.
+        let dip = &ws.dipole_buf;
+        maybe_par_iter_mut!(rhs_pos).zip(maybe_par_iter_mut!(rhs_neg)).enumerate().for_each(|(i, (rp, rn))| {
+            let fg = lambda_cpl_f32 * dip[i];
+            let (mut p, mut q) = (*rp - fg, *rn - fg);
+            if mask[i] != 0 {
+                let r2_residual = r2p_f32[i] - dr_p_use * chi_pos[i] + dr_q_use * chi_neg[i];
+                p -= lambda_cpl_f32 * r2_residual * dr_p_use;
+                q += lambda_cpl_f32 * r2_residual * dr_q_use;
+            }
+            *rp = -p;
+            *rn = -q;
+        });
 
         // --- CG solve ---
-        cg_solve_chisep(
-            &mut ws, &d_kernel,
-            &mx, &my, &mz,
-            &vr_pos, &vr_neg, &vr_sum,
-            lambda_para_f32, lambda_dia_f32, lambda_sum_f32, lambda_cpl_f32,
-            dr_p_use, dr_q_use,
+        let op = ChiSepOperator {
+            d_kernel: &d_kernel,
+            w_pos: &w_pos, w_neg: &w_neg, w_sum: w_sum.as_ref(),
+            lambda_para: lambda_para_f32, lambda_dia: lambda_dia_f32,
+            lambda_sum: lambda_sum_f32, lambda_cpl: lambda_cpl_f32,
+            dr_p: dr_p_use, dr_q: dr_q_use,
             mask,
-            &rhs, &mut dx, &mut stage,
-            cg_tol_f32, cg_max_iter,
-        );
+        };
+        cg_solve_chisep(&mut ws, &op, &rhs, &mut dx, cg_tol_f32, cg_max_iter);
 
-        // --- Update (half Newton step for stability with sign constraints) ---
-        for i in 0..n {
-            chi_pos[i] += 0.5 * dx[i];
-            chi_neg[i] += 0.5 * dx[n + i];
-        }
-
-        // --- Enforce constraints: chi_pos >= 0, chi_neg <= 0 ---
-        for i in 0..n {
+        // --- Update (half Newton step for stability with sign constraints), then
+        // --- enforce the constraints chi_pos >= 0, chi_neg <= 0 ---
+        maybe_par_iter_mut!(chi_pos).zip(maybe_par_iter_mut!(chi_neg)).enumerate().for_each(|(i, (p, q))| {
             if mask[i] == 0 {
-                chi_pos[i] = 0.0;
-                chi_neg[i] = 0.0;
+                *p = 0.0;
+                *q = 0.0;
             } else {
-                chi_pos[i] = chi_pos[i].max(0.0);
-                chi_neg[i] = chi_neg[i].min(0.0);
+                *p = (*p + 0.5 * dx[i]).max(0.0);
+                *q = (*q + 0.5 * dx[n + i]).min(0.0);
             }
-        }
+        });
 
         // --- Convergence check ---
         let update_norm = norm_squared_f32(&dx).sqrt();
@@ -493,6 +558,31 @@ where
     (chi_pos_out, chi_neg_out, chi_total)
 }
 
+/// `a += t`, `b += t` elementwise
+fn add_to_both(a: &mut [f32], b: &mut [f32], t: &[f32]) {
+    maybe_par_iter_mut!(a).zip(maybe_par_iter_mut!(b)).enumerate().for_each(|(i, (a, b))| {
+        *a += t[i];
+        *b += t[i];
+    });
+}
+
+/// The fixed parts of the chi-sep Hessian operator for one Gauss-Newton iteration.
+struct ChiSepOperator<'a> {
+    /// The dipole kernel D
+    d_kernel: &'a [f32],
+    w_pos: &'a TvWeights,
+    w_neg: &'a TvWeights,
+    /// `None` while `lambda_sum` is 0
+    w_sum: Option<&'a TvWeights>,
+    lambda_para: f32,
+    lambda_dia: f32,
+    lambda_sum: f32,
+    lambda_cpl: f32,
+    dr_p: f32,
+    dr_q: f32,
+    mask: &'a [u8],
+}
+
 /// Apply chi-sep Hessian operator A to doubled vector dx = [d_pos; d_neg].
 ///
 /// A_pos = λ_para * TV_hess(d_pos) + λ_sum * TV_hess_sum(d_pos+d_neg)
@@ -503,150 +593,103 @@ where
 /// TV_hessian uses IRLS: bdiv(wG*Vr*wG*fgrad(.)), positive semi-definite.
 /// Field fidelity: D², same for both, positive semi-definite.
 /// R2': rank-1 structure [dr_p, -dr_q]^T * [dr_p, -dr_q], positive semi-definite.
-#[allow(clippy::too_many_arguments)]
-fn apply_chisep_operator(
-    ws: &mut ChiSepWorkspace,
-    d_kernel: &[f32],
-    mx: &[f32], my: &[f32], mz: &[f32],
-    vr_pos: &[f32], vr_neg: &[f32], vr_sum: &[f32],
-    lambda_para: f32, lambda_dia: f32, lambda_sum: f32, lambda_cpl: f32,
-    dr_p: f32, dr_q: f32,
-    mask: &[u8],
-    dx: &[f32],
-    out: &mut [f32],
-    stage: &mut [f32],
-) {
+/// The λ_sum term is skipped while λ_sum is 0.
+fn apply_chisep_operator(ws: &mut ChiSepWorkspace, op: &ChiSepOperator, dx: &[f32], out: &mut [f32]) {
     let n = ws.n;
     let (nx, ny, nz) = (ws.nx, ws.ny, ws.nz);
     let (vsx, vsy, vsz) = (ws.vsx, ws.vsy, ws.vsz);
 
-    let d_pos = &dx[..n];
-    let d_neg = &dx[n..];
+    let (d_pos, d_neg) = dx.split_at(n);
+    let (out_pos, out_neg) = out.split_at_mut(n);
 
     // TV for chi_pos: λ_para * bdiv(wG*Vr_pos*wG*fgrad(d_pos))
-    fgrad_periodic_inplace_f32(&mut ws.gx, &mut ws.gy, &mut ws.gz,
-        d_pos, nx, ny, nz, vsx, vsy, vsz);
-    apply_gradient_weights_f32(&mut ws.reg_x, &mut ws.reg_y, &mut ws.reg_z,
-        mx, my, mz, vr_pos, &ws.gx, &ws.gy, &ws.gz);
-    bdiv_periodic_inplace_f32(&mut ws.div_buf,
-        &ws.reg_x, &ws.reg_y, &ws.reg_z, nx, ny, nz, vsx, vsy, vsz);
-    for i in 0..n {
-        out[i] = lambda_para * ws.div_buf[i];
-    }
-
+    tv_term(d_pos, op.w_pos, op.lambda_para, nx, ny, nz, vsx, vsy, vsz, out_pos);
     // TV for chi_neg: λ_dia * bdiv(wG*Vr_neg*wG*fgrad(d_neg))
-    fgrad_periodic_inplace_f32(&mut ws.gx, &mut ws.gy, &mut ws.gz,
-        d_neg, nx, ny, nz, vsx, vsy, vsz);
-    apply_gradient_weights_f32(&mut ws.reg_x, &mut ws.reg_y, &mut ws.reg_z,
-        mx, my, mz, vr_neg, &ws.gx, &ws.gy, &ws.gz);
-    bdiv_periodic_inplace_f32(&mut ws.div_buf,
-        &ws.reg_x, &ws.reg_y, &ws.reg_z, nx, ny, nz, vsx, vsy, vsz);
-    for i in 0..n {
-        out[n + i] = lambda_dia * ws.div_buf[i];
-    }
+    tv_term(d_neg, op.w_neg, op.lambda_dia, nx, ny, nz, vsx, vsy, vsz, out_neg);
 
-    // TV for sum (d_pos + d_neg): λ_sum * bdiv(wG*Vr_sum*wG*fgrad(d_pos+d_neg))
-    // Applied equally to both components. `stage` holds the sum and stays valid
-    // through the field-fidelity term below (no clones in this CG hot path).
-    for i in 0..n {
-        stage[i] = d_pos[i] + d_neg[i];
-    }
-    fgrad_periodic_inplace_f32(&mut ws.gx, &mut ws.gy, &mut ws.gz,
-        stage, nx, ny, nz, vsx, vsy, vsz);
-    apply_gradient_weights_f32(&mut ws.reg_x, &mut ws.reg_y, &mut ws.reg_z,
-        mx, my, mz, vr_sum, &ws.gx, &ws.gy, &ws.gz);
-    bdiv_periodic_inplace_f32(&mut ws.div_buf,
-        &ws.reg_x, &ws.reg_y, &ws.reg_z, nx, ny, nz, vsx, vsy, vsz);
-    for i in 0..n {
-        let tv_s = lambda_sum * ws.div_buf[i];
-        out[i] += tv_s;
-        out[n + i] += tv_s;
+    // `stage` holds d_pos + d_neg for the sum TV and the field-fidelity term.
+    maybe_par_iter_mut!(ws.stage).enumerate().for_each(|(i, s)| *s = d_pos[i] + d_neg[i]);
+
+    // TV for sum (d_pos + d_neg): λ_sum * bdiv(wG*Vr_sum*wG*fgrad(d_pos+d_neg)),
+    // applied equally to both components
+    if let Some(w_sum) = op.w_sum {
+        tv_term(&ws.stage, w_sum, op.lambda_sum, nx, ny, nz, vsx, vsy, vsz, &mut ws.div_buf);
+        add_to_both(out_pos, out_neg, &ws.div_buf);
     }
 
     // Field fidelity: λ_cpl * D²(d_pos + d_neg), SAME for both
-    ws.fft_ws.apply_dipole_inplace(stage, d_kernel, &mut ws.dipole_buf, &mut ws.complex_buf);
-    stage.copy_from_slice(&ws.dipole_buf);
-    ws.fft_ws.apply_dipole_inplace(stage, d_kernel, &mut ws.dipole_buf, &mut ws.complex_buf);
-
-    for i in 0..n {
-        let ff = lambda_cpl * ws.dipole_buf[i];
-        out[i] += ff;
-        out[n + i] += ff;
-    }
+    ws.fft_ws.apply_dipole_inplace(&ws.stage, op.d_kernel, &mut ws.dipole_buf, &mut ws.complex_buf);
+    ws.stage.copy_from_slice(&ws.dipole_buf);
+    ws.fft_ws.apply_dipole_inplace(&ws.stage, op.d_kernel, &mut ws.dipole_buf, &mut ws.complex_buf);
 
     // R2' fidelity: rank-1 Hessian [dr_p, -dr_q]^T * [dr_p, -dr_q]
     // r2_lin = dr_p * d_pos - dr_q * d_neg
     // out_pos += λ_cpl * dr_p * r2_lin
     // out_neg -= λ_cpl * dr_q * r2_lin
-    for i in 0..n {
-        if mask[i] == 0 { continue; }
-        let r2_lin = dr_p * d_pos[i] - dr_q * d_neg[i];
-        out[i] += lambda_cpl * dr_p * r2_lin;
-        out[n + i] -= lambda_cpl * dr_q * r2_lin;
-    }
+    let (lambda_cpl, dr_p, dr_q, mask, dip) = (op.lambda_cpl, op.dr_p, op.dr_q, op.mask, &ws.dipole_buf);
+    maybe_par_iter_mut!(out_pos).zip(maybe_par_iter_mut!(out_neg)).enumerate().for_each(|(i, (a, b))| {
+        let ff = lambda_cpl * dip[i];
+        *a += ff;
+        *b += ff;
+        if mask[i] != 0 {
+            let r2_lin = dr_p * d_pos[i] - dr_q * d_neg[i];
+            *a += lambda_cpl * dr_p * r2_lin;
+            *b -= lambda_cpl * dr_q * r2_lin;
+        }
+    });
 }
 
-/// CG solver for the doubled chi-sep system.
-#[allow(clippy::too_many_arguments)]
+/// CG solver for the doubled chi-sep system (vectors in the workspace).
 fn cg_solve_chisep(
     ws: &mut ChiSepWorkspace,
-    d_kernel: &[f32],
-    mx: &[f32], my: &[f32], mz: &[f32],
-    vr_pos: &[f32], vr_neg: &[f32], vr_sum: &[f32],
-    lambda_para: f32, lambda_dia: f32, lambda_sum: f32, lambda_cpl: f32,
-    dr_p: f32, dr_q: f32,
-    mask: &[u8],
+    op: &ChiSepOperator,
     b: &[f32],
     x: &mut [f32],
-    stage: &mut [f32],
     tol: f32,
     max_iter: usize,
 ) {
-    let n2 = 2 * ws.n;
     x.fill(0.0);
 
-    let mut cg_r = vec![0.0f32; n2];
-    let mut cg_p = vec![0.0f32; n2];
-    let mut cg_ap = vec![0.0f32; n2];
+    let mut cg_r = std::mem::take(&mut ws.cg_r);
+    let mut cg_p = std::mem::take(&mut ws.cg_p);
+    let mut cg_ap = std::mem::take(&mut ws.cg_ap);
 
-    cg_r.copy_from_slice(&b[..n2]);
+    cg_r.copy_from_slice(b);
     cg_p.copy_from_slice(&cg_r);
 
     let mut rsold = dot_product_f32(&cg_r, &cg_r);
     let b_norm = dot_product_f32(b, b).sqrt();
 
-    if b_norm < 1e-10 {
-        return;
+    if b_norm >= 1e-10 {
+        for _cg_iter in 0..max_iter {
+            apply_chisep_operator(ws, op, &cg_p, &mut cg_ap);
+
+            let pap = dot_product_f32(&cg_p, &cg_ap);
+            if pap.abs() < 1e-15 {
+                break;
+            }
+
+            let alpha = rsold / pap;
+            // x += α·p, r −= α·Ap (as `axpy_f32` computes them), in one pass
+            maybe_par_iter_mut!(x).zip(maybe_par_iter_mut!(cg_r)).enumerate().for_each(|(i, (x, r))| {
+                *x += alpha * cg_p[i];
+                *r += -alpha * cg_ap[i];
+            });
+
+            let rsnew = dot_product_f32(&cg_r, &cg_r);
+            if rsnew.sqrt() < tol * b_norm {
+                break;
+            }
+
+            let beta_cg = rsnew / rsold;
+            xpby(&mut cg_p, &cg_r, beta_cg);
+            rsold = rsnew;
+        }
     }
 
-    for _cg_iter in 0..max_iter {
-        apply_chisep_operator(
-            ws, d_kernel, mx, my, mz,
-            vr_pos, vr_neg, vr_sum,
-            lambda_para, lambda_dia, lambda_sum, lambda_cpl,
-            dr_p, dr_q,
-            mask,
-            &cg_p, &mut cg_ap, stage,
-        );
-
-        let pap = dot_product_f32(&cg_p, &cg_ap);
-        if pap.abs() < 1e-15 {
-            break;
-        }
-
-        let alpha = rsold / pap;
-        axpy_f32(x, alpha, &cg_p);
-        axpy_f32(&mut cg_r, -alpha, &cg_ap);
-
-        let rsnew = dot_product_f32(&cg_r, &cg_r);
-        if rsnew.sqrt() < tol * b_norm {
-            break;
-        }
-
-        let beta_cg = rsnew / rsold;
-        xpby_f32(&mut cg_p, &cg_r, beta_cg);
-        rsold = rsnew;
-    }
+    ws.cg_r = cg_r;
+    ws.cg_p = cg_p;
+    ws.cg_ap = cg_ap;
 }
 
 #[cfg(test)]
@@ -766,6 +809,35 @@ mod tests {
         let neg_min = chi_neg_out.iter().cloned().fold(0.0_f64, f64::min);
         assert!(pos_max > 0.0, "chi+ should have positive values, max={}", pos_max);
         assert!(neg_min < 0.0, "chi- should have negative values, min={}", neg_min);
+    }
+
+    /// The fused TV term equals the three-pass `fgrad`, weighting, `bdiv` it replaced, bitwise,
+    /// on a grid with unequal sides and voxel sizes (and a single-plane one).
+    #[test]
+    fn tv_term_equals_unfused_passes() {
+        for &(nx, ny, nz) in &[(13usize, 9usize, 7usize), (6, 5, 1), (1, 4, 9)] {
+            let n = nx * ny * nz;
+            let (vsx, vsy, vsz) = (0.9f32, 1.1f32, 1.3f32);
+            let x: Vec<f32> = (0..n).map(|i| (i as f32 * 0.37).sin()).collect();
+            let vr: Vec<f32> = (0..n).map(|i| 1.0 + (i as f32 * 0.21).cos().abs()).collect();
+            let m = |s: usize| -> Vec<f32> { (0..n).map(|i| !(i * s).is_multiple_of(5) as u8 as f32).collect() };
+            let (mx, my, mz) = (m(3), m(7), m(11));
+            let lambda = 30.0f32;
+
+            let (mut gx, mut gy, mut gz) = (vec![0.0f32; n], vec![0.0f32; n], vec![0.0f32; n]);
+            let (mut rx, mut ry, mut rz) = (vec![0.0f32; n], vec![0.0f32; n], vec![0.0f32; n]);
+            let mut div = vec![0.0f32; n];
+            fgrad_periodic_inplace_f32(&mut gx, &mut gy, &mut gz, &x, nx, ny, nz, vsx, vsy, vsz);
+            apply_gradient_weights_f32(&mut rx, &mut ry, &mut rz, &mx, &my, &mz, &vr, &gx, &gy, &gz);
+            bdiv_periodic_inplace_f32(&mut div, &rx, &ry, &rz, nx, ny, nz, vsx, vsy, vsz);
+            let want: Vec<f32> = div.iter().map(|&d| lambda * d).collect();
+
+            let mut w: TvWeights = [vec![0.0; n], vec![0.0; n], vec![0.0; n]];
+            tv_weights(&mx, &my, &mz, &vr, &mut w);
+            let mut got = vec![f32::NAN; n];
+            tv_term(&x, &w, lambda, nx, ny, nz, vsx, vsy, vsz, &mut got);
+            assert_eq!(got, want, "{:?}", (nx, ny, nz));
+        }
     }
 
     fn corr(a: &[f64], b: &[f64], mask: &[u8]) -> f64 {
