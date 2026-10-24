@@ -2,8 +2,9 @@
 //! of QSM.rs#296 (commit f16a122), on a small two-source phantom whose grid is padded for the
 //! FFTs (30×28×26 → 30×30×27).
 //!
-//! The stored maps are what the old code returned, so this pins the result to the old
-//! implementation's.
+//! The speed-up applies the CG operator's D(D(·)) as one transform pair with D², which rounds
+//! differently in single precision; everything else it changed gives the same bits. The stored
+//! maps are what the old code returned, so this pins the result to the old implementation's.
 
 use qsm_core::separation::{chi_sep_medi, ChiSepParams};
 use qsm_core::Grid;
@@ -110,4 +111,4 @@ fn matches_the_implementation_before_the_speed_up() {
 }
 
 /// Relative to the map's largest magnitude
-const TOL: f64 = 0.0;
+const TOL: f64 = 1e-5;
