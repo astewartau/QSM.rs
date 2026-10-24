@@ -4,8 +4,11 @@
 #
 # Usage: scripts/integration_report.sh [--figures]
 #   Reads metrics/<test>.csv (RESULT: lines), slices/*.bin (to decide which sections ran) and,
-#   with --figures, figures/*.png (the montages scripts/render_slices.py draws). Writes the
-#   report to stdout. COVERAGE and TESTS_PASSED come from the environment (unit-test job).
+#   with --figures, figures/*.png (the montages scripts/render_slices.py draws), putting under
+#   each section the montage that goes with it: inline from FIGURES_BASE_URL (where
+#   scripts/publish_ci_results.sh published them) when that is set, otherwise named, for the
+#   reader to open from the run's `figures` artifact. Writes the report to stdout. COVERAGE and
+#   TESTS_PASSED come from the environment (unit-test job).
 #
 # The job summary and the PR comment are both this report — the comment with --figures — so a
 # new result is added in one place. Every test the workflow can run has a row (or, for pass/fail
@@ -118,9 +121,13 @@ emit_figures() {
   for slug in "$@"; do
     case " $EMITTED_FIGURES " in *" $slug "*) continue ;; esac
     if [ -f "figures/${slug}.png" ]; then
-      # A blank line first: right after a table, an image line would be read as one more row.
+      # A blank line first: right after a table, the line would be read as one more row.
       echo ""
-      echo "![${slug}](figures/${slug}.png)"
+      if [ -n "${FIGURES_BASE_URL:-}" ]; then
+        echo "![${slug}](${FIGURES_BASE_URL}/${slug}.png)"
+      else
+        echo "_Figure: \`${slug}.png\` in the figures artifact (linked at the end)._"
+      fi
       echo ""
       EMITTED_FIGURES="$EMITTED_FIGURES $slug"
     fi

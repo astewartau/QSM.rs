@@ -7,6 +7,10 @@ on:
     # the full results comment). Any other label re-runs the ordinary path-based selection, which
     # is correct, if redundant.
     types: [opened, synchronize, reopened, labeled]
+  # Every merge runs the whole suite, so its metrics record (metrics/main/ on the `ci-figures`
+  # branch) is the baseline PR comments compare against.
+  push:
+    branches: [main]
   workflow_dispatch:  # Manual trigger: runs everything (no PR comment; results in the job summary)
 
 permissions:
@@ -150,9 +154,10 @@ jobs:
             echo "run_multislice=true" >> "$GITHUB_OUTPUT"
           }
 
-          # Manual trigger, or the `run-all-tests` label on the PR: run everything.
-          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
-            echo "workflow_dispatch: running all tests"
+          # Manual trigger, a push to main (the baseline record needs every test), or the
+          # `run-all-tests` label on the PR: run everything.
+          if [ "$EVENT_NAME" != "pull_request" ]; then
+            echo "$EVENT_NAME: running all tests"
             output_all
             exit 0
           fi
@@ -611,6 +616,7 @@ jobs:
               tests/support/*) : ;;
               # Reporting only: how results are drawn and tabled, never what is computed.
               scripts/render_slices.py|scripts/render_paper_figures.py|scripts/integration_report.sh|scripts/post_pr_comment.sh) : ;;
+              scripts/ci_metrics.py|scripts/publish_ci_results.sh|scripts/ci_figures_cleanup.sh) : ;;
 
               # Anything else under src/ or tests/ has no mapping above — a new file, most likely.
               # Run everything rather than nothing: a change that maps to no test must not pass
@@ -921,7 +927,7 @@ jobs:
 
   # Collect metrics from all parallel jobs and produce a single summary
   summary:
-    needs: [detect-changes, unit-tests, plain-tests, onnx-tests]
+    needs: [detect-changes, setup, setup-chisep, unit-tests, plain-tests, onnx-tests]
     # Post the results comment only when something actually ran. On changes that
     # select no tests (e.g. docs-only), skip it instead of posting an empty
     # "Tests passed: N/A" comment. `always()` keeps it running even if a selected
@@ -939,6 +945,12 @@ jobs:
       needs.detect-changes.outputs.run_geometry == 'true' ||
       needs.detect-changes.outputs.run_multislice == 'true')
     runs-on: ubuntu-latest
+    # `contents: write` only here, and only to push the figures and the metrics record to the
+    # `ci-figures` branch (scripts/publish_ci_results.sh). Never on a fork PR, whose token is
+    # read-only whatever this says.
+    permissions:
+      contents: write
+      pull-requests: write
     steps:
       - uses: actions/checkout@v4
 
@@ -983,39 +995,113 @@ jobs:
             python scripts/render_slices.py slices figures
           fi
 
-      - name: Setup Node.js (canvas@2 needs prebuilt binary)
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-
-      - name: Setup CML
-        uses: iterative/setup-cml@v3
-        # The PR results comment is informational; the real pass/fail gate is the
-        # `tests-passed` job. Don't let a transient GitHub API rate-limit here
-        # (CML / comment posting) fail the whole run.
-        continue-on-error: true
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
       - name: Upload figures
-        # Kept with the run, so the comment can point here if the image host is down.
-        if: github.event_name == 'pull_request'
+        # Full resolution, for 30 days. The comment shows the compressed copies published below.
+        id: figures
         continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: figures
           path: figures/
           if-no-files-found: ignore
+          retention-days: 30
 
-      - name: Post PR comment with results
-        if: github.event_name == 'pull_request'
+      - name: Compress figures for the comment
+        # A 256-colour palette: the montages are greyscale maps and a few colour scales, and the
+        # copies on `ci-figures` come out several times smaller. The artifact keeps the originals.
+        continue-on-error: true
+        run: |
+          mkdir -p figures-web
+          if compgen -G "figures/*.png" > /dev/null; then
+            pip install pillow
+            python3 - <<'EOF'
+          import glob, os
+          from PIL import Image
+          for f in sorted(glob.glob("figures/*.png")):
+              out = os.path.join("figures-web", os.path.basename(f))
+              Image.open(f).convert("RGB").quantize(colors=256).save(out, optimize=True)
+              print(f"{f}: {os.path.getsize(f) // 1024} KiB -> {os.path.getsize(out) // 1024} KiB")
+          EOF
+          fi
+
+      - name: Record metrics
         continue-on-error: true
         env:
-          REPO_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          TESTED_SHA: ${{ github.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          TEST_DATA_KEY: ${{ needs.setup.outputs.key }}
+          TEST_DATA_SHA256: ${{ needs.setup.outputs.sha256 }}
+          CHISEP_DATA_KEY: ${{ needs.setup-chisep.outputs.key }}
+          CHISEP_DATA_SHA256: ${{ needs.setup-chisep.outputs.sha256 }}
           COVERAGE: ${{ needs.unit-tests.outputs.coverage }}
           TESTS_PASSED: ${{ needs.unit-tests.outputs.tests_passed }}
         run: |
-          bash scripts/integration_report.sh --figures > report.md
-          bash scripts/post_pr_comment.sh report.md
+          export TESTS_TREE=$(git rev-parse HEAD:tests) SRC_TREE=$(git rev-parse HEAD:src)
+          python3 scripts/ci_metrics.py record metrics > run.json
+          echo "Recorded $(jq '.tests | length' run.json) test(s)."
+
+      - name: Compare with main
+        # Against the newest record from a push to main (each merge runs the whole suite).
+        if: github.event_name == 'pull_request'
+        continue-on-error: true
+        run: |
+          base=""
+          if git fetch -q --no-tags --depth 1 --filter=blob:none origin \
+               "+refs/heads/ci-figures:refs/remotes/origin/ci-figures" 2>/dev/null; then
+            # Records are metrics/main/<run_id>-<attempt>.json: the newest is the highest run id.
+            latest=$(git ls-tree --name-only refs/remotes/origin/ci-figures metrics/main/ \
+              | sed 's#.*/##; s#\.json$##' | sort -t- -k1,1n -k2,2n | tail -n 1)
+            if [ -n "$latest" ]; then
+              git show "refs/remotes/origin/ci-figures:metrics/main/${latest}.json" > main.json
+              base=main.json
+            fi
+          fi
+          python3 scripts/ci_metrics.py compare run.json $base > delta.md
+          cat delta.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Publish figures and metrics
+        # A PR keeps only its latest run's figures; main keeps each run's until the weekly
+        # cleanup (ci-figures-cleanup.yml). Metrics records are kept for good. Not on a fork PR or
+        # a manual run: a fork's token cannot push, and a manual run is not a baseline.
+        id: publish
+        if: >-
+          github.event_name == 'push' ||
+          (github.event_name == 'pull_request' &&
+          github.event.pull_request.head.repo.full_name == github.repository)
+        continue-on-error: true
+        env:
+          FIGURES_DIR: figures-web
+          SCOPE: ${{ github.event_name == 'push' && 'main' || format('pr-{0}', github.event.pull_request.number) }}
+          METRICS_FILE: run.json
+        run: |
+          run="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          export FIGURES_DEST="figures/${SCOPE}/integration-tests/${run}"
+          export METRICS_DEST="metrics/${SCOPE}/${run}.json"
+          if [ "$SCOPE" != main ]; then export PRUNE_OLDER="figures/${SCOPE}/integration-tests"; fi
+          [ -f "$METRICS_FILE" ] || unset METRICS_FILE
+          bash scripts/publish_ci_results.sh
+
+      - name: Post PR comment with results
+        # Informational; the pass/fail gate is the `tests-passed` job. On a fork PR the token is
+        # read-only and the post fails, which continue-on-error keeps from failing the run.
+        if: github.event_name == 'pull_request'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          FIGURES_BASE_URL: ${{ steps.publish.outputs.base_url }}
+          FIGURES_URL: ${{ steps.figures.outputs.artifact-url }}
+          FIGURES_RETENTION_DAYS: 30
+          COVERAGE: ${{ needs.unit-tests.outputs.coverage }}
+          TESTS_PASSED: ${{ needs.unit-tests.outputs.tests_passed }}
+        run: |
+          {
+            bash scripts/integration_report.sh --figures
+            if [ -f delta.md ]; then echo ""; cat delta.md; fi
+          } > report.md
+          bash scripts/post_pr_comment.sh report.md integration-tests

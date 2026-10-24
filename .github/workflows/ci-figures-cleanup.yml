@@ -1,0 +1,33 @@
+name: CI figures cleanup
+
+# The `ci-figures` branch holds the PR comments' figures and every run's metrics record
+# (scripts/publish_ci_results.sh). Weekly, this deletes the figures of PRs closed more than 7 days
+# ago and of any run older than 30 days, and squashes the branch to one commit so deleted images
+# stop taking space. Metrics records are kept. See scripts/ci_figures_cleanup.sh.
+
+on:
+  schedule:
+    - cron: "17 3 * * 0"   # Sundays 03:17 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: read
+
+concurrency:
+  group: ci-figures-cleanup
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Prune and squash ci-figures
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash scripts/ci_figures_cleanup.sh
