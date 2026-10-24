@@ -17,6 +17,13 @@ on:
       upload:
         type: boolean
         default: true
+    # Recorded with each run's metrics (scripts/ci_metrics.py): two records are like-for-like only
+    # on the same data.
+    outputs:
+      key:
+        value: ${{ jobs.fetch.outputs.key }}
+      sha256:
+        value: ${{ jobs.fetch.outputs.sha256 }}
 
 defaults:
   run:
@@ -25,6 +32,19 @@ defaults:
 jobs:
   fetch:
     runs-on: ubuntu-latest
+    outputs:
+      key: ${{ steps.data-hash.outputs.key }}
+      sha256: ${{ steps.data-hash.outputs.sha256 }}
+    env:
+      # The cache keys. Bump one whenever its OSF dataset changes: they carry no content hash, so
+      # a replaced bundle is otherwise masked by every existing runner cache — the download is
+      # skipped, the stale bundle is served, and the tests that needed the new data skip while
+      # reporting success.
+      # bids v2 (2026-10-06): added the 2D multi-slice sessions ses-thick / ses-offsets / ses-gap
+      # (qsm-forward examples/multislice_2d.py), for tests/multislice_2d.rs.
+      # chisep v2 (2026-10-19): forces a real download so the WaterButler fix below is exercised.
+      BIDS_KEY: testdata-v2-y8adf
+      CHISEP_KEY: chisep-data-v2-y8adf
     steps:
       - name: Cache test data
         id: cache-testdata
@@ -32,13 +52,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: bids
-          # Bump this key whenever the OSF bundle changes. It carries no content hash, so a
-          # replaced bids.zip is otherwise masked by every existing runner cache — the download
-          # is skipped, the stale bundle is served, and the tests that needed the new data skip
-          # while reporting success.
-          # v2 (2026-10-06): added the 2D multi-slice sessions ses-thick / ses-offsets / ses-gap
-          # (qsm-forward examples/multislice_2d.py), for tests/multislice_2d.rs.
-          key: testdata-v2-y8adf
+          key: ${{ env.BIDS_KEY }}
 
       - name: Download test data from OSF
         if: inputs.dataset == 'bids' && (steps.cache-testdata.outputs.cache-hit != 'true')
@@ -67,9 +81,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: qsmci-chisep
-          # Bump the key whenever the OSF dataset changes (no content hash; see the BIDS cache).
-          # v2 (2026-10-19): forces a real download so the WaterButler fix below is exercised.
-          key: chisep-data-v2-y8adf
+          key: ${{ env.CHISEP_KEY }}
 
       - name: Download chisep phantom from OSF
         if: inputs.dataset == 'chisep' && (steps.cache-chisep.outputs.cache-hit != 'true')
@@ -145,6 +157,18 @@ jobs:
             rm -rf qsmci-chisep && mv qsmci-chisep-flat qsmci-chisep
           fi
           ls qsmci-chisep/inputs qsmci-chisep/groundtruth
+
+      - name: Hash test data
+        id: data-hash
+        env:
+          DATASET: ${{ inputs.dataset }}
+        run: |
+          if [ "$DATASET" = bids ]; then dir=bids key=$BIDS_KEY; else dir=qsmci-chisep key=$CHISEP_KEY; fi
+          echo "key=$key" >> "$GITHUB_OUTPUT"
+          # One hash over every file's path and content, independent of mtimes and archive order.
+          sha=$(cd "$dir" && find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | cut -d' ' -f1)
+          echo "sha256=$sha" >> "$GITHUB_OUTPUT"
+          echo "$DATASET data sha256: $sha"
 
       - name: Upload chisep data artifact
         if: inputs.dataset == 'chisep' && inputs.upload
