@@ -1995,6 +1995,42 @@ pub fn fit_ppm_complex_noise(magnitude: &[f64], n_echoes: usize) -> Vec<f64> {
         .collect()
 }
 
+/// How far, in seconds, each echo spacing may be from the first for [`fit_ppm_complex`] and
+/// MEDI's noise map ([`fit_ppm_complex_noise`]) to count the echoes as evenly spaced: 0.02 ms.
+///
+/// `Fit_ppm_complex.m` models the phase in echo index and takes no echo times, so it has no
+/// tolerance of its own; the check is QSM.rs's, to refuse trains the model does not describe.
+/// The tolerance is absolute and set by how echo times are stored, not by the spacing: BIDS
+/// sidecars and DICOM headers round them, typically to 0.01 ms, so each spacing can be off by
+/// 0.01 ms and two spacings of an evenly spaced train can differ by 0.02 ms (for example
+/// `[4.92, 9.84, 14.77, 19.68]` ms, spacings `[4.92, 4.93, 4.91]` ms). A relative 1e-3 of the
+/// spacing, used before, is 0.005 ms on a 5 ms train and refused such sidecars. A train that
+/// really is uneven (a different first interval, a missing echo) is off by far more.
+pub const FIT_PPM_COMPLEX_SPACING_TOLERANCE_S: f64 = 2e-5;
+
+/// Why [`fit_ppm_complex`] (and so MEDI's field map and noise map, which every pipeline entry
+/// point that runs them checks with this) cannot use these echo times, or `None` if it can: they
+/// must be finite, increasing (a single echo after `TE = 0`), and evenly spaced, each spacing
+/// within [`FIT_PPM_COMPLEX_SPACING_TOLERANCE_S`] of the first. A host can call this to reject a
+/// run before any work starts, and so applies exactly the rule and tolerance QSM.rs does.
+pub fn echo_spacing_problem(echo_times: &[f64]) -> Option<String> {
+    let first = match echo_times {
+        [] => return Some("needs at least one echo time".to_string()),
+        [te] => *te,
+        [te1, te2, ..] => te2 - te1,
+    };
+    if echo_times.iter().any(|t| !t.is_finite()) || first <= 0.0 {
+        return Some(format!("needs finite, increasing echo times; got {echo_times:?} s"));
+    }
+    if echo_times.windows(2).any(|w| ((w[1] - w[0]) - first).abs() > FIT_PPM_COMPLEX_SPACING_TOLERANCE_S) {
+        return Some(format!(
+            "needs evenly spaced echoes (each spacing within {} ms of the first); got {echo_times:?} s",
+            FIT_PPM_COMPLEX_SPACING_TOLERANCE_S * 1e3
+        ));
+    }
+    None
+}
+
 /// Complex multi-echo field fit, a port of `Fit_ppm_complex.m` (MEDI toolbox 2024.11.26; Liu et
 /// al., MRM 2013;69:467; Kressler et al., IEEE TMI 2010;29:273; de Rochefort et al., MRM
 /// 2008;60:1003).
@@ -2008,8 +2044,8 @@ pub fn fit_ppm_complex_noise(magnitude: &[f64], n_echoes: usize) -> Vec<f64> {
 /// [`B0EstimationMethod::ComplexFit`](crate::pipeline::B0EstimationMethod::ComplexFit) is chosen.
 ///
 /// As in the reference:
-/// - the echoes must be evenly spaced (`echo_times` is only used to check that and to report the
-///   spacing; the model is in echo index);
+/// - the echoes must be evenly spaced (`echo_times` is only used to check that, with
+///   [`echo_spacing_problem`], and to report the spacing; the model is in echo index);
 /// - the stopping test and the iteration count are global over the volume, not per voxel;
 /// - a single echo is fitted as `cat(4, abs(M), M)`, i.e. with zero phase at `TE = 0`, so the
 ///   field is the echo's phase over `TE₁`;
@@ -2058,14 +2094,10 @@ pub fn fit_ppm_complex(
         check_len(&format!("fit_ppm_complex: phase of echo {}", e + 1), phases[e].len(), n)?;
         check_len(&format!("fit_ppm_complex: magnitude of echo {}", e + 1), magnitudes[e].len(), n)?;
     }
-    let echo_spacing = if n_in == 1 { echo_times[0] } else { echo_times[1] - echo_times[0] };
-    let uneven = echo_times.windows(2)
-        .any(|w| ((w[1] - w[0]) - echo_spacing).abs() > 1e-3 * echo_spacing.abs());
-    if uneven || !(echo_spacing.is_finite() && echo_spacing > 0.0) {
-        return Err(InputError(format!(
-            "fit_ppm_complex needs evenly spaced, increasing echo times; got {echo_times:?}"
-        )));
+    if let Some(problem) = echo_spacing_problem(echo_times) {
+        return Err(InputError(format!("fit_ppm_complex {problem}")));
     }
+    let echo_spacing = if n_in == 1 { echo_times[0] } else { echo_times[1] - echo_times[0] };
     if !(params.reltol.is_finite() && params.reltol >= 0.0) {
         return Err(InputError(format!("fit_ppm_complex: reltol must be >= 0, got {}", params.reltol)));
     }
@@ -2259,6 +2291,21 @@ mod tests {
         let v = [1.0];
         let e = fit_ppm_complex(&[&v, &v, &v], &[&v, &v, &v], &[0.005, 0.010, 0.020], &FitPpmComplexParams::default());
         assert!(e.unwrap_err().0.contains("evenly spaced"));
+    }
+
+    #[test]
+    fn echo_spacing_accepts_sidecar_rounding() {
+        // An evenly spaced train as its sidecars round it: spacings 4.92, 4.93, 4.91 ms.
+        let te = [4.92e-3, 9.84e-3, 14.77e-3, 19.68e-3];
+        assert_eq!(echo_spacing_problem(&te), None);
+        let v = [1.0];
+        let r = fit_ppm_complex(&[&v, &v, &v, &v], &[&v, &v, &v, &v], &te, &FitPpmComplexParams::default()).unwrap();
+        assert_eq!(r.echo_spacing, te[1] - te[0]);
+        // A train that is uneven by more than rounding, decreasing, non-finite or empty is not.
+        for bad in [&[4.92e-3, 9.84e-3, 14.80e-3][..], &[0.03, 0.02, 0.01], &[0.005, f64::NAN], &[0.0], &[]] {
+            assert!(echo_spacing_problem(bad).is_some(), "{bad:?}");
+        }
+        assert_eq!(echo_spacing_problem(&[0.005]), None);
     }
 
     use super::*;

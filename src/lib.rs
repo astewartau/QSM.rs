@@ -171,6 +171,7 @@ pub mod fieldmap {
         PhaseOffsetParams, CoilCombinationResult, LinearFitParams, LinearFitResult, B0WeightType,
         multi_echo_robust_fit, RobustFitParams, RobustFitResult, RobustLoss, EchoQuality,
         fit_ppm_complex, fit_ppm_complex_noise, FitPpmComplexParams, FitPpmComplexResult,
+        echo_spacing_problem, FIT_PPM_COMPLEX_SPACING_TOLERANCE_S,
     };
 }
 
