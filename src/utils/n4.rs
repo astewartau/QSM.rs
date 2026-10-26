@@ -105,7 +105,7 @@
 //! Reference implementation: <https://github.com/ANTsX/ANTs> (`Examples/N4BiasFieldCorrection.cxx`)
 //! and <https://github.com/InsightSoftwareConsortium/ITK> (`Modules/Filtering/BiasCorrection`).
 
-use crate::utils::bias_correction::check_volume;
+use crate::error::InputError;
 use crate::Grid;
 use num_complex::Complex64;
 use rustfft::FftPlanner;
@@ -156,6 +156,67 @@ impl Default for N4Params {
     }
 }
 
+impl N4Params {
+    /// Checks the parameters [`n4_bias_correction`] cannot run with, without an image: at least
+    /// one fitting level, the first with at least one iteration (ITK refines the lattice the
+    /// previous level fitted, so the first level must fit one), a shrink factor and mesh sizes of at least 1, a spline order of 1, 2 or
+    /// 3, at least two histogram bins, a finite FWHM > 0, a finite Wiener noise ≥ 0 and a finite
+    /// convergence threshold. The errors name the parameter and its value. A host can call this
+    /// (and [`Self::check_grid`] once it knows the grid) to refuse a run before any work starts;
+    /// [`n4_bias_correction`] runs the same checks.
+    pub fn validate(&self) -> Result<(), InputError> {
+        if self.max_iterations.first().is_none_or(|&n| n == 0) {
+            return Err(InputError::param(
+                "N4 max_iterations",
+                format!("{:?}", self.max_iterations),
+                "at least one fitting level, the first with at least one iteration",
+            ));
+        }
+        if self.shrink_factor == 0 {
+            return Err(InputError::param("N4 shrink_factor", 0, ">= 1"));
+        }
+        if self.mesh.contains(&0) {
+            return Err(InputError::param("N4 mesh", format!("{:?}", self.mesh), ">= 1 along each axis"));
+        }
+        if !(1..=3).contains(&self.spline_order) {
+            return Err(InputError::param("N4 spline_order", self.spline_order, "1, 2 or 3"));
+        }
+        if self.histogram_bins < 2 {
+            return Err(InputError::param("N4 histogram_bins", self.histogram_bins, ">= 2"));
+        }
+        if !(self.bias_field_fwhm.is_finite() && self.bias_field_fwhm > 0.0) {
+            return Err(InputError::param("N4 bias_field_fwhm", self.bias_field_fwhm, "finite and > 0"));
+        }
+        if !(self.wiener_noise.is_finite() && self.wiener_noise >= 0.0) {
+            return Err(InputError::param("N4 wiener_noise", self.wiener_noise, "finite and >= 0"));
+        }
+        if !self.convergence_threshold.is_finite() {
+            return Err(InputError::param("N4 convergence_threshold", self.convergence_threshold, "finite"));
+        }
+        Ok(())
+    }
+
+    /// Checks that a grid of `dims` voxels is large enough for these parameters: N4 fits the
+    /// bias field on the image shrunk by [`Self::shrink_factor`] (ITK's `ShrinkImageFilter`,
+    /// `n / shrink_factor` voxels per axis), and its B-spline fit needs at least two voxels along
+    /// each axis of the shrunk grid, i.e. `2 · shrink_factor` voxels per axis. The error names
+    /// the axis, its size and the shrink factor. Assumes `shrink_factor >= 1` (see
+    /// [`Self::validate`]).
+    pub fn check_grid(&self, dims: (usize, usize, usize)) -> Result<(), InputError> {
+        let s = self.shrink_factor.max(1);
+        for (axis, n) in [dims.0, dims.1, dims.2].into_iter().enumerate() {
+            if n / s < 2 {
+                return Err(InputError(format!(
+                    "N4 needs at least {} voxels along each axis at shrink_factor = {s} (two after \
+                     shrinking); axis {axis} of the {}x{}x{} grid has {n}",
+                    2 * s, dims.0, dims.1, dims.2
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Output of [`n4_bias_correction`].
 #[derive(Clone, Debug)]
 pub struct N4Output {
@@ -178,27 +239,35 @@ pub struct N4Output {
 /// * `progress_callback` - Called with (iterations done, maximum iterations) after each
 ///   iteration.
 ///
-/// # Panics
-/// If a volume does not match the grid, the shrunk grid has fewer than two voxels along an
-/// axis, there are no fitting levels, the spline order is not 1, 2 or 3, a mesh size is zero,
-/// there are fewer than two histogram bins, or the mask selects no voxel of the shrunk grid.
+/// # Errors
+/// [`InputError`] if the parameters fail [`N4Params::validate`], the grid fails
+/// [`N4Params::check_grid`] (fewer than two voxels along an axis after shrinking), the image or
+/// mask does not match the grid, or the mask selects no voxel of the shrunk grid.
 pub fn n4_bias_correction(
     image: &[f64],
     mask: Option<&[u8]>,
     grid: &Grid,
     params: &N4Params,
     progress_callback: impl Fn(usize, usize),
-) -> N4Output {
-    let n_total = check_volume("n4_bias_correction: image", image.len(), grid);
+) -> Result<N4Output, InputError> {
+    params.validate()?;
+    let (nx, ny, nz) = grid.dims;
+    let n_total = nx * ny * nz;
+    let check_volume = |name: &str, len: usize| {
+        if len == n_total {
+            Ok(())
+        } else {
+            Err(InputError(format!(
+                "N4 {name} has {len} voxels but the grid is {nx}x{ny}x{nz} ({n_total} voxels)"
+            )))
+        }
+    };
+    check_volume("image", image.len())?;
     if let Some(m) = mask {
-        check_volume("n4_bias_correction: mask", m.len(), grid);
+        check_volume("mask", m.len())?;
     }
+    params.check_grid(grid.dims)?;
     let order = params.spline_order;
-    assert!((1..=3).contains(&order), "n4_bias_correction: spline order must be 1, 2 or 3 (got {order})");
-    assert!(!params.max_iterations.is_empty(), "n4_bias_correction: at least one fitting level is needed");
-    assert!(params.mesh.iter().all(|&m| m > 0), "n4_bias_correction: mesh sizes must be positive");
-    assert!(params.histogram_bins >= 2, "n4_bias_correction: at least two histogram bins are needed");
-    assert!(params.shrink_factor > 0, "n4_bias_correction: shrink factor must be positive");
 
     let dims = [grid.dims.0, grid.dims.1, grid.dims.2];
 
@@ -207,13 +276,8 @@ pub fn n4_bias_correction(
     let mut sdims = [0usize; 3];
     let mut offs = [0usize; 3];
     for d in 0..3 {
-        let m = (dims[d] / s).max(1);
-        assert!(
-            m >= 2,
-            "n4_bias_correction: the shrunk grid needs at least two voxels per axis \
-             (axis {d} has {} voxels at shrink factor {s})",
-            dims[d]
-        );
+        // At least 2, by `check_grid` above.
+        let m = dims[d] / s;
         sdims[d] = m;
         // o = (n-1)/2 - s(m-1)/2, rounded half up; in halves: k = (n-1) - s(m-1).
         let k = (dims[d] as i64 - 1) - (s as i64) * (m as i64 - 1);
@@ -235,7 +299,13 @@ pub fn n4_bias_correction(
         }
     }
     let inc_idx: Vec<usize> = (0..ns).filter(|&i| included[i]).collect();
-    assert!(!inc_idx.is_empty(), "n4_bias_correction: the mask selects no voxel of the shrunk grid");
+    if inc_idx.is_empty() {
+        return Err(InputError(format!(
+            "N4's mask selects no voxel of the image shrunk by shrink_factor = {s} \
+             ({}x{}x{} voxels)",
+            sdims[0], sdims[1], sdims[2]
+        )));
+    }
 
     // --- Log transform (positive voxels inside the mask only) ---
     for &i in &inc_idx {
@@ -292,8 +362,7 @@ pub fn n4_bias_correction(
                 lattice = Some(refined);
                 ncp = new_ncp;
             } else {
-                // ITK refines the lattice it has; with no iteration yet there is none.
-                panic!("n4_bias_correction: the first fitting level needs at least one iteration");
+                unreachable!("validate() requires an iteration at the first level");
             }
         }
     }
@@ -334,7 +403,7 @@ pub fn n4_bias_correction(
         }
     }
 
-    N4Output { corrected, bias_field }
+    Ok(N4Output { corrected, bias_field })
 }
 
 //=============================================================================
@@ -761,7 +830,7 @@ mod tests {
     fn n4_reduces_a_smooth_bias() {
         let (img, _bias, grid) = phantom([24, 24, 24]);
         let params = N4Params { max_iterations: vec![20, 20], ..N4Params::default() };
-        let out = n4_bias_correction(&img, None, &grid, &params, |_, _| {});
+        let out = n4_bias_correction(&img, None, &grid, &params, |_, _| {}).unwrap();
         // Within-class coefficient of variation drops.
         let cv = |v: &[f64], lo: f64, hi: f64| {
             let sel: Vec<f64> = img.iter().zip(v).filter(|(a, _)| **a > lo && **a < hi).map(|(_, b)| *b).collect();
@@ -783,7 +852,7 @@ mod tests {
         let (img, _bias, grid) = phantom([20, 20, 20]);
         let mask: Vec<u8> = img.iter().map(|&v| (v > 0.0) as u8).collect();
         let params = N4Params { max_iterations: vec![5], ..N4Params::default() };
-        let out = n4_bias_correction(&img, Some(&mask), &grid, &params, |_, _| {});
+        let out = n4_bias_correction(&img, Some(&mask), &grid, &params, |_, _| {}).unwrap();
         let (mut lo, mut hi, mut clo, mut chi) = (f64::MAX, f64::MIN, f64::MAX, f64::MIN);
         for i in 0..img.len() {
             if mask[i] == 0 {
@@ -803,8 +872,39 @@ mod tests {
         let (img, _bias, grid) = phantom([16, 16, 16]);
         let params = N4Params { convergence_threshold: 1.0, ..N4Params::default() };
         let last = std::cell::Cell::new(0);
-        n4_bias_correction(&img, None, &grid, &params, |i, _| last.set(i));
+        n4_bias_correction(&img, None, &grid, &params, |i, _| last.set(i)).unwrap();
         assert_eq!(last.get(), params.max_iterations.len());
+    }
+
+    #[test]
+    fn refuses_unusable_input_with_an_error() {
+        let (img, _bias, grid) = phantom([16, 16, 16]);
+        let err = |p: N4Params| n4_bias_correction(&img, None, &grid, &p, |_, _| {}).unwrap_err().to_string();
+        let d = N4Params::default;
+        assert_eq!(err(N4Params { spline_order: 4, ..d() }), "N4 spline_order = 4 is out of range: must be 1, 2 or 3");
+        assert_eq!(err(N4Params { max_iterations: vec![], ..d() }), "N4 max_iterations = [] is out of range: must be at least one fitting level, the first with at least one iteration");
+        assert!(err(N4Params { max_iterations: vec![0, 50], ..d() }).starts_with("N4 max_iterations = [0, 50]"));
+        assert!(n4_bias_correction(&img, None, &grid, &N4Params { max_iterations: vec![1, 0], ..d() }, |_, _| {}).is_ok());
+        assert_eq!(err(N4Params { mesh: [1, 0, 1], ..d() }), "N4 mesh = [1, 0, 1] is out of range: must be >= 1 along each axis");
+        assert_eq!(err(N4Params { histogram_bins: 1, ..d() }), "N4 histogram_bins = 1 is out of range: must be >= 2");
+        assert_eq!(err(N4Params { shrink_factor: 0, ..d() }), "N4 shrink_factor = 0 is out of range: must be >= 1");
+        assert!(err(N4Params { bias_field_fwhm: 0.0, ..d() }).starts_with("N4 bias_field_fwhm = 0"));
+        assert!(err(N4Params { wiener_noise: f64::NAN, ..d() }).starts_with("N4 wiener_noise = NaN"));
+        assert!(err(N4Params { convergence_threshold: f64::INFINITY, ..d() }).starts_with("N4 convergence_threshold = inf"));
+        // The grid check names the axis, its size and the shrink factor: a 6-slice slab at 4.
+        let slab = Grid::new(16, 16, 6, 1.0, 1.0, 1.0);
+        let e = n4_bias_correction(&vec![1.0; 16 * 16 * 6], None, &slab, &d(), |_, _| {}).unwrap_err().to_string();
+        assert!(e.contains("axis 2") && e.contains("has 6") && e.contains("shrink_factor = 4"), "{e}");
+        assert_eq!(d().check_grid((16, 16, 6)).unwrap_err().to_string(), e);
+        assert!(d().check_grid((8, 8, 8)).is_ok() && d().check_grid((8, 8, 7)).is_err());
+        // Volumes that do not match the grid, and a mask that selects nothing.
+        let e = n4_bias_correction(&img[1..], None, &grid, &d(), |_, _| {}).unwrap_err().to_string();
+        assert!(e.starts_with("N4 image has 4095 voxels but the grid is 16x16x16"), "{e}");
+        let e = n4_bias_correction(&img, Some(&[1u8; 10]), &grid, &d(), |_, _| {}).unwrap_err().to_string();
+        assert!(e.starts_with("N4 mask has 10 voxels"), "{e}");
+        let e = n4_bias_correction(&img, Some(&vec![0u8; img.len()]), &grid, &d(), |_, _| {}).unwrap_err().to_string();
+        assert!(e.contains("mask selects no voxel"), "{e}");
+        assert!(d().validate().is_ok());
     }
 
     #[test]

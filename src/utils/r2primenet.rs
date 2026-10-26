@@ -1,4 +1,4 @@
-//! R2PRIMEnet: learned R2* → R2′ conversion (`onnx` feature).
+//! R2PRIMEnet: learned R2* → R2′ conversion (inference needs the `onnx` feature).
 //!
 //! When no spin-echo acquisition provides a measured R2, [`r2prime`](super::epg::r2prime)
 //! (R2′ = R2* − R2) has nothing to subtract. R2PRIMEnet — the R2*→R2′ conversion network of
@@ -78,8 +78,15 @@
 //! susceptibility source separation." Human Brain Mapping, 46(4):e70136 — R2PRIMEnet is its
 //! R2*→R2′ conversion network.
 
+// The parameters and limits are plain Rust and always built, so hosts can carry the settings
+// and check a patch without the networks; only inference needs `onnx`.
+#![cfg_attr(not(feature = "onnx"), allow(dead_code))]
+
+#[cfg(feature = "onnx")]
 use crate::grid::Grid;
+#[cfg(feature = "onnx")]
 use crate::models::onnx::{OnnxError, OnnxModel, Tensor};
+#[cfg(feature = "onnx")]
 use super::sliding::starts;
 
 /// The authors' patch: `(D, H, W)` = `(x, y, z)`.
@@ -88,7 +95,8 @@ pub const AUTHORS_PATCH: (usize, usize, usize) = (192, 192, 128);
 /// A patch that fits a 32-bit (WASM) heap; see the module docs for what it costs.
 pub const WASM_PATCH: (usize, usize, usize) = (128, 128, 64);
 
-/// Four pooling levels, so every patch dimension must be a multiple of this.
+/// Four pooling levels, so every patch dimension must be a multiple of this. Built without `onnx`,
+/// like the other limits here, so a host can check a patch without the networks.
 pub const POOL_MULTIPLE: usize = 16;
 
 /// Field strength the published R2PRIMEnet weights were trained at, in Tesla (Kim 2025).
@@ -189,6 +197,7 @@ impl Default for R2PrimeNetNorm {
 ///
 /// # Panics
 /// If a patch dimension is not a multiple of 16 (the network's four pooling levels).
+#[cfg(feature = "onnx")]
 pub fn r2primenet(
     r2star: &[f64],
     mask: &[u8],
@@ -301,6 +310,7 @@ pub fn r2primenet(
 /// `magnitude` is voxel-major `(n_voxels, n_echoes)` and `echo_times` are in **seconds**
 /// (ARLO requires ≥3 increasing echo times; other echo times are [`OnnxError::Domain`]); R2* is 0 outside `mask`. Returns `(r2prime_hz, r2star_hz)` so the caller
 /// can keep the intermediate R2* map.
+#[cfg(feature = "onnx")]
 pub fn r2primenet_from_magnitude(
     magnitude: &[f64],
     echo_times: &[f64],

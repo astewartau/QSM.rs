@@ -311,7 +311,9 @@ fn box_mean_replicate(data: &[f64], dims: (usize, usize, usize), half: [usize; 3
 /// or the root sum of squares) and N4 (not another bias correction) matter.
 ///
 /// # Errors
-/// If there are no echoes, or an echo does not match the grid.
+/// If there are no echoes, an echo does not match the grid, or N4 refuses the grid (fewer than
+/// 8 voxels along an axis at ANTs' default shrink factor of 4; see
+/// [`N4Params::check_grid`](crate::utils::N4Params::check_grid)).
 pub fn qsmart_vessel_magnitude(
     magnitudes: &[&[f64]],
     grid: &crate::Grid,
@@ -330,7 +332,7 @@ pub fn qsmart_vessel_magnitude(
     }
     let ne = magnitudes.len() as f64;
     let mean: Vec<f64> = (0..n).map(|i| magnitudes.iter().map(|m| m[i]).sum::<f64>() / ne).collect();
-    Ok(crate::utils::n4_bias_correction(&mean, None, grid, &crate::utils::N4Params::default(), |_, _| {}).corrected)
+    Ok(crate::utils::n4_bias_correction(&mean, None, grid, &crate::utils::N4Params::default(), |_, _| {})?.corrected)
 }
 
 /// Complete QSMART pipeline parameters
@@ -463,7 +465,7 @@ mod tests {
             .collect();
         let refs: Vec<&[f64]> = echoes.iter().map(|v| v.as_slice()).collect();
         let mean: Vec<f64> = (0..n).map(|i| (echoes[0][i] + echoes[1][i] + echoes[2][i]) / 3.0).collect();
-        let want = crate::utils::n4_bias_correction(&mean, None, &grid, &crate::utils::N4Params::default(), |_, _| {}).corrected;
+        let want = crate::utils::n4_bias_correction(&mean, None, &grid, &crate::utils::N4Params::default(), |_, _| {}).unwrap().corrected;
         assert_eq!(qsmart_vessel_magnitude(&refs, &grid).unwrap(), want);
         assert!(qsmart_vessel_magnitude(&[], &grid).is_err());
         assert!(qsmart_vessel_magnitude(&[&echoes[0][..n - 1]], &grid).is_err());

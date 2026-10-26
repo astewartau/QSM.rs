@@ -118,8 +118,9 @@ pub const AUTHORS_PATCH: (usize, usize, usize) = (192, 192, 128);
 /// (`tests/chisep_xsepnet.rs`).
 pub const WASM_PATCH: (usize, usize, usize) = (128, 128, 64);
 
-/// Four pooling levels, so every patch dimension must be a multiple of this.
-const POOL_MULTIPLE: usize = 16;
+/// Four pooling levels, so every patch dimension must be a multiple of this. Public (and built
+/// without `onnx`) so a host can check a patch, or state the rule, without restating the number.
+pub const POOL_MULTIPLE: usize = 16;
 
 /// Inference parameters for [`chisepnet`].
 #[cfg_attr(feature = "introspection", derive(serde::Serialize))]

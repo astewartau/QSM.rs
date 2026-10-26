@@ -67,8 +67,10 @@ use crate::models::onnx::{OnnxModel, OnnxError, Tensor};
 #[cfg(feature = "onnx")]
 use crate::utils::sliding::starts;
 
-/// Three 2× pooling levels, so every patch dimension must be a multiple of this.
-const POOL_MULTIPLE: usize = 8;
+/// Three 2× pooling levels, so every patch dimension must be a multiple of this. Public (and
+/// built without `onnx`) so a host can check a patch, or state the rule, without restating the
+/// number.
+pub const POOL_MULTIPLE: usize = 8;
 
 /// A patch that fits a 32-bit (WASM) heap alongside a browser pipeline's other volumes. Peak
 /// memory, measured natively (single-threaded): about 1.8 KB per patch voxel plus ~0.9 GB for the

@@ -197,11 +197,14 @@ pub mod relaxometry {
     pub use crate::utils::epg::{
         epg_cpmg_echoes, r2_epg, r2prime, R2EpgParams, R2PrimeMap, EPG_TE_TOLERANCE_S,
     };
-    #[cfg(feature = "onnx")]
+    // The parameters and limits are always exported, so hosts built without `onnx` can carry
+    // R2PRIMEnet settings and check a patch; only the inference functions need the feature.
     pub use crate::utils::r2primenet::{
-        r2primenet, r2primenet_from_magnitude, R2PrimeNetNorm, R2PrimeNetParams,
-        AUTHORS_PATCH, WASM_PATCH, B0_TOLERANCE_T, TRAINED_B0_T, POOL_MULTIPLE,
+        R2PrimeNetNorm, R2PrimeNetParams, AUTHORS_PATCH, WASM_PATCH, B0_TOLERANCE_T, TRAINED_B0_T,
+        POOL_MULTIPLE,
     };
+    #[cfg(feature = "onnx")]
+    pub use crate::utils::r2primenet::{r2primenet, r2primenet_from_magnitude};
 }
 
 /// MP-PCA denoising for multi-volume data (e.g. multi-echo magnitude).

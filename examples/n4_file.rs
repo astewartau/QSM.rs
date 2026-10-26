@@ -40,7 +40,7 @@ fn main() {
     }
     let t = std::time::Instant::now();
     let iterations = std::cell::Cell::new(0);
-    let out = n4_bias_correction(&f.data, mask.as_deref(), &grid, &params, |i, _| iterations.set(i));
+    let out = n4_bias_correction(&f.data, mask.as_deref(), &grid, &params, |i, _| iterations.set(i)).expect("n4");
     eprintln!("n4: {:?}, {} iterations, {:.2}s", f.dims, iterations.get(), t.elapsed().as_secs_f64());
     save_nifti_to_file(Path::new(&a[2]), &out.corrected, f.dims, vs, &f.affine).expect("write corrected");
     if let Some(p) = a.get(3) {

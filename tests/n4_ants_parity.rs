@@ -37,7 +37,7 @@ fn max_rel(a: &[f64], b: &[f64]) -> f64 {
 fn n4_matches_ants_defaults() {
     let (input, ants_bias, _) = load();
     let grid = Grid::new(DIMS.0, DIMS.1, DIMS.2, 1.0, 1.0, 1.5);
-    let out = n4_bias_correction(&input, None, &grid, &N4Params::default(), |_, _| {});
+    let out = n4_bias_correction(&input, None, &grid, &N4Params::default(), |_, _| {}).unwrap();
     let d = max_rel(&out.bias_field, &ants_bias);
     println!("bias field vs ANTs: max relative difference {d:.2e}");
     assert!(d < 2e-4, "bias field differs from ANTs by {d}");
@@ -48,7 +48,7 @@ fn n4_matches_ants_with_mask() {
     let (input, _, ants_masked) = load();
     let grid = Grid::new(DIMS.0, DIMS.1, DIMS.2, 1.0, 1.0, 1.5);
     let mask: Vec<u8> = input.iter().map(|&v| (v > 30.0) as u8).collect();
-    let out = n4_bias_correction(&input, Some(&mask), &grid, &N4Params::default(), |_, _| {});
+    let out = n4_bias_correction(&input, Some(&mask), &grid, &N4Params::default(), |_, _| {}).unwrap();
     let d = max_rel(&out.corrected, &ants_masked);
     println!("masked, rescaled output vs ANTs: max relative difference {d:.2e}");
     assert!(d < 1e-3, "corrected image differs from ANTs by {d}");

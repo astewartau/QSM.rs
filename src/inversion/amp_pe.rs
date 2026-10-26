@@ -1237,7 +1237,7 @@ mod tests {
         let run = |p: AmpPeParams| amp_pe(&[0.0; 64], &[1u8; 64], None, None, &grid, (0.0, 0.0, 1.0), &p, |_, _| {});
         for o in [0, 5] {
             let err = run(AmpPeParams { wave_order: o, ..Default::default() }).unwrap_err();
-            assert!(err.0.contains("AMP-PE wave_order") && err.0.contains("1..=4"), "{err}");
+            assert!(err.0.contains("AMP-PE wave_order") && err.0.contains("from 1 to 4"), "{err}");
         }
         let err = run(AmpPeParams { nlevel: 64, ..Default::default() }).unwrap_err();
         assert!(err.0.contains("AMP-PE nlevel = 64") && err.0.contains("<= 63"), "{err}");
