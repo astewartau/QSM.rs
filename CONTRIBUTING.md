@@ -261,8 +261,12 @@ QSMxT and qsmbly can show it. Its module docs are the specification; the essenti
   under `# Pipeline rules`.
 - **Tests** in the same file must keep passing: add a violating case for the new rule to
   `violations()`; the default config must still raise nothing; strengths must match their basis.
-- Rules never change settings themselves. A host shows the finding and lets the user apply the
-  rule's `default`; no setting changes silently because another was chosen.
+- Rules never change settings themselves, and hosts never change a setting silently (no
+  default that depends on another setting). Hosts show actionable findings (`Required`,
+  `Recommended`, `Discouraged`) in a pop-up with Apply / Keep mine and a badge on the setting
+  afterwards. When a method is chosen they also offer that method's "reference pipeline"
+  pop-up, listing its `Reference`-strength differences, and mark those settings with an info
+  marker that names the method.
 
 ## Tests
 
