@@ -323,6 +323,7 @@ fn field_mapping_with_offset(
         phase_offset: Some(phase_offset),
         robust_fit,
         reliability: None,
+        qsmart_fit_threshold: None,
         field_noise_ppm: None,
     })
 }
@@ -454,6 +455,7 @@ fn field_mapping_direct(
         robust_fit,
         field_noise_ppm: None,
         reliability: None,
+        qsmart_fit_threshold: None,
     })
 }
 
@@ -483,6 +485,7 @@ fn field_mapping_qsmart(
         phase_offset: None,
         robust_fit: None,
         reliability: Some(fit.reliability),
+        qsmart_fit_threshold: Some(fit.fit_threshold),
         field_noise_ppm: None,
     })
 }
@@ -585,6 +588,7 @@ fn field_mapping_single_echo(
         phase_offset: None,
         robust_fit: None,
         reliability: None,
+        qsmart_fit_threshold: None,
         field_noise_ppm: None,
     })
 }
@@ -657,6 +661,7 @@ fn field_mapping_complex_fit(
         phase_offset: None,
         robust_fit: None,
         reliability: None,
+        qsmart_fit_threshold: None,
         field_noise_ppm: Some(field_noise_ppm),
     })
 }
@@ -740,6 +745,14 @@ mod tests {
         assert_eq!(got.b0_field_ppm, want.field_ppm);
         assert_eq!(got.reliability, Some(want.reliability));
         assert!(got.reliability.as_ref().unwrap().contains(&0) && got.reliability.as_ref().unwrap().contains(&1));
+        assert_eq!(got.qsmart_fit_threshold, Some(thr));
+        // An adaptive threshold is reported as the residual the percentile resolved to.
+        let pct = crate::utils::QsmartFitThreshold::Percentile(99.0);
+        let want_pct = crate::utils::qsmart_echofit(&uw, &m, &meta.echo_times, &grid, ppm, pct);
+        let config_pct = FieldMappingConfig { b0_estimation: B0EstimationMethod::QsmartEchofit { fit_threshold: pct }, ..config.clone() };
+        let got_pct = run_field_mapping(&p, Some(&m), &mask, &meta, &config_pct, &mut |_, _| {}).unwrap();
+        assert_eq!(got_pct.qsmart_fit_threshold, Some(want_pct.fit_threshold));
+        assert!(want_pct.fit_threshold > 0.0 && want_pct.fit_threshold != thr);
 
         for bad in [
             FieldMappingConfig { unwrapping_algorithm: UnwrappingAlgorithm::Romeo, ..config.clone() },
@@ -750,7 +763,8 @@ mod tests {
         }
         // Every other method leaves R_0 out.
         let linear = FieldMappingConfig { b0_estimation: B0EstimationMethod::LinearFit(LinearFitParams::default()), ..config };
-        assert!(run_field_mapping(&p, Some(&m), &mask, &meta, &linear, &mut |_, _| {}).unwrap().reliability.is_none());
+        let got_linear = run_field_mapping(&p, Some(&m), &mask, &meta, &linear, &mut |_, _| {}).unwrap();
+        assert!(got_linear.reliability.is_none() && got_linear.qsmart_fit_threshold.is_none());
     }
 
     #[test]

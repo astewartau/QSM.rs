@@ -307,6 +307,31 @@ mod tests {
         assert!(run_bg_removal(&field, &mask, &meta, &config, Some(&vec![1.0; 2 * n]), &mut |_, _| {}).is_ok());
     }
 
+    /// The dispatcher checks the echo times with `fieldmap::echo_spacing_problem`, so a train
+    /// that is even up to sidecar rounding runs and an uneven one is refused before any work.
+    #[test]
+    fn pdf_checks_echo_spacing_with_the_public_rule() {
+        let (nx, ny, nz) = (8, 8, 8);
+        let n = nx * ny * nz;
+        let config = BgRemovalConfig { algorithm: BgRemovalAlgorithm::Pdf, ..Default::default() };
+        let (field, mask) = (vec![0.1; n], vec![1u8; n]);
+        for (te, ok) in [(vec![4.92e-3, 9.84e-3, 14.77e-3, 19.68e-3], true), (vec![5e-3, 10e-3, 16e-3, 21e-3], false)] {
+            assert_eq!(crate::fieldmap::echo_spacing_problem(&te).is_none(), ok);
+            let meta = ScanMetadata {
+                dims: (nx, ny, nz), voxel_size: (1.0, 1.0, 1.0),
+                echo_times: te.clone(), field_strength: 3.0, b0_direction: (0.0, 0.0, 1.0),
+                slice_geometry: None,
+                affine: None,
+            };
+            let r = run_bg_removal(&field, &mask, &meta, &config, Some(&vec![1.0; te.len() * n]), &mut |_, _| {});
+            match r {
+                Ok(_) => assert!(ok, "{te:?} ran"),
+                Err(PipelineError::InvalidInput(msg)) => assert!(!ok && msg.contains("evenly spaced"), "{msg}"),
+                Err(other) => panic!("{other:?}"),
+            }
+        }
+    }
+
     /// The noise map reaches PDF in the field's unit: the pipeline gives the same local field as
     /// `pdf` called with `Fit_ppm_complex`'s N_std divided by the ppm-to-radian factor.
     #[test]

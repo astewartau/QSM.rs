@@ -1111,6 +1111,12 @@ pub struct FieldMappingResult {
     /// combined the echoes; `None` for every other method. Pass it to
     /// [`run_qsmart`](crate::pipeline::run_qsmart).
     pub reliability: Option<Vec<u8>>,
+    /// The blurred echo-fit residual [`reliability`](Self::reliability) was cut at, when
+    /// [`B0EstimationMethod::QsmartEchofit`] combined the echoes: the percentile's value for
+    /// [`QsmartFitThreshold::Percentile`](crate::utils::QsmartFitThreshold::Percentile), the
+    /// value itself for a fixed threshold (`echofit.m` prints it as "Setting adaptive echo-fit
+    /// threshold at %2.2f"). `None` for every other method.
+    pub qsmart_fit_threshold: Option<f64>,
     /// Standard deviation of `b0_field_ppm` per voxel, in ppm, for the methods that estimate it:
     /// [`B0EstimationMethod::ComplexFit`] (`Fit_ppm_complex.m`'s `dp1`, MEDI's `N_std`, which
     /// MEDI passes to PDF and MEDI_L1). `None` for every other method.

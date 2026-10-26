@@ -24,11 +24,8 @@ pub(crate) fn echo_magnitudes<'a>(
     if n_echoes == 0 {
         return Err(PipelineError::InvalidInput(format!("{method} needs the echo times")));
     }
-    let spacing: Vec<f64> = echo_times.windows(2).map(|w| w[1] - w[0]).collect();
-    if spacing.iter().any(|d| (d - spacing[0]).abs() > 1e-3 * spacing[0].abs()) {
-        return Err(PipelineError::InvalidInput(format!(
-            "{method}'s noise map (Fit_ppm_complex) needs evenly spaced echoes; got {echo_times:?}"
-        )));
+    if let Some(problem) = crate::fieldmap::echo_spacing_problem(echo_times) {
+        return Err(PipelineError::InvalidInput(format!("{method}'s noise map (Fit_ppm_complex) {problem}")));
     }
     match magnitude {
         Some(m) if m.len() == n_voxels * n_echoes => {
