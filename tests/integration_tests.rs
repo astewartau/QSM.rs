@@ -1110,7 +1110,7 @@ fn test_n4_bias_correction() {
     let mean: Vec<f64> = (0..n).map(|i| data.mag_echoes.iter().map(|m| m[i]).sum::<f64>() / ne).collect();
     let (out, elapsed) = run_timed!("N4", qsm_core::utils::n4_bias_correction(
         &mean, None, &grid, &qsm_core::utils::N4Params::default(), |_, _| {},
-    ));
+    ).unwrap());
 
     println!("N4 {:>10.2?}", elapsed);
     println!("RESULT:N4 bias correction,-,-,-,-,{:.2}", elapsed.as_secs_f64());
