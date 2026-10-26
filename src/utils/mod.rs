@@ -35,7 +35,6 @@ pub mod resample;
 pub mod simd_ops;
 pub mod r2star;
 pub mod epg;
-#[cfg(feature = "onnx")]
 pub mod r2primenet;
 #[cfg(feature = "onnx")]
 pub(crate) mod sliding;
@@ -63,11 +62,11 @@ pub use morphology::*;
 pub use simd_ops::*;
 pub use r2star::*;
 pub use epg::*;
-#[cfg(feature = "onnx")]
 pub use r2primenet::{
-    r2primenet, r2primenet_from_magnitude, R2PrimeNetNorm, R2PrimeNetParams,
-    AUTHORS_PATCH, WASM_PATCH, B0_TOLERANCE_T, TRAINED_B0_T,
+    R2PrimeNetNorm, R2PrimeNetParams, AUTHORS_PATCH, WASM_PATCH, B0_TOLERANCE_T, TRAINED_B0_T,
 };
+#[cfg(feature = "onnx")]
+pub use r2primenet::{r2primenet, r2primenet_from_magnitude};
 pub use denoise::*;
 pub use anisotropic_diffusion::{gradient_anisotropic_diffusion, AnisotropicDiffusionParams};
 pub use gibbs::*;

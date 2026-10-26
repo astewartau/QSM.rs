@@ -43,7 +43,7 @@ pub fn check_order(param: &str, order: usize) -> Result<(), crate::error::InputE
         Err(crate::error::InputError::param(
             param,
             order,
-            &format!("{}..={} (db1–db4)", SUPPORTED_ORDERS.start(), SUPPORTED_ORDERS.end()),
+            &format!("from {} to {} (db1–db4)", SUPPORTED_ORDERS.start(), SUPPORTED_ORDERS.end()),
         ))
     }
 }
@@ -599,7 +599,7 @@ mod tests {
         }
         for o in [0, 5, 40] {
             let err = check_order("WaveSep wavelet_order", o).unwrap_err();
-            assert!(err.0.contains(&format!("WaveSep wavelet_order = {o}")) && err.0.contains("1..=4"), "{err}");
+            assert!(err.0.contains(&format!("WaveSep wavelet_order = {o}")) && err.0.ends_with("must be from 1 to 4 (db1–db4)"), "{err}");
         }
     }
 }
