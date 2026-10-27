@@ -278,6 +278,7 @@ fn field_mapping() {
     estimations.push(B0EstimationMethod::LinearFit(LinearFitParams::default()));
     estimations.push(B0EstimationMethod::RobustFit(RobustFitParams::default()));
     estimations.push(B0EstimationMethod::ComplexFit(FitPpmComplexParams::default()));
+    estimations.push(B0EstimationMethod::QsmartEchofit { fit_threshold: Default::default() });
     let unwrappers = [
         (UnwrappingAlgorithm::Romeo, LaplacianSolver::Dct),
         (UnwrappingAlgorithm::Laplacian, LaplacianSolver::Dct),
@@ -296,6 +297,17 @@ fn field_mapping() {
             check("run_field_mapping", &r.b0_field_ppm);
         }
     }
+    // QSMART's field map: its echo fit on the raw phase, Laplacian-unwrapped with the mirror solver
+    let config = FieldMappingConfig {
+        unwrapping_algorithm: UnwrappingAlgorithm::Laplacian,
+        laplacian_solver: LaplacianSolver::Mirror,
+        laplacian_unmasked: true,
+        b0_estimation: B0EstimationMethod::QsmartEchofit { fit_threshold: Default::default() },
+        ..Default::default()
+    };
+    let r = run_field_mapping(&phases, Some(&mags), &p.mask, &m, &config, &mut no_progress()).unwrap();
+    check("run_field_mapping qsmart-echofit", &r.b0_field_ppm);
+    assert!(r.reliability.is_some());
     // bipolar correction, no phase-offset removal, and a single echo without magnitude
     let config = FieldMappingConfig { bipolar_correction: true, phase_offset_removal: false, ..Default::default() };
     let r = run_field_mapping(&phases, Some(&mags), &p.mask, &m, &config, &mut no_progress()).unwrap();
