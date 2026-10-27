@@ -304,7 +304,6 @@ fn field_mapping_with_offset(
             let fit = crate::utils::multi_echo_linear_fit(
                 &uw_refs, mag_slices, tes, mask,
                 params.estimate_offset,
-                params.reliability_threshold_percentile,
             );
             crate::utils::field_to_hz(&fit.field)
         }
@@ -426,7 +425,6 @@ fn field_mapping_direct(
             let fit = crate::utils::multi_echo_linear_fit(
                 &uw_refs, mag_slices, tes, mask,
                 params.estimate_offset,
-                params.reliability_threshold_percentile,
             );
             rads_to_ppm(&fit.field, metadata.field_strength)
         }
@@ -1200,7 +1198,7 @@ mod tests {
         }).collect();
 
         for estimate_offset in [true, false] {
-            let p = LinearFitParams { estimate_offset, ..Default::default() };
+            let p = LinearFitParams { estimate_offset };
             let cfg = FieldMappingConfig {
                 unwrapping_algorithm: UnwrappingAlgorithm::Laplacian,
                 b0_estimation: B0EstimationMethod::LinearFit(p.clone()),
@@ -1210,7 +1208,7 @@ mod tests {
             let got = run_field_mapping(&refs(&ph), Some(&refs(&mg)), &mask, &meta, &cfg, &mut |_, _| {})
                 .unwrap().b0_field_ppm;
             let fit = crate::utils::multi_echo_linear_fit(
-                &refs(&uw), &refs(&mg), &tes, &mask, p.estimate_offset, p.reliability_threshold_percentile);
+                &refs(&uw), &refs(&mg), &tes, &mask, p.estimate_offset);
             let want = rads_to_ppm(&fit.field, 3.0);
             let d = max_abs_diff(&got, &want, &mask);
             assert!(d < 1e-12, "estimate_offset {estimate_offset}: differs from the aligned fit by {d}");
@@ -1360,7 +1358,6 @@ mod tests {
         let fit = crate::utils::multi_echo_linear_fit(
             &refs(&uw), &refs(&mg), &tes, &mask,
             LinearFitParams::default().estimate_offset,
-            LinearFitParams::default().reliability_threshold_percentile,
         );
         assert_eq!(got, rads_to_ppm(&fit.field, 3.0));
     }
@@ -1733,8 +1730,6 @@ mod tests {
             RobustFitParams { downweight_level: f64::NAN, ..d.clone() },
             RobustFitParams { flag_ratio: 0.5, ..d.clone() },
             RobustFitParams { flag_ratio: f64::NAN, ..d.clone() },
-            RobustFitParams { reliability_threshold_percentile: -1.0, ..d.clone() },
-            RobustFitParams { reliability_threshold_percentile: 100.5, ..d.clone() },
         ];
         for p in bad {
             let cfg = FieldMappingConfig { b0_estimation: B0EstimationMethod::RobustFit(p.clone()), ..Default::default() };
@@ -1747,8 +1742,6 @@ mod tests {
             RobustFitParams { downweight_level: 1.0, ..d.clone() },
             RobustFitParams { flag_ratio: 1.0, ..d.clone() },
             RobustFitParams { flag_ratio: f64::INFINITY, ..d.clone() },
-            RobustFitParams { reliability_threshold_percentile: 0.0, ..d.clone() },
-            RobustFitParams { reliability_threshold_percentile: 100.0, ..d.clone() },
             RobustFitParams { iterations: 0, ..d.clone() },
         ];
         for p in edges {
