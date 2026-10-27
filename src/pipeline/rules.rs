@@ -947,6 +947,12 @@ pub static RULES: &[Rule] = &[
         "field_mapping.b0_estimation", &[Choice("qsmart-echofit")],
         "QSMART's total field and reliability map R_0 come from echofit.m",
         "QSMART QSMART.m l. 26; echofit.m"),
+    one_of("qsmart-echofit.unwrap-laplacian",
+        &[method("field_mapping.b0_estimation", &[Choice("qsmart-echofit")])],
+        "field_mapping.unwrapping_algorithm", LAPLACIAN, Strength::Required, Basis::Implementation,
+        "QSMART's echo fit unwraps each echo over the whole volume with Laplacian unwrapping; the \
+         pipeline refuses other unwrapping with it",
+        "QSMART unwrap_phase.m l. 5-10, echofit.m; QSM.rs B0EstimationMethod::QsmartEchofit docs"),
     reference("sti.echo-combination", &[inv(STI), MULTI_ECHO],
         "field_mapping.b0_estimation", WEIGHTED_AVG,
         "STI Suite's QSM_GUI sums the unwrapped echoes and divides by the summed echo times",
@@ -1484,6 +1490,10 @@ mod tests {
                 c.cfg.field_mapping.unwrapping_algorithm = UnwrappingAlgorithm::Laplacian;
             })),
             ("qsmart.field-echofit", Case::new(inversion(I::Qsmart))),
+            ("qsmart-echofit.unwrap-laplacian", Case::new(|c| {
+                c.cfg.field_mapping.b0_estimation =
+                    B0EstimationMethod::QsmartEchofit { fit_threshold: Default::default() };
+            })),
             ("sti.echo-combination", Case::new(|c| { inversion(I::Star)(c); linear_fit(c) })),
             ("sti.echo-weights", Case::new(inversion(I::Ilsqr))),
             ("qsmart.mask-bet", Case::new(inversion(I::Qsmart))),

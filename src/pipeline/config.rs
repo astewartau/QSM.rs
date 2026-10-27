@@ -250,7 +250,8 @@ pub enum B0EstimationMethod {
     /// reaches `fit_threshold` (by default the 99th percentile of the blurred residual, as
     /// QSMART's authors run it; see [`QsmartFitThreshold`](crate::utils::QsmartFitThreshold)).
     /// The field is converted to ppm with QSMART's γ = 2.675e8 rad/s/T. Phase-offset removal and
-    /// bipolar correction do not apply.
+    /// bipolar correction do not apply. Any other unwrapping is refused (rule
+    /// `qsmart-echofit.unwrap-laplacian`, Required).
     QsmartEchofit {
         /// Residual threshold for `R_0`
         fit_threshold: crate::utils::QsmartFitThreshold,
