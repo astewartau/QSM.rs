@@ -44,7 +44,13 @@ pub struct HomogeneityParams {
     /// Gaussian smoothing sigma in mm (default: 7.0)
     pub sigma_mm: f64,
     /// Boxes per dimension for the `boxsegment` tissue segmentation, `makehomogeneous`'s `nbox`
-    /// (default here: 3; MriResearchTools' default is 15).
+    /// (default: 15, MriResearchTools'). Not the number of box-filter passes of the smoothing.
+    ///
+    /// Measured on the EMTP travelling heads (bridge run 1; #314): the earlier default of 3 left
+    /// echo 1 visibly uneven, with a large dark centre on a GE MR750 (in-brain coefficient of
+    /// variation 0.429, against 0.114 with 15 and 0.116 with N4; Philips Achieva 0.152 / 0.098 /
+    /// 0.103). With 15 the image matches N4's; BET masks moved by at most 1.4 % in volume, and
+    /// on GE agreed better with HD-BET.
     pub nbox: usize,
 }
 
@@ -52,7 +58,7 @@ impl Default for HomogeneityParams {
     fn default() -> Self {
         Self {
             sigma_mm: 7.0,
-            nbox: 3,
+            nbox: 15,
         }
     }
 }
@@ -1648,6 +1654,16 @@ mod tests {
         let n = 8;
         let out = makehomogeneous(&vec![1.0; n * n * n], &grid(n, n, n), 4.0, 5).unwrap();
         assert_eq!(out.len(), n * n * n);
+    }
+
+    /// The defaults are MriResearchTools' (`makehomogeneous(mag; sigma_mm=7, nbox=15)`), and the
+    /// pipeline config's copies agree with them until it holds `HomogeneityParams` itself (#314).
+    #[test]
+    fn defaults_are_mriresearchtools_and_agree_with_the_pipeline_config() {
+        let p = HomogeneityParams::default();
+        assert_eq!((p.sigma_mm, p.nbox), (7.0, 15));
+        let m = crate::pipeline::MaskingConfig::default();
+        assert_eq!((m.homogeneity_sigma_mm, m.homogeneity_nbox), (p.sigma_mm, p.nbox));
     }
 
     /// #199: `nbox = 0` divided by zero in the box segmentation; it is an error now.
