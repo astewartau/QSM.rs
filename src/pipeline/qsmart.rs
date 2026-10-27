@@ -22,7 +22,9 @@
 //! - **Coil combination**: POEM (`coil_comb.m`, `'smooth3'`), before anything QSM.rs takes.
 //! - **Unwrapping**: Laplacian (`Demo_QSMART.m` l. 32), Hongfu Sun's `lapunwrap.m` per echo on
 //!   the unmasked phase (`unwrap_phase.m` l. 5–10):
-//!   [`LaplacianSolver::Mirror`](crate::unwrap::LaplacianSolver::Mirror).
+//!   [`LaplacianSolver::Mirror`](crate::unwrap::LaplacianSolver::Mirror) with
+//!   [`FieldMappingConfig::laplacian_unmasked`]. These are the field mapping's own settings, not
+//!   QSMART's: the global default stays ROMEO, and the rules below suggest QSMART's choices.
 //! - **Total field**: `echofit.m`, magnitude-weighted zero-intercept fit of phase against TE,
 //!   divided by `γ·B0/1e6` with γ = 2.675e8 rad/s/T and B0 = `qsm_params.field` (7 in the demo);
 //!   the reliability map `R_0` from the box-blurred residual (`fit_threshold` 40 in
@@ -47,7 +49,7 @@
 //! # Pipeline rules
 //!
 //! The facts above that a configuration can depart from are published as rules in
-//! [`crate::pipeline::rules::RULES`] (each with its strength, basis, reason and source): `qsmart.mask-bet`, `qsmart.unwrap-laplacian`, `qsmart.laplacian-solver`, `qsmart.field-echofit`, `qsmart.inner-inversion`, `qsmart.ilsqr-iterations`, `qsmart.ilsqr-pad`.
+//! [`crate::pipeline::rules::RULES`] (each with its strength, basis, reason and source): `qsmart.mask-bet`, `qsmart.unwrap-laplacian`, `qsmart.laplacian-solver`, `qsmart.unwrap-unmasked`, `qsmart.field-echofit`, `qsmart.inner-inversion`, `qsmart.ilsqr-iterations`, `qsmart.ilsqr-pad`.
 
 use super::config::*;
 use super::observer::{Observer, VolumeRef};

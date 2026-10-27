@@ -184,16 +184,6 @@ pub fn run_field_mapping(
             }
         }
         B0EstimationMethod::QsmartEchofit { fit_threshold } => {
-            if config.unwrapping_algorithm != UnwrappingAlgorithm::Laplacian {
-                return Err(PipelineError::InvalidConfig(
-                    "QSMART's echo fit follows its Laplacian unwrapping; choose Laplacian unwrapping".into(),
-                ));
-            }
-            if config.bipolar_correction {
-                return Err(PipelineError::InvalidConfig(
-                    "QSMART's echo fit has no bipolar correction; turn bipolar correction off".into(),
-                ));
-            }
             fit_threshold.validate().map_err(PipelineError::InvalidConfig)?;
         }
         B0EstimationMethod::WeightedAvg { .. } | B0EstimationMethod::LinearFit(_) => {}
@@ -213,10 +203,6 @@ pub fn run_field_mapping(
     let mag_slices: &[&[f64]] = magnitudes.unwrap_or(&uniform_mags);
 
     progress(0, 4);
-
-    if let B0EstimationMethod::QsmartEchofit { fit_threshold } = config.b0_estimation {
-        return field_mapping_qsmart(phases, mag_slices, metadata, config, fit_threshold, progress);
-    }
 
     if n_echoes > 1 && do_offset {
         // ---- Path A: Phase offset removal + unwrap + B0 estimation ----
@@ -292,6 +278,10 @@ fn field_mapping_with_offset(
     // Step 4: B0 estimation
     progress(3, 4);
     let mut robust_fit = None;
+    if let B0EstimationMethod::QsmartEchofit { fit_threshold } = config.b0_estimation {
+        progress(4, 4);
+        return Ok(FieldMappingResult { phase_offset: Some(phase_offset), ..qsmart_fit(&unwrapped, mag_slices, metadata, fit_threshold) });
+    }
     let b0_hz = match &config.b0_estimation {
         B0EstimationMethod::WeightedAvg { weighting } => {
             crate::utils::calculate_b0_weighted(
@@ -313,7 +303,7 @@ fn field_mapping_with_offset(
             robust_fit = Some(report);
             crate::utils::field_to_hz(&field_rads)
         }
-        B0EstimationMethod::QsmartEchofit { .. } => unreachable!("taken by field_mapping_qsmart"),
+        B0EstimationMethod::QsmartEchofit { .. } => unreachable!("returned above"),
         B0EstimationMethod::ComplexFit(_) => unreachable!("run_field_mapping takes the complex fit's own path"),
     };
 
@@ -332,7 +322,7 @@ fn field_mapping_with_offset(
 ///
 /// Taken whenever offset removal is off: always with Laplacian unwrapping, and with ROMEO when
 /// `phase_offset_removal` is false. Each echo is unwrapped on its own (for Laplacian, with the
-/// phase zeroed outside `mask` first and `config.laplacian_solver` as the Poisson solver), and the echoes are then combined with
+/// phase zeroed outside `mask` first unless `config.laplacian_unmasked`, and `config.laplacian_solver` as the Poisson solver), and the echoes are then combined with
 /// `config.b0_estimation`, as on the offset-removal path:
 ///
 /// * [`B0EstimationMethod::WeightedAvg`] (the default): each echo is unwrapped only up to a
@@ -365,6 +355,12 @@ fn field_mapping_with_offset(
 ///   loss would blame on the echo), then the robust fit runs on the aligned echoes. Keep
 ///   `estimate_offset` on unless the echoes are known to be offset-free (e.g. MCPC-3D-S
 ///   combined): the offset removal that would otherwise take the intercept out does not run here.
+/// * [`B0EstimationMethod::QsmartEchofit`]: QSMART's `echofit.m` on the echoes as unwrapped. With
+///   Laplacian nothing is aligned, as in QSMART (whose `unwrap_phase` → `echofit` removes no
+///   per-echo constant), and with `laplacian_unmasked` every echo is kept over the whole volume,
+///   because `echofit.m` fits every voxel and takes its `R_0` threshold from all of them. With
+///   ROMEO, whole turns are aligned as for the weighted mean: a fit through the origin turns a
+///   turn between echoes into a slope error.
 #[allow(clippy::too_many_arguments)]
 fn field_mapping_direct(
     phases: &[&[f64]],
@@ -382,13 +378,15 @@ fn field_mapping_direct(
 
     // Per-echo unwrapping. The Laplacian unwrap is a global Poisson solve, so phase noise
     // outside the brain leaks into it; zero the phase outside the mask first (as STI Suite's
-    // `MRPhaseUnwrap(mask .* phase)` is called in the UK Biobank pipeline).
+    // `MRPhaseUnwrap(mask .* phase)` is called in the UK Biobank pipeline), unless
+    // `laplacian_unmasked` asks for the raw phase (STI Suite's GUI, QSMART).
     progress(1, 4);
     let is_laplacian = config.unwrapping_algorithm == UnwrappingAlgorithm::Laplacian;
+    let region = LaplacianRegion::new(config, mask);
     let mut unwrapped: Vec<Vec<f64>> = Vec::with_capacity(n_echoes);
     for e in 0..n_echoes {
         let masked;
-        let phase: &[f64] = if is_laplacian {
+        let phase: &[f64] = if region.zero_outside {
             masked = mask_phase(phases[e], mask);
             &masked
         } else {
@@ -396,7 +394,7 @@ fn field_mapping_direct(
         };
         let uw = unwrap_single(
             phase, mag_slices.first().copied().unwrap_or(&[]),
-            mask, config, nx, ny, nz, vsx, vsy, vsz,
+            region.keep(mask), config, nx, ny, nz, vsx, vsy, vsz,
             if e + 1 < n_echoes { Some(phases[e + 1]) } else { None },
             tes[e],
             if e + 1 < n_echoes { tes[e + 1] } else { 0.0 },
@@ -405,6 +403,13 @@ fn field_mapping_direct(
     }
 
     progress(3, 4);
+    if let B0EstimationMethod::QsmartEchofit { fit_threshold } = config.b0_estimation {
+        if !is_laplacian {
+            align_per_echo_constants(&mut unwrapped, tes, mask, config.unwrapping_algorithm);
+        }
+        progress(4, 4);
+        return Ok(qsmart_fit(&unwrapped, mag_slices, metadata, fit_threshold));
+    }
     let mut robust_fit = None;
     let b0_field_ppm = match &config.b0_estimation {
         B0EstimationMethod::WeightedAvg { weighting } => {
@@ -444,7 +449,7 @@ fn field_mapping_direct(
             robust_fit = Some(report);
             rads_to_ppm(&field_rads, metadata.field_strength)
         }
-        B0EstimationMethod::QsmartEchofit { .. } => unreachable!("taken by field_mapping_qsmart"),
+        B0EstimationMethod::QsmartEchofit { .. } => unreachable!("returned above"),
         B0EstimationMethod::ComplexFit(_) => unreachable!("run_field_mapping takes the complex fit's own path"),
     };
 
@@ -459,35 +464,51 @@ fn field_mapping_direct(
     })
 }
 
-/// [`B0EstimationMethod::QsmartEchofit`]: QSMART.m's `unwrap_phase` (Laplacian, each echo over
-/// the whole volume, nothing masked or aligned) followed by `echofit.m`.
-fn field_mapping_qsmart(
-    phases: &[&[f64]],
+/// [`B0EstimationMethod::QsmartEchofit`] on unwrapped echoes: QSMART's `echofit.m`
+/// ([`qsmart_echofit`](crate::utils::qsmart_echofit)) with QSMART's γ, giving the total field
+/// over every voxel and the reliability map `R_0`.
+fn qsmart_fit(
+    unwrapped: &[Vec<f64>],
     mag_slices: &[&[f64]],
     metadata: &ScanMetadata,
-    config: &FieldMappingConfig,
     fit_threshold: crate::utils::QsmartFitThreshold,
-    progress: &mut dyn FnMut(usize, usize),
-) -> Result<FieldMappingResult, PipelineError> {
-    let grid = metadata.grid();
-    let everywhere = vec![1u8; phases[0].len()];
-    progress(1, 4);
-    let unwrapped: Vec<Vec<f64>> = phases.iter()
-        .map(|p| crate::unwrap::laplacian_unwrap(p, &everywhere, &grid, config.laplacian_solver))
-        .collect();
-    progress(3, 4);
+) -> FieldMappingResult {
     let uw: Vec<&[f64]> = unwrapped.iter().map(|u| u.as_slice()).collect();
     let ppm = crate::utils::QSMART_GYRO * metadata.field_strength / 1e6;
-    let fit = crate::utils::qsmart_echofit(&uw, mag_slices, &metadata.echo_times, &grid, ppm, fit_threshold);
-    progress(4, 4);
-    Ok(FieldMappingResult {
+    let fit = crate::utils::qsmart_echofit(&uw, mag_slices, &metadata.echo_times, &metadata.grid(), ppm, fit_threshold);
+    FieldMappingResult {
         b0_field_ppm: fit.field_ppm,
         phase_offset: None,
         robust_fit: None,
         reliability: Some(fit.reliability),
         qsmart_fit_threshold: Some(fit.fit_threshold),
         field_noise_ppm: None,
-    })
+    }
+}
+
+/// Where Laplacian unwrapping works ([`FieldMappingConfig::laplacian_unmasked`]): on the phase
+/// zeroed outside the mask, keeping the result inside it (the default); or on the raw phase.
+/// The raw phase's result is kept over the whole volume only for QSMART's echo fit, which fits
+/// every voxel (`echofit.m`); the other combinations use only the voxels inside the mask.
+struct LaplacianRegion {
+    zero_outside: bool,
+    everywhere: Option<Vec<u8>>,
+}
+
+impl LaplacianRegion {
+    fn new(config: &FieldMappingConfig, mask: &[u8]) -> Self {
+        let unmasked = config.unwrapping_algorithm == UnwrappingAlgorithm::Laplacian && config.laplacian_unmasked;
+        let echofit = matches!(config.b0_estimation, B0EstimationMethod::QsmartEchofit { .. });
+        LaplacianRegion {
+            zero_outside: config.unwrapping_algorithm == UnwrappingAlgorithm::Laplacian && !unmasked,
+            everywhere: (unmasked && echofit).then(|| vec![1; mask.len()]),
+        }
+    }
+
+    /// The mask the unwrapped result is kept in.
+    fn keep<'a>(&'a self, mask: &'a [u8]) -> &'a [u8] {
+        self.everywhere.as_deref().unwrap_or(mask)
+    }
 }
 
 /// [`multi_echo_robust_fit`](crate::utils::multi_echo_robust_fit) on unwrapped echoes: the field
@@ -559,21 +580,26 @@ fn field_mapping_single_echo(
 ) -> Result<FieldMappingResult, PipelineError> {
     progress(1, 4);
     // Laplacian: as on the multi-echo path, the phase is zeroed outside the mask first (a global
-    // Poisson solve otherwise carries the noise there into the brain) and the masked mean the
-    // unwrap leaves undetermined is removed, so one echo gives the same field as each echo of a
-    // series does.
+    // Poisson solve otherwise carries the noise there into the brain; not with
+    // `laplacian_unmasked`) and the masked mean the unwrap leaves undetermined is removed, so one
+    // echo gives the same field as each echo of a series does. QSMART's echo fit removes nothing.
     let is_laplacian = config.unwrapping_algorithm == UnwrappingAlgorithm::Laplacian;
+    let region = LaplacianRegion::new(config, mask);
     let masked;
-    let phase: &[f64] = if is_laplacian {
+    let phase: &[f64] = if region.zero_outside {
         masked = mask_phase(phase, mask);
         &masked
     } else {
         phase
     };
     let mut unwrapped = unwrap_single(
-        phase, mag, mask, config, nx, ny, nz, vsx, vsy, vsz,
+        phase, mag, region.keep(mask), config, nx, ny, nz, vsx, vsy, vsz,
         None, metadata.echo_times[0], 0.0,
     );
+    if let B0EstimationMethod::QsmartEchofit { fit_threshold } = config.b0_estimation {
+        progress(4, 4);
+        return Ok(qsmart_fit(&[unwrapped], &[mag], metadata, fit_threshold));
+    }
     if is_laplacian {
         remove_masked_mean(&mut unwrapped, mask);
     }
@@ -714,8 +740,9 @@ mod tests {
 
     #[test]
     fn qsmart_echofit_is_unmasked_laplacian_then_echofit() {
-        // QSMART's route: every echo unwrapped over the whole volume (the mask plays no part),
-        // then qsmart_echofit, which also returns R_0.
+        // QSMART's route, from the regular settings: every echo's raw phase unwrapped over the
+        // whole volume with the mirror solver (the mask plays no part), then qsmart_echofit,
+        // which also returns R_0. Bit for bit what QSMART's own route computed.
         let meta = make_test_metadata(3);
         let n = 8 * 8 * 8;
         let phases: Vec<Vec<f64>> = meta.echo_times.iter()
@@ -738,6 +765,7 @@ mod tests {
         let config = FieldMappingConfig {
             unwrapping_algorithm: UnwrappingAlgorithm::Laplacian,
             laplacian_solver: LaplacianSolver::Mirror,
+            laplacian_unmasked: true,
             b0_estimation: B0EstimationMethod::QsmartEchofit { fit_threshold: crate::utils::QsmartFitThreshold::Absolute(thr) },
             ..Default::default()
         };
@@ -754,17 +782,82 @@ mod tests {
         assert_eq!(got_pct.qsmart_fit_threshold, Some(want_pct.fit_threshold));
         assert!(want_pct.fit_threshold > 0.0 && want_pct.fit_threshold != thr);
 
-        for bad in [
+        let bad = FieldMappingConfig { b0_estimation: B0EstimationMethod::QsmartEchofit { fit_threshold: crate::utils::QsmartFitThreshold::Percentile(0.0) }, ..config.clone() };
+        assert!(run_field_mapping(&p, Some(&m), &mask, &meta, &bad, &mut |_, _| {}).is_err());
+
+        // The phase masked first (the default) is a different unwrap, kept inside the mask.
+        let masked = FieldMappingConfig { laplacian_unmasked: false, ..config.clone() };
+        let got_masked = run_field_mapping(&p, Some(&m), &mask, &meta, &masked, &mut |_, _| {}).unwrap();
+        assert_ne!(got_masked.b0_field_ppm, want.field_ppm);
+        assert!(got_masked.b0_field_ppm.iter().zip(&mask).all(|(&f, &k)| k != 0 || f == 0.0));
+
+        // ROMEO, with or without phase-offset removal or bipolar correction, feeds the same fit:
+        // a departure from QSMART, not a refusal.
+        for other in [
             FieldMappingConfig { unwrapping_algorithm: UnwrappingAlgorithm::Romeo, ..config.clone() },
-            FieldMappingConfig { bipolar_correction: true, ..config.clone() },
-            FieldMappingConfig { b0_estimation: B0EstimationMethod::QsmartEchofit { fit_threshold: crate::utils::QsmartFitThreshold::Percentile(0.0) }, ..config.clone() },
+            FieldMappingConfig { unwrapping_algorithm: UnwrappingAlgorithm::Romeo, phase_offset_removal: false, ..config.clone() },
+            FieldMappingConfig { unwrapping_algorithm: UnwrappingAlgorithm::Romeo, bipolar_correction: true, ..config.clone() },
         ] {
-            assert!(run_field_mapping(&p, Some(&m), &mask, &meta, &bad, &mut |_, _| {}).is_err());
+            let got = run_field_mapping(&p, Some(&m), &mask, &meta, &other, &mut |_, _| {}).unwrap();
+            assert!(got.reliability.is_some() && got.qsmart_fit_threshold.is_some(), "{other:?}");
+            assert!(got.b0_field_ppm.iter().all(|f| f.is_finite()));
         }
         // Every other method leaves R_0 out.
         let linear = FieldMappingConfig { b0_estimation: B0EstimationMethod::LinearFit(LinearFitParams::default()), ..config };
         let got_linear = run_field_mapping(&p, Some(&m), &mask, &meta, &linear, &mut |_, _| {}).unwrap();
         assert!(got_linear.reliability.is_none() && got_linear.qsmart_fit_threshold.is_none());
+    }
+
+    #[test]
+    fn qsmart_echofit_on_one_echo_is_unmasked_laplacian_then_echofit() {
+        let meta = make_test_metadata(1);
+        let n = 8 * 8 * 8;
+        let phase: Vec<f64> = (0..n).map(|i| { let t = 2.0 * (1.0 + (i as f64 * 0.37).sin()); t.sin().atan2(t.cos()) }).collect();
+        let mag: Vec<f64> = (0..n).map(|i| 1.0 + (i % 5) as f64).collect();
+        let mut mask = vec![0u8; n];
+        mask[100..300].fill(1);
+        let grid = meta.grid();
+        let uw = crate::unwrap::laplacian_unwrap(&phase, &vec![1; n], &grid, LaplacianSolver::Mirror);
+        let fit_threshold = crate::utils::QsmartFitThreshold::default();
+        let want = crate::utils::qsmart_echofit(&[&uw], &[&mag], &meta.echo_times, &grid, crate::utils::QSMART_GYRO * 3.0 / 1e6, fit_threshold);
+        let config = FieldMappingConfig {
+            unwrapping_algorithm: UnwrappingAlgorithm::Laplacian,
+            laplacian_solver: LaplacianSolver::Mirror,
+            laplacian_unmasked: true,
+            b0_estimation: B0EstimationMethod::QsmartEchofit { fit_threshold },
+            ..Default::default()
+        };
+        let got = run_field_mapping(&[&phase], Some(&[&mag]), &mask, &meta, &config, &mut |_, _| {}).unwrap();
+        assert_eq!(got.b0_field_ppm, want.field_ppm);
+        assert_eq!(got.reliability, Some(want.reliability));
+    }
+
+    /// Unmasked Laplacian unwrapping solves on the raw phase; the other combinations still keep
+    /// the field inside the mask.
+    #[test]
+    fn laplacian_unmasked_unwraps_the_raw_phase() {
+        let meta = make_test_metadata(3);
+        let n = 8 * 8 * 8;
+        let phases: Vec<Vec<f64>> = meta.echo_times.iter()
+            .map(|te| (0..n).map(|i| { let t = 400.0 * te * (1.0 + (i as f64 * 0.37).sin()); t.sin().atan2(t.cos()) }).collect())
+            .collect();
+        let p: Vec<&[f64]> = phases.iter().map(|v| v.as_slice()).collect();
+        let mut mask = vec![0u8; n];
+        mask[100..300].fill(1);
+        let grid = meta.grid();
+        let base = FieldMappingConfig { unwrapping_algorithm: UnwrappingAlgorithm::Laplacian, ..Default::default() };
+        let unmasked = FieldMappingConfig { laplacian_unmasked: true, ..base.clone() };
+        let got = run_field_mapping(&p, None, &mask, &meta, &unmasked, &mut |_, _| {}).unwrap().b0_field_ppm;
+        // As the multi-echo path computes it, from echoes unwrapped on the raw phase.
+        let mut uw: Vec<Vec<f64>> = p.iter().map(|ph| crate::unwrap::laplacian_unwrap(ph, &mask, &grid, LaplacianSolver::Dct)).collect();
+        align_per_echo_constants(&mut uw, &meta.echo_times, &mask, UnwrappingAlgorithm::Laplacian);
+        let ones = vec![1.0; n];
+        let mags: Vec<&[f64]> = (0..3).map(|_| ones.as_slice()).collect();
+        let want = hz_to_ppm(&crate::utils::calculate_b0_weighted(&uw, &mags, &meta.echo_times, &mask, B0WeightType::PhaseSNR, &grid), 3.0);
+        assert_eq!(got, want);
+        let masked = run_field_mapping(&p, None, &mask, &meta, &base, &mut |_, _| {}).unwrap().b0_field_ppm;
+        assert_ne!(got, masked);
+        assert!(got.iter().zip(&mask).all(|(&f, &k)| k != 0 || f == 0.0));
     }
 
     #[test]

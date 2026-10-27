@@ -241,16 +241,22 @@ pub enum B0EstimationMethod {
     /// magnitude of every echo and evenly spaced echoes. Also returns the field's noise map
     /// ([`FieldMappingResult::field_noise_ppm`], MEDI's `N_std`).
     ComplexFit(FitPpmComplexParams),
-    /// QSMART's echo fit (`echofit.m`, [`qsmart_echofit`](crate::utils::qsmart_echofit)): each
-    /// echo unwrapped on its own over the whole, unmasked volume (Laplacian unwrapping only; QSMART
-    /// uses [`LaplacianSolver::Mirror`](crate::unwrap::LaplacianSolver::Mirror)), then the
-    /// magnitude-weighted fit of phase against TE through the origin, with no per-echo constant
-    /// removed. Also returns QSMART's reliability map `R_0`
-    /// ([`FieldMappingResult::reliability`]): voxels whose fit residual, box-filtered over ~1 mm,
-    /// reaches `fit_threshold` (by default the 99th percentile of the blurred residual, as
-    /// QSMART's authors run it; see [`QsmartFitThreshold`](crate::utils::QsmartFitThreshold)).
-    /// The field is converted to ppm with QSMART's γ = 2.675e8 rad/s/T. Phase-offset removal and
-    /// bipolar correction do not apply.
+    /// QSMART's echo fit (`echofit.m`, [`qsmart_echofit`](crate::utils::qsmart_echofit)): the
+    /// magnitude-weighted fit of phase against TE through the origin, over every voxel of the
+    /// unwrapped echoes, with no per-echo constant removed after Laplacian unwrapping (with ROMEO,
+    /// whole turns between echoes are aligned, as for the weighted mean). Also returns QSMART's
+    /// reliability map `R_0` ([`FieldMappingResult::reliability`]): voxels whose fit residual,
+    /// box-filtered over ~1 mm, reaches `fit_threshold` (by default the 99th percentile of the
+    /// blurred residual, as QSMART's authors run it; see
+    /// [`QsmartFitThreshold`](crate::utils::QsmartFitThreshold)). The field is converted to ppm
+    /// with QSMART's γ = 2.675e8 rad/s/T.
+    ///
+    /// The echoes come from the configured unwrapping, phase-offset removal and bipolar
+    /// correction. QSMART unwraps each echo with Laplacian unwrapping on the raw phase
+    /// (`unwrap_phase.m`: [`LaplacianSolver::Mirror`],
+    /// [`FieldMappingConfig::laplacian_unmasked`]) and does neither of the others; with those
+    /// settings this is QSMART's field map, bit for bit. The rules `qsmart.unwrap-laplacian`,
+    /// `qsmart.laplacian-solver` and `qsmart.unwrap-unmasked` suggest them for a QSMART run.
     QsmartEchofit {
         /// Residual threshold for `R_0`
         fit_threshold: crate::utils::QsmartFitThreshold,
@@ -436,6 +442,15 @@ pub struct FieldMappingConfig {
     /// [`B0WeightType::AssumedDecay`] at 40 ms, a multi-echo run gives UK Biobank's field map
     /// (see [`run_field_mapping`](super::run_field_mapping)).
     pub laplacian_solver: LaplacianSolver,
+    /// Laplacian unwrapping on the raw phase over the whole volume, instead of on the phase
+    /// zeroed outside the brain mask (default `false`). Zeroing first keeps the noise outside the
+    /// brain out of the global Poisson solve, and is what UK Biobank (`MRPhaseUnwrap(mask .*
+    /// phase)`) and QSM.jl do. STI Suite 3.0's `QSM_GUI` and QSMART unwrap the raw phase
+    /// (rules `sti.unwrap-unmasked`, `qsmart.unwrap-unmasked`; see [`crate::unwrap::laplacian`]).
+    /// With [`B0EstimationMethod::QsmartEchofit`] the unwrapped echoes are also kept over the
+    /// whole volume, as QSMART fits them; the other combinations use the voxels inside the mask.
+    /// Only with Laplacian unwrapping.
+    pub laplacian_unmasked: bool,
     pub romeo_params: RomeoParams,
 }
 
@@ -461,6 +476,7 @@ impl Default for FieldMappingConfig {
             bipolar_correction: false,
             b0_estimation: B0EstimationMethod::default(),
             laplacian_solver: LaplacianSolver::Dct,
+            laplacian_unmasked: false,
             romeo_params: RomeoParams::default(),
         }
     }

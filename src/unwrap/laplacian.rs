@@ -32,8 +32,9 @@
 //! error that `Dct` does not have. Hence `Dct` is the default.
 //!
 //! Multi-echo field maps are built by [`crate::pipeline::run_field_mapping`], whose
-//! `laplacian_solver` setting selects the solver: each echo is masked, unwrapped and combined
-//! with the configured [`B0WeightType`](crate::utils::B0WeightType). UK Biobank's field map is
+//! `laplacian_solver` setting selects the solver: each echo is masked (unless
+//! [`laplacian_unmasked`](crate::pipeline::FieldMappingConfig::laplacian_unmasked)), unwrapped
+//! and combined with the configured [`B0WeightType`](crate::utils::B0WeightType). UK Biobank's field map is
 //! `Fft { pad: [64; 3] }` with [`B0WeightType::AssumedDecay`](crate::utils::B0WeightType::AssumedDecay)
 //! at 40 ms.
 //!
@@ -50,14 +51,16 @@
 //! - The GUI ("3D GRE data" and "Single button for QSM") calls it once on all echoes,
 //!   `MRPhaseUnwrap(φ, 'voxelsize', vs)` with the **raw, unmasked** wrapped phase (the input
 //!   is bitwise the loaded phase, nonzero outside the mask), so the GUI does not do the
-//!   `mask · φ` that [`run_field_mapping`](crate::pipeline::run_field_mapping) and UK Biobank
-//!   do. It then **sums** the unwrapped echoes (no per-echo offset removal, no weighting) and
+//!   `mask · φ` that [`run_field_mapping`](crate::pipeline::run_field_mapping) does by default and
+//!   UK Biobank does ([`laplacian_unmasked`](crate::pipeline::FieldMappingConfig::laplacian_unmasked)
+//!   is the GUI's choice; rule `sti.unwrap-unmasked`). It then **sums** the unwrapped echoes (no per-echo offset removal, no weighting) and
 //!   gives `Σφ` to V-SHARP, with `TE` = `ΣTE` for the inversion: in `φ/TE` form, the
 //!   [`B0WeightType::TEs`](crate::utils::B0WeightType::TEs) weighting (`Σφₑ/ΣTEₑ`).
 //! - STI Suite 2.01's GUI also offered "Combine Laplacian" (the Laplacians of all echoes,
 //!   combined) followed by iHARPERELLA (see [`crate::bgremove::iharperella`](mod@crate::bgremove::iharperella)).
 //! - QSMART does not use `MRPhaseUnwrap` but Hongfu Sun's `lapunwrap.m` (mirror extension):
-//!   [`LaplacianSolver::Mirror`], per echo on the unmasked phase (`unwrap_phase.m` l. 5–10).
+//!   [`LaplacianSolver::Mirror`], per echo on the unmasked phase (`unwrap_phase.m` l. 5–10;
+//!   [`laplacian_unmasked`](crate::pipeline::FieldMappingConfig::laplacian_unmasked)).
 //!
 //! # Reference pipeline (other than STI Suite)
 //!

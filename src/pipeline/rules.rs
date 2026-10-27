@@ -409,6 +409,7 @@ pub const SETTINGS: &[(&str, &str)] = &[
     ("field_mapping.phase_offset_sigma_mm", "MCPC-3D-S smoothing sigma per axis, mm; only with phase-offset removal"),
     ("field_mapping.bipolar_correction", "Bipolar readout correction (bool)"),
     ("field_mapping.laplacian_solver", "Laplacian unwrapping's solver: dct, fft-12 (LaplacianSolver::FFT_DEFAULT_PAD), fft (other padding) or mirror; only with Laplacian unwrapping"),
+    ("field_mapping.laplacian_unmasked", "Laplacian unwrapping on the raw phase over the whole volume, not the phase zeroed outside the mask (bool); only with Laplacian unwrapping"),
     ("bg_removal.algorithm", "Background field removal (BgRemovalAlgorithm::id)"),
     ("bg_removal.vsharp.deconvolve", "V-SHARP's TSVD deconvolution (bool); only with V-SHARP"),
     ("bg_removal.vsharp.max_radius", "V-SHARP's largest kernel radius, mm; only with V-SHARP"),
@@ -548,6 +549,11 @@ pub fn current(input: &RuleInput, facts: &ScanFacts, setting: &str) -> Option<Ve
                 }),
             )
         }
+        "field_mapping.laplacian_unmasked" => gated(
+            inv_input.needs_field_mapping()
+                && c.field_mapping.unwrapping_algorithm == super::config::UnwrappingAlgorithm::Laplacian,
+            Current::Bool(c.field_mapping.laplacian_unmasked),
+        ),
         "bg_removal.vsharp.deconvolve" => gated(vsharp, Current::Bool(c.bg_removal.vsharp.deconvolve)),
         "bg_removal.vsharp.max_radius" => gated(vsharp, Current::Number(c.bg_removal.vsharp.max_radius)),
         "bg_removal.vsharp.min_radius" => gated(vsharp, Current::Number(c.bg_removal.vsharp.min_radius)),
@@ -933,6 +939,11 @@ pub static RULES: &[Rule] = &[
         "field_mapping.laplacian_solver", &[Choice("fft-12")],
         "MRPhaseUnwrap is the FFT Schofield-Zhu solver with 12 voxels of padding",
         "STI Suite 3.0 MRPhaseUnwrap, probed (recorded in QSM.rs LaplacianSolver::Fft docs)"),
+    reference("sti.unwrap-unmasked",
+        &[inv(STI), method("field_mapping.unwrapping_algorithm", LAPLACIAN)],
+        "field_mapping.laplacian_unmasked", &[Bool(true)],
+        "STI Suite's QSM_GUI gives MRPhaseUnwrap the raw wrapped phase, not the phase masked first",
+        "STI Suite 3.0 QSM_GUI, probed headless (recorded in QSM.rs laplacian.rs docs)"),
     reference("qsmart.unwrap-laplacian", &[inv(&[Choice("qsmart")])],
         "field_mapping.unwrapping_algorithm", LAPLACIAN,
         "QSMART unwraps each echo with Laplacian unwrapping (lapunwrap.m)",
@@ -942,6 +953,11 @@ pub static RULES: &[Rule] = &[
         "field_mapping.laplacian_solver", &[Choice("mirror")],
         "QSMART's lapunwrap.m solves on the mirrored volume",
         "QSMART unwrap_phase.m l. 5-10, lapunwrap.m"),
+    reference("qsmart.unwrap-unmasked",
+        &[inv(&[Choice("qsmart")]), method("field_mapping.unwrapping_algorithm", LAPLACIAN)],
+        "field_mapping.laplacian_unmasked", &[Bool(true)],
+        "QSMART unwraps each echo's raw phase over the whole volume, and its echo fit fits every voxel",
+        "QSMART unwrap_phase.m l. 5-10; echofit.m"),
     // ---------------------------------------------------------------- Field mapping
     reference("qsmart.field-echofit", &[inv(&[Choice("qsmart")])],
         "field_mapping.b0_estimation", &[Choice("qsmart-echofit")],
@@ -1484,6 +1500,14 @@ mod tests {
                 c.cfg.field_mapping.unwrapping_algorithm = UnwrappingAlgorithm::Laplacian;
             })),
             ("qsmart.field-echofit", Case::new(inversion(I::Qsmart))),
+            ("qsmart.unwrap-unmasked", Case::new(|c| {
+                inversion(I::Qsmart)(c);
+                c.cfg.field_mapping.unwrapping_algorithm = UnwrappingAlgorithm::Laplacian;
+            })),
+            ("sti.unwrap-unmasked", Case::new(|c| {
+                inversion(I::Ilsqr)(c);
+                c.cfg.field_mapping.unwrapping_algorithm = UnwrappingAlgorithm::Laplacian;
+            })),
             ("sti.echo-combination", Case::new(|c| { inversion(I::Star)(c); linear_fit(c) })),
             ("sti.echo-weights", Case::new(inversion(I::Ilsqr))),
             ("qsmart.mask-bet", Case::new(inversion(I::Qsmart))),
