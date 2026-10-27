@@ -1827,7 +1827,7 @@ fn run_qsmart_reconstruction(
         .collect();
     println!("[INFO] Multi-echo linear fit...");
     let fit_result = multi_echo_linear_fit(
-        &unwrapped_phases, &data.mag_echoes, &data.echo_times, &data.mask, false, 0.0,
+        &unwrapped_phases, &data.mag_echoes, &data.echo_times, &data.mask, false,
     );
     let field_hz = field_to_hz(&fit_result.field);
 
@@ -2254,7 +2254,7 @@ fn test_all_combinations() {
         // Multi-echo linear fit
         let fit_result = multi_echo_linear_fit(
             &unwrapped_phases, &data.mag_echoes, &data.echo_times, &data.mask,
-            false, 0.0,
+            false,
         );
         let field_hz = field_to_hz(&fit_result.field);
 
@@ -2265,10 +2265,7 @@ fn test_all_combinations() {
         ).unwrap();
 
         let mask_f64: Vec<f64> = data.mask.iter().map(|&v| v as f64).collect();
-        let weighted_mask: Vec<f64> = mask_f64.iter()
-            .zip(fit_result.reliability_mask.iter())
-            .map(|(&m, &r)| if m > 0.0 && r > 0 { 1.0 } else { 0.0 })
-            .collect();
+        let weighted_mask: Vec<f64> = mask_f64.iter().map(|&m| if m > 0.0 { 1.0 } else { 0.0 }).collect();
 
         let gyro_rad: f64 = 2.675e8;
         let ppm_factor = gyro_rad * data.field_strength / 1e6;
@@ -3552,11 +3549,11 @@ fn test_robust_echo_combination() {
     let params = RobustFitParams::default();
     // The reference every other map is scored against: the ordinary fit on the uncorrupted data.
     let reference = multi_echo_linear_fit(
-        &uw_clean, &data.mag_echoes, &data.echo_times, &data.mask, true, 0.0,
+        &uw_clean, &data.mag_echoes, &data.echo_times, &data.mask, true,
     );
     let (plain, t_plain) = run_timed!(
         "linear fit (corrupted)",
-        multi_echo_linear_fit(&uw_bad, &mags_bad, &data.echo_times, &data.mask, true, 0.0)
+        multi_echo_linear_fit(&uw_bad, &mags_bad, &data.echo_times, &data.mask, true)
     );
     let (robust, t_robust) = run_timed!(
         "robust fit (corrupted)",

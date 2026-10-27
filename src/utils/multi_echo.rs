@@ -66,15 +66,12 @@ impl Default for PhaseOffsetParams {
 pub struct LinearFitParams {
     /// Estimate and remove constant phase offset
     pub estimate_offset: bool,
-    /// Percentile threshold for reliability-based voxel exclusion (degrees)
-    pub reliability_threshold_percentile: f64,
 }
 
 impl Default for LinearFitParams {
     fn default() -> Self {
         Self {
             estimate_offset: true,
-            reliability_threshold_percentile: 90.0,
         }
     }
 }
@@ -1019,8 +1016,6 @@ pub struct LinearFitResult {
     pub phase_offset: Vec<f64>,
     /// Fit residual (normalized by magnitude sum)
     pub fit_residual: Vec<f64>,
-    /// Reliability mask (1 = reliable, 0 = unreliable)
-    pub reliability_mask: Vec<u8>,
 }
 
 /// Multi-echo linear fit with magnitude weighting
@@ -1036,17 +1031,15 @@ pub struct LinearFitResult {
 /// * `tes` - Echo times in seconds
 /// * `mask` - Binary mask
 /// * `estimate_offset` - If true, estimate phase offset (intercept)
-/// * `reliability_threshold_percentile` - Percentile for reliability masking (0-100, 0=disable)
 ///
 /// # Returns
-/// LinearFitResult containing field, phase_offset, fit_residual, reliability_mask
+/// LinearFitResult containing field, phase_offset, fit_residual
 pub fn multi_echo_linear_fit(
     unwrapped_phases: &[impl AsRef<[f64]>],
     mags: &[impl AsRef<[f64]>],
     tes: &[f64],
     mask: &[u8],
     estimate_offset: bool,
-    reliability_threshold_percentile: f64,
 ) -> LinearFitResult {
     let n_echoes = unwrapped_phases.len();
     let n_total = unwrapped_phases[0].as_ref().len();
@@ -1161,57 +1154,11 @@ pub fn multi_echo_linear_fit(
         }
     }
 
-    // Create reliability mask based on fit residuals
-    let reliability_mask = if reliability_threshold_percentile > 0.0 {
-        compute_reliability_mask(&fit_residual, mask, reliability_threshold_percentile)
-    } else {
-        // All masked voxels are reliable
-        mask.to_vec()
-    };
-
     LinearFitResult {
         field,
         phase_offset,
         fit_residual,
-        reliability_mask,
     }
-}
-
-/// Compute reliability mask by thresholding fit residuals
-///
-/// Applies Gaussian smoothing to residuals before thresholding (matching echofit.m)
-fn compute_reliability_mask(
-    fit_residual: &[f64],
-    mask: &[u8],
-    threshold_percentile: f64,
-) -> Vec<u8> {
-    let n_total = fit_residual.len();
-
-    // Collect non-zero residuals for percentile calculation
-    let mut residuals: Vec<f64> = fit_residual.iter()
-        .enumerate()
-        .filter(|(i, &r)| mask[*i] > 0 && r > 0.0 && r.is_finite())
-        .map(|(_, &r)| r)
-        .collect();
-
-    if residuals.is_empty() {
-        return mask.to_vec();
-    }
-
-    // Sort and find threshold at given percentile
-    residuals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let percentile_idx = ((threshold_percentile / 100.0) * residuals.len() as f64) as usize;
-    let threshold = residuals[percentile_idx.min(residuals.len() - 1)];
-
-    // Create reliability mask
-    let mut reliability = vec![0u8; n_total];
-    for i in 0..n_total {
-        if mask[i] > 0 && fit_residual[i] < threshold {
-            reliability[i] = 1;
-        }
-    }
-
-    reliability
 }
 
 // =========================================================================
@@ -1344,8 +1291,6 @@ pub struct RobustFitParams {
     /// Estimate and remove a constant phase offset, as in [`multi_echo_linear_fit`]. Costs one
     /// degree of freedom, which matters here — see [`multi_echo_robust_fit`].
     pub estimate_offset: bool,
-    /// Percentile for the returned reliability mask, as in [`multi_echo_linear_fit`].
-    pub reliability_threshold_percentile: f64,
 }
 
 impl RobustFitParams {
@@ -1364,7 +1309,6 @@ impl RobustFitParams {
     /// | `iterations` | any (`0` = report only) |
     /// | `downweight_level` | `0 < level ≤ 1` |
     /// | `flag_ratio` | `≥ 1` (`+∞` never flags) |
-    /// | `reliability_threshold_percentile` | `0 ≤ p ≤ 100` (`0` disables) |
     pub fn validate(&self) -> Result<(), String> {
         if let Some(t) = self.tuning {
             if !(t.is_finite() && t > 0.0) {
@@ -1379,12 +1323,6 @@ impl RobustFitParams {
         if self.flag_ratio.is_nan() || self.flag_ratio < 1.0 {
             return Err(format!("robust fit flag ratio must be at least 1, got {}", self.flag_ratio));
         }
-        if !(0.0..=100.0).contains(&self.reliability_threshold_percentile) {
-            return Err(format!(
-                "robust fit reliability threshold percentile must be in [0, 100], got {}",
-                self.reliability_threshold_percentile
-            ));
-        }
         Ok(())
     }
 }
@@ -1398,7 +1336,6 @@ impl Default for RobustFitParams {
             downweight_level: 0.75,
             flag_ratio: 3.0,
             estimate_offset: true,
-            reliability_threshold_percentile: 90.0,
         }
     }
 }
@@ -1640,7 +1577,6 @@ pub fn multi_echo_robust_fit(
             tes,
             mask,
             params.estimate_offset,
-            params.reliability_threshold_percentile,
         );
         return RobustFitResult {
             fit,
@@ -1804,7 +1740,7 @@ pub fn multi_echo_robust_fit(
 
     // --- final fit with the converged weights, reusing the ordinary estimator --------------
     // The product magnitude × robust is just another weight, so the established fit function
-    // computes the field, the offset, the residual and the reliability mask exactly as it
+    // computes the field, the offset and the residual exactly as it
     // would for any other weighting. Nothing about the model changes; only the weights do.
     let weighted_mags: Vec<Vec<f64>> = (0..n_echoes)
         .map(|e| {
@@ -1818,7 +1754,6 @@ pub fn multi_echo_robust_fit(
         tes,
         mask,
         params.estimate_offset,
-        params.reliability_threshold_percentile,
     );
 
     // --- per-echo diagnostics --------------------------------------------------------------
@@ -2784,13 +2719,11 @@ mod tests {
         let result = multi_echo_linear_fit(
             &phases, &mags, &tes, &mask,
             false, // no offset estimation
-            0.0,   // no reliability threshold
         );
 
         assert_eq!(result.field.len(), n);
         assert_eq!(result.phase_offset.len(), n);
         assert_eq!(result.fit_residual.len(), n);
-        assert_eq!(result.reliability_mask.len(), n);
 
         for i in 0..n {
             assert!((result.field[i] - slope).abs() < 1e-6,
@@ -2799,8 +2732,6 @@ mod tests {
                 "offset should be 0 when estimate_offset=false");
             assert!(result.fit_residual[i] < 1e-10,
                 "residual should be ~0 for perfect linear data");
-            assert_eq!(result.reliability_mask[i], 1,
-                "reliability should match mask when threshold=0");
         }
     }
 
@@ -2823,7 +2754,6 @@ mod tests {
         let result = multi_echo_linear_fit(
             &phases, &mags, &tes, &mask,
             true, // estimate offset
-            0.0,
         );
 
         for i in 0..n {
@@ -2849,7 +2779,7 @@ mod tests {
             .map(|_| vec![1.0; n])
             .collect();
 
-        let result = multi_echo_linear_fit(&phases, &mags, &tes, &mask, true, 0.0);
+        let result = multi_echo_linear_fit(&phases, &mags, &tes, &mask, true);
 
         for i in 0..n {
             assert_eq!(result.field[i], 0.0);
@@ -2876,7 +2806,7 @@ mod tests {
             .map(|_| vec![1.0; n])
             .collect();
 
-        let result = multi_echo_linear_fit(&phases, &mags, &tes, &mask, false, 0.0);
+        let result = multi_echo_linear_fit(&phases, &mags, &tes, &mask, false);
 
         for i in 0..n {
             assert!((result.field[i] - slopes[i]).abs() < 1e-6,
@@ -2885,7 +2815,7 @@ mod tests {
     }
 
     #[test]
-    fn test_multi_echo_linear_fit_with_reliability_threshold() {
+    fn test_multi_echo_linear_fit_residual_marks_noisy_voxels() {
         // Create data where some voxels have noisy fits
         let n = 100;
         let tes = [0.005, 0.010, 0.015];
@@ -2906,17 +2836,9 @@ mod tests {
             }
         }
 
-        // Use 80th percentile threshold
-        let result = multi_echo_linear_fit(&phases, &mags, &tes, &mask, false, 80.0);
+        let result = multi_echo_linear_fit(&phases, &mags, &tes, &mask, false);
 
-        assert_eq!(result.reliability_mask.len(), n);
-
-        // Clean voxels (0..90) have residual=0, noisy voxels (90..100) have residual>0.
-        // The threshold is computed from non-zero residuals only.
-        // Voxels with residual=0 satisfy 0 < threshold, but compute_reliability_mask
-        // checks `fit_residual[i] < threshold` -- 0 < any positive threshold => reliable=1.
-        // However, residual might not be exactly 0 due to floating point.
-        // Just verify that the noisy voxels have higher residuals than clean ones.
+        // Clean voxels (0..90) fit exactly; the noisy ones (90..100) leave a residual.
         let max_clean_resid = result.fit_residual[0..90].iter()
             .cloned().fold(0.0f64, f64::max);
         let min_noisy_resid = result.fit_residual[90..100].iter()
@@ -2925,10 +2847,6 @@ mod tests {
             "clean residuals ({}) should be less than noisy residuals ({})",
             max_clean_resid, min_noisy_resid);
 
-        // The reliability mask should exist and have valid values
-        for &v in &result.reliability_mask {
-            assert!(v == 0 || v == 1);
-        }
     }
 
     #[test]
@@ -2945,48 +2863,15 @@ mod tests {
             .collect();
 
         // Should not crash; field should be 0 because sum_w_te_sq ~ 0
-        let result = multi_echo_linear_fit(&phases, &mags, &tes, &mask, false, 0.0);
+        let result = multi_echo_linear_fit(&phases, &mags, &tes, &mask, false);
         for v in &result.field {
             assert!(v.is_finite());
         }
 
-        let result2 = multi_echo_linear_fit(&phases, &mags, &tes, &mask, true, 0.0);
+        let result2 = multi_echo_linear_fit(&phases, &mags, &tes, &mask, true);
         for v in &result2.field {
             assert!(v.is_finite());
         }
-    }
-
-    // =========================================================================
-    // compute_reliability_mask
-    // =========================================================================
-
-    #[test]
-    fn test_compute_reliability_mask_basic() {
-        let n = 10;
-        let mask = vec![1u8; n];
-        // Residuals in ascending order: 0.1, 0.2, ..., 1.0
-        let fit_residual: Vec<f64> = (1..=n).map(|i| i as f64 * 0.1).collect();
-
-        // 50th percentile: threshold ~ 0.5
-        let reliability = compute_reliability_mask(&fit_residual, &mask, 50.0);
-        assert_eq!(reliability.len(), n);
-
-        // Voxels with residual < threshold should be reliable
-        let reliable_count: usize = reliability.iter().map(|&v| v as usize).sum();
-        assert!(reliable_count > 0 && reliable_count < n,
-            "some but not all should be reliable, got {}/{}", reliable_count, n);
-    }
-
-    #[test]
-    fn test_compute_reliability_mask_all_zero_residual() {
-        let n = 5;
-        let mask = vec![1u8; n];
-        let fit_residual = vec![0.0; n];
-
-        // When all residuals are 0, the filter skips them (r > 0.0 check fails)
-        // so residuals vec is empty and mask is returned as-is
-        let reliability = compute_reliability_mask(&fit_residual, &mask, 50.0);
-        assert_eq!(reliability, mask);
     }
 
     // =========================================================================
@@ -3223,13 +3108,12 @@ mod tests {
         // /1000 that used to be here was a leftover from the millisecond era and
         // fed the fit 5-15 microsecond echo times.
         let result = multi_echo_linear_fit(
-            &corrected, &mags, &tes, &mask, true, 0.0,
+            &corrected, &mags, &tes, &mask, true,
         );
 
         assert_eq!(result.field.len(), n);
         assert_eq!(result.phase_offset.len(), n);
         assert_eq!(result.fit_residual.len(), n);
-        assert_eq!(result.reliability_mask.len(), n);
 
         for v in &result.field {
             assert!(v.is_finite(), "field should be finite");
@@ -3662,7 +3546,7 @@ mod tests {
     fn a_clean_series_is_not_flagged_and_is_barely_touched() {
         let (phases, mags, tes, truth, mask) = echo_series(4000, 0.02);
         let p = RobustFitParams::default();
-        let lin = multi_echo_linear_fit(&phases, &mags, &tes, &mask, true, 0.0);
+        let lin = multi_echo_linear_fit(&phases, &mags, &tes, &mask, true);
         let rob = multi_echo_robust_fit(&phases, &mags, &tes, &mask, &p);
 
         println!(
@@ -3727,7 +3611,7 @@ mod tests {
         const AMP: f64 = 0.8;
         corrupt_block(&mut phases, &mut mags, BAD, 0.35, 0.8, AMP);
 
-        let lin = multi_echo_linear_fit(&phases, &mags, &tes, &mask, true, 0.0);
+        let lin = multi_echo_linear_fit(&phases, &mags, &tes, &mask, true);
         let rob = multi_echo_robust_fit(&phases, &mags, &tes, &mask, &RobustFitParams::default());
 
         println!(
@@ -3781,7 +3665,7 @@ mod tests {
         // Three echoes with an intercept is two parameters and one spare degree of freedom —
         // below the four this needs.
         let (p3, m3, t3) = (&phases[..3], &mags[..3], &tes[..3]);
-        let lin = multi_echo_linear_fit(p3, m3, t3, &mask, true, 0.0);
+        let lin = multi_echo_linear_fit(p3, m3, t3, &mask, true);
         let rob = multi_echo_robust_fit(p3, m3, t3, &mask, &RobustFitParams::default());
 
         assert_eq!(rob.fit.field, lin.field, "field must be the ordinary fit, untouched");
@@ -4077,7 +3961,7 @@ mod tests {
                 ph[bad][v] += 0.8 * r;
                 mg[bad][v] *= 0.8;
             }
-            let lin = multi_echo_linear_fit(&ph, &mg, &tes, &mask, true, 0.0);
+            let lin = multi_echo_linear_fit(&ph, &mg, &tes, &mask, true);
             let rob = multi_echo_robust_fit(&ph, &mg, &tes, &mask, &p);
             let err = |f: &[f64]| -> f64 {
                 (0..n).map(|v| (f[v] - slope[v]).abs()).sum::<f64>() / n as f64
