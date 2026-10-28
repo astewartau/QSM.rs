@@ -4,9 +4,21 @@
 //! Uses the spherical mean value property of harmonic functions to
 //! separate local from background fields.
 //!
-//! The SHARP authors (Schweser et al.) have no public code; this module is a port of QSM.jl's
-//! `sharp` (kamesy/QSM.jl fde4b92, `src/bgremove/sharp.jl`), a third-party implementation, with
-//! its defaults. QSM.jl, line by line:
+//! # Which implementation
+//!
+//! The SHARP authors (Schweser et al. 2011) published no code. Where the authors' code does not
+//! exist, QSM.rs follows one designated implementation per family; for Kames's SMV methods
+//! (SHARP, V-SHARP's filtering, iSMV) and inversions that is QSM.jl, his maintained successor
+//! to QSM.m. So this module is a port of QSM.jl's `sharp` (kamesy/QSM.jl fde4b92,
+//! `src/bgremove/sharp.jl`), with its defaults. Other implementations, for reference:
+//!
+//! | implementation | radius | TSVD threshold |
+//! |---|---|---|
+//! | QSM.jl `sharp` (followed) | `18·min(vsz)` mm | 0.05 |
+//! | QSM.m `sharp.m` (kamesy/QSM.m f22dc40, `src/bgremove/sharp.m:13-15,33-34`) | 9 mm | 0.05 |
+//! | Hongfu Sun's `sharp.m` (sunhongfu/QSM c75b138, `background_field_removal/sharp.m`) | 4 mm if omitted (`ker_rad`, rounded to voxels per axis); his drivers pass 2–5 mm, mostly 3 | no default; his drivers pass 0.05–0.1, mostly 0.1 |
+//!
+//! QSM.jl, line by line:
 //!
 //! 1. Crop the field and the mask to the mask's bounding box (`crop_indices`) and zero-pad them
 //!    to `fastfftsize(box, (p, p, p); rfft = true)` with `p = ⌈r / min(vsz)⌉`
@@ -36,11 +48,10 @@
 //!
 //! # Reference pipeline
 //!
-//! QSM.jl's README pipeline uses V-SHARP, not SHARP (see [`super::vsharp`]). For comparison,
-//! Hongfu Sun's `sharp.m` (github sunhongfu/QSM, also third-party) defaults to a 4 mm kernel
-//! (rounded to voxels per axis, at least 1), keeps voxels where the normalised SMV of the mask
-//! exceeds `1 − 1/|ball|`, and its driver `Siemens_3T/qsm_r2s_prisma.m` runs it on a BET mask
-//! (`bet2 -f 0.4 -w 2`) times its echo-fit reliability map.
+//! QSM.jl's README pipeline uses V-SHARP, not SHARP (see [`super::vsharp`]). Hongfu Sun's
+//! `sharp.m` keeps voxels where the normalised SMV of the mask exceeds `1 − 1/|ball|`, and his
+//! driver `Siemens_3T/qsm_r2s_prisma.m` runs it on a BET mask (`bet2 -f 0.4 -w 2`) times his
+//! echo-fit reliability map.
 //!
 //! Reference:
 //! Schweser, F., Deistung, A., Lehr, B.W., Reichenbach, J.R. (2011).
