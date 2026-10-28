@@ -445,7 +445,11 @@ pub struct FieldMappingConfig {
     /// Laplacian unwrapping on the raw phase over the whole volume, instead of on the phase
     /// zeroed outside the brain mask (default `false`). Zeroing first keeps the noise outside the
     /// brain out of the global Poisson solve, and is what UK Biobank (`MRPhaseUnwrap(mask .*
-    /// phase)`) and QSM.jl do. STI Suite 3.0's `QSM_GUI` and QSMART unwrap the raw phase
+    /// phase)`) does. QSM.jl's `unwrap_laplacian` takes the raw phase: its `:dct` solver (this
+    /// crate's [`LaplacianSolver::Dct`]) ignores the mask, so it is `laplacian_unmasked: true`
+    /// here, while its default `:mgpcg` (not ported) multiplies the Laplacian by the mask and
+    /// solves with a Dirichlet boundary on it, which also removes the background (see
+    /// [`crate::unwrap::laplacian`]). STI Suite 3.0's `QSM_GUI` and QSMART unwrap the raw phase
     /// (rules `sti.unwrap-unmasked`, `qsmart.unwrap-unmasked`; see [`crate::unwrap::laplacian`]).
     /// With [`B0EstimationMethod::QsmartEchofit`] the unwrapped echoes are also kept over the
     /// whole volume, as QSMART fits them; the other combinations use the voxels inside the mask.
