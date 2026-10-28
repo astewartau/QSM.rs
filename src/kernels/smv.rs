@@ -66,6 +66,51 @@ pub fn smv_kernel(
     s
 }
 
+/// How far STI Suite's SMV ball reaches past its nominal radius, in mm: its ball of radius `r`
+/// holds the voxels within `r + 1/6` of the centre. See [`sti_smv_kernel`].
+pub const STI_BALL_MARGIN_MM: f64 = 1.0 / 6.0;
+
+/// STI Suite 3.0 `V_SHARP`'s SMV kernel: the voxels whose centres lie within
+/// `radius + `[`STI_BALL_MARGIN_MM`] mm of the centre, **without the centre voxel**, normalised
+/// to sum 1, centred at index (0, 0, 0) for FFT use (Fortran order, like [`smv_kernel`]).
+///
+/// Recovered from STI Suite's P-code by fitting its output: on the QSM-CI KKI travelling head
+/// (256×256×128, 1 mm; QSMxT/QSM-CI parity, astewartau/QSM.rs#329) a NumPy V-SHARP with this
+/// ball reproduces `V_SHARP`'s unmasked output to 2e-6 relative (its float32 output) and its
+/// eroded mask exactly, where [`smv_kernel`]'s ball (radius `r`, centre included) is 4.4 %
+/// off. STI runs on a 1 mm grid, where only the squared integer distances matter; on other
+/// grids the margin is taken in mm.
+pub fn sti_smv_kernel(grid: &Grid, radius: f64) -> Vec<f64> {
+    let (nx, ny, nz) = grid.dims;
+    let (vsx, vsy, vsz) = grid.voxel_size;
+    let reach = radius + STI_BALL_MARGIN_MM;
+    let r_squared = reach * reach;
+    let wrap = |i: usize, n: usize| if i <= n / 2 { i as f64 } else { i as f64 - n as f64 };
+    let mut s = vec![0.0; nx * ny * nz];
+    let mut count = 0.0;
+    for k in 0..nz {
+        let dz = wrap(k, nz) * vsz;
+        for j in 0..ny {
+            let dy = wrap(j, ny) * vsy;
+            for i in 0..nx {
+                if i == 0 && j == 0 && k == 0 {
+                    continue;
+                }
+                let dx = wrap(i, nx) * vsx;
+                if dx * dx + dy * dy + dz * dz <= r_squared {
+                    s[i + j * nx + k * nx * ny] = 1.0;
+                    count += 1.0;
+                }
+            }
+        }
+    }
+    if count > 0.0 {
+        let norm = 1.0 / count;
+        s.iter_mut().for_each(|v| *v *= norm);
+    }
+    s
+}
+
 /// Erode a binary mask using FFT-based SMV convolution.
 ///
 /// Convolves the mask with an SMV kernel in Fourier space and thresholds.
@@ -182,6 +227,19 @@ mod tests {
     fn test_smv_kernel_center() {
         let s = smv_kernel(&grid(16), 2.0);
         assert!(s[0] > 0.0, "Center voxel should be in sphere");
+    }
+
+    #[test]
+    fn test_sti_smv_kernel_excludes_the_centre_and_reaches_r_plus_a_sixth() {
+        let g = grid(16);
+        let s = sti_smv_kernel(&g, 1.0);
+        // r = 1 at 1 mm: the 6 face neighbours (distance 1 ≤ 7/6); the 12 edge neighbours
+        // (√2 ≈ 1.41) and the centre are out.
+        assert_eq!(s[0], 0.0);
+        assert_eq!(s.iter().filter(|&&v| v > 0.0).count(), 6);
+        assert!((s.iter().sum::<f64>() - 1.0).abs() < 1e-12);
+        // r = 2: |x|² ≤ (13/6)² = 4.69, so distances² 1, 2, 3, 4 (6 + 12 + 8 + 6 = 32 voxels).
+        assert_eq!(sti_smv_kernel(&g, 2.0).iter().filter(|&&v| v > 0.0).count(), 32);
     }
 
     #[test]
