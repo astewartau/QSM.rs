@@ -101,7 +101,7 @@
 //! |---|---|---|---|---|
 //! | phantom, 1 mm | 59.4 % / 0.807 | same | same | same |
 //! | phantom slab, 1 mm | **68.5 % / 0.730** | 68.5 % / 0.730 | 1334 % / 0.034 | 1334 % / 0.034 |
-//! | phantom slab, 1 × 1 × 2 mm | 65.6 % / 0.757 | **65.5 % / 0.757** | 349 % / 0.082 | 347 % / 0.082 |
+//! | phantom slab, 1 × 1 × 2 mm | **65.6 % / 0.757** | 65.5 % / 0.757 | 349 % / 0.082 | 347 % / 0.082 |
 //!
 //! - **Coverage.** The edge erosion's cost is the voxels it removes at the faces: about 1,010 of
 //!   the in-vivo scan's 1.5 million (one face), and 70,418 of 617,917 on the 1 mm phantom slab
@@ -113,7 +113,10 @@
 //! - **Divergence.** It changes χ only on anisotropic voxels: by 1.1 % (relative L2) on a
 //!   0.9 × 1.0 × 1.3 mm phantom. On the 1 × 1 × 2 mm in-vivo scan with the reference's erosion,
 //!   the package's divergence accounts for the 2.3 % that separates "edge erosion only" from the
-//!   package.
+//!   package. Against the truth it does not help either way: on the 1 × 1 × 2 mm slab the
+//!   package's divergence scores 0.1 points lower NRMSE (65.5 % vs 65.6 %, corr equal). The
+//!   default stays the exact adjoint because that is the operator the TGV problem needs, not
+//!   for a measured gain.
 //!
 //! The phantom cases use QSM-CI's in-silico phantom (QSM Challenge 2.0 head model, 164 × 205 × 205
 //! at 1 mm, 7 T) with its true total field. They were run in the QSM.rs Actions on the CI's data
