@@ -339,8 +339,19 @@ fn field_mapping_with_offset(
 ///
 ///   Then `B0 = Σ w (φ/TE) / Σ w` with the variant's `weighting`.
 ///
-///   Neither the masking nor this alignment is QSM.jl's: QSM.jl's README unwraps the raw phase
-///   and inverts each echo's field separately, so it has no echo combination to compare with.
+///   This alignment is QSM.rs's own (kept, Ashley 2026-10-28): each echo's Laplacian unwrap is
+///   determined only up to a constant of its own, so the constants are removed before the
+///   echoes are combined, which loses only a global constant field. No reference combines
+///   Laplacian-unwrapped echoes this way. The MATLAB pipelines QSM.rs reproduces with other
+///   settings: UK Biobank (STI Suite `MRPhaseUnwrap` on the masked phase, then the T2*-weighted
+///   average; [`LaplacianSolver::Fft`](crate::unwrap::LaplacianSolver::Fft) `{ pad: [64; 3] }` with
+///   [`B0WeightType::AssumedDecay`], matched to ≈1e-14 rad up to a global constant, see
+///   [`run_field_mapping`]), QSMART (Hongfu Sun's `lapunwrap` per echo on the raw phase, then
+///   `echofit`; [`LaplacianSolver::Mirror`](crate::unwrap::LaplacianSolver::Mirror) with
+///   `laplacian_unmasked` and [`B0EstimationMethod::QsmartEchofit`], which aligns nothing) and
+///   STI Suite's GUI (`MRPhaseUnwrap` on the raw phase, echoes summed: `laplacian_unmasked` with
+///   [`B0WeightType::TEs`]). QSM.jl's README unwraps the raw phase and inverts each echo's field
+///   separately, so it has no echo combination to compare with.
 ///   Measured on the QSM-CI in-vivo travelling-head scan (Prisma 2.89 T, 1 mm, 5 echoes)
 ///   against QSM.jl's `unwrap_laplacian(…; solver = :dct)` with each echo scaled by its TE and
 ///   combined by QSM.jl's `multi_echo_average` (`W` = magnitude), in the QSM-CI `julia-qsm`
