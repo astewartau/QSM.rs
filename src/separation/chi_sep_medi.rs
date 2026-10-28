@@ -109,8 +109,9 @@
 //! - **An all-zero CSF mask means no CSF term.** The toolbox applies the CSF term whenever
 //!   `option_data.mask_CSF` is not empty; with a mask that has no voxels, the mean over it is
 //!   `NaN`, `NaN·λ_CSF` is `NaN` even for `λ_CSF = 0`, and every step is lost (the solver returns its
-//!   initial guess). Its own GUI passes `[]` when it has no CSF mask, which turns the term off;
-//!   an all-zero mask here does the same.
+//!   initial guess). Its own GUI passes `[]` when it has no CSF mask, which turns the term off.
+//!   The CSF mask is a required input here, as in `Chisep_script.m`; passing an all-zero mask
+//!   reproduces the GUI's no-CSF behaviour (`mask_CSF = []`).
 //! - **No wall-clock limit.** The toolbox also stops after `params.time_limit` (default 1800 s) of
 //!   iterations. That makes its output depend on the machine; it is not reproduced.
 //! - Options of `chi_sep_MEDI` that `Chisep_script.m` does not use are not exposed:
@@ -300,7 +301,8 @@ pub struct ChiSepMediInputs<'a> {
     pub qsm: &'a [f64],
     /// Brain mask (`mask`), nonzero inside.
     pub mask: &'a [u8],
-    /// CSF mask (`option_data.mask_CSF`), nonzero inside. All zero: no CSF term.
+    /// CSF mask (`option_data.mask_CSF`), nonzero inside; required, as `Chisep_script.m` passes
+    /// one. All zero: no CSF term, which reproduces the toolbox GUI (`mask_CSF = []`).
     pub mask_csf: &'a [u8],
 }
 
