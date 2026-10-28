@@ -20,9 +20,14 @@
 //!   `mcpc3ds` function itself defaults to `[10, 10, 5]` voxels (`src/mcpc3ds.jl:17,39`). The
 //!   command line says to reduce it on a small field of view and to use 0 along an axis with a
 //!   single slice; that is left to the caller.
-//! - **Masks.** MCPC-3D-S, ROMEO and the bipolar fit all use the brain mask passed in. The
-//!   reference `mcpc3ds` makes its own `robustmask` of `sqrt(|HIP|)` (`mcpc3ds.jl:44-46`), and the
-//!   CLI unwraps inside `robustmask` of the template magnitude (`caller.jl:201-204`).
+//! - **Masks.** MCPC-3D-S makes its own `robustmask` of `sqrt(|HIP|)`, as the reference
+//!   `mcpc3ds` does (`mcpc3ds.jl:44-46`; [`crate::utils::phase_offset_removal`]). ROMEO and the
+//!   bipolar fit use the brain mask passed in, as the CLI does when given one (`-k`); without
+//!   one the CLI unwraps inside `robustmask` of the template magnitude (`caller.jl:201-204`).
+//! - **ROMEO settings.** [`RomeoParams::romeo_cli`](crate::unwrap::RomeoParams::romeo_cli): the
+//!   CLI's `romeo3` weights (its default with a magnitude) and no temporal re-unwrapping of
+//!   uncertain voxels. The result matches the CLI up to its single-precision arithmetic (see
+//!   [`crate::unwrap::romeo`], *Agreement with the reference*).
 //! - **Offset removal off, or Laplacian unwrapping.** Phase-offset removal and bipolar correction
 //!   run only with ROMEO (`do_offset` below); with Laplacian they are skipped whatever the
 //!   config says. Without them each echo is unwrapped on its own (the template and `individual`
@@ -242,7 +247,7 @@ fn field_mapping_with_offset(
     progress(1, 4);
     let grid = crate::Grid::new(nx, ny, nz, vsx, vsy, vsz);
     let (mut corrected, phase_offset) = crate::utils::phase_offset_removal(
-        phases, mag_slices, tes, mask,
+        phases, mag_slices, tes,
         config.phase_offset_sigma_voxels((vsx, vsy, vsz)), [0, 1],
         crate::unwrap::UnwrapMethod::Romeo,
         &grid,
@@ -1694,7 +1699,7 @@ mod tests {
         let cfg = robust_cfg(UnwrappingAlgorithm::Romeo, true);
         let got = run(&cfg);
         let (corrected, _) = crate::utils::phase_offset_removal(
-            &ph, &mg, &TES4, &mask, cfg.phase_offset_sigma_voxels((1.0, 1.0, 1.0)), [0, 1],
+            &ph, &mg, &TES4, cfg.phase_offset_sigma_voxels((1.0, 1.0, 1.0)), [0, 1],
             crate::unwrap::UnwrapMethod::Romeo, &grid,
         );
         let uw = crate::unwrap::unwrap_romeo_multi_echo(&corrected, &refs(&mg), &TES4, &mask, &cfg.romeo_params, &grid);

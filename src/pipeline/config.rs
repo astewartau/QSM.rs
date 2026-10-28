@@ -451,6 +451,8 @@ pub struct FieldMappingConfig {
     /// whole volume, as QSMART fits them; the other combinations use the voxels inside the mask.
     /// Only with Laplacian unwrapping.
     pub laplacian_unmasked: bool,
+    /// ROMEO's settings (default [`RomeoParams::romeo_cli`]: the `romeo` command line's, as
+    /// the rest of this default config is; see [`run_field_mapping`](super::run_field_mapping)).
     pub romeo_params: RomeoParams,
 }
 
@@ -477,7 +479,7 @@ impl Default for FieldMappingConfig {
             b0_estimation: B0EstimationMethod::default(),
             laplacian_solver: LaplacianSolver::Dct,
             laplacian_unmasked: false,
-            romeo_params: RomeoParams::default(),
+            romeo_params: RomeoParams::romeo_cli(),
         }
     }
 }

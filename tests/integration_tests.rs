@@ -55,7 +55,7 @@ fn run_field_mapping(data: &common::TestData) -> Vec<f64> {
     // Step 1: Phase offset removal (uses TE ratios only — unit-agnostic)
     println!("[INFO] Phase offset removal...");
     let (corrected_phases, _offset) = phase_offset_removal(
-        &data.phase_echoes, &data.mag_echoes, &data.echo_times, &data.mask,
+        &data.phase_echoes, &data.mag_echoes, &data.echo_times,
         [10.0, 10.0, 5.0], [0, 1], UnwrapMethod::Romeo,
         &grid,
     );
@@ -87,7 +87,7 @@ fn run_field_mapping_laplacian(data: &common::TestData) -> Vec<f64> {
 
     // Phase offset removal is unchanged: it unwraps the HIP with ROMEO and uses TE ratios.
     let (corrected_phases, _offset) = phase_offset_removal(
-        &data.phase_echoes, &data.mag_echoes, &data.echo_times, &data.mask,
+        &data.phase_echoes, &data.mag_echoes, &data.echo_times,
         [10.0, 10.0, 5.0], [0, 1], UnwrapMethod::Romeo,
         &grid,
     );
@@ -116,7 +116,7 @@ fn run_field_mapping_bestpath(data: &common::TestData) -> Vec<f64> {
     let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
 
     let (corrected_phases, _offset) = phase_offset_removal(
-        &data.phase_echoes, &data.mag_echoes, &data.echo_times, &data.mask,
+        &data.phase_echoes, &data.mag_echoes, &data.echo_times,
         [10.0, 10.0, 5.0], [0, 1], UnwrapMethod::Romeo,
         &grid,
     );
@@ -145,7 +145,7 @@ fn run_field_mapping_prelude(data: &common::TestData) -> Vec<f64> {
     let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
 
     let (corrected_phases, _offset) = phase_offset_removal(
-        &data.phase_echoes, &data.mag_echoes, &data.echo_times, &data.mask,
+        &data.phase_echoes, &data.mag_echoes, &data.echo_times,
         [10.0, 10.0, 5.0], [0, 1], UnwrapMethod::Romeo,
         &grid,
     );
@@ -3104,7 +3104,7 @@ fn field_map_ppm(
     let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
 
     let (corrected_phases, _offset) = phase_offset_removal(
-        phases, magnitudes, &data.echo_times, mask,
+        phases, magnitudes, &data.echo_times,
         [10.0, 10.0, 5.0], [0, 1], UnwrapMethod::Romeo,
         &grid,
     );
@@ -3531,7 +3531,7 @@ fn test_robust_echo_combination() {
     // --- unwrap both series through the real pipeline ----------------------------------------
     let unwrap = |phases: &[Vec<f64>], mags: &[Vec<f64>]| -> Vec<Vec<f64>> {
         let (corrected, _) = phase_offset_removal(
-            phases, mags, &data.echo_times, &data.mask,
+            phases, mags, &data.echo_times,
             pipeline::FieldMappingConfig::default().phase_offset_sigma_voxels(data.voxel_size),
             [0, 1], UnwrapMethod::Romeo, &grid,
         );
