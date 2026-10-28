@@ -192,6 +192,8 @@ fn test_bgremove_sharp() {
     common::save_center_slices(&result, &eroded_mask, data.dims, "bgremove_sharp");
 
     assert!(res.nrmse < 0.5, "SHARP NRMSE too high: {}", res.nrmse);
+    // SEPIA's defaults (4 mm, 0.03; see `bgremove::sharp`). The eroded rim counts as zeros in
+    // this full-mask score.
     assert!(res.correlation > 0.7, "SHARP correlation too low: {}", res.correlation);
 }
 

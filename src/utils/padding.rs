@@ -21,6 +21,57 @@ pub fn next_fast_fft_size(size: usize) -> usize {
     }
 }
 
+/// Next size `>= n` whose only prime factors are 2, 3, 5 and 7: QSM.jl's `nextfastfft`
+/// (`nextprod((2, 3, 5, 7), n)`, `src/utils/utils.jl:15-17`, fde4b92).
+pub fn qsmjl_next_fast_fft(n: usize) -> usize {
+    let mut s = n.max(1);
+    loop {
+        let mut m = s;
+        for p in [2, 3, 5, 7] {
+            while m.is_multiple_of(p) {
+                m /= p;
+            }
+        }
+        if m == 1 {
+            return s;
+        }
+        s += 1;
+    }
+}
+
+/// QSM.jl's `fastfftsize(sz, ksz; rfft = true)` (`src/utils/utils.jl:41-72`, fde4b92), the array
+/// size QSM.jl's `padfastfft` pads to before its FFTs. Axis `d` with `ksz[d] < 0` keeps its
+/// size; the others grow to `qsmjl_next_fast_fft(sz[d] + max(ksz[d], 1) − 1)`, and the first
+/// such axis (the real-to-complex FFT's halved axis) is then moved to the next even fast size
+/// within three tries, or else to the fast size + 1.
+///
+/// QSM.jl uses this size for every FFT-based method, so a port that must reproduce QSM.jl's
+/// periodic boundary (a deconvolution, an inverse filter) has to use the same size, even with
+/// complex FFTs.
+pub fn qsmjl_fast_fft_size(sz: [usize; 3], ksz: [i64; 3]) -> [usize; 3] {
+    let Some(i1) = ksz.iter().position(|&k| k > -1) else { return sz };
+    let mut out = sz;
+    for d in 0..3 {
+        if ksz[d] < 0 {
+            continue;
+        }
+        let s0 = qsmjl_next_fast_fft(sz[d] + ksz[d].max(1) as usize - 1);
+        out[d] = if d == i1 {
+            let mut s = s0;
+            for _ in 0..3 {
+                if s.is_multiple_of(2) {
+                    break;
+                }
+                s = qsmjl_next_fast_fft(s + 1);
+            }
+            if s.is_multiple_of(2) { s } else { s0 + 1 }
+        } else {
+            s0
+        };
+    }
+    out
+}
+
 /// Pad a 3D array to fast FFT size
 ///
 /// # Arguments
@@ -183,6 +234,25 @@ mod tests {
         // Should match original
         for (orig, rec) in data.iter().zip(recovered.iter()) {
             assert_eq!(*orig, *rec);
+        }
+    }
+
+    #[test]
+    fn qsmjl_fast_fft_size_matches_qsm_jl() {
+        // QSM.jl fde4b92 `QSM.fastfftsize(sz, ksz; rfft=true)`, run in the QSM-CI julia-qsm image
+        let cases: [([usize; 3], [i64; 3], [usize; 3]); 9] = [
+            ([11, 11, 13], [0; 3], [12, 12, 14]),
+            ([176, 240, 150], [0; 3], [180, 240, 150]),
+            ([255, 97, 49], [0; 3], [256, 98, 49]),
+            ([15, 15, 15], [0; 3], [16, 15, 15]),
+            ([141, 170, 141], [18; 3], [160, 189, 160]),
+            ([33, 29, 25], [6; 3], [40, 35, 30]),
+            ([33, 29, 25], [-1, 6, 6], [33, 36, 30]),
+            ([37, 41, 23], [4, -1, 2], [40, 41, 24]),
+            ([20, 20, 20], [-1; 3], [20, 20, 20]),
+        ];
+        for (sz, k, want) in cases {
+            assert_eq!(qsmjl_fast_fft_size(sz, k), want, "fastfftsize({sz:?}, {k:?})");
         }
     }
 }
