@@ -41,6 +41,39 @@
 //!
 //! The output is χ in ppm.
 //!
+//! # Agreement with the reference
+//!
+//! On the QSM-CI in-vivo travelling-head scan (Siemens Prisma 2.89 T, 1 mm, 184×256×128, ROMEO
+//! total field, brain mask touching the first z plane) against the package in the QSM-CI
+//! `julia-qsm` image (`sha256:b3c048ac…`, 6c0886a, 4 threads), both at the package's defaults
+//! (1655 iterations): NRMSE 4.0e-4 % for a wrapped echo (the field as phase at TE1, the
+//! package's `get_laplace_phase_del`), and 3.7e-4 % for [`TgvInput::FieldPpm`] against the
+//! package with its own discrete Laplacian kernel on the unwrapped phase. Both are float32
+//! rounding over 1655 iterations. Before the erosion was the reference's (the crate's
+//! [`erode_mask`](crate::utils::morphology::erode_mask) also erodes from the array's edge), the
+//! field comparison gave NRMSE 11 %. `tests/tgv_tgvjl_parity.rs` checks both inputs, anisotropic
+//! voxels and oblique B0 against the package's output on small phantoms (relative L2 ≤ 3e-6).
+//!
+//! Against the package's `get_laplace_phase_romeo`, which ROMEO-unwraps the given phase again
+//! before its discrete Laplacian, the in-vivo field differs by NRMSE 12 %: on that scan the
+//! re-unwrap adds ±2π at 2 voxels inside the data-term mask, which spreads through the
+//! inversion. [`TgvInput::FieldPpm`] takes the Laplacian of the field as given.
+//!
+//! Where the reference is followed although it looks unintended:
+//! - **Erosion at the array's edge.** Neighbours outside the array are skipped, so a mask that
+//!   reaches the array's edge is not eroded from it (`erode_mask`, `src/tgv.jl:218-222`; the
+//!   original Python's `erode_mask` treats them as inside).
+//! - **Divergence in the `w` update.** Each row of `q` takes its differences along all three
+//!   axes scaled by that row's own resolution (`update_w_kernel!`; the same in the original
+//!   Python). On anisotropic voxels this is not the adjoint of the symmetric gradient in the `q`
+//!   update. Following it changed χ by 1.1 % on a small 0.9 × 1.0 × 1.3 mm phantom; on
+//!   isotropic voxels nothing changes. See `symdiv_rows_f32`.
+//!
+//! One deviation: χ is returned inside the eroded mask (`erosions` erosions of `mask`) and is
+//! zero elsewhere. The package returns its whole working box, whose χ outside that mask is the
+//! stencils' spill-over where the data term does not act (no data there; e.g. 44,530 voxels
+//! of the in-vivo brain mask).
+//!
 //! Optimizations:
 //! - Bounding box reduction: only process the region containing the mask
 //! - Pre-allocated buffers: all temporary arrays allocated once outside the loop
@@ -67,9 +100,72 @@
 //!   `laplacian = get_laplace_phase3`, `correct_laplacian = false` (README).
 //! - Langkammer et al. 2015 (abstract): 3D EPI at 3T and 7T, 1 mm isotropic at 3T.
 
-use crate::utils::morphology::erode_mask;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
+
+/// One erosion as the reference does it (`erode_mask`, `src/tgv.jl:218-222`, 6c0886a): a voxel
+/// stays in the mask when it and its in-bounds 6-neighbours (`strel_diamond`) all are.
+/// Neighbours outside the array are skipped (`checkbounds`), so a mask touching the array's edge
+/// is not eroded from it, unlike [`crate::utils::morphology::erode_mask`].
+fn erode_mask(mask: &[u8], nx: usize, ny: usize, nz: usize) -> Vec<u8> {
+    let nxy = nx * ny;
+    let mut out = vec![0u8; mask.len()];
+    for k in 0..nz {
+        for j in 0..ny {
+            for i in 0..nx {
+                let l = i + j * nx + k * nxy;
+                out[l] = u8::from(
+                    mask[l] != 0
+                        && (i == 0 || mask[l - 1] != 0)
+                        && (i + 1 == nx || mask[l + 1] != 0)
+                        && (j == 0 || mask[l - nx] != 0)
+                        && (j + 1 == ny || mask[l + nx] != 0)
+                        && (k == 0 || mask[l - nxy] != 0)
+                        && (k + 1 == nz || mask[l + nxy] != 0),
+                );
+            }
+        }
+    }
+    out
+}
+
+/// The divergence of the symmetric tensor `q` in the `w` update, as the reference computes it
+/// (`update_w_kernel!`, `src/tgv_helper.jl:88-105`, 6c0886a; the same in the original Python
+/// `tgv_deconv_update_w`, `qsm_tgv_cython_helper.pyx`): row `d` of the tensor (`(qxx, qxy, qxz)`
+/// for `w_x`, ...) takes its backward differences along x, y and z all scaled by `1/res_d`, the
+/// row's own resolution, not by the resolution of the axis each difference is along. On
+/// isotropic voxels that is the ordinary divergence; on anisotropic voxels it is not the adjoint
+/// of the symmetric gradient used in the `q` update. Kept as the reference has it (see the
+/// module docs, *Agreement with the reference*).
+#[allow(clippy::too_many_arguments)] // the six tensor components, as in symdiv_inplace_f32
+fn symdiv_rows_f32(
+    divx: &mut [f32], divy: &mut [f32], divz: &mut [f32],
+    sxx: &[f32], sxy: &[f32], sxz: &[f32],
+    syy: &[f32], syz: &[f32], szz: &[f32],
+    grid: &crate::Grid,
+) {
+    let (nx, ny, _) = grid.dims;
+    let (r1, r2, r3) = (1.0 / grid.vsx() as f32, 1.0 / grid.vsy() as f32, 1.0 / grid.vsz() as f32);
+    let nxy = nx * ny;
+    // Backward differences with zero flux before the first plane (`div_local`).
+    let d = |a: &[f32], l: usize, has_prev: bool, step: usize| a[l] - if has_prev { a[l - step] } else { 0.0 };
+    maybe_par_chunks_mut!(divx, nxy)
+        .zip(maybe_par_chunks_mut!(divy, nxy))
+        .zip(maybe_par_chunks_mut!(divz, nxy))
+        .enumerate()
+        .for_each(|(k, ((dxs, dys), dzs))| {
+            for j in 0..ny {
+                for i in 0..nx {
+                    let local = i + j * nx;
+                    let l = local + k * nxy;
+                    let (bi, bj, bk) = (i > 0, j > 0, k > 0);
+                    dxs[local] = (d(sxx, l, bi, 1) + d(sxy, l, bj, nx) + d(sxz, l, bk, nxy)) * r1;
+                    dys[local] = (d(sxy, l, bi, 1) + d(syy, l, bj, nx) + d(syz, l, bk, nxy)) * r2;
+                    dzs[local] = (d(sxz, l, bi, 1) + d(syz, l, bj, nx) + d(szz, l, bk, nxy)) * r3;
+                }
+            }
+        });
+}
 
 /// γ/2π in MHz/T, as used by TGV-QSM (Julia and Python reference implementations): the
 /// reference implementation's value, not `crate::constants`. Keep it.
@@ -1206,11 +1302,10 @@ pub fn tgv_qsm(
     let res = (vsx, vsy, vsz);
     let iterations = params.iterations.unwrap_or_else(|| get_default_iterations(res, params.step_size));
 
-    // Erode mask
-    let full_grid = crate::Grid::new(nx, ny, nz, vsx as f64, vsy as f64, vsz as f64);
+    // Erode mask (the reference's erosion, which does not erode from the array's edge)
     let mut mask_eroded = mask.to_vec();
     for _ in 0..params.erosions {
-        mask_eroded = erode_mask(&mask_eroded, &full_grid, 1);
+        mask_eroded = erode_mask(&mask_eroded, nx, ny, nz);
     }
     // The bounding box below has no extent for an empty mask (its size underflowed).
     if !mask_eroded.iter().any(|&m| m != 0) {
@@ -1226,7 +1321,7 @@ pub fn tgv_qsm(
     }
 
     // Create mask0 (one more erosion for internal computations)
-    let mask0 = erode_mask(&mask_eroded, &full_grid, 1);
+    let mask0 = erode_mask(&mask_eroded, nx, ny, nz);
 
     // Bounding box of the eroded mask with one voxel of padding (the reference's
     // `mask_box_indices`)
@@ -1398,7 +1493,7 @@ pub fn tgv_qsm(
             ws.szz[i] = ws.qzz[i] * m;
         }
 
-        crate::utils::gradient::symdiv_inplace_f32(
+        symdiv_rows_f32(
             &mut ws.divqx, &mut ws.divqy, &mut ws.divqz,
             &ws.sxx, &ws.sxy, &ws.sxz, &ws.syy, &ws.syz, &ws.szz,
             &sub_grid
@@ -1484,13 +1579,18 @@ mod tests {
         let ny = 5;
         let nz = 5;
 
+        // The reference skips neighbours outside the array: a full mask does not erode.
         let mask = vec![1u8; nx * ny * nz];
-        let grid5 = crate::Grid::new(nx, ny, nz, 1.0, 1.0, 1.0);
-        let eroded = erode_mask(&mask, &grid5, 1);
+        assert!(erode_mask(&mask, nx, ny, nz).iter().all(|&m| m == 1));
 
+        // A hole erodes its 6 neighbours, not the diagonals.
+        let mut mask = mask;
         let center = 2 + 2 * nx + 2 * nx * ny;
-        assert_eq!(eroded[center], 1);
-        assert_eq!(eroded[0], 0);
+        mask[center] = 0;
+        let eroded = erode_mask(&mask, nx, ny, nz);
+        assert_eq!(eroded.iter().filter(|&&m| m == 0).count(), 7);
+        assert_eq!(eroded[center + 1], 0);
+        assert_eq!(eroded[center + 1 + nx], 1);
     }
 
     #[test]
