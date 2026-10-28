@@ -64,6 +64,16 @@
 //! # let _ = qsmjl;
 //! ```
 //!
+//! The deconvolution threshold default, 0.05, is QSM.jl's `vsharp` `thr` and QSM.m's
+//! `vsharp.m` `thr` (kamesy/QSM.m f22dc40, `src/bgremove/vsharp.m:15,32`): STI Suite's
+//! `V_SHARP` (the original authors' code, whose other defaults this module keeps) does not
+//! deconvolve, so the threshold has no STI value. QSM.rs defaulted to 0.2 from PR #72
+//! (2026-09-07), a QSM.rs tuning: on the QSM Challenge 2.0 phantom (ROMEO field, V-SHARP,
+//! several dipole inversions) 0.2 gave a lower NRMSE on every inversion tested, and was
+//! identical to 0.05 on a noise-free field, because the higher threshold leaves out more of the
+//! low-frequency band where field-mapping error is amplified. It remains available as an
+//! explicit `threshold`.
+//!
 //! On the QSM-CI in-vivo travelling-head scan (Siemens Prisma 2.89 T, 1 mm, 184×256×128, ROMEO
 //! total field and brain mask) these settings and QSM.jl's `vsharp` in the QSM-CI `julia-qsm`
 //! image (`sha256:b3c048ac…`) agree to float rounding: NRMSE 2.6e-10 %, max |Δ| 5.8e-11 ppm,
@@ -209,11 +219,10 @@ impl VsharpGrid {
 #[derive(Clone, Debug)]
 pub struct VsharpParams {
     /// Deconvolution (TSVD) threshold: k-space frequencies where |1 - S| < threshold are dropped
-    /// rather than divided through (default: 0.05, QSM.jl `vsharp`'s `thr`,
-    /// `src/bgremove/sharp.jl`, fde4b92: STI Suite does not deconvolve, so QSM.jl is the only
-    /// reference for it). Only used when [`deconvolve`](Self::deconvolve) is true. Higher values
-    /// regularise more; before this default followed QSM.jl it was 0.2, chosen because the
-    /// deconvolution amplifies structured error in an estimated (not ground-truth) field.
+    /// rather than divided through (default: 0.05, QSM.jl `vsharp`'s and QSM.m `vsharp.m`'s
+    /// `thr`; STI Suite does not deconvolve). Only used when [`deconvolve`](Self::deconvolve) is
+    /// true. Higher values regularise more; 0.2 was QSM.rs's tuned default before (see the
+    /// module docs, *QSM.jl's `vsharp`*).
     pub threshold: f64,
     /// Maximum (starting) SMV kernel radius in mm (default: 12.0, STI Suite's `V_SHARP`
     /// `smvsize` default, also what its `QSM_GUI` and the χ-separation toolbox pass)
