@@ -40,6 +40,45 @@
 //! (STI Suite V-SHARP + iLSQR) XSIM 0.641 → 0.714, NRMSE 75.2 → 69.4 %, r 0.781 → 0.790. On
 //! these 1 mm isotropic inputs the 1 mm grid only adds the crop.
 //!
+//! ## QSM.jl's `vsharp`
+//!
+//! The filtering itself (the balls, the per-voxel choice of radius, the edge test and the
+//! deconvolution) is a port of QSM.jl's `vsharp` (kamesy/QSM.jl fde4b92, `_sharp!` for a radius
+//! vector in `src/bgremove/sharp.jl`), including its working box: the mask's bounding box
+//! zero-padded to QSM.jl's fast FFT size for the largest radius, so the deconvolution is periodic
+//! on that box (as in [`super::sharp`]), and its edge test `S_r ∗ mask > 1 − √eps(Float64)`.
+//! QSM.jl's own defaults are reachable with
+//!
+//! ```
+//! use qsm_core::bgremove::{VsharpGrid, VsharpParams};
+//! let vsz = (1.0_f64, 1.0_f64, 1.0_f64);
+//! let (lo, hi) = (vsz.0.min(vsz.1).min(vsz.2), vsz.0.max(vsz.1).max(vsz.2));
+//! let qsmjl = VsharpParams {
+//!     max_radius: 18.0 * lo,   // QSM.jl: r = 18*minimum(vsz):-2*maximum(vsz):2*maximum(vsz)
+//!     min_radius: 2.0 * hi,
+//!     radius_step: 2.0 * hi,
+//!     threshold: 0.05,         // QSM.jl's thr (also this module's default)
+//!     deconvolve: true,        // QSM.jl always deconvolves
+//!     grid: VsharpGrid::Native,
+//! };
+//! # let _ = qsmjl;
+//! ```
+//!
+//! On the QSM-CI in-vivo travelling-head scan (Siemens Prisma 2.89 T, 1 mm, 184×256×128, ROMEO
+//! total field and brain mask) these settings and QSM.jl's `vsharp` in the QSM-CI `julia-qsm`
+//! image (`sha256:b3c048ac…`) agree to float rounding: NRMSE 2.6e-10 %, max |Δ| 5.8e-11 ppm,
+//! identical masks (both outputs saved as float32); with radii 12 → 1 mm in 1 mm steps, NRMSE
+//! 2.1e-10 %. Before the working box and edge test were QSM.jl's (the deconvolution was
+//! periodic on the whole field of view, and the edge test was `> 1 − √1e-7`), the 12 → 1 mm
+//! comparison gave NRMSE 15.5 %. `tests/sharp_qsmjl_parity.rs` checks the port against
+//! QSM.jl's output on small phantoms (max |Δ| < 1e-15 ppm).
+//!
+//! The old edge test `1 − √1e-7` also let a ball count as fitting when it missed a few of its
+//! voxels (up to 2 of the 7,153 voxels of a 12 mm ball at 1 mm), so near the rim some voxels took a larger
+//! radius than fits. The QSM.jl test fixes that for every setting, including the STI Suite
+//! defaults: on the travelling-head scan the default output moved by NRMSE 1.8 % (same
+//! output mask), all of it from the edge test (the working box alone changes it by 2e-7 %).
+//!
 //! ## Working grid
 //!
 //! The SMV balls live on a voxel grid. On strongly anisotropic voxels (e.g. 0.8 × 0.8 × 3 mm)
@@ -91,8 +130,9 @@
 //! "Whole brain susceptibility mapping using compressed sensing."
 //! Magnetic Resonance in Medicine, 67(1):137-147. https://doi.org/10.1002/mrm.23000
 //!
-//! Implementation follows QSM.jl (https://github.com/kamesy/QSM.jl); defaults follow STI Suite
-//! 3.0's `V_SHARP` (see *Defaults*).
+//! Implementation follows QSM.jl (https://github.com/kamesy/QSM.jl; see *QSM.jl's `vsharp`*);
+//! defaults follow STI Suite 3.0's `V_SHARP` (see *Defaults*), except the deconvolution
+//! threshold, which only QSM.jl has.
 //!
 //! # Pipeline rules
 //!
@@ -104,6 +144,7 @@ use crate::error::InputError;
 use crate::Grid;
 use crate::fft::{fft3d, ifft3d};
 use crate::kernels::smv::{smv_kernel, erode_mask_smv};
+use super::sharp::{SmvBox, QSMJL_SMV_DELTA};
 
 /// Zero margin (native voxels per side) around the mask's bounding box when V-SHARP runs on an
 /// isotropic working grid. See the [module docs](self).
@@ -168,8 +209,11 @@ impl VsharpGrid {
 #[derive(Clone, Debug)]
 pub struct VsharpParams {
     /// Deconvolution (TSVD) threshold: k-space frequencies where |1 - S| < threshold are dropped
-    /// rather than divided through. Higher = more regularisation, more robust to a noisy input field
-    /// (default: 0.2). Only used when [`deconvolve`](Self::deconvolve) is true.
+    /// rather than divided through (default: 0.05, QSM.jl `vsharp`'s `thr`,
+    /// `src/bgremove/sharp.jl`, fde4b92: STI Suite does not deconvolve, so QSM.jl is the only
+    /// reference for it). Only used when [`deconvolve`](Self::deconvolve) is true. Higher values
+    /// regularise more; before this default followed QSM.jl it was 0.2, chosen because the
+    /// deconvolution amplifies structured error in an estimated (not ground-truth) field.
     pub threshold: f64,
     /// Maximum (starting) SMV kernel radius in mm (default: 12.0, STI Suite's `V_SHARP`
     /// `smvsize` default, also what its `QSM_GUI` and the χ-separation toolbox pass)
@@ -247,11 +291,8 @@ impl VsharpParams {
 impl Default for VsharpParams {
     fn default() -> Self {
         Self {
-            // 0.2 (was 0.05): the deconvolution amplifies structured error in a noisy estimated field,
-            // and real pipelines always feed V-SHARP an estimated (not ground-truth) field. A stronger
-            // regularisation is robust to that; 0.05 under-regularises and only wins on a clean field
-            // (which BFR is never run on in practice). See the PR for the benchmark.
-            threshold: 0.2,
+            // QSM.jl's `thr` (see the field docs); unused unless `deconvolve`.
+            threshold: 0.05,
             max_radius: 12.0,
             min_radius: STI_MIN_RADIUS_MM,
             radius_step: STI_RADIUS_STEP_MM,
@@ -489,6 +530,10 @@ fn vsharp_radii(params: &VsharpParams) -> Vec<f64> {
 /// Internal entry point; the public [`vsharp`] wrapper derives the radii
 /// from [`VsharpParams`]. `deconvolve` is the TSVD threshold of the final
 /// deconvolution, or `None` to return the SMV high-passed field undeconvolved.
+///
+/// Like QSM.jl's `_sharp!` for a radius vector (`src/bgremove/sharp.jl`, fde4b92), it works in
+/// the mask's bounding box zero-padded for the largest radius ([`SmvBox`]), so the
+/// deconvolution is periodic on that box as in QSM.jl.
 pub(crate) fn vsharp_with_radii(
     field: &[f64],
     mask: &[u8],
@@ -511,6 +556,24 @@ pub(crate) fn vsharp_with_radii(
         );
     }
 
+    let r_max = radii.iter().cloned().fold(f64::MIN, f64::max);
+    let Some(bx) = SmvBox::new(mask, grid, r_max) else {
+        return (vec![0.0; nx * ny * nz], vec![0; nx * ny * nz]);
+    };
+    let (local, support) = vsharp_padded(&bx.crop(field), &bx.crop(mask), &bx.grid(grid), radii, deconvolve, progress);
+    (bx.uncrop(&local), bx.uncrop(&support))
+}
+
+/// V-SHARP on QSM.jl's padded box.
+fn vsharp_padded(
+    field: &[f64],
+    mask: &[u8],
+    grid: &Grid,
+    radii: &[f64],
+    deconvolve: Option<f64>,
+    mut progress: impl FnMut(usize, usize),
+) -> (Vec<f64>, Vec<u8>) {
+    let (nx, ny, nz) = grid.dims;
     let n_total = nx * ny * nz;
     let n_radii = radii.len();
 
@@ -530,7 +593,7 @@ pub(crate) fn vsharp_with_radii(
     let mut local_field = vec![0.0; n_total];
     let mut final_mask = vec![0u8; n_total];
 
-    let delta = 1.0 - 1e-7_f64.sqrt();
+    let delta = QSMJL_SMV_DELTA;
     let mut inverse_kernel: Option<Vec<f64>> = None;
 
     for (idx, &radius) in sorted_radii.iter().enumerate() {
@@ -648,7 +711,9 @@ mod tests {
 
     #[test]
     fn test_vsharp_nonuniform_voxels() {
-        let n = 8;
+        // Balls that fit in the mask on every axis (the filtering box is zero-padded, as in
+        // QSM.jl, so a ball no longer fits by wrapping around an all-ones mask).
+        let n = 16;
         let field: Vec<f64> = (0..n*n*n).map(|i| (i as f64) * 0.001).collect();
         let mask = vec![1u8; n * n * n];
         let grid = Grid::new(n, n, n, 0.5, 1.0, 2.0);
@@ -1155,7 +1220,7 @@ mod tests {
         let mut nm = vec![0.0; nw];
         let mut buf = vec![Complex64::new(0.0, 0.0); nw];
         let mut inv: Option<Vec<f64>> = None;
-        let delta = 1.0 - 1e-7_f64.sqrt();
+        let delta = QSMJL_SMV_DELTA;
         for &r in &radii {
             let (mut k_fft, count) = kernel_fft(ne, [h; 3], r);
             if count == 0.0 { continue; }
@@ -1171,13 +1236,23 @@ mod tests {
             for i in 0..nw { if fits[i] && nm[i] == 0.0 { bg[i] = buf[i].re; nm[i] = 1.0; } }
         }
         let mut l: Vec<Complex64> = (0..nw).map(|i| Complex64::new((pe[i] - bg[i]) * nm[i], 0.0)).collect();
-        if p.deconvolve {
-            if let Some(inv) = inv {
-                fft3d(&mut l, ne[0], ne[1], ne[2]);
-                for i in 0..nw { l[i] *= inv[i]; }
-                ifft3d(&mut l, ne[0], ne[1], ne[2]);
-                for i in 0..nw { l[i] = Complex64::new(l[i].re * nm[i], 0.0); }
-            }
+        if p.deconvolve && inv.is_some() {
+            // QSM.jl deconvolves periodically on the mask's bounding box padded for the largest
+            // radius (its `padfastfft`), not on the whole working grid.
+            let w_grid = Grid::new(ne[0], ne[1], ne[2], h, h, h);
+            let me_u8: Vec<u8> = me.iter().map(|&v| v as u8).collect();
+            let bx = SmvBox::new(&me_u8, &w_grid, radii[0]).unwrap();
+            let (bx_n, by_n, bz_n) = bx.np;
+            let (k_fft, count) = kernel_fft([bx_n, by_n, bz_n], [h; 3], radii[0]);
+            let inv_b: Vec<f64> = k_fft.iter().map(|s| { let oms = 1.0 - s.re / count; if oms.abs() < p.threshold { 0.0 } else { 1.0 / oms } }).collect();
+            let lr: Vec<f64> = l.iter().map(|c| c.re).collect();
+            let mut lb = to_complex(&bx.crop(&lr));
+            fft3d(&mut lb, bx_n, by_n, bz_n);
+            for (v, iv) in lb.iter_mut().zip(&inv_b) { *v *= iv; }
+            ifft3d(&mut lb, bx_n, by_n, bz_n);
+            let lb: Vec<f64> = lb.iter().map(|c| c.re).collect();
+            let back = bx.uncrop(&lb);
+            for i in 0..nw { l[i] = Complex64::new(back[i] * nm[i], 0.0); }
         }
         let mut bg_c = vec![0.0; ni[0] * ni[1] * ni[2]];
         let mut nm_c = vec![0.0; bg_c.len()];
