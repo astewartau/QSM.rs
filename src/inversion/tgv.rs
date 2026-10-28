@@ -81,7 +81,14 @@
 //! differs; the brain mask reaches the array's first z plane), defaults against the package:
 //! NRMSE 11.1 % for [`TgvInput::FieldPpm`] and 11.7 % for a wrapped echo (corr 0.994), over
 //! the voxels both return; the defaults also drop the ~1,070 edge voxels the package keeps
-//! there. With `reference_quirks`, 3.7e-4 % and 4.0e-4 %. The divergence fix changes χ only on
+//! there. With `reference_quirks`, 3.7e-4 % and 4.0e-4 %. On the QSM-CI in-silico phantom's
+//! total field (QSM Challenge 2.0 head model, 164 × 205 × 205 at 1 mm, with a head mask that
+//! reaches three array faces), `reference_quirks` matches the package to NRMSE 6.0e-4 %; the
+//! defaults erode 308,014 more voxels at those faces, and over the voxels both return differ
+//! from it by NRMSE 91 % at the faces' side, falling to 29 % beyond 20 voxels from any face and
+//! 16 % beyond 40. Against the true χ there, the defaults correlate better (0.39 vs 0.35 over
+//! the shared voxels; 0.51 vs 0.47 beyond 10 voxels from a face): the package's unmasked
+//! stencils at the array edge are what spreads. The divergence fix changes χ only on
 //! anisotropic voxels: by 1.1 % (relative L2) on a 0.9 × 1.0 × 1.3 mm phantom.
 //!
 //! One deviation: χ is returned inside the eroded mask (`erosions` erosions of `mask`) and is
