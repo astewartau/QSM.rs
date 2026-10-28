@@ -391,9 +391,13 @@ fn separation() {
     let mag_rss = rss_combine(&p.mag_refs()).unwrap();
     let mag_multi = p.mag_voxel_major();
     let r2prime: Vec<f64> = p.mask.iter().zip(&p.chi).map(|(&k, &x)| if k != 0 { 5.0 + 50.0 * x.abs() } else { 0.0 }).collect();
+    // DECOMPOSE's per-echo QSM: the phantom's χ at every echo.
+    let ne = mag_multi.len() / p.chi.len();
+    let chi_per_echo: Vec<f64> = p.chi.iter().flat_map(|&c| std::iter::repeat_n(c, ne)).collect();
     let inputs = SeparationInputs {
         local_field_ppm: &p.local_ppm,
         qsm: &p.chi,
+        qsm_per_echo: Some(&chi_per_echo),
         mask: &p.mask,
         r2prime: Some(&r2prime),
         r2star: None,
@@ -1021,6 +1025,7 @@ fn dl_separation(algorithm: SeparationAlgorithm, patch: Option<(usize, usize, us
     let inputs = SeparationInputs {
         local_field_ppm: &p.local_ppm,
         qsm: &p.chi,
+        qsm_per_echo: None,
         mask: &p.mask,
         r2prime: Some(&r2prime),
         r2star: None,
@@ -1282,6 +1287,7 @@ mod browser_memory {
         let inputs = SeparationInputs {
             local_field_ppm: &local,
             qsm: &chi,
+            qsm_per_echo: None,
             mask: &mask,
             r2prime: Some(&r2prime),
             r2star: None,

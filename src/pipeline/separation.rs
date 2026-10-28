@@ -14,7 +14,8 @@
 //! Each method's module docs have a "Reference pipeline" section: the masking, unwrapping,
 //! background removal and QSM method its authors fed it, and where this stage's inputs differ
 //! from theirs. The main differences, all recorded there with sources:
-//! - `Decompose` takes one χ_total, where the authors fed a STAR-QSM per echo.
+//! - `Decompose` takes a QSM per echo ([`SeparationInputs::qsm_per_echo`]), as its authors
+//!   do (a STAR-QSM per echo); producing those is the caller's.
 //! - The analytic methods' D_r is calibrated at 3 T only. `ChiSepIlsqr`, `ChiSepMedi` and
 //!   `WaveSep` keep 137 Hz/ppm at every field, while `R2starQsm` and `HcChisep` scale theirs by
 //!   B0/3. Neither choice comes from the authors.
@@ -35,6 +36,8 @@ pub struct SeparationInputs<'a> {
     /// Conventional QSM χ_total in ppm — the QSM-init for `ChiSepIlsqr` and the
     /// input for `R2starQsm` / `WaveSep` / `Decompose` / `HcChisep`.
     pub qsm: &'a [f64],
+    /// QSM of each echo in ppm, voxel-major `(n_voxels, n_echoes)` (`Decompose`, required).
+    pub qsm_per_echo: Option<&'a [f64]>,
     /// Binary brain mask (`n_voxels`, 1 = inside).
     pub mask: &'a [u8],
     /// R2' map in Hz (`ChiSepIlsqr` / `ChiSepMedi` / `WaveSep` / `HcChisep`).
@@ -125,9 +128,10 @@ pub fn run_separation(
         }
         SeparationAlgorithm::Decompose => {
             let magnitude = need(inputs.magnitude_multi, "magnitude_multi")?;
+            let qsm_per_echo = need(inputs.qsm_per_echo, "qsm_per_echo")?;
             let params = DecomposeParams { b0, ..config.decompose.clone() };
             crate::separation::decompose(
-                inputs.qsm, magnitude, &metadata.echo_times, mask, &params, progress,
+                qsm_per_echo, magnitude, &metadata.echo_times, mask, &params, progress,
             )?
         }
         SeparationAlgorithm::HcChisep => {
@@ -264,6 +268,11 @@ fn check_inputs(
             &format!("magnitude_multi ({n_echoes} echoes x {n} voxels)"), m.len(), n * n_echoes,
         )?;
     }
+    if let Some(m) = inputs.qsm_per_echo {
+        crate::error::check_len(
+            &format!("qsm_per_echo ({n_echoes} echoes x {n} voxels)"), m.len(), n * n_echoes,
+        )?;
+    }
     if algorithm == SeparationAlgorithm::Decompose && n_echoes < 3 {
         return Err(PipelineError::InvalidInput(format!(
             "Decompose needs at least 3 echoes, got {n_echoes}"
@@ -300,6 +309,7 @@ mod tests {
         SeparationInputs {
             local_field_ppm: qsm,
             qsm,
+            qsm_per_echo: None,
             mask,
             r2prime: None,
             r2star: None,
@@ -373,11 +383,18 @@ mod tests {
         let mask = vec![1u8; n];
         let m = meta(nx, ny, nz);
 
+        let qsm_per_echo = vec![0.01; n * ne];
         let mut d_inputs = base_inputs(&qsm, &mask);
         d_inputs.magnitude_multi = Some(&mag_multi);
         let d_cfg = SeparationConfig { algorithm: SeparationAlgorithm::Decompose, ..Default::default() };
+        // The per-echo QSM is required.
+        assert!(run_separation(d_inputs, &m, &d_cfg, &mut |_, _| {}).is_err());
+        d_inputs.qsm_per_echo = Some(&qsm_per_echo);
         let rd = run_separation(d_inputs, &m, &d_cfg, &mut |_, _| {}).unwrap();
         assert_eq!(rd.chi_pos.len(), n);
+        // A per-echo QSM of the wrong length is an error, not a panic.
+        d_inputs.qsm_per_echo = Some(&qsm_per_echo[..n]);
+        assert!(run_separation(d_inputs, &m, &d_cfg, &mut |_, _| {}).is_err());
 
         let mut h_inputs = base_inputs(&qsm, &mask);
         h_inputs.r2prime = Some(&r2prime);

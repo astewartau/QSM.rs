@@ -14,11 +14,11 @@
 //! coefficient, χ+ ≥ 0, χ− ≤ 0 (ppm-scale). C+, C−, C₀ are the paramagnetic,
 //! diamagnetic and neutral compartment amplitudes and R2*₀ the baseline decay.
 //!
-//! Like the QSM-CI reference, the *phase* is synthesized from the provided
-//! conventional QSM (χ_total) rather than re-derived from raw multi-echo phase —
-//! this isolates DECOMPOSE's separation step. The observed complex data per echo
-//! is `y = |mag_norm| · exp(−i·(2/3)·χ_total·γ·B0·TE)` (magnitude normalised by its
-//! global maximum).
+//! As in the authors' `DECOMPOSE_analysis.m`, the *phase* is synthesized from a QSM of
+//! **each echo** (theirs: STAR-QSM per echo, `QSM_multi`): the complex data per echo is
+//! `y(TE) = |mag_norm(TE)| · exp(−i·(2/3)·χ(TE)·γ·B0·TE)` (magnitude normalised by its global
+//! maximum). [`decompose`] takes that per-echo QSM; producing it is the caller's. A voxel whose
+//! `Σ y` is zero is skipped, as theirs is.
 //!
 //! The per-voxel fit is a 3-stage alternating bounded least-squares, repeated
 //! `n_inner` times: (1) amplitudes `[C+,C−,C₀]` against the linear signal, then
@@ -30,7 +30,9 @@
 //! sub-model (`pscModel`) gives χ+ and the diamagnetic sub-model (`dscModel`)
 //! gives |χ−|. χ+ is returned ≥ 0, χ− ≤ 0.
 //!
-//! **Phase unwrapping.** Every phase the fit and the reconstruction see arrives
+//! **Phase unwrapping** (off by default: [`DecomposeParams::unwrap_phase`]). The authors' code
+//! takes every phase on its principal branch (MATLAB's `log` and `angle`), and so does this
+//! port by default. With the option on: every phase the fit and the reconstruction see arrives
 //! through `atan2`, on `(−π, π]`. A compartment accumulates `(2/3)·χ·γ·B0·TE`
 //! radians, so above `|χ_total| = π / ((2/3)·γ·B0·TE_max)` the late echoes fold
 //! back onto that branch — 0.09 ppm at 7 T with a 28 ms last echo, which is
@@ -59,11 +61,30 @@
 //! compartment amplitudes set the gain, and they are only weakly identifiable
 //! from data that carries no sub-voxel compartment signature.
 //!
-//! **Output-mapping note.** The QSM-CI reference *comment* claims a para/dia
-//! output swap (χ+ = |DSC|); on the qsm-forward phantom that swap anti-correlates
-//! with the ground truth, while the physically-consistent mapping used here
-//! (χ+ = |PSC|, from the paramagnetic sub-model) correlates strongly. We therefore
-//! do not replicate the reference's swap.
+//! **Output mapping.** χ+ = |PSC| and χ− = −|DSC|, from the paramagnetic and diamagnetic
+//! sub-models. The authors' script writes DSC to its paramagnetic file (`XPSC`) and PSC to the
+//! diamagnetic one, but it also fits the *conjugate* of the data: `ydata =
+//! squeeze(y_data(i,j,k,:))'` is MATLAB's conjugate transpose. Conjugating the data maps the
+//! fit onto its mirror image exactly (`conj(S(C+, C−, χ+, χ−)) = S(C−, C+, −χ−, −χ+)`, with
+//! mirrored bounds and initial values), so their DSC is this port's PSC and the two swaps
+//! cancel: the same maps, without either. Measured: this port's χ+ against the
+//! `decompose-qsm` container's `chi-para` (its `|DSC|`), r 0.999; against its `chi-dia`, r −0.32.
+//!
+//! # Agreement with the authors' code
+//!
+//! Against the QSM-CI `decompose-qsm` container (the authors' `utils/` and fit loop compiled
+//! from licensed MATLAB R2023b, verified identical to it, QSMxT/QSM-CI#309), given the same
+//! per-echo QSM, on a 24×24×16 crop of the KKI travelling head (3 T, 5 echoes, 9216 voxels):
+//!
+//! | port | χ+ NRMSE (r) | χ− NRMSE (r) |
+//! |---|---|---|
+//! | before (unwrapping and χ cap on, LM 30 iterations, stop at 1e-10) | 92.0 % (0.587) | 34.9 % (0.933) |
+//! | principal-branch phases, LM 30 iterations | 8.2 % (0.9956) | 10.1 % (0.9951) |
+//! | **defaults** (also LM to 400 iterations, stop at 1e-12) | **2.9 %** (0.9994) | **3.3 %** (0.9994) |
+//!
+//! The rest is the solver: `lsqcurvefit`'s trust-region-reflective method and stopping rules
+//! against the bounded Levenberg–Marquardt here, which end some voxels' stages at other points
+//! (median |Δχ+| 1.7e-4 ppm; 10 % of voxels over 1e-3 ppm carry most of the difference).
 //!
 //! # Reference pipeline
 //!
@@ -75,8 +96,8 @@
 //! - **Mask:** FSL BET. **Unwrapping:** Laplacian. **Background removal:** V-SHARP.
 //! - **QSM input:** STAR-QSM computed **for each echo**. The signal model (Eq. 4) is
 //!   `y(t) = M(t)·exp(−i·(2/3)·χ(t)·γ·B0·t)` with the per-echo χ(t), not one echo-combined χ.
-//!   This function takes a single χ_total and repeats it for every echo, which deviates from the
-//!   authors' input.
+//!   [`decompose`] takes that per-echo χ. (The authors' script runs STAR-QSM per echo at
+//!   `padsize` 12 after `MRPhaseUnwrap` and `V_SHARP(smvsize 25)` of that echo.)
 //! - **Referencing:** χ referenced to the whole-brain mean.
 //! - **Constants:** `0.5 > |χ+|, |χ−| > 0` (§2.2, [`DecomposeParams::chi_bound`]), and
 //!   `a = 323.5 Hz/ppm` at 3 T (§2.1), which the formula above reproduces and which scales with
@@ -117,9 +138,16 @@ pub struct DecomposeParams {
     pub n_inner: usize,
     /// Upper bound on |χ| in the fit, ppm (reference default: 0.5).
     pub chi_bound: f64,
-    /// Max Levenberg–Marquardt iterations per fit stage (reference lsqcurvefit
-    /// defaults to a trust-region solve; 30 is ample for these 1–3 parameter fits).
+    /// Max Levenberg–Marquardt iterations per fit stage (default 400, `lsqcurvefit`'s
+    /// `MaxIterations`). The authors' `lsqcurvefit` (trust-region-reflective) solves each stage
+    /// to its minimum; capping at 30 left χ± 8–10 % (NRMSE) from theirs, 400 leaves 3 % (see
+    /// the module docs, *Agreement with the authors' code*).
     pub max_lm_iter: usize,
+    /// Unwrap the phase along the echoes and cap the χ search at what the echo spacing can
+    /// represent (see the module docs, *Phase unwrapping*). Default `false`: the authors' code
+    /// takes every phase on its principal branch (`log`, `angle`) and searches χ up to
+    /// [`chi_bound`](Self::chi_bound).
+    pub unwrap_phase: bool,
 }
 
 impl DecomposeParams {
@@ -139,16 +167,19 @@ impl Default for DecomposeParams {
             b0: 7.0,
             n_inner: 10,
             chi_bound: 0.5,
-            max_lm_iter: 30,
+            max_lm_iter: 400,
+            unwrap_phase: false,
         }
     }
 }
 
-/// DECOMPOSE source separation from a provided QSM and multi-echo magnitude.
+/// DECOMPOSE source separation from per-echo QSM and the multi-echo magnitude.
 ///
 /// # Arguments
-/// * `chi_total` — Conventional QSM χ_total in **ppm** (`n_voxels`), used to
-///   synthesize the per-echo phase.
+/// * `chi_per_echo` — QSM of **each echo** in **ppm**, flattened as `(n_voxels, n_echoes)`
+///   (echo fastest per voxel, like `magnitude`): the authors' input (`QSM_multi`, a STAR-QSM
+///   per echo in `DECOMPOSE_analysis.m`). It sets each echo's phase,
+///   `−(2/3)·χ(TE)·γ·B0·TE`.
 /// * `magnitude` — Multi-echo magnitude, flattened as `(n_voxels, n_echoes)` in
 ///   row-major order (echo fastest per voxel) — the same layout as
 ///   [`crate::separation::r2star_qsm_from_magnitude`]. Normalised internally by
@@ -165,7 +196,7 @@ impl Default for DecomposeParams {
 /// convention: `chi_pos` ≥ 0 (paramagnetic), `chi_neg` ≤ 0 (diamagnetic, signed),
 /// and `chi_total = chi_pos + chi_neg`.
 pub fn decompose(
-    chi_total: &[f64],
+    chi_per_echo: &[f64],
     magnitude: &[f64],
     echo_times: &[f64],
     mask: &[u8],
@@ -173,13 +204,13 @@ pub fn decompose(
     mut progress: impl FnMut(usize, usize),
 ) -> Result<super::ChiSepMaps, InputError> {
     params.validate()?;
-    let n = chi_total.len();
+    let n = mask.len();
     let ne = echo_times.len();
     if ne < 3 {
         return Err(InputError::new(format!("DECOMPOSE needs at least 3 echoes, got {ne}")));
     }
+    check_len("DECOMPOSE per-echo QSM (n_voxels * n_echoes)", chi_per_echo.len(), n * ne)?;
     check_len("DECOMPOSE magnitude (n_voxels * n_echoes)", magnitude.len(), n * ne)?;
-    check_len("DECOMPOSE mask", mask.len(), n)?;
 
     let b0 = params.b0;
     let te = echo_times;
@@ -206,42 +237,40 @@ pub fn decompose(
         voxels,
         || Scratch::new(ne),
         |ws: &mut Scratch, &i: &usize| {
-            // Build the complex data y[e] = mag_norm · exp(-i·(2/3)·χ_total·γ·B0·TE).
-            let chi = chi_total[i];
-            let mut all_zero = true;
+            // y[e] = mag_norm · exp(−i·(2/3)·χ(TE_e)·γ·B0·TE_e) (`y_data`).
+            let (mut sum_re, mut sum_im) = (0.0, 0.0);
             for e in 0..ne {
                 let m = magnitude[i * ne + e] / gmax;
-                if m > 0.0 {
-                    all_zero = false;
-                }
-                let ph = -(2.0 / 3.0) * chi * GAMMA * b0 * te[e];
+                let ph = -(2.0 / 3.0) * chi_per_echo[i * ne + e] * GAMMA * b0 * te[e];
                 ws.y[e] = (m * ph.cos(), m * ph.sin());
-                // log(y) for stages 2 & 3. `ph` is the phase we just synthesized,
-                // so keep it as it is rather than recovering a ±π-wrapped copy of
-                // it through `atan2` — see the note above `unwrap_near`.
-                ws.logy[e] = (0.5 * (m * m).max(1e-300).ln(), ph);
+                sum_re += ws.y[e].0;
+                sum_im += ws.y[e].1;
+                // log(y) for stages 2 & 3: MATLAB's `log`, on the principal branch, unless
+                // `unwrap_phase`, where the synthesized phase is used as it is (see
+                // `unwrap_near`).
+                let arg = if params.unwrap_phase { ph } else { ws.y[e].1.atan2(ws.y[e].0) };
+                ws.logy[e] = (0.5 * (m * m).max(1e-300).ln(), arg);
             }
-            if all_zero {
+            // The authors skip a voxel whose `sum(ydata)` is zero.
+            if sum_re == 0.0 && sum_im == 0.0 {
                 return (i, 0.0, 0.0);
             }
 
             let (cp, cm, c0, r0, chip, chim) =
                 fit_voxel(te, &ws.y, &ws.logy, b0, params, &mut ws.lm);
 
-            // Reconstruct χ+ (from dscModel) and χ− (from pscModel), both as the
-            // per-compartment phase accumulation −Σangle/den.
-            let dsc = recon_phase(te, b0, den, |t| {
+            // PSC = −Σangle(pscModel)/den and DSC = −Σangle(dscModel)/den, as the authors
+            // compute them. PSC comes from the paramagnetic compartment and DSC from the
+            // diamagnetic one, so χ+ = |PSC| and χ− = −|DSC|. The authors' script writes them
+            // the other way round (DSC to `XPSC`, PSC to `XDSC`); see the module docs,
+            // *Output mapping*.
+            let unwrap = params.unwrap_phase;
+            let dsc = recon_phase(te, den, unwrap, |t| {
                 dsc_model(t, cp, cm, c0, chip, chim, r0, b0)
             });
-            let psc = recon_phase(te, b0, den, |t| {
+            let psc = recon_phase(te, den, unwrap, |t| {
                 psc_model(t, cp, cm, c0, chip, chim, r0, b0)
             });
-            // pscModel recovers the paramagnetic term (∝ χ+), dscModel the
-            // diamagnetic term (∝ |χ−|). We use this physically-correct mapping
-            // (χ+ = |PSC|, χ− = −|DSC|), which correlates positively with the
-            // qsm-forward phantom's ground truth. Note: the QSM-CI reference
-            // *comment* claims the opposite ("χ+ = |DSC|"); that swap anti-
-            // correlates with this GT, so we do not replicate it. See module docs.
             (i, psc.abs(), -dsc.abs())
         }
     )
@@ -306,8 +335,14 @@ fn fit_voxel(
     // them. At 7 T with 8 ms spacing the limit is 0.31 ppm, well inside the 0.5
     // ppm default — which is what left the recovered pallidum speckled with
     // dropouts even after the phases were unwrapped.
+    // Only with `unwrap_phase`: the authors search up to `chi_bound`.
     let dte = te.windows(2).map(|w| w[1] - w[0]).fold(te[0], f64::max);
-    let ub = params.chi_bound.min(PI / ((2.0 / 3.0) * GAMMA * b0 * dte));
+    let ub = if params.unwrap_phase {
+        params.chi_bound.min(PI / ((2.0 / 3.0) * GAMMA * b0 * dte))
+    } else {
+        params.chi_bound
+    };
+    let unwrap = params.unwrap_phase;
     let inf = f64::INFINITY;
     let maxit = params.max_lm_iter;
 
@@ -332,7 +367,7 @@ fn fit_voxel(
                     let m = clog(signal_model(
                         te[e], c[0], c[1], c[2], chi[0], chi[1], x[0], b0,
                     ));
-                    let ang = if e == 0 { m.1 } else { unwrap_near(m.1, prev) };
+                    let ang = if e == 0 || !unwrap { m.1 } else { unwrap_near(m.1, prev) };
                     prev = ang;
                     out[e] = m.0 - logy[e].0;
                     out[ne + e] = -(ang - logy[e].1);
@@ -347,7 +382,7 @@ fn fit_voxel(
                 let mut prev = 0.0;
                 for e in 0..ne {
                     let m = clog(signal_model(te[e], c[0], c[1], c[2], x[0], x[1], r0, b0));
-                    let ang = if e == 0 { m.1 } else { unwrap_near(m.1, prev) };
+                    let ang = if e == 0 || !unwrap { m.1 } else { unwrap_near(m.1, prev) };
                     prev = ang;
                     out[e] = m.0 - logy[e].0;
                     out[ne + e] = -(ang - logy[e].1);
@@ -466,16 +501,16 @@ fn unwrap_near(ang: f64, prev: f64) -> f64 {
     ang + ((prev - ang) / TAU).round() * TAU
 }
 
-/// Reconstruct a source value: `−Σ angle(model(TE)) / den`, with the phase
+/// Reconstruct a source value: `−Σ angle(model(TE)) / den`, with (if `unwrap`) the phase
 /// unwrapped along the echo axis so a strong source is not folded back to zero
 /// (see [`unwrap_near`]).
-fn recon_phase(te: &[f64], _b0: f64, den: f64, model: impl Fn(f64) -> (f64, f64)) -> f64 {
+fn recon_phase(te: &[f64], den: f64, unwrap: bool, model: impl Fn(f64) -> (f64, f64)) -> f64 {
     let mut s = 0.0;
     let mut prev = 0.0;
     for (e, &t) in te.iter().enumerate() {
         let z = model(t);
         let raw = z.1.atan2(z.0);
-        let ang = if e == 0 { raw } else { unwrap_near(raw, prev) };
+        let ang = if e == 0 || !unwrap { raw } else { unwrap_near(raw, prev) };
         prev = ang;
         s += ang;
     }
@@ -545,7 +580,9 @@ where
     resid(&x[..n], &mut s.r);
     let mut cost = dot(&s.r, &s.r);
     let mut lambda = 1e-3;
-    let ftol = 1e-10;
+    // Converge each stage tightly: the authors' lsqcurvefit solves each one to its minimum
+    // (stopping at 1e-10 left the result 2.5–3x further from theirs).
+    let ftol = 1e-12;
 
     for _ in 0..max_iter {
         // Forward-difference Jacobian J (m×n), column-major in `s.jac`.
@@ -684,6 +721,11 @@ fn solve_small(
 mod tests {
     use super::*;
 
+    /// One χ per voxel repeated at every echo: the per-echo QSM `decompose` takes.
+    fn per_echo(chi: &[f64], ne: usize) -> Vec<f64> {
+        chi.iter().flat_map(|&c| std::iter::repeat_n(c, ne)).collect()
+    }
+
     #[test]
     fn lm_recovers_linear_fit() {
         // Fit y = m·t + c via LM on residual [m·t+c − data].
@@ -723,51 +765,56 @@ mod tests {
         }
     }
 
-    /// Sign/plumbing check on a synthetic voxel. Verifies the output sign
-    /// convention and the physically-correct mapping: χ+ = |PSC| (paramagnetic
-    /// sub-model), χ− = −|DSC| (diamagnetic sub-model). A voxel with a large
-    /// paramagnetic fit amplitude/χ therefore yields a dominant χ+.
+    /// Output mapping on a synthetic voxel: χ+ = |PSC| (`−Σangle(pscModel)/den`, the
+    /// paramagnetic compartment) and χ− = −|DSC| of the fitted parameters, and on
+    /// paramagnetic-dominant data χ+ dominates.
     #[test]
-    fn decompose_signs_on_synthetic_voxel() {
+    fn outputs_are_psc_and_dsc() {
         let te = [0.004, 0.012, 0.020, 0.028];
         let b0 = 7.0;
-        let params = DecomposeParams {
-            b0,
-            n_inner: 12,
-            chi_bound: 0.5,
-            max_lm_iter: 40,
-        };
-
-        // Forward: paramagnetic-dominant fit parameters.
+        let params = DecomposeParams { b0, n_inner: 12, chi_bound: 0.5, max_lm_iter: 40, unwrap_phase: false };
         let (cp, cm, c0, chip, chim, r0) = (0.5, 0.1, 0.4, 0.10, -0.02, 20.0);
-        let sig: Vec<(f64, f64)> = te
-            .iter()
-            .map(|&t| signal_model(t, cp, cm, c0, chip, chim, r0, b0))
-            .collect();
-        let chi_total_val = chip + chim;
-        let n = 1;
         let ne = te.len();
-        let mut mag = vec![0.0_f64; n * ne];
-        for e in 0..ne {
-            mag[e] = (sig[e].0 * sig[e].0 + sig[e].1 * sig[e].1).sqrt();
-        }
-        let chi_total = vec![chi_total_val; n];
-        let mask = vec![1u8; n];
-        let (pos, neg, tot) = decompose(&chi_total, &mag, &te, &mask, &params, |_, _| {}).unwrap();
-        // Sign convention + invariant.
-        assert!(pos[0] >= 0.0, "χ+ must be ≥ 0");
-        assert!(neg[0] <= 0.0, "χ− must be ≤ 0");
-        assert!(
-            (tot[0] - (pos[0] + neg[0])).abs() < 1e-12,
-            "χ_total = χ+ + χ−"
-        );
-        // Physically-correct mapping: paramagnetic fit → χ+ (|PSC|) dominates.
-        assert!(
-            pos[0] > neg[0].abs(),
-            "expected χ+ dominant: χ+={} χ−={}",
-            pos[0],
-            neg[0]
-        );
+        let mag: Vec<f64> = te
+            .iter()
+            .map(|&t| {
+                let z = signal_model(t, cp, cm, c0, chip, chim, r0, b0);
+                (z.0 * z.0 + z.1 * z.1).sqrt()
+            })
+            .collect();
+        let chi = per_echo(&[chip + chim], ne);
+        let (pos, neg, tot) = decompose(&chi, &mag, &te, &[1u8], &params, |_, _| {}).unwrap();
+
+        // The same fit by hand.
+        let gmax = mag.iter().cloned().fold(0.0, f64::max);
+        let y: Vec<(f64, f64)> = (0..ne)
+            .map(|e| {
+                let ph = -(2.0 / 3.0) * chi[e] * GAMMA * b0 * te[e];
+                (mag[e] / gmax * ph.cos(), mag[e] / gmax * ph.sin())
+            })
+            .collect();
+        let logy: Vec<(f64, f64)> = y.iter().map(|&z| clog(z)).collect();
+        let mut lm = LmScratch::new(2 * ne);
+        let (fcp, fcm, fc0, fr0, fchip, fchim) = fit_voxel(&te, &y, &logy, b0, &params, &mut lm);
+        let den = (2.0 / 3.0) * GAMMA * b0 * te.iter().sum::<f64>();
+        let dsc = recon_phase(&te, den, false, |t| dsc_model(t, fcp, fcm, fc0, fchip, fchim, fr0, b0));
+        let psc = recon_phase(&te, den, false, |t| psc_model(t, fcp, fcm, fc0, fchip, fchim, fr0, b0));
+        assert!((pos[0] - psc.abs()).abs() < 1e-9 && (neg[0] + dsc.abs()).abs() < 1e-9,
+            "{pos:?} {neg:?} vs PSC {psc} DSC {dsc}");
+        assert!(pos[0] > neg[0].abs(), "χ+ dominant: χ+={} χ−={}", pos[0], neg[0]);
+        assert!((tot[0] - (pos[0] + neg[0])).abs() < 1e-12, "χ_total = χ+ + χ−");
+    }
+
+    /// Each echo's phase comes from that echo's QSM: a per-echo χ that differs between echoes
+    /// gives a different result from one repeated χ.
+    #[test]
+    fn each_echo_uses_its_own_qsm() {
+        let te = [0.004, 0.012, 0.020, 0.028];
+        let params = DecomposeParams { b0: 3.0, n_inner: 4, ..Default::default() };
+        let mag = [1.0, 0.8, 0.6, 0.45];
+        let same = decompose(&[0.05; 4], &mag, &te, &[1u8], &params, |_, _| {}).unwrap();
+        let varying = decompose(&[0.05, 0.06, 0.07, 0.08], &mag, &te, &[1u8], &params, |_, _| {}).unwrap();
+        assert_ne!((same.0[0], same.1[0]), (varying.0[0], varying.1[0]));
     }
 
     /// Regression: χ+ must survive past the phase-wrap threshold.
@@ -788,6 +835,7 @@ mod tests {
             n_inner: 10,
             chi_bound: 0.5,
             max_lm_iter: 30,
+            unwrap_phase: true,
         };
         let threshold = PI / ((2.0 / 3.0) * GAMMA * b0 * te[te.len() - 1]);
         assert!(
@@ -809,7 +857,7 @@ mod tests {
                 })
                 .collect();
             let (pos, _neg, _tot) =
-                decompose(&[chip + chim], &mag, &te, &[1u8], &params, |_, _| {}).unwrap();
+                decompose(&per_echo(&[chip + chim], te.len()), &mag, &te, &[1u8], &params, |_, _| {}).unwrap();
             assert!(
                 pos[0] > 0.0,
                 "χ+ collapsed to zero at χ+={chip} (χ_total={}, threshold {threshold:.4})",
@@ -844,6 +892,7 @@ mod tests {
             n_inner: 10,
             chi_bound: 0.5,
             max_lm_iter: 30,
+            unwrap_phase: true,
         };
         let (dr_pos, dr_neg, r2) = (320.0_f64, 397.0_f64, 30.0_f64);
         let chim = -0.015_f64;
@@ -852,7 +901,7 @@ mod tests {
             let r2s = r2 + dr_pos * chip + dr_neg * chim.abs();
             let mag: Vec<f64> = te.iter().map(|&t| (-r2s * t).exp()).collect();
             let (pos, _neg, _tot) =
-                decompose(&[chip + chim], &mag, &te, &[1u8], &params, |_, _| {}).unwrap();
+                decompose(&per_echo(&[chip + chim], te.len()), &mag, &te, &[1u8], &params, |_, _| {}).unwrap();
             assert!(
                 pos[0] > 0.3 * chip,
                 "dropout at χ+={chip:.2}: recovered {:.5} (gain {:.3})",
@@ -868,7 +917,7 @@ mod tests {
         let te = [0.004, 0.012, 0.020, 0.028];
         let b0 = 7.0;
         let ne = te.len();
-        let params = DecomposeParams { b0, n_inner: 4, chi_bound: 0.5, max_lm_iter: 20 };
+        let params = DecomposeParams { b0, n_inner: 4, chi_bound: 0.5, max_lm_iter: 20, unwrap_phase: false };
 
         // A real signal for the fitted voxels.
         let (cp, cm, c0, chip, chim, r0) = (0.4, 0.2, 0.4, 0.06, -0.05, 22.0);
@@ -885,7 +934,7 @@ mod tests {
             mag[2 * ne + e] = smag[e];
             mag[3 * ne + e] = smag[e];
         }
-        let chi_total = vec![chip + chim; n];
+        let chi_total = per_echo(&vec![chip + chim; n], ne);
         let mask = vec![0u8, 1, 1, 1];
 
         let mut last = (0usize, 0usize);
@@ -912,12 +961,14 @@ mod tests {
         let mag = [1.0, 0.9, 0.8];
         for bad in [-0.1, f64::NAN] {
             let params = DecomposeParams { chi_bound: bad, ..Default::default() };
-            let err = decompose(&[0.0], &mag, &te, &[1u8], &params, |_, _| {}).unwrap_err();
+            let err = decompose(&[0.0; 3], &mag, &te, &[1u8], &params, |_, _| {}).unwrap_err();
             assert!(err.0.contains("DECOMPOSE chi_bound") && err.0.contains(">= 0"), "{err}");
         }
         let ok = DecomposeParams::default();
-        assert!(decompose(&[0.0], &mag[..2], &te[..2], &[1u8], &ok, |_, _| {}).is_err());
-        assert!(decompose(&[0.0], &mag[..2], &te, &[1u8], &ok, |_, _| {}).is_err());
-        assert!(decompose(&[0.0], &mag, &te, &[1u8, 1], &ok, |_, _| {}).is_err());
+        assert!(decompose(&[0.0; 2], &mag[..2], &te[..2], &[1u8], &ok, |_, _| {}).is_err());
+        assert!(decompose(&[0.0; 3], &mag[..2], &te, &[1u8], &ok, |_, _| {}).is_err());
+        assert!(decompose(&[0.0; 3], &mag, &te, &[1u8, 1], &ok, |_, _| {}).is_err());
+        // One χ per voxel where one per echo is needed.
+        assert!(decompose(&[0.0], &mag, &te, &[1u8], &ok, |_, _| {}).is_err());
     }
 }

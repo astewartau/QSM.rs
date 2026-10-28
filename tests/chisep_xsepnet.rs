@@ -130,6 +130,7 @@ fn separate(ph: &ChiSepPhantom, cfg: &SeparationConfig) -> (Vec<f64>, Vec<f64>, 
     let inputs = SeparationInputs {
         local_field_ppm: &ph.local_field_ppm,
         qsm: &ph.chi_total,
+        qsm_per_echo: None,
         mask: &ph.mask,
         r2prime: Some(&ph.r2prime),
         r2star: None,
