@@ -46,12 +46,11 @@
 //! On the QSM-CI in-vivo travelling-head scan (Siemens Prisma 2.89 T, 1 mm, 184×256×128, ROMEO
 //! total field, brain mask touching the first z plane) against the package in the QSM-CI
 //! `julia-qsm` image (`sha256:b3c048ac…`, 6c0886a, 4 threads), both at the package's defaults
-//! (1655 iterations): NRMSE 4.0e-4 % for a wrapped echo (the field as phase at TE1, the
+//! (1655 iterations) and with [`TgvParams::reference_quirks`]: NRMSE 4.0e-4 % for a wrapped echo (the field as phase at TE1, the
 //! package's `get_laplace_phase_del`), and 3.7e-4 % for [`TgvInput::FieldPpm`] against the
 //! package with its own discrete Laplacian kernel on the unwrapped phase. Both are float32
-//! rounding over 1655 iterations. Before the erosion was the reference's (the crate's
-//! [`erode_mask`](crate::utils::morphology::erode_mask) also erodes from the array's edge), the
-//! field comparison gave NRMSE 11 %. `tests/tgv_tgvjl_parity.rs` checks both inputs, anisotropic
+//! rounding over 1655 iterations. Without `reference_quirks` (the defaults, see below) the same
+//! field comparison gives NRMSE 11 %, from the erosion at the edge. `tests/tgv_tgvjl_parity.rs` checks both inputs, anisotropic
 //! voxels and oblique B0 against the package's output on small phantoms (relative L2 ≤ 3e-6).
 //!
 //! Against the package's `get_laplace_phase_romeo`, which ROMEO-unwraps the given phase again
@@ -59,15 +58,31 @@
 //! re-unwrap adds ±2π at 2 voxels inside the data-term mask, which spreads through the
 //! inversion. [`TgvInput::FieldPpm`] takes the Laplacian of the field as given.
 //!
-//! Where the reference is followed although it looks unintended:
-//! - **Erosion at the array's edge.** Neighbours outside the array are skipped, so a mask that
-//!   reaches the array's edge is not eroded from it (`erode_mask`, `src/tgv.jl:218-222`; the
-//!   original Python's `erode_mask` treats them as inside).
-//! - **Divergence in the `w` update.** Each row of `q` takes its differences along all three
-//!   axes scaled by that row's own resolution (`update_w_kernel!`; the same in the original
-//!   Python). On anisotropic voxels this is not the adjoint of the symmetric gradient in the `q`
-//!   update. Following it changed χ by 1.1 % on a small 0.9 × 1.0 × 1.3 mm phantom; on
-//!   isotropic voxels nothing changes. See `symdiv_rows_f32`.
+//! # Where QSM.rs differs from the reference
+//!
+//! Two details of the reference code are fixed by default, as unequivocal fixes (QSM.rs's
+//! reference rule: the original's behaviour stays available, here with
+//! [`TgvParams::reference_quirks`], which the parity test turns on):
+//! - **Erosion at the array's edge.** The reference skips neighbours outside the array
+//!   (`erode_mask`, `src/tgv.jl:218-222`; the original Python's `erode_mask` treats them as
+//!   inside), so a mask that reaches the array's edge is not eroded from it. There the
+//!   Laplacian and gradient stencils have no neighbour (the reference replicates the edge value
+//!   or drops the term), so the data term at those voxels is not the operator it is elsewhere.
+//!   By default a neighbour outside the array counts as outside the mask.
+//! - **Divergence in the `w` update.** The reference scales each row of `q` by that row's own
+//!   resolution for all three of its differences (`update_w_kernel!`; the same in the original
+//!   Python `tgv_deconv_update_w`). Chambolle–Pock converges to the problem the paper states only
+//!   when the operator in the primal update is the exact adjoint of the one in the dual update;
+//!   on anisotropic voxels the reference's is not the adjoint of its symmetric gradient (a
+//!   unit test checks the identity for the default and its failure for the reference's). By
+//!   default the `w` update uses the exact adjoint. On isotropic voxels the two are the same.
+//!
+//! Measured on the in-vivo travelling-head scan above (1 mm isotropic, so only the erosion
+//! differs; the brain mask reaches the array's first z plane), defaults against the package:
+//! NRMSE 11.1 % for [`TgvInput::FieldPpm`] and 11.7 % for a wrapped echo (corr 0.994), over
+//! the voxels both return; the defaults also drop the ~1,070 edge voxels the package keeps
+//! there. With `reference_quirks`, 3.7e-4 % and 4.0e-4 %. The divergence fix changes χ only on
+//! anisotropic voxels: by 1.1 % (relative L2) on a 0.9 × 1.0 × 1.3 mm phantom.
 //!
 //! One deviation: χ is returned inside the eroded mask (`erosions` erosions of `mask`) and is
 //! zero elsewhere. The package returns its whole working box, whose χ outside that mask is the
@@ -103,11 +118,14 @@
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
-/// One erosion as the reference does it (`erode_mask`, `src/tgv.jl:218-222`, 6c0886a): a voxel
-/// stays in the mask when it and its in-bounds 6-neighbours (`strel_diamond`) all are.
-/// Neighbours outside the array are skipped (`checkbounds`), so a mask touching the array's edge
-/// is not eroded from it, unlike [`crate::utils::morphology::erode_mask`].
-fn erode_mask(mask: &[u8], nx: usize, ny: usize, nz: usize) -> Vec<u8> {
+/// One erosion with the 6-neighbour (`strel_diamond`) element. A neighbour outside the array
+/// counts as outside the mask, so a mask that reaches the array's edge is eroded from it (the
+/// default: the Laplacian and gradient stencils have no neighbour there). With `skip_outside`,
+/// neighbours outside the array are skipped instead, as the reference's `erode_mask` does
+/// (`src/tgv.jl:218-222`, 6c0886a, `checkbounds`), so such a mask is not eroded from the edge
+/// ([`TgvParams::reference_quirks`]).
+fn erode_mask(mask: &[u8], nx: usize, ny: usize, nz: usize, skip_outside: bool) -> Vec<u8> {
+    let edge = skip_outside;
     let nxy = nx * ny;
     let mut out = vec![0u8; mask.len()];
     for k in 0..nz {
@@ -116,12 +134,12 @@ fn erode_mask(mask: &[u8], nx: usize, ny: usize, nz: usize) -> Vec<u8> {
                 let l = i + j * nx + k * nxy;
                 out[l] = u8::from(
                     mask[l] != 0
-                        && (i == 0 || mask[l - 1] != 0)
-                        && (i + 1 == nx || mask[l + 1] != 0)
-                        && (j == 0 || mask[l - nx] != 0)
-                        && (j + 1 == ny || mask[l + nx] != 0)
-                        && (k == 0 || mask[l - nxy] != 0)
-                        && (k + 1 == nz || mask[l + nxy] != 0),
+                        && (if i == 0 { edge } else { mask[l - 1] != 0 })
+                        && (if i + 1 == nx { edge } else { mask[l + 1] != 0 })
+                        && (if j == 0 { edge } else { mask[l - nx] != 0 })
+                        && (if j + 1 == ny { edge } else { mask[l + nx] != 0 })
+                        && (if k == 0 { edge } else { mask[l - nxy] != 0 })
+                        && (if k + 1 == nz { edge } else { mask[l + nxy] != 0 }),
                 );
             }
         }
@@ -135,8 +153,9 @@ fn erode_mask(mask: &[u8], nx: usize, ny: usize, nz: usize) -> Vec<u8> {
 /// for `w_x`, ...) takes its backward differences along x, y and z all scaled by `1/res_d`, the
 /// row's own resolution, not by the resolution of the axis each difference is along. On
 /// isotropic voxels that is the ordinary divergence; on anisotropic voxels it is not the adjoint
-/// of the symmetric gradient used in the `q` update. Kept as the reference has it (see the
-/// module docs, *Agreement with the reference*).
+/// of the symmetric gradient used in the `q` update. Used only with
+/// [`TgvParams::reference_quirks`]; the default is the adjoint
+/// ([`crate::utils::gradient::symdiv_inplace_f32`]). See the module docs.
 #[allow(clippy::too_many_arguments)] // the six tensor components, as in symdiv_inplace_f32
 fn symdiv_rows_f32(
     divx: &mut [f32], divy: &mut [f32], divz: &mut [f32],
@@ -243,6 +262,15 @@ pub struct TgvParams {
     /// combined over echoes, so the first echo time, the default where the reference does not
     /// say.
     pub te: crate::EchoTime,
+    /// Reproduce two details of the reference code that QSM.rs fixes by default (default
+    /// `false`; see the module docs, *Where QSM.rs differs from the reference*):
+    /// - the mask is not eroded from the array's edge (the reference skips neighbours outside
+    ///   the array), where the default erodes it, since the stencils have no neighbour there;
+    /// - the `w` update's divergence scales each row of `q` by that row's resolution, where the
+    ///   default uses the exact adjoint of the symmetric gradient.
+    ///
+    /// With `true` QSM.rs matches the package to float32 rounding (`tests/tgv_tgvjl_parity.rs`).
+    pub reference_quirks: bool,
 }
 
 impl Default for TgvParams {
@@ -250,7 +278,15 @@ impl Default for TgvParams {
         // QuantitativeSusceptibilityMappingTGV.jl defaults: regularization = 2,
         // erosions = 3, step_size = 3, iterations from the voxel size.
         let (alpha0, alpha1) = get_default_alpha(2.0);
-        Self { alpha1, alpha0, iterations: None, erosions: 3, step_size: 3.0, te: crate::EchoTime::First }
+        Self {
+            alpha1,
+            alpha0,
+            iterations: None,
+            erosions: 3,
+            step_size: 3.0,
+            te: crate::EchoTime::First,
+            reference_quirks: false,
+        }
     }
 }
 
@@ -1305,7 +1341,7 @@ pub fn tgv_qsm(
     // Erode mask (the reference's erosion, which does not erode from the array's edge)
     let mut mask_eroded = mask.to_vec();
     for _ in 0..params.erosions {
-        mask_eroded = erode_mask(&mask_eroded, nx, ny, nz);
+        mask_eroded = erode_mask(&mask_eroded, nx, ny, nz, params.reference_quirks);
     }
     // The bounding box below has no extent for an empty mask (its size underflowed).
     if !mask_eroded.iter().any(|&m| m != 0) {
@@ -1321,7 +1357,7 @@ pub fn tgv_qsm(
     }
 
     // Create mask0 (one more erosion for internal computations)
-    let mask0 = erode_mask(&mask_eroded, nx, ny, nz);
+    let mask0 = erode_mask(&mask_eroded, nx, ny, nz, params.reference_quirks);
 
     // Bounding box of the eroded mask with one voxel of padding (the reference's
     // `mask_box_indices`)
@@ -1493,11 +1529,21 @@ pub fn tgv_qsm(
             ws.szz[i] = ws.qzz[i] * m;
         }
 
-        symdiv_rows_f32(
-            &mut ws.divqx, &mut ws.divqy, &mut ws.divqz,
-            &ws.sxx, &ws.sxy, &ws.sxz, &ws.syy, &ws.syz, &ws.szz,
-            &sub_grid
-        );
+        // The exact adjoint of the symmetric gradient in the q update (Chambolle–Pock needs
+        // it); the reference's row-scaled version with `reference_quirks`.
+        if params.reference_quirks {
+            symdiv_rows_f32(
+                &mut ws.divqx, &mut ws.divqy, &mut ws.divqz,
+                &ws.sxx, &ws.sxy, &ws.sxz, &ws.syy, &ws.syz, &ws.szz,
+                &sub_grid
+            );
+        } else {
+            crate::utils::gradient::symdiv_inplace_f32(
+                &mut ws.divqx, &mut ws.divqy, &mut ws.divqz,
+                &ws.sxx, &ws.sxy, &ws.sxz, &ws.syy, &ws.syz, &ws.szz,
+                &sub_grid
+            );
+        }
 
         // Julia: w_dest = w; if mask: w_dest += tau*(p + div(mask0*q))
         for i in 0..b_total {
@@ -1573,21 +1619,59 @@ mod tests {
         assert!(max_val < 1e-5, "Laplacian of constant should be ~0, got max {}", max_val);
     }
 
+    fn adjoint_gap(rows: bool) -> f64 {
+        // <E w, q> (off-diagonals counted twice, as the q projection's norm counts them) against
+        // -<w, div q>, on anisotropic voxels, with q zero on the box faces (as mask0 keeps it).
+        let (nx, ny, nz) = (9, 8, 7);
+        let n = nx * ny * nz;
+        let grid = crate::Grid::new(nx, ny, nz, 0.9, 1.0, 1.4);
+        let val = |s: usize, l: usize| ((l * 2654435761 + s * 40503) % 1000) as f32 / 500.0 - 1.0;
+        let w: Vec<Vec<f32>> = (0..3).map(|s| (0..n).map(|l| val(s, l)).collect()).collect();
+        let face = |l: usize| {
+            let (i, j, k) = (l % nx, (l / nx) % ny, l / (nx * ny));
+            i == 0 || j == 0 || k == 0 || i + 1 == nx || j + 1 == ny || k + 1 == nz
+        };
+        let q: Vec<Vec<f32>> = (0..6).map(|s| (0..n).map(|l| if face(l) { 0.0 } else { val(s + 3, l) }).collect()).collect();
+        let mut e: Vec<Vec<f32>> = vec![vec![0.0; n]; 6];
+        let [exx, exy, exz, eyy, eyz, ezz] = &mut e[..] else { unreachable!() };
+        crate::utils::gradient::symgrad_inplace_f32(exx, exy, exz, eyy, eyz, ezz, &w[0], &w[1], &w[2], &grid);
+        let mut d: Vec<Vec<f32>> = vec![vec![0.0; n]; 3];
+        let [dx, dy, dz] = &mut d[..] else { unreachable!() };
+        if rows {
+            symdiv_rows_f32(dx, dy, dz, &q[0], &q[1], &q[2], &q[3], &q[4], &q[5], &grid);
+        } else {
+            crate::utils::gradient::symdiv_inplace_f32(dx, dy, dz, &q[0], &q[1], &q[2], &q[3], &q[4], &q[5], &grid);
+        }
+        let weight = [1.0, 2.0, 2.0, 1.0, 2.0, 1.0];
+        let lhs: f64 = (0..6).map(|s| (0..n).map(|l| weight[s] * e[s][l] as f64 * q[s][l] as f64).sum::<f64>()).sum();
+        let rhs: f64 = -(0..3).map(|s| (0..n).map(|l| w[s][l] as f64 * d[s][l] as f64).sum::<f64>()).sum::<f64>();
+        (lhs - rhs).abs() / lhs.abs().max(rhs.abs())
+    }
+
+    #[test]
+    fn default_w_update_divergence_is_the_adjoint_and_the_references_is_not() {
+        assert!(adjoint_gap(false) < 1e-5, "default: relative gap {}", adjoint_gap(false));
+        assert!(adjoint_gap(true) > 1e-2, "reference: relative gap {}", adjoint_gap(true));
+    }
+
     #[test]
     fn test_erode_mask() {
         let nx = 5;
         let ny = 5;
         let nz = 5;
 
-        // The reference skips neighbours outside the array: a full mask does not erode.
+        // Default: outside the array counts as outside the mask, so a full mask erodes from
+        // the edge; the reference (skip_outside) does not erode it.
         let mask = vec![1u8; nx * ny * nz];
-        assert!(erode_mask(&mask, nx, ny, nz).iter().all(|&m| m == 1));
+        let eroded = erode_mask(&mask, nx, ny, nz, false);
+        assert_eq!(eroded.iter().filter(|&&m| m == 1).count(), 27);
+        assert!(erode_mask(&mask, nx, ny, nz, true).iter().all(|&m| m == 1));
 
         // A hole erodes its 6 neighbours, not the diagonals.
         let mut mask = mask;
         let center = 2 + 2 * nx + 2 * nx * ny;
         mask[center] = 0;
-        let eroded = erode_mask(&mask, nx, ny, nz);
+        let eroded = erode_mask(&mask, nx, ny, nz, true);
         assert_eq!(eroded.iter().filter(|&&m| m == 0).count(), 7);
         assert_eq!(eroded[center + 1], 0);
         assert_eq!(eroded[center + 1 + nx], 1);
