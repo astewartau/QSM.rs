@@ -19,6 +19,10 @@
 //! (L109) but its keyword list says `:identity` (L131). Same README pipeline as
 //! [`super::rts`](mod@super::rts).
 //!
+//! QSM.jl is this method's reference: its authors released no code, and QSM.jl, Kames's maintained successor to
+//! QSM.m, is the implementation designated for this family (QSM.rs's reference rule: the authors' code where it
+//! exists, otherwise one designated implementation per family, the others' values recorded).
+//!
 //! QSM.jl pads the field to its fast FFT size first (`pad = (0, 0, 0)`, `padfastfft`,
 //! `src/inversion/direct.jl:182-184`), and so does this port by default ([`TikhonovParams::pad`]).
 //!

@@ -19,6 +19,9 @@
 //! LSMR inner products are taken over the half spectrum QSM.jl stores (`kx` index
 //! `0..=nx/2`) so its scalars are the same.
 //!
+//! QSM.jl is this method's reference: RTS is Kames's method and QSM.jl is his code, so this is the authors' code (QSM.rs's reference rule: the authors' code where it
+//! exists, otherwise one designated implementation per family, the others' values recorded).
+//!
 //! QSM.jl pads the field to its fast FFT size first (`pad = (0, 0, 0)`, `padfastfft`,
 //! `src/inversion/rts.jl:109-111`), and so does this port by default ([`RtsParams::pad`]); the
 //! padding changes the result, since the filters act on the periodic extension of the array.

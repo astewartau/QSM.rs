@@ -17,6 +17,10 @@
 //! gradient of the field. QSM.jl's optional data and TV weights (`W`, `Wtv`) are not ported;
 //! their default (`nothing`) is what this function computes.
 //!
+//! QSM.jl is this method's reference: QSM.jl, Kames's maintained successor to QSM.m, is the implementation
+//! designated for this family (QSM.rs's reference rule: the authors' code where it
+//! exists, otherwise one designated implementation per family, the others' values recorded).
+//!
 //! QSM.jl pads the field to its fast FFT size first (`pad = (0, 0, 0)`, `padfastfft`), and so
 //! does this port by default ([`TvParams::pad`]).
 //!

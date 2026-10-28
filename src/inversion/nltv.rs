@@ -33,6 +33,10 @@
 //! bins differently. That is the only difference between the two: about 1e-4 ppm RMS on a 3T
 //! scan tilted by 6 degrees, and none for axial B0.
 //!
+//! QSM.jl is this method's reference: QSM.jl, Kames's maintained successor to QSM.m, is the implementation
+//! designated for this family (QSM.rs's reference rule: the authors' code where it
+//! exists, otherwise one designated implementation per family, the others' values recorded).
+//!
 //! # Agreement with QSM.jl
 //!
 //! On the QSM-CI in-vivo travelling-head scan (Siemens Prisma 2.89 T, 1 mm, 184×256×128, V-SHARP
