@@ -608,7 +608,7 @@ jobs:
                 fi ;;
               # Test binaries no workflow job runs (reference-parity, local-data and wasm tests):
               # their non-ignored tests run in unit-tests.yml, which every tests/ change selects.
-              tests/amppe_qsmci.rs|tests/chi_sep_medi_snu_parity.rs|tests/crosscheck.rs|tests/ilsqr_sti_parity.rs|tests/star_sti_parity.rs|tests/vsharp_sti_parity.rs|tests/n4_ants_parity.rs|tests/sharp_sepia_parity.rs) : ;;
+              tests/amppe_qsmci.rs|tests/chi_sep_medi_snu_parity.rs|tests/chi_sep_ilsqr_snu_parity.rs|tests/crosscheck.rs|tests/ilsqr_sti_parity.rs|tests/star_sti_parity.rs|tests/vsharp_sti_parity.rs|tests/n4_ants_parity.rs|tests/sharp_sepia_parity.rs) : ;;
               # Parity with the Julia originals (QSM.jl, ROMEO.jl, TGV.jl), fixtures from QSM-CI's julia-qsm image.
               tests/*_qsmjl_parity.rs|tests/*_romeojl_parity.rs|tests/*_tgvjl_parity.rs) : ;;
               tests/models_onnx.rs|tests/qsmart_validation.rs|tests/relaxometry_demo.rs|tests/wasm_pipeline.rs) : ;;
