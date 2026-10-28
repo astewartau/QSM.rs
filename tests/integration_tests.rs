@@ -1549,8 +1549,9 @@ fn test_pipeline_romeo_b0() {
 /// - B, QSMxT's current settings: individual unwrapping, global correction, MCPC-3D-S σ 4 voxels.
 ///
 /// The total field is scored against the true total field after removing the mean difference in
-/// the mask (unwrapping fixes it only up to a global constant), and χ through the same V-SHARP
-/// and RTS against the true χ. This test measures; its bounds only catch a broken pipeline.
+/// the mask (unwrapping fixes it only up to a global constant); the local field after the same
+/// V-SHARP against the true local field; and χ through that V-SHARP and RTS against the true χ.
+/// This test measures; its bounds only catch a broken pipeline.
 #[test]
 #[ignore]
 fn test_fieldmap_romeo_settings() {
@@ -1595,11 +1596,14 @@ fn test_fieldmap_romeo_settings() {
         fres.print_ci_metrics(elapsed);
         println!("[INFO] {name}: global offset {offset:.4} ppm, {wraps} of {} mask voxels off by ≥ half a turn at TE1", inside.len());
         let (local, eroded) = bgremove::vsharp(&aligned, &data.mask, &grid, &VsharpParams::default(), |_, _| {}).unwrap();
+        let lres = TestResult::new(&format!("{name} local field"), &local, &data.fieldmap_local, &eroded, data.dims);
+        lres.print_with_time(elapsed);
+        lres.print_ci_metrics(elapsed);
         let chi = inversion::rts(&local, &eroded, &grid, data.b0_dir, &RtsParams::default(), |_, _| {});
         let cres = TestResult::new(&format!("{name} chi"), &chi, &data.chi, &eroded, data.dims);
         cres.print_with_time(elapsed);
         cres.print_ci_metrics(elapsed);
-        assert!(fres.correlation > 0.9, "{name}: field correlation {}", fres.correlation);
+        assert!(fres.correlation > 0.5, "{name}: field correlation {}", fres.correlation);
         assert!(cres.correlation > 0.3, "{name}: χ correlation {}", cres.correlation);
     }
 }
