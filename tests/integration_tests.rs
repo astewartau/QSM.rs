@@ -1542,6 +1542,68 @@ fn test_pipeline_romeo_b0() {
     assert!(res.nrmse < 0.5, "ROMEO+B0 NRMSE too high: {}", res.nrmse);
 }
 
+/// Two ROMEO field-mapping configurations on the phantom, scored against its ground truth
+/// (QSM.rs#319: which one QSMxT should default to):
+/// - A, the `romeo` CLI's multi-echo approach: MCPC-3D-S with σ 7 mm, temporal unwrapping from
+///   echo 1, no global correction, phase-SNR weighting ([`RomeoParams::romeo_cli`]);
+/// - B, QSMxT's current settings: individual unwrapping, global correction, MCPC-3D-S σ 4 voxels.
+///
+/// The total field is scored against the true total field after removing the mean difference in
+/// the mask (unwrapping fixes it only up to a global constant), and χ through the same V-SHARP
+/// and RTS against the true χ. This test measures; its bounds only catch a broken pipeline.
+#[test]
+#[ignore]
+fn test_fieldmap_romeo_settings() {
+    let data = match TestData::load() {
+        Ok(d) => d,
+        Err(e) => return common::skip_for_missing_data(&format!("test_fieldmap_romeo_settings: {e}")),
+    };
+    let (nx, ny, nz) = data.dims;
+    let (vsx, vsy, vsz) = data.voxel_size;
+    let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
+    let meta = pipeline::ScanMetadata {
+        dims: data.dims,
+        voxel_size: data.voxel_size,
+        echo_times: data.echo_times.clone(),
+        field_strength: data.field_strength,
+        b0_direction: data.b0_dir,
+        slice_geometry: None,
+        affine: None,
+    };
+    let ph: Vec<&[f64]> = data.phase_echoes.iter().map(|p| p.as_slice()).collect();
+    let mg: Vec<&[f64]> = data.mag_echoes.iter().map(|m| m.as_slice()).collect();
+    let a = pipeline::FieldMappingConfig { romeo_params: RomeoParams::romeo_cli(), ..Default::default() };
+    let b = pipeline::FieldMappingConfig {
+        romeo_params: RomeoParams { individual: true, correct_global: true, ..RomeoParams::default() },
+        phase_offset_sigma_mm: [4.0 * vsx, 4.0 * vsy, 4.0 * vsz],
+        ..Default::default()
+    };
+    let inside: Vec<usize> = (0..data.mask.len()).filter(|&l| data.mask[l] != 0).collect();
+    for (name, config) in [("ROMEO A (CLI)", a), ("ROMEO B (QSMxT)", b)] {
+        let start = Instant::now();
+        let fm = pipeline::run_field_mapping(&ph, Some(&mg), &data.mask, &meta, &config, &mut |_, _| {})
+            .expect("field mapping");
+        let elapsed = start.elapsed();
+        let field = fm.b0_field_ppm;
+        let offset = inside.iter().map(|&l| field[l] - data.fieldmap[l]).sum::<f64>() / inside.len() as f64;
+        let aligned: Vec<f64> = (0..field.len()).map(|l| if data.mask[l] != 0 { field[l] - offset } else { 0.0 }).collect();
+        // a voxel off by half a turn or more at the first echo has a wrap error
+        let turn_ppm = 1e6 / (42.576e6 * data.field_strength * data.echo_times[0]);
+        let wraps = inside.iter().filter(|&&l| (aligned[l] - data.fieldmap[l]).abs() > 0.5 * turn_ppm).count();
+        let fres = TestResult::new(&format!("{name} field"), &aligned, &data.fieldmap, &data.mask, data.dims);
+        fres.print_with_time(elapsed);
+        fres.print_ci_metrics(elapsed);
+        println!("[INFO] {name}: global offset {offset:.4} ppm, {wraps} of {} mask voxels off by ≥ half a turn at TE1", inside.len());
+        let (local, eroded) = bgremove::vsharp(&aligned, &data.mask, &grid, &VsharpParams::default(), |_, _| {}).unwrap();
+        let chi = inversion::rts(&local, &eroded, &grid, data.b0_dir, &RtsParams::default(), |_, _| {});
+        let cres = TestResult::new(&format!("{name} chi"), &chi, &data.chi, &eroded, data.dims);
+        cres.print_with_time(elapsed);
+        cres.print_ci_metrics(elapsed);
+        assert!(fres.correlation > 0.9, "{name}: field correlation {}", fres.correlation);
+        assert!(cres.correlation > 0.3, "{name}: χ correlation {}", cres.correlation);
+    }
+}
+
 /// Unwrap with each method, then run the same background removal, and score the **local**
 /// field against ground truth.
 ///
