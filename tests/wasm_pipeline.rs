@@ -328,10 +328,7 @@ fn bg_removal() {
         if needs_weights(algorithm.dl_model_id()) {
             continue;
         }
-        let mut config = BgRemovalConfig { algorithm, ..Default::default() };
-        // SHARP's default kernel is QSM.jl's 18 voxels, which no ball fits in this small phantom
-        // (the eroded mask would be empty); a 3 mm kernel exercises the same code.
-        config.sharp.radius = Some(3.0);
+        let config = BgRemovalConfig { algorithm, ..Default::default() };
         let r = run_bg_removal(&p.total_ppm, &p.mask, &m, &config, Some(&echoes), &mut no_progress())
             .unwrap_or_else(|e| panic!("{algorithm:?}: {e}"));
         check(&format!("{algorithm:?}"), &r.local_field_ppm);

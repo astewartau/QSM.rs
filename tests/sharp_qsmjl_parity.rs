@@ -1,5 +1,5 @@
-//! `bgremove::sharp` and `bgremove::vsharp` against QSM.jl's `sharp` and `vsharp` (kamesy/QSM.jl
-//! fde4b92) on small polynomial phantoms.
+//! `bgremove::sharp` (`SharpVariant::QsmJl`) and `bgremove::vsharp` against QSM.jl's `sharp` and
+//! `vsharp` (kamesy/QSM.jl fde4b92) on small polynomial phantoms.
 //!
 //! The inputs are rebuilt here exactly as `tests/data/sharp_qsmjl_small.jl` built them (an
 //! ellipsoid mask holding a harmonic background and two spheres of local field, from + − × ÷
@@ -10,7 +10,7 @@
 //! [`CASES`] order: the number of voxels in QSM.jl's eroded mask (u32), that mask as bits over
 //! the volume (column-major, least significant bit first), and QSM.jl's local field there (f64).
 
-use qsm_core::bgremove::{sharp, vsharp, SharpParams, VsharpGrid, VsharpParams};
+use qsm_core::bgremove::{sharp, vsharp, SharpParams, SharpVariant, VsharpGrid, VsharpParams};
 use qsm_core::Grid;
 
 enum Method {
@@ -95,7 +95,11 @@ fn sharp_and_vsharp_match_qsm_jl_to_rounding() {
         let (field, mask) = phantom(case.dims, case.vs);
         let grid = Grid::new(case.dims[0], case.dims[1], case.dims[2], case.vs[0], case.vs[1], case.vs[2]);
         let (local, eroded) = match case.method {
-            Method::Sharp { radius, threshold } => sharp(&field, &mask, &grid, &SharpParams { radius, threshold }),
+            Method::Sharp { radius, threshold } => {
+                // `SharpVariant::QsmJl`; `None` radius: QSM.jl's default (`SharpParams::qsmjl`)
+                let r = radius.unwrap_or(SharpParams::qsmjl(&grid).radius);
+                sharp(&field, &mask, &grid, &SharpParams { radius: r, threshold, variant: SharpVariant::QsmJl })
+            }
             Method::Vsharp { max, min, step, threshold } => {
                 let p = VsharpParams {
                     threshold,
