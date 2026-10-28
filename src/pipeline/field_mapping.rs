@@ -270,9 +270,11 @@ fn field_mapping_with_offset(
         UnwrappingAlgorithm::Laplacian => {
             // Neumann, not the ROI-masked variant: this stage wants unwrapping only.
             // Background removal is a later stage, and the masked variant would remove it
-            // here first — measurably worse than doing it once, properly.
+            // here first — measurably worse than doing it once, properly. The phase is zeroed
+            // outside the mask first (MCPC-3D-S corrects every voxel, and the Laplacian unwrap
+            // takes the whole array), as on the direct path.
             corrected.iter()
-                .map(|p| crate::unwrap::laplacian_unwrap(p, mask, &grid, config.laplacian_solver))
+                .map(|p| crate::unwrap::laplacian_unwrap(&mask_phase(p, mask), mask, &grid, config.laplacian_solver))
                 .collect()
         }
         UnwrappingAlgorithm::Romeo => {

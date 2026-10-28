@@ -92,9 +92,15 @@ fn run_field_mapping_laplacian(data: &common::TestData) -> Vec<f64> {
         &grid,
     );
 
+    // The Laplacian unwrap takes the phase of the whole array, so zero it outside the brain
+    // first, as `run_field_mapping`'s Laplacian path does (`mask · φ`). MCPC-3D-S returns the
+    // corrected phase at every voxel, as MriResearchTools' `mcpc3ds` does.
     let unwrapped: Vec<Vec<f64>> = corrected_phases
         .iter()
-        .map(|p| laplacian_unwrap(p, &data.mask, &grid, LaplacianSolver::Dct))
+        .map(|p| {
+            let masked: Vec<f64> = p.iter().zip(&data.mask).map(|(&v, &m)| if m != 0 { v } else { 0.0 }).collect();
+            laplacian_unwrap(&masked, &data.mask, &grid, LaplacianSolver::Dct)
+        })
         .collect();
 
     calculate_b0_weighted(
