@@ -11,8 +11,27 @@
 //! - The authors' group's `iSMV.m` (shipped in github.com/agr78/mSMV,
 //!   `code/dependencies/MEDI_functions/iSMV.m`) iterates `F ← SMV(F)·M + BV` until
 //!   `||ΔF||/||F|| < 0.001`, with no iteration cap and the radius given by the caller.
-//! - This module follows QSM.jl instead (a residual-based stop, `tol` 1e-6 of the initial
-//!   residual, capped at `max_iter` 50, radius 5 mm), so its defaults are neither of the above.
+//! - This module is a port of QSM.jl's `ismv` (kamesy/QSM.jl fde4b92, `src/bgremove/ismv.jl`),
+//!   with its defaults: radius `r = 2·max(vsz)` mm, stop when the residual `‖fᵢ − fᵢ₋₁‖` falls
+//!   to `tol = 1e-3` of the first one, at most `maxit = 500` iterations. These are neither of
+//!   the above. (Before this module used QSM.jl's defaults it defaulted to radius 5 mm, `tol`
+//!   1e-6 and 50 iterations, which had no reference.)
+//!
+//! QSM.jl crops to the mask's bounding box and zero-pads to a fast FFT size before filtering;
+//! this port filters on the whole array, periodically. iSMV only applies the SMV kernel
+//! forwards, at voxels whose ball lies inside the mask, so the two are the same unless the mask
+//! reaches two opposite faces of the array (then a ball can wrap around here and count as
+//! fitting). QSM.jl's edge test is `S ∗ mask > 1 − √eps(Float64)`, this port's `> 1 − 1e-10`:
+//! the same for any ball of fewer than 6·10⁷ voxels.
+//!
+//! # Agreement with QSM.jl
+//!
+//! On the QSM-CI in-vivo travelling-head scan (Siemens Prisma 2.89 T, 1 mm, 184×256×128, ROMEO
+//! total field and brain mask), QSM.jl's `ismv` in the QSM-CI `julia-qsm` image
+//! (`sha256:b3c048ac…`, QSM.jl fde4b92) and this port agree to float rounding (both outputs
+//! saved as float32), with identical masks: at QSM.jl's defaults NRMSE 1.4e-9 %, max |Δ|
+//! 2.3e-10 ppm; at radius 5 mm, `tol` 1e-6, 50 iterations NRMSE 3.1e-9 %, max |Δ| 4.7e-10 ppm.
+//! `tests/ismv_qsmjl_parity.rs` checks the port against QSM.jl's output on small phantoms.
 //!
 //! Reference:
 //! Wen, Y., Zhou, D., Liu, T., Spincemaille, P., Wang, Y. (2014).
@@ -27,21 +46,35 @@ use crate::fft::{fft3d, ifft3d, fft_real_kernel};
 use crate::kernels::smv::{smv_kernel, erode_mask_smv};
 use crate::utils::vec_norm;
 
-/// iSMV algorithm parameters
+/// iSMV algorithm parameters (QSM.jl `ismv` keywords and defaults)
 #[cfg_attr(feature = "introspection", derive(serde::Serialize))]
 #[derive(Clone, Debug)]
 pub struct IsmvParams {
-    /// Convergence tolerance
+    /// Stop when the residual falls to this fraction of the first one (default: 1e-3, QSM.jl
+    /// `ismv`'s `tol`, `src/bgremove/ismv.jl`, fde4b92)
     pub tol: f64,
-    /// Maximum iterations
+    /// Maximum iterations (default: 500, QSM.jl `ismv`'s `maxit`)
     pub max_iter: usize,
-    /// SMV kernel radius in mm (default: 5.0)
-    pub radius: f64,
+    /// SMV kernel radius in mm; `None` (the default) is QSM.jl `ismv`'s default `r`, 2 × the
+    /// largest voxel dimension (2 mm at 1 mm). See [`IsmvParams::radius_mm`].
+    pub radius: Option<f64>,
 }
 
 impl Default for IsmvParams {
     fn default() -> Self {
-        Self { tol: 1e-6, max_iter: 50, radius: 5.0 }
+        Self { tol: 1e-3, max_iter: 500, radius: None }
+    }
+}
+
+impl IsmvParams {
+    /// QSM.jl `ismv`'s default kernel radius as a multiple of the largest voxel dimension.
+    pub const QSMJL_RADIUS_VOXELS: f64 = 2.0;
+
+    /// The kernel radius in mm on `grid`: [`radius`](Self::radius), or QSM.jl's default
+    /// `2 · max(voxel size)`.
+    pub fn radius_mm(&self, grid: &Grid) -> f64 {
+        let (a, b, c) = grid.voxel_size;
+        self.radius.unwrap_or(Self::QSMJL_RADIUS_VOXELS * a.max(b).max(c))
     }
 }
 
@@ -63,7 +96,7 @@ pub fn ismv(
     params: &IsmvParams,
     progress: impl FnMut(usize, usize),
 ) -> (Vec<f64>, Vec<u8>) {
-    ismv_core(field, mask, grid, params.radius, params.tol, params.max_iter, progress)
+    ismv_core(field, mask, grid, params.radius_mm(grid), params.tol, params.max_iter, progress)
 }
 
 /// iSMV with an explicit absolute kernel radius (mm).
