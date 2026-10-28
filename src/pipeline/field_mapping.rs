@@ -338,6 +338,16 @@ fn field_mapping_with_offset(
 ///     when the echoes are already consistent.
 ///
 ///   Then `B0 = Σ w (φ/TE) / Σ w` with the variant's `weighting`.
+///
+///   Neither the masking nor this alignment is QSM.jl's: QSM.jl's README unwraps the raw phase
+///   and inverts each echo's field separately, so it has no echo combination to compare with.
+///   Measured on the QSM-CI in-vivo travelling-head scan (Prisma 2.89 T, 1 mm, 5 echoes)
+///   against QSM.jl's `unwrap_laplacian(…; solver = :dct)` with each echo scaled by its TE and
+///   combined by QSM.jl's `multi_echo_average` (`W` = magnitude), in the QSM-CI `julia-qsm`
+///   image (`sha256:b3c048ac…`): with the phase masked and each echo's masked mean removed on the
+///   QSM.jl side too, the field maps agree to NRMSE 1.4e-9 % (float32 output rounding); with
+///   QSM.jl's raw phase and no mean removal, NRMSE 46 % against this default and 28 % against
+///   `laplacian_unmasked: true`, the rest being the per-echo constants this alignment removes.
 /// * [`B0EstimationMethod::LinearFit`]: the magnitude-weighted fit of phase against TE with
 ///   the variant's [`LinearFitParams`](crate::utils::LinearFitParams). With ROMEO it runs on the
 ///   per-echo unwrapped phases as they come out of the unwrapper, which is what this path
