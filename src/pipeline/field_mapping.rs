@@ -24,9 +24,12 @@
 //!   `mcpc3ds` does (`mcpc3ds.jl:44-46`; [`crate::utils::phase_offset_removal`]). ROMEO and the
 //!   bipolar fit use the brain mask passed in, as the CLI does when given one (`-k`); without
 //!   one the CLI unwraps inside `robustmask` of the template magnitude (`caller.jl:201-204`).
-//! - **ROMEO settings.** [`RomeoParams::romeo_cli`](crate::unwrap::RomeoParams::romeo_cli): the
-//!   CLI's `romeo3` weights (its default with a magnitude) and no temporal re-unwrapping of
-//!   uncertain voxels. The result matches the CLI up to its single-precision arithmetic (see
+//! - **ROMEO settings.** The default is ROMEO.jl's API defaults
+//!   ([`RomeoParams::default`](crate::unwrap::RomeoParams::default): `:romeo` weights,
+//!   `temporal_uncertain_unwrapping` 0.5). The CLI turns `-w romeo` into `romeo3` when a
+//!   magnitude is given and does no temporal re-unwrapping;
+//!   [`RomeoParams::romeo_cli`](crate::unwrap::RomeoParams::romeo_cli) sets those, and with it
+//!   the result matches the CLI up to the CLI's single-precision arithmetic (see
 //!   [`crate::unwrap::romeo`], *Agreement with the reference*).
 //! - **Offset removal off, or Laplacian unwrapping.** Phase-offset removal and bipolar correction
 //!   run only with ROMEO (`do_offset` below); with Laplacian they are skipped whatever the

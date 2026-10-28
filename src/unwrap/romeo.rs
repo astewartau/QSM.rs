@@ -24,8 +24,7 @@
 //!   magnitude coherence) is the API's default (`src/weights.jl:56,75-76`), which
 //!   [`RomeoParams::default`] matches; `:romeo4` sets the same four flags (`src/weights.jl:81-82`).
 //!   The CLI's `-w romeo` default becomes `romeo3` (no phase linearity) whenever a magnitude is
-//!   given and `romeo4` otherwise (`ext/RomeoApp/caller.jl:49-55`): [`RomeoParams::romeo_cli`],
-//!   which the field-mapping pipeline uses by default.
+//!   given and `romeo4` otherwise (`ext/RomeoApp/caller.jl:49-55`): [`RomeoParams::romeo_cli`].
 //! - **Weight bins.** Each weight in `[0, 1]` goes to the bin `max(round((1 − w)·255), 1)`
 //!   (`rescale`, `src/weights.jl:139-146`); the bins order the growth, so they are ROMEO.jl's here
 //!   (stored as `256 − bin`). An edge is weighted when its first voxel is in the mask
@@ -77,15 +76,15 @@
 //! five echoes), QSM.rs's template unwrapping gives the CLI's unwrapped echoes exactly.
 //!
 //! The `romeo` CLI itself reads the NIfTI phase and magnitude as Float32 and computes in single
-//! precision; QSM.rs computes in f64. That alone leaves a residual on the in-vivo scan: with
-//! the CLI's defaults (`romeo -B` with a brain mask, the pipeline's default config), B0 differs
-//! by NRMSE 2.9 % (corr 0.9995), from 2π differences in ~1,250 voxels of the MCPC-3D-S HIP
-//! unwrap that propagate through the offset smoothing (fed the CLI's own single-precision HIP,
-//! QSM.rs differs in 36 voxels; fed its corrected phase, in none). Before the seed, weight bins,
-//! edge masking, `mcpc3ds`'s own mask and smoothing, and the CLI's `romeo3`/`temporal_uncertain_unwrapping`
-//! defaults were ROMEO.jl's, the same comparison gave NRMSE 25 %; with individual unwrapping,
-//! global correction, `romeo4` and a 4 mm offset smoothing on both sides it went from 6.4 % to
-//! 1.1 %.
+//! precision; QSM.rs computes in f64 (kept: double precision throughout, Ashley 2026-10-28).
+//! That alone leaves a residual on the in-vivo scan. The CLI's defaults (`romeo -B` with a brain
+//! mask) against the pipeline with [`RomeoParams::romeo_cli`]: B0 NRMSE 2.9 % (corr 0.9995),
+//! from 2π differences in ~1,250 voxels of the MCPC-3D-S HIP unwrap that propagate through the
+//! offset smoothing (fed the CLI's own single-precision HIP, QSM.rs differs in 36 voxels; fed
+//! its corrected phase, in none). Before the seed, weight bins, edge masking, `mcpc3ds`'s own
+//! mask and smoothing were ROMEO.jl's, the same comparison gave NRMSE 25 %; with individual
+//! unwrapping, global correction, `romeo4` and a 4 mm offset smoothing on both sides it went
+//! from 6.4 % to 1.1 %.
 
 use std::f64::consts::PI;
 
