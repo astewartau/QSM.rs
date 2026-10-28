@@ -46,12 +46,13 @@
 //! On the QSM-CI in-vivo travelling-head scan (Siemens Prisma 2.89 T, 1 mm, 184×256×128, ROMEO
 //! total field, brain mask touching the first z plane) against the package in the QSM-CI
 //! `julia-qsm` image (`sha256:b3c048ac…`, 6c0886a, 4 threads), both at the package's defaults
-//! (1655 iterations) and with [`TgvParams::reference_quirks`]: NRMSE 4.0e-4 % for a wrapped echo (the field as phase at TE1, the
-//! package's `get_laplace_phase_del`), and 3.7e-4 % for [`TgvInput::FieldPpm`] against the
-//! package with its own discrete Laplacian kernel on the unwrapped phase. Both are float32
-//! rounding over 1655 iterations. Without `reference_quirks` (the defaults, see below) the same
-//! field comparison gives NRMSE 11 %, from the erosion at the edge. `tests/tgv_tgvjl_parity.rs` checks both inputs, anisotropic
-//! voxels and oblique B0 against the package's output on small phantoms (relative L2 ≤ 3e-6).
+//! (1655 iterations) and with both [`TgvParams::reference_divergence`] and
+//! [`TgvParams::reference_edge_erosion`]: NRMSE 4.0e-4 % for a wrapped echo (the field as phase
+//! at TE1, the package's `get_laplace_phase_del`), and 3.7e-4 % for [`TgvInput::FieldPpm`]
+//! against the package with its own discrete Laplacian kernel on the unwrapped phase. Both are
+//! float32 rounding over 1655 iterations. `tests/tgv_tgvjl_parity.rs` checks both inputs,
+//! anisotropic voxels and oblique B0 against the package's output on small phantoms (relative
+//! L2 ≤ 3e-6), with both options on. The defaults differ; see below.
 //!
 //! Against the package's `get_laplace_phase_romeo`, which ROMEO-unwraps the given phase again
 //! before its discrete Laplacian, the in-vivo field differs by NRMSE 12 %: on that scan the
@@ -60,36 +61,64 @@
 //!
 //! # Where QSM.rs differs from the reference
 //!
-//! Two details of the reference code are fixed by default, as unequivocal fixes (QSM.rs's
-//! reference rule: the original's behaviour stays available, here with
-//! [`TgvParams::reference_quirks`], which the parity test turns on):
-//! - **Erosion at the array's edge.** The reference skips neighbours outside the array
-//!   (`erode_mask`, `src/tgv.jl:218-222`; the original Python's `erode_mask` treats them as
-//!   inside), so a mask that reaches the array's edge is not eroded from it. There the
-//!   Laplacian and gradient stencils have no neighbour (the reference replicates the edge value
-//!   or drops the term), so the data term at those voxels is not the operator it is elsewhere.
-//!   By default a neighbour outside the array counts as outside the mask.
-//! - **Divergence in the `w` update.** The reference scales each row of `q` by that row's own
-//!   resolution for all three of its differences (`update_w_kernel!`; the same in the original
-//!   Python `tgv_deconv_update_w`). Chambolle–Pock converges to the problem the paper states only
-//!   when the operator in the primal update is the exact adjoint of the one in the dual update;
-//!   on anisotropic voxels the reference's is not the adjoint of its symmetric gradient (a
-//!   unit test checks the identity for the default and its failure for the reference's). By
-//!   default the `w` update uses the exact adjoint. On isotropic voxels the two are the same.
+//! Two details of the reference code are fixed by default. Each is an independent option that
+//! restores the reference's behaviour (QSM.rs's reference rule: unequivocal fixes are the
+//! default, and the original's behaviour stays available for parity):
+//! - **Divergence in the `w` update** ([`TgvParams::reference_divergence`]). The reference scales
+//!   each row of `q` by that row's own resolution for all three of its differences
+//!   (`update_w_kernel!`; the same in the original Python `tgv_deconv_update_w`). Chambolle–Pock
+//!   converges to the problem the paper states only when the operator in the primal update is
+//!   the exact adjoint of the one in the dual update. On anisotropic voxels the reference's is not
+//!   the adjoint of its symmetric gradient; a unit test checks the identity for the default and
+//!   its failure for the reference's. By default the `w` update uses the exact adjoint. This is a
+//!   pure correctness fix: it affects only anisotropic voxels, and on isotropic voxels the two
+//!   are the same operator.
+//! - **Erosion at the array's edge** ([`TgvParams::reference_edge_erosion`]). The reference skips
+//!   neighbours outside the array (`erode_mask`, `src/tgv.jl:218-222`; the original Python's
+//!   `erode_mask` treats them as inside), so a mask that reaches an array face is not eroded
+//!   from it. There the Laplacian and gradient stencils have no valid neighbour (the reference
+//!   replicates the edge value or drops the term), so the data term at those voxels is not the
+//!   operator it is elsewhere. By default a neighbour outside the array counts as outside the
+//!   mask, which removes those voxels. This affects only masks that reach an array face, and
+//!   costs coverage at those faces.
 //!
-//! Measured on the in-vivo travelling-head scan above (1 mm isotropic, so only the erosion
-//! differs; the brain mask reaches the array's first z plane), defaults against the package:
-//! NRMSE 11.1 % for [`TgvInput::FieldPpm`] and 11.7 % for a wrapped echo (corr 0.994), over
-//! the voxels both return; the defaults also drop the ~1,070 edge voxels the package keeps
-//! there. With `reference_quirks`, 3.7e-4 % and 4.0e-4 %. On the QSM-CI in-silico phantom's
-//! total field (QSM Challenge 2.0 head model, 164 × 205 × 205 at 1 mm, with a head mask that
-//! reaches three array faces), `reference_quirks` matches the package to NRMSE 6.0e-4 %; the
-//! defaults erode 308,014 more voxels at those faces, and over the voxels both return differ
-//! from it by NRMSE 91 % at the faces' side, falling to 29 % beyond 20 voxels from any face and
-//! 16 % beyond 40. Against the true χ there, the defaults correlate better (0.39 vs 0.35 over
-//! the shared voxels; 0.51 vs 0.47 beyond 10 voxels from a face): the package's unmasked
-//! stencils at the array edge are what spreads. The divergence fix changes χ only on
-//! anisotropic voxels: by 1.1 % (relative L2) on a 0.9 × 1.0 × 1.3 mm phantom.
+//! Measured against the package and, on the QSM-CI phantom, against the true χ. The total field
+//! is the input; the defaults are QSM.rs's, and "both" turns both options on. NRMSE against the
+//! package is over the voxels both return. NRMSE and corr against the truth are over the voxels
+//! every setting returns.
+//!
+//! | case | mask reaches | default | divergence only | edge erosion only | both |
+//! |---|---|---|---|---|---|
+//! | in vivo, 1 mm (travelling head, brain mask) | z = 0 | 11.0 % | 11.0 % | 3.7e-4 % | 3.7e-4 % |
+//! | in vivo, 1 × 1 × 2 mm (same, z pairs averaged) | z = 0 | 14.6 % | 14.4 % | 2.3 % | 2.0e-4 % |
+//! | phantom, 1 mm (CI brain mask) | no face | 3.8e-4 % | 3.8e-4 % | 3.8e-4 % | 3.8e-4 % |
+//! | phantom slab, 48 slices at 1 mm | both z faces | 99.8 % | 99.8 % | 4.4e-4 % | 4.4e-4 % |
+//! | phantom slab, 48 slices at 1 × 1 × 2 mm | both z faces | 97.9 % | 97.9 % | 1.7 % | 1.1e-4 % |
+//!
+//! Against the true χ:
+//!
+//! | case | default | divergence only | edge erosion only | both (= the package) |
+//! |---|---|---|---|---|
+//! | phantom, 1 mm | 59.4 % / 0.807 | same | same | same |
+//! | phantom slab, 1 mm | **68.5 % / 0.730** | 68.5 % / 0.730 | 1334 % / 0.034 | 1334 % / 0.034 |
+//! | phantom slab, 1 × 1 × 2 mm | 65.6 % / 0.757 | **65.5 % / 0.757** | 349 % / 0.082 | 347 % / 0.082 |
+//!
+//! - **Coverage.** The edge erosion's cost is the voxels it removes at the faces: about 1,010 of
+//!   the in-vivo scan's 1.5 million (one face), and 70,418 of 617,917 on the 1 mm phantom slab
+//!   (two faces, 11 %). On a head mask (χ ≠ 0) of the phantom reaching three faces, it removes
+//!   308,014 voxels.
+//! - **Why it is still the default.** When the mask is cut by a face, the reference's unmasked
+//!   stencils there spread through the whole slab: χ against the truth goes from NRMSE 69 % to
+//!   1334 %.
+//! - **Divergence.** It changes χ only on anisotropic voxels: by 1.1 % (relative L2) on a
+//!   0.9 × 1.0 × 1.3 mm phantom. On the 1 × 1 × 2 mm in-vivo scan with the reference's erosion,
+//!   the package's divergence accounts for the 2.3 % that separates "edge erosion only" from the
+//!   package.
+//!
+//! The phantom cases use QSM-CI's in-silico phantom (QSM Challenge 2.0 head model, 164 × 205 × 205
+//! at 1 mm, 7 T) with its true total field. They were run in the QSM.rs Actions on the CI's data
+//! (QSM.rs#324). The slabs are 48 slices centred on the brain, cut from the field, the mask and
+//! the truth; the 1 × 1 × 2 mm slab averages pairs of 96 slices.
 //!
 //! One deviation: χ is returned inside the eroded mask (`erosions` erosions of `mask`) and is
 //! zero elsewhere. The package returns its whole working box, whose χ outside that mask is the
@@ -130,7 +159,7 @@ use rayon::prelude::*;
 /// default: the Laplacian and gradient stencils have no neighbour there). With `skip_outside`,
 /// neighbours outside the array are skipped instead, as the reference's `erode_mask` does
 /// (`src/tgv.jl:218-222`, 6c0886a, `checkbounds`), so such a mask is not eroded from the edge
-/// ([`TgvParams::reference_quirks`]).
+/// ([`TgvParams::reference_edge_erosion`]).
 fn erode_mask(mask: &[u8], nx: usize, ny: usize, nz: usize, skip_outside: bool) -> Vec<u8> {
     let edge = skip_outside;
     let nxy = nx * ny;
@@ -161,7 +190,7 @@ fn erode_mask(mask: &[u8], nx: usize, ny: usize, nz: usize, skip_outside: bool) 
 /// row's own resolution, not by the resolution of the axis each difference is along. On
 /// isotropic voxels that is the ordinary divergence; on anisotropic voxels it is not the adjoint
 /// of the symmetric gradient used in the `q` update. Used only with
-/// [`TgvParams::reference_quirks`]; the default is the adjoint
+/// [`TgvParams::reference_divergence`]; the default is the adjoint
 /// ([`crate::utils::gradient::symdiv_inplace_f32`]). See the module docs.
 #[allow(clippy::too_many_arguments)] // the six tensor components, as in symdiv_inplace_f32
 fn symdiv_rows_f32(
@@ -269,15 +298,20 @@ pub struct TgvParams {
     /// combined over echoes, so the first echo time, the default where the reference does not
     /// say.
     pub te: crate::EchoTime,
-    /// Reproduce two details of the reference code that QSM.rs fixes by default (default
-    /// `false`; see the module docs, *Where QSM.rs differs from the reference*):
-    /// - the mask is not eroded from the array's edge (the reference skips neighbours outside
-    ///   the array), where the default erodes it, since the stencils have no neighbour there;
-    /// - the `w` update's divergence scales each row of `q` by that row's resolution, where the
-    ///   default uses the exact adjoint of the symmetric gradient.
+    /// Use the reference's divergence in the `w` update (default `false`: the exact adjoint of
+    /// the symmetric gradient). The reference scales each row of `q` by that row's own
+    /// resolution; on anisotropic voxels that is not the adjoint, so Chambolle–Pock does not
+    /// solve the stated TGV problem. No effect on isotropic voxels. See the module docs,
+    /// *Where QSM.rs differs from the reference*.
+    pub reference_divergence: bool,
+    /// Erode the mask as the reference does (default `false`: erode it from the array's edge
+    /// too). The reference skips neighbours outside the array, so a mask that reaches an array
+    /// face is not eroded from it, and keeps voxels whose Laplacian and gradient stencils have
+    /// no neighbour there. No effect unless the mask reaches an array face.
     ///
-    /// With `true` QSM.rs matches the package to float32 rounding (`tests/tgv_tgvjl_parity.rs`).
-    pub reference_quirks: bool,
+    /// With both this and [`reference_divergence`](Self::reference_divergence), QSM.rs matches
+    /// the package to float32 rounding (`tests/tgv_tgvjl_parity.rs`).
+    pub reference_edge_erosion: bool,
 }
 
 impl Default for TgvParams {
@@ -292,7 +326,8 @@ impl Default for TgvParams {
             erosions: 3,
             step_size: 3.0,
             te: crate::EchoTime::First,
-            reference_quirks: false,
+            reference_divergence: false,
+            reference_edge_erosion: false,
         }
     }
 }
@@ -1345,10 +1380,10 @@ pub fn tgv_qsm(
     let res = (vsx, vsy, vsz);
     let iterations = params.iterations.unwrap_or_else(|| get_default_iterations(res, params.step_size));
 
-    // Erode mask (the reference's erosion, which does not erode from the array's edge)
+    // Erode the mask (from the array's edge too, unless `reference_edge_erosion`)
     let mut mask_eroded = mask.to_vec();
     for _ in 0..params.erosions {
-        mask_eroded = erode_mask(&mask_eroded, nx, ny, nz, params.reference_quirks);
+        mask_eroded = erode_mask(&mask_eroded, nx, ny, nz, params.reference_edge_erosion);
     }
     // The bounding box below has no extent for an empty mask (its size underflowed).
     if !mask_eroded.iter().any(|&m| m != 0) {
@@ -1364,7 +1399,7 @@ pub fn tgv_qsm(
     }
 
     // Create mask0 (one more erosion for internal computations)
-    let mask0 = erode_mask(&mask_eroded, nx, ny, nz, params.reference_quirks);
+    let mask0 = erode_mask(&mask_eroded, nx, ny, nz, params.reference_edge_erosion);
 
     // Bounding box of the eroded mask with one voxel of padding (the reference's
     // `mask_box_indices`)
@@ -1537,8 +1572,8 @@ pub fn tgv_qsm(
         }
 
         // The exact adjoint of the symmetric gradient in the q update (Chambolle–Pock needs
-        // it); the reference's row-scaled version with `reference_quirks`.
-        if params.reference_quirks {
+        // it); the reference's row-scaled version with `reference_divergence`.
+        if params.reference_divergence {
             symdiv_rows_f32(
                 &mut ws.divqx, &mut ws.divqy, &mut ws.divqz,
                 &ws.sxx, &ws.sxy, &ws.sxz, &ws.syy, &ws.syz, &ws.szz,

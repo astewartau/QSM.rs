@@ -3,13 +3,21 @@
 //! of the echo (for a field, the TE it is expressed at). Writes χ in ppm.
 //!
 //! usage: tgv_file <field|phase> <input.nii[.gz]> <mask.nii[.gz]> <chi_out.nii.gz> <TE_s> <B0_T> <Hx> <Hy> <Hz> [iterations]
+//!        [--reference-divergence] [--reference-edge-erosion]
+//!
+//! The two flags set [`TgvParams::reference_divergence`] and
+//! [`TgvParams::reference_edge_erosion`]; with both, the package's own code is reproduced.
 use qsm_core::inversion::{tgv_qsm, TgvInput, TgvParams};
 use qsm_core::io::{read_nifti_file, save_nifti_to_file};
 use qsm_core::Grid;
 use std::path::Path;
 
 fn main() {
-    let a: Vec<String> = std::env::args().collect();
+    let all: Vec<String> = std::env::args().collect();
+    let flag = |f: &str| all.iter().any(|x| x == f);
+    let (reference_divergence, reference_edge_erosion) =
+        (flag("--reference-divergence"), flag("--reference-edge-erosion"));
+    let a: Vec<String> = all.iter().filter(|x| !x.starts_with("--")).cloned().collect();
     if a.len() != 10 && a.len() != 11 {
         eprintln!("usage: {} <field|phase> <input> <mask> <chi_out> <TE_s> <B0_T> <Hx> <Hy> <Hz> [iterations]", a[0]);
         std::process::exit(2);
@@ -26,7 +34,7 @@ fn main() {
         other => panic!("input kind must be field or phase, got {other}"),
     };
     let iterations = (a.len() == 11).then(|| num(10) as usize);
-    let params = TgvParams { iterations, ..TgvParams::default() };
+    let params = TgvParams { iterations, reference_divergence, reference_edge_erosion, ..TgvParams::default() };
     eprintln!("tgv params: {params:?}");
     let t = std::time::Instant::now();
     let chi = tgv_qsm(input, &mask, &grid, &params, (num(7), num(8), num(9)), |_, _| {}).expect("tgv");
