@@ -192,7 +192,10 @@ fn test_bgremove_sharp() {
     common::save_center_slices(&result, &eroded_mask, data.dims, "bgremove_sharp");
 
     assert!(res.nrmse < 0.5, "SHARP NRMSE too high: {}", res.nrmse);
-    assert!(res.correlation > 0.7, "SHARP correlation too low: {}", res.correlation);
+    // QSM.jl's default kernel (18 × the voxel size) erodes a wide rim, which counts as zeros in
+    // this full-mask score: r 0.63 (XSIM 0.34) here, and QSM.jl's own `sharp` scores the same
+    // (the port matches it to 1e-10 %; see `bgremove::sharp`). The 6 mm kernel used before gave r > 0.7.
+    assert!(res.correlation > 0.6, "SHARP correlation too low: {}", res.correlation);
 }
 
 #[test]
