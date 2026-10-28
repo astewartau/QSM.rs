@@ -613,7 +613,7 @@ fn medi_l1(
 }
 
 /// `out[i] = f(i)` for every `i` (over threads with the `parallel` feature)
-pub(super) fn par_fill<T: Send>(out: &mut [T], f: impl Fn(usize) -> T + Sync + Send) {
+pub(crate) fn par_fill<T: Send>(out: &mut [T], f: impl Fn(usize) -> T + Sync + Send) {
     #[cfg(feature = "parallel")]
     out.par_iter_mut().with_min_len(1 << 14).enumerate().for_each(|(i, v)| *v = f(i));
     #[cfg(not(feature = "parallel"))]
@@ -621,7 +621,7 @@ pub(super) fn par_fill<T: Send>(out: &mut [T], f: impl Fn(usize) -> T + Sync + S
 }
 
 /// `f(i, &mut out[i])` for every `i` (over threads with the `parallel` feature)
-pub(super) fn par_update<T: Send>(out: &mut [T], f: impl Fn(usize, &mut T) + Sync + Send) {
+pub(crate) fn par_update<T: Send>(out: &mut [T], f: impl Fn(usize, &mut T) + Sync + Send) {
     #[cfg(feature = "parallel")]
     out.par_iter_mut().with_min_len(1 << 14).enumerate().for_each(|(i, v)| f(i, v));
     #[cfg(not(feature = "parallel"))]
@@ -697,7 +697,7 @@ pub(super) fn dconv_weighted(
 }
 
 /// `fgrad.m`: forward differences, zero at the last voxel along each axis
-pub(super) fn fgrad(x: &[f64], dims: (usize, usize, usize), vs: [f64; 3], g: &mut [Vec<f64>; 3]) {
+pub(crate) fn fgrad(x: &[f64], dims: (usize, usize, usize), vs: [f64; 3], g: &mut [Vec<f64>; 3]) {
     let (nx, ny, nz) = dims;
     let nxy = nx * ny;
     let [g0, g1, g2] = g;
@@ -753,7 +753,7 @@ fn bdiv(g: &[Vec<f64>; 3], dims: (usize, usize, usize), vs: [f64; 3], out: &mut 
 /// `reg(dx) = div(wG.*(Vr.*(wG.*grad(real(dx)))))` into `out`, with `wvw = wG.*Vr.*wG`: `bdiv`
 /// of the weighted `fgrad`, a z plane at a time so the gradients never leave the cache. Each
 /// value is computed with the same operations as `fgrad` followed by `bdiv`.
-pub(super) fn reg(x: &[f64], wvw: &[Vec<f64>; 3], dims: (usize, usize, usize), vs: [f64; 3], out: &mut [f64]) {
+pub(crate) fn reg(x: &[f64], wvw: &[Vec<f64>; 3], dims: (usize, usize, usize), vs: [f64; 3], out: &mut [f64]) {
     let (nx, ny, nz) = dims;
     let nxy = nx * ny;
     // Weighted forward differences of plane k: x and y into gx, gy (when given), z into gz.
@@ -810,22 +810,22 @@ pub(super) fn reg(x: &[f64], wvw: &[Vec<f64>; 3], dims: (usize, usize, usize), v
 }
 
 /// `cgsolve.m`'s vectors, reused across Gauss-Newton iterations
-pub(super) struct CgBuffers {
-    pub(super) x: Vec<f64>,
+pub(crate) struct CgBuffers {
+    pub(crate) x: Vec<f64>,
     r: Vec<f64>,
     d: Vec<f64>,
     q: Vec<f64>,
 }
 
 impl CgBuffers {
-    pub(super) fn new(n: usize) -> Self {
+    pub(crate) fn new(n: usize) -> Self {
         Self { x: vec![0.0; n], r: vec![0.0; n], d: vec![0.0; n], q: vec![0.0; n] }
     }
 }
 
 /// `cgsolve.m` from a zero start; the last iterate is left in `cg.x`. `progress` receives the
 /// iteration count. The dot products are summed in index order, as before.
-pub(super) fn cgsolve(
+pub(crate) fn cgsolve(
     mut a: impl FnMut(&[f64], &mut [f64]),
     b: &[f64],
     tol: f64,
@@ -873,7 +873,7 @@ pub(super) fn cgsolve(
 
 /// `dataterm_mask.m` into `w`: 0 gives 1 everywhere; 1 gives `Mask./N_std` (0 where that is
 /// not finite) normalised to mean 1 over the mask.
-pub(super) fn dataterm_mask(mode: i32, n_std: &[f64], mask: &[bool], w: &mut [f64]) {
+pub(crate) fn dataterm_mask(mode: i32, n_std: &[f64], mask: &[bool], w: &mut [f64]) {
     if mode == 0 {
         w.fill(1.0);
         return;
@@ -892,7 +892,7 @@ pub(super) fn dataterm_mask(mode: i32, n_std: &[f64], mask: &[bool], w: &mut [f6
 /// direction, over the whole volume. The threshold starts at 1% of `max(iMag)` and is scaled by
 /// 1.05 or 0.95 until the number of gradient components above it, over the number of voxels in
 /// the mask, crosses `percentage`.
-pub(super) fn gradient_mask(mag: &[f64], mask: &[bool], grid: &Grid, percentage: f64) -> [Vec<f64>; 3] {
+pub(crate) fn gradient_mask(mag: &[f64], mask: &[bool], grid: &Grid, percentage: f64) -> [Vec<f64>; 3] {
     let vs = [grid.vsx(), grid.vsy(), grid.vsz()];
     let n = mag.len();
     let masked: Vec<f64> = mag.iter().zip(mask).map(|(&v, &m)| if m { v } else { 0.0 }).collect();
@@ -921,8 +921,9 @@ pub(super) fn gradient_mask(mag: &[f64], mask: &[bool], grid: &Grid, percentage:
     } else {
         // MATLAB loops forever if the fraction cannot reach `percentage` (e.g. a constant
         // magnitude, whose only edges are at the mask boundary). Stop once the level is below
-        // the smallest nonzero gradient, where the count can no longer change.
-        let min_positive = sorted.iter().copied().find(|&v| v > 0.0).unwrap_or(0.0);
+        // the smallest nonzero gradient, where the count can no longer change; with no nonzero
+        // gradient at all, at once (0.95·level stalls at the smallest subnormal, never 0).
+        let min_positive = sorted.iter().copied().find(|&v| v > 0.0).unwrap_or(f64::INFINITY);
         while numerator / denominator < percentage && level >= min_positive && level > 0.0 {
             level *= 0.95;
             numerator = above(level) as f64;
@@ -1447,6 +1448,15 @@ mod tests {
             assert!(my[i] == 0.0 || my[i] == 1.0, "my should be binary, got {}", my[i]);
             assert!(mz[i] == 0.0 || mz[i] == 1.0, "mz should be binary, got {}", mz[i]);
         }
+    }
+
+    /// A constant magnitude has no gradient anywhere: the level search must stop (MATLAB's loops
+    /// forever) and nothing is an edge.
+    #[test]
+    fn gradient_mask_of_a_constant_magnitude_terminates_with_no_edges() {
+        let grid = Grid::new(6, 6, 6, 1.0, 1.0, 1.0);
+        let g = gradient_mask(&[1.0; 216], &[true; 216], &grid, 0.9);
+        assert!(g.iter().all(|c| c.iter().all(|&v| v == 1.0)));
     }
 
     fn small_params() -> MediParams {

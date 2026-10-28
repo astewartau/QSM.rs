@@ -15,15 +15,16 @@
 //! background removal and QSM method its authors fed it, and where this stage's inputs differ
 //! from theirs. The main differences, all recorded there with sources:
 //! - `Decompose` takes one χ_total, where the authors fed a STAR-QSM per echo.
-//! - The analytic methods' D_r is calibrated at 3 T only. `ChiSepIlsqr`, `ChiSepMedi` and
-//!   `WaveSep` keep 137 Hz/ppm at every field, while `R2starQsm` and `HcChisep` scale theirs by
-//!   B0/3. Neither choice comes from the authors.
+//! - The analytic methods' D_r is calibrated at 3 T only. `ChiSepMedi` defaults to the
+//!   χ-separation toolbox's `137·(B0/2.9)` (from the authors' code). `ChiSepIlsqr` and `WaveSep`
+//!   keep 137 Hz/ppm at every field, while `R2starQsm` and `HcChisep` scale theirs by B0/3;
+//!   those choices do not come from the authors.
 //! - `ChiSepNet` is trained at 3 T and 1 mm, and its authors' QSM channel is QSMnetME, which
 //!   QSM.rs does not have.
 
 use super::config::*;
 use crate::separation::{
-    ChiSepIlsqrParams, ChiSepParams, DecomposeParams, HcChisepParams, R2starQsmParams,
+    ChiSepIlsqrParams, ChiSepMediInputs, ChiSepMediParams, DecomposeParams, HcChisepParams, R2starQsmParams,
 };
 
 /// Inputs for [`run_separation`]. Provide whatever the chosen algorithm needs;
@@ -43,6 +44,11 @@ pub struct SeparationInputs<'a> {
     pub r2star: Option<&'a [f64]>,
     /// Root-sum-of-squares magnitude (`ChiSepIlsqr` / `ChiSepMedi`).
     pub magnitude_rss: Option<&'a [f64]>,
+    /// Noise standard deviation of the field, `N_std` (`ChiSepMedi`; see
+    /// [`ChiSepMediInputs::n_std`]).
+    pub n_std: Option<&'a [f64]>,
+    /// CSF mask, nonzero inside (`ChiSepMedi`; see [`ChiSepMediInputs::mask_csf`]).
+    pub mask_csf: Option<&'a [u8]>,
     /// Multi-echo magnitude, voxel-major `(n_voxels, n_echoes)`
     /// (`R2starQsm` / `Decompose` / `HcChisep`).
     pub magnitude_multi: Option<&'a [f64]>,
@@ -98,13 +104,17 @@ pub fn run_separation(
             )
         }
         SeparationAlgorithm::ChiSepMedi => {
-            let r2prime = need(inputs.r2prime, "r2prime")?;
-            let magnitude = need(inputs.magnitude_rss, "magnitude_rss")?;
-            let params = ChiSepParams { cf, ..config.chi_sep_medi.clone() };
-            crate::separation::chi_sep_medi(
-                inputs.local_field_ppm, r2prime, magnitude, mask,
-                &grid, bdir, &params, progress,
-            )
+            let medi_inputs = ChiSepMediInputs {
+                magnitude: need(inputs.magnitude_rss, "magnitude_rss")?,
+                local_field: inputs.local_field_ppm,
+                r2prime: need(inputs.r2prime, "r2prime")?,
+                n_std: need(inputs.n_std, "n_std")?,
+                qsm: inputs.qsm,
+                mask,
+                mask_csf: need(inputs.mask_csf, "mask_csf")?,
+            };
+            let params = ChiSepMediParams { cf, ..config.chi_sep_medi.clone() };
+            crate::separation::chi_sep_medi(&medi_inputs, &grid, bdir, &params, progress)?
         }
         SeparationAlgorithm::R2starQsm => {
             let params = R2starQsmParams { b0, ..config.r2star_qsm.clone() };
@@ -276,7 +286,7 @@ fn check_inputs(
 }
 
 /// Require an optional input, or return an `InvalidInput` error naming it.
-fn need<'a>(opt: Option<&'a [f64]>, what: &str) -> Result<&'a [f64], PipelineError> {
+fn need<'a, T>(opt: Option<&'a [T]>, what: &str) -> Result<&'a [T], PipelineError> {
     opt.ok_or_else(|| PipelineError::InvalidInput(format!("{what} required for this algorithm")))
 }
 
@@ -304,6 +314,8 @@ mod tests {
             r2prime: None,
             r2star: None,
             magnitude_rss: None,
+            n_std: None,
+            mask_csf: None,
             magnitude_multi: None,
             se_magnitude_multi: None,
         }
@@ -351,14 +363,33 @@ mod tests {
         let r2prime = vec![2.0; n];
         let mag = vec![1.0; n];
         let mask = vec![1u8; n];
+        let n_std = vec![0.01; n];
+        let no_csf = vec![0u8; n];
         let m = meta(nx, ny, nz);
         for alg in [SeparationAlgorithm::ChiSepIlsqr, SeparationAlgorithm::ChiSepMedi] {
             let mut inputs = base_inputs(&field, &mask);
             inputs.r2prime = Some(&r2prime);
             inputs.magnitude_rss = Some(&mag);
+            inputs.n_std = Some(&n_std);
+            inputs.mask_csf = Some(&no_csf);
             let cfg = SeparationConfig { algorithm: alg, ..Default::default() };
             let r = run_separation(inputs, &m, &cfg, &mut |_, _| {}).unwrap();
             assert_eq!(r.chi_pos.len(), n);
+        }
+        // chi-sep-medi takes the noise map and the CSF mask the toolbox takes, and says so
+        for missing in ["n_std", "mask_csf"] {
+            let mut inputs = base_inputs(&field, &mask);
+            inputs.r2prime = Some(&r2prime);
+            inputs.magnitude_rss = Some(&mag);
+            if missing != "n_std" {
+                inputs.n_std = Some(&n_std);
+            }
+            if missing != "mask_csf" {
+                inputs.mask_csf = Some(&no_csf);
+            }
+            let cfg = SeparationConfig { algorithm: SeparationAlgorithm::ChiSepMedi, ..Default::default() };
+            let e = run_separation(inputs, &m, &cfg, &mut |_, _| {}).unwrap_err();
+            assert!(e.to_string().contains(&format!("{missing} required")), "{e}");
         }
     }
 

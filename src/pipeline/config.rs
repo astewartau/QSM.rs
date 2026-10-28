@@ -15,7 +15,7 @@ use crate::inversion::{
     LsqrQsmParams, HeidiParams, StarParams,
 };
 use crate::separation::{
-    ChiSepIlsqrParams, ChiSepNetParams, ChiSepParams, DecomposeParams, HcChisepParams,
+    ChiSepIlsqrParams, ChiSepMediParams, ChiSepNetParams, DecomposeParams, HcChisepParams,
     R2starQsmParams, SusepNetParams, WaveSepParams,
 };
 use crate::unwrap::romeo::RomeoParams;
@@ -985,7 +985,7 @@ pub struct SeparationConfig {
     pub algorithm: SeparationAlgorithm,
     /// `cf` on the chi-sep params is overridden from scan metadata by the dispatcher.
     pub chi_sep_ilsqr: ChiSepIlsqrParams,
-    pub chi_sep_medi: ChiSepParams,
+    pub chi_sep_medi: ChiSepMediParams,
     /// `b0` overridden from scan metadata by the dispatcher.
     pub r2star_qsm: R2starQsmParams,
     pub wavesep: WaveSepParams,
@@ -1004,7 +1004,7 @@ impl Default for SeparationConfig {
         Self {
             algorithm: SeparationAlgorithm::ChiSepIlsqr,
             chi_sep_ilsqr: ChiSepIlsqrParams::default(),
-            chi_sep_medi: ChiSepParams::default(),
+            chi_sep_medi: ChiSepMediParams::default(),
             r2star_qsm: R2starQsmParams::default(),
             wavesep: WaveSepParams::default(),
             decompose: DecomposeParams::default(),

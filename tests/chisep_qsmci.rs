@@ -6,6 +6,9 @@
 //! |-------------------------------|--------------|--------------|
 //! | chi-sep-ilsqr (SNU-LIST)      | 0.590/0.862  | 0.480/0.807  |
 //! | chi-sep-medi  (SNU-LIST)      | 0.731/0.904  | 0.580/0.911  |
+//!
+//! The chi-sep-medi entry's container never iterates (its empty CSF mask makes every step NaN,
+//! see `separation::chi_sep_medi`), so its row scores the toolbox's initial guess.
 //! | chi-sepnet    (deep learning) | 0.887/0.944  | 0.719/0.884  |
 //!
 //! Caveat: the phantom was regenerated after those runs (GT corr 0.935 between
@@ -23,7 +26,7 @@ mod common;
 
 use common::{assert_chisep_separated, chisep_score, load_chisep_phantom, save_center_slices};
 use qsm_core::inversion::ilsqr;
-use qsm_core::separation::{chi_sep_ilsqr, chi_sep_medi, ChiSepIlsqrParams, ChiSepParams};
+use qsm_core::separation::{chi_sep_ilsqr, chi_sep_medi, ChiSepIlsqrParams, ChiSepMediInputs, ChiSepMediParams};
 use std::time::Instant;
 
 #[test]
@@ -94,8 +97,8 @@ fn test_chi_sep_ilsqr_qsmci() {
     assert_chisep_separated("chi_sep_ilsqr", &chi_pos, &dia_mag, &ph.gt_para, &ph.gt_dia, &ph.mask, 0.6, 0.4);
 }
 
-/// Regression floors for `chi_sep_medi`'s χ+ / |χ−| correlation with ground truth. Measured
-/// 0.88 / 0.66 on the local copy of the phantom after the R2' weighting fix (0.74 / -0.22 before).
+/// Regression floors for `chi_sep_medi`'s χ+ / |χ−| correlation with ground truth, kept from the
+/// earlier paper-based port; the toolbox port's own scores are in the CI metrics.
 const MEDI_PARA_FLOOR: f64 = 0.6;
 const MEDI_DIA_FLOOR: f64 = 0.4;
 
@@ -103,31 +106,29 @@ const MEDI_DIA_FLOOR: f64 = 0.4;
 #[ignore] // needs the qsmci phantom; run with --release (see module docs)
 fn test_chi_sep_medi_qsmci() {
     let Some(ph) = load_chisep_phantom() else { return };
-    println!("[INFO] chi_sep_medi on qsmci phantom (posted MATLAB chi-sep-medi: para 0.73/0.90, dia 0.58/0.91)");
-
-    // 137/137 used to be set here because the default was 114/30; it is the default now
-    // (QSM.rs#130), so this scores the shipped configuration rather than a local override.
-    let params = ChiSepParams { cf: ph.cf, max_iter: 30, ..ChiSepParams::default() };
-    assert_eq!(
-        (params.dr_pos, params.dr_neg),
-        (137.0, 137.0),
-        "this phantom's reference numbers were measured at Dr = 137 Hz/ppm"
-    );
+    let n = ph.mask.len();
+    let ne = ph.tes.len();
+    println!("[INFO] chi_sep_medi on qsmci phantom");
+    // The inputs as Chisep_script.m makes them: STI Suite iLSQR QSM of the local field,
+    // N_std from Fit_ppm_complex, a CSF mask from extract_CSF on the ARLO R2*.
+    let (qsm, _, _, _) = ilsqr(&ph.local_field_ppm, &ph.mask, &ph.grid, ph.bdir, &ChiSepIlsqrParams::default().qsm_ilsqr, |_, _| {});
+    let echo_major: Vec<f64> = (0..ne).flat_map(|e| (0..n).map(move |v| (v, e))).map(|(v, e)| ph.mag_voxel_major[v * ne + e]).collect();
+    let n_std = qsm_core::utils::fit_ppm_complex_noise(&echo_major, ne);
+    let r2s = qsm_core::utils::r2star::arlo(&echo_major, &ph.tes, n).expect("arlo");
+    let mask_csf = qsm_core::inversion::extract_csf(&r2s, &ph.mask, &ph.grid, 5.0, true);
+    println!("[INFO] CSF mask: {} voxels", mask_csf.iter().filter(|&&m| m != 0).count());
+    let inputs = ChiSepMediInputs {
+        magnitude: &ph.magnitude_rss,
+        local_field: &ph.local_field_ppm,
+        r2prime: &ph.r2prime,
+        n_std: &n_std,
+        qsm: &qsm,
+        mask: &ph.mask,
+        mask_csf: &mask_csf,
+    };
+    let params = ChiSepMediParams { cf: ph.cf, ..ChiSepMediParams::default() };
     let t = Instant::now();
-    let (chi_pos, chi_neg, _) = chi_sep_medi(
-        &ph.local_field_ppm,
-        &ph.r2prime,
-        &ph.magnitude_rss,
-        &ph.mask,
-        &ph.grid,
-        ph.bdir,
-        &params,
-        |i, tot| {
-            if i % 5 == 0 || i == tot {
-                println!("  iter {}/{}", i, tot);
-            }
-        },
-    );
+    let (chi_pos, chi_neg, _) = chi_sep_medi(&inputs, &ph.grid, ph.bdir, &params, |i, tot| println!("  iter {}/{}", i, tot)).expect("chi_sep_medi");
     let secs = t.elapsed().as_secs_f64();
     println!("[INFO] chi_sep_medi done in {:.1?}", t.elapsed());
 
@@ -137,8 +138,5 @@ fn test_chi_sep_medi_qsmci() {
     chisep_score("chi_sep_medi χ−", &dia_mag, &ph.gt_dia, &ph.mask, ph.dims, secs);
     save_center_slices(&chi_pos, &ph.mask, ph.dims, "chisep_medi_para");
     save_center_slices(&dia_mag, &ph.mask, ph.dims, "chisep_medi_dia");
-
-    // Before its R2' term was weighted as in Shin 2021, χ+ and |χ−| were the same map (both
-    // ≈ R2'/2Dr; corr(χ+, |χ−|) 0.99) and |χ−| scored 0.07 against its ground truth.
     assert_chisep_separated("chi_sep_medi", &chi_pos, &dia_mag, &ph.gt_para, &ph.gt_dia, &ph.mask, MEDI_PARA_FLOOR, MEDI_DIA_FLOOR);
 }
