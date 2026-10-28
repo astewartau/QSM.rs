@@ -103,36 +103,11 @@ impl Default for NltvParams {
     }
 }
 
-/// Next size >= n whose only prime factors are 2, 3, 5, 7 (Julia `nextprod((2,3,5,7), n)`).
-fn next_fast_fft(n: usize) -> usize {
-    let mut s = n.max(1);
-    loop {
-        let mut m = s;
-        for p in [2, 3, 5, 7] {
-            while m.is_multiple_of(p) {
-                m /= p;
-            }
-        }
-        if m == 1 {
-            return s;
-        }
-        s += 1;
-    }
-}
-
 /// QSM.jl `fastfftsize(sz, (0, 0, 0); rfft=true)`: the fast FFT size, with an even first
 /// dimension where one is close.
 fn fast_fft_dims(dims: (usize, usize, usize)) -> (usize, usize, usize) {
-    let s0 = next_fast_fft(dims.0);
-    let mut s = s0;
-    for _ in 0..3 {
-        if s.is_multiple_of(2) {
-            break;
-        }
-        s = next_fast_fft(s + 1);
-    }
-    let sx = if s.is_multiple_of(2) { s } else { s0 + 1 };
-    (sx, next_fast_fft(dims.1), next_fast_fft(dims.2))
+    let [x, y, z] = crate::utils::padding::qsmjl_fast_fft_size([dims.0, dims.1, dims.2], [0; 3]);
+    (x, y, z)
 }
 
 #[inline]
@@ -349,14 +324,5 @@ mod tests {
         assert_eq!(chi.len(), n * n * n);
         assert_eq!(chi[0], 0.0);
         assert!(chi.iter().all(|v| v.is_finite()));
-    }
-
-    #[test]
-    fn test_fast_fft_dims() {
-        // values from QSM.jl fastfftsize(sz, (0, 0, 0); rfft=true)
-        assert_eq!(fast_fft_dims((11, 11, 13)), (12, 12, 14));
-        assert_eq!(fast_fft_dims((176, 240, 150)), (180, 240, 150));
-        assert_eq!(fast_fft_dims((255, 97, 49)), (256, 98, 49));
-        assert_eq!(fast_fft_dims((15, 15, 15)), (16, 15, 15));
     }
 }
