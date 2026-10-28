@@ -50,7 +50,7 @@ fn case() -> (Vec<f64>, Vec<f64>, Vec<u8>) {
 
 fn reference() -> (Vec<f64>, Vec<f64>) {
     let bytes = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/decompose_qsm_small.bin")).unwrap();
-    let v: Vec<f64> = bytes.chunks_exact(8).map(|c| f64::from_le_bytes(c.try_into().unwrap())).collect();
+    let v: Vec<f64> = bytes.as_chunks::<8>().0.iter().map(|c| f64::from_le_bytes(*c)).collect();
     let n = DIMS.iter().product::<usize>();
     assert_eq!(v.len(), 2 * n);
     (v[..n].to_vec(), v[n..].to_vec())
