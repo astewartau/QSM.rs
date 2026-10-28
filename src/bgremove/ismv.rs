@@ -11,11 +11,19 @@
 //! - The authors' group's `iSMV.m` (shipped in github.com/agr78/mSMV,
 //!   `code/dependencies/MEDI_functions/iSMV.m`) iterates `F ← SMV(F)·M + BV` until
 //!   `||ΔF||/||F|| < 0.001`, with no iteration cap and the radius given by the caller.
-//! - This module is a port of QSM.jl's `ismv` (kamesy/QSM.jl fde4b92, `src/bgremove/ismv.jl`),
-//!   with its defaults: radius `r = 2·max(vsz)` mm, stop when the residual `‖fᵢ − fᵢ₋₁‖` falls
-//!   to `tol = 1e-3` of the first one, at most `maxit = 500` iterations. These are neither of
-//!   the above. (Before this module used QSM.jl's defaults it defaulted to radius 5 mm, `tol`
-//!   1e-6 and 50 iterations, which had no reference.)
+//! - QSM.m's `ismv.m` (kamesy/QSM.m f22dc40, `src/bgremove/ismv.m:12-17,37-39`): radius 3 mm,
+//!   `tol = sqrt(eps)` of the first residual, at most 500 iterations.
+//!
+//! # Which implementation
+//!
+//! The paper released no code; the authors' lab's `iSMV.m` above ships only as a dependency of
+//! a later method (mSMV) and leaves the radius to its caller. QSM.rs therefore follows the one
+//! implementation designated for Kames's SMV methods (Ashley, 2026-10-28): QSM.jl, his
+//! maintained successor to QSM.m. So this module is a port of
+//! QSM.jl's `ismv` (kamesy/QSM.jl fde4b92, `src/bgremove/ismv.jl`), with its defaults: radius
+//! `r = 2·max(vsz)` mm, stop when the residual `‖fᵢ − fᵢ₋₁‖` falls to `tol = 1e-3` of the first
+//! one, at most `maxit = 500` iterations. (Before this module used QSM.jl's defaults it
+//! defaulted to radius 5 mm, `tol` 1e-6 and 50 iterations, which had no reference.)
 //!
 //! QSM.jl crops to the mask's bounding box and zero-pads to a fast FFT size before filtering;
 //! this port filters on the whole array, periodically. iSMV only applies the SMV kernel
