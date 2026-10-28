@@ -11,6 +11,20 @@
 //!
 //! Reference implementation: https://github.com/kamesy/QSM.jl
 //!
+//! QSM.jl pads the field to its fast FFT size first (`pad = (0, 0, 0)`, `padfastfft`,
+//! `src/inversion/direct.jl:182-184`), and so does this port by default ([`TkdParams::pad`]).
+//!
+//! # Agreement with QSM.jl
+//!
+//! On the QSM-CI in-vivo travelling-head scan (Siemens Prisma 2.89 T, 1 mm, 184×256×128, V-SHARP
+//! local field and brain mask), against QSM.jl in the QSM-CI `julia-qsm` image (`sha256:b3c048ac…`,
+//! QSM.jl fde4b92), both outputs saved as float32:
+//! identical (NRMSE 0) for `tkd` and `tsvd` at QSM.jl's defaults and with padding off on both.
+//! Before this port padded, its defaults differed from QSM.jl's by NRMSE 7.5 % (TKD) and 15.6 %
+//! (TSVD). `tests/inversion_qsmjl_parity.rs` checks both against QSM.jl's output on small
+//! phantoms. With B0 tilted and an even-sized axis, the Nyquist planes differ (see
+//! [`super::rts`](mod@super::rts)).
+//!
 //! # Reference pipeline
 //! QSM.jl (commit fde4b92) `tkd`/`tsvd` (`src/inversion/direct.jl` L1-96), threshold 0.15 for
 //! both: TKD replaces `1/D` by `sign(D)/thr` where `|D| <= thr`, TSVD by 0. QSM.jl's README
@@ -29,11 +43,15 @@ use crate::Grid;
 pub struct TkdParams {
     /// Truncation threshold (typically 0.1-0.2)
     pub threshold: f64,
+    /// Zero padding per axis, QSM.jl's `pad` (default `[0, 0, 0]`, QSM.jl's): `< 0` does not
+    /// pad that axis, `≥ 0` pads it by at least that many voxels, rounded up to QSM.jl's fast
+    /// FFT size (see [`with_qsmjl_padding`](crate::utils::padding::with_qsmjl_padding)).
+    pub pad: [i64; 3],
 }
 
 impl Default for TkdParams {
     fn default() -> Self {
-        Self { threshold: 0.15 }
+        Self { threshold: 0.15, pad: crate::utils::padding::QSMJL_PAD }
     }
 }
 
@@ -52,6 +70,19 @@ impl Default for TkdParams {
 /// # Returns
 /// Susceptibility map (same size as input)
 pub fn tkd(
+    local_field: &[f64],
+    mask: &[u8],
+    grid: &Grid,
+    bdir: (f64, f64, f64),
+    params: &TkdParams,
+) -> Vec<f64> {
+    crate::utils::padding::with_qsmjl_padding(local_field, mask, grid, params.pad, |f, m, g| {
+        tkd_unpadded(f, m, g, bdir, params)
+    })
+}
+
+/// [`tkd`] on the already padded grid.
+fn tkd_unpadded(
     local_field: &[f64],
     mask: &[u8],
     grid: &Grid,
@@ -115,6 +146,19 @@ pub fn tsvd(
     bdir: (f64, f64, f64),
     params: &TkdParams,
 ) -> Vec<f64> {
+    crate::utils::padding::with_qsmjl_padding(local_field, mask, grid, params.pad, |f, m, g| {
+        tsvd_unpadded(f, m, g, bdir, params)
+    })
+}
+
+/// [`tsvd`] on the already padded grid.
+fn tsvd_unpadded(
+    local_field: &[f64],
+    mask: &[u8],
+    grid: &Grid,
+    bdir: (f64, f64, f64),
+    params: &TkdParams,
+) -> Vec<f64> {
     let (nx, ny, nz) = grid.dims;
     let n_total = grid.n_total();
     let threshold = params.threshold;
@@ -170,7 +214,7 @@ mod tests {
         let mask = vec![1u8; n * n * n];
         let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
 
-        let chi = tkd(&field, &mask, &grid, (0.0, 0.0, 1.0), &TkdParams { threshold: 0.15 });
+        let chi = tkd(&field, &mask, &grid, (0.0, 0.0, 1.0), &TkdParams { threshold: 0.15, ..Default::default() });
 
         for val in chi.iter() {
             assert!(val.abs() < 1e-10, "Zero field should give zero chi");
@@ -189,7 +233,7 @@ mod tests {
         mask[0] = 0;
         mask[1] = 0;
 
-        let chi = tkd(&field, &mask, &grid, (0.0, 0.0, 1.0), &TkdParams { threshold: 0.15 });
+        let chi = tkd(&field, &mask, &grid, (0.0, 0.0, 1.0), &TkdParams { threshold: 0.15, ..Default::default() });
 
         assert_eq!(chi[0], 0.0, "Outside mask should be 0");
         assert_eq!(chi[1], 0.0, "Outside mask should be 0");
@@ -203,7 +247,7 @@ mod tests {
         let mask = vec![1u8; n * n * n];
         let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
 
-        let chi = tkd(&field, &mask, &grid, (0.0, 0.0, 1.0), &TkdParams { threshold: 0.15 });
+        let chi = tkd(&field, &mask, &grid, (0.0, 0.0, 1.0), &TkdParams { threshold: 0.15, ..Default::default() });
 
         for (i, val) in chi.iter().enumerate() {
             assert!(val.is_finite(), "Chi should be finite at index {}", i);
@@ -218,8 +262,8 @@ mod tests {
         let mask = vec![1u8; n * n * n];
         let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
 
-        let chi_tkd = tkd(&field, &mask, &grid, (0.0, 0.0, 1.0), &TkdParams { threshold: 0.15 });
-        let chi_tsvd = tsvd(&field, &mask, &grid, (0.0, 0.0, 1.0), &TkdParams { threshold: 0.15 });
+        let chi_tkd = tkd(&field, &mask, &grid, (0.0, 0.0, 1.0), &TkdParams { threshold: 0.15, ..Default::default() });
+        let chi_tsvd = tsvd(&field, &mask, &grid, (0.0, 0.0, 1.0), &TkdParams { threshold: 0.15, ..Default::default() });
 
         // They should be different
         let diff: f64 = chi_tkd.iter().zip(chi_tsvd.iter())

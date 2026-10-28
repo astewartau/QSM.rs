@@ -18,6 +18,18 @@
 //! `reg = :identity` in the code (L149-150); its docstring's signature line says `:gradient`
 //! (L109) but its keyword list says `:identity` (L131). Same README pipeline as
 //! [`super::rts`](mod@super::rts).
+//!
+//! QSM.jl pads the field to its fast FFT size first (`pad = (0, 0, 0)`, `padfastfft`,
+//! `src/inversion/direct.jl:182-184`), and so does this port by default ([`TikhonovParams::pad`]).
+//!
+//! # Agreement with QSM.jl
+//!
+//! On the QSM-CI in-vivo travelling-head scan (Siemens Prisma 2.89 T, 1 mm, 184×256×128, V-SHARP
+//! local field and brain mask), against QSM.jl in the QSM-CI `julia-qsm` image (`sha256:b3c048ac…`,
+//! QSM.jl fde4b92), both outputs saved as float32:
+//! identical (NRMSE 0) at QSM.jl's defaults and with padding off on both. Before this port
+//! padded, its defaults differed from QSM.jl's by NRMSE 1.9 %. `tests/inversion_qsmjl_parity.rs`
+//! checks the identity and gradient regularisers against QSM.jl's output on small phantoms.
 
 use num_complex::Complex64;
 use crate::fft::{fft3d, ifft3d};
@@ -46,11 +58,15 @@ pub struct TikhonovParams {
     pub lambda: f64,
     /// Regularization type
     pub reg: Regularization,
+    /// Zero padding per axis, QSM.jl's `pad` (default `[0, 0, 0]`, QSM.jl's): `< 0` does not
+    /// pad that axis, `≥ 0` pads it by at least that many voxels, rounded up to QSM.jl's fast
+    /// FFT size (see [`with_qsmjl_padding`](crate::utils::padding::with_qsmjl_padding)).
+    pub pad: [i64; 3],
 }
 
 impl Default for TikhonovParams {
     fn default() -> Self {
-        Self { lambda: 0.01, reg: Regularization::Identity }
+        Self { lambda: 0.01, reg: Regularization::Identity, pad: crate::utils::padding::QSMJL_PAD }
     }
 }
 
@@ -66,6 +82,19 @@ impl Default for TikhonovParams {
 /// # Returns
 /// Susceptibility map
 pub fn tikhonov(
+    local_field: &[f64],
+    mask: &[u8],
+    grid: &Grid,
+    bdir: (f64, f64, f64),
+    params: &TikhonovParams,
+) -> Vec<f64> {
+    crate::utils::padding::with_qsmjl_padding(local_field, mask, grid, params.pad, |f, m, g| {
+        tikhonov_unpadded(f, m, g, bdir, params)
+    })
+}
+
+/// [`tikhonov`] on the already padded grid.
+fn tikhonov_unpadded(
     local_field: &[f64],
     mask: &[u8],
     grid: &Grid,
@@ -184,11 +213,11 @@ mod tests {
         let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
 
         let chi_id = tikhonov(&field, &mask, &grid, bdir,
-                             &TikhonovParams { lambda: 0.01, reg: Regularization::Identity });
+                             &TikhonovParams { lambda: 0.01, reg: Regularization::Identity, ..Default::default() });
         let chi_grad = tikhonov(&field, &mask, &grid, bdir,
-                               &TikhonovParams { lambda: 0.01, reg: Regularization::Gradient });
+                               &TikhonovParams { lambda: 0.01, reg: Regularization::Gradient, ..Default::default() });
         let chi_lap = tikhonov(&field, &mask, &grid, bdir,
-                              &TikhonovParams { lambda: 0.01, reg: Regularization::Laplacian });
+                              &TikhonovParams { lambda: 0.01, reg: Regularization::Laplacian, ..Default::default() });
 
         // All should be different
         let diff_ig: f64 = chi_id.iter().zip(chi_grad.iter())

@@ -17,6 +17,20 @@
 //! gradient of the field. QSM.jl's optional data and TV weights (`W`, `Wtv`) are not ported;
 //! their default (`nothing`) is what this function computes.
 //!
+//! QSM.jl pads the field to its fast FFT size first (`pad = (0, 0, 0)`, `padfastfft`), and so
+//! does this port by default ([`TvParams::pad`]).
+//!
+//! # Agreement with QSM.jl
+//!
+//! On the QSM-CI in-vivo travelling-head scan (Siemens Prisma 2.89 T, 1 mm, 184×256×128, V-SHARP
+//! local field and brain mask), against QSM.jl in the QSM-CI `julia-qsm` image (`sha256:b3c048ac…`,
+//! QSM.jl fde4b92), both outputs saved as float32:
+//! NRMSE 3.4e-14 % at QSM.jl's defaults. Before this port padded, its defaults differed from
+//! QSM.jl's by NRMSE 6.9 %. `tests/inversion_qsmjl_parity.rs` checks it against QSM.jl's output on
+//! a small phantom (relative L2 ~1e-15). As in [`super::rts`](mod@super::rts), the DC term of the
+//! Laplacian is exactly 0 here; on anisotropic voxels QSM.jl inverts its rounding, which shifts
+//! χ by an arbitrary constant.
+//!
 //! # Reference pipeline
 //! QSM.jl's README pipeline (commit fde4b92, L35-52: BET on the last echo, 5-voxel erosion,
 //! Laplacian unwrapping, V-SHARP), as for [`super::rts`](mod@super::rts).
@@ -38,6 +52,10 @@ pub struct TvParams {
     pub tol: f64,
     /// Maximum iterations
     pub max_iter: usize,
+    /// Zero padding per axis, QSM.jl's `pad` (default `[0, 0, 0]`, QSM.jl's): `< 0` does not
+    /// pad that axis, `≥ 0` pads it by at least that many voxels, rounded up to QSM.jl's fast
+    /// FFT size (see [`with_qsmjl_padding`](crate::utils::padding::with_qsmjl_padding)).
+    pub pad: [i64; 3],
 }
 
 impl Default for TvParams {
@@ -47,6 +65,7 @@ impl Default for TvParams {
             rho: None,
             tol: 1e-3,
             max_iter: 250,
+            pad: crate::utils::padding::QSMJL_PAD,
         }
     }
 }
@@ -70,6 +89,20 @@ impl Default for TvParams {
 /// # Returns
 /// Susceptibility map
 pub fn tv_admm(
+    local_field: &[f64],
+    mask: &[u8],
+    grid: &Grid,
+    bdir: (f64, f64, f64),
+    params: &TvParams,
+    progress: impl FnMut(usize, usize),
+) -> Vec<f64> {
+    crate::utils::padding::with_qsmjl_padding(local_field, mask, grid, params.pad, |f, m, g| {
+        tv_admm_unpadded(f, m, g, bdir, params, progress)
+    })
+}
+
+/// [`tv_admm`] on the already padded grid.
+fn tv_admm_unpadded(
     local_field: &[f64],
     mask: &[u8],
     grid: &Grid,
@@ -131,7 +164,7 @@ mod tests {
         let field = vec![0.0; n * n * n];
         let mask = vec![1u8; n * n * n];
         let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
-        let params = TvParams { lambda: 1e-3, rho: Some(0.1), tol: 1e-2, max_iter: 10 };
+        let params = TvParams { lambda: 1e-3, rho: Some(0.1), tol: 1e-2, max_iter: 10, ..Default::default() };
 
         let chi = tv_admm(&field, &mask, &grid, (0.0, 0.0, 1.0), &params, |_, _| {});
 
@@ -147,7 +180,7 @@ mod tests {
         let field: Vec<f64> = (0..n*n*n).map(|i| (i as f64) * 0.001).collect();
         let mask = vec![1u8; n * n * n];
         let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
-        let params = TvParams { lambda: 1e-3, rho: Some(0.1), tol: 1e-2, max_iter: 10 };
+        let params = TvParams { lambda: 1e-3, rho: Some(0.1), tol: 1e-2, max_iter: 10, ..Default::default() };
 
         let chi = tv_admm(&field, &mask, &grid, (0.0, 0.0, 1.0), &params, |_, _| {});
 
@@ -167,7 +200,7 @@ mod tests {
         }
         let mask = vec![1u8; n * n * n];
         let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
-        let params = TvParams { lambda: 1e-2, rho: Some(1.0), tol: 1e-2, max_iter: 50 };
+        let params = TvParams { lambda: 1e-2, rho: Some(1.0), tol: 1e-2, max_iter: 50, ..Default::default() };
 
         let chi_tv = tv_admm(&field, &mask, &grid, (0.0, 0.0, 1.0), &params, |_, _| {});
 
@@ -190,7 +223,7 @@ mod tests {
         let field: Vec<f64> = (0..n*n*n).map(|i| ((i as f64) * 0.7).sin() * 0.01).collect();
         let mask = vec![1u8; n * n * n];
         let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
-        let params = TvParams { lambda: 1e-3, rho: Some(0.1), tol: 1e-3, max_iter: 50 };
+        let params = TvParams { lambda: 1e-3, rho: Some(0.1), tol: 1e-3, max_iter: 50, ..Default::default() };
 
         // Sequential (1 thread)
         let pool_1 = rayon::ThreadPoolBuilder::new().num_threads(1).build().unwrap();
