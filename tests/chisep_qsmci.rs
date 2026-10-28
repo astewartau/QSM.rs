@@ -26,7 +26,7 @@ mod common;
 
 use common::{assert_chisep_separated, chisep_score, load_chisep_phantom, save_center_slices};
 use qsm_core::inversion::ilsqr;
-use qsm_core::separation::{chi_sep_ilsqr, chi_sep_medi, ChiSepIlsqrParams, ChiSepMediInputs, ChiSepMediParams};
+use qsm_core::separation::{chi_sep_ilsqr, chi_sep_medi, ChiSepIlsqrInputs, ChiSepIlsqrParams, ChiSepMediInputs, ChiSepMediParams};
 use std::time::Instant;
 
 #[test]
@@ -49,32 +49,11 @@ fn test_chi_sep_ilsqr_qsmci() {
     );
     println!("[INFO] iLSQR QSM in {:.1?}", t.elapsed());
 
-    let lambda1: f64 = std::env::var("CHISEP_LAMBDA1")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(1.0);
-    let params = ChiSepIlsqrParams {
-        cf: ph.cf,
-        lambda1,
-        ..ChiSepIlsqrParams::default()
-    };
-    println!("[INFO] chi_sep_ilsqr  lambda1 {}", lambda1);
+    let params = ChiSepIlsqrParams { cf: ph.cf, ..ChiSepIlsqrParams::default() };
+    let inputs = ChiSepIlsqrInputs { local_field: &ph.local_field_ppm, r2prime: &ph.r2prime, qsm: &qsm, mask: &ph.mask };
     let t = Instant::now();
-    let (chi_pos, chi_neg, _) = chi_sep_ilsqr(
-        &ph.local_field_ppm,
-        &ph.r2prime,
-        &ph.magnitude_rss,
-        &qsm,
-        &ph.mask,
-        &ph.grid,
-        ph.bdir,
-        &params,
-        |i, tot| {
-            if i % 5 == 0 || i == tot {
-                println!("  iter {}/{}", i, tot);
-            }
-        },
-    );
+    let (chi_pos, chi_neg, _) = chi_sep_ilsqr(&inputs, &ph.grid, ph.bdir, &params, |i, tot| println!("  NNLS iter {}/{}", i, tot))
+        .expect("chi_sep_ilsqr");
     let secs = t.elapsed().as_secs_f64();
     println!("[INFO] chi_sep_ilsqr done in {:.1?}", t.elapsed());
 
