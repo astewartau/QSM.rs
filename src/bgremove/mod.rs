@@ -78,7 +78,7 @@ pub mod iharperella;
 pub mod bfrnet;
 
 pub use smv::smv;
-pub use sharp::{sharp, SharpParams};
+pub use sharp::{sharp, SharpParams, SharpVariant};
 pub use resharp::{resharp, ResharpParams};
 pub use vsharp::{vsharp, VsharpGrid, VsharpParams};
 pub use pdf::{pdf, DipoleKernelSpace, PdfParams};
