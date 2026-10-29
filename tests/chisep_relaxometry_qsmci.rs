@@ -113,9 +113,13 @@ fn test_decompose_qsmci() {
     let n_inner = std::env::var("DECOMPOSE_NINNER").ok().and_then(|s| s.parse().ok()).unwrap_or(10);
     let params = DecomposeParams { b0: ph.b0, n_inner, ..DecomposeParams::default() };
 
+    // DECOMPOSE takes a QSM per echo; the phantom has one χ_total, so repeat it at every echo.
+    let ne = ph.tes.len();
+    let chi_per_echo: Vec<f64> = ph.chi_total.iter().flat_map(|&c| std::iter::repeat_n(c, ne)).collect();
+
     let t = Instant::now();
     let (chi_pos, chi_neg, _chi_total) = decompose(
-        &ph.chi_total,
+        &chi_per_echo,
         &ph.mag_voxel_major,
         &ph.tes,
         &ph.mask,
