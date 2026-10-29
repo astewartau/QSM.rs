@@ -16,16 +16,16 @@
 //! from theirs. The main differences, all recorded there with sources:
 //! - `Decompose` takes a QSM per echo ([`SeparationInputs::qsm_per_echo`]), as its authors
 //!   do (a STAR-QSM per echo); producing those is the caller's.
-//! - The analytic methods' D_r is calibrated at 3 T only. `ChiSepMedi` defaults to the
-//!   χ-separation toolbox's `137·(B0/2.9)` (from the authors' code). `ChiSepIlsqr` and `WaveSep`
-//!   keep 137 Hz/ppm at every field, while `R2starQsm` and `HcChisep` scale theirs by B0/3;
+//! - The analytic methods' D_r is calibrated at 3 T only. `ChiSepMedi` and `ChiSepIlsqr` default
+//!   to the χ-separation toolbox's `137·(B0/2.9)` (from the authors' code). `WaveSep` keeps
+//!   137 Hz/ppm at every field, while `R2starQsm` and `HcChisep` scale theirs by B0/3;
 //!   those choices do not come from the authors.
 //! - `ChiSepNet` is trained at 3 T and 1 mm, and its authors' QSM channel is QSMnetME, which
 //!   QSM.rs does not have.
 
 use super::config::*;
 use crate::separation::{
-    ChiSepIlsqrParams, ChiSepMediInputs, ChiSepMediParams, DecomposeParams, HcChisepParams, R2starQsmParams,
+    ChiSepIlsqrInputs, ChiSepIlsqrParams, ChiSepMediInputs, ChiSepMediParams, DecomposeParams, HcChisepParams, R2starQsmParams,
 };
 
 /// Inputs for [`run_separation`]. Provide whatever the chosen algorithm needs;
@@ -34,7 +34,7 @@ use crate::separation::{
 pub struct SeparationInputs<'a> {
     /// Local (tissue) field in ppm — for `ChiSepIlsqr` / `ChiSepMedi`.
     pub local_field_ppm: &'a [f64],
-    /// Conventional QSM χ_total in ppm — the QSM-init for `ChiSepIlsqr` and the
+    /// Conventional QSM χ_total in ppm — the QSM-init for `ChiSepIlsqr` / `ChiSepMedi` and the
     /// input for `R2starQsm` / `WaveSep` / `Decompose` / `HcChisep`.
     pub qsm: &'a [f64],
     /// QSM of each echo in ppm, voxel-major `(n_voxels, n_echoes)` (`Decompose`, required).
@@ -45,7 +45,8 @@ pub struct SeparationInputs<'a> {
     pub r2prime: Option<&'a [f64]>,
     /// R2* map in Hz (`R2starQsm`); if absent, fit from `magnitude_multi`.
     pub r2star: Option<&'a [f64]>,
-    /// Root-sum-of-squares magnitude (`ChiSepIlsqr` / `ChiSepMedi`).
+    /// Root-sum-of-squares magnitude (`ChiSepMedi`; the toolbox's `chi_sep_iLSQR` takes it but
+    /// never uses it, so `ChiSepIlsqr` does not).
     pub magnitude_rss: Option<&'a [f64]>,
     /// Noise standard deviation of the field, `N_std` (`ChiSepMedi`; see
     /// [`ChiSepMediInputs::n_std`]).
@@ -98,13 +99,14 @@ pub fn run_separation(
 
     let (chi_pos, chi_neg, chi_total) = match config.algorithm {
         SeparationAlgorithm::ChiSepIlsqr => {
-            let r2prime = need(inputs.r2prime, "r2prime")?;
-            let magnitude = need(inputs.magnitude_rss, "magnitude_rss")?;
+            let ilsqr_inputs = ChiSepIlsqrInputs {
+                local_field: inputs.local_field_ppm,
+                r2prime: need(inputs.r2prime, "r2prime")?,
+                qsm: inputs.qsm,
+                mask,
+            };
             let params = ChiSepIlsqrParams { cf, ..config.chi_sep_ilsqr.clone() };
-            crate::separation::chi_sep_ilsqr(
-                inputs.local_field_ppm, r2prime, magnitude, inputs.qsm, mask,
-                &grid, bdir, &params, progress,
-            )
+            crate::separation::chi_sep_ilsqr(&ilsqr_inputs, &grid, bdir, &params, progress)?
         }
         SeparationAlgorithm::ChiSepMedi => {
             let medi_inputs = ChiSepMediInputs {
@@ -386,6 +388,12 @@ mod tests {
             let r = run_separation(inputs, &m, &cfg, &mut |_, _| {}).unwrap();
             assert_eq!(r.chi_pos.len(), n);
         }
+        // chi-sep-ilsqr takes no magnitude, noise map or CSF mask (the toolbox's chi_sep_iLSQR
+        // never uses them)
+        let mut inputs = base_inputs(&field, &mask);
+        inputs.r2prime = Some(&r2prime);
+        let cfg = SeparationConfig { algorithm: SeparationAlgorithm::ChiSepIlsqr, ..Default::default() };
+        assert!(run_separation(inputs, &m, &cfg, &mut |_, _| {}).is_ok());
         // chi-sep-medi takes the noise map and the CSF mask the toolbox takes, and says so
         for missing in ["n_std", "mask_csf"] {
             let mut inputs = base_inputs(&field, &mask);
