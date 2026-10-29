@@ -35,15 +35,27 @@
 //! padded, its defaults differed from QSM.jl's by NRMSE 0.45 %. `tests/inversion_qsmjl_parity.rs`
 //! checks it against QSM.jl's output on small phantoms (relative L2 ~1e-15), axial and oblique.
 //!
-//! Two deviations, both where QSM.jl's result is not well defined:
+//! One deviation, where QSM.jl's result is not well defined:
 //! - **DC of the Laplacian.** On anisotropic voxels the FFT of the Laplacian stencil is not
 //!   exactly 0 at DC (4.4e-16 at 0.9 × 1.0 × 1.3 mm), and QSM.jl inverts that rounding, which
 //!   puts an arbitrary constant into χ (it moved χ by a uniform 1e-3 ppm on a small phantom, and
 //!   changed the iteration count). Here the DC term is exactly 0, as it is on isotropic voxels.
-//! - **Nyquist planes with tilted B0.** QSM.jl's real-to-complex FFT and its kernel's negative
-//!   Nyquist frequency treat the Nyquist planes of an even-sized axis differently from this
-//!   port's complex FFT once B0 is tilted (the kernel is then not even in each axis); with odd
-//!   sizes, or axial B0, the two agree to rounding.
+//!
+//! Tilted B0 on even sizes is reproduced too: before each inverse FFT the spectrum is replaced by
+//! the Hermitian spectrum QSM.jl's `irfft` reads from its stored half
+//! ([`crate::fft::c2r_spectrum`]; see *Half spectrum* below).
+//!
+//! # Half spectrum (tilted B0)
+//!
+//! QSM.jl applies its k-space multipliers on FFTW's real-to-complex half spectrum and inverts
+//! with `irfft`. With B0 tilted from the grid axes the dipole kernel is not even on the Nyquist
+//! planes of an even axis (`D(k) ≠ D(−k)` there, since the index of −½ maps to itself), and
+//! `irfft` resolves that differently from a full complex FFT and its real part. This port uses
+//! the multiplier `irfft` implies ([`crate::fft::c2r_kernel`]/[`crate::fft::c2r_spectrum`],
+//! astewartau/QSM.rs#329), which reproduces QSM.jl there too. Before (2026-10-29) the full-FFT
+//! port differed from QSM.jl on the oblique KKI travelling head (Philips Achieva, B0 tilted) by
+//! 0.5–1.2 % NRMSE for TKD, TSVD, Tikhonov and RTS (QSMxT/QSM-CI parity workflow);
+//! `tests/inversion_qsmjl_parity.rs` now has even-sized oblique cases.
 //!
 //! # Reference pipeline
 //! QSM.jl's README example (commit fde4b92, L35-52) ends in `rts`: FSL BET on the last echo's
@@ -332,6 +344,8 @@ fn rts_unpadded(
     }
     fft_ws.fft3d(&mut work);
     let mut xhat = lsmr_diag(&d, &work, nx, params.lsmr_iter);
+    // QSM.jl's irfft of its half spectrum (astewartau/QSM.rs#329; see the module docs)
+    crate::fft::c2r_spectrum(&mut xhat, nx, ny, nz);
     fft_ws.ifft3d(&mut xhat);
     let mut x: Vec<f64> = (0..n).map(|i| if mask[i] != 0 { xhat[i].re } else { 0.0 }).collect();
 
@@ -380,6 +394,7 @@ fn rts_unpadded(
         for i in 0..n {
             work[i] = work[i] * i_a[i] + f_hat[i];
         }
+        crate::fft::c2r_spectrum(&mut work, nx, ny, nz);
         fft_ws.ifft3d(&mut work);
         for i in 0..n {
             x[i] = work[i].re;

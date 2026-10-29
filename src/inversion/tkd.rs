@@ -26,8 +26,19 @@
 //! identical (NRMSE 0) for `tkd` and `tsvd` at QSM.jl's defaults and with padding off on both.
 //! Before this port padded, its defaults differed from QSM.jl's by NRMSE 7.5 % (TKD) and 15.6 %
 //! (TSVD). `tests/inversion_qsmjl_parity.rs` checks both against QSM.jl's output on small
-//! phantoms. With B0 tilted and an even-sized axis, the Nyquist planes differ (see
-//! [`super::rts`](mod@super::rts)).
+//! phantoms, including tilted B0 on even sizes.
+//!
+//! # Half spectrum (tilted B0)
+//!
+//! QSM.jl applies its k-space multipliers on FFTW's real-to-complex half spectrum and inverts
+//! with `irfft`. With B0 tilted from the grid axes the dipole kernel is not even on the Nyquist
+//! planes of an even axis (`D(k) ≠ D(−k)` there, since the index of −½ maps to itself), and
+//! `irfft` resolves that differently from a full complex FFT and its real part. This port uses
+//! the multiplier `irfft` implies ([`crate::fft::c2r_kernel`]/[`crate::fft::c2r_spectrum`],
+//! astewartau/QSM.rs#329), which reproduces QSM.jl there too. Before (2026-10-29) the full-FFT
+//! port differed from QSM.jl on the oblique KKI travelling head (Philips Achieva, B0 tilted) by
+//! 0.5–1.2 % NRMSE for TKD, TSVD, Tikhonov and RTS (QSMxT/QSM-CI parity workflow);
+//! `tests/inversion_qsmjl_parity.rs` now has even-sized oblique cases.
 //!
 //! # Reference pipeline
 //! QSM.jl (commit fde4b92) `tkd`/`tsvd` (`src/inversion/direct.jl` L1-96), threshold 0.15 for
@@ -113,6 +124,10 @@ fn tkd_unpadded(
         }
     }).collect();
 
+    // QSM.jl applies this multiplier on its real-to-complex half spectrum; the kernel `irfft`
+    // implies, so the full FFT reproduces it with tilted B0 (astewartau/QSM.rs#329).
+    let inv_d = crate::fft::c2r_kernel(&inv_d, nx, ny, nz);
+
     // Convert local field to complex
     let mut field_complex: Vec<Complex64> = local_field.iter()
         .map(|&x| Complex64::new(x, 0.0))
@@ -179,6 +194,10 @@ fn tsvd_unpadded(
             1.0 / dval
         }
     }).collect();
+
+    // QSM.jl applies this multiplier on its real-to-complex half spectrum; the kernel `irfft`
+    // implies, so the full FFT reproduces it with tilted B0 (astewartau/QSM.rs#329).
+    let inv_d = crate::fft::c2r_kernel(&inv_d, nx, ny, nz);
 
     // Convert local field to complex
     let mut field_complex: Vec<Complex64> = local_field.iter()

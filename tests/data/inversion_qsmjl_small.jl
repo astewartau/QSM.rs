@@ -20,9 +20,10 @@
 using QSM
 
 const N = (24, 22, 20)              # 22 is not a fast FFT size: QSM.jl's default pads it to 24
-# Odd sizes, unpadded, for the oblique cases: with an even size QSM.jl's real-to-complex FFT and
-# its kernel's negative Nyquist frequency treat the Nyquist planes differently from a complex
-# FFT once B0 is tilted (the dipole kernel is then not even in each axis on its own).
+# Odd sizes, unpadded, for the first oblique cases. The cases after them are oblique on even
+# sizes, where QSM.jl's real-to-complex FFT resolves the Nyquist planes of the tilted dipole
+# kernel differently from a plain complex FFT; QSM.rs reproduces that with the kernel `irfft`
+# implies (astewartau/QSM.rs#329). They are appended so the earlier cases' bytes do not change.
 const N_ODD = (23, 21, 19)
 const ANISO = (0.9, 1.0, 1.3)
 # The iterative methods (tv, rts) run on 1 mm voxels: on anisotropic voxels the FFT of
@@ -67,6 +68,12 @@ const CASES = [
     ("tv, QSM.jl defaults", N, ISO, (f, m, v) -> tv(f, m, v)),
     ("rts, QSM.jl defaults", N, ISO, (f, m, v) -> rts(f, m, v)),
     ("rts, oblique B0, odd sizes, no padding", N_ODD, ISO, (f, m, v) -> rts(f, m, v; bdir=OBLIQUE, pad=nopad)),
+    ("tkd, oblique B0, even sizes, QSM.jl defaults", N, ANISO, (f, m, v) -> tkd(f, m, v; bdir=OBLIQUE)),
+    ("tsvd, oblique B0, even sizes, QSM.jl defaults", N, ANISO, (f, m, v) -> tsvd(f, m, v; bdir=OBLIQUE)),
+    ("tikh, oblique B0, even sizes, QSM.jl defaults", N, ANISO, (f, m, v) -> tikh(f, m, v; bdir=OBLIQUE)),
+    ("tikh, gradient, oblique B0, even sizes, lambda 1e-3, pad 4", N, ANISO, (f, m, v) -> tikh(f, m, v; bdir=OBLIQUE, reg=:gradient, lambda=1e-3, pad=(4, 4, 4))),
+    ("tv, oblique B0, even sizes, QSM.jl defaults", N, ISO, (f, m, v) -> tv(f, m, v; bdir=OBLIQUE)),
+    ("rts, oblique B0, even sizes, QSM.jl defaults", N, ISO, (f, m, v) -> rts(f, m, v; bdir=OBLIQUE)),
 ]
 
 open(ARGS[1], "w") do io

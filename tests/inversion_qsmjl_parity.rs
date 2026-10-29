@@ -7,7 +7,8 @@
 //! the fixture holds only QSM.jl's output. The script ran in the QSM-CI `julia-qsm` image,
 //! `sha256:b3c048acd8a88f23b7a04378f2b85dbac433bcc78b3d9cdf8ce58eb8a7478185` (Julia 1.10.11, the
 //! Manifest committed in QSMxT/QSM-CI `algorithms/_julia/env`); the command is in the script's
-//! header, and the script also says why the oblique cases use odd sizes, the iterative ones
+//! header, and the script also says why the first oblique cases use odd sizes and the later ones
+//! even sizes (QSM.jl's half spectrum, astewartau/QSM.rs#329), the iterative ones
 //! 1 mm voxels, and why `nltv` is not here. `tests/data/inversion_qsmjl_small.bin`
 //! (little-endian), per case in [`CASES`] order: the number of mask voxels (u32) and QSM.jl's χ
 //! there (f64, ppm, column-major).
@@ -41,7 +42,7 @@ struct Case {
     method: Method,
 }
 
-const CASES: [Case; 8] = [
+const CASES: [Case; 14] = [
     Case { name: "tkd, QSM.jl defaults", dims: N, vs: ANISO, bdir: AXIAL, method: Method::Tkd(TkdParams { threshold: 0.15, pad: [0; 3] }) },
     Case {
         name: "tkd, oblique B0, odd sizes, no padding",
@@ -80,6 +81,31 @@ const CASES: [Case; 8] = [
         bdir: OBLIQUE,
         method: Method::Rts(RtsParams { pad: NOPAD, ..QSMJL_RTS }),
     },
+    // Tilted B0 on even sizes: QSM.jl's half-spectrum Nyquist planes (astewartau/QSM.rs#329).
+    Case { name: "tkd, oblique B0, even sizes, QSM.jl defaults", dims: N, vs: ANISO, bdir: OBLIQUE, method: Method::Tkd(TkdParams { threshold: 0.15, pad: [0; 3] }) },
+    Case { name: "tsvd, oblique B0, even sizes, QSM.jl defaults", dims: N, vs: ANISO, bdir: OBLIQUE, method: Method::Tsvd(TkdParams { threshold: 0.15, pad: [0; 3] }) },
+    Case {
+        name: "tikh, oblique B0, even sizes, QSM.jl defaults",
+        dims: N,
+        vs: ANISO,
+        bdir: OBLIQUE,
+        method: Method::Tikh(TikhonovParams { lambda: 1e-2, reg: Regularization::Identity, pad: [0; 3] }),
+    },
+    Case {
+        name: "tikh, gradient, oblique B0, even sizes, lambda 1e-3, pad 4",
+        dims: N,
+        vs: ANISO,
+        bdir: OBLIQUE,
+        method: Method::Tikh(TikhonovParams { lambda: 1e-3, reg: Regularization::Gradient, pad: [4; 3] }),
+    },
+    Case {
+        name: "tv, oblique B0, even sizes, QSM.jl defaults",
+        dims: N,
+        vs: ISO,
+        bdir: OBLIQUE,
+        method: Method::Tv(TvParams { lambda: 1e-3, rho: None, tol: 1e-3, max_iter: 250, pad: [0; 3] }),
+    },
+    Case { name: "rts, oblique B0, even sizes, QSM.jl defaults", dims: N, vs: ISO, bdir: OBLIQUE, method: Method::Rts(QSMJL_RTS) },
 ];
 
 /// QSM.jl `rts`'s defaults, spelled out so the test also pins `RtsParams::default()` below.
