@@ -26,6 +26,18 @@
 //! QSM.jl pads the field to its fast FFT size first (`pad = (0, 0, 0)`, `padfastfft`,
 //! `src/inversion/direct.jl:182-184`), and so does this port by default ([`TikhonovParams::pad`]).
 //!
+//! # Half spectrum (tilted B0)
+//!
+//! QSM.jl applies its k-space multipliers on FFTW's real-to-complex half spectrum and inverts
+//! with `irfft`. With B0 tilted from the grid axes the dipole kernel is not even on the Nyquist
+//! planes of an even axis (`D(k) ≠ D(−k)` there, since the index of −½ maps to itself), and
+//! `irfft` resolves that differently from a full complex FFT and its real part. This port uses
+//! the multiplier `irfft` implies ([`crate::fft::c2r_kernel`]/[`crate::fft::c2r_spectrum`],
+//! astewartau/QSM.rs#329), which reproduces QSM.jl there too. Before (2026-10-29) the full-FFT
+//! port differed from QSM.jl on the oblique KKI travelling head (Philips Achieva, B0 tilted) by
+//! 0.5–1.2 % NRMSE for TKD, TSVD, Tikhonov and RTS (QSMxT/QSM-CI parity workflow);
+//! `tests/inversion_qsmjl_parity.rs` now has even-sized oblique cases.
+//!
 //! # Agreement with QSM.jl
 //!
 //! On the QSM-CI in-vivo travelling-head scan (Siemens Prisma 2.89 T, 1 mm, 184×256×128, V-SHARP
@@ -149,6 +161,10 @@ fn tikhonov_unpadded(
             0.0
         }
     }).collect();
+
+    // QSM.jl applies this multiplier on its real-to-complex half spectrum; the kernel `irfft`
+    // implies, so the full FFT reproduces it with tilted B0 (astewartau/QSM.rs#329).
+    let inv_d = crate::fft::c2r_kernel(&inv_d, nx, ny, nz);
 
     // Convert local field to complex
     let mut field_complex: Vec<Complex64> = local_field.iter()
