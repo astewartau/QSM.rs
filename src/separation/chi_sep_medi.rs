@@ -1,967 +1,843 @@
-//! Chi-separation using MEDI-based coupled optimization
+//! χ-separation (MEDI): the SNU χ-separation toolbox's `chi_sep_MEDI`
 //!
-//! Separates total susceptibility into paramagnetic (chi+) and diamagnetic (chi-)
-//! components using chi_pos + chi_neg formulation:
-//!   chi_pos >= 0 (paramagnetic, iron), in Hz internally
-//!   chi_neg <= 0 (diamagnetic, myelin), in Hz internally
-//!   chi_total = chi_pos + chi_neg
+//! [`chi_sep_medi`] implements **`chi_sep_MEDI` of the χ-separation toolbox v1.1.3** (SNU-LIST,
+//! Jongho Lee's lab; `functions/corefunc/chi_sep_MEDI.p` and `chi_sep_MEDI_func.p`), as its
+//! script `Chisep_script.m` calls it (l. 153-161):
+//! `chi_sep_MEDI(mag, local_field_hz, r2prime, N_std, mask, params, option_data)` with
+//! `params.lambda = 1`, `params.lambda_CSF = 1`, `option_data.qsm`, `option_data.mask_CSF` and
+//! `option_data.N_std`. The toolbox ships as protected P-code; with the authors' permission the
+//! algorithm was recovered by black-box probing in licensed MATLAB R2023b: the profiler (which
+//! lists the bodies of the P-code's anonymous functions verbatim), logging wrappers on the
+//! functions it calls that save the caller's whole workspace (`evalin('caller', 'save ...')`),
+//! and replaying the operators captured in those workspaces (their function handles stay
+//! callable after `load`). A MATLAB re-implementation built from that reproduces
+//! `chi_sep_MEDI` to 3·10⁻¹⁶ relative on six phantoms (see *Agreement with the toolbox*).
 //!
-//! Forward model (all in Hz):
-//!   field = D * (chi_pos + chi_neg)
-//!   R2'(Hz) = dr_p_eff * chi_pos + dr_q_eff * (-chi_neg)
-//!           = dr_p_eff * |chi_pos| + dr_q_eff * |chi_neg|
-//!   where dr_eff = ppm_factor * Dr (dimensionless effective relaxivity)
+//! Earlier QSM.rs versions ported Shin et al. 2021's Supplementary Methods instead, with their
+//! own weights, λ and no QSM, CSF mask or noise map; the toolbox's algorithm below differs in
+//! every step after the forward model.
 //!
-//! The two residuals are weighted as in Shin et al. 2021, the field term by (2π)² against
-//! the R2' term's 1 (both in Hz), under the coupling weight `lambda_cpl`; edge-masked L1 TV
-//! on each source (`lambda_para`, `lambda_dia`) regularises.
+//! # The algorithm
 //!
-//! The constraints (chi_pos >= 0, chi_neg <= 0) naturally break the gauge
-//! freedom of the chi_pos + chi_neg formulation. In most voxels, either
-//! chi_pos = 0 or chi_neg = 0, which pins one variable to its constraint
-//! boundary and prevents correlated drift.
+//! The unknowns are `x+ = χ+ ≥ 0` and `x− = |χ−| ≥ 0` in ppm. With `D` the dipole convolution in
+//! Hz (`(CF/10⁶)·F⁻¹ D F`) and `D_r,±` the relaxometric constants (Hz/ppm):
+//!
+//! 1. **Defaults** (`chi_sep_MEDI`): `B0 = CF/42.58·10⁶`; `D_r,pos = D_r,neg = 137·(B0/2.9)`
+//!    ([`toolbox_default_dr`]); `pad_size` 5, `tol_norm_ratio` 0.03, `max_iter` 30,
+//!    `cg_max_iter` 100, `cg_tol` 0.05 (see [`ChiSepMediParams`]); and, not parameters, at least
+//!    [`CHI_SEP_MEDI_MIN_ITER`] = 6 iterations, `ε` = 10⁻⁵ and `wei_mag` = 1/(2π).
+//! 2. **Edge masks** on the input grid: `wG = gradient_mask(mag, mask, 0.9)` (MEDI's
+//!    `gradient_mask.m`: `|∇(mag·mask)|` thresholded so that 90 % of the mask's voxel count of
+//!    gradient components lie above the level; 1 = not an edge). The R2′ edge mask `wG_r2p` is
+//!    the same magnitude mask.
+//! 3. **Padding**: every volume is zero-padded by `pad_size` voxels at both ends of the **third
+//!    axis only**; `wG`, `wG_r2p` are padded with 1. Everything below runs on that grid. Exactly
+//!    zero R2′ voxels (including the padding) become `eps` (2.2·10⁻¹⁶).
+//! 4. **Weights and targets**: `m = dataterm_mask(N_std, mask)` (MEDI's: `mask/N_std`, 0 where not
+//!    finite, divided by its mean over the mask); R2′ residual weight `wei_mag·m`, field residual
+//!    weight `m`. Targets: `R2′·mask` where `R2′ > 0` (0 elsewhere) and the local field in Hz.
+//! 5. **Dipole kernel**: MEDI's `dipole_kernel(N, vs, B0_dir, 'kspace')`: the k-grid
+//!    `(−N/2 : N/2−1)/(N·vs)` per axis, `D = 1/3 − (k·B0)²/|k|²` (0 at `k = 0`), `fftshift`ed. On
+//!    an axis with an odd number of voxels that grid steps through half-integers and misses
+//!    `k = 0`, so the kernel is sampled half a frequency bin off and the convolution has an
+//!    imaginary part; it is kept as the toolbox keeps it (complex arithmetic throughout, real part
+//!    taken where the toolbox takes it).
+//! 6. **Initial guess** from the QSM `χ` (`option_data.qsm`): the voxelwise solution of
+//!    `D_r,pos·x+ + D_r,neg·x− = R2′`, `x+ − x− = χ`, each clamped at 0:
+//!    `x+ = max((R2′ + D_r,neg·χ)/(D_r,pos + D_r,neg), 0)`, `x− = max((R2′ − D_r,pos·χ)/(…), 0)`
+//!    (with the raw R2′, negative values included). The iterate is that, masked. A copy with the
+//!    CSF voxels set to 0 is what the first iteration's L1 weights see (a quirk of the toolbox:
+//!    the iterate itself keeps the CSF values).
+//! 7. **Gauss-Newton** while (`res > tol` or `iter < 6`) and `iter < max_iter`:
+//!    - L1 weights `V_s = 1/√(|wG·∇x_s|² + ε)` for `s = +, −`, and `V_t = 1/√(|wG·∇(x+ − x−)|² + ε)`
+//!      (∇: MEDI's `fgrad`, forward differences scaled by the voxel size, 0 at the last voxel).
+//!    - Gradients `b_s` of
+//!      `‖wei_mag·m·(D_r,pos·x+ + D_r,neg·x− − R2′)‖² + ‖m·(D x+ − D x− − f)‖²
+//!       + λ Σ_s ‖wG V_s^½ ∇x_s‖² + 2λ ‖wG V_t^½ ∇(x+ − x−)‖² + λ_CSF Σ_s ‖LT(|x_s|)‖²`
+//!      (as the toolbox evaluates them: `2·D_rᵀ M²·residual`, `∇ᵀ(wG V wG ∇·)` with `∇ᵀ` the exact
+//!      adjoint of `fgrad`), where `LT(v) = M_CSF·(v − mean(v over M_CSF))`.
+//!    - One CG solve **per source** (`cgsolve.m`, MEDI's: zero start, last iterate, residual
+//!      recomputed every 50 iterations): `A_s dx_s = −b_s`, where `A_s` is the same expression's
+//!      linearisation in `x_s` with the other source's step set to zero, **CSF term included**
+//!      (`λ_CSF·LT(LT(|dx|))`, nonlinear through the `abs`; the toolbox rebinds its `reg_p`/`reg_n`
+//!      to include it before building the CG operators).
+//!    - `x_s ← max(x_s + dx_s·mask, 0)`; `res = ‖Δx‖/‖x‖` over both sources inside the mask
+//!      eroded by a sphere of radius 3 voxels (`imerode(mask, strel('sphere', 3))`, voxels
+//!      outside the array counted as inside), with `Δx` the projected step. The iterate with the
+//!      smallest `res` so far is kept.
+//! 8. **Output**: that iterate, cropped back to the input grid: `x_para = x+`, `x_dia = x−` (≥ 0),
+//!    `x_tot = x+ − x−`. QSM.rs returns `(χ+, χ− = −x−, χ+ + χ−)`.
+//!
+//! # Units
+//!
+//! The toolbox takes the local field in Hz; [`chi_sep_medi`] takes it in ppm and multiplies by
+//! `cf/10⁶` (so the result depends on [`ChiSepMediParams::cf`] only through `D_r`'s default and the
+//! relative weight of the two residuals). R2′ is in Hz, the QSM and the output in ppm.
+//!
+//! # Agreement with the toolbox
+//!
+//! Compared with `chi_sep_MEDI` itself (toolbox v1.1.3 in licensed MATLAB R2023b; QSM.rs in
+//! double precision, as the toolbox runs):
+//!
+//! - **Phantoms** (`tests/chi_sep_medi_snu_parity.rs`, fixture from
+//!   `tests/data/chi_sep_medi_snu_small.m`): 40×36×28 at 3 T with a CSF mask; 33×29×21 at 7 T,
+//!   0.8×0.9×1.5 mm, oblique B0, with a CSF mask; negative R2′, `D_r` 120/150, λ = 2, no CSF
+//!   mask. Same Gauss-Newton iteration counts (7, 6, 6), χ+ and |χ−| to relative L2
+//!   ≤ 1.1·10⁻¹⁵, max |Δ| ≤ 8·10⁻¹⁷ ppm.
+//! - **In vivo** (the EMTP travelling-head scan of QSM-CI's fidelity check, 3 T, 184×256×128,
+//!   1.39 M mask voxels; its local field, R2′ and χ; `N_std = 1/|mag|`; no CSF mask): 6
+//!   iterations each; χ+ relative L2 8.0·10⁻¹³, |χ−| 4.0·10⁻¹², max |Δ| 4.3·10⁻¹¹ ppm.
+//! - **QSM-CI's χ-separation phantom** (`chisep-mc`, 7 T, 164×205×205, same inputs): 6 iterations
+//!   each; χ+ relative L2 5.7·10⁻³ (max |Δ| 7.8·10⁻³ ppm), |χ−| 4.9·10⁻³ (1.3·10⁻² ppm),
+//!   r = 0.99997. That residual is rounding, amplified: on this phantom every inner CG solve
+//!   runs 42-50 iterations (5-10 on the scans above), and the result moves as much under changes
+//!   at the last bit. The toolbox itself, run with 4 instead of 8 threads, changes by 2.3·10⁻³ /
+//!   3.5·10⁻³; the MATLAB re-implementation (identical to 3·10⁻¹⁶ on the phantoms) differs from
+//!   it by 2.4·10⁻³ / 5.5·10⁻³; and QSM.rs's own result moves by 2.4·10⁻³ when the field is scaled
+//!   by 1 + 10⁻¹⁴.
+//!
+//! # Performance
+//!
+//! Each CG iteration costs four 3-D FFTs (two dipole convolutions, complex) and two fused
+//! gradient-adjoint passes; a Gauss-Newton iteration is two CG solves. In vivo (184×256×138
+//! padded, 6 iterations) [`chi_sep_medi`] takes 106-133 s on 6 threads with a 2.7 GB peak (the
+//! toolbox: 286 s on 8); on `chisep-mc` (164×205×215, CG solves of ~45 iterations) 282-292 s
+//! (the toolbox: 931 s). Memory is about 45 `f64` per padded voxel.
+//!
+//! # Deviations
+//!
+//! - **An all-zero CSF mask means no CSF term.** The toolbox applies the CSF term whenever
+//!   `option_data.mask_CSF` is not empty; with a mask that has no voxels, the mean over it is
+//!   `NaN`, `NaN·λ_CSF` is `NaN` even for `λ_CSF = 0`, and every step is lost (the solver returns its
+//!   initial guess). Its own GUI passes `[]` when it has no CSF mask, which turns the term off.
+//!   The CSF mask is a required input here, as in `Chisep_script.m`; passing an all-zero mask
+//!   reproduces the GUI's no-CSF behaviour (`mask_CSF = []`).
+//! - **No wall-clock limit.** The toolbox also stops after `params.time_limit` (default 1800 s) of
+//!   iterations. That makes its output depend on the machine; it is not reproduced.
+//! - Options of `chi_sep_MEDI` that `Chisep_script.m` does not use are not exposed:
+//!   `option_data.wG`/`wG_r2p` (precomputed edge masks), `mask_FastRelax`/`mask_SlowRelax`
+//!   (voxels whose R2′ residual weight drops to 0.1; both default to empty), and the TKD
+//!   initialisation it uses without `option_data.qsm` (`params.init_option`).
 //!
 //! # Reference pipeline
 //!
-//! The SNU-LIST toolbox's `chi_sep_MEDI` is driven by the same script as `chi_sep_iLSQR`
-//! (`Chisep_script.m`), so the preprocessing is the one listed in
-//! [`chi_sep_ilsqr`](mod@super::chi_sep_ilsqr): BET mask, ROMEO + weighted echo averaging, V-SHARP
-//! `smvsize = 12`, STI Suite iLSQR QSM. How this function differs from the toolbox call:
+//! What `Chisep_script.m` (toolbox v1.1.3) runs before `chi_sep_MEDI`, with its line numbers:
 //!
-//! - The toolbox call is `chi_sep_MEDI(mag, local_field_hz, r2prime, N_std, mask, params,
-//!   option_data)` with `params.lambda = 1`, `params.lambda_CSF = 1`, `option_data.qsm = QSM`
-//!   (the iLSQR QSM) and `option_data.mask_CSF` (`Chisep_script.m:150-161`). Kim et al. 2025
-//!   (Hum Brain Mapp 46(4):e70136, §2.3) also ran it with "MEDI regularization with a
-//!   regularization parameter of 1". This function takes no QSM, no CSF mask and no noise map
-//!   `N_std` (its SNR weight comes from the magnitude). Its λ defaults (30/30/100) were measured
-//!   on the QSM-CI phantom (see the comment in `ChiSepParams`'s `Default`), not taken from the
-//!   toolbox.
-//! - D_r: the toolbox's value is inside the compiled `.p`. QSM.rs uses [`DR_SHIN_2021`] at every
-//!   field strength (see [`chi_sep_ilsqr`](mod@super::chi_sep_ilsqr) for the 7 T question).
+//! - Tukey k-space windowing of the complex multi-echo data, factor 0.4 for Siemens/GE and 0 for
+//!   Philips (l. 70-73); `mag` = root-sum-of-squares over echoes (l. 75).
+//! - `N_std` from `Preprocessing4Phase(mag, phase)` (l. 76), which is MEDI's `Fit_ppm_complex`
+//!   noise map (probed: equal to 3·10⁻¹⁸; QSM.rs [`crate::utils::fit_ppm_complex_noise`]).
+//! - Mask: MEDI's `BET` on `mag` (l. 82); R2* by ARLO with more than three equally spaced echoes,
+//!   NNLS otherwise (l. 87-93); `mask_CSF = extract_CSF(r2star, mask, voxel_size)` (MEDI's
+//!   `extract_CSF.m`, l. 96; QSM.rs [`crate::inversion::extract_csf`]).
+//! - ROMEO with phase-offset correction and weighted echo averaging, `W = TE·exp(−TE/40 ms)`
+//!   (l. 99-123); V-SHARP `smvsize` 12 (l. 136-139); the local field in Hz (l. 139).
+//! - QSM: STI Suite `QSM_iLSQR(..., 'padsize', [12 12 12])` (l. 145), passed as `option_data.qsm`
+//!   (l. 158).
+//! - R2′ is the user's (the script's input; its README offers a pseudo-R2 map otherwise).
 //!
-//! Reference:
-//! Shin, H., et al. (2021). "chi-separation: Magnetic susceptibility source
-//! separation toward iron and myelin mapping in the brain." NeuroImage, 240:118371.
+//! The toolbox's GUI (`WrapperChisepMEDI.p`, probed with a stand-in app object) differs: it
+//! passes `mask_CSF = []` (no CSF term), `N_std = c/mag` (only relative values matter, see
+//! [`ChiSepMediInputs::n_std`]), the RSS of the Tukey-windowed magnitude, `λ = λ_CSF = 1`, and
+//! `option_data.qsm` only when its "QSM initialisation" option is on.
+//!
+//! Reference: Shin, H.-G., Lee, J., Yun, Y. H., Yoo, S. H., Jang, J., Oh, S.-H., Nam, Y., Jung,
+//! S., Kim, S., Fukunaga, M., Kim, W., Choi, H. J., Lee, J. (2021). "χ-separation: Magnetic
+//! susceptibility source separation toward iron and myelin mapping in the brain." NeuroImage,
+//! 240:118371. <https://doi.org/10.1016/j.neuroimage.2021.118371>
 //!
 //! # Pipeline rules
 //!
 //! The facts above that a configuration can depart from are published as rules in
-//! [`crate::pipeline::rules::RULES`] (each with its strength, basis, reason and source): `chi-sep.mask-bet`, `chi-sep.unwrap-romeo`, `chi-sep.echo-combination`, `chi-sep.echo-weights`, `chi-sep.bg-vsharp`.
+//! [`crate::pipeline::rules::RULES`] (each with its strength, basis, reason and source):
+//! `chi-sep.mask-bet`, `chi-sep.unwrap-romeo`, `chi-sep.echo-combination`, `chi-sep.echo-weights`,
+//! `chi-sep.bg-vsharp`, `chi-sep-medi.qsm-ilsqr`.
 
-use num_complex::Complex32;
+use crate::error::{check_len, InputError};
+use crate::fft::Fft3dWorkspace;
+use crate::inversion::medi::{cgsolve, dataterm_mask, fgrad, gradient_mask, par_fill, par_update, reg, CgBuffers};
 use crate::Grid;
-use super::DR_SHIN_2021;
-use crate::fft::Fft3dWorkspaceF32;
-use crate::kernels::dipole::dipole_kernel_f32;
-use crate::inversion::medi::{gradient_mask_f32, fgrad_periodic_inplace_f32};
-#[cfg(any(test, doc))]
-use crate::inversion::medi::bdiv_periodic_inplace_f32;
-use crate::utils::padding::{next_fast_fft_size, pad3d, unpad3d};
-use crate::utils::simd_ops::{dot_product_f32, norm_squared_f32, compute_p_weights_f32};
-#[cfg(any(test, doc))]
-use crate::utils::simd_ops::apply_gradient_weights_f32;
-#[cfg(doc)]
-use crate::utils::simd_ops::{axpy_f32, xpby_f32};
-#[cfg(feature = "parallel")]
-use rayon::prelude::*;
+use num_complex::Complex64;
 
-/// Workspace for chi-separation — holds all reusable buffers (f32), allocated once per call.
-struct ChiSepWorkspace {
-    n: usize,
-    nx: usize, ny: usize, nz: usize,
-    vsx: f32, vsy: f32, vsz: f32,
+use super::ChiSepMaps;
 
-    fft_ws: Fft3dWorkspaceF32,
+/// The gyromagnetic ratio the toolbox's `chi_sep_MEDI` and `chi_sep_iLSQR` use to get the field
+/// strength from `params.CF` (their `gyro_`), in Hz/T. It differs from
+/// [`crate::constants::GAMMA_BAR_HZ_PER_T`] (42.576 MHz/T); kept so the field-dependent defaults
+/// match the toolbox.
+pub const TOOLBOX_GYRO_HZ_PER_T: f64 = 42.58e6;
 
-    gx: Vec<f32>,
-    gy: Vec<f32>,
-    gz: Vec<f32>,
+/// The field strength, in tesla, at which the toolbox's default relaxometric constant is
+/// [`super::DR_SHIN_2021`] (137 Hz/ppm): `chi_sep_MEDI` and `chi_sep_iLSQR` default to
+/// `D_r = 137·(B0/2.9)` for both sources, `B0 = CF/42.58e6`, when `params.Dr_pos`/`Dr_neg` are not
+/// given (probed: 141.7241379310345 at `CF` = 127.74 MHz, bit for bit). Shin et al. 2021 measured
+/// 137 on a nominal 3 T (2.89 T) scanner; the toolbox scales it linearly with the field.
+pub const TOOLBOX_DR_REFERENCE_TESLA: f64 = 2.9;
 
-    div_buf: Vec<f32>,
-
-    complex_buf: Vec<Complex32>,
-    dipole_buf: Vec<f32>,
-    /// d_pos + d_neg inside the operator
-    stage: Vec<f32>,
-
-    cg_r: Vec<f32>,
-    cg_p: Vec<f32>,
-    cg_ap: Vec<f32>,
+/// The toolbox's default `D_r` in Hz/ppm at central frequency `cf` (Hz): `137·((cf/42.58e6)/2.9)`,
+/// in that order of operations.
+pub fn toolbox_default_dr(cf: f64) -> f64 {
+    super::DR_SHIN_2021 * ((cf / TOOLBOX_GYRO_HZ_PER_T) / TOOLBOX_DR_REFERENCE_TESLA)
 }
 
-impl ChiSepWorkspace {
-    fn new(nx: usize, ny: usize, nz: usize, vsx: f32, vsy: f32, vsz: f32) -> Self {
-        let n = nx * ny * nz;
-        Self {
-            n, nx, ny, nz, vsx, vsy, vsz,
-            fft_ws: Fft3dWorkspaceF32::new(nx, ny, nz),
-            gx: vec![0.0; n],
-            gy: vec![0.0; n],
-            gz: vec![0.0; n],
-            div_buf: vec![0.0; n],
-            complex_buf: vec![Complex32::new(0.0, 0.0); n],
-            dipole_buf: vec![0.0; n],
-            stage: vec![0.0; n],
-            cg_r: vec![0.0; 2 * n],
-            cg_p: vec![0.0; 2 * n],
-            cg_ap: vec![0.0; 2 * n],
-        }
-    }
-}
+/// Gauss-Newton iterations `chi_sep_MEDI` always runs (its `min_iter`, not a parameter), even
+/// once the relative change is below [`ChiSepMediParams::tol`].
+pub const CHI_SEP_MEDI_MIN_ITER: usize = 6;
 
-/// Per-axis TV weights `wG·Vr·wG` (`m·p·m` in [`apply_gradient_weights_f32`]'s terms), formed
-/// once per Gauss-Newton iteration and multiplied in the same order, so `w·∇x` has the bits of
-/// `m·p·m·∇x`.
-type TvWeights = [Vec<f32>; 3];
+/// `ε` in the L1 weights `1/sqrt(|wG·∇χ|² + ε)` (`chi_sep_MEDI_func`'s `eps__`).
+const EPS_L1: f64 = 1e-5;
+/// Weight of the R2′ residual against the field residual, both in Hz (`wei_mag` = 1/(2π)).
+const WEI_MAG: f64 = 1.0 / (2.0 * std::f64::consts::PI);
+/// MEDI `gradient_mask`'s `percentage` as the toolbox passes it: the number of gradient components
+/// marked as edges, as a fraction of the mask's voxel count.
+const EDGE_PERCENTAGE: f64 = 0.9;
+/// Radius, in voxels, of the sphere the mask is eroded by for the convergence test.
+const ERODE_RADIUS: i64 = 3;
 
-fn tv_weights(mx: &[f32], my: &[f32], mz: &[f32], vr: &[f32], w: &mut TvWeights) {
-    let [wx, wy, wz] = w;
-    maybe_par_iter_mut!(wx)
-        .zip(maybe_par_iter_mut!(wy))
-        .zip(maybe_par_iter_mut!(wz))
-        .enumerate()
-        .for_each(|(i, ((a, b), c))| {
-            *a = mx[i] * vr[i] * mx[i];
-            *b = my[i] * vr[i] * my[i];
-            *c = mz[i] * vr[i] * mz[i];
-        });
-}
-
-/// `out = λ · bdiv(w ⊙ fgrad(x))` with periodic boundaries: the IRLS TV term, the same values
-/// as [`fgrad_periodic_inplace_f32`], the weighting and [`bdiv_periodic_inplace_f32`] in turn
-/// (bitwise; see the test), but a few z planes at a time so the gradients stay in cache and no
-/// full-volume temporaries are written.
-#[allow(clippy::too_many_arguments)]
-fn tv_term(
-    x: &[f32],
-    w: &TvWeights,
-    lambda: f32,
-    nx: usize, ny: usize, nz: usize,
-    vsx: f32, vsy: f32, vsz: f32,
-    out: &mut [f32],
-) {
-    let nxy = nx * ny;
-    let (hx, hy, hz) = (1.0 / vsx, 1.0 / vsy, 1.0 / vsz);
-    let (ax, ay, az) = (-1.0 / vsx, -1.0 / vsy, -1.0 / vsz);
-    // Weighted periodic forward differences of plane k: z into gz, and x, y when asked.
-    let grad = |k: usize, gxy: Option<(&mut [f32], &mut [f32])>, gz: &mut [f32]| {
-        let base = k * nxy;
-        let znext = if k + 1 < nz { base + nxy } else { 0 };
-        for q in 0..nxy {
-            let p = base + q;
-            gz[q] = w[2][p] * ((x[znext + q] - x[p]) * hz);
-        }
-        if let Some((gx, gy)) = gxy {
-            for j in 0..ny {
-                let row = base + j * nx;
-                let yrow = if j + 1 < ny { row + nx } else { base };
-                for i in 0..nx {
-                    let q = i + j * nx;
-                    let p = row + i;
-                    let xn = if i + 1 < nx { x[p + 1] } else { x[row] };
-                    gx[q] = w[0][p] * ((xn - x[p]) * hx);
-                    gy[q] = w[1][p] * ((x[yrow + i] - x[p]) * hy);
-                }
-            }
-        }
-    };
-    let planes = |k0: usize, o: &mut [f32], bufs: &mut [Vec<f32>; 4]| {
-        let [gx, gy, gz, gz_prev] = bufs;
-        grad(if k0 > 0 { k0 - 1 } else { nz - 1 }, None, gz_prev);
-        for (dk, op) in o.chunks_mut(nxy).enumerate() {
-            grad(k0 + dk, Some((gx, gy)), gz);
-            for j in 0..ny {
-                for i in 0..nx {
-                    let q = i + j * nx;
-                    let gx_prev = if i > 0 { gx[q - 1] } else { gx[nx - 1 + j * nx] };
-                    let gy_prev = if j > 0 { gy[q - nx] } else { gy[i + (ny - 1) * nx] };
-                    let div = (gx[q] - gx_prev) * ax + (gy[q] - gy_prev) * ay + (gz[q] - gz_prev[q]) * az;
-                    op[q] = lambda * div;
-                }
-            }
-            std::mem::swap(gz, gz_prev);
-        }
-    };
-    let new_bufs = || [vec![0.0f32; nxy], vec![0.0f32; nxy], vec![0.0f32; nxy], vec![0.0f32; nxy]];
-    // A few planes per task: each task recomputes one plane of z differences.
-    const PLANES: usize = 4;
-    #[cfg(feature = "parallel")]
-    out.par_chunks_mut(nxy * PLANES)
-        .enumerate()
-        .for_each_init(new_bufs, |bufs, (c, o)| planes(c * PLANES, o, bufs));
-    #[cfg(not(feature = "parallel"))]
-    {
-        let mut bufs = new_bufs();
-        out.chunks_mut(nxy * PLANES).enumerate().for_each(|(c, o)| planes(c * PLANES, o, &mut bufs));
-    }
-}
-
-/// `a = b + beta·a` elementwise ([`xpby_f32`]'s values, on rayon threads under `parallel`)
-fn xpby(a: &mut [f32], b: &[f32], beta: f32) {
-    maybe_par_iter_mut!(a).zip(maybe_par_iter!(b)).for_each(|(a, &b)| *a = b + beta * *a);
-}
-
-/// Chi-separation algorithm parameters.
-///
-/// `cf`, `dr_pos`, and `dr_neg` are acquisition/tissue dependent and should be
-/// set for your scan; the remaining fields are optimization knobs with sensible
-/// defaults.
+/// Parameters for [`chi_sep_medi`]. The defaults are the toolbox's (see the module docs).
 #[cfg_attr(feature = "introspection", derive(serde::Serialize))]
 #[derive(Clone, Debug)]
-pub struct ChiSepParams {
-    /// Central frequency in Hz (e.g. 123.2e6 for 3T)
+pub struct ChiSepMediParams {
+    /// Central frequency in Hz (`params.CF`; default 123.2 MHz). The field strength the
+    /// defaults of [`Self::dr_pos`] and [`Self::dr_neg`] scale with is `cf / 42.58e6`.
     pub cf: f64,
-    /// Paramagnetic L1 regularization weight
-    pub lambda_para: f64,
-    /// Diamagnetic L1 regularization weight
-    pub lambda_dia: f64,
-    /// Field/R2' coupling weight
-    pub lambda_cpl: f64,
-    /// Paramagnetic relaxivity in Hz/ppm
-    pub dr_pos: f64,
-    /// Diamagnetic relaxivity in Hz/ppm
-    pub dr_neg: f64,
-    /// Edge-mask percentage for morphology weighting
-    pub percentage: f64,
-    /// Inner conjugate-gradient tolerance
-    pub cg_tol: f64,
-    /// Inner conjugate-gradient max iterations
-    pub cg_max_iter: usize,
-    /// Outer Gauss-Newton max iterations
-    pub max_iter: usize,
-    /// Outer convergence tolerance
+    /// Weight of the edge-masked L1 terms (`params.lambda`; default 1, as `Chisep_script.m` and
+    /// the toolbox GUI set it).
+    pub lambda: f64,
+    /// Weight of the CSF term (`params.lambda_CSF`; default 1, as `Chisep_script.m` and the GUI
+    /// set it). Used only where [`ChiSepMediInputs::mask_csf`] has voxels.
+    pub lambda_csf: f64,
+    /// Paramagnetic relaxometric constant in Hz/ppm (`params.Dr_pos`). `None` (the default):
+    /// the toolbox's `137·(B0/2.9)` ([`toolbox_default_dr`]).
+    pub dr_pos: Option<f64>,
+    /// Diamagnetic relaxometric constant in Hz/ppm (`params.Dr_neg`). `None` (the default): the
+    /// same as [`Self::dr_pos`]'s default.
+    pub dr_neg: Option<f64>,
+    /// Zero padding, in voxels, added at both ends of the third axis only (`params.pad_size`;
+    /// default 5).
+    pub pad: usize,
+    /// Stop once the relative change of `[χ+ |χ−|]` in the eroded mask falls to this, after at
+    /// least [`CHI_SEP_MEDI_MIN_ITER`] iterations (`params.tol_norm_ratio`; default 0.03).
     pub tol: f64,
+    /// Gauss-Newton iterations at most (`params.max_iter`; default 30).
+    pub max_iter: usize,
+    /// Conjugate-gradient relative tolerance (`params.cg_tol`; default 0.05).
+    pub cg_tol: f64,
+    /// Conjugate-gradient iterations at most, per source and Gauss-Newton step
+    /// (`params.cg_max_iter`; default 100).
+    pub cg_max_iter: usize,
 }
 
-impl Default for ChiSepParams {
+impl Default for ChiSepMediParams {
     fn default() -> Self {
         Self {
             cf: 123.2e6,
-            // 30 against λ_cpl = 100, with the R2' term at Shin 2021's weight. On the QSM-CI
-            // chisep phantom χ+/|χ−| correlate 0.88/0.66 with truth at 30 (10: 0.91/0.57,
-            // 100: 0.83/0.65, 300: 0.73/0.58, 1000: 0.64/0.37). The old default of 1000 was
-            // tuned with the R2' term weighted ~5000x heavier, where no λ separated the sources.
-            lambda_para: 30.0,
-            lambda_dia: 30.0,
-            lambda_cpl: 100.0,
-            // Same paper, same forward model, same single-orientation QSM as `chi_sep_ilsqr`, so
-            // the same relaxivity. These read 114/30 until QSM.rs#130: 114 is the COSMOS-
-            // referenced constant ([`DR_KIM_2025_COSMOS`](super::DR_KIM_2025_COSMOS)) borrowed
-            // from the χ-sepnet networks, which this method is not, and 30 appears in no
-            // publication — neither Shin 2021 nor Kim 2025 fits the two sources separately. The
-            // integration test in `tests/chisep_qsmci.rs` already overrode both to 137, so the
-            // measured behaviour is unchanged; only the default moved to match it.
-            dr_pos: DR_SHIN_2021,
-            dr_neg: DR_SHIN_2021,
-            percentage: 0.3,
-            cg_tol: 0.01,
+            lambda: 1.0,
+            lambda_csf: 1.0,
+            dr_pos: None,
+            dr_neg: None,
+            pad: 5,
+            tol: 0.03,
+            max_iter: 30,
+            cg_tol: 0.05,
             cg_max_iter: 100,
-            max_iter: 10,
-            tol: 0.1,
         }
     }
 }
 
-/// Chi-separation using MEDI-based coupled optimization.
-///
-/// # Arguments
-/// * `local_field` - Local field map in ppm (same units convention as the
-///   dipole-inversion algorithms; converted to Hz internally via `params.cf`)
-/// * `r2prime` - R2' map in Hz
-/// * `magnitude` - Magnitude image for edge weighting
-/// * `mask` - Binary brain mask, 1 = brain
-/// * `grid` - Volume grid (dimensions and voxel sizes)
-/// * `bdir` - B0 field direction
-/// * `params` - Chi-separation parameters (see [`ChiSepParams`])
-/// * `progress` - Progress callback: `(iteration, total_iterations)`
-///
-/// # Returns
-/// `(chi_pos, chi_neg, chi_total)` — susceptibility maps in ppm
-///
-/// Volumes whose dimensions are not FFT-friendly (2ᵃ·3ᵇ·5ᶜ) are transparently
-/// zero-padded to the next fast size for the internal FFTs and cropped back
-/// (see [`chi_sep_ilsqr`](crate::separation::chi_sep_ilsqr) for details).
-///
-/// # Performance
-///
-/// On the QSM-CI χ-separation phantom (164×205×205, padded to 180×216×216; 30 Gauss-Newton
-/// iterations, ~1900 CG steps), AMD EPYC 9454: 4 threads 720 s → 295 s, 16 threads
-/// 839 s → 150 s, without `parallel` 883 s → 461 s, WASM (Node, one thread) 2584 s → 1534 s
-/// (QSM.rs#296). Applying the CG field term as one transform pair (`doubled_dipole_kernel`)
-/// rounds differently from the two passes it replaced; on that phantom the maps then differ
-/// from the earlier ones as much as the earlier code's own maps move when the field is scaled
-/// by 1 + 10⁻⁷ (median 2·10⁻⁵ ppm, a few voxels up to ~0.1 ppm). Most of the remaining time
-/// is the dipole FFT pair, the two TV terms and CG's two dot products, which stay sequential.
-pub fn chi_sep_medi<F>(
-    local_field: &[f64],
-    r2prime: &[f64],
-    magnitude: &[f64],
-    mask: &[u8],
-    grid: &Grid,
-    bdir: (f64, f64, f64),
-    params: &ChiSepParams,
-    progress: F,
-) -> (Vec<f64>, Vec<f64>, Vec<f64>)
-where
-    F: FnMut(usize, usize),
-{
-    let dims = grid.dims;
-    let fast = (
-        next_fast_fft_size(dims.0),
-        next_fast_fft_size(dims.1),
-        next_fast_fft_size(dims.2),
-    );
-    if fast == dims {
-        return chi_sep_medi_core(local_field, r2prime, magnitude, mask, grid, bdir, params, progress);
+impl ChiSepMediParams {
+    /// The relaxometric constants used, `(D_r,pos, D_r,neg)` in Hz/ppm: the explicit values, or
+    /// the toolbox's [`toolbox_default_dr`].
+    pub fn dr(&self) -> (f64, f64) {
+        let default = toolbox_default_dr(self.cf);
+        (self.dr_pos.unwrap_or(default), self.dr_neg.unwrap_or(default))
     }
-    let (vsx, vsy, vsz) = grid.voxel_size;
-    let pgrid = Grid::new(fast.0, fast.1, fast.2, vsx, vsy, vsz);
-    let (chi_pos, chi_neg, chi_total) = chi_sep_medi_core(
-        &pad3d(local_field, dims, fast),
-        &pad3d(r2prime, dims, fast),
-        &pad3d(magnitude, dims, fast),
-        &pad3d(mask, dims, fast),
-        &pgrid,
-        bdir,
-        params,
-        progress,
-    );
-    (
-        unpad3d(&chi_pos, fast, dims),
-        unpad3d(&chi_neg, fast, dims),
-        unpad3d(&chi_total, fast, dims),
-    )
-}
 
-#[allow(clippy::too_many_arguments)]
-fn chi_sep_medi_core<F>(
-    local_field: &[f64],
-    r2prime: &[f64],
-    magnitude: &[f64],
-    mask: &[u8],
-    grid: &Grid,
-    bdir: (f64, f64, f64),
-    params: &ChiSepParams,
-    mut progress: F,
-) -> (Vec<f64>, Vec<f64>, Vec<f64>)
-where
-    F: FnMut(usize, usize),
-{
-    let cf = params.cf;
-    let lambda_para = params.lambda_para;
-    let lambda_dia = params.lambda_dia;
-    let lambda_cpl = params.lambda_cpl;
-    let dr_pos = params.dr_pos;
-    let dr_neg = params.dr_neg;
-    let percentage = params.percentage;
-    let cg_tol = params.cg_tol;
-    let cg_max_iter = params.cg_max_iter;
-    let max_iter = params.max_iter;
-    let tol = params.tol;
-    let (nx, ny, nz) = grid.dims;
-    let (vsx, vsy, vsz) = grid.voxel_size;
-    let n = nx * ny * nz;
-    let ppm_factor = (1.0e6 / cf) as f32;
-
-    let vsx_f32 = vsx as f32;
-    let vsy_f32 = vsy as f32;
-    let vsz_f32 = vsz as f32;
-    let bdir_f32 = (bdir.0 as f32, bdir.1 as f32, bdir.2 as f32);
-    let lambda_para_f32 = lambda_para as f32;
-    let lambda_dia_f32 = lambda_dia as f32;
-    let lambda_cpl_f32 = lambda_cpl as f32;
-    let cg_tol_f32 = cg_tol as f32;
-    let tol_f32 = tol as f32;
-
-    // Effective relaxivities: Dr(Hz/ppm) * ppm_factor(ppm/Hz) = dimensionless
-    // R2'(Hz) = Dr_pos * chi_ppm = Dr_pos * (chi_Hz * ppm_factor) = dr_p_eff * chi_Hz
-    let dr_p_eff = ppm_factor * dr_pos as f32;
-    let dr_q_eff = ppm_factor * dr_neg as f32;
-
-    // Data-term weighting from Shin et al. 2021: the cost is
-    //   ‖Wr·(R2' − Dr·(|χ+| + |χ−|))‖² + ‖i·2π·Wf·(f − D(χ+ + χ−))‖²
-    // with both residuals in Hz, so the field term carries (2π)² against the R2' term's 1
-    // (the same weighting `chi_sep_ilsqr` uses). Here λ_cpl multiplies the field term, so the
-    // R2' equation (data and relaxivities) is scaled by 1/(2π).
-    //
-    // This used to be auto-tuned to put the χ+/χ− gauge mode's eigenvalue at 10·max(λ_para,
-    // λ_dia), which weighted the R2' term ~120x above the field term at 3-7 T instead of ~40x
-    // below it. The solver then met R2' alone and returned χ+ ≈ |χ−| ≈ R2'/2Dr: the same map
-    // twice (corr(χ+, |χ−|) 0.99 on the QSM-CI chisep phantom, |χ−| at 0.07 against its truth).
-    let r2_scale = 1.0 / std::f32::consts::TAU;
-    let dr_p_use = dr_p_eff * r2_scale;
-    let dr_q_use = dr_q_eff * r2_scale;
-
-    // Local field arrives in ppm (library-wide convention); the solver works in
-    // Hz internally, so convert on entry.
-    let field_f32: Vec<f32> = local_field.iter()
-        .zip(mask.iter())
-        .map(|(&v, &m)| if m != 0 { (v * cf * 1.0e-6) as f32 } else { 0.0 })
-        .collect();
-    let r2p_f32: Vec<f32> = r2prime.iter()
-        .zip(mask.iter())
-        .map(|(&v, &m)| if m != 0 { (v as f32) * r2_scale } else { 0.0 })
-        .collect();
-    let mag_f32: Vec<f32> = magnitude.iter().map(|&v| v as f32).collect();
-
-    let mut ws = ChiSepWorkspace::new(nx, ny, nz, vsx_f32, vsy_f32, vsz_f32);
-    let d_kernel = dipole_kernel_f32(grid, bdir_f32);
-    // The CG operator's field term is D applied twice, each time as real(ifft(D·fft(·))), with
-    // nothing in between, so one transform pair does it (see `doubled_dipole_kernel`).
-    let d2_kernel = doubled_dipole_kernel(&d_kernel, nx, ny, nz);
-    let (mx, my, mz) = gradient_mask_f32(
-        &mag_f32, mask, nx, ny, nz, vsx_f32, vsy_f32, vsz_f32, percentage as f32,
-    );
-
-    // chi_pos >= 0 (paramagnetic), chi_neg <= 0 (diamagnetic), both in Hz
-    let mut chi_pos = vec![0.0f32; n];
-    let mut chi_neg = vec![0.0f32; n];
-
-    let mut vr = vec![0.0f32; n];
-    let new_w = || -> TvWeights { [vec![0.0f32; n], vec![0.0f32; n], vec![0.0f32; n]] };
-    let mut w_pos = new_w();
-    let mut w_neg = new_w();
-    let n2 = 2 * n;
-    let mut dx = vec![0.0f32; n2];
-    let mut rhs = vec![0.0f32; n2];
-    let mut chi_sum_buf = vec![0.0f32; n];
-    let mut field_residual = vec![0.0f32; n];
-
-    // TV weight on (chi+ + chi-) sum — paper uses 2*lambda for sum term
-    // Disabled for now (0.0) pending parameter tuning; the sum TV can over-couple components.
-    // Every use of the term is skipped while its weight is exactly 0 (it would add 0).
-    let lambda_sum_f32 = 0.0_f32;
-    let mut w_sum = (lambda_sum_f32 != 0.0).then(new_w);
-
-    let eps = 1.0e-6_f32;
-
-    for iter in 0..max_iter {
-        progress(iter + 1, max_iter);
-
-        // --- TV reweighting: Vr = 1/sqrt(|wG∇χ|² + ε), then the weights wG·Vr·wG ---
-        fgrad_periodic_inplace_f32(&mut ws.gx, &mut ws.gy, &mut ws.gz,
-            &chi_pos, nx, ny, nz, vsx_f32, vsy_f32, vsz_f32);
-        compute_p_weights_f32(&mut vr, &mx, &my, &mz, &ws.gx, &ws.gy, &ws.gz, eps);
-        tv_weights(&mx, &my, &mz, &vr, &mut w_pos);
-
-        fgrad_periodic_inplace_f32(&mut ws.gx, &mut ws.gy, &mut ws.gz,
-            &chi_neg, nx, ny, nz, vsx_f32, vsy_f32, vsz_f32);
-        compute_p_weights_f32(&mut vr, &mx, &my, &mz, &ws.gx, &ws.gy, &ws.gz, eps);
-        tv_weights(&mx, &my, &mz, &vr, &mut w_neg);
-
-        maybe_par_iter_mut!(chi_sum_buf).enumerate().for_each(|(i, s)| *s = chi_pos[i] + chi_neg[i]);
-
-        // TV weights for the sum (chi+ + chi-)
-        if let Some(w_sum) = w_sum.as_mut() {
-            fgrad_periodic_inplace_f32(&mut ws.gx, &mut ws.gy, &mut ws.gz,
-                &chi_sum_buf, nx, ny, nz, vsx_f32, vsy_f32, vsz_f32);
-            compute_p_weights_f32(&mut vr, &mx, &my, &mz, &ws.gx, &ws.gy, &ws.gz, eps);
-            tv_weights(&mx, &my, &mz, &vr, w_sum);
-        }
-
-        // --- Residuals (chi_sum_buf holds chi_pos + chi_neg) ---
-        // field_residual = field - D*(chi_pos + chi_neg)
-        ws.fft_ws.apply_dipole_inplace(&chi_sum_buf, &d_kernel, &mut ws.dipole_buf, &mut ws.complex_buf);
-        maybe_par_iter_mut!(field_residual).enumerate().for_each(|(i, r)| *r = field_f32[i] - ws.dipole_buf[i]);
-
-        // --- Build gradient (MEDI convention: b_orig = gradient, then negate) ---
-        //
-        // Gradient derived from first principles:
-        //   J = λ_para*TV(χ+) + λ_dia*TV(χ-) + λ_cpl/2*||field_res||² + λ_cpl/2*||r2_res||²
-        //
-        // ∂J/∂χ+ = λ_para*TV_grad(χ+) - λ_cpl*D(field_res) - λ_cpl*r2_res*dr_p_eff
-        // ∂J/∂χ- = λ_dia*TV_grad(χ-)  - λ_cpl*D(field_res) + λ_cpl*r2_res*dr_q_eff
-        //
-        // TV_grad(χ) = bdiv(wG*Vr*wG*fgrad(χ)) [MEDI convention, IS the gradient]
-        //   because bdiv = -div, so bdiv(wG*Vr*wG*∇χ) = -div(wG*Vr*wG*∇χ) = ∂TV/∂χ
-        //
-        // Field: ∂||field_res||²/∂χ+ = -2*D(field_res), with 1/2 → -D(field_res)
-        //   Same for χ- since chi_total = χ+ + χ-, ∂/∂χ- has same sign
-        //
-        // R2': r2_res = R2' - dr_p*χ+ + dr_q*χ- (since |χ-| = -χ-)
-        //   ∂r2_res/∂χ+ = -dr_p → ∂||r2_res||²/∂χ+ = -2*r2_res*dr_p, with 1/2 → -r2_res*dr_p
-        //   ∂r2_res/∂χ- = +dr_q → ∂||r2_res||²/∂χ- = +2*r2_res*dr_q, with 1/2 → +r2_res*dr_q
-        let (rhs_pos, rhs_neg) = rhs.split_at_mut(n);
-        tv_term(&chi_pos, &w_pos, lambda_para_f32, nx, ny, nz, vsx_f32, vsy_f32, vsz_f32, rhs_pos);
-        tv_term(&chi_neg, &w_neg, lambda_dia_f32, nx, ny, nz, vsx_f32, vsy_f32, vsz_f32, rhs_neg);
-
-        // TV gradient for (chi+ + chi-) sum — applied equally to both components
-        if let Some(w_sum) = w_sum.as_ref() {
-            tv_term(&chi_sum_buf, w_sum, lambda_sum_f32, nx, ny, nz, vsx_f32, vsy_f32, vsz_f32, &mut ws.div_buf);
-            add_to_both(rhs_pos, rhs_neg, &ws.div_buf);
-        }
-
-        // Field fidelity gradient: -λ_cpl * D(field_res), SAME sign for both
-        ws.fft_ws.apply_dipole_inplace(&field_residual, &d_kernel,
-            &mut ws.dipole_buf, &mut ws.complex_buf);
-
-        // Then the R2' fidelity gradient on the mask, with the R2' residual scaled by r2_scale:
-        //   r2_res = R2'·s - dr_p_use * chi_pos + dr_q_use * chi_neg   (dr_*_use = dr_*_eff·s)
-        //   ∂J/∂χ+ contribution: -λ_cpl * r2_res * dr_p_use
-        //   ∂J/∂χ- contribution: +λ_cpl * r2_res * dr_q_use
-        // and the negation for CG: b = -gradient.
-        let dip = &ws.dipole_buf;
-        maybe_par_iter_mut!(rhs_pos).zip(maybe_par_iter_mut!(rhs_neg)).enumerate().for_each(|(i, (rp, rn))| {
-            let fg = lambda_cpl_f32 * dip[i];
-            let (mut p, mut q) = (*rp - fg, *rn - fg);
-            if mask[i] != 0 {
-                let r2_residual = r2p_f32[i] - dr_p_use * chi_pos[i] + dr_q_use * chi_neg[i];
-                p -= lambda_cpl_f32 * r2_residual * dr_p_use;
-                q += lambda_cpl_f32 * r2_residual * dr_q_use;
-            }
-            *rp = -p;
-            *rn = -q;
-        });
-
-        // --- CG solve ---
-        let op = ChiSepOperator {
-            d2_kernel: &d2_kernel,
-            w_pos: &w_pos, w_neg: &w_neg, w_sum: w_sum.as_ref(),
-            lambda_para: lambda_para_f32, lambda_dia: lambda_dia_f32,
-            lambda_sum: lambda_sum_f32, lambda_cpl: lambda_cpl_f32,
-            dr_p: dr_p_use, dr_q: dr_q_use,
-            mask,
-        };
-        cg_solve_chisep(&mut ws, &op, &rhs, &mut dx, cg_tol_f32, cg_max_iter);
-
-        // --- Update (half Newton step for stability with sign constraints), then
-        // --- enforce the constraints chi_pos >= 0, chi_neg <= 0 ---
-        maybe_par_iter_mut!(chi_pos).zip(maybe_par_iter_mut!(chi_neg)).enumerate().for_each(|(i, (p, q))| {
-            if mask[i] == 0 {
-                *p = 0.0;
-                *q = 0.0;
+    /// Checks the parameters [`chi_sep_medi`] checks.
+    pub fn validate(&self) -> Result<(), InputError> {
+        let pos = |name: &str, v: f64| {
+            if v.is_finite() && v > 0.0 {
+                Ok(())
             } else {
-                *p = (*p + 0.5 * dx[i]).max(0.0);
-                *q = (*q + 0.5 * dx[n + i]).min(0.0);
+                Err(InputError::param(name, v, "finite and > 0"))
             }
-        });
+        };
+        pos("χ-separation MEDI cf", self.cf)?;
+        let (dp, dn) = self.dr();
+        pos("χ-separation MEDI dr_pos", dp)?;
+        pos("χ-separation MEDI dr_neg", dn)?;
+        for (name, v) in [("χ-separation MEDI lambda", self.lambda), ("χ-separation MEDI lambda_csf", self.lambda_csf)] {
+            if !(v.is_finite() && v >= 0.0) {
+                return Err(InputError::param(name, v, "finite and ≥ 0"));
+            }
+        }
+        for (name, v) in [("χ-separation MEDI tol", self.tol), ("χ-separation MEDI cg_tol", self.cg_tol)] {
+            if !(v.is_finite() && v >= 0.0) {
+                return Err(InputError::param(name, v, "finite and ≥ 0"));
+            }
+        }
+        if self.max_iter == 0 {
+            return Err(InputError::param("χ-separation MEDI max_iter", 0, "≥ 1"));
+        }
+        Ok(())
+    }
+}
 
-        // --- Convergence check ---
-        let update_norm = norm_squared_f32(&dx).sqrt();
-        let sol_norm = (norm_squared_f32(&chi_pos) + norm_squared_f32(&chi_neg)).sqrt();
-        let ratio = update_norm / (sol_norm + 1e-6);
+/// The volumes [`chi_sep_medi`] takes, as `chi_sep_MEDI(mag, local_field_hz, r2prime, N_std,
+/// mask, params, option_data)` takes them. All are on the grid, column-major.
+#[derive(Clone, Copy)]
+pub struct ChiSepMediInputs<'a> {
+    /// Magnitude (`mag`; `Chisep_script.m` passes the root-sum-of-squares over echoes). Only its
+    /// edges are used (MEDI's `gradient_mask`).
+    pub magnitude: &'a [f64],
+    /// Local field in ppm (the toolbox takes it in Hz; converted with [`ChiSepMediParams::cf`]).
+    pub local_field: &'a [f64],
+    /// R2′ in Hz (`r2prime`).
+    pub r2prime: &'a [f64],
+    /// Noise standard deviation of the field (`N_std`); the data weights are `mask/N_std`
+    /// normalised to mean 1, so only its relative values matter.
+    pub n_std: &'a [f64],
+    /// Conventional QSM in ppm (`option_data.qsm`), the initial guess.
+    pub qsm: &'a [f64],
+    /// Brain mask (`mask`), nonzero inside.
+    pub mask: &'a [u8],
+    /// CSF mask (`option_data.mask_CSF`), nonzero inside; required, as `Chisep_script.m` passes
+    /// one. All zero: no CSF term, which reproduces the toolbox GUI (`mask_CSF = []`).
+    pub mask_csf: &'a [u8],
+}
 
-        if ratio < tol_f32 {
-            break;
+/// The arrays of one run, on the padded grid.
+struct Problem {
+    dims: (usize, usize, usize),
+    vs: [f64; 3],
+    /// R2′ data weight `wei_mag·m` and field data weight `m` (`M_cat`'s two halves)
+    w_mag: Vec<f64>,
+    w_phs: Vec<f64>,
+    /// R2′`.*mask` where R2′ > 0, and the local field in Hz (`target_`'s two halves)
+    t_mag: Vec<f64>,
+    t_phs: Vec<f64>,
+    /// Dipole kernel, MEDI's `dipole_kernel(..., 'kspace')`
+    d: Vec<f64>,
+    /// MEDI edge mask of the magnitude, 1 = not an edge (`wG`; `wG_r2p` is the same)
+    wg: [Vec<f64>; 3],
+    csf: Vec<usize>,
+    drp: f64,
+    drn: f64,
+    cf_mhz: f64,
+    lambda: f64,
+    lambda_csf: f64,
+}
+
+/// χ-separation by the SNU χ-separation toolbox's `chi_sep_MEDI` (see the module docs).
+///
+/// Takes the volumes of [`ChiSepMediInputs`] on `grid` and the B0 direction `bdir` (used as
+/// given, as the toolbox uses `params.b0_dir`; pass a unit vector), and returns `(χ+, χ−,
+/// χ_total)` in ppm, χ+ ≥ 0, χ− ≤ 0, zero outside the mask. `progress` receives
+/// `(iteration, max_iter)` after each Gauss-Newton step.
+///
+/// # Errors
+/// An [`InputError`] for parameters [`ChiSepMediParams::validate`] rejects and for a volume
+/// whose length is not the grid's.
+pub fn chi_sep_medi(
+    inputs: &ChiSepMediInputs,
+    grid: &Grid,
+    bdir: (f64, f64, f64),
+    params: &ChiSepMediParams,
+    mut progress: impl FnMut(usize, usize),
+) -> Result<ChiSepMaps, InputError> {
+    params.validate()?;
+    let n0 = grid.n_total();
+    for (name, len) in [
+        ("χ-separation MEDI magnitude", inputs.magnitude.len()),
+        ("χ-separation MEDI local_field", inputs.local_field.len()),
+        ("χ-separation MEDI r2prime", inputs.r2prime.len()),
+        ("χ-separation MEDI n_std", inputs.n_std.len()),
+        ("χ-separation MEDI qsm", inputs.qsm.len()),
+        ("χ-separation MEDI mask", inputs.mask.len()),
+        ("χ-separation MEDI mask_csf", inputs.mask_csf.len()),
+    ] {
+        check_len(name, len, n0)?;
+    }
+    let (nx, ny, nz0) = grid.dims;
+    let pz = params.pad;
+    let nz = nz0 + 2 * pz;
+    let dims = (nx, ny, nz);
+    let n = nx * ny * nz;
+    let nxy = nx * ny;
+    let vs = [grid.vsx(), grid.vsy(), grid.vsz()];
+    // padarray(a, [0 0 pad_size], fill, 'both')
+    let pad = |a: &dyn Fn(usize) -> f64, fill: f64| -> Vec<f64> {
+        let mut out = vec![fill; n];
+        out[pz * nxy..(pz + nz0) * nxy].iter_mut().enumerate().for_each(|(i, v)| *v = a(i));
+        out
+    };
+    let mask0: Vec<bool> = inputs.mask.iter().map(|&m| m != 0).collect();
+    // wG = gradient_mask(iMag, Mask, 0.9) on the input grid; wG_r2p is the same. Padded with 1.
+    let wg0 = gradient_mask(inputs.magnitude, &mask0, grid, EDGE_PERCENTAGE);
+    let wg = [0, 1, 2].map(|c| pad(&|i| wg0[c][i], 1.0));
+    let maskf = pad(&|i| f64::from(u8::from(mask0[i])), 0.0);
+    let mask: Vec<bool> = maskf.iter().map(|&m| m != 0.0).collect();
+    let (drp, drn) = params.dr();
+    let cf_mhz = params.cf / 1e6;
+    let t_phs = pad(&|i| inputs.local_field[i] * cf_mhz, 0.0);
+    // r2prime(r2prime == 0) = eps, after padding
+    let mut r2p = pad(&|i| inputs.r2prime[i], 0.0);
+    par_update(&mut r2p, |_, v| {
+        if *v == 0.0 {
+            *v = f64::EPSILON;
+        }
+    });
+    let n_std = pad(&|i| inputs.n_std[i], 0.0);
+    let qsm = pad(&|i| inputs.qsm[i], 0.0);
+    let csf_mask: Vec<bool> = pad(&|i| f64::from(u8::from(inputs.mask_csf[i] != 0)), 0.0).iter().map(|&v| v != 0.0).collect();
+    let csf: Vec<usize> = (0..n).filter(|&i| csf_mask[i]).collect();
+
+    // m = dataterm_mask(1, N_std, Mask); M_cat = [wei_mag.*m.*wei_r2p, m]
+    let mut m = vec![0.0; n];
+    dataterm_mask(1, &n_std, &mask, &mut m);
+    let mut w_mag = vec![0.0; n];
+    par_fill(&mut w_mag, |i| WEI_MAG * m[i]);
+    // target: R2' where it is positive (the initial guess below takes it as given)
+    let mut t_mag = vec![0.0; n];
+    par_fill(&mut t_mag, |i| if r2p[i] > 0.0 { r2p[i] * maskf[i] } else { 0.0 });
+    let d = toolbox_dipole_kernel(dims, vs, bdir);
+
+    // Initial guess from the voxelwise system Dr_pos·x+ + Dr_neg·x− = R2', x+ − x− = χ.
+    let init = |sign: f64, dr_other: f64| -> Vec<f64> {
+        let mut v = vec![0.0; n];
+        par_fill(&mut v, |i| ((r2p[i] + sign * dr_other * qsm[i]) / (drp + drn)).max(0.0));
+        v
+    };
+    let xp0 = init(1.0, drn);
+    let xn0 = init(-1.0, drp);
+    // The weights of the first iteration see the guess with the CSF zeroed; the iterate does not.
+    let mut x_pos = xp0.clone();
+    let mut x_neg = xn0.clone();
+    for &i in &csf {
+        x_pos[i] = 0.0;
+        x_neg[i] = 0.0;
+    }
+    let mut it_pos = xp0;
+    let mut it_neg = xn0;
+    par_update(&mut it_pos, |i, v| *v *= maskf[i]);
+    par_update(&mut it_neg, |i, v| *v *= maskf[i]);
+    let eroded = erode_sphere(&mask, dims, ERODE_RADIUS);
+
+    let pb = Problem {
+        dims, vs, w_mag, w_phs: m, t_mag, t_phs, d, wg, csf,
+        drp, drn, cf_mhz, lambda: params.lambda, lambda_csf: params.lambda_csf,
+    };
+    let mut ws = Workspace::new(dims);
+
+    let mut iter = 0;
+    let mut res = f64::INFINITY;
+    let mut res_min = f64::INFINITY;
+    let (mut best_pos, mut best_neg) = (x_pos.clone(), x_neg.clone());
+    let mut cg = CgBuffers::new(n);
+    let mut bp = vec![0.0; n];
+    let mut bn = vec![0.0; n];
+    while (res > params.tol || iter < CHI_SEP_MEDI_MIN_ITER) && iter < params.max_iter {
+        iter += 1;
+        // Vr = 1./sqrt(abs(wG.*grad(x)).^2 + eps), for each source and for their difference
+        let vr = |ws: &mut Workspace, x: &[f64]| -> [Vec<f64>; 3] {
+            fgrad(x, dims, vs, &mut ws.g);
+            let mut out = [vec![0.0; n], vec![0.0; n], vec![0.0; n]];
+            for c in 0..3 {
+                let (g, w) = (&ws.g[c], &pb.wg[c]);
+                par_fill(&mut out[c], |i| {
+                    let a = w[i] * g[i];
+                    // wG.*(Vr.*(wG.*.)) with wG ∈ {0, 1}
+                    w[i] / (a * a + EPS_L1).sqrt()
+                });
+            }
+            out
+        };
+        let mut diff = vec![0.0; n];
+        par_fill(&mut diff, |i| x_pos[i] - x_neg[i]);
+        let w_pos = vr(&mut ws, &x_pos);
+        let w_neg = vr(&mut ws, &x_neg);
+        let w_tot = vr(&mut ws, &diff);
+        // bp, bn: the gradients, at (x_pos, x_neg)
+        pb.gradients(&mut ws, &x_pos, &x_neg, &w_pos, &w_neg, &w_tot, &mut bp, &mut bn);
+        par_update(&mut bp, |_, v| *v = -*v);
+        par_update(&mut bn, |_, v| *v = -*v);
+        cgsolve(|dx, out| pb.apply(&mut ws, dx, true, &w_pos, &w_tot, out), &bp, params.cg_tol, params.cg_max_iter, &mut cg, |_| {});
+        let dxp = cg.x.clone();
+        cgsolve(|dx, out| pb.apply(&mut ws, dx, false, &w_neg, &w_tot, out), &bn, params.cg_tol, params.cg_max_iter, &mut cg, |_| {});
+        let dxn = &cg.x;
+        // x = max(x + dx.*Mask, 0); res = norm(dx_real.*Me)/norm(x.*Me) over both sources
+        let mut num = 0.0;
+        let mut den = 0.0;
+        for (it, x, dx) in [(&mut it_pos, &mut x_pos, &dxp[..]), (&mut it_neg, &mut x_neg, &dxn[..])] {
+            for i in 0..n {
+                let new = (it[i] + dx[i] * maskf[i]).max(0.0);
+                if eroded[i] {
+                    let dr = new - it[i];
+                    num += dr * dr;
+                    den += new * new;
+                }
+                it[i] = new;
+                x[i] = new;
+            }
+        }
+        res = num.sqrt() / den.sqrt();
+        if res < res_min {
+            res_min = res;
+            best_pos.copy_from_slice(&x_pos);
+            best_neg.copy_from_slice(&x_neg);
+        }
+        progress(iter, params.max_iter);
+    }
+
+    // Crop the padding; χ− is returned signed.
+    let crop = |a: &[f64], sign: f64| -> Vec<f64> {
+        (0..n0).map(|i| if mask0[i] { sign * a[pz * nxy + i] } else { 0.0 }).collect()
+    };
+    let chi_pos = crop(&best_pos, 1.0);
+    let chi_neg = crop(&best_neg, -1.0);
+    let chi_total = chi_pos.iter().zip(&chi_neg).map(|(p, q)| p + q).collect();
+    Ok((chi_pos, chi_neg, chi_total))
+}
+
+/// Buffers reused across operator applications.
+struct Workspace {
+    fft: Fft3dWorkspace,
+    a: Vec<Complex64>,
+    b: Vec<Complex64>,
+    g: [Vec<f64>; 3],
+    r: Vec<f64>,
+    s: Vec<f64>,
+}
+
+impl Workspace {
+    fn new((nx, ny, nz): (usize, usize, usize)) -> Self {
+        let n = nx * ny * nz;
+        let z = Complex64::new(0.0, 0.0);
+        Self {
+            fft: Fft3dWorkspace::new(nx, ny, nz),
+            a: vec![z; n],
+            b: vec![z; n],
+            g: [vec![0.0; n], vec![0.0; n], vec![0.0; n]],
+            r: vec![0.0; n],
+            s: vec![0.0; n],
+        }
+    }
+}
+
+impl Problem {
+    /// `Dconv_p` in place: `buf ← (CF/1e6)·ifftn(D.*fftn(buf))`
+    fn dconv(&self, fft: &mut Fft3dWorkspace, buf: &mut [Complex64]) {
+        fft.fft3d(buf);
+        par_update(buf, |i, v| *v *= self.d[i]);
+        fft.ifft3d(buf);
+        let s = self.cf_mhz;
+        par_update(buf, |_, v| *v *= s);
+    }
+
+    /// `λ_CSF·LT(LT(|x|))` added to `out`, with `LT(v) = Mask_CSF.*(v − mean(v(Mask_CSF)))`
+    fn add_csf(&self, x: &[f64], out: &mut [f64]) {
+        if self.csf.is_empty() {
+            return;
+        }
+        let k = self.csf.len() as f64;
+        let m1 = self.csf.iter().map(|&i| x[i].abs()).sum::<f64>() / k;
+        let lt: Vec<f64> = self.csf.iter().map(|&i| x[i].abs() - m1).collect();
+        let m2 = lt.iter().sum::<f64>() / k;
+        for (&i, &v) in self.csf.iter().zip(&lt) {
+            out[i] += self.lambda_csf * (v - m2);
         }
     }
 
-    // Convert Hz -> ppm
-    let chi_pos_out: Vec<f64> = chi_pos.iter()
-        .zip(mask.iter())
-        .map(|(&v, &m)| if m == 0 { 0.0 } else { (v * ppm_factor) as f64 })
-        .collect();
-    let chi_neg_out: Vec<f64> = chi_neg.iter()
-        .zip(mask.iter())
-        .map(|(&v, &m)| if m == 0 { 0.0 } else { (v * ppm_factor) as f64 })
-        .collect();
-    let chi_total: Vec<f64> = chi_pos_out.iter()
-        .zip(chi_neg_out.iter())
-        .map(|(&p, &n)| p + n)
-        .collect();
+    /// The regulariser of one source: `λ·∇ᵀ(W_single ∇x) + 2λ·∇ᵀ(W_tot ∇(x − y)) + CSF(x)` with
+    /// `x − y` given as `diff`, added to `out`.
+    #[allow(clippy::too_many_arguments)]
+    fn add_reg(&self, ws: &mut Workspace, x: &[f64], diff: &[f64], w_single: &[Vec<f64>; 3], w_tot: &[Vec<f64>; 3], out: &mut [f64]) {
+        let lam = self.lambda;
+        reg(x, w_single, self.dims, self.vs, &mut ws.r);
+        reg(diff, w_tot, self.dims, self.vs, &mut ws.s);
+        let (r, s) = (&ws.r, &ws.s);
+        par_update(out, |i, v| *v += lam * r[i] + 2.0 * (lam * s[i]));
+        self.add_csf(x, out);
+    }
 
-    (chi_pos_out, chi_neg_out, chi_total)
+    /// The CG operator of one source (`Ap` or `An`): data term plus regulariser at `dx` with the
+    /// other source's step zero.
+    fn apply(&self, ws: &mut Workspace, dx: &[f64], pos: bool, w_single: &[Vec<f64>; 3], w_tot: &[Vec<f64>; 3], out: &mut [f64]) {
+        let dr = if pos { self.drp } else { self.drn };
+        // phase: Dconv_p(m.*(m.*Dconv_p(dx)))
+        par_fill(&mut ws.a, |i| Complex64::new(dx[i], 0.0));
+        self.dconv(&mut ws.fft, &mut ws.a);
+        let w = &self.w_phs;
+        par_update(&mut ws.a, |i, v| *v = (*v * w[i]) * w[i]);
+        self.dconv(&mut ws.fft, &mut ws.a);
+        let (a, wm) = (&ws.a, &self.w_mag);
+        par_fill(out, |i| 2.0 * (dr * (wm[i] * (wm[i] * (dr * dx[i])))) + 2.0 * a[i].re);
+        // reg_p(dx, zero_mat) / reg_n(zero_mat, dx): the difference term sees dx − 0
+        self.add_reg(ws, dx, dx, w_single, w_tot, out);
+    }
+
+    /// `bp = fidelity_derivative_p + reg_p` and `bn` likewise, at `(xp, xn)`.
+    #[allow(clippy::too_many_arguments)]
+    fn gradients(
+        &self,
+        ws: &mut Workspace,
+        xp: &[f64],
+        xn: &[f64],
+        w_pos: &[Vec<f64>; 3],
+        w_neg: &[Vec<f64>; 3],
+        w_tot: &[Vec<f64>; 3],
+        bp: &mut [f64],
+        bn: &mut [f64],
+    ) {
+        let n = xp.len();
+        // field residual: Dconv_p(xp) + (−Dconv_p(xn)) − f, weighted twice
+        par_fill(&mut ws.a, |i| Complex64::new(xp[i], 0.0));
+        self.dconv(&mut ws.fft, &mut ws.a);
+        par_fill(&mut ws.b, |i| Complex64::new(xn[i], 0.0));
+        self.dconv(&mut ws.fft, &mut ws.b);
+        let (b, t, w) = (&ws.b, &self.t_phs, &self.w_phs);
+        par_update(&mut ws.a, |i, v| *v = ((*v + (-b[i])) - t[i]) * w[i] * w[i]);
+        self.dconv(&mut ws.fft, &mut ws.a);
+        // R2' residual: Dr_pos·xp + Dr_neg·xn − r2p.*mask, weighted twice
+        let mut rm = vec![0.0; n];
+        let (wm, tm) = (&self.w_mag, &self.t_mag);
+        par_fill(&mut rm, |i| wm[i] * (wm[i] * ((self.drp * xp[i] + self.drn * xn[i]) - tm[i])));
+        let a = &ws.a;
+        par_fill(bp, |i| 2.0 * (self.drp * rm[i]) + 2.0 * a[i].re);
+        par_fill(bn, |i| 2.0 * (self.drn * rm[i]) - 2.0 * a[i].re);
+        let mut diff = vec![0.0; n];
+        par_fill(&mut diff, |i| xp[i] - xn[i]);
+        self.add_reg(ws, xp, &diff, w_pos, w_tot, bp);
+        par_fill(&mut diff, |i| xn[i] - xp[i]);
+        self.add_reg(ws, xn, &diff, w_neg, w_tot, bn);
+    }
 }
 
-/// The kernel K with `real(ifft(K·fft(x))) = real(ifft(D·fft(real(ifft(D·fft(x))))))` for real
-/// `x`: K = D_s², with D_s(k) = (D(k) + D(−k))/2.
-///
-/// Taking the real part of `ifft(D·X)` for real `x` (Hermitian `X`) is the same as using D's
-/// even part D_s, and D_s·X is Hermitian, so the second pass sees D_s·X exactly and gives
-/// D_s²·X. D_s = D wherever D(k) = D(−k), which is everywhere except on the Nyquist planes of
-/// even-sized axes when B0 is oblique to that axis (there −k aliases to a different frequency
-/// than the one D is evaluated at). Only the rounding differs from the two passes.
-fn doubled_dipole_kernel(d: &[f32], nx: usize, ny: usize, nz: usize) -> Vec<f32> {
-    let mut k2 = vec![0.0f32; d.len()];
-    maybe_par_chunks_mut!(k2, nx * ny).enumerate().for_each(|(k, plane)| {
-        let km = (nz - k) % nz;
+/// MEDI's `dipole_kernel(matrix_size, voxel_size, B0_dir, 'kspace')`, as the toolbox builds it:
+/// the k-grid `(-N/2 : N/2-1)/(N·vs)` per axis (half-integer steps on an odd axis), `D = 1/3 −
+/// (k·B0)²/|k|²`, `NaN` (k = 0) set to 0, then `fftshift`ed (circular shift by `floor(N/2)`).
+fn toolbox_dipole_kernel((nx, ny, nz): (usize, usize, usize), vs: [f64; 3], b0: (f64, f64, f64)) -> Vec<f64> {
+    let coord = |i: usize, n: usize, v: f64| (-(n as f64) / 2.0 + i as f64) / (n as f64 * v);
+    let mut d = vec![0.0; nx * ny * nz];
+    for k in 0..nz {
+        let z = coord(k, nz, vs[2]);
+        let kk = (k + nz / 2) % nz;
         for j in 0..ny {
-            let jm = (ny - j) % ny;
+            let y = coord(j, ny, vs[1]);
+            let jj = (j + ny / 2) % ny;
             for i in 0..nx {
-                let im = (nx - i) % nx;
-                let a = d[i + nx * (j + ny * k)];
-                let b = d[im + nx * (jm + ny * km)];
-                let ds = if a == b { a } else { 0.5 * (a + b) };
-                plane[i + nx * j] = ds * ds;
+                let x = coord(i, nx, vs[0]);
+                let ii = (i + nx / 2) % nx;
+                let s = x * b0.0 + y * b0.1 + z * b0.2;
+                let den = x * x + y * y + z * z;
+                let v = 1.0 / 3.0 - (s * s) / den;
+                d[ii + nx * (jj + ny * kk)] = if v.is_nan() { 0.0 } else { v };
             }
-        }
-    });
-    k2
-}
-
-/// `a += t`, `b += t` elementwise
-fn add_to_both(a: &mut [f32], b: &mut [f32], t: &[f32]) {
-    maybe_par_iter_mut!(a).zip(maybe_par_iter_mut!(b)).enumerate().for_each(|(i, (a, b))| {
-        *a += t[i];
-        *b += t[i];
-    });
-}
-
-/// The fixed parts of the chi-sep Hessian operator for one Gauss-Newton iteration.
-struct ChiSepOperator<'a> {
-    /// The field term's kernel, D applied twice ([`doubled_dipole_kernel`])
-    d2_kernel: &'a [f32],
-    w_pos: &'a TvWeights,
-    w_neg: &'a TvWeights,
-    /// `None` while `lambda_sum` is 0
-    w_sum: Option<&'a TvWeights>,
-    lambda_para: f32,
-    lambda_dia: f32,
-    lambda_sum: f32,
-    lambda_cpl: f32,
-    dr_p: f32,
-    dr_q: f32,
-    mask: &'a [u8],
-}
-
-/// Apply chi-sep Hessian operator A to doubled vector dx = [d_pos; d_neg].
-///
-/// A_pos = λ_para * TV_hess(d_pos) + λ_sum * TV_hess_sum(d_pos+d_neg)
-///       + λ_cpl * D²(d_pos + d_neg) + λ_cpl * dr_p * (dr_p * d_pos - dr_q * d_neg)
-/// A_neg = λ_dia * TV_hess(d_neg) + λ_sum * TV_hess_sum(d_pos+d_neg)
-///       + λ_cpl * D²(d_pos + d_neg) - λ_cpl * dr_q * (dr_p * d_pos - dr_q * d_neg)
-///
-/// TV_hessian uses IRLS: bdiv(wG*Vr*wG*fgrad(.)), positive semi-definite.
-/// Field fidelity: D², same for both, positive semi-definite; one FFT pair (`doubled_dipole_kernel`).
-/// R2': rank-1 structure [dr_p, -dr_q]^T * [dr_p, -dr_q], positive semi-definite.
-/// The λ_sum term is skipped while λ_sum is 0.
-fn apply_chisep_operator(ws: &mut ChiSepWorkspace, op: &ChiSepOperator, dx: &[f32], out: &mut [f32]) {
-    let n = ws.n;
-    let (nx, ny, nz) = (ws.nx, ws.ny, ws.nz);
-    let (vsx, vsy, vsz) = (ws.vsx, ws.vsy, ws.vsz);
-
-    let (d_pos, d_neg) = dx.split_at(n);
-    let (out_pos, out_neg) = out.split_at_mut(n);
-
-    // TV for chi_pos: λ_para * bdiv(wG*Vr_pos*wG*fgrad(d_pos))
-    tv_term(d_pos, op.w_pos, op.lambda_para, nx, ny, nz, vsx, vsy, vsz, out_pos);
-    // TV for chi_neg: λ_dia * bdiv(wG*Vr_neg*wG*fgrad(d_neg))
-    tv_term(d_neg, op.w_neg, op.lambda_dia, nx, ny, nz, vsx, vsy, vsz, out_neg);
-
-    // `stage` holds d_pos + d_neg for the sum TV and the field-fidelity term.
-    maybe_par_iter_mut!(ws.stage).enumerate().for_each(|(i, s)| *s = d_pos[i] + d_neg[i]);
-
-    // TV for sum (d_pos + d_neg): λ_sum * bdiv(wG*Vr_sum*wG*fgrad(d_pos+d_neg)),
-    // applied equally to both components
-    if let Some(w_sum) = op.w_sum {
-        tv_term(&ws.stage, w_sum, op.lambda_sum, nx, ny, nz, vsx, vsy, vsz, &mut ws.div_buf);
-        add_to_both(out_pos, out_neg, &ws.div_buf);
-    }
-
-    // Field fidelity: λ_cpl * D²(d_pos + d_neg), SAME for both
-    ws.fft_ws.apply_dipole_inplace(&ws.stage, op.d2_kernel, &mut ws.dipole_buf, &mut ws.complex_buf);
-
-    // R2' fidelity: rank-1 Hessian [dr_p, -dr_q]^T * [dr_p, -dr_q]
-    // r2_lin = dr_p * d_pos - dr_q * d_neg
-    // out_pos += λ_cpl * dr_p * r2_lin
-    // out_neg -= λ_cpl * dr_q * r2_lin
-    let (lambda_cpl, dr_p, dr_q, mask, dip) = (op.lambda_cpl, op.dr_p, op.dr_q, op.mask, &ws.dipole_buf);
-    maybe_par_iter_mut!(out_pos).zip(maybe_par_iter_mut!(out_neg)).enumerate().for_each(|(i, (a, b))| {
-        let ff = lambda_cpl * dip[i];
-        *a += ff;
-        *b += ff;
-        if mask[i] != 0 {
-            let r2_lin = dr_p * d_pos[i] - dr_q * d_neg[i];
-            *a += lambda_cpl * dr_p * r2_lin;
-            *b -= lambda_cpl * dr_q * r2_lin;
-        }
-    });
-}
-
-/// CG solver for the doubled chi-sep system (vectors in the workspace).
-fn cg_solve_chisep(
-    ws: &mut ChiSepWorkspace,
-    op: &ChiSepOperator,
-    b: &[f32],
-    x: &mut [f32],
-    tol: f32,
-    max_iter: usize,
-) {
-    x.fill(0.0);
-
-    let mut cg_r = std::mem::take(&mut ws.cg_r);
-    let mut cg_p = std::mem::take(&mut ws.cg_p);
-    let mut cg_ap = std::mem::take(&mut ws.cg_ap);
-
-    cg_r.copy_from_slice(b);
-    cg_p.copy_from_slice(&cg_r);
-
-    let mut rsold = dot_product_f32(&cg_r, &cg_r);
-    let b_norm = dot_product_f32(b, b).sqrt();
-
-    if b_norm >= 1e-10 {
-        for _cg_iter in 0..max_iter {
-            apply_chisep_operator(ws, op, &cg_p, &mut cg_ap);
-
-            let pap = dot_product_f32(&cg_p, &cg_ap);
-            if pap.abs() < 1e-15 {
-                break;
-            }
-
-            let alpha = rsold / pap;
-            // x += α·p, r −= α·Ap (as `axpy_f32` computes them), in one pass
-            maybe_par_iter_mut!(x).zip(maybe_par_iter_mut!(cg_r)).enumerate().for_each(|(i, (x, r))| {
-                *x += alpha * cg_p[i];
-                *r += -alpha * cg_ap[i];
-            });
-
-            let rsnew = dot_product_f32(&cg_r, &cg_r);
-            if rsnew.sqrt() < tol * b_norm {
-                break;
-            }
-
-            let beta_cg = rsnew / rsold;
-            xpby(&mut cg_p, &cg_r, beta_cg);
-            rsold = rsnew;
         }
     }
+    d
+}
 
-    ws.cg_r = cg_r;
-    ws.cg_p = cg_p;
-    ws.cg_ap = cg_ap;
+/// `imerode(mask, strel('sphere', r))`: a voxel stays if every voxel of the ball of radius `r`
+/// voxels around it is in the mask, counting voxels outside the array as in the mask (MATLAB's
+/// border rule for erosion).
+fn erode_sphere(mask: &[bool], (nx, ny, nz): (usize, usize, usize), r: i64) -> Vec<bool> {
+    let mut offs = Vec::new();
+    for dz in -r..=r {
+        for dy in -r..=r {
+            for dx in -r..=r {
+                if dx * dx + dy * dy + dz * dz <= r * r {
+                    offs.push((dx, dy, dz));
+                }
+            }
+        }
+    }
+    let mut out = vec![false; mask.len()];
+    par_fill(&mut out, |p| {
+        if !mask[p] {
+            return false;
+        }
+        let (i, j, k) = ((p % nx) as i64, ((p / nx) % ny) as i64, (p / (nx * ny)) as i64);
+        offs.iter().all(|&(dx, dy, dz)| {
+            let (a, b, c) = (i + dx, j + dy, k + dz);
+            if a < 0 || b < 0 || c < 0 || a >= nx as i64 || b >= ny as i64 || c >= nz as i64 {
+                return true;
+            }
+            mask[a as usize + nx * (b as usize + ny * c as usize)]
+        })
+    });
+    out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Grid;
-    use crate::kernels::dipole::dipole_kernel;
-    use crate::fft::{fft3d_real, ifft3d_real};
 
-    fn make_sphere(nx: usize, ny: usize, nz: usize, cx: f64, cy: f64, cz: f64, r: f64) -> Vec<f64> {
-        let mut vol = vec![0.0; nx * ny * nz];
+    /// A small separable problem: a χ+ block and a χ− block in an ellipsoid, with R2′ and field
+    /// consistent with them (the field from QSM.rs's own kernel; only shapes matter here).
+    /// (field ppm, R2′ Hz, χ ppm, magnitude, N_std, mask)
+    type Problem6 = (Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>, Vec<u8>);
+
+    fn problem(n: (usize, usize, usize)) -> Problem6 {
+        let (nx, ny, nz) = n;
+        let nt = nx * ny * nz;
+        let mut chi = vec![0.0; nt];
+        let mut mask = vec![0u8; nt];
+        let mut r2p = vec![0.0; nt];
         for k in 0..nz {
             for j in 0..ny {
                 for i in 0..nx {
-                    let dx = i as f64 - cx;
-                    let dy = j as f64 - cy;
-                    let dz = k as f64 - cz;
-                    if dx * dx + dy * dy + dz * dz <= r * r {
-                        vol[i + j * nx + k * nx * ny] = 1.0;
+                    let l = i + nx * (j + ny * k);
+                    let (x, y, z) = (i as f64 - nx as f64 / 2.0, j as f64 - ny as f64 / 2.0, k as f64 - nz as f64 / 2.0);
+                    if (x / (0.4 * nx as f64)).powi(2) + (y / (0.4 * ny as f64)).powi(2) + (z / (0.4 * nz as f64)).powi(2) <= 1.0 {
+                        mask[l] = 1;
+                        let (p, q) = (if x > 1.0 { 0.05 } else { 0.0 }, if x < -1.0 { 0.03 } else { 0.0 });
+                        chi[l] = p - q;
+                        r2p[l] = 137.0 * (p + q) + 2.0;
                     }
                 }
             }
         }
-        vol
-    }
-
-    #[test]
-    fn test_chi_sep_medi_basic() {
-        let (nx, ny, nz) = (32, 32, 32);
-        let n = nx * ny * nz;
         let grid = Grid::new(nx, ny, nz, 1.0, 1.0, 1.0);
-        let bdir = (0.0, 0.0, 1.0);
-        let cf: f64 = 123.2e6; // 3T
+        let d = crate::kernels::dipole::dipole_kernel(&grid, (0.0, 0.0, 1.0));
+        let mut buf: Vec<Complex64> = chi.iter().map(|&v| Complex64::new(v, 0.0)).collect();
+        crate::fft::fft3d(&mut buf, nx, ny, nz);
+        buf.iter_mut().zip(&d).for_each(|(b, &dv)| *b *= dv);
+        crate::fft::ifft3d(&mut buf, nx, ny, nz);
+        let field: Vec<f64> = buf.iter().zip(&mask).map(|(b, &m)| b.re * m as f64).collect();
+        let mag: Vec<f64> = (0..nt).map(|l| 100.0 + (l % 7) as f64).collect();
+        let n_std: Vec<f64> = mask.iter().map(|&m| 0.01 * m as f64).collect();
+        (field, r2p, chi, mag, n_std, mask)
+    }
 
-        let chi_pos_true_ppm = 0.05;
-        let chi_neg_true_ppm = -0.03;
-
-        let sphere_inner = make_sphere(nx, ny, nz, 16.0, 16.0, 16.0, 4.0);
-        let sphere_outer = make_sphere(nx, ny, nz, 16.0, 16.0, 16.0, 8.0);
-        let brain_mask = make_sphere(nx, ny, nz, 16.0, 16.0, 16.0, 12.0);
-
-        let mut chi_pos_ppm = vec![0.0f64; n];
-        let mut chi_neg_ppm = vec![0.0f64; n];
-        for i in 0..n {
-            if sphere_inner[i] > 0.5 {
-                chi_pos_ppm[i] = chi_pos_true_ppm;
-            }
-            if sphere_outer[i] > 0.5 && sphere_inner[i] < 0.5 {
-                chi_neg_ppm[i] = chi_neg_true_ppm;
-            }
+    fn run(
+        n: (usize, usize, usize),
+        csf: bool,
+        params: &ChiSepMediParams,
+    ) -> (Result<ChiSepMaps, InputError>, usize, Vec<u8>) {
+        let (field, r2p, chi, mag, n_std, mask) = problem(n);
+        let mut mask_csf = vec![0u8; mask.len()];
+        if csf {
+            let c = n.0 / 2 + n.0 * (n.1 / 2 + n.1 * (n.2 / 2));
+            mask_csf[c] = 1;
+            mask_csf[c + 1] = 1;
         }
-
-        // Forward model: field_ppm = D * chi_total_ppm (library units convention)
-        let chi_total_ppm: Vec<f64> = chi_pos_ppm.iter()
-            .zip(chi_neg_ppm.iter())
-            .map(|(&p, &n)| p + n)
-            .collect();
-        let d = dipole_kernel(&grid, bdir);
-        let chi_fft = fft3d_real(&chi_total_ppm, nx, ny, nz);
-        let field_fft: Vec<_> = chi_fft.iter()
-            .zip(d.iter())
-            .map(|(&c, &dk)| c * dk)
-            .collect();
-        let local_field = ifft3d_real(&field_fft, nx, ny, nz);
-
-        // R2'(Hz) = Dr_pos * |chi+_ppm| + Dr_neg * |chi-_ppm|
-        let dr_pos: f64 = 114.0;
-        let dr_neg: f64 = 30.0;
-        let r2prime: Vec<f64> = (0..n).map(|i| {
-            dr_pos * chi_pos_ppm[i].abs() + dr_neg * chi_neg_ppm[i].abs()
-        }).collect();
-
-        let mask: Vec<u8> = brain_mask.iter()
-            .map(|&v| if v > 0.5 { 1 } else { 0 })
-            .collect();
-
-        let magnitude: Vec<f64> = (0..n).map(|i| {
-            if mask[i] == 0 { return 0.0; }
-            let base = 100.0;
-            if sphere_inner[i] > 0.5 {
-                base * 1.5
-            } else if sphere_outer[i] > 0.5 {
-                base * 0.7
-            } else {
-                base
-            }
-        }).collect();
-
-        let params = ChiSepParams {
-            cf,
-            lambda_para: 1000.0, lambda_dia: 1000.0, lambda_cpl: 100.0,
-            dr_pos, dr_neg,
-            percentage: 0.3, cg_tol: 0.01, cg_max_iter: 100, max_iter: 10, tol: 0.1,
+        let inputs = ChiSepMediInputs {
+            magnitude: &mag, local_field: &field, r2prime: &r2p, n_std: &n_std, qsm: &chi, mask: &mask, mask_csf: &mask_csf,
         };
-        let (chi_pos_out, chi_neg_out, chi_total_out) = chi_sep_medi(
-            &local_field, &r2prime, &magnitude, &mask,
-            &grid, bdir, &params,
-            |_, _| {},
-        );
+        let grid = Grid::new(n.0, n.1, n.2, 1.0, 1.0, 1.0);
+        let mut iters = 0;
+        let r = chi_sep_medi(&inputs, &grid, (0.0, 0.0, 1.0), params, |i, _| iters = i);
+        (r, iters, mask)
+    }
 
-        // chi+ should be non-negative, chi- non-positive
-        for i in 0..n {
-            if mask[i] != 0 {
-                assert!(chi_pos_out[i] >= -1e-10,
-                    "chi+ should be non-negative at voxel {}, got {}", i, chi_pos_out[i]);
-                assert!(chi_neg_out[i] <= 1e-10,
-                    "chi- should be non-positive at voxel {}, got {}", i, chi_neg_out[i]);
+    #[test]
+    fn defaults_are_the_toolbox_values() {
+        let p = ChiSepMediParams::default();
+        assert_eq!((p.lambda, p.lambda_csf, p.pad, p.tol, p.max_iter, p.cg_tol, p.cg_max_iter), (1.0, 1.0, 5, 0.03, 30, 0.05, 100));
+        assert_eq!((p.dr_pos, p.dr_neg), (None, None));
+        let (dp, dn) = ChiSepMediParams { cf: 127.74e6, ..p.clone() }.dr();
+        assert_eq!((dp, dn), (141.7241379310345, 141.7241379310345));
+        let (dp, dn) = ChiSepMediParams { dr_pos: Some(120.0), dr_neg: Some(150.0), ..p }.dr();
+        assert_eq!((dp, dn), (120.0, 150.0));
+    }
+
+    #[test]
+    fn param_errors_name_the_parameter() {
+        let bad = [
+            ChiSepMediParams { cf: 0.0, ..Default::default() },
+            ChiSepMediParams { dr_pos: Some(-1.0), ..Default::default() },
+            ChiSepMediParams { dr_neg: Some(f64::NAN), ..Default::default() },
+            ChiSepMediParams { lambda: -1.0, ..Default::default() },
+            ChiSepMediParams { lambda_csf: f64::INFINITY, ..Default::default() },
+            ChiSepMediParams { tol: -0.1, ..Default::default() },
+            ChiSepMediParams { cg_tol: f64::NAN, ..Default::default() },
+            ChiSepMediParams { max_iter: 0, ..Default::default() },
+        ];
+        let names = ["cf", "dr_pos", "dr_neg", "lambda", "lambda_csf", "tol", "cg_tol", "max_iter"];
+        for (p, name) in bad.iter().zip(names) {
+            let e = p.validate().unwrap_err().to_string();
+            assert!(e.starts_with(&format!("χ-separation MEDI {name} = ")), "{e}");
+        }
+        assert!(ChiSepMediParams::default().validate().is_ok());
+    }
+
+    #[test]
+    fn wrong_buffer_length_is_an_input_error() {
+        let n = (8, 8, 6);
+        let nt = n.0 * n.1 * n.2;
+        let v = vec![0.0; nt];
+        let short = vec![0.0; nt - 1];
+        let m = vec![1u8; nt];
+        let grid = Grid::new(n.0, n.1, n.2, 1.0, 1.0, 1.0);
+        let inputs = ChiSepMediInputs { magnitude: &v, local_field: &v, r2prime: &short, n_std: &v, qsm: &v, mask: &m, mask_csf: &m };
+        let e = chi_sep_medi(&inputs, &grid, (0.0, 0.0, 1.0), &ChiSepMediParams::default(), |_, _| {}).unwrap_err();
+        assert_eq!(e.to_string(), format!("χ-separation MEDI r2prime has {} values, expected {nt}", nt - 1));
+    }
+
+    #[test]
+    fn sources_have_their_signs_and_runs_at_least_six_iterations() {
+        let (r, iters, mask) = run((16, 14, 10), true, &ChiSepMediParams::default());
+        let (p, q, t) = r.unwrap();
+        assert!(iters >= CHI_SEP_MEDI_MIN_ITER, "{iters}");
+        for l in 0..p.len() {
+            assert!(p[l] >= 0.0 && q[l] <= 0.0 && t[l] == p[l] + q[l]);
+            if mask[l] == 0 {
+                assert!(p[l] == 0.0 && q[l] == 0.0);
             }
         }
-
-        for i in 0..n {
-            let diff = (chi_total_out[i] - chi_pos_out[i] - chi_neg_out[i]).abs();
-            assert!(diff < 1e-10, "chi_total != chi+ + chi- at voxel {}", i);
-        }
-
-        let pos_max = chi_pos_out.iter().cloned().fold(0.0_f64, f64::max);
-        let neg_min = chi_neg_out.iter().cloned().fold(0.0_f64, f64::min);
-        assert!(pos_max > 0.0, "chi+ should have positive values, max={}", pos_max);
-        assert!(neg_min < 0.0, "chi- should have negative values, min={}", neg_min);
+        assert!(p.iter().any(|&v| v > 0.01) && q.iter().any(|&v| v < -0.01));
+        // max_iter below the minimum caps it
+        let (_, iters, _) = run((16, 14, 10), true, &ChiSepMediParams { max_iter: 2, ..Default::default() });
+        assert_eq!(iters, 2);
     }
 
-    /// The fused TV term equals the three-pass `fgrad`, weighting, `bdiv` it replaced, bitwise,
-    /// on a grid with unequal sides and voxel sizes (and a single-plane one).
+    /// The toolbox turns every value NaN with a CSF mask that has no voxels; here it means no CSF
+    /// term, and the result is the same as with a mask that never touches a voxel's update.
     #[test]
-    fn tv_term_equals_unfused_passes() {
-        for &(nx, ny, nz) in &[(13usize, 9usize, 7usize), (6, 5, 1), (1, 4, 9)] {
-            let n = nx * ny * nz;
-            let (vsx, vsy, vsz) = (0.9f32, 1.1f32, 1.3f32);
-            let x: Vec<f32> = (0..n).map(|i| (i as f32 * 0.37).sin()).collect();
-            let vr: Vec<f32> = (0..n).map(|i| 1.0 + (i as f32 * 0.21).cos().abs()).collect();
-            let m = |s: usize| -> Vec<f32> { (0..n).map(|i| !(i * s).is_multiple_of(5) as u8 as f32).collect() };
-            let (mx, my, mz) = (m(3), m(7), m(11));
-            let lambda = 30.0f32;
-
-            let (mut gx, mut gy, mut gz) = (vec![0.0f32; n], vec![0.0f32; n], vec![0.0f32; n]);
-            let (mut rx, mut ry, mut rz) = (vec![0.0f32; n], vec![0.0f32; n], vec![0.0f32; n]);
-            let mut div = vec![0.0f32; n];
-            fgrad_periodic_inplace_f32(&mut gx, &mut gy, &mut gz, &x, nx, ny, nz, vsx, vsy, vsz);
-            apply_gradient_weights_f32(&mut rx, &mut ry, &mut rz, &mx, &my, &mz, &vr, &gx, &gy, &gz);
-            bdiv_periodic_inplace_f32(&mut div, &rx, &ry, &rz, nx, ny, nz, vsx, vsy, vsz);
-            let want: Vec<f32> = div.iter().map(|&d| lambda * d).collect();
-
-            let mut w: TvWeights = [vec![0.0; n], vec![0.0; n], vec![0.0; n]];
-            tv_weights(&mx, &my, &mz, &vr, &mut w);
-            let mut got = vec![f32::NAN; n];
-            tv_term(&x, &w, lambda, nx, ny, nz, vsx, vsy, vsz, &mut got);
-            assert_eq!(got, want, "{:?}", (nx, ny, nz));
-        }
+    fn empty_csf_mask_means_no_csf_term() {
+        let (r, _, _) = run((16, 14, 10), false, &ChiSepMediParams::default());
+        let (p, q, _) = r.unwrap();
+        assert!(p.iter().chain(&q).all(|v| v.is_finite()));
+        let (r0, _, _) = run((16, 14, 10), false, &ChiSepMediParams { lambda_csf: 0.0, ..Default::default() });
+        assert_eq!(r0.unwrap().0, p);
     }
 
-    /// One pass with `doubled_dipole_kernel` is the two dipole passes it replaces, up to f32
-    /// rounding, on even-sized axes with B0 oblique to them (where D is not even, so the plain
-    /// D² would not be).
+    /// On an even grid MEDI's k-space kernel is the usual unshifted kernel; on an odd axis its
+    /// grid misses k = 0 by half a bin.
     #[test]
-    fn doubled_dipole_kernel_equals_two_passes() {
-        let (nx, ny, nz) = (12, 10, 8);
-        let n = nx * ny * nz;
-        let grid = Grid::new(nx, ny, nz, 1.0, 1.1, 1.3);
-        let d = dipole_kernel_f32(&grid, (0.3, -0.2, 0.93));
-        let x: Vec<f32> = (0..n).map(|i| (i as f32 * 0.37).sin() + (i as f32 * 0.05).cos()).collect();
-        let mut ws = Fft3dWorkspaceF32::new(nx, ny, nz);
-        let mut buf = vec![Complex32::new(0.0, 0.0); n];
-        let (mut once, mut twice) = (vec![0.0f32; n], vec![0.0f32; n]);
-        ws.apply_dipole_inplace(&x, &d, &mut once, &mut buf);
-        let first = once.clone();
-        ws.apply_dipole_inplace(&first, &d, &mut twice, &mut buf);
-        ws.apply_dipole_inplace(&x, &doubled_dipole_kernel(&d, nx, ny, nz), &mut once, &mut buf);
-        let scale = twice.iter().fold(0.0f32, |a, &v| a.max(v.abs()));
-        let diff = once.iter().zip(&twice).fold(0.0f32, |a, (&p, &q)| a.max((p - q).abs()));
-        assert!(diff <= 1e-5 * scale, "max |Δ| {diff:e} vs max {scale}");
-        let plain: Vec<f32> = d.iter().map(|&v| v * v).collect();
-        ws.apply_dipole_inplace(&x, &plain, &mut once, &mut buf);
-        let diff_plain = once.iter().zip(&twice).fold(0.0f32, |a, (&p, &q)| a.max((p - q).abs()));
-        assert!(diff_plain > 1e-3 * scale, "D is even here after all: {diff_plain:e}");
+    fn toolbox_kernel_is_the_fft_kernel_on_even_grids_and_half_a_bin_off_on_odd() {
+        let vs = [0.8, 1.0, 1.5];
+        let h = (0.1, -0.2, 0.97);
+        let d = toolbox_dipole_kernel((8, 6, 4), vs, h);
+        let grid = Grid::new(8, 6, 4, vs[0], vs[1], vs[2]);
+        let norm = (h.0 * h.0 + h.1 * h.1 + h.2 * h.2).sqrt();
+        let r = crate::kernels::dipole::dipole_kernel(&grid, (h.0 / norm, h.1 / norm, h.2 / norm));
+        let rn = toolbox_dipole_kernel((8, 6, 4), vs, (h.0 / norm, h.1 / norm, h.2 / norm));
+        assert!(rn.iter().zip(&r).all(|(a, b)| (a - b).abs() < 1e-12));
+        assert_eq!(d[0], 0.0);
+        let odd = toolbox_dipole_kernel((5, 6, 4), [1.0; 3], (0.0, 0.0, 1.0));
+        // no exact zero frequency on the odd axis: no entry is the k = 0 fill value except by
+        // coincidence, and index 0 holds k_x = -0.5 + 2 = ... the fftshift of -2.5..1.5
+        assert!(odd[0] != 0.0);
     }
 
-    fn corr(a: &[f64], b: &[f64], mask: &[u8]) -> f64 {
-        let idx: Vec<usize> = (0..a.len()).filter(|&i| mask[i] != 0).collect();
-        let n = idx.len() as f64;
-        let ma = idx.iter().map(|&i| a[i]).sum::<f64>() / n;
-        let mb = idx.iter().map(|&i| b[i]).sum::<f64>() / n;
-        let (mut ab, mut aa, mut bb) = (0.0, 0.0, 0.0);
-        for &i in &idx {
-            let (x, y) = (a[i] - ma, b[i] - mb);
-            ab += x * y;
-            aa += x * x;
-            bb += y * y;
-        }
-        ab / (aa * bb).sqrt()
-    }
-
-    /// The two sources must come back as two different maps, each where it was put.
-    ///
-    /// A paramagnetic and a diamagnetic sphere side by side at 7 T. Before the R2' term carried
-    /// Shin 2021's weight (1 against the field term's (2π)²) it was auto-scaled ~120x above the
-    /// field term, and the solver met R2' alone: χ+ and |χ−| both came back ≈ R2'/2Dr, i.e. the
-    /// same map, with |χ−| bright in the paramagnetic sphere.
     #[test]
-    fn test_chi_sep_medi_separates_sources() {
-        let (nx, ny, nz) = (32, 32, 32);
-        let n = nx * ny * nz;
-        let grid = Grid::new(nx, ny, nz, 1.0, 1.0, 1.0);
-        let bdir = (0.0, 0.0, 1.0);
-        let cf: f64 = crate::constants::GAMMA_BAR_HZ_PER_T * 7.0;
-        let dr = super::DR_SHIN_2021;
-
-        let para = make_sphere(nx, ny, nz, 10.0, 16.0, 16.0, 4.0);
-        let dia = make_sphere(nx, ny, nz, 22.0, 16.0, 16.0, 4.0);
-        let brain = make_sphere(nx, ny, nz, 16.0, 16.0, 16.0, 13.0);
-        let mask: Vec<u8> = brain.iter().map(|&v| (v > 0.5) as u8).collect();
-        let gt_pos: Vec<f64> = para.iter().map(|&v| if v > 0.5 { 0.1 } else { 0.0 }).collect();
-        let gt_neg: Vec<f64> = dia.iter().map(|&v| if v > 0.5 { -0.05 } else { 0.0 }).collect();
-
-        let total: Vec<f64> = gt_pos.iter().zip(&gt_neg).map(|(p, q)| p + q).collect();
-        let d = dipole_kernel(&grid, bdir);
-        let f: Vec<_> = fft3d_real(&total, nx, ny, nz).iter().zip(&d).map(|(&c, &k)| c * k).collect();
-        let field = ifft3d_real(&f, nx, ny, nz);
-        let r2prime: Vec<f64> = (0..n).map(|i| dr * (gt_pos[i] - gt_neg[i])).collect();
-        let magnitude: Vec<f64> = mask.iter().map(|&m| 100.0 * m as f64).collect();
-
-        let params = ChiSepParams { cf, ..ChiSepParams::default() };
-        let (chi_pos, chi_neg, _) =
-            chi_sep_medi(&field, &r2prime, &magnitude, &mask, &grid, bdir, &params, |_, _| {});
-        let dia_mag: Vec<f64> = chi_neg.iter().map(|v| -v).collect();
-        let gt_dia: Vec<f64> = gt_neg.iter().map(|v| -v).collect();
-
-        let mean_in = |v: &[f64], region: &[f64]| {
-            let idx: Vec<usize> = (0..n).filter(|&i| region[i] > 0.5).collect();
-            idx.iter().map(|&i| v[i]).sum::<f64>() / idx.len() as f64
-        };
-        let same = corr(&chi_pos, &dia_mag, &mask);
-        let pos_own = corr(&chi_pos, &gt_pos, &mask);
-        let neg_own = corr(&dia_mag, &gt_dia, &mask);
-        println!("corr(χ+,|χ−|) {same:.3}  χ+ vs truth {pos_own:.3}  |χ−| vs truth {neg_own:.3}");
-        println!(
-            "χ+ in para/dia sphere {:.4}/{:.4}  |χ−| in para/dia sphere {:.4}/{:.4}",
-            mean_in(&chi_pos, &para), mean_in(&chi_pos, &dia),
-            mean_in(&dia_mag, &para), mean_in(&dia_mag, &dia)
-        );
-        assert!(same < 0.3, "χ+ and |χ−| are the same map: corr {same:.3}");
-        assert!(pos_own > 0.7, "χ+ vs its truth {pos_own:.3}");
-        assert!(neg_own > 0.7, "|χ−| vs its truth {neg_own:.3}");
-        assert!(mean_in(&chi_pos, &para) > 3.0 * mean_in(&chi_pos, &dia), "χ+ not concentrated in the paramagnetic sphere");
-        assert!(mean_in(&dia_mag, &dia) > 3.0 * mean_in(&dia_mag, &para), "|χ−| not concentrated in the diamagnetic sphere");
+    fn erosion_counts_voxels_outside_the_array_as_inside() {
+        let dims = (9, 9, 9);
+        let full = vec![true; 729];
+        assert!(erode_sphere(&full, dims, 3).iter().all(|&v| v));
+        let mut holed = full.clone();
+        holed[4 + 9 * (4 + 9 * 4)] = false;
+        let e = erode_sphere(&holed, dims, 3);
+        // every voxel within distance 3 of the hole is removed, the rest stay
+        for k in 0..9i64 {
+            for j in 0..9i64 {
+                for i in 0..9i64 {
+                    let d2 = (i - 4).pow(2) + (j - 4).pow(2) + (k - 4).pow(2);
+                    assert_eq!(e[(i + 9 * (j + 9 * k)) as usize], d2 > 9, "({i},{j},{k})");
+                }
+            }
+        }
     }
 }
