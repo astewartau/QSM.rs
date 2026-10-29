@@ -85,7 +85,7 @@ pub fn run_bg_removal(
         BgRemovalAlgorithm::Ismv => {
             crate::bgremove::ismv(
                 field_ppm, mask, &grid, &config.ismv, progress,
-            )
+            )?
         }
         BgRemovalAlgorithm::Sharp => {
             crate::bgremove::sharp(

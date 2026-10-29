@@ -82,7 +82,7 @@ pub use sharp::{sharp, SharpParams, SharpVariant};
 pub use resharp::{resharp, ResharpParams};
 pub use vsharp::{vsharp, VsharpBall, VsharpGrid, VsharpParams};
 pub use pdf::{pdf, DipoleKernelSpace, PdfParams};
-pub use ismv::{ismv, IsmvParams};
+pub use ismv::{ismv, IsmvParams, IsmvVariant};
 pub use lbv::{lbv, LbvParams};
 pub use sdf::{sdf, sdf_curvature, sdf_simple, SdfParams};
 pub use iharperella::{
