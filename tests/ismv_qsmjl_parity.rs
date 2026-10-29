@@ -21,13 +21,13 @@ struct Case {
 
 fn cases() -> [Case; 3] {
     [
-        Case { name: "QSM.jl defaults", dims: [40, 36, 32], vs: [1.0; 3], params: IsmvParams::default() },
-        Case { name: "QSM.jl defaults, anisotropic", dims: [32, 28, 24], vs: [0.9, 1.0, 1.3], params: IsmvParams::default() },
+        Case { name: "QSM.jl defaults", dims: [40, 36, 32], vs: [1.0; 3], params: IsmvParams::qsmjl() },
+        Case { name: "QSM.jl defaults, anisotropic", dims: [32, 28, 24], vs: [0.9, 1.0, 1.3], params: IsmvParams::qsmjl() },
         Case {
             name: "r 4 mm, tol 1e-6, 50 iterations",
             dims: [40, 36, 32],
             vs: [1.0; 3],
-            params: IsmvParams { radius: Some(4.0), tol: 1e-6, max_iter: 50 },
+            params: IsmvParams { radius: Some(4.0), tol: 1e-6, max_iter: Some(50), ..IsmvParams::qsmjl() },
         },
     ]
 }
@@ -87,7 +87,7 @@ fn ismv_matches_qsm_jl_to_rounding() {
     for (case, (want_mask, want)) in cases.iter().zip(load_qsmjl(&cases)) {
         let (field, mask) = phantom(case.dims, case.vs);
         let grid = Grid::new(case.dims[0], case.dims[1], case.dims[2], case.vs[0], case.vs[1], case.vs[2]);
-        let (local, eroded) = ismv(&field, &mask, &grid, &case.params, |_, _| {});
+        let (local, eroded) = ismv(&field, &mask, &grid, &case.params, |_, _| {}).expect("ismv");
         assert_eq!(eroded, want_mask, "{}: eroded mask", case.name);
         let got: Vec<f64> = (0..local.len()).filter(|&l| mask[l] != 0).map(|l| local[l]).collect();
         assert_eq!(got.len(), want.len(), "{}: mask voxels", case.name);
