@@ -143,6 +143,7 @@ use std::f64::consts::PI;
 
 use crate::error::{check_len, InputError};
 use crate::solvers::lsq_trr::{lsq_trust_region_reflective, LsqTrrOptions, LsqTrrWorkspace};
+use crate::utils::fdlibm;
 
 /// Gyromagnetic constant used by the DECOMPOSE reference: `42.58 · 2π` — the reference
 /// implementation's value (`signalModel.m`), not `crate::constants`. Keep it.
@@ -301,15 +302,15 @@ pub fn decompose(
             for e in 0..ne {
                 let m = magnitude[i * ne + e] / gmax;
                 let ph = -(2.0 / 3.0) * chi_per_echo[i * ne + e] * GAMMA * b0 * te[e];
-                let y = (m * ph.cos(), m * ph.sin());
+                let y = (m * fdlibm::cos(ph), m * fdlibm::sin(ph));
                 ws.yc[e] = (y.0, -y.1);
                 sum_re += ws.yc[e].0;
                 sum_im += ws.yc[e].1;
                 // log(conj y) for stages 2 & 3: MATLAB's `log`, on the principal branch, unless
                 // `unwrap_phase`, where the synthesized phase is used as it is (see
                 // `unwrap_near`).
-                let arg = if params.unwrap_phase { -ph } else { ws.yc[e].1.atan2(ws.yc[e].0) };
-                ws.logyc[e] = (ws.yc[e].0.hypot(ws.yc[e].1).ln(), arg);
+                let (lr, la) = matlab_log(ws.yc[e]);
+                ws.logyc[e] = (lr, if params.unwrap_phase { -ph } else { la });
             }
             // The authors skip a voxel whose `sum(ydata)` is zero.
             if sum_re == 0.0 && sum_im == 0.0 {
@@ -431,7 +432,7 @@ fn fit_voxel(
         let mut prev = 0.0;
         for e in 0..ne {
             let z = signal_model(te[e], q, b0);
-            let (lr, la) = (z.0.hypot(z.1).ln(), z.1.atan2(z.0));
+            let (lr, la) = matlab_log(z);
             let ang = if e == 0 || !unwrap { la } else { unwrap_near(la, prev) };
             prev = ang;
             out[e] = lr - logyc[e].0;
@@ -496,13 +497,20 @@ fn fit_voxel(
     p
 }
 
+/// MATLAB's complex `log(z)` as `(log|z|, angle z)`: FDLIBM's `atan2` and MATLAB's rule for the
+/// real part ([`fdlibm::log_abs`]), bit for bit.
+#[inline]
+fn matlab_log(z: (f64, f64)) -> (f64, f64) {
+    (fdlibm::log_abs(z.0, z.1), fdlibm::atan2(z.1, z.0))
+}
+
 /// `C · exp(−(decay + i·freq)·t)` evaluated as MATLAB does it: `exp` of the complex exponent
 /// `(−decay·t, −freq·t)` is `e^{re}·(cos im, sin im)`, then scaled by `C`.
 #[inline]
 fn compartment(amp: f64, decay: f64, freq: f64, t: f64) -> (f64, f64) {
-    let e = (-decay * t).exp();
+    let e = fdlibm::exp(-decay * t);
     let im = -freq * t;
-    (amp * (e * im.cos()), amp * (e * im.sin()))
+    (amp * (e * fdlibm::cos(im)), amp * (e * fdlibm::sin(im)))
 }
 
 /// `a = 2π·γ·B0 / (9√3)` (`signalModel.m`).
@@ -517,7 +525,7 @@ fn signal_model(t: f64, p: &Fit, b0: f64) -> (f64, f64) {
     let a = broadening(b0);
     let t1 = compartment(p.c[0], a * p.chi[0] + p.r0, (2.0 / 3.0) * p.chi[0] * GAMMA * b0, t);
     let t2 = compartment(p.c[1], -a * p.chi[1] + p.r0, (2.0 / 3.0) * p.chi[1] * GAMMA * b0, t);
-    let t3 = p.c[2] * (-p.r0 * t).exp();
+    let t3 = p.c[2] * fdlibm::exp(-p.r0 * t);
     (t1.0 + t2.0 + t3, t1.1 + t2.1)
 }
 
@@ -526,7 +534,7 @@ fn signal_model(t: f64, p: &Fit, b0: f64) -> (f64, f64) {
 fn psc_model(t: f64, p: &Fit, b0: f64) -> (f64, f64) {
     let a = broadening(b0);
     let t1 = compartment(p.c[0], a * p.chi[0] + p.r0, (2.0 / 3.0) * p.chi[0] * GAMMA * b0, t);
-    let t3 = (p.c[2] + p.c[1]) * (-p.r0 * t).exp();
+    let t3 = (p.c[2] + p.c[1]) * fdlibm::exp(-p.r0 * t);
     (t1.0 + t3, t1.1)
 }
 
@@ -536,7 +544,7 @@ fn psc_model(t: f64, p: &Fit, b0: f64) -> (f64, f64) {
 fn dsc_model(t: f64, p: &Fit, b0: f64) -> (f64, f64) {
     let a = broadening(b0);
     let t2 = compartment(p.c[1], -a * p.chi[1] + p.r0, (2.0 / 3.0) * -p.chi[1] * GAMMA * b0, t);
-    let t3 = (p.c[2] + p.c[0]) * (-p.r0 * t).exp();
+    let t3 = (p.c[2] + p.c[0]) * fdlibm::exp(-p.r0 * t);
     (t2.0 + t3, t2.1)
 }
 
@@ -569,7 +577,7 @@ fn recon_phase(te: &[f64], den: f64, unwrap: bool, model: impl Fn(f64) -> (f64, 
     let mut prev = 0.0;
     for (e, &t) in te.iter().enumerate() {
         let z = model(t);
-        let raw = z.1.atan2(z.0);
+        let raw = fdlibm::atan2(z.1, z.0);
         let ang = if e == 0 || !unwrap { raw } else { unwrap_near(raw, prev) };
         prev = ang;
         s += ang;
@@ -621,13 +629,10 @@ mod tests {
         let yc: Vec<(f64, f64)> = (0..ne)
             .map(|e| {
                 let ph = -(2.0 / 3.0) * chi[e] * GAMMA * b0 * te[e];
-                (mag[e] / gmax * ph.cos(), -(mag[e] / gmax * ph.sin()))
+                (mag[e] / gmax * fdlibm::cos(ph), -(mag[e] / gmax * fdlibm::sin(ph)))
             })
             .collect();
-        let logyc: Vec<(f64, f64)> = yc
-            .iter()
-            .map(|&z| (z.0.hypot(z.1).ln(), z.1.atan2(z.0)))
-            .collect();
+        let logyc: Vec<(f64, f64)> = yc.iter().map(|&z| matlab_log(z)).collect();
         let mut ws = StageSolvers::new(2 * ne);
         let p = fit_voxel(&te, &yc, &logyc, b0, &params, &mut ws);
         let den = (2.0 / 3.0) * GAMMA * b0 * te.iter().sum::<f64>();
@@ -848,14 +853,12 @@ mod tests {
         let (mut ok, mut total) = (0, 0);
         let mut worst: Vec<(f64, String)> = Vec::new();
         let mut by_stage = [[0usize; 2]; 3];
+        let mut bit_same = [0usize; 3];
         let only = std::env::var("DECOMPOSE_ONLY").ok();
         for call in calls.iter().filter(|c| c.stage.is_some() && only.as_deref().is_none_or(|o| o == c.tag)) {
             let (v, _, st, fx) = call.stage.unwrap();
             let yc = yv(v);
-            let logyc: Vec<(f64, f64)> = yc
-                .iter()
-                .map(|z| (z.0.hypot(z.1).ln(), z.1.atan2(z.0)))
-                .collect();
+            let logyc: Vec<(f64, f64)> = yc.iter().map(|&z| matlab_log(z)).collect();
             let q = Fit {
                 c: [fx[3], fx[4], fx[5]],
                 r0: fx[2],
@@ -863,9 +866,9 @@ mod tests {
             };
             let log_resid = |q: &Fit, out: &mut [f64]| {
                 for e in 0..ne {
-                    let z = signal_model(te[e], q, b0);
-                    out[e] = z.0.hypot(z.1).ln() - logyc[e].0;
-                    out[ne + e] = -z.1.atan2(z.0) - -logyc[e].1;
+                    let (lr, la) = matlab_log(signal_model(te[e], q, b0));
+                    out[e] = lr - logyc[e].0;
+                    out[ne + e] = -la - -logyc[e].1;
                 }
             };
             let r = match st {
@@ -894,6 +897,12 @@ mod tests {
             let d = compare(call, &r, 1e-6);
             total += 1;
             let good = d.same_counts && d.same_exit && d.first_divergence.is_none();
+            if d.first_bit.is_none() {
+                bit_same[st - 1] += 1;
+            }
+            if std::env::var("DECOMPOSE_BITS").is_ok() {
+                eprintln!("BITS {} {} {:?} {}", d.tag, st, d.first_bit, good);
+            }
             by_stage[st - 1][usize::from(good)] += 1;
             if good {
                 ok += 1;
@@ -911,5 +920,6 @@ mod tests {
             eprintln!("{}", w.1);
         }
         eprintln!("{ok} of {total} stage calls identical (counts, exit flag, every evaluation to 1e-6); by stage [differ, same]: {by_stage:?}");
+        eprintln!("bit-identical throughout (every evaluation point and sum of squares) by stage: {bit_same:?}");
     }
 }

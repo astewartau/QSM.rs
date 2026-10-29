@@ -171,6 +171,9 @@ pub struct Diff {
     pub first_divergence: Option<usize>,
     /// Largest relative difference over the evaluation points both have.
     pub max_eval_rel: f64,
+    /// First evaluation whose point or sum of squares differs in any bit (or that only one side
+    /// made), if any: `None` means the two runs are bit-identical throughout.
+    pub first_bit: Option<usize>,
     /// Relative difference of the final x.
     pub x_rel: f64,
     pub matlab: (i32, usize, usize),
@@ -190,6 +193,15 @@ pub fn compare(call: &Call, r: &Replay, tol: f64) -> Diff {
     if first.is_none() && call.evals.len() != r.evals.len() {
         first = Some(call.evals.len().min(r.evals.len()));
     }
+    let bits = |v: &[f64]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+    let mut first_bit = call
+        .evals
+        .iter()
+        .zip(&r.evals)
+        .position(|(a, b)| bits(&a.0) != bits(&b.0) || a.1.to_bits() != b.1.to_bits());
+    if first_bit.is_none() && call.evals.len() != r.evals.len() {
+        first_bit = Some(call.evals.len().min(r.evals.len()));
+    }
     let x_rel = vrel(&call.x, &r.x);
     let rust = (
         r.report.exit.matlab_exitflag(),
@@ -203,6 +215,7 @@ pub fn compare(call: &Call, r: &Replay, tol: f64) -> Diff {
         same_exit: matlab.0 == rust.0,
         first_divergence: first,
         max_eval_rel: maxr,
+        first_bit,
         x_rel,
         matlab,
         rust,

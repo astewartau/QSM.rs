@@ -75,21 +75,37 @@
 //!
 //! The 2×2 trust-region subproblem is solved to machine precision; MATLAB's steps on the
 //! trust-region boundary have `‖ŝ‖` within ~1e-13 of Δ, so it solves the secular equation to a
-//! tolerance, and steps agree to ~1e-13 rather than bit for bit. Beyond that the residuals
-//! themselves differ: MATLAB's and Rust's `exp`, `cos`, `log` and `atan2` disagree in the last
-//! bit for some inputs, and a forward difference divides that by `h ≈ 1.5e-8`, so Jacobians
-//! agree to ~1e-8 and iterates to ~1e-9. Where a Jacobian column is pure rounding noise (a
-//! parameter the residual does not depend on to within rounding, such as an amplitude of 1e-11),
-//! that noise decides the step on both sides and the two runs part.
+//! tolerance, and steps agree to ~1e-13 rather than bit for bit.
+//!
+//! **Where the last bits still differ.** A residual written with MATLAB's elementary functions
+//! ([`crate::utils::fdlibm`]: MATLAB R2023b's `exp`, `log`, `sin`, `cos`, `atan2` and `hypot` are
+//! FDLIBM 5.3's, bit for bit) is evaluated identically on both sides, so `F` and the
+//! finite-difference `J` are bit-identical at every point the two runs share. The first quantity
+//! that differs is then the trial step. MATLAB's step solves the same model, but with a forward
+//! error of about `eps·cond(M̂)` in the model's weakest direction (on exactly representable
+//! linear problems, `scripts/lsq_trr_matlab/lin_probe.m`: 30–4000 ulps at `cond(M̂)` = 10²–10⁴,
+//! where this port's direct solve is within an ulp or two of the exact rational answer). That is
+//! the signature of solving in a rotated basis (an eigendecomposition of the reduced matrix, for
+//! one). No combination tried here of a QR or normal-equation Newton step, a Gram–Schmidt, QR
+//! or SVD basis, and an eigen or direct 2×2 solve reproduces MATLAB's bits, and MATLAB's dense linear algebra is MKL's,
+//! whose reduction orders are not documented (`J'*F` and `J'*J` match no sequential, lane-split
+//! or pairwise order tried; `sum` is sequential and `norm` matches reference `dnrm2` on 98 % of
+//! inputs). On a well-determined problem the difference stays at that level and both runs stop at
+//! the same solution to the stopping tolerance; where a Jacobian column is nearly rank-deficient
+//! (a parameter the residual barely depends on, such as an amplitude of 1e-11), it decides the
+//! path and the two runs part.
 //!
 //! **Agreement** (`tests/data/lsq_trr_matlab_generic.txt` in the tests here; the DECOMPOSE trace,
 //! 34 MB, is replayed by `separation::decompose`'s ignored `decompose_stages_match_matlab`): on the 11340 `lsqcurvefit` calls of the
 //! authors' DECOMPOSE fit on the 378-voxel QSM-CI fixture, each started from MATLAB's own x0 and
-//! fixed parameters, 10505 (92.6 %) take the same iterations, function evaluations and exit flag
+//! fixed parameters, 10696 (94.3 %) take the same iterations, function evaluations and exit flag
 //! with every evaluation point within 1e-6: stage 2 (one parameter) 3780 of 3780, stage 1
-//! 3264 of 3780 and stage 3 3461 of 3780. Of the calls whose problem is not degenerate (no
-//! amplitude or χ below 1e-6), 2354 of 2374 (stage 1) and 2107 of 2268 (stage 3) agree; the
-//! rest sit next to such a degenerate parameter. On the generic probe problems, 11 of 16 agree
+//! 3265 of 3780 and stage 3 3651 of 3780 (with the platform's `exp`/`log`/`atan2` in the
+//! residual instead of FDLIBM's: 10505, stage 3 3461). 5823 calls (stage 1 435, stage 2 3686,
+//! stage 3 1702) are bit-identical in every evaluation point and sum of squares. Of the calls
+//! whose parameters (fixed and fitted) all exceed 1e-6, 1204 of 1205 (stage 1) and 1124 of 1177
+//! (stage 3) take MATLAB's path; the other 53 part after a trial step that differs at ~1e-10 and
+//! end at the same minimum. On the generic probe problems, 11 of 16 agree
 //! throughout; the other five (bounded Rosenbrock variants converging onto an active bound, and
 //! the last iterations of unbounded Rosenbrock) reach the same solution to 1e-6 or better, in a
 //! different number of iterations for three of them.
