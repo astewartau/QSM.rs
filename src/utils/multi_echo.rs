@@ -397,28 +397,38 @@ pub fn hermitian_inner_product(
     (hip_phase, hip_mag)
 }
 
-/// Remove phase offset from multi-echo phase data using HIP (Hermitian Inner Product).
+/// Remove phase offset from multi-echo phase data using HIP (Hermitian Inner Product):
+/// MCPC-3D-S, as MriResearchTools.jl's `mcpc3ds` does it for one channel (`src/mcpc3ds.jl:38-57`,
+/// 771eadf).
 ///
-/// Estimates the spatially-varying phase offset from the phase difference between two
-/// echoes, smooths it with a Gaussian filter, and subtracts it from all echoes.
+/// 1. `hip = conj(echo₁)·echo₂` over the whole volume, `weight = sqrt(|hip|)`.
+/// 2. `mask = robustmask(weight)` ([`robust_mask`](crate::utils::robust_mask)); `mcpc3ds` makes
+///    its own mask and takes none from the caller.
+/// 3. The HIP phase unwrapped inside that mask (ROMEO with the default weights and `weight` as the
+///    magnitude, `romeo(angle.(hip); mag=weight, mask)`), scaled by `TE₁/ΔTE` to the phase that
+///    evolved by `TE₁`; the offset is `φ₁` minus that, at every voxel.
+/// 4. The offset smoothed inside the same mask with MriResearchTools' `gaussiansmooth3d_phase`
+///    ([`nan_box_smooth_3d_phase`]), and removed from every echo at every voxel
+///    (`combinewithPO`). Outside the mask the reference's offset (and corrected phase) is NaN;
+///    here the offset is 0 there.
 ///
 /// # Arguments
 /// * `phases` - Wrapped phase per echo (n_echoes arrays of nx*ny*nz)
 /// * `mags` - Magnitude per echo
 /// * `tes` - Echo times (any consistent unit)
-/// * `mask` - Binary mask
 /// * `sigma` - Gaussian smoothing sigma in voxels [x, y, z]
 /// * `echoes` - Which two echoes to use for HIP [e1, e2]
-/// * `unwrap_method` - Method to unwrap the HIP phase (Romeo or Laplacian)
+/// * `unwrap_method` - Method to unwrap the HIP phase (`mcpc3ds` uses ROMEO; the others are
+///   QSM.rs options)
 /// * `grid` - Volume grid (dimensions and voxel sizes)
 ///
 /// # Returns
-/// `(corrected_phases, phase_offset)` — offset-corrected phases and the estimated offset
+/// `(corrected_phases, phase_offset)`: the offset-corrected phases and the smoothed offset, over
+/// the whole volume.
 pub fn phase_offset_removal(
     phases: &[impl AsRef<[f64]>],
     mags: &[impl AsRef<[f64]>],
     tes: &[f64],
-    mask: &[u8],
     sigma: [f64; 3],
     echoes: [usize; 2],
     unwrap_method: UnwrapMethod,
@@ -434,67 +444,63 @@ pub fn phase_offset_removal(
     // ΔTE = TEs[echo2] - TEs[echo1]
     let delta_te = tes[e2] - tes[e1];
 
-    // Compute HIP between the two echoes
-    // HIP = conj(echo1) * echo2, so hip_phase = phase2 - phase1
+    // HIP = conj(echo1) * echo2 over the whole volume: hip_phase = phase2 - phase1
+    let all = vec![1u8; n_total];
     let (hip_phase, hip_mag) = hermitian_inner_product(
         phases[e1].as_ref(), mags[e1].as_ref(),
         phases[e2].as_ref(), mags[e2].as_ref(),
-        mask, n_total
+        &all, n_total
     );
+    drop(all);
+
+    // mcpc3ds: weight = sqrt.(abs.(hip)); mask = robustmask(weight)
+    let weight: Vec<f64> = hip_mag.iter().map(|&x| x.sqrt()).collect();
+    drop(hip_mag);
+    let mask = crate::utils::robust_mask(&weight, grid);
 
     // Unwrap HIP phase
     let unwrapped_hip = match unwrap_method {
         UnwrapMethod::Romeo => {
-            let weight: Vec<f64> = hip_mag.iter().map(|&x| x.sqrt()).collect();
-            unwrap_romeo(&hip_phase, &weight, None, 0.0, 0.0, mask, &RomeoParams::default(), grid)
+            unwrap_romeo(&hip_phase, &weight, None, 0.0, 0.0, &mask, &RomeoParams::default(), grid)
         }
         UnwrapMethod::Laplacian => {
             // The HIP is a phase *difference*; removing its harmonic component would
             // discard part of the offset this function exists to estimate.
-            laplacian_unwrap(&hip_phase, mask, grid, LaplacianSolver::Dct)
+            laplacian_unwrap(&hip_phase, &mask, grid, LaplacianSolver::Dct)
         }
         UnwrapMethod::BestPath => {
-            unwrap_bestpath(&hip_phase, mask, &BestPathParams::default(), grid)
+            unwrap_bestpath(&hip_phase, &mask, &BestPathParams::default(), grid)
         }
         UnwrapMethod::Prelude => {
-            unwrap_prelude(&hip_phase, mask, grid, &PreludeParams::default())
+            unwrap_prelude(&hip_phase, &mask, grid, &PreludeParams::default())
         }
     };
     drop(hip_phase);
-    drop(hip_mag);
+    drop(weight);
 
-    // Phase evolution at TE1: (TE1 / ΔTE) * unwrapped_hip
-    // This gives the phase that would have evolved from TE=0 to TE=TE1
+    // po = φ₁ − (TE₁/ΔTE)·unwrapped HIP, at every voxel (mcpc3ds.jl:48-49); not wrapped here
     let scale = tes[e1] / delta_te;
-    let mut phase_offset = vec![0.0; n_total];
-    for i in 0..n_total {
-        if mask[i] > 0 {
-            // Phase offset = phase[echo1] - phase_evolution
-            // phase_evolution = scale * unwrapped_hip
-            // IMPORTANT: Do NOT wrap here! Julia line 49 does raw subtraction
-            phase_offset[i] = phases[e1].as_ref()[i] - scale * unwrapped_hip[i];
-        }
-    }
-    drop(unwrapped_hip); // Free ~82 MB early
+    let phase_offset: Vec<f64> = (0..n_total)
+        .map(|i| phases[e1].as_ref()[i] - scale * unwrapped_hip[i])
+        .collect();
+    drop(unwrapped_hip);
 
-    // Smooth the phase offset (handles wrapping via complex representation)
-    // Julia line 51: po[:,:,:,icha] .= gaussiansmooth3d_phase(view(po,:,:,:,icha), sigma; mask)
-    let phase_offset_smoothed = gaussian_smooth_3d_phase(&phase_offset, sigma, mask, grid);
-    drop(phase_offset); // Free ~82 MB early
+    // mcpc3ds.jl:51: po .= gaussiansmooth3d_phase(po, sigma; mask): MriResearchTools' NaN-aware
+    // box filter with mask (4 passes, alternating direction), [`nan_box_smooth_3d_phase`].
+    // Outside its mask the reference's offset is NaN, and so is its corrected phase; here the
+    // offset is 0 there, so those voxels keep their phase (nothing downstream uses them inside
+    // a brain mask, which lies inside this mask).
+    let mut phase_offset_smoothed = nan_box_smooth_3d_phase(&phase_offset, sigma, &mask, grid);
+    drop(phase_offset);
+    phase_offset_smoothed.iter_mut().for_each(|v| if !v.is_finite() { *v = 0.0 });
 
-    // Remove phase offset from all echoes
-    // Julia combinewithPO does: exp.(1im .* (phase - po)) then angle()
-    // This is equivalent to wrap_to_pi(phase - po)
-    let mut corrected_phases = Vec::with_capacity(n_echoes);
-    for e in 0..n_echoes {
-        let mut corrected = vec![0.0; n_total];
-        for i in 0..n_total {
-            if mask[i] > 0 {
-                corrected[i] = wrap_to_pi(phases[e].as_ref()[i] - phase_offset_smoothed[i]);
-            }
-        }
-        corrected_phases.push(corrected);
-    }
+    // combinewithPO for one channel: angle(|c|·c·exp(−i·po)) = wrap(φ − po), at every voxel
+    let corrected_phases = (0..n_echoes)
+        .map(|e| {
+            let p = phases[e].as_ref();
+            (0..n_total).map(|i| wrap_to_pi(p[i] - phase_offset_smoothed[i])).collect()
+        })
+        .collect();
 
     (corrected_phases, phase_offset_smoothed)
 }
@@ -2883,11 +2889,11 @@ mod tests {
         let (nx, ny, nz) = (8, 8, 8);
         let n = nx * ny * nz;
         let tes = [0.005, 0.010, 0.015];
-        let (phases, mags, mask) = make_synthetic_multi_echo(nx, ny, nz, &tes);
+        let (phases, mags, _mask) = make_synthetic_multi_echo(nx, ny, nz, &tes);
 
         let sigma = [1.0, 1.0, 1.0];
         let (corrected, offset) = phase_offset_removal(
-            &phases, &mags, &tes, &mask, sigma, [0, 1], UnwrapMethod::Romeo, &grid(nx, ny, nz),
+            &phases, &mags, &tes, sigma, [0, 1], UnwrapMethod::Romeo, &grid(nx, ny, nz),
         );
 
         // Check sizes
@@ -2902,11 +2908,11 @@ mod tests {
     fn test_phase_offset_removal_finite_output() {
         let (nx, ny, nz) = (8, 8, 8);
         let tes = [0.005, 0.010, 0.015];
-        let (phases, mags, mask) = make_synthetic_multi_echo(nx, ny, nz, &tes);
+        let (phases, mags, _mask) = make_synthetic_multi_echo(nx, ny, nz, &tes);
 
         let sigma = [1.0, 1.0, 1.0];
         let (corrected, offset) = phase_offset_removal(
-            &phases, &mags, &tes, &mask, sigma, [0, 1], UnwrapMethod::Romeo, &grid(nx, ny, nz),
+            &phases, &mags, &tes, sigma, [0, 1], UnwrapMethod::Romeo, &grid(nx, ny, nz),
         );
 
         for v in &offset {
@@ -2923,11 +2929,11 @@ mod tests {
     fn test_phase_offset_removal_corrected_in_range() {
         let (nx, ny, nz) = (8, 8, 8);
         let tes = [0.005, 0.010, 0.015];
-        let (phases, mags, mask) = make_synthetic_multi_echo(nx, ny, nz, &tes);
+        let (phases, mags, _mask) = make_synthetic_multi_echo(nx, ny, nz, &tes);
 
         let sigma = [1.0, 1.0, 1.0];
         let (corrected, _) = phase_offset_removal(
-            &phases, &mags, &tes, &mask, sigma, [0, 1], UnwrapMethod::Romeo, &grid(nx, ny, nz),
+            &phases, &mags, &tes, sigma, [0, 1], UnwrapMethod::Romeo, &grid(nx, ny, nz),
         );
 
         // Corrected phases should be in [-pi, pi] since wrap_to_pi is applied
@@ -2950,11 +2956,10 @@ mod tests {
         // All echoes have constant phase 0.5 (no TE dependence)
         let phases: Vec<Vec<f64>> = (0..3).map(|_| vec![0.5; n]).collect();
         let mags: Vec<Vec<f64>> = (0..3).map(|_| vec![1.0; n]).collect();
-        let mask = vec![1u8; n];
 
         let sigma = [1.0, 1.0, 1.0];
         let (corrected, _offset) = phase_offset_removal(
-            &phases, &mags, &tes, &mask, sigma, [0, 1], UnwrapMethod::Romeo, &grid(nx, ny, nz),
+            &phases, &mags, &tes, sigma, [0, 1], UnwrapMethod::Romeo, &grid(nx, ny, nz),
         );
 
         // After removing offset, corrected phases should be close to 0
@@ -2981,7 +2986,7 @@ mod tests {
 
         // Step 1: Phase offset removal
         let (corrected, offset) = phase_offset_removal(
-            &phases, &mags, &tes, &mask, sigma, [0, 1],
+            &phases, &mags, &tes, sigma, [0, 1],
             UnwrapMethod::Romeo, &grid(nx, ny, nz),
         );
         assert_eq!(corrected.len(), tes.len());
@@ -3015,7 +3020,7 @@ mod tests {
         let sigma = [1.0, 1.0, 1.0];
 
         let (corrected, _) = phase_offset_removal(
-            &phases, &mags, &tes, &mask, sigma, [0, 1],
+            &phases, &mags, &tes, sigma, [0, 1],
             UnwrapMethod::Romeo, &grid(nx, ny, nz),
         );
         let mag_refs: Vec<&[f64]> = mags.iter().map(|m| m.as_slice()).collect();
@@ -3101,7 +3106,7 @@ mod tests {
 
         let sigma = [1.0, 1.0, 1.0];
         let (corrected, _offset) = phase_offset_removal(
-            &phases, &mags, &tes, &mask, sigma, [0, 1], UnwrapMethod::Romeo, &grid(nx, ny, nz),
+            &phases, &mags, &tes, sigma, [0, 1], UnwrapMethod::Romeo, &grid(nx, ny, nz),
         );
 
         // Run linear fit on corrected phases. `tes` is already in seconds; the
@@ -3181,7 +3186,7 @@ mod tests {
         let sigma = [1.0, 1.0, 1.0];
 
         let (mut corrected, _) = phase_offset_removal(
-            &phases, &mags, &tes, &mask, sigma, [0, 1],
+            &phases, &mags, &tes, sigma, [0, 1],
             UnwrapMethod::Romeo, &grid(nx, ny, nz),
         );
         let mag_refs: Vec<&[f64]> = mags.iter().map(|m| m.as_slice()).collect();
