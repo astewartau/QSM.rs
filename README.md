@@ -243,7 +243,7 @@ Methods marked † need the `onnx` feature and model weights.
 
 | Algorithm | Description | Reference |
 |-----------|-------------|-----------|
-| **χ-separation** | Paramagnetic/diamagnetic separation from local field, R2′ and magnitude; iLSQR-style (QSM-initialized) and MEDI-style variants | Shin, H., et al. (2021). "χ-separation: Magnetic susceptibility source separation toward iron and myelin mapping in the brain." *NeuroImage*, 240:118371. [DOI](https://doi.org/10.1016/j.neuroimage.2021.118371) |
+| **χ-separation** | Paramagnetic/diamagnetic separation from local field, R2′ and magnitude: the SNU χ-separation toolbox's MEDI variant (`chi_sep_medi`, which also takes N_std, a QSM and a CSF mask) and an iLSQR-style variant (`chi_sep_ilsqr`) | Shin, H., et al. (2021). "χ-separation: Magnetic susceptibility source separation toward iron and myelin mapping in the brain." *NeuroImage*, 240:118371. [DOI](https://doi.org/10.1016/j.neuroimage.2021.118371) |
 | **HC-ChiSep** | Hollow-cylinder separation with fibre angle estimated from multi-echo magnitude | Wharton, S., Bowtell, R. (2012). "Fiber orientation-dependent white matter contrast in gradient echo MRI." *PNAS*, 109(45):18559-18564. [DOI](https://doi.org/10.1073/pnas.1211075109) |
 | **R2\*-QSM** | Closed-form separation from QSM and R2* | Dimov, A.V., et al. (2022). "Magnetic susceptibility source separation solely from gradient echo data: histological validation." *Tomography*, 8(3):1544-1551. [DOI](https://doi.org/10.3390/tomography8030128) |
 | **WaveSep** | Wavelet-domain L1 separation from QSM and R2′ | Fang, Z., et al. (2023). "Wavelet-based single-step susceptibility source separation." *Proc. ISMRM*. |

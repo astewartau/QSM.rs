@@ -20,9 +20,17 @@
 //!   `mcpc3ds` function itself defaults to `[10, 10, 5]` voxels (`src/mcpc3ds.jl:17,39`). The
 //!   command line says to reduce it on a small field of view and to use 0 along an axis with a
 //!   single slice; that is left to the caller.
-//! - **Masks.** MCPC-3D-S, ROMEO and the bipolar fit all use the brain mask passed in. The
-//!   reference `mcpc3ds` makes its own `robustmask` of `sqrt(|HIP|)` (`mcpc3ds.jl:44-46`), and the
-//!   CLI unwraps inside `robustmask` of the template magnitude (`caller.jl:201-204`).
+//! - **Masks.** MCPC-3D-S makes its own `robustmask` of `sqrt(|HIP|)`, as the reference
+//!   `mcpc3ds` does (`mcpc3ds.jl:44-46`; [`crate::utils::phase_offset_removal`]). ROMEO and the
+//!   bipolar fit use the brain mask passed in, as the CLI does when given one (`-k`); without
+//!   one the CLI unwraps inside `robustmask` of the template magnitude (`caller.jl:201-204`).
+//! - **ROMEO settings.** The default is ROMEO.jl's API defaults
+//!   ([`RomeoParams::default`](crate::unwrap::RomeoParams::default): `:romeo` weights,
+//!   `temporal_uncertain_unwrapping` 0.5). The CLI turns `-w romeo` into `romeo3` when a
+//!   magnitude is given and does no temporal re-unwrapping;
+//!   [`RomeoParams::romeo_cli`](crate::unwrap::RomeoParams::romeo_cli) sets those, and with it
+//!   the result matches the CLI up to the CLI's single-precision arithmetic (see
+//!   [`crate::unwrap::romeo`], *Agreement with the reference*).
 //! - **Offset removal off, or Laplacian unwrapping.** Phase-offset removal and bipolar correction
 //!   run only with ROMEO (`do_offset` below); with Laplacian they are skipped whatever the
 //!   config says. Without them each echo is unwrapped on its own (the template and `individual`
@@ -242,7 +250,7 @@ fn field_mapping_with_offset(
     progress(1, 4);
     let grid = crate::Grid::new(nx, ny, nz, vsx, vsy, vsz);
     let (mut corrected, phase_offset) = crate::utils::phase_offset_removal(
-        phases, mag_slices, tes, mask,
+        phases, mag_slices, tes,
         config.phase_offset_sigma_voxels((vsx, vsy, vsz)), [0, 1],
         crate::unwrap::UnwrapMethod::Romeo,
         &grid,
@@ -262,9 +270,11 @@ fn field_mapping_with_offset(
         UnwrappingAlgorithm::Laplacian => {
             // Neumann, not the ROI-masked variant: this stage wants unwrapping only.
             // Background removal is a later stage, and the masked variant would remove it
-            // here first — measurably worse than doing it once, properly.
+            // here first — measurably worse than doing it once, properly. The phase is zeroed
+            // outside the mask first (MCPC-3D-S corrects every voxel, and the Laplacian unwrap
+            // takes the whole array), as on the direct path.
             corrected.iter()
-                .map(|p| crate::unwrap::laplacian_unwrap(p, mask, &grid, config.laplacian_solver))
+                .map(|p| crate::unwrap::laplacian_unwrap(&mask_phase(p, mask), mask, &grid, config.laplacian_solver))
                 .collect()
         }
         UnwrappingAlgorithm::Romeo => {
@@ -1715,7 +1725,7 @@ mod tests {
         let cfg = robust_cfg(UnwrappingAlgorithm::Romeo, true);
         let got = run(&cfg);
         let (corrected, _) = crate::utils::phase_offset_removal(
-            &ph, &mg, &TES4, &mask, cfg.phase_offset_sigma_voxels((1.0, 1.0, 1.0)), [0, 1],
+            &ph, &mg, &TES4, cfg.phase_offset_sigma_voxels((1.0, 1.0, 1.0)), [0, 1],
             crate::unwrap::UnwrapMethod::Romeo, &grid,
         );
         let uw = crate::unwrap::unwrap_romeo_multi_echo(&corrected, &refs(&mg), &TES4, &mask, &cfg.romeo_params, &grid);

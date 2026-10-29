@@ -135,6 +135,8 @@ fn separate(ph: &ChiSepPhantom, cfg: &SeparationConfig) -> (Vec<f64>, Vec<f64>, 
         r2prime: Some(&ph.r2prime),
         r2star: None,
         magnitude_rss: None,
+        n_std: None,
+        mask_csf: None,
         magnitude_multi: None,
         se_magnitude_multi: None,
     };
