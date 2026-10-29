@@ -44,6 +44,7 @@ pub mod gibbs;
 pub mod ops;
 pub mod special;
 pub mod wavelet;
+pub mod fdlibm;
 pub mod portable_math;
 
 pub use gradient::*;
