@@ -784,6 +784,106 @@ pub fn apply_real_kernel(
     complex.iter().map(|c| c.re).collect()
 }
 
+// ============================================================================
+// Real-to-complex (half-spectrum) equivalence
+// ============================================================================
+//
+// QSM.jl's FFT inversions (`tkd`, `tsvd`, `tikh`, `tv`, `rts`, `nltv`; kamesy/QSM.jl fde4b92)
+// work on FFTW's real-to-complex half spectrum: `rfft` keeps `kx` indices `0..=nx/2` of the
+// first axis, every multiplier is computed there, and `irfft` (`c2r`) treats the stored half as
+// the half of a Hermitian spectrum. A multiplier that is not even, `M(k) ≠ M(−k)`, is resolved by
+// `c2r` differently from a full complex FFT followed by the real part (which applies the average
+// of `M(k)` and `M(−k)` everywhere). The dipole kernel is such a multiplier once B0 is tilted
+// from the grid axes: on the Nyquist plane of an even axis `−½` maps to itself, so
+// `D(k) ≠ D(−k)` there. The two helpers below give the full-FFT path what `c2r` implies
+// (astewartau/QSM.rs#329): with `h = nx/2` (integer division), for each `(i, j, k)` and its
+// mirror `(−i, −j, −k)` (indices mod the size),
+//
+// - `0 < i` and `2i < nx` (stored, not self-conjugate): the stored value;
+// - `2i > nx` (not stored): the conjugate of the mirror's stored value;
+// - `i = 0`, and `i = nx/2` for even `nx` (stored and self-conjugate): the Hermitian part,
+//   `(Y(k) + conj(Y(−k)))/2`; for a real multiplier, the average of `M(k)` and `M(−k)`.
+//
+// A NumPy TKD on `rfft` reproduced QSM.jl to 0.0000 % on the oblique KKI travelling head, and
+// on the full FFT reproduced QSM.rs to 0.0000 %; with this kernel the full FFT reproduces
+// `irfft` to 5e-16. Methods whose original is not a real-to-complex code (MEDI, STI Suite, …)
+// keep the plain full FFT.
+
+/// Where `(i, j, k)` sits in the half spectrum a real-to-complex FFT stores along the first
+/// axis, and the linear index of its mirror `(−i, −j, −k)`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum HalfSpectrum {
+    /// Stored and not its own mirror: kept as is.
+    Stored,
+    /// Not stored: `c2r` reads the conjugate of the mirror.
+    Mirrored(usize),
+    /// Stored and on a self-conjugate plane (`i = 0` or `i = nx/2`): `c2r` reads the
+    /// Hermitian part of the pair.
+    SelfConjugate(usize),
+}
+
+#[inline]
+fn half_spectrum(i: usize, j: usize, k: usize, nx: usize, ny: usize, nz: usize) -> HalfSpectrum {
+    let mirror = || ((nx - i) % nx) + nx * (((ny - j) % ny) + ny * ((nz - k) % nz));
+    if i == 0 || 2 * i == nx {
+        HalfSpectrum::SelfConjugate(mirror())
+    } else if 2 * i < nx {
+        HalfSpectrum::Stored
+    } else {
+        HalfSpectrum::Mirrored(mirror())
+    }
+}
+
+/// The real k-space multiplier that, applied with a full complex FFT and the real part of the
+/// inverse, reproduces applying `m` on FFTW's real-to-complex half spectrum and `irfft`, as
+/// QSM.jl does (astewartau/QSM.rs#329; see the comment above this function in `fft.rs`):
+/// `m` where it is stored, `m(−k)` where it is not, and the average of `m(k)` and `m(−k)` on the
+/// `i = 0` and `i = nx/2` planes. An even `m` is returned unchanged.
+pub fn c2r_kernel(m: &[f64], nx: usize, ny: usize, nz: usize) -> Vec<f64> {
+    assert_eq!(m.len(), nx * ny * nz, "c2r_kernel: kernel size");
+    let mut out = vec![0.0; m.len()];
+    for k in 0..nz {
+        for j in 0..ny {
+            for i in 0..nx {
+                let l = i + nx * (j + ny * k);
+                out[l] = match half_spectrum(i, j, k, nx, ny, nz) {
+                    HalfSpectrum::Stored => m[l],
+                    HalfSpectrum::Mirrored(r) => m[r],
+                    HalfSpectrum::SelfConjugate(r) => 0.5 * (m[l] + m[r]),
+                };
+            }
+        }
+    }
+    out
+}
+
+/// Replaces a full spectrum by the Hermitian spectrum `irfft` reads from its stored half (see
+/// [`c2r_kernel`]), in place: the inverse complex FFT of the result is real and equals QSM.jl's
+/// `irfft` of the half spectrum. For spectra built by more than one multiplier, or by an
+/// iterative solver, between the forward and inverse transforms (RTS's LSMR, NLTV).
+pub fn c2r_spectrum(y: &mut [Complex64], nx: usize, ny: usize, nz: usize) {
+    assert_eq!(y.len(), nx * ny * nz, "c2r_spectrum: spectrum size");
+    for k in 0..nz {
+        for j in 0..ny {
+            for i in 0..nx {
+                let l = i + nx * (j + ny * k);
+                match half_spectrum(i, j, k, nx, ny, nz) {
+                    HalfSpectrum::Stored => {}
+                    // the mirror is stored, so not changed by this loop
+                    HalfSpectrum::Mirrored(r) => y[l] = y[r].conj(),
+                    // each pair once (the smaller index), its own mirror to its real part
+                    HalfSpectrum::SelfConjugate(r) if l <= r => {
+                        let h = 0.5 * (y[l] + y[r].conj());
+                        y[l] = h;
+                        y[r] = h.conj();
+                    }
+                    HalfSpectrum::SelfConjugate(_) => {}
+                }
+            }
+        }
+    }
+}
+
 /// Generate FFT frequency values for a given dimension
 /// Matches numpy.fft.fftfreq(n, d)
 pub fn fftfreq(n: usize, d: f64) -> Vec<f64> {
@@ -932,6 +1032,92 @@ pub fn wrap_angle(angle: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A real-to-complex FFT along x of a real volume, as FFTW's `rfft` stores it: the full
+    /// complex FFT's `i = 0..=nx/2`.
+    fn half_of(full: &[Complex64], nx: usize, ny: usize, nz: usize) -> Vec<Complex64> {
+        let h = nx / 2 + 1;
+        let mut out = Vec::with_capacity(h * ny * nz);
+        for k in 0..nz { for j in 0..ny { for i in 0..h { out.push(full[i + nx * (j + ny * k)]); } } }
+        out
+    }
+
+    /// FFTW's `c2r` along x (after the inverse complex FFT along y and z): a reference
+    /// irfft, written out as a direct sum. Only the stored half is read; the imaginary parts at
+    /// `i = 0` and `i = nx/2` are dropped, as `c2r` drops them.
+    fn irfft_reference(half: &[Complex64], nx: usize, ny: usize, nz: usize) -> Vec<f64> {
+        let h = nx / 2 + 1;
+        // inverse DFT along y and z on each stored x column
+        let mut yz = half.to_vec();
+        let tau = 2.0 * std::f64::consts::PI;
+        let mut tmp = vec![Complex64::new(0.0, 0.0); yz.len()];
+        for k in 0..nz { for j in 0..ny { for i in 0..h {
+            let mut acc = Complex64::new(0.0, 0.0);
+            for kk in 0..nz { for jj in 0..ny {
+                let ph = tau * ((j * jj) as f64 / ny as f64 + (k * kk) as f64 / nz as f64);
+                acc += yz[i + h * (jj + ny * kk)] * Complex64::from_polar(1.0, ph);
+            } }
+            tmp[i + h * (j + ny * k)] = acc;
+        } } }
+        yz = tmp;
+        // c2r along x
+        let mut out = vec![0.0; nx * ny * nz];
+        for k in 0..nz { for j in 0..ny { for x in 0..nx {
+            let mut acc = 0.0;
+            for i in 0..h {
+                let c = yz[i + h * (j + ny * k)];
+                let self_conj = i == 0 || 2 * i == nx;
+                let ph = tau * (i * x) as f64 / nx as f64;
+                let term = if self_conj { c.re * ph.cos() } else { 2.0 * (c * Complex64::from_polar(1.0, ph)).re };
+                acc += term;
+            }
+            out[x + nx * (j + ny * k)] = acc / (nx * ny * nz) as f64;
+        } } }
+        out
+    }
+
+    #[test]
+    fn c2r_kernel_and_spectrum_reproduce_irfft() {
+        // An odd multiplier (like the oblique dipole kernel on Nyquist planes) on even and odd sizes.
+        for &(nx, ny, nz) in &[(6usize, 4usize, 4usize), (6, 5, 4), (5, 4, 6), (4, 3, 3)] {
+            let n = nx * ny * nz;
+            let x: Vec<f64> = (0..n).map(|l| ((l * 7 + 3) % 11) as f64 - 5.0).collect();
+            let m: Vec<f64> = (0..n).map(|l| 0.3 + ((l * 13) % 7) as f64 * 0.1).collect();
+            let mut f: Vec<Complex64> = x.iter().map(|&v| Complex64::new(v, 0.0)).collect();
+            fft3d(&mut f, nx, ny, nz);
+            let mut y: Vec<Complex64> = f.iter().zip(&m).map(|(a, b)| a * b).collect();
+            let want = irfft_reference(&half_of(&y, nx, ny, nz), nx, ny, nz);
+
+            // the kernel, on a full FFT and the real part
+            let k = c2r_kernel(&m, nx, ny, nz);
+            let mut a: Vec<Complex64> = f.iter().zip(&k).map(|(a, b)| a * b).collect();
+            ifft3d(&mut a, nx, ny, nz);
+            // the spectrum
+            c2r_spectrum(&mut y, nx, ny, nz);
+            ifft3d(&mut y, nx, ny, nz);
+            for l in 0..n {
+                assert!((a[l].re - want[l]).abs() < 1e-12, "kernel {:?} at {l}: {} vs {}", (nx, ny, nz), a[l].re, want[l]);
+                assert!((y[l].re - want[l]).abs() < 1e-12, "spectrum {:?} at {l}", (nx, ny, nz));
+                assert!(a[l].im.abs() < 1e-12 && y[l].im.abs() < 1e-12, "real output");
+            }
+        }
+    }
+
+    #[test]
+    fn c2r_kernel_leaves_an_even_kernel_unchanged() {
+        let grid = crate::Grid::new(8, 6, 4, 1.0, 1.0, 1.0);
+        let d = crate::kernels::dipole::dipole_kernel(&grid, (0.0, 0.0, 1.0));
+        assert_eq!(c2r_kernel(&d, 8, 6, 4), d);
+        // tilted B0: changed only on the Nyquist planes (on x's, to the average a full FFT's real
+        // part applies anyway; on y's and z's, which is the difference from a full FFT)
+        let d = crate::kernels::dipole::dipole_kernel(&grid, (0.1, -0.2, 0.97));
+        let k = c2r_kernel(&d, 8, 6, 4);
+        for kk in 0..4 { for j in 0..6 { for i in 0..8 {
+            let l = i + 8 * (j + 6 * kk);
+            if i != 4 && j != 3 && kk != 2 { assert!((k[l] - d[l]).abs() < 1e-15, "{:?}", (i, j, kk)); }
+        } } }
+        assert!(k.iter().zip(&d).any(|(a, b)| (a - b).abs() > 1e-6));
+    }
 
     #[test]
     fn test_fft_ifft_roundtrip() {
