@@ -328,7 +328,9 @@ fn bg_removal() {
         if needs_weights(algorithm.dl_model_id()) {
             continue;
         }
-        let config = BgRemovalConfig { algorithm, ..Default::default() };
+        let mut config = BgRemovalConfig { algorithm, ..Default::default() };
+        // iSMV's default sphere (6 voxels, 9 mm here) erodes this 16³ phantom away entirely
+        config.ismv.radius = Some(3.0);
         let r = run_bg_removal(&p.total_ppm, &p.mask, &m, &config, Some(&echoes), &mut no_progress())
             .unwrap_or_else(|e| panic!("{algorithm:?}: {e}"));
         check(&format!("{algorithm:?}"), &r.local_field_ppm);
@@ -391,6 +393,9 @@ fn separation() {
     let mag_rss = rss_combine(&p.mag_refs()).unwrap();
     let mag_multi = p.mag_voxel_major();
     let r2prime: Vec<f64> = p.mask.iter().zip(&p.chi).map(|(&k, &x)| if k != 0 { 5.0 + 50.0 * x.abs() } else { 0.0 }).collect();
+    // chi-sep-medi's N_std (only its relative values matter) and CSF mask (none)
+    let n_std: Vec<f64> = mag_rss.iter().zip(&p.mask).map(|(&v, &k)| if k != 0 && v > 0.0 { 1.0 / v } else { 0.0 }).collect();
+    let no_csf = vec![0u8; p.mask.len()];
     let inputs = SeparationInputs {
         local_field_ppm: &p.local_ppm,
         qsm: &p.chi,
@@ -398,6 +403,8 @@ fn separation() {
         r2prime: Some(&r2prime),
         r2star: None,
         magnitude_rss: Some(&mag_rss),
+        n_std: Some(&n_std),
+        mask_csf: Some(&no_csf),
         magnitude_multi: Some(&mag_multi),
         se_magnitude_multi: None,
     };
@@ -1025,6 +1032,8 @@ fn dl_separation(algorithm: SeparationAlgorithm, patch: Option<(usize, usize, us
         r2prime: Some(&r2prime),
         r2star: None,
         magnitude_rss: None,
+        n_std: None,
+        mask_csf: None,
         magnitude_multi: None,
         se_magnitude_multi: None,
     };
@@ -1286,6 +1295,8 @@ mod browser_memory {
             r2prime: Some(&r2prime),
             r2star: None,
             magnitude_rss: None,
+            n_std: None,
+            mask_csf: None,
             magnitude_multi: None,
             se_magnitude_multi: None,
         };

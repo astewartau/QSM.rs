@@ -565,105 +565,172 @@ pub fn gaussian_smooth_3d_boxsizes(
 // Robust Mask (matching MriResearchTools.jl)
 //=============================================================================
 
-/// Create robust mask from magnitude using quantile-based thresholding
-///
-/// This matches MriResearchTools.jl's robustmask function, including
-/// post-processing with smoothing and hole filling.
+/// MriResearchTools' unmasked `gaussiansmooth3d!` with explicit box sizes (`for ibox, dim`), in
+/// f32: `boxfilterline!` (`src/smoothing.jl`, 771eadf), a running sum with shrinking windows at
+/// both ends.
+fn smooth_boxes_f32(image: &mut [f32], boxsizes: &[usize], grid: &Grid) {
+    let (nx, ny, nz) = grid.dims;
+    let dims = [nx, ny, nz];
+    let mut line: Vec<f32> = Vec::new();
+    for &bsize0 in boxsizes {
+        for d in 0..3 {
+            let len = dims[d];
+            // checkboxsizes!: odd, and at most half the axis
+            let mut bsize = bsize0 + usize::from(bsize0 % 2 == 0);
+            if bsize as f64 > len as f64 / 2.0 {
+                bsize = len / 2;
+                if bsize % 2 == 0 {
+                    bsize += 1;
+                }
+            }
+            if len == 1 || bsize < 3 {
+                continue;
+            }
+            let (stride, na, sa, nb, sb) = match d {
+                0 => (1, ny, nx, nz, nx * ny),
+                1 => (nx, nx, 1, nz, nx * ny),
+                _ => (nx * ny, nx, 1, ny, nx),
+            };
+            line.resize(len, 0.0);
+            for b in 0..nb {
+                for a in 0..na {
+                    let base = a * sa + b * sb;
+                    for k in 0..len {
+                        line[k] = image[base + k * stride];
+                    }
+                    box_filter_line_f32(&mut line, bsize);
+                    for k in 0..len {
+                        image[base + k * stride] = line[k];
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// `boxfilterline!` (MriResearchTools `src/smoothing.jl`, 771eadf) in f32.
+fn box_filter_line_f32(line: &mut [f32], boxsize: usize) {
+    let n = line.len();
+    let r = boxsize / 2;
+    if n < boxsize {
+        return;
+    }
+    let mut q: VecDeque<f32> = VecDeque::with_capacity(boxsize);
+    let mut lsum: f32 = line[..r].iter().sum();
+    q.extend(line[..r].iter().copied());
+    for i in 0..=r {
+        lsum += line[i + r];
+        q.push_back(line[i + r]);
+        line[i] = lsum / (r + i + 1) as f32;
+    }
+    for i in (r + 1)..(n - r) {
+        lsum += line[i + r] - q.pop_front().unwrap();
+        q.push_back(line[i + r]);
+        line[i] = lsum / boxsize as f32;
+    }
+    for i in (n - r)..n {
+        lsum -= q.pop_front().unwrap();
+        line[i] = lsum / (r + n - i) as f32;
+    }
+}
+
+/// MriResearchTools' `sample(I; n=1e5)` (`src/utility.jl:23-33`, 771eadf): `len = ceil(√min(n,
+/// length))` blocks of `len` consecutive values, starting at `round.(Int, range(0, length − len;
+/// length = len))` (0-based here), keeping the finite ones; all finite values if none are.
+fn mrt_sample(x: &[f64]) -> Vec<f64> {
+    let total = x.len();
+    if total == 0 {
+        return Vec::new();
+    }
+    let n = (1e5f64).min(total as f64);
+    let len = n.sqrt().ceil() as usize;
+    let stop = (total - len) as f64;
+    let mut out = Vec::with_capacity(len * len);
+    for k in 0..len {
+        // Julia's range(0, stop; length=len) and round (ties to even)
+        let start = if len == 1 { 0.0 } else { stop * k as f64 / (len - 1) as f64 };
+        let s = start.round_ties_even() as usize;
+        out.extend(x[s..s + len].iter().copied().filter(|v| v.is_finite()));
+    }
+    if out.is_empty() {
+        out = x.iter().copied().filter(|v| v.is_finite()).collect();
+    }
+    out
+}
+
+/// `Statistics.quantile(v, p)` (type 7, the default) of an ascending `sorted`.
+fn quantile_sorted(sorted: &[f64], p: f64) -> f64 {
+    let n = sorted.len();
+    if n == 1 {
+        return sorted[0];
+    }
+    let aleph = (n - 1) as f64 * p;
+    let j = (aleph.floor() as usize).min(n - 2);
+    let gamma = aleph - j as f64;
+    let (a, b) = (sorted[j], sorted[j + 1]);
+    a + gamma * (b - a)
+}
+
+/// Create robust mask from magnitude using quantile-based thresholding: MriResearchTools.jl's
+/// `robustmask` (`src/masking.jl:6-27`, 771eadf), with its threshold from `sample` and
+/// `Statistics.quantile`, and its box smoothing in single precision (see the comments in the
+/// body). On the √|HIP| of the QSM-CI in-vivo travelling-head scan it gives MriResearchTools'
+/// mask exactly (2,488,761 voxels); before it sampled every positive voxel, took nearest-rank
+/// quantiles and smoothed in f64, and 12,619 voxels differed.
 pub fn robust_mask(mag: &[f64], grid: &Grid) -> Vec<u8> {
     let n_total = check_volume("robust_mask: magnitude", mag.len(), grid);
 
-    // Collect valid (positive, finite) samples and sort
-    let mut samples: Vec<f64> = mag.iter()
-        .filter(|&&v| v.is_finite() && v > 0.0)
-        .copied()
-        .collect();
-
+    // MriResearchTools `robustmask` (`src/masking.jl:6-27`, 771eadf) estimates its threshold
+    // from `sample(weight)` (`src/utility.jl:23-33`): `len = ceil(√min(1e5, n))` blocks of `len`
+    // consecutive voxels (in memory order), starting at `round.(Int, range(0, n − len;
+    // length=len))`, finite values only (zeros included).
+    let samples = mrt_sample(mag);
     if samples.is_empty() {
         return vec![0u8; n_total];
     }
+    let mut sorted = samples.clone();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    // Statistics.quantile (type 7) on the sample
+    let q05 = quantile_sorted(&sorted, 0.05);
+    let q15 = quantile_sorted(&sorted, 0.15);
+    let q80 = quantile_sorted(&sorted, 0.80);
+    let q99 = quantile_sorted(&sorted, 0.99);
+    let mean = |v: Vec<f64>| if v.is_empty() { f64::NAN } else { v.iter().sum::<f64>() / v.len() as f64 };
 
-    samples.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-
-    let len = samples.len();
-
-    // Calculate quantiles
-    let q05_idx = ((0.05 * len as f64) as usize).min(len - 1);
-    let q15_idx = ((0.15 * len as f64) as usize).min(len - 1);
-    let q80_idx = ((0.80 * len as f64) as usize).min(len - 1);
-    let q99_idx = ((0.99 * len as f64) as usize).min(len - 1);
-
-    let q05 = samples[q05_idx];
-    let q15 = samples[q15_idx];
-    let q80 = samples[q80_idx];
-    let q99 = samples[q99_idx];
-
-    // Calculate high intensity mean (between 80th and 99th percentile)
-    let high_samples: Vec<f64> = samples.iter()
-        .filter(|&&v| v >= q80 && v <= q99)
-        .copied()
-        .collect();
-
-    let high_intensity = if high_samples.is_empty() {
-        q99
-    } else {
-        high_samples.iter().sum::<f64>() / high_samples.len() as f64
-    };
-
-    // Estimate noise level from low-intensity voxels
-    let low_samples: Vec<f64> = samples.iter()
-        .filter(|&&v| v <= q15)
-        .copied()
-        .collect();
-
-    let mut noise = if low_samples.is_empty() {
-        0.0
-    } else {
-        low_samples.iter().sum::<f64>() / low_samples.len() as f64
-    };
-
-    // If noise estimate is too high, try using lower percentile
+    // high_intensity = mean(w[q8 .<= w .<= q99]); noise = mean(w[w .<= q15])
+    let high_intensity = mean(samples.iter().copied().filter(|&v| q80 <= v && v <= q99).collect());
+    let mut noise = mean(samples.iter().copied().filter(|&v| v <= q15).collect());
     if noise > high_intensity / 10.0 {
-        let very_low_samples: Vec<f64> = samples.iter()
-            .filter(|&&v| v <= q05)
-            .copied()
-            .collect();
-
-        noise = if very_low_samples.is_empty() {
-            0.0
-        } else {
-            very_low_samples.iter().sum::<f64>() / very_low_samples.len() as f64
-        };
-
+        noise = mean(samples.iter().copied().filter(|&v| v <= q05).collect());
         if noise > high_intensity / 10.0 {
-            noise = 0.0;
+            noise = 0.0; // no noise detected
         }
     }
 
     // Calculate threshold: max(5*noise, high_intensity/5)
     let threshold = (5.0 * noise).max(high_intensity / 5.0);
 
-    // Create initial binary mask
-    let mut mask_f64: Vec<f64> = mag.iter()
+    // The mask, then: smoothed with one 5-voxel box per axis, > 0.4; holes filled; smoothed
+    // with two 3-voxel boxes per axis, > 0.6. MriResearchTools smooths the Bool mask as Float32
+    // (`gaussiansmooth3d` starts from `0f0 .+ image`) and compares with the Float64 literals, so
+    // a box average of exactly 2/5 counts as above 0.4 there (0.4f0 > 0.4). The smoothing here
+    // is the same running-sum box filter in f32, compared the same way.
+    let mut mask_f32: Vec<f32> = mag.iter()
         .map(|&v| if v > threshold { 1.0 } else { 0.0 })
         .collect();
-
-    // Post-processing Step 1: Smooth with nbox=1, boxsize=5, threshold at 0.4
-    let boxsizes1 = vec![vec![5], vec![5], vec![5]];
-    mask_f64 = gaussian_smooth_3d_boxsizes(&mask_f64, &boxsizes1, 1, grid);
-    let mut mask: Vec<u8> = mask_f64.iter()
-        .map(|&v| if v > 0.4 { 1 } else { 0 })
+    smooth_boxes_f32(&mut mask_f32, &[5], grid);
+    let mut mask: Vec<u8> = mask_f32.iter()
+        .map(|&v| u8::from(v as f64 > 0.4))
         .collect();
 
-    // Post-processing Step 2: Fill holes
+    // fill_holes(mask; max_hole_size = length(mask) / 20)
     let max_hole_size = n_total / 20;
     mask = fill_holes(&mask, grid, max_hole_size);
 
-    // Post-processing Step 3: Smooth with nbox=2, boxsizes=[3,3], threshold at 0.6
-    mask_f64 = mask.iter().map(|&v| v as f64).collect();
-    let boxsizes2 = vec![vec![3, 3], vec![3, 3], vec![3, 3]];
-    mask_f64 = gaussian_smooth_3d_boxsizes(&mask_f64, &boxsizes2, 2, grid);
-    mask = mask_f64.iter()
-        .map(|&v| if v > 0.6 { 1 } else { 0 })
+    let mut mask_f32: Vec<f32> = mask.iter().map(|&v| v as f32).collect();
+    smooth_boxes_f32(&mut mask_f32, &[3, 3], grid);
+    mask = mask_f32.iter()
+        .map(|&v| u8::from(v as f64 > 0.6))
         .collect();
 
     mask
