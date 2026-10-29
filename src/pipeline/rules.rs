@@ -1341,8 +1341,9 @@ pub static RULES: &[Rule] = &[
         "DECOMPOSE was designed for 3 T (its χ bound keeps the phase under 2π at TE 25 ms and \
          3 T); at 7 T the phase wraps between echoes and χ+ partly collapses unless the phase is \
          unwrapped along the echoes",
-        "Chen et al. 2021 NeuroImage 242:118477 (DECOMPOSE), §2.2; measured in QSM.rs \
-         separation::decompose docs (Phase unwrapping at 7 T)"),
+        "Chen et al. 2021 NeuroImage 242:118477 (DECOMPOSE), §2.2; measured on the QSM-CI 7 T \
+         chisep phantom, χ+ r 0.48 off, 0.90 on (QSM.rs separation::decompose docs, Phase \
+         unwrapping at 7 T)"),
     reference("decompose.reference-mean", &[sep(&[Choice("decompose")])], "reference",
         &[Choice("mean")],
         "DECOMPOSE's χ is referenced to the whole-brain mean",

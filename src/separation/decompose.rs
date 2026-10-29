@@ -49,9 +49,20 @@
 //! **Phase unwrapping at 7 T.** The authors designed the fit for 3 T: their χ bound "was roughly
 //! calculated using TE = 25 ms and B0 = 3T to ensure the phase does not exceed 2π" (Chen et al.
 //! 2021, §2.2). At 7 T the phase wraps between echoes inside ordinary deep grey matter, and with
-//! the authors' default (principal-branch phases) χ+ partly collapses: on the QSM-CI 7 T
-//! `chisep-mc` phantom, χ+ correlates 0.59 with the truth on principal-branch phases and 0.87
-//! with `unwrap_phase` on (measured 2026-10-29). The default stays the authors' (off,
+//! the authors' default (principal-branch phases) χ+ partly collapses. Measured 2026-10-29 on
+//! the QSM-CI 7 T chisep phantom (164×205×205, 1 mm, TE 4/12/20/28 ms; its provided χ given at
+//! every echo; `tests/chisep_relaxometry_qsmci.rs`, `DECOMPOSE_UNWRAP=1` for the second row),
+//! with this code (the `lsqcurvefit` port) and only `unwrap_phase` changed (it unwraps and caps
+//! the χ search, below):
+//!
+//! | `unwrap_phase` | χ+ r / XSIM / NRMSE | χ− r / XSIM / NRMSE |
+//! |---|---|---|
+//! | off (the authors' default) | 0.484 / 0.216 / 10.9 % | 0.745 / 0.325 / 4.8 % |
+//! | on | **0.895** / 0.489 / 7.1 % | **0.865** / 0.477 / 4.0 % |
+//!
+//! (An earlier figure, χ+ r 0.59 for the authors' default against 0.87 on main, QSM.rs#333's CI
+//! run 40786263426, compared ports that also differed in the solver and the χ cap, so it did not
+//! isolate unwrapping.) The default stays the authors' (off,
 //! [`DecomposeParams::unwrap_phase`]); the pipeline rule `decompose.unwrap-7t` suggests turning
 //! it on at 7 T (from 6.5 T, so a Siemens 7 T's 6.98 T counts).
 //!
