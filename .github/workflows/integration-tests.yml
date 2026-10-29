@@ -86,7 +86,6 @@ jobs:
           done
           for f in tests/chisep_*.rs; do
             b=$(basename "$f" .rs)
-            [ "$b" = chisep_integration ] && continue   # forward-phantom variant, run locally only
             grep -q '#\[ignore' "$f" || continue
             echo " $registered " | tr '\n' ' ' | grep -qw -- "$b" || missing="$missing $f"
           done
@@ -123,7 +122,7 @@ jobs:
           all_bgremove='["test_bgremove_sharp","test_bgremove_resharp","test_bgremove_vsharp","test_bgremove_vsharp_deconvolve","test_bgremove_pdf","test_bgremove_ismv","test_bgremove_lbv"]'
           all_inversion='["test_inversion_tkd","test_inversion_tkd_cropped","test_inversion_tsvd","test_inversion_tikhonov","test_inversion_tv","test_inversion_rts","test_inversion_ilsqr","test_inversion_star","test_inversion_medi","test_inversion_medi_msmv","test_inversion_nltv","test_inversion_ndi","test_inversion_fansi","test_inversion_fansi_tgv","test_inversion_l1qsm","test_inversion_whqsm","test_inversion_hdqsm","test_inversion_amp_pe","test_inversion_lsqr","test_inversion_heidi","test_multiorient_cosmos","test_multiorient_sti","test_multiorient_coverage","test_multiorient_noise","test_multiorient_register","test_multiorient_register_capture_range"]'
           all_combined='["test_combined_tgv","test_combined_tfi"]'
-          all_pipeline='["test_pipeline_romeo_b0","test_pipeline_unwrap_bfr_romeo","test_pipeline_unwrap_bfr_laplacian_neumann","test_pipeline_unwrap_bfr_bestpath","test_pipeline_unwrap_bfr_prelude","test_pipeline_unwrap_bfr_stage_laplacian","test_pipeline_tgv","test_pipeline_tgv_single_echo","test_pipeline_qsmart","test_pipeline_qsmart_tikhonov","test_pipeline_harperella","test_pipeline_iharperella","test_bias_correction","test_n4_bias_correction","test_swi","test_smwi","test_r2star_t2star","test_motion_correction","test_robust_echo_combination","test_pipeline_masking","test_pipeline_two_pass"]'
+          all_pipeline='["test_pipeline_romeo_b0","test_pipeline_unwrap_bfr_romeo","test_pipeline_unwrap_bfr_laplacian_neumann","test_pipeline_unwrap_bfr_bestpath","test_pipeline_unwrap_bfr_prelude","test_pipeline_unwrap_bfr_stage_laplacian","test_pipeline_tgv","test_pipeline_tgv_single_echo","test_pipeline_qsmart","test_pipeline_qsmart_tikhonov","test_pipeline_harperella","test_pipeline_iharperella","test_bias_correction","test_n4_bias_correction","test_swi","test_smwi","test_r2star_t2star","test_motion_correction","test_robust_echo_combination","test_fieldmap_romeo_settings","test_pipeline_masking","test_pipeline_two_pass"]'
           # χ-separation entries are whole test *binaries* (each runs several methods).
           all_chisep='["chisep_qsmci","chisep_relaxometry_qsmci","chisep_xsepnet","chisep_r2primenet","chisep_orientation"]'
           # Deep-learning models (in tests/dl_models.rs; weights fetched from the registry).
@@ -559,7 +558,7 @@ jobs:
 
               # Utils (QSMART components)
               src/utils/multi_echo.rs)
-                pipeline="$pipeline test_pipeline_romeo_b0 test_pipeline_unwrap_bfr_romeo test_pipeline_unwrap_bfr_laplacian_neumann test_pipeline_unwrap_bfr_bestpath test_pipeline_unwrap_bfr_prelude test_pipeline_unwrap_bfr_stage_laplacian test_pipeline_tgv test_pipeline_qsmart test_pipeline_qsmart_tikhonov test_robust_echo_combination" ;;
+                pipeline="$pipeline test_pipeline_romeo_b0 test_pipeline_unwrap_bfr_romeo test_pipeline_unwrap_bfr_laplacian_neumann test_pipeline_unwrap_bfr_bestpath test_pipeline_unwrap_bfr_prelude test_pipeline_unwrap_bfr_stage_laplacian test_pipeline_tgv test_pipeline_qsmart test_pipeline_qsmart_tikhonov test_robust_echo_combination test_fieldmap_romeo_settings" ;;
               src/utils/vasculature.rs|src/utils/frangi.rs|src/utils/curvature.rs|src/utils/qsmart.rs)
                 pipeline="$pipeline test_pipeline_qsmart test_pipeline_qsmart_tikhonov" ;;
               src/utils/bias_correction.rs)
@@ -609,7 +608,7 @@ jobs:
                 fi ;;
               # Test binaries no workflow job runs (reference-parity, local-data and wasm tests):
               # their non-ignored tests run in unit-tests.yml, which every tests/ change selects.
-              tests/amppe_qsmci.rs|tests/chisep_integration.rs|tests/crosscheck.rs|tests/ilsqr_sti_parity.rs|tests/star_sti_parity.rs|tests/vsharp_sti_parity.rs|tests/n4_ants_parity.rs|tests/sharp_sepia_parity.rs|tests/ismv_wen2014_parity.rs) : ;;
+              tests/amppe_qsmci.rs|tests/chi_sep_medi_snu_parity.rs|tests/chi_sep_ilsqr_snu_parity.rs|tests/crosscheck.rs|tests/ilsqr_sti_parity.rs|tests/star_sti_parity.rs|tests/vsharp_sti_parity.rs|tests/n4_ants_parity.rs|tests/sharp_sepia_parity.rs|tests/ismv_wen2014_parity.rs) : ;;
               # Parity with the Julia originals (QSM.jl, ROMEO.jl, TGV.jl), fixtures from QSM-CI's julia-qsm image.
               tests/*_qsmjl_parity.rs|tests/*_romeojl_parity.rs|tests/*_tgvjl_parity.rs) : ;;
               tests/models_onnx.rs|tests/qsmart_validation.rs|tests/relaxometry_demo.rs|tests/wasm_pipeline.rs) : ;;

@@ -11,10 +11,15 @@
 //! with `src/seed.jl` for seeding and `src/region_handling.jl` for merging), from Dymerska et al.
 //! (2021), *Magn Reson Med* 85(4):2294-2308, <https://doi.org/10.1002/mrm.28563>. Its defaults —
 //! one seed, no region merging or correction, `wrap_addition = 0` (`src/algorithm.jl:3`) — are
-//! [`crate::unwrap::RomeoParams::default`]'s. [`grow_region_unwrap_full`] follows ROMEO.jl's
-//! seeding (best summed edge weight first, extra seeds while the queue's best weight is worse
-//! than the last seed's threshold, multi-echo seed correction); [`grow_region_unwrap`] takes its
-//! seed from the caller (the mask's centre of mass in `unwrap_romeo`), which ROMEO.jl does not do.
+//! [`crate::unwrap::RomeoParams::default`]'s. [`grow_region_unwrap_full`] is what ROMEO uses, for
+//! one seed as for several: ROMEO.jl's seeding (the best summed edge bins first, ties to the
+//! highest linear index; extra seeds while the queue's best weight is worse than the last seed's
+//! threshold; multi-echo seed correction), its neighbour order (−x, +x, −y, +y, −z, +z) and its
+//! last-in first-out bins, and like ROMEO.jl it grows along every valid edge without testing a
+//! mask (the weights hold it). With ROMEO.jl's weight bins
+//! ([`crate::unwrap::romeo`]) it reproduces ROMEO.jl's unwrapping exactly
+//! (`tests/romeo_romeojl_parity.rs`). [`grow_region_unwrap`] takes its seed from the caller and
+//! is not used by ROMEO.
 //! Nothing here depends on voxel size, field strength or orientation.
 
 use crate::priority_queue::BucketQueue;
@@ -22,13 +27,16 @@ use std::f64::consts::PI;
 
 /// Neighbor offsets: (dimension_for_weight, di, dj, dk)
 /// dimension 0 = x edges, 1 = y edges, 2 = z edges
+// ROMEO.jl's order (`getnewedge`, `src/algorithm.jl:81-89`, 08776d4: i = 1..6 is −x, +x, −y,
+// +y, −z, +z). Edges of equal weight leave the queue last-in first-out, so this order decides
+// which of them is unwrapped first.
 const NEIGHBOR_OFFSETS: [(usize, i32, i32, i32); 6] = [
-    (0, 1, 0, 0),
     (0, -1, 0, 0),
-    (1, 0, 1, 0),
+    (0, 1, 0, 0),
     (1, 0, -1, 0),
-    (2, 0, 0, 1),
+    (1, 0, 1, 0),
     (2, 0, 0, -1),
+    (2, 0, 0, 1),
 ];
 
 const TWO_PI: f64 = 2.0 * PI;
@@ -285,7 +293,8 @@ pub fn grow_region_unwrap_from_visited(
 /// # Arguments
 /// * `phase` - Mutable phase values, modified in-place
 /// * `weights` - Edge weights (3 * nx * ny * nz), 0 = no edge, 1-255 = valid
-/// * `mask` - Read-only binary mask (>0 = in ROI)
+/// * `mask` - Read-only binary mask (>0 = in ROI): where seeds are taken from. The growth follows
+///   the weights, which are 0 for edges that leave it (see the module docs).
 /// * `visited` - Output region IDs (0 = unvisited, 1..255 = region)
 /// * `nx`, `ny`, `nz` - Array dimensions
 /// * `wrap_addition` - Extra phase tolerance for linear unwrapping [0, π]
@@ -311,9 +320,14 @@ pub fn grow_region_unwrap_full(
     let max_seeds = max_seeds.max(1);
     let mut pq: BucketQueue<QueueItem> = BucketQueue::new(256);
     let mut num_seeds: u8 = 0;
-    let mut seed_thresh: usize = 0;
+    let mut seed_thresh: f64 = 0.0;
 
-    // Build sorted seed candidates: voxels ordered by sum of outgoing edge weights (descending)
+    // Seed candidates in ROMEO.jl's order (`getseedqueue`/`findseed!`, `src/seed.jl`, 08776d4):
+    // by the sum of each voxel's three forward edge bins, best first, where a bin is
+    // `256 − priority` and an invalid or missing edge counts as the worst bin, 255; among equal
+    // sums the highest linear index first (ROMEO.jl's queue pops each bin last-in first-out).
+    // ROMEO.jl also queues voxels outside the mask, but with all their edges invalid they come
+    // last, and the growth below never leaves the mask.
     let mut seed_candidates: Vec<(u32, usize, usize, usize)> = Vec::new();
     for k in 0..nz {
         for j in 0..ny {
@@ -321,23 +335,20 @@ pub fn grow_region_unwrap_full(
                 let idx = idx3d(i, j, k, nx, ny);
                 if mask[idx] == 0 { continue; }
                 let mut sum = 0u32;
-                // Sum weights in 3 positive directions from this voxel
                 for dim in 0..3 {
                     let (ni, nj, nk) = match dim {
                         0 => (i + 1, j, k),
                         1 => (i, j + 1, k),
                         _ => (i, j, k + 1),
                     };
-                    if ni < nx && nj < ny && nk < nz {
-                        let w = weights[idx4d(dim, i, j, k, nx, ny, nz)];
-                        sum += w as u32;
-                    }
+                    let w = if ni < nx && nj < ny && nk < nz { weights[idx4d(dim, i, j, k, nx, ny, nz)] } else { 0 };
+                    sum += if w == 0 { 255 } else { 256 - w as u32 };
                 }
                 seed_candidates.push((sum, i, j, k));
             }
         }
     }
-    seed_candidates.sort_unstable_by_key(|a| std::cmp::Reverse(a.0));
+    seed_candidates.sort_unstable_by_key(|&(sum, i, j, k)| (sum, std::cmp::Reverse(idx3d(i, j, k, nx, ny))));
     let mut seed_cursor = 0;
 
     // Add first seed
@@ -356,7 +367,7 @@ pub fn grow_region_unwrap_full(
         // Check if we need a new seed before popping
         if num_seeds < max_seeds {
             if let Some(best_prio) = pq.peek_max_priority() {
-                if best_prio < seed_thresh {
+                if (best_prio as f64) < seed_thresh {
                     add_seed_full(
                         phase, weights, mask, visited, &mut pq,
                         &seed_candidates, &mut seed_cursor, &mut num_seeds,
@@ -374,7 +385,9 @@ pub fn grow_region_unwrap_full(
         };
 
         let n_idx = idx3d(ni, nj, nk, nx, ny);
-        if visited[n_idx] != 0 || mask[n_idx] == 0 {
+        // ROMEO.jl grows along every valid edge (weight > 0) and does not test the mask here:
+        // the weights already hold it (see `calculate_weights_romeo_with_flags`).
+        if visited[n_idx] != 0 {
             continue;
         }
 
@@ -397,7 +410,7 @@ pub fn grow_region_unwrap_full(
                 let nnk = nnk as usize;
                 let nn_idx = idx3d(nni, nnj, nnk, nx, ny);
 
-                if mask[nn_idx] > 0 && visited[nn_idx] == 0 {
+                if visited[nn_idx] == 0 {
                     let ei = ni.min(nni);
                     let ej = nj.min(nnj);
                     let ek = nk.min(nnk);
@@ -426,14 +439,14 @@ fn add_seed_full(
     candidates: &[(u32, usize, usize, usize)],
     cursor: &mut usize,
     num_seeds: &mut u8,
-    seed_thresh: &mut usize,
+    seed_thresh: &mut f64,
     seed_phase2: Option<&[f64]>,
     seed_tes: Option<(f64, f64)>,
     nx: usize, ny: usize, nz: usize,
 ) -> bool {
     // Find next unvisited candidate
     while *cursor < candidates.len() {
-        let (quality, si, sj, sk) = candidates[*cursor];
+        let (_, si, sj, sk) = candidates[*cursor];
         *cursor += 1;
         let idx = idx3d(si, sj, sk, nx, ny);
         if mask[idx] > 0 && visited[idx] == 0 {
@@ -453,7 +466,7 @@ fn add_seed_full(
                     let nj = nj as usize;
                     let nk = nk as usize;
                     let n_idx = idx3d(ni, nj, nk, nx, ny);
-                    if mask[n_idx] > 0 && visited[n_idx] == 0 {
+                    if visited[n_idx] == 0 {
                         let ei = si.min(ni);
                         let ej = sj.min(nj);
                         let ek = sk.min(nk);
@@ -465,8 +478,18 @@ fn add_seed_full(
                 }
             }
 
-            // Compute new seed threshold: avg quality / 2 (in our convention, higher = better)
-            *seed_thresh = (quality as usize) / 6; // quality is sum of 3 weights, /6 = avg/2
+            // ROMEO.jl's new-seed threshold (`addseed!`, `src/seed.jl:20-22`): with S the sum of
+            // the seed's three forward edge bins (0 for an invalid edge), a new seed is added once
+            // the best queued bin is worse than `256 − div(256 − S/3, 2)`, i.e. once the best
+            // queued priority (`256 − bin`) is below `div(256 − S/3, 2)`.
+            let s_bins: f64 = (0..3)
+                .map(|dim| {
+                    let (ni, nj, nk) = match dim { 0 => (si + 1, sj, sk), 1 => (si, sj + 1, sk), _ => (si, sj, sk + 1) };
+                    let w = if ni < nx && nj < ny && nk < nz { weights[idx4d(dim, si, sj, sk, nx, ny, nz)] } else { 0 };
+                    if w == 0 { 0.0 } else { 256.0 - w as f64 }
+                })
+                .sum();
+            *seed_thresh = ((256.0 - s_bins / 3.0) / 2.0).floor();
             return true;
         }
     }

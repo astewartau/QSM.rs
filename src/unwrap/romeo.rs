@@ -21,9 +21,15 @@
 //! authors' code; file:line refer to those trees.
 //!
 //! - **Weights.** `:romeo` (phase coherence, phase gradient coherence, phase linearity,
-//!   magnitude coherence) is the default of both the API and the `romeo` CLI
-//!   (`src/weights.jl:56,75-76`; `ext/RomeoApp/argparse.jl:51-58`). [`RomeoParams::default`]
-//!   matches. `:romeo4` sets the same four flags as `:romeo` (`src/weights.jl:81-82`).
+//!   magnitude coherence) is the API's default (`src/weights.jl:56,75-76`), which
+//!   [`RomeoParams::default`] matches; `:romeo4` sets the same four flags (`src/weights.jl:81-82`).
+//!   The CLI's `-w romeo` default becomes `romeo3` (no phase linearity) whenever a magnitude is
+//!   given and `romeo4` otherwise (`ext/RomeoApp/caller.jl:49-55`): [`RomeoParams::romeo_cli`].
+//! - **Weight bins.** Each weight in `[0, 1]` goes to the bin `max(round((1 − w)·255), 1)`
+//!   (`rescale`, `src/weights.jl:139-146`); the bins order the growth, so they are ROMEO.jl's here
+//!   (stored as `256 − bin`). An edge is weighted when its first voxel is in the mask
+//!   (`mask[I] && checkbounds(J)`, `src/weights.jl:99-100`), with the magnitude masked, so the
+//!   growth can step one voxel out of the mask along +x, +y or +z (and through such voxels).
 //! - **Multi-echo mode.** Temporal (template) unwrapping is the default: the template echo
 //!   (`template=1`, i.e. index 0 here) is unwrapped spatially, with the echo after it (or before
 //!   it, for a later template) as `phase2` for the gradient-coherence weight, and the others
@@ -32,8 +38,8 @@
 //!   phase-offset-correction is not applicable" (`argparse.jl:95-100`). Both match
 //!   [`RomeoParams::default`] (`template: 0`, `individual: false`).
 //! - **`temporal_uncertain_unwrapping`.** 0.5 in the API (`src/unwrapping.jl:52,70`), which
-//!   QSM.rs and CLEAR-SWI's `romeo_combine` use; the CLI's default is 0 and it marks the option
-//!   EXPERIMENTAL (`argparse.jl:165-172`).
+//!   [`RomeoParams::default`] and CLEAR-SWI's `romeo_combine` use; the CLI's default is 0 and it
+//!   marks the option EXPERIMENTAL (`argparse.jl:165-172`); [`RomeoParams::romeo_cli`] has 0.
 //! - **`correct_global`** is off by default in both the API and the CLI (`src/unwrapping.jl:43`,
 //!   `argparse.jl:129-135`). (QSMxT's Python releases ran the CLI with
 //!   `--individual-unwrapping --correct-global`, `qsmxt/interfaces/nipype_interface_romeo.py:66`;
@@ -50,18 +56,39 @@
 //!   is in [`crate::utils::phase_offset_removal`]; its defaults are in the module docs of
 //!   `utils::multi_echo`. `calculateB0_unwrapped` states that "the phase offsets have to be
 //!   removed prior" (MriResearchTools `src/romeofunctions.jl:3-7`).
-//! - **Seed.** ROMEO.jl seeds at the voxel whose three edges have the best summed weight and,
-//!   with multi-echo input, corrects the seed's 2π count from `phase2` (`src/seed.jl:2-60`). The
-//!   multi-seed path here (`max_seeds > 1`, or any of `wrap_addition`, `merge_regions`,
-//!   `correct_regions`) does the same; the default single-seed path seeds at the mask's centre
-//!   of mass ([`find_seed_point`]) instead, which can change the result's global 2π offset and
-//!   the growth order.
+//! - **Seed.** ROMEO.jl seeds at the voxel whose three forward edges have the best summed bin
+//!   (ties to the highest linear index) and corrects the seed's 2π count from `phase2` with
+//!   multi-echo input, or wraps it into (−π, π] otherwise (`src/seed.jl`). So does every path here
+//!   ([`crate::region_grow::grow_region_unwrap_full`]). Before, the default single-seed path
+//!   seeded at the mask's centre of mass ([`find_seed_point`], no longer used here), which could
+//!   change the global 2π offset and the growth order.
 //! - **Resolution, field strength, orientation.** Nothing in ROMEO depends on them: the weights
 //!   use phase differences between 6-connected neighbours and echo-time ratios only.
+//!
+//! # Agreement with the reference
+//!
+//! In double precision QSM.rs reproduces ROMEO.jl's `unwrap` exactly (the same number of turns at
+//! every voxel) in template mode with the API's and the CLI's settings and in individual mode
+//! with global correction, and MriResearchTools' `mcpc3ds` to 9e-16 rad
+//! (`tests/romeo_romeojl_parity.rs`, a noisy three-echo phantom; ROMEO.jl 08776d4 and
+//! MriResearchTools 771eadf in the QSM-CI `julia-qsm` image `sha256:b3c048ac…`). Given the
+//! CLI's own MCPC-3D-S output on the QSM-CI in-vivo travelling-head scan (Prisma 2.89 T, 1 mm,
+//! five echoes), QSM.rs's template unwrapping gives the CLI's unwrapped echoes exactly.
+//!
+//! The `romeo` CLI itself reads the NIfTI phase and magnitude as Float32 and computes in single
+//! precision; QSM.rs computes in f64 (kept: double precision throughout, Ashley 2026-10-28).
+//! That alone leaves a residual on the in-vivo scan. The CLI's defaults (`romeo -B` with a brain
+//! mask) against the pipeline with [`RomeoParams::romeo_cli`]: B0 NRMSE 2.9 % (corr 0.9995),
+//! from 2π differences in ~1,250 voxels of the MCPC-3D-S HIP unwrap that propagate through the
+//! offset smoothing (fed the CLI's own single-precision HIP, QSM.rs differs in 36 voxels; fed
+//! its corrected phase, in none). Before the seed, weight bins, edge masking, `mcpc3ds`'s own
+//! mask and smoothing were ROMEO.jl's, the same comparison gave NRMSE 25 %; with individual
+//! unwrapping, global correction, `romeo4` and a 4 mm offset smoothing on both sides it went
+//! from 6.4 % to 1.1 %.
 
 use std::f64::consts::PI;
 
-use crate::region_grow::{grow_region_unwrap, grow_region_unwrap_from_visited, grow_region_unwrap_full};
+use crate::region_grow::{grow_region_unwrap_from_visited, grow_region_unwrap_full};
 use crate::Grid;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
@@ -186,6 +213,21 @@ impl Default for RomeoParams {
 }
 
 impl RomeoParams {
+    /// The `romeo` command line's settings for multi-echo data with a magnitude (ROMEO.jl
+    /// 08776d4), where they differ from the API's ([`RomeoParams::default`]):
+    /// - weights `romeo3` (phase coherence, phase gradient coherence, magnitude coherence): the
+    ///   CLI's `-w romeo` default becomes `romeo3` whenever a magnitude is given, and `romeo4`
+    ///   (the API's `:romeo`) only without one (`load_data_and_resolve_args!`,
+    ///   `ext/RomeoApp/caller.jl:49-55`);
+    /// - `temporal_uncertain_unwrapping` 0, the CLI's default (`argparse.jl:165-172`), where the
+    ///   API's is 0.5.
+    ///
+    /// Everything else (template echo 1, temporal unwrapping, no global correction, one seed)
+    /// is the same in both.
+    pub fn romeo_cli() -> Self {
+        Self { phase_linearity: false, temporal_uncertain_unwrapping: 0.0, ..Self::default() }
+    }
+
     /// Create params matching a ROMEO.jl weight type preset.
     pub fn from_weight_type(wt: RomeoWeightType) -> Self {
         if wt == RomeoWeightType::BestPath {
@@ -309,7 +351,6 @@ pub fn calculate_weights_romeo_with_flags(
 
     let has_mag = !mag.is_empty();
     let has_phase2 = phase2.is_some();
-    let te_ratio = if te2.abs() > 1e-10 { te1 / te2 } else { 1.0 };
 
     // Disable magnitude flags if no magnitude data
     let f_mc  = flags[3] && has_mag;
@@ -347,7 +388,12 @@ pub fn calculate_weights_romeo_with_flags(
 
             let idx_n = idx3d(ni, nj, nk, nx, ny);
 
-            if mask[idx] == 0 || mask[idx_n] == 0 {
+            // ROMEO.jl tests only the edge's first voxel (`mask[I] && checkbounds(J)`,
+            // `src/weights.jl:99-100`), so an edge from the mask's last voxel to the next one
+            // outside it is valid (weak: the magnitude is masked, so its magnitude coherence is
+            // 0) and the growth can step one voxel out of the mask in +x, +y or +z, and back
+            // in through such voxels.
+            if mask[idx] == 0 {
                 return;
             }
 
@@ -364,7 +410,8 @@ pub fn calculate_weights_romeo_with_flags(
                 let phase2_data = phase2.unwrap();
                 let wrapped_p1 = wrap_angle(phase[idx_n] - phase[idx]);
                 let wrapped_p2 = wrap_angle(phase2_data[idx_n] - phase2_data[idx]);
-                let pgc = (1.0 - (wrapped_p1 - wrapped_p2 * te_ratio).abs()).max(0.0);
+                // ROMEO.jl: γ(P2[i] - P2[j]) * TEs[1] / TEs[2], left to right
+                let pgc = (1.0 - (wrapped_p1 - wrapped_p2 * te1 / te2).abs()).max(0.0);
                 weight *= 0.1 + 0.9 * pgc;
             }
 
@@ -375,14 +422,16 @@ pub fn calculate_weights_romeo_with_flags(
             }
 
             if has_mag {
+                // ROMEO.jl masks the magnitude (`mag .* mask`, `parsekwargs`)
                 let m1 = mag[idx];
-                let m2 = mag[idx_n];
+                let m2 = if mask[idx_n] != 0 { mag[idx_n] } else { 0.0 };
                 let small = m1.min(m2);
                 let big = m1.max(m2);
 
                 // 4. Magnitude coherence: (min/max)²
                 if f_mc {
-                    let mc = if big > 1e-12 { (small / big).powi(2) } else { 0.0 };
+                    // 0/0 is NaN in ROMEO.jl, which makes the edge invalid
+                    let mc = if big > 0.0 { (small / big).powi(2) } else { f64::NAN };
                     weight *= 0.1 + 0.9 * mc;
                 }
 
@@ -453,15 +502,18 @@ fn phase_linearity_triplet(a: f64, b: f64, c: f64) -> f64 {
     if pl.is_nan() { 0.5 } else { pl }
 }
 
-/// Rescale weight from [0,1] to u8 [1,255], with 0 = invalid.
+/// Rescale a weight in `[0, 1]` (1 best) to the queue priority, as ROMEO.jl bins it.
 ///
-/// Matches ROMEO.jl convention: valid edges always have weight ≥ 1.
+/// ROMEO.jl's `rescale` (`src/weights.jl:139-146`, 08776d4) maps `w` to the bin
+/// `max(round((1 − w)·255), 1)` (1 best, 255 worst, Julia's round-half-to-even) and anything
+/// outside `[0, 1]` to 0 (invalid). Here the priority is `256 − bin`, so 255 is best, 1 worst
+/// and 0 invalid, with exactly ROMEO.jl's bins (a weight of 0 is the worst valid edge, as there).
+/// The bins decide the growth order, so they must be ROMEO.jl's for the same result.
 #[inline]
 fn rescale_weight(w: f64) -> u8 {
-    if w > 0.0 && w <= 1.0 {
-        (w * 254.0).round() as u8 + 1  // [1, 255]
-    } else if w > 1.0 {
-        255
+    if (0.0..=1.0).contains(&w) {
+        let bin = (((1.0 - w) * 255.0).round_ties_even() as i64).max(1);
+        (256 - bin) as u8
     } else {
         0
     }
@@ -772,36 +824,27 @@ pub fn unwrap_romeo(
     let mut unwrapped = phase.to_vec();
     let n_total = nx * ny * nz;
 
-    if params.max_seeds > 1 || params.wrap_addition > 0.0 || params.merge_regions || params.correct_regions {
-        // Full-featured path with multi-seed, wrap_addition, region merging
-        let mut visited = vec![0u8; n_total];
-        let num_regions = grow_region_unwrap_full(
-            &mut unwrapped, &weights, mask, &mut visited,
-            nx, ny, nz, params.wrap_addition, params.max_seeds,
-            phase2, if phase2.is_some() { Some((te1, te2)) } else { None },
-        );
+    // ROMEO.jl's region growing (`grow_region_unwrap!`), seeded as ROMEO.jl seeds (see the
+    // module docs, *Seed*), for one seed as for several.
+    let mut visited = vec![0u8; n_total];
+    let num_regions = grow_region_unwrap_full(
+        &mut unwrapped, &weights, mask, &mut visited,
+        nx, ny, nz, params.wrap_addition, params.max_seeds,
+        phase2, if phase2.is_some() { Some((te1, te2)) } else { None },
+    );
 
-        if params.merge_regions && num_regions > 1 {
-            let remaining = merge_regions_post(
-                &mut unwrapped, &mut visited, num_regions, &weights, nx, ny, nz,
-            );
-            if params.correct_regions {
-                // correct_regions on remaining regions
-                for &r in &remaining {
-                    correct_regions(&mut unwrapped, &visited, r);
-                }
-            }
-        } else if params.correct_regions && num_regions > 0 {
-            correct_regions(&mut unwrapped, &visited, num_regions);
-        }
-    } else {
-        // Simple single-seed path (faster, no region tracking overhead)
-        let (seed_i, seed_j, seed_k) = find_seed_point(mask, nx, ny, nz);
-        let mut work_mask = mask.to_vec();
-        grow_region_unwrap(
-            &mut unwrapped, &weights, &mut work_mask,
-            nx, ny, nz, seed_i, seed_j, seed_k,
+    if params.merge_regions && num_regions > 1 {
+        let remaining = merge_regions_post(
+            &mut unwrapped, &mut visited, num_regions, &weights, nx, ny, nz,
         );
+        if params.correct_regions {
+            // correct_regions on remaining regions
+            for &r in &remaining {
+                correct_regions(&mut unwrapped, &visited, r);
+            }
+        }
+    } else if params.correct_regions && num_regions > 0 {
+        correct_regions(&mut unwrapped, &visited, num_regions);
     }
 
     // correctglobal for 3D: subtract median n·2π offset
@@ -899,21 +942,14 @@ fn unwrap_template<P: AsRef<[f64]>, M: AsRef<[f64]>>(
 
     // Spatially unwrap template echo
     let mut result: Vec<Vec<f64>> = phases.iter().map(|p| p.as_ref().to_vec()).collect();
-    if params.wrap_addition > 0.0 {
-        let mut visited = vec![0u8; n_total];
-        grow_region_unwrap_full(
-            &mut result[template], &weights, mask, &mut visited,
-            nx, ny, nz, params.wrap_addition, 1,
-            Some(phases[p2ref].as_ref()), Some((tes[template], tes[p2ref])),
-        );
-    } else {
-        let (seed_i, seed_j, seed_k) = find_seed_point(mask, nx, ny, nz);
-        let mut work_mask = mask.to_vec();
-        grow_region_unwrap(
-            &mut result[template], &weights, &mut work_mask,
-            nx, ny, nz, seed_i, seed_j, seed_k,
-        );
-    }
+    // ROMEO.jl: `unwrap!(view(wrapped, :, :, :, template); args..., weights)` with phase2 and
+    // TEs, so the seed's 2π count is set from phase2 (`seedcorrection!`).
+    let mut visited = vec![0u8; n_total];
+    grow_region_unwrap_full(
+        &mut result[template], &weights, mask, &mut visited,
+        nx, ny, nz, params.wrap_addition, params.max_seeds,
+        Some(phases[p2ref].as_ref()), Some((tes[template], tes[p2ref])),
+    );
 
     // Temporally unwrap other echoes outward from template
     // Order: template-1, template-2, ..., 0, template+1, template+2, ..., n-1
@@ -973,9 +1009,8 @@ fn unwrap_individual<P: AsRef<[f64]> + Sync, M: AsRef<[f64]> + Sync>(
     nx: usize, ny: usize, nz: usize,
 ) -> Vec<Vec<f64>> {
     let n_echoes = phases.len();
-    let (seed_i, seed_j, seed_k) = find_seed_point(mask, nx, ny, nz);
 
-    // Each echo is unwrapped independently from the same seed, so the echoes
+    // Each echo is unwrapped independently, so the echoes
     // fan out across threads (under the `parallel` feature). Order is preserved
     // by the parallel `collect`.
     let echo_indices: Vec<usize> = (0..n_echoes).collect();
@@ -995,10 +1030,11 @@ fn unwrap_individual<P: AsRef<[f64]> + Sync, M: AsRef<[f64]> + Sync>(
             );
 
             let mut unwrapped = phases[i].as_ref().to_vec();
-            let mut work_mask = mask.to_vec();
-            grow_region_unwrap(
-                &mut unwrapped, &weights, &mut work_mask,
-                nx, ny, nz, seed_i, seed_j, seed_k,
+            let mut visited = vec![0u8; nx * ny * nz];
+            grow_region_unwrap_full(
+                &mut unwrapped, &weights, mask, &mut visited,
+                nx, ny, nz, params.wrap_addition, params.max_seeds,
+                Some(phases[e2].as_ref()), Some((tes[i], tes[e2])),
             );
             unwrapped
         })
@@ -2096,10 +2132,11 @@ mod tests {
 
     #[test]
     fn test_rescale_weight() {
-        assert_eq!(rescale_weight(1.0), 255);    // best
-        assert_eq!(rescale_weight(0.5), 128);    // mid
-        assert!(rescale_weight(0.001) >= 1);     // worst valid ≥ 1
-        assert_eq!(rescale_weight(0.0), 0);      // invalid
+        // ROMEO.jl: bin = max(round((1 - w) * 255), 1); priority = 256 - bin
+        assert_eq!(rescale_weight(1.0), 255);    // best (bin 1)
+        assert_eq!(rescale_weight(0.5), 128);    // bin round(127.5) = 128 (ties to even)
+        assert_eq!(rescale_weight(0.0), 1);      // worst valid (bin 255)
         assert_eq!(rescale_weight(-0.1), 0);     // invalid
+        assert_eq!(rescale_weight(f64::NAN), 0); // invalid
     }
 }
