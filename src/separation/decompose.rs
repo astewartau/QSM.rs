@@ -158,10 +158,10 @@ pub struct DecomposeParams {
     pub n_inner: usize,
     /// Upper bound on |χ| in the fit, ppm (reference default: 0.5).
     pub chi_bound: f64,
-    /// `MaxIterations` of each stage's `lsqcurvefit` (default 400, MATLAB's default, which the
-    /// authors keep). Every other solver setting is `lsqcurvefit`'s default
-    /// ([`LsqTrrOptions::default`]).
-    pub max_iterations: usize,
+    /// `optimoptions('lsqcurvefit', …)` of every stage: iterations, evaluations, tolerances and
+    /// finite-difference settings. Default: MATLAB's defaults ([`LsqTrrOptions::default`]), which
+    /// the authors' code keeps (`MaxIterations` 400, the 1e-6 tolerances).
+    pub lsqcurvefit: LsqTrrOptions,
     /// Unwrap the phase along the echoes and cap the χ search at what the echo spacing can
     /// represent (see the module docs, *Phase unwrapping*). Default `false`: the authors' code
     /// takes every phase on its principal branch (`log`, `angle`) and searches χ up to
@@ -224,7 +224,7 @@ impl Default for DecomposeParams {
             b0: 7.0,
             n_inner: 10,
             chi_bound: 0.5,
-            max_iterations: 400,
+            lsqcurvefit: LsqTrrOptions::default(),
             unwrap_phase: false,
             solvers: DecomposeStageSolvers::default(),
         }
@@ -423,7 +423,7 @@ fn fit_voxel(
     };
     let unwrap = params.unwrap_phase;
     let inf = f64::INFINITY;
-    let opts = LsqTrrOptions { max_iterations: params.max_iterations, ..LsqTrrOptions::default() };
+    let opts = &params.lsqcurvefit;
 
     // `complex_to_real(log(model)) − complex_to_real(log(ydata))`, phases optionally unwrapped
     // along the echoes.
@@ -456,7 +456,7 @@ fn fit_voxel(
             &mut x,
             &[0.0; 3],
             &[inf; 3],
-            &opts,
+            opts,
             &mut ws.s1,
             |_| {},
         ),
@@ -471,7 +471,7 @@ fn fit_voxel(
             &mut x,
             &[0.0],
             &[inf],
-            &opts,
+            opts,
             &mut ws.s2,
             |_| {},
         ),
@@ -486,7 +486,7 @@ fn fit_voxel(
             &mut x,
             &[0.0, -upper],
             &[upper, 0.0],
-            &opts,
+            opts,
             &mut ws.s3,
             |_| {},
         ),
@@ -596,7 +596,7 @@ mod tests {
             b0,
             n_inner: 12,
             chi_bound: 0.5,
-            max_iterations: 400,
+            lsqcurvefit: LsqTrrOptions::default(),
             unwrap_phase: false,
             solvers: Default::default(),
         };
@@ -675,7 +675,7 @@ mod tests {
             b0,
             n_inner: 10,
             chi_bound: 0.5,
-            max_iterations: 400,
+            lsqcurvefit: LsqTrrOptions::default(),
             unwrap_phase: true,
             solvers: Default::default(),
         };
@@ -733,7 +733,7 @@ mod tests {
             b0,
             n_inner: 10,
             chi_bound: 0.5,
-            max_iterations: 400,
+            lsqcurvefit: LsqTrrOptions::default(),
             unwrap_phase: true,
             solvers: Default::default(),
         };
@@ -760,7 +760,7 @@ mod tests {
         let te = [0.004, 0.012, 0.020, 0.028];
         let b0 = 7.0;
         let ne = te.len();
-        let params = DecomposeParams { b0, n_inner: 4, chi_bound: 0.5, max_iterations: 400, unwrap_phase: false, solvers: Default::default() };
+        let params = DecomposeParams { b0, n_inner: 4, chi_bound: 0.5, lsqcurvefit: LsqTrrOptions::default(), unwrap_phase: false, solvers: Default::default() };
 
         // A real signal for the fitted voxels.
         let (cp, cm, c0, chip, chim, r0) = (0.4, 0.2, 0.4, 0.06, -0.05, 22.0);
