@@ -33,6 +33,22 @@
 //! bins differently. That is the only difference between the two: about 1e-4 ppm RMS on a 3T
 //! scan tilted by 6 degrees, and none for axial B0.
 //!
+//! QSM.jl is this method's reference: QSM.jl, Kames's maintained successor to QSM.m, is the implementation
+//! designated for this family (QSM.rs's reference rule: the authors' code where it
+//! exists, otherwise one designated implementation per family, the others' values recorded).
+//!
+//! # Agreement with QSM.jl
+//!
+//! On the QSM-CI in-vivo travelling-head scan (Siemens Prisma 2.89 T, 1 mm, 184×256×128, V-SHARP
+//! local field and brain mask), against QSM.jl in the QSM-CI `julia-qsm` image (`sha256:b3c048ac…`,
+//! QSM.jl fde4b92), both outputs saved as float32:
+//! with QSM.jl given this port's data weight `W` and the field in radians at the first echo
+//! time, NRMSE 1.8e-10 %, max |Δ| 1.2e-10 ppm (195 iterations here). QSM.jl's `nltv` cannot
+//! be run on small arrays for a fixture test: its data-term multiplier `ue` is allocated with
+//! `similar` and never initialised, and on small arrays (which reuse freed memory) its output is
+//! NaN and differs between runs. The fresh, zeroed allocations of the in-vivo arrays start it at
+//! zero, as this port does.
+//!
 //! # Units
 //! Like the other inversions, NLTV takes the local field in ppm and returns ppm. The nonlinear
 //! data term needs the phase in radians, so the field is converted with `2*pi*gamma*b0*te`
@@ -84,6 +100,10 @@ pub struct NltvParams {
     /// gives no rule for a field combined over echoes, so the first echo time, the default where
     /// the reference does not say.
     pub te: EchoTime,
+    /// Zero padding per axis, QSM.jl's `pad` (default `[0, 0, 0]`, QSM.jl's): `< 0` does not
+    /// pad that axis, `≥ 0` pads it by at least that many voxels, rounded up to QSM.jl's fast
+    /// FFT size (see [`with_qsmjl_padding`](crate::utils::padding::with_qsmjl_padding)).
+    pub pad: [i64; 3],
 }
 
 impl Default for NltvParams {
@@ -99,15 +119,9 @@ impl Default for NltvParams {
             b0: 3.0,
             echo_times: vec![0.02],
             te: EchoTime::First,
+            pad: crate::utils::padding::QSMJL_PAD,
         }
     }
-}
-
-/// QSM.jl `fastfftsize(sz, (0, 0, 0); rfft=true)`: the fast FFT size, with an even first
-/// dimension where one is close.
-fn fast_fft_dims(dims: (usize, usize, usize)) -> (usize, usize, usize) {
-    let [x, y, z] = crate::utils::padding::qsmjl_fast_fft_size([dims.0, dims.1, dims.2], [0; 3]);
-    (x, y, z)
 }
 
 #[inline]
@@ -146,10 +160,11 @@ pub fn nltv(
     // ppm -> radians, as the nonlinear data term needs.
     let ppm_to_rad = 2.0 * std::f64::consts::PI * crate::constants::GAMMA_BAR_MHZ_PER_T * params.b0 * params.te.seconds(&params.echo_times, "NLTV");
 
-    // Zero padding to a fast FFT size (QSM.jl `pad = (0, 0, 0)`). Every step is
+    // Zero padding to a fast FFT size (QSM.jl `pad`, `(0, 0, 0)` by default). Every step is
     // shift-equivariant, so placing the data in the corner is the same as centring it.
     let dims = grid.dims;
-    let pdims = fast_fft_dims(dims);
+    let [px, py, pz] = crate::utils::padding::qsmjl_fast_fft_size([dims.0, dims.1, dims.2], params.pad);
+    let pdims = (px, py, pz);
     let pgrid = Grid::new(pdims.0, pdims.1, pdims.2, grid.vsx(), grid.vsy(), grid.vsz());
     let n = pgrid.n_total();
 

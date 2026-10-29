@@ -19,13 +19,38 @@
 //! LSMR inner products are taken over the half spectrum QSM.jl stores (`kx` index
 //! `0..=nx/2`) so its scalars are the same.
 //!
+//! QSM.jl is this method's reference: RTS is Kames's method and QSM.jl is his code, so this is the authors' code (QSM.rs's reference rule: the authors' code where it
+//! exists, otherwise one designated implementation per family, the others' values recorded).
+//!
+//! QSM.jl pads the field to its fast FFT size first (`pad = (0, 0, 0)`, `padfastfft`,
+//! `src/inversion/rts.jl:109-111`), and so does this port by default ([`RtsParams::pad`]); the
+//! padding changes the result, since the filters act on the periodic extension of the array.
+//!
+//! # Agreement with QSM.jl
+//!
+//! On the QSM-CI in-vivo travelling-head scan (Siemens Prisma 2.89 T, 1 mm, 184×256×128, V-SHARP
+//! local field and brain mask), against QSM.jl in the QSM-CI `julia-qsm` image (`sha256:b3c048ac…`,
+//! QSM.jl fde4b92), both outputs saved as float32:
+//! NRMSE 1.0e-8 % at QSM.jl's defaults, 1.3e-9 % with padding off on both. Before this port
+//! padded, its defaults differed from QSM.jl's by NRMSE 0.45 %. `tests/inversion_qsmjl_parity.rs`
+//! checks it against QSM.jl's output on small phantoms (relative L2 ~1e-15), axial and oblique.
+//!
+//! Two deviations, both where QSM.jl's result is not well defined:
+//! - **DC of the Laplacian.** On anisotropic voxels the FFT of the Laplacian stencil is not
+//!   exactly 0 at DC (4.4e-16 at 0.9 × 1.0 × 1.3 mm), and QSM.jl inverts that rounding, which
+//!   puts an arbitrary constant into χ (it moved χ by a uniform 1e-3 ppm on a small phantom, and
+//!   changed the iteration count). Here the DC term is exactly 0, as it is on isotropic voxels.
+//! - **Nyquist planes with tilted B0.** QSM.jl's real-to-complex FFT and its kernel's negative
+//!   Nyquist frequency treat the Nyquist planes of an even-sized axis differently from this
+//!   port's complex FFT once B0 is tilted (the kernel is then not even in each axis); with odd
+//!   sizes, or axial B0, the two agree to rounding.
+//!
 //! # Reference pipeline
 //! QSM.jl's README example (commit fde4b92, L35-52) ends in `rts`: FSL BET on the last echo's
 //! magnitude (`-f 0.5`), eroded by 5 voxels; Laplacian unwrapping of each echo, each scaled to
 //! ppm by its own TE; V-SHARP with QSM.jl's defaults (radii `18*min(vsz)` down to `2*max(vsz)`
 //! mm in steps of `2*max(vsz)`, threshold 0.05; `src/bgremove/sharp.jl` L136-137); then `rts` on
-//! the (per-echo) local field. QSM.jl's `pad = (0, 0, 0)` pads to a fast FFT size only; this
-//! port does not pad.
+//! the (per-echo) local field, with `pad = (0, 0, 0)`, padding to QSM.jl's fast FFT size only.
 //!
 //! # Pipeline rules
 //!
@@ -60,6 +85,10 @@ pub struct RtsParams {
     pub tau: f64,
     /// Factor `rho` is raised by (`gamma`)
     pub gamma: f64,
+    /// Zero padding per axis, QSM.jl's `pad` (default `[0, 0, 0]`, QSM.jl's): `< 0` does not
+    /// pad that axis, `≥ 0` pads it by at least that many voxels, rounded up to QSM.jl's fast
+    /// FFT size (see [`with_qsmjl_padding`](crate::utils::padding::with_qsmjl_padding)).
+    pub pad: [i64; 3],
 }
 
 impl Default for RtsParams {
@@ -73,6 +102,7 @@ impl Default for RtsParams {
             lsmr_iter: 4,
             tau: 0.7,
             gamma: 5.0,
+            pad: crate::utils::padding::QSMJL_PAD,
         }
     }
 }
@@ -259,6 +289,20 @@ pub fn rts(
     grid: &Grid,
     bdir: (f64, f64, f64),
     params: &RtsParams,
+    progress: impl FnMut(usize, usize),
+) -> Vec<f64> {
+    crate::utils::padding::with_qsmjl_padding(local_field, mask, grid, params.pad, |f, m, g| {
+        rts_unpadded(f, m, g, bdir, params, progress)
+    })
+}
+
+/// [`rts`] on the already padded grid.
+fn rts_unpadded(
+    local_field: &[f64],
+    mask: &[u8],
+    grid: &Grid,
+    bdir: (f64, f64, f64),
+    params: &RtsParams,
     mut progress: impl FnMut(usize, usize),
 ) -> Vec<f64> {
     let (nx, ny, nz) = grid.dims;
@@ -274,7 +318,10 @@ pub fn rts(
         .map(|&v| Complex64::new(v, 0.0))
         .collect();
     fft_ws.fft3d(&mut work);
-    let l: Vec<f64> = work.iter().map(|c| c.re).collect();
+    let mut l: Vec<f64> = work.iter().map(|c| c.re).collect();
+    // Exactly 0 at DC (the stencil sums to zero; its FFT does only to rounding on anisotropic
+    // voxels, and inverting that rounding puts an arbitrary constant into χ). See the module docs.
+    l[0] = 0.0;
 
     // M = mu on the well-conditioned frequencies
     let m: Vec<f64> = d.iter().map(|&dv| if dv.abs() > params.delta { params.mu } else { 0.0 }).collect();

@@ -326,7 +326,7 @@ fn test_bgremove_ismv() {
         &grid,
         &IsmvParams::default(),
         |_, _| {},
-    ));
+    ).expect("ismv"));
 
     let res = TestResult::new("iSMV", &result, &data.fieldmap_local, &data.mask, data.dims);
     res.print_with_time(elapsed);
@@ -415,7 +415,7 @@ fn test_inversion_tkd() {
         &data.mask,
         &grid,
         data.b0_dir,
-        &TkdParams { threshold: 0.2 },
+        &TkdParams { threshold: 0.2, ..Default::default() },
     ));
 
     let res = TestResult::new("TKD", &result, &data.chi, &data.mask, data.dims);
@@ -443,7 +443,7 @@ fn test_inversion_tkd_cropped() {
     let (nx, ny, nz) = data.dims;
     let (vsx, vsy, vsz) = data.voxel_size;
     let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
-    let params = TkdParams { threshold: 0.2 };
+    let params = TkdParams { threshold: 0.2, ..Default::default() };
     let full = inversion::tkd(&data.fieldmap_local, &data.mask, &grid, data.b0_dir, &params);
 
     let start = Instant::now();
@@ -483,7 +483,7 @@ fn test_inversion_tsvd() {
         &data.mask,
         &grid,
         data.b0_dir,
-        &TkdParams { threshold: 0.2 },
+        &TkdParams { threshold: 0.2, ..Default::default() },
     ));
 
     let res = TestResult::new("TSVD", &result, &data.chi, &data.mask, data.dims);
@@ -511,7 +511,7 @@ fn test_inversion_tikhonov() {
         &data.mask,
         &grid,
         data.b0_dir,
-        &TikhonovParams { lambda: 1e-3, reg: inversion::tikhonov::Regularization::Gradient },
+        &TikhonovParams { lambda: 1e-3, reg: inversion::tikhonov::Regularization::Gradient, ..Default::default() },
     ));
 
     let res = TestResult::new("Tikhonov", &result, &data.chi, &data.mask, data.dims);
@@ -1239,7 +1239,7 @@ fn test_smwi() {
     println!("[INFO] Reconstructing χ (TKD)...");
     let chi = inversion::tkd(
         &data.fieldmap_local, &data.mask, &grid, data.b0_dir,
-        &TkdParams { threshold: 0.2 },
+        &TkdParams { threshold: 0.2, ..Default::default() },
     );
 
     let start = Instant::now();
@@ -2032,7 +2032,7 @@ fn benchmark_all_algorithms() {
     // iSMV
     let ((result, _), elapsed) = run_timed!("iSMV", bgremove::ismv(
         &data.fieldmap, &data.mask, &grid, &IsmvParams::default(), |_, _| {}
-    ));
+    ).expect("ismv"));
     TestResult::new("iSMV", &result, &data.fieldmap_local, &data.mask, data.dims).print_with_time(elapsed);
 
     // LBV (using defaults: tol=1e-6, adaptive max_iter)
@@ -2054,14 +2054,14 @@ fn benchmark_all_algorithms() {
 
     // TKD
     let (result, elapsed) = run_timed!("TKD", inversion::tkd(
-        &data.fieldmap_local, &data.mask, &grid, data.b0_dir, &TkdParams { threshold: 0.2 }
+        &data.fieldmap_local, &data.mask, &grid, data.b0_dir, &TkdParams { threshold: 0.2, ..Default::default() }
     ));
     TestResult::new("TKD", &result, &data.chi, &data.mask, data.dims).print_with_time(elapsed);
     inversion_results.push(("TKD".to_string(), result, elapsed));
 
     // TSVD
     let (result, elapsed) = run_timed!("TSVD", inversion::tsvd(
-        &data.fieldmap_local, &data.mask, &grid, data.b0_dir, &TkdParams { threshold: 0.2 }
+        &data.fieldmap_local, &data.mask, &grid, data.b0_dir, &TkdParams { threshold: 0.2, ..Default::default() }
     ));
     TestResult::new("TSVD", &result, &data.chi, &data.mask, data.dims).print_with_time(elapsed);
     inversion_results.push(("TSVD".to_string(), result, elapsed));
@@ -2069,7 +2069,7 @@ fn benchmark_all_algorithms() {
     // Tikhonov
     let (result, elapsed) = run_timed!("Tikhonov", inversion::tikhonov(
         &data.fieldmap_local, &data.mask, &grid,
-        data.b0_dir, &TikhonovParams { lambda: 1e-3, reg: inversion::tikhonov::Regularization::Gradient }
+        data.b0_dir, &TikhonovParams { lambda: 1e-3, reg: inversion::tikhonov::Regularization::Gradient, ..Default::default() }
     ));
     TestResult::new("Tikhonov", &result, &data.chi, &data.mask, data.dims).print_with_time(elapsed);
     inversion_results.push(("Tikhonov".to_string(), result, elapsed));
@@ -2195,7 +2195,7 @@ fn test_all_combinations() {
     // iSMV
     let ((result, mask), elapsed) = run_timed!("iSMV", bgremove::ismv(
         &data.fieldmap, &data.mask, &grid, &IsmvParams::default(), |_, _| {}
-    ));
+    ).expect("ismv"));
     TestResult::new("iSMV", &result, &data.fieldmap_local, &data.mask, data.dims).print_with_time(elapsed);
     bfr_results.push(BfrResult { name: "iSMV".into(), local_field: result, mask, elapsed });
 
@@ -2236,14 +2236,14 @@ fn test_all_combinations() {
 
         // TKD
         let (result, elapsed) = run_timed!("TKD", inversion::tkd(
-            &bfr.local_field, &bfr.mask, &grid, data.b0_dir, &TkdParams { threshold: 0.2 }
+            &bfr.local_field, &bfr.mask, &grid, data.b0_dir, &TkdParams { threshold: 0.2, ..Default::default() }
         ));
         let c = ChallengeMetrics::compute("TKD", &result, &data.chi, &bfr.mask, &data.segmentation, data.dims);
         emit_row(&mut csv, &bfr.name, "TKD", &c, bt, elapsed.as_secs_f64());
 
         // TSVD
         let (result, elapsed) = run_timed!("TSVD", inversion::tsvd(
-            &bfr.local_field, &bfr.mask, &grid, data.b0_dir, &TkdParams { threshold: 0.2 }
+            &bfr.local_field, &bfr.mask, &grid, data.b0_dir, &TkdParams { threshold: 0.2, ..Default::default() }
         ));
         let c = ChallengeMetrics::compute("TSVD", &result, &data.chi, &bfr.mask, &data.segmentation, data.dims);
         emit_row(&mut csv, &bfr.name, "TSVD", &c, bt, elapsed.as_secs_f64());
@@ -2251,7 +2251,7 @@ fn test_all_combinations() {
         // Tikhonov
         let (result, elapsed) = run_timed!("Tikhonov", inversion::tikhonov(
             &bfr.local_field, &bfr.mask, &grid,
-            data.b0_dir, &TikhonovParams { lambda: 1e-3, reg: inversion::tikhonov::Regularization::Gradient }
+            data.b0_dir, &TikhonovParams { lambda: 1e-3, reg: inversion::tikhonov::Regularization::Gradient, ..Default::default() }
         ));
         let c = ChallengeMetrics::compute("Tikhonov", &result, &data.chi, &bfr.mask, &data.segmentation, data.dims);
         emit_row(&mut csv, &bfr.name, "Tikhonov", &c, bt, elapsed.as_secs_f64());
@@ -2482,7 +2482,7 @@ fn test_multiorient_cosmos() {
     common::save_center_slices(&result, &data.mask, data.dims, "inversion_cosmos");
 
     // Single-orientation TKD on the axial field from the identical forward model.
-    let tkd = inversion::tkd(&fields[0], &data.mask, &grid, bdirs[0], &TkdParams { threshold: 0.2 });
+    let tkd = inversion::tkd(&fields[0], &data.mask, &grid, bdirs[0], &TkdParams { threshold: 0.2, ..Default::default() });
     let tkd_res = TestResult::new("TKD (single orientation)", &tkd, &chi_src, &data.mask, data.dims);
     tkd_res.print();
 
