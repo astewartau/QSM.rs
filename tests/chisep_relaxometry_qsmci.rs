@@ -111,7 +111,11 @@ fn test_decompose_qsmci() {
     // Signal-domain 3-compartment per-voxel fit from the provided QSM + multi-echo
     // magnitude. n_inner can be lowered via env for a quick smoke run.
     let n_inner = std::env::var("DECOMPOSE_NINNER").ok().and_then(|s| s.parse().ok()).unwrap_or(10);
-    let params = DecomposeParams { b0: ph.b0, n_inner, ..DecomposeParams::default() };
+    // `DECOMPOSE_UNWRAP=1` turns on the echo unwrapping (DecomposeParams::unwrap_phase; off by
+    // default, as in the authors' code), for the 7 T comparison in the decompose docs.
+    let unwrap_phase = std::env::var("DECOMPOSE_UNWRAP").is_ok_and(|v| v == "1");
+    let params = DecomposeParams { b0: ph.b0, n_inner, unwrap_phase, ..DecomposeParams::default() };
+    println!("[INFO] DECOMPOSE unwrap_phase = {unwrap_phase}");
 
     // DECOMPOSE takes a QSM per echo; the phantom has one χ_total, so repeat it at every echo.
     let ne = ph.tes.len();

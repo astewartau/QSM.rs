@@ -1039,6 +1039,13 @@ pub struct QsmPipelineConfig {
     pub bg_removal: BgRemovalConfig,
     pub inversion: InversionConfig,
     pub reference: QsmReference,
+    /// Reconstruct a QSM for each echo instead of one from the echo-combined field (see
+    /// [`super::per_echo`]): each echo's phase is unwrapped and divided by its own echo time
+    /// ([`super::per_echo::run_field_mapping_per_echo`]), and background removal, inversion and
+    /// referencing run on that echo's field with its own echo time ([`ScanMetadata::echo`]). The
+    /// echo combination ([`FieldMappingConfig::b0_estimation`]), phase-offset removal and bipolar
+    /// correction then do not run. Default `false`: one QSM from the combined field.
+    pub qsm_per_echo: bool,
 }
 
 impl Default for QsmPipelineConfig {
@@ -1049,6 +1056,7 @@ impl Default for QsmPipelineConfig {
             bg_removal: BgRemovalConfig::default(),
             inversion: InversionConfig::default(),
             reference: QsmReference::Mean,
+            qsm_per_echo: false,
         }
     }
 }
@@ -1100,6 +1108,13 @@ impl ScanMetadata {
             dims: self.dims,
             voxel_size: self.voxel_size,
         }
+    }
+
+    /// This scan's metadata for echo `e` alone (`echo_times = [echo_times[e]]`), for the stages
+    /// of a per-echo reconstruction ([`QsmPipelineConfig::qsm_per_echo`]): each echo's field,
+    /// local field and χ are computed at that echo's time. Panics if `e` is out of range.
+    pub fn echo(&self, e: usize) -> ScanMetadata {
+        ScanMetadata { echo_times: vec![self.echo_times[e]], ..self.clone() }
     }
 
     /// Refuse an acquisition whose slices are not contiguous.
@@ -1518,6 +1533,7 @@ mod slice_gap_coverage {
         // unwrap::unwrap_slicewise rather than refusal. Refusing here would block the one path
         // that handles the case.
         ("run_field_mapping", "unwrapping: the remedy is slice-wise, not refusal"),
+        ("run_field_mapping_per_echo", "unwrapping, as run_field_mapping"),
         // Masking is thresholding and morphology on the voxel grid. It reads no kernel and
         // produces no field, so a gap changes nothing about whether its output is meaningful —
         // and the stages that consume the mask refuse the gap themselves.
