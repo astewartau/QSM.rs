@@ -1443,7 +1443,7 @@ fn test_qsmart_07b_ilsqr_diagnostics() {
         &data.mask_u8,
         &grid,
         B0_DIR,
-        &TkdParams { threshold: 0.1 },
+        &TkdParams { threshold: 0.1, ..Default::default() },
     );
     let elapsed = start.elapsed();
     println!("\n[INFO] TKD completed in {:.2?}", elapsed);

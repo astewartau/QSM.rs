@@ -5,8 +5,8 @@
 //! components using local field maps and R2' relaxation data.
 //!
 //! # Methods
-//! - `chi_sep_ilsqr`: the original Shin 2021 projected-CG algorithm (SNU-LIST
-//!   toolbox `chi_sep_iLSQR`), initialized from a conventional QSM
+//! - `chi_sep_ilsqr`: the SNU χ-separation toolbox's `chi_sep_iLSQR` (LSQR, streaking removal
+//!   and NNLS from a QSM)
 //! - `chi_sep_medi`: the SNU χ-separation toolbox's `chi_sep_MEDI` (edge-masked L1 Gauss-Newton
 //!   from a QSM, with a CSF term)
 //! - `r2star_qsm`: closed-form separation from a QSM + R2* (Dimov 2022, no R2' needed)
@@ -83,7 +83,7 @@ pub mod wavesep;
 pub mod susep_net;
 pub mod chisepnet;
 
-pub use chi_sep_ilsqr::{chi_sep_ilsqr, chisep_toolbox_ilsqr, ChiSepIlsqrParams};
+pub use chi_sep_ilsqr::{chi_sep_ilsqr, chisep_toolbox_ilsqr, ChiSepIlsqrInputs, ChiSepIlsqrParams, NNLS_ITER_MAX, NNLS_TOL};
 pub use chi_sep_medi::{chi_sep_medi, ChiSepMediInputs, ChiSepMediParams, CHI_SEP_MEDI_MIN_ITER, toolbox_default_dr, TOOLBOX_DR_REFERENCE_TESLA, TOOLBOX_GYRO_HZ_PER_T};
 pub use decompose::{decompose, DecomposeParams};
 pub use hc_chisep::{hc_chisep, HcChisepParams};
@@ -102,8 +102,9 @@ mod tests {
 
     /// The analytic methods must default to the same relaxivity.
     ///
-    /// `chi_sep_medi` follows the χ-separation toolbox, which scales 137 Hz/ppm with the field
-    /// (`137·(B0/2.9)`); [`toolbox_default_dr_is_shin_2021_at_2_9_tesla`] checks it.
+    /// `chi_sep_medi` and `chi_sep_ilsqr` follow the χ-separation toolbox, which scales
+    /// 137 Hz/ppm with the field (`137·(B0/2.9)`); [`toolbox_default_dr_is_shin_2021_at_2_9_tesla`]
+    /// checks it.
     ///
     /// D_r is a physical constant of the forward model, not a tuning knob: when two variants of
     /// χ-separation default to different values, the same data analysed with each is not
@@ -111,13 +112,10 @@ mod tests {
     /// others' 137/137 until QSM.rs#130 — undetected because no test asserted they agreed.
     #[test]
     fn analytic_methods_share_one_relaxivity() {
-        let ilsqr = ChiSepIlsqrParams::default();
         let wave = WaveSepParams::default();
         let hc = HcChisepParams::default();
 
         for (name, dr) in [
-            ("chi_sep_ilsqr.dr_pos", ilsqr.dr_pos),
-            ("chi_sep_ilsqr.dr_neg", ilsqr.dr_neg),
             ("wavesep.dr_pos", wave.dr_pos),
             ("wavesep.dr_neg", wave.dr_neg),
             ("hc_chisep.dr_pos_3t", hc.dr_pos_3t),
@@ -140,6 +138,8 @@ mod tests {
         assert_eq!(at(3.0), 141.7241379310345, "the toolbox's value at CF = 127.74 MHz");
         let (dp, dn) = ChiSepMediParams { cf: TOOLBOX_GYRO_HZ_PER_T * 7.0, ..Default::default() }.dr();
         assert!((dp - 137.0 * 7.0 / 2.9).abs() < 1e-9 && dp == dn);
+        let p = ChiSepIlsqrParams { cf: TOOLBOX_GYRO_HZ_PER_T * 7.0, ..Default::default() };
+        assert_eq!(p.dr(), (dp, dn), "chi_sep_ilsqr shares chi_sep_medi's default");
     }
 
     /// Negative source magnitudes become 0; non-negative ones pass through unchanged, and
