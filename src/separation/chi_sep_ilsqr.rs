@@ -155,7 +155,7 @@
 //!
 //! The peak is step 1's first solve: `pcg`'s `x`, `xmin`, `q`, `r`, `p` (10 `f64` per padded
 //! voxel), the right-hand side (2) and the FFT buffer (2), plus what the NNLS iterations keep
-//! (the mask, `W_I`, the two volumes of `W_G²`, the cone): about **14.25 `f64` per padded voxel +
+//! (the mask, `W_I`, the two volumes `W_G²` is computed from, the cone): about **14.25 `f64` per padded voxel +
 //! 1.5 per mask voxel + 2 per voxel of the mask's bounding box**. Later, with the current and best
 //! iterates held (4 per mask voxel), it is 12.25 + 5.5 per mask voxel + 2 per box voxel, which is
 //! more only if the mask fills over half the padded grid; a bound for any mask is 14.25 per padded
