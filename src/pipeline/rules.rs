@@ -416,6 +416,9 @@ pub const SETTINGS: &[(&str, &str)] = &[
     ("bg_removal.vsharp.min_radius", "V-SHARP's smallest kernel radius, mm; only with V-SHARP"),
     ("bg_removal.vsharp.radius_step", "V-SHARP's step between kernel radii, mm; only with V-SHARP"),
     ("bg_removal.vsharp.grid", "V-SHARP's working grid: native, isotropic-finest, isotropic-1mm or isotropic (other spacing); only with V-SHARP"),
+    ("bg_removal.ismv.variant", "iSMV's implementation: wen2014 or qsmjl (IsmvVariant::id); only with iSMV"),
+    ("bg_removal.ismv.tol", "iSMV's stopping tolerance (IsmvParams::tol); only with iSMV"),
+    ("bg_removal.ismv.max_iter", "iSMV's iteration cap (IsmvParams::max_iter); no cap reads as +∞ (null in JSON); only with iSMV"),
     ("bg_removal.resharp.radius", "RESHARP's kernel radius, mm; only with RESHARP"),
     ("bg_removal.resharp.max_iter", "RESHARP's CG iteration cap; only with RESHARP"),
     ("inversion.algorithm", "Dipole inversion (InversionAlgorithm::id)"),
@@ -437,7 +440,9 @@ pub const SETTINGS: &[(&str, &str)] = &[
     ("inversion.qsmart.ilsqr_max_iter", "QSMART's iLSQR iteration count; only with QSMART"),
     ("inversion.qsmart.ilsqr_pad_mm", "QSMART's iLSQR padding, mm; only with QSMART"),
     ("reference", "QSM referencing (QsmReference: mean or none)"),
+    ("qsm_per_echo", "A QSM per echo, and their mean, instead of one QSM from the echo-combined field (QsmPipelineConfig::qsm_per_echo, bool)"),
     ("separation.algorithm", "χ-separation (SeparationAlgorithm::id)"),
+    ("separation.decompose.unwrap_phase", "DECOMPOSE's phase unwrapping along the echoes (DecomposeParams::unwrap_phase, bool); only with DECOMPOSE"),
     ("segmentation.inference", "SynthSeg inference: full-volume, low-memory (SynthSegInference::LOW_MEMORY) or sliding-window"),
     ("segmentation.inference.patch", "SynthSeg window edge, voxels at 1 mm (SlidingWindow::patch)"),
 ];
@@ -485,14 +490,22 @@ fn hd_bet_steps(c: &QsmPipelineConfig) -> impl Iterator<Item = &HdBetParams> {
 /// ([`InversionConfig::input`](super::config::InversionConfig::input)), which for TGV depends on
 /// the echo count; that difference is only between two inputs that both skip background removal,
 /// so one echo is assumed when the count is not known.
+///
+/// A per-echo reconstruction ([`QsmPipelineConfig::qsm_per_echo`]) runs every stage on one echo
+/// at a time, so its inversion's input is the one-echo input, and the settings that combine or
+/// compare echoes (the echo combination and its weighting, phase-offset removal and its sigma,
+/// bipolar correction) are not in play.
 pub fn current(input: &RuleInput, facts: &ScanFacts, setting: &str) -> Option<Vec<Current>> {
     let c = input.pipeline;
-    let inv_input = c.inversion.input(facts.echo_count.unwrap_or(1));
+    let inv_input = c.inversion.input(if c.qsm_per_echo { 1 } else { facts.echo_count.unwrap_or(1) });
+    // Field mapping that combines or compares echoes: not on a per-echo reconstruction.
+    let combines = inv_input.needs_field_mapping() && !c.qsm_per_echo;
     let one = |v: Current| vec![v];
     let gated = |on: bool, v: Current| if on { vec![v] } else { vec![] };
     let bg = |a: super::config::BgRemovalAlgorithm| inv_input.needs_bg_removal() && c.bg_removal.algorithm == a;
     let vsharp = bg(super::config::BgRemovalAlgorithm::Vsharp);
     let resharp = bg(super::config::BgRemovalAlgorithm::Resharp);
+    let ismv = bg(super::config::BgRemovalAlgorithm::Ismv);
     use super::config::InversionAlgorithm as A;
     let alg = |a: &[A]| a.contains(&c.inversion.algorithm);
     let qsmart = alg(&[A::Qsmart]);
@@ -514,24 +527,16 @@ pub fn current(input: &RuleInput, facts: &ScanFacts, setting: &str) -> Option<Ve
             inv_input.needs_field_mapping(),
             Current::Choice(c.field_mapping.unwrapping_algorithm.id()),
         ),
-        "field_mapping.b0_estimation" => gated(
-            inv_input.needs_field_mapping(),
-            Current::Choice(c.field_mapping.b0_estimation.id()),
-        ),
+        "field_mapping.b0_estimation" => gated(combines, Current::Choice(c.field_mapping.b0_estimation.id())),
         "field_mapping.b0_estimation.weighting" => match &c.field_mapping.b0_estimation {
-            super::config::B0EstimationMethod::WeightedAvg { weighting } if inv_input.needs_field_mapping() => {
+            super::config::B0EstimationMethod::WeightedAvg { weighting } if combines => {
                 one(Current::Choice(weight_id(weighting)))
             }
             _ => vec![],
         },
-        "field_mapping.phase_offset_removal" => gated(
-            inv_input.needs_field_mapping(),
-            Current::Bool(c.field_mapping.phase_offset_removal),
-        ),
-        "field_mapping.bipolar_correction" => gated(
-            inv_input.needs_field_mapping(),
-            Current::Bool(c.field_mapping.bipolar_correction),
-        ),
+        "field_mapping.phase_offset_removal" => gated(combines, Current::Bool(c.field_mapping.phase_offset_removal)),
+        "field_mapping.bipolar_correction" => gated(combines, Current::Bool(c.field_mapping.bipolar_correction)),
+        "qsm_per_echo" => one(Current::Bool(c.qsm_per_echo)),
         "reference" => one(Current::Choice(match c.reference {
             super::config::QsmReference::Mean => "mean",
             super::config::QsmReference::None => "none",
@@ -559,7 +564,7 @@ pub fn current(input: &RuleInput, facts: &ScanFacts, setting: &str) -> Option<Ve
         "bg_removal.vsharp.min_radius" => gated(vsharp, Current::Number(c.bg_removal.vsharp.min_radius)),
         "bg_removal.vsharp.radius_step" => gated(vsharp, Current::Number(c.bg_removal.vsharp.radius_step)),
         "field_mapping.phase_offset_sigma_mm" => gated(
-            inv_input.needs_field_mapping() && c.field_mapping.phase_offset_removal,
+            combines && c.field_mapping.phase_offset_removal,
             Current::Vector(c.field_mapping.phase_offset_sigma_mm.to_vec()),
         ),
         "inversion.ilsqr.max_iter" => gated(alg(&[A::Ilsqr]), Current::Number(c.inversion.ilsqr.max_iter as f64)),
@@ -572,6 +577,12 @@ pub fn current(input: &RuleInput, facts: &ScanFacts, setting: &str) -> Option<Ve
                 crate::bgremove::VsharpGrid::Isotropic { spacing_mm: 1.0 } => "isotropic-1mm",
                 crate::bgremove::VsharpGrid::Isotropic { .. } => "isotropic",
             }),
+        ),
+        "bg_removal.ismv.variant" => gated(ismv, Current::Choice(c.bg_removal.ismv.variant.id())),
+        "bg_removal.ismv.tol" => gated(ismv, Current::Number(c.bg_removal.ismv.tol)),
+        "bg_removal.ismv.max_iter" => gated(
+            ismv,
+            Current::Number(c.bg_removal.ismv.max_iter.map_or(f64::INFINITY, |n| n as f64)),
         ),
         "bg_removal.resharp.radius" => gated(resharp, Current::Number(c.bg_removal.resharp.radius)),
         "bg_removal.resharp.max_iter" => gated(resharp, Current::Number(c.bg_removal.resharp.max_iter as f64)),
@@ -615,6 +626,12 @@ pub fn current(input: &RuleInput, facts: &ScanFacts, setting: &str) -> Option<Ve
         "separation.algorithm" => {
             input.separation.map(|s| Current::Choice(s.algorithm.id())).into_iter().collect()
         }
+        "separation.decompose.unwrap_phase" => input
+            .separation
+            .filter(|s| s.algorithm == super::config::SeparationAlgorithm::Decompose)
+            .map(|s| Current::Bool(s.decompose.unwrap_phase))
+            .into_iter()
+            .collect(),
         "segmentation.inference" => input
             .segmentation
             .map(|s| {
@@ -696,6 +713,9 @@ const fn fact_at_most(fact: Fact, max: f64) -> Condition {
 }
 const ON_WASM: Condition = C::Fact { fact: Fact::Target, is: Test::OneOf { values: &[Choice("wasm")] } };
 const MULTI_ECHO: Condition = fact_at_least(Fact::EchoCount, 2.0);
+/// The field strength from which `decompose.unwrap-7t` fires: 7 T scanners, including those that
+/// report 6.98 T (Siemens), and nothing at 3 T or below.
+const DECOMPOSE_UNWRAP_FROM_T: f64 = 6.5;
 
 /// A choice of `strength` on `basis`: `setting` should be one of `values`, the first being the
 /// default.
@@ -839,7 +859,7 @@ pub static RULES: &[Rule] = &[
         "Yaghmaie et al. 2021 NeuroImage 231:117701 (QSMART) §3.1; QSMART brainmask.m l. 7-33"),
     reference("decompose.mask-bet", &[sep(&[Choice("decompose")])], "masking.generator", BET,
         "DECOMPOSE's pipeline masks with FSL BET",
-        "Chen et al. 2021 NeuroImage 242:118735 (DECOMPOSE), §3"),
+        "Chen et al. 2021 NeuroImage 242:118477 (DECOMPOSE), §3.6"),
     Rule {
         id: "mindgrab.wasm-heap",
         when: &[method("masking.generator", &[Choice("mindgrab")]), ON_WASM],
@@ -926,7 +946,7 @@ pub static RULES: &[Rule] = &[
     reference("decompose.unwrap-laplacian", &[sep(&[Choice("decompose")])],
         "field_mapping.unwrapping_algorithm", LAPLACIAN,
         "DECOMPOSE's pipeline uses Laplacian unwrapping",
-        "Chen et al. 2021 NeuroImage 242:118735 (DECOMPOSE), §3"),
+        "Chen et al. 2021 NeuroImage 242:118477 (DECOMPOSE), §3.6"),
     reference("chi-sep.unwrap-romeo", &[sep(CHI_SEP_TOOLBOX)],
         "field_mapping.unwrapping_algorithm", ROMEO,
         "The χ-separation toolbox and χ-sepnet unwrap each echo with ROMEO",
@@ -1079,7 +1099,7 @@ pub static RULES: &[Rule] = &[
         "Dimov et al. 2022 Tomography 8:1544, Methods"),
     reference("decompose.bg-vsharp", &[sep(&[Choice("decompose")])], "bg_removal.algorithm", VSHARP,
         "DECOMPOSE's pipeline removes the background with V-SHARP",
-        "Chen et al. 2021 NeuroImage 242:118735 (DECOMPOSE), §3"),
+        "Chen et al. 2021 NeuroImage 242:118477 (DECOMPOSE), §3.6"),
     reference("sti.bg-vsharp", &[inv(STI)], "bg_removal.algorithm", VSHARP,
         "STI Suite's QSM_GUI feeds iLSQR and STAR-QSM the V-SHARP local field",
         "STI Suite 3.0 QSM_GUI, probed headless (recorded in QSM.rs star.rs and ilsqr.rs docs)"),
@@ -1168,6 +1188,14 @@ pub static RULES: &[Rule] = &[
         reason: "RESHARP's author's code allows its CG solve up to 200 iterations",
         source: "sunhongfu/QSM background_field_removal/resharp.m l. 32-34, 92",
     },
+    reference("ismv-qsmjl.tolerance", &[method("bg_removal.ismv.variant", &[Choice("qsmjl")])],
+        "bg_removal.ismv.tol", &[Number(1e-3)],
+        "QSM.jl's ismv stops when the residual falls to 1e-3 of the first",
+        "QSM.jl src/bgremove/ismv.jl:39 (fde4b92); QSM.rs IsmvParams::qsmjl"),
+    reference("ismv-qsmjl.max-iterations", &[method("bg_removal.ismv.variant", &[Choice("qsmjl")])],
+        "bg_removal.ismv.max_iter", &[Number(500.0)],
+        "QSM.jl's ismv stops after at most 500 iterations",
+        "QSM.jl src/bgremove/ismv.jl:40 (fde4b92); QSM.rs IsmvParams::qsmjl"),
     // ---------------------------------------------------------------- Dipole inversion
     Rule {
         id: "star.padding",
@@ -1301,12 +1329,24 @@ pub static RULES: &[Rule] = &[
         "Dimov et al. 2022 Tomography 8:1544, Methods"),
     reference("decompose.qsm-star", &[sep(&[Choice("decompose")])], "inversion.algorithm",
         &[Choice("star")],
-        "DECOMPOSE's χ was reconstructed with STAR-QSM",
-        "Chen et al. 2021 NeuroImage 242:118735 (DECOMPOSE), §3"),
+        "DECOMPOSE's χ of each echo was reconstructed with STAR-QSM",
+        "Chen et al. 2021 NeuroImage 242:118477 (DECOMPOSE), §3.6"),
+    recommend("decompose.qsm-per-echo", &[sep(&[Choice("decompose")])], "qsm_per_echo", &[Bool(true)],
+        "DECOMPOSE's authors use the QSM of each echo, χ(t), instead of the average QSM across \
+         echoes, and state that a TE-dependent QSM input is necessary",
+        "Chen et al. 2021 NeuroImage 242:118477 (DECOMPOSE), §2.2, §4.1; STAR-QSM per echo §3.6"),
+    measured_better("decompose.unwrap-7t",
+        &[sep(&[Choice("decompose")]), fact_at_least(Fact::FieldStrength, DECOMPOSE_UNWRAP_FROM_T)],
+        "separation.decompose.unwrap_phase", &[Bool(true)],
+        "DECOMPOSE was designed for 3 T (its χ bound keeps the phase under 2π at TE 25 ms and \
+         3 T); at 7 T the phase wraps between echoes and χ+ partly collapses unless the phase is \
+         unwrapped along the echoes",
+        "Chen et al. 2021 NeuroImage 242:118477 (DECOMPOSE), §2.2; measured in QSM.rs \
+         separation::decompose docs (Phase unwrapping at 7 T)"),
     reference("decompose.reference-mean", &[sep(&[Choice("decompose")])], "reference",
         &[Choice("mean")],
         "DECOMPOSE's χ is referenced to the whole-brain mean",
-        "Chen et al. 2021 NeuroImage 242:118735 (DECOMPOSE), §3"),
+        "Chen et al. 2021 NeuroImage 242:118477 (DECOMPOSE), §3.6"),
     reference("susep-net.qsm-iqsm-plus", &[sep(&[Choice("susep-net")])], "inversion.algorithm",
         &[Choice("iqsm-plus")],
         "SUSEP-Net's in-vivo QSM input is from iQSM+",
@@ -1494,6 +1534,8 @@ mod tests {
             ("sti.vsharp-grid", Case::new(|c| { inversion(I::Star)(c); c.cfg.bg_removal.vsharp.grid = crate::bgremove::VsharpGrid::Native })),
             ("resharp.radius", Case::new(|c| { background(B::Resharp)(c); c.cfg.bg_removal.resharp.radius = 6.0 })),
             ("resharp.iterations", Case::new(|c| { background(B::Resharp)(c); c.cfg.bg_removal.resharp.max_iter = 30 })),
+            ("ismv-qsmjl.tolerance", Case::new(|c| { background(B::Ismv)(c); c.cfg.bg_removal.ismv.variant = crate::bgremove::IsmvVariant::QsmJl })),
+            ("ismv-qsmjl.max-iterations", Case::new(|c| { background(B::Ismv)(c); c.cfg.bg_removal.ismv.variant = crate::bgremove::IsmvVariant::QsmJl })),
             ("sti.unwrap-laplacian", Case::new(inversion(I::Ilsqr))),
             ("sti.laplacian-solver", Case::new(|c| {
                 inversion(I::Star)(c);
@@ -1524,6 +1566,11 @@ mod tests {
             ("qsmart.ilsqr-pad", Case::new(|c| { inversion(I::Qsmart)(c); c.cfg.inversion.qsmart.ilsqr_pad_mm = 12.0 })),
             ("r2star-qsm.qsm-medi", Case::new(separation(S::R2starQsm))),
             ("decompose.qsm-star", Case::new(separation(S::Decompose))),
+            ("decompose.qsm-per-echo", Case::new(separation(S::Decompose))),
+            ("decompose.unwrap-7t", Case::new(|c| {
+                separation(S::Decompose)(c);
+                c.facts.field_strength = Some(7.0);
+            })),
             ("decompose.reference-mean", Case::new(|c| {
                 separation(S::Decompose)(c);
                 c.cfg.reference = QsmReference::None;
@@ -1692,5 +1739,92 @@ mod tests {
         let pad = j.as_array().unwrap().iter().find(|f| f["id"] == "star.padding").unwrap();
         assert_eq!(pad["current"], serde_json::json!([[12.0, 12.0, 12.0]]));
         assert_eq!(pad["default"], serde_json::json!([8.0, 8.0, 20.0]));
+    }
+
+    /// DECOMPOSE's per-echo QSM: recommended with DECOMPOSE (stated by its authors), satisfied
+    /// by a per-echo reconstruction, and silent without DECOMPOSE.
+    #[test]
+    fn decompose_wants_a_qsm_per_echo() {
+        let id = "decompose.qsm-per-echo";
+        let r = RULES.iter().find(|r| r.id == id).unwrap();
+        assert_eq!((r.strength, r.basis, r.default), (Strength::Recommended, Basis::Stated, Bool(true)));
+        assert!(Case::new(separation(SeparationAlgorithm::Decompose)).ids().contains(&id));
+        let on = Case::new(|c| { separation(SeparationAlgorithm::Decompose)(c); c.cfg.qsm_per_echo = true });
+        assert!(!on.ids().contains(&id), "{:?}", on.ids());
+        assert!(!Case::new(separation(SeparationAlgorithm::ChiSepIlsqr)).ids().contains(&id));
+    }
+
+    /// DECOMPOSE's unwrapping is suggested at 7 T (a Siemens 7 T reports 6.98 T) and not at 3 T,
+    /// nor when it is already on, nor before the field strength is known.
+    #[test]
+    fn decompose_unwrapping_at_7t_only() {
+        let id = "decompose.unwrap-7t";
+        let at = |b0: Option<f64>, unwrap: bool| Case::new(|c| {
+            separation(SeparationAlgorithm::Decompose)(c);
+            c.sep.as_mut().unwrap().decompose.unwrap_phase = unwrap;
+            c.facts.field_strength = b0;
+        }).ids().contains(&id);
+        assert!(at(Some(7.0), false) && at(Some(6.98), false) && at(Some(9.4), false));
+        assert!(!at(Some(3.0), false) && !at(Some(2.89), false) && !at(Some(1.5), false));
+        assert!(!at(Some(7.0), true));
+        assert!(!at(None, false));
+        let r = RULES.iter().find(|r| r.id == id).unwrap();
+        assert_eq!((r.strength, r.basis), (Strength::Recommended, Basis::Measured));
+        assert!(r.needs_scan());
+        // The authors' default stays: DecomposeParams leaves unwrapping off.
+        assert!(!crate::separation::DecomposeParams::default().unwrap_phase);
+    }
+
+    /// QSM.jl's iSMV variant suggests QSM.jl's tolerance and cap; its own params pass, the
+    /// default variant raises nothing, and "no cap" reads as +∞ (null in JSON).
+    #[test]
+    fn ismv_qsmjl_suggests_qsmjl_values() {
+        use crate::bgremove::{IsmvParams, IsmvVariant};
+        let ids = ["ismv-qsmjl.tolerance", "ismv-qsmjl.max-iterations"];
+        let with = |p: IsmvParams| Case::new(|c| {
+            c.cfg.bg_removal.algorithm = BgRemovalAlgorithm::Ismv;
+            c.cfg.bg_removal.ismv = p;
+        });
+        let ismv_ids = |c: &Case| -> Vec<&'static str> { c.ids().into_iter().filter(|id| id.starts_with("ismv")).collect() };
+        let variant_only = with(IsmvParams { variant: IsmvVariant::QsmJl, ..Default::default() });
+        assert!(ids.iter().all(|id| variant_only.ids().contains(id)), "{:?}", variant_only.ids());
+        let f = evaluate(&variant_only.input(), &variant_only.facts);
+        let cap = f.iter().find(|f| f.rule.id == ids[1]).unwrap();
+        assert_eq!(cap.current, vec![Current::Number(f64::INFINITY)]);
+        assert!(serde_json::to_value(cap).unwrap()["current"][0].is_null());
+        assert!(ismv_ids(&with(IsmvParams::qsmjl())).is_empty());
+        assert!(ismv_ids(&with(IsmvParams::default())).is_empty());
+        let p = IsmvParams::qsmjl();
+        for r in RULES.iter().filter(|r| ids.contains(&r.id)) {
+            assert_eq!(r.strength, Strength::Reference, "{}", r.id);
+            let v = if r.setting == "bg_removal.ismv.tol" { p.tol } else { p.max_iter.unwrap() as f64 };
+            assert_eq!(r.default, Number(v), "{}", r.id);
+        }
+        // Not in play without iSMV.
+        let off = Case::new(|c| c.cfg.bg_removal.ismv.variant = IsmvVariant::QsmJl);
+        assert!(off.ids().is_empty(), "{:?}", off.ids());
+    }
+
+    /// On a per-echo reconstruction the settings that combine or compare echoes are not in play.
+    #[test]
+    fn per_echo_takes_echo_combination_out_of_play() {
+        let combining = ["field_mapping.b0_estimation", "field_mapping.phase_offset_removal",
+            "field_mapping.phase_offset_sigma_mm", "field_mapping.bipolar_correction",
+            "field_mapping.b0_estimation.weighting"];
+        let mut c = Case::new(|c| c.cfg.field_mapping.phase_offset_removal = true);
+        for p in combining {
+            assert!(!current(&c.input(), &c.facts, p).unwrap().is_empty(), "{p}");
+        }
+        c.cfg.qsm_per_echo = true;
+        for p in combining {
+            assert!(current(&c.input(), &c.facts, p).unwrap().is_empty(), "{p}");
+        }
+        assert!(!current(&c.input(), &c.facts, "field_mapping.unwrapping_algorithm").unwrap().is_empty());
+        assert_eq!(current(&c.input(), &c.facts, "qsm_per_echo").unwrap(), vec![Current::Bool(true)]);
+        // STI Suite's echo weighting is about how echoes are combined: silent per echo.
+        let combined = Case::new(inversion(InversionAlgorithm::Star));
+        assert!(combined.ids().contains(&"sti.echo-weights"), "{:?}", combined.ids());
+        let per_echo = Case { cfg: QsmPipelineConfig { qsm_per_echo: true, ..combined.cfg.clone() }, ..combined.clone() };
+        assert!(!per_echo.ids().contains(&"sti.echo-weights"), "{:?}", per_echo.ids());
     }
 }

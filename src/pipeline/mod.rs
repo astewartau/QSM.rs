@@ -15,6 +15,9 @@
 //! Two-pass artefact reduction ([`two_pass`]) runs stages 2-3 a second time against a mask whose
 //! holes are intact, then folds the two reconstructions together.
 //!
+//! [`per_echo`] runs stages 1-4 once per echo instead ([`QsmPipelineConfig::qsm_per_echo`]): a
+//! QSM for each echo, and their mean.
+//!
 //! For TGV, use [`run_tgv`] which combines steps 1-4 internally.
 //!
 //! [`run_qsmart`] reports its progress and intermediates (vessel mask, per-stage local fields and
@@ -45,6 +48,7 @@ pub mod separation;
 pub mod observer;
 pub mod qsmart;
 pub mod two_pass;
+pub mod per_echo;
 pub mod rules;
 
 pub use config::*;

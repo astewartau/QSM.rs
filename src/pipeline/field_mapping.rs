@@ -608,11 +608,28 @@ fn field_mapping_single_echo(
     progress: &mut dyn FnMut(usize, usize),
 ) -> Result<FieldMappingResult, PipelineError> {
     progress(1, 4);
-    // Laplacian: as on the multi-echo path, the phase is zeroed outside the mask first (a global
-    // Poisson solve otherwise carries the noise there into the brain; not with
-    // `laplacian_unmasked`) and the masked mean the unwrap leaves undetermined is removed, so one
-    // echo gives the same field as each echo of a series does. QSMART's echo fit removes nothing.
-    let is_laplacian = config.unwrapping_algorithm == UnwrappingAlgorithm::Laplacian;
+    let unwrapped = unwrap_one_echo(phase, mag, mask, metadata.echo_times[0], config, nx, ny, nz, vsx, vsy, vsz);
+    if let B0EstimationMethod::QsmartEchofit { fit_threshold } = config.b0_estimation {
+        progress(4, 4);
+        return Ok(qsmart_fit(&[unwrapped], &[mag], metadata, fit_threshold));
+    }
+    progress(4, 4);
+    Ok(single_echo_result(&unwrapped, mask, metadata.echo_times[0], metadata.field_strength, config))
+}
+
+/// One echo's phase, unwrapped. Laplacian: as on the multi-echo path, the phase is zeroed outside
+/// the mask first (a global Poisson solve otherwise carries the noise there into the brain; not
+/// with `laplacian_unmasked`).
+#[allow(clippy::too_many_arguments)]
+fn unwrap_one_echo(
+    phase: &[f64],
+    mag: &[f64],
+    mask: &[u8],
+    te: f64,
+    config: &FieldMappingConfig,
+    nx: usize, ny: usize, nz: usize,
+    vsx: f64, vsy: f64, vsz: f64,
+) -> Vec<f64> {
     let region = LaplacianRegion::new(config, mask);
     let masked;
     let phase: &[f64] = if region.zero_outside {
@@ -621,31 +638,81 @@ fn field_mapping_single_echo(
     } else {
         phase
     };
-    let mut unwrapped = unwrap_single(
-        phase, mag, region.keep(mask), config, nx, ny, nz, vsx, vsy, vsz,
-        None, metadata.echo_times[0], 0.0,
-    );
-    if let B0EstimationMethod::QsmartEchofit { fit_threshold } = config.b0_estimation {
-        progress(4, 4);
-        return Ok(qsmart_fit(&[unwrapped], &[mag], metadata, fit_threshold));
-    }
-    if is_laplacian {
+    unwrap_single(phase, mag, region.keep(mask), config, nx, ny, nz, vsx, vsy, vsz, None, te, 0.0)
+}
+
+/// One echo's field from its unwrapped phase: the masked mean a Laplacian unwrap leaves
+/// undetermined removed (so one echo gives the same field as each echo of a series does), then
+/// divided by the echo time.
+fn single_echo_result(
+    unwrapped: &[f64],
+    mask: &[u8],
+    te: f64,
+    field_strength: f64,
+    config: &FieldMappingConfig,
+) -> FieldMappingResult {
+    let mut unwrapped = unwrapped.to_vec();
+    if config.unwrapping_algorithm == UnwrappingAlgorithm::Laplacian {
         remove_masked_mean(&mut unwrapped, mask);
     }
-
     // field = unwrapped / TE → rad/s
-    let te = metadata.echo_times[0];
     let field_rads: Vec<f64> = unwrapped.iter().map(|&v| v / te).collect();
-
-    progress(4, 4);
-    Ok(FieldMappingResult {
-        b0_field_ppm: rads_to_ppm(&field_rads, metadata.field_strength),
+    FieldMappingResult {
+        b0_field_ppm: rads_to_ppm(&field_rads, field_strength),
         phase_offset: None,
         robust_fit: None,
         reliability: None,
         qsmart_fit_threshold: None,
         field_noise_ppm: None,
-    })
+    }
+}
+
+/// The field of **each echo on its own**, for a per-echo reconstruction
+/// ([`QsmPipelineConfig::qsm_per_echo`](super::config::QsmPipelineConfig::qsm_per_echo); see
+/// [`super::per_echo`]): echo `e`'s phase is unwrapped with
+/// [`FieldMappingConfig::unwrapping_algorithm`] (ROMEO with that echo's magnitude) and divided by
+/// its own echo time, exactly as a single-echo series is ([`run_field_mapping`] with one echo).
+/// The echo combination ([`FieldMappingConfig::b0_estimation`]), phase-offset removal and bipolar
+/// correction combine or compare echoes, so they do not apply and are not run. This is the
+/// DECOMPOSE authors' per-echo field: `MRPhaseUnwrap` of each echo's raw phase, then that echo's
+/// background removal and STAR-QSM at its TE (Chen et al. 2021, NeuroImage 242:118477, §3.6).
+///
+/// Returns one [`FieldMappingResult`] per echo, in echo order.
+pub fn run_field_mapping_per_echo(
+    phases: &[&[f64]],
+    magnitudes: Option<&[&[f64]]>,
+    mask: &[u8],
+    metadata: &ScanMetadata,
+    config: &FieldMappingConfig,
+    progress: &mut dyn FnMut(usize, usize),
+) -> Result<Vec<FieldMappingResult>, PipelineError> {
+    let (nx, ny, nz) = metadata.dims;
+    let (vsx, vsy, vsz) = metadata.voxel_size;
+    let n_voxels = nx * ny * nz;
+    let n_echoes = phases.len();
+    if n_echoes == 0 {
+        return Err(PipelineError::InvalidInput("no phase echoes provided".into()));
+    }
+    if metadata.echo_times.len() != n_echoes {
+        return Err(PipelineError::DimensionMismatch { expected: n_echoes, got: metadata.echo_times.len() });
+    }
+    if mask.len() != n_voxels {
+        return Err(PipelineError::DimensionMismatch { expected: n_voxels, got: mask.len() });
+    }
+    let uniform = vec![1.0f64; n_voxels];
+    let mut out = Vec::with_capacity(n_echoes);
+    for (e, p) in phases.iter().enumerate() {
+        let mag: &[f64] = magnitudes.and_then(|m| m.get(e).copied()).unwrap_or(&uniform);
+        if p.len() != n_voxels || mag.len() != n_voxels {
+            return Err(PipelineError::DimensionMismatch { expected: n_voxels, got: p.len().min(mag.len()) });
+        }
+        progress(e, n_echoes);
+        let te = metadata.echo_times[e];
+        let unwrapped = unwrap_one_echo(p, mag, mask, te, config, nx, ny, nz, vsx, vsy, vsz);
+        out.push(single_echo_result(&unwrapped, mask, te, metadata.field_strength, config));
+    }
+    progress(n_echoes, n_echoes);
+    Ok(out)
 }
 
 /// [`B0EstimationMethod::ComplexFit`]: MEDI's field map. `Fit_ppm_complex` on the wrapped

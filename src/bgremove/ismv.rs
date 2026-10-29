@@ -127,6 +127,15 @@
 //!
 //! SEPIA does not offer iSMV.
 //!
+//! # Pipeline rules
+//!
+//! Choosing [`IsmvVariant::QsmJl`] keeps the tolerance and iteration cap that are set, which by
+//! default are the paper's (5e-5, no cap). QSM.jl's own are published as `Reference` rules in
+//! [`crate::pipeline::rules::RULES`], so a host can offer them with the variant:
+//! `ismv-qsmjl.tolerance` (1e-3) and `ismv-qsmjl.max-iterations` (500), QSM.jl fde4b92
+//! `src/bgremove/ismv.jl:39-40` (`tol = 1e-3`, `maxit = 500`; [`IsmvParams::qsmjl`]). Its radius needs
+//! no rule: `radius` `None` is already the variant's own (`2 · max(voxel size)`).
+//!
 //! # Tests
 //!
 //! `tests/ismv_wen2014_parity.rs` checks the default against the lab's `iSMV.m`/`tdcsmv.m` run
@@ -167,6 +176,16 @@ pub enum IsmvVariant {
     /// QSM.jl's `ismv` (fde4b92): its ball, `1 − √eps` erosion and residual-based stopping
     /// rule. For the QSM.jl parity pair.
     QsmJl,
+}
+
+impl IsmvVariant {
+    /// Stable id: `"wen2014"` or `"qsmjl"` (the pipeline rules' `bg_removal.ismv.variant`).
+    pub fn id(self) -> &'static str {
+        match self {
+            IsmvVariant::Wen2014 => "wen2014",
+            IsmvVariant::QsmJl => "qsmjl",
+        }
+    }
 }
 
 /// iSMV parameters. The defaults are Wen et al. 2014's with the lab's `iSMV.m` (see the

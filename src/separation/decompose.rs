@@ -46,6 +46,15 @@
 //! The original method, published at 3 T, does not meet this limit in practice —
 //! the threshold there is ~0.2 ppm.
 //!
+//! **Phase unwrapping at 7 T.** The authors designed the fit for 3 T: their χ bound "was roughly
+//! calculated using TE = 25 ms and B0 = 3T to ensure the phase does not exceed 2π" (Chen et al.
+//! 2021, §2.2). At 7 T the phase wraps between echoes inside ordinary deep grey matter, and with
+//! the authors' default (principal-branch phases) χ+ partly collapses: on the QSM-CI 7 T
+//! `chisep-mc` phantom, χ+ correlates 0.59 with the truth on principal-branch phases and 0.87
+//! with `unwrap_phase` on (measured 2026-10-29). The default stays the authors' (off,
+//! [`DecomposeParams::unwrap_phase`]); the pipeline rule `decompose.unwrap-7t` suggests turning
+//! it on at 7 T (from 6.5 T, so a Siemens 7 T's 6.98 T counts).
+//!
 //! Unwrapping is only unambiguous while the phase step *between* echoes stays
 //! under π, so the χ search is additionally capped at
 //! `π / ((2/3)·γ·B0·ΔTE_max)` — 0.31 ppm at 7 T with 8 ms spacing, inside the
@@ -107,13 +116,16 @@
 //!
 //! # Reference pipeline
 //!
-//! Chen et al. 2021 (NeuroImage 242:118735, §3 "Material and methods"; PMC8720043):
+//! Chen et al. 2021 (NeuroImage 242:118477, §3.6 "Image preparation and QSM reconstruction"; PMC8720043):
 //!
 //! - **Data:** in vivo at 3 T (GE MR750w), 0.86 × 0.86 × 1.0 mm, 16 echoes,
 //!   TE1/ΔTE/TE16 = 2.7/2.9/46.2 ms. The phantom was 1 mm iso, 16 echoes 1.47–25.9 ms; the ex
 //!   vivo data were 7 T.
 //! - **Mask:** FSL BET. **Unwrapping:** Laplacian. **Background removal:** V-SHARP.
-//! - **QSM input:** STAR-QSM computed **for each echo**. The signal model (Eq. 4) is
+//! - **QSM input:** STAR-QSM computed **for each echo** ("Note that QSM of each echo, χ(t), is
+//!   used instead of the average QSM across all echoes", §2.2; "it is necessary to use
+//!   TE-dependent QSM as the input", §4.1). A host gets it from a per-echo reconstruction
+//!   ([`crate::pipeline::per_echo`]). The signal model (Eq. 4) is
 //!   `y(t) = M(t)·exp(−i·(2/3)·χ(t)·γ·B0·t)` with the per-echo χ(t), not one echo-combined χ.
 //!   [`decompose`] takes that per-echo χ. (The authors' script runs STAR-QSM per echo at
 //!   `padsize` 12 after `MRPhaseUnwrap` and `V_SHARP(smvsize 25)` of that echo.)
@@ -128,13 +140,13 @@
 //! Reference:
 //! Chen, J., et al. (2021). "Decompose quantitative susceptibility mapping (QSM)
 //! to sub-voxel diamagnetic and paramagnetic components based on gradient-echo MRI
-//! data." NeuroImage 242:118735. https://doi.org/10.1016/j.neuroimage.2021.118735
+//! data." NeuroImage 242:118477. https://doi.org/10.1016/j.neuroimage.2021.118477
 //! Reference implementation (QSM-CI port of Tim Ho's open MATLAB DECOMPOSE-QSM).
 //!
 //! # Pipeline rules
 //!
 //! The facts above that a configuration can depart from are published as rules in
-//! [`crate::pipeline::rules::RULES`] (each with its strength, basis, reason and source): `decompose.mask-bet`, `decompose.unwrap-laplacian`, `decompose.bg-vsharp`, `decompose.qsm-star`, `decompose.reference-mean`.
+//! [`crate::pipeline::rules::RULES`] (each with its strength, basis, reason and source): `decompose.mask-bet`, `decompose.unwrap-laplacian`, `decompose.bg-vsharp`, `decompose.qsm-star`, `decompose.qsm-per-echo` (Recommended: stated by the authors, §2.2 and §4.1), `decompose.reference-mean`, and `decompose.unwrap-7t` (Recommended at 7 T: measured, above).
 
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
