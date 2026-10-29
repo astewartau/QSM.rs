@@ -328,7 +328,9 @@ fn bg_removal() {
         if needs_weights(algorithm.dl_model_id()) {
             continue;
         }
-        let config = BgRemovalConfig { algorithm, ..Default::default() };
+        let mut config = BgRemovalConfig { algorithm, ..Default::default() };
+        // iSMV's default sphere (6 voxels, 9 mm here) erodes this 16³ phantom away entirely
+        config.ismv.radius = Some(3.0);
         let r = run_bg_removal(&p.total_ppm, &p.mask, &m, &config, Some(&echoes), &mut no_progress())
             .unwrap_or_else(|e| panic!("{algorithm:?}: {e}"));
         check(&format!("{algorithm:?}"), &r.local_field_ppm);
