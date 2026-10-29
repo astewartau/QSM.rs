@@ -455,6 +455,10 @@ pub struct FieldMappingConfig {
     /// whole volume, as QSMART fits them; the other combinations use the voxels inside the mask.
     /// Only with Laplacian unwrapping.
     pub laplacian_unmasked: bool,
+    /// ROMEO's settings (default [`RomeoParams::default`], ROMEO.jl's API defaults).
+    /// [`RomeoParams::romeo_cli`] gives the `romeo` command line's (`romeo3` weights with a
+    /// magnitude, no temporal re-unwrapping), which with the rest of this default config is the
+    /// CLI's B0 pipeline. Which of the two QSMxT should default to is being measured (QSM.rs#319).
     pub romeo_params: RomeoParams,
 }
 
