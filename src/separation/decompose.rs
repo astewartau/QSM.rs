@@ -20,7 +20,7 @@
 //! maximum). [`decompose`] takes that per-echo QSM; producing it is the caller's. A voxel whose
 //! `Σ y` is zero is skipped, as theirs is.
 //!
-//! The per-voxel fit is a 3-stage alternating bounded least-squares, repeated
+//! The per-voxel fit is a 3-stage alternating bounded least-squares (`lsqcurvefit`), repeated
 //! `n_inner` times: (1) amplitudes `[C+,C−,C₀]` against the linear signal, then
 //! (2) `R2*₀` and (3) `[χ+,χ−]` against `log(signal)` (complex log). The residual
 //! is the complex difference packed as `[Re; −Im]`, matching the reference.
@@ -61,30 +61,49 @@
 //! compartment amplitudes set the gain, and they are only weakly identifiable
 //! from data that carries no sub-voxel compartment signature.
 //!
-//! **Output mapping.** χ+ = |PSC| and χ− = −|DSC|, from the paramagnetic and diamagnetic
-//! sub-models. The authors' script writes DSC to its paramagnetic file (`XPSC`) and PSC to the
-//! diamagnetic one, but it also fits the *conjugate* of the data: `ydata =
-//! squeeze(y_data(i,j,k,:))'` is MATLAB's conjugate transpose. Conjugating the data maps the
-//! fit onto its mirror image exactly (`conj(S(C+, C−, χ+, χ−)) = S(C−, C+, −χ−, −χ+)`, with
-//! mirrored bounds and initial values), so their DSC is this port's PSC and the two swaps
-//! cancel: the same maps, without either. Measured: this port's χ+ against the
-//! `decompose-qsm` container's `chi-para` (its `|DSC|`), r 0.999; against its `chi-dia`, r −0.32.
+//! **Output mapping.** The port fits what the authors fit: their `ydata =
+//! squeeze(y_data(i,j,k,:))'` is MATLAB's conjugate transpose, so the fit is to conj(y), in their
+//! parameter order and with their bounds and initial values. Conjugating the data mirrors the fit
+//! (`conj(S(C+, C−, χ+, χ−)) = S(C−, C+, −χ−, −χ+)`), which is why their script writes DSC to its
+//! paramagnetic file (`XPSC`) and PSC to the diamagnetic one; the port writes χ+ = |DSC| and
+//! χ− = −|PSC| the same way. (Fitting y itself and writing PSC as χ+ gives the same maps
+//! mathematically, as earlier versions of this port did, but not the same rounding, and the
+//! solver's path through a near-degenerate voxel follows rounding.)
+//!
+//! **Solver.** Every stage is MATLAB `lsqcurvefit` with its default options, which the authors
+//! use: the trust-region-reflective method, ported in [`crate::solvers::lsq_trr`] and verified
+//! against MATLAB R2023b call by call on this fit (its module docs, *Matching MATLAB*: 92.6 % of
+//! the fixture's 11340 stage calls take MATLAB's exact path, all stage-2 calls among them). The
+//! solver of each stage is selectable ([`DecomposeParams::solvers`]), for the paper's choice.
+//! Before that this port used a bounded Levenberg–Marquardt, which left χ± 2.9–3.3 % (NRMSE) from
+//! the authors' code on the KKI crop below and 11.1 % / 9.0 % on the full chisep-mc phantom
+//! (astewartau/QSM.rs#329).
 //!
 //! # Agreement with the authors' code
 //!
 //! Against the QSM-CI `decompose-qsm` container (the authors' `utils/` and fit loop compiled
 //! from licensed MATLAB R2023b, verified identical to it, QSMxT/QSM-CI#309), given the same
-//! per-echo QSM, on a 24×24×16 crop of the KKI travelling head (3 T, 5 echoes, 9216 voxels):
+//! per-echo QSM:
 //!
-//! | port | χ+ NRMSE (r) | χ− NRMSE (r) |
-//! |---|---|---|
-//! | before (unwrapping and χ cap on, LM 30 iterations, stop at 1e-10) | 92.0 % (0.587) | 34.9 % (0.933) |
-//! | principal-branch phases, LM 30 iterations | 8.2 % (0.9956) | 10.1 % (0.9951) |
-//! | **defaults** (also LM to 400 iterations, stop at 1e-12) | **2.9 %** (0.9994) | **3.3 %** (0.9994) |
+//! | port | data | χ+ NRMSE (r) | χ− NRMSE (r) |
+//! |---|---|---|---|
+//! | unwrapping and χ cap on, LM 30 iterations, stop at 1e-10 | KKI 24×24×16 crop (3 T, 5 echoes) | 92.0 % (0.587) | 34.9 % (0.933) |
+//! | principal-branch phases, LM 30 iterations | KKI crop | 8.2 % (0.9956) | 10.1 % (0.9951) |
+//! | LM to 400 iterations, stop at 1e-12 | KKI crop | 2.9 % (0.9994) | 3.3 % (0.9994) |
+//! | LM to 400 iterations, stop at 1e-12 | `tests/data/decompose_qsm_small` (378 voxels) | 1.1 % (0.99985) | 11.6 % (0.9915) |
+//! | **`lsqcurvefit` trust-region-reflective** (default) | `tests/data/decompose_qsm_small` | **0.24 %** (0.99999) | **0.90 %** (0.99995) |
 //!
-//! The rest is the solver: `lsqcurvefit`'s trust-region-reflective method and stopping rules
-//! against the bounded Levenberg–Marquardt here, which end some voxels' stages at other points
-//! (median |Δχ+| 1.7e-4 ppm; 10 % of voxels over 1e-3 ppm carry most of the difference).
+//! What remains is concentrated in voxels where one compartment collapses (an amplitude or χ
+//! within rounding of 0): there the Jacobian column of the vanished parameter is rounding noise,
+//! and MATLAB's and Rust's elementary functions round differently (see `lsq_trr`).
+//!
+//! # Threads
+//!
+//! Voxels are fitted in parallel (rayon, feature `parallel`), and the result is bit-identical at
+//! any thread count. The fit allocates nothing per voxel (see the loop). On a 6-core i5-11500,
+//! 12000 synthetic 6-echo voxels, static musl build: 1.37 s on 1 thread, 0.70 s on 2, 0.37 s on
+//! 4, 0.26 s on 6, 0.23 s on 12. (With bounded LM to 400 iterations: 28.0 s, 8.0 s, 6.4 s on 1,
+//! 4, 6 threads; `lsqcurvefit`'s 1e-6 tolerances end each stage far sooner than LM's 1e-12.)
 //!
 //! # Reference pipeline
 //!
@@ -123,6 +142,7 @@ use rayon::prelude::*;
 use std::f64::consts::PI;
 
 use crate::error::{check_len, InputError};
+use crate::solvers::lsq_trr::{lsq_trust_region_reflective, LsqTrrOptions, LsqTrrWorkspace};
 
 /// Gyromagnetic constant used by the DECOMPOSE reference: `42.58 · 2π` — the reference
 /// implementation's value (`signalModel.m`), not `crate::constants`. Keep it.
@@ -138,16 +158,53 @@ pub struct DecomposeParams {
     pub n_inner: usize,
     /// Upper bound on |χ| in the fit, ppm (reference default: 0.5).
     pub chi_bound: f64,
-    /// Max Levenberg–Marquardt iterations per fit stage (default 400, `lsqcurvefit`'s
-    /// `MaxIterations`). The authors' `lsqcurvefit` (trust-region-reflective) solves each stage
-    /// to its minimum; capping at 30 left χ± 8–10 % (NRMSE) from theirs, 400 leaves 3 % (see
-    /// the module docs, *Agreement with the authors' code*).
-    pub max_lm_iter: usize,
+    /// `MaxIterations` of each stage's `lsqcurvefit` (default 400, MATLAB's default, which the
+    /// authors keep). Every other solver setting is `lsqcurvefit`'s default
+    /// ([`LsqTrrOptions::default`]).
+    pub max_iterations: usize,
     /// Unwrap the phase along the echoes and cap the χ search at what the echo spacing can
     /// represent (see the module docs, *Phase unwrapping*). Default `false`: the authors' code
     /// takes every phase on its principal branch (`log`, `angle`) and searches χ up to
     /// [`chi_bound`](Self::chi_bound).
     pub unwrap_phase: bool,
+    /// The solver of each of the three stages (see [`DecomposeStageSolvers`]).
+    pub solvers: DecomposeStageSolvers,
+}
+
+/// Which solver fits each stage of the alternating fit.
+///
+/// The reference implementation (Tim Ho's MATLAB DECOMPOSE-QSM, which the QSM-CI `decompose-qsm`
+/// container runs) calls `lsqcurvefit` with its default trust-region-reflective algorithm for all
+/// three stages, and that is the default here. The paper (Chen et al. 2021, §3.1) describes a
+/// different choice: Eq. 5.1 (the amplitudes, with `C+ + C− + C₀ = 1`) and Eq. 5.2 (R2*₀) by
+/// `lsqlin`'s interior-point method, and only Eq. 5.3 (χ±) by `lsqnonlin` trust-region-reflective
+/// with a supplied Jacobian sparsity pattern. Those solvers are not ported (yet); this is where
+/// they would be selected.
+#[cfg_attr(feature = "introspection", derive(serde::Serialize))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DecomposeStageSolvers {
+    /// Stage 1, the amplitudes `[C+, C−, C₀]`.
+    pub amplitudes: DecomposeStageSolver,
+    /// Stage 2, `R2*₀`.
+    pub r2star: DecomposeStageSolver,
+    /// Stage 3, `[χ+, χ−]`.
+    pub chi: DecomposeStageSolver,
+}
+
+impl Default for DecomposeStageSolvers {
+    fn default() -> Self {
+        let s = DecomposeStageSolver::LsqcurvefitTrustRegionReflective;
+        Self { amplitudes: s, r2star: s, chi: s }
+    }
+}
+
+/// A stage solver for [`decompose`].
+#[cfg_attr(feature = "introspection", derive(serde::Serialize))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DecomposeStageSolver {
+    /// MATLAB `lsqcurvefit` with its default options (trust-region-reflective, finite-difference
+    /// Jacobian): [`lsq_trust_region_reflective`]. The reference implementation's solver.
+    LsqcurvefitTrustRegionReflective,
 }
 
 impl DecomposeParams {
@@ -167,8 +224,9 @@ impl Default for DecomposeParams {
             b0: 7.0,
             n_inner: 10,
             chi_bound: 0.5,
-            max_lm_iter: 400,
+            max_iterations: 400,
             unwrap_phase: false,
+            solvers: DecomposeStageSolvers::default(),
         }
     }
 }
@@ -227,51 +285,47 @@ pub fn decompose(
 
     // Per-voxel fit → (index, chi_pos, chi_neg). Embarrassingly parallel.
     //
-    // The fit allocates nothing: every buffer lives in a `Scratch` that rayon
-    // hands out once per worker thread and we reuse across voxels. This matters
-    // far beyond the usual allocator overhead — the released binaries are static
-    // musl builds, whose allocator serialises under concurrent small
-    // allocations, and the churn this loop used to produce (~10⁴ allocations per
-    // voxel) made the loop get *slower* as threads were added.
+    // The fit allocates nothing: every buffer lives in a `Scratch` that rayon hands out per
+    // worker job and reuses across voxels. This matters far beyond the usual allocator overhead:
+    // the released binaries are static musl builds, whose allocator serialises concurrent small
+    // allocations. Before QSM.rs#93 this loop made ~10⁴ allocations per voxel and got *slower*
+    // with every thread added (QSMxT v9.16.0 on 3200 voxels: 2.2 s on 1 thread, 6.3 s on 8);
+    // allocation-free, it scales with the physical cores (the module docs, *Threads*).
     let results: Vec<(usize, f64, f64)> = maybe_par_map_init!(
         voxels,
         || Scratch::new(ne),
         |ws: &mut Scratch, &i: &usize| {
-            // y[e] = mag_norm · exp(−i·(2/3)·χ(TE_e)·γ·B0·TE_e) (`y_data`).
+            // The authors' `ydata = squeeze(y_data(i,j,k,:))'`: MATLAB's `'` is the conjugate
+            // transpose, so they fit conj(y), y[e] = mag_norm · exp(−i·(2/3)·χ(TE_e)·γ·B0·TE_e).
             let (mut sum_re, mut sum_im) = (0.0, 0.0);
             for e in 0..ne {
                 let m = magnitude[i * ne + e] / gmax;
                 let ph = -(2.0 / 3.0) * chi_per_echo[i * ne + e] * GAMMA * b0 * te[e];
-                ws.y[e] = (m * ph.cos(), m * ph.sin());
-                sum_re += ws.y[e].0;
-                sum_im += ws.y[e].1;
-                // log(y) for stages 2 & 3: MATLAB's `log`, on the principal branch, unless
+                let y = (m * ph.cos(), m * ph.sin());
+                ws.yc[e] = (y.0, -y.1);
+                sum_re += ws.yc[e].0;
+                sum_im += ws.yc[e].1;
+                // log(conj y) for stages 2 & 3: MATLAB's `log`, on the principal branch, unless
                 // `unwrap_phase`, where the synthesized phase is used as it is (see
                 // `unwrap_near`).
-                let arg = if params.unwrap_phase { ph } else { ws.y[e].1.atan2(ws.y[e].0) };
-                ws.logy[e] = (0.5 * (m * m).max(1e-300).ln(), arg);
+                let arg = if params.unwrap_phase { -ph } else { ws.yc[e].1.atan2(ws.yc[e].0) };
+                ws.logyc[e] = (ws.yc[e].0.hypot(ws.yc[e].1).ln(), arg);
             }
             // The authors skip a voxel whose `sum(ydata)` is zero.
             if sum_re == 0.0 && sum_im == 0.0 {
                 return (i, 0.0, 0.0);
             }
 
-            let (cp, cm, c0, r0, chip, chim) =
-                fit_voxel(te, &ws.y, &ws.logy, b0, params, &mut ws.lm);
+            let p = fit_voxel(te, &ws.yc, &ws.logyc, b0, params, &mut ws.solver);
 
-            // PSC = −Σangle(pscModel)/den and DSC = −Σangle(dscModel)/den, as the authors
-            // compute them. PSC comes from the paramagnetic compartment and DSC from the
-            // diamagnetic one, so χ+ = |PSC| and χ− = −|DSC|. The authors' script writes them
-            // the other way round (DSC to `XPSC`, PSC to `XDSC`); see the module docs,
-            // *Output mapping*.
+            // The authors' reconstruction: PSC = −Σangle(pscModel)/den, DSC = −Σangle(dscModel)/den,
+            // written as χ+ = |DSC| (`XPSC`) and |χ−| = |PSC| (`XDSC`). Fitting conj(y) mirrors the
+            // compartments, so it is DSC that carries the paramagnetic source (module docs,
+            // *Output mapping*).
             let unwrap = params.unwrap_phase;
-            let dsc = recon_phase(te, den, unwrap, |t| {
-                dsc_model(t, cp, cm, c0, chip, chim, r0, b0)
-            });
-            let psc = recon_phase(te, den, unwrap, |t| {
-                psc_model(t, cp, cm, c0, chip, chim, r0, b0)
-            });
-            (i, psc.abs(), -dsc.abs())
+            let dsc = recon_phase(te, den, unwrap, |t| dsc_model(t, &p, b0));
+            let psc = recon_phase(te, den, unwrap, |t| psc_model(t, &p, b0));
+            (i, dsc.abs(), -psc.abs())
         }
     )
     .collect();
@@ -288,44 +342,69 @@ pub fn decompose(
     Ok((chi_pos, chi_neg, chi_out))
 }
 
-/// Reusable scratch for one voxel's fit. Every buffer is fully overwritten
-/// before it is read, so a `Scratch` shared across voxels (or across a rayon
-/// worker's whole share of them) cannot carry state between them.
+/// One voxel's fitted parameters, in the authors' order and sign convention (fitted to conj(y)).
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Fit {
+    /// `C_plus`, `C_minus`, `C_0`.
+    c: [f64; 3],
+    /// `R_star_2_0`.
+    r0: f64,
+    /// `chi_plus`, `chi_minus`.
+    chi: [f64; 2],
+}
+
+/// Reusable scratch for one voxel's fit. Every buffer is fully overwritten before it is read, so
+/// a `Scratch` shared across voxels cannot carry state between them.
 struct Scratch {
-    /// Complex data per echo.
-    y: Vec<(f64, f64)>,
-    /// `log(y)` per echo.
-    logy: Vec<(f64, f64)>,
-    /// Levenberg–Marquardt buffers.
-    lm: LmScratch,
+    /// conj(y) per echo.
+    yc: Vec<(f64, f64)>,
+    /// `log(conj(y))` per echo.
+    logyc: Vec<(f64, f64)>,
+    solver: StageSolvers,
 }
 
 impl Scratch {
     fn new(ne: usize) -> Self {
-        Self {
-            y: vec![(0.0, 0.0); ne],
-            logy: vec![(0.0, 0.0); ne],
-            lm: LmScratch::new(2 * ne),
-        }
+        Self { yc: vec![(0.0, 0.0); ne], logyc: vec![(0.0, 0.0); ne], solver: StageSolvers::new(2 * ne) }
     }
 }
 
-/// The three-stage alternating fit for a single voxel. Returns
-/// `(C+, C−, C₀, R2*₀, χ+, χ−)`.
-#[allow(clippy::too_many_arguments)]
+/// `lsqcurvefit` workspaces for the three stages (3, 1 and 2 parameters).
+struct StageSolvers {
+    s1: LsqTrrWorkspace,
+    s2: LsqTrrWorkspace,
+    s3: LsqTrrWorkspace,
+}
+
+impl StageSolvers {
+    fn new(m: usize) -> Self {
+        Self { s1: LsqTrrWorkspace::new(m, 3), s2: LsqTrrWorkspace::new(m, 1), s3: LsqTrrWorkspace::new(m, 2) }
+    }
+}
+
+/// The authors' three-stage alternating fit for one voxel (`DECOMPOSE_analysis.m`):
+///
+/// ```text
+/// chi_0 = [0.05 -0.05]; R0 = 25; C0 = [0.3 0.3 0.4];
+/// for it = 1:N_inner
+///     C0    = lsqcurvefit(objective1 (C),  C0,    TE, complex_to_real(ydata),      [0 0 0], [inf inf inf]);
+///     R0    = lsqcurvefit(objective2 (R0), R0,    TE, complex_to_real(log(ydata)), 0,       inf);
+///     chi_0 = lsqcurvefit(objective3 (χ),  chi_0, TE, complex_to_real(log(ydata)), [0 -upper], [upper 0]);
+/// end
+/// ```
+///
+/// with `lsqcurvefit`'s default options, which [`lsq_trust_region_reflective`] reproduces.
+/// `lsqcurvefit`'s residual is `fun(x, TE) − ydata`, packed by `complex_to_real` as `[Re; −Im]`.
 fn fit_voxel(
     te: &[f64],
-    y: &[(f64, f64)],
-    logy: &[(f64, f64)],
+    yc: &[(f64, f64)],
+    logyc: &[(f64, f64)],
     b0: f64,
     params: &DecomposeParams,
-    lm: &mut LmScratch,
-) -> (f64, f64, f64, f64, f64, f64) {
+    ws: &mut StageSolvers,
+) -> Fit {
     let ne = te.len();
-    // Initial values (reference).
-    let mut c = [0.3_f64, 0.3, 0.4]; // [C+, C−, C₀]
-    let mut r0 = 25.0_f64;
-    let mut chi = [0.05_f64, -0.05]; // [χ+, χ−]
+    let mut p = Fit { c: [0.3, 0.3, 0.4], r0: 25.0, chi: [0.05, -0.05] };
 
     // Cap the χ search at the largest |χ| the echo spacing can represent without
     // aliasing. Unwrapping puts each echo's phase on the branch nearest the
@@ -335,155 +414,136 @@ fn fit_voxel(
     // them. At 7 T with 8 ms spacing the limit is 0.31 ppm, well inside the 0.5
     // ppm default — which is what left the recovered pallidum speckled with
     // dropouts even after the phases were unwrapped.
-    // Only with `unwrap_phase`: the authors search up to `chi_bound`.
+    // Only with `unwrap_phase`: the authors search up to `chi_bound` (`upper`).
     let dte = te.windows(2).map(|w| w[1] - w[0]).fold(te[0], f64::max);
-    let ub = if params.unwrap_phase {
+    let upper = if params.unwrap_phase {
         params.chi_bound.min(PI / ((2.0 / 3.0) * GAMMA * b0 * dte))
     } else {
         params.chi_bound
     };
     let unwrap = params.unwrap_phase;
     let inf = f64::INFINITY;
-    let maxit = params.max_lm_iter;
+    let opts = LsqTrrOptions { max_iterations: params.max_iterations, ..LsqTrrOptions::default() };
+
+    // `complex_to_real(log(model)) − complex_to_real(log(ydata))`, phases optionally unwrapped
+    // along the echoes.
+    let log_resid = |q: &Fit, out: &mut [f64]| {
+        let mut prev = 0.0;
+        for e in 0..ne {
+            let z = signal_model(te[e], q, b0);
+            let (lr, la) = (z.0.hypot(z.1).ln(), z.1.atan2(z.0));
+            let ang = if e == 0 || !unwrap { la } else { unwrap_near(la, prev) };
+            prev = ang;
+            out[e] = lr - logyc[e].0;
+            out[ne + e] = -ang - -logyc[e].1;
+        }
+    };
 
     for _ in 0..params.n_inner {
-        // Stage 1: amplitudes C against the linear signal y.
-        {
-            let resid = |x: &[f64], out: &mut [f64]| {
+        // Stage 1: objective1, the amplitudes [C+, C−, C₀] against the linear signal.
+        let q = p;
+        let mut x = p.c;
+        match params.solvers.amplitudes {
+            DecomposeStageSolver::LsqcurvefitTrustRegionReflective => lsq_trust_region_reflective(
+            |x: &[f64], out: &mut [f64]| {
+                let q = Fit { c: [x[0], x[1], x[2]], ..q };
                 for e in 0..ne {
-                    let m = signal_model(te[e], x[0], x[1], x[2], chi[0], chi[1], r0, b0);
-                    out[e] = m.0 - y[e].0;
-                    out[ne + e] = -(m.1 - y[e].1);
+                    let z = signal_model(te[e], &q, b0);
+                    out[e] = z.0 - yc[e].0;
+                    out[ne + e] = -z.1 - -yc[e].1;
                 }
-            };
-            let x = lm_bounded(resid, &c, &[0.0, 0.0, 0.0], &[inf, inf, inf], maxit, lm);
-            c = [x[0], x[1], x[2]];
-        }
-        // Stage 2: R2*₀ against log(y).
-        {
-            let resid = |x: &[f64], out: &mut [f64]| {
-                let mut prev = 0.0;
-                for e in 0..ne {
-                    let m = clog(signal_model(
-                        te[e], c[0], c[1], c[2], chi[0], chi[1], x[0], b0,
-                    ));
-                    let ang = if e == 0 || !unwrap { m.1 } else { unwrap_near(m.1, prev) };
-                    prev = ang;
-                    out[e] = m.0 - logy[e].0;
-                    out[ne + e] = -(ang - logy[e].1);
-                }
-            };
-            let x = lm_bounded(resid, &[r0], &[0.0], &[inf], maxit, lm);
-            r0 = x[0];
-        }
-        // Stage 3: [χ+, χ−] against log(y).
-        {
-            let resid = |x: &[f64], out: &mut [f64]| {
-                let mut prev = 0.0;
-                for e in 0..ne {
-                    let m = clog(signal_model(te[e], c[0], c[1], c[2], x[0], x[1], r0, b0));
-                    let ang = if e == 0 || !unwrap { m.1 } else { unwrap_near(m.1, prev) };
-                    prev = ang;
-                    out[e] = m.0 - logy[e].0;
-                    out[ne + e] = -(ang - logy[e].1);
-                }
-            };
-            let x = lm_bounded(resid, &chi, &[0.0, -ub], &[ub, 0.0], maxit, lm);
-            chi = [x[0], x[1]];
-        }
+            },
+            &mut x,
+            &[0.0; 3],
+            &[inf; 3],
+            &opts,
+            &mut ws.s1,
+            |_| {},
+        ),
+        };
+        p.c = x;
+        // Stage 2: objective2, R2*₀ against log(ydata).
+        let q = p;
+        let mut x = [p.r0];
+        match params.solvers.r2star {
+            DecomposeStageSolver::LsqcurvefitTrustRegionReflective => lsq_trust_region_reflective(
+            |x: &[f64], out: &mut [f64]| log_resid(&Fit { r0: x[0], ..q }, out),
+            &mut x,
+            &[0.0],
+            &[inf],
+            &opts,
+            &mut ws.s2,
+            |_| {},
+        ),
+        };
+        p.r0 = x[0];
+        // Stage 3: objective3, [χ+, χ−] against log(ydata).
+        let q = p;
+        let mut x = p.chi;
+        match params.solvers.chi {
+            DecomposeStageSolver::LsqcurvefitTrustRegionReflective => lsq_trust_region_reflective(
+            |x: &[f64], out: &mut [f64]| log_resid(&Fit { chi: [x[0], x[1]], ..q }, out),
+            &mut x,
+            &[0.0, -upper],
+            &[upper, 0.0],
+            &opts,
+            &mut ws.s3,
+            |_| {},
+        ),
+        };
+        p.chi = x;
     }
-    (c[0], c[1], c[2], r0, chi[0], chi[1])
+    p
 }
 
-/// Complex DECOMPOSE signal model at echo time `t` (seconds). Returns `(re, im)`.
-#[allow(clippy::too_many_arguments)]
+/// `C · exp(−(decay + i·freq)·t)` evaluated as MATLAB does it: `exp` of the complex exponent
+/// `(−decay·t, −freq·t)` is `e^{re}·(cos im, sin im)`, then scaled by `C`.
 #[inline]
-fn signal_model(
-    t: f64,
-    cp: f64,
-    cm: f64,
-    c0: f64,
-    chip: f64,
-    chim: f64,
-    r0: f64,
-    b0: f64,
-) -> (f64, f64) {
-    let a = (2.0 * PI * GAMMA * b0) / (9.0 * 3.0_f64.sqrt());
-    // term1: paramagnetic
-    let d1 = a * chip + r0;
-    let w1 = (2.0 / 3.0) * chip * GAMMA * b0;
-    let t1 = cexp_decay(cp, d1, w1, t);
-    // term2: diamagnetic (χ− ≤ 0, so −a·χ− ≥ 0 adds decay)
-    let d2 = -a * chim + r0;
-    let w2 = (2.0 / 3.0) * chim * GAMMA * b0;
-    let t2 = cexp_decay(cm, d2, w2, t);
-    // term3: neutral
-    let t3 = (c0 * (-r0 * t).exp(), 0.0);
-    (t1.0 + t2.0 + t3.0, t1.1 + t2.1 + t3.1)
+fn compartment(amp: f64, decay: f64, freq: f64, t: f64) -> (f64, f64) {
+    let e = (-decay * t).exp();
+    let im = -freq * t;
+    (amp * (e * im.cos()), amp * (e * im.sin()))
 }
 
-/// Paramagnetic-only reconstruction sub-model (`pscModel.m`).
-#[allow(clippy::too_many_arguments)]
+/// `a = 2π·γ·B0 / (9√3)` (`signalModel.m`).
 #[inline]
-fn psc_model(
-    t: f64,
-    cp: f64,
-    cm: f64,
-    c0: f64,
-    chip: f64,
-    _chim: f64,
-    r0: f64,
-    b0: f64,
-) -> (f64, f64) {
-    let a = (2.0 * PI * GAMMA * b0) / (9.0 * 3.0_f64.sqrt());
-    let d1 = a * chip + r0;
-    let w1 = (2.0 / 3.0) * chip * GAMMA * b0;
-    let t1 = cexp_decay(cp, d1, w1, t);
-    let t3 = ((c0 + cm) * (-r0 * t).exp(), 0.0);
-    (t1.0 + t3.0, t1.1 + t3.1)
+fn broadening(b0: f64) -> f64 {
+    (2.0 * PI * GAMMA * b0) / (9.0 * 3.0_f64.sqrt())
 }
 
-/// Diamagnetic-only reconstruction sub-model (`dscModel.m`). Note the flipped
-/// imaginary sign `(2/3)·(−χ−)·γ·B0` relative to [`signal_model`].
-#[allow(clippy::too_many_arguments)]
+/// The authors' `signalModel.m` at echo time `t` (seconds). Returns `(re, im)`.
 #[inline]
-fn dsc_model(
-    t: f64,
-    cp: f64,
-    cm: f64,
-    c0: f64,
-    _chip: f64,
-    chim: f64,
-    r0: f64,
-    b0: f64,
-) -> (f64, f64) {
-    let a = (2.0 * PI * GAMMA * b0) / (9.0 * 3.0_f64.sqrt());
-    let d2 = -a * chim + r0;
-    let w2 = (2.0 / 3.0) * (-chim) * GAMMA * b0; // flipped sign
-    let t2 = cexp_decay(cm, d2, w2, t);
-    let t3 = ((c0 + cp) * (-r0 * t).exp(), 0.0);
-    (t2.0 + t3.0, t2.1 + t3.1)
+fn signal_model(t: f64, p: &Fit, b0: f64) -> (f64, f64) {
+    let a = broadening(b0);
+    let t1 = compartment(p.c[0], a * p.chi[0] + p.r0, (2.0 / 3.0) * p.chi[0] * GAMMA * b0, t);
+    let t2 = compartment(p.c[1], -a * p.chi[1] + p.r0, (2.0 / 3.0) * p.chi[1] * GAMMA * b0, t);
+    let t3 = p.c[2] * (-p.r0 * t).exp();
+    (t1.0 + t2.0 + t3, t1.1 + t2.1)
 }
 
-/// `amp · exp(−(decay + i·freq)·t)` as `(re, im)`.
+/// The authors' `pscModel.m`: the `C_plus` compartment, the rest at the baseline decay.
 #[inline]
-fn cexp_decay(amp: f64, decay: f64, freq: f64, t: f64) -> (f64, f64) {
-    let mag = amp * (-decay * t).exp();
-    let ang = -freq * t;
-    (mag * ang.cos(), mag * ang.sin())
+fn psc_model(t: f64, p: &Fit, b0: f64) -> (f64, f64) {
+    let a = broadening(b0);
+    let t1 = compartment(p.c[0], a * p.chi[0] + p.r0, (2.0 / 3.0) * p.chi[0] * GAMMA * b0, t);
+    let t3 = (p.c[2] + p.c[1]) * (-p.r0 * t).exp();
+    (t1.0 + t3, t1.1)
 }
 
-/// Complex natural log: `log(z) = log|z| + i·angle(z)`.
+/// The authors' `dscModel.m`: the `C_minus` compartment with its frequency negated
+/// (`(2/3)·(−χ−)·γ·B0`), the rest at the baseline decay.
 #[inline]
-fn clog(z: (f64, f64)) -> (f64, f64) {
-    let mag2 = z.0 * z.0 + z.1 * z.1;
-    (0.5 * mag2.max(1e-300).ln(), z.1.atan2(z.0))
+fn dsc_model(t: f64, p: &Fit, b0: f64) -> (f64, f64) {
+    let a = broadening(b0);
+    let t2 = compartment(p.c[1], -a * p.chi[1] + p.r0, (2.0 / 3.0) * -p.chi[1] * GAMMA * b0, t);
+    let t3 = (p.c[2] + p.c[0]) * (-p.r0 * t).exp();
+    (t2.0 + t3, t2.1)
 }
 
 /// `2π`, the period of the phase branch cut.
 const TAU: f64 = 2.0 * PI;
 
-/// Put `ang` on the 2π-branch nearest `prev`.
+/// Put `ang` on the 2π-branch nearest `prev` (only with [`DecomposeParams::unwrap_phase`]).
 ///
 /// Every phase here reaches us through `atan2`, which folds onto `(−π, π]`. That
 /// fold is not harmless: a compartment accumulates `(2/3)·χ·γ·B0·TE` radians, so
@@ -517,206 +577,6 @@ fn recon_phase(te: &[f64], den: f64, unwrap: bool, model: impl Fn(f64) -> (f64, 
     -s / den
 }
 
-// ---------------------------------------------------------------------------
-// Bounded Levenberg–Marquardt for small (n ≤ 3) least-squares problems.
-// ---------------------------------------------------------------------------
-
-/// Largest parameter count any DECOMPOSE stage fits (stage 1: `[C+, C−, C₀]`).
-/// Keeps the LM state on the stack.
-const LM_MAX_N: usize = 3;
-
-/// Scratch buffers for [`lm_bounded`], sized once for a residual of length `m`
-/// and reused across every stage, LM iteration and voxel. Contents are always
-/// written before they are read.
-struct LmScratch {
-    /// Residual at the current `x`.
-    r: Vec<f64>,
-    /// Residual at the finite-difference probe point.
-    rp: Vec<f64>,
-    /// Residual at the trial point.
-    rn: Vec<f64>,
-    /// Jacobian, `m × LM_MAX_N`, column-major.
-    jac: Vec<f64>,
-}
-
-impl LmScratch {
-    fn new(m: usize) -> Self {
-        Self {
-            r: vec![0.0; m],
-            rp: vec![0.0; m],
-            rn: vec![0.0; m],
-            jac: vec![0.0; m * LM_MAX_N],
-        }
-    }
-}
-
-/// Minimise ‖resid(x)‖² over the box `[lb, ub]` by Levenberg–Marquardt with a
-/// forward finite-difference Jacobian and per-step projection onto the box.
-/// Sized for the 1–3 parameter DECOMPOSE stages.
-///
-/// `resid` writes the residual for a parameter vector into the caller's buffer
-/// rather than returning a fresh one, and all other working storage is either a
-/// stack array (`n ≤ LM_MAX_N`) or a buffer in `s`, so a solve allocates
-/// nothing. Only the first `x0.len()` entries of the returned array are
-/// meaningful.
-fn lm_bounded<F>(
-    resid: F,
-    x0: &[f64],
-    lb: &[f64],
-    ub: &[f64],
-    max_iter: usize,
-    s: &mut LmScratch,
-) -> [f64; LM_MAX_N]
-where
-    F: Fn(&[f64], &mut [f64]),
-{
-    let n = x0.len();
-    debug_assert!(n <= LM_MAX_N);
-    let m = s.r.len();
-    let mut x = [0.0_f64; LM_MAX_N];
-    for d in 0..n {
-        x[d] = x0[d].clamp(lb[d], ub[d]);
-    }
-    resid(&x[..n], &mut s.r);
-    let mut cost = dot(&s.r, &s.r);
-    let mut lambda = 1e-3;
-    // Converge each stage tightly: the authors' lsqcurvefit solves each one to its minimum
-    // (stopping at 1e-10 left the result 2.5–3x further from theirs).
-    let ftol = 1e-12;
-
-    for _ in 0..max_iter {
-        // Forward-difference Jacobian J (m×n), column-major in `s.jac`.
-        for j in 0..n {
-            let h = 1e-6 * x[j].abs().max(1e-3);
-            let mut xp = x;
-            xp[j] = (x[j] + h).clamp(lb[j], ub[j]);
-            let hj = xp[j] - x[j];
-            let step = if hj.abs() < 1e-30 { h } else { hj };
-            if hj.abs() < 1e-30 {
-                xp[j] = x[j] + h; // allow out-of-box probe when pinned at a bound
-            }
-            resid(&xp[..n], &mut s.rp);
-            for k in 0..m {
-                s.jac[j * m + k] = (s.rp[k] - s.r[k]) / step;
-            }
-        }
-        // Normal equations A = JᵀJ (n×n), g = Jᵀr (n).
-        let mut a = [0.0_f64; LM_MAX_N * LM_MAX_N];
-        let mut g = [0.0_f64; LM_MAX_N];
-        for jc in 0..n {
-            for jr in 0..n {
-                let mut acc = 0.0;
-                for k in 0..m {
-                    acc += s.jac[jr * m + k] * s.jac[jc * m + k];
-                }
-                a[jr * n + jc] = acc;
-            }
-            let mut acc = 0.0;
-            for k in 0..m {
-                acc += s.jac[jc * m + k] * s.r[k];
-            }
-            g[jc] = acc;
-        }
-
-        // Inner loop: inflate lambda until a step decreases the cost.
-        let mut improved = false;
-        for _ in 0..30 {
-            let mut al = a;
-            for d in 0..n {
-                al[d * n + d] += lambda * a[d * n + d].max(1e-12);
-            }
-            let Some(dx) = solve_small(&al, &g, n) else {
-                lambda *= 2.5;
-                continue;
-            };
-            let mut xn = [0.0_f64; LM_MAX_N];
-            for d in 0..n {
-                xn[d] = (x[d] - dx[d]).clamp(lb[d], ub[d]);
-            }
-            resid(&xn[..n], &mut s.rn);
-            let cn = dot(&s.rn, &s.rn);
-            if cn < cost {
-                let rel = (cost - cn) / cost.max(1e-300);
-                x = xn;
-                s.r.copy_from_slice(&s.rn);
-                cost = cn;
-                lambda = (lambda * 0.4).max(1e-12);
-                improved = true;
-                if rel < ftol {
-                    return x;
-                }
-                break;
-            } else {
-                lambda *= 2.5;
-                if lambda > 1e12 {
-                    break;
-                }
-            }
-        }
-        if !improved {
-            break;
-        }
-    }
-    x
-}
-
-#[inline]
-fn dot(a: &[f64], b: &[f64]) -> f64 {
-    a.iter().zip(b).map(|(&x, &y)| x * y).sum()
-}
-
-/// Solve `A x = b` for small `n` (≤ `LM_MAX_N`) by Gaussian elimination with
-/// partial pivoting. `a` is row-major `n×n`. Returns `None` if singular. Only
-/// the first `n` entries of the inputs and the result are used.
-fn solve_small(
-    a: &[f64; LM_MAX_N * LM_MAX_N],
-    b: &[f64; LM_MAX_N],
-    n: usize,
-) -> Option<[f64; LM_MAX_N]> {
-    let mut m = *a;
-    let mut y = *b;
-    for col in 0..n {
-        // Partial pivot.
-        let mut piv = col;
-        let mut best = m[col * n + col].abs();
-        for r in (col + 1)..n {
-            let v = m[r * n + col].abs();
-            if v > best {
-                best = v;
-                piv = r;
-            }
-        }
-        if best < 1e-300 {
-            return None;
-        }
-        if piv != col {
-            for c in 0..n {
-                m.swap(col * n + c, piv * n + c);
-            }
-            y.swap(col, piv);
-        }
-        let d = m[col * n + col];
-        for r in (col + 1)..n {
-            let f = m[r * n + col] / d;
-            if f != 0.0 {
-                for c in col..n {
-                    m[r * n + c] -= f * m[col * n + c];
-                }
-                y[r] -= f * y[col];
-            }
-        }
-    }
-    let mut x = [0.0_f64; LM_MAX_N];
-    for col in (0..n).rev() {
-        let mut acc = y[col];
-        for c in (col + 1)..n {
-            acc -= m[col * n + c] * x[c];
-        }
-        x[col] = acc / m[col * n + col];
-    }
-    Some(x)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -726,83 +586,64 @@ mod tests {
         chi.iter().flat_map(|&c| std::iter::repeat_n(c, ne)).collect()
     }
 
+    /// Output mapping on a synthetic voxel: χ+ = |DSC| and χ− = −|PSC| of the parameters fitted
+    /// to conj(y), as the authors write them, and on paramagnetic-dominant data χ+ dominates.
     #[test]
-    fn lm_recovers_linear_fit() {
-        // Fit y = m·t + c via LM on residual [m·t+c − data].
-        let t = [0.0, 1.0, 2.0, 3.0];
-        let data = [1.0, 3.0, 5.0, 7.0]; // m=2, c=1
-        let resid = |x: &[f64], out: &mut [f64]| {
-            for (k, (&ti, d)) in t.iter().zip(data).enumerate() {
-                out[k] = x[0] * ti + x[1] - d;
-            }
-        };
-        let mut lm = LmScratch::new(t.len());
-        let x = lm_bounded(
-            resid,
-            &[0.0, 0.0],
-            &[-10.0, -10.0],
-            &[10.0, 10.0],
-            50,
-            &mut lm,
-        );
-        assert!((x[0] - 2.0).abs() < 1e-6, "slope {}", x[0]);
-        assert!((x[1] - 1.0).abs() < 1e-6, "intercept {}", x[1]);
-    }
-
-    #[test]
-    fn solve_small_3x3() {
-        // A x = b with a known solution.
-        let a: [f64; 9] = [2.0, 1.0, 1.0, 1.0, 3.0, 2.0, 1.0, 0.0, 0.0];
-        let x_true = [1.0, 2.0, 3.0];
-        let b: [f64; 3] = [
-            a[0] * x_true[0] + a[1] * x_true[1] + a[2] * x_true[2],
-            a[3] * x_true[0] + a[4] * x_true[1] + a[5] * x_true[2],
-            a[6] * x_true[0] + a[7] * x_true[1] + a[8] * x_true[2],
-        ];
-        let x = solve_small(&a, &b, 3).unwrap();
-        for i in 0..3 {
-            assert!((x[i] - x_true[i]).abs() < 1e-9, "x{i} = {}", x[i]);
-        }
-    }
-
-    /// Output mapping on a synthetic voxel: χ+ = |PSC| (`−Σangle(pscModel)/den`, the
-    /// paramagnetic compartment) and χ− = −|DSC| of the fitted parameters, and on
-    /// paramagnetic-dominant data χ+ dominates.
-    #[test]
-    fn outputs_are_psc_and_dsc() {
+    fn outputs_are_the_authors_dsc_and_psc() {
         let te = [0.004, 0.012, 0.020, 0.028];
         let b0 = 7.0;
-        let params = DecomposeParams { b0, n_inner: 12, chi_bound: 0.5, max_lm_iter: 40, unwrap_phase: false };
-        let (cp, cm, c0, chip, chim, r0) = (0.5, 0.1, 0.4, 0.10, -0.02, 20.0);
+        let params = DecomposeParams {
+            b0,
+            n_inner: 12,
+            chi_bound: 0.5,
+            max_iterations: 400,
+            unwrap_phase: false,
+            solvers: Default::default(),
+        };
+        let truth = Fit {
+            c: [0.5, 0.1, 0.4],
+            r0: 20.0,
+            chi: [0.10, -0.02],
+        };
         let ne = te.len();
         let mag: Vec<f64> = te
             .iter()
             .map(|&t| {
-                let z = signal_model(t, cp, cm, c0, chip, chim, r0, b0);
+                let z = signal_model(t, &truth, b0);
                 (z.0 * z.0 + z.1 * z.1).sqrt()
             })
             .collect();
-        let chi = per_echo(&[chip + chim], ne);
+        let chi = per_echo(&[truth.chi[0] + truth.chi[1]], ne);
         let (pos, neg, tot) = decompose(&chi, &mag, &te, &[1u8], &params, |_, _| {}).unwrap();
 
         // The same fit by hand.
         let gmax = mag.iter().cloned().fold(0.0, f64::max);
-        let y: Vec<(f64, f64)> = (0..ne)
+        let yc: Vec<(f64, f64)> = (0..ne)
             .map(|e| {
                 let ph = -(2.0 / 3.0) * chi[e] * GAMMA * b0 * te[e];
-                (mag[e] / gmax * ph.cos(), mag[e] / gmax * ph.sin())
+                (mag[e] / gmax * ph.cos(), -(mag[e] / gmax * ph.sin()))
             })
             .collect();
-        let logy: Vec<(f64, f64)> = y.iter().map(|&z| clog(z)).collect();
-        let mut lm = LmScratch::new(2 * ne);
-        let (fcp, fcm, fc0, fr0, fchip, fchim) = fit_voxel(&te, &y, &logy, b0, &params, &mut lm);
+        let logyc: Vec<(f64, f64)> = yc
+            .iter()
+            .map(|&z| (z.0.hypot(z.1).ln(), z.1.atan2(z.0)))
+            .collect();
+        let mut ws = StageSolvers::new(2 * ne);
+        let p = fit_voxel(&te, &yc, &logyc, b0, &params, &mut ws);
         let den = (2.0 / 3.0) * GAMMA * b0 * te.iter().sum::<f64>();
-        let dsc = recon_phase(&te, den, false, |t| dsc_model(t, fcp, fcm, fc0, fchip, fchim, fr0, b0));
-        let psc = recon_phase(&te, den, false, |t| psc_model(t, fcp, fcm, fc0, fchip, fchim, fr0, b0));
-        assert!((pos[0] - psc.abs()).abs() < 1e-9 && (neg[0] + dsc.abs()).abs() < 1e-9,
-            "{pos:?} {neg:?} vs PSC {psc} DSC {dsc}");
-        assert!(pos[0] > neg[0].abs(), "χ+ dominant: χ+={} χ−={}", pos[0], neg[0]);
-        assert!((tot[0] - (pos[0] + neg[0])).abs() < 1e-12, "χ_total = χ+ + χ−");
+        let dsc = recon_phase(&te, den, false, |t| dsc_model(t, &p, b0));
+        let psc = recon_phase(&te, den, false, |t| psc_model(t, &p, b0));
+        assert_eq!((pos[0], neg[0]), (dsc.abs(), -psc.abs()));
+        assert!(
+            pos[0] > neg[0].abs(),
+            "χ+ dominant: χ+={} χ−={}",
+            pos[0],
+            neg[0]
+        );
+        assert!(
+            (tot[0] - (pos[0] + neg[0])).abs() < 1e-12,
+            "χ_total = χ+ + χ−"
+        );
     }
 
     /// Each echo's phase comes from that echo's QSM: a per-echo χ that differs between echoes
@@ -834,8 +675,9 @@ mod tests {
             b0,
             n_inner: 10,
             chi_bound: 0.5,
-            max_lm_iter: 30,
+            max_iterations: 400,
             unwrap_phase: true,
+            solvers: Default::default(),
         };
         let threshold = PI / ((2.0 / 3.0) * GAMMA * b0 * te[te.len() - 1]);
         assert!(
@@ -852,7 +694,7 @@ mod tests {
             let mag: Vec<f64> = te
                 .iter()
                 .map(|&t| {
-                    let z = signal_model(t, cp, cm, c0, chip, chim, r0, b0);
+                    let z = signal_model(t, &Fit { c: [cp, cm, c0], r0, chi: [chip, chim] }, b0);
                     (z.0 * z.0 + z.1 * z.1).sqrt()
                 })
                 .collect();
@@ -891,8 +733,9 @@ mod tests {
             b0,
             n_inner: 10,
             chi_bound: 0.5,
-            max_lm_iter: 30,
+            max_iterations: 400,
             unwrap_phase: true,
+            solvers: Default::default(),
         };
         let (dr_pos, dr_neg, r2) = (320.0_f64, 397.0_f64, 30.0_f64);
         let chim = -0.015_f64;
@@ -917,13 +760,13 @@ mod tests {
         let te = [0.004, 0.012, 0.020, 0.028];
         let b0 = 7.0;
         let ne = te.len();
-        let params = DecomposeParams { b0, n_inner: 4, chi_bound: 0.5, max_lm_iter: 20, unwrap_phase: false };
+        let params = DecomposeParams { b0, n_inner: 4, chi_bound: 0.5, max_iterations: 400, unwrap_phase: false, solvers: Default::default() };
 
         // A real signal for the fitted voxels.
         let (cp, cm, c0, chip, chim, r0) = (0.4, 0.2, 0.4, 0.06, -0.05, 22.0);
         let sig: Vec<(f64, f64)> = te
             .iter()
-            .map(|&t| signal_model(t, cp, cm, c0, chip, chim, r0, b0))
+            .map(|&t| signal_model(t, &Fit { c: [cp, cm, c0], r0, chi: [chip, chim] }, b0))
             .collect();
         let smag: Vec<f64> = sig.iter().map(|z| (z.0 * z.0 + z.1 * z.1).sqrt()).collect();
 
@@ -970,5 +813,103 @@ mod tests {
         assert!(decompose(&[0.0; 3], &mag, &te, &[1u8, 1], &ok, |_, _| {}).is_err());
         // One χ per voxel where one per echo is needed.
         assert!(decompose(&[0.0], &mag, &te, &[1u8], &ok, |_, _| {}).is_err());
+    }
+
+    /// Every `lsqcurvefit` call of the authors' fit, replayed stage by stage against MATLAB
+    /// R2023b (`scripts/lsq_trr_matlab/probe_lsq_trr.m` on the conj(y) that
+    /// `decompose_qsm_parity::decompose_probe_input` writes): each stage starts from MATLAB's
+    /// own x0 and fixed parameters, so a difference is that call's alone.
+    /// `DECOMPOSE_TRACE=<trace> DECOMPOSE_PROBE_IN=<input> cargo test --release --lib
+    /// decompose_stages_match_matlab -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn decompose_stages_match_matlab() {
+        use crate::solvers::lsq_trr_trace::{compare, dump, parse, replay};
+        let (Ok(tp), Ok(yp)) = (
+            std::env::var("DECOMPOSE_TRACE"),
+            std::env::var("DECOMPOSE_PROBE_IN"),
+        ) else {
+            return;
+        };
+        let raw: Vec<f64> = std::fs::read(yp)
+            .unwrap()
+            .chunks(8)
+            .map(|c| f64::from_le_bytes(c.try_into().unwrap()))
+            .collect();
+        let (nv, ne, b0) = (raw[0] as usize, raw[1] as usize, raw[2]);
+        let te = raw[3..3 + ne].to_vec();
+        let yv = |v: usize| -> Vec<(f64, f64)> {
+            let o = 3 + ne + v * 2 * ne;
+            (0..ne).map(|e| (raw[o + e], raw[o + ne + e])).collect()
+        };
+        assert!(nv > 0);
+        let calls = parse(&std::fs::read_to_string(tp).unwrap());
+        let dump_tag = std::env::var("DECOMPOSE_DUMP").ok();
+        let (mut ok, mut total) = (0, 0);
+        let mut worst: Vec<(f64, String)> = Vec::new();
+        let mut by_stage = [[0usize; 2]; 3];
+        let only = std::env::var("DECOMPOSE_ONLY").ok();
+        for call in calls.iter().filter(|c| c.stage.is_some() && only.as_deref().is_none_or(|o| o == c.tag)) {
+            let (v, _, st, fx) = call.stage.unwrap();
+            let yc = yv(v);
+            let logyc: Vec<(f64, f64)> = yc
+                .iter()
+                .map(|z| (z.0.hypot(z.1).ln(), z.1.atan2(z.0)))
+                .collect();
+            let q = Fit {
+                c: [fx[3], fx[4], fx[5]],
+                r0: fx[2],
+                chi: [fx[0], fx[1]],
+            };
+            let log_resid = |q: &Fit, out: &mut [f64]| {
+                for e in 0..ne {
+                    let z = signal_model(te[e], q, b0);
+                    out[e] = z.0.hypot(z.1).ln() - logyc[e].0;
+                    out[ne + e] = -z.1.atan2(z.0) - -logyc[e].1;
+                }
+            };
+            let r = match st {
+                1 => replay(call, |x, out| {
+                    let q = Fit {
+                        c: [x[0], x[1], x[2]],
+                        ..q
+                    };
+                    for e in 0..ne {
+                        let z = signal_model(te[e], &q, b0);
+                        out[e] = z.0 - yc[e].0;
+                        out[ne + e] = -z.1 - -yc[e].1;
+                    }
+                }),
+                2 => replay(call, |x, out| log_resid(&Fit { r0: x[0], ..q }, out)),
+                _ => replay(call, |x, out| {
+                    log_resid(
+                        &Fit {
+                            chi: [x[0], x[1]],
+                            ..q
+                        },
+                        out,
+                    )
+                }),
+            };
+            let d = compare(call, &r, 1e-6);
+            total += 1;
+            let good = d.same_counts && d.same_exit && d.first_divergence.is_none();
+            by_stage[st - 1][usize::from(good)] += 1;
+            if good {
+                ok += 1;
+            }
+            worst.push((d.x_rel, format!("{d:?}")));
+            if !good && std::env::var("DECOMPOSE_LIST").is_ok() {
+                eprintln!("FAIL {} fd={:?} x_rel={:.1e} M={:?} R={:?}", d.tag, d.first_divergence, d.x_rel, d.matlab, d.rust);
+            }
+            if dump_tag.as_deref() == Some(call.tag.as_str()) {
+                eprintln!("{}", dump(call, &r));
+            }
+        }
+        worst.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
+        for w in worst.iter().take(15) {
+            eprintln!("{}", w.1);
+        }
+        eprintln!("{ok} of {total} stage calls identical (counts, exit flag, every evaluation to 1e-6); by stage [differ, same]: {by_stage:?}");
     }
 }

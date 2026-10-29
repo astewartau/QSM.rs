@@ -84,7 +84,7 @@ pub mod chisepnet;
 
 pub use chi_sep_ilsqr::{chi_sep_ilsqr, chisep_toolbox_ilsqr, ChiSepIlsqrParams, STI_FUNCTION_NITER};
 pub use chi_sep_medi::{chi_sep_medi, ChiSepParams};
-pub use decompose::{decompose, DecomposeParams};
+pub use decompose::{decompose, DecomposeParams, DecomposeStageSolver, DecomposeStageSolvers};
 pub use hc_chisep::{hc_chisep, HcChisepParams};
 pub use r2star_qsm::{r2star_qsm, r2star_qsm_from_magnitude, R2starQsmParams};
 pub use wavesep::{wavesep, WaveSepParams};
