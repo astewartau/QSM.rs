@@ -246,7 +246,7 @@ fn reconstruct_via(
     assert!(bdir.2 > 1.0 - 1e-9, "the destination grid should be axial, got bdir {bdir:?}");
 
     let grid = Grid::new(dst_dims.0, dst_dims.1, dst_dims.2, dst_voxel.0, dst_voxel.1, dst_voxel.2);
-    let chi = inversion::tkd(&field, &mask, &grid, bdir, &TkdParams { threshold: 0.2 });
+    let chi = inversion::tkd(&field, &mask, &grid, bdir, &TkdParams { threshold: 0.2, ..Default::default() });
 
     resample_onto(&chi, dst_dims, dst_affine, sag.dims, &sag.affine)
         .expect("a cardinal affine is invertible")

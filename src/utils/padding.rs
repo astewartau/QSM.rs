@@ -72,6 +72,38 @@ pub fn qsmjl_fast_fft_size(sz: [usize; 3], ksz: [i64; 3]) -> [usize; 3] {
     out
 }
 
+/// QSM.jl's default `pad` for its FFT inversions (`tkd`, `tsvd`, `tikh`, `tv`, `rts`, `nltv`):
+/// `(0, 0, 0)`, padding each axis only up to QSM.jl's fast FFT size.
+pub const QSMJL_PAD: [i64; 3] = [0; 3];
+
+/// Runs `inv` on `field` and `mask` zero-padded the way QSM.jl's FFT inversions pad them (their
+/// `pad` keyword: `padfastfft(f, pad; rfft = true)`, `src/inversion/direct.jl:182-184`,
+/// `rts.jl:109-111`, `tv.jl`, fde4b92) and crops the result back. An axis with `pad < 0` is not
+/// padded; otherwise it grows to [`qsmjl_fast_fft_size`]. QSM.jl centres the data in the
+/// padding; here it sits at the origin, which is the same for these inversions (all periodic:
+/// FFTs and periodic finite differences, the mask applied voxel-wise).
+///
+/// The padding changes the result, because the inverse filters act on the periodic extension
+/// of the array: QSM.jl's defaults (`pad = (0, 0, 0)`) pad a 184-voxel axis to 192, for
+/// example. A port that must reproduce QSM.jl at its defaults has to pad the same way.
+pub fn with_qsmjl_padding(
+    field: &[f64],
+    mask: &[u8],
+    grid: &crate::Grid,
+    pad: [i64; 3],
+    inv: impl FnOnce(&[f64], &[u8], &crate::Grid) -> Vec<f64>,
+) -> Vec<f64> {
+    let dims = [grid.dims.0, grid.dims.1, grid.dims.2];
+    let p = qsmjl_fast_fft_size(dims, pad);
+    if p == dims {
+        return inv(field, mask, grid);
+    }
+    let pd = (p[0], p[1], p[2]);
+    let pg = crate::Grid::new(p[0], p[1], p[2], grid.vsx(), grid.vsy(), grid.vsz());
+    let out = inv(&pad3d(field, grid.dims, pd), &pad3d(mask, grid.dims, pd), &pg);
+    unpad3d(&out, pd, grid.dims)
+}
+
 /// Pad a 3D array to fast FFT size
 ///
 /// # Arguments

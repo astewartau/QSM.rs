@@ -161,6 +161,11 @@ pub fn prepare_admm_spectral(
         .map(|&x| Complex64::new(x, 0.0))
         .collect();
     fft_ws.fft3d(&mut l_complex);
+    // The Laplacian's DC term is 0 (its stencil sums to zero), but its FFT is only zero to
+    // rounding on anisotropic voxels (e.g. 4.4e-16 at 0.9 × 1.0 × 1.3 mm), and inverting that
+    // puts a rounding-dependent constant into χ. Zero it, so `a` at DC is exactly 0 and χ's DC is
+    // 0, as it is on isotropic voxels. QSM.jl's `tv` keeps its rounded value (see `tv`'s docs).
+    l_complex[0] = Complex64::new(0.0, 0.0);
     let mut inv_a: Vec<f64> = vec![0.0; n_total];
     for i in 0..n_total {
         let a = d_kernel[i] * d_kernel[i] + rho * l_complex[i].re;
