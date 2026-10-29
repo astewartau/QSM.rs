@@ -167,7 +167,7 @@
 use crate::error::{check_len, InputError};
 use crate::fft::Fft3dWorkspace;
 use crate::inversion::medi::{fgrad, par_fill, par_update};
-use crate::inversion::{IlsqrParams, STI_GUI_PAD_MM};
+use crate::inversion::{IlsqrParams, STI_DEFAULT_NITER, STI_GUI_PAD_MM};
 use crate::Grid;
 use num_complex::Complex64;
 
@@ -186,15 +186,12 @@ const TKD_THRESHOLD: f64 = 0.125;
 /// Tukey window ratio of the R2′ smoothing.
 const TUKEY_RATIO: f64 = 0.5;
 
-/// Iteration cap STI Suite's `QSM_iLSQR` uses when called without `'niter'` (probed: bitwise
-/// equal to an explicit 100), which is how the χ-separation toolbox calls it.
-pub const STI_FUNCTION_NITER: usize = 100;
-
 /// The iLSQR call of the χ-separation toolbox (`Chisep_script.m` l. 142-145) for the QSM that
-/// [`chi_sep_ilsqr`] and [`super::chi_sep_medi`] start from: [`STI_FUNCTION_NITER`] iterations,
+/// [`chi_sep_ilsqr`] and [`super::chi_sep_medi`] start from: [`STI_DEFAULT_NITER`] iterations
+/// (`QSM_iLSQR`'s own default, as the toolbox calls it without `'niter'`),
 /// [`STI_GUI_PAD_MM`] padding, STI's tolerances.
 pub fn chisep_toolbox_ilsqr() -> IlsqrParams {
-    IlsqrParams { max_iter: STI_FUNCTION_NITER, pad_mm: STI_GUI_PAD_MM, ..IlsqrParams::default() }
+    IlsqrParams { max_iter: STI_DEFAULT_NITER, pad_mm: STI_GUI_PAD_MM, ..IlsqrParams::default() }
 }
 
 /// Parameters for [`chi_sep_ilsqr`]. The defaults are the toolbox's (see the module docs); the
@@ -1182,7 +1179,7 @@ mod tests {
         assert_eq!((NNLS_TOL, NNLS_ITER_MAX), (0.01, 10));
         let (dp, dn) = ChiSepIlsqrParams { cf: 127.74e6, ..p.clone() }.dr();
         assert_eq!((dp, dn), (141.7241379310345, 141.7241379310345));
-        assert_eq!(p.qsm_ilsqr.max_iter, STI_FUNCTION_NITER);
+        assert_eq!(p.qsm_ilsqr.max_iter, STI_DEFAULT_NITER);
     }
 
     #[test]

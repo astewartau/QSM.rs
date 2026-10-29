@@ -83,7 +83,7 @@ pub mod wavesep;
 pub mod susep_net;
 pub mod chisepnet;
 
-pub use chi_sep_ilsqr::{chi_sep_ilsqr, chisep_toolbox_ilsqr, ChiSepIlsqrInputs, ChiSepIlsqrParams, NNLS_ITER_MAX, NNLS_TOL, STI_FUNCTION_NITER};
+pub use chi_sep_ilsqr::{chi_sep_ilsqr, chisep_toolbox_ilsqr, ChiSepIlsqrInputs, ChiSepIlsqrParams, NNLS_ITER_MAX, NNLS_TOL};
 pub use chi_sep_medi::{chi_sep_medi, ChiSepMediInputs, ChiSepMediParams, CHI_SEP_MEDI_MIN_ITER, toolbox_default_dr, TOOLBOX_DR_REFERENCE_TESLA, TOOLBOX_GYRO_HZ_PER_T};
 pub use decompose::{decompose, DecomposeParams};
 pub use hc_chisep::{hc_chisep, HcChisepParams};
