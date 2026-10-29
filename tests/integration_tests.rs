@@ -326,7 +326,7 @@ fn test_bgremove_ismv() {
         &grid,
         &IsmvParams::default(),
         |_, _| {},
-    ));
+    ).expect("ismv"));
 
     let res = TestResult::new("iSMV", &result, &data.fieldmap_local, &data.mask, data.dims);
     res.print_with_time(elapsed);
@@ -2032,7 +2032,7 @@ fn benchmark_all_algorithms() {
     // iSMV
     let ((result, _), elapsed) = run_timed!("iSMV", bgremove::ismv(
         &data.fieldmap, &data.mask, &grid, &IsmvParams::default(), |_, _| {}
-    ));
+    ).expect("ismv"));
     TestResult::new("iSMV", &result, &data.fieldmap_local, &data.mask, data.dims).print_with_time(elapsed);
 
     // LBV (using defaults: tol=1e-6, adaptive max_iter)
@@ -2195,7 +2195,7 @@ fn test_all_combinations() {
     // iSMV
     let ((result, mask), elapsed) = run_timed!("iSMV", bgremove::ismv(
         &data.fieldmap, &data.mask, &grid, &IsmvParams::default(), |_, _| {}
-    ));
+    ).expect("ismv"));
     TestResult::new("iSMV", &result, &data.fieldmap_local, &data.mask, data.dims).print_with_time(elapsed);
     bfr_results.push(BfrResult { name: "iSMV".into(), local_field: result, mask, elapsed });
 
