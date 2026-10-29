@@ -2,9 +2,11 @@
 //!
 //! [`ilsqr`] implements **STI Suite 3.0's `QSM_iLSQR`** (Li et al. 2015), as called with
 //! `QSM_iLSQR(phase, mask, 'TE', TE, 'B0', B0, 'H', H, 'padsize', [p p p], 'voxelsize', vs)`
-//! with `p` = [`IlsqrParams::pad_mm`]. The defaults are what STI Suite 3.0's `QSM_GUI` passes:
-//! [`STI_GUI_PAD_MM`] = 12 mm of padding and [`STI_GUI_NITER`] = 40 iterations (see
-//! [`IlsqrParams`]). Called without `'padsize'`, `QSM_iLSQR` pads [`STI_DEFAULT_PAD_MM`] = 6;
+//! with `p` = [`IlsqrParams::pad_mm`]. The defaults are [`STI_DEFAULT_NITER`] = 100 iterations,
+//! `QSM_iLSQR`'s own default, which applies when it is called as a function without `'niter'`
+//! (as UK Biobank's pipeline and STI Suite's `STI_Templates.m` call it), and [`STI_GUI_PAD_MM`]
+//! = 12 mm of padding, what STI Suite 3.0's `QSM_GUI` passes (see [`IlsqrParams`]). The GUI
+//! passes [`STI_GUI_NITER`] = 40 iterations. Called without `'padsize'`, `QSM_iLSQR` pads [`STI_DEFAULT_PAD_MM`] = 6;
 //! UK Biobank and STI Suite's examples pass 64, [`STI_PAD_MM`].
 //! STI Suite ships as protected P-code, so the algorithm was recovered by black-box probing
 //! (call tracing, capturing the operators and right-hand sides it hands to MATLAB's `lsqr`, and
@@ -93,8 +95,13 @@
 //!   `tol_step1` 0.01, `tol_step2` 0.001, `Kthreshold` 0.1. The struct call is bitwise equal to
 //!   `QSM_iLSQR(..., 'padsize', [12 12 12], 'niter', 40)`. Called without them, `QSM_iLSQR`
 //!   uses `niter` 100 (bitwise equal to an explicit 100) and `padsize` 6 mm (see *Padding*).
-//!   [`IlsqrParams::default`] follows the GUI (40, 12 mm). (`STI_Templates.m` lists
-//!   `padsize = [12 12 12]` as the default; the function's own default is 6.)
+//!   [`IlsqrParams::default`] takes the function's 100 iterations (decided 2026-10-29: UK
+//!   Biobank and `STI_Templates.m` l. 115 call `QSM_iLSQR` without `'niter'`, so 100 is what
+//!   they run; 40 is only what the GUI passes) and the GUI's 12 mm padding. (`STI_Templates.m`
+//!   lists `padsize = [12 12 12]` as the default; the function's own default is 6.) Until
+//!   2026-10-29 the default was the GUI's 40; the QSM-CI parity pair against the verified
+//!   `ilsqr-sti` container (which calls it without `'niter'`) differed by 17–18 % NRMSE at 40
+//!   and 1–2 % at 100 (astewartau/QSM.rs#329).
 //! - **Masking**: the GUI's "Single button for QSM" path builds the mask by thresholding the
 //!   magnitude (`Support_Functions/CreateMask.m`: rescale, threshold, largest connected
 //!   component, fill holes; then the P-coded `Getmasking`/`PolishMask`), not with BET.
@@ -121,9 +128,12 @@
 
 /// Parameters for the iLSQR algorithm.
 ///
-/// The defaults are what STI Suite 3.0's `QSM_GUI` passes to `QSM_iLSQR`, since that is what
-/// STI Suite users run (as for STAR-QSM's padding, [`crate::inversion::StarParams::pad`]).
-/// Probed in MATLAB R2023b by driving `QSM_GUI` headless ("3D GRE data", then "iLSQR") with a
+/// The iteration cap defaults to `QSM_iLSQR`'s own default, 100, which is what runs when it is
+/// called as a function without `'niter'`: UK Biobank's pipeline and STI Suite's own
+/// `STI_Templates.m` example call it that way (decided 2026-10-29; until then the default was
+/// the GUI's 40, which remains available as `max_iter: STI_GUI_NITER`). The padding defaults
+/// to what STI Suite 3.0's `QSM_GUI` passes (as for STAR-QSM's padding,
+/// [`crate::inversion::StarParams::pad`]). Probed in MATLAB R2023b by driving `QSM_GUI` headless ("3D GRE data", then "iLSQR") with a
 /// logging wrapper around `QSM_iLSQR`: the GUI passes a `params` struct with `niter` 40,
 /// `padsize` [12 12 12], `tol_step1` 0.01, `tol_step2` 0.001 and `Kthreshold` 0.1, bitwise
 /// equal to `QSM_iLSQR(..., 'padsize', [12 12 12], 'niter', 40)`. Called without them,
@@ -131,9 +141,10 @@
 /// tolerance of 0.01. `max_iter` is STI's `'niter'` argument (it caps both solves).
 /// `pad_mm` is STI's `'padsize'` (see the module docs, *Padding*).
 ///
-/// Measured against the function's defaults (100 iterations, 6 mm): on the qsm-forward
-/// phantom's true local field χ XSIM 0.686 → 0.671, NRMSE 40.3 → 42.0 %, r 0.916 → 0.908 (the
-/// fewer iterations; 12 mm alone changes little), at under half the run time; behind the
+/// Measured, the GUI's settings (40, 12 mm) against the function's defaults (100, 6 mm): on
+/// the qsm-forward phantom's true local field χ XSIM 0.686 → 0.671, NRMSE 40.3 → 42.0 %,
+/// r 0.916 → 0.908 (the fewer iterations; 12 mm alone changes little), at under half the run
+/// time; behind the
 /// pipeline's V-SHARP the differences are ≤ 0.01 XSIM (phantom 0.308 → 0.301). On an
 /// in-vivo 3T scan behind the default V-SHARP, agreement with the UK Biobank pipeline's χ
 /// is XSIM 0.772 → 0.764, NRMSE 75.5 → 73.5 %, r 0.814 → 0.820.
@@ -142,9 +153,10 @@
 pub struct IlsqrParams {
     /// Tolerance of the streaking-artefact solve (default: 1e-3)
     pub tol: f64,
-    /// Maximum iterations of each LSQR solve: STI's `'niter'` (default [`STI_GUI_NITER`] = 40,
-    /// what `QSM_GUI` passes; `QSM_iLSQR`'s own default is 100, which the χ-separation
-    /// toolbox's `Chisep_script.m` leaves in place, and QSMART passes 50)
+    /// Maximum iterations of each LSQR solve: STI's `'niter'` (default [`STI_DEFAULT_NITER`] =
+    /// 100, `QSM_iLSQR`'s own default, which UK Biobank, `STI_Templates.m` and the χ-separation
+    /// toolbox's `Chisep_script.m` leave in place; `QSM_GUI` passes [`STI_GUI_NITER`] = 40, and
+    /// QSMART 50)
     pub max_iter: usize,
     /// Zero padding per side in mm, on every axis: STI's `'padsize'` (default
     /// [`STI_GUI_PAD_MM`] = 12, what `QSM_GUI` passes; [`STI_DEFAULT_PAD_MM`] = 6 is
@@ -157,7 +169,7 @@ impl Default for IlsqrParams {
     fn default() -> Self {
         Self {
             tol: 1e-3,
-            max_iter: STI_GUI_NITER,
+            max_iter: STI_DEFAULT_NITER,
             pad_mm: STI_GUI_PAD_MM,
         }
     }
@@ -181,9 +193,14 @@ pub const STI_PAD_MM: f64 = 64.0;
 /// toolbox's `Chisep_script.m` use the same value.
 pub const STI_GUI_PAD_MM: f64 = 12.0;
 
-/// Iteration cap (`niter`) STI Suite 3.0's `QSM_GUI` passes to `QSM_iLSQR`, and the default of
-/// [`IlsqrParams::max_iter`]. `QSM_iLSQR`'s own default is 100.
+/// Iteration cap (`niter`) STI Suite 3.0's `QSM_GUI` passes to `QSM_iLSQR`. Not the default of
+/// [`IlsqrParams::max_iter`] (that is [`STI_DEFAULT_NITER`]); set it to reproduce the GUI.
 pub const STI_GUI_NITER: usize = 40;
+
+/// `QSM_iLSQR`'s own iteration cap, used when it is called without `'niter'` (output bitwise
+/// equal to an explicit 100), as UK Biobank's pipeline and STI Suite's `STI_Templates.m` call
+/// it, and the default of [`IlsqrParams::max_iter`].
+pub const STI_DEFAULT_NITER: usize = 100;
 
 /// Zero padding STI's `QSM_iLSQR` uses when called without `'padsize'` (as QSMART calls it),
 /// in mm. Probed in STI Suite 3.0: output bitwise equal to an explicit `padsize` of 6 mm
@@ -1465,9 +1482,9 @@ mod tests {
     #[test]
     fn test_ilsqr_params_defaults() {
         let p = IlsqrParams::default();
-        // STI Suite 3.0's QSM_GUI: niter 40, padsize 12
-        assert_eq!((p.tol, p.max_iter, p.pad_mm), (1e-3, STI_GUI_NITER, STI_GUI_PAD_MM));
-        assert_eq!((STI_GUI_NITER, STI_GUI_PAD_MM), (40, 12.0));
+        // QSM_iLSQR's own niter (100, as UK Biobank and STI_Templates.m run it); the GUI's padsize 12
+        assert_eq!((p.tol, p.max_iter, p.pad_mm), (1e-3, STI_DEFAULT_NITER, STI_GUI_PAD_MM));
+        assert_eq!((STI_DEFAULT_NITER, STI_GUI_NITER, STI_GUI_PAD_MM), (100, 40, 12.0));
         assert_eq!((STI_PAD_MM, STI_DEFAULT_PAD_MM), (64.0, 6.0));
         assert!(p.validate().is_ok());
     }

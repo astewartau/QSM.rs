@@ -71,7 +71,7 @@
 //! The facts above that a configuration can depart from are published as rules in
 //! [`crate::pipeline::rules::RULES`] (each with its strength, basis, reason and source): `chi-sep.mask-bet`, `chi-sep.unwrap-romeo`, `chi-sep.echo-combination`, `chi-sep.echo-weights`, `chi-sep.bg-vsharp`, `chi-sep-ilsqr.qsm-ilsqr`.
 
-use crate::inversion::{IlsqrParams, STI_GUI_PAD_MM};
+use crate::inversion::{IlsqrParams, STI_DEFAULT_NITER, STI_GUI_PAD_MM};
 use crate::fft::Fft3dWorkspaceF32;
 use crate::inversion::medi::{
     bdiv_periodic_inplace_f32, fgrad_periodic_inplace_f32, gradient_mask_f32,
@@ -118,8 +118,8 @@ pub struct ChiSepIlsqrParams {
     /// for hosts that reconstruct it (the pipeline takes the QSM as an input). Default
     /// [`chisep_toolbox_ilsqr`]: 100 iterations, 12 mm padding, as the χ-separation toolbox's
     /// `Chisep_script.m` (l. 142-145) calls STI Suite's `QSM_iLSQR`: `'padsize', [12 12 12]`
-    /// and no `'niter'`, so the function's default of 100. This differs from
-    /// [`IlsqrParams::default`] (the STI Suite GUI's 40 iterations).
+    /// and no `'niter'`, so the function's default of 100, which is also
+    /// [`IlsqrParams::default`]'s since 2026-10-29 (the STI Suite GUI's 40 before).
     ///
     /// On the QSM-CI χ-separation phantom the choice hardly matters: with the QSM from
     /// 100 iterations / 6 mm, 40 / 12 mm or 100 / 12 mm, χ+ scores r 0.946 / XSIM 0.717 and
@@ -127,14 +127,11 @@ pub struct ChiSepIlsqrParams {
     pub qsm_ilsqr: IlsqrParams,
 }
 
-/// Iteration cap STI Suite's `QSM_iLSQR` uses when called without `'niter'` (probed: bitwise
-/// equal to an explicit 100), which is how the χ-separation toolbox calls it.
-pub const STI_FUNCTION_NITER: usize = 100;
-
-/// The iLSQR call of the χ-separation toolbox (`Chisep_script.m` l. 142-145):
-/// [`STI_FUNCTION_NITER`] iterations, [`STI_GUI_PAD_MM`] padding, STI's tolerances.
+/// The iLSQR call of the χ-separation toolbox (`Chisep_script.m` l. 142-145): no `'niter'`, so
+/// `QSM_iLSQR`'s own [`STI_DEFAULT_NITER`] iterations (now also [`IlsqrParams`]'s default;
+/// spelled out so the toolbox call stays pinned), [`STI_GUI_PAD_MM`] padding, STI's tolerances.
 pub fn chisep_toolbox_ilsqr() -> IlsqrParams {
-    IlsqrParams { max_iter: STI_FUNCTION_NITER, pad_mm: STI_GUI_PAD_MM, ..IlsqrParams::default() }
+    IlsqrParams { max_iter: STI_DEFAULT_NITER, pad_mm: STI_GUI_PAD_MM, ..IlsqrParams::default() }
 }
 
 impl Default for ChiSepIlsqrParams {
