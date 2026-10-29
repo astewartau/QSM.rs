@@ -117,6 +117,10 @@ pub fn tikhonov(
         }
     }).collect();
 
+    // QSM.jl applies this multiplier on its real-to-complex half spectrum; the kernel `irfft`
+    // implies, so the full FFT reproduces it with tilted B0 (astewartau/QSM.rs#329).
+    let inv_d = crate::fft::c2r_kernel(&inv_d, nx, ny, nz);
+
     // Convert local field to complex
     let mut field_complex: Vec<Complex64> = local_field.iter()
         .map(|&x| Complex64::new(x, 0.0))

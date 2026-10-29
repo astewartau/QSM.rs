@@ -28,10 +28,12 @@
 //!   authors as the paper (and of [`super::ndi`]); QSM.jl squares it.
 //! - QSM.jl allocates the data-term multiplier without initialising it; here it starts at zero.
 //!
-//! QSM.jl uses real FFTs, this port complex FFTs and the real part. When B0 is tilted from the
-//! grid axes the dipole kernel is not symmetric on the Nyquist planes, and the two treat those
-//! bins differently. That is the only difference between the two: about 1e-4 ppm RMS on a 3T
-//! scan tilted by 6 degrees, and none for axial B0.
+//! QSM.jl uses real FFTs, this port complex FFTs. When B0 is tilted from the grid axes the
+//! dipole kernel is not symmetric on the Nyquist planes, and the two would treat those bins
+//! differently (about 1e-4 ppm RMS on a 3T scan tilted by 6 degrees); before each inverse FFT
+//! this port therefore replaces the spectrum by the Hermitian one QSM.jl's `irfft` reads from
+//! its stored half ([`crate::fft::c2r_spectrum`], astewartau/QSM.rs#329, from 2026-10-29). Not
+//! fixture-tested (QSM.jl's `nltv` is not reproducible on small arrays; see below).
 //!
 //! # Units
 //! Like the other inversions, NLTV takes the local field in ppm and returns ppm. The nonlinear
@@ -204,6 +206,8 @@ pub fn nltv(
             x_hat[i] = rho * ia[i] * x_hat[i] + f_hat[i];
             work[i] = x_hat[i];
         }
+        // QSM.jl's irfft of its half spectrum (astewartau/QSM.rs#329; see the module docs)
+        crate::fft::c2r_spectrum(&mut work, pdims.0, pdims.1, pdims.2);
         fft_ws.ifft3d(&mut work);
         for i in 0..n {
             x[i] = work[i].re;
@@ -235,6 +239,7 @@ pub fn nltv(
         for i in 0..n {
             work[i] = x_hat[i] * d[i];
         }
+        crate::fft::c2r_spectrum(&mut work, pdims.0, pdims.1, pdims.2);
         fft_ws.ifft3d(&mut work);
         for i in 0..n {
             let v = work[i].re + ue[i];

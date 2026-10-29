@@ -285,6 +285,8 @@ pub fn rts(
     }
     fft_ws.fft3d(&mut work);
     let mut xhat = lsmr_diag(&d, &work, nx, params.lsmr_iter);
+    // QSM.jl's irfft of its half spectrum (astewartau/QSM.rs#329; see the module docs)
+    crate::fft::c2r_spectrum(&mut xhat, nx, ny, nz);
     fft_ws.ifft3d(&mut xhat);
     let mut x: Vec<f64> = (0..n).map(|i| if mask[i] != 0 { xhat[i].re } else { 0.0 }).collect();
 
@@ -333,6 +335,7 @@ pub fn rts(
         for i in 0..n {
             work[i] = work[i] * i_a[i] + f_hat[i];
         }
+        crate::fft::c2r_spectrum(&mut work, nx, ny, nz);
         fft_ws.ifft3d(&mut work);
         for i in 0..n {
             x[i] = work[i].re;

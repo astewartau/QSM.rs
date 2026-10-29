@@ -146,7 +146,8 @@ where
 
 /// Pre-compute ADMM spectral operators (dipole kernel, inverse operator, and RHS).
 ///
-/// Shared by TV-ADMM and NLTV. Returns (fft_workspace, inv_a, f_hat).
+/// For TV-ADMM (QSM.jl's `tv`): both are the kernels QSM.jl's real-to-complex FFT implies
+/// ([`crate::fft::c2r_kernel`]). Returns (fft_workspace, inv_a, f_hat).
 pub fn prepare_admm_spectral(
     local_field: &[f64],
     grid: &Grid,
@@ -166,13 +167,19 @@ pub fn prepare_admm_spectral(
         let a = d_kernel[i] * d_kernel[i] + rho * l_complex[i].re;
         inv_a[i] = if a.abs() > 1e-20 { 1.0 / a } else { 0.0 };
     }
+    // QSM.jl's `tv` applies `iA` and `iA·D` on its real-to-complex half spectrum; give the full
+    // FFT the kernels `irfft` implies (astewartau/QSM.rs#329), so tilted B0 matches it too.
+    let (nx, ny, nz) = grid.dims;
+    let rhs: Vec<f64> = (0..n_total).map(|i| d_kernel[i] * inv_a[i]).collect();
+    let rhs = crate::fft::c2r_kernel(&rhs, nx, ny, nz);
+    let inv_a = crate::fft::c2r_kernel(&inv_a, nx, ny, nz);
     let f_hat = &mut l_complex;
     for i in 0..n_total {
         f_hat[i] = Complex64::new(local_field[i], 0.0);
     }
     fft_ws.fft3d(f_hat);
     for i in 0..n_total {
-        f_hat[i] = f_hat[i] * d_kernel[i] * inv_a[i];
+        f_hat[i] *= rhs[i];
     }
     (fft_ws, inv_a, l_complex)
 }
