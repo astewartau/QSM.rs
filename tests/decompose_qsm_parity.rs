@@ -83,12 +83,41 @@ fn decompose_reproduces_the_authors_code() {
     let (e_p, r_p) = nrmse_r(&p, &rp);
     let (e_d, r_d) = nrmse_r(&d, &rd);
     eprintln!("chi+ NRMSE {:.3} %, r {r_p:.5}; chi- NRMSE {:.3} %, r {r_d:.5}", 100.0 * e_p, 100.0 * e_d);
-    // The remaining difference is the solver (lsqcurvefit's trust-region-reflective method
-    // against bounded Levenberg-Marquardt); see the module docs.
-    assert!(e_p < 0.03 && r_p > 0.999, "chi+ NRMSE {e_p}, r {r_p}");
-    assert!(e_d < 0.03 && r_d > 0.999, "chi- NRMSE {e_d}, r {r_d}");
+    // 0.24 % and 0.90 % with the lsqcurvefit port; what remains sits in near-degenerate voxels
+    // (see the module docs, *Agreement with the authors' code*).
+    assert!(e_p < 0.005 && r_p > 0.9999, "chi+ NRMSE {e_p}, r {r_p}");
+    assert!(e_d < 0.015 && r_d > 0.9999, "chi- NRMSE {e_d}, r {r_d}");
     // Masked-out voxels stay zero on both sides.
     for l in (0..mask.len()).filter(|&l| mask[l] == 0) {
         assert_eq!((pos[l], neg[l], ref_para[l], ref_dia[l]), (0.0, 0.0, 0.0, 0.0));
     }
+}
+
+/// Writes the fixture's per-voxel conj(y) for `scripts/lsq_trr_matlab/probe_lsq_trr.m`, which
+/// runs the authors' fit on it in MATLAB and records every `lsqcurvefit` call
+/// (`DECOMPOSE_PROBE_IN=<file> cargo test --test decompose_qsm_parity -- --ignored`).
+#[test]
+#[ignore]
+fn decompose_probe_input() {
+    let Ok(path) = std::env::var("DECOMPOSE_PROBE_IN") else { return };
+    let (chi, mag, mask) = case();
+    let ne = TE.len();
+    let g = 42.58 * 2.0 * std::f64::consts::PI;
+    let gmax = mag.iter().cloned().fold(0.0_f64, f64::max);
+    let vox: Vec<usize> = (0..mask.len()).filter(|&l| mask[l] != 0).collect();
+    let mut out: Vec<f64> = vec![vox.len() as f64, ne as f64, B0];
+    out.extend_from_slice(&TE);
+    for &l in &vox {
+        let (mut re, mut im) = (Vec::new(), Vec::new());
+        for e in 0..ne {
+            let m = mag[l * ne + e] / gmax;
+            let ph = -(2.0 / 3.0) * chi[l * ne + e] * g * B0 * TE[e];
+            re.push(m * ph.cos());
+            im.push(-(m * ph.sin()));
+        }
+        out.extend(re);
+        out.extend(im);
+    }
+    let bytes: Vec<u8> = out.iter().flat_map(|v| v.to_le_bytes()).collect();
+    std::fs::write(path, bytes).unwrap();
 }
