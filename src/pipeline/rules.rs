@@ -1290,7 +1290,7 @@ pub static RULES: &[Rule] = &[
     reference("chi-sep-ilsqr.qsm-ilsqr", &[sep(&[Choice("chi-sep-ilsqr")])], "inversion.algorithm",
         &[Choice("ilsqr")],
         "The χ-separation toolbox feeds it STI Suite iLSQR QSM",
-        "χ-separation toolbox Chisep_script.m:142-145,170"),
+        "χ-separation toolbox v1.1.3 Chisep_script.m:145,170"),
     reference("chi-sep-medi.qsm-ilsqr", &[sep(&[Choice("chi-sep-medi")])], "inversion.algorithm",
         &[Choice("ilsqr")],
         "The χ-separation toolbox initialises χ-separation-MEDI from STI Suite iLSQR QSM",

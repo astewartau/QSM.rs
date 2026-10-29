@@ -616,7 +616,7 @@ impl Problem {
 /// MEDI's `dipole_kernel(matrix_size, voxel_size, B0_dir, 'kspace')`, as the toolbox builds it:
 /// the k-grid `(-N/2 : N/2-1)/(N·vs)` per axis (half-integer steps on an odd axis), `D = 1/3 −
 /// (k·B0)²/|k|²`, `NaN` (k = 0) set to 0, then `fftshift`ed (circular shift by `floor(N/2)`).
-fn toolbox_dipole_kernel((nx, ny, nz): (usize, usize, usize), vs: [f64; 3], b0: (f64, f64, f64)) -> Vec<f64> {
+pub(super) fn toolbox_dipole_kernel((nx, ny, nz): (usize, usize, usize), vs: [f64; 3], b0: (f64, f64, f64)) -> Vec<f64> {
     let coord = |i: usize, n: usize, v: f64| (-(n as f64) / 2.0 + i as f64) / (n as f64 * v);
     let mut d = vec![0.0; nx * ny * nz];
     for k in 0..nz {
