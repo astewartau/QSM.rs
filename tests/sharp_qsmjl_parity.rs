@@ -10,7 +10,7 @@
 //! [`CASES`] order: the number of voxels in QSM.jl's eroded mask (u32), that mask as bits over
 //! the volume (column-major, least significant bit first), and QSM.jl's local field there (f64).
 
-use qsm_core::bgremove::{sharp, vsharp, SharpParams, SharpVariant, VsharpGrid, VsharpParams};
+use qsm_core::bgremove::{sharp, vsharp, SharpParams, SharpVariant, VsharpBall, VsharpGrid, VsharpParams};
 use qsm_core::Grid;
 
 enum Method {
@@ -107,6 +107,7 @@ fn sharp_and_vsharp_match_qsm_jl_to_rounding() {
                     min_radius: min,
                     radius_step: step,
                     deconvolve: true,
+                    ball: VsharpBall::QsmJl,
                     grid: VsharpGrid::Native,
                 };
                 vsharp(&field, &mask, &grid, &p, |_, _| {}).unwrap()

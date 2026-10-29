@@ -22,9 +22,15 @@
 //! **no deconvolution**, the background interpolated back; `smvsize` defaults to 12 mm. Here
 //! that is `deconvolve: false`, an [`Isotropic`](VsharpGrid::Isotropic) 1 mm grid (same 12-voxel
 //! crop margin, [`CROP_MARGIN`]), `max_radius` 12 and STI's radius schedule, 12 → 2 mm in 1 mm
-//! steps ([`VsharpParams::radius_step`]). What remains different from STI: this module's ball
-//! (voxel centres within r, centre included, where STI's is `|x| ≤ r + 1/6` without the
-//! centre) and STI's mask back-interpolation. The papers and the code disagree on the deconvolution:
+//! steps ([`VsharpParams::radius_step`]), and STI's ball, [`VsharpBall::StiSuite`] (`|x| ≤ r + 1/6`
+//! without its centre voxel, a ball fitting only where all its voxels are in the mask). What
+//! remains different from STI is its mask back-interpolation on non-1 mm input.
+//!
+//! **Measured** (QSM-CI parity, astewartau/QSM.rs#329): on the KKI travelling head (256×256×128,
+//! 1 mm, STI Suite `V_SHARP` in the verified `vsharp-sti` v2 container, the same total field and
+//! mask), the STI ball gives the same eroded mask and NRMSE 2e-6 relative (STI's float32 output),
+//! where the earlier ball (radius `r`, centre included, [`VsharpBall::QsmJl`]) gave 4.4 %.
+//! `tests/vsharp_sti_parity.rs` holds a small case. The papers and the code disagree on the deconvolution:
 //! Li et al. 2011 (NeuroImage 55:1645, *Image Analysis* and *Results*) and Wu et al. 2012
 //! (*Background phase removal*: "a deconvolution is carried out to restore the local phase",
 //! with the kernel of the largest diameter used) both deconvolve the SMV-filtered phase,
@@ -42,15 +48,15 @@
 //!
 //! ## QSM.jl's `vsharp`
 //!
-//! The filtering itself (the balls, the per-voxel choice of radius, the edge test and the
-//! deconvolution) is a port of QSM.jl's `vsharp` (kamesy/QSM.jl fde4b92, `_sharp!` for a radius
+//! The filtering (the per-voxel choice of radius and the deconvolution, and with
+//! [`VsharpBall::QsmJl`] the balls and the edge test) is a port of QSM.jl's `vsharp` (kamesy/QSM.jl fde4b92, `_sharp!` for a radius
 //! vector in `src/bgremove/sharp.jl`), including its working box: the mask's bounding box
 //! zero-padded to QSM.jl's fast FFT size for the largest radius, so the deconvolution is periodic
 //! on that box (as in [`super::sharp`]), and its edge test `S_r ∗ mask > 1 − √eps(Float64)`.
 //! QSM.jl's own defaults are reachable with
 //!
 //! ```
-//! use qsm_core::bgremove::{VsharpGrid, VsharpParams};
+//! use qsm_core::bgremove::{VsharpBall, VsharpGrid, VsharpParams};
 //! let vsz = (1.0_f64, 1.0_f64, 1.0_f64);
 //! let (lo, hi) = (vsz.0.min(vsz.1).min(vsz.2), vsz.0.max(vsz.1).max(vsz.2));
 //! let qsmjl = VsharpParams {
@@ -59,6 +65,7 @@
 //!     radius_step: 2.0 * hi,
 //!     threshold: 0.05,         // QSM.jl's thr (also this module's default)
 //!     deconvolve: true,        // QSM.jl always deconvolves
+//!     ball: VsharpBall::QsmJl,  // QSM.jl's ball and edge test
 //!     grid: VsharpGrid::Native,
 //! };
 //! # let _ = qsmjl;
@@ -125,7 +132,7 @@
 //! Voxels where only r = 1 fits are dropped, so the radii in effect are 2…R mm and the output
 //! mask is the voxels a 2 mm (+1/6) ball fits around, back-interpolated `> 0.5`; this module's
 //! mask is the union down to [`VsharpParams::min_radius`], which by default is the same 2 mm
-//! (see *Defaults*); the ball shape still differs.
+//! (see *Defaults*), and the ball is STI's ([`VsharpBall::StiSuite`]).
 //! `smvsize` defaults to 12 (probed: bitwise equal to an explicit 12), which is also what STI
 //! Suite's GUI passes (its "Radius" field) and what QSMART's paper used for its V-SHARP
 //! comparison (Yaghmaie et al. 2021, §3.4).
@@ -153,7 +160,7 @@ use num_complex::Complex64;
 use crate::error::InputError;
 use crate::Grid;
 use crate::fft::{fft3d, ifft3d};
-use crate::kernels::smv::{smv_kernel, erode_mask_smv};
+use crate::kernels::smv::{smv_kernel, sti_smv_kernel, erode_mask_smv};
 use super::sharp::{SmvBox, QSMJL_SMV_DELTA};
 
 /// Zero margin (native voxels per side) around the mask's bounding box when V-SHARP runs on an
@@ -169,6 +176,20 @@ pub const STI_RADIUS_STEP_MM: f64 = 1.0;
 
 /// Working-grid spacing of STI Suite's `V_SHARP`, in mm: the default of [`VsharpParams::grid`].
 pub const STI_GRID_MM: f64 = 1.0;
+
+/// The SMV ball V-SHARP filters with. See the [module docs](self#defaults).
+#[cfg_attr(feature = "introspection", derive(serde::Serialize))]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum VsharpBall {
+    /// STI Suite's `V_SHARP` ball ([`sti_smv_kernel`]): the voxels within `r + 1/6` mm,
+    /// centre voxel excluded; a ball fits where every one of its voxels is in the mask. The
+    /// default.
+    #[default]
+    StiSuite,
+    /// QSM.jl's ball ([`smv_kernel`]): the voxels within `r`, centre included; a ball fits
+    /// where `S∗mask > 1 − √1e-7`.
+    QsmJl,
+}
 
 /// Grid V-SHARP estimates the background field on. See the [module docs](self#working-grid).
 #[cfg_attr(feature = "introspection", derive(serde::Serialize))]
@@ -241,9 +262,7 @@ pub struct VsharpParams {
     /// so the radii in effect are 2 … 12 mm (black-box probe, ukb-qsmxt
     /// `docs/08_vsharp_sti.md` step 4). Before this parameter existed `min_radius` was also
     /// the step, which cannot express that schedule; the previous default, 12 → 1 mm in 1 mm
-    /// steps, is `min_radius: 1.0, radius_step: 1.0`. STI's ball is `|x| ≤ r + 1/6` without its
-    /// centre voxel; this module's is the voxel centres within `r`, centre included, so the
-    /// kernels themselves still differ slightly from STI's.
+    /// steps, is `min_radius: 1.0, radius_step: 1.0`. The ball shape is [`ball`](Self::ball).
     ///
     /// Measured against 12 → 1 mm (no deconvolution, 1 mm grid, ROMEO field, then RTS): the
     /// output mask loses ~5 % of its voxels, all at the rim. On the voxels both keep, χ on the
@@ -261,6 +280,9 @@ pub struct VsharpParams {
     /// `true` recovers more low-frequency tissue contrast on a clean field (see the module
     /// docs, *Defaults*).
     pub deconvolve: bool,
+    /// The SMV ball (default [`VsharpBall::StiSuite`], STI Suite's `V_SHARP`). See the
+    /// [module docs](self#defaults).
+    pub ball: VsharpBall,
     /// Grid the background is estimated on (default: [`VsharpGrid::Isotropic`] at 1 mm, as
     /// STI Suite's `V_SHARP` resamples to 1 mm before filtering). See
     /// [`VsharpParams::working_grid`] for the choice resolved on a given input.
@@ -306,6 +328,7 @@ impl Default for VsharpParams {
             min_radius: STI_MIN_RADIUS_MM,
             radius_step: STI_RADIUS_STEP_MM,
             deconvolve: false,
+            ball: VsharpBall::StiSuite,
             grid: VsharpGrid::Isotropic { spacing_mm: STI_GRID_MM },
         }
     }
@@ -341,9 +364,9 @@ pub fn vsharp(
     let radii = vsharp_radii(params);
     let deconvolve = params.deconvolve.then_some(params.threshold);
     Ok(match params.working_grid(grid) {
-        VsharpGrid::Native => vsharp_with_radii(field, mask, grid, &radii, deconvolve, progress),
+        VsharpGrid::Native => vsharp_with_radii(field, mask, grid, &radii, deconvolve, params.ball, progress),
         VsharpGrid::Isotropic { spacing_mm } => {
-            vsharp_isotropic(field, mask, grid, spacing_mm, &radii, deconvolve, progress)
+            vsharp_isotropic(field, mask, grid, spacing_mm, &radii, deconvolve, params.ball, progress)
         }
         VsharpGrid::IsotropicFinest => unreachable!("working_grid resolves IsotropicFinest"),
     })
@@ -358,6 +381,7 @@ fn vsharp_isotropic(
     h: f64,
     radii: &[f64],
     deconvolve: Option<f64>,
+    ball: VsharpBall,
     progress: impl FnMut(usize, usize),
 ) -> (Vec<f64>, Vec<u8>) {
     let (nx, ny, nz) = grid.dims;
@@ -408,7 +432,7 @@ fn vsharp_isotropic(
 
     // 3. V-SHARP on W
     let w_grid = Grid::new(ne[0], ne[1], ne[2], h, h, h);
-    let (local_w, support_w) = vsharp_with_radii(&pe, &me, &w_grid, radii, deconvolve, progress);
+    let (local_w, support_w) = vsharp_with_radii(&pe, &me, &w_grid, radii, deconvolve, ball, progress);
 
     // 4. background (field − local) and support back to the native grid
     let mut bg_c = vec![0.0; ni[0] * ni[1] * ni[2]];
@@ -538,17 +562,20 @@ fn vsharp_radii(params: &VsharpParams) -> Vec<f64> {
 ///
 /// Internal entry point; the public [`vsharp`] wrapper derives the radii
 /// from [`VsharpParams`]. `deconvolve` is the TSVD threshold of the final
-/// deconvolution, or `None` to return the SMV high-passed field undeconvolved.
+/// deconvolution, or `None` to return the SMV high-passed field undeconvolved. `ball` picks
+/// the SMV kernel and its edge test.
 ///
 /// Like QSM.jl's `_sharp!` for a radius vector (`src/bgremove/sharp.jl`, fde4b92), it works in
 /// the mask's bounding box zero-padded for the largest radius ([`SmvBox`]), so the
 /// deconvolution is periodic on that box as in QSM.jl.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn vsharp_with_radii(
     field: &[f64],
     mask: &[u8],
     grid: &Grid,
     radii: &[f64],
     deconvolve: Option<f64>,
+    ball: VsharpBall,
     mut progress: impl FnMut(usize, usize),
 ) -> (Vec<f64>, Vec<u8>) {
     let (nx, ny, nz) = grid.dims;
@@ -557,8 +584,8 @@ pub(crate) fn vsharp_with_radii(
         return (vec![0.0; nx * ny * nz], mask.to_vec());
     }
 
-    // If only one radius and deconvolving, this is regular SHARP
-    if let (1, Some(threshold)) = (radii.len(), deconvolve) {
+    // If only one radius and deconvolving with SHARP's ball, this is regular SHARP
+    if let (1, Some(threshold), VsharpBall::QsmJl) = (radii.len(), deconvolve, ball) {
         progress(1, 1);
         return crate::bgremove::sharp::sharp_core(
             field, mask, grid, threshold, radii[0]
@@ -569,7 +596,7 @@ pub(crate) fn vsharp_with_radii(
     let Some(bx) = SmvBox::new(mask, grid, r_max) else {
         return (vec![0.0; nx * ny * nz], vec![0; nx * ny * nz]);
     };
-    let (local, support) = vsharp_padded(&bx.crop(field), &bx.crop(mask), &bx.grid(grid), radii, deconvolve, progress);
+    let (local, support) = vsharp_padded(&bx.crop(field), &bx.crop(mask), &bx.grid(grid), radii, deconvolve, ball, progress);
     (bx.uncrop(&local), bx.uncrop(&support))
 }
 
@@ -580,6 +607,7 @@ fn vsharp_padded(
     grid: &Grid,
     radii: &[f64],
     deconvolve: Option<f64>,
+    ball: VsharpBall,
     mut progress: impl FnMut(usize, usize),
 ) -> (Vec<f64>, Vec<u8>) {
     let (nx, ny, nz) = grid.dims;
@@ -602,7 +630,12 @@ fn vsharp_padded(
     let mut local_field = vec![0.0; n_total];
     let mut final_mask = vec![0u8; n_total];
 
-    let delta = QSMJL_SMV_DELTA;
+    // A ball fits where S∗mask reaches 1. STI's test admits no missing voxel (its eroded mask
+    // is reproduced exactly with a tolerance far below one voxel of a 2 mm ball, 1/32).
+    let delta = match ball {
+        VsharpBall::StiSuite => 1.0 - 1e-9,
+        VsharpBall::QsmJl => QSMJL_SMV_DELTA,
+    };
     let mut inverse_kernel: Option<Vec<f64>> = None;
 
     for (idx, &radius) in sorted_radii.iter().enumerate() {
@@ -610,7 +643,10 @@ fn vsharp_padded(
         progress(idx + 1, n_radii);
 
         // Generate SMV kernel
-        let s_kernel = smv_kernel(grid, radius);
+        let s_kernel = match ball {
+            VsharpBall::StiSuite => sti_smv_kernel(grid, radius),
+            VsharpBall::QsmJl => smv_kernel(grid, radius),
+        };
 
         // FFT of SMV kernel
         let mut s_complex: Vec<Complex64> = s_kernel.iter()
@@ -686,7 +722,7 @@ mod tests {
         let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
 
         let radii = vec![4.0, 3.0, 2.0];
-        let (local, _) = vsharp_with_radii(&field, &mask, &grid, &radii, Some(0.05), |_, _| {});
+        let (local, _) = vsharp_with_radii(&field, &mask, &grid, &radii, Some(0.05), VsharpBall::QsmJl, |_, _| {});
 
         for &val in local.iter() {
             assert!(val.abs() < 1e-10);
@@ -702,7 +738,7 @@ mod tests {
 
         // V-SHARP with multiple radii
         let radii = vec![5.0, 4.0, 3.0, 2.0];
-        let (_, vsharp_mask) = vsharp_with_radii(&field, &mask, &grid, &radii, Some(0.05), |_, _| {});
+        let (_, vsharp_mask) = vsharp_with_radii(&field, &mask, &grid, &radii, Some(0.05), VsharpBall::QsmJl, |_, _| {});
 
         // SHARP with single large radius
         let (_, sharp_mask) = crate::bgremove::sharp::sharp_core(
@@ -730,7 +766,7 @@ mod tests {
         // Anisotropic voxel sizes
         let radii = vec![4.0, 3.0, 2.0];
         let (local, final_mask) = vsharp_with_radii(
-            &field, &mask, &grid, &radii, Some(0.05), |_, _| {}
+            &field, &mask, &grid, &radii, Some(0.05), VsharpBall::QsmJl, |_, _| {}
         );
 
         // All values should be finite
@@ -753,7 +789,7 @@ mod tests {
         // Single radius should delegate to SHARP
         let radii = vec![3.0];
         let (local, final_mask) = vsharp_with_radii(
-            &field, &mask, &grid, &radii, Some(0.05), |_, _| {}
+            &field, &mask, &grid, &radii, Some(0.05), VsharpBall::QsmJl, |_, _| {}
         );
 
         // All values should be finite
@@ -785,7 +821,7 @@ mod tests {
         let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
 
         let (local, returned_mask) = vsharp_with_radii(
-            &field, &mask, &grid, &[], Some(0.05), |_, _| {}
+            &field, &mask, &grid, &[], Some(0.05), VsharpBall::QsmJl, |_, _| {}
         );
 
         for &val in &local {
@@ -828,7 +864,7 @@ mod tests {
         let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
         let radii = vec![6.0, 4.0, 3.0, 2.0];
         let (local, final_mask) = vsharp_with_radii(
-            &field, &mask, &grid, &radii, Some(0.05), |_, _| {}
+            &field, &mask, &grid, &radii, Some(0.05), VsharpBall::QsmJl, |_, _| {}
         );
 
         assert_eq!(local.len(), n * n * n);
@@ -857,7 +893,7 @@ mod tests {
         let radii = vec![4.0, 3.0, 2.0];
         let mut progress_calls = Vec::new();
         let (local, _) = vsharp_with_radii(
-            &field, &mask, &grid, &radii, Some(0.05),
+            &field, &mask, &grid, &radii, Some(0.05), VsharpBall::QsmJl,
             |idx, total| { progress_calls.push((idx, total)); }
         );
 
@@ -878,7 +914,7 @@ mod tests {
         let radii = vec![3.0];
         let mut progress_calls = Vec::new();
         let (local, _) = vsharp_with_radii(
-            &field, &mask, &grid, &radii, Some(0.05),
+            &field, &mask, &grid, &radii, Some(0.05), VsharpBall::QsmJl,
             |idx, total| { progress_calls.push((idx, total)); }
         );
 
@@ -898,7 +934,7 @@ mod tests {
 
         let mut progress_calls = Vec::new();
         let (local, returned_mask) = vsharp_with_radii(
-            &field, &mask, &grid, &[], Some(0.05),
+            &field, &mask, &grid, &[], Some(0.05), VsharpBall::QsmJl,
             |idx, total| { progress_calls.push((idx, total)); }
         );
 
@@ -920,10 +956,10 @@ mod tests {
         let radii_unsorted = vec![2.0, 4.0, 3.0];
 
         let (local_sorted, mask_sorted) = vsharp_with_radii(
-            &field, &mask, &grid, &radii_sorted, Some(0.05), |_, _| {}
+            &field, &mask, &grid, &radii_sorted, Some(0.05), VsharpBall::QsmJl, |_, _| {}
         );
         let (local_unsorted, mask_unsorted) = vsharp_with_radii(
-            &field, &mask, &grid, &radii_unsorted, Some(0.05), |_, _| {}
+            &field, &mask, &grid, &radii_unsorted, Some(0.05), VsharpBall::QsmJl, |_, _| {}
         );
 
         // Results should be the same regardless of input order
@@ -974,7 +1010,7 @@ mod tests {
         let (field, mask) = sphere_case(n, 8.0);
         let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
         let radii = [4.0, 3.0, 2.0];
-        let (local, out_mask) = vsharp_with_radii(&field, &mask, &grid, &radii, None, |_, _| {});
+        let (local, out_mask) = vsharp_with_radii(&field, &mask, &grid, &radii, None, VsharpBall::QsmJl, |_, _| {});
 
         let delta = 1.0 - 1e-7_f64.sqrt();
         let mut expected = vec![0.0; n * n * n];
@@ -1030,7 +1066,7 @@ mod tests {
         let n = 20;
         let (field, mask) = sphere_case(n, 8.0);
         let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
-        let (hp, hp_mask) = vsharp_with_radii(&field, &mask, &grid, &[3.0], None, |_, _| {});
+        let (hp, hp_mask) = vsharp_with_radii(&field, &mask, &grid, &[3.0], None, VsharpBall::QsmJl, |_, _| {});
         let (sh, sh_mask) = crate::bgremove::sharp::sharp_core(&field, &mask, &grid, 0.05, 3.0);
         assert_eq!(hp_mask, sh_mask);
         assert!(hp.iter().zip(&sh).any(|(a, b)| (a - b).abs() > 1e-6));
@@ -1085,7 +1121,7 @@ mod tests {
         for deconvolve in [true, false] {
             let base = VsharpParams { max_radius: 4.0, deconvolve, grid: VsharpGrid::Native, ..Default::default() };
             let radii = vsharp_radii(&base);
-            let expected = vsharp_with_radii(&field, &mask, &grid, &radii, deconvolve.then_some(base.threshold), |_, _| {});
+            let expected = vsharp_with_radii(&field, &mask, &grid, &radii, deconvolve.then_some(base.threshold), base.ball, |_, _| {});
             assert_eq!(vsharp(&field, &mask, &grid, &base, |_, _| {}).unwrap(), expected);
             let finest = VsharpParams { grid: VsharpGrid::IsotropicFinest, ..base.clone() };
             assert_eq!(vsharp(&field, &mask, &grid, &finest, |_, _| {}).unwrap(), expected);
@@ -1094,7 +1130,7 @@ mod tests {
         let ag = Grid::new(24, 24, 10, 0.8, 0.8, 3.0);
         let (af, am) = ellipsoid_case(ag.dims, ag.voxel_size, [8.0, 8.0, 12.0]);
         let p = VsharpParams { max_radius: 4.0, deconvolve: true, grid: VsharpGrid::Native, ..Default::default() };
-        let expected = vsharp_with_radii(&af, &am, &ag, &vsharp_radii(&p), Some(p.threshold), |_, _| {});
+        let expected = vsharp_with_radii(&af, &am, &ag, &vsharp_radii(&p), Some(p.threshold), p.ball, |_, _| {});
         assert_eq!(vsharp(&af, &am, &ag, &p, |_, _| {}).unwrap(), expected);
     }
 
@@ -1295,6 +1331,8 @@ mod tests {
             let p = VsharpParams {
                 max_radius: 6.0,
                 deconvolve,
+                // The prototype builds QSM.jl's ball; the grid mechanics do not depend on it.
+                ball: VsharpBall::QsmJl,
                 grid: VsharpGrid::Isotropic { spacing_mm: 1.0 },
                 ..Default::default()
             };
