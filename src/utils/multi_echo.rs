@@ -215,6 +215,40 @@ pub fn hermitian_inner_product(
     (hip_phase, hip_mag)
 }
 
+/// `mcpc3ds`'s HIP over the whole volume: `hip = conj(echo₁)·echo₂` as `(angle(hip),
+/// sqrt(|hip|))`, the phase and the weight (`src/mcpc3ds.jl:42-44`, 771eadf).
+fn hip_weight(
+    phases: &[impl AsRef<[f64]>],
+    mags: &[impl AsRef<[f64]>],
+    echoes: [usize; 2],
+    n_total: usize,
+) -> (Vec<f64>, Vec<f64>) {
+    let [e1, e2] = echoes;
+    let all = vec![1u8; n_total];
+    let (hip_phase, hip_mag) = hermitian_inner_product(
+        phases[e1].as_ref(), mags[e1].as_ref(),
+        phases[e2].as_ref(), mags[e2].as_ref(),
+        &all, n_total
+    );
+    (hip_phase, hip_mag.into_iter().map(f64::sqrt).collect())
+}
+
+/// MCPC-3D-S's own mask, `robustmask(sqrt(|hip|))` of the HIP of `echoes`, as MriResearchTools'
+/// `mcpc3ds` makes it (`src/mcpc3ds.jl:44-46`, 771eadf). It is the mask [`phase_offset_removal`]
+/// unwraps and smooths the offset in, and the one `mcpc3ds` hands to `bipolar_correction!`
+/// (`mcpc3ds.jl:55`), so a caller that pairs the two with [`bipolar_correction`] passes this mask
+/// to match the reference.
+pub fn mcpc3ds_mask(
+    phases: &[impl AsRef<[f64]>],
+    mags: &[impl AsRef<[f64]>],
+    echoes: [usize; 2],
+    grid: &Grid,
+) -> Vec<u8> {
+    let (nx, ny, nz) = grid.dims;
+    let (_, weight) = hip_weight(phases, mags, echoes, nx * ny * nz);
+    crate::utils::robust_mask(&weight, grid)
+}
+
 /// Remove phase offset from multi-echo phase data using HIP (Hermitian Inner Product):
 /// MCPC-3D-S, as MriResearchTools.jl's `mcpc3ds` does it for one channel (`src/mcpc3ds.jl:38-57`,
 /// 771eadf).
@@ -262,18 +296,8 @@ pub fn phase_offset_removal(
     // ΔTE = TEs[echo2] - TEs[echo1]
     let delta_te = tes[e2] - tes[e1];
 
-    // HIP = conj(echo1) * echo2 over the whole volume: hip_phase = phase2 - phase1
-    let all = vec![1u8; n_total];
-    let (hip_phase, hip_mag) = hermitian_inner_product(
-        phases[e1].as_ref(), mags[e1].as_ref(),
-        phases[e2].as_ref(), mags[e2].as_ref(),
-        &all, n_total
-    );
-    drop(all);
-
-    // mcpc3ds: weight = sqrt.(abs.(hip)); mask = robustmask(weight)
-    let weight: Vec<f64> = hip_mag.iter().map(|&x| x.sqrt()).collect();
-    drop(hip_mag);
+    let (hip_phase, weight) = hip_weight(phases, mags, echoes, n_total);
+    // mcpc3ds: mask = robustmask(weight)
     let mask = crate::utils::robust_mask(&weight, grid);
 
     // Unwrap HIP phase
