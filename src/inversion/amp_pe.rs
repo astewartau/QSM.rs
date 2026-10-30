@@ -61,7 +61,7 @@ use crate::fft::Fft3dWorkspace;
 use crate::inversion::admm::prepare_fansi_spectral;
 use crate::utils::special::{erfc, erfcx};
 use crate::error::InputError;
-use crate::utils::wavelet::WaveletPlan;
+use crate::utils::wavelet::{Periodization, WaveletPlan};
 use crate::Grid;
 use num_complex::Complex64;
 #[cfg(feature = "parallel")]
@@ -328,7 +328,7 @@ pub fn amp_pe(
     let kernel_energy = dip.kernel.iter().map(|&d| d * d).sum::<f64>() / n as f64;
 
     // Wavelet plan (orthonormal; coef_len == n).
-    let plan = WaveletPlan::new(params.wave_order, pad, params.nlevel);
+    let plan = WaveletPlan::new(params.wave_order, pad, params.nlevel, Periodization::Matlab);
     debug_assert_eq!(plan.coef_len(), n);
 
     // --- L2 (Tikhonov) seed for distribution initialization only ---
