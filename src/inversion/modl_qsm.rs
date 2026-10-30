@@ -39,6 +39,19 @@
 //! callers needing resampling should do so upstream. Weights are not bundled; the
 //! caller passes `modl-qsm.onnx`.
 //!
+//! # Parity
+//!
+//! Measured against the authors' Keras graph (`define_generator` + `model_test`, QSM-CI's
+//! `modl-qsm` image, MoDL-QSM 111a493, `logs/last.h5`) on a 36×32×28 in-vivo box of
+//! `prisma-bridge-run1` (QSM.rs#330):
+//!
+//! - Every intermediate of the unroll (`A^H φ`, the step, the normalisation, each CNN-prior pass,
+//!   `-α A^H A x`) matches the Keras layer outputs to 1e-7–3e-6 relative.
+//! - End to end: 0.0002 % NRMSE (r 1.0000000, max |Δ| 3.2e-7 ppm).
+//! - QSM-CI's `recon.py` wrote χ through the mask's uint8 NIfTI header, so nibabel stored it in 8
+//!   bits; that quantisation was the whole 1.49 % gap first measured against that entry. The port
+//!   does not reproduce it.
+//!
 //! # Reference pipeline
 //!
 //! The authors' `test/test_tools.py:210-249` (`model_test`) is what the grid requirements above
