@@ -1,10 +1,11 @@
 //! `bgremove::iharperella` against STI Suite 3.0's `iHARPERELLA` on a small phantom.
 //!
-//! The input is rebuilt here exactly as the MATLAB script that made the references built it
-//! (a smooth field in an ellipsoid mask, 32x32x24, 1-based `ndgrid` coordinates), so the
-//! fixture only holds STI's output. `tests/data/iharperella_sti_small.bin` (little-endian): for
-//! each case in [`CASES`] order, the number of mask voxels (u32) and STI's output there (f64,
-//! column-major), from MATLAB R2023b
+//! The input is rebuilt here exactly as `tests/data/iharperella_sti_small.m`, the MATLAB script
+//! that made the references, built it (a smooth field in an ellipsoid mask, 32x32x24, 1-based
+//! `ndgrid` coordinates), so the fixture only holds STI's output. No verified QSM-CI container
+//! runs iHARPERELLA yet (QSMxT/QSM-CI#300, B3), so the fixture is still a licensed-MATLAB one.
+//! `tests/data/iharperella_sti_small.bin` (little-endian): for each case in [`CASES`] order, the
+//! number of mask voxels (u32) and STI's output there (f64, column-major), from MATLAB R2023b
 //! `tp = iHARPERELLA(f, mask, 'voxelsize', vs, 'padsize', pad, 'niter', niter)`.
 //! STI's output is zero outside the mask.
 //!
