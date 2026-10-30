@@ -23,7 +23,7 @@
 //! errors decide the details, so the full-length comparison with STI is loose, and the
 //! algorithm itself is pinned by the short double-precision runs.
 
-use qsm_core::inversion::{ilsqr, IlsqrParams};
+use qsm_core::inversion::{ilsqr, IlsqrParams, IlsqrPrecision};
 use qsm_core::Grid;
 
 struct Fixture {
@@ -54,10 +54,10 @@ fn load() -> Fixture {
     Fixture { phase, mask, inside, sti: (s0, s1), clone5: (c0, c1) }
 }
 
-fn run(fx: &Fixture, max_iter: usize) -> (Vec<f64>, Vec<f64>) {
+fn run(fx: &Fixture, max_iter: usize, precision: IlsqrPrecision) -> (Vec<f64>, Vec<f64>) {
     let to_ppm = 1.0 / (2.0 * std::f64::consts::PI * 42.575 * 3.0 * 20.0e-3); // STI's scaling
     let grid = Grid::new(DIMS.0, DIMS.1, DIMS.2, 1.0, 1.0, 1.5);
-    let params = IlsqrParams { max_iter, pad_mm: 8.0, ..IlsqrParams::default() };
+    let params = IlsqrParams { max_iter, pad_mm: 8.0, precision, ..IlsqrParams::default() };
     let (chi, _, _, x1) = ilsqr(&fx.phase, &fx.mask, &grid, (0.1, -0.2, 0.95f64.sqrt()), &params, |_, _| {});
     for i in 0..chi.len() { if fx.mask[i] == 0 { assert_eq!(chi[i], 0.0); } }
     let pick = |v: &[f64]| fx.inside.iter().map(|&i| v[i] * to_ppm).collect::<Vec<f64>>();
@@ -77,21 +77,33 @@ fn corr(a: &[f64], b: &[f64]) -> f64 {
 #[test]
 fn ilsqr_matches_the_reverse_engineered_algorithm() {
     let fx = load();
-    let (chi, x1) = run(&fx, 5);
+    let (chi, x1) = run(&fx, 5, IlsqrPrecision::Double);
     let (d, d1) = (maxd(&chi, &fx.clone5.0), maxd(&x1, &fx.clone5.1));
     println!("5 iterations vs double-precision clone: chi max|d| {:.2e}, initial {:.2e} (rms {:.2e})", d, d1, rms(&fx.clone5.0));
     assert!(d1 < 1e-9 * rms(&fx.clone5.1), "initial LSQR differs by {}", d1);
     assert!(d < 1e-9 * rms(&fx.clone5.0), "chi differs by {}", d);
 }
 
+fn nrmse(a: &[f64], b: &[f64]) -> f64 {
+    (a.iter().zip(b).map(|(x, y)| (x - y).powi(2)).sum::<f64>() / b.iter().map(|y| y * y).sum::<f64>()).sqrt()
+}
+
 #[test]
 fn ilsqr_matches_sti_suite() {
     let fx = load();
-    // The fixture is QSM_iLSQR without 'niter', i.e. STI's function default of 100.
-    let (chi, x1) = run(&fx, 100);
+    // The fixture is QSM_iLSQR without 'niter', i.e. STI's function default of 100. This case
+    // (noise, phase outside the mask, 20×20×14) is sensitive to rounding: measured 2026-10-30,
+    // in STI's single precision χ NRMSE 0.17 % (initial solution 0.010 %); in double precision
+    // 10.6 % (initial 0.36 %), r 0.9948.
+    let (chi, x1) = run(&fx, 100, IlsqrPrecision::Single);
+    let (e, e1) = (nrmse(&chi, &fx.sti.0), nrmse(&x1, &fx.sti.1));
+    println!("single vs STI: chi NRMSE {e:.2e}, initial {e1:.2e}");
+    assert!(e < 0.01, "single: chi NRMSE {e}");
+    assert!(e1 < 1e-3, "single: initial NRMSE {e1}");
+    let (chi, x1) = run(&fx, 100, IlsqrPrecision::Double);
     let (r, r1) = (corr(&chi, &fx.sti.0), corr(&x1, &fx.sti.1));
-    println!("vs STI: chi r {:.6} max|d| {:.2e}; initial r {:.8} max|d| {:.2e} (rms chi {:.2e})",
-             r, maxd(&chi, &fx.sti.0), r1, maxd(&x1, &fx.sti.1), rms(&fx.sti.0));
+    println!("double vs STI: chi r {:.6} NRMSE {:.2e} max|d| {:.2e}; initial r {:.8} max|d| {:.2e} (rms chi {:.2e})",
+             r, nrmse(&chi, &fx.sti.0), maxd(&chi, &fx.sti.0), r1, maxd(&x1, &fx.sti.1), rms(&fx.sti.0));
     assert!(r1 > 0.9999, "initial LSQR r = {}", r1);
     assert!(r > 0.99, "chi r = {}", r);
     assert!(maxd(&x1, &fx.sti.1) < 0.05 * rms(&fx.sti.1));
@@ -134,26 +146,41 @@ const QSMCI_CASES: [QsmciCase; 2] = [
     QsmciCase { dims: (32, 28, 28), vs: (1.0, 1.0, 1.0), h: (0.0, 0.0, 1.0), pad: 8.0 },
 ];
 
-#[test]
-fn ilsqr_defaults_match_the_ilsqr_sti_container() {
+/// QSM.rs against the container's χ at the container's call, in `precision`; returns (NRMSE, r)
+/// per case.
+fn against_container(precision: IlsqrPrecision) -> Vec<(f64, f64)> {
     // The container turns ppm into phase with γ = 42.576 MHz/T and STI turns it back with its
     // own 42.575, so STI's χ is the field's χ scaled by 42.576/42.575.
     let gamma_ratio = 42.576 / 42.575;
-    for (c, (mask, field, sti)) in QSMCI_CASES.iter().zip(load_qsmci()) {
+    QSMCI_CASES.iter().zip(load_qsmci()).map(|(c, (mask, field, sti))| {
         let grid = Grid::new(c.dims.0, c.dims.1, c.dims.2, c.vs.0, c.vs.1, c.vs.2);
-        let params = IlsqrParams { pad_mm: c.pad, ..IlsqrParams::default() };
+        let params = IlsqrParams { pad_mm: c.pad, precision, ..IlsqrParams::default() };
         let (chi, _, _, _) = ilsqr(&field, &mask, &grid, c.h, &params, |_, _| {});
         let got: Vec<f64> = (0..chi.len()).filter(|&i| mask[i] != 0).map(|i| chi[i] * gamma_ratio).collect();
-        let nrmse = (got.iter().zip(&sti).map(|(a, b)| (a - b).powi(2)).sum::<f64>() / sti.iter().map(|b| b * b).sum::<f64>()).sqrt();
-        let (r, d) = (corr(&got, &sti), maxd(&got, &sti));
-        println!("{:?} pad {}: vs STI (container) NRMSE {nrmse:.2e}, r {r:.7}, max|Δ| {d:.2e} ppm (rms χ {:.2e})", c.dims, c.pad, rms(&sti));
-        // Measured 2026-10-30: NRMSE 3.4 % (r 0.99943) and 1.6 % (r 0.99987). STI runs both LSQR
-        // solves in single precision, and after a few dozen iterations that rounding decides the
-        // iterates (see the module docs): QSM.rs is closest to STI at STI's own 100 iterations
-        // (NRMSE 9.1 % / 7.4 % at 40, 6.4 % / 4.3 % at 200), while rounding QSM.rs's input to
-        // float32 moves it by only 5.7e-4 / 1.8e-5. The algorithm itself is pinned to 1e-9 by
-        // `ilsqr_matches_the_reverse_engineered_algorithm`.
-        assert!(nrmse < 0.05, "{:?}: NRMSE {nrmse}", c.dims);
-        assert!(r > 0.999, "{:?}: r {r}", c.dims);
+        let (e, r, d) = (nrmse(&got, &sti), corr(&got, &sti), maxd(&got, &sti));
+        println!("{precision:?} {:?} pad {}: vs STI (container) NRMSE {e:.2e}, r {r:.7}, max|Δ| {d:.2e} ppm (rms χ {:.2e})", c.dims, c.pad, rms(&sti));
+        (e, r)
+    }).collect()
+}
+
+#[test]
+fn ilsqr_defaults_match_the_ilsqr_sti_container() {
+    // Measured 2026-10-30: NRMSE 0.12 % (r 0.9999993) and 0.072 % (r 0.9999997). Before
+    // FastQSM's closing followed IPT's imclose it was 3.4 % and 1.6 % (astewartau/QSM.rs#329).
+    // The rest is STI's single-precision LSQR (next test).
+    for (c, (e, r)) in QSMCI_CASES.iter().zip(against_container(IlsqrPrecision::Double)) {
+        assert!(e < 0.005, "{:?}: NRMSE {e}", c.dims);
+        assert!(r > 0.99999, "{:?}: r {r}", c.dims);
+    }
+}
+
+#[test]
+fn ilsqr_single_precision_matches_the_ilsqr_sti_container() {
+    // Measured 2026-10-30: NRMSE 0.032 % and 0.019 %, the size of STI's own CPU dependence on
+    // these cases (3.6e-4 and 1.2e-4 relative between the CPU that made the fixture and a
+    // GitHub-hosted runner, tests/data/ilsqr_sti_qsmci_small.py).
+    for (c, (e, r)) in QSMCI_CASES.iter().zip(against_container(IlsqrPrecision::Single)) {
+        assert!(e < 1e-3, "{:?}: NRMSE {e}", c.dims);
+        assert!(r > 0.999999, "{:?}: r {r}", c.dims);
     }
 }

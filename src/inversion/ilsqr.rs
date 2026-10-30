@@ -24,8 +24,9 @@
 //! 3. **Initial solution**: LSQR on `D W D χ = D W φ` (`D` = dipole convolution), tolerance
 //!    0.01, at most `max_iter` iterations (MATLAB `lsqr` stopping rules).
 //! 4. **FastQSM** prior: `sign(D)·Fφ`, blended where `|D|` is small with a copy smoothed *in
-//!    k-space* by a closed radius-3 ball, masked, blended again, rescaled to a TKD (threshold
-//!    1/8) solution by least squares inside the mask.
+//!    k-space* by a radius-3 ball closed with IPT's `imclose(·, [1 1 1])` (which, on this ball,
+//!    only fills its centre), masked, blended again, rescaled to a TKD (threshold 1/8)
+//!    solution by least squares inside the mask.
 //! 5. **Gradient weights** `G_d` (`d` = x, y, z): forward differences of the FastQSM map (no
 //!    voxel-size scaling), pooled over the three axes inside the mask; `G = 1` below the 50th
 //!    percentile of `|∇|`, `0` above the 70th, linear between.
@@ -50,26 +51,40 @@
 //! counts in both solves there, and χ within a relative L2 of 5.8e-9 (the artefact solve
 //! amplifying rounding-level differences of the initial solution, which agree to 2.7e-15).
 //!
-//! Everything runs in double precision. STI Suite runs its LSQR solves in single precision;
-//! the remaining difference to STI's output (r = 0.9999985, 99.9th percentile |Δ| 3.7e-4 ppm
-//! on that field) is that rounding, amplified by the solves.
+//! By default everything runs in double precision. STI Suite runs its two LSQR solves in single
+//! precision: their operators (single FFTs, `single(D)`, `single(W)`, `single(G)`), and
+//! MATLAB's `lsqr` on single vectors and scalars, with the right-hand sides computed in double
+//! and rounded to single (probed: STI's initial solve is reproduced to 2e-8 that way, against
+//! 7e-4 in double). [`IlsqrPrecision::Single`] does the same, for parity with STI; it runs the
+//! two solves on dense vectors over the padded grid (no pruned transforms), so it is slower
+//! and needs more memory. Double precision stays the default (QSM.rs keeps double where the
+//! reference uses single and it does no harm): LSQR stopped after a fixed number of
+//! iterations amplifies rounding, so the two precisions differ by ~0.1 % NRMSE on smooth
+//! phantoms and up to ~10 % on small noisy ones (below), neither being more accurate.
 //!
 //! # Agreement with STI Suite
 //!
 //! `tests/ilsqr_sti_parity.rs` (measured 2026-10-30):
 //! - Against the re-implementation of `QSM_iLSQR` the algorithm was recovered with
-//!   (`tests/data/ilsqr_sti_clone.m`, double precision, 5 iterations per solve): max |Δ| 5.6e-14
-//!   ppm on a 20×20×14 phantom. This pins the algorithm.
-//! - Against STI's own output (licensed MATLAB R2023b, the same phantom, 100 iterations): initial
-//!   LSQR solution r 0.999994; χ r 0.9971.
+//!   (`tests/data/ilsqr_sti_clone.m`, double precision, 5 iterations per solve): max |Δ| 5.7e-14
+//!   ppm on a 20×20×14 phantom (noise, phase outside the mask). This pins the algorithm.
+//! - Against STI's own output on that phantom (licensed MATLAB R2023b, 100 iterations):
+//!   [`IlsqrPrecision::Single`] χ NRMSE 0.17 %, initial LSQR solution 0.010 %; double precision
+//!   χ 10.6 % (r 0.9948), initial 0.36 %.
 //! - Against the verified QSM-CI `ilsqr-sti` container (QSMxT/QSM-CI#304) at its call (100
-//!   iterations, `padsize` 12 and 8) on two 32×32×24 / 32×28×28 phantoms: NRMSE 3.4 % and 1.6 %,
-//!   r 0.99943 and 0.99987. This is STI's single-precision LSQR: QSM.rs is closest to STI at
-//!   STI's iteration count (7–9 % at 40, 4–6 % at 200), and rounding QSM.rs's input to float32
-//!   moves it by under 0.06 %. On whole heads the effect is smaller (above; 1–2 % NRMSE in the
-//!   QSM-CI parity pair, astewartau/QSM.rs#329). That fixture is regenerated in Actions by
-//!   `tests/data/ilsqr_sti_qsmci_small.py`. STI's own χ moves by 1–4e-4 relative between CPUs
-//!   (a GitHub-hosted runner against the workstation that made the fixture).
+//!   iterations, `padsize` 12 and 8) on two noise-free 32×32×24 / 32×28×28 phantoms: double
+//!   NRMSE 0.12 % and 0.072 % (r 0.9999993, 0.9999997); single 0.032 % and 0.019 %, which is
+//!   STI's own spread between CPUs (its χ moves by 3.6e-4 and 1.2e-4 relative between the
+//!   workstation that made the fixture and a GitHub-hosted runner). That fixture is regenerated
+//!   in Actions by `tests/data/ilsqr_sti_qsmci_small.py`.
+//!
+//! Until 2026-10-30 the FastQSM kernel was closed without IPT's padding (−∞ beyond the array
+//! for the dilation, +∞ for the erosion, on the unpadded 7³ ball), which kept 32 dilated
+//! voxels at the ball's ±y caps (179 non-zeros against `imclose`'s 147). FastQSM moved by 2 %,
+//! its gradient weights at ~800 voxels per axis, and χ by 3.4 % / 1.6 % NRMSE on the container
+//! phantoms, 1.0 % on QSM-CI's sim and 1.8 % on the KKI travelling head
+//! (astewartau/QSM.rs#329). The licensed fixture above had been made with an `imclose` stand-in
+//! of the same kind, which hid it; it was regenerated with MATLAB's own `imclose`.
 //!
 //! # Padding
 //!
@@ -118,7 +133,8 @@
 //!   lists `padsize = [12 12 12]` as the default; the function's own default is 6.) Until
 //!   2026-10-29 the default was the GUI's 40; the QSM-CI parity pair against the verified
 //!   `ilsqr-sti` container (which calls it without `'niter'`) differed by 17–18 % NRMSE at 40
-//!   and 1–2 % at 100 (astewartau/QSM.rs#329).
+//!   and 1–2 % at 100 (astewartau/QSM.rs#329); that 1–2 % was the FastQSM closing (see
+//!   *Agreement with STI Suite*).
 //! - **Masking**: the GUI's "Single button for QSM" path builds the mask by thresholding the
 //!   magnitude (`Support_Functions/CreateMask.m`: rescale, threshold, largest connected
 //!   component, fill holes; then the P-coded `Getmasking`/`PolishMask`), not with BET.
@@ -180,6 +196,21 @@ pub struct IlsqrParams {
     /// `QSM_iLSQR`'s own default and [`STI_PAD_MM`] reproduces UK Biobank / STI Suite's
     /// examples). Must be finite and ≥ 0.
     pub pad_mm: f64,
+    /// Arithmetic of the two LSQR solves (default [`IlsqrPrecision::Double`]; `Single` is
+    /// STI Suite's own, for parity with it)
+    pub precision: IlsqrPrecision,
+}
+
+/// Arithmetic of iLSQR's two LSQR solves (see the module docs, *Performance and precision*).
+#[cfg_attr(feature = "introspection", derive(serde::Serialize))]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum IlsqrPrecision {
+    /// Double precision throughout (the default).
+    #[default]
+    Double,
+    /// STI Suite's arithmetic: both solves' operators, LSQR vectors and scalars in single
+    /// precision, their right-hand sides computed in double and rounded to single.
+    Single,
 }
 
 impl Default for IlsqrParams {
@@ -188,6 +219,7 @@ impl Default for IlsqrParams {
             tol: 1e-3,
             max_iter: STI_DEFAULT_NITER,
             pad_mm: STI_GUI_PAD_MM,
+            precision: IlsqrPrecision::Double,
         }
     }
 }
@@ -225,10 +257,10 @@ pub const STI_DEFAULT_NITER: usize = 100;
 pub const STI_DEFAULT_PAD_MM: f64 = 6.0;
 
 use std::cell::RefCell;
-use num_complex::Complex64;
+use num_complex::{Complex32, Complex64};
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
-use crate::fft::{Box3, Fft3dWorkspace, FftOpts};
+use crate::fft::{Box3, Fft3dWorkspace, Fft3dWorkspaceF32, FftOpts};
 use crate::kernels::dipole::dipole_kernel;
 use crate::Grid;
 
@@ -952,7 +984,10 @@ fn ilsqr_with(
     tracer.stage("Laplacian weights (incl. F phi)");
 
     // 3. initial solution: LSQR on D W D χ = D W φ, with D = F⁻¹ diag(dk) F (initial_solve)
-    let (x1r, out1) = initial_solve(n, &p, &w, &dk, &crop_box, params.max_iter, tracer);
+    let (x1r, out1) = match params.precision {
+        IlsqrPrecision::Double => initial_solve(n, &p, &w, &dk, &crop_box, params.max_iter, tracer),
+        IlsqrPrecision::Single => initial_solve_single(n, &p, &w, &dk, params.max_iter),
+    };
     tracer.solve(&out1);
     tracer.stage("solve 1 (initial LSQR)");
     progress(2, 4);
@@ -992,7 +1027,10 @@ fn ilsqr_with(
 
     // 6. streaking artefacts (artefact_solve), subtracted from the initial solution
     let sq = (nt as f64).sqrt();
-    let (xsa, out2) = artefact_solve(n, &x1r, &m, &inside, gw, &dk, &crop_box1, params.tol, params.max_iter, tracer);
+    let (xsa, out2) = match params.precision {
+        IlsqrPrecision::Double => artefact_solve(n, &x1r, &m, &inside, gw, &dk, &crop_box1, params.tol, params.max_iter, tracer),
+        IlsqrPrecision::Single => artefact_solve_single(n, &x1r, &m, &gw, &dk, params.tol, params.max_iter),
+    };
     tracer.solve(&out2);
 
     // 7. subtract, mask, crop back
@@ -1149,7 +1187,7 @@ fn sti_fastqsm(
 ) -> Vec<f64> {
     let nt = p_k.len();
     // kernel: ball3D(3) (centre excluded) / its count, closed along the 2nd axis with [1 1 1]
-    // (out-of-array = −∞ for the dilation, +∞ for the erosion), not renormalised
+    // as IPT's `imclose` does it (below), not renormalised
     let r = 3i64;
     let s = 7usize;
     let mut ball = vec![0.0f64; s * s * s];
@@ -1163,22 +1201,43 @@ fn sti_fastqsm(
         }
     }
     ball.iter_mut().for_each(|v| *v /= cnt);
+    // IPT's `imclose(b, [1 1 1])`: a greyscale dilation then erosion along the 2nd axis, on
+    // the image padded by one voxel of −∞ at both ends of that axis (out-of-array neighbours
+    // are skipped, i.e. −∞ for the dilation and +∞ for the erosion), cropped back. On this
+    // ball it only fills the centre, as `imclose` does in MATLAB R2023b (probed on Bunya,
+    // astewartau/QSM.rs#329); without the padding the erosion keeps 32 dilated voxels at the
+    // ball's ±y caps, which moved FastQSM by 2 % and iLSQR's χ by 1.6–3.4 % NRMSE.
+    let sp = s + 2;
+    let at = |i: usize, j: usize, k: usize| i + j * s + k * s * sp;
+    let mut padded = vec![f64::NEG_INFINITY; s * sp * s];
+    for k in 0..s {
+        for j in 0..s {
+            for i in 0..s {
+                padded[at(i, j + 1, k)] = ball[i + j * s + k * s * s];
+            }
+        }
+    }
     let line = |a: &[f64], dil: bool| -> Vec<f64> {
         let mut o = vec![0.0; a.len()];
-        for (l, ov) in o.iter_mut().enumerate() {
-            let j = (l / s) % s;
-            let mut v = a[l];
-            for jj in [j.wrapping_sub(1), j + 1] {
-                if jj < s {
-                    let q = a[l - j * s + jj * s];
-                    v = if dil { v.max(q) } else { v.min(q) };
+        for k in 0..s {
+            for j in 0..sp {
+                for i in 0..s {
+                    let mut v = a[at(i, j, k)];
+                    for jj in [j.wrapping_sub(1), j + 1] {
+                        if jj < sp {
+                            let q = a[at(i, jj, k)];
+                            v = if dil { v.max(q) } else { v.min(q) };
+                        }
+                    }
+                    o[at(i, j, k)] = v;
                 }
             }
-            *ov = v;
         }
         o
     };
-    let closed = line(&line(&ball, true), false);
+    let closed_p = line(&line(&padded, true), false);
+    let closed: Vec<f64> = (0..s * s * s).map(|l| closed_p[at(l % s, (l / s) % s + 1, l / (s * s))]).collect();
+    debug_assert_eq!(closed.iter().filter(|&&v| v != 0.0).count(), 147);
     // STI smooths the k-space of the *centred* image (fftnc: origin at the array centre); on
     // the k-space of the uncentred image that is the same convolution with the kernel
     // modulated by (−1)^(i+j+k) (all padded dimensions are even).
@@ -1232,6 +1291,221 @@ fn sti_fastqsm(
     let a = if sxx > 0.0 { sxy / sxx } else { 1.0 };
     crate::maybe_par_iter_mut!(xfs).for_each(|v| *v *= a);
     xfs
+}
+
+// ============================================================================
+// Single precision: STI Suite's own arithmetic in the two LSQR solves
+// ============================================================================
+
+/// `‖x‖₂` of a single-precision vector, accumulated in f64 over [`dense_parts`] and rounded to
+/// f32 (the value MATLAB's `norm` of a `single` vector rounds to, up to its BLAS's order).
+fn cnorm32(x: &[Complex32]) -> f32 {
+    let parts = dense_parts(x.len());
+    let xs = split_parts(x, &parts);
+    let sums: Vec<f64> = crate::maybe_par_iter!(xs)
+        .map(|c| c.iter().map(|v| (v.re as f64) * (v.re as f64) + (v.im as f64) * (v.im as f64)).sum::<f64>())
+        .collect();
+    sums.iter().sum::<f64>().sqrt() as f32
+}
+
+/// MATLAB `lsqr` (zero initial guess, no preconditioner) on `single` data: the iteration and
+/// stopping rules of [`lsqr_matlab`], with every vector and scalar in single precision, as
+/// MATLAB runs it when `b` and the operator's results are `single` (a `double` scalar such as
+/// `tol` or `eps` meeting a `single` one is rounded to single first).
+fn lsqr_matlab_f32<F, G>(mut apply_a: F, mut apply_ah: G, b: Vec<Complex32>, nx: usize, tol: f64, max_iter: usize) -> (Vec<Complex32>, LsqrOutcome)
+where
+    F: FnMut(&[Complex32], &mut [Complex32]),
+    G: FnMut(&[Complex32], &mut [Complex32]),
+{
+    let zero = Complex32::new(0.0, 0.0);
+    let tol = tol as f32;
+    let n2b = cnorm32(&b);
+    let tolb = tol * n2b;
+    let mut u = b;
+    let mut beta = n2b;
+    let mut normr = beta;
+    let scale = |x: &mut [Complex32], s: f32| crate::maybe_par_iter_mut!(x).for_each(|z| *z /= s);
+    if beta != 0.0 {
+        scale(&mut u, beta);
+    }
+    let (mut c, mut s) = (1.0f32, 0.0f32);
+    let mut phibar = beta;
+    let mut v = vec![zero; nx];
+    apply_ah(&u, &mut v);
+    let mut x = vec![zero; nx];
+    let mut alpha = cnorm32(&v);
+    if alpha != 0.0 {
+        scale(&mut v, alpha);
+    }
+    let mut normar = alpha * beta;
+    let relres = |nr: f32| if n2b > 0.0 { (nr / n2b) as f64 } else { 0.0 };
+    if normar == 0.0 {
+        return (x, LsqrOutcome { flag: 0, iter: 0, relres: relres(normr) });
+    }
+    let mut un = vec![zero; u.len()];
+    let mut vt = vec![zero; nx];
+    let mut d = vec![zero; nx];
+    let mut normx = 0.0f32;
+    let mut norma = 0.0f32;
+    let mut stag = 0usize;
+    let mut flag = 1u8;
+    let mut iter = max_iter;
+    let eps = f64::EPSILON as f32;
+    for ii in 1..=max_iter {
+        apply_a(&v, &mut un);
+        crate::maybe_par_iter_mut!(un).zip(crate::maybe_par_iter!(u)).for_each(|(a, &b)| *a -= b * alpha);
+        beta = cnorm32(&un);
+        if beta != 0.0 {
+            scale(&mut un, beta);
+        }
+        std::mem::swap(&mut u, &mut un);
+        norma = (norma * norma + alpha * alpha + beta * beta).sqrt();
+        let thet = -s * alpha;
+        let rhot = c * alpha;
+        let rho = (rhot * rhot + beta * beta).sqrt();
+        c = rhot / rho;
+        s = -beta / rho;
+        let phi = c * phibar;
+        if phi == 0.0 {
+            stag = 1;
+        }
+        phibar *= s;
+        let converged = normar / (norma * normr) <= tol || normr <= tolb;
+        let breakdown = !phi.is_finite() || rho == 0.0 || !rho.is_finite();
+        crate::maybe_par_iter_mut!(d).zip(crate::maybe_par_iter!(v)).for_each(|(di, &vi)| *di = (vi - *di * thet) / rho);
+        if phi.abs() * cnorm32(&d) < eps * normx {
+            stag += 1;
+        } else {
+            stag = 0;
+        }
+        if converged {
+            flag = 0;
+            iter = ii - 1;
+            break;
+        }
+        if stag >= 3 {
+            flag = 3;
+            iter = ii - 1;
+            break;
+        }
+        if breakdown {
+            flag = 4;
+            iter = ii - 1;
+            break;
+        }
+        crate::maybe_par_iter_mut!(x).zip(crate::maybe_par_iter!(d)).for_each(|(xi, &di)| *xi += di * phi);
+        normx = cnorm32(&x);
+        normr *= s.abs();
+        apply_ah(&u, &mut vt);
+        crate::maybe_par_iter_mut!(vt).zip(crate::maybe_par_iter!(v)).for_each(|(a, &b)| *a -= b * beta);
+        std::mem::swap(&mut v, &mut vt);
+        alpha = cnorm32(&v);
+        if (alpha == 0.0 || !alpha.is_finite()) && ii < max_iter {
+            flag = 4;
+            iter = ii;
+            break;
+        }
+        if alpha != 0.0 {
+            scale(&mut v, alpha);
+        }
+        normar = alpha * (s * phi).abs();
+    }
+    if flag == 1 && (normar / (norma * normr) <= tol || normr <= tolb) {
+        flag = 0;
+    }
+    (x, LsqrOutcome { flag, iter, relres: relres(normr) })
+}
+
+/// Step 3 of [`ilsqr`] as STI computes it ([`IlsqrPrecision::Single`]): the right-hand side
+/// `D W φ` in double, rounded to single; the operator `D W D` evaluated in single precision
+/// (single 3-D FFTs, `single(D)`, `single(W)`) and MATLAB's `lsqr` on single data. Returns the
+/// real part of the solution in double, as STI's `double(x1)`.
+fn initial_solve_single(n: [usize; 3], p: &[f64], w: &[f64], dk: &[f64], max_iter: usize) -> (Vec<f64>, LsqrOutcome) {
+    let nt = p.len();
+    let mut b: Vec<Complex64> = p.iter().zip(w).map(|(&pv, &wv)| Complex64::new(wv * pv, 0.0)).collect();
+    let mut ws64 = Fft3dWorkspace::new(n[0], n[1], n[2]);
+    ws64.fft3d(&mut b);
+    b.iter_mut().zip(dk).for_each(|(z, &dv)| *z *= dv);
+    ws64.ifft3d(&mut b);
+    drop(ws64);
+    let b1: Vec<Complex32> = b.iter().map(|z| Complex32::new(z.re as f32, z.im as f32)).collect();
+    drop(b);
+    let dks: Vec<f32> = dk.iter().map(|&v| v as f32).collect();
+    let wss: Vec<f32> = w.iter().map(|&v| v as f32).collect();
+    let ws = RefCell::new(Fft3dWorkspaceF32::new(n[0], n[1], n[2]));
+    let apply1 = |x: &[Complex32], out: &mut [Complex32]| {
+        let mut ws = ws.borrow_mut();
+        out.copy_from_slice(x);
+        ws.fft3d(out);
+        crate::maybe_par_iter_mut!(out).zip(crate::maybe_par_iter!(dks)).for_each(|(z, &dv)| *z *= dv);
+        ws.ifft3d(out);
+        crate::maybe_par_iter_mut!(out).zip(crate::maybe_par_iter!(wss)).for_each(|(z, &wv)| *z *= wv);
+        ws.fft3d(out);
+        crate::maybe_par_iter_mut!(out).zip(crate::maybe_par_iter!(dks)).for_each(|(z, &dv)| *z *= dv);
+        ws.ifft3d(out);
+    };
+    let (x1, out) = lsqr_matlab_f32(apply1, apply1, b1, nt, 0.01, max_iter);
+    (x1.iter().map(|z| z.re as f64).collect(), out)
+}
+
+/// Step 6 of [`ilsqr`] as STI computes it ([`IlsqrPrecision::Single`]): the right-hand side
+/// `G ∇(M·Re χ₁)` in double, rounded to single; the operator `y ↦ G ∇(√N F⁻¹(M_ic y))` and its
+/// adjoint `r ↦ M_ic F(∇ᴴ(G r)) / √N` in single precision, on dense vectors (the unknown over
+/// the whole k-space grid, the residual over three whole image grids); MATLAB's `lsqr` on
+/// single data. Returns `Re F⁻¹(M_ic y)` in double (the artefacts divided by √N), as
+/// [`artefact_solve`] does.
+#[allow(clippy::too_many_arguments)]
+fn artefact_solve_single(n: [usize; 3], x1: &[f64], m: &[f64], gw: &[Vec<f64>], dk: &[f64], tol: f64, max_iter: usize) -> (Vec<f64>, LsqrOutcome) {
+    let nt = dk.len();
+    let mic: Vec<f32> = dk.iter().map(|&v| if v.abs() < 0.1 { 1.0 } else { 0.0 }).collect();
+    let gws: Vec<Vec<f32>> = gw.iter().map(|g| g.iter().map(|&v| v as f32).collect()).collect();
+    let next = |l: usize, a: usize| circ_next(l, a, n);
+    let prev = |l: usize, a: usize| {
+        let step = [1, n[0], n[0] * n[1]][a];
+        if (l / step).is_multiple_of(n[a]) { l + (n[a] - 1) * step } else { l - step }
+    };
+    // b2 = [Wg_a .* fd(x1 .* M, a)] in double, then single
+    let x1m: Vec<f64> = x1.iter().zip(m).map(|(&x, &mv)| x * mv).collect();
+    let mut b2 = vec![Complex32::new(0.0, 0.0); 3 * nt];
+    for (a, ba) in b2.chunks_mut(nt).enumerate() {
+        let (g, x1m) = (&gw[a], &x1m);
+        crate::maybe_par_iter_mut!(ba).enumerate().for_each(|(l, o)| *o = Complex32::new((g[l] * (x1m[next(l, a)] - x1m[l])) as f32, 0.0));
+    }
+    drop(x1m);
+    let s = (nt as f64).sqrt() as f32;
+    let ws = RefCell::new(Fft3dWorkspaceF32::new(n[0], n[1], n[2]));
+    let t_cell = RefCell::new(vec![Complex32::new(0.0, 0.0); nt]);
+    let apply2 = |y: &[Complex32], out: &mut [Complex32]| {
+        let mut t = t_cell.borrow_mut();
+        crate::maybe_par_iter_mut!(t).zip(crate::maybe_par_iter!(y)).zip(crate::maybe_par_iter!(mic)).for_each(|((o, &yv), &mv)| *o = yv * mv);
+        ws.borrow_mut().ifft3d(&mut t);
+        crate::maybe_par_iter_mut!(t).for_each(|z| *z *= s);
+        let t = &t[..];
+        for (a, oa) in out.chunks_mut(nt).enumerate() {
+            let g = &gws[a];
+            crate::maybe_par_iter_mut!(oa).enumerate().for_each(|(l, o)| *o = (t[next(l, a)] - t[l]) * g[l]);
+        }
+    };
+    let apply2h = |r: &[Complex32], out: &mut [Complex32]| {
+        // u = Σ_a fdT(r_a .* Wg_a), fdT(q)[l] = q[l − e_a] − q[l], summed from zero in axis order
+        crate::maybe_par_iter_mut!(out).enumerate().for_each(|(l, o)| {
+            let mut u = Complex32::new(0.0, 0.0);
+            for a in 0..3 {
+                let (ra, g) = (&r[a * nt..(a + 1) * nt], &gws[a]);
+                let lp = prev(l, a);
+                u += ra[lp] * g[lp] - ra[l] * g[l];
+            }
+            *o = u;
+        });
+        ws.borrow_mut().fft3d(out);
+        crate::maybe_par_iter_mut!(out).zip(crate::maybe_par_iter!(mic)).for_each(|(z, &mv)| *z = *z * mv / s);
+    };
+    let (y, out) = lsqr_matlab_f32(apply2, apply2h, b2, nt, tol, max_iter);
+    drop(t_cell);
+    let mut xsa: Vec<Complex64> = y.iter().zip(&mic).map(|(z, &mv)| Complex64::new(z.re as f64, z.im as f64) * mv as f64).collect();
+    drop(y);
+    Fft3dWorkspace::new(n[0], n[1], n[2]).ifft3d(&mut xsa);
+    (xsa.iter().map(|z| z.re).collect(), out)
 }
 
 fn sign0(v: f64) -> f64 {
