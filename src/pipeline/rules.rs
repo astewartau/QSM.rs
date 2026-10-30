@@ -443,6 +443,7 @@ pub const SETTINGS: &[(&str, &str)] = &[
     ("qsm_per_echo", "A QSM per echo, and their mean, instead of one QSM from the echo-combined field (QsmPipelineConfig::qsm_per_echo, bool)"),
     ("separation.algorithm", "χ-separation (SeparationAlgorithm::id)"),
     ("separation.decompose.unwrap_phase", "DECOMPOSE's phase unwrapping along the echoes (DecomposeParams::unwrap_phase, bool); only with DECOMPOSE"),
+    ("separation.decompose.chi_bound", "DECOMPOSE's bound on |χ| in the fit (DecomposeChiBound::id): ppm (a fixed bound, the authors' 0.5) or echo-spacing (π / ((2/3)·γ·B0·ΔTE_max), computed from the scan); only with DECOMPOSE"),
     ("segmentation.inference", "SynthSeg inference: full-volume, low-memory (SynthSegInference::LOW_MEMORY) or sliding-window"),
     ("segmentation.inference.patch", "SynthSeg window edge, voxels at 1 mm (SlidingWindow::patch)"),
 ];
@@ -632,6 +633,12 @@ pub fn current(input: &RuleInput, facts: &ScanFacts, setting: &str) -> Option<Ve
             .map(|s| Current::Bool(s.decompose.unwrap_phase))
             .into_iter()
             .collect(),
+        "separation.decompose.chi_bound" => input
+            .separation
+            .filter(|s| s.algorithm == super::config::SeparationAlgorithm::Decompose)
+            .map(|s| Current::Choice(s.decompose.chi_bound.id()))
+            .into_iter()
+            .collect(),
         "segmentation.inference" => input
             .segmentation
             .map(|s| {
@@ -713,7 +720,7 @@ const fn fact_at_most(fact: Fact, max: f64) -> Condition {
 }
 const ON_WASM: Condition = C::Fact { fact: Fact::Target, is: Test::OneOf { values: &[Choice("wasm")] } };
 const MULTI_ECHO: Condition = fact_at_least(Fact::EchoCount, 2.0);
-/// The field strength from which `decompose.unwrap-7t` fires: 7 T scanners, including those that
+/// The field strength from which `decompose.unwrap-7t` and `decompose.chi-bound-7t` fire: 7 T scanners, including those that
 /// report 6.98 T (Siemens), and nothing at 3 T or below.
 const DECOMPOSE_UNWRAP_FROM_T: f64 = 6.5;
 
@@ -1340,10 +1347,20 @@ pub static RULES: &[Rule] = &[
         "separation.decompose.unwrap_phase", &[Bool(true)],
         "DECOMPOSE was designed for 3 T (its χ bound keeps the phase under 2π at TE 25 ms and \
          3 T); at 7 T the phase wraps between echoes and χ+ partly collapses unless the phase is \
-         unwrapped along the echoes",
+         unwrapped along the echoes (with decompose.chi-bound-7t's bound)",
         "Chen et al. 2021 NeuroImage 242:118477 (DECOMPOSE), §2.2; measured on the QSM-CI 7 T \
-         chisep phantom, χ+ r 0.48 off, 0.90 on (QSM.rs separation::decompose docs, Phase \
-         unwrapping at 7 T)"),
+         chisep phantom, χ+ r 0.48 off, 0.66 on, 0.90 on with the echo-spacing χ bound (QSM.rs \
+         separation::decompose docs, At 7 T)"),
+    measured_better("decompose.chi-bound-7t",
+        &[sep(&[Choice("decompose")]), fact_at_least(Fact::FieldStrength, DECOMPOSE_UNWRAP_FROM_T)],
+        "separation.decompose.chi_bound", &[Choice("echo-spacing")],
+        "A tuning value: bound the χ search at π / ((2/3)·γ·B0·ΔTE_max), computed from the scan \
+         (0.31 ppm at 7 T with 8 ms spacing), the largest |χ| whose phase step between echoes \
+         stays under π so that unwrapping along the echoes is unambiguous; the authors' 0.5 ppm \
+         was set for TE 25 ms at 3 T",
+        "Chen et al. 2021 NeuroImage 242:118477 (DECOMPOSE), §2.2; measured on the QSM-CI 7 T \
+         chisep phantom, χ− r 0.75 → 0.85 with this bound alone, χ+ r 0.66 → 0.90 with \
+         unwrapping (QSM.rs separation::decompose docs, At 7 T)"),
     reference("decompose.reference-mean", &[sep(&[Choice("decompose")])], "reference",
         &[Choice("mean")],
         "DECOMPOSE's χ is referenced to the whole-brain mean",
@@ -1572,6 +1589,10 @@ mod tests {
                 separation(S::Decompose)(c);
                 c.facts.field_strength = Some(7.0);
             })),
+            ("decompose.chi-bound-7t", Case::new(|c| {
+                separation(S::Decompose)(c);
+                c.facts.field_strength = Some(7.0);
+            })),
             ("decompose.reference-mean", Case::new(|c| {
                 separation(S::Decompose)(c);
                 c.cfg.reference = QsmReference::None;
@@ -1774,6 +1795,29 @@ mod tests {
         assert!(r.needs_scan());
         // The authors' default stays: DecomposeParams leaves unwrapping off.
         assert!(!crate::separation::DecomposeParams::default().unwrap_phase);
+    }
+
+    /// DECOMPOSE's echo-spacing χ bound is suggested at 7 T and not at 3 T, nor when it is already
+    /// chosen, nor before the field strength is known; a fixed bound of any value reads as "ppm".
+    #[test]
+    fn decompose_chi_bound_at_7t_only() {
+        use crate::separation::DecomposeChiBound as B;
+        let id = "decompose.chi-bound-7t";
+        let at = |b0: Option<f64>, bound: B| Case::new(|c| {
+            separation(SeparationAlgorithm::Decompose)(c);
+            c.sep.as_mut().unwrap().decompose.chi_bound = bound;
+            c.facts.field_strength = b0;
+        }).ids().contains(&id);
+        assert!(at(Some(7.0), B::Ppm(0.5)) && at(Some(6.98), B::Ppm(0.3)) && at(Some(9.4), B::Ppm(0.5)));
+        assert!(!at(Some(3.0), B::Ppm(0.5)) && !at(Some(1.5), B::Ppm(0.5)));
+        assert!(!at(Some(7.0), B::EchoSpacing));
+        assert!(!at(None, B::Ppm(0.5)));
+        let r = RULES.iter().find(|r| r.id == id).unwrap();
+        assert_eq!((r.strength, r.basis), (Strength::Recommended, Basis::Measured));
+        assert_eq!(r.default, Value::Choice("echo-spacing"));
+        assert!(r.needs_scan());
+        // The authors' default stays: 0.5 ppm.
+        assert_eq!(crate::separation::DecomposeParams::default().chi_bound, B::Ppm(0.5));
     }
 
     /// QSM.jl's iSMV variant suggests QSM.jl's tolerance and cap; its own params pass, the
