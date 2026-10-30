@@ -15,7 +15,15 @@
 //! `Dct` is unweighted least-squares unwrapping: the Poisson equation for the wrapped phase
 //! differences, solved under a Neumann condition with a DCT (Ghiglia & Romero 1994). It
 //! reproduces QSM.jl's `:dct` solver exactly (QSM.jl v0.5.4 on byte-identical input: r =
-//! 1.000000, rms difference 0.0).
+//! 1.000000, rms difference 0.0). `tests/laplacian_qsmjl_parity.rs` keeps this checked against
+//! QSM.jl fde4b92 in the verified QSM-CI `julia-qsm` image (QSMxT/QSM-CI#299) on two wrapped
+//! phantoms, 1 mm and anisotropic: max |Δ| 8.9e-15 rad (measured 2026-10-30).
+//!
+//! Through UK Biobank's pipeline in the verified QSM-CI `ukb-qsm` container (QSMxT/QSM-CI#305),
+//! `Fft` with `pad` 64 per echo, combined with
+//! [`B0WeightType::AssumedDecay`](crate::utils::B0WeightType::AssumedDecay), gives the
+//! pipeline's combined phase to 2.5e-14 rad (`tests/ukb_qsm_parity.rs`, two echoes at
+//! 1×1×1.5 mm, measured 2026-10-30).
 //!
 //! `Fft` is the literal Schofield & Zhu method: the Laplacian of the true phase from the sin/cos
 //! identity with spectral derivatives, then an FFT Poisson solve. It reproduces STI Suite 3.0's

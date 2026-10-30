@@ -8,21 +8,9 @@
 //! which differs from the release: it does not high-pass the field (see
 //! [`MediParams::smv_shrink_mask`]), and `medi` follows the release.
 //!
-//! ```matlab
-//! % d = dump directory (rdf.f64, mask.u8, mag.f64 from dump_inputs); one run per toolbox,
-//! % with only that toolbox's functions/ on the path
-//! N = [32 36 28]; vs = [1 1 1.2]; TE = [4 8 12 16]*1e-3; B0 = 3; n = prod(N);
-//! rd = @(f,t,k) reshape(fread(fopen(fullfile(d,f)),k,t), [N k/n]);
-//! RDF = rd('rdf.f64','double',n); Mask = rd('mask.u8','uint8',n) > 0; mag = rd('mag.f64','double',4*n);
-//! [~, N_std] = Fit_ppm_complex(mag); iMag = sqrt(sum(mag.^2, 4));
-//! matrix_size = N; voxel_size = vs; delta_TE = TE(2)-TE(1); CF = 42.576e6*B0; B0_dir = [0 0 1];
-//! iFreq = [];
-//! save RDF.mat RDF iFreq N_std iMag Mask matrix_size voxel_size delta_TE CF B0_dir
-//! one = {'lambda', 1000, 'max_iter', 1};                    % no Mask_CSF: no CSF term
-//! chi_nosmv    = MEDI_L1('filename', 'RDF.mat', one{:}, 'nosmv');
-//! chi_shrink   = MEDI_L1('filename', 'RDF.mat', one{:}, 'smv', 5);
-//! chi_noshrink = MEDI_L1('filename', 'RDF.mat', one{:}, 'smv', 5, 'smv_shrink_mask', 0);
-//! ```
+//! The generator is `tests/data/medi_smv_small.m` (licensed MATLAB R2023b; `dump_inputs` writes
+//! the phantom for it). The release's three cases are also checked against the verified QSM-CI
+//! `medi-cornell` container, which can regenerate them in Actions (`tests/medi_cornell_parity.rs`).
 //!
 //! One Gauss-Newton step is where the SMV options act (the field, the mask, the dipole kernel
 //! and the noise); MERIT and the later steps are MEDI's own code. With all defaults (10 steps)

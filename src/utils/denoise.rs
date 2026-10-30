@@ -15,6 +15,13 @@
 //!
 //! Applying this to multi-echo magnitude before R2*/R2 fitting reduces the
 //! variance of the fitted relaxation rate without blurring structure.
+//!
+//! **Agreement with DIPY** (astewartau/QSM.rs#327, known gap): because of the centre-voxel
+//! assignment, the output is not DIPY's, which averages the overlapping patches' estimates. They
+//! differ by 0.97 % NRMSE on a travelling head's five echoes (QSMxT/QSM-CI#302) and 1.3 % on the
+//! six-echo 14×14×10 phantom of `tests/mppca_dipy_parity.rs` (DIPY 1.12.1 in the verified
+//! `py-originals` image, patch radius 2; measured 2026-10-30), where DIPY changes the input by
+//! 2.3 % and QSM.rs by 2.0 %. Matching DIPY needs the overlapping-patch average.
 
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;

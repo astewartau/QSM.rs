@@ -1,18 +1,25 @@
-# Generator of the inputs behind tests/data/decompose_qsm_small.bin, for the QSM-CI
-# decompose-qsm container (the authors' DECOMPOSE-QSM utils and fit loop, compiled from licensed
-# MATLAB R2023b and verified identical to it, QSMxT/QSM-CI#309):
+# Generator of tests/data/decompose_qsm_small.bin: the QSM-CI decompose-qsm container (the
+# authors' DECOMPOSE-QSM utils and fit loop, compiled from licensed MATLAB R2023b and verified
+# identical to it, QSMxT/QSM-CI#309) on a small synthetic case, for tests/decompose_qsm_parity.rs:
 #   ghcr.io/astewartau/qsm-ci/decompose-qsm@sha256:a273a9b34f2863e4dac7e0c99f2c90e0dc220c56bf2e0f892c671a16be40112f
 #
-#   python decompose_qsm_small.py in      # magnitude (4-D), chimap, mask, params.json
-#   podman run --rm --network none --userns=keep-id -v $PWD/in:/input:ro -v $PWD/out:/output \
-#     -v <QSM-CI>/algorithms/decompose-qsm:/algo:ro <image above> bash /algo/run.sh /input /output
+#   python3 tests/data/decompose_qsm_small.py tests/data/decompose_qsm_small.bin
+#
+# Needs numpy, nibabel and podman or docker (CONTAINER_ENGINE overrides; the regenerate-fixtures
+# workflow runs it in Actions). It writes the inputs (magnitude (4-D), chimap, mask, params.json),
+# runs the container's compiled recon on them, and packs its output.
 #
 # The container gives every echo the same QSM (chimap), so the per-echo QSM the port takes is
 # chimap repeated. tests/decompose_qsm_parity.rs rebuilds these inputs with the same formulas.
 # The .bin (little-endian f64, column-major, every voxel): out/chi-para.nii.gz, then
 # out/chi-dia.nii.gz (|χ−|), as the container wrote them (float32, widened).
-import sys, json, numpy as np, nibabel as nib
-out = sys.argv[1]
+import json, os, shutil, subprocess, sys, tempfile
+import numpy as np, nibabel as nib
+
+IMAGE = "ghcr.io/astewartau/qsm-ci/decompose-qsm@sha256:a273a9b34f2863e4dac7e0c99f2c90e0dc220c56bf2e0f892c671a16be40112f"
+tmp = tempfile.TemporaryDirectory()
+out = os.path.join(tmp.name, "in")
+os.makedirs(out)
 n = (8, 8, 6)
 TE = [0.004, 0.009, 0.014, 0.019, 0.024, 0.029]
 B0 = 3.0
@@ -32,3 +39,15 @@ nib.save(nib.Nifti1Image(mag.astype(np.float64), aff), f"{out}/magnitude.nii.gz"
 nib.save(nib.Nifti1Image(chi.astype(np.float64), aff), f"{out}/chimap.nii.gz")
 nib.save(nib.Nifti1Image(mask, aff), f"{out}/mask.nii.gz")
 json.dump({"B0": B0, "B0_dir": [0, 0, 1], "TE": TE, "voxel_size": [1, 1, 1]}, open(f"{out}/params.json", "w"))
+
+res = os.path.join(tmp.name, "out")
+os.makedirs(res)
+os.chmod(res, 0o777)
+engine = os.environ.get("CONTAINER_ENGINE") or shutil.which("podman") or "docker"
+user = ["--userns=keep-id"] if os.path.basename(engine) == "podman" else ["--user", f"{os.getuid()}:{os.getgid()}"]
+subprocess.run([engine, "run", "--rm", "--network", "none", *user, "-e", "MCR_CACHE_ROOT=/tmp/mcr", "-e", "HOME=/tmp",
+                "-v", f"{out}:/input:ro", "-v", f"{res}:/output", IMAGE, "/opt/qsm-ci/recon", "/input", "/output"],
+               check=True, stdout=subprocess.DEVNULL)
+ld = lambda f: np.asarray(nib.load(os.path.join(res, f)).dataobj, dtype=np.float64).ravel(order="F")
+np.concatenate([ld("chi-para.nii.gz"), ld("chi-dia.nii.gz")]).astype("<f8").tofile(sys.argv[1])
+tmp.cleanup()

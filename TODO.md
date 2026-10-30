@@ -8,7 +8,7 @@ Algorithms present in reference toolboxes but not yet in QSM.rs.
 Implemented in `src/bgremove/resharp.rs`.
 
 ### ~~iHARPERELLA~~ — DONE
-Implemented in `src/pipeline/iharperella.rs`.
+Implemented in `src/bgremove/iharperella.rs` (STI Suite 3.0's `iHARPERELLA`).
 
 ### Polynomial Background Fitting — LOW PRIORITY
 - **Source**: `background_field_removal/poly2d.m`, `poly3d.m`, `poly3d_nonlinear.m`
@@ -48,14 +48,8 @@ Implemented in `src/pipeline/iharperella.rs`.
 
 ## From STISuite V3.0
 
-### QSM_STAR (Streaking Artifact Reduction) — MEDIUM PRIORITY
-- **Reference**: Wei H, et al. NMR Biomed 2015;28:1294-1303
-- **Source**: `Core_Functions_P/QSM_star.m` (compiled .p)
-- **Description**: Fast QSM inversion using STAR method to reduce streaking artifacts from sources with large dynamic range. ~30 seconds runtime.
-- **Why medium**: Different approach from existing inversion methods, but we already have many (TKD, TV, MEDI, iLSQR, RTS, TGV).
+### ~~QSM_STAR (Streaking Artifact Reduction)~~ — DONE
+Implemented in `src/inversion/star.rs` (STI Suite 3.0's `QSM_star`).
 
-### STI (Susceptibility Tensor Imaging) — LOW PRIORITY
-- **Reference**: Liu C. Magn Reson Med 2010;63(6):1471-7
-- **Source**: `Core_Functions_P/STI_Parfor.m`
-- **Description**: Susceptibility tensor calculation from multi-orientation QSM data. Computes 6-component symmetric tensor.
-- **Why low priority**: Requires special multi-orientation acquisition data, niche use case.
+### ~~STI (Susceptibility Tensor Imaging)~~ — DONE
+Implemented in `src/inversion/sti.rs`.

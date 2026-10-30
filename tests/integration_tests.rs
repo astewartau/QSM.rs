@@ -304,9 +304,9 @@ fn test_bgremove_pdf() {
     res.print_ci_metrics(elapsed);
     common::save_center_slices(&result, &data.mask, data.dims, "bgremove_pdf");
 
-    // MEDI's PDF.m with its own defaults (30 CG iterations) correlates 0.644 with the true local
-    // field here, stopping short of convergence (0.83 at 300). QSM.rs defaults to 300 iterations
-    // (see PdfParams::n_cg); the threshold stays at the level the reference's defaults reach.
+    // PdfParams::default() is PDF.m's (30 CG iterations, which stop short of convergence; 300 is
+    // the suggested tuning, see PdfParams::n_cg). MEDI's PDF.m with these defaults correlates
+    // 0.644 with the true local field here, and the thresholds are at the level they reach.
     assert!(res.nrmse < 0.5, "PDF NRMSE too high: {}", res.nrmse);
     assert!(res.correlation > 0.6, "PDF correlation too low: {}", res.correlation);
 }

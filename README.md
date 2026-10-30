@@ -287,14 +287,14 @@ This library was developed with reference to the following open-source implement
 | Repository | Algorithms | Language |
 |------------|------------|----------|
 | [mSMV](https://github.com/agr78/mSMV) | iSMV (`iSMV.m`, `tdcsmv.m`) | MATLAB |
-| [QSM.jl](https://github.com/kamesy/QSM.jl) | SHARP, V-SHARP, SMV, iSMV, LBV, Laplacian unwrap, TKD, TSVD, Tikhonov, TV, RTS, NLTV, multi-echo linear fit | Julia |
+| [QSM.jl](https://github.com/kamesy/QSM.jl) | SHARP, V-SHARP, SMV, iSMV, Laplacian unwrap, TKD, TSVD, Tikhonov, TV, RTS, NLTV, multi-echo linear fit | Julia |
 | [FANSI-toolbox](https://gitlab.com/cmilovic/FANSI-toolbox) | NDI, FANSI (nlTV/nlTGV), L1-QSM, WH-QSM | MATLAB |
 | [HD-QSM](https://github.com/mglambert/HD-QSM) | HD-QSM | MATLAB |
 | [QSM_AMP_PE](https://github.com/EmoryCN2L/QSM_AMP_PE) | AMP-PE | MATLAB |
 | [qsm_heidi](https://gitlab.com/R01NS114227/qsm_heidi) | LSQR, HEIDI | MATLAB |
 | [QuantitativeSusceptibilityMappingTGV.jl](https://github.com/korbinian90/QuantitativeSusceptibilityMappingTGV.jl) | TGV | Julia |
 | [MriResearchTools.jl](https://github.com/korbinian90/MriResearchTools.jl) | ROMEO, MCPC-3D-S, B0 weighted average, R2*/T2*, bias correction, hole filling | Julia |
-| [MEDI_toolbox](https://github.com/huawu02/MEDI_toolbox) | MEDI, PDF | MATLAB |
+| [MEDI toolbox](http://pre.weill.cornell.edu/mri/pages/qsm.html) (release 2024.11.26) | MEDI, MEDI+0, PDF, LBV, TFI, R2*/T2* (ARLO), complex fit | MATLAB |
 | [FSL-BET2](https://github.com/Bostrix/FSL-BET2) | BET | C++ |
 | [Rodent-Skull-Stripping](https://github.com/VitoLin21/Rodent-Skull-Stripping) | RS2-Net | Python |
 | [brainchop-cli](https://github.com/neuroneural/brainchop-cli) | MindGrab | Python |

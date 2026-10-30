@@ -1,8 +1,10 @@
 //! `utils::n4_bias_correction` against ANTs 2.4.3's `N4BiasFieldCorrection` on a small synthetic
 //! case.
 //!
-//! `tests/data/n4_ants_small.bin` (little-endian f32, column-major, 30x32x26 grid, voxel
-//! 1x1x1.5 mm, identity orientation) holds:
+//! `tests/data/n4_ants_small.bin` is made by `tests/data/n4_ants_small.py` with the verified QSM-CI
+//! `ants-n4` image (the official ANTs 2.4.3 release binary, ITK 4 threads; QSMxT/QSM-CI#302), so it
+//! can be regenerated in Actions (`.github/workflows/regenerate-fixtures.yml`). Little-endian f32,
+//! column-major, 30x32x26 grid, voxel 1x1x1.5 mm, identity orientation; it holds:
 //! - the input: three intensity classes (60, 100, 160) in a sphere, Gaussian noise (σ = 3) inside
 //!   it, times the bias `exp(0.35x − 0.25y + 0.2z²)` (x, y, z in [−1, 1] across the grid), zero
 //!   outside;
@@ -12,7 +14,9 @@
 //!
 //! ITK runs N4 in single precision and multithreaded, and the rounding is amplified over the
 //! iterations: ANTs' own results here change by up to 2e-5 (bias field) and 3e-4 (masked,
-//! rescaled output) relative between thread counts. The tolerances allow for that.
+//! rescaled output) relative between thread counts (the fixture used to be made with another
+//! ANTs build and thread count, and moved by 1.1e-5 and 7.7e-5 when remade with the container).
+//! The tolerances allow for that.
 
 use qsm_core::utils::{n4_bias_correction, N4Params};
 use qsm_core::Grid;
