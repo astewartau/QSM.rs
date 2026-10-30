@@ -12,6 +12,10 @@
 #
 #   python3 tests/data/amp_pe_qsmci_small.py tests/data/amp_pe_qsmci_small.bin
 #
+# machine-dependent: the container's MATLAB runtime rounds differently on some CPUs. A GitHub-hosted
+# runner has given the oblique case's χ up to 3e-8 ppm (relative L2 1.1e-7, float32 rounding) from the
+# committed .bin, with identical inputs. Far inside tests/amppe_qsmci.rs's limits.
+#
 # Needs numpy, nibabel and podman or docker (CONTAINER_ENGINE overrides; the regenerate-fixtures
 # workflow runs it in Actions). Layout (little-endian), per case in CASES order: the mask over the
 # grid (u8, column-major), the local field at the mask voxels (f64, ppm; zero outside, as the
