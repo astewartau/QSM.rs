@@ -37,9 +37,10 @@
 //!
 //! `tests/mritools_parity.rs` against MriResearchTools 771eadf in the verified QSM-CI `julia-qsm`
 //! image (QSMxT/QSM-CI#299), measured 2026-10-30, on a 20×18×14 phantom at 1×1×1.5 mm:
-//! [`robust_mask`] is `robustmask` to the voxel. **Known gap** (astewartau/QSM.rs#319):
-//! [`makehomogeneous`] (σ 7 mm, `nbox` 15) is 3.3 % NRMSE in the mask from `makehomogeneous`
-//! (the ratio of the two between 0.85 and 1.05).
+//! [`robust_mask`] is `robustmask` to the voxel, and [`makehomogeneous`] (σ 7 mm, `nbox` 15) is
+//! `makehomogeneous` bit for bit. It was 3.3 % NRMSE in the mask (the ratio of the two between
+//! 0.85 and 1.05) before three port errors were fixed (astewartau/QSM.rs#319); see
+//! [`get_sensitivity`].
 
 /// Parameters for inhomogeneity correction (bias field removal).
 ///
@@ -117,7 +118,8 @@ fn get_box_sizes(sigma: f64, n: usize) -> Vec<usize> {
 
     // wl = next lower odd integer
     let wl_float = wideal - (wideal + 1.0) % 2.0;
-    let wl = wl_float.round() as usize;
+    // Julia's `round` (and `round(Int, …)`) rounds ties to even
+    let wl = wl_float.round_ties_even() as usize;
     let wl = if wl.is_multiple_of(2) { wl + 1 } else { wl }; // ensure odd
     let wu = wl + 2;
 
@@ -126,7 +128,7 @@ fn get_box_sizes(sigma: f64, n: usize) -> Vec<usize> {
     let n_f = n as f64;
     let mideal = (12.0 * sigma * sigma - n_f * wl_f * wl_f - 4.0 * n_f * wl_f - 3.0 * n_f)
                  / (-4.0 * wl_f - 4.0);
-    let m = mideal.round() as usize;
+    let m = mideal.round_ties_even() as usize;
 
     (0..n).map(|i| if i < m { wl } else { wu }).collect()
 }
@@ -195,7 +197,10 @@ fn box_filter_line(line: &mut [f64], boxsize: usize) {
 }
 
 /// 1D weighted box filter on a line (in-place), matching Julia's weighted boxfilterline!
-fn box_filter_line_weighted(line: &mut [f64], weight: &mut [f64], boxsize: usize) {
+///
+/// The weights are Float32 there (`gaussiansmooth3d!` converts them), so `w^2` and `w − wold`
+/// are computed in f32 and each updated weight is rounded to f32; the sums are f64.
+fn box_filter_line_weighted(line: &mut [f64], weight: &mut [f32], boxsize: usize) {
     if boxsize < 3 || line.len() < boxsize {
         return;
     }
@@ -204,7 +209,7 @@ fn box_filter_line_weighted(line: &mut [f64], weight: &mut [f64], boxsize: usize
     let r = boxsize / 2;
 
     let mut lq: VecDeque<f64> = VecDeque::with_capacity(boxsize);
-    let mut wq: VecDeque<f64> = VecDeque::with_capacity(boxsize);
+    let mut wq: VecDeque<f32> = VecDeque::with_capacity(boxsize);
 
     // Initialize with first boxsize values
     let mut sum = f64::EPSILON; // slightly bigger than 0 to avoid division by 0
@@ -212,9 +217,9 @@ fn box_filter_line_weighted(line: &mut [f64], weight: &mut [f64], boxsize: usize
     let mut wsmooth = f64::EPSILON;
 
     for i in 0..boxsize {
-        sum += line[i] * weight[i];
-        wsum += weight[i];
-        wsmooth += weight[i] * weight[i];
+        sum += line[i] * weight[i] as f64;
+        wsum += weight[i] as f64;
+        wsmooth += (weight[i] * weight[i]) as f64;
         lq.push_back(line[i]);
         wq.push_back(weight[i]);
     }
@@ -228,70 +233,69 @@ fn box_filter_line_weighted(line: &mut [f64], weight: &mut [f64], boxsize: usize
         wq.push_back(w);
         lq.push_back(l);
 
-        sum += l * w - lold * wold;
-        wsum += w - wold;
+        sum += l * w as f64 - lold * wold as f64;
+        wsum += (w - wold) as f64;
         line[i] = sum / wsum;
-        wsmooth += w * w - wold * wold;
-        weight[i] = wsmooth / wsum;
+        wsmooth += (w * w - wold * wold) as f64;
+        weight[i] = (wsmooth / wsum) as f32;
     }
 }
 
-/// 1D box filter with NaN handling (for masked smoothing)
-/// Matches Julia's nanboxfilterline!
-fn nan_box_filter_line(line: &mut [f64], boxsize: usize) {
-    if boxsize < 3 || line.len() < boxsize {
-        return;
-    }
-
-    let n = line.len();
-    let r = boxsize / 2;
-    let maxfills = r;
-
-    // Create padded buffer with NaN padding
-    let mut orig = vec![f64::NAN; n + boxsize - 1];
-    orig[r..r + n].copy_from_slice(line);
-
-    // Initial sum of first window (excluding NaN)
-    let mut lsum = 0.0;
-    for i in (r + 1)..=(2 * r) {
-        if !orig[i].is_nan() {
-            lsum += orig[i];
-        }
-    }
-
-    let mut nfills = 0usize;
-    let mut nvalids = 0usize;
-
+/// Running-average line filter that treats `NaN` as "no data": the box only starts once it
+/// holds `boxsize` valid samples, and when it runs into `NaN` it extrapolates linearly for up
+/// to `boxsize/2` samples ("fill" mode) before waiting for data again. Positions the filter
+/// never reaches keep their input value. Port of `nanboxfilterline!` (MriResearchTools.jl);
+/// `orig` is scratch space that is resized as needed.
+///
+/// [`makehomogeneous`]'s masked smoothing had its own copy until 2026-10-30, which wrote each
+/// fill-mode extrapolation one voxel further than the original (`i + r < n` with a 0-based `i`,
+/// so the last voxel of a line was overwritten) and ignored the original's stop when the running
+/// sum turns NaN. The first alone put [`makehomogeneous`] 4.0 % NRMSE from MriResearchTools (see
+/// [`get_sensitivity`]). This is the port MCPC-3D-S already used (exact in the ROMEO fixture).
+pub fn nan_box_filter_line(line: &mut [f64], boxsize: usize, orig: &mut Vec<f64>) {
     #[derive(PartialEq, Clone, Copy)]
     enum Mode { Nan, Normal, Fill }
-    let mut mode = Mode::Nan;
+    let n = line.len();
+    let r = boxsize / 2;
+    if n == 0 || boxsize < 3 {
+        return;
+    }
+    let maxfills = r;
+    orig.clear();
+    orig.resize(n + boxsize - 1, f64::NAN);
+    orig[r..r + n].copy_from_slice(line);
 
-    for i in 0..n {
-        // Check for mode change
+    let mut lsum: f64 = orig[r..2 * r].iter().sum();
+    if lsum.is_nan() {
+        lsum = 0.0;
+    }
+    let (mut nfills, mut nvalids) = (0usize, 0usize);
+    let mut mode = Mode::Nan;
+    let bs = boxsize as f64;
+
+    // `i` is the 1-based output index, as in the reference; orig[k] here is orig[k+1] there.
+    for i in 1..=n {
+        if lsum.is_nan() {
+            break;
+        }
+        let lead = orig[i - 1 + 2 * r];
         match mode {
             Mode::Normal => {
-                if orig[i + 2 * r].is_nan() {
+                if lead.is_nan() {
                     mode = Mode::Fill;
                 }
             }
             Mode::Nan => {
-                if orig[i + 2 * r].is_nan() {
-                    nvalids = 0;
-                } else {
-                    nvalids += 1;
-                }
+                if lead.is_nan() { nvalids = 0; } else { nvalids += 1; }
                 if nvalids == boxsize {
                     mode = Mode::Normal;
-                    lsum = 0.0;
-                    for j in i..=(i + 2 * r) {
-                        lsum += orig[j];
-                    }
-                    line[i] = lsum / boxsize as f64;
+                    lsum = orig[i - 1..i + 2 * r].iter().sum();
+                    line[i - 1] = lsum / bs;
                     continue;
                 }
             }
             Mode::Fill => {
-                if orig[i + 2 * r].is_nan() {
+                if lead.is_nan() {
                     nfills += 1;
                     if nfills > maxfills {
                         mode = Mode::Nan;
@@ -305,36 +309,25 @@ fn nan_box_filter_line(line: &mut [f64], boxsize: usize) {
                 }
             }
         }
-
-        // Perform operation
         match mode {
             Mode::Normal => {
-                if i > 0 {
-                    lsum += orig[i + 2 * r] - orig[i - 1];
-                }
-                line[i] = lsum / boxsize as f64;
+                let trailing = if i >= 2 { orig[i - 2] } else { 0.0 };
+                lsum += orig[i - 1 + 2 * r] - trailing;
+                line[i - 1] = lsum / bs;
             }
             Mode::Fill => {
-                if i > 0 {
-                    lsum -= orig[i - 1];
-                }
-                line[i] = (lsum - orig[i]) / (boxsize - 2) as f64;
-
-                // Extrapolate the NaN value
-                let extrapolated = if i >= r {
-                    2.0 * line[i] - line[i - r]
-                } else {
-                    line[i]
-                };
-                orig[i + 2 * r] = extrapolated;
+                let trailing = if i >= 2 { orig[i - 2] } else { 0.0 };
+                lsum -= trailing;
+                line[i - 1] = (lsum - orig[i - 1]) / (bs - 2.0);
+                let prev = if i > r { line[i - 1 - r] } else { line[i - 1] };
+                let extrapolated = 2.0 * line[i - 1] - prev;
+                orig[i - 1 + 2 * r] = extrapolated;
                 if i + r < n {
-                    line[i + r] = extrapolated;
+                    line[i - 1 + r] = extrapolated;
                 }
-                lsum += orig[i + 2 * r];
+                lsum += extrapolated;
             }
-            Mode::Nan => {
-                // Keep as NaN or 0
-            }
+            Mode::Nan => {}
         }
     }
 }
@@ -347,14 +340,16 @@ fn nan_box_filter_line(line: &mut [f64], boxsize: usize) {
 /// - data: input 3D data (will be copied)
 /// - sigma: sigma values for each dimension [sx, sy, sz]
 /// - mask: optional mask (None = no masking)
-/// - weight: optional weights (None = no weighting)
+/// - weight: optional weights (None = no weighting). As in MriResearchTools, they are copied to
+///   f32 (`Float32.(weight)`), zeros are replaced by the smallest non-zero weight, and the
+///   caller's array is left unchanged.
 /// - nbox: number of box filter passes (default 3, or 4 with mask)
 /// - nx, ny, nz: dimensions
 pub fn gaussian_smooth_3d(
     data: &[f64],
     sigma: [f64; 3],
     mask: Option<&[u8]>,
-    mut weight: Option<&mut [f64]>,
+    weight: Option<&[f64]>,
     nbox: usize,
     grid: &Grid,
 ) -> Vec<f64> {
@@ -363,9 +358,18 @@ pub fn gaussian_smooth_3d(
     if let Some(m) = mask {
         check_volume("gaussian_smooth_3d: mask", m.len(), grid);
     }
-    if let Some(w) = weight.as_deref() {
+    if let Some(w) = weight {
         check_volume("gaussian_smooth_3d: weight", w.len(), grid);
     }
+    // `weight = Float32.(weight); weight[weight .== 0] .= minimum(weight[weight .!= 0])`
+    let mut weight: Option<Vec<f32>> = weight.map(|w| {
+        let mut w: Vec<f32> = w.iter().map(|&v| v as f32).collect();
+        let min_nz = w.iter().copied().filter(|&v| v != 0.0).fold(f32::INFINITY, f32::min);
+        for v in w.iter_mut().filter(|v| **v == 0.0) {
+            *v = min_nz;
+        }
+        w
+    });
     let mut result: Vec<f64> = data.to_vec();
 
     // Calculate box sizes for each dimension
@@ -385,6 +389,7 @@ pub fn gaussian_smooth_3d(
     }
 
     // Apply box filters for each pass and dimension
+    let mut scratch: Vec<f64> = Vec::new();
     for ibox in 0..nbox {
         // X direction
         let bsize_x = boxsizes[0][ibox];
@@ -400,9 +405,9 @@ pub fn gaussian_smooth_3d(
                     }).collect();
 
                     if mask.is_some() {
-                        nan_box_filter_line(&mut line, bsize_x);
+                        nan_box_filter_line(&mut line, bsize_x, &mut scratch);
                     } else if let Some(ref mut w) = weight.as_deref_mut() {
-                        let mut wline: Vec<f64> = (0..nx).map(|i| {
+                        let mut wline: Vec<f32> = (0..nx).map(|i| {
                             let idx = if reverse { nx - 1 - i } else { i };
                             w[idx3d(idx, j, k, nx, ny)]
                         }).collect();
@@ -436,9 +441,9 @@ pub fn gaussian_smooth_3d(
                     }).collect();
 
                     if mask.is_some() {
-                        nan_box_filter_line(&mut line, bsize_y);
+                        nan_box_filter_line(&mut line, bsize_y, &mut scratch);
                     } else if let Some(ref mut w) = weight.as_deref_mut() {
-                        let mut wline: Vec<f64> = (0..ny).map(|j| {
+                        let mut wline: Vec<f32> = (0..ny).map(|j| {
                             let idx = if reverse { ny - 1 - j } else { j };
                             w[idx3d(i, idx, k, nx, ny)]
                         }).collect();
@@ -472,9 +477,9 @@ pub fn gaussian_smooth_3d(
                     }).collect();
 
                     if mask.is_some() {
-                        nan_box_filter_line(&mut line, bsize_z);
+                        nan_box_filter_line(&mut line, bsize_z, &mut scratch);
                     } else if let Some(ref mut w) = weight.as_deref_mut() {
-                        let mut wline: Vec<f64> = (0..nz).map(|k| {
+                        let mut wline: Vec<f32> = (0..nz).map(|k| {
                             let idx = if reverse { nz - 1 - k } else { k };
                             w[idx3d(i, j, idx, nx, ny)]
                         }).collect();
@@ -666,17 +671,26 @@ fn mrt_sample(x: &[f64]) -> Vec<f64> {
     out
 }
 
-/// `Statistics.quantile(v, p)` (type 7, the default) of an ascending `sorted`.
+/// `Statistics.quantile(v, p)` (type 7, the default) of an ascending `sorted`, in Julia 1.10's
+/// arithmetic (`Statistics._quantile`, `stdlib/v1.10/Statistics/src/Statistics.jl:1000-1031`):
+/// `aleph = n·p + (1 − p)`, `j = clamp(trunc(aleph), 1, n − 1)` (1-based), `γ = aleph − j`, then
+/// `a + γ(b − a)` when `a ≈ b` (`isapprox`, rtol √eps) and `(1 − γ)a + γb` otherwise.
 fn quantile_sorted(sorted: &[f64], p: f64) -> f64 {
     let n = sorted.len();
     if n == 1 {
         return sorted[0];
     }
-    let aleph = (n - 1) as f64 * p;
-    let j = (aleph.floor() as usize).min(n - 2);
-    let gamma = aleph - j as f64;
-    let (a, b) = (sorted[j], sorted[j + 1]);
-    a + gamma * (b - a)
+    let m = 1.0 - p; // alpha + p (1 − alpha − beta) with alpha = beta = 1, exactly
+    let aleph = n as f64 * p + m;
+    let j = (aleph.trunc() as usize).clamp(1, n - 1);
+    let gamma = (aleph - j as f64).clamp(0.0, 1.0);
+    let (a, b) = (sorted[j - 1], sorted[j]);
+    let approx = a == b || (a - b).abs() <= f64::EPSILON.sqrt() * a.abs().max(b.abs());
+    if a.is_finite() && b.is_finite() && approx {
+        a + gamma * (b - a)
+    } else {
+        (1.0 - gamma) * a + gamma * b
+    }
 }
 
 /// Create robust mask from magnitude using quantile-based thresholding: MriResearchTools.jl's
@@ -752,6 +766,12 @@ pub fn robust_mask(mag: &[f64], grid: &Grid) -> Vec<u8> {
 ///
 /// Divides the image into nbox^3 boxes and identifies voxels that
 /// consistently appear in the high-intensity range across multiple boxes.
+///
+/// MriResearchTools' `boxsegment` and `threshold` (`src/intensitycorrection.jl`, 771eadf): box
+/// centres every `boxshift = ceil(N / nbox)` voxels from the first, each box
+/// `max(1, c − boxshift):min(c + boxshift, N)` with both ends included, a voxel counts in a box
+/// when it is strictly within ±10 % of the box's `quantile(image[mask], 0.9)`, and tissue is what
+/// at least two boxes count.
 fn box_segment(
     image: &[f64],
     mask: &[u8],
@@ -773,13 +793,14 @@ fn box_segment(
         while cy < ny {
             let mut cx = 0;
             while cx < nx {
-                // Calculate box bounds (2x box_shift around center)
+                // Box bounds: `max(1, c − boxshift):min(c + boxshift, N)`, both ends included
+                // (MriResearchTools `boxsegment`, `src/intensitycorrection.jl`, 771eadf).
                 let x_start = cx.saturating_sub(box_shift_x);
-                let x_end = (cx + box_shift_x).min(nx);
+                let x_end = (cx + box_shift_x + 1).min(nx);
                 let y_start = cy.saturating_sub(box_shift_y);
-                let y_end = (cy + box_shift_y).min(ny);
+                let y_end = (cy + box_shift_y + 1).min(ny);
                 let z_start = cz.saturating_sub(box_shift_z);
-                let z_end = (cz + box_shift_z).min(nz);
+                let z_end = (cz + box_shift_z + 1).min(nz);
 
                 // Collect values in this box
                 let mut box_vals: Vec<f64> = Vec::new();
@@ -799,10 +820,9 @@ fn box_segment(
                     continue;
                 }
 
-                // Sort and find 90th percentile
+                // `threshold`: `quantile(image[mask], 0.9)` (Statistics, type 7)
                 box_vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-                let q90_idx = ((0.9 * box_vals.len() as f64) as usize).min(box_vals.len() - 1);
-                let q90 = box_vals[q90_idx];
+                let q90 = quantile_sorted(&box_vals, 0.9);
 
                 // Define tissue range around 90th percentile
                 let width = 0.1;
@@ -867,13 +887,13 @@ fn fill_and_smooth(
            lowpass[i].is_nan() ||
            lowpass[i] > 10.0 * stable_mean {
             lowpass[i] = 3.0 * stable_mean;
-            weight[i] = 0.2; // Filled holes get less weight
+            weight[i] = 1.2 - 1.0; // `1.2 .- lowpassmask`: filled holes get less weight
         }
     }
 
     // Apply weighted smoothing
     let nbox = 3; // default for non-masked smoothing
-    let smoothed = gaussian_smooth_3d(lowpass, sigma2, None, Some(&mut weight), nbox, grid);
+    let smoothed = gaussian_smooth_3d(lowpass, sigma2, None, Some(&weight), nbox, grid);
     lowpass.copy_from_slice(&smoothed);
 }
 
@@ -885,6 +905,21 @@ fn fill_and_smooth(
 ///
 /// This estimates the RF receive field inhomogeneity (sensitivity map)
 /// that can be divided out to correct the image.
+///
+/// MriResearchTools' `getsensitivity` (771eadf). **Agreement:** bit-identical to
+/// MriResearchTools' `makehomogeneous(mag; sigma = 7 mm in voxels, nbox = 15)` on the 20×18×14,
+/// 1×1×1.5 mm phantom of `tests/mritools_parity.rs` (verified QSM-CI `julia-qsm` image,
+/// QSMxT/QSM-CI#299; measured 2026-10-30), where it was 3.3 % NRMSE in the mask before three
+/// port errors were fixed (astewartau/QSM.rs#319). Each measured alone, with the other two fixed:
+/// - the masked smoothing's `nanboxfilterline!` wrote each fill-mode extrapolation onto the last
+///   voxel of the line as well (an off-by-one from Julia's 1-based index): 4.0 %;
+/// - [`box_segment`]'s boxes stopped one voxel short of `c + boxshift`, which the original
+///   includes: 1.05 %;
+/// - its 90th percentile was a nearest-rank index, not `Statistics.quantile` (type 7): 0.35 %.
+///
+/// Also now as the original, at rounding level: Julia's ties-to-even `round` in the box widths,
+/// and the Float32 weights of `fillandsmooth!`'s weighted smoothing (`gaussiansmooth3d!` converts
+/// them). These are port fixes, not tuning: the algorithm and its defaults are unchanged.
 ///
 /// # Errors
 /// If `nbox` (boxes per dimension for the tissue segmentation) is 0.
@@ -1273,7 +1308,7 @@ mod tests {
     fn test_nan_box_filter_line_too_small() {
         let mut line = vec![1.0, 2.0];
         let original = line.clone();
-        nan_box_filter_line(&mut line, 5);
+        nan_box_filter_line(&mut line, 5, &mut Vec::new());
         assert_eq!(line, original);
     }
 
@@ -1281,7 +1316,7 @@ mod tests {
     fn test_nan_box_filter_line_no_nans() {
         // All valid data => the nan filter processes it and produces finite results
         let mut line = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0];
-        nan_box_filter_line(&mut line, 3);
+        nan_box_filter_line(&mut line, 3, &mut Vec::new());
         // All values should remain finite
         for &v in &line {
             assert!(v.is_finite(), "All values should be finite after nan box filter");
@@ -1295,7 +1330,7 @@ mod tests {
     fn test_nan_box_filter_line_with_nans() {
         // Data with NaN gaps
         let mut line = vec![5.0, 5.0, 5.0, f64::NAN, f64::NAN, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0];
-        nan_box_filter_line(&mut line, 3);
+        nan_box_filter_line(&mut line, 3, &mut Vec::new());
         // Non-NaN regions should still be mostly finite
         let finite_count = line.iter().filter(|v| v.is_finite()).count();
         assert!(finite_count >= 6, "Most values should be finite, got {}", finite_count);
@@ -1308,7 +1343,7 @@ mod tests {
         for i in 2..10 {
             line[i] = f64::NAN;
         }
-        nan_box_filter_line(&mut line, 3);
+        nan_box_filter_line(&mut line, 3, &mut Vec::new());
         // The function should not panic and edge values should remain finite
         assert!(line[0].is_finite() || line[0].is_nan());
     }
@@ -1352,9 +1387,9 @@ mod tests {
     fn test_gaussian_smooth_3d_with_weights() {
         let n = 8;
         let data = vec![10.0; n * n * n];
-        let mut weight = vec![1.0; n * n * n];
+        let weight = vec![1.0; n * n * n];
         let result = gaussian_smooth_3d(
-            &data, [1.5, 1.5, 1.5], None, Some(&mut weight), 3, &grid(n, n, n),
+            &data, [1.5, 1.5, 1.5], None, Some(&weight), 3, &grid(n, n, n),
         );
         assert_eq!(result.len(), n * n * n);
         for &v in &result {
@@ -1713,8 +1748,8 @@ mod tests {
     #[should_panic(expected = "gaussian_smooth_3d: weight has 216 voxels but the grid is 8x8x8 (512 voxels)")]
     fn gaussian_smooth_3d_refuses_weight_not_matching_grid() {
         let data = vec![1.0; 8 * 8 * 8];
-        let mut weight = vec![1.0; 6 * 6 * 6];
-        gaussian_smooth_3d(&data, [1.5, 1.5, 1.5], None, Some(&mut weight), 3, &grid(8, 8, 8));
+        let weight = vec![1.0; 6 * 6 * 6];
+        gaussian_smooth_3d(&data, [1.5, 1.5, 1.5], None, Some(&weight), 3, &grid(8, 8, 8));
     }
 
     #[test]
