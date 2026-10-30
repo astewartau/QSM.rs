@@ -232,17 +232,95 @@ fn box_filter_line_weighted(line: &mut [f64], weight: &mut [f32], boxsize: usize
     }
 }
 
-/// 1D box filter with NaN handling (for masked smoothing): MriResearchTools' `nanboxfilterline!`,
-/// the same port [`mcpc3ds_combine`](crate::utils::multi_echo::mcpc3ds_combine) uses
-/// ([`crate::utils::multi_echo::nan_box_filter_line`]).
+/// Running-average line filter that treats `NaN` as "no data": the box only starts once it
+/// holds `boxsize` valid samples, and when it runs into `NaN` it extrapolates linearly for up
+/// to `boxsize/2` samples ("fill" mode) before waiting for data again. Positions the filter
+/// never reaches keep their input value. Port of `nanboxfilterline!` (MriResearchTools.jl);
+/// `orig` is scratch space that is resized as needed.
 ///
-/// This module had its own copy until 2026-10-30, which wrote each fill-mode extrapolation one
-/// voxel further than the original (`i + r < n` with a 0-based `i`, so the last voxel of a line
-/// was overwritten) and ignored the original's stop when the running sum turns NaN. The first
-/// alone put [`makehomogeneous`] 4.0 % NRMSE from MriResearchTools (module docs).
-fn nan_box_filter_line(line: &mut [f64], boxsize: usize) {
-    let mut scratch = Vec::new();
-    crate::utils::multi_echo::nan_box_filter_line(line, boxsize, &mut scratch);
+/// [`makehomogeneous`]'s masked smoothing had its own copy until 2026-10-30, which wrote each
+/// fill-mode extrapolation one voxel further than the original (`i + r < n` with a 0-based `i`,
+/// so the last voxel of a line was overwritten) and ignored the original's stop when the running
+/// sum turns NaN. The first alone put [`makehomogeneous`] 4.0 % NRMSE from MriResearchTools (see
+/// [`get_sensitivity`]). This is the port MCPC-3D-S already used (exact in the ROMEO fixture).
+pub fn nan_box_filter_line(line: &mut [f64], boxsize: usize, orig: &mut Vec<f64>) {
+    #[derive(PartialEq, Clone, Copy)]
+    enum Mode { Nan, Normal, Fill }
+    let n = line.len();
+    let r = boxsize / 2;
+    if n == 0 || boxsize < 3 {
+        return;
+    }
+    let maxfills = r;
+    orig.clear();
+    orig.resize(n + boxsize - 1, f64::NAN);
+    orig[r..r + n].copy_from_slice(line);
+
+    let mut lsum: f64 = orig[r..2 * r].iter().sum();
+    if lsum.is_nan() {
+        lsum = 0.0;
+    }
+    let (mut nfills, mut nvalids) = (0usize, 0usize);
+    let mut mode = Mode::Nan;
+    let bs = boxsize as f64;
+
+    // `i` is the 1-based output index, as in the reference; orig[k] here is orig[k+1] there.
+    for i in 1..=n {
+        if lsum.is_nan() {
+            break;
+        }
+        let lead = orig[i - 1 + 2 * r];
+        match mode {
+            Mode::Normal => {
+                if lead.is_nan() {
+                    mode = Mode::Fill;
+                }
+            }
+            Mode::Nan => {
+                if lead.is_nan() { nvalids = 0; } else { nvalids += 1; }
+                if nvalids == boxsize {
+                    mode = Mode::Normal;
+                    lsum = orig[i - 1..i + 2 * r].iter().sum();
+                    line[i - 1] = lsum / bs;
+                    continue;
+                }
+            }
+            Mode::Fill => {
+                if lead.is_nan() {
+                    nfills += 1;
+                    if nfills > maxfills {
+                        mode = Mode::Nan;
+                        nfills = 0;
+                        lsum = 0.0;
+                        nvalids = 0;
+                    }
+                } else {
+                    mode = Mode::Normal;
+                    nfills = 0;
+                }
+            }
+        }
+        match mode {
+            Mode::Normal => {
+                let trailing = if i >= 2 { orig[i - 2] } else { 0.0 };
+                lsum += orig[i - 1 + 2 * r] - trailing;
+                line[i - 1] = lsum / bs;
+            }
+            Mode::Fill => {
+                let trailing = if i >= 2 { orig[i - 2] } else { 0.0 };
+                lsum -= trailing;
+                line[i - 1] = (lsum - orig[i - 1]) / (bs - 2.0);
+                let prev = if i > r { line[i - 1 - r] } else { line[i - 1] };
+                let extrapolated = 2.0 * line[i - 1] - prev;
+                orig[i - 1 + 2 * r] = extrapolated;
+                if i + r < n {
+                    line[i - 1 + r] = extrapolated;
+                }
+                lsum += extrapolated;
+            }
+            Mode::Nan => {}
+        }
+    }
 }
 
 /// 3D Gaussian smoothing using box filter approximation
@@ -302,6 +380,7 @@ pub fn gaussian_smooth_3d(
     }
 
     // Apply box filters for each pass and dimension
+    let mut scratch: Vec<f64> = Vec::new();
     for ibox in 0..nbox {
         // X direction
         let bsize_x = boxsizes[0][ibox];
@@ -317,7 +396,7 @@ pub fn gaussian_smooth_3d(
                     }).collect();
 
                     if mask.is_some() {
-                        nan_box_filter_line(&mut line, bsize_x);
+                        nan_box_filter_line(&mut line, bsize_x, &mut scratch);
                     } else if let Some(ref mut w) = weight.as_deref_mut() {
                         let mut wline: Vec<f32> = (0..nx).map(|i| {
                             let idx = if reverse { nx - 1 - i } else { i };
@@ -353,7 +432,7 @@ pub fn gaussian_smooth_3d(
                     }).collect();
 
                     if mask.is_some() {
-                        nan_box_filter_line(&mut line, bsize_y);
+                        nan_box_filter_line(&mut line, bsize_y, &mut scratch);
                     } else if let Some(ref mut w) = weight.as_deref_mut() {
                         let mut wline: Vec<f32> = (0..ny).map(|j| {
                             let idx = if reverse { ny - 1 - j } else { j };
@@ -389,7 +468,7 @@ pub fn gaussian_smooth_3d(
                     }).collect();
 
                     if mask.is_some() {
-                        nan_box_filter_line(&mut line, bsize_z);
+                        nan_box_filter_line(&mut line, bsize_z, &mut scratch);
                     } else if let Some(ref mut w) = weight.as_deref_mut() {
                         let mut wline: Vec<f32> = (0..nz).map(|k| {
                             let idx = if reverse { nz - 1 - k } else { k };
@@ -1220,7 +1299,7 @@ mod tests {
     fn test_nan_box_filter_line_too_small() {
         let mut line = vec![1.0, 2.0];
         let original = line.clone();
-        nan_box_filter_line(&mut line, 5);
+        nan_box_filter_line(&mut line, 5, &mut Vec::new());
         assert_eq!(line, original);
     }
 
@@ -1228,7 +1307,7 @@ mod tests {
     fn test_nan_box_filter_line_no_nans() {
         // All valid data => the nan filter processes it and produces finite results
         let mut line = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0];
-        nan_box_filter_line(&mut line, 3);
+        nan_box_filter_line(&mut line, 3, &mut Vec::new());
         // All values should remain finite
         for &v in &line {
             assert!(v.is_finite(), "All values should be finite after nan box filter");
@@ -1242,7 +1321,7 @@ mod tests {
     fn test_nan_box_filter_line_with_nans() {
         // Data with NaN gaps
         let mut line = vec![5.0, 5.0, 5.0, f64::NAN, f64::NAN, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0];
-        nan_box_filter_line(&mut line, 3);
+        nan_box_filter_line(&mut line, 3, &mut Vec::new());
         // Non-NaN regions should still be mostly finite
         let finite_count = line.iter().filter(|v| v.is_finite()).count();
         assert!(finite_count >= 6, "Most values should be finite, got {}", finite_count);
@@ -1255,7 +1334,7 @@ mod tests {
         for i in 2..10 {
             line[i] = f64::NAN;
         }
-        nan_box_filter_line(&mut line, 3);
+        nan_box_filter_line(&mut line, 3, &mut Vec::new());
         // The function should not panic and edge values should remain finite
         assert!(line[0].is_finite() || line[0].is_nan());
     }
