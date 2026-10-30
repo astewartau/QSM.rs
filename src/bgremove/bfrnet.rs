@@ -27,6 +27,15 @@
 //!   image resolutions may need retraining" (Discussion). The authors' `BFRnet_demo.m` does not
 //!   resample.
 //!
+//! # Agreement with the original
+//!
+//! `tests/models_onnx/field.rs` runs it on a 36×32×28 box of in-vivo data (1 mm, 2.89 T, across the
+//! brain's edge) against its original's verified QSM-CI entry, BFRnet (`bfrnet`) (QSMxT/QSM-CI#316;
+//! the fixture is regenerated in Actions by `tests/data/dl_field_qsmci_small.py`): NRMSE 2.1e-4 %,
+//! max |Δ| 1.6e-7 ppm (measured 2026-10-30): float32 rounding. The box is one of the original
+//! wrapper's 128³ patches, so it runs whole there, as [`bfrnet`] does here; on volumes larger than
+//! 128³ the wrapper tiles and this does not (0.56 % apart on QSM-CI's 128×160×96 case).
+//!
 //! # Pipeline rules
 //!
 //! The facts above that a configuration can depart from are published as rules in

@@ -5,13 +5,10 @@
 //! (`.github/workflows/regenerate-fixtures.yml`): a 24x24x24 synthetic case (χ_total, R2′, mask)
 //! and WaveSep's χ+ and |χ−| (float32) at its defaults, as QSM-CI's `wavesep` submission runs it.
 //!
-//! **Known gap** (astewartau/QSM.rs#327): both stop after the same 13 iterations, but differ by
-//! ~10 % NRMSE. The wavelet step is the cause: on a smooth 32³ field, QSM.rs's db4 periodized
-//! soft-threshold proximal step differs from PyWavelets' (`wavedecn`/`waverecn`,
-//! `mode="periodization"`, the same level 2) by 3.4 % relative, so the two bases are not the same.
-//! On the larger synthetic case of QSMxT/QSM-CI#302 the gap was 0.11 % (χ+) and 1.08 % (χ−). This
-//! test records the measured distance so that a change shows, and is to be tightened once the
-//! transform matches PyWavelets'.
+//! Both stop after the same 13 iterations and agree to the fixture's float32 rounding. Until the
+//! wavelet step used PyWavelets' periodization (astewartau/QSM.rs#327; see `separation::wavesep`)
+//! they were ~10 % NRMSE apart here, and 0.11 % (χ+) / 1.08 % (χ−) on QSMxT/QSM-CI#302's larger
+//! synthetic case.
 
 use qsm_core::separation::{wavesep, WaveSepParams};
 use qsm_core::Grid;
@@ -48,8 +45,9 @@ fn wavesep_matches_wavesep() {
     let dia: Vec<f64> = inside.iter().map(|&i| -maps.1[i]).collect();
     let nrmse = |a: &[f64], b: &[f64]| (a.iter().zip(b).map(|(x, y)| (x - y).powi(2)).sum::<f64>() / b.iter().map(|y| y * y).sum::<f64>()).sqrt();
     let (np, nd) = (nrmse(&para, &ref_para), nrmse(&dia, &ref_dia));
-    println!("vs WaveSep: χ+ NRMSE {:.4} %, |χ−| NRMSE {:.4} %", 100.0 * np, 100.0 * nd);
-    // Measured 2026-10-30: χ+ 10.16 %, |χ−| 10.04 %, 13 iterations each (the gap above).
+    println!("vs WaveSep: χ+ NRMSE {np:.2e}, |χ−| NRMSE {nd:.2e}");
+    // Measured 2026-10-30: χ+ 2.8e-8, |χ−| 2.5e-8 (float32), 13 iterations each; with MATLAB's
+    // wavelet alignment it was 10.16 % / 10.04 %.
     assert_eq!(iters, 13, "iterations");
-    assert!(np < 0.11 && nd < 0.11, "χ+ {np}, χ− {nd}");
+    assert!(np < 1e-6 && nd < 1e-6, "χ+ {np}, χ− {nd}");
 }
