@@ -3,15 +3,16 @@ name: Regenerate fixtures
 # Regenerates parity fixtures in tests/data from the original implementations' verified QSM-CI
 # containers (astewartau/QSM.rs#317), and checks that they reproduce the committed files.
 #
-# A fixture `tests/data/<name>.bin` can be regenerated here when it has a Python generator
-# `tests/data/<name>.py` that builds the inputs, runs the container (pinned by digest in the
-# script) itself and writes the .bin: `python3 tests/data/<name>.py <out.bin>`. A run fails if the
-# result differs from the committed .bin, and uploads it either way (artifact `fixture-<name>`), so
-# a fixture that should change (a new container digest, new cases) is replaced from that artifact.
-# A generator whose header has a line starting `# machine-dependent:` makes an original whose
-# output rounds differently on different CPUs (the line says by how much); for those a mismatch is
-# a warning. Generators in other forms (`.jl` run inside the Julia image, `.m` that need licensed
-# MATLAB) say how to run them in their header.
+# A fixture `tests/data/<name>.bin` can be regenerated here when it has a generator next to it:
+# - `tests/data/<name>.py`, which builds the inputs, runs the container (pinned by digest in the
+#   script) itself and writes the .bin: `python3 tests/data/<name>.py <out.bin>`;
+# - `tests/data/<name>.jl`, run inside the verified Julia image by the `podman run ...` command in
+#   its header (run here with docker, writing the .bin elsewhere).
+# A run fails if the result differs from the committed .bin, and uploads it either way (artifact
+# `fixture-<name>`), so a fixture that should change (a new container digest, new cases) is
+# replaced from that artifact. A generator whose header has a line starting `# machine-dependent:`
+# makes an original whose output rounds differently on different CPUs (the line says by how
+# much); for those a mismatch is a warning. `.m` generators need licensed MATLAB and are not run.
 #
 # Runs on demand for one fixture, and on pull requests for every generator they add or change.
 
@@ -19,12 +20,13 @@ on:
   workflow_dispatch:
     inputs:
       fixture:
-        description: "Fixture name: tests/data/<name>.py and .bin (e.g. star_sti_qsmci_small)"
+        description: "Fixture name: tests/data/<name>.py or .jl, and .bin (e.g. star_sti_qsmci_small)"
         type: string
         required: true
   pull_request:
     paths:
       - "tests/data/*.py"
+      - "tests/data/*.jl"
       - ".github/workflows/regenerate-fixtures.yml"
 
 defaults:
@@ -52,12 +54,13 @@ jobs:
           if [ -n "$INPUT" ]; then
             names="$INPUT"
           else
-            # Generators the pull request adds or changes (a .py whose .bin is beside it).
-            names=$(git diff --name-only --diff-filter=AM "$BASE" HEAD -- 'tests/data/*.py' | sed 's|tests/data/||; s|\.py$||')
+            # Generators the pull request adds or changes.
+            names=$(git diff --name-only --diff-filter=AM "$BASE" HEAD -- 'tests/data/*.py' 'tests/data/*.jl' | sed 's|tests/data/||; s|\.[a-z]*$||' | sort -u)
           fi
           json=$(for n in $names; do
             [[ "$n" =~ ^[A-Za-z0-9_]+$ ]] || { echo "::error::bad fixture name '$n'" >&2; exit 1; }
-            [ -f "tests/data/$n.py" ] && [ -f "tests/data/$n.bin" ] || { echo "::error::no tests/data/$n.py and .bin" >&2; exit 1; }
+            { [ -f "tests/data/$n.py" ] || [ -f "tests/data/$n.jl" ]; } && [ -f "tests/data/$n.bin" ] \
+              || { echo "::error::no tests/data/$n.py or .jl, and .bin" >&2; exit 1; }
             echo "$n"
           done | jq -R . | jq -cs .)
           echo "fixtures=$json" >> "$GITHUB_OUTPUT"
@@ -96,7 +99,18 @@ jobs:
           CONTAINER_ENGINE: docker
         run: |
           mkdir -p regenerated
-          python3 "tests/data/$NAME.py" "regenerated/$NAME.bin"
+          if [ -f "tests/data/$NAME.py" ]; then
+            python3 "tests/data/$NAME.py" "regenerated/$NAME.bin"
+          else
+            # The header's `podman run ... /data/<name>.jl /data/<name>.bin`, with docker, as this
+            # user, writing to regenerated/ instead.
+            cmd=$(sed -n '/^#   podman run/,/\.bin$/p' "tests/data/$NAME.jl" | sed 's/^#[[:space:]]*//; s/\\$//' | tr '\n' ' ')
+            [ -n "$cmd" ] || { echo "::error::no 'podman run' command in tests/data/$NAME.jl's header"; exit 1; }
+            cmd=${cmd/podman run/docker run --user $(id -u):$(id -g) -v $PWD/regenerated:/out}
+            cmd=${cmd/\/data\/$NAME.bin//out/$NAME.bin}
+            echo "$cmd"
+            eval "$cmd"
+          fi
 
       - name: Upload
         if: always()
@@ -110,7 +124,7 @@ jobs:
         run: |
           if cmp "regenerated/$NAME.bin" "tests/data/$NAME.bin"; then
             echo "tests/data/$NAME.bin reproduced exactly"
-          elif grep -q '^# machine-dependent:' "tests/data/$NAME.py"; then
+          elif cat tests/data/"$NAME".py tests/data/"$NAME".jl 2>/dev/null | grep -q '^# machine-dependent:'; then
             echo "::warning::tests/data/$NAME.bin differs from the regenerated one (artifact fixture-$NAME); its original is machine-dependent (see the generator's header)"
           else
             echo "::error::tests/data/$NAME.bin differs from the regenerated one (artifact fixture-$NAME)"

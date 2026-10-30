@@ -8,6 +8,8 @@
 #     ghcr.io/astewartau/qsm-ci/julia-qsm@sha256:b3c048acd8a88f23b7a04378f2b85dbac433bcc78b3d9cdf8ce58eb8a7478185 \
 #     julia --sysimage /opt/qsmci-julia/mritools.so --startup-file=no /data/tgv_tgvjl_small.jl /data/tgv_tgvjl_small.bin
 #
+# .github/workflows/regenerate-fixtures.yml runs this command (with docker) in Actions.
+#
 # The phantom is built from + - * / only, so the Rust test rebuilds it bit for bit. The mask
 # touches the array's first and last z planes, where the package's erosion does not erode. Layout
 # of the output (little-endian), per case in CASES order: the number of voxels in the package's

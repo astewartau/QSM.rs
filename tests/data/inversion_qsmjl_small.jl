@@ -14,6 +14,8 @@
 #     ghcr.io/astewartau/qsm-ci/julia-qsm@sha256:b3c048acd8a88f23b7a04378f2b85dbac433bcc78b3d9cdf8ce58eb8a7478185 \
 #     julia --sysimage /opt/qsmci-julia/qsmjl.so --startup-file=no /data/inversion_qsmjl_small.jl /data/inversion_qsmjl_small.bin
 #
+# .github/workflows/regenerate-fixtures.yml runs this command (with docker) in Actions.
+#
 # The phantom is built from + - * / only, so the Rust test rebuilds it bit for bit. Layout of the
 # output (little-endian), per case in CASES order: the number of mask voxels (u32) and QSM.jl's
 # chi at the mask voxels (f64, ppm, column-major order), on that case's phantom.
