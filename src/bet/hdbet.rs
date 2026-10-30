@@ -56,6 +56,15 @@
 //!
 //! Reference implementation: https://github.com/MIC-DKFZ/HD-BET (Apache-2.0; weights CC-BY-NC-4.0).
 //!
+//! # Agreement with the original
+//!
+//! `tests/models_onnx/separation.rs` runs it on the 2 mm root-sum-of-squares magnitude of QSM-CI's
+//! 128×160×96 case (`tests/data/dl_head_small.bin`; a whole head, which HD-BET needs) against its
+//! original's verified QSM-CI entry, HD-BET 2.0.1 (`hd-bet-qsmci`) (QSMxT/QSM-CI#316; the fixture
+//! is regenerated in Actions by `tests/data/dl_hdbet_qsmci_small.py`): with
+//! [`HdBetInference::SLIDING_WINDOW`] and no mirroring, as the original's `hd-bet --disable_tta`
+//! runs, the masks are identical (Dice 1.0, 187,055 voxels; measured 2026-10-30).
+//!
 //! # Pipeline rules
 //!
 //! The facts above that a configuration can depart from are published as rules in

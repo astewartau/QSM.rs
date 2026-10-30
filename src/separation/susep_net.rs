@@ -52,6 +52,15 @@
 //! arXiv:2506.13293.
 //! Code: <https://github.com/YangGaoUQ/SUSEP-Net>
 //!
+//! # Agreement with the original
+//!
+//! `tests/models_onnx/separation.rs` runs it on a 36×32×28 box of in-vivo data (1 mm, 2.89 T,
+//! across the brain's edge) against its original's verified QSM-CI entry, SUSEP-Net (`susep-net`)
+//! (QSMxT/QSM-CI#316; the fixture is regenerated in Actions by
+//! `tests/data/dl_separation_qsmci_small.py`): χ+ and χ− NRMSE 2.4e-5 %, max |Δ| 1.7e-7 ppm
+//! (measured 2026-10-30): float32 rounding. The original moves by about 1e-7 relative from run to
+//! run, since its wrapper uses every CPU.
+//!
 //! # Pipeline rules
 //!
 //! The facts above that a configuration can depart from are published as rules in

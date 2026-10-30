@@ -49,7 +49,7 @@ from pathlib import Path
 SECONDS = {
     "chisep_orientation": 377, "chisep_qsmci": 1027, "chisep_r2primenet": 100,
     "chisep_relaxometry_qsmci": 253, "chisep_xsepnet": 151,
-    "models_onnx": 20, "multislice_2d": 1, "oblique_sagittal": 1,
+    "models_onnx": 60, "multislice_2d": 1, "oblique_sagittal": 1,
     "test_bet": 2, "test_bgremove_ismv": 11, "test_bgremove_lbv": 12,
     "test_bgremove_pdf": 20, "test_bgremove_resharp": 80, "test_bgremove_sharp": 2,
     "test_bgremove_vsharp": 6, "test_bgremove_vsharp_deconvolve": 6,
@@ -139,8 +139,9 @@ def spec(unit, cwd):
     elif fam == "models_onnx":
         # The deep-learning ports against their originals' fixtures (its non-ignored tests).
         # Gates: these are parity checks on fixed data, not metrics. Two attempts, for the weight
-        # download (the shard restores the weights cache, so it is rarely needed).
-        binary, args = unit, ["--nocapture"]
+        # download (the shard restores the weights cache, so it is rarely needed). Two tests at a
+        # time: χ-sepnet, R2PRIMEnet and HD-BET run the authors' full-size patches, ~4 GB each.
+        binary, args = unit, ["--nocapture", "--test-threads", "2"]
         env = {"QSM_MODEL_CACHE": model_cache(cwd)}
         fallback, timeout, gate, attempts = None, 20, True, 2
     else:  # oblique_sagittal, multislice_2d: pass/fail sections, no fallback row

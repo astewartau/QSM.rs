@@ -94,6 +94,20 @@
 //! - **Orientation:** "For non-axial input data, the orientation was rotated such that the B0
 //!   orientation is along the z-direction" (§2.1.2), as covered above.
 //!
+//! # Agreement with the original
+//!
+//! `tests/models_onnx/separation.rs` runs it on a 36×32×28 box of in-vivo data (1 mm, 2.89 T,
+//! across the brain's edge) against its original's verified QSM-CI entry, SNU-LIST's
+//! `240904_xsepnet.onnx` in QSM-CI's sliding window (`chisepnet`) (QSMxT/QSM-CI#316; the fixture is
+//! regenerated in Actions by `tests/data/dl_separation_qsmci_small.py`): at the authors'
+//! 192×192×128 patch, **χ+ NRMSE 1.7 %** (r 0.99982, max |Δ| 0.011 ppm), χ− NRMSE 0.045 % (max |Δ|
+//! 0.003 ppm) (measured 2026-10-30; 2.5 % and 1.5 % on QSM-CI's 128×160×96 case). Not rounding: the
+//! original runs SNU's fixed-patch ONNX, this crate its own export, whose hash differs; an open gap
+//! (astewartau/QSM.rs#330). The test holds it at its measured size, to be tightened once found. The
+//! patch matters for parity: a volume smaller than the patch is zero-padded up to it, and the
+//! network's activations in that padding differ from the convolutions' own zero padding, so a
+//! smaller [`ChiSepNetParams::patch`] changes the result near the volume's far edges.
+//!
 //! # Pipeline rules
 //!
 //! The facts above that a configuration can depart from are published as rules in
