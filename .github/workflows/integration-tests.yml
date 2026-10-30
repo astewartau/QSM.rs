@@ -125,8 +125,9 @@ jobs:
           all_pipeline='["test_pipeline_romeo_b0","test_pipeline_unwrap_bfr_romeo","test_pipeline_unwrap_bfr_laplacian_neumann","test_pipeline_unwrap_bfr_bestpath","test_pipeline_unwrap_bfr_prelude","test_pipeline_unwrap_bfr_stage_laplacian","test_pipeline_tgv","test_pipeline_tgv_single_echo","test_pipeline_qsmart","test_pipeline_qsmart_tikhonov","test_pipeline_harperella","test_pipeline_iharperella","test_bias_correction","test_n4_bias_correction","test_swi","test_smwi","test_r2star_t2star","test_motion_correction","test_robust_echo_combination","test_fieldmap_romeo_settings","test_pipeline_masking","test_pipeline_two_pass"]'
           # χ-separation entries are whole test *binaries* (each runs several methods).
           all_chisep='["chisep_qsmci","chisep_relaxometry_qsmci","chisep_xsepnet","chisep_r2primenet","chisep_orientation"]'
-          # Deep-learning models (in tests/dl_models.rs; weights fetched from the registry).
-          all_dl='["test_dl_qsmgan","test_dl_lpcnn","test_dl_ir2qsm","test_dl_modl_qsm","test_dl_nextqsm","test_dl_iqfm","test_dl_hdbet","test_dl_r2primenet","test_dl_xqsm","test_dl_qsmnet","test_dl_qsmnet_plus","test_dl_autoqsm","test_dl_iqsm","test_dl_iqsm_plus","test_dl_bfrnet","test_dl_mindgrab","test_dl_rs2net","test_dl_synthseg","test_dl_synthseg_window"]'
+          # Deep-learning models (in tests/dl_models.rs; weights fetched from the registry), and
+          # `models_onnx`, the whole binary of their ports' fixture tests against the originals.
+          all_dl='["models_onnx","test_dl_qsmgan","test_dl_lpcnn","test_dl_ir2qsm","test_dl_modl_qsm","test_dl_nextqsm","test_dl_iqfm","test_dl_hdbet","test_dl_r2primenet","test_dl_xqsm","test_dl_qsmnet","test_dl_qsmnet_plus","test_dl_autoqsm","test_dl_iqsm","test_dl_iqsm_plus","test_dl_bfrnet","test_dl_mindgrab","test_dl_rs2net","test_dl_synthseg","test_dl_synthseg_window"]'
           all_dl_names=$(echo "$all_dl" | jq -r '.[]' | tr '\n' ' ')
           # Ignored tests deliberately not run here: the manual benchmark and combinatorial sweep
           # (combinatorial-tests.yml).
@@ -351,7 +352,7 @@ jobs:
               src/bgremove/ismv.rs)   bgremove="$bgremove test_bgremove_ismv" ;;
               src/bgremove/lbv.rs)    bgremove="$bgremove test_bgremove_lbv" ;;
               src/bgremove/sdf.rs)    pipeline="$pipeline test_pipeline_qsmart test_pipeline_qsmart_tikhonov" ;;
-              src/bgremove/bfrnet.rs) dl="$dl test_dl_bfrnet" ;;
+              src/bgremove/bfrnet.rs) dl="$dl test_dl_bfrnet models_onnx" ;;
 
               # Dipole inversion
               src/inversion/admm.rs)
@@ -393,9 +394,9 @@ jobs:
                 chisep="$chisep chisep_relaxometry_qsmci" ;;
 
               # χ-separation (all methods share src/separation; both test binaries)
-              src/separation/chisepnet.rs) chisep="$chisep chisep_xsepnet chisep_orientation" ;;
-              src/separation/susep_net.rs) chisep="$chisep chisep_xsepnet" ;;
-              src/utils/r2primenet.rs) chisep="$chisep chisep_r2primenet chisep_orientation"; dl="$dl test_dl_r2primenet" ;;
+              src/separation/chisepnet.rs) chisep="$chisep chisep_xsepnet chisep_orientation"; dl="$dl models_onnx" ;;
+              src/separation/susep_net.rs) chisep="$chisep chisep_xsepnet"; dl="$dl models_onnx" ;;
+              src/utils/r2primenet.rs) chisep="$chisep chisep_r2primenet chisep_orientation"; dl="$dl test_dl_r2primenet models_onnx" ;;
               # geometry.rs feeds three different things: the axis relabelling chisep_orientation
               # is built on; the cardinal-resample pathway oblique_sagittal covers, on the
               # anisotropic non-axial affine that is the only data exercising how axial_grid_for
@@ -438,28 +439,28 @@ jobs:
                 else
                   for id in $changed_ids; do
                     case "$id" in
-                      qsmgan)     dl="$dl test_dl_qsmgan" ;;
-                      lpcnn)      dl="$dl test_dl_lpcnn" ;;
-                      ir2qsm)     dl="$dl test_dl_ir2qsm" ;;
-                      modl-qsm)   dl="$dl test_dl_modl_qsm" ;;
-                      nextqsm)    dl="$dl test_dl_nextqsm" ;;
-                      iqfm)       dl="$dl test_dl_iqfm" ;;
-                      hd-bet)     dl="$dl test_dl_hdbet" ;;
-                      bfrnet)     dl="$dl test_dl_bfrnet" ;;
-                      xqsm)       dl="$dl test_dl_xqsm" ;;
-                      qsmnet)     dl="$dl test_dl_qsmnet" ;;
-                      qsmnet-plus) dl="$dl test_dl_qsmnet_plus" ;;
-                      autoqsm)    dl="$dl test_dl_autoqsm" ;;
-                      iqsm)       dl="$dl test_dl_iqsm" ;;
-                      iqsm-plus)  dl="$dl test_dl_iqsm_plus" ;;
+                      qsmgan)     dl="$dl test_dl_qsmgan models_onnx" ;;
+                      lpcnn)      dl="$dl test_dl_lpcnn models_onnx" ;;
+                      ir2qsm)     dl="$dl test_dl_ir2qsm models_onnx" ;;
+                      modl-qsm)   dl="$dl test_dl_modl_qsm models_onnx" ;;
+                      nextqsm)    dl="$dl test_dl_nextqsm models_onnx" ;;
+                      iqfm)       dl="$dl test_dl_iqfm models_onnx" ;;
+                      hd-bet)     dl="$dl test_dl_hdbet models_onnx" ;;
+                      bfrnet)     dl="$dl test_dl_bfrnet models_onnx" ;;
+                      xqsm)       dl="$dl test_dl_xqsm models_onnx" ;;
+                      qsmnet)     dl="$dl test_dl_qsmnet models_onnx" ;;
+                      qsmnet-plus) dl="$dl test_dl_qsmnet_plus models_onnx" ;;
+                      autoqsm)    dl="$dl test_dl_autoqsm models_onnx" ;;
+                      iqsm)       dl="$dl test_dl_iqsm models_onnx" ;;
+                      iqsm-plus)  dl="$dl test_dl_iqsm_plus models_onnx" ;;
                       rs2-net)    dl="$dl test_dl_rs2net" ;;
                       mindgrab)   dl="$dl test_dl_mindgrab" ;;
                       # synthseg-2.0's weights are Pending (not hosted), so it has no test of its
                       # own; its entry shares the SynthSeg code path.
                       synthseg|synthseg-2.0) dl="$dl test_dl_synthseg test_dl_synthseg_window" ;;
-                      r2primenet) dl="$dl test_dl_r2primenet"; chisep="$chisep chisep_r2primenet" ;;
-                      chi-sepnet) chisep="$chisep chisep_xsepnet" ;;
-                      susep-net)  chisep="$chisep chisep_qsmci chisep_xsepnet" ;;
+                      r2primenet) dl="$dl test_dl_r2primenet models_onnx"; chisep="$chisep chisep_r2primenet" ;;
+                      chi-sepnet) chisep="$chisep chisep_xsepnet"; dl="$dl models_onnx" ;;
+                      susep-net)  chisep="$chisep chisep_qsmci chisep_xsepnet"; dl="$dl models_onnx" ;;
                       # No dedicated test (xqsm, qsmnet, autoqsm, iqsm, synthseg, …): cover it
                       # with the full DL set rather than assume nothing needs running.
                       *) echo "registry.rs: '$id' has no mapped test → all DL tests"
@@ -468,18 +469,18 @@ jobs:
                   done
                 fi ;;
               src/models/*)  dl="$dl $all_dl_names"; chisep="$chisep chisep_xsepnet chisep_r2primenet" ;;
-              src/inversion/qsmgan.rs)   dl="$dl test_dl_qsmgan" ;;
-              src/inversion/lpcnn.rs)    dl="$dl test_dl_lpcnn" ;;
-              src/inversion/ir2qsm.rs)   dl="$dl test_dl_ir2qsm" ;;
-              src/inversion/modl_qsm.rs) dl="$dl test_dl_modl_qsm" ;;
-              src/inversion/nextqsm.rs)  dl="$dl test_dl_nextqsm" ;;
-              src/inversion/iqfm.rs)     dl="$dl test_dl_iqfm" ;;
-              src/inversion/xqsm.rs)     dl="$dl test_dl_xqsm" ;;
-              src/inversion/qsmnet.rs)   dl="$dl test_dl_qsmnet test_dl_qsmnet_plus" ;;
-              src/inversion/autoqsm.rs)  dl="$dl test_dl_autoqsm" ;;
+              src/inversion/qsmgan.rs)   dl="$dl test_dl_qsmgan models_onnx" ;;
+              src/inversion/lpcnn.rs)    dl="$dl test_dl_lpcnn models_onnx" ;;
+              src/inversion/ir2qsm.rs)   dl="$dl test_dl_ir2qsm models_onnx" ;;
+              src/inversion/modl_qsm.rs) dl="$dl test_dl_modl_qsm models_onnx" ;;
+              src/inversion/nextqsm.rs)  dl="$dl test_dl_nextqsm models_onnx" ;;
+              src/inversion/iqfm.rs)     dl="$dl test_dl_iqfm models_onnx" ;;
+              src/inversion/xqsm.rs)     dl="$dl test_dl_xqsm models_onnx" ;;
+              src/inversion/qsmnet.rs)   dl="$dl test_dl_qsmnet test_dl_qsmnet_plus models_onnx" ;;
+              src/inversion/autoqsm.rs)  dl="$dl test_dl_autoqsm models_onnx" ;;
               # iQFM and iQSM+ reuse iQSM's preprocessing.
-              src/inversion/iqsm.rs)     dl="$dl test_dl_iqsm test_dl_iqsm_plus test_dl_iqfm" ;;
-              src/inversion/iqsm_plus.rs) dl="$dl test_dl_iqsm_plus" ;;
+              src/inversion/iqsm.rs)     dl="$dl test_dl_iqsm test_dl_iqsm_plus test_dl_iqfm models_onnx" ;;
+              src/inversion/iqsm_plus.rs) dl="$dl test_dl_iqsm_plus models_onnx" ;;
               # The overlap-tiling the DL inversions share (their *_tiled variants).
               src/inversion/tiled.rs)    dl="$dl $all_dl_names" ;;
               # Every DL test shares this file's helpers, so a change to one of them can break the
@@ -502,8 +503,8 @@ jobs:
 
               # Brain extraction (HD-BET is a DL model: its own test in the DL matrix). RS2-Net
               # reuses HD-BET's sliding window and resampling; SynthSeg uses `resize`.
-              src/bet/hdbet.rs) dl="$dl test_dl_hdbet test_dl_rs2net" ;;
-              src/utils/resample.rs) dl="$dl test_dl_hdbet test_dl_synthseg test_dl_synthseg_window" ;;
+              src/bet/hdbet.rs) dl="$dl test_dl_hdbet test_dl_rs2net models_onnx" ;;
+              src/utils/resample.rs) dl="$dl test_dl_hdbet test_dl_synthseg test_dl_synthseg_window models_onnx" ;;
               src/bet/rs2net.rs) dl="$dl test_dl_rs2net" ;;
               src/bet/mindgrab.rs) dl="$dl test_dl_mindgrab" ;;
               src/bet/*) run_bet=true; pipeline="$pipeline test_pipeline_masking" ;;
@@ -608,10 +609,13 @@ jobs:
                 fi ;;
               # Test binaries no workflow job runs (reference-parity, local-data and wasm tests):
               # their non-ignored tests run in unit-tests.yml, which every tests/ change selects.
-              tests/amppe_qsmci.rs|tests/chi_sep_medi_snu_parity.rs|tests/chi_sep_ilsqr_snu_parity.rs|tests/crosscheck.rs|tests/ilsqr_sti_parity.rs|tests/star_sti_parity.rs|tests/vsharp_sti_parity.rs|tests/decompose_qsm_parity.rs|tests/n4_ants_parity.rs|tests/sharp_sepia_parity.rs|tests/ismv_wen2014_parity.rs) : ;;
+              tests/amppe_qsmci.rs|tests/clearswi_parity.rs|tests/chi_sep_medi_snu_parity.rs|tests/chi_sep_ilsqr_snu_parity.rs|tests/crosscheck.rs|tests/ilsqr_sti_parity.rs|tests/star_sti_parity.rs|tests/vsharp_sti_parity.rs|tests/vsharp_sti_aniso_parity.rs|tests/decompose_qsm_parity.rs|tests/n4_ants_parity.rs|tests/sharp_sepia_parity.rs|tests/ismv_wen2014_parity.rs) : ;;
               # Parity with the Julia originals (QSM.jl, ROMEO.jl, TGV.jl), fixtures from QSM-CI's julia-qsm image.
               tests/*_qsmjl_parity.rs|tests/*_romeojl_parity.rs|tests/*_tgvjl_parity.rs) : ;;
-              tests/models_onnx.rs|tests/qsmart_validation.rs|tests/relaxometry_demo.rs|tests/wasm_pipeline.rs) : ;;
+              tests/qsmart_validation.rs|tests/relaxometry_demo.rs|tests/wasm_pipeline.rs) : ;;
+              # The deep-learning ports' fixture tests, their fixtures, and the script that cut
+              # their inputs.
+              tests/models_onnx.rs|tests/models_onnx/*|tests/data/dl_*|scripts/dl_fixture_inputs.py) dl="$dl models_onnx" ;;
               tests/weight_provider.rs|tests/data/*) : ;;
               # Only tests/wasm_pipeline.rs includes these (`#[path]`); it runs in unit-tests.yml.
               tests/support/*) : ;;

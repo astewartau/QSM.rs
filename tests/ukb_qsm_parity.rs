@@ -46,8 +46,9 @@ fn phase() -> Vec<Vec<f64>> {
 struct Fixture {
     mask: Vec<u8>,
     mask_vsharp: Vec<u8>,
-    /// on the grid, zero outside the mask each belongs to
+    /// over the whole grid
     phs_comb: Vec<f64>,
+    /// on the grid, zero outside V_SHARP's mask
     local: Vec<f64>,
 }
 
@@ -66,7 +67,8 @@ fn load() -> Fixture {
         }
         v
     };
-    let (phs_comb, local) = (spread(&mask), spread(&mask_vsharp));
+    let all = vec![1u8; n];
+    let (phs_comb, local) = (spread(&all), spread(&mask_vsharp));
     assert_eq!(o, raw.len(), "fixture length");
     Fixture { mask, mask_vsharp, phs_comb, local }
 }
@@ -108,9 +110,8 @@ fn ukb_vsharp_matches_the_ukb_qsm_container() {
     let nrmse = (both.iter().map(|&l| (local[l] - fx.local[l]).powi(2)).sum::<f64>() / both.iter().map(|&l| fx.local[l].powi(2)).sum::<f64>()).sqrt();
     println!("V-SHARP: {mask_diff} mask voxels differ; max |Δ| {max:.2e} rad, NRMSE {nrmse:.2e}");
     assert_eq!(mask_diff, 0, "V-SHARP masks");
-    // Measured 2026-10-30: the same eroded mask, NRMSE 4.5 % (max |Δ| 0.026 rad). Known gap
-    // (astewartau/QSM.rs#329): on these 1×1×1.5 mm voxels STI resamples to a 1 mm grid and back,
-    // and the `vsharp` module docs name its back-interpolation as what is not yet reproduced; on
-    // 1 mm voxels `vsharp_sti_parity.rs` matches to float32 rounding.
-    assert!(nrmse < 0.05, "V-SHARP NRMSE {nrmse:e}");
+    // Measured 2026-10-30: the same eroded mask, NRMSE 1.2e-6 (max |Δ| 7e-7 rad; STI's float32).
+    // Before STI's even crop (astewartau/QSM.rs#329, `vsharp` module docs) it was 4.1 %, and this
+    // fixture, then holding the combined phase only inside the mask, showed 4.5 %.
+    assert!(nrmse < 5e-6, "V-SHARP NRMSE {nrmse:e}");
 }

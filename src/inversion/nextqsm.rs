@@ -28,6 +28,16 @@
 //! - **Resampling:** none; the data-consistency dipole kernel uses the NIfTI voxel size
 //!   (`predict_all.py:60-61`).
 //!
+//! # Agreement with the original
+//!
+//! `tests/models_onnx/field.rs` runs it on a 36×32×28 box of in-vivo data (1 mm, 2.89 T, across the
+//! brain's edge) against its original's verified QSM-CI entry, nextqsm 1.0.6 (`nextqsm`)
+//! (QSMxT/QSM-CI#316; the fixture is regenerated in Actions by
+//! `tests/data/dl_field_qsmci_small.py`): **NRMSE 0.12 %**, r 0.9999993, max |Δ| 0.058 ppm
+//! (measured 2026-10-30; 0.97 % on QSM-CI's 128×160×96 case, 3.1 % on a 64³ box). Not rounding, and
+//! not yet explained: an open gap (astewartau/QSM.rs#330). The test holds it at its measured size,
+//! to be tightened once found.
+//!
 //! # Pipeline rules
 //!
 //! The facts above that a configuration can depart from are published as rules in

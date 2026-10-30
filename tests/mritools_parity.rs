@@ -9,11 +9,11 @@
 //! `.github/workflows/regenerate-fixtures.yml` runs it in Actions). The phantom is rebuilt here
 //! exactly as the script builds it; the layout is in the script.
 //!
-//! `robust_mask`, `fill_holes`, `calculate_b0_weighted` and `bipolar_correction` match to the
-//! voxel and to rounding (`bipolar_correction` since it follows `bipolar_correction!` step for step;
-//! it was up to 0.48 rad off before, astewartau/QSM.rs#319). **Known gap** (#319), recorded so that
-//! a change shows and to be tightened when fixed: `makehomogeneous` is 3.3 % (NRMSE in the mask;
-//! up to 15 % at a voxel) from MriResearchTools'.
+//! `makehomogeneous` is MriResearchTools' bit for bit (it was 3.3 % NRMSE before three port errors
+//! were fixed, see `utils::get_sensitivity`), and `robust_mask`, `fill_holes`,
+//! `calculate_b0_weighted` and `bipolar_correction` match to the voxel and to rounding
+//! (`bipolar_correction` since it follows `bipolar_correction!` step for step; it was up to
+//! 0.48 rad off before, astewartau/QSM.rs#319).
 
 use qsm_core::unwrap::UnwrapMethod;
 use qsm_core::utils::{
@@ -114,8 +114,8 @@ fn mritools_ports_match_mritools() {
     let (gi, wi): (Vec<f64>, Vec<f64>) = inside.iter().map(|&l| (got[l], want[l])).unzip();
     let nrmse = (gi.iter().zip(&wi).map(|(a, b)| (a - b).powi(2)).sum::<f64>() / wi.iter().map(|b| b * b).sum::<f64>()).sqrt();
     println!("makehomogeneous: in the mask NRMSE {nrmse:.2e}, max |Δ| / max {:.2e}", max_rel(&gi, &wi));
-    // Measured 2026-10-30: NRMSE 3.3 % in the mask (the known gap above).
-    assert!(nrmse < 0.04, "makehomogeneous: NRMSE {nrmse:e}");
+    // Measured 2026-10-30: bit-identical (NRMSE 0; 3.3 % before the fixes in `get_sensitivity`).
+    assert!(nrmse == 0.0, "makehomogeneous: NRMSE {nrmse:e}");
 
     let want = r.bits(nv);
     let got = robust_mask(&p.mag[0], &grid);
