@@ -57,6 +57,26 @@
 //! - The rescaling phase masks ([`PhaseScaling::Positive`] and friends) clamp the rescaled
 //!   value to [0, 1] before raising it to `strength`, so a value beyond the 1st/99th-percentile
 //!   extrapolation cannot exceed 1 (or go negative under a non-integer power).
+//!
+//! # Agreement with CLEARSWI.jl
+//!
+//! `tests/clearswi_parity.rs` (measured 2026-10-30) runs a 20×20×14 three-echo phantom through
+//! CLEARSWI.jl 0949bc5 in the verified QSM-CI Julia image (QSMxT/QSM-CI#299; the fixture is
+//! regenerated in Actions by `tests/data/clearswi_small.jl`):
+//!
+//! - **Matched:** the phase mask's mask ([`robust_mask`]) is identical, and so is the SWI magnitude
+//!   without sensitivity correction (RSS and softplus; 2e-14 %).
+//! - **Open gaps (astewartau/QSM.rs#319):** the CLEAR sensitivity estimate ([`get_sensitivity`])
+//!   puts the magnitude 4.4 % from CLEARSWI.jl's, the gap recorded there for `makehomogeneous`,
+//!   which is built on it. [`highpass_filter`]'s masked smoothing is 1.9 % from MriResearchTools'
+//!   masked `gaussiansmooth3d`, so after unwrapping (given the true phase, CLEARSWI.jl's own steps)
+//!   the combined filtered phase is 5.6 % and the phase mask 0.65 % from CLEARSWI.jl's.
+//! - **The deliberate unwrapping difference** (above) cannot be avoided by the input:
+//!   MriResearchTools' `laplacianunwrap` does not return even a phase without wraps unchanged (it
+//!   adds a smooth field of 0.09–0.20 rad standard deviation per echo there), where the DCT solver
+//!   returns it up to a constant. End to end, with the gap above, the phase mask is 2.2 % from
+//!   CLEARSWI.jl's without wraps and 4.1 % with wraps across the brain (the filtered phase 18 % and
+//!   45 %): the high-pass filter does not remove all of it.
 
 use crate::error::InputError;
 use crate::unwrap::{laplacian_unwrap, unwrap_romeo_multi_echo, LaplacianSolver, RomeoParams};
