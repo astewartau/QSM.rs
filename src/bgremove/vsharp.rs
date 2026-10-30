@@ -24,13 +24,19 @@
 //! crop margin, [`CROP_MARGIN`]), `max_radius` 12 and STI's radius schedule, 12 → 2 mm in 1 mm
 //! steps ([`VsharpParams::radius_step`]), and STI's ball, [`VsharpBall::StiSuite`] (`|x| ≤ r + 1/6`
 //! without its centre voxel, a ball fitting only where all its voxels are in the mask). What
-//! remains different from STI is its mask back-interpolation on non-1 mm input.
+//! remains different from STI is its mask back-interpolation on non-1 mm input: through UK
+//! Biobank's pipeline in the verified QSM-CI `ukb-qsm` container (QSMxT/QSM-CI#305) on a
+//! 32×32×20 phantom at 1×1×1.5 mm, the eroded mask is the same and the local field is 4.5 %
+//! (NRMSE) from STI's (`tests/ukb_qsm_parity.rs`, measured 2026-10-30; astewartau/QSM.rs#329).
 //!
 //! **Measured** (QSM-CI parity, astewartau/QSM.rs#329): on the KKI travelling head (256×256×128,
 //! 1 mm, STI Suite `V_SHARP` in the verified `vsharp-sti` v2 container, the same total field and
 //! mask), the STI ball gives the same eroded mask and NRMSE 2e-6 relative (STI's float32 output),
 //! where the earlier ball (radius `r`, centre included, [`VsharpBall::QsmJl`]) gave 4.4 %.
-//! `tests/vsharp_sti_parity.rs` holds a small case. The papers and the code disagree on the deconvolution:
+//! `tests/vsharp_sti_parity.rs` holds a small case (40×44×36, `smvsize` 12 and 6, from the same
+//! container, regenerated in Actions by `tests/data/vsharp_sti_small.py`): the same eroded mask
+//! and max |Δ| < 5e-8 on a field of up to 0.15, STI's single-precision filtering.
+//! The papers and the code disagree on the deconvolution:
 //! Li et al. 2011 (NeuroImage 55:1645, *Image Analysis* and *Results*) and Wu et al. 2012
 //! (*Background phase removal*: "a deconvolution is carried out to restore the local phase",
 //! with the kernel of the largest diameter used) both deconvolve the SMV-filtered phase,

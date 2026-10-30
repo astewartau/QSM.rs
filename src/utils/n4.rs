@@ -71,7 +71,10 @@
 //! it reads a double-precision NIfTI, moves this implementation's output by 6.7e-4 and
 //! 1.7e-4 on the first two volumes. Spline orders 1 and 2 and the masked, rescaled output agree
 //! as closely (≤ 5e-5 and 6e-6 on the first volume). `tests/n4_ants_parity.rs` checks a
-//! 30×32×26 synthetic volume against ANTs, with and without a mask.
+//! 30×32×26 synthetic volume against ANTs, with and without a mask: against the verified QSM-CI
+//! `ants-n4` image (ANTs 2.4.3, 4 threads; QSMxT/QSM-CI#302; `tests/data/n4_ants_small.py`
+//! regenerates it in Actions) the bias field agrees to 1.5e-5 and the masked, rescaled output to
+//! 6.2e-5 relative (measured 2026-10-30).
 //!
 //! # Shrink offset
 //!

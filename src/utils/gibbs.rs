@@ -26,6 +26,12 @@
 //! A second deliberate deviation: negative output values are set to 0. The input is magnitude,
 //! where a negative value has no physical meaning; DIPY returns the undershoot as it is. Every
 //! non-negative value is unchanged.
+//!
+//! **Agreement with DIPY** (astewartau/QSM.rs#327, known gap): because of the 3-D generalisation,
+//! the output is not DIPY's (2-D slices normal to z, its default). Both change the input by about
+//! as much, but differ from each other by 2.0 % NRMSE on a travelling head (QSMxT/QSM-CI#302) and
+//! 3.0 % on the 24×24×16 phantom of `tests/gibbs_dipy_parity.rs` (DIPY 1.12.1 in the verified
+//! `py-originals` image; measured 2026-10-30). Matching DIPY needs a 2-D slice-wise mode.
 
 use crate::fft::{fft3d_real, ifft3d_real};
 use num_complex::Complex64;

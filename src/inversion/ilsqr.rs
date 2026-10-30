@@ -54,6 +54,23 @@
 //! the remaining difference to STI's output (r = 0.9999985, 99.9th percentile |Δ| 3.7e-4 ppm
 //! on that field) is that rounding, amplified by the solves.
 //!
+//! # Agreement with STI Suite
+//!
+//! `tests/ilsqr_sti_parity.rs` (measured 2026-10-30):
+//! - Against the re-implementation of `QSM_iLSQR` the algorithm was recovered with
+//!   (`tests/data/ilsqr_sti_clone.m`, double precision, 5 iterations per solve): max |Δ| 5.6e-14
+//!   ppm on a 20×20×14 phantom. This pins the algorithm.
+//! - Against STI's own output (licensed MATLAB R2023b, the same phantom, 100 iterations): initial
+//!   LSQR solution r 0.999994; χ r 0.9971.
+//! - Against the verified QSM-CI `ilsqr-sti` container (QSMxT/QSM-CI#304) at its call (100
+//!   iterations, `padsize` 12 and 8) on two 32×32×24 / 32×28×28 phantoms: NRMSE 3.4 % and 1.6 %,
+//!   r 0.99943 and 0.99987. This is STI's single-precision LSQR: QSM.rs is closest to STI at
+//!   STI's iteration count (7–9 % at 40, 4–6 % at 200), and rounding QSM.rs's input to float32
+//!   moves it by under 0.06 %. On whole heads the effect is smaller (above; 1–2 % NRMSE in the
+//!   QSM-CI parity pair, astewartau/QSM.rs#329). That fixture is regenerated in Actions by
+//!   `tests/data/ilsqr_sti_qsmci_small.py`. STI's own χ moves by 1–4e-4 relative between CPUs
+//!   (a GitHub-hosted runner against the workstation that made the fixture).
+//!
 //! # Padding
 //!
 //! [`IlsqrParams::pad_mm`] is STI's `'padsize'`: millimetres of zero padding per side, the same
