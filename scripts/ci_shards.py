@@ -9,9 +9,10 @@ merge, its time limit, its retries and the metrics row it leaves when it fails.
 
 A unit is what one matrix entry ran before: a test name in tests/integration_tests.rs or
 tests/dl_models.rs, or a whole test binary (the χ-separation binaries, `oblique_sagittal`,
-`multislice_2d`). Each unit still runs as its own process with the same command line, and still
-leaves `metrics/<unit>.csv` (its RESULT: rows, then a STATUS: line) and whatever it writes under
-`slices/`, so the summary job reads exactly what it read before.
+`multislice_2d`, and `models_onnx`, the deep-learning ports' fixture tests). Each unit still
+runs as its own process with the same command line, and still leaves `metrics/<unit>.csv` (its
+RESULT: rows, then a STATUS: line) and whatever it writes under `slices/`, so the summary job
+reads exactly what it read before.
 
 Usage:
   ci_shards.py plan     read the selection from the environment (the JSON lists detect-changes
@@ -48,7 +49,7 @@ from pathlib import Path
 SECONDS = {
     "chisep_orientation": 377, "chisep_qsmci": 1027, "chisep_r2primenet": 100,
     "chisep_relaxometry_qsmci": 253, "chisep_xsepnet": 151,
-    "multislice_2d": 1, "oblique_sagittal": 1,
+    "models_onnx": 20, "multislice_2d": 1, "oblique_sagittal": 1,
     "test_bet": 2, "test_bgremove_ismv": 11, "test_bgremove_lbv": 12,
     "test_bgremove_pdf": 20, "test_bgremove_resharp": 80, "test_bgremove_sharp": 2,
     "test_bgremove_vsharp": 6, "test_bgremove_vsharp_deconvolve": 6,
@@ -94,6 +95,8 @@ def family(unit):
         return "dl"
     if unit.startswith("chisep_"):
         return "chisep"
+    if unit == "models_onnx":
+        return unit
     if unit in ("oblique_sagittal", "multislice_2d"):
         return unit
     return "integration"
@@ -133,6 +136,13 @@ def spec(unit, cwd):
         binary, args = "dl_models", [unit, "--ignored", "--exact", "--nocapture"]
         env = {"QSM_MODEL_CACHE": model_cache(cwd)}
         fallback, timeout, gate, attempts = f"RESULT:{unit},-,-,-,-,-", 40, False, 3
+    elif fam == "models_onnx":
+        # The deep-learning ports against their originals' fixtures (its non-ignored tests).
+        # Gates: these are parity checks on fixed data, not metrics. Two attempts, for the weight
+        # download (the shard restores the weights cache, so it is rarely needed).
+        binary, args = unit, ["--nocapture"]
+        env = {"QSM_MODEL_CACHE": model_cache(cwd)}
+        fallback, timeout, gate, attempts = None, 20, True, 2
     else:  # oblique_sagittal, multislice_2d: pass/fail sections, no fallback row
         binary, args = unit, ["--ignored", "--nocapture"]
         if unit == "multislice_2d":

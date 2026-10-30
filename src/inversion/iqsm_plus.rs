@@ -29,6 +29,20 @@
 //!   of at least 1 that cannot change the result, since the 3×3×3 LoT stencil only reaches voxels
 //!   inside the unmodified mask wherever its output survives the eroded mask.
 //!
+//! # Agreement with the original
+//!
+//! `tests/models_onnx/field.rs` runs it on a 36×32×28 box of in-vivo data (1 mm, 2.89 T, across the
+//! brain's edge) against its original's verified QSM-CI entry, iQSM+ a534d94 (`iqsm-plus`)
+//! (QSMxT/QSM-CI#316; the fixture is regenerated in Actions by
+//! `tests/data/dl_field_qsmci_small.py`): per echo, NRMSE 2.7e-4 to 3.3e-4 %, max |Δ| up to 6.8e-7
+//! ppm: float32 rounding.
+//!
+//! The original runs one echo at a time: the authors' Python driver combines echoes with weights
+//! (mag·TE)², where this crate uses their MATLAB echo fit's mag·TE² (see [`iqsm_plus_multi_echo`]).
+//! On the box's first and third echoes the driver's combination is (mag·TE)² of its per-echo
+//! outputs to 1.6e-3 %, and the two weightings differ by 3.1 % NRMSE; [`iqsm_plus_multi_echo`]
+//! matches the MATLAB fit of the original's per-echo outputs to 2.4e-4 % (measured 2026-10-30).
+//!
 //! # Pipeline rules
 //!
 //! The facts above that a configuration can depart from are published as rules in

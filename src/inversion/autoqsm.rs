@@ -37,6 +37,14 @@
 //!   axial orientation".
 //! - **Resampling:** the authors' `code/test.py` and `util.data_predict` do not resample.
 //!
+//! # Agreement with the original
+//!
+//! `tests/models_onnx/field.rs` runs it on a 36×32×28 box of in-vivo data (1 mm, 2.89 T, across the
+//! brain's edge) against its original's verified QSM-CI entry, AutoQSM b59f5e7 (`autoqsm`)
+//! (QSMxT/QSM-CI#316; the fixture is regenerated in Actions by
+//! `tests/data/dl_field_qsmci_small.py`): NRMSE 1.8e-4 %, max |Δ| 2.5e-7 ppm (measured 2026-10-30):
+//! float32 rounding.
+//!
 //! # Pipeline rules
 //!
 //! The facts above that a configuration can depart from are published as rules in

@@ -20,6 +20,20 @@
 //! Identical to [iQSM](mod@crate::inversion::iqsm#reference-pipeline): the authors run iQFM through the
 //! same `run_iqsm` (`sunhongfu/iQSM` `inference.py:139-237`), which requires a brain mask for the
 //! iQFM output (README).
+//!
+//! # Agreement with the original
+//!
+//! `tests/models_onnx/field.rs` runs it on a 36×32×28 box of in-vivo data (1 mm, 2.89 T, across the
+//! brain's edge) against its original's verified QSM-CI entry, iQFM bb163ef (`iqfm`)
+//! (QSMxT/QSM-CI#316; the fixture is regenerated in Actions by
+//! `tests/data/dl_field_qsmci_small.py`): per echo, NRMSE 2.8e-3 to 6.8e-3 %, max |Δ| up to 4.0e-6
+//! ppm: float32 rounding.
+//!
+//! The original runs one echo at a time: the authors' Python driver combines echoes with weights
+//! (mag·TE)², where this crate uses their MATLAB echo fit's mag·TE² (see [`iqfm_multi_echo`]). On
+//! the box's first and third echoes the driver's combination is (mag·TE)² of its per-echo outputs
+//! to 5e-6 %, and the two weightings differ by 3.4 % NRMSE; [`iqfm_multi_echo`] matches the MATLAB
+//! fit of the original's per-echo outputs to 2.7e-3 % (measured 2026-10-30).
 
 use crate::grid::Grid;
 use crate::inversion::TileConfig;
