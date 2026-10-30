@@ -82,10 +82,20 @@ pub fn dilate_mask(mask: &[u8], grid: &Grid, iterations: usize) -> Vec<u8> {
     current
 }
 
-/// Erode a binary mask with a spherical structuring element of `radius` voxels
-/// (MATLAB `imerode(mask, strel('sphere', radius))`). Voxels whose ball crosses the
-/// volume edge are removed.
+/// Erode a binary mask with a spherical structuring element of `radius` voxels. Voxels whose
+/// ball crosses the volume edge are removed (unlike MATLAB's `imerode`: see
+/// [`imerode_sphere`]).
 pub(crate) fn erode_ball(mask: &[u8], nx: usize, ny: usize, nz: usize, radius: i32) -> Vec<u8> {
+    erode_ball_padded(mask, nx, ny, nz, radius, false)
+}
+
+/// MATLAB's `imerode(mask, strel('sphere', radius))`: `imerode` pads the volume with its
+/// maximum, so the edge doesn't erode a mask that touches it.
+pub(crate) fn imerode_sphere(mask: &[u8], nx: usize, ny: usize, nz: usize, radius: i32) -> Vec<u8> {
+    erode_ball_padded(mask, nx, ny, nz, radius, true)
+}
+
+fn erode_ball_padded(mask: &[u8], nx: usize, ny: usize, nz: usize, radius: i32, edge_inside: bool) -> Vec<u8> {
     let n_total = nx * ny * nz;
     let mut eroded = vec![0u8; n_total];
 
@@ -115,6 +125,9 @@ pub(crate) fn erode_ball(mask: &[u8], nx: usize, ny: usize, nz: usize, radius: i
                             if ni < 0 || ni >= nx as i32 ||
                                nj < 0 || nj >= ny as i32 ||
                                nk < 0 || nk >= nz as i32 {
+                                if edge_inside {
+                                    continue;
+                                }
                                 all_inside = false;
                                 break 'outer;
                             }
