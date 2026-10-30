@@ -1,12 +1,23 @@
-//! `inversion::ilsqr` against STI Suite 3.0's `QSM_iLSQR` on a small synthetic case.
+//! `inversion::ilsqr` against STI Suite 3.0's `QSM_iLSQR` on small synthetic cases.
 //!
-//! `tests/data/ilsqr_sti_small.bin` (little-endian, column-major, 20x20x14 grid, voxel
-//! 1x1x1.5 mm, B0 direction (0.1, -0.2, sqrt(0.95)), TE 20 ms, 3 T, padsize 8 mm) holds:
-//! - the tissue phase (f32, rad; nonzero outside the mask too) and the mask (u8);
-//! - inside the mask only: STI's two outputs (f32, ppm) from MATLAB R2023b
-//!   `[chi, chi_lsqr] = QSM_iLSQR(phase, mask, 'TE', 20, 'B0', 3, 'H', H, 'padsize', [8 8 8],
-//!   'voxelsize', [1 1 1.5])`, then the same two from the MATLAB re-implementation of that
-//!   algorithm (`ilsqr_sti_clone.m`, double precision, 5 iterations per LSQR solve; f64).
+//! Two fixtures:
+//!
+//! - `tests/data/ilsqr_sti_qsmci_small.bin`, made by `tests/data/ilsqr_sti_qsmci_small.py` with the
+//!   verified QSM-CI `ilsqr-sti` container (QSMxT/QSM-CI#304), so it can be regenerated in Actions
+//!   (`.github/workflows/regenerate-fixtures.yml`): two phantoms (layout in the script), each with
+//!   the local field the container was given and its χ (float32, which is STI's single-precision χ
+//!   exactly). QSM.rs runs at its defaults, which are the container's call (100 iterations) with
+//!   its `padsize`.
+//! - `tests/data/ilsqr_sti_small.bin` (little-endian, column-major, 20x20x14 grid, voxel
+//!   1x1x1.5 mm, B0 direction (0.1, -0.2, sqrt(0.95)), TE 20 ms, 3 T, padsize 8 mm), made in
+//!   licensed MATLAB R2023b by `tests/data/ilsqr_sti_small.m`, holds:
+//!   - the tissue phase (f32, rad; nonzero outside the mask too) and the mask (u8);
+//!   - inside the mask only: STI's two outputs (f32, ppm) from
+//!     `[chi, chi_lsqr] = QSM_iLSQR(phase, mask, 'TE', 20, 'B0', 3, 'H', H, 'padsize', [8 8 8],
+//!     'voxelsize', [1 1 1.5])`, then the same two from the MATLAB re-implementation of that
+//!     algorithm (`tests/data/ilsqr_sti_clone.m`, double precision, 5 iterations per LSQR solve;
+//!     f64). The container does not return the initial LSQR solution or run the re-implementation,
+//!     so this one stays a licensed-MATLAB fixture.
 //!
 //! STI runs its LSQR solves in single precision. After a dozen or so iterations LSQR's rounding
 //! errors decide the details, so the full-length comparison with STI is loose, and the
@@ -84,4 +95,65 @@ fn ilsqr_matches_sti_suite() {
     assert!(r1 > 0.9999, "initial LSQR r = {}", r1);
     assert!(r > 0.99, "chi r = {}", r);
     assert!(maxd(&x1, &fx.sti.1) < 0.05 * rms(&fx.sti.1));
+}
+
+/// The container fixture: per case, (mask, field in ppm on the grid, STI's χ at the mask voxels).
+fn load_qsmci() -> Vec<(Vec<u8>, Vec<f64>, Vec<f64>)> {
+    let raw = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/ilsqr_sti_qsmci_small.bin")).expect("fixture");
+    let mut o = 0;
+    let out = QSMCI_CASES.iter().map(|c| {
+        let n = c.dims.0 * c.dims.1 * c.dims.2;
+        let m = u32::from_le_bytes(raw[o..o + 4].try_into().unwrap()) as usize;
+        let mask = raw[o + 4..o + 4 + n].to_vec();
+        o += 4 + n;
+        let inside: Vec<usize> = (0..n).filter(|&i| mask[i] != 0).collect();
+        assert_eq!(inside.len(), m);
+        let mut field = vec![0.0; n];
+        for (v, &i) in inside.iter().enumerate() {
+            field[i] = f64::from_le_bytes(raw[o + 8 * v..o + 8 * v + 8].try_into().unwrap());
+        }
+        o += 8 * m;
+        let chi = (0..m).map(|v| f32::from_le_bytes(raw[o + 4 * v..o + 4 * v + 4].try_into().unwrap()) as f64).collect();
+        o += 4 * m;
+        (mask, field, chi)
+    }).collect();
+    assert_eq!(o, raw.len());
+    out
+}
+
+struct QsmciCase {
+    dims: (usize, usize, usize),
+    vs: (f64, f64, f64),
+    h: (f64, f64, f64),
+    pad: f64,
+}
+
+/// `CASES` of `tests/data/ilsqr_sti_qsmci_small.py`, in order (B0 and TE only set the phase scale).
+const QSMCI_CASES: [QsmciCase; 2] = [
+    QsmciCase { dims: (32, 32, 24), vs: (1.0, 1.0, 1.5), h: (0.1, -0.2, 0.974_679_434_480_896_4), pad: 12.0 },
+    QsmciCase { dims: (32, 28, 28), vs: (1.0, 1.0, 1.0), h: (0.0, 0.0, 1.0), pad: 8.0 },
+];
+
+#[test]
+fn ilsqr_defaults_match_the_ilsqr_sti_container() {
+    // The container turns ppm into phase with γ = 42.576 MHz/T and STI turns it back with its
+    // own 42.575, so STI's χ is the field's χ scaled by 42.576/42.575.
+    let gamma_ratio = 42.576 / 42.575;
+    for (c, (mask, field, sti)) in QSMCI_CASES.iter().zip(load_qsmci()) {
+        let grid = Grid::new(c.dims.0, c.dims.1, c.dims.2, c.vs.0, c.vs.1, c.vs.2);
+        let params = IlsqrParams { pad_mm: c.pad, ..IlsqrParams::default() };
+        let (chi, _, _, _) = ilsqr(&field, &mask, &grid, c.h, &params, |_, _| {});
+        let got: Vec<f64> = (0..chi.len()).filter(|&i| mask[i] != 0).map(|i| chi[i] * gamma_ratio).collect();
+        let nrmse = (got.iter().zip(&sti).map(|(a, b)| (a - b).powi(2)).sum::<f64>() / sti.iter().map(|b| b * b).sum::<f64>()).sqrt();
+        let (r, d) = (corr(&got, &sti), maxd(&got, &sti));
+        println!("{:?} pad {}: vs STI (container) NRMSE {nrmse:.2e}, r {r:.7}, max|Δ| {d:.2e} ppm (rms χ {:.2e})", c.dims, c.pad, rms(&sti));
+        // Measured 2026-10-30: NRMSE 3.4 % (r 0.99943) and 1.6 % (r 0.99987). STI runs both LSQR
+        // solves in single precision, and after a few dozen iterations that rounding decides the
+        // iterates (see the module docs): QSM.rs is closest to STI at STI's own 100 iterations
+        // (NRMSE 9.1 % / 7.4 % at 40, 6.4 % / 4.3 % at 200), while rounding QSM.rs's input to
+        // float32 moves it by only 5.7e-4 / 1.8e-5. The algorithm itself is pinned to 1e-9 by
+        // `ilsqr_matches_the_reverse_engineered_algorithm`.
+        assert!(nrmse < 0.05, "{:?}: NRMSE {nrmse}", c.dims);
+        assert!(r > 0.999, "{:?}: r {r}", c.dims);
+    }
 }

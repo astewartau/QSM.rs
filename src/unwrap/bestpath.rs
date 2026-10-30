@@ -99,6 +99,13 @@
 //! the same margin by which scikit-image disagrees with *itself* between rng seeds
 //! (0.06%).
 //!
+//! `tests/bestpath_skimage_parity.rs` keeps this checked, against scikit-image 0.26.0 in the
+//! verified QSM-CI `py-originals` image (QSMxT/QSM-CI#302; `tests/data/bestpath_skimage_small.py`
+//! regenerates it in Actions): on two small phantoms, one noisy, every voxel has scikit-image's
+//! wrap count, and the values agree to 1.8e-15 rad (measured 2026-10-30). In the noisy one the
+//! whole volume sits one 2π above scikit-image's: the component's absolute offset (above). On a
+//! travelling head, every voxel took scikit-image's wrap count too.
+//!
 //! It was this comparison that turned up the `extend_mask` quirk above. Following
 //! the apparent intent cost an order of magnitude in accuracy near the ROI boundary
 //! at high noise — 0.51% of wrap counts wrong against ground truth, versus 0.06%

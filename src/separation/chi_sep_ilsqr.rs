@@ -115,6 +115,10 @@
 //!   4 NNLS iterations each; χ+ relative L2 2.5·10⁻¹² (max |Δ| 8.8·10⁻¹² ppm), |χ−| 3.2·10⁻¹²
 //!   (7.2·10⁻¹² ppm). The toolbox run with 4 instead of 8 threads moves by 1.1·10⁻¹² / 1.5·10⁻¹²
 //!   here and 2.6·10⁻¹² / 2.9·10⁻¹² in vivo.
+//! - **The verified QSM-CI `chi-sep-ilsqr` container** (QSMxT/QSM-CI#306; its own STI Suite QSM,
+//!   `tests/chi_sep_ilsqr_qsmci_parity.rs`, regenerated in Actions by
+//!   `tests/data/chi_sep_ilsqr_qsmci_small.py`): χ+ and |χ−| to relative L2 3·10⁻⁸ on a 24×22×18
+//!   phantom, the container's float32 output (measured 2026-10-30).
 //!
 //! The residual is rounding inside the iterations. QSM.rs evaluates the same expressions with its
 //! own FFT and, where that saves work, in a different order (step 1's operator applies `Dc∘Dc`

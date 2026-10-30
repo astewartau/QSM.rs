@@ -11,13 +11,19 @@
 //!   (`:136`), smoothness `-w 1` (`:139`), 1000 iterations (`:792`), curvature radii
 //!   3.33–10 mm scaled by the smoothness (`:788-789`), surface from `make_mesh_from_icosa(5, m)`
 //!   (`:772`). [`BetParams::default`] has the same `f`, `g`, smoothness and iterations, and
-//!   `subdivisions: 4` (2562 vertices; whether that is BET2's `icosa(5)` depends on
-//!   `make_mesh_from_icosa`'s level convention, which is not in that repository).
+//!   `subdivisions: 4` (2562 vertices, which is BET2's `icosa(5)`: see *Agreement with bet2*).
 //! - **Input.** BET was developed on structural (T1-, T2-, PD-weighted) head images (Smith
 //!   2002) and works in mm
 //!   (the search distances and curvature limits above), so it assumes human-scale anatomy; see
 //!   [`BetParams::voxel_scale`] for rodents. It needs no orientation: the initial sphere comes
 //!   from the image's intensity centre of gravity. `-g` is a gradient along the voxel z axis.
+//! - **Agreement with bet2** (astewartau/QSM.rs#327, known gap). Against bet2 d5acd7f
+//!   (QSM-CI's local `bet2` image, QSMxT/QSM-CI#302): Dice 0.9857 (`-f 0.5`) and 0.9915 (`-f 0.2`)
+//!   on a travelling head, QSM.rs's masks 1.3 % and 0.6 % larger; 0.9903 and 0.9922 on the
+//!   synthetic head of `tests/bet_bet2_parity.rs` (measured 2026-10-30). The gap is in the
+//!   evolution. (`make_mesh_from_icosa(n)` is in that repository, `meshclass/mesh.cpp:210`: it
+//!   retessellates the icosahedron `n − 1` times, so bet2's `icosa(5)` is `subdivisions: 4`;
+//!   `subdivisions: 5` agrees less.)
 //! - **In QSM pipelines.** MEDI runs BET on `iMag = sqrt(sum(abs(iField).^2,4))`, the RSS over
 //!   echoes, with `f = 0.5` (MEDI_toolbox `README.m:92,111`) or `f = 0.1`
 //!   (`MEDI_full_process.m:109,128`). QSMART runs `bet2 -f 0.2 -m` on the first echo's

@@ -59,7 +59,12 @@
 //! data", "star QSM", with `QSM_star`'s inputs and output captured) on 64×64×48 at 1×1×1.5 mm,
 //! 80×72×40 at 0.8×0.9×2 mm and 64×64×64 at 1 mm, the default [`STAR_GUI_PAD`] reproduces the
 //! GUI's χ to rounding as well. `tests/star_sti_parity.rs` checks three of the phantoms and the
-//! GUI padding on the anisotropic one.
+//! GUI padding on the anisotropic one (licensed MATLAB R2023b, `tests/data/star_sti_small.m`).
+//! It also checks three 32×36×28 phantoms (3 T axial, anisotropic voxels, oblique 7 T with `pad`
+//! 8) against the verified QSM-CI `star-sti` container (QSMxT/QSM-CI#304), which writes χ as
+//! float32: QSM.rs is within half a float32 ulp of every voxel (relative L2 2.4–3.0e-8, the
+//! float32 rounding; measured 2026-10-30). That fixture is regenerated in Actions by
+//! `tests/data/star_sti_qsmci_small.py`.
 //!
 //! # Performance
 //!

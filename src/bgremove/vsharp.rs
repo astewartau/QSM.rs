@@ -31,7 +31,10 @@
 //! 1 mm, STI Suite `V_SHARP` in the verified `vsharp-sti` v2 container, the same total field and
 //! mask), the STI ball gives the same eroded mask and NRMSE 2e-6 relative (STI's float32 output),
 //! where the earlier ball (radius `r`, centre included, [`VsharpBall::QsmJl`]) gave 4.4 %.
-//! `tests/vsharp_sti_parity.rs` holds a small case. The papers and the code disagree on the deconvolution:
+//! `tests/vsharp_sti_parity.rs` holds a small case (40×44×36, `smvsize` 12 and 6, from the same
+//! container, regenerated in Actions by `tests/data/vsharp_sti_small.py`): the same eroded mask
+//! and max |Δ| < 5e-8 on a field of up to 0.15, STI's single-precision filtering.
+//! The papers and the code disagree on the deconvolution:
 //! Li et al. 2011 (NeuroImage 55:1645, *Image Analysis* and *Results*) and Wu et al. 2012
 //! (*Background phase removal*: "a deconvolution is carried out to restore the local phase",
 //! with the kernel of the largest diameter used) both deconvolve the SMV-filtered phase,

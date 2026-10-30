@@ -17,8 +17,9 @@
 //!   sources live in the box plus the padding, and the result is put back into the full volume;
 //! - `W = 1/N_std`, set to 0 where `N_std` is 0, and to 0 outside the mask;
 //! - the normal equations `M_bg D W² D M_bg x = M_bg D W² f` (`dipole_term.m`) are solved by
-//!   conjugate gradients (`cgsolve.m`, starting from 0, at most `n_cg` iterations (30 in `PDF.m`, 300 here by default; see [`PdfParams::n_cg`]), returning
-//!   the last iterate), stopping when the relative residual falls below
+//!   conjugate gradients (`cgsolve.m`, starting from 0, at most `n_cg` = 30 iterations,
+//!   returning the last iterate; more iterations are a tuning option, see
+//!   [`PdfParams::n_cg`]), stopping when the relative residual falls below
 //!   `tol · ||D W outside the mask|| / ||M_bg D W² f||` with `tol` = 0.1;
 //! - the dipole kernel is `dipole_kernel.m`'s k-space kernel when B0 is along an axis
 //!   (`norm(B0_dir, 1) < 1.01`). For an oblique B0 it is the kernel named by `space`, by default
@@ -66,7 +67,8 @@
 //! # Pipeline rules
 //!
 //! The facts above that a configuration can depart from are published as rules in
-//! [`crate::pipeline::rules::RULES`] (each with its strength, basis, reason and source): `pdf.mask-bet`, `pdf.field-complex-fit`.
+//! [`crate::pipeline::rules::RULES`] (each with its strength, basis, reason and source): `pdf.mask-bet`, `pdf.field-complex-fit`, and the measured suggestion `pdf.cg-iterations`
+//! (see [`PdfParams::n_cg`]).
 
 use num_complex::Complex64;
 use crate::error::{check_len, InputError};
@@ -86,18 +88,30 @@ pub enum DipoleKernelSpace {
     KSpace,
 }
 
-/// PDF parameters (`PDF.m` defaults, except `n_cg`)
+/// PDF parameters (`PDF.m` defaults)
 #[cfg_attr(feature = "introspection", derive(serde::Serialize))]
 #[derive(Clone, Debug)]
 pub struct PdfParams {
     /// Tolerance (`tol`): CG stops when its relative residual falls below
     /// `tol · ||D W outside the mask|| / ||M_bg D W² f||`
     pub tol: f64,
-    /// Maximum CG iterations (`n_CG`). **Deviation:** 300 by default instead of `PDF.m`'s 30.
-    /// At 30 the solve can stop far from convergence: on a Philips 3T travelling-head scan the
-    /// local field kept a large residual background (correlation with V-SHARP 0.54 at 30
-    /// iterations, 0.83 at 300), while a GE scan was unaffected (0.85 / 0.84). Neither reached
-    /// `tol` within 300. Costs about 30 s more per 1 mm whole-brain scan.
+    /// Maximum CG iterations (`n_CG`), by default `PDF.m`'s 30 (its default argument, which
+    /// MEDI's `README.m:124` pipeline uses). Decided 2026-10-30: the default follows the
+    /// reference, and the iteration count is tuning. Until then QSM.rs defaulted to 300.
+    ///
+    /// More iterations measured better, so 300 is suggested by the rule `pdf.cg-iterations`
+    /// (Recommended, measured; [`crate::pipeline::rules::RULES`]). At 30 the solve can stop far
+    /// from convergence:
+    /// - on a Philips 3 T travelling-head scan the local field kept a large residual background
+    ///   (correlation with V-SHARP 0.54 at 30 iterations, 0.83 at 300), while a GE scan was
+    ///   unaffected (0.85 at 30, 0.84 at 300); neither scan reached `tol` within 300;
+    /// - on QSM-CI's simulated head (QSM Challenge 2.0, 7 T), MEDI's own `PDF.m` at its
+    ///   defaults (the `pdf-cornell` container, identical to licensed MATLAB) scored about
+    ///   100 % NRMSE against the true local field, and QSM.rs's PDF at 300 iterations 44 %
+    ///   (QSMxT/QSM-CI#322).
+    ///
+    /// 300 costs about 30 s more per 1 mm whole-brain scan. The mSMV authors run 100 (with
+    /// `tol` 0; see the module docs, Reference pipeline).
     pub n_cg: usize,
     /// Kernel for an oblique B0 (`space`)
     pub space: DipoleKernelSpace,
@@ -108,7 +122,7 @@ pub struct PdfParams {
 
 impl Default for PdfParams {
     fn default() -> Self {
-        Self { tol: 0.1, n_cg: 300, space: DipoleKernelSpace::ImageSpace, n_pad: 40 }
+        Self { tol: 0.1, n_cg: 30, space: DipoleKernelSpace::ImageSpace, n_pad: 40 }
     }
 }
 

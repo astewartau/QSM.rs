@@ -11,6 +11,8 @@
 //!   SDF stage 1: sigma1=10, sigma2=0
 //!   SDF stage 2: sigma1=8, sigma2=2
 //!   SDF spatial radius: 8, lower_lim: 0.7, curv_constant: 500
+//!   (0.7 is what these reference intermediates were made with. QSMART's released code passes
+//!   `sdffilterLowerLim` 0.6 (`Demo_QSMART.m` l. 56), which is `SdfParams`' default.)
 //!   Frangi: scaleRange=[0.01, 0.05], scaleRatio=0.01, C=500
 //!   Vasculature sphere radius: 8
 //!   iLSQR: cgs_num=500, inv_num=500, smv_rad=0.1 (Demo_QSMART.m fields, unused: QSMART.m calls
@@ -49,6 +51,7 @@ const FIELD_TESLA: f64 = 7.0;
 const GYRO: f64 = 2.675e8; // rad/s/T
 
 // SDF parameters
+/// What Warda's reference run used; QSMART's `Demo_QSMART.m` and `SdfParams::default` use 0.6.
 const SDF_LOWER_LIM: f64 = 0.7;
 const SDF_CURV_CONSTANT: f64 = 500.0;
 
