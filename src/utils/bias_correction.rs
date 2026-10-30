@@ -37,9 +37,10 @@
 //!
 //! `tests/mritools_parity.rs` against MriResearchTools 771eadf in the verified QSM-CI `julia-qsm`
 //! image (QSMxT/QSM-CI#299), measured 2026-10-30, on a 20×18×14 phantom at 1×1×1.5 mm:
-//! [`robust_mask`] is `robustmask` to the voxel. **Known gap** (astewartau/QSM.rs#319):
-//! [`makehomogeneous`] (σ 7 mm, `nbox` 15) is 3.3 % NRMSE in the mask from `makehomogeneous`
-//! (the ratio of the two between 0.85 and 1.05).
+//! [`robust_mask`] is `robustmask` to the voxel, and [`makehomogeneous`] (σ 7 mm, `nbox` 15) is
+//! `makehomogeneous` bit for bit. It was 3.3 % NRMSE in the mask (the ratio of the two between
+//! 0.85 and 1.05) before three port errors were fixed (astewartau/QSM.rs#319); see
+//! [`get_sensitivity`].
 
 /// Parameters for inhomogeneity correction (bias field removal).
 ///
