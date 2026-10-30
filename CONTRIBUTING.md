@@ -388,6 +388,8 @@ a new one should not become the longest shard without a reason.
   sets the version from the tag, packages the crate and attaches it to the release, and deploys
   the docs. Do not bump the version in a PR.
 - Release notes are drafted from the merged PRs' bodies and posted on the GitHub release.
+- Before a release, the parity workflow (QSMxT/QSM-CI, every QSM.rs port against its verified
+  original) must pass against the release candidate.
 - A release is cut only when the maintainer approves it.
 
 ### Docs
