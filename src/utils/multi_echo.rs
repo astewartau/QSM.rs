@@ -36,7 +36,11 @@
 //!   `romeofunctions.jl:33-35`) is not ported; [`B0WeightType::AssumedDecay`] is UK Biobank's.
 //! - **Linear fit** ([`multi_echo_linear_fit`]): after QSM.jl's `multi_echo_linear_fit`
 //!   (kamesy/QSM.jl fde4b92, `src/utils/multi_echo.jl:209-260`; phase offset modelled by
-//!   default, `W` the square root of the weights, e.g. `mag/σ`) and QSMART's `echofit.m`.
+//!   default, `W` the square root of the weights, e.g. `mag/σ`) and QSMART's `echofit.m`. Each
+//!   echo is weighted by its magnitude, which is QSM.jl's fit with `W = sqrt(mag)`; with that,
+//!   `tests/linearfit_qsmjl_parity.rs` matches QSM.jl (in the verified QSM-CI `julia-qsm` image,
+//!   QSMxT/QSM-CI#299) to 5e-16 relative in the slope and 4e-15 rad in the offset, with and
+//!   without the offset (measured 2026-10-30).
 //! - **Robust fit** ([`multi_echo_robust_fit`]) is QSM.rs's own (IRLS with Tukey/Huber loss);
 //!   it has no external reference, and its defaults rest on the measurements recorded on
 //!   [`RobustLoss`] and [`RobustFitParams`].
