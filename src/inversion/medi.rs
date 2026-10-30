@@ -59,8 +59,12 @@
 //! `Fit_ppm_complex.m` assumes evenly spaced echoes.
 //!
 //! # Zero padding
-//! `zeropad` pads the volume at the end of each axis before the inversion and crops the result,
-//! as `MEDI_L1`'s `'zeropad'` option does.
+//! `zeropad` pads the volume with zeros at the end of each axis before the inversion and crops
+//! the result back. That is what `MEDI_L1`'s `'zeropad'` option is meant to do, but in MEDI
+//! 2024.11.26 the option fails: `parse_QSM_input` pads the volumes but leaves `matrix_size` and
+//! the masks (`Mask`, `Mask_CSF`) at the unpadded size, so `MEDI_L1` stops on mismatched
+//! arrays. The QSM-CI `medi-cornell` container pads the inputs itself before calling `MEDI_L1`
+//! instead (QSMxT/QSM-CI#309).
 //!
 //! # Input: the local field
 //! `medi` takes the local field from a background removal, with or without SMV or mSMV. The
