@@ -85,7 +85,7 @@ pub mod chisepnet;
 
 pub use chi_sep_ilsqr::{chi_sep_ilsqr, chisep_toolbox_ilsqr, ChiSepIlsqrInputs, ChiSepIlsqrParams, NNLS_ITER_MAX, NNLS_TOL};
 pub use chi_sep_medi::{chi_sep_medi, ChiSepMediInputs, ChiSepMediParams, CHI_SEP_MEDI_MIN_ITER, toolbox_default_dr, TOOLBOX_DR_REFERENCE_TESLA, TOOLBOX_GYRO_HZ_PER_T};
-pub use decompose::{decompose, DecomposeParams, DecomposeStageSolver, DecomposeStageSolvers};
+pub use decompose::{decompose, DecomposeChiBound, DecomposeParams, DecomposeStageSolver, DecomposeStageSolvers};
 pub use hc_chisep::{hc_chisep, HcChisepParams};
 pub use r2star_qsm::{r2star_qsm, r2star_qsm_from_magnitude, R2starQsmParams};
 pub use wavesep::{wavesep, WaveSepParams};

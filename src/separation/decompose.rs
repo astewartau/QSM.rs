@@ -37,42 +37,61 @@
 //! radians, so above `|χ_total| = π / ((2/3)·γ·B0·TE_max)` the late echoes fold
 //! back onto that branch — 0.09 ppm at 7 T with a 28 ms last echo, which is
 //! ordinary globus pallidus. Left folded, the alternation converges to a
-//! degenerate fixed point (χ− pinned at `chi_bound`, R2*₀ and the amplitudes at
-//! zero) and returns χ+ = 0 exactly, so the most paramagnetic structure in the
+//! degenerate fixed point (χ− pinned at the χ bound, R2*₀ and the amplitudes at
+//! zero) and returns χ+ ≈ 0, so the most paramagnetic structure in the
 //! volume reads as a hole. Both the stage-2/3 residuals and `recon_phase`
 //! therefore walk the echoes in order and keep each phase on the branch nearest
 //! its predecessor ([`unwrap_near`]); the synthesized data phase is known in
 //! closed form and is used unwrapped rather than round-tripped through `atan2`.
-//! The original method, published at 3 T, does not meet this limit in practice —
-//! the threshold there is ~0.2 ppm.
+//! The option does only this; it does not change the χ search (that is
+//! [`DecomposeParams::chi_bound`]). The original method, published at 3 T, does not meet this
+//! limit in practice — the threshold there is ~0.2 ppm.
 //!
-//! **Phase unwrapping at 7 T.** The authors designed the fit for 3 T: their χ bound "was roughly
-//! calculated using TE = 25 ms and B0 = 3T to ensure the phase does not exceed 2π" (Chen et al.
-//! 2021, §2.2). At 7 T the phase wraps between echoes inside ordinary deep grey matter, and with
-//! the authors' default (principal-branch phases) χ+ partly collapses. Measured 2026-10-29 on
-//! the QSM-CI 7 T chisep phantom (164×205×205, 1 mm, TE 4/12/20/28 ms; its provided χ given at
-//! every echo; `tests/chisep_relaxometry_qsmci.rs`, `DECOMPOSE_UNWRAP=1` for the second row),
-//! with this code (the `lsqcurvefit` port) and only `unwrap_phase` changed (it unwraps and caps
-//! the χ search, below):
+//! **The χ bound** ([`DecomposeParams::chi_bound`], a tuning value). The authors search
+//! `0 ≤ χ+ ≤ 0.5`, `−0.5 ≤ χ− ≤ 0` ppm, a bound "roughly calculated using TE = 25 ms and B0 = 3T
+//! to ensure the phase does not exceed 2π" (Chen et al. 2021, §2.2); that is the default
+//! ([`DecomposeChiBound::Ppm`]`(0.5)`). [`DecomposeChiBound::EchoSpacing`] instead takes the
+//! bound from the scan: `π / ((2/3)·γ·B0·ΔTE_max)`, with `ΔTE_max` the largest phase step the
+//! unwrapping walks (`TE₁` from zero, or any echo spacing). Unwrapping along the echoes is
+//! unambiguous only while the phase step between echoes stays under π, and this is the largest
+//! |χ| for which it does: 0.31 ppm (0.3145) at 7 T with 8 ms spacing, 0.73 ppm at 3 T. Past it the
+//! model matches a given χ on more than one branch and the stage-3 landscape grows spurious
+//! minima.
 //!
-//! | `unwrap_phase` | χ+ r / XSIM / NRMSE | χ− r / XSIM / NRMSE |
-//! |---|---|---|
-//! | off (the authors' default) | 0.484 / 0.216 / 10.9 % | 0.745 / 0.325 / 4.8 % |
-//! | on | **0.895** / 0.489 / 7.1 % | **0.865** / 0.477 / 4.0 % |
+//! **At 7 T.** The authors designed the fit for 3 T, and at 7 T the phase wraps between echoes
+//! inside ordinary deep grey matter. Measured 2026-10-30 on the QSM-CI 7 T chisep phantom
+//! (164×205×205, 1 mm, TE 4/12/20/28 ms; its provided χ given at every echo) with this code at
+//! astewartau/QSM.rs@add3d6e (the `lsqcurvefit` port, FDLIBM), `n_inner` 10:
 //!
-//! (An earlier figure, χ+ r 0.59 for the authors' default against 0.87 on main, QSM.rs#333's CI
-//! run 40786263426, compared ports that also differed in the solver and the χ cap, so it did not
-//! isolate unwrapping.) The default stays the authors' (off,
-//! [`DecomposeParams::unwrap_phase`]); the pipeline rule `decompose.unwrap-7t` suggests turning
-//! it on at 7 T (from 6.5 T, so a Siemens 7 T's 6.98 T counts).
+//! ```text
+//! QSMCI_CHISEP=<phantom> DECOMPOSE_UNWRAP=<0|1> DECOMPOSE_CHI_BOUND=<ppm|echo-spacing> \
+//!   cargo test --release --features parallel --test chisep_relaxometry_qsmci \
+//!   test_decompose_qsmci -- --ignored --nocapture
+//! ```
 //!
-//! Unwrapping is only unambiguous while the phase step *between* echoes stays
-//! under π, so the χ search is additionally capped at
-//! `π / ((2/3)·γ·B0·ΔTE_max)` — 0.31 ppm at 7 T with 8 ms spacing, inside the
-//! 0.5 ppm default [`DecomposeParams::chi_bound`]. Past that the model matches a
-//! given χ on more than one branch, the stage-3 landscape grows spurious minima,
-//! and scattered voxels fall into them; capping the search is what removes the
-//! speckle of dropouts that unwrapping alone left in the recovered pallidum.
+//! "Pallidum" is the phantom's globus pallidus (`dseg` label 2, 3683 voxels, true mean χ+
+//! 0.137 ppm); "collapsed" counts its voxels whose χ+ is under a quarter of the truth.
+//!
+//! | `unwrap_phase` | `chi_bound` | χ+ r / XSIM / NRMSE | χ− r / XSIM / NRMSE | pallidum mean χ+ | collapsed |
+//! |---|---|---|---|---|---|
+//! | off (authors) | 0.5 (authors) | 0.484 / 0.216 / 10.9 % | 0.745 / 0.325 / 4.8 % | 0.002 | 3541 |
+//! | on | 0.5 | 0.658 / 0.250 / 10.0 % | 0.751 / 0.324 / 4.7 % | 0.027 | 2932 |
+//! | off | echo spacing (0.3145) | 0.587 / 0.367 / 9.7 % | 0.846 / 0.471 / 4.1 % | 0.005 | 3372 |
+//! | on | echo spacing (0.3145) | **0.895 / 0.489 / 7.1 %** | **0.865 / 0.477 / 4.0 %** | 0.111 | 17 |
+//!
+//! So the two help in different ways. The bound alone improves χ− (r 0.75 → 0.85) and χ+'s XSIM,
+//! but leaves the pallidum collapsed; unwrapping alone recovers little of it; together they
+//! recover it. (The rows were first measured with the bound hard-wired into the unwrapping
+//! option, as `min(0.5, π / ((2/3)·γ·B0·ΔTE_max))`; that option, and a plain `chi_bound` of
+//! 0.3145 with and without unwrapping, gave the same metrics to the digits shown, and so does
+//! [`DecomposeChiBound::EchoSpacing`]. An older note
+//! here, from the bounded-LM port, said the bound removed "a speckle of dropouts" that unwrapping
+//! alone left; with this solver, unwrapping alone leaves most of the pallidum collapsed, and
+//! voxels at exactly χ+ = 0 number 1–8 of 1.31 M in every row.) The defaults stay the authors'
+//! (off, 0.5); the pipeline rules `decompose.unwrap-7t` and `decompose.chi-bound-7t` suggest
+//! both at 7 T (from 6.5 T, so a Siemens 7 T's 6.98 T counts). An earlier figure, χ+ r 0.59 for
+//! the authors' default against 0.87 (QSM.rs#333's CI run 40786263426), compared ports that also
+//! differed in the solver, so it isolated neither change.
 //!
 //! Note that `−Σ angle / den` remains a *compressive* estimator of χ: its gain
 //! rises with χ itself (≈0.03 at white-matter χ+, ≈0.87 in the pallidum on the
@@ -141,7 +160,7 @@
 //!   [`decompose`] takes that per-echo χ. (The authors' script runs STAR-QSM per echo at
 //!   `padsize` 12 after `MRPhaseUnwrap` and `V_SHARP(smvsize 25)` of that echo.)
 //! - **Referencing:** χ referenced to the whole-brain mean.
-//! - **Constants:** `0.5 > |χ+|, |χ−| > 0` (§2.2, [`DecomposeParams::chi_bound`]), and
+//! - **Constants:** `0.5 > |χ+|, |χ−| > 0` (§2.2, [`DecomposeParams::chi_bound`]'s default), and
 //!   `a = 323.5 Hz/ppm` at 3 T (§2.1), which the formula above reproduces and which scales with
 //!   B0 by construction.
 //!
@@ -157,7 +176,7 @@
 //! # Pipeline rules
 //!
 //! The facts above that a configuration can depart from are published as rules in
-//! [`crate::pipeline::rules::RULES`] (each with its strength, basis, reason and source): `decompose.mask-bet`, `decompose.unwrap-laplacian`, `decompose.bg-vsharp`, `decompose.qsm-star`, `decompose.qsm-per-echo` (Recommended: stated by the authors, §2.2 and §4.1), `decompose.reference-mean`, and `decompose.unwrap-7t` (Recommended at 7 T: measured, above).
+//! [`crate::pipeline::rules::RULES`] (each with its strength, basis, reason and source): `decompose.mask-bet`, `decompose.unwrap-laplacian`, `decompose.bg-vsharp`, `decompose.qsm-star`, `decompose.qsm-per-echo` (Recommended: stated by the authors, §2.2 and §4.1), `decompose.reference-mean`, and at 7 T `decompose.unwrap-7t` and `decompose.chi-bound-7t` (Recommended: measured, *At 7 T* above).
 
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
@@ -180,16 +199,17 @@ pub struct DecomposeParams {
     pub b0: f64,
     /// Number of alternating 3-stage fit passes per voxel (reference default: 10).
     pub n_inner: usize,
-    /// Upper bound on |χ| in the fit, ppm (reference default: 0.5).
-    pub chi_bound: f64,
+    /// The bound on |χ+| and |χ−| in the stage-3 search. Default: the authors' 0.5 ppm
+    /// ([`DecomposeChiBound::Ppm`]); [`DecomposeChiBound::EchoSpacing`] takes it from the scan
+    /// (see the module docs, *The χ bound*).
+    pub chi_bound: DecomposeChiBound,
     /// `optimoptions('lsqcurvefit', …)` of every stage: iterations, evaluations, tolerances and
     /// finite-difference settings. Default: MATLAB's defaults ([`LsqTrrOptions::default`]), which
     /// the authors' code keeps (`MaxIterations` 400, the 1e-6 tolerances).
     pub lsqcurvefit: LsqTrrOptions,
-    /// Unwrap the phase along the echoes and cap the χ search at what the echo spacing can
-    /// represent (see the module docs, *Phase unwrapping*). Default `false`: the authors' code
-    /// takes every phase on its principal branch (`log`, `angle`) and searches χ up to
-    /// [`chi_bound`](Self::chi_bound).
+    /// Unwrap the phase along the echoes (see the module docs, *Phase unwrapping*). Default
+    /// `false`: the authors' code takes every phase on its principal branch (`log`, `angle`).
+    /// It leaves the χ search to [`chi_bound`](Self::chi_bound).
     pub unwrap_phase: bool,
     /// The solver of each of the three stages (see [`DecomposeStageSolvers`]).
     pub solvers: DecomposeStageSolvers,
@@ -231,14 +251,70 @@ pub enum DecomposeStageSolver {
     LsqcurvefitTrustRegionReflective,
 }
 
+/// The bound on |χ| in DECOMPOSE's stage-3 search (`[0, −bound]` to `[bound, 0]`), see the
+/// module docs, *The χ bound*.
+#[cfg_attr(feature = "introspection", derive(serde::Serialize))]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum DecomposeChiBound {
+    /// A fixed bound in ppm. The authors' is 0.5 (Chen et al. 2021, §2.2), the default.
+    Ppm(f64),
+    /// `π / ((2/3)·γ·B0·ΔTE_max)`, the largest |χ| whose phase step between echoes stays under π,
+    /// so that unwrapping along the echoes is unambiguous; `ΔTE_max` is the largest of `TE₁` and
+    /// the echo spacings. A tuning value: 0.3145 ppm at 7 T with 8 ms spacing.
+    EchoSpacing,
+}
+
 impl DecomposeParams {
-    /// Checks `chi_bound`, the upper bound on |χ| in the fit: it must be ≥ 0 (a negative bound
-    /// leaves the fit's lower bound above its upper one).
+    /// Checks a fixed `chi_bound` ([`DecomposeChiBound::Ppm`]): it must be ≥ 0 ppm (a negative
+    /// bound leaves the fit's lower bound above its upper one). An
+    /// [`EchoSpacing`](DecomposeChiBound::EchoSpacing) bound depends on the echo times, and
+    /// [`decompose`] checks it.
     pub fn validate(&self) -> Result<(), InputError> {
-        if self.chi_bound.is_nan() || self.chi_bound < 0.0 {
-            return Err(InputError::param("DECOMPOSE chi_bound", self.chi_bound, ">= 0 ppm"));
+        if let DecomposeChiBound::Ppm(_) = self.chi_bound {
+            self.chi_bound.resolve(self.b0, &[])?;
         }
         Ok(())
+    }
+}
+
+impl Default for DecomposeChiBound {
+    fn default() -> Self {
+        DecomposeChiBound::Ppm(0.5)
+    }
+}
+
+impl DecomposeChiBound {
+    /// Stable id: `"ppm"` (whatever its value) or `"echo-spacing"`.
+    pub fn id(self) -> &'static str {
+        match self {
+            DecomposeChiBound::Ppm(_) => "ppm",
+            DecomposeChiBound::EchoSpacing => "echo-spacing",
+        }
+    }
+
+    /// The bound in ppm at field `b0` (T) and `echo_times` (s, in acquisition order). Errors if
+    /// it is not ≥ 0 (a negative bound leaves the fit's lower bound above its upper one), or for
+    /// [`EchoSpacing`](Self::EchoSpacing) not a finite positive bound (no echoes, a time ≤ 0).
+    pub fn resolve(self, b0: f64, echo_times: &[f64]) -> Result<f64, InputError> {
+        match self {
+            DecomposeChiBound::Ppm(x) if x.is_nan() || x < 0.0 => {
+                Err(InputError::param("DECOMPOSE chi_bound", x, ">= 0 ppm"))
+            }
+            DecomposeChiBound::Ppm(x) => Ok(x),
+            DecomposeChiBound::EchoSpacing => {
+                let first = echo_times.first().copied().unwrap_or(f64::NAN);
+                let dte = echo_times.windows(2).map(|w| w[1] - w[0]).fold(first, f64::max);
+                let bound = PI / ((2.0 / 3.0) * GAMMA * b0 * dte);
+                if bound.is_finite() && bound > 0.0 {
+                    Ok(bound)
+                } else {
+                    Err(InputError::new(format!(
+                        "DECOMPOSE chi_bound from the echo spacing must be a finite bound > 0 ppm, \
+                         got {bound} (B0 {b0} T, echo times {echo_times:?})"
+                    )))
+                }
+            }
+        }
     }
 }
 
@@ -247,7 +323,7 @@ impl Default for DecomposeParams {
         Self {
             b0: 7.0,
             n_inner: 10,
-            chi_bound: 0.5,
+            chi_bound: DecomposeChiBound::default(),
             lsqcurvefit: LsqTrrOptions::default(),
             unwrap_phase: false,
             solvers: DecomposeStageSolvers::default(),
@@ -296,6 +372,7 @@ pub fn decompose(
 
     let b0 = params.b0;
     let te = echo_times;
+    let upper = params.chi_bound.resolve(b0, te)?;
 
     // Global-max magnitude normalisation (matches the reference).
     let gmax = magnitude.iter().cloned().fold(0.0_f64, f64::max).max(1e-30);
@@ -340,7 +417,7 @@ pub fn decompose(
                 return (i, 0.0, 0.0);
             }
 
-            let p = fit_voxel(te, &ws.yc, &ws.logyc, b0, params, &mut ws.solver);
+            let p = fit_voxel(te, &ws.yc, &ws.logyc, b0, upper, params, &mut ws.solver);
 
             // The authors' reconstruction: PSC = −Σangle(pscModel)/den, DSC = −Σangle(dscModel)/den,
             // written as χ+ = |DSC| (`XPSC`) and |χ−| = |PSC| (`XDSC`). Fitting conj(y) mirrors the
@@ -413,38 +490,25 @@ impl StageSolvers {
 /// for it = 1:N_inner
 ///     C0    = lsqcurvefit(objective1 (C),  C0,    TE, complex_to_real(ydata),      [0 0 0], [inf inf inf]);
 ///     R0    = lsqcurvefit(objective2 (R0), R0,    TE, complex_to_real(log(ydata)), 0,       inf);
-///     chi_0 = lsqcurvefit(objective3 (χ),  chi_0, TE, complex_to_real(log(ydata)), [0 -upper], [upper 0]);
+///     chi_0 = lsqcurvefit(objective3 (χ),  chi_0, TE, complex_to_real(log(ydata)), [0 -0.5], [0.5 0]);
 /// end
 /// ```
 ///
-/// with `lsqcurvefit`'s default options, which [`lsq_trust_region_reflective`] reproduces.
+/// with `lsqcurvefit`'s default options, which [`lsq_trust_region_reflective`] reproduces. The
+/// χ bound `upper` is [`DecomposeParams::chi_bound`], resolved (the authors' 0.5 by default).
 /// `lsqcurvefit`'s residual is `fun(x, TE) − ydata`, packed by `complex_to_real` as `[Re; −Im]`.
 fn fit_voxel(
     te: &[f64],
     yc: &[(f64, f64)],
     logyc: &[(f64, f64)],
     b0: f64,
+    upper: f64,
     params: &DecomposeParams,
     ws: &mut StageSolvers,
 ) -> Fit {
     let ne = te.len();
     let mut p = Fit { c: [0.3, 0.3, 0.4], r0: 25.0, chi: [0.05, -0.05] };
 
-    // Cap the χ search at the largest |χ| the echo spacing can represent without
-    // aliasing. Unwrapping puts each echo's phase on the branch nearest the
-    // previous one, which is only unambiguous while the step between echoes stays
-    // under π; past that the model can match a given χ on more than one branch,
-    // the stage-3 landscape grows spurious minima, and scattered voxels fall into
-    // them. At 7 T with 8 ms spacing the limit is 0.31 ppm, well inside the 0.5
-    // ppm default — which is what left the recovered pallidum speckled with
-    // dropouts even after the phases were unwrapped.
-    // Only with `unwrap_phase`: the authors search up to `chi_bound` (`upper`).
-    let dte = te.windows(2).map(|w| w[1] - w[0]).fold(te[0], f64::max);
-    let upper = if params.unwrap_phase {
-        params.chi_bound.min(PI / ((2.0 / 3.0) * GAMMA * b0 * dte))
-    } else {
-        params.chi_bound
-    };
     let unwrap = params.unwrap_phase;
     let inf = f64::INFINITY;
     let opts = &params.lsqcurvefit;
@@ -626,7 +690,7 @@ mod tests {
         let params = DecomposeParams {
             b0,
             n_inner: 12,
-            chi_bound: 0.5,
+            chi_bound: DecomposeChiBound::Ppm(0.5),
             lsqcurvefit: LsqTrrOptions::default(),
             unwrap_phase: false,
             solvers: Default::default(),
@@ -657,7 +721,7 @@ mod tests {
             .collect();
         let logyc: Vec<(f64, f64)> = yc.iter().map(|&z| matlab_log(z)).collect();
         let mut ws = StageSolvers::new(2 * ne);
-        let p = fit_voxel(&te, &yc, &logyc, b0, &params, &mut ws);
+        let p = fit_voxel(&te, &yc, &logyc, b0, 0.5, &params, &mut ws);
         let den = (2.0 / 3.0) * GAMMA * b0 * te.iter().sum::<f64>();
         let dsc = recon_phase(&te, den, false, |t| dsc_model(t, &p, b0));
         let psc = recon_phase(&te, den, false, |t| psc_model(t, &p, b0));
@@ -694,7 +758,9 @@ mod tests {
     /// returns χ+ = 0 exactly. At the phantom's 7 T and 28 ms last echo that
     /// threshold is 0.090 ppm — inside the globus pallidus, which consequently
     /// reconstructed as a hole. Sweep across it and require a response that is
-    /// non-zero and increasing, not a dropout.
+    /// non-zero and increasing, not a dropout, with the configuration the 7 T rules suggest
+    /// (`unwrap_phase` and the echo-spacing χ bound; unwrapping with the authors' 0.5 ppm bound
+    /// fails here, as on the phantom: module docs, *At 7 T*).
     #[test]
     fn chi_pos_survives_the_phase_wrap_threshold() {
         let te = [0.004, 0.012, 0.020, 0.028]; // 7 T phantom sampling
@@ -702,7 +768,7 @@ mod tests {
         let params = DecomposeParams {
             b0,
             n_inner: 10,
-            chi_bound: 0.5,
+            chi_bound: DecomposeChiBound::EchoSpacing,
             lsqcurvefit: LsqTrrOptions::default(),
             unwrap_phase: true,
             solvers: Default::default(),
@@ -743,16 +809,14 @@ mod tests {
         }
     }
 
-    /// Regression: no scattered dropouts across the deep-grey χ+ range.
+    /// The 7 T configuration the pipeline rules suggest (`unwrap_phase` with the echo-spacing χ
+    /// bound) recovers χ+ across the deep-grey range.
     ///
-    /// Unwrapping alone was not enough. The χ search ran to `chi_bound` (0.5 ppm
-    /// by default), past the 0.31 ppm that 8 ms echo spacing can represent
-    /// without the per-echo phase step exceeding π. In that aliased region the
-    /// stage-3 landscape grows spurious minima, and voxels at particular
-    /// (χ, R2*) combinations fell into them — leaving a recovered pallidum that
-    /// was bright but speckled with black. Feed single-compartment data built the
-    /// way the phantom builds it (magnitude decaying at R2* = R2 + Dr·|χ|, phase
-    /// from χ_total) and require every voxel across the band to recover.
+    /// Single-compartment data built the way the QSM-CI phantom builds it (magnitude decaying at
+    /// R2* = R2 + Dr·|χ|, phase from χ_total), swept over χ+ 0.03–0.30 ppm; every voxel must
+    /// recover at least 0.3 of its χ+. With the authors' 0.5 ppm bound unwrapping alone fails
+    /// here, as on the phantom, where it leaves most of the pallidum collapsed and the
+    /// echo-spacing bound (0.3145 ppm here) recovers it (module docs, *At 7 T*).
     #[test]
     fn chi_pos_has_no_dropouts_across_deep_grey() {
         let te = [0.004, 0.012, 0.020, 0.028];
@@ -760,7 +824,7 @@ mod tests {
         let params = DecomposeParams {
             b0,
             n_inner: 10,
-            chi_bound: 0.5,
+            chi_bound: DecomposeChiBound::EchoSpacing,
             lsqcurvefit: LsqTrrOptions::default(),
             unwrap_phase: true,
             solvers: Default::default(),
@@ -788,7 +852,7 @@ mod tests {
         let te = [0.004, 0.012, 0.020, 0.028];
         let b0 = 7.0;
         let ne = te.len();
-        let params = DecomposeParams { b0, n_inner: 4, chi_bound: 0.5, lsqcurvefit: LsqTrrOptions::default(), unwrap_phase: false, solvers: Default::default() };
+        let params = DecomposeParams { b0, n_inner: 4, chi_bound: DecomposeChiBound::Ppm(0.5), lsqcurvefit: LsqTrrOptions::default(), unwrap_phase: false, solvers: Default::default() };
 
         // A real signal for the fitted voxels.
         let (cp, cm, c0, chip, chim, r0) = (0.4, 0.2, 0.4, 0.06, -0.05, 22.0);
@@ -824,6 +888,25 @@ mod tests {
         assert_eq!(last, (3, 3), "final progress");
     }
 
+    /// The echo-spacing χ bound: `π / ((2/3)·γ·B0·ΔTE_max)`, 0.3145 ppm at 7 T with 8 ms spacing
+    /// (the first echo, 4 ms, is a smaller step), set by the largest step (`TE₁` counts), and an
+    /// error where it is not a finite positive bound.
+    #[test]
+    fn echo_spacing_chi_bound() {
+        let b = |b0: f64, te: &[f64]| DecomposeChiBound::EchoSpacing.resolve(b0, te);
+        let at7 = b(7.0, &[0.004, 0.012, 0.020, 0.028]).unwrap();
+        assert!((at7 - 0.31447).abs() < 1e-4, "{at7}");
+        assert_eq!(at7, PI / ((2.0 / 3.0) * GAMMA * 7.0 * 0.008));
+        // An irregular spacing: the largest step sets it.
+        assert_eq!(b(7.0, &[0.004, 0.008, 0.020]).unwrap(), PI / ((2.0 / 3.0) * GAMMA * 7.0 * 0.012));
+        // A first echo later than the spacing: TE₁ sets it.
+        assert_eq!(b(3.0, &[0.010, 0.013, 0.016]).unwrap(), PI / ((2.0 / 3.0) * GAMMA * 3.0 * 0.010));
+        assert!(b(7.0, &[]).is_err() && b(7.0, &[0.0, 0.0, 0.0]).is_err() && b(0.0, &[0.004, 0.008]).is_err());
+        assert_eq!(DecomposeChiBound::Ppm(0.2).resolve(7.0, &[]).unwrap(), 0.2);
+        assert_eq!(DecomposeParams::default().chi_bound, DecomposeChiBound::Ppm(0.5));
+        assert_eq!((DecomposeChiBound::Ppm(0.5).id(), DecomposeChiBound::EchoSpacing.id()), ("ppm", "echo-spacing"));
+    }
+
     /// #199: a negative `chi_bound` panicked inside the fit; it is an error now, as are the
     /// shape problems that used to be asserts.
     #[test]
@@ -831,7 +914,7 @@ mod tests {
         let te = [0.004, 0.008, 0.012];
         let mag = [1.0, 0.9, 0.8];
         for bad in [-0.1, f64::NAN] {
-            let params = DecomposeParams { chi_bound: bad, ..Default::default() };
+            let params = DecomposeParams { chi_bound: DecomposeChiBound::Ppm(bad), ..Default::default() };
             let err = decompose(&[0.0; 3], &mag, &te, &[1u8], &params, |_, _| {}).unwrap_err();
             assert!(err.0.contains("DECOMPOSE chi_bound") && err.0.contains(">= 0"), "{err}");
         }
