@@ -59,8 +59,12 @@
 //! `Fit_ppm_complex.m` assumes evenly spaced echoes.
 //!
 //! # Zero padding
-//! `zeropad` pads the volume at the end of each axis before the inversion and crops the result,
-//! as `MEDI_L1`'s `'zeropad'` option does.
+//! `zeropad` pads the volume with zeros at the end of each axis before the inversion and crops
+//! the result back. That is what `MEDI_L1`'s `'zeropad'` option is meant to do, but in MEDI
+//! 2024.11.26 the option fails: `parse_QSM_input` pads the volumes but leaves `matrix_size` and
+//! the masks (`Mask`, `Mask_CSF`) at the unpadded size, so `MEDI_L1` stops on mismatched
+//! arrays. The QSM-CI `medi-cornell` container pads the inputs itself before calling `MEDI_L1`
+//! instead (QSMxT/QSM-CI#309).
 //!
 //! # Input: the local field
 //! `medi` takes the local field from a background removal, with or without SMV or mSMV. The
@@ -132,6 +136,15 @@
 //!
 //! After one step the differences are single (MATLAB) against double (here) rounding. Over
 //! ten steps they also include CG stopping one iteration apart at `cg_tol` 0.01.
+//!
+//! `tests/medi_cornell_parity.rs` checks the same against the verified QSM-CI `medi-cornell`
+//! container (MEDI 2024.11.26, QSMxT/QSM-CI#309; regenerated in Actions by
+//! `tests/data/medi_cornell_small.py`), measured 2026-10-30: one step 2.7e-7 / 1.3e-8 / 1.5e-7
+//! ppm max abs diff for the three rows above (the container writes χ as float32); and MEDI_L1's
+//! defaults end to end (SMV with shrinking, MERIT, 10 steps, MEDI+0 with the CSF mask from
+//! `arlo` and [`extract_csf`] on the phantom with three CSF-like blobs) 2.9e-8 ppm, relative L2
+//! 6.0e-7, every CG solve stopping where MATLAB's did. On the way, `fit_ppm_complex_noise`
+//! (N_std), `arlo` (R2*) and [`extract_csf`] are bit-identical to the container's.
 //!
 //! # MEDI-mSMV
 //! [`MediParams::msmv`] is `MEDI_L1(..., 'msmv', radius)` from the mSMV authors' MEDI toolbox

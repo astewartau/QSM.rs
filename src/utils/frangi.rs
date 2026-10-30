@@ -612,7 +612,8 @@ mod tests {
     /// volumes for scales 0.01:0.01:0.05 with C = 500 (single-precision underflow decides
     /// which voxels are nonzero; double gives ~8x as many), first as MATLAB returns it and
     /// then with MATLAB's single `exp` swapped for a correctly rounded one, and last for
-    /// scales 0.5:0.5:2 with C = 200 (the Gaussian path), also with that `exp`.
+    /// scales 0.5:0.5:2 with C = 200 (the Gaussian path), also with that `exp`. Generator:
+    /// `tests/data/frangi_matlab_single_small.m` (licensed MATLAB).
     #[test]
     fn matches_matlab_single_precision() {
         let raw = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/frangi_matlab_single_small.bin"))
