@@ -32,6 +32,14 @@
 //!   phase-wrapping regions (|phase|>pi) the nonlinear solve is multistable, so
 //!   that ~1e-7 seed perturbation can select a different local solution there.
 //!   This crate uses full double precision (a strict improvement).
+//! * Against the unmodified original, the verified QSM-CI `amp-pe` container (QSMxT/QSM-CI#309,
+//!   bit-identical to licensed MATLAB), `tests/amppe_qsmci.rs` measures NRMSE 1.09 % (30×28×22,
+//!   db1, nlevel 3, with magnitude) and 1.41 % (32×32×24, db2, nlevel 2, oblique B0), 6
+//!   linearisations per stage (2026-10-30; the fixture is regenerated in Actions by
+//!   `tests/data/amp_pe_qsmci_small.py`). The exact norms above are the likely cause: scaling
+//!   ‖A_qsm‖²_F alone by 1 % moves the result by 0.3–0.45 % NRMSE, and two random probes miss it
+//!   by more. Parity with the original needs its probes (MATLAB's `randn` after `rng('default')`)
+//!   as an option: astewartau/QSM.rs#363.
 //!
 //! # Reference pipeline
 //! The authors' scripts (<https://github.com/EmoryCN2L/QSM_AMP_PE>, commit 15bf8dc; README
