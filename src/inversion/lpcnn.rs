@@ -25,6 +25,14 @@
 //! - **Resampling:** none in the authors' code; the dipole kernel is built for the input's voxel
 //!   size.
 //!
+//! # Agreement with the original
+//!
+//! `tests/models_onnx/dipole.rs` runs it on a 36×32×28 box of in-vivo data (1 mm, 2.89 T, across
+//! the brain's edge) against its original's verified QSM-CI entry, LPCNN dd1ef2b (`lpcnn`)
+//! (QSMxT/QSM-CI#316; the fixture is regenerated in Actions by
+//! `tests/data/dl_dipole_qsmci_small.py`): NRMSE 3.7e-5 %, max |Δ| 8.5e-8 ppm (measured
+//! 2026-10-30): float32 rounding.
+//!
 //! # Pipeline rules
 //!
 //! The facts above that a configuration can depart from are published as rules in

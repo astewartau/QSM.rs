@@ -58,6 +58,15 @@
 //! paraphrase: `inter_data` zero-pads/truncates k-space to 1 mm before the net and back to the
 //! input voxel size afterwards, then masks. The README describes the input as the "tissue phase";
 //! `test/test_demo.py` feeds the shipped `phi` with voxel size `[1,1,1]` and B0 `[0,0,1]`.
+//!
+//! # Agreement with the original
+//!
+//! `tests/models_onnx/dipole.rs` runs it on a 36×32×28 box of in-vivo data (1 mm, 2.89 T, across
+//! the brain's edge) against its original's verified QSM-CI entry, MoDL-QSM 111a493 (`modl-qsm`)
+//! (QSMxT/QSM-CI#316; the fixture is regenerated in Actions by
+//! `tests/data/dl_dipole_qsmci_small.py`): **NRMSE 1.5 %**, r 0.99986, max |Δ| 4.3e-4 ppm (measured
+//! 2026-10-30; 3.8 % on QSM-CI's 128×160×96 case). Not rounding, and not yet explained: an open gap
+//! (astewartau/QSM.rs#330). The test holds it at its measured size, to be tightened once found.
 
 use num_complex::Complex64;
 
