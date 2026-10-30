@@ -30,6 +30,22 @@
 //! - **Orientation:** inputs must match the orientation/polarity of the shipped `val_input.mat`
 //!   (`README.md:86`): axial, B0 along the third axis.
 //!
+//! # Activation and parity
+//!
+//! The two checkpoints differ in more than their weights: each one's `network_info_<name>.npy`
+//! names its activation, and the authors' inference builds the U-Net with it. `QSMnet_64` uses
+//! plain ReLU, `QSMnet+_64` LeakyReLU (α 0.1). The first `qsmnet.onnx` export used LeakyReLU for
+//! both, and was checked against a TF graph built the same way, so it went unnoticed: χ came out
+//! 1.34× too large, 81 % NRMSE from the original (QSM.rs#330). `export_qsmnet.py` now takes the
+//! activation from `network_info`.
+//!
+//! Measured against QSM-CI's `qsmnet` and `qsmnet-plus` entries (TensorFlow 1.14, SNU-LIST/QSMnet
+//! f8782ed, the authors' checkpoints) on a 36×32×28 in-vivo box of `prisma-bridge-run1`:
+//! [`qsmnet`] is 0.0002 % NRMSE from the original (max |Δ| 2.9e-7 ppm; before the re-export,
+//! 81 %). Run through ONNX Runtime with the same normalisation and padding, the exported graph is
+//! 0.00006 % from it and QSMnet+'s is 0.0001 %. The exported graph matches the TF graph to 4.4e-6
+//! on the export's own check.
+//!
 //! # Pipeline rules
 //!
 //! The facts above that a configuration can depart from are published as rules in
