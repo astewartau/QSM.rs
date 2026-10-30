@@ -133,6 +133,15 @@
 //! After one step the differences are single (MATLAB) against double (here) rounding. Over
 //! ten steps they also include CG stopping one iteration apart at `cg_tol` 0.01.
 //!
+//! `tests/medi_cornell_parity.rs` checks the same against the verified QSM-CI `medi-cornell`
+//! container (MEDI 2024.11.26, QSMxT/QSM-CI#309; regenerated in Actions by
+//! `tests/data/medi_cornell_small.py`), measured 2026-10-30: one step 2.7e-7 / 1.3e-8 / 1.5e-7
+//! ppm max abs diff for the three rows above (the container writes χ as float32); and MEDI_L1's
+//! defaults end to end (SMV with shrinking, MERIT, 10 steps, MEDI+0 with the CSF mask from
+//! `arlo` and [`extract_csf`] on the phantom with three CSF-like blobs) 2.9e-8 ppm, relative L2
+//! 6.0e-7, every CG solve stopping where MATLAB's did. On the way, `fit_ppm_complex_noise`
+//! (N_std), `arlo` (R2*) and [`extract_csf`] are bit-identical to the container's.
+//!
 //! # MEDI-mSMV
 //! [`MediParams::msmv`] is `MEDI_L1(..., 'msmv', radius)` from the mSMV authors' MEDI toolbox
 //! (agr78/mSMV, `prerelease/MEDI_toolbox-mSMV100125.zip`; Roberts et al. 2024, Eq. 12): SMV is
