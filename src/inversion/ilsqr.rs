@@ -68,7 +68,8 @@
 //!   STI's iteration count (7–9 % at 40, 4–6 % at 200), and rounding QSM.rs's input to float32
 //!   moves it by under 0.06 %. On whole heads the effect is smaller (above; 1–2 % NRMSE in the
 //!   QSM-CI parity pair, astewartau/QSM.rs#329). That fixture is regenerated in Actions by
-//!   `tests/data/ilsqr_sti_qsmci_small.py`.
+//!   `tests/data/ilsqr_sti_qsmci_small.py`. STI's own χ moves by 1–4e-4 relative between CPUs
+//!   (a GitHub-hosted runner against the workstation that made the fixture).
 //!
 //! # Padding
 //!

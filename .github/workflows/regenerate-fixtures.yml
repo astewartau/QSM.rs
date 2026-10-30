@@ -8,8 +8,10 @@ name: Regenerate fixtures
 # script) itself and writes the .bin: `python3 tests/data/<name>.py <out.bin>`. A run fails if the
 # result differs from the committed .bin, and uploads it either way (artifact `fixture-<name>`), so
 # a fixture that should change (a new container digest, new cases) is replaced from that artifact.
-# Generators in other forms (`.jl` run inside the Julia image, `.m` that need licensed MATLAB) say
-# how to run them in their header.
+# A generator whose header has a line starting `# machine-dependent:` makes an original whose
+# output rounds differently on different CPUs (the line says by how much); for those a mismatch is
+# a warning. Generators in other forms (`.jl` run inside the Julia image, `.m` that need licensed
+# MATLAB) say how to run them in their header.
 #
 # Runs on demand for one fixture, and on pull requests for every generator they add or change.
 
@@ -108,6 +110,8 @@ jobs:
         run: |
           if cmp "regenerated/$NAME.bin" "tests/data/$NAME.bin"; then
             echo "tests/data/$NAME.bin reproduced exactly"
+          elif grep -q '^# machine-dependent:' "tests/data/$NAME.py"; then
+            echo "::warning::tests/data/$NAME.bin differs from the regenerated one (artifact fixture-$NAME); its original is machine-dependent (see the generator's header)"
           else
             echo "::error::tests/data/$NAME.bin differs from the regenerated one (artifact fixture-$NAME)"
             exit 1

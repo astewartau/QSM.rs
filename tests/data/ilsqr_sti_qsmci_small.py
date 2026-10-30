@@ -8,6 +8,12 @@
 # without 'niter' (so 100), then writes χ (ppm) as float32. STI computes χ in single precision, so
 # the float32 output is STI's χ exactly.
 #
+# machine-dependent: STI's single-precision LSQR rounds differently on different CPUs. The
+# committed .bin was made on an Intel i5-11500 (12 threads); a GitHub-hosted runner gives χ 3.6e-4
+# and 1.2e-4 relative L2 away (max 3.7e-5 ppm), the same on every run on either machine (MKL_CBWR
+# does not change it). That is far inside tests/ilsqr_sti_parity.rs's tolerance, so the
+# regenerate-fixtures workflow reports a mismatch here as a warning, not a failure.
+#
 #   python3 tests/data/ilsqr_sti_qsmci_small.py tests/data/ilsqr_sti_qsmci_small.bin
 #
 # Needs numpy, nibabel and podman or docker (CONTAINER_ENGINE overrides; the regenerate-fixtures
