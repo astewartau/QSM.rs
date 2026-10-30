@@ -538,90 +538,9 @@ pub fn gaussian_box_sizes(sigma: f64, n: usize) -> Vec<usize> {
     (1..=n).map(|i| if (i as f64) <= m { wl as usize } else { wu as usize }).collect()
 }
 
-/// Running-average line filter that treats `NaN` as "no data": the box only starts once it
-/// holds `boxsize` valid samples, and when it runs into `NaN` it extrapolates linearly for up
-/// to `boxsize/2` samples ("fill" mode) before waiting for data again. Positions the filter
-/// never reaches keep their input value. Port of `nanboxfilterline!` (MriResearchTools.jl);
-/// `orig` is scratch space that is resized as needed.
-pub fn nan_box_filter_line(line: &mut [f64], boxsize: usize, orig: &mut Vec<f64>) {
-    #[derive(PartialEq, Clone, Copy)]
-    enum Mode { Nan, Normal, Fill }
-    let n = line.len();
-    let r = boxsize / 2;
-    if n == 0 || boxsize < 3 {
-        return;
-    }
-    let maxfills = r;
-    orig.clear();
-    orig.resize(n + boxsize - 1, f64::NAN);
-    orig[r..r + n].copy_from_slice(line);
-
-    let mut lsum: f64 = orig[r..2 * r].iter().sum();
-    if lsum.is_nan() {
-        lsum = 0.0;
-    }
-    let (mut nfills, mut nvalids) = (0usize, 0usize);
-    let mut mode = Mode::Nan;
-    let bs = boxsize as f64;
-
-    // `i` is the 1-based output index, as in the reference; orig[k] here is orig[k+1] there.
-    for i in 1..=n {
-        if lsum.is_nan() {
-            break;
-        }
-        let lead = orig[i - 1 + 2 * r];
-        match mode {
-            Mode::Normal => {
-                if lead.is_nan() {
-                    mode = Mode::Fill;
-                }
-            }
-            Mode::Nan => {
-                if lead.is_nan() { nvalids = 0; } else { nvalids += 1; }
-                if nvalids == boxsize {
-                    mode = Mode::Normal;
-                    lsum = orig[i - 1..i + 2 * r].iter().sum();
-                    line[i - 1] = lsum / bs;
-                    continue;
-                }
-            }
-            Mode::Fill => {
-                if lead.is_nan() {
-                    nfills += 1;
-                    if nfills > maxfills {
-                        mode = Mode::Nan;
-                        nfills = 0;
-                        lsum = 0.0;
-                        nvalids = 0;
-                    }
-                } else {
-                    mode = Mode::Normal;
-                    nfills = 0;
-                }
-            }
-        }
-        match mode {
-            Mode::Normal => {
-                let trailing = if i >= 2 { orig[i - 2] } else { 0.0 };
-                lsum += orig[i - 1 + 2 * r] - trailing;
-                line[i - 1] = lsum / bs;
-            }
-            Mode::Fill => {
-                let trailing = if i >= 2 { orig[i - 2] } else { 0.0 };
-                lsum -= trailing;
-                line[i - 1] = (lsum - orig[i - 1]) / (bs - 2.0);
-                let prev = if i > r { line[i - 1 - r] } else { line[i - 1] };
-                let extrapolated = 2.0 * line[i - 1] - prev;
-                orig[i - 1 + 2 * r] = extrapolated;
-                if i + r < n {
-                    line[i - 1 + r] = extrapolated;
-                }
-                lsum += extrapolated;
-            }
-            Mode::Nan => {}
-        }
-    }
-}
+/// MriResearchTools' `nanboxfilterline!`; lives in [`crate::utils::bias_correction`] (which
+/// `makehomogeneous` and CLEAR-SWI also use) so that module stays free of the unwrappers.
+pub use crate::utils::bias_correction::nan_box_filter_line;
 
 /// Masked 3D smoothing by repeated NaN-aware box filtering — the `mask` branch of
 /// `gaussiansmooth3d!` in MriResearchTools.jl (4 passes per axis, alternating direction on
