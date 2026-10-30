@@ -66,13 +66,10 @@
 //!
 //! # Agreement with WaveSep
 //!
-//! Against WaveSep f3a192e in the verified QSM-CI `wavesep` image (QSMxT/QSM-CI#302): χ+ 0.11 %
-//! and χ− 1.08 % NRMSE on a 164×205×205 synthetic case, and 10.2 % / 10.0 % on the 24³ case of
-//! `tests/wavesep_parity.rs` (measured 2026-10-30), with the same iteration counts. Known gap
-//! (astewartau/QSM.rs#327): the wavelet transform is not PyWavelets'. On a smooth 32³ field the
-//! db4 periodized soft-threshold step ([`WaveletPlan`] forward, threshold, inverse) differs from
-//! PyWavelets' `wavedecn`/`waverecn` (`mode="periodization"`, the same level) by 3.4 % relative,
-//! while each round-trips exactly, so the two use differently aligned bases.
+//! Against WaveSep f3a192e in the verified QSM-CI `wavesep` image (QSMxT/QSM-CI#302), on the 24³
+//! case of `tests/wavesep_parity.rs`: χ+ 2.8e-8 and χ− 2.5e-8 NRMSE (the fixture's float32), the
+//! same 13 iterations (measured 2026-10-30). The wavelet step's history and the earlier gap
+//! (10.2 % / 10.0 % here; 0.11 % / 1.08 % on a 164×205×205 case) are above, under the padding.
 
 use super::DR_SHIN_2021;
 use crate::utils::wavelet::{dwt_max_level, Periodization, WaveletPlan};
