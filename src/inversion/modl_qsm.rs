@@ -39,12 +39,34 @@
 //! callers needing resampling should do so upstream. Weights are not bundled; the
 //! caller passes `modl-qsm.onnx`.
 //!
+//! # Parity
+//!
+//! Measured against the authors' Keras graph (`define_generator` + `model_test`, QSM-CI's
+//! `modl-qsm` image, MoDL-QSM 111a493, `logs/last.h5`) on a 36×32×28 in-vivo box of
+//! `prisma-bridge-run1` (QSM.rs#330):
+//!
+//! - Every intermediate of the unroll (`A^H φ`, the step, the normalisation, each CNN-prior pass,
+//!   `-α A^H A x`) matches the Keras layer outputs to 1e-7–3e-6 relative.
+//! - End to end: 0.0002 % NRMSE (r 1.0000000, max |Δ| 3.2e-7 ppm).
+//! - QSM-CI's `recon.py` wrote χ through the mask's uint8 NIfTI header, so nibabel stored it in 8
+//!   bits; that quantisation was the whole 1.49 % gap first measured against that entry. The port
+//!   does not reproduce it.
+//!
 //! # Reference pipeline
 //!
 //! The authors' `test/test_tools.py:210-249` (`model_test`) is what the grid requirements above
 //! paraphrase: `inter_data` zero-pads/truncates k-space to 1 mm before the net and back to the
 //! input voxel size afterwards, then masks. The README describes the input as the "tissue phase";
 //! `test/test_demo.py` feeds the shipped `phi` with voxel size `[1,1,1]` and B0 `[0,0,1]`.
+//!
+//! # Agreement with the original
+//!
+//! `tests/models_onnx/dipole.rs` runs it on a 36×32×28 box of in-vivo data (1 mm, 2.89 T, across
+//! the brain's edge) against its original's verified QSM-CI entry, MoDL-QSM 111a493 (`modl-qsm`)
+//! (QSMxT/QSM-CI#316; the fixture is regenerated in Actions by
+//! `tests/data/dl_dipole_qsmci_small.py`): **NRMSE 1.5 %**, r 0.99986, max |Δ| 4.3e-4 ppm (measured
+//! 2026-10-30; 3.8 % on QSM-CI's 128×160×96 case). Not rounding, and not yet explained: an open gap
+//! (astewartau/QSM.rs#330). The test holds it at its measured size, to be tightened once found.
 
 use num_complex::Complex64;
 

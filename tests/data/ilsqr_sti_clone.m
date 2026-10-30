@@ -115,12 +115,16 @@ function b = ball3d_sti(r)
 end
 
 function B = imclose_line(A)
-% greyscale closing with the 1x3 structuring element [1 1 1] (along dim 2), IPT semantics
-% (out-of-array = -Inf for dilation, +Inf for erosion)
+% IPT's greyscale imclose(A, [1 1 1]) (the 1x3 line acts along dim 2): A padded with one -Inf
+% voxel at both ends of dim 2, dilated (out-of-array = -Inf), eroded (out-of-array = +Inf) and
+% cropped back. On STI's ball3D(3) this only fills the centre, as MATLAB R2023b's imclose does
+% (astewartau/QSM.rs#329); without the padding the ball's +-y caps keep 32 dilated voxels.
+z = -inf(size(A, 1), 1, size(A, 3)); A = cat(2, z, A, z);
 p = -inf(size(A) + [0 2 0]); p(:, 2:end-1, :) = A;
 Dl = max(max(p(:, 1:end-2, :), p(:, 2:end-1, :)), p(:, 3:end, :));
 q = inf(size(A) + [0 2 0]); q(:, 2:end-1, :) = Dl;
 B = min(min(q(:, 1:end-2, :), q(:, 2:end-1, :)), q(:, 3:end, :));
+B = B(:, 2:end-1, :);
 end
 
 function g = fd(u, d)

@@ -27,6 +27,24 @@
 //!   (`processing/data_loader.py`). The unwrapping method is not specified.
 //! - **Resampling:** none; the data-consistency dipole kernel uses the NIfTI voxel size
 //!   (`predict_all.py:60-61`).
+//! - **Padding:** an odd axis gets one zero voxel in front, then each axis is padded equally on
+//!   both sides to a multiple of 64 (`tf_utils/misc.py` `add_padding`/`remove_padding`).
+//!
+//! # Parity
+//!
+//! Measured against the `nextqsm` 1.0.6 package (QSM-CI's `nextqsm` entry, `predict_all.py`, run
+//! on the same CPU) on in-vivo boxes of `prisma-bridge-run1`, all at 1 mm (QSM.rs#330):
+//!
+//! - Per step, given the same inputs, the BFR output, the data-consistency gradient and the
+//!   regulariser gradient each match TensorFlow to ~1e-6 relative.
+//! - End to end: 0.13 % NRMSE (r 0.9999992, max |Δ| 0.045 ppm) on 36×32×28, and 0.038 % (r
+//!   0.9999999, max |Δ| 0.022 ppm) on 35×31×27 (odd axes). Before the padding fix below, the odd
+//!   box was 70.6 % (r 0.73).
+//! - That residual is the method's own sensitivity to float32 rounding, not a port difference:
+//!   the regulariser's gradient goes through `sign(VarNet(x))`, so voxels whose output is near
+//!   zero flip sign between implementations. The package itself moves by 0.10 % NRMSE (max |Δ|
+//!   0.058 ppm) on the 36×32×28 box between an AVX-512 Intel and an AVX2 AMD CPU, and the same
+//!   glue on ONNX Runtime instead of tract lands 0.0057 % from it.
 //!
 //! # Agreement with the original
 //!
@@ -60,7 +78,7 @@ pub const NEXTQSM_LAMBDAS: [f64; 6] =
 /// * `mask` — binary brain mask (same layout).
 /// * `bdir` — B0 direction; `bf_onnx`/`vjp_onnx` — the two exported graphs.
 ///
-/// The volume is zero-padded (centered) to a multiple of 64 (six pooling levels),
+/// The volume is zero-padded to a multiple of 64 (six pooling levels) as the package pads it,
 /// reconstructed, and cropped back. Returns susceptibility (ppm), masked.
 pub fn nextqsm(
     total_field: &[f64],
@@ -75,14 +93,9 @@ pub fn nextqsm(
     assert_eq!(total_field.len(), n);
     assert_eq!(mask.len(), n);
 
-    // Centered pad to a multiple of 64.
-    let pad = |s: usize| -> (usize, usize) {
-        let total = (64 - s % 64) % 64;
-        (total / 2, s + total)
-    };
-    let (bx, px) = pad(nx);
-    let (by, py) = pad(ny);
-    let (bz, pz) = pad(nz);
+    let (bx, px) = pad64(nx);
+    let (by, py) = pad64(ny);
+    let (bz, pz) = pad64(nz);
     let pgrid = Grid { dims: (px, py, pz), voxel_size: grid.voxel_size };
     let np = px * py * pz;
 
@@ -111,6 +124,17 @@ pub fn nextqsm(
         }
     }
     Ok(chi)
+}
+
+/// Where an axis of `s` voxels starts in its padded copy, and the padded length (the next
+/// multiple of 64), as the package pads it (`tf_utils/misc.py` `add_padding`): an odd axis first
+/// gets one zero voxel in front, then each axis is padded equally on both sides. So the volume
+/// starts at ⌈total/2⌉, not ⌊total/2⌋, on odd axes. The networks pool six times, so a one-voxel
+/// shift moves every pooling window: on a 35×31×27 in-vivo box, ⌊total/2⌋ gave 70.6 % NRMSE
+/// against the package and ⌈total/2⌉ gives 0.038 % (QSM.rs#330).
+fn pad64(s: usize) -> (usize, usize) {
+    let total = (64 - s % 64) % 64;
+    (total.div_ceil(2), s + total)
 }
 
 /// NeXtQSM on a grid already sized to a multiple of 64 (no internal padding).
@@ -248,4 +272,22 @@ pub fn nextqsm_tiled(
         |f, m, g| nextqsm(f, m, g, bdir, bf_onnx, vjp_onnx),
         progress,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::pad64;
+
+    #[test]
+    fn pads_like_the_package() {
+        // Even axes: equal padding on both sides.
+        assert_eq!(pad64(64), (0, 64));
+        assert_eq!(pad64(36), (14, 64));
+        assert_eq!(pad64(160), (16, 192));
+        // Odd axes: one voxel in front first, then equal padding (misc.add_padding).
+        assert_eq!(pad64(35), (15, 64));
+        assert_eq!(pad64(27), (19, 64));
+        assert_eq!(pad64(63), (1, 64));
+        assert_eq!(pad64(65), (32, 128));
+    }
 }

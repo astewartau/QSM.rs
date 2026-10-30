@@ -38,8 +38,11 @@
 //!   linearisations per stage (2026-10-30; the fixture is regenerated in Actions by
 //!   `tests/data/amp_pe_qsmci_small.py`). The exact norms above are the likely cause: scaling
 //!   ‖A_qsm‖²_F alone by 1 % moves the result by 0.3–0.45 % NRMSE, and two random probes miss it
-//!   by more. Parity with the original needs its probes (MATLAB's `randn` after `rng('default')`)
-//!   as an option: astewartau/QSM.rs#363.
+//!   by more. Decision (Ashley Stewart, 2026-10-30, astewartau/QSM.rs#363): the exact norms are
+//!   an unequivocal improvement on a two-probe random estimate, so they stay, with no option for
+//!   the original's probes (MATLAB's `randn` after `rng('default')`). The documented parity with
+//!   the original is these ~1.1–1.4 %, held at that size by `tests/amppe_qsmci.rs` and by the
+//!   `amp-pe` parity pair in QSM-CI.
 //!
 //! # Reference pipeline
 //! The authors' scripts (<https://github.com/EmoryCN2L/QSM_AMP_PE>, commit 15bf8dc; README

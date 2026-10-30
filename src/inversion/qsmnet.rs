@@ -46,6 +46,10 @@
 //! 0.00006 % from it and QSMnet+'s is 0.0001 %. The exported graph matches the TF graph to 4.4e-6
 //! on the export's own check.
 //!
+//! `tests/models_onnx/dipole.rs` checks both against those entries on that box (QSMxT/QSM-CI#316;
+//! the fixture is regenerated in Actions by `tests/data/dl_dipole_qsmci_small.py`): QSMnet+ NRMSE
+//! 3.7e-4 %, max |Δ| 4.3e-7 ppm (float32 rounding).
+//!
 //! # Pipeline rules
 //!
 //! The facts above that a configuration can depart from are published as rules in

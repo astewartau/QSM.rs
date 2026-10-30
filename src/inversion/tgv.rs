@@ -47,12 +47,13 @@
 //! total field, brain mask touching the first z plane) against the package in the QSM-CI
 //! `julia-qsm` image (`sha256:b3c048ac…`, 6c0886a, 4 threads), both at the package's defaults
 //! (1655 iterations) and with both [`TgvParams::reference_divergence`] and
-//! [`TgvParams::reference_edge_erosion`]: NRMSE 4.0e-4 % for a wrapped echo (the field as phase
+//! [`TgvParams::reference_edge_erosion`], over the voxels both return: NRMSE 4.0e-4 % for a wrapped echo (the field as phase
 //! at TE1, the package's `get_laplace_phase_del`), and 3.7e-4 % for [`TgvInput::FieldPpm`]
 //! against the package with its own discrete Laplacian kernel on the unwrapped phase. Both are
 //! float32 rounding over 1655 iterations. `tests/tgv_tgvjl_parity.rs` checks both inputs,
 //! anisotropic voxels and oblique B0 against the package's output on small phantoms (relative
-//! L2 ≤ 3e-6), with both options on. The defaults differ; see below.
+//! L2 ≤ 3e-6), with all three reference options on (the comparison covers the package's whole
+//! output box). The defaults differ; see below.
 //!
 //! Against the package's `get_laplace_phase_romeo`, which ROMEO-unwraps the given phase again
 //! before its discrete Laplacian, the in-vivo field differs by NRMSE 12 %: on that scan the
@@ -61,9 +62,10 @@
 //!
 //! # Where QSM.rs differs from the reference
 //!
-//! Two details of the reference code are fixed by default. Each is an independent option that
-//! restores the reference's behaviour (QSM.rs's reference rule: unequivocal fixes are the
-//! default, and the original's behaviour stays available for parity):
+//! Two details of the reference code are fixed by default, and one of its outputs is trimmed.
+//! Each is an independent option that restores the reference's behaviour (QSM.rs's reference
+//! rule: unequivocal fixes are the default, and the original's behaviour stays available for
+//! parity):
 //! - **Divergence in the `w` update** ([`TgvParams::reference_divergence`]). The reference scales
 //!   each row of `q` by that row's own resolution for all three of its differences
 //!   (`update_w_kernel!`; the same in the original Python `tgv_deconv_update_w`). Chambolle–Pock
@@ -81,6 +83,19 @@
 //!   operator it is elsewhere. By default a neighbour outside the array counts as outside the
 //!   mask, which removes those voxels. This affects only masks that reach an array face, and
 //!   costs coverage at those faces.
+//! - **Output support** ([`TgvParams::reference_output_box`]). χ is returned inside the eroded
+//!   mask (`erosions` erosions of `mask`) and is zero elsewhere. The reference returns its whole
+//!   working box (the eroded mask's bounding box plus one voxel, `reduce_to_mask_box`), whose χ
+//!   outside that mask is the stencils' spill-over where the data term does not act: a rim of
+//!   up to two voxels around the eroded mask (no data there; e.g. 44,530 voxels of the in-vivo
+//!   brain mask). Inside the eroded mask the two are the same. By default QSM.rs trims that rim,
+//!   since no data constrain it; the option returns it.
+//!   - **What it changes in a comparison with the package.** Inside an uneroded brain mask the
+//!     rim is part of the comparison. QSM-CI's `tgv` pair (QSMxT/QSM-CI `tgv-tgvjl` vs
+//!     `tgv-qsmrs`, compared inside the dataset's mask, QSM.rs main 7f8271e, run 41019310531)
+//!     measured NRMSE 3.84 % (sim, 41,907 rim voxels) and 6.74 % (KKI travelling head, 46,101):
+//!     all of it the rim. Over the voxels both return, the same outputs differ by 3.8e-4 %
+//!     (sim) and 4.9e-3 % (KKI): float32 rounding over 1655 iterations (#369).
 //!
 //! Measured against the package and, on the QSM-CI phantom, against the true χ. The total field
 //! is the input; the defaults are QSM.rs's, and "both" turns both options on. NRMSE against the
@@ -122,11 +137,6 @@
 //! at 1 mm, 7 T) with its true total field. They were run in the QSM.rs Actions on the CI's data
 //! (QSM.rs#324). The slabs are 48 slices centred on the brain, cut from the field, the mask and
 //! the truth; the 1 × 1 × 2 mm slab averages pairs of 96 slices.
-//!
-//! One deviation: χ is returned inside the eroded mask (`erosions` erosions of `mask`) and is
-//! zero elsewhere. The package returns its whole working box, whose χ outside that mask is the
-//! stencils' spill-over where the data term does not act (no data there; e.g. 44,530 voxels
-//! of the in-vivo brain mask).
 //!
 //! Optimizations:
 //! - Bounding box reduction: only process the region containing the mask
@@ -312,9 +322,17 @@ pub struct TgvParams {
     /// face is not eroded from it, and keeps voxels whose Laplacian and gradient stencils have
     /// no neighbour there. No effect unless the mask reaches an array face.
     ///
-    /// With both this and [`reference_divergence`](Self::reference_divergence), QSM.rs matches
-    /// the package to float32 rounding (`tests/tgv_tgvjl_parity.rs`).
+    /// With this, [`reference_divergence`](Self::reference_divergence) and
+    /// [`reference_output_box`](Self::reference_output_box), QSM.rs matches the package to
+    /// float32 rounding (`tests/tgv_tgvjl_parity.rs`).
     pub reference_edge_erosion: bool,
+    /// Return χ over the reference's whole working box (default `false`: inside the eroded
+    /// mask only, zero elsewhere). The reference returns every voxel of the eroded mask's
+    /// bounding box plus one voxel (`reduce_to_mask_box`, `src/tgv.jl` L21, L86-88), so a rim
+    /// of up to two voxels just outside the eroded mask carries the stencils' spill-over, where
+    /// the data term does not act. A comparison with the package inside an uneroded mask
+    /// counts that rim. See the module docs, *Where QSM.rs differs from the reference*.
+    pub reference_output_box: bool,
 }
 
 impl Default for TgvParams {
@@ -331,6 +349,7 @@ impl Default for TgvParams {
             te: crate::EchoTime::First,
             reference_divergence: false,
             reference_edge_erosion: false,
+            reference_output_box: false,
         }
     }
 }
@@ -1614,17 +1633,19 @@ pub fn tgv_qsm(
 
     progress(iterations, iterations);
 
-    // Full-size result inside the eroded mask; chi is in rad units, divide by c for ppm
+    // Full-size result inside the eroded mask, or over the whole box with
+    // `reference_output_box`; chi is in rad units, divide by c for ppm
     let mut result = vec![0.0f32; n_total];
-    let mut chi_masked = vec![0.0f32; b_total];
-    for i in 0..b_total {
-        if mask_eroded_sub[i] != 0 {
-            chi_masked[i] = ws.chi[i];
+    if !params.reference_output_box {
+        for (v, &m) in ws.chi.iter_mut().zip(mask_eroded_sub.iter()) {
+            if m == 0 {
+                *v = 0.0;
+            }
         }
     }
 
     // Insert back into full volume
-    insert_subvolume(&mut result, &chi_masked, &bbox, nx, ny, nz);
+    insert_subvolume(&mut result, &ws.chi, &bbox, nx, ny, nz);
 
     Ok(result.iter().map(|&v| v as f64 / c).collect())
 }
@@ -1946,6 +1967,33 @@ mod tests {
         let iters = progress_iters.borrow();
         assert_eq!(iters.len(), 101);
         assert_eq!(*iters.last().unwrap(), 100);
+    }
+
+    /// The default returns χ inside the eroded mask only; `reference_output_box` returns the
+    /// same χ there plus the reference's rim (nonzero spill-over just outside it).
+    #[test]
+    fn output_box_adds_the_rim_and_keeps_the_eroded_mask() {
+        let n = 20;
+        let mask = sphere_mask(n, 8.0);
+        let field = test_field(n, 0.01);
+        let grid = crate::Grid::new(n, n, n, 1.0, 1.0, 1.0);
+        let run = |box_out: bool| {
+            let p = TgvParams { iterations: Some(50), erosions: 1, reference_output_box: box_out, ..Default::default() };
+            tgv_qsm(TgvInput::FieldPpm { field: &field, echo_times: &[0.02], b0_t: 3.0 }, &mask, &grid, &p, (0.0, 0.0, 1.0), |_, _| {})
+                .unwrap()
+        };
+        let (trimmed, boxed) = (run(false), run(true));
+        let eroded = erode_mask(&mask, n, n, n, false);
+        let mut rim = 0;
+        for l in 0..n * n * n {
+            if eroded[l] != 0 {
+                assert_eq!(trimmed[l], boxed[l]);
+            } else {
+                assert_eq!(trimmed[l], 0.0);
+                rim += (boxed[l] != 0.0) as usize;
+            }
+        }
+        assert!(rim > 0, "no χ outside the eroded mask with reference_output_box");
     }
 
     fn sphere_mask(n: usize, radius: f64) -> Vec<u8> {

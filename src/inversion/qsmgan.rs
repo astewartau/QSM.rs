@@ -30,6 +30,14 @@
 //! - **Input unit:** the README feeds SEPIA's local field; the paper and code scale it by 100
 //!   without stating its unit. This crate passes ppm (as the QSM-CI runner does).
 //!
+//! # Agreement with the original
+//!
+//! `tests/models_onnx/dipole.rs` runs it on a 36×32×28 box of in-vivo data (1 mm, 2.89 T, across
+//! the brain's edge) against its original's verified QSM-CI entry, QSMGAN 521d202 (`qsmgan`)
+//! (QSMxT/QSM-CI#316; the fixture is regenerated in Actions by
+//! `tests/data/dl_dipole_qsmci_small.py`): NRMSE 1.7e-4 %, max |Δ| 8.4e-8 ppm (measured
+//! 2026-10-30): float32 rounding.
+//!
 //! # Pipeline rules
 //!
 //! The facts above that a configuration can depart from are published as rules in

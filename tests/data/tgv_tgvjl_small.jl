@@ -79,13 +79,16 @@ open(ARGS[1], "w") do io
         for _ in 1:3
             em = T.erode_mask(em)
         end
-        write(io, UInt32(count(em)))
-        bits = zeros(UInt8, cld(length(em), 8))
-        for (l, b) in enumerate(vec(em))
+        box = falses(size(em))
+        box[T.mask_box_indices(em)...] .= true
+        write(io, UInt32(count(box)))
+        bits = zeros(UInt8, cld(length(box), 8))
+        for (l, b) in enumerate(vec(box))
             b && (bits[(l - 1) >> 3 + 1] |= UInt8(1) << ((l - 1) & 7))
         end
         write(io, bits)
-        write(io, Float64.(chi[em]))
-        println(name, ": ", count(m), " mask voxels, ", count(em), " eroded, max |phase| ", maximum(abs.(phase)))
+        write(io, Float64.(chi[box]))
+        println(name, ": ", count(m), " mask voxels, ", count(em), " eroded, ", count(box), " in the box, ",
+                count(box .& .!em .& (chi .!= 0)), " nonzero outside the eroded mask, max |phase| ", maximum(abs.(phase)))
     end
 end

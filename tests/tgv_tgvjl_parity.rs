@@ -8,9 +8,10 @@
 //! `sha256:b3c048acd8a88f23b7a04378f2b85dbac433bcc78b3d9cdf8ce58eb8a7478185` (Julia 1.10.11, the
 //! Manifest committed in QSMxT/QSM-CI `algorithms/_julia/env`, 4 threads); the command is in the
 //! script's header. `tests/data/tgv_tgvjl_small.bin` (little-endian), per case in [`CASES`]
-//! order: the number of voxels in the package's eroded mask (u32), that mask as bits over the
-//! volume (column-major, least significant bit first), and the package's χ there (f64 of its
-//! Float32, ppm). Both run in single precision for hundreds of iterations, so they agree to
+//! order: the number of voxels in the box the package returns (its eroded mask's bounding box
+//! plus one voxel, u32), that box as bits over the volume (column-major, least significant bit
+//! first), and the package's χ there (f64 of its Float32, ppm), including the rim outside the
+//! eroded mask. Both run in single precision for hundreds of iterations, so they agree to
 //! float32 rounding (relative L2 ~1e-6), not to f64's.
 
 use qsm_core::inversion::{tgv_qsm, TgvInput, TgvParams};
@@ -99,12 +100,13 @@ fn tgv_matches_the_package_to_float32_rounding() {
     for (case, (want_mask, want)) in CASES.iter().zip(load_tgvjl()) {
         let (field, mask) = phantom(case.dims, case.vs);
         let grid = Grid::new(case.dims[0], case.dims[1], case.dims[2], case.vs[0], case.vs[1], case.vs[2]);
-        // The package's own erosion and w-update divergence (`TgvParams::reference_edge_erosion`,
-        // `TgvParams::reference_divergence`).
+        // The package's own erosion, w-update divergence and output box
+        // (`TgvParams::reference_edge_erosion`, `reference_divergence`, `reference_output_box`).
         let params = TgvParams {
             iterations: case.iterations,
             reference_divergence: true,
             reference_edge_erosion: true,
+            reference_output_box: true,
             ..Default::default()
         };
         let chi = match case.phase_scale {
@@ -119,9 +121,8 @@ fn tgv_matches_the_package_to_float32_rounding() {
             None => tgv_qsm(TgvInput::FieldPpm { field: &field, echo_times: &[TE], b0_t: B0 }, &mask, &grid, &params, case.bdir, |_, _| {})
                 .unwrap(),
         };
-        // QSM.rs returns χ in the eroded mask, the package's whole box. Some voxels of the eroded
-        // mask on the array's edge stay exactly 0 in both.
-        assert!((0..chi.len()).all(|l| want_mask[l] != 0 || chi[l] == 0.0), "{}: χ outside the package's eroded mask", case.name);
+        // With `reference_output_box`, QSM.rs returns the package's whole box, rim included.
+        assert!((0..chi.len()).all(|l| want_mask[l] != 0 || chi[l] == 0.0), "{}: χ outside the package's box", case.name);
         let got: Vec<f64> = (0..chi.len()).filter(|&l| want_mask[l] != 0).map(|l| chi[l]).collect();
         let max_d = got.iter().zip(&want).map(|(a, b)| (a - b).abs()).fold(0.0, f64::max);
         let rel = (got.iter().zip(&want).map(|(a, b)| (a - b).powi(2)).sum::<f64>() / want.iter().map(|b| b * b).sum::<f64>()).sqrt();
