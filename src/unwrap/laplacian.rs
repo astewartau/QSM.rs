@@ -17,6 +17,12 @@
 //! reproduces QSM.jl's `:dct` solver exactly (QSM.jl v0.5.4 on byte-identical input: r =
 //! 1.000000, rms difference 0.0).
 //!
+//! Through UK Biobank's pipeline in the verified QSM-CI `ukb-qsm` container (QSMxT/QSM-CI#305),
+//! `Fft` with `pad` 64 per echo, combined with
+//! [`B0WeightType::AssumedDecay`](crate::utils::B0WeightType::AssumedDecay), gives the
+//! pipeline's combined phase to 2.5e-14 rad (`tests/ukb_qsm_parity.rs`, two echoes at
+//! 1×1×1.5 mm, measured 2026-10-30).
+//!
 //! `Fft` is the literal Schofield & Zhu method: the Laplacian of the true phase from the sin/cos
 //! identity with spectral derivatives, then an FFT Poisson solve. It reproduces STI Suite 3.0's
 //! `MRPhaseUnwrap(phase, 'voxelsize', vs, 'padsize', pad)`, which is this algorithm, to
