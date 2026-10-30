@@ -16,8 +16,10 @@
 # Needs numpy, nibabel and podman or docker (CONTAINER_ENGINE overrides). The phase is built from
 # + - * / and round only, so the Rust test rebuilds it bit for bit. Layout (little-endian,
 # column-major, 32x32x20 at 1x1x1.5 mm): the trimmed mask and V_SHARP's mask, as bits over the
-# grid (least significant bit first, ceil(n/8) bytes each); then at the trimmed mask's voxels the
-# combined unwrapped phase (f64, rad), and at V_SHARP's mask's voxels its local field (f64).
+# grid (least significant bit first, ceil(n/8) bytes each); then the combined unwrapped phase over
+# the whole grid (f64, rad: V_SHARP uses the phase just outside the mask, which its even crop and
+# its resampling of the 1.5 mm axis carry onto its 1 mm grid), and at V_SHARP's mask's voxels its
+# local field (f64).
 import json, os, shutil, subprocess, sys, tempfile
 import numpy as np, nibabel as nib
 
@@ -60,5 +62,5 @@ with tempfile.TemporaryDirectory() as tmp:
 with open(sys.argv[1], "wb") as f:
     for m in (m1, mv):
         f.write(np.packbits(m, bitorder="little").tobytes())
-    f.write(comb[m1].astype("<f8").tobytes() + local[mv].astype("<f8").tobytes())
+    f.write(comb.astype("<f8").tobytes() + local[mv].astype("<f8").tobytes())
 print("masks", int(m1.sum()), int(mv.sum()), "of", int(mask.sum()))

@@ -1,790 +1,147 @@
-//! Smoke test for the ONNX inference path (`onnx` feature).
+//! The deep-learning ports against their originals (`onnx` feature).
 //!
-//! Runs a real exported QSM network end-to-end through `models::onnx` to prove
-//! the pure-Rust `tract` engine loads and executes it. Ignored by default and
-//! points at a local weight file via an env var, since weights are not vendored.
+//! # Fixture tests
+//!
+//! Each port runs on a small box of real data and is compared with its original's output on the
+//! same box, made by the original's verified QSM-CI entry (QSMxT/QSM-CI#316: the authors' code and
+//! weights, pinned by digest, bit-identical run to run), astewartau/QSM.rs#317:
+//!
+//! - `tests/data/dl_invivo_small.bin`: the inputs, a 36x32x28 box of the public travelling-head
+//!   scan `prisma-bridge-run1` (Siemens Prisma, 2.89 T, 5 echoes, 1 mm) across the brain's edge,
+//!   cut by `scripts/dl_fixture_inputs.py` (provenance and layout there).
+//! - `tests/data/dl_<group>_qsmci_small.bin`, one per group of originals, made by the generator
+//!   next to it (`dl_<group>_qsmci_small.py`, which runs the containers and holds their digests),
+//!   so it can be regenerated in Actions (`.github/workflows/regenerate-fixtures.yml`). Each
+//!   group's tests are a module of this binary, in `tests/models_onnx/`: `dipole` (inversions
+//!   from the local field), `field` (from the total field or the phase) and `separation`
+//!   (χ-separation, R2′ and brain extraction).
+//!
+//! The weights are the registry's (fetched with `download`, or from `$QSM_MODEL_DIR`). Each test
+//! reports NRMSE, Pearson r and max |Δ| inside the mask, and asserts limits set from what was
+//! measured, which each port's module docs record. These run in CI as the `models_onnx` unit of
+//! integration-tests.yml (`scripts/ci_shards.py`), from the `onnx` build; locally:
 //!
 //! ```bash
-//! BFRNET_ONNX=~/repos/qsm/qsmci/qsmci/algorithms/bfrnet/BFRnet.onnx \
-//!   cargo test --features onnx --test models_onnx -- --ignored --nocapture
+//! cargo test --release --features "onnx download" --test models_onnx -- --nocapture
 //! ```
+//!
+//! # Manual tests
+//!
+//! The `#[ignore]` tests below are the ones without a fixture yet: they read references from local
+//! paths (env vars), or measure memory and speed.
 #![cfg(feature = "onnx")]
+
+use qsm_core::Grid;
+
+/// The box of `tests/data/dl_invivo_small.bin` (`scripts/dl_fixture_inputs.py`).
+const DIMS: [usize; 3] = [36, 32, 28];
+/// Echo times (s), field strength (T) and B0 direction of the box's scan.
+#[allow(dead_code)] // each group's tests read some of these
+const TES: [f64; 5] = [0.005, 0.011, 0.017, 0.023, 0.029];
+#[allow(dead_code)] // as TES
+const B0: f64 = 2.8946;
+#[allow(dead_code)] // as TES
+const B0_DIR: (f64, f64, f64) = (0.0, 0.0, 1.0);
+
+/// The volumes of `tests/data/dl_invivo_small.bin`, column-major over [`DIMS`] at 1 mm.
+#[allow(dead_code)] // each group's tests read some of them
+struct Invivo {
+    mask: Vec<u8>,
+    /// Total and local field (ppm), χ (ppm) and R2′ (s⁻¹)
+    total_field: Vec<f64>,
+    local_field: Vec<f64>,
+    chi: Vec<f64>,
+    r2prime: Vec<f64>,
+    /// Per echo, in [`TES`] order: magnitude and phase (rad)
+    magnitude: Vec<Vec<f64>>,
+    phase: Vec<Vec<f64>>,
+}
+
+fn data_file(name: &str) -> Vec<u8> {
+    let p = format!("{}/tests/data/{name}", env!("CARGO_MANIFEST_DIR"));
+    std::fs::read(&p).unwrap_or_else(|e| panic!("{p}: {e}"))
+}
+
+fn f32s(raw: &[u8]) -> Vec<f64> {
+    raw.as_chunks::<4>().0.iter().map(|&b| f32::from_le_bytes(b) as f64).collect()
+}
+
+fn invivo() -> Invivo {
+    let raw = data_file("dl_invivo_small.bin");
+    let n = DIMS.iter().product::<usize>();
+    assert_eq!(raw.len(), n + 4 * n * 14);
+    let vol = |i: usize| f32s(&raw[n + 4 * n * i..n + 4 * n * (i + 1)]);
+    Invivo {
+        mask: raw[..n].to_vec(),
+        total_field: vol(0),
+        local_field: vol(1),
+        chi: vol(2),
+        r2prime: vol(3),
+        magnitude: (0..5).map(|e| vol(4 + e)).collect(),
+        phase: (0..5).map(|e| vol(9 + e)).collect(),
+    }
+}
+
+fn grid() -> Grid {
+    Grid::new(DIMS[0], DIMS[1], DIMS[2], 1.0, 1.0, 1.0)
+}
+
+/// A group fixture's outputs: `count` volumes, each float32 at the mask voxels.
+fn originals(name: &str, mask: &[u8], count: usize) -> Vec<Vec<f64>> {
+    let raw = data_file(name);
+    let m = mask.iter().filter(|&&v| v != 0).count();
+    assert_eq!(raw.len(), 4 * m * count, "{name}: expected {count} volumes of {m} voxels");
+    raw.chunks_exact(4 * m).map(f32s).collect()
+}
+
+/// The registry model's first weight file.
+fn weights(id: &str) -> qsm_core::models::WeightBytes {
+    qsm_core::models::primary_weight(id)
+        .unwrap_or_else(|e| panic!("{id} weights ({e}): build with `download` or set $QSM_MODEL_DIR"))
+}
+
+/// NRMSE (%), Pearson r and max |Δ| of `port` against `original` (at the mask voxels), printed.
+fn parity(name: &str, port: &[f64], mask: &[u8], original: &[f64]) -> (f64, f64, f64) {
+    let a: Vec<f64> = port.iter().zip(mask).filter(|(_, &m)| m != 0).map(|(&v, _)| v).collect();
+    assert_eq!(a.len(), original.len());
+    assert!(a.iter().all(|v| v.is_finite()), "{name}: non-finite output");
+    let n = a.len() as f64;
+    let (ma, mb) = (a.iter().sum::<f64>() / n, original.iter().sum::<f64>() / n);
+    let (mut sab, mut saa, mut sbb, mut d2, mut b2, mut dmax) = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0f64);
+    for (&x, &y) in a.iter().zip(original) {
+        sab += (x - ma) * (y - mb);
+        saa += (x - ma).powi(2);
+        sbb += (y - mb).powi(2);
+        d2 += (x - y).powi(2);
+        b2 += y * y;
+        dmax = dmax.max((x - y).abs());
+    }
+    let (nrmse, r) = (100.0 * (d2 / b2).sqrt(), sab / (saa * sbb).sqrt());
+    println!("{name}: NRMSE {nrmse:.2e} %, r {r:.8}, max |Δ| {dmax:.2e}");
+    (nrmse, r, dmax)
+}
+
+/// Asserts the measured parity: NRMSE (%) and max |Δ| within these limits. Where a port matches
+/// its original to float32 rounding, the limits are about 3-5 × what was measured, for other CPUs'
+/// rounding.
+fn assert_parity(name: &str, port: &[f64], mask: &[u8], original: &[f64], nrmse_max: f64, dmax_max: f64) {
+    let (nrmse, _, dmax) = parity(name, port, mask, original);
+    assert!(nrmse <= nrmse_max && dmax <= dmax_max,
+        "{name}: NRMSE {nrmse:.3e} % (limit {nrmse_max:e}), max |Δ| {dmax:.3e} (limit {dmax_max:e})");
+}
+
+#[path = "models_onnx/dipole.rs"]
+mod dipole;
+#[path = "models_onnx/field.rs"]
+mod field;
+#[path = "models_onnx/separation.rs"]
+mod separation;
+
+// ---------------------------------------------------------------------------------------------
+// Manual tests.
 
 use qsm_core::models::onnx::{OnnxModel, Tensor};
 
-#[test]
-#[ignore]
-fn bfrnet_forward_runs() {
-    let path = std::env::var("BFRNET_ONNX")
-        .expect("set BFRNET_ONNX to a local BFRnet.onnx to run this test");
-    let bytes = std::fs::read(&path).expect("read onnx file");
-    println!("loaded {} bytes from {path}", bytes.len());
-
-    let model = OnnxModel::load(&bytes).expect("parse onnx");
-
-    // Fully-convolutional; use a small volume divisible by 8.
-    let (d, h, w) = (32usize, 32, 32);
-    let field: Vec<f32> = (0..d * h * w).map(|i| ((i % 7) as f32 - 3.0) * 0.01).collect();
-
-    let out = model
-        .run_single(&Tensor::new(vec![1, 1, d, h, w], field))
-        .expect("forward pass");
-
-    println!("output shape {:?}", out.shape);
-    assert_eq!(out.shape, vec![1, 1, d, h, w], "output should match input shape");
-    assert!(out.data.iter().all(|v| v.is_finite()), "output must be finite");
-    let mean = out.data.iter().copied().sum::<f32>() / out.data.len() as f32;
-    println!("output mean {mean:.6}, first few {:?}", &out.data[..4.min(out.data.len())]);
-}
-
-/// Parity: `bgremove::bfrnet` (tract, with the layout repack) must match the
-/// authors' ONNX-Runtime reference on a real total-field volume. This validates
-/// the column-major↔row-major repack and the crop/mask math, not just that it
-/// runs.
-///
-/// ```bash
-/// BFRNET_ONNX=~/repos/qsm/qsmci/qsmci/algorithms/bfrnet/BFRnet.onnx \
-///   cargo test --features onnx --test models_onnx bfrnet_matches -- --ignored --nocapture
-/// ```
-#[test]
-#[ignore]
-fn bfrnet_matches_python_reference() {
-    use qsm_core::io::read_nifti_file;
-    use std::path::Path;
-
-    let qsmci = "/home/ashley/repos/qsm/qsmci/qsmci";
-    let total_p = std::env::var("BFRNET_TOTALFIELD")
-        .unwrap_or(format!("{qsmci}/data/sim/dev/groundtruth/totalfield.nii.gz"));
-    let mask_p = std::env::var("BFRNET_MASK")
-        .unwrap_or(format!("{qsmci}/data/sim/dev/inputs/mask.nii.gz"));
-    let ref_p = std::env::var("BFRNET_REF")
-        .unwrap_or("/tmp/bfrnet_ref/localfield_ref.nii.gz".to_string());
-    let onnx_p = std::env::var("BFRNET_ONNX")
-        .unwrap_or(format!("{qsmci}/algorithms/bfrnet/BFRnet.onnx"));
-
-    let total = read_nifti_file(Path::new(&total_p)).expect("total field");
-    let mask_nii = read_nifti_file(Path::new(&mask_p)).expect("mask");
-    let reference = read_nifti_file(Path::new(&ref_p)).expect("reference localfield");
-    let onnx_bytes = std::fs::read(&onnx_p).expect("onnx");
-
-    let grid = qsm_core::Grid {
-        dims: total.dims,
-        voxel_size: total.voxel_size,
-    };
-    let mask: Vec<u8> = mask_nii.data.iter().map(|&v| (v > 0.5) as u8).collect();
-
-    let local = qsm_core::bgremove::bfrnet(&total.data, &mask, &grid, &onnx_bytes)
-        .expect("bfrnet inference");
-
-    assert_eq!(local.len(), reference.data.len());
-
-    // Correlation + max abs difference over in-mask voxels.
-    let (mut sxx, mut syy, mut sxy, mut sx, mut sy, mut n) = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
-    let mut max_abs = 0.0f64;
-    for i in 0..local.len() {
-        if mask[i] == 0 {
-            continue;
-        }
-        let (a, b) = (local[i], reference.data[i]);
-        sx += a;
-        sy += b;
-        sxx += a * a;
-        syy += b * b;
-        sxy += a * b;
-        n += 1.0;
-        max_abs = max_abs.max((a - b).abs());
-    }
-    let cov = sxy - sx * sy / n;
-    let corr = cov / ((sxx - sx * sx / n).sqrt() * (syy - sy * sy / n).sqrt());
-    println!("BFRnet vs ONNX-Runtime: corr = {corr:.6}, max|Δ| = {max_abs:.6e} ppm, n = {n}");
-
-    assert!(corr > 0.999, "correlation too low: {corr}");
-    assert!(max_abs < 5e-3, "max abs diff too high: {max_abs}");
-}
-
-/// Parity: `inversion::xqsm` (tract, centered-pad repack) must match the
-/// ONNX-Runtime reference on a real local-field volume.
-///
-/// ```bash
-/// cargo test --features onnx --test models_onnx xqsm_matches -- --ignored --nocapture
-/// ```
-#[test]
-#[ignore]
-fn xqsm_matches_python_reference() {
-    use qsm_core::io::read_nifti_file;
-    use std::path::Path;
-
-    let qsmci = "/home/ashley/repos/qsm/qsmci/qsmci";
-    let field_p = std::env::var("XQSM_LOCALFIELD")
-        .unwrap_or(format!("{qsmci}/data/sim/dev/groundtruth/localfield.nii.gz"));
-    let mask_p = std::env::var("XQSM_MASK")
-        .unwrap_or(format!("{qsmci}/data/sim/dev/inputs/mask.nii.gz"));
-    let ref_p = std::env::var("XQSM_REF").unwrap_or("/tmp/xqsm_ref/chi_ref.nii.gz".to_string());
-    let onnx_p = std::env::var("XQSM_ONNX").unwrap_or("/tmp/xqsm_export/xqsm.onnx".to_string());
-
-    let field = read_nifti_file(Path::new(&field_p)).expect("local field");
-    let mask_nii = read_nifti_file(Path::new(&mask_p)).expect("mask");
-    let reference = read_nifti_file(Path::new(&ref_p)).expect("reference chi");
-    let onnx_bytes = std::fs::read(&onnx_p).expect("onnx");
-
-    let grid = qsm_core::Grid { dims: field.dims, voxel_size: field.voxel_size };
-    let mask: Vec<u8> = mask_nii.data.iter().map(|&v| (v > 0.5) as u8).collect();
-
-    let chi = qsm_core::inversion::xqsm(&field.data, &mask, &grid, &onnx_bytes).expect("xqsm");
-    assert_eq!(chi.len(), reference.data.len());
-
-    let (mut sxx, mut syy, mut sxy, mut sx, mut sy, mut n) = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
-    let mut max_abs = 0.0f64;
-    for i in 0..chi.len() {
-        if mask[i] == 0 {
-            continue;
-        }
-        let (a, b) = (chi[i], reference.data[i]);
-        sx += a;
-        sy += b;
-        sxx += a * a;
-        syy += b * b;
-        sxy += a * b;
-        n += 1.0;
-        max_abs = max_abs.max((a - b).abs());
-    }
-    let corr = (sxy - sx * sy / n) / ((sxx - sx * sx / n).sqrt() * (syy - sy * sy / n).sqrt());
-    println!("xQSM vs ONNX-Runtime: corr = {corr:.6}, max|Δ| = {max_abs:.6e} ppm, n = {n}");
-    assert!(corr > 0.999, "correlation too low: {corr}");
-    assert!(max_abs < 5e-3, "max abs diff too high: {max_abs}");
-}
-
-/// Parity: `inversion::qsmnet` (tract, NDHWC + norm) vs the ONNX-Runtime
-/// reference. Also the first proof that `tract` can run a `tf2onnx`-converted
-/// (legacy TensorFlow) graph.
-///
-/// ```bash
-/// cargo test --release --features onnx --test models_onnx qsmnet_matches -- --ignored --nocapture
-/// ```
-#[test]
-#[ignore]
-fn qsmnet_matches_python_reference() {
-    use qsm_core::io::read_nifti_file;
-    use std::path::Path;
-
-    let qsmci = "/home/ashley/repos/qsm/qsmci/qsmci";
-    let field_p = std::env::var("QSMNET_LOCALFIELD")
-        .unwrap_or(format!("{qsmci}/data/sim/dev/groundtruth/localfield.nii.gz"));
-    let mask_p = std::env::var("QSMNET_MASK")
-        .unwrap_or(format!("{qsmci}/data/sim/dev/inputs/mask.nii.gz"));
-    let ref_p = std::env::var("QSMNET_REF").unwrap_or("/tmp/qsmnet_ref/chi_ref.nii.gz".to_string());
-    let onnx_p =
-        std::env::var("QSMNET_ONNX").unwrap_or("/tmp/qsmnet_export/qsmnet.onnx".to_string());
-
-    let field = read_nifti_file(Path::new(&field_p)).expect("local field");
-    let mask_nii = read_nifti_file(Path::new(&mask_p)).expect("mask");
-    let reference = read_nifti_file(Path::new(&ref_p)).expect("reference chi");
-    let onnx_bytes = std::fs::read(&onnx_p).expect("onnx");
-
-    let grid = qsm_core::Grid { dims: field.dims, voxel_size: field.voxel_size };
-    let mask: Vec<u8> = mask_nii.data.iter().map(|&v| (v > 0.5) as u8).collect();
-
-    let chi = qsm_core::inversion::qsmnet(
-        &field.data, &mask, &grid, &onnx_bytes, &qsm_core::inversion::QsmnetNorm::default(),
-    )
-    .expect("qsmnet");
-    assert_eq!(chi.len(), reference.data.len());
-
-    let (mut sxx, mut syy, mut sxy, mut sx, mut sy, mut n) = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
-    let mut max_abs = 0.0f64;
-    for i in 0..chi.len() {
-        if mask[i] == 0 {
-            continue;
-        }
-        let (a, b) = (chi[i], reference.data[i]);
-        sx += a; sy += b; sxx += a * a; syy += b * b; sxy += a * b; n += 1.0;
-        max_abs = max_abs.max((a - b).abs());
-    }
-    let corr = (sxy - sx * sy / n) / ((sxx - sx * sx / n).sqrt() * (syy - sy * sy / n).sqrt());
-    println!("QSMnet vs ONNX-Runtime: corr = {corr:.6}, max|Δ| = {max_abs:.6e} ppm, n = {n}");
-    assert!(corr > 0.999, "correlation too low: {corr}");
-    assert!(max_abs < 5e-3, "max abs diff too high: {max_abs}");
-}
-
-/// Parity: `inversion::qsmnet` with the QSMnet+ weights + norm vs the
-/// ONNX-Runtime reference (same clean-rebuild recipe as QSMnet).
-///
-/// ```bash
-/// cargo test --release --features onnx --test models_onnx qsmnet_plus -- --ignored --nocapture
-/// ```
-#[test]
-#[ignore]
-fn qsmnet_plus_matches_python_reference() {
-    use qsm_core::io::read_nifti_file;
-    use std::path::Path;
-
-    let qsmci = "/home/ashley/repos/qsm/qsmci/qsmci";
-    let field = read_nifti_file(Path::new(&std::env::var("QSMNETP_LOCALFIELD").unwrap_or(
-        format!("{qsmci}/data/sim/dev/groundtruth/localfield.nii.gz"),
-    )))
-    .expect("field");
-    let mask_nii = read_nifti_file(Path::new(
-        &std::env::var("QSMNETP_MASK").unwrap_or(format!("{qsmci}/data/sim/dev/inputs/mask.nii.gz")),
-    ))
-    .expect("mask");
-    let reference = read_nifti_file(Path::new(
-        &std::env::var("QSMNETP_REF").unwrap_or("/tmp/qsmnetplus_ref/chi_ref.nii.gz".to_string()),
-    ))
-    .expect("reference");
-    let onnx_bytes = std::fs::read(
-        std::env::var("QSMNETP_ONNX")
-            .unwrap_or("/tmp/qsmnetplus_export/qsmnet_plus_clean.onnx".to_string()),
-    )
-    .expect("onnx");
-
-    let grid = qsm_core::Grid { dims: field.dims, voxel_size: field.voxel_size };
-    let mask: Vec<u8> = mask_nii.data.iter().map(|&v| (v > 0.5) as u8).collect();
-    let chi = qsm_core::inversion::qsmnet(
-        &field.data, &mask, &grid, &onnx_bytes, &qsm_core::inversion::QsmnetNorm::qsmnet_plus(),
-    )
-    .expect("qsmnet+");
-
-    let (mut sxx, mut syy, mut sxy, mut sx, mut sy, mut n) = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
-    let mut max_abs = 0.0f64;
-    for i in 0..chi.len() {
-        if mask[i] == 0 {
-            continue;
-        }
-        let (a, b) = (chi[i], reference.data[i]);
-        sx += a; sy += b; sxx += a * a; syy += b * b; sxy += a * b; n += 1.0;
-        max_abs = max_abs.max((a - b).abs());
-    }
-    let corr = (sxy - sx * sy / n) / ((sxx - sx * sx / n).sqrt() * (syy - sy * sy / n).sqrt());
-    println!("QSMnet+ vs ONNX-Runtime: corr = {corr:.6}, max|Δ| = {max_abs:.6e} ppm, n = {n}");
-    assert!(corr > 0.999, "correlation too low: {corr}");
-    assert!(max_abs < 5e-3, "max abs diff too high: {max_abs}");
-}
-
-/// Parity: `separation::susep_net` (tract, 3-in/2-out, z-score + de-norm) vs the
-/// ONNX-Runtime reference on cropped chi-sep inputs.
-///
-/// ```bash
-/// cargo test --release --features onnx --test models_onnx susep_net_matches -- --ignored --nocapture
-/// ```
-#[test]
-#[ignore]
-fn susep_net_matches_python_reference() {
-    use qsm_core::io::read_nifti_file;
-    use std::path::Path;
-
-    let dir = std::env::var("SUSEP_DIR").unwrap_or("/tmp/susep_ref".to_string());
-    let rd = |n: &str| read_nifti_file(Path::new(&format!("{dir}/{n}.nii.gz"))).expect(n);
-    let field = rd("localfield");
-    let qsm = rd("chimap");
-    let r2p = rd("r2prime");
-    let mask_nii = rd("mask");
-    let ref_pos = rd("chi_pos_ref");
-    let ref_neg = rd("chi_neg_ref");
-    let onnx_bytes =
-        std::fs::read(std::env::var("SUSEP_ONNX").unwrap_or("/tmp/susep_export/susep-net.onnx".into()))
-            .expect("onnx");
-
-    let grid = qsm_core::Grid { dims: field.dims, voxel_size: field.voxel_size };
-    let mask: Vec<u8> = mask_nii.data.iter().map(|&v| (v > 0.5) as u8).collect();
-
-    let (chi_pos, chi_neg, _tot) = qsm_core::separation::susep_net(
-        &field.data, &qsm.data, &r2p.data, &mask, &grid, &onnx_bytes,
-        &qsm_core::separation::SusepNetNorm::default(),
-        &qsm_core::separation::SusepNetParams::default(),
-        |_, _| {},
-    )
-    .expect("susep-net");
-
-    // Reference χ− is a positive magnitude; our χ− is signed (≤0) — compare magnitude.
-    for (name, got, want, sign) in [
-        ("chi+", &chi_pos, &ref_pos.data, 1.0f64),
-        ("chi-", &chi_neg, &ref_neg.data, -1.0f64),
-    ] {
-        let (mut sxx, mut syy, mut sxy, mut sx, mut sy, mut n) = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
-        let mut max_abs = 0.0f64;
-        for i in 0..got.len() {
-            if mask[i] == 0 {
-                continue;
-            }
-            let (a, b) = (got[i], sign * want[i]);
-            sx += a; sy += b; sxx += a * a; syy += b * b; sxy += a * b; n += 1.0;
-            max_abs = max_abs.max((a - b).abs());
-        }
-        let corr = (sxy - sx * sy / n) / ((sxx - sx * sx / n).sqrt() * (syy - sy * sy / n).sqrt());
-        println!("SUSEP-Net {name}: corr = {corr:.6}, max|Δ| = {max_abs:.6e} ppm");
-        assert!(corr > 0.999, "{name} correlation too low: {corr}");
-        assert!(max_abs < 5e-3, "{name} max abs diff too high: {max_abs}");
-    }
-}
-
-/// Parity: `inversion::autoqsm` (tract, fixed 64³→32³ + Rust sliding-window
-/// tiling/blend) vs the authors' Keras `data_predict` patch-stitched reference.
-/// Validates both the clean V-Net re-export and the tiling replica.
-///
-/// ```bash
-/// cargo test --release --features onnx --test models_onnx autoqsm_matches -- --ignored --nocapture
-/// ```
-#[test]
-#[ignore]
-fn autoqsm_matches_keras_reference() {
-    use qsm_core::io::read_nifti_file;
-    use std::path::Path;
-
-    let dir = std::env::var("AUTOQSM_DIR").unwrap_or("/tmp/autoqsm_export".to_string());
-    let field = read_nifti_file(Path::new(&format!("{dir}/totalfield.nii.gz"))).expect("field");
-    let mask_nii = read_nifti_file(Path::new(&format!("{dir}/mask.nii.gz"))).expect("mask");
-    let reference = read_nifti_file(Path::new(&format!("{dir}/chi_ref.nii.gz"))).expect("ref");
-    let onnx_bytes = std::fs::read(format!("{dir}/autoqsm.onnx")).expect("onnx");
-
-    let grid = qsm_core::Grid { dims: field.dims, voxel_size: field.voxel_size };
-    let mask: Vec<u8> = mask_nii.data.iter().map(|&v| (v > 0.5) as u8).collect();
-    // The Keras reference was fed this field as-is, in the network's own training convention;
-    // `autoqsm` takes this crate's convention and negates it, so hand it the negated field.
-    let field_crate: Vec<f64> = field.data.iter().map(|&v| -v).collect();
-    let chi = qsm_core::inversion::autoqsm(&field_crate, &mask, &grid, &onnx_bytes).expect("autoqsm");
-
-    // Reference is whole-head (unmasked); our output is masked — compare in-mask.
-    let (mut sxx, mut syy, mut sxy, mut sx, mut sy, mut n) = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
-    let mut max_abs = 0.0f64;
-    for i in 0..chi.len() {
-        if mask[i] == 0 {
-            continue;
-        }
-        let (a, b) = (chi[i], reference.data[i]);
-        sx += a; sy += b; sxx += a * a; syy += b * b; sxy += a * b; n += 1.0;
-        max_abs = max_abs.max((a - b).abs());
-    }
-    let corr = (sxy - sx * sy / n) / ((sxx - sx * sx / n).sqrt() * (syy - sy * sy / n).sqrt());
-    println!("AutoQSM vs Keras: corr = {corr:.6}, max|Δ| = {max_abs:.6e} ppm, n = {n}");
-    assert!(corr > 0.999, "correlation too low: {corr}");
-    assert!(max_abs < 5e-3, "max abs diff too high: {max_abs}");
-}
-
-/// Parity: `inversion::iqsm` (tract, 4-input phase→χ incl. scalar te/b0, sphere
-/// erosion, LG crop-pad rewrite) vs the authors' original `inference.run_iqsm`
-/// (torch) on echo 0 of the dev phase.
-///
-/// ```bash
-/// cargo test --release --features onnx --test models_onnx iqsm_matches -- --ignored --nocapture
-/// ```
-#[test]
-#[ignore]
-fn iqsm_matches_python_reference() {
-    use qsm_core::io::read_nifti_file;
-    use std::path::Path;
-
-    let phase = read_nifti_file(Path::new(
-        &std::env::var("IQSM_PHASE").unwrap_or("/tmp/iqsm_ref/phase_e0.nii.gz".into()),
-    ))
-    .expect("phase");
-    let mask_nii = read_nifti_file(Path::new(&std::env::var("IQSM_MASK").unwrap_or(
-        "/home/ashley/repos/qsm/qsmci/qsmci/data/sim/dev/inputs/mask.nii.gz".into(),
-    )))
-    .expect("mask");
-    let reference = read_nifti_file(Path::new(
-        &std::env::var("IQSM_REF").unwrap_or("/tmp/iqsm_ref/iQSM.nii.gz".into()),
-    ))
-    .expect("ref");
-    let onnx_bytes =
-        std::fs::read(std::env::var("IQSM_ONNX").unwrap_or("/tmp/iqsm_export/iqsm.onnx".into()))
-            .expect("onnx");
-
-    let grid = qsm_core::Grid { dims: phase.dims, voxel_size: phase.voxel_size };
-    let mask: Vec<u8> = mask_nii.data.iter().map(|&v| (v > 0.5) as u8).collect();
-
-    // Match the reference: te=0.004 s (echo 0), b0=3 T, phase_sign=-1, erode radius 3.
-    let chi = qsm_core::inversion::iqsm(
-        &phase.data, &mask, &grid, 0.004, 3.0, -1.0, 3, &onnx_bytes,
-    )
-    .expect("iqsm");
-
-    // Compare where the reference is non-zero (the eroded mask region).
-    let (mut sxx, mut syy, mut sxy, mut sx, mut sy, mut n) = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
-    let mut max_abs = 0.0f64;
-    for i in 0..chi.len() {
-        if reference.data[i] == 0.0 {
-            continue;
-        }
-        let (a, b) = (chi[i], reference.data[i]);
-        sx += a; sy += b; sxx += a * a; syy += b * b; sxy += a * b; n += 1.0;
-        max_abs = max_abs.max((a - b).abs());
-    }
-    let corr = (sxy - sx * sy / n) / ((sxx - sx * sx / n).sqrt() * (syy - sy * sy / n).sqrt());
-    println!("iQSM vs Python: corr = {corr:.6}, max|Δ| = {max_abs:.6e} ppm, n = {n}");
-    assert!(corr > 0.999, "correlation too low: {corr}");
-    assert!(max_abs < 5e-3, "max abs diff too high: {max_abs}");
-}
-
-/// Parity: `separation::chisepnet` (tract; 192³-ish patch U-Net, z-score + sliding
-/// window + denorm) vs the SNU-LIST `recon.py` on the chisep dev inputs. Compares
-/// χ+ vs chi-para and |χ−| vs chi-dia. Needs the gated onnx locally.
-///
-/// ```bash
-/// CHISEPNET_ONNX=<...>/240904_xsepnet.onnx \
-///   cargo test --release --features onnx --test models_onnx chisepnet_matches -- --ignored --nocapture
-/// ```
-#[test]
-#[ignore]
-fn chisepnet_matches_python_reference() {
-    use qsm_core::io::read_nifti_file;
-    use std::path::Path;
-
-    let base = std::env::var("CHISEP_IN")
-        .unwrap_or("/home/ashley/repos/qsm/qsmci/qsmci/data/sim/chisep/inputs".into());
-    let rd = |p: String| read_nifti_file(Path::new(&p)).expect("nii");
-    let field = rd(format!("{base}/localfield.nii.gz"));
-    let qsm = rd(format!("{base}/chimap.nii.gz"));
-    let r2p = rd(format!("{base}/r2prime.nii.gz"));
-    let mask_nii = rd(format!("{base}/mask.nii.gz"));
-    let ref_pos = rd(std::env::var("CHISEP_REF_POS").unwrap_or("/tmp/chisepnet_ref/chi-para.nii.gz".into()));
-    let ref_neg = rd(std::env::var("CHISEP_REF_NEG").unwrap_or("/tmp/chisepnet_ref/chi-dia.nii.gz".into()));
-    let onnx_bytes = std::fs::read(std::env::var("CHISEPNET_ONNX").unwrap_or(
-        "/home/ashley/repos/qsm/chi-separation/Chisep_Toolbox_v1.1.3/models/240904_xsepnet.onnx".into(),
-    ))
-    .expect("onnx (gated — set CHISEPNET_ONNX)");
-
-    let grid = qsm_core::Grid { dims: field.dims, voxel_size: field.voxel_size };
-    let mask: Vec<u8> = mask_nii.data.iter().map(|&v| (v > 0.5) as u8).collect();
-    let (chi_pos, chi_neg, _tot) = qsm_core::separation::chisepnet(
-        &field.data, &qsm.data, &r2p.data, &mask, &grid, &onnx_bytes,
-        &qsm_core::separation::ChiSepNetNorm::default(),
-        &qsm_core::separation::ChiSepNetParams::default(),
-    )
-    .expect("chisepnet");
-
-    // χ− is returned signed (≤0); the recon.py chi-dia is the positive magnitude.
-    let corr = |a: &[f64], b: &[f64]| -> (f64, f64) {
-        let (mut sxx, mut syy, mut sxy, mut sx, mut sy, mut n) = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
-        let mut mx = 0.0f64;
-        for i in 0..a.len() {
-            if mask[i] == 0 {
-                continue;
-            }
-            sx += a[i]; sy += b[i]; sxx += a[i] * a[i]; syy += b[i] * b[i]; sxy += a[i] * b[i]; n += 1.0;
-            mx = mx.max((a[i] - b[i]).abs());
-        }
-        ((sxy - sx * sy / n) / ((sxx - sx * sx / n).sqrt() * (syy - sy * sy / n).sqrt()), mx)
-    };
-    let neg_mag: Vec<f64> = chi_neg.iter().map(|&v| -v).collect();
-    let (cp, mp) = corr(&chi_pos, &ref_pos.data);
-    let (cn, mn) = corr(&neg_mag, &ref_neg.data);
-    println!("χ-sepnet vs Python: χ+ corr={cp:.6} max|Δ|={mp:.3e} | χ− corr={cn:.6} max|Δ|={mn:.3e}");
-    assert!(cp > 0.999 && cn > 0.999, "correlation too low: χ+={cp} χ−={cn}");
-    assert!(mp < 5e-3 && mn < 5e-3, "max abs diff too high: χ+={mp} χ−={mn}");
-}
-
-/// Parity: `inversion::lpcnn` (tract; 3-iter proximal-gradient unroll — FFT dipole
-/// data-consistency + normalization in Rust, prox CNN in ONNX) vs the full LPCNN
-/// model forward on the dev local field.
-///
-/// ```bash
-/// cargo test --release --features onnx --test models_onnx lpcnn_matches -- --ignored --nocapture
-/// ```
-#[test]
-#[ignore]
-fn lpcnn_matches_python_reference() {
-    use qsm_core::io::read_nifti_file;
-    use std::path::Path;
-
-    let field = read_nifti_file(Path::new(
-        &std::env::var("LPCNN_FIELD").unwrap_or("/tmp/lpcnn_ref/localfield.nii.gz".into()),
-    ))
-    .expect("field");
-    let mask_nii = read_nifti_file(Path::new(&std::env::var("LPCNN_MASK").unwrap_or(
-        "/home/ashley/repos/qsm/qsmci/qsmci/data/sim/dev/inputs/mask.nii.gz".into(),
-    )))
-    .expect("mask");
-    let reference = read_nifti_file(Path::new(
-        &std::env::var("LPCNN_REF").unwrap_or("/tmp/lpcnn_ref/chimap.nii.gz".into()),
-    ))
-    .expect("ref");
-    let onnx_bytes =
-        std::fs::read(std::env::var("LPCNN_ONNX").unwrap_or("/tmp/lpcnn_export/lpcnn.onnx".into()))
-            .expect("onnx");
-
-    let grid = qsm_core::Grid { dims: field.dims, voxel_size: field.voxel_size };
-    let mask: Vec<u8> = mask_nii.data.iter().map(|&v| (v > 0.5) as u8).collect();
-    let chi = qsm_core::inversion::lpcnn(&field.data, &mask, &grid, (0.0, 0.0, 1.0), &onnx_bytes)
-        .expect("lpcnn");
-
-    let (mut sxx, mut syy, mut sxy, mut sx, mut sy, mut n) = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
-    let mut max_abs = 0.0f64;
-    for i in 0..chi.len() {
-        if mask[i] == 0 {
-            continue;
-        }
-        let (a, b) = (chi[i], reference.data[i]);
-        sx += a; sy += b; sxx += a * a; syy += b * b; sxy += a * b; n += 1.0;
-        max_abs = max_abs.max((a - b).abs());
-    }
-    let corr = (sxy - sx * sy / n) / ((sxx - sx * sx / n).sqrt() * (syy - sy * sy / n).sqrt());
-    println!("LPCNN vs Python: corr = {corr:.6}, max|Δ| = {max_abs:.6e} ppm, n = {n}");
-    assert!(corr > 0.999, "correlation too low: {corr}");
-    assert!(max_abs < 5e-3, "max abs diff too high: {max_abs}");
-}
-
-/// Parity: `inversion::ir2qsm` (tract; the whole IR2U-net is ONNX — /8 zero-pad,
-/// crop and mask in Rust, no normalization) vs the deterministic IR2QSM model
-/// forward (AddNoise pinned off) on the dev local field.
-///
-/// ```bash
-/// cargo test --release --features onnx --test models_onnx ir2qsm_matches -- --ignored --nocapture
-/// ```
-#[test]
-#[ignore]
-fn ir2qsm_matches_python_reference() {
-    use qsm_core::io::read_nifti_file;
-    use std::path::Path;
-
-    let field = read_nifti_file(Path::new(
-        &std::env::var("IR2QSM_FIELD").unwrap_or("/tmp/ir2qsm_ref/localfield.nii.gz".into()),
-    ))
-    .expect("field");
-    let mask_nii = read_nifti_file(Path::new(&std::env::var("IR2QSM_MASK").unwrap_or(
-        "/home/ashley/repos/qsm/qsmci/qsmci/data/sim/dev/inputs/mask.nii.gz".into(),
-    )))
-    .expect("mask");
-    let reference = read_nifti_file(Path::new(
-        &std::env::var("IR2QSM_REF").unwrap_or("/tmp/ir2qsm_ref/chimap.nii.gz".into()),
-    ))
-    .expect("ref");
-    let onnx_bytes = std::fs::read(
-        std::env::var("IR2QSM_ONNX").unwrap_or("/tmp/ir2qsm_export/ir2qsm.onnx".into()),
-    )
-    .expect("onnx");
-
-    let grid = qsm_core::Grid { dims: field.dims, voxel_size: field.voxel_size };
-    let mask: Vec<u8> = mask_nii.data.iter().map(|&v| (v > 0.5) as u8).collect();
-    let chi = qsm_core::inversion::ir2qsm(&field.data, &mask, &grid, &onnx_bytes).expect("ir2qsm");
-
-    let (mut sxx, mut syy, mut sxy, mut sx, mut sy, mut n) = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
-    let mut max_abs = 0.0f64;
-    for i in 0..chi.len() {
-        if mask[i] == 0 {
-            continue;
-        }
-        let (a, b) = (chi[i], reference.data[i]);
-        sx += a; sy += b; sxx += a * a; syy += b * b; sxy += a * b; n += 1.0;
-        max_abs = max_abs.max((a - b).abs());
-    }
-    let corr = (sxy - sx * sy / n) / ((sxx - sx * sx / n).sqrt() * (syy - sy * sy / n).sqrt());
-    println!("IR2QSM vs Python: corr = {corr:.6}, max|Δ| = {max_abs:.6e} ppm, n = {n}");
-    assert!(corr > 0.999, "correlation too low: {corr}");
-    assert!(max_abs < 5e-3, "max abs diff too high: {max_abs}");
-}
-
-/// Parity: `inversion::modl_qsm` (tract; 3-iter model-based unroll — FFT dipole
-/// A/Aᴴ data-consistency + per-channel normalization in Rust, 2-channel CNN prior
-/// in ONNX) vs the authors' MoDL-QSM (TF 1.15/Keras 2.2.5) forward on the dev field.
-///
-/// ```bash
-/// cargo test --release --features onnx --test models_onnx modl_qsm_matches -- --ignored --nocapture
-/// ```
-#[test]
-#[ignore]
-fn modl_qsm_matches_python_reference() {
-    use qsm_core::io::read_nifti_file;
-    use std::path::Path;
-
-    let field = read_nifti_file(Path::new(
-        &std::env::var("MODL_FIELD").unwrap_or("/tmp/modl_qsm_ref/localfield.nii.gz".into()),
-    ))
-    .expect("field");
-    let mask_nii = read_nifti_file(Path::new(&std::env::var("MODL_MASK").unwrap_or(
-        "/home/ashley/repos/qsm/qsmci/qsmci/data/sim/dev/inputs/mask.nii.gz".into(),
-    )))
-    .expect("mask");
-    let reference = read_nifti_file(Path::new(
-        &std::env::var("MODL_REF").unwrap_or("/tmp/modl_qsm_ref/chimap.nii.gz".into()),
-    ))
-    .expect("ref");
-    let onnx_bytes = std::fs::read(
-        std::env::var("MODL_ONNX").unwrap_or("/tmp/modl_qsm_export/modl-qsm.onnx".into()),
-    )
-    .expect("onnx");
-
-    let grid = qsm_core::Grid { dims: field.dims, voxel_size: field.voxel_size };
-    let mask: Vec<u8> = mask_nii.data.iter().map(|&v| (v > 0.5) as u8).collect();
-    let chi = qsm_core::inversion::modl_qsm(&field.data, &mask, &grid, (0.0, 0.0, 1.0), &onnx_bytes)
-        .expect("modl_qsm");
-
-    let (mut sxx, mut syy, mut sxy, mut sx, mut sy, mut n) = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
-    let mut max_abs = 0.0f64;
-    for i in 0..chi.len() {
-        if mask[i] == 0 {
-            continue;
-        }
-        let (a, b) = (chi[i], reference.data[i]);
-        sx += a; sy += b; sxx += a * a; syy += b * b; sxy += a * b; n += 1.0;
-        max_abs = max_abs.max((a - b).abs());
-    }
-    let corr = (sxy - sx * sy / n) / ((sxx - sx * sx / n).sqrt() * (syy - sy * sy / n).sqrt());
-    println!("MoDL-QSM vs Python: corr = {corr:.6}, max|Δ| = {max_abs:.6e} ppm, n = {n}");
-    assert!(corr > 0.999, "correlation too low: {corr}");
-    assert!(max_abs < 5e-3, "max abs diff too high: {max_abs}");
-}
-
-/// Parity: `inversion::qsmgan` (tract; patch-based i64o48 U-Net generator, sign
-/// flip + input_scale + atanh/10) vs the authors' `recon.py` on the dev local field.
-///
-/// ```bash
-/// cargo test --release --features onnx --test models_onnx qsmgan_matches -- --ignored --nocapture
-/// ```
-#[test]
-#[ignore]
-fn qsmgan_matches_python_reference() {
-    use qsm_core::io::read_nifti_file;
-    use std::path::Path;
-
-    let field = read_nifti_file(Path::new(
-        &std::env::var("QSMGAN_FIELD").unwrap_or("/tmp/qsmgan_ref/localfield.nii.gz".into()),
-    ))
-    .expect("field");
-    let mask_nii = read_nifti_file(Path::new(&std::env::var("QSMGAN_MASK").unwrap_or(
-        "/home/ashley/repos/qsm/qsmci/qsmci/data/sim/dev/inputs/mask.nii.gz".into(),
-    )))
-    .expect("mask");
-    let reference = read_nifti_file(Path::new(
-        &std::env::var("QSMGAN_REF").unwrap_or("/tmp/qsmgan_ref/chimap.nii.gz".into()),
-    ))
-    .expect("ref");
-    let onnx_bytes = std::fs::read(
-        std::env::var("QSMGAN_ONNX").unwrap_or("/tmp/qsmgan_export/qsmgan.onnx".into()),
-    )
-    .expect("onnx");
-
-    let grid = qsm_core::Grid { dims: field.dims, voxel_size: field.voxel_size };
-    let mask: Vec<u8> = mask_nii.data.iter().map(|&v| (v > 0.5) as u8).collect();
-    let chi = qsm_core::inversion::qsmgan(&field.data, &mask, &grid, &onnx_bytes).expect("qsmgan");
-
-    let (mut sxx, mut syy, mut sxy, mut sx, mut sy, mut n) = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
-    let mut max_abs = 0.0f64;
-    for i in 0..chi.len() {
-        if mask[i] == 0 {
-            continue;
-        }
-        let (a, b) = (chi[i], reference.data[i]);
-        sx += a; sy += b; sxx += a * a; syy += b * b; sxy += a * b; n += 1.0;
-        max_abs = max_abs.max((a - b).abs());
-    }
-    let corr = (sxy - sx * sy / n) / ((sxx - sx * sx / n).sqrt() * (syy - sy * sy / n).sqrt());
-    println!("QSMGAN vs Python: corr = {corr:.6}, max|Δ| = {max_abs:.6e} ppm, n = {n}");
-    assert!(corr > 0.999, "correlation too low: {corr}");
-    assert!(max_abs < 5e-3, "max abs diff too high: {max_abs}");
-}
-
-/// Parity: `inversion::iqfm` (tract; the iQSM LoT-Unet's tissue-field head, phase →
-/// local field) vs the authors' original `inference.run_iqsm(run_iqfm=True)` on
-/// echo 0 of the dev phase. Same code path as iQSM, different weights + output.
-///
-/// ```bash
-/// cargo test --release --features onnx --test models_onnx iqfm_matches -- --ignored --nocapture
-/// ```
-#[test]
-#[ignore]
-fn iqfm_matches_python_reference() {
-    use qsm_core::io::read_nifti_file;
-    use std::path::Path;
-
-    let phase = read_nifti_file(Path::new(
-        &std::env::var("IQFM_PHASE").unwrap_or("/tmp/iqfm_ref/phase_e0.nii.gz".into()),
-    ))
-    .expect("phase");
-    let mask_nii = read_nifti_file(Path::new(&std::env::var("IQFM_MASK").unwrap_or(
-        "/home/ashley/repos/qsm/qsmci/qsmci/data/sim/dev/inputs/mask.nii.gz".into(),
-    )))
-    .expect("mask");
-    let reference = read_nifti_file(Path::new(
-        &std::env::var("IQFM_REF").unwrap_or("/tmp/iqfm_ref/iQFM.nii.gz".into()),
-    ))
-    .expect("ref");
-    let onnx_bytes =
-        std::fs::read(std::env::var("IQFM_ONNX").unwrap_or("/tmp/iqfm_export/iqfm.onnx".into()))
-            .expect("onnx");
-
-    let grid = qsm_core::Grid { dims: phase.dims, voxel_size: phase.voxel_size };
-    let mask: Vec<u8> = mask_nii.data.iter().map(|&v| (v > 0.5) as u8).collect();
-
-    // Match the reference: te=0.004 s (echo 0), b0=3 T, phase_sign=-1, erode radius 3.
-    let lfs = qsm_core::inversion::iqfm(
-        &phase.data, &mask, &grid, 0.004, 3.0, -1.0, 3, &onnx_bytes,
-    )
-    .expect("iqfm");
-
-    let (mut sxx, mut syy, mut sxy, mut sx, mut sy, mut n) = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
-    let mut max_abs = 0.0f64;
-    for i in 0..lfs.len() {
-        if reference.data[i] == 0.0 {
-            continue;
-        }
-        let (a, b) = (lfs[i], reference.data[i]);
-        sx += a; sy += b; sxx += a * a; syy += b * b; sxy += a * b; n += 1.0;
-        max_abs = max_abs.max((a - b).abs());
-    }
-    let corr = (sxy - sx * sy / n) / ((sxx - sx * sx / n).sqrt() * (syy - sy * sy / n).sqrt());
-    println!("iQFM vs Python: corr = {corr:.6}, max|Δ| = {max_abs:.6e} ppm, n = {n}");
-    assert!(corr > 0.999, "correlation too low: {corr}");
-    assert!(max_abs < 5e-3, "max abs diff too high: {max_abs}");
-}
-
-/// Parity: `inversion::iqsm_plus` (tract; OA-LFE, z_prjs input, brain-bbox crop)
-/// vs the authors' original `inference.run_iqsm_plus` on echo 0 of the dev phase.
-///
-/// ```bash
-/// cargo test --release --features onnx --test models_onnx iqsm_plus_matches -- --ignored --nocapture
-/// ```
-#[test]
-#[ignore]
-fn iqsm_plus_matches_python_reference() {
-    use qsm_core::io::read_nifti_file;
-    use std::path::Path;
-
-    let phase = read_nifti_file(Path::new(
-        &std::env::var("IQSMP_PHASE").unwrap_or("/tmp/iqsmplus_ref/phase_e0.nii.gz".into()),
-    ))
-    .expect("phase");
-    let mask_nii = read_nifti_file(Path::new(&std::env::var("IQSMP_MASK").unwrap_or(
-        "/home/ashley/repos/qsm/qsmci/qsmci/data/sim/dev/inputs/mask.nii.gz".into(),
-    )))
-    .expect("mask");
-    let reference = read_nifti_file(Path::new(
-        &std::env::var("IQSMP_REF").unwrap_or("/tmp/iqsmplus_ref/iQSM_plus.nii.gz".into()),
-    ))
-    .expect("ref");
-    let onnx_bytes = std::fs::read(
-        std::env::var("IQSMP_ONNX").unwrap_or("/tmp/iqsmplus_export/iqsm-plus.onnx".into()),
-    )
-    .expect("onnx");
-
-    let grid = qsm_core::Grid { dims: phase.dims, voxel_size: phase.voxel_size };
-    let mask: Vec<u8> = mask_nii.data.iter().map(|&v| (v > 0.5) as u8).collect();
-    let chi = qsm_core::inversion::iqsm_plus(
-        &phase.data, &mask, &grid, 0.004, 3.0, (0.0, 0.0, 1.0), -1.0, 3, &onnx_bytes,
-    )
-    .expect("iqsm_plus");
-
-    let (mut sxx, mut syy, mut sxy, mut sx, mut sy, mut n) = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
-    let mut max_abs = 0.0f64;
-    for i in 0..chi.len() {
-        if reference.data[i] == 0.0 {
-            continue;
-        }
-        let (a, b) = (chi[i], reference.data[i]);
-        sx += a; sy += b; sxx += a * a; syy += b * b; sxy += a * b; n += 1.0;
-        max_abs = max_abs.max((a - b).abs());
-    }
-    let corr = (sxy - sx * sy / n) / ((sxx - sx * sx / n).sqrt() * (syy - sy * sy / n).sqrt());
-    println!("iQSM+ vs Python: corr = {corr:.6}, max|Δ| = {max_abs:.6e} ppm, n = {n}");
-    assert!(corr > 0.999, "correlation too low: {corr}");
-    assert!(max_abs < 5e-3, "max abs diff too high: {max_abs}");
-}
-
-/// Parity: `inversion::nextqsm_padded` (BFR ONNX + FFT data-consistency gradient
-/// + hand-coded VarNet-VJP ONNX, 6-step unroll) vs the `nextqsm` package output.
-///
-/// ```bash
-/// cargo test --release --features onnx --test models_onnx nextqsm_matches -- --ignored --nocapture
-/// ```
 /// Memory probe: load `PROBE_ONNX`, run one op at `PROBE_SHAPE` (`c,d,h,w`),
 /// print peak RSS (VmHWM). Used to check whether tract streams a given op or
 /// materializes a giant im2col buffer at full resolution.
@@ -855,51 +212,6 @@ fn nextqsm_bench_realsize() {
     println!("NeXtQSM (tract) end-to-end on real volume: {dt:.1} s  (finite out: {finite}/{})", chi.len());
 }
 
-#[test]
-#[ignore]
-fn nextqsm_matches_python_reference() {
-    use qsm_core::io::read_nifti_file;
-    use std::path::Path;
-
-    let dir = std::env::var("NEXTQSM_DIR").unwrap_or("/tmp/nextqsm_export".to_string());
-    let rd = |n: &str| read_nifti_file(Path::new(&format!("{dir}/{n}.nii.gz"))).expect(n);
-    let source = rd("source_pad");
-    let mask_nii = rd("mask_pad");
-    let reference = rd("chi_ref");
-    let bf = std::fs::read(format!("{dir}/nextqsm-bf.onnx")).expect("bf onnx");
-    let vjp = std::fs::read(format!("{dir}/nextqsm-vjp.onnx")).expect("vjp onnx");
-
-    let grid = qsm_core::Grid { dims: source.dims, voxel_size: (1.0, 1.0, 1.0) };
-    let mask: Vec<u8> = mask_nii.data.iter().map(|&v| (v > 0.5) as u8).collect();
-
-    let chi = qsm_core::inversion::nextqsm_padded(
-        &source.data, &mask, &grid, (0.0, 0.0, 1.0), &bf, &vjp,
-        &qsm_core::inversion::NEXTQSM_LAMBDAS,
-    )
-    .expect("nextqsm");
-
-    let (mut sxx, mut syy, mut sxy, mut sx, mut sy, mut n) = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
-    let mut max_abs = 0.0f64;
-    for i in 0..chi.len() {
-        if mask[i] == 0 {
-            continue;
-        }
-        let (a, b) = (chi[i], reference.data[i]);
-        sx += a; sy += b; sxx += a * a; syy += b * b; sxy += a * b; n += 1.0;
-        max_abs = max_abs.max((a - b).abs());
-    }
-    let corr = (sxy - sx * sy / n) / ((sxx - sx * sx / n).sqrt() * (syy - sy * sy / n).sqrt());
-    println!("NeXtQSM vs Python: corr = {corr:.6}, max|Δ| = {max_abs:.6e} ppm, n = {n}");
-    // Reference is the genuine `nextqsm` (predict_all.py, TensorFlow) padded output.
-    // The 6-step variational unroll is mildly chaotic, so float32 TF-vs-tract
-    // differences in the two U-Nets (each matched to ~1e-5 relative in isolation)
-    // amplify to ~0.05 ppm at the worst voxels while the map stays essentially
-    // identical (corr > 0.9999). A same-engine ONNX-Runtime unroll shows the same
-    // ~0.05 spread vs TF, so this is inherent cross-engine drift, not a port error.
-    assert!(corr > 0.999, "correlation too low: {corr}");
-    assert!(max_abs < 0.1, "max abs diff too high: {max_abs}");
-}
-
 /// End-to-end weight fetch: with the `download` feature, download a model from
 /// its hosted URL into a fresh cache and verify SHA-256. Exercises the real
 /// "download on use" path (QSMxT scenario). Needs network.
@@ -937,54 +249,6 @@ fn osf_download_and_verify() {
     println!("{id}: downloaded {} bytes, sha ok, cached", bytes.len());
 
     let _ = std::fs::remove_dir_all(&tmp);
-}
-
-
-
-/// HD-BET end-to-end parity: `bet::hd_bet` (tract + the Rust nnU-Net pipeline) vs the genuine
-/// `hd-bet` CLI (PyTorch, CPU, no TTA) on the three cases from qsm-ci's
-/// `scripts/onnx-export/reference/ref_hdbet.py`: the 1 mm qsm-forward phantom (A), the same with
-/// relabelled 0.9×0.9×1.2 mm spacing and zeroed border slabs (B: crop + cubic resampling), and
-/// every 4th slice at 0.9×0.9×4 mm (C: nnU-Net's separate-z resampling).
-///
-/// ```bash
-/// HDBET_ONNX=/path/hd-bet.onnx HDBET_REF_DIR=/path/ref \
-///   cargo test --release --features onnx --test models_onnx hdbet -- --ignored --nocapture
-/// ```
-#[test]
-#[ignore]
-fn hdbet_matches_python_reference() {
-    use qsm_core::bet::{hd_bet, HdBetInference, HdBetParams};
-    use qsm_core::io::read_nifti_file;
-    use std::path::Path;
-
-    let onnx = std::fs::read(std::env::var("HDBET_ONNX").unwrap_or("/tmp/hdbet_export/hd-bet.onnx".into()))
-        .expect("HDBET_ONNX");
-    let dir = std::env::var("HDBET_REF_DIR").unwrap_or("/tmp/hdbet_ref".into());
-    let cases = std::env::var("HDBET_CASES").unwrap_or("A,B,C".into());
-    for case in cases.split(',') {
-        let mag = read_nifti_file(Path::new(&format!("{dir}/{case}_mag.nii.gz"))).expect("magnitude");
-        let cli = read_nifti_file(Path::new(&format!("{dir}/{case}_mask_cli.nii.gz"))).expect("CLI mask");
-        let (nx, ny, nz) = mag.dims;
-        let (vx, vy, vz) = mag.voxel_size;
-        let grid = qsm_core::Grid::new(nx, ny, nz, vx, vy, vz);
-        let t = std::time::Instant::now();
-        // the CLI runs nnU-Net's sliding window
-        let params = HdBetParams { inference: HdBetInference::SLIDING_WINDOW, ..HdBetParams::default() };
-        let mask = hd_bet(&mag.data, &grid, &onnx, &params, |_, _| {}).expect("hd_bet");
-        let (mut inter, mut a, mut b, mut diff) = (0usize, 0usize, 0usize, 0usize);
-        for (&m, &c) in mask.iter().zip(&cli.data) {
-            let (m, c) = (m != 0, c > 0.5);
-            inter += (m && c) as usize;
-            a += m as usize;
-            b += c as usize;
-            diff += (m != c) as usize;
-        }
-        let dice = 2.0 * inter as f64 / (a + b) as f64;
-        println!("case {case}: {:?} @ {:?} mm  Dice vs CLI {dice:.6}  differing voxels {diff}  ({:.1}s)",
-            mag.dims, mag.voxel_size, t.elapsed().as_secs_f64());
-        assert!(dice > 0.999, "case {case}: Dice {dice}");
-    }
 }
 
 /// RS2-Net end-to-end parity: `bet::rs2_net` (tract + the Rust nnU-Net pipeline) vs RS2-Net's
@@ -1067,106 +331,6 @@ fn mindgrab_matches_brainchop() {
     println!("{:?} @ {:?} mm  Dice vs reference {dice:.6}  differing voxels {diff}  ({:.1}s)",
         mag.dims, mag.voxel_size, t.elapsed().as_secs_f64());
     assert!(dice > 0.999, "Dice {dice}");
-}
-
-/// Parity: `relaxometry::r2primenet` (tract, with the column-major↔NCDHW repack and the
-/// sliding-window overlap averaging) must match the authors' ONNX-Runtime recipe on the
-/// same R2* volume. Generate the fixtures first with
-/// `scripts/onnx-export/ref_r2primenet.py`, which writes `r2star.nii.gz` (the input, so
-/// both sides see identical bytes) and `r2prime_ref.nii.gz`.
-///
-/// ```bash
-/// R2PRIMENET_ONNX=<...>/240531_R2PRIMEnet.onnx \
-///   cargo test --release --features onnx --test models_onnx r2primenet_matches -- --ignored --nocapture
-/// ```
-#[test]
-#[ignore]
-fn r2primenet_matches_python_reference() {
-    use qsm_core::io::read_nifti_file;
-    use std::path::Path;
-
-    let rd = |p: String| read_nifti_file(Path::new(&p)).expect("nii");
-    let base = std::env::var("R2PRIMENET_REF").unwrap_or("/tmp/r2primenet_ref".into());
-    let r2star = rd(format!("{base}/r2star.nii.gz"));
-    let reference = rd(format!("{base}/r2prime_ref.nii.gz"));
-    let mask_nii = rd(std::env::var("R2PRIMENET_MASK").unwrap_or(
-        "/home/ashley/repos/qsm/QSM.rs/TEST_DATA/QSM_Dat08c_Mask.nii.gz".into(),
-    ));
-    let onnx_bytes = std::fs::read(std::env::var("R2PRIMENET_ONNX").unwrap_or(
-        "/home/ashley/repos/qsm/chi-separation/Chisep_Toolbox_v1.1.3/models/240531_R2PRIMEnet.onnx"
-            .into(),
-    ))
-    .expect("onnx (set R2PRIMENET_ONNX)");
-
-    let grid = qsm_core::Grid { dims: r2star.dims, voxel_size: r2star.voxel_size };
-    let mask: Vec<u8> = mask_nii.data.iter().map(|&v| (v > 0.5) as u8).collect();
-
-    let norm = qsm_core::relaxometry::R2PrimeNetNorm::default();
-    let run = |patch: (usize, usize, usize)| {
-        let mut patches = 0usize;
-        let out = qsm_core::relaxometry::r2primenet(
-            &r2star.data,
-            &mask,
-            &grid,
-            // Parity against the authors' own reference run: whatever field the reference was
-            // acquired at, this must reproduce it, so the guard is not what is under test here.
-            qsm_core::relaxometry::TRAINED_B0_T,
-            &onnx_bytes,
-            &norm,
-            &qsm_core::relaxometry::R2PrimeNetParams { patch, ..Default::default() },
-            |done, total| {
-                if done > 0 {
-                    patches = total;
-                    println!("  patch {done}/{total}");
-                }
-            },
-        )
-        .expect("r2primenet");
-        (out, patches)
-    };
-    let (out, patches) = run(qsm_core::relaxometry::AUTHORS_PATCH);
-    assert_eq!(patches, 4, "205x164x205 should tile into 2x1x2 authors' patches");
-
-    let (mut sx, mut sy, mut sxx, mut syy, mut sxy, mut n, mut maxd) =
-        (0.0, 0.0, 0.0, 0.0, 0.0, 0.0f64, 0.0f64);
-    for i in 0..out.len() {
-        if mask[i] == 0 {
-            continue;
-        }
-        let (a, b) = (out[i], reference.data[i] as f64);
-        sx += a; sy += b; sxx += a * a; syy += b * b; sxy += a * b; n += 1.0;
-        maxd = maxd.max((a - b).abs());
-    }
-    let corr = (sxy - sx * sy / n) / ((sxx - sx * sx / n).sqrt() * (syy - sy * sy / n).sqrt());
-    println!(
-        "R2PRIMEnet vs Python: corr={corr:.6} max|Δ|={maxd:.3e} Hz, mean R2′={:.2} Hz",
-        sx / n
-    );
-    assert!(corr > 0.999999, "correlation too low: {corr}");
-    // The reference is written as f32 NIfTI, so ~1e-3 Hz of storage rounding is expected
-    // on R2′ values of tens of Hz; anything larger is a real discrepancy.
-    assert!(maxd < 5e-3, "max abs diff too high: {maxd} Hz");
-
-    // The WASM patch is an approximation of the authors' patch (the net sees less context),
-    // and this pins how much it costs — 0.998 / 2.9% when this was measured. It is the
-    // browser's only option: one 64-channel activation at the authors' patch is 1.2 GB.
-    let (small, patches) = run(qsm_core::relaxometry::WASM_PATCH);
-    assert_eq!(patches, 16, "205x164x205 should tile into 2x2x2... 16 WASM patches");
-    let (mut sx2, mut sy2, mut sxx2, mut syy2, mut sxy2, mut n2, mut num, mut den) =
-        (0.0, 0.0, 0.0, 0.0, 0.0, 0.0f64, 0.0f64, 0.0f64);
-    for i in 0..out.len() {
-        if mask[i] == 0 {
-            continue;
-        }
-        let (a, b) = (out[i], small[i]);
-        sx2 += a; sy2 += b; sxx2 += a * a; syy2 += b * b; sxy2 += a * b; n2 += 1.0;
-        num += (a - b) * (a - b); den += a * a;
-    }
-    let corr2 = (sxy2 - sx2 * sy2 / n2) / ((sxx2 - sx2 * sx2 / n2).sqrt() * (syy2 - sy2 * sy2 / n2).sqrt());
-    let nrmse = 100.0 * (num / den).sqrt();
-    println!("WASM patch vs authors' patch: corr={corr2:.4} NRMSE={nrmse:.2}%");
-    assert!(corr2 > 0.99, "small-patch correlation regressed: {corr2}");
-    assert!(nrmse < 6.0, "small-patch NRMSE regressed: {nrmse}%");
 }
 
 /// Parity: `separation::susep_net` (tract; column-major↔NCDHW repack, pad-to-8, de-normalise)
