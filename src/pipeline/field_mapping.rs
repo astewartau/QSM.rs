@@ -21,9 +21,15 @@
 //!   command line says to reduce it on a small field of view and to use 0 along an axis with a
 //!   single slice; that is left to the caller.
 //! - **Masks.** MCPC-3D-S makes its own `robustmask` of `sqrt(|HIP|)`, as the reference
-//!   `mcpc3ds` does (`mcpc3ds.jl:44-46`; [`crate::utils::phase_offset_removal`]). ROMEO and the
-//!   bipolar fit use the brain mask passed in, as the CLI does when given one (`-k`); without
-//!   one the CLI unwraps inside `robustmask` of the template magnitude (`caller.jl:201-204`).
+//!   `mcpc3ds` does (`mcpc3ds.jl:44-46`; [`crate::utils::phase_offset_removal`]), and bipolar
+//!   correction runs inside that same mask ([`crate::utils::mcpc3ds_mask`]), because `mcpc3ds`
+//!   calls `bipolar_correction!` with it (`mcpc3ds.jl:55`). This used to be the brain mask: on
+//!   `tests/mritools_parity.rs`'s phantom, whose mask differs from that robust mask at about a
+//!   tenth of their voxels, it left the corrected phase up to 0.22 rad from `mcpc3ds(...;
+//!   bipolar_correction = true)` inside the brain; with `mcpc3ds`' mask it agrees to 1.8e-15 rad
+//!   (QSM.rs#330). ROMEO uses the brain mask passed in,
+//!   as the CLI does when given one (`-k`); without one the CLI unwraps inside `robustmask` of
+//!   the template magnitude (`caller.jl:201-204`).
 //! - **ROMEO settings.** The default is ROMEO.jl's API defaults
 //!   ([`RomeoParams::default`](crate::unwrap::RomeoParams::default): `:romeo` weights,
 //!   `temporal_uncertain_unwrapping` 0.5). The CLI turns `-w romeo` into `romeo3` when a
@@ -256,10 +262,13 @@ fn field_mapping_with_offset(
         &grid,
     );
 
-    // Step 2: Bipolar correction (optional, >= 3 echoes)
+    // Step 2: Bipolar correction (optional, >= 3 echoes), inside MCPC-3D-S's own mask
+    // `robustmask(sqrt(|hip|))`, as `mcpc3ds` passes it to `bipolar_correction!`
+    // (`mcpc3ds.jl:55`), not the brain mask (QSM.rs#330).
     if config.bipolar_correction && n_echoes >= 3 {
+        let mcpc_mask = crate::utils::mcpc3ds_mask(phases, mag_slices, [0, 1], &grid);
         crate::utils::bipolar_correction(
-            &mut corrected, mag_slices, tes, mask,
+            &mut corrected, mag_slices, tes, &mcpc_mask,
             config.phase_offset_sigma_voxels((vsx, vsy, vsz)), &grid,
         );
     }

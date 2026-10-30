@@ -32,7 +32,8 @@ jobs:
       - uses: actions/checkout@v4
 
       # The test binaries each build holds, and its features. `onnx` adds the deep-learning stack
-      # and `download` for the models and the χ-sepnet binaries, which fetch their weights from
+      # and `download` for the models, their fixture tests (models_onnx) and the χ-sepnet
+      # binaries, which fetch their weights from
       # the registry (the classical χ-separation binaries ignore them), and makes sure the hosted
       # weights are in the shared weights cache (below).
       - name: Build settings
@@ -46,7 +47,7 @@ jobs:
               tests="integration_tests oblique_sagittal multislice_2d" ;;
             onnx)
               features="parallel onnx download"; weights=true
-              tests="dl_models chisep_qsmci chisep_relaxometry_qsmci chisep_xsepnet chisep_r2primenet chisep_orientation" ;;
+              tests="dl_models models_onnx chisep_qsmci chisep_relaxometry_qsmci chisep_xsepnet chisep_r2primenet chisep_orientation" ;;
             *)
               echo "::error::unknown test-binaries build '$NAME'"; exit 1 ;;
           esac

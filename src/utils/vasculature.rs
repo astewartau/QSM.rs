@@ -22,6 +22,15 @@
 //! steps of 0.1 and c = 50. The bottom-hat radius (8) and Frangi scales are in voxels, and
 //! Otsu's threshold depends on the magnitude's intensity distribution, so the vessel mask
 //! depends on that magnitude being the one QSMART uses.
+//!
+//! # Agreement with the original
+//!
+//! `tests/qsmart_qsmci_parity.rs` (measured 2026-10-30) runs QSMART's stages on the inputs the
+//! verified QSM-CI `qsmart-matlab` v3 container (QSMxT/QSM-CI#296, bit-identical to licensed
+//! MATLAB) gave its own, on a 36×36×28 vessel phantom at 3 T; the fixture is regenerated in Actions
+//! by `tests/data/qsmart_qsmci_small.py`. From the same magnitudes,
+//! [`crate::utils::qsmart_vessel_magnitude`] then [`generate_vasculature_mask`] give the toolbox's
+//! `vasculature_mask` exactly (0 of 8,312 mask voxels differ; 276 vessel voxels).
 
 use crate::error::InputError;
 use crate::Grid;
