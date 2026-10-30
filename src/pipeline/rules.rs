@@ -421,6 +421,7 @@ pub const SETTINGS: &[(&str, &str)] = &[
     ("bg_removal.ismv.max_iter", "iSMV's iteration cap (IsmvParams::max_iter); no cap reads as +∞ (null in JSON); only with iSMV"),
     ("bg_removal.resharp.radius", "RESHARP's kernel radius, mm; only with RESHARP"),
     ("bg_removal.resharp.max_iter", "RESHARP's CG iteration cap; only with RESHARP"),
+    ("bg_removal.pdf.n_cg", "PDF's CG iteration cap (PdfParams::n_cg); only with PDF"),
     ("inversion.algorithm", "Dipole inversion (InversionAlgorithm::id)"),
     ("inversion.star.pad", "STAR-QSM padding per side, voxels (StarParams::pad)"),
     ("inversion.ilsqr.max_iter", "iLSQR's LSQR iteration cap (IlsqrParams::max_iter); only with iLSQR"),
@@ -507,6 +508,7 @@ pub fn current(input: &RuleInput, facts: &ScanFacts, setting: &str) -> Option<Ve
     let vsharp = bg(super::config::BgRemovalAlgorithm::Vsharp);
     let resharp = bg(super::config::BgRemovalAlgorithm::Resharp);
     let ismv = bg(super::config::BgRemovalAlgorithm::Ismv);
+    let pdf = bg(super::config::BgRemovalAlgorithm::Pdf);
     use super::config::InversionAlgorithm as A;
     let alg = |a: &[A]| a.contains(&c.inversion.algorithm);
     let qsmart = alg(&[A::Qsmart]);
@@ -587,6 +589,7 @@ pub fn current(input: &RuleInput, facts: &ScanFacts, setting: &str) -> Option<Ve
         ),
         "bg_removal.resharp.radius" => gated(resharp, Current::Number(c.bg_removal.resharp.radius)),
         "bg_removal.resharp.max_iter" => gated(resharp, Current::Number(c.bg_removal.resharp.max_iter as f64)),
+        "bg_removal.pdf.n_cg" => gated(pdf, Current::Number(c.bg_removal.pdf.n_cg as f64)),
         "inversion.whqsm.weight" => gated(
             alg(&[A::Whqsm]),
             Current::Choice(match c.inversion.whqsm.weight {
@@ -812,6 +815,8 @@ const fn discourage(
 }
 
 const BET: &[Value] = &[Choice("bet")];
+/// The CG iteration count `pdf.cg-iterations` suggests (measured; see `PdfParams::n_cg`).
+const PDF_SUGGESTED_N_CG: f64 = 300.0;
 const PDF: &[Value] = &[Choice("pdf")];
 const VSHARP: &[Value] = &[Choice("vsharp")];
 const LAPLACIAN: &[Value] = &[Choice("laplacian")];
@@ -1195,6 +1200,24 @@ pub static RULES: &[Rule] = &[
         reason: "RESHARP's author's code allows its CG solve up to 200 iterations",
         source: "sunhongfu/QSM background_field_removal/resharp.m l. 32-34, 92",
     },
+    Rule {
+        id: "pdf.cg-iterations",
+        when: &[bg(PDF)],
+        setting: "bg_removal.pdf.n_cg",
+        expect: Test::Range { min: Some(PDF_SUGGESTED_N_CG), max: None },
+        default: Number(PDF_SUGGESTED_N_CG),
+        unit: Unit::None,
+        strength: Strength::Recommended,
+        basis: Basis::Measured,
+        reason: "A tuning value: PDF.m's 30 CG iterations can stop far from convergence. At 300, \
+                 a Philips 3 T scan's local field correlated 0.83 with V-SHARP's, against 0.54 \
+                 at 30 (a GE scan: 0.84 against 0.85), and on QSM-CI's simulated head NRMSE was \
+                 44 %, against about 100 % for MEDI's PDF.m at 30; neither scan converged \
+                 within 300. Costs about 30 s more per 1 mm whole-brain scan",
+        source: "QSM.rs PdfParams::n_cg docs (travelling-head scans); QSMxT/QSM-CI#322 (pdf-cornell \
+                 vs pdf-qsmrs on the simulated head); PDF.m default n_CG 30, MEDI toolbox \
+                 2024.11.26",
+    },
     reference("ismv-qsmjl.tolerance", &[method("bg_removal.ismv.variant", &[Choice("qsmjl")])],
         "bg_removal.ismv.tol", &[Number(1e-3)],
         "QSM.jl's ismv stops when the residual falls to 1e-3 of the first",
@@ -1552,6 +1575,7 @@ mod tests {
             ("sti.vsharp-grid", Case::new(|c| { inversion(I::Star)(c); c.cfg.bg_removal.vsharp.grid = crate::bgremove::VsharpGrid::Native })),
             ("resharp.radius", Case::new(|c| { background(B::Resharp)(c); c.cfg.bg_removal.resharp.radius = 6.0 })),
             ("resharp.iterations", Case::new(|c| { background(B::Resharp)(c); c.cfg.bg_removal.resharp.max_iter = 30 })),
+            ("pdf.cg-iterations", Case::new(background(B::Pdf))),
             ("ismv-qsmjl.tolerance", Case::new(|c| { background(B::Ismv)(c); c.cfg.bg_removal.ismv.variant = crate::bgremove::IsmvVariant::QsmJl })),
             ("ismv-qsmjl.max-iterations", Case::new(|c| { background(B::Ismv)(c); c.cfg.bg_removal.ismv.variant = crate::bgremove::IsmvVariant::QsmJl })),
             ("sti.unwrap-laplacian", Case::new(inversion(I::Ilsqr))),
@@ -1731,8 +1755,32 @@ mod tests {
             c.cfg.bg_removal.algorithm = BgRemovalAlgorithm::Pdf;
             c.cfg.masking.sections[0].generator = MaskOp::Bet(Default::default());
             c.cfg.field_mapping.b0_estimation = B0EstimationMethod::ComplexFit(Default::default());
+            c.cfg.bg_removal.pdf.n_cg = 300;
         });
         assert!(c.ids().is_empty(), "{:?}", c.ids());
+    }
+
+    /// PDF's iteration count: the default is PDF.m's 30, and 300 (or more) is a measured
+    /// suggestion, silent once followed and when PDF is not run.
+    #[test]
+    fn pdf_suggests_more_iterations() {
+        let id = "pdf.cg-iterations";
+        let r = RULES.iter().find(|r| r.id == id).unwrap();
+        assert_eq!((r.strength, r.basis, r.default), (Strength::Recommended, Basis::Measured, Number(300.0)));
+        assert_eq!(crate::bgremove::PdfParams::default().n_cg, 30);
+        let with = |n: usize| Case::new(|c| {
+            c.cfg.bg_removal.algorithm = BgRemovalAlgorithm::Pdf;
+            c.cfg.bg_removal.pdf.n_cg = n;
+        }).ids().contains(&id);
+        assert!(with(30) && with(299));
+        assert!(!with(300) && !with(1000));
+        // Not in play without PDF, nor when the inversion skips background removal.
+        assert!(!Case::new(|c| c.cfg.bg_removal.pdf.n_cg = 30).ids().contains(&id));
+        let total_field = Case::new(|c| {
+            c.cfg.inversion.algorithm = InversionAlgorithm::Autoqsm;
+            c.cfg.bg_removal.algorithm = BgRemovalAlgorithm::Pdf;
+        });
+        assert!(!total_field.ids().contains(&id), "{:?}", total_field.ids());
     }
 
     /// The JSON form carries everything the evaluation uses.
