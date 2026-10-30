@@ -25,7 +25,9 @@
 # machine-dependent: the PyTorch and TensorFlow CPU kernels round by instruction set. With oneDNN and
 # MKL held to AVX2 (DNNL_MAX_CPU_ISA, MKL_ENABLE_INSTRUCTIONS) instead of the AVX-512 of the Intel
 # i5-11500 that made the committed .bin, xqsm, lpcnn, qsmgan and ir2qsm move by 4e-7 to 1.3e-6
-# relative (max |Δ| up to 8.5e-7 ppm); qsmnet, qsmnet-plus and modl-qsm do not move.
+# relative (max |Δ| up to 8.5e-7 ppm); qsmnet, qsmnet-plus and modl-qsm do not move. On a
+# GitHub-hosted runner (regenerate-fixtures, 2026-10-30) all seven move, by 2e-7 to 9e-7 relative
+# (max |Δ| up to 5.2e-7 ppm), well inside the tests' limits.
 #
 # Needs numpy, nibabel, network access (GitHub) and podman or docker (CONTAINER_ENGINE overrides; the
 # regenerate-fixtures workflow runs it in Actions, where each image is removed after use, since
