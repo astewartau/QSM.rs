@@ -19,6 +19,10 @@
 #
 # .github/workflows/regenerate-fixtures.yml runs this command (with docker) in Actions.
 #
+# machine-dependent: Julia's tanh rounds differently between CPUs, so a GitHub-hosted runner gives
+# 7 phase-mask values (cases 1-3) 1 ulp (1.1e-16) from the committed .bin, made on an AMD EPYC.
+# Everything else is identical. Far inside tests/clearswi_parity.rs's tolerances.
+#
 # The phantom is built from + - * /, round and integer xor only, so the Rust test rebuilds it bit
 # for bit. Layout (little-endian, column-major over the 20x20x14 grid, voxel 1x1x1.5 mm), per case
 # 1-3: the phase mask's mask (robustmask of the first echo's magnitude) as bits (least significant
