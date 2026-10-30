@@ -1,6 +1,8 @@
 //! MriResearchTools.jl's ports against MriResearchTools.jl itself (korbinian90, 771eadf):
 //! `makehomogeneous`, `robust_mask` (`robustmask`), `fill_holes`, `calculate_b0_weighted`
-//! (`calculateB0_unwrapped`) and `bipolar_correction` (`bipolar_correction!`).
+//! (`calculateB0_unwrapped`), `bipolar_correction` (`bipolar_correction!`), and `phase_offset_removal`
+//! + `bipolar_correction` inside `mcpc3ds_mask` as the pipeline runs them (`mcpc3ds(...;
+//! bipolar_correction = true)`).
 //!
 //! `tests/data/mritools_small.bin` is made by `tests/data/mritools_small.jl` in the verified QSM-CI
 //! `julia-qsm` image (QSMxT/QSM-CI#299; the command is in its header, and
@@ -13,7 +15,11 @@
 //! a change shows and to be tightened when fixed: `makehomogeneous` is 3.3 % (NRMSE in the mask;
 //! up to 15 % at a voxel) from MriResearchTools'.
 
-use qsm_core::utils::{bipolar_correction, calculate_b0_weighted, fill_holes, makehomogeneous, robust_mask, B0WeightType};
+use qsm_core::unwrap::UnwrapMethod;
+use qsm_core::utils::{
+    bipolar_correction, calculate_b0_weighted, fill_holes, makehomogeneous, mcpc3ds_mask, phase_offset_removal, robust_mask,
+    B0WeightType,
+};
 use qsm_core::Grid;
 use std::f64::consts::PI;
 
@@ -146,6 +152,23 @@ fn mritools_ports_match_mritools() {
         // Measured 2026-10-30: 4.4e-16 rad (echoes 1, 3) and 8.9e-16 rad (2, 4); before the port
         // followed `bipolar_correction!` step for step, 0.24 and 0.48 rad.
         assert!(d < 1e-12, "bipolar echo {}: {d:e}", e + 1);
+    }
+
+    // MCPC-3D-S with bipolar correction, as the pipeline's field mapping runs them: `mcpc3ds`
+    // corrects the bipolar artefact inside its own `robustmask(sqrt(|hip|))`, not the brain mask.
+    let sigma = [7.0, 7.0, 7.0 / 1.5];
+    let (mut phases, _) = phase_offset_removal(&p.wrapped, &p.mag, &TES, sigma, [0, 1], UnwrapMethod::Romeo, &grid);
+    let mcpc_mask = mcpc3ds_mask(&p.wrapped, &p.mag, [0, 1], &grid);
+    bipolar_correction(&mut phases, &p.mag, &TES, &mcpc_mask, sigma, &grid);
+    for (e, ph) in phases.iter().enumerate() {
+        let want = r.f64s(m);
+        let got: Vec<f64> = inside.iter().map(|&l| ph[l]).collect();
+        let d = got.iter().zip(&want).map(|(a, b)| (a - b - 2.0 * PI * ((a - b) / (2.0 * PI)).round()).abs()).fold(0.0, f64::max);
+        println!("mcpc3ds + bipolar echo {}: max |Δ| {d:.2e} rad (modulo 2π)", e + 1);
+        // Measured 2026-10-30: 1.3e-15 rad (echoes 1, 3) and 1.8e-15 rad (2, 4). With the
+        // phantom's mask in place of mcpc3ds' (what the pipeline did before, QSM.rs#330): 0.11 and
+        // 0.22 rad.
+        assert!(d < 1e-12, "mcpc3ds + bipolar echo {}: {d:e}", e + 1);
     }
     assert_eq!(r.o, raw.len(), "fixture length");
 }
