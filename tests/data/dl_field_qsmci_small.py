@@ -25,8 +25,10 @@
 #
 #   python3 tests/data/dl_field_qsmci_small.py tests/data/dl_field_qsmci_small.bin
 #
-# machine-dependent: the PyTorch and TensorFlow CPU kernels round by instruction set (see
-# tests/data/dl_dipole_qsmci_small.py; measured there at up to 1.3e-6 relative).
+# machine-dependent: the PyTorch CPU kernels round by instruction set. On a GitHub-hosted runner
+# (regenerate-fixtures, 2026-10-30) autoqsm, nextqsm and bfrnet reproduce the committed .bin (made on
+# an Intel i5-11500) exactly; the iQSM family moves by 1.9e-6 to 7.0e-5 relative (max |Δ| up to
+# 4.0e-6 ppm), a quarter or less of the tests' limits.
 #
 # Needs numpy, nibabel, network access (GitHub) and podman or docker (CONTAINER_ENGINE overrides; the
 # regenerate-fixtures workflow runs it in Actions, where each image is removed after its last use;
