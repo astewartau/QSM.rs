@@ -23,8 +23,9 @@
 //! that is `deconvolve: false`, an [`Isotropic`](VsharpGrid::Isotropic) 1 mm grid (same 12-voxel
 //! crop margin, [`CROP_MARGIN`]), `max_radius` 12 and STI's radius schedule, 12 → 2 mm in 1 mm
 //! steps ([`VsharpParams::radius_step`]), and STI's ball, [`VsharpBall::StiSuite`] (`|x| ≤ r + 1/6`
-//! without its centre voxel, a ball fitting only where all its voxels are in the mask). What
-//! remains different from STI is its mask back-interpolation on non-1 mm input.
+//! without its centre voxel, a ball fitting only where all its voxels are in the mask), and STI's
+//! crop: its `MaskBoundingBox` makes the bounding box even along every axis before the margin
+//! (`sti_even_box`).
 //!
 //! **Measured** (QSM-CI parity, astewartau/QSM.rs#329): on the KKI travelling head (256×256×128,
 //! 1 mm, STI Suite `V_SHARP` in the verified `vsharp-sti` v2 container, the same total field and
@@ -45,6 +46,23 @@
 //! r 0.546 → 0.521; in-vivo 3T Philips scan, agreement with the UK Biobank pipeline's χ
 //! (STI Suite V-SHARP + iLSQR) XSIM 0.641 → 0.714, NRMSE 75.2 → 69.4 %, r 0.781 → 0.790. On
 //! these 1 mm isotropic inputs the 1 mm grid only adds the crop.
+//!
+//! **Anisotropic voxels** (astewartau/QSM.rs#329, measured 2026-10-30): on UK Biobank's
+//! 1×1×1.5 mm (a 32×32×20 phantom through `UKBiobank_QSM_core.m` in the verified `ukb-qsm` v2
+//! container, identical to licensed MATLAB R2023b on it) the eroded mask was STI's but the local
+//! field 4.1 % NRMSE from it. The cause was the crop, not the resampling: STI's
+//! `MaskBoundingBox` turns the mask's 11 slices into 12, and that slice's phase (outside the mask)
+//! reaches the 1 mm working grid through the z interpolation. Spied in licensed MATLAB, STI's
+//! resampling is exactly this module's (`interp3` linear, native samples at `(1:N)·vs` mm, working
+//! samples at `1:ceil(N·vs)` mm, the mask `> 0.5` both ways, the background interpolated back in
+//! float32), and its working-grid background is the phase outside the eroded mask and the
+//! largest fitting ball's `S_r∗φ` inside it. With the even box that phantom agrees to 1.2e-6. A
+//! second, smaller cause showed on non-integer resamplings (1.2×0.8×1.5 mm): STI interpolates the
+//! mask in single precision, and exact ties at 0.5 fall outside its `> 0.5` test where f64 put
+//! some just inside (`trilinear_mask_f32`; 0.96 % and 13 output voxels before). With both,
+//! `tests/vsharp_sti_aniso_parity.rs` (four phantoms from 1×1×1.5 to 0.7×0.7×3 mm, the verified
+//! `vsharp-sti` container) agrees to 7e-7–1.1e-6 NRMSE (STI's float32) with the same masks; before,
+//! 6e-4 to 2 % and up to 22 mask voxels apart.
 //!
 //! ## QSM.jl's `vsharp`
 //!
@@ -104,7 +122,8 @@
 //! grid, at the finest input voxel size ([`VsharpGrid::IsotropicFinest`]) or at a fixed spacing
 //! ([`VsharpGrid::Isotropic`]):
 //!
-//! 1. crop the field and mask to the mask's bounding box with a zero margin of
+//! 1. crop the field and mask to the mask's bounding box, made even along each axis as STI's
+//!    `MaskBoundingBox` does (`sti_even_box`), with a zero margin of
 //!    [`CROP_MARGIN`] native voxels per side (this also fixes where the working grid sits
 //!    relative to the anatomy, so it lands the same way on repeat scans);
 //! 2. resample both trilinearly onto the isotropic grid (mask: interpolated value > 0.5), axes
@@ -389,6 +408,7 @@ fn vsharp_isotropic(
     let mut local_out = vec![0.0; nx * ny * nz];
     let mut mask_out = vec![0u8; nx * ny * nz];
     let Some((lo, hi)) = bounding_box(mask, grid.dims) else { return (local_out, mask_out) };
+    let (lo, hi) = sti_even_box(lo, hi, [nx, ny, nz]);
 
     // 1. crop to the bounding box with a zero margin
     let pad = CROP_MARGIN;
@@ -414,7 +434,9 @@ fn vsharp_isotropic(
         (1..=ni[d]).map(|q| if vs[d] == h { q as f64 } else { q as f64 * h / vs[d] }).collect::<Vec<f64>>()
     });
     let pi = trilinear(&p, np, &fwd);
-    let mi = trilinear(&m, np, &fwd);
+    // STI interpolates the mask as single (`interp3` on a single array), and the `> 0.5` test
+    // below meets exact ties at 0.5 on non-integer resamplings, so this follows its arithmetic
+    let mi = trilinear_mask_f32(&m, np, &fwd);
     let ne = ni.map(|n| n + n % 2);
     let mut pe = vec![0.0; ne[0] * ne[1] * ne[2]];
     let mut me = vec![0u8; pe.len()];
@@ -424,7 +446,7 @@ fn vsharp_isotropic(
                 let s = i + j * ni[0] + k * ni[0] * ni[1];
                 let d = i + j * ne[0] + k * ne[0] * ne[1];
                 pe[d] = pi[s];
-                me[d] = u8::from(mi[s] > 0.5);
+                me[d] = u8::from(mi[s] > 0.5f32);
             }
         }
     }
@@ -451,12 +473,12 @@ fn vsharp_isotropic(
         (1..=np[d]).map(|a| if vs[d] == h { a as f64 } else { a as f64 * vs[d] / h }).collect::<Vec<f64>>()
     });
     let bg_n = trilinear(&bg_c, ni, &back);
-    let nm_n = trilinear(&nm_c, ni, &back);
+    let nm_n = trilinear_mask_f32(&nm_c, ni, &back);
     for k in lo[2]..=hi[2] {
         for j in lo[1]..=hi[1] {
             for i in lo[0]..=hi[0] {
                 let s = (i - lo[0] + pad) + (j - lo[1] + pad) * np[0] + (k - lo[2] + pad) * np[0] * np[1];
-                if nm_n[s] > 0.5 {
+                if nm_n[s] > 0.5f32 {
                     let d = i + j * nx + k * nx * ny;
                     local_out[d] = p[s] - bg_n[s];
                     mask_out[d] = 1;
@@ -465,6 +487,30 @@ fn vsharp_isotropic(
         }
     }
     (local_out, mask_out)
+}
+
+/// STI Suite's `MaskBoundingBox(mask, voxelsize)` (V_SHARP's crop): the mask's bounding box made
+/// even along every axis. An odd extent grows by one voxel at its high end, or at its low end
+/// when the high end is the array's last voxel; an odd axis the mask fills entirely loses its
+/// last voxel. The voxel size plays no part. Probed black-box in licensed MATLAB R2023b on
+/// 17,952 boxes (lengths 8–40, eleven voxel sizes 0.5–3 mm, every position), all reproduced.
+///
+/// This was the anisotropic-voxel gap (astewartau/QSM.rs#329): the extra slice holds phase from
+/// outside the mask, and on a non-1 mm axis the resampling carries it onto the working grid
+/// next to the mask edge. See the [module docs](self#defaults).
+fn sti_even_box(mut lo: [usize; 3], mut hi: [usize; 3], n: [usize; 3]) -> ([usize; 3], [usize; 3]) {
+    for d in 0..3 {
+        if (hi[d] - lo[d] + 1) % 2 == 1 {
+            if hi[d] + 1 < n[d] {
+                hi[d] += 1;
+            } else if lo[d] > 0 {
+                lo[d] -= 1;
+            } else if hi[d] > lo[d] {
+                hi[d] -= 1;
+            }
+        }
+    }
+    (lo, hi)
 }
 
 /// Inclusive bounding box of the nonzero mask voxels, or `None` for an empty mask.
@@ -530,6 +576,56 @@ fn trilinear(src: &[f64], n: [usize; 3], coords: &[Vec<f64>; 3]) -> Vec<f64> {
                     }
                 }
                 out[a + b * ox + c * ox * oy] = v;
+            }
+        }
+    }
+    out
+}
+
+/// [`trilinear`] of a 0/1 mask as MATLAB's `interp3(..., 'linear')` computes it on a **single**
+/// array, which is how STI Suite's `V_SHARP` resamples its mask both ways: each fraction rounded
+/// to f32, then `(1 − f)·v₀ + f·v₁` in f32, along axis 1 first (`interp3`'s X, the second array
+/// dimension), then axis 0, then axis 2.
+///
+/// The masks are thresholded at `> 0.5`, and on non-integer resamplings exact ties at 0.5 occur;
+/// f64 puts some of them at 0.5 + 1e-15 (in), STI's single at 0.5 or 0.49999997 (out). On a
+/// 27×31×24 phantom at 1.2×0.8×1.5 mm (STI Suite `V_SHARP` in licensed MATLAB R2023b, spied,
+/// 2026-10-30) this reproduces every one of STI's thresholded working-mask voxels (the values to
+/// 1 ulp at 39 of 116,280); f64 put 19 voxels on the other side and moved the local field by 0.96 %.
+fn trilinear_mask_f32(src: &[f64], n: [usize; 3], coords: &[Vec<f64>; 3]) -> Vec<f32> {
+    let w = |d: usize| -> Vec<Option<(usize, f32)>> {
+        coords[d]
+            .iter()
+            .map(|&u| {
+                if !(1.0..=n[d] as f64).contains(&u) {
+                    return None;
+                }
+                let t = u - 1.0;
+                let i0 = (t.floor() as usize).min(n[d].saturating_sub(2));
+                Some((i0, (t - i0 as f64) as f32))
+            })
+            .collect()
+    };
+    let (wx, wy, wz) = (w(0), w(1), w(2));
+    let (ox, oy) = (wx.len(), wy.len());
+    let at = |i: usize, j: usize, k: usize| -> f32 {
+        if i < n[0] && j < n[1] && k < n[2] { src[i + j * n[0] + k * n[0] * n[1]] as f32 } else { 0.0 }
+    };
+    let lerp = |v0: f32, v1: f32, f: f32| (1.0 - f) * v0 + f * v1;
+    let mut out = vec![0.0f32; ox * oy * wz.len()];
+    for (c, wzk) in wz.iter().enumerate() {
+        let Some((k0, fz)) = *wzk else { continue };
+        for (b, wyj) in wy.iter().enumerate() {
+            let Some((j0, fy)) = *wyj else { continue };
+            for (a, wxi) in wx.iter().enumerate() {
+                let Some((i0, fx)) = *wxi else { continue };
+                // along axis 1, then 0, then 2
+                let plane = |k: usize| {
+                    let r0 = lerp(at(i0, j0, k), at(i0, j0 + 1, k), fy);
+                    let r1 = lerp(at(i0 + 1, j0, k), at(i0 + 1, j0 + 1, k), fy);
+                    lerp(r0, r1, fx)
+                };
+                out[a + b * ox + c * ox * oy] = lerp(plane(k0), plane(k0 + 1), fz);
             }
         }
     }
@@ -713,6 +809,22 @@ fn vsharp_padded(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// STI Suite's `MaskBoundingBox(mask, [vs 1 1])` in licensed MATLAB R2023b (2026-10-30) on a
+    /// mask spanning `lo..=hi` (1-based) of an axis of length `n`: (n, vs, lo, hi, STI lo, STI hi).
+    #[test]
+    fn sti_even_box_matches_mask_bounding_box() {
+        let probed = [
+            (9, 1.5, 1, 9, 1, 8), (9, 1.0, 1, 8, 1, 8), (9, 1.0, 2, 9, 2, 9), (9, 1.0, 9, 9, 8, 9),
+            (9, 0.8, 3, 7, 3, 8), (20, 2.5, 5, 10, 5, 10), (20, 1.2, 5, 11, 5, 12), (21, 0.7, 1, 21, 1, 20),
+            (40, 3.0, 40, 40, 39, 40), (8, 1.0, 1, 1, 1, 2),
+        ];
+        for (n, _vs, lo, hi, slo, shi) in probed {
+            let (l, h) = sti_even_box([lo - 1, 0, 0], [hi - 1, 1, 1], [n, 4, 4]);
+            assert_eq!((l[0] + 1, h[0] + 1), (slo, shi), "n {n}, {lo}..={hi}");
+            assert_eq!((l[1], h[1]), (0, 1), "an even extent is kept");
+        }
+    }
 
     #[test]
     fn test_vsharp_zero_field() {
@@ -1230,6 +1342,7 @@ mod tests {
         let mut local_out = vec![0.0; nx * ny * nz];
         let mut mask_out = vec![0u8; nx * ny * nz];
         let Some((lo, hi)) = bounding_box(mask, grid.dims) else { return (local_out, mask_out) };
+        let (lo, hi) = sti_even_box(lo, hi, [nx, ny, nz]);
         let pad = 12;
         let np = [0, 1, 2].map(|d| hi[d] - lo[d] + 1 + 2 * pad);
         let mut pp = vec![0.0; np[0] * np[1] * np[2]];
@@ -1244,7 +1357,7 @@ mod tests {
         let ni = [0, 1, 2].map(|d| if vs[d] == h { np[d] } else { (np[d] as f64 * vs[d] / h).ceil() as usize });
         let fwd = [0, 1, 2].map(|d| (1..=ni[d]).map(|q| if vs[d] == h { q as f64 } else { q as f64 * h / vs[d] }).collect::<Vec<f64>>());
         let pi = trilinear(&pp, np, &fwd);
-        let mi = trilinear(&m, np, &fwd);
+        let mi = trilinear_mask_f32(&m, np, &fwd);
         let ne = ni.map(|n| n + n % 2);
         let mut pe = vec![0.0; ne[0] * ne[1] * ne[2]];
         let mut me = vec![0.0; pe.len()];
@@ -1252,7 +1365,7 @@ mod tests {
             let s = i + j * ni[0] + k * ni[0] * ni[1];
             let d = i + j * ne[0] + k * ne[0] * ne[1];
             pe[d] = pi[s];
-            me[d] = if mi[s] > 0.5 { 1.0 } else { 0.0 };
+            me[d] = if mi[s] > 0.5f32 { 1.0 } else { 0.0 };
         }}}
         let nw = ne[0] * ne[1] * ne[2];
         let mut radii = vsharp_radii(p);
@@ -1309,10 +1422,10 @@ mod tests {
         }}}
         let back = [0, 1, 2].map(|d| (1..=np[d]).map(|a| if vs[d] == h { a as f64 } else { a as f64 * vs[d] / h }).collect::<Vec<f64>>());
         let bg_n = trilinear(&bg_c, ni, &back);
-        let nm_n = trilinear(&nm_c, ni, &back);
+        let nm_n = trilinear_mask_f32(&nm_c, ni, &back);
         for k in lo[2]..=hi[2] { for j in lo[1]..=hi[1] { for i in lo[0]..=hi[0] {
             let s = (i - lo[0] + pad) + (j - lo[1] + pad) * np[0] + (k - lo[2] + pad) * np[0] * np[1];
-            if nm_n[s] > 0.5 {
+            if nm_n[s] > 0.5f32 {
                 let d = i + j * nx + k * nx * ny;
                 local_out[d] = pp[s] - bg_n[s];
                 mask_out[d] = 1;
