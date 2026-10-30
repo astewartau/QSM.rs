@@ -1,6 +1,7 @@
 //! The small synthetic phantom of the MEDI parity tests against MATLAB (`msmv_medi_parity.rs`,
-//! `medi_smv_parity.rs`). It is built from `+ − × ÷` only (no transcendental functions, no FFT),
-//! so it is the same on every platform; [`dump`] writes it for the MATLAB scripts in those files.
+//! `medi_smv_parity.rs`, `medi_cornell_parity.rs`). It is built from `+ − × ÷` only (no
+//! transcendental functions, no FFT), so it is the same on every platform; [`dump`] writes it for
+//! the MATLAB scripts in those files, and `tests/data/medi_cornell_small.py` rebuilds it in Python.
 
 #![allow(dead_code)] // each test binary uses only part of it
 
@@ -39,6 +40,16 @@ pub struct Phantom {
 /// tube and blobs in the field, bright tubes in R2* near the edge, and hashed texture; the
 /// magnitudes decay as `M0/(1 + R2*·TE)`.
 pub fn phantom() -> Phantom {
+    build(false)
+}
+
+/// [`phantom`] with three CSF-like blobs near the centre (R2* ≈ 2 Hz), so MEDI+0's
+/// `extract_CSF` finds ventricles.
+pub fn phantom_csf() -> Phantom {
+    build(true)
+}
+
+fn build(csf: bool) -> Phantom {
     let [nx, ny, nz] = DIMS;
     let n = nx * ny * nz;
     let (mut rdf, mut mask, mut r2s, mut mag) = (vec![0.0; n], vec![0u8; n], vec![0.0; n], vec![0.0; 4 * n]);
@@ -51,8 +62,15 @@ pub fn phantom() -> Phantom {
                 let tube = (x - 9.0) * (x - 9.0) + (y - 6.0) * (y - 6.0);
                 let tube2 = (y + 10.0) * (y + 10.0) + (z - 4.0) * (z - 4.0);
                 let blob = (x + 4.0) * (x + 4.0) + (y - 3.0) * (y - 3.0) + z * z;
-                let r2 = 20.0 + bump(45.0, tube, 1.5) + bump(35.0, tube2 + 0.25 * (x + 2.0) * (x + 2.0), 1.0)
+                let mut r2 = 20.0 + bump(45.0, tube, 1.5) + bump(35.0, tube2 + 0.25 * (x + 2.0) * (x + 2.0), 1.0)
                     + bump(25.0, blob, 6.0) + 3.0 * hash(p, 1);
+                let ventricle = [(0.0, -5.0, 0.0), (0.0, 5.0, 0.0), (-3.0, 0.0, 4.0)]
+                    .iter()
+                    .map(|&(cx, cy, cz): &(f64, f64, f64)| (x - cx) * (x - cx) + (y - cy) * (y - cy) + (z - cz) * (z - cz))
+                    .fold(f64::INFINITY, f64::min);
+                if csf && ventricle < 6.0 {
+                    r2 = 2.0 + 0.5 * hash(p, 5);
+                }
                 r2s[p] = r2;
                 let m0 = if inside { 1.0 + 0.05 * hash(p, 2) } else { 0.05 * (1.0 + hash(p, 3)) };
                 for (e, &te) in TE.iter().enumerate() {
