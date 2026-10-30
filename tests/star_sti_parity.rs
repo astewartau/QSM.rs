@@ -1,13 +1,22 @@
-//! `inversion::star_qsm` against STI Suite 3.0's `QSM_star` on 48x56x40 phantoms.
+//! `inversion::star_qsm` against STI Suite 3.0's `QSM_star` on small phantoms.
 //!
-//! The inputs are rebuilt here exactly as the MATLAB script that made the references built them
-//! (spheres of four susceptibilities in an ellipsoid mask, forward-modelled with STI's centred
-//! dipole kernel, converted to phase with γ = 42.576 MHz/T), so the fixture only holds STI's
-//! output. `tests/data/star_sti_small.bin` (little-endian): for each case in [`CASES`] order, the
-//! number of mask voxels (u32) and STI's χ there (f64, ppm, column-major), from MATLAB R2023b
-//! `chi = QSM_star(TP, mask, 'TE', TE, 'B0', B0, 'H', H, 'padsize', pad, 'voxelsize', vs)`.
-//! The last case uses `StarParams`' default padding, `[8 8 20]` as STI Suite's `QSM_GUI` passes it.
-//! STI's χ is zero outside the mask.
+//! Two fixtures:
+//!
+//! - `tests/data/star_sti_qsmci_small.bin`, made by `tests/data/star_sti_qsmci_small.py` with the
+//!   verified QSM-CI `star-sti` container (QSMxT/QSM-CI#304), so it can be regenerated in Actions
+//!   (`.github/workflows/regenerate-fixtures.yml`): three 32x36x28 phantoms (layout in the
+//!   script), each with the local field the container was given and its χ, which the container
+//!   writes as float32.
+//! - `tests/data/star_sti_small.bin`, made in licensed MATLAB R2023b by
+//!   `tests/data/star_sti_small.m`, holds STI's χ in double precision on 48x56x40 phantoms, and a
+//!   case with the GUI's anisotropic padding, which the container (one `padsize` for all axes)
+//!   cannot run. Its inputs are rebuilt here exactly as that script built them (spheres of four
+//!   susceptibilities in an ellipsoid mask, forward-modelled with STI's centred dipole kernel,
+//!   converted to phase with γ = 42.576 MHz/T), so it only holds STI's output: for each case in
+//!   [`CASES`] order, the number of mask voxels (u32) and STI's χ there (f64, ppm, column-major),
+//!   from `chi = QSM_star(TP, mask, 'TE', TE, 'B0', B0, 'H', H, 'padsize', pad, 'voxelsize', vs)`.
+//!   The last case uses `StarParams`' default padding, `[8 8 20]` as STI Suite's `QSM_GUI` passes
+//!   it. STI's χ is zero outside the mask.
 
 use num_complex::Complex64;
 use qsm_core::fft::{fft3d, ifft3d};
@@ -50,7 +59,7 @@ const CASES: [Case; 4] = [
     },
 ];
 
-/// The reference script's phantom (`mk_phantom.m`): χ and mask.
+/// The phantom of `mk_phantom` in `tests/data/star_sti_small.m`: χ and mask.
 fn phantom(vs: [f64; 3]) -> (Vec<f64>, Vec<u8>) {
     let n = DIMS;
     let r = 0.4 * (0..3).map(|a| n[a] as f64 * vs[a]).fold(f64::INFINITY, f64::min);
@@ -147,5 +156,71 @@ fn star_matches_sti_suite_to_rounding() {
         println!("{}: {} iterations, max|Δ| {:.2e} ppm, relative L2 {:.2e}", case.name, iterations, max_d, rel);
         assert_eq!(iterations, case.iterations, "{}: iterations", case.name);
         assert!(rel < 1e-12 && max_d < 1e-13, "{}: max|Δ| {max_d:e}, relative L2 {rel:e}", case.name);
+    }
+}
+
+/// A case of `tests/data/star_sti_qsmci_small.py`.
+struct QsmciCase {
+    vs: [f64; 3],
+    h: [f64; 3],
+    b0: f64,
+    /// Echo time, s
+    te: f64,
+    pad: usize,
+}
+
+const QSMCI_DIMS: [usize; 3] = [32, 36, 28];
+/// `CASES` of `tests/data/star_sti_qsmci_small.py`, in order.
+const QSMCI_CASES: [QsmciCase; 3] = [
+    QsmciCase { vs: [1.0, 1.0, 1.0], h: [0.0, 0.0, 1.0], b0: 3.0, te: 0.020, pad: 12 },
+    QsmciCase { vs: [0.8, 0.9, 1.5], h: [0.0, 0.0, 1.0], b0: 3.0, te: 0.020, pad: 12 },
+    QsmciCase { vs: [1.0, 1.0, 1.0], h: [0.10101525445522108, -0.4040610178208843, 0.9091372900969897], b0: 7.0, te: 0.005, pad: 8 },
+];
+
+/// The container fixture: per case, (mask, field in ppm on the grid, STI's χ at the mask voxels).
+fn load_qsmci() -> Vec<(Vec<u8>, Vec<f64>, Vec<f32>)> {
+    let raw = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/star_sti_qsmci_small.bin")).expect("fixture");
+    let n = QSMCI_DIMS.iter().product::<usize>();
+    let mut o = 0;
+    let out = QSMCI_CASES.iter().map(|_| {
+        let m = u32::from_le_bytes(raw[o..o + 4].try_into().unwrap()) as usize;
+        let mask = raw[o + 4..o + 4 + n].to_vec();
+        o += 4 + n;
+        let inside: Vec<usize> = (0..n).filter(|&i| mask[i] != 0).collect();
+        assert_eq!(inside.len(), m);
+        let mut field = vec![0.0; n];
+        for (v, &i) in inside.iter().enumerate() {
+            field[i] = f64::from_le_bytes(raw[o + 8 * v..o + 8 * v + 8].try_into().unwrap());
+        }
+        o += 8 * m;
+        let chi = (0..m).map(|v| f32::from_le_bytes(raw[o + 4 * v..o + 4 * v + 4].try_into().unwrap())).collect();
+        o += 4 * m;
+        (mask, field, chi)
+    }).collect();
+    assert_eq!(o, raw.len());
+    out
+}
+
+#[test]
+fn star_matches_the_star_sti_container_to_float32() {
+    for (QsmciCase { vs, h, b0, te, pad }, (mask, field, sti)) in QSMCI_CASES.iter().zip(load_qsmci()) {
+        let params = StarParams { pad: [*pad; 3], echo_times: vec![*te], te: EchoTime::First, b0: *b0 };
+        // The container turns ppm into phase with γ = 42.576 MHz/T, STAR (here and in STI) with
+        // 42.575: give QSM.rs the field whose phase is the one STI was given.
+        let field: Vec<f64> = field.iter().map(|&f| f * 42.576 / 42.575).collect();
+        let grid = Grid::new(QSMCI_DIMS[0], QSMCI_DIMS[1], QSMCI_DIMS[2], vs[0], vs[1], vs[2]);
+        let chi = star_qsm(&field, &mask, &grid, (h[0], h[1], h[2]), &params, |_, _| {});
+        let got: Vec<f64> = (0..chi.len()).filter(|&l| mask[l] != 0).map(|l| chi[l]).collect();
+        // The container rounds STI's double χ to float32: allow that rounding (half an ulp of the
+        // value) plus 1e-13 ppm, the double-precision agreement of the licensed-MATLAB fixture.
+        let mut worst = 0.0f64;
+        for (a, &b) in got.iter().zip(&sti) {
+            let half_ulp = (f32::from_bits(b.to_bits() + 1) - b).abs() as f64 / 2.0;
+            worst = worst.max(((a - b as f64).abs() - 1e-13).max(0.0) / half_ulp.max(f64::MIN_POSITIVE));
+        }
+        let rel = (got.iter().zip(&sti).map(|(a, &b)| (a - b as f64).powi(2)).sum::<f64>()
+            / sti.iter().map(|&b| (b as f64).powi(2)).sum::<f64>()).sqrt();
+        println!("{vs:?} pad {pad}: relative L2 {rel:.2e}, worst |Δ| {worst:.3} half-ulps of float32");
+        assert!(worst <= 1.0, "{vs:?}: |Δ| up to {worst} half-ulps");
     }
 }

@@ -1,0 +1,114 @@
+name: Regenerate fixtures
+
+# Regenerates parity fixtures in tests/data from the original implementations' verified QSM-CI
+# containers (astewartau/QSM.rs#317), and checks that they reproduce the committed files.
+#
+# A fixture `tests/data/<name>.bin` can be regenerated here when it has a Python generator
+# `tests/data/<name>.py` that builds the inputs, runs the container (pinned by digest in the
+# script) itself and writes the .bin: `python3 tests/data/<name>.py <out.bin>`. A run fails if the
+# result differs from the committed .bin, and uploads it either way (artifact `fixture-<name>`), so
+# a fixture that should change (a new container digest, new cases) is replaced from that artifact.
+# Generators in other forms (`.jl` run inside the Julia image, `.m` that need licensed MATLAB) say
+# how to run them in their header.
+#
+# Runs on demand for one fixture, and on pull requests for every generator they add or change.
+
+on:
+  workflow_dispatch:
+    inputs:
+      fixture:
+        description: "Fixture name: tests/data/<name>.py and .bin (e.g. star_sti_qsmci_small)"
+        type: string
+        required: true
+  pull_request:
+    paths:
+      - "tests/data/*.py"
+      - ".github/workflows/regenerate-fixtures.yml"
+
+defaults:
+  run:
+    shell: bash
+
+permissions:
+  contents: read
+
+jobs:
+  list:
+    runs-on: ubuntu-latest
+    outputs:
+      fixtures: ${{ steps.list.outputs.fixtures }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Fixtures to regenerate
+        id: list
+        env:
+          INPUT: ${{ inputs.fixture }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if [ -n "$INPUT" ]; then
+            names="$INPUT"
+          else
+            # Generators the pull request adds or changes (a .py whose .bin is beside it).
+            names=$(git diff --name-only --diff-filter=AM "$BASE" HEAD -- 'tests/data/*.py' | sed 's|tests/data/||; s|\.py$||')
+          fi
+          json=$(for n in $names; do
+            [[ "$n" =~ ^[A-Za-z0-9_]+$ ]] || { echo "::error::bad fixture name '$n'" >&2; exit 1; }
+            [ -f "tests/data/$n.py" ] && [ -f "tests/data/$n.bin" ] || { echo "::error::no tests/data/$n.py and .bin" >&2; exit 1; }
+            echo "$n"
+          done | jq -R . | jq -cs .)
+          echo "fixtures=$json" >> "$GITHUB_OUTPUT"
+          echo "fixtures: $json"
+
+  regenerate:
+    needs: list
+    if: needs.list.outputs.fixtures != '[]'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        fixture: ${{ fromJSON(needs.list.outputs.fixtures) }}
+    env:
+      NAME: ${{ matrix.fixture }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # The MATLAB Runtime images are ~11 GB; the runner starts with ~20 GB free.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Pinned: numpy builds the inputs (its FFT for the dipole fields), so another version may
+      # round them differently and the comparison below would flag that.
+      - name: Install numpy and nibabel
+        run: pip install numpy==2.5.4 nibabel==5.4.2
+
+      - name: Generate
+        env:
+          CONTAINER_ENGINE: docker
+        run: |
+          mkdir -p regenerated
+          python3 "tests/data/$NAME.py" "regenerated/$NAME.bin"
+
+      - name: Upload
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fixture-${{ matrix.fixture }}
+          path: regenerated/
+          if-no-files-found: ignore
+
+      - name: Compare with the committed fixture
+        run: |
+          if cmp "regenerated/$NAME.bin" "tests/data/$NAME.bin"; then
+            echo "tests/data/$NAME.bin reproduced exactly"
+          else
+            echo "::error::tests/data/$NAME.bin differs from the regenerated one (artifact fixture-$NAME)"
+            exit 1
+          fi
