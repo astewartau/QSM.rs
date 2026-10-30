@@ -124,7 +124,7 @@ jobs:
         run: |
           if cmp "regenerated/$NAME.bin" "tests/data/$NAME.bin"; then
             echo "tests/data/$NAME.bin reproduced exactly"
-          elif cat tests/data/"$NAME".py tests/data/"$NAME".jl 2>/dev/null | grep -q '^# machine-dependent:'; then
+          elif grep -qs '^# machine-dependent:' tests/data/"$NAME".py tests/data/"$NAME".jl; then
             echo "::warning::tests/data/$NAME.bin differs from the regenerated one (artifact fixture-$NAME); its original is machine-dependent (see the generator's header)"
           else
             echo "::error::tests/data/$NAME.bin differs from the regenerated one (artifact fixture-$NAME)"

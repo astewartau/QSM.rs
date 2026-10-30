@@ -10,6 +10,11 @@
 #
 # .github/workflows/regenerate-fixtures.yml runs this command (with docker) in Actions.
 #
+# machine-dependent: FFTW and the package's SIMD kernels are picked by CPU, so its float32 χ
+# differs between CPUs: on a GitHub-hosted runner the first case (package defaults) is 1.1e-7
+# relative L2 (max 1.1e-8 ppm) from the committed .bin, made on an Intel i5-11500, and the other
+# cases are identical. Inside tests/tgv_tgvjl_parity.rs's float32-rounding tolerance.
+#
 # The phantom is built from + - * / only, so the Rust test rebuilds it bit for bit. The mask
 # touches the array's first and last z planes, where the package's erosion does not erode. Layout
 # of the output (little-endian), per case in CASES order: the number of voxels in the package's

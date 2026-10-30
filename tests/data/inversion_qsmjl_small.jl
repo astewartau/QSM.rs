@@ -16,6 +16,10 @@
 #
 # .github/workflows/regenerate-fixtures.yml runs this command (with docker) in Actions.
 #
+# machine-dependent: FFTW picks its kernels by CPU, so QSM.jl's χ differs in the last bits between
+# CPUs: a GitHub-hosted runner gives relative L2 2–8e-16 (max 1.3e-15 ppm) from the committed .bin,
+# made on an Intel i5-11500. Far inside tests/inversion_qsmjl_parity.rs's tolerances.
+#
 # The phantom is built from + - * / only, so the Rust test rebuilds it bit for bit. Layout of the
 # output (little-endian), per case in CASES order: the number of mask voxels (u32) and QSM.jl's
 # chi at the mask voxels (f64, ppm, column-major order), on that case's phantom.
