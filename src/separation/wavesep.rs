@@ -26,6 +26,15 @@
 //! periodic max decomposition level, [`dwt_max_level`]), matching PyWavelets'
 //! `periodization` round-trip, then cropped back.
 //!
+//! The wavelet step is PyWavelets' own transform: `wavedecn`/`waverecn` with `mode="periodization"`
+//! ([`Periodization::PyWavelets`]: the filter centred at `2k + lf/2`, and PyWavelets' db4 taps).
+//! Until 2026-10-30 WaveSep used MATLAB's `'per'` alignment (`2k + 1`, the convention AMP-PE needs)
+//! and MATLAB's db4 taps, which is a differently aligned basis: the proximal step was 3.4 % from
+//! PyWavelets' on a smooth 32³ field, and the separation 10.2 % (χ+) / 10.0 % (χ−) NRMSE from
+//! WaveSep f3a192e on the 24³ case of `tests/wavesep_parity.rs` (0.11 % / 1.08 % on QSMxT/QSM-CI#302's
+//! 164×205×205 case). With PyWavelets' transform the 24³ case agrees to 2.8e-8 / 2.5e-8 NRMSE (the
+//! fixture's float32 rounding), with the same 13 iterations (astewartau/QSM.rs#327).
+//!
 //! # Reference pipeline
 //!
 //! - **Data:** in-vivo 3 T, 1 mm isotropic, six head orientations per subject (Fang et al. 2023,
@@ -57,16 +66,13 @@
 //!
 //! # Agreement with WaveSep
 //!
-//! Against WaveSep f3a192e in the verified QSM-CI `wavesep` image (QSMxT/QSM-CI#302): χ+ 0.11 %
-//! and χ− 1.08 % NRMSE on a 164×205×205 synthetic case, and 10.2 % / 10.0 % on the 24³ case of
-//! `tests/wavesep_parity.rs` (measured 2026-10-30), with the same iteration counts. Known gap
-//! (astewartau/QSM.rs#327): the wavelet transform is not PyWavelets'. On a smooth 32³ field the
-//! db4 periodized soft-threshold step ([`WaveletPlan`] forward, threshold, inverse) differs from
-//! PyWavelets' `wavedecn`/`waverecn` (`mode="periodization"`, the same level) by 3.4 % relative,
-//! while each round-trips exactly, so the two use differently aligned bases.
+//! Against WaveSep f3a192e in the verified QSM-CI `wavesep` image (QSMxT/QSM-CI#302), on the 24³
+//! case of `tests/wavesep_parity.rs`: χ+ 2.8e-8 and χ− 2.5e-8 NRMSE (the fixture's float32), the
+//! same 13 iterations (measured 2026-10-30). The wavelet step's history and the earlier gap
+//! (10.2 % / 10.0 % here; 0.11 % / 1.08 % on a 164×205×205 case) are above, under the padding.
 
 use super::DR_SHIN_2021;
-use crate::utils::wavelet::{dwt_max_level, WaveletPlan};
+use crate::utils::wavelet::{dwt_max_level, Periodization, WaveletPlan};
 use crate::error::{check_len, InputError};
 use crate::Grid;
 
@@ -166,7 +172,7 @@ pub fn wavesep(
         r
     };
 
-    let plan = WaveletPlan::new(params.wavelet_order, pdims, level);
+    let plan = WaveletPlan::new(params.wavelet_order, pdims, level, Periodization::PyWavelets);
     let th = params.alpha * params.lambda;
     let dr_ratio = params.dr_neg / params.dr_pos;
 
