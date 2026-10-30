@@ -219,7 +219,7 @@ impl Default for IlsqrParams {
             tol: 1e-3,
             max_iter: STI_DEFAULT_NITER,
             pad_mm: STI_GUI_PAD_MM,
-            precision: IlsqrPrecision::Double,
+            precision: IlsqrPrecision::Single,
         }
     }
 }
