@@ -58,9 +58,10 @@
 //! 7e-4 in double). [`IlsqrPrecision::Single`] does the same, for parity with STI; it runs the
 //! two solves on dense vectors over the padded grid (no pruned transforms), so it is slower
 //! and needs more memory. Double precision stays the default (QSM.rs keeps double where the
-//! reference uses single and it does no harm): LSQR stopped after a fixed number of
-//! iterations amplifies rounding, so the two precisions differ by ~0.1 % NRMSE on smooth
-//! phantoms and up to ~10 % on small noisy ones (below), neither being more accurate.
+//! reference uses single and it does no harm): on whole heads both agree with STI equally
+//! well (QSM-CI's sim and KKI travelling head: 0.0024 % and 0.017 % NRMSE in either
+//! precision). LSQR stopped after a fixed number of iterations amplifies rounding, though, so
+//! on small noisy volumes only single precision follows STI (below: 0.17 % against 10.6 %).
 //!
 //! # Agreement with STI Suite
 //!
@@ -82,8 +83,10 @@
 //! for the dilation, +∞ for the erosion, on the unpadded 7³ ball), which kept 32 dilated
 //! voxels at the ball's ±y caps (179 non-zeros against `imclose`'s 147). FastQSM moved by 2 %,
 //! its gradient weights at ~800 voxels per axis, and χ by 3.4 % / 1.6 % NRMSE on the container
-//! phantoms, 1.0 % on QSM-CI's sim and 1.8 % on the KKI travelling head
-//! (astewartau/QSM.rs#329). The licensed fixture above had been made with an `imclose` stand-in
+//! phantoms, 0.99 % on QSM-CI's sim and 1.78 % on the KKI travelling head; with the closing
+//! fixed, 0.0024 % and 0.017 % (QSMxT/QSM-CI parity runs 41019608126 → 41023156365,
+//! astewartau/QSM.rs#329). QSMART, which calls this iLSQR, moved from 16.71 % to 16.64 % on sim
+//! against the original QSMART (4.27 % on KKI). The licensed fixture above had been made with an `imclose` stand-in
 //! of the same kind, which hid it; it was regenerated with MATLAB's own `imclose`.
 //!
 //! # Padding
