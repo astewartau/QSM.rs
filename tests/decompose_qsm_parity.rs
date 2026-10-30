@@ -2,8 +2,9 @@
 //!
 //! The reference is the QSM-CI `decompose-qsm` container (the authors' `utils/` and fit loop,
 //! compiled from licensed MATLAB R2023b and verified identical to it, QSMxT/QSM-CI#309). The
-//! inputs are rebuilt here with the formulas of `tests/data/decompose_qsm_small.py`, which wrote
-//! them for it; the fixture holds only its output: `chi-para`, then `chi-dia` (|χ−|), every
+//! inputs are rebuilt here with the formulas of `tests/data/decompose_qsm_small.py`, which runs
+//! the container on them (and can regenerate the fixture in Actions,
+//! `.github/workflows/regenerate-fixtures.yml`); the fixture holds only its output: `chi-para`, then `chi-dia` (|χ−|), every
 //! voxel, column-major, f64 (from its float32 files). The container gives every echo the same
 //! QSM, so the per-echo QSM here is that χ repeated.
 
