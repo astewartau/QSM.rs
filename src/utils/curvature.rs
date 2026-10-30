@@ -6,8 +6,8 @@
 //! The curvatures are used in QSMART to weight the spatially-dependent filtering
 //! near brain boundaries to reduce artifacts.
 //!
-//! Uses 2D Delaunay triangulation (via delaunator crate) matching MATLAB's approach:
-//! `tri = delaunay(x, y)` - triangulates on x,y coordinates with z as height.
+//! Uses 2D Delaunay triangulation matching MATLAB's approach: `tri = delaunay(x, y)` -
+//! triangulates on x,y coordinates with z as height.
 //!
 //! Reference:
 //! Meyer, M., Desbrun, M., Schröder, P., Barr, A.H. (2003).
@@ -16,11 +16,35 @@
 //!
 //! Reference implementation: https://www.mathworks.com/matlabcentral/fileexchange/61136-curvatures
 //!
-//! The angles and the smoothing kernels use [`portable_math`](crate::utils::portable_math), so
-//! the result is the same on every target. A vertex on a flat patch has an angle sum of 2π up to
-//! rounding, and the sign of `2π - Σθ` decides whether it gets a curvature weight of 1 or
-//! (nearly) 0; with the platform's `acos` that sign, and SDF's smoothing widths after it, could
-//! differ between the browser and `qsmxt run`.
+//! ## Agreement with the original
+//!
+//! SDF's smoothing widths are `σ·round(prox^n, 2)`, a discrete choice, so a small difference in
+//! the curvature-weighted proximity map moves whole voxels from one width to another. This module
+//! therefore reproduces MATLAB's curvature, not just the method (astewartau/QSM.rs#320):
+//!
+//! - **Triangulation.** MATLAB's `delaunay` is CGAL's, which breaks cocircular ties by a symbolic
+//!   perturbation, so its triangulation of the grid's many cocircular points is unique.
+//!   `triangulate_surface` flips delaunator's ties to it.
+//! - **Arithmetic.** `curvatures.m`'s angles with MATLAB's `acos` (FDLIBM's,
+//!   [`fdlibm::acos`](crate::utils::fdlibm::acos)), `norm` (reference BLAS `dnrm2`) and `dot`, the
+//!   third angle as `pi - (a1 + a2)`, and `A_mixed`'s `>= pi/2`. A vertex on a flat patch has an
+//!   angle sum of 2π up to rounding, and the sign of `2π - Σθ` decides whether it gets a
+//!   curvature weight of 1 or (nearly) 0, so these are MATLAB's bits on purpose. Only IEEE
+//!   arithmetic and FDLIBM are used, so the result is the same on every target, the browser
+//!   included.
+//! - **Erosion.** `imerode` pads with the maximum: a mask touching the array edge isn't eroded
+//!   there ([`imerode_sphere`](crate::utils::morphology)).
+//!
+//! Measured with licensed MATLAB R2023b on the 36×36×28 fixture of
+//! `tests/qsmart_qsmci_parity.rs` (an instrumented copy of `sdf_curvature.m` and
+//! `calculate_curvature.m`, each QSM.rs step given MATLAB's inputs): MATLAB's 1,122 triangles
+//! (539 cocircular edges among them) triangle for triangle, all 3,366 angles bit for bit, and
+//! SDF's local field to 4e-5 % in stage 1 and 2e-5 % in stage 2 (the float32 of the fixture),
+//! where delaunator's ties, glibc's `acos` and plain `sqrt(x²+y²+z²)` had given 10.9 % and 2.1 %.
+//! What is left: 29 of 1,600 surface voxels still get a different curvature weight. They are
+//! flat vertices, where MATLAB's `2π - Σθ` is ±1e-16 and its sign follows the order of CGAL's
+//! triangles and of their vertices, which no public interface fixes. Here they don't change any
+//! smoothing width.
 //!
 //! ## Reference pipeline
 //!
@@ -176,7 +200,7 @@ fn triangulate_surface(
     // Counter-clockwise triangles; delaunator can leave zero-area slivers along collinear hull
     // points, which CGAL's triangulation doesn't have.
     let mut tris: Vec<[usize; 3]> = Vec::with_capacity(result.triangles.len() / 3);
-    for t in result.triangles.chunks_exact(3) {
+    for t in result.triangles.as_chunks::<3>().0 {
         match orient(pts[t[0]], pts[t[1]], pts[t[2]]) {
             1 => tris.push([t[0], t[1], t[2]]),
             -1 => tris.push([t[0], t[2], t[1]]),
@@ -797,6 +821,77 @@ mod tests {
         }
 
         mask
+    }
+
+    /// Unique `(x, y)` points of a grid-aligned surface: an ellipsoid's surface voxels, first
+    /// occurrence kept as `calculate_curvature_proximity` keeps them.
+    fn ellipsoid_surface_points(dims: (usize, usize, usize), radii: (f64, f64, f64)) -> Vec<Point3D> {
+        let (nx, ny, nz) = dims;
+        let mut mask = vec![0u8; nx * ny * nz];
+        for k in 0..nz {
+            for j in 0..ny {
+                for i in 0..nx {
+                    let (x, y, z) = (i as f64 - (nx - 1) as f64 / 2.0, j as f64 - (ny - 1) as f64 / 2.0, k as f64 - (nz - 1) as f64 / 2.0);
+                    if (x / radii.0).powi(2) + (y / radii.1).powi(2) + (z / radii.2).powi(2) < 1.0 {
+                        mask[i + j * nx + k * nx * ny] = 1;
+                    }
+                }
+            }
+        }
+        let mut seen = std::collections::HashSet::new();
+        extract_surface_voxels(&mask, nx, ny, nz).into_iter()
+            .map(|idx| Point3D::new((idx % nx) as f64, ((idx / nx) % ny) as f64, (idx / (nx * ny)) as f64))
+            .filter(|p| seen.insert((p.x as i64, p.y as i64)))
+            .collect()
+    }
+
+    #[test]
+    fn triangulation_is_cgals_unique_perturbed_delaunay() {
+        // MATLAB's (CGAL's) triangulation doesn't depend on the order of the points: the
+        // perturbation makes it unique. Grid points have many cocircular quadruples, which
+        // delaunator alone splits according to its insertion order.
+        for (dims, radii) in [((36, 36, 28), (14.0, 13.5, 10.5)), ((40, 31, 20), (19.5, 12.2, 9.0))] {
+            let pts = ellipsoid_surface_points(dims, radii);
+            let n = pts.len();
+            let canonical = |tris: &[Triangle], ids: &[usize]| {
+                let mut v: Vec<[usize; 3]> = tris.iter().map(|t| {
+                    let mut a = [ids[t.v0], ids[t.v1], ids[t.v2]];
+                    a.sort_unstable();
+                    a
+                }).collect();
+                v.sort_unstable();
+                v
+            };
+            let (tris, boundary) = triangulate_surface(&pts);
+            let h = boundary.iter().filter(|&&b| b).count();
+            // A triangulation of n points with h on the hull has 2n - 2 - h triangles.
+            assert_eq!(tris.len(), 2 * n - 2 - h);
+            let ids: Vec<usize> = (0..n).collect();
+            let reference = canonical(&tris, &ids);
+            // A fixed shuffle of the same points.
+            let mut perm: Vec<usize> = (0..n).collect();
+            let mut state = 12345u64;
+            for i in (1..n).rev() {
+                state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                perm.swap(i, (state >> 33) as usize % (i + 1));
+            }
+            let shuffled: Vec<Point3D> = perm.iter().map(|&i| pts[i]).collect();
+            let (tris2, _) = triangulate_surface(&shuffled);
+            assert_eq!(canonical(&tris2, &perm), reference, "triangulation depends on the point order");
+        }
+    }
+
+    #[test]
+    fn perturbed_incircle_breaks_square_ties() {
+        // The unit square is cocircular; CGAL's perturbation splits it by one fixed diagonal
+        // whatever the order of the points.
+        let pts = [(0i64, 0i64), (1, 0), (1, 1), (0, 1)];
+        // (0,0),(1,0),(1,1) counter-clockwise, (0,1) on its circle: perturbed, which side?
+        let s1 = side_of_oriented_circle(&pts, 0, 1, 2, 3);
+        // The other diagonal: (1,0),(1,1),(0,1) with (0,0).
+        let s2 = side_of_oriented_circle(&pts, 1, 2, 3, 0);
+        assert_ne!(s1, 0);
+        assert_ne!(s1, s2, "exactly one diagonal of the square is Delaunay under the perturbation");
     }
 
     // =====================================================================

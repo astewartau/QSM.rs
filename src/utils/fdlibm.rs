@@ -18,6 +18,9 @@
 //! unit circle, where it is `½·log1p((a·a − 1) + b·b)` with `a = max(|re|, |im|)` and
 //! `b = min(|re|, |im|)`, and `log(|re|)` when `im = 0`: see [`log_abs`].
 //!
+//! [`acos`] was checked the same way on QSMART's curvature (astewartau/QSM.rs#320): MATLAB's
+//! triangle angles there, 6 732 `acos` calls, are FDLIBM's bit for bit.
+//!
 //! Only IEEE-754 arithmetic is used (Rust neither contracts `a*b+c` into an FMA nor reorders
 //! floating-point expressions), so the results are the same on every target, glibc, static
 //! musl and wasm alike.
