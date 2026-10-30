@@ -6,8 +6,8 @@
 //! The curvatures are used in QSMART to weight the spatially-dependent filtering
 //! near brain boundaries to reduce artifacts.
 //!
-//! Uses 2D Delaunay triangulation (via delaunator crate) matching MATLAB's approach:
-//! `tri = delaunay(x, y)` - triangulates on x,y coordinates with z as height.
+//! Uses 2D Delaunay triangulation matching MATLAB's approach: `tri = delaunay(x, y)` -
+//! triangulates on x,y coordinates with z as height.
 //!
 //! Reference:
 //! Meyer, M., Desbrun, M., Schröder, P., Barr, A.H. (2003).
@@ -16,11 +16,35 @@
 //!
 //! Reference implementation: https://www.mathworks.com/matlabcentral/fileexchange/61136-curvatures
 //!
-//! The angles and the smoothing kernels use [`portable_math`](crate::utils::portable_math), so
-//! the result is the same on every target. A vertex on a flat patch has an angle sum of 2π up to
-//! rounding, and the sign of `2π - Σθ` decides whether it gets a curvature weight of 1 or
-//! (nearly) 0; with the platform's `acos` that sign, and SDF's smoothing widths after it, could
-//! differ between the browser and `qsmxt run`.
+//! ## Agreement with the original
+//!
+//! SDF's smoothing widths are `σ·round(prox^n, 2)`, a discrete choice, so a small difference in
+//! the curvature-weighted proximity map moves whole voxels from one width to another. This module
+//! therefore reproduces MATLAB's curvature, not just the method (astewartau/QSM.rs#320):
+//!
+//! - **Triangulation.** MATLAB's `delaunay` is CGAL's, which breaks cocircular ties by a symbolic
+//!   perturbation, so its triangulation of the grid's many cocircular points is unique.
+//!   `triangulate_surface` flips delaunator's ties to it.
+//! - **Arithmetic.** `curvatures.m`'s angles with MATLAB's `acos` (FDLIBM's,
+//!   [`fdlibm::acos`](crate::utils::fdlibm::acos)), `norm` (reference BLAS `dnrm2`) and `dot`, the
+//!   third angle as `pi - (a1 + a2)`, and `A_mixed`'s `>= pi/2`. A vertex on a flat patch has an
+//!   angle sum of 2π up to rounding, and the sign of `2π - Σθ` decides whether it gets a
+//!   curvature weight of 1 or (nearly) 0, so these are MATLAB's bits on purpose. Only IEEE
+//!   arithmetic and FDLIBM are used, so the result is the same on every target, the browser
+//!   included.
+//! - **Erosion.** `imerode` pads with the maximum: a mask touching the array edge isn't eroded
+//!   there ([`imerode_sphere`](crate::utils::morphology)).
+//!
+//! Measured with licensed MATLAB R2023b on the 36×36×28 fixture of
+//! `tests/qsmart_qsmci_parity.rs` (an instrumented copy of `sdf_curvature.m` and
+//! `calculate_curvature.m`, each QSM.rs step given MATLAB's inputs): MATLAB's 1,122 triangles
+//! (539 cocircular edges among them) triangle for triangle, all 3,366 angles bit for bit, and
+//! SDF's local field to 4e-5 % in stage 1 and 2e-5 % in stage 2 (the float32 of the fixture),
+//! where delaunator's ties, glibc's `acos` and plain `sqrt(x²+y²+z²)` had given 10.9 % and 2.1 %.
+//! What is left: 29 of 1,600 surface voxels still get a different curvature weight. They are
+//! flat vertices, where MATLAB's `2π - Σθ` is ±1e-16 and its sign follows the order of CGAL's
+//! triangles and of their vertices, which no public interface fixes. Here they don't change any
+//! smoothing width.
 //!
 //! ## Reference pipeline
 //!
@@ -37,7 +61,8 @@ use std::collections::HashMap;
 use std::f64::consts::PI;
 use delaunator::{triangulate, Point};
 use crate::Grid;
-use crate::utils::morphology::{dilate_ball, erode_ball};
+use crate::utils::morphology::{dilate_ball, imerode_sphere};
+use crate::utils::fdlibm;
 use crate::utils::portable_math as pm;
 
 /// Result of curvature calculation
@@ -62,43 +87,6 @@ impl Point3D {
     fn new(x: f64, y: f64, z: f64) -> Self {
         Self { x, y, z }
     }
-
-    fn sub(&self, other: &Point3D) -> Point3D {
-        Point3D::new(self.x - other.x, self.y - other.y, self.z - other.z)
-    }
-
-    fn dot(&self, other: &Point3D) -> f64 {
-        self.x * other.x + self.y * other.y + self.z * other.z
-    }
-
-    fn cross(&self, other: &Point3D) -> Point3D {
-        Point3D::new(
-            self.y * other.z - self.z * other.y,
-            self.z * other.x - self.x * other.z,
-            self.x * other.y - self.y * other.x,
-        )
-    }
-
-    fn norm(&self) -> f64 {
-        (self.x * self.x + self.y * self.y + self.z * self.z).sqrt()
-    }
-
-    fn normalize(&self) -> Point3D {
-        let n = self.norm();
-        if n > 1e-10 {
-            Point3D::new(self.x / n, self.y / n, self.z / n)
-        } else {
-            Point3D::new(0.0, 0.0, 0.0)
-        }
-    }
-
-    fn scale(&self, s: f64) -> Point3D {
-        Point3D::new(self.x * s, self.y * s, self.z * s)
-    }
-
-    fn add(&self, other: &Point3D) -> Point3D {
-        Point3D::new(self.x + other.x, self.y + other.y, self.z + other.z)
-    }
 }
 
 /// Triangle structure
@@ -117,7 +105,7 @@ fn extract_surface_voxels(
     mask: &[u8],
     nx: usize, ny: usize, nz: usize,
 ) -> Vec<usize> {
-    let eroded = erode_ball(mask, nx, ny, nz, 1);
+    let eroded = imerode_sphere(mask, nx, ny, nz, 1);
 
     let mut surface = Vec::new();
     for i in 0..mask.len() {
@@ -129,191 +117,277 @@ fn extract_surface_voxels(
     surface
 }
 
-/// 2D Delaunay triangulation of surface points
+/// Sign of the orientation of `(a, b, c)`: positive if counter-clockwise. Exact on the integer
+/// voxel coordinates.
+fn orient(a: (i64, i64), b: (i64, i64), c: (i64, i64)) -> i64 {
+    ((b.0 - a.0) * (c.1 - a.1) - (b.1 - a.1) * (c.0 - a.0)).signum()
+}
+
+/// Sign of the in-circle determinant: positive if `d` is inside the circle through the
+/// counter-clockwise `(a, b, c)`. Exact on the integer voxel coordinates.
+fn incircle(a: (i64, i64), b: (i64, i64), c: (i64, i64), d: (i64, i64)) -> i64 {
+    let r = |p: (i64, i64)| {
+        let (x, y) = ((p.0 - d.0) as i128, (p.1 - d.1) as i128);
+        (x, y, x * x + y * y)
+    };
+    let (ax, ay, aw) = r(a);
+    let (bx, by, bw) = r(b);
+    let (cx, cy, cw) = r(c);
+    let det = ax * (by * cw - bw * cy) - ay * (bx * cw - bw * cx) + aw * (bx * cy - by * cx);
+    det.signum() as i64
+}
+
+/// CGAL's `Delaunay_triangulation_2::side_of_oriented_circle(p0, p1, p2, p, perturb = true)`:
+/// the in-circle test, with cocircular ties broken by a symbolic perturbation that orders the
+/// points lexicographically by `(x, y)`. Positive: `p` is inside, and the edge opposite it has to
+/// be flipped.
+fn side_of_oriented_circle(pts: &[(i64, i64)], p0: usize, p1: usize, p2: usize, p: usize) -> i64 {
+    let os = incircle(pts[p0], pts[p1], pts[p2], pts[p]);
+    if os != 0 {
+        return os;
+    }
+    let mut order = [p0, p1, p2, p];
+    order.sort_by_key(|&i| pts[i]);
+    for &q in order[2..].iter().rev() {
+        if q == p {
+            return -1;
+        }
+        let o = if q == p2 {
+            orient(pts[p0], pts[p1], pts[p])
+        } else if q == p1 {
+            orient(pts[p0], pts[p], pts[p2])
+        } else {
+            orient(pts[p], pts[p1], pts[p2])
+        };
+        if o != 0 {
+            return o;
+        }
+    }
+    -1
+}
+
+/// 2-D Delaunay triangulation of the surface points' `(x, y)`, as MATLAB's `delaunay(x, y)`.
 ///
-/// This matches MATLAB's approach: `tri = delaunay(x, y)`
-/// Triangulates on x,y coordinates, treating z as a height field.
+/// Surface voxels lie on an integer grid, so many point quadruples are cocircular and the plain
+/// Delaunay triangulation is not unique. MATLAB's `delaunay` is CGAL's `Delaunay_triangulation_2`,
+/// which breaks every such tie by a symbolic perturbation ([`side_of_oriented_circle`]): that
+/// makes its triangulation unique, whatever the insertion order. delaunator's is a valid Delaunay
+/// triangulation that breaks ties its own way, so its cocircular edges are flipped here, with
+/// exact integer predicates, until every edge is Delaunay under CGAL's perturbation. Measured on
+/// the 36×36×28 fixture of `tests/qsmart_qsmci_parity.rs` (astewartau/QSM.rs#320): MATLAB's
+/// triangulation has 539 cocircular edges, and this gives it triangle for triangle.
 ///
-/// Points must have unique (x,y) coordinates (caller should deduplicate first).
+/// Points must have unique (x,y) coordinates (caller should deduplicate first), on the integer
+/// grid. Triangles come out counter-clockwise in `(x, y)`.
 ///
-/// Returns (triangles, boundary_flags) where boundary_flags[i] is true
-/// if vertex i is on the convex hull boundary (matching MATLAB's freeBoundary).
+/// Returns (triangles, boundary_flags): `boundary_flags[i]` is true if vertex `i` is on the free
+/// boundary (the convex hull, collinear points on it included), as `curvatures.m`'s
+/// `freeBoundary` finds it.
 fn triangulate_surface(
     points: &[Point3D],
 ) -> (Vec<Triangle>, Vec<bool>) {
-    if points.len() < 3 {
-        return (Vec::new(), vec![false; points.len()]);
+    let n = points.len();
+    if n < 3 {
+        return (Vec::new(), vec![false; n]);
     }
+    let pts: Vec<(i64, i64)> = points.iter().map(|p| (p.x as i64, p.y as i64)).collect();
 
-    // Convert to delaunator's Point format (2D: x, y only)
     let coords: Vec<Point> = points.iter()
         .map(|p| Point { x: p.x, y: p.y })
         .collect();
-
-    // Run 2D Delaunay triangulation
     let result = triangulate(&coords);
 
-    // Identify boundary vertices (convex hull of the 2D triangulation)
-    let mut boundary = vec![false; points.len()];
-    for &idx in &result.hull {
-        boundary[idx] = true;
+    // Counter-clockwise triangles; delaunator can leave zero-area slivers along collinear hull
+    // points, which CGAL's triangulation doesn't have.
+    let mut tris: Vec<[usize; 3]> = Vec::with_capacity(result.triangles.len() / 3);
+    for t in result.triangles.as_chunks::<3>().0 {
+        match orient(pts[t[0]], pts[t[1]], pts[t[2]]) {
+            1 => tris.push([t[0], t[1], t[2]]),
+            -1 => tris.push([t[0], t[2], t[1]]),
+            _ => {}
+        }
     }
 
-    // Convert triangles
-    let mut triangles = Vec::with_capacity(result.triangles.len() / 3);
-    for i in (0..result.triangles.len()).step_by(3) {
-        triangles.push(Triangle {
-            v0: result.triangles[i],
-            v1: result.triangles[i + 1],
-            v2: result.triangles[i + 2],
-        });
+    // Directed edge (a, b) -> the triangle that has it.
+    let mut edge: HashMap<(usize, usize), usize> = HashMap::with_capacity(3 * tris.len());
+    for (ti, t) in tris.iter().enumerate() {
+        for k in 0..3 {
+            edge.insert((t[k], t[(k + 1) % 3]), ti);
+        }
+    }
+    let third = |t: &[usize; 3], a: usize, b: usize| -> usize {
+        t.iter().copied().find(|&v| v != a && v != b).unwrap()
+    };
+    let mut stack: Vec<(usize, usize)> = edge.keys().copied().filter(|&(a, b)| a < b).collect();
+    stack.sort_unstable();
+    while let Some((a, b)) = stack.pop() {
+        let (Some(&t1), Some(&t2)) = (edge.get(&(a, b)), edge.get(&(b, a))) else { continue };
+        let c = third(&tris[t1], a, b);
+        let d = third(&tris[t2], a, b);
+        if side_of_oriented_circle(&pts, a, b, c, d) <= 0 {
+            continue;
+        }
+        // Flip a-b to c-d: (a, b, c), (b, a, d) -> (a, d, c), (d, b, c).
+        for t in [t1, t2] {
+            let tri = tris[t];
+            for k in 0..3 {
+                edge.remove(&(tri[k], tri[(k + 1) % 3]));
+            }
+        }
+        tris[t1] = [a, d, c];
+        tris[t2] = [d, b, c];
+        for t in [t1, t2] {
+            let tri = tris[t];
+            debug_assert_eq!(orient(pts[tri[0]], pts[tri[1]], pts[tri[2]]), 1);
+            for k in 0..3 {
+                edge.insert((tri[k], tri[(k + 1) % 3]), t);
+            }
+        }
+        stack.extend([(a, d), (d, b), (b, c), (c, a)]);
     }
 
+    let mut boundary = vec![false; n];
+    for &(a, b) in edge.keys() {
+        if !edge.contains_key(&(b, a)) {
+            boundary[a] = true;
+        }
+    }
+    let triangles = tris.into_iter().map(|t| Triangle { v0: t[0], v1: t[1], v2: t[2] }).collect();
     (triangles, boundary)
+}
+
+/// MATLAB's `norm` of a 3-vector: the reference BLAS `dnrm2` (scaled sum of squares), which is
+/// what reproduces `curvatures.m`'s edge lengths bit for bit.
+fn norm_matlab(v: [f64; 3]) -> f64 {
+    let mut scale = 0.0f64;
+    let mut ssq = 1.0f64;
+    for x in v {
+        if x != 0.0 {
+            let a = x.abs();
+            if scale < a {
+                ssq = 1.0 + ssq * (scale / a) * (scale / a);
+                scale = a;
+            } else {
+                ssq += (a / scale) * (a / scale);
+            }
+        }
+    }
+    scale * ssq.sqrt()
+}
+
+/// MATLAB's `dot` of two 3-vectors, in the order that reproduces `curvatures.m`'s angles.
+fn dot_matlab(a: [f64; 3], b: [f64; 3]) -> f64 {
+    a[0] * b[0] + (a[1] * b[1] + a[2] * b[2])
 }
 
 /// Compute Gaussian and mean curvatures using discrete differential geometry
 ///
-/// Based on Meyer et al., "Discrete differential-geometry operators for triangulated 2-manifolds"
+/// `curvatures.m` (Dastan, v1.1) line by line: per triangle, its area, edge vectors
+/// `v1 = p2 - p1`, `v2 = p3 - p2`, `v3 = p1 - p3`, and angles (`acos` at `p1` and `p2`, and
+/// `pi - (a1 + a2)` at `p3`); per vertex not on the free boundary, the angle sum, `A_mixed`
+/// (a triangle with an angle `>= pi/2` gives a half or a quarter of its area) and the mean
+/// curvature vector, over its triangles. The arithmetic is MATLAB's (its `acos`, `norm` and `dot`),
+/// so the angles are its bits: the sign of `2π - Σθ` at a vertex on a flat patch, which decides
+/// whether it gets a curvature weight of 1 or 0, is decided by rounding.
 ///
-/// Boundary vertices (on the triangulation free boundary) get GC=0, MC=0
-/// to match MATLAB's curvatures.m behavior.
+/// Boundary vertices (on the triangulation free boundary) get GC=0, MC=0, as in `curvatures.m`.
 fn compute_curvatures_from_mesh(
     points: &[Point3D],
     triangles: &[Triangle],
     boundary: &[bool],
 ) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
     let n_points = points.len();
-    let mut gaussian_curvature = vec![0.0f64; n_points];
-    let mut mean_curvature = vec![0.0f64; n_points];
-    let mut angle_sum = vec![0.0f64; n_points];
-    let mut area_mixed = vec![0.0f64; n_points];
-    let mut mean_curv_vec = vec![Point3D::new(0.0, 0.0, 0.0); n_points];
-    let mut normal_vec = vec![Point3D::new(0.0, 0.0, 0.0); n_points];
+    let nt = triangles.len();
+    let p = |i: usize| [points[i].x, points[i].y, points[i].z];
+    let sub = |a: [f64; 3], b: [f64; 3]| [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+    let div = |a: [f64; 3], s: f64| [a[0] / s, a[1] / s, a[2] / s];
+    let neg = |a: [f64; 3]| [-a[0], -a[1], -a[2]];
 
-    // Process each triangle
-    for tri in triangles {
-        let p0 = &points[tri.v0];
-        let p1 = &points[tri.v1];
-        let p2 = &points[tri.v2];
-
-        // Edge vectors
-        let e01 = p1.sub(p0); // v0 -> v1
-        let e12 = p2.sub(p1); // v1 -> v2
-        let e20 = p0.sub(p2); // v2 -> v0
-
-        let l01 = e01.norm();
-        let l12 = e12.norm();
-        let l20 = e20.norm();
-
-        if l01 < 1e-10 || l12 < 1e-10 || l20 < 1e-10 {
-            continue;
+    let mut area = vec![0.0f64; nt];
+    let mut v = vec![[[0.0f64; 3]; 3]; nt];
+    let mut l_edg = vec![[0.0f64; 3]; nt];
+    let mut ang = vec![[0.0f64; 3]; nt];
+    let mut f_normal = vec![[0.0f64; 3]; nt];
+    let mut f_center = vec![[0.0f64; 3]; nt];
+    for (i, t) in triangles.iter().enumerate() {
+        let (p1, p2, p3) = (p(t.v0), p(t.v1), p(t.v2));
+        let (a, b) = (sub(p2, p1), sub(p3, p1));
+        let cr = [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+        area[i] = 0.5 * norm_matlab(cr);
+        let cn = norm_matlab(cr);
+        f_normal[i] = if cn > 0.0 { div(cr, cn) } else { [0.0; 3] };
+        let (v1, v2, v3) = (sub(p2, p1), sub(p3, p2), sub(p1, p3));
+        let l = [norm_matlab(v1), norm_matlab(v2), norm_matlab(v3)];
+        // incenter: (|p2p3|·p1 + |p3p1|·p2 + |p1p2|·p3) / perimeter
+        let per = l[0] + l[1] + l[2];
+        for d in 0..3 {
+            f_center[i][d] = (l[1] * p1[d] + l[2] * p2[d] + l[0] * p3[d]) / per;
         }
+        let a0 = fdlibm::acos(dot_matlab(div(v1, l[0]), div(neg(v3), l[2])));
+        let a1 = fdlibm::acos(dot_matlab(div(neg(v1), l[0]), div(v2, l[1])));
+        ang[i] = [a0, a1, PI - (a0 + a1)];
+        v[i] = [v1, v2, v3];
+        l_edg[i] = l;
+    }
 
-        // Triangle area
-        let cross = e01.cross(&e12.scale(-1.0));
-        let area = 0.5 * cross.norm();
-        if area < 1e-10 {
-            continue;
-        }
-
-        // Triangle normal
-        let face_normal = cross.normalize();
-
-        // Angles at each vertex
-        let cos_a0 = e01.normalize().dot(&e20.scale(-1.0).normalize());
-        let cos_a1 = e01.scale(-1.0).normalize().dot(&e12.normalize());
-        let cos_a2 = e12.scale(-1.0).normalize().dot(&e20.normalize());
-
-        let a0 = pm::acos(cos_a0.clamp(-1.0, 1.0));
-        let a1 = pm::acos(cos_a1.clamp(-1.0, 1.0));
-        let a2 = pm::acos(cos_a2.clamp(-1.0, 1.0));
-
-        // Accumulate angle sums for Gaussian curvature
-        angle_sum[tri.v0] += a0;
-        angle_sum[tri.v1] += a1;
-        angle_sum[tri.v2] += a2;
-
-        // Compute cotangent weights for mean curvature
-        let cot_a0 = cos_a0 / (1.0 - cos_a0 * cos_a0).sqrt().max(1e-10);
-        let cot_a1 = cos_a1 / (1.0 - cos_a1 * cos_a1).sqrt().max(1e-10);
-        let cot_a2 = cos_a2 / (1.0 - cos_a2 * cos_a2).sqrt().max(1e-10);
-
-        // Compute A_mixed for each vertex
-        // Check if any angle is obtuse
-        let obtuse_0 = a0 > PI / 2.0;
-        let obtuse_1 = a1 > PI / 2.0;
-        let obtuse_2 = a2 > PI / 2.0;
-
-        // Add contribution to A_mixed for each vertex
-        if obtuse_0 {
-            area_mixed[tri.v0] += area / 2.0;
-        } else if obtuse_1 || obtuse_2 {
-            area_mixed[tri.v0] += area / 4.0;
-        } else {
-            area_mixed[tri.v0] += (l20 * l20 * cot_a1 + l01 * l01 * cot_a2) / 8.0;
-        }
-
-        if obtuse_1 {
-            area_mixed[tri.v1] += area / 2.0;
-        } else if obtuse_0 || obtuse_2 {
-            area_mixed[tri.v1] += area / 4.0;
-        } else {
-            area_mixed[tri.v1] += (l01 * l01 * cot_a2 + l12 * l12 * cot_a0) / 8.0;
-        }
-
-        if obtuse_2 {
-            area_mixed[tri.v2] += area / 2.0;
-        } else if obtuse_0 || obtuse_1 {
-            area_mixed[tri.v2] += area / 4.0;
-        } else {
-            area_mixed[tri.v2] += (l12 * l12 * cot_a0 + l20 * l20 * cot_a1) / 8.0;
-        }
-
-        // Mean curvature vector contribution
-        mean_curv_vec[tri.v0] = mean_curv_vec[tri.v0].add(&e01.scale(cot_a2).add(&e20.scale(-cot_a1)));
-        mean_curv_vec[tri.v1] = mean_curv_vec[tri.v1].add(&e12.scale(cot_a0).add(&e01.scale(-cot_a2)));
-        mean_curv_vec[tri.v2] = mean_curv_vec[tri.v2].add(&e20.scale(cot_a1).add(&e12.scale(-cot_a0)));
-
-        // Accumulate face normal for vertex normal using incenter-based distance weighting
-        // Matches MATLAB: wi = 1/norm(incenter - vertex); n_vec += wi * faceNormal
-        // Incenter = (a*P0 + b*P1 + c*P2) / (a+b+c) where a=|P1P2|, b=|P0P2|, c=|P0P1|
-        let perim = l12 + l20 + l01;
-        if perim > 1e-10 {
-            let incenter = p0.scale(l12).add(&p1.scale(l20)).add(&p2.scale(l01)).scale(1.0 / perim);
-
-            let w0 = 1.0 / p0.sub(&incenter).norm().max(1e-10);
-            let w1 = 1.0 / p1.sub(&incenter).norm().max(1e-10);
-            let w2 = 1.0 / p2.sub(&incenter).norm().max(1e-10);
-
-            normal_vec[tri.v0] = normal_vec[tri.v0].add(&face_normal.scale(w0));
-            normal_vec[tri.v1] = normal_vec[tri.v1].add(&face_normal.scale(w1));
-            normal_vec[tri.v2] = normal_vec[tri.v2].add(&face_normal.scale(w2));
+    let mut attached: Vec<Vec<usize>> = vec![Vec::new(); n_points];
+    for (i, t) in triangles.iter().enumerate() {
+        for vi in [t.v0, t.v1, t.v2] {
+            attached[vi].push(i);
         }
     }
 
-    // Compute final curvature values
-    // Skip boundary vertices (GC=0, MC=0) matching MATLAB's freeBoundary check
+    let mut gaussian_curvature = vec![0.0f64; n_points];
+    let mut mean_curvature = vec![0.0f64; n_points];
+    let mut area_mixed = vec![0.0f64; n_points];
     for i in 0..n_points {
         if boundary[i] {
-            // Boundary vertices get zero curvature (unreliable)
             continue;
         }
-
-        if area_mixed[i] > 1e-10 {
-            // Gaussian curvature: K = (2π - Σθ) / A_mixed
-            gaussian_curvature[i] = (2.0 * PI - angle_sum[i]) / area_mixed[i];
-
-            // Mean curvature: H = |mean_curv_vec| / (4 * A_mixed)
-            let mc_vec = mean_curv_vec[i].scale(0.25 / area_mixed[i]);
-            let mc_mag = mc_vec.norm();
-
-            // Determine sign from dot product with normal
-            let n_vec = normal_vec[i].normalize();
-            let sign = if mc_vec.dot(&n_vec) < 0.0 { -1.0 } else { 1.0 };
-
-            mean_curvature[i] = sign * mc_mag;
+        let mut alf = 0.0f64;
+        let mut a_mixed = 0.0f64;
+        let mut mc_vec = [0.0f64; 3];
+        let mut n_vec = [0.0f64; 3];
+        for &tn in &attached[i] {
+            let t = &triangles[tn];
+            let k = [t.v0, t.v1, t.v2].iter().position(|&x| x == i).unwrap();
+            let (an, vv) = (ang[tn], v[tn]);
+            alf += an[k];
+            let (e, w1, f, w2) = match k {
+                0 => (vv[0], an[2], vv[2], an[1]),
+                1 => (vv[1], an[0], vv[0], an[2]),
+                _ => (vv[2], an[1], vv[1], an[0]),
+            };
+            let (t1, t2) = (libm::tan(w1), libm::tan(w2));
+            for d in 0..3 {
+                mc_vec[d] += e[d] / t1 - f[d] / t2;
+            }
+            if an[k] >= PI / 2.0 {
+                a_mixed += area[tn] / 2.0;
+            } else if an.iter().any(|&x| x >= PI / 2.0) {
+                a_mixed += area[tn] / 4.0;
+            } else {
+                let mut sum = 0.0f64;
+                for m in 0..3 {
+                    if m != k {
+                        let ll = (m + 1) % 3;
+                        sum += l_edg[tn][ll].powi(2) / libm::tan(an[m]);
+                    }
+                }
+                a_mixed += sum / 8.0;
+            }
+            let wi = 1.0 / norm_matlab(sub(f_center[tn], p(i)));
+            for d in 0..3 {
+                n_vec[d] += wi * f_normal[tn][d];
+            }
         }
+        gaussian_curvature[i] = (2.0 * PI - alf) / a_mixed;
+        let mc = [0.25 * mc_vec[0] / a_mixed, 0.25 * mc_vec[1] / a_mixed, 0.25 * mc_vec[2] / a_mixed];
+        let nn = norm_matlab(n_vec);
+        let nv = div(n_vec, nn);
+        let mag = norm_matlab(mc);
+        mean_curvature[i] = if dot_matlab(mc, nv) < 0.0 { -mag } else { mag };
+        area_mixed[i] = a_mixed;
     }
 
     (gaussian_curvature, mean_curvature, area_mixed)
@@ -498,7 +572,7 @@ pub fn calculate_curvature_proximity(
 
 /// Create a surface mask (boundary voxels)
 fn create_surface_mask(mask: &[u8], nx: usize, ny: usize, nz: usize) -> Vec<u8> {
-    let eroded = erode_ball(mask, nx, ny, nz, 1);
+    let eroded = imerode_sphere(mask, nx, ny, nz, 1);
     let mut surface = vec![0u8; mask.len()];
 
     for i in 0..mask.len() {
@@ -749,75 +823,75 @@ mod tests {
         mask
     }
 
-    // =====================================================================
-    // Tests for Point3D operations
-    // =====================================================================
-
-    #[test]
-    fn test_point3d_sub() {
-        let a = Point3D::new(3.0, 4.0, 5.0);
-        let b = Point3D::new(1.0, 1.0, 1.0);
-        let c = a.sub(&b);
-        assert!((c.x - 2.0).abs() < 1e-10);
-        assert!((c.y - 3.0).abs() < 1e-10);
-        assert!((c.z - 4.0).abs() < 1e-10);
+    /// Unique `(x, y)` points of a grid-aligned surface: an ellipsoid's surface voxels, first
+    /// occurrence kept as `calculate_curvature_proximity` keeps them.
+    fn ellipsoid_surface_points(dims: (usize, usize, usize), radii: (f64, f64, f64)) -> Vec<Point3D> {
+        let (nx, ny, nz) = dims;
+        let mut mask = vec![0u8; nx * ny * nz];
+        for k in 0..nz {
+            for j in 0..ny {
+                for i in 0..nx {
+                    let (x, y, z) = (i as f64 - (nx - 1) as f64 / 2.0, j as f64 - (ny - 1) as f64 / 2.0, k as f64 - (nz - 1) as f64 / 2.0);
+                    if (x / radii.0).powi(2) + (y / radii.1).powi(2) + (z / radii.2).powi(2) < 1.0 {
+                        mask[i + j * nx + k * nx * ny] = 1;
+                    }
+                }
+            }
+        }
+        let mut seen = std::collections::HashSet::new();
+        extract_surface_voxels(&mask, nx, ny, nz).into_iter()
+            .map(|idx| Point3D::new((idx % nx) as f64, ((idx / nx) % ny) as f64, (idx / (nx * ny)) as f64))
+            .filter(|p| seen.insert((p.x as i64, p.y as i64)))
+            .collect()
     }
 
     #[test]
-    fn test_point3d_dot() {
-        let a = Point3D::new(1.0, 2.0, 3.0);
-        let b = Point3D::new(4.0, 5.0, 6.0);
-        let d = a.dot(&b);
-        assert!((d - 32.0).abs() < 1e-10); // 1*4 + 2*5 + 3*6 = 32
+    fn triangulation_is_cgals_unique_perturbed_delaunay() {
+        // MATLAB's (CGAL's) triangulation doesn't depend on the order of the points: the
+        // perturbation makes it unique. Grid points have many cocircular quadruples, which
+        // delaunator alone splits according to its insertion order.
+        for (dims, radii) in [((36, 36, 28), (14.0, 13.5, 10.5)), ((40, 31, 20), (19.5, 12.2, 9.0))] {
+            let pts = ellipsoid_surface_points(dims, radii);
+            let n = pts.len();
+            let canonical = |tris: &[Triangle], ids: &[usize]| {
+                let mut v: Vec<[usize; 3]> = tris.iter().map(|t| {
+                    let mut a = [ids[t.v0], ids[t.v1], ids[t.v2]];
+                    a.sort_unstable();
+                    a
+                }).collect();
+                v.sort_unstable();
+                v
+            };
+            let (tris, boundary) = triangulate_surface(&pts);
+            let h = boundary.iter().filter(|&&b| b).count();
+            // A triangulation of n points with h on the hull has 2n - 2 - h triangles.
+            assert_eq!(tris.len(), 2 * n - 2 - h);
+            let ids: Vec<usize> = (0..n).collect();
+            let reference = canonical(&tris, &ids);
+            // A fixed shuffle of the same points.
+            let mut perm: Vec<usize> = (0..n).collect();
+            let mut state = 12345u64;
+            for i in (1..n).rev() {
+                state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                perm.swap(i, (state >> 33) as usize % (i + 1));
+            }
+            let shuffled: Vec<Point3D> = perm.iter().map(|&i| pts[i]).collect();
+            let (tris2, _) = triangulate_surface(&shuffled);
+            assert_eq!(canonical(&tris2, &perm), reference, "triangulation depends on the point order");
+        }
     }
 
     #[test]
-    fn test_point3d_cross() {
-        let a = Point3D::new(1.0, 0.0, 0.0);
-        let b = Point3D::new(0.0, 1.0, 0.0);
-        let c = a.cross(&b);
-        assert!((c.x - 0.0).abs() < 1e-10);
-        assert!((c.y - 0.0).abs() < 1e-10);
-        assert!((c.z - 1.0).abs() < 1e-10);
-    }
-
-    #[test]
-    fn test_point3d_norm() {
-        let p = Point3D::new(3.0, 4.0, 0.0);
-        assert!((p.norm() - 5.0).abs() < 1e-10);
-    }
-
-    #[test]
-    fn test_point3d_normalize() {
-        let p = Point3D::new(0.0, 0.0, 5.0);
-        let n = p.normalize();
-        assert!((n.x - 0.0).abs() < 1e-10);
-        assert!((n.y - 0.0).abs() < 1e-10);
-        assert!((n.z - 1.0).abs() < 1e-10);
-    }
-
-    #[test]
-    fn test_point3d_normalize_zero() {
-        let p = Point3D::new(0.0, 0.0, 0.0);
-        let n = p.normalize();
-        assert!((n.x).abs() < 1e-10);
-        assert!((n.y).abs() < 1e-10);
-        assert!((n.z).abs() < 1e-10);
-    }
-
-    #[test]
-    fn test_point3d_scale_and_add() {
-        let a = Point3D::new(1.0, 2.0, 3.0);
-        let b = a.scale(2.0);
-        assert!((b.x - 2.0).abs() < 1e-10);
-        assert!((b.y - 4.0).abs() < 1e-10);
-        assert!((b.z - 6.0).abs() < 1e-10);
-
-        let c = Point3D::new(0.5, 0.5, 0.5);
-        let d = b.add(&c);
-        assert!((d.x - 2.5).abs() < 1e-10);
-        assert!((d.y - 4.5).abs() < 1e-10);
-        assert!((d.z - 6.5).abs() < 1e-10);
+    fn perturbed_incircle_breaks_square_ties() {
+        // The unit square is cocircular; CGAL's perturbation splits it by one fixed diagonal
+        // whatever the order of the points.
+        let pts = [(0i64, 0i64), (1, 0), (1, 1), (0, 1)];
+        // (0,0),(1,0),(1,1) counter-clockwise, (0,1) on its circle: perturbed, which side?
+        let s1 = side_of_oriented_circle(&pts, 0, 1, 2, 3);
+        // The other diagonal: (1,0),(1,1),(0,1) with (0,0).
+        let s2 = side_of_oriented_circle(&pts, 1, 2, 3, 0);
+        assert_ne!(s1, 0);
+        assert_ne!(s1, s2, "exactly one diagonal of the square is Delaunay under the perturbation");
     }
 
     // =====================================================================

@@ -66,6 +66,31 @@
 //!
 //! Weights are not bundled; the caller passes the exported `chi-sepnet.onnx` bytes.
 //!
+//! # Parity
+//!
+//! Measured against QSM-CI's `chisepnet` entry (the SNU-LIST toolbox's `240904_xsepnet.onnx` and
+//! its normalisation `.mat`, run by QSM-CI's `recon.py`) on a 36×32×28 in-vivo box of
+//! `prisma-bridge-run1`, at the authors' 192×192×128 patch (QSM.rs#330):
+//!
+//! - The hosted `chi-sepnet.onnx` (spatial axes re-declared dynamic) gives exactly the toolbox
+//!   graph's outputs on the same patch: max |Δ| 0.
+//! - The normalisation constants above are the `.mat`'s values.
+//! - The only difference is zero-truncation. This function sets negative de-normalised
+//!   magnitudes to 0, as the authors' `test.py` does. QSM-CI's `recon.py` keeps them: on this box
+//!   2 487 of 19 996 χ+ voxels and 5 χ− voxels are negative. Against the entry as it runs, that is
+//!   1.73 % NRMSE for χ+ and 0.045 % for χ−. Against the entry's output truncated the same way it
+//!   is 0.0000 % (max |Δ| 1.4e-8 ppm). QSMxT/QSM-CI#333 adds the truncation to the entry.
+//! - The SNU MATLAB toolbox truncates too. Its `chi_sepnet_general.p` → `chi_sepnet.p` (v1.1.3)
+//!   was run as a black box on Bunya, MATLAB R2023b, 2026-10-30. The ONNX import was replaced by a
+//!   one-layer network with constant z-scored outputs. χ+ = −2 and χ− = −3 came back as 0 and 0.
+//!   χ+ = +2 came back as 2·0.03526 + 0.02591 = 0.0964. χ− = +0.5 came back as 0.0407, with
+//!   χ_total = χ+ − |χ−|. So negative de-normalised magnitudes are set to 0, and positive ones pass
+//!   through unchanged.
+//! - The same run shows that the toolbox's χ-sepnet path works differently from this function.
+//!   It takes the local field in Hz and R2′ (not a QSM). It makes the QSM channel itself with its
+//!   own `240904_QSMnet.onnx`, after rotating to B0 (`CalculateRotMat`) and resampling to 1 mm
+//!   (`interp3`). That is the QSMnetME step covered under *Reference pipeline* below.
+//!
 //! # Reference pipeline
 //!
 //! Kim et al. 2025 (arXiv:2409.14030, §2.1.1 and §2.2):

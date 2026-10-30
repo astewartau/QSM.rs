@@ -30,6 +30,17 @@
 //! - **Orientation:** inputs must match the orientation/polarity of the shipped `val_input.mat`
 //!   (`README.md:86`): axial, B0 along the third axis.
 //!
+//! # Agreement with the original
+//!
+//! `tests/models_onnx/dipole.rs` runs it on a 36×32×28 box of in-vivo data (1 mm, 2.89 T, across
+//! the brain's edge) against its original's verified QSM-CI entry, QSMnet f8782ed (`qsmnet`,
+//! `qsmnet-plus`) (QSMxT/QSM-CI#316; the fixture is regenerated in Actions by
+//! `tests/data/dl_dipole_qsmci_small.py`): QSMnet+ NRMSE 3.7e-4 %, max |Δ| 4.3e-7 ppm (measured
+//! 2026-10-30): float32 rounding. **QSMnet does not match:** NRMSE 81 % (r 0.88; 126 % on QSM-CI's
+//! 128×160×96 case, χ about 1.38 × the original's). It runs through the same code as QSMnet+, so
+//! the gap is in `qsmnet.onnx`, which does not reproduce the `QSMnet_64-25` checkpoint
+//! (astewartau/QSM.rs#330); its test is ignored until the export is fixed.
+//!
 //! # Pipeline rules
 //!
 //! The facts above that a configuration can depart from are published as rules in

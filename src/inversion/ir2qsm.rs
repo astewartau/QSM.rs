@@ -36,6 +36,16 @@
 //!   RESHARP, iLSQR), with local fields simulated by the forward model, as for xQSM.
 //! - **Testing:** only 1 mm isotropic 3T data; the authors state other resolutions are untested
 //!   (Discussion). The authors' `Evaluate/test_util.py` does not resample.
+//!
+//! # Agreement with the original
+//!
+//! `tests/models_onnx/dipole.rs` runs it on a 36×32×28 box of in-vivo data (1 mm, 2.89 T, across
+//! the brain's edge) against its original's verified QSM-CI entry, IR2QSM 1ddb147 (`ir2qsm`)
+//! (QSMxT/QSM-CI#316; the fixture is regenerated in Actions by
+//! `tests/data/dl_dipole_qsmci_small.py`): NRMSE 5.4e-4 %, max |Δ| 2.7e-6 ppm (measured
+//! 2026-10-30): float32 rounding. The original runs with `add_noise=false`, the noise-free branch
+//! this export pins (above); with the authors' default, noise on, it differs from itself by 12.6 %
+//! NRMSE run to run.
 
 use crate::grid::Grid;
 use crate::models::onnx::{OnnxError, OnnxModel, Tensor};

@@ -19,7 +19,10 @@
 # - the number of mask voxels m (u32), then at the mask voxels calculateB0_unwrapped(unwrapped
 #   phase, mag, TEs, type) for type in :phase_snr, :phase_var, :average, :TEs, :mag (f64, Hz);
 # - bipolar_correction!(PhaseMag(phase, mag); TEs, sigma = [7, 7, 7/1.5], mask): the corrected
-#   phase of each echo at the mask voxels (f64, rad).
+#   phase of each echo at the mask voxels (f64, rad);
+# - mcpc3ds(PhaseMag(phase, mag); TEs, sigma = [7, 7, 7/1.5], bipolar_correction = true): the
+#   corrected phase of each echo at the mask voxels (f64, rad). Its bipolar step runs inside
+#   mcpc3ds' own robustmask(sqrt(|hip|)), which differs from the phantom's mask.
 using MriResearchTools
 const M = MriResearchTools
 
@@ -84,6 +87,11 @@ open(ARGS[1], "w") do io
     M.bipolar_correction!(img; TEs=TES, sigma=[7.0, 7.0, 7.0 / 1.5], mask)
     for e in axes(wrapped, 4)
         write(io, Float64.(img.phase[:, :, :, e][mask]))
+    end
+    mc = mcpc3ds(M.PhaseMag(copy(wrapped), copy(mag)); TEs=TES, sigma=[7.0, 7.0, 7.0 / 1.5],
+                 bipolar_correction=true)
+    for e in axes(wrapped, 4)
+        write(io, Float64.(mc.phase[:, :, :, e][mask]))
     end
     println(count(mask), " mask voxels; robustmask ", count(robustmask(mag1)), ", filled ", count(M.fill_holes(holey; max_hole_size=30)), " of holey ", count(holey))
 end

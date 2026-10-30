@@ -46,6 +46,19 @@
 //!   is √(10² + 10²) ≈ 14.1, and stage 2 uses σ1 = 8, σ2 = 2 (σ = √68 ≈ 8.2)
 //!   (`QSMART_SDF.m` l. 12–13, 20–21; `sdf_curvature.m` l. 8). QSM.rs follows the toolbox.
 //!
+//! # Agreement with the original
+//!
+//! `tests/qsmart_qsmci_parity.rs` (measured 2026-10-30) runs each stage on the inputs the verified
+//! QSM-CI `qsmart-matlab` v3 container (QSMxT/QSM-CI#296, bit-identical to licensed MATLAB) gave
+//! its own, on a 36×36×28 vessel phantom at 3 T; the fixture is regenerated in Actions by
+//! `tests/data/qsmart_qsmci_small.py`. Against the toolbox's intermediates: the vessel mask is
+//! identical; the total field (Laplacian unwrapping and the echo fit) differs by a constant 4.3e-3
+//! ppm, the Laplacian's free constant, and by NRMSE 0.024 % without it; SDF stage 1 by **10.9 %**
+//! and stage 2 by **2.1 %** (an open gap, astewartau/QSM.rs#320); iLSQR stage 1 by 6.5 % and stage
+//! 2 by 2.4 % (STI Suite's single-precision LSQR, see [`ilsqr`](fn@crate::inversion::ilsqr)); and
+//! the offset adjustment is identical (2e-7 %, float32 rounding of the fixture). End to end from
+//! the container's total field and `R_0`, [`run_qsmart`] is 14.7 % from the toolbox's χ.
+//!
 //! # Pipeline rules
 //!
 //! The facts above that a configuration can depart from are published as rules in
