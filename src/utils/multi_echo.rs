@@ -100,6 +100,7 @@ fn wrap_to_pi(angle: f64) -> f64 {
 }
 
 /// Index into 3D array (Fortran/column-major order)
+#[cfg(test)]
 #[inline(always)]
 fn idx3d(i: usize, j: usize, k: usize, nx: usize, ny: usize) -> usize {
     i + j * nx + k * nx * ny
@@ -177,198 +178,6 @@ impl B0WeightType {
             _ => B0WeightType::PhaseSNR, // default
         }
     }
-}
-
-/// 3D Gaussian smoothing for phase data (handles phase wrapping)
-///
-/// Implements gaussiansmooth3d_phase from MriResearchTools.jl
-/// Uses separable Gaussian filtering with phase-aware averaging
-///
-/// # Arguments
-/// * `phase` - Input phase data (nx * ny * nz)
-/// * `sigma` - Smoothing sigma in voxels [sx, sy, sz]
-/// * `mask` - Binary mask (1 = include, 0 = exclude)
-/// * `grid` - Volume grid (dimensions and voxel sizes)
-///
-/// # Returns
-/// Smoothed phase data
-pub fn gaussian_smooth_3d_phase(
-    phase: &[f64],
-    sigma: [f64; 3],
-    mask: &[u8],
-    grid: &Grid,
-) -> Vec<f64> {
-    let (nx, ny, nz) = grid.dims;
-    let n_total = nx * ny * nz;
-
-    // For phase smoothing, we smooth the complex representation
-    // and extract the angle to handle wrapping correctly
-    let mut real = vec![0.0; n_total];
-    let mut imag = vec![0.0; n_total];
-
-    // Convert phase to complex (unit vectors)
-    for i in 0..n_total {
-        if mask[i] > 0 {
-            real[i] = phase[i].cos();
-            imag[i] = phase[i].sin();
-        }
-    }
-
-    // Apply separable Gaussian smoothing to real and imaginary parts
-    let real_smoothed = gaussian_smooth_3d_separable(&real, sigma, mask, nx, ny, nz);
-    let imag_smoothed = gaussian_smooth_3d_separable(&imag, sigma, mask, nx, ny, nz);
-
-    // Convert back to phase
-    let mut result = vec![0.0; n_total];
-    for i in 0..n_total {
-        if mask[i] > 0 {
-            result[i] = imag_smoothed[i].atan2(real_smoothed[i]);
-        }
-    }
-
-    result
-}
-
-/// Separable 3D Gaussian smoothing
-fn gaussian_smooth_3d_separable(
-    data: &[f64],
-    sigma: [f64; 3],
-    mask: &[u8],
-    nx: usize, ny: usize, nz: usize,
-) -> Vec<f64> {
-    let n_total = nx * ny * nz;
-    let mut result = data.to_vec();
-    let mut temp = vec![0.0; n_total];
-
-    // X direction
-    if sigma[0] > 0.0 {
-        let kernel = make_gaussian_kernel(sigma[0]);
-        let half = kernel.len() / 2;
-
-        for k in 0..nz {
-            for j in 0..ny {
-                for i in 0..nx {
-                    let idx = idx3d(i, j, k, nx, ny);
-                    if mask[idx] == 0 {
-                        temp[idx] = 0.0;
-                        continue;
-                    }
-
-                    let mut sum = 0.0;
-                    let mut weight_sum = 0.0;
-
-                    for (ki, &kv) in kernel.iter().enumerate() {
-                        let ii = i as isize + ki as isize - half as isize;
-                        if ii >= 0 && ii < nx as isize {
-                            let nidx = idx3d(ii as usize, j, k, nx, ny);
-                            if mask[nidx] > 0 {
-                                sum += result[nidx] * kv;
-                                weight_sum += kv;
-                            }
-                        }
-                    }
-
-                    temp[idx] = if weight_sum > 0.0 { sum / weight_sum } else { 0.0 };
-                }
-            }
-        }
-        std::mem::swap(&mut result, &mut temp);
-    }
-
-    // Y direction
-    if sigma[1] > 0.0 {
-        let kernel = make_gaussian_kernel(sigma[1]);
-        let half = kernel.len() / 2;
-
-        for k in 0..nz {
-            for j in 0..ny {
-                for i in 0..nx {
-                    let idx = idx3d(i, j, k, nx, ny);
-                    if mask[idx] == 0 {
-                        temp[idx] = 0.0;
-                        continue;
-                    }
-
-                    let mut sum = 0.0;
-                    let mut weight_sum = 0.0;
-
-                    for (ki, &kv) in kernel.iter().enumerate() {
-                        let jj = j as isize + ki as isize - half as isize;
-                        if jj >= 0 && jj < ny as isize {
-                            let nidx = idx3d(i, jj as usize, k, nx, ny);
-                            if mask[nidx] > 0 {
-                                sum += result[nidx] * kv;
-                                weight_sum += kv;
-                            }
-                        }
-                    }
-
-                    temp[idx] = if weight_sum > 0.0 { sum / weight_sum } else { 0.0 };
-                }
-            }
-        }
-        std::mem::swap(&mut result, &mut temp);
-    }
-
-    // Z direction
-    if sigma[2] > 0.0 {
-        let kernel = make_gaussian_kernel(sigma[2]);
-        let half = kernel.len() / 2;
-
-        for k in 0..nz {
-            for j in 0..ny {
-                for i in 0..nx {
-                    let idx = idx3d(i, j, k, nx, ny);
-                    if mask[idx] == 0 {
-                        temp[idx] = 0.0;
-                        continue;
-                    }
-
-                    let mut sum = 0.0;
-                    let mut weight_sum = 0.0;
-
-                    for (ki, &kv) in kernel.iter().enumerate() {
-                        let kk = k as isize + ki as isize - half as isize;
-                        if kk >= 0 && kk < nz as isize {
-                            let nidx = idx3d(i, j, kk as usize, nx, ny);
-                            if mask[nidx] > 0 {
-                                sum += result[nidx] * kv;
-                                weight_sum += kv;
-                            }
-                        }
-                    }
-
-                    temp[idx] = if weight_sum > 0.0 { sum / weight_sum } else { 0.0 };
-                }
-            }
-        }
-        std::mem::swap(&mut result, &mut temp);
-    }
-
-    result
-}
-
-/// Create 1D Gaussian kernel
-fn make_gaussian_kernel(sigma: f64) -> Vec<f64> {
-    let radius = (3.0 * sigma).ceil() as usize;
-    let size = 2 * radius + 1;
-    let mut kernel = vec![0.0; size];
-
-    let two_sigma_sq = 2.0 * sigma * sigma;
-    let mut sum = 0.0;
-
-    for i in 0..size {
-        let x = i as f64 - radius as f64;
-        kernel[i] = (-x * x / two_sigma_sq).exp();
-        sum += kernel[i];
-    }
-
-    // Normalize
-    for k in kernel.iter_mut() {
-        *k /= sum;
-    }
-
-    kernel
 }
 
 /// Compute Hermitian Inner Product (HIP) between two echoes
@@ -923,12 +732,38 @@ pub fn calculate_b0_weighted(
 /// Reference: Eckstein PhD thesis (2021), Section 3.1.3
 /// https://doi.org/10.34726/hss.2021.43447
 ///
+/// MriResearchTools' `bipolar_correction!` (`src/mcpc3ds.jl:97-129`, 771eadf), step for step:
+/// 1. `artefact`: with `k = (TE₁ + TE₃) / TE₂`, `fG = φ₁ + φ₃ − k·φ₂`, where φ₂ is first unwrapped
+///    by `romeo(φ₂; mag = mag₂)` when `k` is within 0.01 of an integer. Over the whole volume: no
+///    mask, and `fG` is not rewrapped.
+/// 2. `gaussiansmooth3d_phase(fG, sigma; mask)`: MriResearchTools' masked box-filter smoothing of
+///    `exp(i·fG)` ([`nan_box_smooth_3d_phase`]), NaN where it cannot extrapolate.
+/// 3. `romeo!(fG; mag = mag₁, correctglobal = true)`: ROMEO on the whole volume, again with no mask
+///    (edges touching a NaN are invalid there and here), then the global `n·2π` correction over
+///    every finite voxel.
+/// 4. `remove_artefact!`: echo `e` loses `t·fG` (`t = m/f` for odd, `(m + 1)/f` for even echoes;
+///    `m = TE₁/(TE₂ − TE₁)`, `f = (2 − k)m − k`) and is rewrapped (`rem2pi`).
+///
+/// **Deviation:** MriResearchTools writes NaN wherever `fG` is NaN (far from the mask); here such
+/// voxels keep their input phase. Everywhere `fG` is finite the result is the original's.
+///
+/// **Agreement** (astewartau/QSM.rs#319): until 2026-10-30 this smoothed `fG` with a true
+/// Gaussian kernel (radius 3σ) instead of MriResearchTools' 4-pass NaN-aware box filter, unwrapped
+/// φ₂ and `fG` inside the mask only, and corrected only inside the mask. On the 4-echo, 20×18×14,
+/// 1×1×1.5 mm phantom of `tests/mritools_parity.rs` (verified QSM-CI `julia-qsm` image,
+/// QSMxT/QSM-CI#299) the artefact estimate was up to 0.48 rad from the original's (corrected phase
+/// 0.24 rad on odd, 0.48 rad on even echoes). Now it agrees to 4.4e-16 / 8.9e-16 rad (measured
+/// 2026-10-30). The smoothing was the whole gap there: with the new smoothing but ROMEO still
+/// masked, the phantom also agrees to 8.9e-16 rad. The unmasked ROMEO is ported because the
+/// original does it; it matters only where the growth inside the mask depends on paths outside it.
+///
 /// # Arguments
 /// * `phases` - Mutable phase data per echo (modified in-place)
-/// * `mags` - Magnitude data per echo
+/// * `mags` - Magnitude data per echo (echo 1's and echo 2's guide ROMEO; empty for none)
 /// * `tes` - Echo times (any consistent unit; only ratios are used)
-/// * `mask` - Binary mask
-/// * `sigma` - Smoothing sigma for artefact estimation
+/// * `mask` - Binary mask: where the artefact is smoothed (MCPC-3D-S's `robustmask` of √|HIP| in
+///   MriResearchTools' `mcpc3ds`)
+/// * `sigma` - Smoothing sigma in voxels for the artefact estimation
 /// * `grid` - Volume grid (dimensions and voxel sizes)
 pub fn bipolar_correction<P: AsMut<[f64]> + AsRef<[f64]>>(
     phases: &mut [P],
@@ -938,71 +773,44 @@ pub fn bipolar_correction<P: AsMut<[f64]> + AsRef<[f64]>>(
     sigma: [f64; 3],
     grid: &Grid,
 ) {
-    let (nx, ny, nz) = grid.dims;
     let n_echoes = phases.len();
     if n_echoes < 3 {
         return; // Need at least 3 echoes
     }
+    let n_total = grid.n_total();
+    // `romeo(...)` without a mask: ROMEO.jl's `mask = trues(size(wrapped))`
+    let everywhere = vec![1u8; n_total];
+    let mag = |e: usize| if mags.is_empty() { &[] as &[f64] } else { mags[e].as_ref() };
 
-    let n_total = nx * ny * nz;
-    let delta_te = tes[1] - tes[0];
-    let m = tes[0] / delta_te;
+    // getm, getk
+    let m = tes[0] / (tes[1] - tes[0]);
     let k = (tes[0] + tes[2]) / tes[1];
 
-    // Step 1: Compute artefact phase = φ1 + φ3 - k*φ2
-    // If k is near-integer, unwrap φ2 first to avoid wrap issues
-    let phi2 = if (k - k.round()).abs() < 0.01 {
-        // k is integer-ish: unwrap φ2 with ROMEO
-        let mag2 = if mags.is_empty() { &[] as &[f64] } else { mags[1].as_ref() };
-        unwrap_romeo(
-            phases[1].as_ref(), mag2, None, 0.0, 0.0,
-            mask, &RomeoParams::default(), grid,
-        )
+    // Step 1: artefact(I, TEs) = ϕ1 .+ ϕ3 .- k .* ϕ2, ϕ2 unwrapped when k is near an integer
+    let phi2 = if (k - k.round_ties_even()).abs() < 0.01 {
+        unwrap_romeo(phases[1].as_ref(), mag(1), None, 0.0, 0.0, &everywhere, &RomeoParams::default(), grid)
     } else {
         phases[1].as_ref().to_vec()
     };
+    let (p1, p3) = (phases[0].as_ref(), phases[2].as_ref());
+    let artefact: Vec<f64> = (0..n_total).map(|i| p1[i] + p3[i] - k * phi2[i]).collect();
 
-    let mut artefact = vec![0.0; n_total];
-    for i in 0..n_total {
-        if mask[i] > 0 {
-            artefact[i] = wrap_to_pi(
-                phases[0].as_ref()[i] + phases[2].as_ref()[i] - k * phi2[i]
-            );
-        }
-    }
+    // Step 2: gaussiansmooth3d_phase(fG, sigma; mask)
+    let smoothed = nan_box_smooth_3d_phase(&artefact, sigma, mask, grid);
 
-    // Step 2: Smooth the artefact
-    artefact = gaussian_smooth_3d_phase(&artefact, sigma, mask, grid);
+    // Step 3: romeo!(fG; mag = mag₁, correctglobal = true), no mask
+    let romeo_params = RomeoParams { correct_global: true, ..Default::default() };
+    let artefact = unwrap_romeo(&smoothed, mag(0), None, 0.0, 0.0, &everywhere, &romeo_params, grid);
 
-    // Step 3: Unwrap the artefact with ROMEO
-    let mag1 = if mags.is_empty() { &[] as &[f64] } else { mags[0].as_ref() };
-    let romeo_params = RomeoParams {
-        correct_global: true,
-        ..Default::default()
-    };
-    artefact = unwrap_romeo(
-        &artefact, mag1, None, 0.0, 0.0,
-        mask, &romeo_params, grid,
-    );
-
-    // Step 4: Remove artefact from each echo
-    // f = (2 - k) * m - k
-    // even echoes: t = (m + 1) / f
-    // odd echoes:  t = m / f
+    // Step 4: remove_artefact!
     let f = (2.0 - k) * m - k;
-    if f.abs() < 1e-10 {
-        return; // Degenerate case
-    }
-
-    for ieco in 0..n_echoes {
-        // Julia is 1-indexed: iseven(ieco) checks 1-indexed echo number
-        // Echo 1 (idx 0) is odd, echo 2 (idx 1) is even, etc.
+    for (ieco, phase) in phases.iter_mut().enumerate() {
+        // Julia's echo index is 1-based: `iseven(ieco)` there is an odd index here
         let t = if (ieco + 1) % 2 == 0 { (m + 1.0) / f } else { m / f };
+        let phase = phase.as_mut();
         for i in 0..n_total {
-            if mask[i] > 0 {
-                phases[ieco].as_mut()[i] = wrap_to_pi(
-                    phases[ieco].as_ref()[i] - t * artefact[i]
-                );
+            if artefact[i].is_finite() {
+                phase[i] = wrap_to_pi(phase[i] - t * artefact[i]);
             }
         }
     }
@@ -2265,13 +2073,6 @@ mod tests {
     }
 
     #[test]
-    fn test_gaussian_kernel() {
-        let kernel = make_gaussian_kernel(1.0);
-        let sum: f64 = kernel.iter().sum();
-        assert!((sum - 1.0).abs() < 1e-10);
-    }
-
-    #[test]
     fn test_hip() {
         let n = 8;
         let phase1 = vec![0.1; n];
@@ -2370,118 +2171,6 @@ mod tests {
         assert_eq!(B0WeightType::from_str("t2star"), B0WeightType::PhaseSNR);
         // Unknown string should default to PhaseSNR
         assert_eq!(B0WeightType::from_str("unknown"), B0WeightType::PhaseSNR);
-    }
-
-    // =========================================================================
-    // gaussian_smooth_3d_phase
-    // =========================================================================
-
-    #[test]
-    fn test_gaussian_smooth_3d_phase_uniform_input() {
-        let (nx, ny, nz) = (8, 8, 8);
-        let n = nx * ny * nz;
-        // Uniform phase should remain (approximately) constant after smoothing
-        let phase = vec![1.0; n];
-        let mask = vec![1u8; n];
-        let sigma = [1.0, 1.0, 1.0];
-
-        let smoothed = gaussian_smooth_3d_phase(&phase, sigma, &mask, &grid(nx, ny, nz));
-
-        assert_eq!(smoothed.len(), n);
-        for v in &smoothed {
-            assert!(v.is_finite(), "smoothed value must be finite");
-            assert!((v - 1.0).abs() < 0.05, "uniform phase should remain ~1.0, got {}", v);
-        }
-    }
-
-    #[test]
-    fn test_gaussian_smooth_3d_phase_zero_sigma() {
-        let (nx, ny, nz) = (4, 4, 4);
-        let n = nx * ny * nz;
-        let phase: Vec<f64> = (0..n).map(|i| wrap_to_pi(i as f64 * 0.1)).collect();
-        let mask = vec![1u8; n];
-        let sigma = [0.0, 0.0, 0.0];
-
-        let smoothed = gaussian_smooth_3d_phase(&phase, sigma, &mask, &grid(nx, ny, nz));
-
-        // With zero sigma, output should equal input (no smoothing applied)
-        assert_eq!(smoothed.len(), n);
-        for i in 0..n {
-            assert!((smoothed[i] - phase[i]).abs() < 1e-10,
-                "zero-sigma smoothing should be identity, voxel {}: got {} expected {}",
-                i, smoothed[i], phase[i]);
-        }
-    }
-
-    #[test]
-    fn test_gaussian_smooth_3d_phase_masked_zeros() {
-        let (nx, ny, nz) = (8, 8, 8);
-        let n = nx * ny * nz;
-        let phase = vec![0.5; n];
-        let mut mask = vec![1u8; n];
-        // Set half the voxels to 0
-        for i in 0..n / 2 {
-            mask[i] = 0;
-        }
-
-        let sigma = [1.0, 1.0, 1.0];
-        let smoothed = gaussian_smooth_3d_phase(&phase, sigma, &mask, &grid(nx, ny, nz));
-
-        assert_eq!(smoothed.len(), n);
-        // Masked-out voxels should remain 0
-        for i in 0..n / 2 {
-            assert_eq!(smoothed[i], 0.0, "masked-out voxel {} should be 0", i);
-        }
-        // Masked-in voxels should be finite
-        for i in n / 2..n {
-            assert!(smoothed[i].is_finite());
-        }
-    }
-
-    // =========================================================================
-    // gaussian_smooth_3d_separable (tested indirectly through phase smoothing
-    // but let's also exercise multi-axis sigma)
-    // =========================================================================
-
-    #[test]
-    fn test_gaussian_smooth_anisotropic_sigma() {
-        let (nx, ny, nz) = (8, 8, 8);
-        let n = nx * ny * nz;
-        let phase: Vec<f64> = (0..n).map(|i| wrap_to_pi(0.3 * (i as f64))).collect();
-        let mask = vec![1u8; n];
-        let sigma = [2.0, 0.5, 1.0]; // anisotropic
-
-        let smoothed = gaussian_smooth_3d_phase(&phase, sigma, &mask, &grid(nx, ny, nz));
-        assert_eq!(smoothed.len(), n);
-        for v in &smoothed {
-            assert!(v.is_finite());
-            assert!(*v >= -PI && *v <= PI, "smoothed phase should be in [-pi, pi], got {}", v);
-        }
-    }
-
-    // =========================================================================
-    // make_gaussian_kernel
-    // =========================================================================
-
-    #[test]
-    fn test_gaussian_kernel_symmetry() {
-        let kernel = make_gaussian_kernel(2.0);
-        let len = kernel.len();
-        for i in 0..len / 2 {
-            assert!((kernel[i] - kernel[len - 1 - i]).abs() < 1e-12,
-                "kernel should be symmetric");
-        }
-    }
-
-    #[test]
-    fn test_gaussian_kernel_peak_at_center() {
-        let kernel = make_gaussian_kernel(1.5);
-        let center = kernel.len() / 2;
-        for (i, &v) in kernel.iter().enumerate() {
-            if i != center {
-                assert!(v <= kernel[center], "center should be peak");
-            }
-        }
     }
 
     // =========================================================================
