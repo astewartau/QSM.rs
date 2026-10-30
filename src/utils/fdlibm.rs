@@ -18,6 +18,9 @@
 //! unit circle, where it is `½·log1p((a·a − 1) + b·b)` with `a = max(|re|, |im|)` and
 //! `b = min(|re|, |im|)`, and `log(|re|)` when `im = 0`: see [`log_abs`].
 //!
+//! [`acos`] was checked the same way on QSMART's curvature (astewartau/QSM.rs#320): MATLAB's
+//! triangle angles there, 6 732 `acos` calls, are FDLIBM's bit for bit.
+//!
 //! Only IEEE-754 arithmetic is used (Rust neither contracts `a*b+c` into an FMA nor reorders
 //! floating-point expressions), so the results are the same on every target, glibc, static
 //! musl and wasm alike.
@@ -675,6 +678,67 @@ fn kernel_rem_pio2(x: &[f64], y: &mut [f64; 2], e0: i32) -> i32 {
     }
     y[1] = if ih == 0 { fw } else { -fw };
     n & 7
+}
+
+/// Arccosine (`e_acos.c`, `__ieee754_acos`).
+///
+/// QSMART's curvature (`curvatures.m`) takes its triangle angles with MATLAB's `acos`. On the
+/// 6 732 `acos` calls of the 36×36×28 fixture of `tests/qsmart_qsmci_parity.rs` (licensed R2023b,
+/// astewartau/QSM.rs#320), this gives MATLAB's bits on every one; glibc's `acos` differs on 1 %.
+pub fn acos(x: f64) -> f64 {
+    const PI: f64 = 3.14159265358979311600e+00;
+    const PIO2_HI: f64 = 1.57079632679489655800e+00;
+    const PIO2_LO: f64 = 6.12323399573676603587e-17;
+    const PS0: f64 = 1.66666666666666657415e-01;
+    const PS1: f64 = -3.25565818622400915405e-01;
+    const PS2: f64 = 2.01212532134862925881e-01;
+    const PS3: f64 = -4.00555345006794114027e-02;
+    const PS4: f64 = 7.91534994289814532176e-04;
+    const PS5: f64 = 3.47933107596021167570e-05;
+    const QS1: f64 = -2.40339491173441421878e+00;
+    const QS2: f64 = 2.02094576023350569471e+00;
+    const QS3: f64 = -6.88283971605453293030e-01;
+    const QS4: f64 = 7.70381505559019352791e-02;
+    let hx = hi(x);
+    let ix = hx & 0x7fff_ffff;
+    if ix >= 0x3ff0_0000 {
+        // |x| >= 1
+        if ((ix - 0x3ff0_0000) as u32 | lo(x)) == 0 {
+            return if hx > 0 { 0.0 } else { PI + 2.0 * PIO2_LO };
+        }
+        return (x - x) / (x - x);
+    }
+    if ix < 0x3fe0_0000 {
+        // |x| < 0.5
+        if ix <= 0x3c60_0000 {
+            return PIO2_HI + PIO2_LO;
+        }
+        let z = x * x;
+        let p = z * (PS0 + z * (PS1 + z * (PS2 + z * (PS3 + z * (PS4 + z * PS5)))));
+        let q = 1.0 + z * (QS1 + z * (QS2 + z * (QS3 + z * QS4)));
+        let r = p / q;
+        PIO2_HI - (x - (PIO2_LO - x * r))
+    } else if hx < 0 {
+        // x < -0.5
+        let z = (1.0 + x) * 0.5;
+        let p = z * (PS0 + z * (PS1 + z * (PS2 + z * (PS3 + z * (PS4 + z * PS5)))));
+        let q = 1.0 + z * (QS1 + z * (QS2 + z * (QS3 + z * QS4)));
+        let s = z.sqrt();
+        let r = p / q;
+        let w = r * s - PIO2_LO;
+        PI - 2.0 * (s + w)
+    } else {
+        // x > 0.5
+        let z = (1.0 - x) * 0.5;
+        let s = z.sqrt();
+        let df = f64::from_bits(s.to_bits() & 0xffff_ffff_0000_0000);
+        let c = (z - df * df) / (s + df);
+        let p = z * (PS0 + z * (PS1 + z * (PS2 + z * (PS3 + z * (PS4 + z * PS5)))));
+        let q = 1.0 + z * (QS1 + z * (QS2 + z * (QS3 + z * QS4)));
+        let r = p / q;
+        let w = r * s + c;
+        2.0 * (df + w)
+    }
 }
 
 /// Sine, radians (`s_sin.c`).

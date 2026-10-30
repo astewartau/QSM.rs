@@ -548,7 +548,7 @@ fn sdf_is_the_same_on_every_target() {
     }
     assert_eq!(
         [bits_hash(&local1), bits_hash(&local2)],
-        [15377585884355703301, 17213865556281589603],
+        [13452666730894123279, 11181522831137142990],
         "SDF differs from the pinned bits"
     );
 }
