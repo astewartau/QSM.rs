@@ -242,7 +242,8 @@ fn flood_fill_component(
 
 /// Fill holes in a binary mask
 ///
-/// Matches MriResearchTools.jl's fill_holes function.
+/// Matches MriResearchTools.jl's fill_holes function (771eadf; to the voxel against it in the
+/// verified QSM-CI `julia-qsm` image, `tests/mritools_parity.rs`).
 /// Fills connected components of zeros (holes) up to max_hole_size.
 /// Uses 6-connectivity for 3D.
 pub fn fill_holes(mask: &[u8], grid: &Grid, max_hole_size: usize) -> Vec<u8> {

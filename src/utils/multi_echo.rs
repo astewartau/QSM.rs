@@ -28,12 +28,18 @@
 //! - **Bipolar correction** ([`bipolar_correction`]): MriResearchTools' `bipolar_correction!`,
 //!   after Eckstein's thesis §3.1.3 (`src/mcpc3ds.jl:97-129`): needs ≥ 3 echoes, uses echoes
 //!   1–3, smooths the artefact with the MCPC-3D-S sigma and unwraps it with ROMEO
-//!   (`correctglobal=true`). Off by default in `mcpc3ds` and the CLI.
+//!   (`correctglobal=true`). Off by default in `mcpc3ds` and the CLI. **Known gap**
+//!   (astewartau/QSM.rs#319): on the 4-echo phantom of `tests/mritools_parity.rs` (MriResearchTools
+//!   in the verified QSM-CI `julia-qsm` image, QSMxT/QSM-CI#299; measured 2026-10-30) the
+//!   artefact estimate differs from `bipolar_correction!`'s by up to 0.48 rad, so the corrected
+//!   phases differ by up to 0.24 rad (odd echoes) and 0.48 rad (even echoes).
 //! - **Weighted average** ([`calculate_b0_weighted`]): `calculateB0_unwrapped` with
 //!   `:phase_snr` (`mag·TE`) by default (`src/romeofunctions.jl:13-24`; CLI
 //!   `--B0-phase-weighting`, `argparse.jl:67-70`); "the phase offsets have to be removed prior"
 //!   (`romeofunctions.jl:3-7`). MriResearchTools' `:simulated_mag` (`exp(−TE/20)·TE`,
 //!   `romeofunctions.jl:33-35`) is not ported; [`B0WeightType::AssumedDecay`] is UK Biobank's.
+//!   Every ported weighting matches `calculateB0_unwrapped` to 3e-16 relative
+//!   (`tests/mritools_parity.rs`, measured 2026-10-30).
 //! - **Linear fit** ([`multi_echo_linear_fit`]): after QSM.jl's `multi_echo_linear_fit`
 //!   (kamesy/QSM.jl fde4b92, `src/utils/multi_echo.jl:209-260`; phase offset modelled by
 //!   default, `W` the square root of the weights, e.g. `mag/σ`) and QSMART's `echofit.m`.
