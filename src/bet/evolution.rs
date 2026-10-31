@@ -11,19 +11,38 @@
 //!   (`:136`), smoothness `-w 1` (`:139`), 1000 iterations (`:792`), curvature radii
 //!   3.33–10 mm scaled by the smoothness (`:788-789`), surface from `make_mesh_from_icosa(5, m)`
 //!   (`:772`). [`BetParams::default`] has the same `f`, `g`, smoothness and iterations, and
-//!   `subdivisions: 4` (2562 vertices, which is BET2's `icosa(5)`: see *Agreement with bet2*).
+//!   `subdivisions: 4`: bet2's `make_mesh_from_icosa(subdivisions + 1)`, 2562 vertices.
 //! - **Input.** BET was developed on structural (T1-, T2-, PD-weighted) head images (Smith
 //!   2002) and works in mm
 //!   (the search distances and curvature limits above), so it assumes human-scale anatomy; see
 //!   [`BetParams::voxel_scale`] for rodents. It needs no orientation: the initial sphere comes
 //!   from the image's intensity centre of gravity. `-g` is a gradient along the voxel z axis.
-//! - **Agreement with bet2** (astewartau/QSM.rs#327, known gap). Against bet2 d5acd7f
-//!   (QSM-CI's local `bet2` image, QSMxT/QSM-CI#302): Dice 0.9857 (`-f 0.5`) and 0.9915 (`-f 0.2`)
-//!   on a travelling head, QSM.rs's masks 1.3 % and 0.6 % larger; 0.9903 and 0.9922 on the
-//!   synthetic head of `tests/bet_bet2_parity.rs` (measured 2026-10-30). The gap is in the
-//!   evolution. (`make_mesh_from_icosa(n)` is in that repository, `meshclass/mesh.cpp:210`: it
-//!   retessellates the icosahedron `n − 1` times, so bet2's `icosa(5)` is `subdivisions: 4`;
-//!   `subdivisions: 5` agrees less.)
+//! - **Ported from bet2 step by step** (astewartau/QSM.rs#327):
+//!   - the mesh is bet2's own icosahedron, `make_mesh_from_icosa`: its orientation, the
+//!     triangle order and winding, and `retessellate` ([`super::icosphere::bet2_icosa`]);
+//!   - vertex normals are `Mpoint::local_normal`, the normalised sum of the unnormalised
+//!     triangle normals (area-weighted);
+//!   - intensities are sampled at the nearest voxel, `(int)(p/dim + 0.5)`, not interpolated.
+//!     Inside the search loop this includes newimage's unchecked `value()`, which past an edge
+//!     reads a neighbouring row's voxel;
+//!   - `l` is the mean over vertices of the mean distance to their neighbours, recomputed at the
+//!     start of iterations 0, 50, 100, 200, …;
+//!   - `t2`/`t98` are newimage's `robustmin`/`robustmax` (`find_thresholds`, a histogram method),
+//!     and `tm` is the `⌊n/2⌋`-th smallest value;
+//!   - `-f`, `-w` and `-g` are rounded to single precision, as bet2 reads them;
+//!   - the mask is `make_mask_from_mesh`: the triangles drawn as bet2's `draw_mesh` draws them,
+//!     then a 6-connected spread from the mesh's mean point, with no hole filling;
+//!   - FSL reverses x of a neurologically stored image (positive determinant) before bet2 runs
+//!     ([`FslLeftRightOrder`]).
+//! - **Agreement with bet2** (Bostrix/FSL-BET2 d5acd7f built from source; measured 2026-10-31):
+//!   - **Travelling head:** on `prisma-bridge-run1`'s echo-1 magnitude after ANTs N4, the masks
+//!     are **identical**, at `-f 0.5` and at `-f 0.2` (0 of 6.0 M voxels differ). Before the
+//!     port, Dice was 0.9857 and 0.9916, with QSM.rs's masks 1.25 % and 0.64 % larger.
+//!   - **Synthetic head** of `tests/bet_bet2_parity.rs`: Dice 0.9991 (`-f 0.5`, 5 voxels) and
+//!     1.0000 (`-f 0.2`). That piecewise-constant head is sensitive at this level. Before the
+//!     port: 0.9903 and 0.9922.
+//!   - **Undefined behaviour in bet2:** a sample index outside the whole volume buffer is read
+//!     as 0 here.
 //! - **In QSM pipelines.** MEDI runs BET on `iMag = sqrt(sum(abs(iField).^2,4))`, the RSS over
 //!   echoes, with `f = 0.5` (MEDI_toolbox `README.m:92,111`) or `f = 0.1`
 //!   (`MEDI_full_process.m:109,128`). QSMART runs `bet2 -f 0.2 -m` on the first echo's
@@ -31,9 +50,10 @@
 //!   `bet` on the last echo with `-f 0.5` and erodes the mask by 5 voxels (`README.md:34-38`).
 
 use crate::Grid;
+use super::icosphere::bet2_icosa;
+#[cfg(test)]
 use super::icosphere::create_icosphere;
-use super::mesh::{build_neighbor_matrix, compute_vertex_normals, compute_mean_edge_length_mm, self_intersection_heuristic};
-use std::collections::VecDeque;
+use super::mesh::{bet2_vertex_normals, build_neighbor_matrix, self_intersection_heuristic};
 
 /// Brain parameters struct (like FSL's bet_parameters)
 struct BetParameters {
@@ -69,12 +89,8 @@ fn estimate_brain_parameters(
         return BetParameters { t2: 0.0, t98: 1.0, t: 0.1, tm: 0.5, cog, cog_mm, radius: 50.0 };
     }
 
-    // Sort for percentiles
-    let mut sorted = nonzero.clone();
-    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
-
-    let t2 = percentile(&sorted, 2.0);
-    let t98 = percentile(&sorted, 98.0);
+    // bet2: newimage's robustmin/robustmax (`find_thresholds`) over the whole volume.
+    let (t2, t98) = find_thresholds(data);
     let t = t2 + 0.1 * (t98 - t2);
 
     // Find center of gravity (weighted by intensity, like FSL)
@@ -147,61 +163,91 @@ fn estimate_brain_parameters(
     let tm = if within_brain_values.is_empty() {
         (t2 + t98) / 2.0 // fallback
     } else {
+        // bet2: med = floor(n/2); tm = max of the `med` smallest values, i.e. sorted[med - 1].
         within_brain_values.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        let mid = within_brain_values.len() / 2;
-        within_brain_values[mid]
+        let med = within_brain_values.len() / 2;
+        within_brain_values[med.max(1) - 1]
     };
 
     BetParameters { t2, t98, t, tm, cog, cog_mm, radius }
 }
 
-/// Compute percentile of sorted array
-fn percentile(sorted: &[f64], p: f64) -> f64 {
-    if sorted.is_empty() {
-        return 0.0;
+/// newimage's `find_thresholds` (Steve Smith's robust 2 %/98 % limits; FSL-BET2 d5acd7f
+/// `newimage/newimage.cc`), for a `volume<float>`: a 1000-bin histogram between the minimum and
+/// maximum, the bins holding the lowest and highest 2 %, and while those limits span less than a
+/// tenth of the range, the histogram redone between them (up to 10 passes, the last ignoring the
+/// end bins). Returns (`robustmin`, `robustmax`).
+fn find_thresholds(data: &[f64]) -> (f64, f64) {
+    const BINS: i64 = 1000;
+    const MAX_PASSES: i32 = 10;
+    let vol: Vec<f32> = data.iter().map(|&v| v as f32).collect();
+    let vmin = vol.iter().copied().fold(f32::INFINITY, f32::min);
+    let vmax = vol.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    let (mut min, mut max) = (vmin, vmax);
+    let (mut top_bin, mut bottom_bin, mut pass) = (0i64, 0i64, 1);
+    let (mut lowest_bin, mut highest_bin) = (0i64, BINS - 1);
+    let (mut thresh2, mut thresh98) = (0.0f32, 0.0f32);
+    let mut hist = vec![0i64; BINS as usize];
+    while pass == 1 || ((thresh98 - thresh2) as f64) < ((max - min) as f64) / 10.0 {
+        if pass > 1 {
+            bottom_bin = (bottom_bin - 1).max(0);
+            top_bin = (top_bin + 1).min(BINS - 1);
+            let tmpmin = (min as f64 + (bottom_bin as f64 / BINS as f64) * (max - min) as f64) as f32;
+            max = (min as f64 + ((top_bin + 1) as f64 / BINS as f64) * (max - min) as f64) as f32;
+            min = tmpmin;
+        }
+        if pass == MAX_PASSES || min == max {
+            min = vmin;
+            max = vmax;
+        }
+        // find_histogram
+        hist.iter_mut().for_each(|h| *h = 0);
+        let mut validsize: i64 = if min == max { -1 } else { 0 };
+        if min != max {
+            let fa = BINS as f64 / (max - min) as f64;
+            let fb = (BINS as f64 * (-(min as f64))) / (max - min) as f64;
+            for &v in &vol {
+                let b = ((fa * v as f64 + fb) as i64).clamp(0, BINS - 1);
+                hist[b as usize] += 1;
+                validsize += 1;
+            }
+        }
+        if validsize < 1 {
+            return (min as f64, max as f64);
+        }
+        if pass == MAX_PASSES {
+            validsize -= hist[lowest_bin as usize] + hist[highest_bin as usize];
+            lowest_bin += 1;
+            highest_bin -= 1;
+        }
+        if validsize < 0 {
+            thresh2 = min;
+            thresh98 = min;
+            break;
+        }
+        let fa = (max - min) as f64 / BINS as f64;
+        let mut count = 0i64;
+        bottom_bin = lowest_bin;
+        while count < validsize / 50 {
+            count += hist[bottom_bin as usize];
+            bottom_bin += 1;
+        }
+        bottom_bin -= 1;
+        thresh2 = min + (bottom_bin as f64 * fa) as f32;
+        count = 0;
+        top_bin = highest_bin;
+        while count < validsize / 50 {
+            count += hist[top_bin as usize];
+            top_bin -= 1;
+        }
+        top_bin += 1;
+        thresh98 = min + ((top_bin + 1) as f64 * fa) as f32;
+        if pass == MAX_PASSES {
+            break;
+        }
+        pass += 1;
     }
-    let idx = (p / 100.0 * (sorted.len() - 1) as f64).round() as usize;
-    sorted[idx.min(sorted.len() - 1)]
-}
-
-/// Trilinear interpolation
-fn sample_intensity(data: &[f64], nx: usize, ny: usize, nz: usize, x: f64, y: f64, z: f64) -> f64 {
-    let x = x.max(0.0).min((nx - 1) as f64);
-    let y = y.max(0.0).min((ny - 1) as f64);
-    let z = z.max(0.0).min((nz - 1) as f64);
-
-    let x0 = x.floor() as usize;
-    let y0 = y.floor() as usize;
-    let z0 = z.floor() as usize;
-    let x1 = (x0 + 1).min(nx - 1);
-    let y1 = (y0 + 1).min(ny - 1);
-    let z1 = (z0 + 1).min(nz - 1);
-
-    let xd = x - x0 as f64;
-    let yd = y - y0 as f64;
-    let zd = z - z0 as f64;
-
-    // Fortran order: x + y*nx + z*nx*ny
-    let idx = |i: usize, j: usize, k: usize| i + j * nx + k * nx * ny;
-
-    let c000 = data[idx(x0, y0, z0)];
-    let c001 = data[idx(x0, y0, z1)];
-    let c010 = data[idx(x0, y1, z0)];
-    let c011 = data[idx(x0, y1, z1)];
-    let c100 = data[idx(x1, y0, z0)];
-    let c101 = data[idx(x1, y0, z1)];
-    let c110 = data[idx(x1, y1, z0)];
-    let c111 = data[idx(x1, y1, z1)];
-
-    let c00 = c000 * (1.0 - xd) + c100 * xd;
-    let c01 = c001 * (1.0 - xd) + c101 * xd;
-    let c10 = c010 * (1.0 - xd) + c110 * xd;
-    let c11 = c011 * (1.0 - xd) + c111 * xd;
-
-    let c0 = c00 * (1.0 - yd) + c10 * yd;
-    let c1 = c01 * (1.0 - yd) + c11 * yd;
-
-    c0 * (1.0 - zd) + c1 * zd
+    (thresh2 as f64, thresh98 as f64)
 }
 
 /// Sample min/max intensities along inward normal (matches FSL-BET2's step_of_computation)
@@ -225,85 +271,56 @@ fn sample_intensities_fsl(
     t: f64,
     tm: f64,
 ) -> (f64, f64, bool) {
-    let d1 = 7.0; // max search distance for Imin (mm)
-    let d2 = 3.0; // max search distance for Imax (mm)
-    let dscale = voxel_size[0].min(voxel_size[1]).min(voxel_size[2]).min(1.0);
-
-    // Initialize like FSL does
+    // bet2.cpp `step_of_computation`: nearest-voxel samples, `(int)(p/dim + 0.5)` (truncated
+    // toward zero), along the inward normal from 1 mm; d1 = 7, d2 = 3.
+    const D1: f64 = 7.0;
+    const D2: f64 = 3.0;
+    let (xdim, ydim, zdim) = (voxel_size[0], voxel_size[1], voxel_size[2]);
+    let dscale = xdim.min(ydim).min(zdim).min(1.0);
+    let in_bounds = |i: i64, j: i64, k: i64| i >= 0 && j >= 0 && k >= 0 && (i as usize) < nx && (j as usize) < ny && (k as usize) < nz;
+    // newimage's `value(x, y, z)` does no bounds check: it reads the voxel at the linear index
+    // `(z·ny + y)·nx + x`, which for an index past an edge is a voxel of a neighbouring row or
+    // slice. That is reproduced; an index outside the whole buffer (undefined behaviour in bet2)
+    // reads 0.
+    let n_total = (nx * ny * nz) as i64;
+    let value = |i: i64, j: i64, k: i64| {
+        let lin = (k * ny as i64 + j) * nx as i64 + i;
+        if (0..n_total).contains(&lin) { data[lin as usize] } else { 0.0 }
+    };
     let mut i_min = tm;
     let mut i_max = t;
-
-    // Convert mm to voxel helper
-    let mm_to_voxel = |p_mm: &[f64; 3]| -> [f64; 3] {
-        [p_mm[0] / voxel_size[0], p_mm[1] / voxel_size[1], p_mm[2] / voxel_size[2]]
-    };
-
-    // Check if voxel position is in bounds
-    let in_bounds = |v: &[f64; 3]| -> bool {
-        v[0] >= 0.0 && v[0] < (nx - 1) as f64 &&
-        v[1] >= 0.0 && v[1] < (ny - 1) as f64 &&
-        v[2] >= 0.0 && v[2] < (nz - 1) as f64
-    };
-
-    // Starting position in mm (1mm inward along normal)
-    let mut p_mm = [
-        point_mm[0] - normal[0],
-        point_mm[1] - normal[1],
-        point_mm[2] - normal[2],
-    ];
-    let mut p_vox = mm_to_voxel(&p_mm);
-
-    // Check if starting point is in bounds (FSL: first bounds check)
-    if !in_bounds(&p_vox) {
-        // FSL: if first bounds check fails, f3 = 0 (no intensity force)
+    let p = [point_mm[0] - normal[0], point_mm[1] - normal[1], point_mm[2] - normal[2]]; // coord + (-1)·n
+    let (mut iv, mut jv, mut kv) = (p[0] / xdim + 0.5, p[1] / ydim + 0.5, p[2] / zdim + 0.5);
+    if !in_bounds(iv as i64, jv as i64, kv as i64) {
         return (i_min, i_max, false);
     }
-
-    let im = sample_intensity(data, nx, ny, nz, p_vox[0], p_vox[1], p_vox[2]);
+    let im = value(iv as i64, jv as i64, kv as i64);
     i_min = i_min.min(im);
     i_max = i_max.max(im);
-
-    // Check far point at d1-1 (FSL: second bounds check)
-    let p_far_mm = [
-        point_mm[0] - (d1 - 1.0) * normal[0],
-        point_mm[1] - (d1 - 1.0) * normal[1],
-        point_mm[2] - (d1 - 1.0) * normal[2],
-    ];
-    let p_far_vox = mm_to_voxel(&p_far_mm);
-
-    if !in_bounds(&p_far_vox) {
-        // FSL: if second bounds check fails, f3 = 0 (no intensity force)
+    let (mut nxv, mut nyv, mut nzv) = (normal[0] / xdim, normal[1] / ydim, normal[2] / zdim);
+    let (i2, j2, k2) = ((iv - (D1 - 1.0) * nxv) as i64, (jv - (D1 - 1.0) * nyv) as i64, (kv - (D1 - 1.0) * nzv) as i64);
+    nxv *= dscale;
+    nyv *= dscale;
+    nzv *= dscale;
+    if !in_bounds(i2, j2, k2) {
         return (i_min, i_max, false);
     }
-
-    let im = sample_intensity(data, nx, ny, nz, p_far_vox[0], p_far_vox[1], p_far_vox[2]);
+    let im = value(i2, j2, k2);
     i_min = i_min.min(im);
-
-    // Sample from 2mm to d1 (stepping by dscale mm)
     let mut gi = 2.0;
-    while gi < d1 {
-        p_mm[0] -= normal[0] * dscale;
-        p_mm[1] -= normal[1] * dscale;
-        p_mm[2] -= normal[2] * dscale;
-        p_vox = mm_to_voxel(&p_mm);
-
-        if in_bounds(&p_vox) {
-            let im = sample_intensity(data, nx, ny, nz, p_vox[0], p_vox[1], p_vox[2]);
-            i_min = i_min.min(im);
-
-            // Only update Imax for samples within d2
-            if gi < d2 {
-                i_max = i_max.max(im);
-            }
+    while gi < D1 {
+        iv -= nxv;
+        jv -= nyv;
+        kv -= nzv;
+        let im = value(iv as i64, jv as i64, kv as i64);
+        i_min = i_min.min(im);
+        if gi < D2 {
+            i_max = i_max.max(im);
         }
-
         gi += dscale;
     }
-
-    // Clamp like FSL does (this is critical for sinus exclusion)
-    i_min = i_min.max(t2);    // Imin can't go below noise floor
-    i_max = i_max.min(tm);    // Imax can't go above median brain intensity
-
+    i_min = i_min.max(t2);
+    i_max = i_max.min(tm);
     (i_min, i_max, true)
 }
 
@@ -317,214 +334,66 @@ fn surface_to_mask(
     nx: usize, ny: usize, nz: usize,
     voxel_size: &[f64; 3],
 ) -> Vec<u8> {
-    // Convert mm vertices to voxel coordinates
-    let vertices: Vec<[f64; 3]> = vertices_mm
-        .iter()
-        .map(|v| [
-            v[0] / voxel_size[0],
-            v[1] / voxel_size[1],
-            v[2] / voxel_size[2],
-        ])
-        .collect();
-
-    let mininc = 0.5;
-
-    // Start with all 1s (outside)
+    // bet2.cpp `make_mask_from_mesh`: a volume of 1s; every triangle drawn as 0s
+    // (`draw_mesh`: points along the edge v1 -> v0 every half of the smallest voxel size, each
+    // joined to v2 by `draw_segment`, samples `floor(p/dim + 0.5)`); then a 6-connected spread
+    // of 0s from the mesh's mean point (truncated to a voxel) through the 1s. Brain is the 0s.
+    let (xdim, ydim, zdim) = (voxel_size[0], voxel_size[1], voxel_size[2]);
+    let mininc = xdim.min(ydim).min(zdim) * 0.5;
     let mut grid: Vec<u8> = vec![1; nx * ny * nz];
-    // Fortran order: x + y*nx + z*nx*ny
     let idx = |i: usize, j: usize, k: usize| i + j * nx + k * nx * ny;
-
-    // Draw mesh surface as 0s
+    let set0 = |p: [f64; 3], grid: &mut Vec<u8>| {
+        let (i, j, k) = ((p[0] / xdim + 0.5).floor(), (p[1] / ydim + 0.5).floor(), (p[2] / zdim + 0.5).floor());
+        if i >= 0.0 && j >= 0.0 && k >= 0.0 && (i as usize) < nx && (j as usize) < ny && (k as usize) < nz {
+            grid[idx(i as usize, j as usize, k as usize)] = 0;
+        }
+    };
+    let unit = |a: [f64; 3], b: [f64; 3]| -> ([f64; 3], f64) {
+        let v = [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+        let d = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+        if d > 0.0 { ([v[0] / d, v[1] / d, v[2] / d], d) } else { (v, d) }
+    };
     for &[i0, i1, i2] in faces {
-        let v0 = vertices[i0];
-        let v1 = vertices[i1];
-        let v2 = vertices[i2];
-
-        // Edge from v1 to v0
-        let edge = [v0[0] - v1[0], v0[1] - v1[1], v0[2] - v1[2]];
-        let edge_len = (edge[0].powi(2) + edge[1].powi(2) + edge[2].powi(2)).sqrt();
-
-        if edge_len < 0.001 {
+        let (v0, v1, v2) = (vertices_mm[i0], vertices_mm[i1], vertices_mm[i2]);
+        let (n, d) = unit(v0, v1);
+        let mut j = 0.0;
+        while j <= d {
+            let p = [v1[0] + j * n[0], v1[1] + j * n[1], v1[2] + j * n[2]];
+            // draw_segment(p, v2): from v2 towards p.
+            let (m, dd) = unit(p, v2);
+            let mut t = 0.0;
+            while t <= dd {
+                set0([v2[0] + t * m[0], v2[1] + t * m[1], v2[2] + t * m[2]], &mut grid);
+                t += mininc;
+            }
+            j += mininc;
+        }
+    }
+    let mut c = [0.0f64; 3];
+    for v in vertices_mm {
+        c[0] += v[0];
+        c[1] += v[1];
+        c[2] += v[2];
+    }
+    let inv = 1.0 / vertices_mm.len() as f64;
+    let (cx, cy, cz) = ((c[0] * inv / xdim) as i64, (c[1] * inv / ydim) as i64, (c[2] * inv / zdim) as i64);
+    let mut stack: Vec<(i64, i64, i64)> = vec![(cx, cy, cz)];
+    let inside = |x: i64, y: i64, z: i64| x >= 0 && y >= 0 && z >= 0 && (x as usize) < nx && (y as usize) < ny && (z as usize) < nz;
+    while let Some((x, y, z)) = stack.pop() {
+        if !inside(x, y, z) {
             continue;
         }
-
-        let edge_dir = [edge[0] / edge_len, edge[1] / edge_len, edge[2] / edge_len];
-        let n_edge_steps = (edge_len / mininc).ceil() as usize + 1;
-
-        for j in 0..n_edge_steps {
-            let d = (j as f64) * mininc;
-            let p_edge = if d > edge_len {
-                v0
-            } else {
-                [v1[0] + d * edge_dir[0], v1[1] + d * edge_dir[1], v1[2] + d * edge_dir[2]]
-            };
-
-            // Draw segment from p_edge to v2
-            let seg = [v2[0] - p_edge[0], v2[1] - p_edge[1], v2[2] - p_edge[2]];
-            let seg_len = (seg[0].powi(2) + seg[1].powi(2) + seg[2].powi(2)).sqrt();
-
-            if seg_len < 0.001 {
-                let ix = p_edge[0].round() as isize;
-                let iy = p_edge[1].round() as isize;
-                let iz = p_edge[2].round() as isize;
-                if ix >= 0 && ix < nx as isize && iy >= 0 && iy < ny as isize && iz >= 0 && iz < nz as isize {
-                    grid[idx(ix as usize, iy as usize, iz as usize)] = 0;
-                }
-                continue;
-            }
-
-            let seg_dir = [seg[0] / seg_len, seg[1] / seg_len, seg[2] / seg_len];
-            let n_seg_steps = (seg_len / mininc).ceil() as usize + 1;
-
-            for k in 0..n_seg_steps {
-                let sd = (k as f64) * mininc;
-                let p = if sd > seg_len {
-                    v2
-                } else {
-                    [p_edge[0] + sd * seg_dir[0], p_edge[1] + sd * seg_dir[1], p_edge[2] + sd * seg_dir[2]]
-                };
-
-                let ix = p[0].round() as isize;
-                let iy = p[1].round() as isize;
-                let iz = p[2].round() as isize;
-
-                if ix >= 0 && ix < nx as isize && iy >= 0 && iy < ny as isize && iz >= 0 && iz < nz as isize {
-                    grid[idx(ix as usize, iy as usize, iz as usize)] = 0;
-                }
+        grid[idx(x as usize, y as usize, z as usize)] = 0;
+        for (dx, dy, dz) in [(-1, 0, 0), (0, -1, 0), (0, 0, -1), (1, 0, 0), (0, 1, 0), (0, 0, 1)] {
+            let (a, b, c) = (x + dx, y + dy, z + dz);
+            if inside(a, b, c) && grid[idx(a as usize, b as usize, c as usize)] == 1 {
+                stack.push((a, b, c));
             }
         }
     }
-
-    // Flood fill from center of mesh
-    let mut center = [0.0, 0.0, 0.0];
-    for v in &vertices {
-        center[0] += v[0];
-        center[1] += v[1];
-        center[2] += v[2];
-    }
-    center[0] /= vertices.len() as f64;
-    center[1] /= vertices.len() as f64;
-    center[2] /= vertices.len() as f64;
-
-    let mut cx = center[0].round() as isize;
-    let mut cy = center[1].round() as isize;
-    let mut cz = center[2].round() as isize;
-
-    cx = cx.max(0).min(nx as isize - 1);
-    cy = cy.max(0).min(ny as isize - 1);
-    cz = cz.max(0).min(nz as isize - 1);
-
-    // If center is on surface, find nearby interior point
-    if grid[idx(cx as usize, cy as usize, cz as usize)] == 0 {
-        'search: for dx in -5..=5 {
-            for dy in -5..=5 {
-                for dz in -5..=5 {
-                    let nx_ = cx + dx;
-                    let ny_ = cy + dy;
-                    let nz_ = cz + dz;
-                    if nx_ >= 0 && nx_ < nx as isize && ny_ >= 0 && ny_ < ny as isize
-                        && nz_ >= 0 && nz_ < nz as isize
-                        && grid[idx(nx_ as usize, ny_ as usize, nz_ as usize)] == 1
-                    {
-                        cx = nx_;
-                        cy = ny_;
-                        cz = nz_;
-                        break 'search;
-                    }
-                }
-            }
-        }
-    }
-
-    // BFS flood fill
-    let mut queue: VecDeque<(usize, usize, usize)> = VecDeque::new();
-    let cx = cx as usize;
-    let cy = cy as usize;
-    let cz = cz as usize;
-    grid[idx(cx, cy, cz)] = 0;
-    queue.push_back((cx, cy, cz));
-
-    let neighbors: [(isize, isize, isize); 6] = [
-        (-1, 0, 0), (1, 0, 0), (0, -1, 0), (0, 1, 0), (0, 0, -1), (0, 0, 1)
-    ];
-
-    while let Some((x, y, z)) = queue.pop_front() {
-        for &(dx, dy, dz) in &neighbors {
-            let nx_ = x as isize + dx;
-            let ny_ = y as isize + dy;
-            let nz_ = z as isize + dz;
-
-            if nx_ >= 0 && nx_ < nx as isize && ny_ >= 0 && ny_ < ny as isize && nz_ >= 0 && nz_ < nz as isize {
-                let ni = idx(nx_ as usize, ny_ as usize, nz_ as usize);
-                if grid[ni] == 1 {
-                    grid[ni] = 0;
-                    queue.push_back((nx_ as usize, ny_ as usize, nz_ as usize));
-                }
-            }
-        }
-    }
-
-    // Invert: 0 = brain (inside + surface), we want 1 = brain
-    for v in grid.iter_mut() {
-        *v = if *v == 0 { 1 } else { 0 };
-    }
-
-    // Fill holes using simple morphological closing
-    fill_holes(&mut grid, nx, ny, nz);
-
-    grid
+    grid.iter().map(|&v| (v == 0) as u8).collect()
 }
 
-/// Simple hole filling
-fn fill_holes(mask: &mut [u8], nx: usize, ny: usize, nz: usize) {
-    // Fortran order: x + y*nx + z*nx*ny
-    let idx = |i: usize, j: usize, k: usize| i + j * nx + k * nx * ny;
-
-    // Flood fill from corners to find exterior
-    let mut exterior: Vec<bool> = vec![false; nx * ny * nz];
-    let mut queue: VecDeque<(usize, usize, usize)> = VecDeque::new();
-
-    // Start from all boundary voxels that are 0
-    for i in 0..nx {
-        for j in 0..ny {
-            for k in 0..nz {
-                if (i == 0 || i == nx - 1 || j == 0 || j == ny - 1 || k == 0 || k == nz - 1)
-                    && mask[idx(i, j, k)] == 0
-                {
-                    exterior[idx(i, j, k)] = true;
-                    queue.push_back((i, j, k));
-                }
-            }
-        }
-    }
-
-    let neighbors: [(isize, isize, isize); 6] = [
-        (-1, 0, 0), (1, 0, 0), (0, -1, 0), (0, 1, 0), (0, 0, -1), (0, 0, 1)
-    ];
-
-    while let Some((x, y, z)) = queue.pop_front() {
-        for &(dx, dy, dz) in &neighbors {
-            let nx_ = x as isize + dx;
-            let ny_ = y as isize + dy;
-            let nz_ = z as isize + dz;
-
-            if nx_ >= 0 && nx_ < nx as isize && ny_ >= 0 && ny_ < ny as isize && nz_ >= 0 && nz_ < nz as isize {
-                let ni = idx(nx_ as usize, ny_ as usize, nz_ as usize);
-                if mask[ni] == 0 && !exterior[ni] {
-                    exterior[ni] = true;
-                    queue.push_back((nx_ as usize, ny_ as usize, nz_ as usize));
-                }
-            }
-        }
-    }
-
-    // Any voxel that is 0 but not exterior is interior -> fill it
-    for i in 0..mask.len() {
-        if mask[i] == 0 && !exterior[i] {
-            mask[i] = 1;
-        }
-    }
-}
 
 /// Self-intersection threshold (matches FSL-BET2)
 const SELF_INTERSECTION_THRESHOLD: f64 = 4000.0;
@@ -561,9 +430,21 @@ fn evolution_pass(
     let normal_max_update_fraction = 0.5;
     let lambda_fit = 0.1;
 
-    // Initial mean edge length
-    // Vertices are in mm, so use the mm version
-    let mut l = compute_mean_edge_length_mm(vertices, faces);
+    // bet2: l, the mean over vertices of the mean distance to their neighbours, recomputed at
+    // the start of iterations 0, 50, 100, 200, ...
+    let mut l = 0.0;
+    let mean_neighbour_distance = |vs: &[[f64; 3]]| -> f64 {
+        let mut total = 0.0;
+        for i in 0..vs.len() {
+            let mut li = 0.0;
+            for j in 0..neighbor_counts[i] {
+                let q = vs[neighbor_matrix[i][j]];
+                li += ((q[0] - vs[i][0]).powi(2) + (q[1] - vs[i][1]).powi(2) + (q[2] - vs[i][2]).powi(2)).sqrt();
+            }
+            total += li / neighbor_counts[i] as f64;
+        }
+        total / vs.len() as f64
+    };
 
     // Smoothing increase factor for recovery passes (FSL: 10^(pass+1))
     let base_increase = if pass > 0 { 10.0_f64.powi((pass + 1) as i32) } else { 1.0 };
@@ -590,8 +471,11 @@ fn evolution_pass(
             base_increase
         };
 
+        if iteration == 50 || iteration % 100 == 0 {
+            l = mean_neighbour_distance(vertices);
+        }
         // Compute vertex normals
-        let normals = compute_vertex_normals(vertices, faces);
+        let normals = bet2_vertex_normals(vertices, faces);
 
         // Compute updates for each vertex
         let mut updates: Vec<[f64; 3]> = vec![[0.0, 0.0, 0.0]; n_vertices];
@@ -686,10 +570,6 @@ fn evolution_pass(
             vertices[i][2] += updates[i][2];
         }
 
-        // Update edge length periodically
-        if iteration % 100 == 0 {
-            l = compute_mean_edge_length_mm(vertices, faces);
-        }
     }
 
     // Debug: report sampling failures
@@ -744,12 +624,43 @@ impl Default for BetParams {
     }
 }
 
-/// Run BET brain extraction
+/// How FSL stores an image's left-right axis, which decides whether FSL flips it on reading
+/// (`FslGetLeftRightOrder2`, `fslio.c`; `read_volume` calls `makeradiological()`): an image
+/// whose sform (or, without one, qform) has a negative determinant is radiological and read as
+/// it is; one with a positive determinant is neurological and FSL reverses its x axis before bet2
+/// sees it (and back when saving). The mesh is not symmetric, so the flip changes the mask.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FslLeftRightOrder {
+    /// Negative determinant (or no orientation): processed as stored.
+    Radiological,
+    /// Positive determinant: x reversed for processing, as FSL does.
+    Neurological,
+}
+
+impl FslLeftRightOrder {
+    /// From a voxel-to-world affine (row-major 4×4, the sform or else the qform the image was
+    /// read with). `None` (no orientation) and a determinant within 1e-12 of 0 are
+    /// radiological, as in FSL.
+    pub fn from_affine(affine: Option<&[f64; 16]>) -> Self {
+        match affine {
+            Some(a) => {
+                let det = a[0] * (a[5] * a[10] - a[6] * a[9]) - a[1] * (a[4] * a[10] - a[6] * a[8])
+                    + a[2] * (a[4] * a[9] - a[5] * a[8]);
+                if det >= 1e-12 { Self::Neurological } else { Self::Radiological }
+            }
+            None => Self::Radiological,
+        }
+    }
+}
+
+/// Run BET brain extraction, as FSL's bet2 (see the module docs).
 ///
 /// # Arguments
 /// * `data` - 3D magnitude image data (nx * ny * nz, Fortran order)
 /// * `grid` - Volume grid (dimensions and voxel sizes)
 /// * `params` - BET parameters (intensity threshold, smoothness, gradient, iterations, subdivisions)
+/// * `order` - The image's [`FslLeftRightOrder`], from its header
+///   ([`FslLeftRightOrder::from_affine`]): bet2 runs on neurological images with x reversed.
 /// * `progress` - Progress callback: `(iteration, total_iterations)`
 ///
 /// # Returns
@@ -758,14 +669,37 @@ pub fn run_bet<F>(
     data: &[f64],
     grid: &Grid,
     params: &BetParams,
+    order: FslLeftRightOrder,
+    progress: F,
+) -> Vec<u8>
+where
+    F: FnMut(usize, usize),
+{
+    match order {
+        FslLeftRightOrder::Radiological => run_bet_as_stored(data, grid, params, progress),
+        FslLeftRightOrder::Neurological => {
+            let (nx, ny, nz) = grid.dims;
+            let flip_x = |i: usize| (nx - 1 - i % nx) + nx * (i / nx);
+            let flipped: Vec<f64> = (0..nx * ny * nz).map(|i| data[flip_x(i)]).collect();
+            let mask = run_bet_as_stored(&flipped, grid, params, progress);
+            (0..nx * ny * nz).map(|i| mask[flip_x(i)]).collect()
+        }
+    }
+}
+
+fn run_bet_as_stored<F>(
+    data: &[f64],
+    grid: &Grid,
+    params: &BetParams,
     mut progress: F,
 ) -> Vec<u8>
 where
     F: FnMut(usize, usize),
 {
-    let fractional_intensity = params.fractional_intensity;
-    let smoothness_factor = params.smoothness;
-    let gradient_threshold = params.gradient_threshold;
+    // bet2 reads -f, -w and -g as floats (`Option<float>`).
+    let fractional_intensity = params.fractional_intensity as f32 as f64;
+    let smoothness_factor = params.smoothness as f32 as f64;
+    let gradient_threshold = params.gradient_threshold as f32 as f64;
     let iterations = params.iterations;
     let subdivisions = params.subdivisions;
     let (nx, ny, nz) = grid.dims;
@@ -781,7 +715,8 @@ where
     let bp = estimate_brain_parameters(data, nx, ny, nz, &voxel_size);
 
     // Step 2: Create icosphere
-    let (unit_vertices, faces) = create_icosphere(subdivisions);
+    // bet2's own icosahedron, `make_mesh_from_icosa(subdivisions + 1)`.
+    let (unit_vertices, faces) = bet2_icosa(subdivisions + 1);
     let n_vertices = unit_vertices.len();
 
     // Scale and position sphere in mm coordinates (start at 50% of estimated radius)
@@ -947,77 +882,6 @@ mod tests {
     }
 
     #[test]
-    fn test_sample_intensity() {
-        let data = vec![
-            0.0, 1.0, 2.0, 3.0,
-            4.0, 5.0, 6.0, 7.0,
-        ];
-        let val = sample_intensity(&data, 2, 2, 2, 0.5, 0.5, 0.5);
-        // Trilinear interpolation of cube corners
-        assert!((val - 3.5).abs() < 0.01);
-    }
-
-    #[test]
-    fn test_sample_intensity_at_corners() {
-        // 2x2x2 cube: values 0..7
-        let data = vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0];
-        // Sampling at integer corners should return exact values
-        assert!((sample_intensity(&data, 2, 2, 2, 0.0, 0.0, 0.0) - 0.0).abs() < 1e-10);
-        assert!((sample_intensity(&data, 2, 2, 2, 1.0, 0.0, 0.0) - 1.0).abs() < 1e-10);
-        assert!((sample_intensity(&data, 2, 2, 2, 0.0, 1.0, 0.0) - 2.0).abs() < 1e-10);
-        assert!((sample_intensity(&data, 2, 2, 2, 1.0, 1.0, 0.0) - 3.0).abs() < 1e-10);
-        assert!((sample_intensity(&data, 2, 2, 2, 0.0, 0.0, 1.0) - 4.0).abs() < 1e-10);
-    }
-
-    #[test]
-    fn test_sample_intensity_clamping() {
-        // Out-of-bounds coordinates should be clamped
-        let data = vec![10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0];
-        // Negative coordinates should clamp to 0
-        let val = sample_intensity(&data, 2, 2, 2, -1.0, -1.0, -1.0);
-        assert!((val - 10.0).abs() < 1e-10, "Expected 10.0, got {}", val);
-        // Beyond max should clamp to max
-        let val = sample_intensity(&data, 2, 2, 2, 5.0, 5.0, 5.0);
-        assert!((val - 80.0).abs() < 1e-10, "Expected 80.0, got {}", val);
-    }
-
-    #[test]
-    fn test_sample_intensity_larger_volume() {
-        // 4x4x4 volume with known pattern
-        let n = 4;
-        let mut data = vec![0.0; n * n * n];
-        for k in 0..n {
-            for j in 0..n {
-                for i in 0..n {
-                    data[i + j * n + k * n * n] = (i + j + k) as f64;
-                }
-            }
-        }
-        // At center (1.5, 1.5, 1.5), each corner = i+j+k
-        // Average of corners: (1+1+1=3, 2+1+1=4, 1+2+1=4, 2+2+1=5, 1+1+2=4, 2+1+2=5, 1+2+2=5, 2+2+2=6) / 8 = 4.5
-        let val = sample_intensity(&data, n, n, n, 1.5, 1.5, 1.5);
-        assert!((val - 4.5).abs() < 1e-10, "Expected 4.5, got {}", val);
-    }
-
-    #[test]
-    fn test_percentile() {
-        let sorted = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0];
-        let p0 = percentile(&sorted, 0.0);
-        assert!((p0 - 1.0).abs() < 1e-10);
-
-        let p50 = percentile(&sorted, 50.0);
-        // Index = round(0.5 * 9) = round(4.5) = 5, value = 6.0
-        assert!((p50 - 5.0).abs() < 1.5, "p50={}", p50);
-
-        let p100 = percentile(&sorted, 100.0);
-        assert!((p100 - 10.0).abs() < 1e-10);
-
-        // Empty array
-        let empty: Vec<f64> = vec![];
-        assert!((percentile(&empty, 50.0) - 0.0).abs() < 1e-10);
-    }
-
-    #[test]
     fn test_power_transform() {
         // Verify power transform matches FSL
         let f = 0.5_f64;
@@ -1109,77 +973,6 @@ mod tests {
     }
 
     #[test]
-    fn test_fill_holes_no_holes() {
-        // A solid 3x3x3 cube with no holes should remain unchanged
-        let nx = 5;
-        let ny = 5;
-        let nz = 5;
-        let mut mask = vec![0u8; nx * ny * nz];
-        let idx = |i: usize, j: usize, k: usize| i + j * nx + k * nx * ny;
-
-        // Place a solid 3x3x3 block in the center
-        for k in 1..4 {
-            for j in 1..4 {
-                for i in 1..4 {
-                    mask[idx(i, j, k)] = 1;
-                }
-            }
-        }
-
-        let original = mask.clone();
-        fill_holes(&mut mask, nx, ny, nz);
-
-        assert_eq!(mask, original, "Solid mask should not change");
-    }
-
-    #[test]
-    fn test_fill_holes_with_interior_hole() {
-        // A 7x7x7 volume with a shell of 1s and a hole (0) inside
-        let n = 7;
-        let idx = |i: usize, j: usize, k: usize| i + j * n + k * n * n;
-        let mut mask = vec![0u8; n * n * n];
-
-        // Create a hollow cube: 1 on shell from (1,1,1) to (5,5,5), 0 inside
-        for k in 1..6 {
-            for j in 1..6 {
-                for i in 1..6 {
-                    mask[idx(i, j, k)] = 1;
-                }
-            }
-        }
-        // Carve out the interior
-        for k in 2..5 {
-            for j in 2..5 {
-                for i in 2..5 {
-                    mask[idx(i, j, k)] = 0;
-                }
-            }
-        }
-
-        // The interior (2..5)^3 should be 0 before fill_holes
-        assert_eq!(mask[idx(3, 3, 3)], 0, "Center should be 0 before fill");
-
-        fill_holes(&mut mask, n, n, n);
-
-        // After fill_holes, interior holes should be filled
-        assert_eq!(mask[idx(3, 3, 3)], 1, "Center hole should be filled");
-        assert_eq!(mask[idx(2, 2, 2)], 1, "Interior corner should be filled");
-
-        // Exterior should still be 0
-        assert_eq!(mask[idx(0, 0, 0)], 0, "Exterior should remain 0");
-        assert_eq!(mask[idx(6, 6, 6)], 0, "Exterior should remain 0");
-    }
-
-    #[test]
-    fn test_fill_holes_exterior_connected() {
-        // All zeros (no brain): nothing to fill
-        let n = 5;
-        let mut mask = vec![0u8; n * n * n];
-        fill_holes(&mut mask, n, n, n);
-        assert!(mask.iter().all(|&v| v == 0), "All-zero mask should stay all-zero");
-    }
-
-    #[test]
     fn test_surface_to_mask_small_sphere() {
         // Create a small icosphere mesh centered in a 16x16x16 grid
         let (unit_verts, faces) = create_icosphere(2);
@@ -1255,7 +1048,7 @@ mod tests {
             &data,
             &grid,
             &BetParams { fractional_intensity: 0.5, smoothness: 1.0, gradient_threshold: 0.0, iterations: 50, subdivisions: 1, voxel_scale: 1.0 },
-            |_, _| {},
+            FslLeftRightOrder::Radiological, |_, _| {},
         );
 
         assert_eq!(mask.len(), nx * ny * nz);
@@ -1285,13 +1078,13 @@ mod tests {
 
         // Anisotropic voxels, so a scale applied to the wrong axis would show up.
         let scaled_grid = Grid::new(nx, ny, nz, 3.0, 4.5, 6.0);
-        let via_grid = run_bet(&data, &scaled_grid, &base, |_, _| {});
+        let via_grid = run_bet(&data, &scaled_grid, &base, FslLeftRightOrder::Radiological, |_, _| {});
 
         let native_grid = Grid::new(nx, ny, nz, 0.3, 0.45, 0.6);
         let via_param = run_bet(
             &data, &native_grid,
             &BetParams { voxel_scale: 10.0, ..base.clone() },
-            |_, _| {},
+            FslLeftRightOrder::Radiological, |_, _| {},
         );
 
         assert_eq!(via_param, via_grid, "voxel_scale must equal scaling the grid itself");
@@ -1307,10 +1100,10 @@ mod tests {
             fractional_intensity: 0.5, smoothness: 1.0, gradient_threshold: 0.0,
             iterations: 50, subdivisions: 1, voxel_scale: 1.0,
         };
-        let unscaled = run_bet(&data, &grid, &base, |_, _| {});
+        let unscaled = run_bet(&data, &grid, &base, FslLeftRightOrder::Radiological, |_, _| {});
 
         for bad in [0.0, -1.0] {
-            let mask = run_bet(&data, &grid, &BetParams { voxel_scale: bad, ..base.clone() }, |_, _| {});
+            let mask = run_bet(&data, &grid, &BetParams { voxel_scale: bad, ..base.clone() }, FslLeftRightOrder::Radiological, |_, _| {});
             assert_eq!(mask, unscaled, "voxel_scale {bad} should behave as 1.0");
         }
     }
@@ -1325,7 +1118,7 @@ mod tests {
             &data,
             &grid,
             &BetParams { fractional_intensity: 0.5, smoothness: 1.0, gradient_threshold: 0.3, iterations: 50, subdivisions: 1, voxel_scale: 1.0 },
-            |_, _| {},
+            FslLeftRightOrder::Radiological, |_, _| {},
         );
 
         assert_eq!(mask.len(), nx * ny * nz);
@@ -1345,7 +1138,7 @@ mod tests {
             &data,
             &grid,
             &BetParams { fractional_intensity: 0.5, smoothness: 1.0, gradient_threshold: 0.0, iterations: 50, subdivisions: 1, voxel_scale: 1.0 },
-            |current, total| {
+            FslLeftRightOrder::Radiological, |current, total| {
                 progress_calls.push((current, total));
             },
         );
@@ -1376,13 +1169,13 @@ mod tests {
             &data,
             &grid,
             &BetParams { fractional_intensity: 0.7, smoothness: 1.0, gradient_threshold: 0.0, iterations: 50, subdivisions: 1, voxel_scale: 1.0 },
-            |_, _| {},
+            FslLeftRightOrder::Radiological, |_, _| {},
         );
         let mask_large = run_bet(
             &data,
             &grid,
             &BetParams { fractional_intensity: 0.3, smoothness: 1.0, gradient_threshold: 0.0, iterations: 50, subdivisions: 1, voxel_scale: 1.0 },
-            |_, _| {},
+            FslLeftRightOrder::Radiological, |_, _| {},
         );
 
         let count_small: usize = mask_small.iter().map(|&v| v as usize).sum();
@@ -1402,7 +1195,7 @@ mod tests {
             &data,
             &grid,
             &BetParams { fractional_intensity: 0.5, smoothness: 1.0, gradient_threshold: 0.0, iterations: 50, subdivisions: 1, voxel_scale: 1.0 },
-            |_, _| {},
+            FslLeftRightOrder::Radiological, |_, _| {},
         );
 
         assert_eq!(mask.len(), nx * ny * nz);
