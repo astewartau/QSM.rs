@@ -6,11 +6,10 @@
 //! It holds bet2's masks for `-f 0.5` (bet2's default) and `-f 0.2` (QSMART's); the head is
 //! rebuilt here exactly as the script builds it.
 //!
-//! **Known gap** (astewartau/QSM.rs#327): QSM.rs's surface evolution is not bet2's: on a travelling
-//! head its masks were 0.6 % (`-f 0.2`) and 1.3 % (`-f 0.5`) larger, Dice 0.9915 and 0.9857. This
-//! test records the measured agreement so that a change shows.
+//! QSM.rs follows bet2 step by step since astewartau/QSM.rs#327 (see `bet::evolution`'s module
+//! docs); on a travelling head the masks are identical.
 
-use qsm_core::bet::{run_bet, BetParams};
+use qsm_core::bet::{run_bet, BetParams, FslLeftRightOrder};
 use qsm_core::Grid;
 
 const DIMS: (usize, usize, usize) = (56, 64, 48);
@@ -45,12 +44,15 @@ fn bet_against_bet2() {
     assert_eq!(raw.len(), 2 * nb);
     let img = head();
     let grid = Grid::new(DIMS.0, DIMS.1, DIMS.2, 1.5, 1.5, 1.5);
-    // Measured 2026-10-30: Dice 0.9903 (-f 0.5; QSM.rs 1.0 % smaller) and 0.9922 (-f 0.2; 0.9 %
-    // larger). The bounds leave 0.002 for platform rounding in the evolution.
-    for (c, (f, min_dice)) in [(0.5, 0.988), (0.2, 0.990)].into_iter().enumerate() {
+    // Measured 2026-10-31: Dice 0.9991 (-f 0.5; 35,875 voxels against 35,870) and 1.0000 (-f 0.2).
+    // This piecewise-constant head is sensitive at that level: a 4-ulp change of the initial
+    // radius moves the -f 0.5 mask by 2 voxels. (Before the port: 0.9903 and 0.9922.)
+    for (c, (f, min_dice)) in [(0.5, 0.998), (0.2, 0.999)].into_iter().enumerate() {
         let bet2: Vec<bool> = (0..n).map(|i| raw[c * nb + i / 8] >> (i % 8) & 1 == 1).collect();
         let params = BetParams { fractional_intensity: f, ..BetParams::default() };
-        let ours = run_bet(&img, &grid, &params, |_, _| {});
+        // nibabel writes diag(1.5, 1.5, 1.5): a positive determinant, so FSL reads the head
+        // with x reversed (neurological storage) and bet2 runs on that.
+        let ours = run_bet(&img, &grid, &params, FslLeftRightOrder::Neurological, |_, _| {});
         let both = (0..n).filter(|&i| bet2[i] && ours[i] != 0).count();
         let (a, b) = (bet2.iter().filter(|&&v| v).count(), ours.iter().filter(|&&v| v != 0).count());
         let dice = 2.0 * both as f64 / (a + b) as f64;

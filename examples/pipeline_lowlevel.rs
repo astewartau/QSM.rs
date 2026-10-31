@@ -40,7 +40,7 @@ fn main() {
     // 1. Brain extraction (params tuned down for this tiny synthetic volume;
     //    use BetParams::default() on real data)
     let bet_params = BetParams { iterations: 100, subdivisions: 2, ..BetParams::default() };
-    let mask = bet::run_bet(&magnitude, &grid, &bet_params, |_, _| {});
+    let mask = bet::run_bet(&magnitude, &grid, &bet_params, bet::FslLeftRightOrder::Radiological, |_, _| {});
 
     // 2. Phase unwrapping (Laplacian: fast, closed-form, no progress callback)
     let unwrapped = unwrap::laplacian_unwrap(&phase, &mask, &grid, unwrap::LaplacianSolver::Dct);
