@@ -22,6 +22,10 @@ const CASES = [
     ("sharp r 4 mm, anisotropic", (32, 28, 24), (0.9, 1.0, 1.3), :sharp, [4.0], 0.05),
     ("vsharp, QSM.jl defaults", (48, 44, 40), (1.0, 1.0, 1.0), :vsharp, nothing, nothing),
     ("vsharp 6:-1.5:1.5 mm, thr 0.1, anisotropic", (32, 28, 24), (0.9, 1.0, 1.3), :vsharp, [6.0, 4.5, 3.0, 1.5], 0.1),
+    # A voxel size one float32 ulp below 1 mm, as NIfTI headers often store 1 mm (the KKI travelling
+    # head's z): cld(12, 0.99999994) = 13, so the box is padded by 13 voxels, not 12
+    # (56×54×45 instead of 56×50×45).
+    ("vsharp 12:-1:1 mm, z one float32 ulp below 1 mm", (48, 44, 40), (1.0, 1.0, Float64(prevfloat(1.0f0))), :vsharp, collect(12.0:-1.0:1.0), 0.05),
 ]
 
 # Ellipsoid mask (semi-axes 0.46, 0.44, 0.42 of the extent) holding a harmonic background and two
