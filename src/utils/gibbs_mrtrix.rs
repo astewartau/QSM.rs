@@ -304,7 +304,7 @@ fn unring1d_line(data: &mut [Complex64], ifft: &dyn Fft<f64>, p: MrtrixUnringPar
             -((j - nsh) as f64)
         }
     };
-    let maxn = if n % 2 == 1 { (n - 1) / 2 } else { n / 2 - 1 };
+    let maxn = if n.is_multiple_of(2) { n / 2 - 1 } else { (n - 1) / 2 };
     // the original line, then each shift
     buf.copy_from_slice(data);
     ifft.process(buf);
@@ -314,7 +314,7 @@ fn unring1d_line(data: &mut [Complex64], ifft: &dyn Fft<f64>, p: MrtrixUnringPar
         let u = Complex64::new(phi.cos(), phi.sin());
         let mut e = Complex64::new(1.0, 0.0);
         buf[0] = data[0];
-        if n % 2 == 0 {
+        if n.is_multiple_of(2) {
             buf[n / 2] = Complex64::new(0.0, 0.0);
         }
         for l in 0..maxn {

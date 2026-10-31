@@ -127,11 +127,12 @@ fn tv_min_line(row: &[f64], n: usize, n_points: usize, out: &mut [f64], diff: &m
 
 /// Which unringing [`gibbs_unring_volume`] and the functions built on it run. See the
 /// [module docs](self) for which suits which acquisition.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum GibbsMode {
     /// Bautista et al.'s 3-D unringing (MRtrix3 `mrdegibbs -dimensionality 3`), for 3-D
     /// acquisitions, which truncate k-space along all three axes. The default: QSM's
     /// gradient-echo scans are typically 3-D. See [`gibbs_unring_3d`].
+    #[default]
     Bautista3d,
     /// Kellner et al.'s 2-D unringing as MRtrix3's `mrdegibbs` implements it, for 2-D multi-slice
     /// acquisitions (k-space truncated in-plane only): each slice normal to `slice_axis`.
@@ -150,11 +151,6 @@ pub enum GibbsMode {
     },
 }
 
-impl Default for GibbsMode {
-    fn default() -> Self {
-        GibbsMode::Bautista3d
-    }
-}
 
 /// DIPY's TV window (`n_points`, its default).
 const N_POINTS: usize = 3;
