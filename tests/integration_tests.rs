@@ -1411,7 +1411,7 @@ fn test_bet() {
             subdivisions: 4,
             voxel_scale: 1.0,
         },
-        |_, _| {},
+        bet::FslLeftRightOrder::Radiological, |_, _| {},
     ));
 
     let dice = common::dice_coefficient(&predicted_mask, &data.mask);
@@ -2367,7 +2367,7 @@ fn test_all_combinations() {
         let lfs_stage1_ppm: Vec<f64> = lfs_stage1.iter().map(|&v| v * ppm_factor).collect();
         let chi_qsmart_raw = adjust_offset(
             &removed_voxels, &lfs_stage1_ppm, &chi_stage1, &chi_stage2,
-            &grid, data.b0_dir, ppm_factor,
+            &grid, data.b0_dir, ppm_factor, qsm_core::utils::QsmartOffsetGrid::Fft,
         );
         let chi_qsmart: Vec<f64> = chi_qsmart_raw.iter().enumerate()
             .map(|(i, &v)| if data.mask[i] > 0 { v * scale_to_ppm } else { 0.0 }).collect();

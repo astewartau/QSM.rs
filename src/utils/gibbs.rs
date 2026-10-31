@@ -5,33 +5,43 @@
 //! (image contrast changes with TE), so it perturbs the mono-exponential decay
 //! and biases R2*/R2 maps — hence unringing is recommended before relaxometry.
 //!
-//! Method (Kellner 2016): resample the image at a set of subvoxel shifts using
-//! the Fourier shift theorem; at each voxel pick the shift that minimises local
-//! total variation (the "ring-free" sampling), then interpolate back to the
-//! grid. The 1-D correction is applied along each axis and the axis-corrected
-//! volumes are combined in the Fourier domain, weighting each axis where its
-//! ringing dominates (low spatial frequency in the other axes).
+//! Method (Kellner 2016): resample the image at a set of subvoxel shifts using the Fourier shift
+//! theorem; at each voxel pick the shift that minimises local total variation (the "ring-free"
+//! sampling), then interpolate back to the grid. The 1-D correction is applied along each axis
+//! and the axis-corrected images are combined in the Fourier domain, weighting each axis where
+//! its ringing dominates (low spatial frequency in the other axes).
 //!
-//! This is a faithful port of DIPY's `gibbs_removal` (Kellner 2016; Neto
-//! Henriques 2018), generalised from 2-D slice-wise to full 3-D: the cosine
-//! weight for axis *i* is `∏_{j≠i}(1+cos k_j) / Σ_m ∏_{j≠m}(1+cos k_j)`, which
-//! reduces exactly to DIPY's 2-D weights.
+//! **Default: DIPY's `gibbs_removal`** ([`GibbsMode::Slices`], slices normal to z), ported step
+//! for step: DIPY's 45 shifts in [0.02, 0.9], `n_points` 3, each shift direction its own inverse
+//! transform and magnitude (`|ifft(c·exp(±ks))|`), the 2-D combination
+//! `|ifft2(fftshift(C1)·G1 + fftshift(C0)·G0)|` with DIPY's `linspace(−π, π)` cosine weights and
+//! edge rows. Its output is a magnitude, so it is never negative.
 //!
-//! One deliberate deviation for speed: both shift directions share a single
-//! complex IFFT (see [`unring_row_inplace`]), which requires symmetrising the
-//! unpaired Nyquist bin on even-length lines. This differs from DIPY only in
-//! that one bin — measured max |diff| ~4e-3 on unit-scale data, r > 0.9999999 —
-//! and halves the per-line FFT work (~2× overall).
+//! **Agreement with DIPY 1.12.1** (verified QSM-CI `py-originals` image, QSMxT/QSM-CI#302;
+//! measured 2026-10-31, astewartau/QSM.rs#327): NRMSE 2.6e-6 % on a 64×64×32 crop of a travelling
+//! head's five echoes (`prisma-bridge-run1`; DIPY changes the input by 3.4 %), and to the
+//! fixture's float32 rounding on the 24×24×16 phantom of `tests/gibbs_dipy_parity.rs`.
 //!
-//! A second deliberate deviation: negative output values are set to 0. The input is magnitude,
-//! where a negative value has no physical meaning; DIPY returns the undershoot as it is. Every
-//! non-negative value is unchanged.
+//! Before this, QSM.rs unrang in 3-D only (now [`GibbsMode::Volume`]: DIPY's 1-D step along each
+//! axis over the whole volume, combined with the 3-D cosine weights
+//! `∏_{j≠i}(1+cos k_j) / Σ_m ∏_{j≠m}(1+cos k_j)`, negative results set to 0). That is QSM.rs's
+//! own generalisation, not a published method: it was 2.0 % from DIPY on a travelling head and
+//! 3.0 % on the phantom. It also shared one inverse transform between the two shift directions,
+//! which needs the even-length Nyquist bin symmetrised; that changed the output by up to 4e-3,
+//! so it is gone (both modes now take the two transforms DIPY takes).
 //!
-//! **Agreement with DIPY** (astewartau/QSM.rs#327, known gap): because of the 3-D generalisation,
-//! the output is not DIPY's (2-D slices normal to z, its default). Both change the input by about
-//! as much, but differ from each other by 2.0 % NRMSE on a travelling head (QSMxT/QSM-CI#302) and
-//! 3.0 % on the 24×24×16 phantom of `tests/gibbs_dipy_parity.rs` (DIPY 1.12.1 in the verified
-//! `py-originals` image; measured 2026-10-30). Matching DIPY needs a 2-D slice-wise mode.
+//! **Which implementation.** DIPY is the reference QSM-CI runs. Kellner's own code (`unring`,
+//! bitbucket.org/reisert/unring, `ringRm.cpp`, also 2-D slice-wise) is not the same algorithm in
+//! its details:
+//! - it splits the slice into the two weighted parts *before* unringing each along its axis,
+//!   with the exact FFT-frequency cosines;
+//! - it takes 41 shifts of ±k/40 voxel (with `PI` = 3.1416) and zeroes the Nyquist bin;
+//! - its TV runs over the complex line, between neighbours 1 and 3;
+//! - it interpolates linearly to the chosen shift.
+//!
+//! Its licence forbids reproducing or modifying it without the University Medical Center
+//! Freiburg's permission, so it is not ported. Whether to follow it is an open question
+//! (astewartau/QSM.rs#327).
 
 use crate::fft::{fft3d_real, ifft3d_real};
 use num_complex::Complex64;
@@ -75,9 +85,76 @@ fn tv_min_line(row: &[f64], n: usize, n_points: usize, out: &mut [f64], diff: &m
     }
 }
 
-/// Reusable per-thread scratch for [`unring_row_inplace`], sized to a line of
-/// length `n`. Allocated once per worker thread (via rayon `for_each_init`) so the
-/// hot loop performs no allocation.
+/// Which unringing [`gibbs_unring_volume`] and the functions built on it run.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GibbsMode {
+    /// DIPY's `gibbs_removal` (the default, `slice_axis = 2`): each 2-D slice normal to
+    /// `slice_axis` is unrung along both of its axes, and the two results are combined in its
+    /// 2-D Fourier domain with DIPY's cosine weights; the output is the magnitude of that
+    /// combination.
+    Slices {
+        /// The axis the slices are normal to (0, 1 or 2).
+        slice_axis: usize,
+    },
+    /// QSM.rs's own 3-D generalisation: each axis unrung over the whole volume, combined with
+    /// the 3-D cosine weights `∏_{j≠i}(1+cos k_j) / Σ_m ∏_{j≠m}(1+cos k_j)`, which reduce to
+    /// Kellner's 2-D ones. Negative results are set to 0. Not an original algorithm.
+    Volume,
+}
+
+impl Default for GibbsMode {
+    fn default() -> Self {
+        GibbsMode::Slices { slice_axis: 2 }
+    }
+}
+
+/// DIPY's TV window (`n_points`, its default).
+const N_POINTS: usize = 3;
+
+/// numpy's `linspace(start, stop, num)`: `i·step + start`, the last value exactly `stop`.
+fn linspace(start: f64, stop: f64, num: usize) -> Vec<f64> {
+    if num == 1 {
+        return vec![start];
+    }
+    let step = (stop - start) / (num - 1) as f64;
+    let mut y: Vec<f64> = (0..num).map(|i| i as f64 * step + start).collect();
+    y[num - 1] = stop;
+    y
+}
+
+/// Everything a line of length `n` needs: DIPY's 45 shifts `ssamp`, the shift factors
+/// `exp(k·s)` for every shift (`k = fftfreq(n, 1/(2πi))`, computed as numpy does), and the FFT
+/// plans.
+struct LineCtx {
+    n: usize,
+    ssamp: Vec<f64>,
+    /// `phases[s*n + m] = exp(i·θ)`, `θ = (m'·Im(1/(n·d)))·ssamp[s]` with `d = 1/(2πi)`.
+    phases: Vec<Complex64>,
+    fft: Arc<dyn Fft<f64>>,
+    ifft: Arc<dyn Fft<f64>>,
+}
+
+impl LineCtx {
+    fn new(n: usize, planner: &mut FftPlanner<f64>) -> Self {
+        let ssamp = linspace(0.02, 0.9, N_SHIFTS);
+        // numpy: d = 1/(2j·π) = −i/(2π); val = 1/(n·d) = i·(−1/(n·(−1/(2π)))) (Python complex
+        // division: real parts 0); k[m] = m'·val with m' the fftfreq integers.
+        let inv_2pi = 1.0 / (2.0 * PI);
+        let b = n as f64 * -inv_2pi;
+        let val_im = -1.0 / b;
+        let mut phases = vec![Complex64::new(0.0, 0.0); ssamp.len() * n];
+        for (s_i, &s) in ssamp.iter().enumerate() {
+            for m in 0..n {
+                let mi = if m < n.div_ceil(2) { m as f64 } else { m as f64 - n as f64 };
+                let theta = (mi * val_im) * s;
+                phases[s_i * n + m] = Complex64::new(theta.cos(), theta.sin());
+            }
+        }
+        LineCtx { n, ssamp, phases, fft: planner.plan_fft_forward(n), ifft: planner.plan_fft_inverse(n) }
+    }
+}
+
+/// Reusable per-thread scratch for [`unring_line`], sized to a line of length `n`.
 struct LineBufs {
     c: Vec<Complex64>,
     buf: Vec<Complex64>,
@@ -88,7 +165,6 @@ struct LineBufs {
     sp: Vec<f64>,
     sn: Vec<f64>,
     img: Vec<f64>,
-    imgn: Vec<f64>,
     tvs: Vec<f64>,
     diff: Vec<f64>,
     scratch_f: Vec<Complex64>,
@@ -96,8 +172,8 @@ struct LineBufs {
 }
 
 impl LineBufs {
-    fn new(n: usize, sf: usize, si: usize) -> Self {
-        let z = Complex64::new(0.0, 0.0);
+    fn new(ctx: &LineCtx) -> Self {
+        let (n, z) = (ctx.n, Complex64::new(0.0, 0.0));
         LineBufs {
             c: vec![z; n],
             buf: vec![z; n],
@@ -108,107 +184,51 @@ impl LineBufs {
             sp: vec![0.0; n],
             sn: vec![0.0; n],
             img: vec![0.0; n],
-            imgn: vec![0.0; n],
             tvs: vec![0.0; n],
             diff: vec![0.0; n],
-            scratch_f: vec![z; sf],
-            scratch_i: vec![z; si],
+            scratch_f: vec![z; ctx.fft.get_inplace_scratch_len()],
+            scratch_i: vec![z; ctx.ifft.get_inplace_scratch_len()],
         }
     }
 }
 
-/// Un-ring a single 1-D line in place, reusing `b`'s buffers.
-///
-/// Both shift directions of a magnitude `ssamp[s]` are evaluated with a single
-/// complex IFFT: for a real line the shifted spectra `c·ph` and `c·conj(ph)`
-/// are each Hermitian (the even-`n` Nyquist bin is symmetrised — see
-/// [`unring_axis`]), so their inverse transforms are real and can share one
-/// transform as `IFFT(c·(ph + i·conj(ph))) = img₊ + i·img₋`. `phases[s*n + m]`
-/// holds the packed factor `ph + i·conj(ph)`.
-#[allow(clippy::too_many_arguments)]
-fn unring_row_inplace(
-    row: &mut [f64],
-    b: &mut LineBufs,
-    n: usize,
-    n_points: usize,
-    ssamp: &[f64],
-    phases: &[Complex64],
-    fft: &Arc<dyn Fft<f64>>,
-    ifft: &Arc<dyn Fft<f64>>,
-) {
-    // Skip near-constant/empty lines (nothing to unring).
-    let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
-    for &v in row.iter() {
-        lo = lo.min(v);
-        hi = hi.max(v);
-    }
-    if hi - lo < 1e-12 {
-        return;
-    }
-
-    let LineBufs {
-        c,
-        buf,
-        tvp,
-        tvn,
-        isp,
-        isn,
-        sp,
-        sn,
-        img,
-        imgn,
-        tvs,
-        diff,
-        scratch_f,
-        scratch_i,
-    } = b;
-
+/// DIPY's `_gibbs_removal_1d` on one line, in place: for each shift `s` in `ssamp`, the line
+/// shifted by `+s` and by `−s` (`|ifft(c·exp(±k·s))|`, each its own inverse transform), and at
+/// every voxel the shift of least local TV in each direction; the result interpolates the two.
+fn unring_line(row: &mut [f64], b: &mut LineBufs, ctx: &LineCtx) {
+    let n = ctx.n;
+    let LineBufs { c, buf, tvp, tvn, isp, isn, sp, sn, img, tvs, diff, scratch_f, scratch_i } = b;
     for m in 0..n {
         c[m] = Complex64::new(row[m], 0.0);
     }
-    fft.process_with_scratch(c, scratch_f);
-
-    tv_min_line(row, n, n_points, tvp, diff);
+    ctx.fft.process_with_scratch(c, scratch_f);
+    tv_min_line(row, n, N_POINTS, tvp, diff);
     tvn.copy_from_slice(tvp);
     isp.copy_from_slice(row);
     isn.copy_from_slice(row);
     sp.iter_mut().for_each(|x| *x = 0.0);
     sn.iter_mut().for_each(|x| *x = 0.0);
     let inv_n = 1.0 / n as f64;
-
-    for (s_i, &s) in ssamp.iter().enumerate() {
-        let ph = &phases[s_i * n..s_i * n + n];
-
-        // Both shift directions in one IFFT: real part = positive shift,
-        // imaginary part = negative shift.
-        for m in 0..n {
-            buf[m] = c[m] * ph[m];
-        }
-        ifft.process_with_scratch(buf, scratch_i);
-        for m in 0..n {
-            img[m] = (buf[m].re * inv_n).abs();
-            imgn[m] = (buf[m].im * inv_n).abs();
-        }
-
-        tv_min_line(img, n, n_points, tvs, diff);
-        for i in 0..n {
-            if tvp[i] > tvs[i] {
-                isp[i] = img[i];
-                sp[i] = s;
-                tvp[i] = tvs[i];
+    for (s_i, &s) in ctx.ssamp.iter().enumerate() {
+        let ph = &ctx.phases[s_i * n..s_i * n + n];
+        for (positive, (best_tv, best_img, best_s)) in [(true, (&mut *tvp, &mut *isp, &mut *sp)), (false, (&mut *tvn, &mut *isn, &mut *sn))] {
+            for m in 0..n {
+                buf[m] = if positive { c[m] * ph[m] } else { c[m] * ph[m].conj() };
             }
-        }
-
-        tv_min_line(imgn, n, n_points, tvs, diff);
-        for i in 0..n {
-            if tvn[i] > tvs[i] {
-                isn[i] = imgn[i];
-                sn[i] = s;
-                tvn[i] = tvs[i];
+            ctx.ifft.process_with_scratch(buf, scratch_i);
+            for m in 0..n {
+                img[m] = (buf[m] * inv_n).norm();
+            }
+            tv_min_line(img, n, N_POINTS, tvs, diff);
+            for i in 0..n {
+                if best_tv[i] > tvs[i] {
+                    best_img[i] = img[i];
+                    best_s[i] = s;
+                    best_tv[i] = tvs[i];
+                }
             }
         }
     }
-
     for i in 0..n {
         let d = sp[i] + sn[i];
         if d != 0.0 {
@@ -229,124 +249,199 @@ fn fftfreq(n: usize) -> Vec<f64> {
         .collect()
 }
 
-/// Un-ring `vol` along a single axis (0=x, 1=y, 2=z), returning a new volume.
-///
-/// Lines are gathered into a contiguous `(num_lines × n)` matrix so they can be
-/// processed in place with `par_chunks_mut` — each worker thread reuses one
-/// [`LineBufs`] (no per-line allocation) and the shift phase factors are
-/// precomputed once for the whole axis.
+/// Un-ring `vol` along a single axis (0=x, 1=y, 2=z) over the whole volume, returning a new
+/// volume ([`GibbsMode::Volume`]'s 1-D step).
 fn unring_axis(vol: &[f64], (nx, ny, nz): (usize, usize, usize), axis: usize) -> Vec<f64> {
     let n = [nx, ny, nz][axis];
-    if n < 4 {
-        return vol.to_vec(); // too short to unring
-    }
-    let freq = fftfreq(n);
-    let ssamp: Vec<f64> = (0..N_SHIFTS)
-        .map(|i| 0.02 + (0.9 - 0.02) * i as f64 / (N_SHIFTS - 1) as f64)
-        .collect();
-    // Precompute the packed shift factors `ph + i·conj(ph)` once
-    // (line-independent), where `ph[m] = exp(i·2π·freq[m]·ssamp[s])` is the
-    // positive-shift factor. For even `n` the unpaired Nyquist bin is
-    // symmetrised to the real factor `cos(π·s)` — the trigonometric-
-    // interpolation convention — so both shifted spectra stay Hermitian and
-    // their (then real) inverse transforms can share one complex IFFT. This
-    // deviates from DIPY only in that one bin, an O(|c[n/2]|/n) difference.
-    let mut phases = vec![Complex64::new(0.0, 0.0); ssamp.len() * n];
-    for (s_i, &s) in ssamp.iter().enumerate() {
-        for m in 0..n {
-            let ph = if 2 * m == n {
-                Complex64::new((PI * s).cos(), 0.0)
-            } else {
-                Complex64::from_polar(1.0, 2.0 * PI * freq[m] * s)
-            };
-            phases[s_i * n + m] = ph + Complex64::i() * ph.conj();
-        }
+    if n < 2 {
+        return vol.to_vec();
     }
     let mut planner = FftPlanner::<f64>::new();
-    let fft = planner.plan_fft_forward(n);
-    let ifft = planner.plan_fft_inverse(n);
-    let sf = fft.get_inplace_scratch_len();
-    let si = ifft.get_inplace_scratch_len();
-
-    // Line start offsets + stride for this axis.
+    let ctx = LineCtx::new(n, &mut planner);
     let (stride, lines): (usize, Vec<usize>) = match axis {
         0 => (1, (0..ny * nz).map(|l| l * nx).collect()),
-        1 => {
-            let mut v = Vec::with_capacity(nx * nz);
-            for z in 0..nz {
-                for x in 0..nx {
-                    v.push(z * nx * ny + x);
-                }
-            }
-            (nx, v)
-        }
-        _ => {
-            let mut v = Vec::with_capacity(nx * ny);
-            for y in 0..ny {
-                for x in 0..nx {
-                    v.push(y * nx + x);
-                }
-            }
-            (nx * ny, v)
-        }
+        1 => (nx, (0..nz).flat_map(|z| (0..nx).map(move |x| z * nx * ny + x)).collect()),
+        _ => (nx * ny, (0..ny).flat_map(|y| (0..nx).map(move |x| y * nx + x)).collect()),
     };
-
-    // Gather strided lines into a contiguous matrix (num_lines × n).
-    let num_lines = lines.len();
-    let mut mat = vec![0.0_f64; num_lines * n];
+    let mut mat = vec![0.0_f64; lines.len() * n];
     for (l, &start) in lines.iter().enumerate() {
-        let dst = &mut mat[l * n..l * n + n];
-        for (i, d) in dst.iter_mut().enumerate() {
+        for (i, d) in mat[l * n..l * n + n].iter_mut().enumerate() {
             *d = vol[start + i * stride];
         }
     }
-
-    // Process each row in place (buffers reused per worker thread).
     #[cfg(feature = "parallel")]
-    mat.par_chunks_mut(n).for_each_init(
-        || LineBufs::new(n, sf, si),
-        |b, row| unring_row_inplace(row, b, n, 3, &ssamp, &phases, &fft, &ifft),
-    );
+    mat.par_chunks_mut(n).for_each_init(|| LineBufs::new(&ctx), |b, row| unring_line(row, b, &ctx));
     #[cfg(not(feature = "parallel"))]
     {
-        let mut b = LineBufs::new(n, sf, si);
+        let mut b = LineBufs::new(&ctx);
         for row in mat.chunks_mut(n) {
-            unring_row_inplace(row, &mut b, n, 3, &ssamp, &phases, &fft, &ifft);
+            unring_line(row, &mut b, &ctx);
         }
     }
-
-    // Scatter back to a new volume.
     let mut out = vol.to_vec();
     for (l, &start) in lines.iter().enumerate() {
-        let src = &mat[l * n..l * n + n];
-        for (i, &s) in src.iter().enumerate() {
+        for (i, &s) in mat[l * n..l * n + n].iter().enumerate() {
             out[start + i * stride] = s;
         }
     }
     out
 }
 
-/// Gibbs-unring a single 3-D volume.
-///
-/// Negative results are set to 0 (a deviation from DIPY; see the module docs).
-pub fn gibbs_unring_volume(vol: &[f64], dims: (usize, usize, usize)) -> Vec<f64> {
+/// DIPY's `_weights(shape)`: `G0`, `G1` (row-major `n0 × n1`) on the fft-shifted grid, from
+/// `linspace(−π, π)` frequencies, with DIPY's edge rows and columns.
+fn dipy_weights(n0: usize, n1: usize) -> (Vec<f64>, Vec<f64>) {
+    let mut g0 = vec![0.0_f64; n0 * n1];
+    let mut g1 = vec![0.0_f64; n0 * n1];
+    let k0 = linspace(-PI, PI, n0);
+    let k1 = linspace(-PI, PI, n1);
+    for i in 1..n0.saturating_sub(1) {
+        for j in 1..n1.saturating_sub(1) {
+            let c0 = 1.0 + k0[i].cos();
+            let c1 = 1.0 + k1[j].cos();
+            g1[i * n1 + j] = c0 / (c0 + c1);
+            g0[i * n1 + j] = c1 / (c0 + c1);
+        }
+    }
+    if n0 >= 2 && n1 >= 1 {
+        for i in 1..n0 - 1 {
+            g1[i * n1] = 1.0;
+            g1[i * n1 + n1 - 1] = 1.0;
+        }
+    }
+    if n1 >= 2 && n0 >= 1 {
+        for j in 1..n1 - 1 {
+            g0[j] = 1.0;
+            g0[(n0 - 1) * n1 + j] = 1.0;
+        }
+    }
+    for &(i, j) in &[(0, 0), (n0 - 1, n1 - 1), (0, n1 - 1), (n0 - 1, 0)] {
+        g1[i * n1 + j] = 0.5;
+        g0[i * n1 + j] = 0.5;
+    }
+    (g0, g1)
+}
+
+/// Everything a slice of `n0 × n1` needs (DIPY's `_gibbs_removal_2d`).
+struct SliceCtx {
+    n0: usize,
+    n1: usize,
+    line0: LineCtx,
+    line1: LineCtx,
+    g0: Vec<f64>,
+    g1: Vec<f64>,
+}
+
+/// In-place 2-D FFT of a row-major `n0 × n1` array with the line plans.
+fn fft2_inplace(a: &mut [Complex64], n0: usize, n1: usize, along1: &Arc<dyn Fft<f64>>, along0: &Arc<dyn Fft<f64>>) {
+    for row in a.chunks_mut(n1) {
+        along1.process(row);
+    }
+    let mut col = vec![Complex64::new(0.0, 0.0); n0];
+    for j in 0..n1 {
+        for i in 0..n0 {
+            col[i] = a[i * n1 + j];
+        }
+        along0.process(&mut col);
+        for i in 0..n0 {
+            a[i * n1 + j] = col[i];
+        }
+    }
+}
+
+/// DIPY's `_gibbs_removal_2d` on a row-major `n0 × n1` slice: unring along axis 1 (`img_c1`) and
+/// axis 0 (`img_c0`), then `|ifft2(fftshift(fft2(img_c1))·G1 + fftshift(fft2(img_c0))·G0)|`.
+fn unring_slice(img: &[f64], ctx: &SliceCtx) -> Vec<f64> {
+    let (n0, n1) = (ctx.n0, ctx.n1);
+    // Along axis 1: rows of length n1.
+    let mut c1 = img.to_vec();
+    let mut b1 = LineBufs::new(&ctx.line1);
+    for row in c1.chunks_mut(n1) {
+        unring_line(row, &mut b1, &ctx.line1);
+    }
+    // Along axis 0: columns of length n0.
+    let mut c0 = img.to_vec();
+    let mut b0 = LineBufs::new(&ctx.line0);
+    let mut col = vec![0.0_f64; n0];
+    for j in 0..n1 {
+        for i in 0..n0 {
+            col[i] = c0[i * n1 + j];
+        }
+        unring_line(&mut col, &mut b0, &ctx.line0);
+        for i in 0..n0 {
+            c0[i * n1 + j] = col[i];
+        }
+    }
+    let mut s1: Vec<Complex64> = c1.iter().map(|&v| Complex64::new(v, 0.0)).collect();
+    let mut s0: Vec<Complex64> = c0.iter().map(|&v| Complex64::new(v, 0.0)).collect();
+    fft2_inplace(&mut s1, n0, n1, &ctx.line1.fft, &ctx.line0.fft);
+    fft2_inplace(&mut s0, n0, n1, &ctx.line1.fft, &ctx.line0.fft);
+    // fftshift (roll by n//2 on each axis), weight, sum.
+    let (h0, h1) = (n0 / 2, n1 / 2);
+    let mut sum = vec![Complex64::new(0.0, 0.0); n0 * n1];
+    for i in 0..n0 {
+        let si = (i + n0 - h0) % n0;
+        for j in 0..n1 {
+            let sj = (j + n1 - h1) % n1;
+            let w = i * n1 + j;
+            sum[w] = s1[si * n1 + sj] * ctx.g1[w] + s0[si * n1 + sj] * ctx.g0[w];
+        }
+    }
+    fft2_inplace(&mut sum, n0, n1, &ctx.line1.ifft, &ctx.line0.ifft);
+    let inv = 1.0 / (n0 * n1) as f64;
+    sum.iter().map(|z| (z * inv).norm()).collect()
+}
+
+/// DIPY's `gibbs_removal(vol, slice_axis)` on one 3-D volume.
+fn unring_slices(vol: &[f64], (nx, ny, nz): (usize, usize, usize), slice_axis: usize) -> Vec<f64> {
+    // The slice's axes in order (DIPY moves the slice axis first and keeps the others' order).
+    let (ns, n0, n1) = match slice_axis {
+        0 => (nx, ny, nz),
+        1 => (ny, nx, nz),
+        _ => (nz, nx, ny),
+    };
+    let index = |s: usize, i: usize, j: usize| match slice_axis {
+        0 => s + i * nx + j * nx * ny,
+        1 => i + s * nx + j * nx * ny,
+        _ => i + j * nx + s * nx * ny,
+    };
+    let mut planner = FftPlanner::<f64>::new();
+    let (g0, g1) = dipy_weights(n0, n1);
+    let ctx = SliceCtx { n0, n1, line0: LineCtx::new(n0, &mut planner), line1: LineCtx::new(n1, &mut planner), g0, g1 };
+    let slice_out = |s: usize| -> Vec<f64> {
+        let mut img = vec![0.0_f64; n0 * n1];
+        for i in 0..n0 {
+            for j in 0..n1 {
+                img[i * n1 + j] = vol[index(s, i, j)];
+            }
+        }
+        unring_slice(&img, &ctx)
+    };
+    #[cfg(feature = "parallel")]
+    let slices: Vec<Vec<f64>> = (0..ns).into_par_iter().map(slice_out).collect();
+    #[cfg(not(feature = "parallel"))]
+    let slices: Vec<Vec<f64>> = (0..ns).map(slice_out).collect();
+    let mut out = vec![0.0_f64; vol.len()];
+    for (s, img) in slices.iter().enumerate() {
+        for i in 0..n0 {
+            for j in 0..n1 {
+                out[index(s, i, j)] = img[i * n1 + j];
+            }
+        }
+    }
+    out
+}
+
+/// QSM.rs's 3-D generalisation ([`GibbsMode::Volume`]).
+fn unring_volume_3d(vol: &[f64], dims: (usize, usize, usize)) -> Vec<f64> {
     let (nx, ny, nz) = dims;
     let n_vox = nx * ny * nz;
-    assert_eq!(vol.len(), n_vox, "vol length must be nx*ny*nz");
-
     let cx = unring_axis(vol, dims, 0);
     let cy = unring_axis(vol, dims, 1);
     let cz = unring_axis(vol, dims, 2);
-
-    // Fourier-domain weighted combine (Kellner cosine weights, 3-D form).
-    let fx = fftfreq(nx);
-    let fy = fftfreq(ny);
-    let fz = fftfreq(nz);
     let cosk = |f: f64| 1.0 + (2.0 * PI * f).cos();
-    let ckx: Vec<f64> = fx.iter().map(|&f| cosk(f)).collect();
-    let cky: Vec<f64> = fy.iter().map(|&f| cosk(f)).collect();
-    let ckz: Vec<f64> = fz.iter().map(|&f| cosk(f)).collect();
-
+    let ckx: Vec<f64> = fftfreq(nx).iter().map(|&f| cosk(f)).collect();
+    let cky: Vec<f64> = fftfreq(ny).iter().map(|&f| cosk(f)).collect();
+    let ckz: Vec<f64> = fftfreq(nz).iter().map(|&f| cosk(f)).collect();
     let sx = fft3d_real(&cx, nx, ny, nz);
     let sy = fft3d_real(&cy, nx, ny, nz);
     let sz = fft3d_real(&cz, nx, ny, nz);
@@ -355,7 +450,7 @@ pub fn gibbs_unring_volume(vol: &[f64], dims: (usize, usize, usize)) -> Vec<f64>
         for y in 0..ny {
             for x in 0..nx {
                 let idx = x + y * nx + z * nx * ny;
-                let wx = cky[y] * ckz[z]; // axis-x correction weight
+                let wx = cky[y] * ckz[z];
                 let wy = ckx[x] * ckz[z];
                 let wz = ckx[x] * cky[y];
                 let den = wx + wy + wz;
@@ -368,7 +463,6 @@ pub fn gibbs_unring_volume(vol: &[f64], dims: (usize, usize, usize)) -> Vec<f64>
         }
     }
     let mut out = ifft3d_real(&spec, nx, ny, nz);
-    // Deviation from DIPY: no negative magnitudes.
     for v in out.iter_mut() {
         if *v < 0.0 {
             *v = 0.0;
@@ -377,17 +471,38 @@ pub fn gibbs_unring_volume(vol: &[f64], dims: (usize, usize, usize)) -> Vec<f64>
     out
 }
 
-/// Gibbs-unring multi-volume data (e.g. multi-echo magnitude).
+/// Gibbs-unring a single 3-D volume with `mode` ([`GibbsMode::default`] is DIPY's).
+///
+/// The output is never negative: DIPY's 2-D combination is a magnitude, and the 3-D mode sets
+/// negative values to 0.
+///
+/// # Panics
+/// If `vol` is not `nx·ny·nz` long or a slice axis is not 0, 1 or 2.
+pub fn gibbs_unring_volume(vol: &[f64], dims: (usize, usize, usize), mode: GibbsMode) -> Vec<f64> {
+    let (nx, ny, nz) = dims;
+    assert_eq!(vol.len(), nx * ny * nz, "vol length must be nx*ny*nz");
+    match mode {
+        GibbsMode::Slices { slice_axis } => {
+            assert!(slice_axis < 3, "slice_axis must be 0, 1 or 2");
+            unring_slices(vol, dims, slice_axis)
+        }
+        GibbsMode::Volume => unring_volume_3d(vol, dims),
+    }
+}
+
+/// Gibbs-unring multi-volume data (e.g. multi-echo magnitude), each volume in turn, as DIPY
+/// does for a 4-D array.
 ///
 /// # Arguments
 /// * `data` - Interleaved `[voxel0_vol0, voxel0_vol1, ..., voxel1_vol0, ...]`
 ///   (row-major `(n_voxels, n_vols)`).
 /// * `dims` - Volume dimensions `(nx, ny, nz)`.
 /// * `n_vols` - Number of volumes.
+/// * `mode` - See [`GibbsMode`]; the default is DIPY's.
 ///
 /// # Returns
-/// Unrung data in the same layout, with negative values set to 0 (see the module docs).
-pub fn gibbs_unring(data: &[f64], dims: (usize, usize, usize), n_vols: usize) -> Vec<f64> {
+/// Unrung data in the same layout (never negative).
+pub fn gibbs_unring(data: &[f64], dims: (usize, usize, usize), n_vols: usize, mode: GibbsMode) -> Vec<f64> {
     let (nx, ny, nz) = dims;
     let n_vox = nx * ny * nz;
     assert_eq!(data.len(), n_vox * n_vols, "data length must be n_voxels * n_vols");
@@ -397,7 +512,7 @@ pub fn gibbs_unring(data: &[f64], dims: (usize, usize, usize), n_vols: usize) ->
         for v in 0..n_vox {
             vol[v] = data[v * n_vols + e];
         }
-        let un = gibbs_unring_volume(&vol, dims);
+        let un = gibbs_unring_volume(&vol, dims, mode);
         for v in 0..n_vox {
             out[v * n_vols + e] = un[v];
         }
@@ -424,12 +539,14 @@ pub fn gibbs_unring(data: &[f64], dims: (usize, usize, usize), n_vols: usize) ->
 /// * `n_vols` - Number of volumes.
 /// * `mask` - Binary mask `[nx*ny*nz]`; the bounding box of `mask != 0` is unrung.
 /// * `margin` - Voxels to expand the bounding box on every side.
+/// * `mode` - See [`GibbsMode`].
 pub fn gibbs_unring_masked(
     data: &[f64],
     dims: (usize, usize, usize),
     n_vols: usize,
     mask: &[u8],
     margin: usize,
+    mode: GibbsMode,
 ) -> Vec<f64> {
     let (nx, ny, nz) = dims;
     let n_vox = nx * ny * nz;
@@ -469,7 +586,7 @@ pub fn gibbs_unring_masked(
 
     // If the crop is (almost) the whole volume, just do the full transform.
     if cx * cy * cz >= n_vox * 9 / 10 {
-        return gibbs_unring(data, dims, n_vols);
+        return gibbs_unring(data, dims, n_vols, mode);
     }
 
     let n_crop = cx * cy * cz;
@@ -485,7 +602,7 @@ pub fn gibbs_unring_masked(
                 }
             }
         }
-        let un = gibbs_unring_volume(&sub, (cx, cy, cz));
+        let un = gibbs_unring_volume(&sub, (cx, cy, cz), mode);
         // Write the corrected crop back.
         for zz in 0..cz {
             for yy in 0..cy {
@@ -544,7 +661,7 @@ mod tests {
         // Extract the corrected centre line.
         let line: Vec<f64> = (0..nx).map(|x| un[x + nx + nx * ny]).collect();
 
-        // Faithful-port check: values must match DIPY's `_gibbs_removal_1d` on the
+        // Port check: values must match DIPY's `_gibbs_removal_1d` on the
         // identical ringing line (indices 30..=40).
         let dipy_ref = [
             0.06875, 0.25484, 0.67489, 1.06882, 1.02528, 0.96117, 0.98865, 1.02746, 1.00689,
@@ -594,13 +711,16 @@ mod tests {
         }
         let rung = ifft3d_real(&spec, nx, ny, nz);
         assert!(rung.iter().any(|&v| v < -1e-3), "the test input should undershoot");
-        let un = gibbs_unring_volume(&rung, (nx, ny, nz));
+        let un = gibbs_unring_volume(&rung, (nx, ny, nz), GibbsMode::Volume);
         assert!(un.iter().all(|&v| v >= 0.0), "unrung magnitude must not be negative");
         assert!(un.contains(&0.0));
         let c = 12 + 12 * nx + 12 * nx * ny;
         assert!(un[c] > 0.5, "block interior kept: {}", un[c]);
-        let multi = gibbs_unring(&rung, (nx, ny, nz), 1);
-        assert!(multi.iter().all(|&v| v >= 0.0));
+        for mode in [GibbsMode::Volume, GibbsMode::default(), GibbsMode::Slices { slice_axis: 0 }] {
+            let multi = gibbs_unring(&rung, (nx, ny, nz), 1, mode);
+            assert!(multi.iter().all(|&v| v >= 0.0), "{mode:?}");
+            assert!(multi[c] > 0.5, "{mode:?}: block interior kept: {}", multi[c]);
+        }
     }
 
     /// Timing + numeric fingerprint on a synthetic volume (sphere + deterministic
@@ -627,7 +747,7 @@ mod tests {
             }
         }
         let t = std::time::Instant::now();
-        let out = gibbs_unring_volume(&vol, (nx, ny, nz));
+        let out = gibbs_unring_volume(&vol, (nx, ny, nz), GibbsMode::default());
         let dt = t.elapsed();
         let sum: f64 = out.iter().sum();
         let sq: f64 = out.iter().map(|v| v * v).sum();

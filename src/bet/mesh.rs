@@ -38,6 +38,7 @@ pub fn build_neighbor_matrix(n_vertices: usize, faces: &[[usize; 3]], max_neighb
     (neighbor_matrix, neighbor_counts)
 }
 
+#[cfg(test)]
 /// Compute outward-pointing normals at each vertex
 pub fn compute_vertex_normals(vertices: &[[f64; 3]], faces: &[[usize; 3]]) -> Vec<[f64; 3]> {
     let n_vertices = vertices.len();
@@ -85,6 +86,32 @@ pub fn compute_vertex_normals(vertices: &[[f64; 3]], faces: &[[usize; 3]]) -> Ve
         }
     }
 
+    normals
+}
+
+/// bet2's `Mpoint::local_normal`: the sum of its triangles' `Triangle::normal()`,
+/// `(v2 − v0) × (v1 − v0)` (not normalised, so area-weighted), normalised.
+pub fn bet2_vertex_normals(vertices: &[[f64; 3]], faces: &[[usize; 3]]) -> Vec<[f64; 3]> {
+    let mut normals: Vec<[f64; 3]> = vec![[0.0, 0.0, 0.0]; vertices.len()];
+    for &[i0, i1, i2] in faces {
+        let (v0, v1, v2) = (vertices[i0], vertices[i1], vertices[i2]);
+        let a = [v2[0] - v0[0], v2[1] - v0[1], v2[2] - v0[2]];
+        let b = [v1[0] - v0[0], v1[1] - v0[1], v1[2] - v0[2]];
+        let n = [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+        for &idx in &[i0, i1, i2] {
+            for c in 0..3 {
+                normals[idx][c] += n[c];
+            }
+        }
+    }
+    for n in normals.iter_mut() {
+        let norm = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+        if norm > 0.0 {
+            for c in n.iter_mut() {
+                *c /= norm;
+            }
+        }
+    }
     normals
 }
 

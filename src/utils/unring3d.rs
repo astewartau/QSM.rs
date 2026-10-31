@@ -165,7 +165,7 @@ impl LineCtx {
                 let arg = 2.0 * indexshift(m, n) * std::f64::consts::PI * s / n as f64;
                 phases[f * n + m] = Complex64::new(0.0, arg).exp();
             }
-            if n % 2 == 0 {
+            if n.is_multiple_of(2) {
                 phases[f * n + n / 2] = Complex64::new(0.0, 0.0);
             }
         }

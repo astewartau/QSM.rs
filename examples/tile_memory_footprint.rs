@@ -104,11 +104,11 @@ fn run(id: &str, w: &[Vec<u8>], field: &[f64], mask: &[u8], grid: &Grid, cfg: &T
         "modl-qsm" => inversion::modl_qsm::modl_qsm_tiled(field, mask, grid, bdir, &w[0], cfg, none),
         "nextqsm" => inversion::nextqsm::nextqsm_tiled(field, mask, grid, bdir, &w[0], &w[1], cfg, none),
         // One echo: echoes run one after another, so more of them add no tile in flight.
-        "iqsm" => inversion::iqsm_multi_echo(&[field], &[], mask, grid, &[te], b0, 1.0, 0, &w[0], Some(cfg)),
+        "iqsm" => inversion::iqsm_multi_echo(&[field], &[], mask, grid, &[te], b0, 1.0, 0, &w[0], Some(cfg), Default::default()),
         "iqsm-plus" => {
             inversion::iqsm_plus_multi_echo(&[field], &[], mask, grid, &[te], b0, bdir, 1.0, 0, &w[0], Some(cfg))
         }
-        "iqfm" => inversion::iqfm_multi_echo(&[field], &[], mask, grid, &[te], b0, 1.0, 0, &w[0], Some(cfg)),
+        "iqfm" => inversion::iqfm_multi_echo(&[field], &[], mask, grid, &[te], b0, 1.0, 0, &w[0], Some(cfg), Default::default()),
         _ => panic!("{id} is not a tiled network"),
     };
     out.unwrap_or_else(|e| panic!("{id}: {e}")).len()

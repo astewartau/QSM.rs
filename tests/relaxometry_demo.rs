@@ -234,7 +234,7 @@ fn test_relaxometry_demo() {
 
     // --- Gibbs unringing (k-space-truncated R2* map → ringing) ---
     let rung = kspace_truncate(&r2star_true, 0.30);
-    let unrung = qsm_core::unring::gibbs_unring_volume(&rung, dims);
+    let unrung = qsm_core::unring::gibbs_unring_volume(&rung, dims, qsm_core::unring::GibbsMode::default());
     let tv_before = tv3(&rung, &mask);
     let tv_after = tv3(&unrung, &mask);
     metric("Gibbs unring", "tv_before", tv_before);

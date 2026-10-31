@@ -47,6 +47,8 @@ pub mod xqsm;
 pub mod qsmnet;
 #[cfg(feature = "onnx")]
 pub mod autoqsm;
+pub mod iqsm_echo_weighting;
+pub use iqsm_echo_weighting::IqsmEchoWeighting;
 #[cfg(feature = "onnx")]
 pub mod iqsm;
 #[cfg(feature = "onnx")]

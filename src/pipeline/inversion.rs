@@ -627,7 +627,9 @@ const IQSM_ERODED_RAD: i32 = 3;
 
 /// Run iQSM single-step reconstruction from wrapped **phase** (joint unwrap +
 /// background removal + dipole inversion). Multi-echo inputs are reconstructed
-/// per echo and magnitude·TE²-combined. Requires the `onnx` feature + `iqsm` weights.
+/// per echo and combined with `echo_weighting` (default (magnitude·TE)², the inverse-variance
+/// weight; see [`IqsmEchoWeighting`](crate::inversion::IqsmEchoWeighting)). Requires the `onnx`
+/// feature + `iqsm` weights.
 ///
 /// `phases`/`magnitudes` are per-echo wrapped-phase / magnitude volumes (column-major);
 /// `metadata` supplies the grid, echo times, and B0. Returns susceptibility (ppm),
@@ -640,6 +642,7 @@ pub fn run_iqsm(
     metadata: &ScanMetadata,
     reference: QsmReference,
     tile: Option<(usize, usize)>,
+    echo_weighting: crate::inversion::IqsmEchoWeighting,
 ) -> Result<Vec<f64>, PipelineError> {
     metadata.require_contiguous_slices()?;
     let grid = metadata.grid();
@@ -647,7 +650,7 @@ pub fn run_iqsm(
     let tile = tile.map(|(core, halo)| crate::inversion::TileConfig { core, halo });
     let chi = crate::inversion::iqsm_multi_echo(
         phases, magnitudes, mask, &grid, &metadata.echo_times,
-        metadata.field_strength, IQSM_PHASE_SIGN, IQSM_ERODED_RAD, &bytes, tile.as_ref(),
+        metadata.field_strength, IQSM_PHASE_SIGN, IQSM_ERODED_RAD, &bytes, tile.as_ref(), echo_weighting,
     ).map_err(|e| PipelineError::AlgorithmError(e.to_string()))?;
     Ok(super::referencing::apply_reference(&chi, mask, reference))
 }
@@ -656,12 +659,14 @@ pub fn run_iqsm(
 pub fn run_iqsm(
     _phases: &[&[f64]], _magnitudes: &[&[f64]], _mask: &[u8],
     _metadata: &ScanMetadata, _reference: QsmReference, _tile: Option<(usize, usize)>,
+    _echo_weighting: crate::inversion::IqsmEchoWeighting,
 ) -> Result<Vec<f64>, PipelineError> {
     Err(PipelineError::InvalidConfig("iQSM requires building qsm-core with the 'onnx' feature".into()))
 }
 
 /// Run iQSM+ single-step reconstruction from wrapped **phase** (orientation-adaptive
-/// variant; the B0 direction is a genuine network input). See [`run_iqsm`].
+/// variant; the B0 direction is a genuine network input). See [`run_iqsm`]; the echoes are
+/// combined with (magnitude·TE)² weights, as in both of the authors' implementations.
 #[cfg(feature = "onnx")]
 pub fn run_iqsm_plus(
     phases: &[&[f64]],
@@ -694,7 +699,8 @@ pub fn run_iqsm_plus(
 /// Run iQFM: joint unwrapping + background removal from wrapped **phase** in one
 /// network (the tissue-field head of the iQSM LoT-Unet). Returns the local
 /// (background-removed) field in ppm — feed it to any dipole inversion. This is a
-/// deep-learning replacement for the unwrap + BFR stages, not an inversion.
+/// deep-learning replacement for the unwrap + BFR stages, not an inversion. Multi-echo
+/// inputs are combined with `echo_weighting`, as in [`run_iqsm`].
 /// Requires the `onnx` feature + `iqfm` weights.
 #[cfg(feature = "onnx")]
 pub fn run_iqfm(
@@ -703,6 +709,7 @@ pub fn run_iqfm(
     mask: &[u8],
     metadata: &ScanMetadata,
     tile: Option<(usize, usize)>,
+    echo_weighting: crate::inversion::IqsmEchoWeighting,
 ) -> Result<Vec<f64>, PipelineError> {
     metadata.require_contiguous_slices()?;
     let grid = metadata.grid();
@@ -710,14 +717,14 @@ pub fn run_iqfm(
     let tile = tile.map(|(core, halo)| crate::inversion::TileConfig { core, halo });
     crate::inversion::iqfm_multi_echo(
         phases, magnitudes, mask, &grid, &metadata.echo_times,
-        metadata.field_strength, IQSM_PHASE_SIGN, IQSM_ERODED_RAD, &bytes, tile.as_ref(),
+        metadata.field_strength, IQSM_PHASE_SIGN, IQSM_ERODED_RAD, &bytes, tile.as_ref(), echo_weighting,
     ).map_err(|e| PipelineError::AlgorithmError(e.to_string()))
 }
 
 #[cfg(not(feature = "onnx"))]
 pub fn run_iqfm(
     _phases: &[&[f64]], _magnitudes: &[&[f64]], _mask: &[u8], _metadata: &ScanMetadata,
-    _tile: Option<(usize, usize)>,
+    _tile: Option<(usize, usize)>, _echo_weighting: crate::inversion::IqsmEchoWeighting,
 ) -> Result<Vec<f64>, PipelineError> {
     Err(PipelineError::InvalidConfig("iQFM requires building qsm-core with the 'onnx' feature".into()))
 }

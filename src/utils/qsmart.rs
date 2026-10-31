@@ -26,6 +26,86 @@ use crate::kernels::dipole::dipole_kernel;
 use crate::pipeline::config::InversionAlgorithm;
 use num_complex::Complex64;
 
+/// The k-space grid [`adjust_offset`] builds its dipole kernel on.
+///
+/// The two agree on even matrix dimensions; they differ only when a dimension is odd.
+#[cfg_attr(feature = "introspection", derive(serde::Serialize))]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum QsmartOffsetGrid {
+    /// The FFT frequency grid ([`dipole_kernel`]: k = 0, ±1/FOV, …, D(0) = 0). The default.
+    #[default]
+    Fft,
+    /// The grid QSMART's `adjust_offset.m` builds, with its complex inner product
+    /// `o = real(x1'*x2/(x1'*x1))`, for parity runs against the authors' code. Per axis it takes
+    /// `x = -N/2:N/2-1` divided by the FOV, zeroes `D(floor(Nx/2+1), floor(Ny/2+1),
+    /// floor(Nz/2+1))` and `fftshift`s. On odd `N` that puts the samples half a step off the FFT
+    /// grid (±0.5/FOV, ±1.5/FOV, …; no k = 0, the zeroed sample at k = −0.5/FOV), which looks
+    /// like an oversight in the original (the grid is meant to be the FFT's), so it is not the
+    /// default. On even `N` it is exactly [`Fft`](Self::Fft).
+    ///
+    /// Measured on the QSM-CI simulated head (164×205×205, astewartau/QSM.rs#320): the authors'
+    /// QSMART v1.0 run on the matrix as given has offset −0.00144; the FFT grid gives −0.00069,
+    /// and the χ maps differ by 3.53 % NRMSE (inside the mask). With this grid QSM.rs's
+    /// `adjust_offset` matches the authors' to rounding, and the whole two-stage chain, fed the
+    /// authors' total field, R₀ and vessel mask, is 0.16 % NRMSE from it (3.54 % on `Fft`).
+    QsmartReference,
+}
+
+impl QsmartOffsetGrid {
+    /// Name used on the command line and in configs.
+    pub fn id(&self) -> &'static str {
+        match self {
+            Self::Fft => "fft",
+            Self::QsmartReference => "qsmart-reference",
+        }
+    }
+
+    /// Parses [`id`](Self::id).
+    pub fn from_id(s: &str) -> Option<Self> {
+        match s {
+            "fft" => Some(Self::Fft),
+            "qsmart-reference" => Some(Self::QsmartReference),
+            _ => None,
+        }
+    }
+}
+
+/// The dipole kernel of [`QsmartOffsetGrid::QsmartReference`] (`adjust_offset.m`'s own grid),
+/// flattened in Fortran order.
+fn adjust_offset_kernel(grid: &crate::Grid, b0_dir: (f64, f64, f64)) -> Vec<f64> {
+    let (nx, ny, nz) = grid.dims;
+    let (vsx, vsy, vsz) = grid.voxel_size;
+    // k at output index p: fftshift = circshift by floor(N/2), so p holds x((p - floor(N/2)) mod N).
+    let axis = |n: usize, vs: f64| -> Vec<f64> {
+        let fov = n as f64 * vs;
+        (0..n)
+            .map(|p| ((p + n - n / 2) % n) as f64 - n as f64 / 2.0)
+            .map(|x| x / fov)
+            .collect()
+    };
+    // The zeroed sample: MATLAB index floor(N/2+1) (0-based N/2) before the shift.
+    let zero_at = |n: usize| (n / 2 + n / 2) % n;
+    let (kx, ky, kz) = (axis(nx, vsx), axis(ny, vsy), axis(nz, vsz));
+    let (bx, by, bz) = b0_dir;
+    let bn = (bx * bx + by * by + bz * bz).sqrt();
+    let (bx, by, bz) = (bx / bn, by / bn, bz / bn);
+    let (zx, zy, zz) = (zero_at(nx), zero_at(ny), zero_at(nz));
+    let mut d = vec![0.0; nx * ny * nz];
+    for k in 0..nz {
+        for j in 0..ny {
+            for i in 0..nx {
+                if i == zx && j == zy && k == zz {
+                    continue;
+                }
+                let k2 = kx[i] * kx[i] + ky[j] * ky[j] + kz[k] * kz[k];
+                let kb = kx[i] * bx + ky[j] * by + kz[k] * bz;
+                d[i + j * nx + k * nx * ny] = 1.0 / 3.0 - kb * kb / k2;
+            }
+        }
+    }
+    d
+}
+
 /// Adjust offset between two-stage QSMART susceptibility maps
 ///
 /// Combines chi_1 (whole ROI) and chi_2 (tissue only) with offset adjustment
@@ -39,6 +119,8 @@ use num_complex::Complex64;
 /// * `grid` - Volume grid (dimensions and voxel sizes)
 /// * `b0_dir` - B0 field direction (unit vector)
 /// * `ppm` - PPM conversion factor (to scale lfs_sdf back)
+/// * `offset_grid` - The k-space grid of the dipole kernel ([`QsmartOffsetGrid`]; matters only
+///   for odd matrix dimensions)
 ///
 /// # Returns
 /// Combined and offset-adjusted susceptibility map
@@ -50,6 +132,7 @@ pub fn adjust_offset(
     grid: &crate::Grid,
     b0_dir: (f64, f64, f64),
     ppm: f64,
+    offset_grid: QsmartOffsetGrid,
 ) -> Vec<f64> {
     let (nx, ny, nz) = grid.dims;
     // Scale lfs_sdf back (it was multiplied by ppm in the QSMART pipeline)
@@ -72,8 +155,10 @@ pub fn adjust_offset(
         .map(|(&c1, &c2)| c1 + c2)
         .collect();
 
-    // Get dipole kernel
-    let d_kernel = dipole_kernel(grid, b0_dir);
+    let d_kernel = match offset_grid {
+        QsmartOffsetGrid::Fft => dipole_kernel(grid, b0_dir),
+        QsmartOffsetGrid::QsmartReference => adjust_offset_kernel(grid, b0_dir),
+    };
 
     // Compute offset using Fourier-space relationship
     // x1 = ifft(D * fft(removed_voxels))
@@ -107,18 +192,18 @@ pub fn adjust_offset(
     ifft3d(&mut d_removed, nx, ny, nz);
     ifft3d(&mut d_combined, nx, ny, nz);
 
-    // x1 = real part of ifft(D * fft(removed))
-    let x1: Vec<f64> = d_removed.iter().map(|c| c.re).collect();
-
-    // x2 = lfs_sdf - real(ifft(D * fft(combined_chi)))
-    let x2: Vec<f64> = lfs_scaled.iter()
-        .zip(d_combined.iter())
-        .map(|(&lfs, c)| lfs - c.re)
-        .collect();
-
-    // Compute offset: o = (x1' * x2) / (x1' * x1)
-    let x1_dot_x2: f64 = x1.iter().zip(x2.iter()).map(|(&a, &b)| a * b).sum();
-    let x1_dot_x1: f64 = x1.iter().map(|&a| a * a).sum();
+    // adjust_offset.m: o = real(x1'*x2/(x1'*x1)) with x1 = ifftn(D.*fftn(removed_voxs)) and
+    // x2 = lfs_sdf - ifftn(D.*fftn(combined_chi)) kept complex. On the FFT grid D is
+    // Hermitian-symmetric and the imaginary parts vanish (to rounding); on the reference grid
+    // with odd dims they do not, and the conjugate inner product is what the original computes.
+    let mut x1_dot_x2 = Complex64::new(0.0, 0.0);
+    let mut x1_dot_x1 = 0.0;
+    for ((x1, &lfs), c) in d_removed.iter().zip(lfs_scaled.iter()).zip(d_combined.iter()) {
+        let x2 = Complex64::new(lfs, 0.0) - c;
+        x1_dot_x2 += x1.conj() * x2;
+        x1_dot_x1 += x1.norm_sqr();
+    }
+    let x1_dot_x2 = x1_dot_x2.re;
 
     let offset = if x1_dot_x1.abs() > 1e-10 {
         x1_dot_x2 / x1_dot_x1
@@ -380,6 +465,9 @@ pub struct QsmartParams {
     pub ilsqr_pad_mm: f64,
     /// Dipole inversion algorithm used for both QSMART stages
     pub inversion: InversionAlgorithm,
+    /// The k-space grid of [`adjust_offset`]'s dipole kernel ([`QsmartOffsetGrid`]: the FFT grid
+    /// by default; `adjust_offset.m`'s own grid for parity runs). Matters only for odd dims.
+    pub adjust_offset_grid: QsmartOffsetGrid,
     /// B0 field direction
     pub b0_dir: (f64, f64, f64),
 }
@@ -403,6 +491,7 @@ impl Default for QsmartParams {
             ilsqr_max_iter: 50,
             ilsqr_pad_mm: crate::inversion::STI_DEFAULT_PAD_MM,
             inversion: InversionAlgorithm::Ilsqr,
+            adjust_offset_grid: QsmartOffsetGrid::Fft,
             b0_dir: (0.0, 0.0, 1.0),
         }
     }
@@ -564,10 +653,35 @@ mod tests {
 
         let result = adjust_offset(
             &removed, &lfs, &chi_1, &chi_2,
-            &g, (0.0, 0.0, 1.0), 1.0
+            &g, (0.0, 0.0, 1.0), 1.0, QsmartOffsetGrid::Fft
         );
 
         assert_eq!(result.len(), n_total);
+    }
+
+    #[test]
+    fn adjust_offset_kernel_matches_fft_grid_on_even_dims() {
+        let g = Grid::new(6, 8, 4, 1.0, 0.5, 2.0);
+        let a = adjust_offset_kernel(&g, (0.1, 0.2, 1.0));
+        let b = dipole_kernel(&g, (0.1, 0.2, 1.0));
+        for (x, y) in a.iter().zip(&b) {
+            assert!((x - y).abs() < 1e-12, "{x} vs {y}");
+        }
+    }
+
+    #[test]
+    fn adjust_offset_kernel_odd_dims_is_half_shifted() {
+        // adjust_offset.m on N = 5 (FOV 5): x = -2.5:1.5, D(3) = 0 (x = -0.5), fftshift by 2
+        // -> k*FOV = [0.5 1.5 -2.5 -1.5 -0.5] with the last sample zeroed.
+        let g = Grid::new(1, 1, 5, 1.0, 1.0, 1.0);
+        let d = adjust_offset_kernel(&g, (0.0, 0.0, 1.0));
+        // The singleton axes give x = -0.5 (FOV 1), so |k|^2 = 0.5 + kz^2.
+        assert_eq!(d[4], 0.0);
+        for (p, kz) in [(0, 0.5), (1, 1.5), (2, -2.5), (3, -1.5)] {
+            let kz: f64 = kz / 5.0;
+            let e = 1.0 / 3.0 - kz * kz / (0.5 + kz * kz);
+            assert!((d[p] - e).abs() < 1e-12, "p={p}: {} vs {e}", d[p]);
+        }
     }
 
     #[test]

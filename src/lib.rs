@@ -29,7 +29,7 @@
 //! let grid = Grid::new(128, 128, 64, 1.0, 1.0, 1.0);
 //! let bdir = (0.0, 0.0, 1.0);
 //!
-//! let mask = bet::run_bet(magnitude, &grid, &BetParams::default(), |_, _| {});
+//! let mask = bet::run_bet(magnitude, &grid, &BetParams::default(), bet::FslLeftRightOrder::Radiological, |_, _| {});
 //! let unwrapped = unwrap::laplacian_unwrap(phase, &mask, &grid, unwrap::LaplacianSolver::Dct);
 //! let (local, eroded) = bgremove::vsharp(&unwrapped, &mask, &grid, &VsharpParams::default(), |_, _| {}).unwrap();
 //! let chi = inversion::tv_admm(&local, &eroded, &grid, bdir, &TvParams::default(), |_, _| {});
@@ -224,7 +224,7 @@ pub mod denoise {
 /// Complementary to [`denoise`]: unringing removes truncation ringing, MP-PCA removes random
 /// noise. Recommended before R2*/R2 fitting.
 pub mod unring {
-    pub use crate::utils::gibbs::{gibbs_unring, gibbs_unring_masked, gibbs_unring_volume};
+    pub use crate::utils::gibbs::{gibbs_unring, gibbs_unring_masked, gibbs_unring_volume, GibbsMode};
     pub use crate::utils::unring3d::{gibbs_unring_3d, gibbs_unring_3d_complex, Unring3dParams};
 }
 
