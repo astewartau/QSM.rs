@@ -218,14 +218,16 @@ pub mod denoise {
     pub use crate::utils::denoise::mppca_denoise;
 }
 
-/// Gibbs-ringing removal by subvoxel shifts for k-space-truncated images: Kellner 2016's
-/// slice-wise method for 2-D multi-slice acquisitions, and Bautista et al. 2021's 3-D extension
-/// ([`gibbs_unring_3d`](crate::utils::unring3d::gibbs_unring_3d)) for 3-D acquisitions.
-/// Complementary to [`denoise`]: unringing removes truncation ringing, MP-PCA removes random
-/// noise. Recommended before R2*/R2 fitting.
+/// Gibbs-ringing removal by subvoxel shifts for k-space-truncated images: Bautista et al.'s 3-D
+/// method for 3-D acquisitions (the default), Kellner et al.'s 2-D method for 2-D multi-slice
+/// acquisitions (MRtrix3's implementation), and DIPY's 2-D implementation as a parity option.
+/// See [`GibbsMode`](crate::utils::gibbs::GibbsMode). Complementary to [`denoise`]: unringing
+/// removes truncation ringing, MP-PCA removes random noise. Recommended before R2*/R2 fitting.
 pub mod unring {
     pub use crate::utils::gibbs::{gibbs_unring, gibbs_unring_masked, gibbs_unring_volume, GibbsMode};
-    pub use crate::utils::unring3d::{gibbs_unring_3d, gibbs_unring_3d_complex, Unring3dParams};
+    pub use crate::utils::gibbs_mrtrix::{
+        gibbs_unring_2d, gibbs_unring_2d_complex, gibbs_unring_3d, gibbs_unring_3d_complex, MrtrixUnringParams,
+    };
 }
 
 /// Brain-mask thresholding and morphology.

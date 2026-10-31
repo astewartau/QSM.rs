@@ -74,3 +74,71 @@ nothing had to be reverse-engineered. This entry is here because the omission is
 deliberate rather than an oversight: the FSL licence permits non-commercial use only
 and extends to "the Software or any derivative of it", which is incompatible with this
 crate's MIT licence. Anyone extending `prelude.rs` should work from the report too.
+
+---
+
+## MRtrix3 — `mrdegibbs` (`cpp/core/degibbs/unring1d.h`, `unring2d.h`, `unring3d.h`)
+
+Consulted while implementing `src/utils/gibbs_mrtrix.rs` (Gibbs unringing: Kellner et al.'s 2-D
+method and Bautista et al.'s 3-D extension), at MRtrix3 `dev` commit
+`9b0a2f1f8778ed7f72d4fe0148738380a6162bc9`. The module is a new Rust implementation of the same
+steps; no MRtrix3 source is included.
+
+The algorithms are published in:
+
+- E. Kellner, B. Dhital, V. G. Kiselev and M. Reisert, "Gibbs-ringing artifact removal based on
+  local subvoxel-shifts", *Magn. Reson. Med.* 76 (2016) 1574–1581.
+  <https://doi.org/10.1002/mrm.26054>
+- T. Bautista, J. O'Muircheartaigh, J. V. Hajnal and J.-D. Tournier, "Removal of Gibbs ringing
+  artefacts for 3D acquisitions using subvoxel shifts", *Proc. ISMRM* 29 (2021) 3535.
+
+MRtrix3 is distributed under the Mozilla Public License, v. 2.0
+(<https://mozilla.org/MPL/2.0/>):
+
+```
+Copyright (c) 2008-2026 the MRtrix3 contributors.
+
+This Source Code Form is subject to the terms of the Mozilla Public
+License, v. 2.0. If a copy of the MPL was not distributed with this
+file, You can obtain one at http://mozilla.org/MPL/2.0/.
+```
+
+---
+
+## DIPY — `dipy/denoise/gibbs.py`
+
+Consulted while implementing the `Dipy2d` mode of `src/utils/gibbs.rs` (DIPY 1.12.1's
+`gibbs_removal`). DIPY is distributed under the BSD-3-Clause licence:
+
+```
+Copyright (c) 2008-2026, dipy developers
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are
+met:
+
+    * Redistributions of source code must retain the above copyright
+       notice, this list of conditions and the following disclaimer.
+
+    * Redistributions in binary form must reproduce the above
+       copyright notice, this list of conditions and the following
+       disclaimer in the documentation and/or other materials provided
+       with the distribution.
+
+    * Neither the name of the dipy developers nor the names of any
+       contributors may be used to endorse or promote products derived
+       from this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+"AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+```
