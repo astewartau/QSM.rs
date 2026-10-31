@@ -250,7 +250,7 @@ pub fn run_qsmart(
         .map(|(&m, &v)| m - v)
         .collect();
     let mut chi = crate::utils::adjust_offset(
-        &removed_voxels, &lfs1, &chi1, &chi2, &grid, bdir, 1.0,
+        &removed_voxels, &lfs1, &chi1, &chi2, &grid, bdir, 1.0, qsmart_params.adjust_offset_grid,
     );
     // QSMART susceptibility is only defined inside the brain mask.
     for (c, &m) in chi.iter_mut().zip(mask.iter()) {

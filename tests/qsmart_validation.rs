@@ -1123,6 +1123,7 @@ fn test_qsmart_10_offset_adjustment() {
         &grid,
         B0_DIR,
         ppm,
+        qsm_core::utils::QsmartOffsetGrid::QsmartReference, // the authors' adjust_offset.m
     );
 
     let elapsed = start.elapsed();
@@ -1278,6 +1279,7 @@ fn test_qsmart_full_pipeline() {
         &grid,
         B0_DIR,
         ppm,
+        qsm_core::utils::QsmartOffsetGrid::QsmartReference, // the authors' adjust_offset.m
     );
     println!("[INFO] Offset adjustment: {:.2?}", step_start.elapsed());
 
