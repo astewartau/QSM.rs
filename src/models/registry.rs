@@ -117,13 +117,14 @@ const MODELS: &[ModelSpec] = &[
         paper: "Yoon et al., NeuroImage 2018; doi:10.1016/j.neuroimage.2018.06.030",
         source: "https://github.com/SNU-LIST/QSMnet",
         license: "",
-        // Clean PyTorch re-export of the TF1.14 checkpoint (tract-friendly NCDHW);
-        // see scripts/onnx-export/export_qsmnet.py. Mirrored on Hugging Face (qsmxt/qsm-onnx-weights).
+        // Clean PyTorch re-export of the TF1.14 checkpoint (tract-friendly NCDHW), with the
+        // checkpoint's own ReLU activation (QSM.rs#330); see scripts/onnx-export/export_qsmnet.py.
+        // Mirrored on Hugging Face (qsmxt/qsm-onnx-weights).
         files: &[WeightFile {
             name: "qsmnet.onnx",
             url: "https://huggingface.co/qsmxt/qsm-onnx-weights/resolve/main/qsmnet.onnx",
-            sha256: "8fd1d79b7a9258a262a2faab9e8469757ae7735f3da6212e431acfb207c21b54",
-            bytes: 397_801_854,
+            sha256: "f1b625e3c04e679077cb8ac9b2617b14e4bbe452f9ae516a806a1acd36e2b159",
+            bytes: 397_801_168,
         }],
         inputs: &["field"],
         outputs: &["chi"],

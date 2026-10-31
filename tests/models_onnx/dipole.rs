@@ -17,11 +17,9 @@ fn xqsm_matches_its_original() {
     assert_parity("xQSM", &chi, &d.mask, &dipole_originals(&d.mask)[0], 5e-3, 5e-5);
 }
 
-/// QSMnet's export does not reproduce the `QSMnet_64-25` checkpoint the original runs
-/// (astewartau/QSM.rs#330: χ about 1.38 × the original's). Un-ignore once the export is fixed;
-/// QSMnet+ runs through the same code and matches.
+/// `QSMnet_64` uses plain ReLU (its `network_info`); the first export used LeakyReLU and was
+/// 81 % off (astewartau/QSM.rs#330). Re-exported: 0.0002 % NRMSE, max |Δ| 2.9e-7 ppm.
 #[test]
-#[ignore = "QSMnet's export does not match its original yet: astewartau/QSM.rs#330"]
 fn qsmnet_matches_its_original() {
     let d = invivo();
     let norm = qsm_core::inversion::QsmnetNorm::default();
