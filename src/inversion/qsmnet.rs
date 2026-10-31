@@ -30,16 +30,25 @@
 //! - **Orientation:** inputs must match the orientation/polarity of the shipped `val_input.mat`
 //!   (`README.md:86`): axial, B0 along the third axis.
 //!
-//! # Agreement with the original
+//! # Activation and parity
 //!
-//! `tests/models_onnx/dipole.rs` runs it on a 36×32×28 box of in-vivo data (1 mm, 2.89 T, across
-//! the brain's edge) against its original's verified QSM-CI entry, QSMnet f8782ed (`qsmnet`,
-//! `qsmnet-plus`) (QSMxT/QSM-CI#316; the fixture is regenerated in Actions by
-//! `tests/data/dl_dipole_qsmci_small.py`): QSMnet+ NRMSE 3.7e-4 %, max |Δ| 4.3e-7 ppm (measured
-//! 2026-10-30): float32 rounding. **QSMnet does not match:** NRMSE 81 % (r 0.88; 126 % on QSM-CI's
-//! 128×160×96 case, χ about 1.38 × the original's). It runs through the same code as QSMnet+, so
-//! the gap is in `qsmnet.onnx`, which does not reproduce the `QSMnet_64-25` checkpoint
-//! (astewartau/QSM.rs#330); its test is ignored until the export is fixed.
+//! The two checkpoints differ in more than their weights: each one's `network_info_<name>.npy`
+//! names its activation, and the authors' inference builds the U-Net with it. `QSMnet_64` uses
+//! plain ReLU, `QSMnet+_64` LeakyReLU (α 0.1). The first `qsmnet.onnx` export used LeakyReLU for
+//! both, and was checked against a TF graph built the same way, so it went unnoticed: χ came out
+//! 1.34× too large, 81 % NRMSE from the original (QSM.rs#330). `export_qsmnet.py` now takes the
+//! activation from `network_info`.
+//!
+//! Measured against QSM-CI's `qsmnet` and `qsmnet-plus` entries (TensorFlow 1.14, SNU-LIST/QSMnet
+//! f8782ed, the authors' checkpoints) on a 36×32×28 in-vivo box of `prisma-bridge-run1`:
+//! [`qsmnet`] is 0.0002 % NRMSE from the original (max |Δ| 2.9e-7 ppm; before the re-export,
+//! 81 %). Run through ONNX Runtime with the same normalisation and padding, the exported graph is
+//! 0.00006 % from it and QSMnet+'s is 0.0001 %. The exported graph matches the TF graph to 4.4e-6
+//! on the export's own check.
+//!
+//! `tests/models_onnx/dipole.rs` checks both against those entries on that box (QSMxT/QSM-CI#316;
+//! the fixture is regenerated in Actions by `tests/data/dl_dipole_qsmci_small.py`): QSMnet+ NRMSE
+//! 3.7e-4 %, max |Δ| 4.3e-7 ppm (float32 rounding).
 //!
 //! # Pipeline rules
 //!

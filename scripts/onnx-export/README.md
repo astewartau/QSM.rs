@@ -168,3 +168,30 @@ SUSEPNET_ONNX=<hosted>/susep-net.onnx \
 On the 208×168×208 padded volume the whole-volume path matches the reference to corr > 0.999999
 and max |Δ| < 5e-5 ppm, and the 128×128×64 sliding window agrees with it at χ+ corr 0.9999 /
 NRMSE 0.72%, χ− corr 0.9981 / NRMSE 1.02%.
+
+## QSMnet / QSMnet+
+
+The SNU-LIST checkpoints are TensorFlow 1.14, and `tf2onnx`'s graph doesn't run in tract, so the
+plain U-Net is rebuilt in PyTorch and the weights are ported into it. `dump_qsmnet_tf.py` runs
+inside QSM-CI's original image, which has the authors' code and checkpoint. It writes the trained
+variables, a TF reference output for a fixed input, and the checkpoint's activation from its own
+`network_info_<name>.npy`: `relu` for `QSMnet_64`, `leaky_relu` (α 0.1) for `QSMnet+_64`.
+`export_qsmnet.py` builds the U-Net with that activation, checks it against the TF output, and
+exports at opset 17.
+
+```
+podman run --rm --network none -v "$PWD":/s:ro -v /tmp/qsmnet_export:/out \
+  ghcr.io/astewartau/qsm-ci/qsmnet@sha256:7081b0782c7cb23ec8a9fc509af44f7f3a4960eec886299af63dc950c6d0b2c3 \
+  python /s/dump_qsmnet_tf.py
+python -m venv .venv && .venv/bin/pip install torch onnx onnxruntime numpy
+.venv/bin/python export_qsmnet.py --dir /tmp/qsmnet_export --out /tmp/qsmnet_export/qsmnet.onnx
+```
+
+(`qsmnet-plus@sha256:d63e1a6a…` for QSMnet+.) The first `qsmnet.onnx` used LeakyReLU for QSMnet as
+well. Its TF check built the graph the same way, so it passed, but χ was 1.34× too large: 81 % NRMSE
+from the original (QSM.rs#330).
+
+Hosted as `qsmnet.onnx` on `qsmxt/qsm-onnx-weights`. Verified export, torch 2.15.0 (CPU), Python
+3.14: 397,801,168 bytes, sha256 `f1b625e3c04e679077cb8ac9b2617b14e4bbe452f9ae516a806a1acd36e2b159`.
+It matches the TF graph to max |Δ| 4.4e-6 on the fixed input. On a 36×32×28 in-vivo box it is
+0.00006 % NRMSE (max |Δ| 1.2e-7 ppm) from QSM-CI's `qsmnet` entry.
