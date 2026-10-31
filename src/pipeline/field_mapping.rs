@@ -102,7 +102,9 @@ use crate::utils::B0WeightType;
 /// [`B0EstimationMethod::ComplexFit`] runs MEDI's `Fit_ppm_complex` on the wrapped complex echoes,
 /// unwraps the fitted phase per echo spacing spatially with `unwrapping_algorithm`, and divides
 /// by the echo spacing. It needs `magnitudes` and evenly spaced echoes, and also returns the
-/// field's noise map in [`FieldMappingResult::field_noise_ppm`] (MEDI's `N_std`):
+/// field's noise map in [`FieldMappingResult::field_noise_ppm`] (MEDI's `N_std`), and the fit
+/// before unwrapping in [`FieldMappingResult::complex_fit`] (MEDI's `iFreq_raw` and `N_std`, in
+/// radians per echo spacing):
 ///
 /// ```
 /// use qsm_core::fieldmap::FitPpmComplexParams;
@@ -333,6 +335,7 @@ fn field_mapping_with_offset(
         reliability: None,
         qsmart_fit_threshold: None,
         field_noise_ppm: None,
+        complex_fit: None,
     })
 }
 
@@ -497,6 +500,7 @@ fn field_mapping_direct(
         phase_offset: None,
         robust_fit,
         field_noise_ppm: None,
+        complex_fit: None,
         reliability: None,
         qsmart_fit_threshold: None,
     })
@@ -521,6 +525,7 @@ fn qsmart_fit(
         reliability: Some(fit.reliability),
         qsmart_fit_threshold: Some(fit.fit_threshold),
         field_noise_ppm: None,
+        complex_fit: None,
     }
 }
 
@@ -673,6 +678,7 @@ fn single_echo_result(
         reliability: None,
         qsmart_fit_threshold: None,
         field_noise_ppm: None,
+        complex_fit: None,
     }
 }
 
@@ -727,7 +733,8 @@ pub fn run_field_mapping_per_echo(
 /// [`B0EstimationMethod::ComplexFit`]: MEDI's field map. `Fit_ppm_complex` on the wrapped
 /// complex echoes gives the phase per echo spacing, wrapped; it is unwrapped spatially, as MEDI's
 /// `iFreq = unwrapPhase(iMag, iFreq_raw, matrix_size)` does, and divided by the echo spacing.
-/// The noise map (`dp1`, MEDI's `N_std`) is converted the same way, to ppm.
+/// The noise map (`dp1`, MEDI's `N_std`) is converted the same way, to ppm. The fit itself is
+/// returned too ([`FieldMappingResult::complex_fit`]: `iFreq_raw` and `N_std` in MEDI's units).
 ///
 /// MEDI's unwrapper is a region-growing method that is not ported; the configured
 /// `unwrapping_algorithm` is used instead. ROMEO gets MEDI's `iMag` (root-sum-of-squares of the
@@ -794,6 +801,7 @@ fn field_mapping_complex_fit(
         reliability: None,
         qsmart_fit_threshold: None,
         field_noise_ppm: Some(field_noise_ppm),
+        complex_fit: Some(fit),
     })
 }
 
@@ -1110,6 +1118,47 @@ mod tests {
             let want_noise = rads_to_ppm(&[(0.2f64).sqrt() / 0.005], 3.0)[0];
             assert!(noise.iter().all(|v| (v - want_noise).abs() < 1e-12));
         }
+    }
+
+    /// The complex fit is returned as it was before unwrapping (MEDI's `iFreq_raw` and `N_std`):
+    /// identical to calling `fit_ppm_complex` directly, wrapped, in radians per echo spacing.
+    /// Other methods return none.
+    #[test]
+    fn complex_fit_returns_the_raw_fit_and_its_noise() {
+        // 3 echoes 5 ms apart, phase per echo spacing 0.5..4.0 rad: above π it comes back wrapped.
+        let meta = make_test_metadata(3);
+        let n = 8 * 8 * 8;
+        let mask = vec![1u8; n];
+        let per_spacing: Vec<f64> = (0..n).map(|i| 0.5 * (1.0 + (i % 8) as f64)).collect();
+        let wrap = |x: f64| (x + PI).rem_euclid(2.0 * PI) - PI;
+        let phases: Vec<Vec<f64>> = (1..=3)
+            .map(|e| per_spacing.iter().map(|&d| wrap(0.3 + d * e as f64)).collect())
+            .collect();
+        let phase_refs: Vec<&[f64]> = phases.iter().map(|p| p.as_slice()).collect();
+        let mags: Vec<Vec<f64>> = [1.0, 0.8, 0.6].iter().map(|&m| vec![m; n]).collect();
+        let mag_refs: Vec<&[f64]> = mags.iter().map(|m| m.as_slice()).collect();
+        let params = crate::utils::FitPpmComplexParams::default();
+        let config = FieldMappingConfig {
+            b0_estimation: B0EstimationMethod::ComplexFit(params), ..Default::default()
+        };
+        let r = run_field_mapping(&phase_refs, Some(&mag_refs), &mask, &meta, &config, &mut |_, _| {}).unwrap();
+        let raw = r.complex_fit.expect("the complex fit returns the fit itself");
+        let direct = crate::utils::fit_ppm_complex(&mag_refs, &phase_refs, &meta.echo_times, &params).unwrap();
+        assert_eq!(raw.field, direct.field);
+        assert_eq!(raw.noise, direct.noise);
+        assert_eq!(raw.echo_spacing, direct.echo_spacing);
+        for (got, &d) in raw.field.iter().zip(&per_spacing) {
+            assert!((got - wrap(d)).abs() < 1e-8, "{got} vs {}", wrap(d));
+            assert!(got.abs() <= PI);
+        }
+        // N_std is field_noise_ppm before the conversion to ppm
+        let noise_ppm = r.field_noise_ppm.unwrap();
+        let from_raw = rads_to_ppm(&raw.noise.iter().map(|v| v / raw.echo_spacing).collect::<Vec<_>>(), 3.0);
+        assert_eq!(noise_ppm, from_raw);
+
+        let config = FieldMappingConfig::default();
+        let r = run_field_mapping(&phase_refs, Some(&mag_refs), &mask, &meta, &config, &mut |_, _| {}).unwrap();
+        assert!(r.complex_fit.is_none());
     }
 
     #[test]
