@@ -27,7 +27,7 @@ struct Case {
     method: Method,
 }
 
-const CASES: [Case; 4] = [
+const CASES: [Case; 5] = [
     Case { name: "sharp, QSM.jl defaults", dims: [56, 52, 48], vs: [1.0; 3], method: Method::Sharp { radius: None, threshold: 0.05 } },
     Case { name: "sharp r 4 mm, anisotropic", dims: [32, 28, 24], vs: [0.9, 1.0, 1.3], method: Method::Sharp { radius: Some(4.0), threshold: 0.05 } },
     // QSM.jl's default radii, 18·min(vsz) down to 2·max(vsz) in steps of 2·max(vsz), thr 0.05
@@ -37,6 +37,16 @@ const CASES: [Case; 4] = [
         dims: [32, 28, 24],
         vs: [0.9, 1.0, 1.3],
         method: Method::Vsharp { max: 6.0, min: 1.5, step: 1.5, threshold: 0.1 },
+    },
+    // A voxel size one float32 ulp below 1 mm, as NIfTI headers often store 1 mm (the KKI
+    // travelling head's z, QSMxT/QSM-CI `vsharp-qsmjl`): QSM.jl pads the box by
+    // cld(12, 0.99999994) = 13 voxels, not 12: here the box grows from 56×50×45 to 56×54×45,
+    // which moves the periodic deconvolution.
+    Case {
+        name: "vsharp 12:-1:1 mm, z one float32 ulp below 1 mm",
+        dims: [48, 44, 40],
+        vs: [1.0, 1.0, 0.999_999_940_395_355_2],
+        method: Method::Vsharp { max: 12.0, min: 1.0, step: 1.0, threshold: 0.05 },
     },
 ];
 
