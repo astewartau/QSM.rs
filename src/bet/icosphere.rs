@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 
+#[cfg(test)]
 /// Create a tessellated icosphere mesh
 ///
 /// # Arguments
@@ -45,6 +46,7 @@ pub fn create_icosphere(subdivisions: usize) -> (Vec<[f64; 3]>, Vec<[usize; 3]>)
     (vertices, faces)
 }
 
+#[cfg(test)]
 /// Subdivide each triangle into 4 triangles
 fn subdivide_icosphere(vertices: &[[f64; 3]], faces: &[[usize; 3]]) -> (Vec<[f64; 3]>, Vec<[usize; 3]>) {
     let mut new_vertices: Vec<[f64; 3]> = vertices.to_vec();
@@ -89,6 +91,66 @@ fn subdivide_icosphere(vertices: &[[f64; 3]], faces: &[[usize; 3]]) -> (Vec<[f64
     }
 
     (new_vertices, new_faces)
+}
+
+/// FSL-BET2's `make_mesh_from_icosa(n, m)` (Bostrix/FSL-BET2 d5acd7f, `meshclass/mesh.cpp`):
+/// its icosahedron (vertex coordinates `tau = 0.8506508084`, `one = 0.5257311121`, in its
+/// orientation and order), every triangle's last two vertices swapped, then `n − 1` passes of
+/// `Mesh::retessellate` (each triangle `(v0, v1, v2)` split at its edge midpoints `p0 = (v1+v2)/2`,
+/// `p1 = (v0+v2)/2`, `p2 = (v0+v1)/2` into `(p2, p0, p1)`, `(p1, v0, p2)`, `(p0, v2, p1)`,
+/// `(p2, v1, p0)`, a midpoint shared with an earlier triangle reused) with every point scaled
+/// back onto the unit sphere by `1/norm` after each pass. `n = 5` (bet2's) gives 2562 vertices.
+pub fn bet2_icosa(n: usize) -> (Vec<[f64; 3]>, Vec<[usize; 3]>) {
+    const TAU: f64 = 0.8506508084;
+    const ONE: f64 = 0.5257311121;
+    // ZA ZB ZC ZD YA YB YC YD XA XB XC XD
+    let mut pts: Vec<[f64; 3]> = vec![
+        [TAU, ONE, 0.0], [-TAU, ONE, 0.0], [-TAU, -ONE, 0.0], [TAU, -ONE, 0.0],
+        [ONE, 0.0, TAU], [ONE, 0.0, -TAU], [-ONE, 0.0, -TAU], [-ONE, 0.0, TAU],
+        [0.0, TAU, ONE], [0.0, -TAU, ONE], [0.0, -TAU, -ONE], [0.0, TAU, -ONE],
+    ];
+    let (za, zb, zc, zd, ya, yb, yc, yd, xa, xb, xc, xd) = (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11);
+    let mut tris: Vec<[usize; 3]> = vec![
+        [ya, xa, yd], [ya, yd, xb], [yb, yc, xd], [yb, xc, yc], [za, ya, zd],
+        [za, zd, yb], [zc, yd, zb], [zc, zb, yc], [xa, za, xd], [xa, xd, zb],
+        [xb, xc, zd], [xb, zc, xc], [xa, ya, za], [xd, za, yb], [ya, xb, zd],
+        [yb, zd, xc], [yd, xa, zb], [yc, zb, xd], [yd, zc, xb], [yc, xc, zc],
+    ];
+    for t in tris.iter_mut() {
+        t.swap(1, 2); // Triangle::swap
+    }
+    for _ in 1..n {
+        let mut added: HashMap<[u64; 3], usize> = HashMap::new();
+        let mut new_tris = Vec::with_capacity(tris.len() * 4);
+        let mid = |a: [f64; 3], b: [f64; 3]| [(a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0, (a[2] + b[2]) / 2.0];
+        for &[v0, v1, v2] in &tris {
+            let pt0 = mid(pts[v1], pts[v2]);
+            let pt2 = mid(pts[v0], pts[v1]);
+            let pt1 = mid(pts[v0], pts[v2]);
+            let mut get = |pt: [f64; 3], pts: &mut Vec<[f64; 3]>| -> usize {
+                // bet2 matches an earlier midpoint to 1e-8; the same edge gives the same bits.
+                let key = [pt[0].to_bits(), pt[1].to_bits(), pt[2].to_bits()];
+                *added.entry(key).or_insert_with(|| {
+                    pts.push(pt);
+                    pts.len() - 1
+                })
+            };
+            let p0 = get(pt0, &mut pts);
+            let p1 = get(pt1, &mut pts);
+            let p2 = get(pt2, &mut pts);
+            new_tris.push([p2, p0, p1]);
+            new_tris.push([p1, v0, p2]);
+            new_tris.push([p0, v2, p1]);
+            new_tris.push([p2, v1, p0]);
+        }
+        tris = new_tris;
+        for p in pts.iter_mut() {
+            let norm = (p[0] * p[0] + p[1] * p[1] + p[2] * p[2]).sqrt();
+            let inv = 1.0 / norm;
+            *p = [p[0] * inv, p[1] * inv, p[2] * inv];
+        }
+    }
+    (pts, tris)
 }
 
 #[cfg(test)]

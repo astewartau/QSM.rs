@@ -238,7 +238,10 @@ pub fn apply_mask_ops(
                 let mag_data = magnitude.ok_or_else(|| {
                     PipelineError::InvalidInput("BET requires magnitude data".into())
                 })?;
-                mask = crate::bet::run_bet(mag_data, &grid, params, |_, _| {});
+                // bet2 flips neurologically stored images (FSL's read_volume); the order comes
+                // from the scan's affine.
+                let order = crate::bet::FslLeftRightOrder::from_affine(metadata.affine.as_ref());
+                mask = crate::bet::run_bet(mag_data, &grid, params, order, |_, _| {});
             }
             MaskOp::Erode { iterations } => {
                 mask = erode_mask(&mask, &grid, *iterations);
@@ -834,7 +837,7 @@ mod tests {
             10.0 + 190.0 / (1.0 + ((r - 1.0) * 2.5).exp())
         }).collect();
         let base = BetParams { iterations: 50, subdivisions: 1, ..BetParams::default() };
-        let base_mask = run_bet(&mag, &grid, &base, |_, _| {});
+        let base_mask = run_bet(&mag, &grid, &base, crate::bet::FslLeftRightOrder::from_affine(meta.affine.as_ref()), |_, _| {});
 
         let variants = [
             BetParams { fractional_intensity: 0.2, ..base.clone() },
@@ -845,7 +848,7 @@ mod tests {
             BetParams { subdivisions: 2, ..base.clone() },
         ];
         for params in variants {
-            let direct = run_bet(&mag, &grid, &params, |_, _| {});
+            let direct = run_bet(&mag, &grid, &params, crate::bet::FslLeftRightOrder::from_affine(meta.affine.as_ref()), |_, _| {});
             assert!(direct != base_mask, "{params:?} should change the mask, or this test proves nothing");
             let op = MaskOp::Bet(params.clone());
             let via_op = apply_mask_ops(vec![1; n * n * n], &[op], &mag, Some(&mag), &meta).unwrap();

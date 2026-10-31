@@ -1410,7 +1410,7 @@ fn test_bet() {
             subdivisions: 4,
             voxel_scale: 1.0,
         },
-        |_, _| {},
+        bet::FslLeftRightOrder::Radiological, |_, _| {},
     ));
 
     let dice = common::dice_coefficient(&predicted_mask, &data.mask);

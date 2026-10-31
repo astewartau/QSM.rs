@@ -18,7 +18,7 @@ pub mod hdbet;
 pub mod mindgrab;
 pub mod rs2net;
 
-pub use evolution::{run_bet, BetParams};
+pub use evolution::{run_bet, BetParams, FslLeftRightOrder};
 #[cfg(feature = "onnx")]
 pub use hdbet::hd_bet;
 pub use hdbet::{hd_bet_memory_bytes, hd_bet_network_input, HdBetInference, HdBetParams};
