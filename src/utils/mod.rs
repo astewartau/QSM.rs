@@ -42,7 +42,7 @@ pub(crate) mod sliding;
 pub mod denoise;
 pub mod anisotropic_diffusion;
 pub mod gibbs;
-pub mod unring3d;
+pub mod gibbs_mrtrix;
 pub mod ops;
 pub mod special;
 pub mod wavelet;

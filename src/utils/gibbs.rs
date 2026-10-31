@@ -1,49 +1,89 @@
-//! Gibbs-ringing removal via local subvoxel shifts (Kellner et al. 2016).
+//! Gibbs-ringing removal via local subvoxel shifts.
 //!
-//! Truncating k-space (finite acquisition matrix) produces oscillatory ringing
-//! near sharp edges. For multi-echo data the ringing pattern differs per echo
-//! (image contrast changes with TE), so it perturbs the mono-exponential decay
-//! and biases R2*/R2 maps — hence unringing is recommended before relaxometry.
+//! Truncating k-space (finite acquisition matrix) produces oscillatory ringing near sharp edges.
+//! For multi-echo data the ringing pattern differs per echo (image contrast changes with TE), so
+//! it perturbs the mono-exponential decay and biases R2*/R2 maps — hence unringing is
+//! recommended before relaxometry.
 //!
-//! Method (Kellner 2016): resample the image at a set of subvoxel shifts using the Fourier shift
-//! theorem; at each voxel pick the shift that minimises local total variation (the "ring-free"
-//! sampling), then interpolate back to the grid. The 1-D correction is applied along each axis
-//! and the axis-corrected images are combined in the Fourier domain, weighting each axis where
-//! its ringing dominates (low spatial frequency in the other axes).
+//! Method (Kellner et al. 2016): resample the image at a set of subvoxel shifts using the Fourier
+//! shift theorem; at each voxel pick the shift that minimises local total variation (the
+//! "ring-free" sampling), then interpolate back to the grid. The 1-D correction runs along each
+//! axis, each axis weighted where its ringing dominates (low spatial frequency in the other axes).
 //!
-//! **Default: DIPY's `gibbs_removal`** ([`GibbsMode::Slices`], slices normal to z), ported step
-//! for step: DIPY's 45 shifts in [0.02, 0.9], `n_points` 3, each shift direction its own inverse
-//! transform and magnitude (`|ifft(c·exp(±ks))|`), the 2-D combination
-//! `|ifft2(fftshift(C1)·G1 + fftshift(C0)·G0)|` with DIPY's `linspace(−π, π)` cosine weights and
-//! edge rows. Its output is a magnitude, so it is never negative.
+//! # Which mode for which acquisition
+//!
+//! | [`GibbsMode`] | method | for |
+//! |---|---|---|
+//! | [`Bautista3d`](GibbsMode::Bautista3d) (**default**) | Bautista et al. 2021, MRtrix3 `mrdegibbs -dimensionality 3` | 3-D acquisitions (k-space truncated along all three axes) |
+//! | [`Mrtrix2d`](GibbsMode::Mrtrix2d) | Kellner et al. 2016, MRtrix3 `mrdegibbs` (2-D) | 2-D multi-slice acquisitions (truncated in-plane only) |
+//! | [`Dipy2d`](GibbsMode::Dipy2d) | Kellner et al. 2016, DIPY `gibbs_removal` | parity with DIPY, the reference QSM-CI runs |
+//!
+//! The default is the 3-D method because QSM's gradient-echo scans are typically 3-D. Kellner's
+//! slice-wise method assumes the ringing runs only in-plane; on a 3-D acquisition it leaves the
+//! ringing along the slice axis (measured below). On a 2-D multi-slice acquisition use
+//! `Mrtrix2d` with `slice_axis` normal to the slices. The MRtrix modes are ported in
+//! [`crate::utils::gibbs_mrtrix`]; DIPY's is in this module. Decided 2026-10-31
+//! (astewartau/QSM.rs#327): MRtrix's implementation of Kellner's method for 2-D, Bautista's for
+//! 3-D, DIPY's kept as a parity option.
+//!
+//! # Measured (2026-10-31, astewartau/QSM.rs#327)
+//!
+//! Phantoms: 96×96×64 voxels of 14 random rotated boxes and ellipsoids inside a head-like shell,
+//! built on a 3× finer grid; ground truth its 3×3×3 voxel averages. A 3-D acquisition keeps the
+//! central 96×96×64 of its k-space; a 2-D one averages each slice's 3 fine slices (the slice
+//! profile) and keeps the central 96×96 in-plane. NRMSE to the ground truth (%), and the RMS
+//! error over the flat voxels 2–8 voxels from any edge (pure ringing); mean of three phantoms
+//! (seeds 0–2, no noise). The MRtrix rows were run with `mrdegibbs` itself (MRtrix3 `dev`
+//! 9b0a2f1), which these ports reproduce to ~1e-16; the 3-D row has negatives set to 0, as here.
+//!
+//! | method | 3-D acq. NRMSE | 3-D acq. flat RMS | 2-D acq. NRMSE | 2-D acq. flat RMS |
+//! |---|---|---|---|---|
+//! | none | 2.81 | 0.0061 | 1.92 | 0.0044 |
+//! | `Dipy2d` | 2.34 | 0.0037 | 1.61 | 0.0021 |
+//! | `Mrtrix2d` | 2.05 | 0.0033 | **1.17** | **0.0009** |
+//! | QSM.rs's former own 3-D generalisation (removed) | 2.03 | 0.0032 | 1.74 | 0.0022 |
+//! | `Bautista3d` | **1.58** | **0.0013** | 1.37 | 0.0010 |
+//!
+//! - On 3-D-truncated data `Bautista3d` removes ~79 % of the flat-region ringing; the slice-wise
+//!   methods remove ~40–45 %.
+//! - On 2-D-truncated data `Mrtrix2d` is best, as expected.
+//! - With noise (σ 0.01, seed 0) the order is the same (3-D acquisition NRMSE: none 3.28,
+//!   `Dipy2d` 2.71, `Mrtrix2d` 2.49, `Bautista3d` 1.92).
+//! - MRtrix's 2-D implementation beats DIPY's on both: it splits the slice into the two weighted
+//!   parts before unringing each (Kellner's order), where DIPY unrings first and weights after.
+//!
+//! QSM.rs used to unring with its own 3-D generalisation of DIPY's steps (each axis unrung over
+//! the whole volume, then combined with the 3-D cosine weights). It was not a published method,
+//! and was no better than the slice-wise methods on 3-D data, so it was removed.
+//!
+//! # Sources and licences
+//!
+//! - Kellner, Dhital, Kiselev & Reisert, "Gibbs-ringing artifact removal based on local
+//!   subvoxel-shifts", MRM 2016, 76, 1574–1581.
+//! - Bautista, O'Muircheartaigh, Hajnal & Tournier, "Removal of Gibbs ringing artefacts for 3D
+//!   acquisitions using subvoxel shifts", Proc. ISMRM 2021, 29, 3535.
+//! - MRtrix3 `mrdegibbs` (`cpp/core/degibbs/unring{1d,2d,3d}.h`, `dev` 9b0a2f1), MPL-2.0:
+//!   ported anew in Rust (no source copied), credited here and in `THIRD_PARTY_NOTICES.md`.
+//!   Tournier, an author of the 3-D method, is an MRtrix3 author.
+//! - DIPY 1.12.1 `dipy.denoise.gibbs.gibbs_removal`, BSD-3-Clause: ported anew in Rust.
+//! - Kellner's own code (`unring`, bitbucket.org/reisert/unring) forbids reproduction or
+//!   modification without the University Medical Center Freiburg's permission, so it is not
+//!   ported; MRtrix3's 2-D implementation follows its structure (split before unringing, exact
+//!   FFT-frequency cosines, a running TV over the complex line, linear interpolation).
+//!
+//! # `Dipy2d`
+//!
+//! DIPY's `gibbs_removal`, ported step for step: DIPY's 45 shifts in [0.02, 0.9], `n_points` 3,
+//! each shift direction its own inverse transform and magnitude (`|ifft(c·exp(±ks))|`), the 2-D
+//! combination `|ifft2(fftshift(C1)·G1 + fftshift(C0)·G0)|` with DIPY's `linspace(−π, π)` cosine
+//! weights and edge rows. Its output is a magnitude, so it is never negative.
 //!
 //! **Agreement with DIPY 1.12.1** (verified QSM-CI `py-originals` image, QSMxT/QSM-CI#302;
-//! measured 2026-10-31, astewartau/QSM.rs#327): NRMSE 2.6e-6 % on a 64×64×32 crop of a travelling
-//! head's five echoes (`prisma-bridge-run1`; DIPY changes the input by 3.4 %), and to the
-//! fixture's float32 rounding on the 24×24×16 phantom of `tests/gibbs_dipy_parity.rs`.
-//!
-//! Before this, QSM.rs unrang in 3-D only (now [`GibbsMode::Volume`]: DIPY's 1-D step along each
-//! axis over the whole volume, combined with the 3-D cosine weights
-//! `∏_{j≠i}(1+cos k_j) / Σ_m ∏_{j≠m}(1+cos k_j)`, negative results set to 0). That is QSM.rs's
-//! own generalisation, not a published method: it was 2.0 % from DIPY on a travelling head and
-//! 3.0 % on the phantom. It also shared one inverse transform between the two shift directions,
-//! which needs the even-length Nyquist bin symmetrised; that changed the output by up to 4e-3,
-//! so it is gone (both modes now take the two transforms DIPY takes).
-//!
-//! **Which implementation.** DIPY is the reference QSM-CI runs. Kellner's own code (`unring`,
-//! bitbucket.org/reisert/unring, `ringRm.cpp`, also 2-D slice-wise) is not the same algorithm in
-//! its details:
-//! - it splits the slice into the two weighted parts *before* unringing each along its axis,
-//!   with the exact FFT-frequency cosines;
-//! - it takes 41 shifts of ±k/40 voxel (with `PI` = 3.1416) and zeroes the Nyquist bin;
-//! - its TV runs over the complex line, between neighbours 1 and 3;
-//! - it interpolates linearly to the chosen shift.
-//!
-//! Its licence forbids reproducing or modifying it without the University Medical Center
-//! Freiburg's permission, so it is not ported. Whether to follow it is an open question
-//! (astewartau/QSM.rs#327).
+//! measured 2026-10-31): NRMSE 2.6e-6 % on a 64×64×32 crop of a travelling head's five echoes
+//! (`prisma-bridge-run1`; DIPY changes the input by 3.4 %), and to the fixture's float32 rounding
+//! on the 24×24×16 phantom of `tests/gibbs_dipy_parity.rs`.
 
-use crate::fft::{fft3d_real, ifft3d_real};
+use crate::utils::gibbs_mrtrix::{gibbs_unring_2d, gibbs_unring_3d, MrtrixUnringParams};
 use num_complex::Complex64;
 use rustfft::{Fft, FftPlanner};
 use std::sync::Arc;
@@ -85,28 +125,32 @@ fn tv_min_line(row: &[f64], n: usize, n_points: usize, out: &mut [f64], diff: &m
     }
 }
 
-/// Which unringing [`gibbs_unring_volume`] and the functions built on it run.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Which unringing [`gibbs_unring_volume`] and the functions built on it run. See the
+/// [module docs](self) for which suits which acquisition.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum GibbsMode {
-    /// DIPY's `gibbs_removal` (the default, `slice_axis = 2`): each 2-D slice normal to
-    /// `slice_axis` is unrung along both of its axes, and the two results are combined in its
-    /// 2-D Fourier domain with DIPY's cosine weights; the output is the magnitude of that
-    /// combination.
-    Slices {
-        /// The axis the slices are normal to (0, 1 or 2).
+    /// Bautista et al.'s 3-D unringing (MRtrix3 `mrdegibbs -dimensionality 3`), for 3-D
+    /// acquisitions, which truncate k-space along all three axes. The default: QSM's
+    /// gradient-echo scans are typically 3-D. See [`gibbs_unring_3d`].
+    #[default]
+    Bautista3d,
+    /// Kellner et al.'s 2-D unringing as MRtrix3's `mrdegibbs` implements it, for 2-D multi-slice
+    /// acquisitions (k-space truncated in-plane only): each slice normal to `slice_axis`.
+    /// See [`gibbs_unring_2d`].
+    Mrtrix2d {
+        /// The axis the slices are normal to (0, 1 or 2; MRtrix's default is 2).
         slice_axis: usize,
     },
-    /// QSM.rs's own 3-D generalisation: each axis unrung over the whole volume, combined with
-    /// the 3-D cosine weights `∏_{j≠i}(1+cos k_j) / Σ_m ∏_{j≠m}(1+cos k_j)`, which reduce to
-    /// Kellner's 2-D ones. Negative results are set to 0. Not an original algorithm.
-    Volume,
+    /// DIPY's `gibbs_removal` (Kellner et al.'s 2-D method as DIPY implements it): each slice
+    /// normal to `slice_axis` is unrung along both of its axes, and the two results are combined
+    /// in its 2-D Fourier domain with DIPY's cosine weights; the output is the magnitude of that
+    /// combination. A parity option: DIPY is the reference QSM-CI runs.
+    Dipy2d {
+        /// The axis the slices are normal to (0, 1 or 2; DIPY's default is 2).
+        slice_axis: usize,
+    },
 }
 
-impl Default for GibbsMode {
-    fn default() -> Self {
-        GibbsMode::Slices { slice_axis: 2 }
-    }
-}
 
 /// DIPY's TV window (`n_points`, its default).
 const N_POINTS: usize = 3;
@@ -237,6 +281,7 @@ fn unring_line(row: &mut [f64], b: &mut LineBufs, ctx: &LineCtx) {
     }
 }
 
+#[cfg(test)]
 fn fftfreq(n: usize) -> Vec<f64> {
     (0..n)
         .map(|m| {
@@ -250,7 +295,8 @@ fn fftfreq(n: usize) -> Vec<f64> {
 }
 
 /// Un-ring `vol` along a single axis (0=x, 1=y, 2=z) over the whole volume, returning a new
-/// volume ([`GibbsMode::Volume`]'s 1-D step).
+/// volume: DIPY's 1-D step, tested against DIPY's `_gibbs_removal_1d`.
+#[cfg(test)]
 fn unring_axis(vol: &[f64], (nx, ny, nz): (usize, usize, usize), axis: usize) -> Vec<f64> {
     let n = [nx, ny, nz][axis];
     if n < 2 {
@@ -431,50 +477,11 @@ fn unring_slices(vol: &[f64], (nx, ny, nz): (usize, usize, usize), slice_axis: u
     out
 }
 
-/// QSM.rs's 3-D generalisation ([`GibbsMode::Volume`]).
-fn unring_volume_3d(vol: &[f64], dims: (usize, usize, usize)) -> Vec<f64> {
-    let (nx, ny, nz) = dims;
-    let n_vox = nx * ny * nz;
-    let cx = unring_axis(vol, dims, 0);
-    let cy = unring_axis(vol, dims, 1);
-    let cz = unring_axis(vol, dims, 2);
-    let cosk = |f: f64| 1.0 + (2.0 * PI * f).cos();
-    let ckx: Vec<f64> = fftfreq(nx).iter().map(|&f| cosk(f)).collect();
-    let cky: Vec<f64> = fftfreq(ny).iter().map(|&f| cosk(f)).collect();
-    let ckz: Vec<f64> = fftfreq(nz).iter().map(|&f| cosk(f)).collect();
-    let sx = fft3d_real(&cx, nx, ny, nz);
-    let sy = fft3d_real(&cy, nx, ny, nz);
-    let sz = fft3d_real(&cz, nx, ny, nz);
-    let mut spec = vec![Complex64::new(0.0, 0.0); n_vox];
-    for z in 0..nz {
-        for y in 0..ny {
-            for x in 0..nx {
-                let idx = x + y * nx + z * nx * ny;
-                let wx = cky[y] * ckz[z];
-                let wy = ckx[x] * ckz[z];
-                let wz = ckx[x] * cky[y];
-                let den = wx + wy + wz;
-                spec[idx] = if den > 1e-12 {
-                    (sx[idx] * wx + sy[idx] * wy + sz[idx] * wz) / den
-                } else {
-                    (sx[idx] + sy[idx] + sz[idx]) / 3.0
-                };
-            }
-        }
-    }
-    let mut out = ifft3d_real(&spec, nx, ny, nz);
-    for v in out.iter_mut() {
-        if *v < 0.0 {
-            *v = 0.0;
-        }
-    }
-    out
-}
-
-/// Gibbs-unring a single 3-D volume with `mode` ([`GibbsMode::default`] is DIPY's).
+/// Gibbs-unring a single 3-D volume with `mode` ([`GibbsMode::default`] is Bautista et al.'s
+/// 3-D unringing).
 ///
-/// The output is never negative: DIPY's 2-D combination is a magnitude, and the 3-D mode sets
-/// negative values to 0.
+/// The output is never negative: DIPY's 2-D combination is a magnitude, and the MRtrix modes'
+/// negative values are set to 0.
 ///
 /// # Panics
 /// If `vol` is not `nx·ny·nz` long or a slice axis is not 0, 1 or 2.
@@ -482,23 +489,24 @@ pub fn gibbs_unring_volume(vol: &[f64], dims: (usize, usize, usize), mode: Gibbs
     let (nx, ny, nz) = dims;
     assert_eq!(vol.len(), nx * ny * nz, "vol length must be nx*ny*nz");
     match mode {
-        GibbsMode::Slices { slice_axis } => {
+        GibbsMode::Bautista3d => gibbs_unring_3d(vol, dims, MrtrixUnringParams::default()),
+        GibbsMode::Mrtrix2d { slice_axis } => gibbs_unring_2d(vol, dims, slice_axis, MrtrixUnringParams::default()),
+        GibbsMode::Dipy2d { slice_axis } => {
             assert!(slice_axis < 3, "slice_axis must be 0, 1 or 2");
             unring_slices(vol, dims, slice_axis)
         }
-        GibbsMode::Volume => unring_volume_3d(vol, dims),
     }
 }
 
-/// Gibbs-unring multi-volume data (e.g. multi-echo magnitude), each volume in turn, as DIPY
-/// does for a 4-D array.
+/// Gibbs-unring multi-volume data (e.g. multi-echo magnitude), each volume in turn, as DIPY and
+/// MRtrix do for a 4-D array.
 ///
 /// # Arguments
 /// * `data` - Interleaved `[voxel0_vol0, voxel0_vol1, ..., voxel1_vol0, ...]`
 ///   (row-major `(n_voxels, n_vols)`).
 /// * `dims` - Volume dimensions `(nx, ny, nz)`.
 /// * `n_vols` - Number of volumes.
-/// * `mode` - See [`GibbsMode`]; the default is DIPY's.
+/// * `mode` - See [`GibbsMode`]; the default is Bautista et al.'s 3-D unringing.
 ///
 /// # Returns
 /// Unrung data in the same layout (never negative).
@@ -619,6 +627,7 @@ pub fn gibbs_unring_masked(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fft::{fft3d_real, ifft3d_real};
 
     #[test]
     fn test_unring_reduces_edge_overshoot() {
@@ -711,12 +720,18 @@ mod tests {
         }
         let rung = ifft3d_real(&spec, nx, ny, nz);
         assert!(rung.iter().any(|&v| v < -1e-3), "the test input should undershoot");
-        let un = gibbs_unring_volume(&rung, (nx, ny, nz), GibbsMode::Volume);
+        let un = gibbs_unring_volume(&rung, (nx, ny, nz), GibbsMode::default());
         assert!(un.iter().all(|&v| v >= 0.0), "unrung magnitude must not be negative");
         assert!(un.contains(&0.0));
         let c = 12 + 12 * nx + 12 * nx * ny;
         assert!(un[c] > 0.5, "block interior kept: {}", un[c]);
-        for mode in [GibbsMode::Volume, GibbsMode::default(), GibbsMode::Slices { slice_axis: 0 }] {
+        for mode in [
+            GibbsMode::Bautista3d,
+            GibbsMode::Mrtrix2d { slice_axis: 2 },
+            GibbsMode::Mrtrix2d { slice_axis: 0 },
+            GibbsMode::Dipy2d { slice_axis: 2 },
+            GibbsMode::Dipy2d { slice_axis: 0 },
+        ] {
             let multi = gibbs_unring(&rung, (nx, ny, nz), 1, mode);
             assert!(multi.iter().all(|&v| v >= 0.0), "{mode:?}");
             assert!(multi[c] > 0.5, "{mode:?}: block interior kept: {}", multi[c]);
