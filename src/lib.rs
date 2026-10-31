@@ -218,11 +218,14 @@ pub mod denoise {
     pub use crate::utils::denoise::mppca_denoise;
 }
 
-/// Gibbs-ringing removal (Kellner 2016 subvoxel shifts) for k-space-truncated
-/// images. Complementary to [`denoise`]: unringing removes truncation ringing,
-/// MP-PCA removes random noise. Recommended before R2*/R2 fitting.
+/// Gibbs-ringing removal by subvoxel shifts for k-space-truncated images: Kellner 2016's
+/// slice-wise method for 2-D multi-slice acquisitions, and Bautista et al. 2021's 3-D extension
+/// ([`gibbs_unring_3d`](crate::utils::unring3d::gibbs_unring_3d)) for 3-D acquisitions.
+/// Complementary to [`denoise`]: unringing removes truncation ringing, MP-PCA removes random
+/// noise. Recommended before R2*/R2 fitting.
 pub mod unring {
     pub use crate::utils::gibbs::{gibbs_unring, gibbs_unring_masked, gibbs_unring_volume};
+    pub use crate::utils::unring3d::{gibbs_unring_3d, gibbs_unring_3d_complex, Unring3dParams};
 }
 
 /// Brain-mask thresholding and morphology.
