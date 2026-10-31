@@ -700,6 +700,26 @@ pub fn read_nifti_dims(path: &std::path::Path) -> Result<(usize, usize, usize), 
     Ok((nx, ny, nz))
 }
 
+/// The image geometry ITK (ITK 5.3, as in ANTs 2.4.3) reads from a NIfTI file's header
+/// ([`ItkGeometry::from_nifti_header`](crate::utils::ItkGeometry::from_nifti_header)), for ports
+/// whose output depends on it ([`n4_bias_correction`](crate::utils::n4_bias_correction)).
+/// Supports .nii and .nii.gz bytes.
+pub fn load_itk_geometry(bytes: &[u8]) -> Result<crate::utils::ItkGeometry, String> {
+    let header = if is_gzip(bytes) {
+        NiftiHeader::from_reader(GzDecoder::new(Cursor::new(bytes)))
+    } else {
+        NiftiHeader::from_reader(Cursor::new(bytes))
+    }
+    .map_err(|e| format!("Failed to read NIfTI header: {e} ({})", get_header_info(bytes)))?;
+    crate::utils::ItkGeometry::from_nifti_header(&header).map_err(|e| e.to_string())
+}
+
+/// [`load_itk_geometry`] of a file.
+pub fn read_itk_geometry_file(path: &std::path::Path) -> Result<crate::utils::ItkGeometry, String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("Failed to read file '{}': {}", path.display(), e))?;
+    load_itk_geometry(&bytes)
+}
+
 /// Read a NIfTI file from a filesystem path
 ///
 /// Supports both .nii and .nii.gz files.

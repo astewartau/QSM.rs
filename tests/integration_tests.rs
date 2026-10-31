@@ -1117,7 +1117,8 @@ fn test_n4_bias_correction() {
     let ne = data.mag_echoes.len() as f64;
     let mean: Vec<f64> = (0..n).map(|i| data.mag_echoes.iter().map(|m| m[i]).sum::<f64>() / ne).collect();
     let (out, elapsed) = run_timed!("N4", qsm_core::utils::n4_bias_correction(
-        &mean, None, &grid, &qsm_core::utils::N4Params::default(), |_, _| {},
+        &mean, None, &grid, &qsm_core::utils::ItkGeometry::make_nii(grid.voxel_size),
+        &qsm_core::utils::N4Params::default(), |_, _| {},
     ).unwrap());
 
     println!("N4 {:>10.2?}", elapsed);

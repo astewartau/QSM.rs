@@ -7,7 +7,7 @@
 //! time. `N4_ITERS=50x50x50x50`, `N4_THRESHOLD=0`, `N4_SHRINK=4` and `N4_ORDER=3` override
 //! the iterations per level and convergence threshold (ANTs' `-c`), the shrink factor (`-s`)
 //! and the spline order (`-b [1x1x1,order]`).
-use qsm_core::io::{read_nifti_file, save_nifti_to_file};
+use qsm_core::io::{read_itk_geometry_file, read_nifti_file, save_nifti_to_file};
 use qsm_core::utils::{n4_bias_correction, N4Params};
 use qsm_core::Grid;
 use std::path::Path;
@@ -38,9 +38,11 @@ fn main() {
     if let Ok(o) = std::env::var("N4_ORDER") {
         params.spline_order = o.parse().expect("spline order");
     }
+    // The input's header, as ANTs (ITK) reads it, decides where the shrunk grid samples.
+    let geometry = read_itk_geometry_file(Path::new(&a[1])).expect("read header");
     let t = std::time::Instant::now();
     let iterations = std::cell::Cell::new(0);
-    let out = n4_bias_correction(&f.data, mask.as_deref(), &grid, &params, |i, _| iterations.set(i)).expect("n4");
+    let out = n4_bias_correction(&f.data, mask.as_deref(), &grid, &geometry, &params, |i, _| iterations.set(i)).expect("n4");
     eprintln!("n4: {:?}, {} iterations, {:.2}s", f.dims, iterations.get(), t.elapsed().as_secs_f64());
     save_nifti_to_file(Path::new(&a[2]), &out.corrected, f.dims, vs, &f.affine).expect("write corrected");
     if let Some(p) = a.get(3) {
