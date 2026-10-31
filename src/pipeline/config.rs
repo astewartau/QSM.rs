@@ -1160,6 +1160,13 @@ pub struct FieldMappingResult {
     /// [`B0EstimationMethod::ComplexFit`] (`Fit_ppm_complex.m`'s `dp1`, MEDI's `N_std`, which
     /// MEDI passes to PDF and MEDI_L1). `None` for every other method.
     pub field_noise_ppm: Option<Vec<f64>>,
+    /// MEDI's complex fit itself, when [`B0EstimationMethod::ComplexFit`] made the field map:
+    /// [`fit_ppm_complex`](crate::utils::fit_ppm_complex)'s result, before spatial unwrapping.
+    /// Its [`field`](crate::utils::FitPpmComplexResult::field) is MEDI's `iFreq_raw` (phase per
+    /// echo spacing, radians, wrapped) and its [`noise`](crate::utils::FitPpmComplexResult::noise)
+    /// MEDI's `N_std` (radians per echo spacing), so a caller that wants them need not run the fit
+    /// again. `None` for every other method.
+    pub complex_fit: Option<crate::utils::FitPpmComplexResult>,
 }
 
 /// Per-echo evidence from [`B0EstimationMethod::RobustFit`]: which echoes the fit stopped
