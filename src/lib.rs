@@ -222,7 +222,7 @@ pub mod denoise {
 /// images. Complementary to [`denoise`]: unringing removes truncation ringing,
 /// MP-PCA removes random noise. Recommended before R2*/R2 fitting.
 pub mod unring {
-    pub use crate::utils::gibbs::{gibbs_unring, gibbs_unring_masked, gibbs_unring_volume};
+    pub use crate::utils::gibbs::{gibbs_unring, gibbs_unring_masked, gibbs_unring_volume, GibbsMode};
 }
 
 /// Brain-mask thresholding and morphology.
