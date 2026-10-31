@@ -744,7 +744,7 @@ pub(crate) fn svd3(mat: &[[f64; 3]; 3]) -> Option<Svd3> {
             let mp1 = m + 1;
             let mut ls = 0usize;
             for lls in lp1..=mp1 {
-                ls = m - lls + lp1;
+                ls = m + lp1 - lls;
                 if ls == l {
                     break;
                 }
