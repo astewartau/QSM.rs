@@ -19,16 +19,21 @@
 ///   `(mag·TE)²`, i.e. magnitude squared, although they print "Magnitude × TE²". QSM-CI's iQSM and
 ///   iQFM originals (bb163ef) run this Python.
 ///
-/// The default is the MATLAB's (the implementation published with the paper);
-/// [`MagnitudeSquaredTeSquared`](Self::MagnitudeSquaredTeSquared) reproduces the Python, for
-/// parity with it. iQSM+ has no choice: both of its authors' implementations use `(mag·TE)²`
-/// (see `iqsm_plus_multi_echo`).
+/// The default is [`MagnitudeSquaredTeSquared`](Self::MagnitudeSquaredTeSquared), `(mag·TE)²`
+/// (Ashley's decision, 2026-10-31). Each echo's χ (or local field) estimate is its phase divided
+/// by TE, and the phase noise has standard deviation ∝ 1/mag, so the estimate's noise variance is
+/// ∝ 1/(mag·TE)²: `(mag·TE)²` is the inverse-variance weight, which gives the combination of least
+/// variance. It is also the authors' current Python, and iQSM+'s weighting in both of its
+/// authors' implementations (`sunhongfu/iQSM_Plus` `legacy/matlab/iQSM_plus.m:273-275`,
+/// `run.py:199`; see `iqsm_plus_multi_echo`, which has no choice). The MATLAB's `mag·TE²`
+/// ([`MagnitudeTeSquared`](Self::MagnitudeTeSquared)) stays as an option, for parity with the
+/// implementation published with the paper.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum IqsmEchoWeighting {
-    /// `w = mag·TE²`: the authors' MATLAB echo fit (the default).
-    #[default]
+    /// `w = mag·TE²`: the authors' MATLAB echo fit (an option, for parity with it).
     MagnitudeTeSquared,
-    /// `w = (mag·TE)² = mag²·TE²`: the authors' Python drivers.
+    /// `w = (mag·TE)² = mag²·TE²`: inverse-variance; the authors' Python drivers (the default).
+    #[default]
     MagnitudeSquaredTeSquared,
 }
 
@@ -101,6 +106,6 @@ mod tests {
         // All weights zero: zero.
         let zero = run(IqsmEchoWeighting::MagnitudeTeSquared, &[&[0.0; 2], &[0.0; 2]]);
         assert_eq!(zero, vec![0.0; 2]);
-        assert_eq!(IqsmEchoWeighting::default(), IqsmEchoWeighting::MagnitudeTeSquared);
+        assert_eq!(IqsmEchoWeighting::default(), IqsmEchoWeighting::MagnitudeSquaredTeSquared);
     }
 }

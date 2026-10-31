@@ -627,8 +627,8 @@ const IQSM_ERODED_RAD: i32 = 3;
 
 /// Run iQSM single-step reconstruction from wrapped **phase** (joint unwrap +
 /// background removal + dipole inversion). Multi-echo inputs are reconstructed
-/// per echo and combined with `echo_weighting` (default magnitude·TE², the authors' MATLAB echo
-/// fit; see [`IqsmEchoWeighting`](crate::inversion::IqsmEchoWeighting)). Requires the `onnx`
+/// per echo and combined with `echo_weighting` (default (magnitude·TE)², the inverse-variance
+/// weight; see [`IqsmEchoWeighting`](crate::inversion::IqsmEchoWeighting)). Requires the `onnx`
 /// feature + `iqsm` weights.
 ///
 /// `phases`/`magnitudes` are per-echo wrapped-phase / magnitude volumes (column-major);

@@ -5,8 +5,8 @@
 //! echo, each alone (given that echo's phase and TE, iQSM+ also its magnitude, and the mask).
 //!
 //! The iQSM family runs on one echo at a time because the echo combination is checked separately:
-//! for iQSM and iQFM QSM.rs defaults to the authors' MATLAB echo fit, weights mag·TE², where the
-//! Python driver weights (mag·TE)² (an option; `src/inversion/iqsm_echo_weighting.rs`). The
+//! for iQSM and iQFM QSM.rs defaults to (mag·TE)², as the authors' Python driver weights, and
+//! offers their MATLAB echo fit's mag·TE² as an option (`src/inversion/iqsm_echo_weighting.rs`). The
 //! per-echo outputs are the network and its pre- and post-processing; the multi-echo test then
 //! checks QSM.rs's combinations against the authors' weights applied to the originals' per-echo
 //! outputs.
@@ -107,7 +107,7 @@ fn iqfm_matches_its_original_per_echo() {
 
 /// The three networks' multi-echo entry points, against the combination of the originals'
 /// per-echo outputs with the authors' weights: iQSM and iQFM with each [`IqsmEchoWeighting`]
-/// (the MATLAB echo fit's mag·TE², the default, and the Python's (mag·TE)²), iQSM+ with (mag·TE)²
+/// (the Python's (mag·TE)², the default, and the MATLAB echo fit's mag·TE²), iQSM+ with (mag·TE)²
 /// (both of its authors' implementations).
 #[test]
 fn iqsm_family_multi_echo_matches_the_echo_combination_of_its_originals() {

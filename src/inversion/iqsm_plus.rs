@@ -84,8 +84,9 @@ pub fn iqsm_plus(
 /// Both of the authors' implementations weight this way (checked at `sunhongfu/iQSM_Plus`
 /// 3ba25f5): the MATLAB `legacy/matlab/iQSM_plus.m:273-275`
 /// (`weights = (mag.*TE).^2; sum(weights.*chi,4)./sum(weights,4)`) and the Python `run.py:199` and
-/// `app.py:415` (`weights = (mag_data * te_bc) ** 2`). Unlike iQSM and iQFM, whose MATLAB uses
-/// mag·TE² (see [`IqsmEchoWeighting`]), there is no choice to offer.
+/// `app.py:415` (`weights = (mag_data * te_bc) ** 2`), and it is the inverse-variance weight. Unlike
+/// iQSM and iQFM, whose MATLAB uses mag·TE² (an option there; see [`IqsmEchoWeighting`]), there is
+/// no other weighting to offer.
 ///
 /// `tile: None` runs each echo on the brain's bounding box in one pass; `Some` runs it patch by
 /// patch, with memory bounded by the patch (an approximation; see [`super::iqsm`]).

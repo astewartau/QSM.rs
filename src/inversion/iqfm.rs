@@ -31,9 +31,9 @@
 //!
 //! The original runs one echo at a time and combines the echoes afterwards. As for iQSM, the
 //! authors' MATLAB echo fit (`sunhongfu/iQSM_Plus` `legacy/matlab/iQFM.m:263-270`, and the iQFM
-//! output of `sunhongfu/iQSM` `legacy/matlab/demo_multi_echo.m:152-160`) weights by mag·TE², the
-//! default here, and their Python driver (`sunhongfu/iQSM` `run.py:170`, `app.py:416`) by
-//! (mag·TE)², an option ([`IqsmEchoWeighting`]). On the box's first and third echoes the driver's
+//! output of `sunhongfu/iQSM` `legacy/matlab/demo_multi_echo.m:152-160`) weights by mag·TE², an
+//! option here, and their Python driver (`sunhongfu/iQSM` `run.py:170`, `app.py:416`) by
+//! (mag·TE)², the inverse-variance weight and the default ([`IqsmEchoWeighting`]). On the box's first and third echoes the driver's
 //! combination is (mag·TE)² of its per-echo outputs to 5e-6 %, and the two weightings differ by
 //! 3.4 % NRMSE; [`iqfm_multi_echo`] matches the MATLAB fit of the original's per-echo outputs to
 //! 2.7e-3 % (measured 2026-10-30), and with the Python weighting their (mag·TE)² combination to
@@ -61,7 +61,7 @@ pub fn iqfm(
 }
 
 /// Multi-echo iQFM: reconstruct each echo and combine them with `weighting` (default
-/// magnitude·TE², the authors' MATLAB echo fit; see [`IqsmEchoWeighting`]), exactly as
+/// (magnitude·TE)², the inverse-variance weight; see [`IqsmEchoWeighting`]), exactly as
 /// [`super::iqsm::iqsm_multi_echo`], whole-volume or tiled (`tile`).
 #[allow(clippy::too_many_arguments)]
 pub fn iqfm_multi_echo(

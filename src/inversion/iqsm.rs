@@ -8,7 +8,7 @@
 //! This mirrors the authors' `inference.run_iqsm`: flip the phase sign, erode the
 //! mask by a radius-3 sphere, centre-pad each dim to a multiple of 16, run the
 //! net, multiply by the (padded) mask, and crop back. For multi-echo data each
-//! echo is reconstructed and combined with magnitude·TE² weighting by default
+//! echo is reconstructed and combined with (magnitude·TE)² weighting by default
 //! ([`iqsm_multi_echo`], [`IqsmEchoWeighting`]).
 //!
 //! The authors run the whole volume in one pass, and so does [`iqsm`]. Its activations scale with
@@ -48,8 +48,8 @@
 //! The original runs one echo at a time and combines the echoes afterwards. The authors' two
 //! implementations combine them differently (see [`IqsmEchoWeighting`]): their MATLAB echo fit,
 //! published with the paper, weights by mag·TE², and their Python driver by (mag·TE)². This crate
-//! defaults to the MATLAB's mag·TE² and offers the Python's (mag·TE)² as an option, for parity with
-//! the Python-based QSM-CI original. On the box's first and third echoes the driver's combination
+//! defaults to (mag·TE)², the inverse-variance weight (each echo's estimate has noise variance
+//! ∝ 1/(mag·TE)²), and offers the MATLAB's mag·TE² as an option, for parity with it. On the box's first and third echoes the driver's combination
 //! is (mag·TE)² of its per-echo outputs to 6e-6 %, and the two weightings differ by 3.0 % NRMSE;
 //! [`iqsm_multi_echo`] matches the MATLAB fit of the original's per-echo outputs to 9.4e-4 %
 //! (measured 2026-10-30), and with the Python weighting their (mag·TE)² combination to 9.5e-4 %
@@ -97,7 +97,7 @@ pub fn iqsm(
 }
 
 /// Multi-echo iQSM: reconstruct each echo and combine them with `weighting` (see
-/// [`IqsmEchoWeighting`]; the default is magnitude·TE², the authors' MATLAB echo fit).
+/// [`IqsmEchoWeighting`]; the default is (magnitude·TE)², the inverse-variance weight).
 /// `phases`/`magnitudes` are per-echo volumes; `tes` the echo times (s). Without
 /// `magnitudes` the weights are TE² alone (uniform magnitude).
 ///
