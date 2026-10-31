@@ -6,10 +6,8 @@
 //! (`.github/workflows/regenerate-fixtures.yml`): a noisy six-echo 14x14x10 phantom, its mask, and
 //! DIPY's output (`patch_radius` 2, `pca_method='eig'`).
 //!
-//! **Known gap** (astewartau/QSM.rs#327): QSM.rs gives each voxel its own patch's estimate, where
-//! DIPY averages the estimates of the overlapping patches, so it is not DIPY's output. This test
-//! records the measured distance so that a change shows, and is to be tightened to rounding once
-//! the overlapping-patch average reproduces DIPY.
+//! DIPY averages the estimates of the overlapping patches (Manjón 2013), and so does QSM.rs since
+//! astewartau/QSM.rs#327; voxels outside the mask are 0 in both.
 
 use qsm_core::denoise::mppca_denoise;
 
@@ -35,9 +33,15 @@ fn mppca_against_dipy() {
     let norm = |f: &dyn Fn(usize) -> f64| inside.iter().map(|&i| f(i).powi(2)).sum::<f64>().sqrt();
     let nrmse = norm(&|i| out[i] - dip[i]) / norm(&|i| dip[i]);
     let (dipy_change, our_change) = (norm(&|i| inp[i] - dip[i]) / norm(&|i| dip[i]), norm(&|i| inp[i] - out[i]) / norm(&|i| dip[i]));
-    println!("vs DIPY in the mask: NRMSE {:.3} %; change from the input: DIPY {:.3} %, QSM.rs {:.3} %",
+    println!("vs DIPY in the mask: NRMSE {:.2e} %; change from the input: DIPY {:.3} %, QSM.rs {:.3} %",
              100.0 * nrmse, 100.0 * dipy_change, 100.0 * our_change);
-    // Measured 2026-10-30: NRMSE 1.33 %, with DIPY changing the input by 2.28 % and QSM.rs by
-    // 1.96 %: the patch-averaging gap above (on a travelling head, 0.97 %).
-    assert!(nrmse < 0.02, "NRMSE {nrmse}");
+    // Measured 2026-10-31: 2.6e-6 %, the fixture's float32 rounding (it was 1.33 % before the
+    // overlapping-patch average). Outside the mask both are 0.
+    assert!(nrmse < 1e-6, "NRMSE {nrmse}");
+    for i in 0..n * VOLS {
+        if mask[i / VOLS] == 0 {
+            assert_eq!(out[i], 0.0);
+            assert_eq!(dip[i], 0.0);
+        }
+    }
 }

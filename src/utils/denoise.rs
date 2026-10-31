@@ -7,21 +7,33 @@
 //! Unlike Gaussian smoothing this preserves spatial edges — it removes noise
 //! along the volume dimension, not across space.
 //!
-//! This is a faithful port of the algorithm in DIPY's `localpca`/`mppca`
-//! (eigenvalue path), which implements Veraart et al. (2016), "Denoising of
-//! diffusion MRI using random matrix theory", NeuroImage 142:394-406, with the
-//! Manjón (2013) overlapping-patch aggregation replaced by a race-free
-//! centre-voxel assignment (each output voxel is denoised by its own patch).
+//! This is a port of DIPY's `mppca` (`localpca.genpca`, eigenvalue path), which implements
+//! Veraart et al. (2016), "Denoising of diffusion MRI using random matrix theory", NeuroImage
+//! 142:394-406, with Manjón et al. (2013)'s overlapping-patch aggregation: every patch's estimate
+//! is given to all its voxels, weighted by `1 / (1 + n − ncomps)`, and each voxel is the weighted
+//! mean of the estimates covering it. Voxels outside the mask are 0, as in DIPY.
 //!
 //! Applying this to multi-echo magnitude before R2*/R2 fitting reduces the
 //! variance of the fitted relaxation rate without blurring structure.
 //!
-//! **Agreement with DIPY** (astewartau/QSM.rs#327, known gap): because of the centre-voxel
-//! assignment, the output is not DIPY's, which averages the overlapping patches' estimates. They
-//! differ by 0.97 % NRMSE on a travelling head's five echoes (QSMxT/QSM-CI#302) and 1.3 % on the
-//! six-echo 14×14×10 phantom of `tests/mppca_dipy_parity.rs` (DIPY 1.12.1 in the verified
-//! `py-originals` image, patch radius 2; measured 2026-10-30), where DIPY changes the input by
-//! 2.3 % and QSM.rs by 2.0 %. Matching DIPY needs the overlapping-patch average.
+//! **Agreement with DIPY 1.12.1** (verified QSM-CI `py-originals` image, QSMxT/QSM-CI#302;
+//! patch radius 2; measured 2026-10-31, astewartau/QSM.rs#327): NRMSE 2.6e-6 % on a 64×64×32
+//! crop of a travelling head's five echoes (`prisma-bridge-run1`; DIPY changes the input by
+//! 2.4 %), and 2.6e-6 % (the fixture's float32 rounding) on the six-echo 14×14×10 phantom of
+//! `tests/mppca_dipy_parity.rs`. What is left is summation order and the eigensolver (cyclic
+//! Jacobi here, LAPACK `syevr` in SciPy). Before this, each voxel took only its own patch's
+//! estimate (a race-free shortcut), which was 0.97 % from DIPY on the full travelling head and
+//! 1.3 % on the phantom.
+//!
+//! **Which implementation.** DIPY is the reference QSM-CI runs. Veraart's own MATLAB,
+//! `MPdenoising.m` (NYU-DiffusionMRI/mppca_denoise), is not the same algorithm in its details:
+//! - it does not centre the patch by default;
+//! - its noise criterion compares two σ² estimates per rank, with a `(max(M, N) − r)/N` scaling;
+//! - it assigns the centre voxel (`'full'` sampling) or whole blocks (`'fast'`, its default for
+//!   denoising) rather than averaging overlapping patches;
+//! - its licence is non-commercial.
+//!
+//! Whether to follow it instead is an open question (astewartau/QSM.rs#327).
 
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
@@ -135,7 +147,16 @@ fn mp_noise_variance(d: &[f64], n_samples: usize) -> f64 {
     var
 }
 
-/// Denoise multi-volume data with MP-PCA.
+/// Denoise multi-volume data with MP-PCA, as DIPY's `mppca` (`genpca` with `sigma=None`,
+/// `pca_method='eig'`).
+///
+/// For every voxel at least `patch_radius` from the volume border and inside the mask, the
+/// `(2r+1)³` patch around it is centred on its per-volume mean, its covariance eigen-decomposed,
+/// the noise variance estimated from the Marchenko–Pastur bulk (DIPY's
+/// `_pca_classifier`), and the components with eigenvalue below `τ = (1 + √(n/m))² σ²` dropped.
+/// Every voxel of the patch gets that patch's estimate, weighted by `1 / (1 + n − ncomps)` with
+/// `ncomps` the dropped count (Manjón et al. 2013, eq. 3), and the output is the weighted mean of
+/// the estimates of all patches covering a voxel.
 ///
 /// # Arguments
 /// * `data` - Interleaved `[voxel0_vol0, voxel0_vol1, ..., voxel1_vol0, ...]`
@@ -143,13 +164,14 @@ fn mp_noise_variance(d: &[f64], n_samples: usize) -> f64 {
 /// * `dims` - Volume dimensions `(nx, ny, nz)`.
 /// * `n_vols` - Number of volumes (e.g. echoes).
 /// * `patch_radius` - Half-width of the cubic patch (radius 2 → 5×5×5).
-/// * `mask` - Optional binary mask; masked-out voxels are copied unchanged.
+/// * `mask` - Optional binary mask: patches are centred only on voxels inside it, and voxels
+///   outside it are 0 in the output, as in DIPY. `None` is the whole volume.
 ///
 /// # Returns
-/// Denoised data in the same layout, with negative denoised values set to 0 as DIPY's
-/// `localpca` does (`clip(min=0)`): the input is magnitude, where a negative value has no
-/// physical meaning. Voxels within `patch_radius` of the volume border, or outside the mask, are
-/// returned unchanged.
+/// Denoised data in the same layout, with negative values set to 0 as DIPY's `genpca` does
+/// (`clip(min=0)`): the input is magnitude, where a negative value has no physical meaning.
+/// Voxels inside the mask that no patch covers (possible only at the volume border, next to the
+/// mask's edge) keep their input values, where DIPY's `0/0` leaves NaN.
 pub fn mppca_denoise(
     data: &[f64],
     dims: (usize, usize, usize),
@@ -162,15 +184,22 @@ pub fn mppca_denoise(
     assert_eq!(data.len(), n_voxels * n_vols, "data length must be n_voxels * n_vols");
     let n = n_vols;
     let r = patch_radius;
-    let mut out = data.to_vec();
+    let side = 2 * r + 1;
+    let m = side * side * side; // patch voxel count
+    let plane = nx * ny;
+    let in_mask = |v: usize| mask.is_none_or(|mk| mk[v] != 0);
+    let tau_factor = 1.0 + (n as f64 / m as f64).sqrt();
 
-    // Denoise each voxel from its own patch (centre assignment → race-free).
-    let denoise_center = |cx: usize, cy: usize, cz: usize, slot: &mut [f64]| {
-        let side = 2 * r + 1;
-        let m = side * side * side; // patch voxel count
-        // Gather patch X (m×n), tracking the centre row.
+    // Σ θ and Σ θ·X̂ over the patches covering each voxel (DIPY's `theta`, `thetax`).
+    let mut theta = vec![0.0_f64; n_voxels];
+    let mut thetax = vec![0.0_f64; n_voxels * n];
+
+    // The estimate of the patch centred at (cx, cy, cz), added into a slab of `theta`/`thetax`
+    // that starts at plane `z0`.
+    let add_patch = |cx: usize, cy: usize, cz: usize, z0: usize, th: &mut [f64], thx: &mut [f64]| {
+        // Gather the patch X (m×n) and its voxel indices.
         let mut x = vec![0.0_f64; m * n];
-        let mut center_row = 0usize;
+        let mut vox_of = vec![0usize; m];
         let mut rr = 0usize;
         for dz in 0..side {
             let z = cz + dz - r;
@@ -178,12 +207,9 @@ pub fn mppca_denoise(
                 let y = cy + dy - r;
                 for dx in 0..side {
                     let xx = cx + dx - r;
-                    if dx == r && dy == r && dz == r {
-                        center_row = rr;
-                    }
-                    let vox = xx + y * nx + z * nx * ny;
-                    x[rr * n..rr * n + n]
-                        .copy_from_slice(&data[vox * n..vox * n + n]);
+                    let vox = xx + y * nx + z * plane;
+                    x[rr * n..rr * n + n].copy_from_slice(&data[vox * n..vox * n + n]);
+                    vox_of[rr] = vox;
                     rr += 1;
                 }
             }
@@ -225,61 +251,84 @@ pub fn mppca_denoise(
         }
         let (d, w) = jacobi_eigh(&cov, n);
         let var = mp_noise_variance(&d, m);
-        let tau_factor = 1.0 + (n as f64 / m as f64).sqrt();
         let tau = tau_factor * tau_factor * var;
-        // Keep components with eigenvalue >= tau; ncomps (noise) = count below.
-        // Reconstruct the centre row: mean + Σ_{kept k} (xc·w_k) w_k.
-        let xc = &x[center_row * n..center_row * n + n];
-        slot[..n].copy_from_slice(&mean[..n]);
-        for k in 0..n {
-            if d[k] < tau {
-                continue; // noise component
+        // Dropped (noise) components: eigenvalue below tau.
+        let kept: Vec<usize> = (0..n).filter(|&k| d[k] >= tau).collect();
+        let ncomps = n - kept.len();
+        let this_theta = 1.0 / (1.0 + n as f64 - ncomps as f64);
+        // X̂ = X W Wᵀ + M over the kept components, for every row of the patch.
+        let mut est = vec![0.0_f64; n];
+        for row in 0..m {
+            est.copy_from_slice(&mean);
+            let xr = &x[row * n..row * n + n];
+            for &k in &kept {
+                let mut proj = 0.0;
+                for a in 0..n {
+                    proj += xr[a] * w[a * n + k];
+                }
+                for t in 0..n {
+                    est[t] += proj * w[t * n + k];
+                }
             }
-            let mut proj = 0.0;
-            for a in 0..n {
-                proj += xc[a] * w[a * n + k];
-            }
+            let local = vox_of[row] - z0 * plane;
+            th[local] += this_theta;
             for t in 0..n {
-                slot[t] += proj * w[t * n + k];
+                thx[local * n + t] += est[t] * this_theta;
             }
         }
-        // Non-negativity (magnitude data), as DIPY's localpca: denoised_arr.clip(min=0)
+    };
+
+    if nx >= side && ny >= side && nz >= side {
+        // Patches centred on planes cz ≡ g (mod 2r+1) cover disjoint slabs of 2r+1 planes, so
+        // each group's planes run in parallel; within a plane, centres go y then x, as DIPY's loop.
+        for g in 0..side {
+            let z_first = g; // slab of the centre plane cz = r + g starts at plane g
+            if r + g >= nz - r {
+                continue;
+            }
+            let slab = side * plane;
+            let th_slabs = theta[z_first * plane..].chunks_exact_mut(slab);
+            let thx_slabs = thetax[z_first * plane * n..].chunks_exact_mut(slab * n);
+            let work = |(t, (th, thx)): (usize, (&mut [f64], &mut [f64]))| {
+                let z0 = z_first + t * side;
+                let cz = z0 + r;
+                if cz >= nz - r {
+                    return;
+                }
+                for cy in r..ny - r {
+                    for cx in r..nx - r {
+                        if in_mask(cx + cy * nx + cz * plane) {
+                            add_patch(cx, cy, cz, z0, th, thx);
+                        }
+                    }
+                }
+            };
+            #[cfg(feature = "parallel")]
+            {
+                let slabs: Vec<_> = th_slabs.zip(thx_slabs).enumerate().collect();
+                slabs.into_par_iter().for_each(work);
+            }
+            #[cfg(not(feature = "parallel"))]
+            {
+                th_slabs.zip(thx_slabs).enumerate().for_each(work);
+            }
+        }
+    }
+
+    let mut out = vec![0.0_f64; n_voxels * n];
+    for v in 0..n_voxels {
+        if !in_mask(v) {
+            continue; // 0, as DIPY's `denoised_arr[mask == 0] = 0`
+        }
+        if theta[v] == 0.0 {
+            out[v * n..v * n + n].copy_from_slice(&data[v * n..v * n + n]);
+            continue;
+        }
         for t in 0..n {
-            if slot[t] < 0.0 {
-                slot[t] = 0.0;
-            }
-        }
-    };
-
-    // Parallel over voxels; each writes only its own n-vector slot.
-    let process = |c: usize, slot: &mut [f64]| {
-        let cx = c % nx;
-        let cy = (c / nx) % ny;
-        let cz = c / (nx * ny);
-        if cx < r || cx >= nx - r || cy < r || cy >= ny - r || cz < r || cz >= nz - r {
-            return; // border: keep original
-        }
-        if let Some(mk) = mask {
-            if mk[c] == 0 {
-                return;
-            }
-        }
-        denoise_center(cx, cy, cz, slot);
-    };
-
-    #[cfg(feature = "parallel")]
-    {
-        out.par_chunks_mut(n)
-            .enumerate()
-            .for_each(|(c, slot)| process(c, slot));
-    }
-    #[cfg(not(feature = "parallel"))]
-    {
-        for (c, slot) in out.chunks_mut(n).enumerate() {
-            process(c, slot);
+            // Non-negativity (magnitude data), as DIPY's `clip(min=0)`.
+            out[v * n + t] = (thetax[v * n + t] / theta[v]).max(0.0);
         }
     }
-
     out
 }
 
