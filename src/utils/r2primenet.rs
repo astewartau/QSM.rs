@@ -77,6 +77,21 @@
 //! Kim, M., Ji, S., Lee, J., et al. (2025). "χ-sepnet: Deep neural network for magnetic
 //! susceptibility source separation." Human Brain Mapping, 46(4):e70136 — R2PRIMEnet is its
 //! R2*→R2′ conversion network.
+//!
+//! # Agreement with the original
+//!
+//! `tests/models_onnx/separation.rs` runs it on a 36×32×28 box of in-vivo data (1 mm, 2.89 T,
+//! across the brain's edge) against its original's verified QSM-CI entry, SNU-LIST's
+//! `240531_R2PRIMEnet.onnx` in QSM-CI's sliding window (`r2primenet`) (QSMxT/QSM-CI#316; the
+//! fixture is regenerated in Actions by `tests/data/dl_separation_qsmci_small.py`): given the same
+//! R2*, [`r2primenet`] matches it to NRMSE 2.9e-5 %, max |Δ| 4.5e-5 s⁻¹ (measured 2026-10-30):
+//! float32 rounding.
+//!
+//! The entry fits R2* itself with a stand-in for ARLO (log-linear least squares weighted by
+//! magnitude²), so the test gives [`r2primenet`] that fit's R2*. [`r2primenet_from_magnitude`] fits
+//! R2* with ARLO, as the toolbox's training data did (its normalisation file is
+//! `..._romeo_arlo.mat`); on the box the two R2* fits differ by 60 % NRMSE (r 0.89), and the R2′
+//! that follows by 112 %. That is the entry's R2* fit, not the network.
 
 // The parameters and limits are plain Rust and always built, so hosts can carry the settings
 // and check a patch without the networks; only inference needs `onnx`.
