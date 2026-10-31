@@ -111,6 +111,16 @@
 //! comparison gave NRMSE 15.5 %. `tests/sharp_qsmjl_parity.rs` checks the port against
 //! QSM.jl's output on small phantoms (max |Δ| < 1e-15 ppm).
 //!
+//! The working box depends on the voxel size at the float rounding level: its padding is
+//! `⌈r_max / min(vsz)⌉`, and NIfTI headers often store 1 mm as 0.99999994 (one float32 ulp
+//! below), for which a 12 mm radius pads 13 voxels, not 12. On the QSM-CI KKI travelling head
+//! (Philips 3 T, 256×256×128, header z spacing 0.99999994, `params.json` 1.0) that alone gave
+//! NRMSE 1.19 % between QSM.rs (header voxel size) and QSM.jl (`params.json`'s) with radii
+//! 12 → 1 mm (QSMxT/QSM-CI parity run 41029942914); given the same voxel size the outputs are
+//! identical in float32. The port keeps QSM.jl's rule (no rounding of the voxel size), so the
+//! two agree whenever they are given the same voxel size; `tests/sharp_qsmjl_parity.rs` has a
+//! case at that spacing (0.75 % from QSM.jl if 1.0 is used instead).
+//!
 //! The old edge test `1 − √1e-7` also let a ball count as fitting when it missed a few of its
 //! voxels (up to 2 of the 7,153 voxels of a 12 mm ball at 1 mm), so near the rim some voxels took a larger
 //! radius than fits. The QSM.jl test fixes that for every setting, including the STI Suite
