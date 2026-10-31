@@ -13,7 +13,8 @@
 //! 2. **Shrink** by `s` = [`N4Params::shrink_factor`] with ITK's `ShrinkImageFilter`, which
 //!    subsamples (no averaging): `m = max(1, ⌊n/s⌋)` samples per axis, at input indices
 //!    `o + s·i` where `o` keeps the physical centres of both grids together,
-//!    `o = round((n−1)/2 − s·(m−1)/2)`, halves rounded up.
+//!    `o = round((n−1)/2 − s·(m−1)/2)`, where a half is rounded the way ITK's arithmetic on the
+//!    image's geometry rounds it (see "Shrink offset").
 //! 3. **Log**: `log v` for voxels in the mask with `v > 0`; every other value is left as it
 //!    is (a zero stays 0, the log of an intensity of 1).
 //! 4. **Iterate.** For each fitting level (one per entry of [`N4Params::max_iterations`]), up
@@ -71,28 +72,57 @@
 //! it reads a double-precision NIfTI, moves this implementation's output by 6.7e-4 and
 //! 1.7e-4 on the first two volumes. Spline orders 1 and 2 and the masked, rescaled output agree
 //! as closely (≤ 5e-5 and 6e-6 on the first volume). `tests/n4_ants_parity.rs` checks a
-//! 30×32×26 synthetic volume against ANTs, with and without a mask: against the verified QSM-CI
+//! 30×32×26 synthetic volume against ANTs, with and without a mask (and on an oblique header, see
+//! "Shrink offset"): against the verified QSM-CI
 //! `ants-n4` image (ANTs 2.4.3, 4 threads; QSMxT/QSM-CI#302; `tests/data/n4_ants_small.py`
 //! regenerates it in Actions) the bias field agrees to 1.5e-5 and the masked, rescaled output to
 //! 6.2e-5 relative (measured 2026-10-30).
 //!
 //! # Shrink offset
 //!
-//! ITK finds the shrink offset `o` above by mapping a physical point back to an index and
-//! rounding, so where `(n−1)/2 − s·(m−1)/2` is a half-integer, ITK's rounding of a value that
-//! is exactly `k + ½` in exact arithmetic depends on the image's origin, spacing and direction
-//! cosines in floating point and can come out at `k` instead of `k + 1`. Here it is always
-//! `k + 1` (what ITK computes for an axis-aligned image whose origin and spacing are exact in
-//! binary, as NIfTI images with integer or dyadic geometry are). [`Grid`] carries no origin or
-//! direction, so other geometries cannot be reproduced; the difference is a one-voxel shift of
-//! the samples the bias field is fitted to.
+//! ITK finds the shrink offset `o` above by mapping the shrunk grid's first voxel to a physical
+//! point and back to an input index, rounding half up. Along every even axis `(n−1)/2 − s·(m−1)/2`
+//! is a half-integer `k + ½`, so the rounding goes whichever way the floating-point arithmetic of
+//! that round trip leaves it: `k + 1` for an axis-aligned image whose origin and spacing are exact
+//! in binary, but often `k` for a scanner's oblique header. The image's geometry is therefore an
+//! input ([`ItkGeometry`]): [`ItkGeometry::shrink_offsets`] repeats ITK's arithmetic step by step,
+//! including its SVD-based 3×3 inverse (bit-identical to VNL's on the matrices in
+//! `tests/data/vnl_inverse_3x3.txt`), from the geometry ITK 5.3 reads from the NIfTI header
+//! ([`ItkGeometry::from_nifti_header`], [`crate::io::load_itk_geometry`]).
+//!
+//! A one-voxel shift of the samples the bias field is fitted to is not small. On the in-vivo
+//! Prisma echo-1 magnitude of QSMxT/QSM-CI#312 (184×256×128, 1 mm; its sform carries a 4.9e-12
+//! off-diagonal term), ITK takes offsets (2, 1, 2) where an axis-aligned header gives (2, 2, 2).
+//! Against ANTs 2.4.3 on the real header (NRMSE over voxels where ANTs' output is non-zero,
+//! measured 2026-10-31):
+//!
+//! | Offsets | Corrected image NRMSE |
+//! |---|---|
+//! | (2, 2, 2), the axis-aligned rule this port used before | 3.04 % |
+//! | (2, 1, 2), from the header | **0.0054 %** |
+//! | (2, 2, 2) with the axis-aligned header, against ANTs on that header | 0.0019 % |
+//!
+//! On 208 headers the predicted offsets were the ones whose output matches ANTs 2.4.3's (each on
+//! a 40×44×36 synthetic image, so every axis is a half-integer case; best match ≤ 6.4e-4 relative
+//! RMS, every other combination ≥ 8.2e-2): 161 distinct in-vivo headers (travelling heads of three
+//! vendors, UK Biobank, clinical prostate, Ridani, the Prisma above; 115 with a qform and sform of
+//! code 1, 45 sform-only of code 2, one sform-only of code 1), 39 of them again with the sform
+//! removed so that ITK takes the qform, and QSMART's `make_nii` headers at eight voxel sizes
+//! (0.43–2.2 mm). The axis-aligned rule was right for 33 of the 208. `tests/n4_ants_parity.rs`
+//! checks the Prisma header on its 30×32×26 case, where ITK takes (3, 1, 3) and the bias field
+//! agrees with ANTs (the verified QSM-CI `ants-n4` image) to 1.9e-6 relative.
 //!
 //! # Reference pipeline
 //!
 //! In QSM, QSMART runs `N4BiasFieldCorrection -i mag1_sos.nii -o mag1_sos_n4.nii` (ANTs defaults,
 //! no mask) on the first echo's coil-RSS magnitude before `bet2 -f 0.2`
 //! (`QSMART_toolbox_v1.0/brainmask.m:7-14`), and on the echo-averaged magnitude for vessel
-//! detection (the comparison above). Nothing in N4 assumes a field strength or orientation.
+//! detection (the comparison above). It writes both files with `make_nii(img, vox)`, whatever the
+//! scanner's header was, so their geometry is [`ItkGeometry::make_nii`]
+//! ([`crate::utils::qsmart_vessel_magnitude`] uses it). On the QSM-CI sim's mean magnitude
+//! (164×205×205, 1 mm) this port matches ANTs 2.4.3 and 2.5.4 (identical to each other) to
+//! 1.2e-4 % NRMSE, and to 1.9e-5 % on the same volume padded to 164×206×206. Nothing in N4
+//! assumes a field strength or orientation.
 //!
 //! References:
 //! Tustison, N.J., Avants, B.B., Cook, P.A., Zheng, Y., Egan, A., Yushkevich, P.A., Gee, J.C.
@@ -109,6 +139,7 @@
 //! and <https://github.com/InsightSoftwareConsortium/ITK> (`Modules/Filtering/BiasCorrection`).
 
 use crate::error::InputError;
+use crate::utils::itk_geometry::ItkGeometry;
 use crate::Grid;
 use num_complex::Complex64;
 use rustfft::FftPlanner;
@@ -238,6 +269,10 @@ pub struct N4Output {
 /// * `mask` - Optional mask (`-x`): non-zero voxels are used for fitting; outside it the output
 ///   is the input. `None` uses the whole image, as ANTs does.
 /// * `grid` - Grid dimensions and voxel size.
+/// * `geometry` - The image's geometry as ITK reads it from the file ANTs would be given
+///   ([`ItkGeometry::from_nifti_header`], or [`ItkGeometry::make_nii`] for QSMART's files): it
+///   decides where the shrunk grid samples the image (module docs, "Shrink offset"). For an image
+///   with no header, [`ItkGeometry::axis_aligned`].
 /// * `params` - See [`N4Params`]; the default reproduces the ANTs command line's defaults.
 /// * `progress_callback` - Called with (iterations done, maximum iterations) after each
 ///   iteration.
@@ -245,11 +280,13 @@ pub struct N4Output {
 /// # Errors
 /// [`InputError`] if the parameters fail [`N4Params::validate`], the grid fails
 /// [`N4Params::check_grid`] (fewer than two voxels along an axis after shrinking), the image or
-/// mask does not match the grid, or the mask selects no voxel of the shrunk grid.
+/// mask does not match the grid, the geometry's direction · spacing is singular, or the mask
+/// selects no voxel of the shrunk grid.
 pub fn n4_bias_correction(
     image: &[f64],
     mask: Option<&[u8]>,
     grid: &Grid,
+    geometry: &ItkGeometry,
     params: &N4Params,
     progress_callback: impl Fn(usize, usize),
 ) -> Result<N4Output, InputError> {
@@ -271,6 +308,8 @@ pub fn n4_bias_correction(
     }
     params.check_grid(grid.dims)?;
     let order = params.spline_order;
+    // Where ITK's ShrinkImageFilter starts sampling: from the image's geometry, as ITK computes it.
+    let itk_offsets = geometry.shrink_offsets(grid.dims, params.shrink_factor)?;
 
     let dims = [grid.dims.0, grid.dims.1, grid.dims.2];
 
@@ -282,9 +321,8 @@ pub fn n4_bias_correction(
         // At least 2, by `check_grid` above.
         let m = dims[d] / s;
         sdims[d] = m;
-        // o = (n-1)/2 - s(m-1)/2, rounded half up; in halves: k = (n-1) - s(m-1).
-        let k = (dims[d] as i64 - 1) - (s as i64) * (m as i64 - 1);
-        offs[d] = ((k + 1).div_euclid(2)).max(0) as usize;
+        // ITK's offset, ≈ (n−1)/2 − s(m−1)/2 (see "Shrink offset"); kept inside the image.
+        offs[d] = itk_offsets[d].min(dims[d] - 1 - s * (m - 1));
     }
     let ns = sdims[0] * sdims[1] * sdims[2];
     let mut log_input = vec![0.0f64; ns];
@@ -805,6 +843,10 @@ mod tests {
         }
     }
 
+    fn geo(g: &Grid) -> ItkGeometry {
+        ItkGeometry::axis_aligned([g.voxel_size.0, g.voxel_size.1, g.voxel_size.2])
+    }
+
     fn phantom(n: [usize; 3]) -> (Vec<f64>, Vec<f64>, Grid) {
         // Two tissue classes in a sphere, times a smooth multiplicative bias.
         let grid = Grid::new(n[0], n[1], n[2], 1.0, 1.0, 1.0);
@@ -833,7 +875,7 @@ mod tests {
     fn n4_reduces_a_smooth_bias() {
         let (img, _bias, grid) = phantom([24, 24, 24]);
         let params = N4Params { max_iterations: vec![20, 20], ..N4Params::default() };
-        let out = n4_bias_correction(&img, None, &grid, &params, |_, _| {}).unwrap();
+        let out = n4_bias_correction(&img, None, &grid, &geo(&grid), &params, |_, _| {}).unwrap();
         // Within-class coefficient of variation drops.
         let cv = |v: &[f64], lo: f64, hi: f64| {
             let sel: Vec<f64> = img.iter().zip(v).filter(|(a, _)| **a > lo && **a < hi).map(|(_, b)| *b).collect();
@@ -855,7 +897,7 @@ mod tests {
         let (img, _bias, grid) = phantom([20, 20, 20]);
         let mask: Vec<u8> = img.iter().map(|&v| (v > 0.0) as u8).collect();
         let params = N4Params { max_iterations: vec![5], ..N4Params::default() };
-        let out = n4_bias_correction(&img, Some(&mask), &grid, &params, |_, _| {}).unwrap();
+        let out = n4_bias_correction(&img, Some(&mask), &grid, &geo(&grid), &params, |_, _| {}).unwrap();
         let (mut lo, mut hi, mut clo, mut chi) = (f64::MAX, f64::MIN, f64::MAX, f64::MIN);
         for i in 0..img.len() {
             if mask[i] == 0 {
@@ -875,19 +917,19 @@ mod tests {
         let (img, _bias, grid) = phantom([16, 16, 16]);
         let params = N4Params { convergence_threshold: 1.0, ..N4Params::default() };
         let last = std::cell::Cell::new(0);
-        n4_bias_correction(&img, None, &grid, &params, |i, _| last.set(i)).unwrap();
+        n4_bias_correction(&img, None, &grid, &geo(&grid), &params, |i, _| last.set(i)).unwrap();
         assert_eq!(last.get(), params.max_iterations.len());
     }
 
     #[test]
     fn refuses_unusable_input_with_an_error() {
         let (img, _bias, grid) = phantom([16, 16, 16]);
-        let err = |p: N4Params| n4_bias_correction(&img, None, &grid, &p, |_, _| {}).unwrap_err().to_string();
+        let err = |p: N4Params| n4_bias_correction(&img, None, &grid, &geo(&grid), &p, |_, _| {}).unwrap_err().to_string();
         let d = N4Params::default;
         assert_eq!(err(N4Params { spline_order: 4, ..d() }), "N4 spline_order = 4 is out of range: must be 1, 2 or 3");
         assert_eq!(err(N4Params { max_iterations: vec![], ..d() }), "N4 max_iterations = [] is out of range: must be at least one fitting level, the first with at least one iteration");
         assert!(err(N4Params { max_iterations: vec![0, 50], ..d() }).starts_with("N4 max_iterations = [0, 50]"));
-        assert!(n4_bias_correction(&img, None, &grid, &N4Params { max_iterations: vec![1, 0], ..d() }, |_, _| {}).is_ok());
+        assert!(n4_bias_correction(&img, None, &grid, &geo(&grid), &N4Params { max_iterations: vec![1, 0], ..d() }, |_, _| {}).is_ok());
         assert_eq!(err(N4Params { mesh: [1, 0, 1], ..d() }), "N4 mesh = [1, 0, 1] is out of range: must be >= 1 along each axis");
         assert_eq!(err(N4Params { histogram_bins: 1, ..d() }), "N4 histogram_bins = 1 is out of range: must be >= 2");
         assert_eq!(err(N4Params { shrink_factor: 0, ..d() }), "N4 shrink_factor = 0 is out of range: must be >= 1");
@@ -896,27 +938,27 @@ mod tests {
         assert!(err(N4Params { convergence_threshold: f64::INFINITY, ..d() }).starts_with("N4 convergence_threshold = inf"));
         // The grid check names the axis, its size and the shrink factor: a 6-slice slab at 4.
         let slab = Grid::new(16, 16, 6, 1.0, 1.0, 1.0);
-        let e = n4_bias_correction(&vec![1.0; 16 * 16 * 6], None, &slab, &d(), |_, _| {}).unwrap_err().to_string();
+        let e = n4_bias_correction(&vec![1.0; 16 * 16 * 6], None, &slab, &geo(&slab), &d(), |_, _| {}).unwrap_err().to_string();
         assert!(e.contains("axis 2") && e.contains("has 6") && e.contains("shrink_factor = 4"), "{e}");
         assert_eq!(d().check_grid((16, 16, 6)).unwrap_err().to_string(), e);
         assert!(d().check_grid((8, 8, 8)).is_ok() && d().check_grid((8, 8, 7)).is_err());
         // Volumes that do not match the grid, and a mask that selects nothing.
-        let e = n4_bias_correction(&img[1..], None, &grid, &d(), |_, _| {}).unwrap_err().to_string();
+        let e = n4_bias_correction(&img[1..], None, &grid, &geo(&grid), &d(), |_, _| {}).unwrap_err().to_string();
         assert!(e.starts_with("N4 image has 4095 voxels but the grid is 16x16x16"), "{e}");
-        let e = n4_bias_correction(&img, Some(&[1u8; 10]), &grid, &d(), |_, _| {}).unwrap_err().to_string();
+        let e = n4_bias_correction(&img, Some(&[1u8; 10]), &grid, &geo(&grid), &d(), |_, _| {}).unwrap_err().to_string();
         assert!(e.starts_with("N4 mask has 10 voxels"), "{e}");
-        let e = n4_bias_correction(&img, Some(&vec![0u8; img.len()]), &grid, &d(), |_, _| {}).unwrap_err().to_string();
+        let e = n4_bias_correction(&img, Some(&vec![0u8; img.len()]), &grid, &geo(&grid), &d(), |_, _| {}).unwrap_err().to_string();
         assert!(e.contains("mask selects no voxel"), "{e}");
         assert!(d().validate().is_ok());
     }
 
     #[test]
     fn shrink_offset_matches_itk() {
-        // (n-1)/2 - s(m-1)/2 rounded half up: n=178, s=4 -> m=44, 2.5 -> 3; n=148 -> 1.5 -> 2.
-        for (n, s, want) in [(178i64, 4i64, 3i64), (148, 4, 2), (32, 4, 2), (33, 4, 2), (10, 3, 2)] {
-            let m = n / s;
-            let k = (n - 1) - s * (m - 1);
-            assert_eq!((k + 1).div_euclid(2), want, "n {n} s {s}");
+        // Axis-aligned, exact geometry: (n-1)/2 - s(m-1)/2 rounded half up: n=178, s=4 -> m=44,
+        // 2.5 -> 3; n=148 -> 1.5 -> 2; odd n give whole numbers.
+        for (n, s, want) in [(178usize, 4usize, 3usize), (148, 4, 2), (32, 4, 2), (33, 4, 2), (10, 3, 2)] {
+            let g = ItkGeometry::axis_aligned([1.0, 1.0, 1.0]);
+            assert_eq!(g.shrink_offsets((n, n, n), s).unwrap(), [want; 3], "n {n} s {s}");
         }
     }
 }

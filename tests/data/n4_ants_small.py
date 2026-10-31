@@ -12,7 +12,10 @@
 # Gaussian noise (σ = 3, seeded) inside it, times the bias exp(0.35x − 0.25y + 0.2z²), 30x32x26 at
 # 1x1x1.5 mm. Layout (little-endian f32, column-major): the input; the bias field of
 # `N4BiasFieldCorrection -i in.nii -o [n4.nii,bias.nii]` (all defaults); the corrected image of
-# the same with `-x mask.nii`, the mask `input > 30`.
+# the same with `-x mask.nii`, the mask `input > 30`; the bias field of the same input written with
+# a scanner's oblique header instead (`oblique.nii`: the sform, code 2, of QSM-CI's in-vivo
+# prisma-bridge-run1, whose direction cosines carry a 4.9e-12 off-diagonal term; qform code 0),
+# on which ITK's shrink starts one voxel earlier along y (astewartau/QSM.rs#327).
 import os, sys, tempfile
 import numpy as np, nibabel as nib
 
@@ -43,10 +46,24 @@ aff = np.diag([1.0, 1.0, 1.5, 1.0])
 with tempfile.TemporaryDirectory() as w:
     nib.save(nib.Nifti1Image(img, aff), f"{w}/in.nii")
     nib.save(nib.Nifti1Image((img > 30).astype(np.float32), aff), f"{w}/mask.nii")
+    # The oblique header, float32 bit patterns as stored in prisma-bridge-run1's magnitude.
+    f = lambda b: float(np.array([b], dtype="<u4").view("<f4")[0])
+    srow = np.array([[f(0xbf800000), f(0xacac4c41), 0.0, f(0x42b602eb)],
+                     [f(0xacac4c41), f(0x3f800000), f(0x80000000), f(0xc2e31894)],
+                     [0.0, 0.0, f(0x3f800000), f(0xc21eab36)], [0, 0, 0, 1]], dtype=np.float64)
+    ob = nib.Nifti1Image(img, None)
+    ob.header.set_sform(srow, code=2)
+    ob.header.set_qform(None, code=0)
+    ob.header["pixdim"][1:4] = 1.0
+    nib.save(ob, f"{w}/oblique.nii")
+    h = nib.load(f"{w}/oblique.nii").header
+    assert h["sform_code"] == 2 and h["qform_code"] == 0
+    assert np.array_equal(np.stack([h["srow_x"], h["srow_y"], h["srow_z"]]), srow[:3].astype(np.float32))
     n4 = ["N4BiasFieldCorrection", "-i", "in.nii"]
     env = ["ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS=4"]
     run(IMAGE, w, n4 + ["-o", "[n4.nii,n4_bias.nii]"], env)
     run(IMAGE, w, n4 + ["-x", "mask.nii", "-o", "[n4m.nii,n4m_bias.nii]"], env)
+    run(IMAGE, w, ["N4BiasFieldCorrection", "-i", "oblique.nii", "-o", "[n4o.nii,n4o_bias.nii]"], env)
     ld = lambda f: np.asarray(nib.load(f"{w}/{f}").dataobj, dtype=np.float32).ravel(order="F")
-    out = np.concatenate([img.ravel(order="F"), ld("n4_bias.nii"), ld("n4m.nii")]).astype("<f4")
+    out = np.concatenate([img.ravel(order="F"), ld("n4_bias.nii"), ld("n4m.nii"), ld("n4o_bias.nii")]).astype("<f4")
 out.tofile(sys.argv[1])

@@ -310,6 +310,17 @@ fn box_mean_replicate(data: &[f64], dims: (usize, usize, usize), half: [usize; 3
 /// QSMART's vessel threshold depends on the magnitude's intensity scale, so the mean (not the sum
 /// or the root sum of squares) and N4 (not another bias correction) matter.
 ///
+/// N4 is given the geometry of the file QSMART writes for ANTs, `make_nii(AvgEcho, vox)`
+/// ([`ItkGeometry::make_nii`](crate::utils::ItkGeometry::make_nii)), which decides where N4's
+/// shrunk grid samples the image. On the QSM-CI sim's mean magnitude (164×205×205) this port's N4
+/// output is ANTs' (2.4.3 and 2.5.4) to 1.2e-4 % NRMSE (measured 2026-10-31,
+/// astewartau/QSM.rs#327). QSM-CI's `qsmart-matlab` entry pads odd axes to even with zeros before
+/// calling the toolbox, so its N4 sees 164×206×206; on that volume this port's N4 is ANTs' to
+/// 1.9e-5 %, and its vessel mask
+/// ([`generate_vasculature_mask`](crate::utils::generate_vasculature_mask)) is the entry's to 3
+/// voxels in 827,779. The padding alone moves the vessel mask to Dice 0.988, the sim gap of
+/// astewartau/QSM.rs#320.
+///
 /// # Errors
 /// If there are no echoes, an echo does not match the grid, or N4 refuses the grid (fewer than
 /// 8 voxels along an axis at ANTs' default shrink factor of 4; see
@@ -332,7 +343,10 @@ pub fn qsmart_vessel_magnitude(
     }
     let ne = magnitudes.len() as f64;
     let mean: Vec<f64> = (0..n).map(|i| magnitudes.iter().map(|m| m[i]).sum::<f64>() / ne).collect();
-    Ok(crate::utils::n4_bias_correction(&mean, None, grid, &crate::utils::N4Params::default(), |_, _| {})?.corrected)
+    // QSMART hands ANTs a file from make_nii(AvgEcho, vox) / save_nii, whose header sets where N4's
+    // shrunk grid samples the image.
+    let geometry = crate::utils::ItkGeometry::make_nii(grid.voxel_size);
+    Ok(crate::utils::n4_bias_correction(&mean, None, grid, &geometry, &crate::utils::N4Params::default(), |_, _| {})?.corrected)
 }
 
 /// Complete QSMART pipeline parameters
@@ -465,7 +479,8 @@ mod tests {
             .collect();
         let refs: Vec<&[f64]> = echoes.iter().map(|v| v.as_slice()).collect();
         let mean: Vec<f64> = (0..n).map(|i| (echoes[0][i] + echoes[1][i] + echoes[2][i]) / 3.0).collect();
-        let want = crate::utils::n4_bias_correction(&mean, None, &grid, &crate::utils::N4Params::default(), |_, _| {}).unwrap().corrected;
+        let geo = crate::utils::ItkGeometry::make_nii(grid.voxel_size);
+        let want = crate::utils::n4_bias_correction(&mean, None, &grid, &geo, &crate::utils::N4Params::default(), |_, _| {}).unwrap().corrected;
         assert_eq!(qsmart_vessel_magnitude(&refs, &grid).unwrap(), want);
         assert!(qsmart_vessel_magnitude(&[], &grid).is_err());
         assert!(qsmart_vessel_magnitude(&[&echoes[0][..n - 1]], &grid).is_err());
