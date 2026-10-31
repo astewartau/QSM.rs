@@ -8,8 +8,8 @@
 //! This mirrors the authors' `inference.run_iqsm`: flip the phase sign, erode the
 //! mask by a radius-3 sphere, centre-pad each dim to a multiple of 16, run the
 //! net, multiply by the (padded) mask, and crop back. For multi-echo data each
-//! echo is reconstructed and combined with magnitude·TE² weighting
-//! ([`iqsm_multi_echo`]).
+//! echo is reconstructed and combined with magnitude·TE² weighting by default
+//! ([`iqsm_multi_echo`], [`IqsmEchoWeighting`]).
 //!
 //! The authors run the whole volume in one pass, and so does [`iqsm`]. Its activations scale with
 //! the volume; the multi-echo entry point can instead run each echo patch by patch (a
@@ -45,17 +45,23 @@
 //! `tests/data/dl_field_qsmci_small.py`): per echo, NRMSE 9.8e-4 to 2.0e-3 %, max |Δ| up to 3.9e-6
 //! ppm: float32 rounding.
 //!
-//! The original runs one echo at a time: the authors' Python driver combines echoes with weights
-//! (mag·TE)², where this crate uses their MATLAB echo fit's mag·TE² (see [`iqsm_multi_echo`]). On
-//! the box's first and third echoes the driver's combination is (mag·TE)² of its per-echo outputs
-//! to 6e-6 %, and the two weightings differ by 3.0 % NRMSE; [`iqsm_multi_echo`] matches the MATLAB
-//! fit of the original's per-echo outputs to 9.4e-4 % (measured 2026-10-30).
+//! The original runs one echo at a time and combines the echoes afterwards. The authors' two
+//! implementations combine them differently (see [`IqsmEchoWeighting`]): their MATLAB echo fit,
+//! published with the paper, weights by mag·TE², and their Python driver by (mag·TE)². This crate
+//! defaults to the MATLAB's mag·TE² and offers the Python's (mag·TE)² as an option, for parity with
+//! the Python-based QSM-CI original. On the box's first and third echoes the driver's combination
+//! is (mag·TE)² of its per-echo outputs to 6e-6 %, and the two weightings differ by 3.0 % NRMSE;
+//! [`iqsm_multi_echo`] matches the MATLAB fit of the original's per-echo outputs to 9.4e-4 %
+//! (measured 2026-10-30), and with the Python weighting their (mag·TE)² combination to 9.5e-4 %
+//! (measured 2026-10-31).
 //!
 //! # Pipeline rules
 //!
 //! The facts above that a configuration can depart from are published as rules in
 //! [`crate::pipeline::rules::RULES`] (each with its strength, basis, reason and source): `iqsm.mask-bet`.
 
+pub use super::iqsm_echo_weighting::IqsmEchoWeighting;
+pub(crate) use super::iqsm_echo_weighting::combine_echoes;
 use super::tiled::{tile_cost_of, tile_patch_size, tiled_volume_algorithm, TileConfig};
 use crate::models::TileCost;
 use crate::grid::Grid;
@@ -90,15 +96,10 @@ pub fn iqsm(
     iqsm_with(&|i| model.run(i), phase_rad, mask, grid, te, b0, phase_sign, eroded_rad)
 }
 
-/// Multi-echo iQSM: reconstruct each echo and combine with magnitude·TE² weights.
+/// Multi-echo iQSM: reconstruct each echo and combine them with `weighting` (see
+/// [`IqsmEchoWeighting`]; the default is magnitude·TE², the authors' MATLAB echo fit).
 /// `phases`/`magnitudes` are per-echo volumes; `tes` the echo times (s). Without
 /// `magnitudes` the weights are TE² alone (uniform magnitude).
-///
-/// The weights are those of the authors' MATLAB echo fit: `sunhongfu/iQSM_Plus`
-/// `legacy/matlab/iQSM.m:262-267` fits `TE·χ` against TE with `echofit.m`
-/// (`sunhongfu/iQSM` `legacy/matlab/iQSM_fcns/echofit.m`), which is `Σ mag·TE²·χ / Σ mag·TE²`.
-/// The authors' current Python drivers (`sunhongfu/iQSM` `run.py:170`, the `--echo_4d` path, and
-/// `app.py`) weight by `(mag·TE)²` instead, i.e. magnitude squared; this crate does not.
 ///
 /// `tile: None` runs each echo on the whole volume; `Some` runs it patch by patch (see the
 /// module docs), the mask eroded once on the whole volume first.
@@ -114,8 +115,11 @@ pub fn iqsm_multi_echo(
     eroded_rad: i32,
     model_onnx: &[u8],
     tile: Option<&TileConfig>,
+    weighting: IqsmEchoWeighting,
 ) -> Result<Vec<f64>, OnnxError> {
-    lot_multi_echo("iqsm", phases, magnitudes, mask, grid, tes, b0, phase_sign, eroded_rad, model_onnx, tile)
+    lot_multi_echo(
+        "iqsm", phases, magnitudes, mask, grid, tes, b0, phase_sign, eroded_rad, model_onnx, tile, weighting,
+    )
 }
 
 /// [`iqsm_multi_echo`] for either head of the network: `model_id` (`"iqsm"` or `"iqfm"`) names
@@ -133,6 +137,7 @@ pub(crate) fn lot_multi_echo(
     eroded_rad: i32,
     model_onnx: &[u8],
     tile: Option<&TileConfig>,
+    weighting: IqsmEchoWeighting,
 ) -> Result<Vec<f64>, OnnxError> {
     assert_eq!(phases.len(), tes.len(), "one TE per echo");
     let model = OnnxModel::load(model_onnx)?;
@@ -146,7 +151,7 @@ pub(crate) fn lot_multi_echo(
         }
         None => None,
     };
-    combine_echoes(phases, magnitudes, tes, grid.n_total(), |phase, te| match &tiled {
+    combine_echoes(phases, magnitudes, tes, grid.n_total(), weighting, |phase, te| match &tiled {
         None => iqsm_with(&whole, phase, mask, grid, te, b0, phase_sign, eroded_rad),
         Some((cfg, plan)) => tiled_echo(phase, mask, grid, eroded_rad, cfg, &cost, |ph, m, g| {
             iqsm_with(&|i| plan.run(i), ph, m, g, te, b0, phase_sign, 0)
@@ -168,31 +173,6 @@ pub(crate) fn tiled_echo(
 ) -> Result<Vec<f64>, OnnxError> {
     let eroded = if eroded_rad > 0 { sphere_erode(mask, grid, eroded_rad) } else { mask.to_vec() };
     tiled_volume_algorithm(phase, &eroded, grid, cost, cfg, run_patch, |_, _| {})
-}
-
-/// Reconstruct each echo with `echo(phase, te)` and combine with magnitude·TE² weights.
-pub(crate) fn combine_echoes(
-    phases: &[&[f64]],
-    magnitudes: &[&[f64]],
-    tes: &[f64],
-    n: usize,
-    mut echo: impl FnMut(&[f64], f64) -> Result<Vec<f64>, OnnxError>,
-) -> Result<Vec<f64>, OnnxError> {
-    let mut acc = vec![0.0f64; n];
-    let mut wsum = vec![0.0f64; n];
-    for (e, &phase) in phases.iter().enumerate() {
-        let chi = echo(phase, tes[e])?;
-        let te2 = tes[e] * tes[e];
-        for i in 0..n {
-            let w = magnitudes.get(e).map(|m| m[i]).unwrap_or(1.0) * te2;
-            acc[i] += w * chi[i];
-            wsum[i] += w;
-        }
-    }
-    for i in 0..n {
-        acc[i] = if wsum[i] > 0.0 { acc[i] / wsum[i] } else { 0.0 };
-    }
-    Ok(acc)
 }
 
 #[allow(clippy::too_many_arguments)]

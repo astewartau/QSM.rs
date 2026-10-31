@@ -9,7 +9,7 @@
 //! Pipeline (mirrors the authors' `inference.run_iqsm_plus`): flip the phase sign,
 //! erode the mask by a radius-3 sphere, **crop to the brain bounding box + 16-voxel
 //! margin**, centre-pad to a multiple of 16, run, ×mask, then paste the result back
-//! into the full grid. Multi-echo data is combined with magnitude·TE² weighting.
+//! into the full grid. Multi-echo data is combined with (magnitude·TE)² weighting.
 //!
 //! Only axial-ish acquisitions are handled directly here; the authors' extra
 //! axis-permutation for strongly oblique fields (`|dir_y| > |dir_z|`) is not applied.
@@ -37,11 +37,13 @@
 //! `tests/data/dl_field_qsmci_small.py`): per echo, NRMSE 2.7e-4 to 3.3e-4 %, max |Δ| up to 6.8e-7
 //! ppm: float32 rounding.
 //!
-//! The original runs one echo at a time: the authors' Python driver combines echoes with weights
-//! (mag·TE)², where this crate uses their MATLAB echo fit's mag·TE² (see [`iqsm_plus_multi_echo`]).
-//! On the box's first and third echoes the driver's combination is (mag·TE)² of its per-echo
-//! outputs to 1.6e-3 %, and the two weightings differ by 3.1 % NRMSE; [`iqsm_plus_multi_echo`]
-//! matches the MATLAB fit of the original's per-echo outputs to 2.4e-4 % (measured 2026-10-30).
+//! The original runs one echo at a time and combines the echoes afterwards with weights
+//! (mag·TE)², in both of the authors' implementations (see [`iqsm_plus_multi_echo`]), and so does
+//! this crate. On the box's first and third echoes the driver's combination is (mag·TE)² of its
+//! per-echo outputs to 1.6e-3 %, and mag·TE² weighting (iQSM's MATLAB echo fit, which this crate
+//! used for iQSM+ until 2026-10-31) differs from it by 3.1 % NRMSE (measured 2026-10-30);
+//! [`iqsm_plus_multi_echo`] matches the (mag·TE)² combination of the original's per-echo outputs
+//! to 2.5e-4 % (measured 2026-10-31).
 //!
 //! # Pipeline rules
 //!
@@ -49,7 +51,7 @@
 //! [`crate::pipeline::rules::RULES`] (each with its strength, basis, reason and source): `iqsm.mask-bet`.
 
 use crate::grid::Grid;
-use crate::inversion::iqsm::{combine_echoes, sphere_erode, tiled_echo, Net};
+use crate::inversion::iqsm::{combine_echoes, sphere_erode, tiled_echo, IqsmEchoWeighting, Net};
 use crate::inversion::tiled::{tile_cost_of, tile_patch_size, TileConfig};
 use crate::models::onnx::{OnnxModel, OnnxError, Tensor};
 
@@ -76,9 +78,14 @@ pub fn iqsm_plus(
     iqsm_plus_with(&|i| model.run(i), phase_rad, mask, grid, te, b0, b0_dir, phase_sign, eroded_rad, true)
 }
 
-/// Multi-echo iQSM+: reconstruct each echo and combine with magnitude·TE² weights, as
-/// [`iqsm_multi_echo`](super::iqsm::iqsm_multi_echo) does (see there for how the authors' MATLAB and
-/// Python drivers differ).
+/// Multi-echo iQSM+: reconstruct each echo and combine them with weights (magnitude·TE)², i.e.
+/// [`IqsmEchoWeighting::MagnitudeSquaredTeSquared`]; without `magnitudes`, TE² alone.
+///
+/// Both of the authors' implementations weight this way (checked at `sunhongfu/iQSM_Plus`
+/// 3ba25f5): the MATLAB `legacy/matlab/iQSM_plus.m:273-275`
+/// (`weights = (mag.*TE).^2; sum(weights.*chi,4)./sum(weights,4)`) and the Python `run.py:199` and
+/// `app.py:415` (`weights = (mag_data * te_bc) ** 2`). Unlike iQSM and iQFM, whose MATLAB uses
+/// mag·TE² (see [`IqsmEchoWeighting`]), there is no choice to offer.
 ///
 /// `tile: None` runs each echo on the brain's bounding box in one pass; `Some` runs it patch by
 /// patch, with memory bounded by the patch (an approximation; see [`super::iqsm`]).
@@ -108,7 +115,8 @@ pub fn iqsm_plus_multi_echo(
         }
         None => None,
     };
-    combine_echoes(phases, magnitudes, tes, grid.n_total(), |phase, te| match &tiled {
+    let weighting = IqsmEchoWeighting::MagnitudeSquaredTeSquared;
+    combine_echoes(phases, magnitudes, tes, grid.n_total(), weighting, |phase, te| match &tiled {
         None => iqsm_plus_with(&whole, phase, mask, grid, te, b0, b0_dir, phase_sign, eroded_rad, true),
         // A tile is already a multiple of 16 and shaped as the plan is: no crop to the brain.
         Some((cfg, plan)) => tiled_echo(phase, mask, grid, eroded_rad, cfg, &cost, |ph, m, g| {

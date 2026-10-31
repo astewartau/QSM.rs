@@ -4,13 +4,15 @@
 //! the box's total field and mask), then `iqsm`, `iqsm-plus` and `iqfm` on the first and the third
 //! echo, each alone (given that echo's phase and TE, iQSM+ also its magnitude, and the mask).
 //!
-//! The iQSM family runs on one echo at a time because QSM.rs and the authors' Python driver combine
-//! echoes differently on purpose: QSM.rs follows the authors' MATLAB echo fit, weights mag·TE²; the
-//! Python driver weights (mag·TE)² (`src/inversion/iqsm.rs`). The per-echo outputs are the network
-//! and its pre- and post-processing, which the two share; the `*_multi_echo` tests then check QSM.rs's
-//! combination against the MATLAB fit's, applied to the originals' per-echo outputs.
+//! The iQSM family runs on one echo at a time because the echo combination is checked separately:
+//! for iQSM and iQFM QSM.rs defaults to the authors' MATLAB echo fit, weights mag·TE², where the
+//! Python driver weights (mag·TE)² (an option; `src/inversion/iqsm_echo_weighting.rs`). The
+//! per-echo outputs are the network and its pre- and post-processing; the multi-echo test then
+//! checks QSM.rs's combinations against the authors' weights applied to the originals' per-echo
+//! outputs.
 
 use super::{assert_parity, grid, invivo, originals, weights, B0, B0_DIR, TES};
+use qsm_core::inversion::IqsmEchoWeighting;
 
 /// The generator's `ECHOES` (0-based).
 const ECHOES: [usize; 2] = [0, 2];
@@ -31,13 +33,13 @@ fn per_echo(model: usize, k: usize) -> usize {
 
 /// The authors' MATLAB echo fit (`echofit.m`), Σ mag·TE²·χ / Σ mag·TE², of the originals'
 /// per-echo outputs, at the mask voxels.
-fn echo_fit(per_echo: &[&Vec<f64>], magnitude: &[Vec<f64>], mask: &[u8]) -> Vec<f64> {
+fn echo_fit(per_echo: &[&Vec<f64>], magnitude: &[Vec<f64>], mask: &[u8], weighting: IqsmEchoWeighting) -> Vec<f64> {
     let inside: Vec<usize> = (0..mask.len()).filter(|&i| mask[i] != 0).collect();
     (0..inside.len())
         .map(|v| {
             let (mut num, mut den) = (0.0, 0.0);
             for (k, &e) in ECHOES.iter().enumerate() {
-                let w = magnitude[e][inside[v]] * TES[e] * TES[e];
+                let w = weighting.weight(magnitude[e][inside[v]], TES[e]);
                 num += w * per_echo[k][v];
                 den += w;
             }
@@ -103,33 +105,38 @@ fn iqfm_matches_its_original_per_echo() {
     }
 }
 
-/// The three networks' multi-echo entry points, against the MATLAB echo fit of the originals'
-/// per-echo outputs.
+/// The three networks' multi-echo entry points, against the combination of the originals'
+/// per-echo outputs with the authors' weights: iQSM and iQFM with each [`IqsmEchoWeighting`]
+/// (the MATLAB echo fit's mag·TE², the default, and the Python's (mag·TE)²), iQSM+ with (mag·TE)²
+/// (both of its authors' implementations).
 #[test]
-fn iqsm_family_multi_echo_matches_the_echo_fit_of_its_originals() {
+fn iqsm_family_multi_echo_matches_the_echo_combination_of_its_originals() {
+    use IqsmEchoWeighting::{MagnitudeSquaredTeSquared as Python, MagnitudeTeSquared as Matlab};
     let d = invivo();
     let orig = field_originals(&d.mask);
     let phases: Vec<&[f64]> = ECHOES.iter().map(|&e| d.phase[e].as_slice()).collect();
     let mags: Vec<&[f64]> = ECHOES.iter().map(|&e| d.magnitude[e].as_slice()).collect();
     let tes: Vec<f64> = ECHOES.iter().map(|&e| TES[e]).collect();
-    let fit = |model: usize| {
+    let fit = |model: usize, w| {
         let per: Vec<&Vec<f64>> = (0..ECHOES.len()).map(|k| &orig[per_echo(model, k)]).collect();
-        echo_fit(&per, &d.magnitude, &d.mask)
+        echo_fit(&per, &d.magnitude, &d.mask, w)
     };
     let g = grid();
-    let iqsm = qsm_core::inversion::iqsm_multi_echo(
-        &phases, &mags, &d.mask, &g, &tes, B0, PHASE_SIGN, ERODED_RAD, &weights("iqsm"), None,
-    )
-    .unwrap();
-    assert_parity("iQSM, echoes 1 and 3", &iqsm, &d.mask, &fit(0), 5e-3, 1e-5);
+    for (w, name) in [(Matlab, "mag·TE²"), (Python, "(mag·TE)²")] {
+        let iqsm = qsm_core::inversion::iqsm_multi_echo(
+            &phases, &mags, &d.mask, &g, &tes, B0, PHASE_SIGN, ERODED_RAD, &weights("iqsm"), None, w,
+        )
+        .unwrap();
+        assert_parity(&format!("iQSM, echoes 1 and 3, {name}"), &iqsm, &d.mask, &fit(0, w), 5e-3, 1e-5);
+        let iqfm = qsm_core::inversion::iqfm_multi_echo(
+            &phases, &mags, &d.mask, &g, &tes, B0, PHASE_SIGN, ERODED_RAD, &weights("iqfm"), None, w,
+        )
+        .unwrap();
+        assert_parity(&format!("iQFM, echoes 1 and 3, {name}"), &iqfm, &d.mask, &fit(2, w), 1.5e-2, 1e-5);
+    }
     let iqsm_plus = qsm_core::inversion::iqsm_plus_multi_echo(
         &phases, &mags, &d.mask, &g, &tes, B0, B0_DIR, PHASE_SIGN, ERODED_RAD, &weights("iqsm-plus"), None,
     )
     .unwrap();
-    assert_parity("iQSM+, echoes 1 and 3", &iqsm_plus, &d.mask, &fit(1), 2e-3, 5e-6);
-    let iqfm = qsm_core::inversion::iqfm_multi_echo(
-        &phases, &mags, &d.mask, &g, &tes, B0, PHASE_SIGN, ERODED_RAD, &weights("iqfm"), None,
-    )
-    .unwrap();
-    assert_parity("iQFM, echoes 1 and 3", &iqfm, &d.mask, &fit(2), 1.5e-2, 1e-5);
+    assert_parity("iQSM+, echoes 1 and 3, (mag·TE)²", &iqsm_plus, &d.mask, &fit(1, Python), 2e-3, 5e-6);
 }
