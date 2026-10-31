@@ -22,9 +22,52 @@
 //! Reference implementation: https://github.com/wtsyeda/QSMART
 
 use crate::fft::{fft3d, ifft3d};
-use crate::kernels::dipole::dipole_kernel;
 use crate::pipeline::config::InversionAlgorithm;
 use num_complex::Complex64;
+
+/// The dipole kernel QSMART's `adjust_offset.m` builds, flattened in Fortran order.
+///
+/// `adjust_offset.m` does not use the usual FFT frequency grid: per axis it takes
+/// `x = -N/2:N/2-1` divided by the FOV, sets `D(floor(Nx/2+1), floor(Ny/2+1), floor(Nz/2+1)) = 0`,
+/// then `fftshift`s. On even `N` this is exactly the FFT grid with D(0) = 0 (what
+/// [`dipole_kernel`] gives). On odd `N` the samples sit half a step off the FFT grid
+/// (±0.5/FOV, ±1.5/FOV, …; no k = 0), and the zeroed sample lands at the last index
+/// (k = −0.5/FOV). The original runs this on odd matrices as they are (the QSM-CI simulated
+/// head is 164×205×205); using the FFT grid there instead halves the offset and changes χ by
+/// 3.5 % NRMSE (QSM.rs#320), so the original's grid is kept.
+fn adjust_offset_kernel(grid: &crate::Grid, b0_dir: (f64, f64, f64)) -> Vec<f64> {
+    let (nx, ny, nz) = grid.dims;
+    let (vsx, vsy, vsz) = grid.voxel_size;
+    // k at output index p: fftshift = circshift by floor(N/2), so p holds x((p - floor(N/2)) mod N).
+    let axis = |n: usize, vs: f64| -> Vec<f64> {
+        let fov = n as f64 * vs;
+        (0..n)
+            .map(|p| ((p + n - n / 2) % n) as f64 - n as f64 / 2.0)
+            .map(|x| x / fov)
+            .collect()
+    };
+    // The zeroed sample: MATLAB index floor(N/2+1) (0-based N/2) before the shift.
+    let zero_at = |n: usize| (n / 2 + n / 2) % n;
+    let (kx, ky, kz) = (axis(nx, vsx), axis(ny, vsy), axis(nz, vsz));
+    let (bx, by, bz) = b0_dir;
+    let bn = (bx * bx + by * by + bz * bz).sqrt();
+    let (bx, by, bz) = (bx / bn, by / bn, bz / bn);
+    let (zx, zy, zz) = (zero_at(nx), zero_at(ny), zero_at(nz));
+    let mut d = vec![0.0; nx * ny * nz];
+    for k in 0..nz {
+        for j in 0..ny {
+            for i in 0..nx {
+                if i == zx && j == zy && k == zz {
+                    continue;
+                }
+                let k2 = kx[i] * kx[i] + ky[j] * ky[j] + kz[k] * kz[k];
+                let kb = kx[i] * bx + ky[j] * by + kz[k] * bz;
+                d[i + j * nx + k * nx * ny] = 1.0 / 3.0 - kb * kb / k2;
+            }
+        }
+    }
+    d
+}
 
 /// Adjust offset between two-stage QSMART susceptibility maps
 ///
@@ -72,8 +115,9 @@ pub fn adjust_offset(
         .map(|(&c1, &c2)| c1 + c2)
         .collect();
 
-    // Get dipole kernel
-    let d_kernel = dipole_kernel(grid, b0_dir);
+    // adjust_offset.m's own dipole kernel (see [`adjust_offset_kernel`]): on odd matrix
+    // dimensions it is not the usual FFT grid.
+    let d_kernel = adjust_offset_kernel(grid, b0_dir);
 
     // Compute offset using Fourier-space relationship
     // x1 = ifft(D * fft(removed_voxels))
@@ -107,18 +151,18 @@ pub fn adjust_offset(
     ifft3d(&mut d_removed, nx, ny, nz);
     ifft3d(&mut d_combined, nx, ny, nz);
 
-    // x1 = real part of ifft(D * fft(removed))
-    let x1: Vec<f64> = d_removed.iter().map(|c| c.re).collect();
-
-    // x2 = lfs_sdf - real(ifft(D * fft(combined_chi)))
-    let x2: Vec<f64> = lfs_scaled.iter()
-        .zip(d_combined.iter())
-        .map(|(&lfs, c)| lfs - c.re)
-        .collect();
-
-    // Compute offset: o = (x1' * x2) / (x1' * x1)
-    let x1_dot_x2: f64 = x1.iter().zip(x2.iter()).map(|(&a, &b)| a * b).sum();
-    let x1_dot_x1: f64 = x1.iter().map(|&a| a * a).sum();
+    // adjust_offset.m: o = real(x1'*x2/(x1'*x1)) with x1 = ifftn(D.*fftn(removed_voxs)) and
+    // x2 = lfs_sdf - ifftn(D.*fftn(combined_chi)) kept complex. On even dims D is
+    // Hermitian-symmetric and the imaginary parts vanish; on odd dims they do not, and the
+    // conjugate inner product is what the original computes.
+    let mut x1_dot_x2 = Complex64::new(0.0, 0.0);
+    let mut x1_dot_x1 = 0.0;
+    for ((x1, &lfs), c) in d_removed.iter().zip(lfs_scaled.iter()).zip(d_combined.iter()) {
+        let x2 = Complex64::new(lfs, 0.0) - c;
+        x1_dot_x2 += x1.conj() * x2;
+        x1_dot_x1 += x1.norm_sqr();
+    }
+    let x1_dot_x2 = x1_dot_x2.re;
 
     let offset = if x1_dot_x1.abs() > 1e-10 {
         x1_dot_x2 / x1_dot_x1
@@ -455,6 +499,7 @@ pub fn compute_weighted_mask_stage2(mask: &[f64], r_0: &[f64], vasc_only: &[f64]
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::kernels::dipole::dipole_kernel;
 
     #[test]
     fn vessel_magnitude_is_n4_of_the_echo_mean() {
@@ -553,6 +598,31 @@ mod tests {
         );
 
         assert_eq!(result.len(), n_total);
+    }
+
+    #[test]
+    fn adjust_offset_kernel_matches_fft_grid_on_even_dims() {
+        let g = Grid::new(6, 8, 4, 1.0, 0.5, 2.0);
+        let a = adjust_offset_kernel(&g, (0.1, 0.2, 1.0));
+        let b = dipole_kernel(&g, (0.1, 0.2, 1.0));
+        for (x, y) in a.iter().zip(&b) {
+            assert!((x - y).abs() < 1e-12, "{x} vs {y}");
+        }
+    }
+
+    #[test]
+    fn adjust_offset_kernel_odd_dims_is_half_shifted() {
+        // adjust_offset.m on N = 5 (FOV 5): x = -2.5:1.5, D(3) = 0 (x = -0.5), fftshift by 2
+        // -> k*FOV = [0.5 1.5 -2.5 -1.5 -0.5] with the last sample zeroed.
+        let g = Grid::new(1, 1, 5, 1.0, 1.0, 1.0);
+        let d = adjust_offset_kernel(&g, (0.0, 0.0, 1.0));
+        // The singleton axes give x = -0.5 (FOV 1), so |k|^2 = 0.5 + kz^2.
+        assert_eq!(d[4], 0.0);
+        for (p, kz) in [(0, 0.5), (1, 1.5), (2, -2.5), (3, -1.5)] {
+            let kz: f64 = kz / 5.0;
+            let e = 1.0 / 3.0 - kz * kz / (0.5 + kz * kz);
+            assert!((d[p] - e).abs() < 1e-12, "p={p}: {} vs {e}", d[p]);
+        }
     }
 
     #[test]
