@@ -878,7 +878,7 @@ fn dl_bfr_iqfm() {
     let m = meta_one_echo();
     let (phases, mags) = (p.phase_refs(), p.mag_refs());
     for tile in [None, Some((8, 4))] {
-        if let Some(local) = on_provided_weights("iqfm", || run_iqfm(&phases[..1], &mags[..1], &p.mask, &m, tile)) {
+        if let Some(local) = on_provided_weights("iqfm", || run_iqfm(&phases[..1], &mags[..1], &p.mask, &m, tile, Default::default())) {
             check("iqfm", &local);
         }
     }
@@ -956,7 +956,7 @@ fn dl_inv_iqsm() {
     let (phases, mags) = (p.phase_refs(), p.mag_refs());
     for tile in [None, Some((8, 4))] {
         let chi =
-            on_provided_weights("iqsm", || run_iqsm(&phases[..1], &mags[..1], &p.mask, &m, QsmReference::None, tile));
+            on_provided_weights("iqsm", || run_iqsm(&phases[..1], &mags[..1], &p.mask, &m, QsmReference::None, tile, Default::default()));
         if let Some(chi) = chi {
             check("iqsm", &chi);
         }
@@ -1268,8 +1268,8 @@ mod browser_memory {
         let mg: Vec<&[f64]> = mg.iter().map(Vec::as_slice).collect();
         let label = format!("5 echoes, {}", tile_label(tile));
         measure(id, &label, || match id {
-            "iqfm" => run_iqfm(&ph, &mg, &mask, &s.m, tile),
-            "iqsm" => run_iqsm(&ph, &mg, &mask, &s.m, QsmReference::None, tile),
+            "iqfm" => run_iqfm(&ph, &mg, &mask, &s.m, tile, Default::default()),
+            "iqsm" => run_iqsm(&ph, &mg, &mask, &s.m, QsmReference::None, tile, Default::default()),
             _ => run_iqsm_plus(&ph, &mg, &mask, &s.m, QsmReference::None, tile),
         });
     }
@@ -1372,11 +1372,11 @@ mod browser_memory {
                 "lpcnn" => inversion::lpcnn::lpcnn_tiled(f, m, g, bdir, &w[0], &cfg, none),
                 "modl-qsm" => inversion::modl_qsm::modl_qsm_tiled(f, m, g, bdir, &w[0], &cfg, none),
                 "nextqsm" => inversion::nextqsm::nextqsm_tiled(f, m, g, bdir, &w[0], &w[1], &cfg, none),
-                "iqsm" => inversion::iqsm_multi_echo(&[f], &[], m, g, &[te], b0, 1.0, 0, &w[0], Some(&cfg)),
+                "iqsm" => inversion::iqsm_multi_echo(&[f], &[], m, g, &[te], b0, 1.0, 0, &w[0], Some(&cfg), Default::default()),
                 "iqsm-plus" => {
                     inversion::iqsm_plus_multi_echo(&[f], &[], m, g, &[te], b0, bdir, 1.0, 0, &w[0], Some(&cfg))
                 }
-                "iqfm" => inversion::iqfm_multi_echo(&[f], &[], m, g, &[te], b0, 1.0, 0, &w[0], Some(&cfg)),
+                "iqfm" => inversion::iqfm_multi_echo(&[f], &[], m, g, &[te], b0, 1.0, 0, &w[0], Some(&cfg), Default::default()),
                 _ => panic!("{id} is not a tiled network"),
             };
             out.unwrap_or_else(|e| panic!("{id}: {e}"));

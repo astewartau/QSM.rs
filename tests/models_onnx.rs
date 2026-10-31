@@ -503,8 +503,8 @@ fn tiled_phase_nets_and_bfrnet_track_whole_volume() {
     let e = 1;
     let m1 = ScanMetadata { echo_times: vec![tes[e]], ..meta.clone() };
     let (ph1, mg1): (Vec<&[f64]>, Vec<&[f64]>) = (vec![&phases[e]], vec![&mags[e]]);
-    let iqfm = |tile| run_iqfm(&ph1, &mg1, &mask, &m1, tile).expect("iqfm");
-    let iqsm = |tile| run_iqsm(&ph1, &mg1, &mask, &m1, QsmReference::None, tile).expect("iqsm");
+    let iqfm = |tile| run_iqfm(&ph1, &mg1, &mask, &m1, tile, Default::default()).expect("iqfm");
+    let iqsm = |tile| run_iqsm(&ph1, &mg1, &mask, &m1, QsmReference::None, tile, Default::default()).expect("iqsm");
     let iqsm_plus = |tile| run_iqsm_plus(&ph1, &mg1, &mask, &m1, QsmReference::None, tile).expect("iqsm+");
     // The networks erode the mask by 3 voxels; compare where they wrote.
     let compare_mask = |v: &[f64]| -> Vec<u8> { v.iter().map(|&x| (x != 0.0) as u8).collect() };
