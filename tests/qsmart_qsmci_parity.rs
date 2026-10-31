@@ -23,7 +23,7 @@ use qsm_core::bgremove::{sdf, SdfParams};
 use qsm_core::inversion::{ilsqr, IlsqrParams};
 use qsm_core::unwrap::{laplacian_unwrap, LaplacianSolver};
 use qsm_core::utils::{
-    adjust_offset, generate_vasculature_mask, qsmart_echofit, qsmart_vessel_magnitude, QsmartFitThreshold,
+    adjust_offset, generate_vasculature_mask, QsmartOffsetGrid, qsmart_echofit, qsmart_vessel_magnitude, QsmartFitThreshold,
     QsmartParams, VasculatureParams,
 };
 use qsm_core::Grid;
@@ -205,7 +205,7 @@ fn ilsqr_stages_match_qsmart() {
 fn offset_adjustment_matches_qsmart() {
     let f = load();
     let removed: Vec<f64> = mask_r0(&f).iter().zip(&f.vasc_only).map(|(m, v)| m - v).collect();
-    let mut chi = adjust_offset(&removed, &f.lfs1, &f.chi1, &f.chi2, &grid(), (0.0, 0.0, 1.0), 1.0);
+    let mut chi = adjust_offset(&removed, &f.lfs1, &f.chi1, &f.chi2, &grid(), (0.0, 0.0, 1.0), 1.0, QsmartOffsetGrid::QsmartReference);
     for (c, &m) in chi.iter_mut().zip(&f.mask) {
         if m == 0 {
             *c = 0.0;
