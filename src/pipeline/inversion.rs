@@ -408,7 +408,7 @@ pub fn heidi_seed_problem(config: &InversionConfig) -> Option<String> {
 /// HEIDI's cone fill on a seed χ map: streaking reduction after `config`'s inversion
 /// ([`crate::inversion::heidi_cone_fill`]). [`run_dipole_inversion`] calls it when
 /// [`InversionConfig::cone_fill_after`] holds; a host that combines several inversions (two-pass)
-/// runs them with `apply_heidi` off and calls this once on the combined map.
+/// runs them with `apply_heidi` off and calls this once on the combined map, for any seed.
 ///
 /// # Arguments
 /// * `chi_seed` - The inversion's χ in ppm

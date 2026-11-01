@@ -641,9 +641,11 @@ impl InversionConfig {
     /// Whether HEIDI's cone fill runs on the method's result after the inversion, rather than
     /// inside it: [`Self::apply_heidi`] with any seed but LSQR, whose reference recipe
     /// ([`crate::inversion::heidi()`]) [`run_dipole_inversion`](super::run_dipole_inversion) runs as
-    /// one step. [`run_dipole_inversion`](super::run_dipole_inversion) applies it either way; a
-    /// host that combines several inversions (two-pass) runs them with `apply_heidi` off when this
-    /// holds and fills the combined map with [`run_heidi_cone_fill`](super::run_heidi_cone_fill).
+    /// one step. [`run_dipole_inversion`](super::run_dipole_inversion) applies it either way. A
+    /// host that combines several inversions (two-pass) instead runs them with `apply_heidi` off
+    /// and fills the combined map once with [`run_heidi_cone_fill`](super::run_heidi_cone_fill),
+    /// whatever the seed (an LSQR map is then filled as the method's masked result, as
+    /// `Wrapper_QSM_HEIDI4all` fills any seed).
     pub fn cone_fill_after(&self) -> bool {
         self.apply_heidi && self.algorithm != InversionAlgorithm::Lsqr
     }
