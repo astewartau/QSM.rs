@@ -145,6 +145,8 @@ pub fn run_qsmart(
     // QSMART-selected algorithm.
     let mut inner_config = inversion_config.clone();
     inner_config.algorithm = qsmart_params.inversion;
+    // QSMART's two stages are its own recipe: HEIDI's cone fill is not part of it.
+    inner_config.apply_heidi = false;
     // The original QSMART (QSMART_toolbox_v1.0/QSMART.m) calls STI Suite's QSM_iLSQR for both
     // stages as `QSM_iLSQR(lfs, mask, 'H', z_prjs, 'voxelsize', res, 'niter', 50, 'TE', 1000,
     // 'B0', B0)`: no `'padsize'` (STI's default, 6 mm) and both LSQR solves capped at 50

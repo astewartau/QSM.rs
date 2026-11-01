@@ -37,7 +37,15 @@
 //! * the cone is `|D| > 0.1` (the driver's `PostProcCone.threshold`) with `D` the
 //!   spatial-domain unit dipole response ([`super::lsqr_qsm::spatial_dipole_kernel`]);
 //! * NESTA runs with the driver's tolerance, machine epsilon, so every continuation step uses
-//!   all of its inner iterations (8 × 500).
+//!   all of its inner iterations (8 × 500);
+//! * the homogeneity masks are built from the phase denoised by ITK 3.20's gradient
+//!   anisotropic diffusion (the executable `diffusionimagefilter.m` runs, 5 iterations, time
+//!   step 0.05, conductance 1), in the phase's units. That executable works in `float` and sums
+//!   the mean squared gradient that sets its conductance scale in `float`, which underestimates
+//!   it (by about 1 % on a whole brain); QSM.rs computes it in double by default, and
+//!   [`AnisotropicDiffusionParams::reference_itk`] reproduces the executable bit for bit. The
+//!   two give the same masks but for the voxels at the gradient thresholds (about 0.07 % on an
+//!   in-vivo brain, QSM-CI parity case `s005001-cbic-prisma-bridge-run1`).
 //!
 //! Units: the field is in ppm and χ comes back in ppm. The gradient and Laplacian
 //! thresholds below are therefore in ppm/mm and ppm/voxel², independent of echo
@@ -58,6 +66,39 @@
 //! Becker, S., Bobin, J., Candès, E.J. (2011). "NESTA: A fast and accurate
 //! first-order method for sparse recovery." SIAM Journal on Imaging Sciences,
 //! 4(1):1-39. https://doi.org/10.1137/090756855
+//!
+//! # Any seed: HEIDI as streaking reduction
+//!
+//! The cone fill does not depend on where the seed came from. The authors'
+//! `computesusceptibility_heidi(suscInterim, …)` (qsm_heidi 4592631) takes the initial χ map
+//! from outside and only refills its cone (the changelog calls the step "PostProcCone"), and
+//! SEPIA's HEIDI add-on (Salman, Schweser and Chan, 2025) offers it after any dipole inversion
+//! as "Streaking reduction by HEIDI": `Wrapper_QSM_HEIDI4all(localField, chiRaw, …)`, called from
+//! `wrapper/QSMMacro.m` on the method's result. [`heidi_cone_fill`] is that step:
+//!
+//! * **Grid:** as `Wrapper_QSM_HEIDI4all`, the field, mask and seed are cropped to the mask's
+//!   bounding box with the 40-voxel anti-aliasing frame (the grid [`heidi`] runs on), and χ is
+//!   masked at the end (`chi .* mask`). The seed is the method's (masked) result as it is.
+//! * **Units:** the qsm_heidi pipeline's, phase at the chosen echo time, for every seed, so
+//!   [`heidi`] and [`heidi_cone_fill`] fill the cone the same way. `Wrapper_QSM_HEIDI4all` instead
+//!   passes the field and the seed in Hz/2π, a factor `(2π)²·TE` (≈ 0.8 at TE = 20 ms) from
+//!   those; the factor moves the gradient thresholds and NESTA's absolute final μ only.
+//! * **Seed suitability.** The paper takes the well-conditioned region from a minimally
+//!   regularised inversion and only the cone from the TV prior. A seed whose region outside the
+//!   cone is close to data-consistent fits that: LSQR (the reference, which [`heidi`] runs), and
+//!   TKD, TSVD, small-λ Tikhonov, NDI and RTS (RTS already splits k-space the same way). A
+//!   regularised seed (MEDI, TV and the FANSI family, NLTV, iLSQR, STAR, AMP-PE, the
+//!   deep-learning methods) keeps its regularisation outside the cone, as only the cone is
+//!   replaced. The pipeline publishes this as the `heidi.seed-*` rules
+//!   ([`crate::pipeline::rules::RULES`]).
+//! * **Truncated seeds.** TKD and TSVD zero or clip `|D| < threshold`; with that threshold above
+//!   the cone threshold, truncated coefficients would be kept as if they were data. Upstream
+//!   stops with an error there ("DipoleFilter parameter must not be larger that Cone threshold",
+//!   `computesusceptibility_heidi.m` L922-923), and so does the pipeline
+//!   ([`crate::pipeline::heidi_seed_problem`]).
+//! * **Not offered:** methods without a local field (the total-field and phase methods: the
+//!   homogeneity weights come from the local field), χ-separation and multi-orientation
+//!   reconstructions (upstream refuses more than one field: "You cannot use HEIDI with COSMOS").
 //!
 //! # Reference pipeline
 //! Same inputs as [`super::lsqr_qsm`](mod@super::lsqr_qsm) (qsm_heidi commit 4592631): a SHARP-corrected local field
@@ -80,7 +121,7 @@ use crate::utils::anisotropic_diffusion::{
 use crate::utils::apply_mask_zero;
 use crate::{EchoTime, Grid};
 
-use super::lsqr_qsm::{crop_pad, lsqr_qsm_padded, spatial_dipole_kernel, uncrop, LsqrQsmParams};
+use super::lsqr_qsm::{crop_grid, crop_pad, lsqr_qsm_padded, spatial_dipole_kernel, uncrop, LsqrQsmParams};
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
@@ -114,8 +155,9 @@ pub struct HeidiParams {
     /// Field-Laplacian threshold in ppm per voxel² (the stencil is in voxel units,
     /// matching upstream).
     pub laplacian_threshold: f64,
-    /// Anisotropic-diffusion smoothing applied to the field before the gradients
-    /// are taken. `None` skips it.
+    /// Anisotropic-diffusion smoothing applied to the field (in upstream's phase units) before
+    /// the gradients are taken. `None` skips it. Its `reference_itk` reproduces the ITK
+    /// executable upstream runs (see the module docs).
     pub denoise: Option<AnisotropicDiffusionParams>,
     /// TV weight kept at voxels that read as an edge in *every* direction.
     ///
@@ -172,6 +214,7 @@ impl Default for HeidiParams {
                 iterations: 5,
                 time_step: 0.05,
                 conductance: 1.0,
+                reference_itk: false,
             }),
             gradient_mask_floor: 0.0,
             continuation_steps: 8,
@@ -220,7 +263,7 @@ pub fn heidi(
     mut progress: impl FnMut(usize, usize),
 ) -> Vec<f64> {
     let lsqr_iters = lsqr.max_iter;
-    let total = lsqr_iters + params.continuation_steps.max(1) * params.inner_iterations;
+    let total = lsqr_iters + cone_fill_iterations(params);
     let seed = lsqr_qsm_padded(local_field, mask, magnitude, grid, bdir, lsqr, |i, _| progress(i, total));
     let Some((pgrid, crop, chi_seed)) = seed else {
         return vec![0.0; grid.n_total()];
@@ -231,6 +274,63 @@ pub fn heidi(
     let mut chi = uncrop(&chi, grid.dims, &crop);
     apply_mask_zero(&mut chi, mask);
     chi
+}
+
+/// HEIDI's cone fill on any seed χ map: streaking reduction after a dipole inversion, as the
+/// authors' `computesusceptibility_heidi(suscInterim, …)` and SEPIA's `Wrapper_QSM_HEIDI4all`.
+///
+/// The well-conditioned coefficients (`|D(k)| > cone_threshold`) of `chi_seed` are kept as exact
+/// constraints and the dipole cone is refilled under HEIDI's homogeneity-weighted TV, exactly as
+/// [`heidi`] does to its LSQR seed. See the module docs, *Any seed*, for which seeds suit it.
+///
+/// The grid is upstream's: the field, the mask and the seed are cropped to the mask's bounding
+/// box and given LSQR's 40-voxel anti-aliasing frame (odd extents), as `Wrapper_QSM_HEIDI4all`
+/// does with `zealouscrop(mask)` and `prepareforconvolution(…, 40)` on every input, the seed
+/// included. A seed is whatever its method returned, normally masked; the frame around it is 0.
+///
+/// # Arguments
+/// * `local_field` - Local field in ppm (`nx * ny * nz`, Fortran order), the one the seed was
+///   inverted from: HEIDI's homogeneity weights come from it
+/// * `mask` - Binary brain mask
+/// * `chi_seed` - The seed χ map in ppm
+/// * `grid` - Volume grid
+/// * `bdir` - B0 direction
+/// * `params` - HEIDI parameters ([`HeidiParams::b0`] and [`HeidiParams::echo_times`] are the
+///   scan's)
+/// * `progress` - Progress callback `(iteration, total_iterations)`
+///
+/// # Returns
+/// Susceptibility map in ppm, masked (as `Wrapper_QSM_HEIDI4all`'s `chi .* mask`).
+pub fn heidi_cone_fill(
+    local_field: &[f64],
+    mask: &[u8],
+    chi_seed: &[f64],
+    grid: &Grid,
+    bdir: (f64, f64, f64),
+    params: &HeidiParams,
+    progress: impl FnMut(usize, usize),
+) -> Vec<f64> {
+    let n_total = grid.n_total();
+    assert_eq!(local_field.len(), n_total, "field length must match grid");
+    assert_eq!(mask.len(), n_total, "mask length must match grid");
+    assert_eq!(chi_seed.len(), n_total, "seed length must match grid");
+    let Some(crop) = crop_grid(mask, grid.dims) else {
+        return vec![0.0; n_total];
+    };
+    let (vsx, vsy, vsz) = grid.voxel_size;
+    let pgrid = Grid::new(crop[0].2, crop[1].2, crop[2].2, vsx, vsy, vsz);
+    let field = crop_pad(local_field, grid.dims, &crop);
+    let pmask = crop_pad(mask, grid.dims, &crop);
+    let seed = crop_pad(chi_seed, grid.dims, &crop);
+    let chi = heidi_on_grid(&field, &pmask, &seed, &pgrid, bdir, params, progress);
+    let mut chi = uncrop(&chi, grid.dims, &crop);
+    apply_mask_zero(&mut chi, mask);
+    chi
+}
+
+/// Progress steps of the cone fill: [`heidi_cone_fill`], and [`heidi`]'s second stage.
+pub fn cone_fill_iterations(params: &HeidiParams) -> usize {
+    params.continuation_steps.max(1) * params.inner_iterations
 }
 
 /// HEIDI's cone fill on a grid with odd extents (upstream's), from the seed `chi_init`
@@ -287,8 +387,15 @@ pub fn homogeneity_masks(
     let mut field = local_field.to_vec();
     apply_mask_zero(&mut field, mask);
 
+    // Upstream denoises the phase (`diffusionimagefilter` on `phase .* mask`), so the
+    // diffusion runs in its units; it is scale-free but for rounding, which ITK's float
+    // arithmetic (`reference_itk`) makes visible.
     let smoothed = match &params.denoise {
-        Some(d) => gradient_anisotropic_diffusion(&field, grid, d),
+        Some(d) => {
+            let to_phase = -GAMMA * params.te.seconds(&params.echo_times, "HEIDI") * params.b0 * 1e-6;
+            let phase: Vec<f64> = field.iter().map(|v| v * to_phase).collect();
+            gradient_anisotropic_diffusion(&phase, grid, d).into_iter().map(|v| v / to_phase).collect()
+        }
         None => field,
     };
 
@@ -978,6 +1085,56 @@ mod tests {
         }
         let unscaled = nesta_cone_fill(&seed, &cone, &masks, &g, &p, |_, _| {});
         assert!(chi.iter().zip(&unscaled).any(|(a, b)| (a - b).abs() > 1e-9), "scale had no effect");
+    }
+
+    /// The cone fill on an outside seed runs on upstream's grid like `heidi`'s, returns the
+    /// input grid masked, and agrees with `heidi_on_grid` on that grid (the seed cropped and
+    /// framed as `Wrapper_QSM_HEIDI4all` frames it).
+    #[test]
+    fn cone_fill_takes_any_seed_on_upstreams_grid() {
+        let (nx, ny, nz) = (12usize, 11usize, 13usize);
+        let g = Grid::new(nx, ny, nz, 1.0, 1.0, 1.0);
+        let n_total = g.n_total();
+        let field: Vec<f64> = (0..n_total).map(|i| ((i as f64) * 0.31).sin() * 0.05).collect();
+        let mut mask = vec![0u8; n_total];
+        for k in 3..10 {
+            for j in 2..9 {
+                for i in 3..9 {
+                    mask[i + nx * (j + ny * k)] = 1;
+                }
+            }
+        }
+        let seed: Vec<f64> = field.iter().zip(&mask).map(|(f, &m)| if m != 0 { 0.4 * f } else { 0.0 }).collect();
+        let params = HeidiParams { denoise: None, continuation_steps: 2, inner_iterations: 10, ..Default::default() };
+        let mut last = 0;
+        let chi = heidi_cone_fill(&field, &mask, &seed, &g, (0.0, 0.0, 1.0), &params, |i, total| {
+            assert!(i <= total);
+            assert_eq!(total, cone_fill_iterations(&params));
+            last = i;
+        });
+        assert_eq!(chi.len(), n_total);
+        assert!(chi.iter().all(|v| v.is_finite()));
+        assert!(chi.iter().zip(&mask).all(|(v, &m)| m != 0 || *v == 0.0), "not masked");
+        assert!(chi.iter().any(|v| v.abs() > 0.0), "empty map");
+        assert_eq!(last, cone_fill_iterations(&params));
+
+        let crop = crop_grid(&mask, g.dims).unwrap();
+        let pgrid = Grid::new(crop[0].2, crop[1].2, crop[2].2, 1.0, 1.0, 1.0);
+        let on_grid = heidi_on_grid(
+            &crop_pad(&field, g.dims, &crop),
+            &crop_pad(&mask, g.dims, &crop),
+            &crop_pad(&seed, g.dims, &crop),
+            &pgrid,
+            (0.0, 0.0, 1.0),
+            &params,
+            |_, _| {},
+        );
+        let mut expected = uncrop(&on_grid, g.dims, &crop);
+        apply_mask_zero(&mut expected, &mask);
+        assert_eq!(chi, expected);
+
+        let z = heidi_cone_fill(&field, &vec![0u8; n_total], &seed, &g, (0.0, 0.0, 1.0), &params, |_, _| {});
+        assert!(z.iter().all(|v| *v == 0.0));
     }
 
     #[test]
