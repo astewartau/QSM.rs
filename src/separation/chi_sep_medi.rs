@@ -62,9 +62,12 @@
 //!      (`λ_CSF·LT(LT(|dx|))`, nonlinear through the `abs`; the toolbox rebinds its `reg_p`/`reg_n`
 //!      to include it before building the CG operators).
 //!    - `x_s ← max(x_s + dx_s·mask, 0)`; `res = ‖Δx‖/‖x‖` over both sources inside the mask
-//!      eroded by a sphere of radius 3 voxels (`imerode(mask, strel('sphere', 3))`, voxels
-//!      outside the array counted as inside), with `Δx` the projected step. The iterate with the
-//!      smallest `res` so far is kept.
+//!      eroded by a sphere (`imerode(mask, strel('sphere', erode_size))`, voxels outside the
+//!      array counted as inside), with `Δx` the projected step. `erode_size =
+//!      min(round(min(effective_mask_size)/10), 5)` voxels, `effective_mask_size` being the
+//!      number of slices along each axis that hold any mask voxel (5 on a head); with
+//!      `erode_size` 0 the whole padded grid counts. The iterate with the smallest `res` so far is
+//!      kept.
 //! 8. **Output**: that iterate, cropped back to the input grid: `x_para = x+`, `x_dia = x−` (≥ 0),
 //!    `x_tot = x+ − x−`. QSM.rs returns `(χ+, χ− = −x−, χ+ + χ−)`.
 //!
@@ -84,18 +87,31 @@
 //!   0.8×0.9×1.5 mm, oblique B0, with a CSF mask; negative R2′, `D_r` 120/150, λ = 2, no CSF
 //!   mask. Same Gauss-Newton iteration counts (7, 6, 6), χ+ and |χ−| to relative L2
 //!   ≤ 1.1·10⁻¹⁵, max |Δ| ≤ 8·10⁻¹⁷ ppm.
-//! - **In vivo** (the EMTP travelling-head scan of QSM-CI's fidelity check, 3 T, 184×256×128,
-//!   1.39 M mask voxels; its local field, R2′ and χ; `N_std = 1/|mag|`; no CSF mask): 6
-//!   iterations each; χ+ relative L2 8.0·10⁻¹³, |χ−| 4.0·10⁻¹², max |Δ| 4.3·10⁻¹¹ ppm.
-//! - **QSM-CI's χ-separation phantom** (`chisep-mc`, 7 T, 164×205×205, same inputs): 6 iterations
-//!   each; χ+ relative L2 5.7·10⁻³ (max |Δ| 7.8·10⁻³ ppm), |χ−| 4.9·10⁻³ (1.3·10⁻² ppm),
-//!   r = 0.99997. That residual is rounding, amplified: on this phantom every inner CG solve
-//!   runs 42-50 iterations (5-10 on the scans above), and the result moves as much under changes
-//!   at the last bit. The toolbox itself, run with 4 instead of 8 threads, changes by 2.3·10⁻³ /
-//!   3.5·10⁻³; the MATLAB re-implementation (identical to 3·10⁻¹⁶ on the phantoms) differs from
-//!   it by 2.4·10⁻³ / 5.5·10⁻³; and QSM.rs's own result moves by 2.4·10⁻³ when the field is scaled
-//!   by 1 + 10⁻¹⁴.
+//! - **The verified QSM-CI `chi-sep-medi` container** (v4, identical to licensed MATLAB;
+//!   QSMxT/QSM-CI#351): `option_data.qsm` = χ_total, `N_std` = `Fit_ppm_complex`'s `dp1` from the
+//!   echoes' magnitudes, `mask_CSF = []`, `CF` = 42.5774 MHz/T·B0. QSM.rs's `N_std`
+//!   ([`crate::utils::fit_ppm_complex_noise`]) equals the container's bit for bit in every case.
+//!   - a 24×22×18 phantom whose voxels decay at different rates (`tests/chi_sep_medi_qsmci_parity.rs`,
+//!     regenerated in Actions by `tests/data/chi_sep_medi_qsmci_small.py`): χ+ and |χ−| to relative
+//!     L2 2.6·10⁻⁸, the container's float32 output;
+//!   - in vivo (the EMTP travelling-head scan of QSM-CI's fidelity check, 3 T, 184×256×128,
+//!     1.39 M mask voxels; its local field, R2′ and χ): 6 iterations each, the same `res` at every
+//!     iteration (to the 4 digits the toolbox prints); χ+ and |χ−| to relative L2 2.5·10⁻⁸, max
+//!     |Δ| 3·10⁻⁸ / 9·10⁻⁸ ppm, the float32 output (measured 2026-11-01, `examples/chi_sep_file.rs`);
+//!   - QSM-CI's χ-separation phantom (`chisep-mc`, 7 T, 164×205×205, same inputs): 6 iterations
+//!     each, `res` equal at the first; χ+ relative L2 1.7·10⁻³ (max |Δ| 8.3·10⁻³ ppm), |χ−|
+//!     9.3·10⁻³ (7.9·10⁻³ ppm), r ≥ 0.9999. That residual is rounding, amplified: on this phantom
+//!     every inner CG solve runs 42-50 iterations (5-10 in vivo), and the result moves as much under
+//!     changes at the last bit. The toolbox itself, run with 4 instead of 8 threads, moves by
+//!     3.7·10⁻³ / 1.13·10⁻² (more than QSM.rs differs from it), and QSM.rs moves by 2.1·10⁻³ /
+//!     4.5·10⁻³ when `CF` changes by one ulp. QSM-CI's `chisep-medi` / `chisep-medi-qsmrs` parity
+//!     pair checks this phantom.
 //!
+//!   Before QSM.rs#382 these cases ran with `N_std = 1/|mag|` (in vivo relative L2 8·10⁻¹³ against
+//!   licensed MATLAB with that input), and the convergence test eroded the mask by 3 voxels
+//!   instead of the toolbox's `erode_size` (5 on these scans; see step 7), which changed `res` by
+//!   about 5 % but neither the iteration counts nor the results here.
+
 //! # Performance
 //!
 //! Each CG iteration costs four 3-D FFTs (two dipole convolutions, complex) and two fused
@@ -137,9 +153,13 @@
 //! - R2′ is the user's (the script's input; its README offers a pseudo-R2 map otherwise).
 //!
 //! The toolbox's GUI (`WrapperChisepMEDI.p`, probed with a stand-in app object) differs: it
-//! passes `mask_CSF = []` (no CSF term), `N_std = c/mag` (only relative values matter, see
-//! [`ChiSepMediInputs::n_std`]), the RSS of the Tukey-windowed magnitude, `λ = λ_CSF = 1`, and
-//! `option_data.qsm` only when its "QSM initialisation" option is on.
+//! passes `mask_CSF = []` (no CSF term), the RSS of the Tukey-windowed magnitude, `λ = λ_CSF = 1`,
+//! and `option_data.qsm` only when its "QSM initialisation" option is on. Its `N_std` is the
+//! script's: `Fit_ppm_complex`'s `dp1` from the multi-echo magnitude, zero outside the mask
+//! (QSM.rs#382; probed in licensed R2023b on phantoms whose voxels decay at different rates, where
+//! the GUI's and `Preprocessing4Phase`'s `N_std` both equal `dp1` to 1.1·10⁻¹⁵). An earlier reading
+//! of the GUI's as `c/|mag|` came from a phantom with uniform decay, where `dp1` is proportional to
+//! `1/RSS`; with per-voxel decay `dp1·RSS` varies (0.72-0.87 there).
 //!
 //! Reference: Shin, H.-G., Lee, J., Yun, Y. H., Yoo, S. H., Jang, J., Oh, S.-H., Nam, Y., Jung,
 //! S., Kim, S., Fukunaga, M., Kim, W., Choi, H. J., Lee, J. (2021). "χ-separation: Magnetic
@@ -191,8 +211,32 @@ const WEI_MAG: f64 = 1.0 / (2.0 * std::f64::consts::PI);
 /// MEDI `gradient_mask`'s `percentage` as the toolbox passes it: the number of gradient components
 /// marked as edges, as a fraction of the mask's voxel count.
 const EDGE_PERCENTAGE: f64 = 0.9;
-/// Radius, in voxels, of the sphere the mask is eroded by for the convergence test.
-const ERODE_RADIUS: i64 = 3;
+/// The largest radius, in voxels, of `chi_sep_MEDI`'s convergence-mask erosion.
+const ERODE_MAX: i64 = 5;
+
+/// `chi_sep_MEDI`'s convergence mask (`Mask_erode`): the mask eroded by a sphere of radius
+/// `erode_size = min(round(min(effective_mask_size)/10), 5)` voxels, where `effective_mask_size`
+/// counts, along each axis, the slices that hold any mask voxel (probed in licensed R2023b: two
+/// 10³ cubes far apart give [20 20 20]; voxel sizes and `pad_size` play no part; a head gives 5).
+/// A radius of 0 (an axis with fewer than five such slices) makes it the whole padded grid, as in
+/// the toolbox. `round` is MATLAB's, halves away from zero (15 slices give 2, 25 give 3), as
+/// Rust's.
+fn convergence_mask(mask: &[bool], dims: (usize, usize, usize)) -> Vec<bool> {
+    let (nx, ny, nz) = dims;
+    let mut any = [vec![false; nx], vec![false; ny], vec![false; nz]];
+    for (p, _) in mask.iter().enumerate().filter(|(_, &m)| m) {
+        any[0][p % nx] = true;
+        any[1][(p / nx) % ny] = true;
+        any[2][p / (nx * ny)] = true;
+    }
+    let extent = any.iter().map(|a| a.iter().filter(|&&v| v).count()).min().unwrap_or(0);
+    let r = ((extent as f64 / 10.0).round() as i64).min(ERODE_MAX);
+    if r == 0 {
+        vec![true; mask.len()]
+    } else {
+        erode_sphere(mask, dims, r)
+    }
+}
 
 /// Parameters for [`chi_sep_medi`]. The defaults are the toolbox's (see the module docs).
 #[cfg_attr(feature = "introspection", derive(serde::Serialize))]
@@ -295,7 +339,9 @@ pub struct ChiSepMediInputs<'a> {
     /// R2′ in Hz (`r2prime`).
     pub r2prime: &'a [f64],
     /// Noise standard deviation of the field (`N_std`); the data weights are `mask/N_std`
-    /// normalised to mean 1, so only its relative values matter.
+    /// normalised to mean 1, so only its relative values matter. The toolbox (script and GUI)
+    /// passes MEDI `Fit_ppm_complex`'s `dp1` from the echoes' magnitudes,
+    /// [`crate::utils::fit_ppm_complex_noise`].
     pub n_std: &'a [f64],
     /// Conventional QSM in ppm (`option_data.qsm`), the initial guess.
     pub qsm: &'a [f64],
@@ -421,7 +467,7 @@ pub fn chi_sep_medi(
     let mut it_neg = xn0;
     par_update(&mut it_pos, |i, v| *v *= maskf[i]);
     par_update(&mut it_neg, |i, v| *v *= maskf[i]);
-    let eroded = erode_sphere(&mask, dims, ERODE_RADIUS);
+    let eroded = convergence_mask(&mask, dims);
 
     let pb = Problem {
         dims, vs, w_mag, w_phs: m, t_mag, t_phs, d, wg, csf,
@@ -794,6 +840,36 @@ mod tests {
 
     /// The toolbox turns every value NaN with a CSF mask that has no voxels; here it means no CSF
     /// term, and the result is the same as with a mask that never touches a voxel's update.
+    /// `nnz(Mask_erode)` as `chi_sep_MEDI` made it (licensed R2023b, read from its workspace) for
+    /// box masks on a 64×60×56 grid (66 slices after its padding): the erosion radius follows the
+    /// smallest number of mask slices along an axis, rounded to tens.
+    #[test]
+    fn convergence_mask_matches_the_toolbox() {
+        let dims = (64, 60, 66);
+        let boxes = |boxes: &[([usize; 3], [usize; 3])]| -> Vec<bool> {
+            let mut m = vec![false; dims.0 * dims.1 * dims.2];
+            for &(o, n) in boxes {
+                for k in o[2]..o[2] + n[2] {
+                    for j in o[1]..o[1] + n[1] {
+                        for i in o[0]..o[0] + n[0] {
+                            m[i + dims.0 * (j + dims.1 * (k + 5))] = true;
+                        }
+                    }
+                }
+            }
+            m
+        };
+        let centred = |n: [usize; 3]| boxes(&[([(64 - n[0]) / 2, (60 - n[1]) / 2, (56 - n[2]) / 2], n)]);
+        let count = |m: &[bool]| convergence_mask(m, dims).iter().filter(|&&v| v).count();
+        for (n, want) in [([10, 10, 10], 512), ([16, 16, 16], 1728), ([24, 24, 24], 8000), ([30, 30, 30], 13824),
+                          ([48, 48, 48], 54872), ([40, 20, 10], 5472), ([15, 30, 30], 7436), ([25, 30, 30], 10944),
+                          ([4, 30, 30], 64 * 60 * 66), ([56, 56, 50], 84640)] {
+            assert_eq!(count(&centred(n)), want, "box {n:?}");
+        }
+        // Two 10³ cubes far apart count 20 slices per axis: radius 2.
+        assert_eq!(count(&boxes(&[([4, 4, 4], [10; 3]), ([44, 39, 39], [10; 3])])), 432);
+    }
+
     #[test]
     fn empty_csf_mask_means_no_csf_term() {
         let (r, _, _) = run((16, 14, 10), false, &ChiSepMediParams::default());
