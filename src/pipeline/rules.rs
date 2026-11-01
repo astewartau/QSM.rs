@@ -436,7 +436,11 @@ pub const SETTINGS: &[(&str, &str)] = &[
     ("inversion.medi.msmv.prefilter", "MEDI-mSMV's SMV prefilter (MsmvParams::prefilter, bool); only with MEDI-mSMV"),
     ("inversion.medi.te", "Echo time MEDI converts at (EchoTime); only with MEDI"),
     ("inversion.tfi.te", "Echo time TFI converts at (EchoTime); only with TFI"),
+    ("inversion.apply_heidi", "HEIDI's cone fill after the inversion (InversionConfig::apply_heidi, bool)"),
+    ("inversion.heidi.cone_threshold", "HEIDI's cone threshold, |D| (HeidiParams::cone_threshold); only with HEIDI"),
     ("inversion.heidi.te", "Echo time HEIDI converts at (EchoTime); only with HEIDI"),
+    ("inversion.tkd.threshold", "TKD's truncation threshold, |D| (TkdParams::threshold); only with TKD"),
+    ("inversion.tsvd.threshold", "TSVD's truncation threshold, |D| (TkdParams::threshold); only with TSVD"),
     ("inversion.qsmart.inversion", "QSMART's inner inversion (InversionAlgorithm::id); only with QSMART"),
     ("inversion.qsmart.ilsqr_max_iter", "QSMART's iLSQR iteration count; only with QSMART"),
     ("inversion.qsmart.ilsqr_pad_mm", "QSMART's iLSQR padding, mm; only with QSMART"),
@@ -612,7 +616,11 @@ pub fn current(input: &RuleInput, facts: &ScanFacts, setting: &str) -> Option<Ve
         },
         "inversion.medi.te" => gated(alg(&[A::Medi]), Current::Choice(echo_time_id(c.inversion.medi.te))),
         "inversion.tfi.te" => gated(alg(&[A::Tfi]), Current::Choice(echo_time_id(c.inversion.tfi.te))),
-        "inversion.heidi.te" => gated(alg(&[A::Heidi]), Current::Choice(echo_time_id(c.inversion.heidi.te))),
+        "inversion.apply_heidi" => one(Current::Bool(c.inversion.apply_heidi)),
+        "inversion.heidi.cone_threshold" => gated(c.inversion.apply_heidi, Current::Number(c.inversion.heidi.cone_threshold)),
+        "inversion.heidi.te" => gated(c.inversion.apply_heidi, Current::Choice(echo_time_id(c.inversion.heidi.te))),
+        "inversion.tkd.threshold" => gated(alg(&[A::Tkd]), Current::Number(c.inversion.tkd.threshold)),
+        "inversion.tsvd.threshold" => gated(alg(&[A::Tsvd]), Current::Number(c.inversion.tsvd.threshold)),
         "inversion.qsmart.inversion" => gated(qsmart, Current::Choice(c.inversion.qsmart.inversion.id())),
         "inversion.qsmart.ilsqr_max_iter" => {
             gated(qsmart, Current::Number(c.inversion.qsmart.ilsqr_max_iter as f64))
@@ -825,6 +833,51 @@ const COMPLEX_FIT: &[Value] = &[Choice("complex-fit")];
 const WEIGHTED_AVG: &[Value] = &[Choice("weighted-avg")];
 const CHI_SEP_TOOLBOX: &[Value] = &[Choice("chi-sep-ilsqr"), Choice("chi-sep-medi"), Choice("chi-sepnet")];
 const STI: &[Value] = &[Choice("star"), Choice("ilsqr")];
+/// HEIDI's cone fill is on (`inversion.apply_heidi`): the trigger of the `heidi.*` rules.
+const HEIDI_ON: Condition = method("inversion.apply_heidi", &[Bool(true)]);
+/// Inversions with no local field to fill the cone from (the total-field and phase methods).
+const HEIDI_NO_LOCAL_FIELD: &[Value] = &[
+    Choice("tfi"), Choice("tgv"), Choice("qsmart"), Choice("autoqsm"), Choice("nextqsm"),
+    Choice("iqsm"), Choice("iqsm-plus"),
+];
+/// Seeds whose region outside the cone is near data-consistent (the HEIDI module docs, *Any seed*).
+const HEIDI_UNREGULARISED_SEEDS: &[Value] =
+    &[Choice("tkd"), Choice("tsvd"), Choice("tikhonov"), Choice("ndi")];
+/// Seeds whose regularisation outside the cone HEIDI would keep.
+const HEIDI_REGULARISED_SEEDS: &[Value] = &[
+    Choice("medi"), Choice("tv"), Choice("nltv"), Choice("fansi"), Choice("fansi-tgv"),
+    Choice("l1qsm"), Choice("whqsm"), Choice("hdqsm"), Choice("amp-pe"), Choice("ilsqr"),
+    Choice("star"), Choice("xqsm"), Choice("qsmnet"), Choice("qsmnet-plus"), Choice("qsmgan"),
+    Choice("ir2qsm"), Choice("lpcnn"), Choice("modl-qsm"),
+];
+const LSQR: &[Value] = &[Choice("lsqr")];
+/// Upstream's error when a truncating seed's threshold is above the cone's.
+const HEIDI_CONE_SOURCE: &str = "qsm_heidi computesusceptibility_heidi.m L922-923 (4592631); QSM.rs heidi.rs docs (Any seed)";
+
+/// HEIDI's default cone threshold: the `heidi.*-cone` rules are exact for it;
+/// [`heidi_seed_problem`](super::heidi_seed_problem) checks any.
+const HEIDI_DEFAULT_CONE: Condition = C::Setting {
+    setting: "inversion.heidi.cone_threshold",
+    is: Test::Range { min: Some(0.1), max: Some(0.1) },
+};
+
+/// `heidi.<method>-cone`: a truncating seed's threshold must not be above HEIDI's cone threshold.
+const fn heidi_truncation(id: &'static str, when: &'static [Condition], setting: &'static str) -> Rule {
+    Rule {
+        id,
+        when,
+        setting,
+        expect: Test::Range { min: None, max: Some(0.1) },
+        default: Number(0.1),
+        unit: Unit::None,
+        strength: Strength::Required,
+        basis: Basis::Stated,
+        reason: "Coefficients the seed truncated (|D| below its threshold) would be kept as data \
+                 where they lie outside HEIDI's cone; upstream stops with an error",
+        source: HEIDI_CONE_SOURCE,
+    }
+}
+
 const FANSI_FAMILY: &[Value] =
     &[Choice("ndi"), Choice("fansi"), Choice("fansi-tgv"), Choice("l1qsm"), Choice("whqsm")];
 
@@ -1084,7 +1137,7 @@ pub static RULES: &[Rule] = &[
     reference("amp-pe.bg-pdf", &[inv(&[Choice("amp-pe")])], "bg_removal.algorithm", PDF,
         "AMP-PE's pipeline removes the background with PDF",
         "QSM_AMP_PE README (Overview, step 4); qsm_multi_echo_combined.m L112-139"),
-    reference("lsqr.bg-sharp", &[inv(&[Choice("lsqr"), Choice("heidi")])], "bg_removal.algorithm",
+    reference("lsqr.bg-sharp", &[inv(&[Choice("lsqr")])], "bg_removal.algorithm",
         &[Choice("sharp")],
         "The authors' LSQR/HEIDI pipeline inverts a SHARP local field",
         "qsm_heidi makefile L14-20, def.sh (4592631)"),
@@ -1341,9 +1394,40 @@ pub static RULES: &[Rule] = &[
     reference("tfi.te-spacing", &[inv(&[Choice("tfi")]), MULTI_ECHO], "inversion.tfi.te", &[Choice("spacing")],
         "TFI runs through MEDI_L1, which converts with delta_TE",
         "MEDI toolbox 2024.11.26 MEDI_L1.m:202 (QSM.rs TfiParams::te, #276)"),
-    reference("heidi.te-last", &[inv(&[Choice("heidi")]), MULTI_ECHO], "inversion.heidi.te", &[Choice("last")],
+    reference("heidi.te-last", &[HEIDI_ON, MULTI_ECHO], "inversion.heidi.te", &[Choice("last")],
         "The authors' HEIDI pipeline converts at the last echo time",
         "qsm_heidi phase2susceptibilityfactor.m L70-71 (QSM.rs HeidiParams::te, #276)"),
+    // ---------------------------------------------------------------- HEIDI after the inversion
+    Rule {
+        id: "heidi.local-field",
+        when: &[HEIDI_ON],
+        setting: "inversion.algorithm",
+        expect: Test::NoneOf { values: HEIDI_NO_LOCAL_FIELD },
+        default: Choice("lsqr"),
+        unit: Unit::None,
+        strength: Strength::Required,
+        basis: Basis::Implementation,
+        reason: "HEIDI's homogeneity weights and cone fill take the local field the seed was \
+                 inverted from; this method has none",
+        source: "QSM.rs heidi.rs docs (Any seed); run_heidi_cone_fill",
+    },
+    recommend("heidi.seed-lsqr", &[HEIDI_ON, inv(HEIDI_UNREGULARISED_SEEDS)], "inversion.algorithm", LSQR,
+        "HEIDI as published keeps the well-conditioned k-space of a minimally regularised LSQR \
+         solution and fills only the cone",
+        "Schweser et al. 2012 NeuroImage 62:2083 (HEIDI); qsm_heidi makefile, inversion_lsqr.m then inversion_heidi.m (4592631)"),
+    reference("heidi.seed-rts", &[HEIDI_ON, inv(&[Choice("rts")])], "inversion.algorithm", LSQR,
+        "HEIDI's reference seed is LSQR; RTS already splits k-space at the cone and fills it with \
+         TV of its own",
+        "Schweser et al. 2012 NeuroImage 62:2083 (HEIDI); Kames et al. 2018 NeuroImage 167:276 (RTS)"),
+    discourage("heidi.seed-regularised", &[HEIDI_ON, inv(HEIDI_REGULARISED_SEEDS)], "inversion.algorithm",
+        HEIDI_REGULARISED_SEEDS, Choice("lsqr"), Basis::Stated,
+        "HEIDI replaces only the dipole cone, so this method's regularisation outside the cone is \
+         kept; HEIDI takes that region from a minimally regularised, near data-consistent solution",
+        "Schweser et al. 2012 NeuroImage 62:2083 (HEIDI); QSM.rs heidi.rs docs (Any seed)"),
+    heidi_truncation("heidi.tkd-cone", &[HEIDI_ON, inv(&[Choice("tkd")]), HEIDI_DEFAULT_CONE],
+        "inversion.tkd.threshold"),
+    heidi_truncation("heidi.tsvd-cone", &[HEIDI_ON, inv(&[Choice("tsvd")]), HEIDI_DEFAULT_CONE],
+        "inversion.tsvd.threshold"),
     // ---------------------------------------------------------------- χ-separation inputs
     reference("chi-sep-ilsqr.qsm-ilsqr", &[sep(&[Choice("chi-sep-ilsqr")])], "inversion.algorithm",
         &[Choice("ilsqr")],
@@ -1521,7 +1605,17 @@ mod tests {
             ("chi-sep.echo-weights", Case::new(separation(S::ChiSepIlsqr))),
             ("hdqsm.bg-pdf", Case::new(inversion(I::Hdqsm))),
             ("amp-pe.bg-pdf", Case::new(inversion(I::AmpPe))),
-            ("lsqr.bg-sharp", Case::new(inversion(I::Heidi))),
+            ("lsqr.bg-sharp", Case::new(inversion(I::Lsqr))),
+            ("heidi.local-field", Case::new(|c| { inversion(I::Tfi)(c); c.cfg.inversion.apply_heidi = true })),
+            ("heidi.seed-lsqr", Case::new(|c| {
+                inversion(I::Tkd)(c);
+                c.cfg.inversion.apply_heidi = true;
+                c.cfg.inversion.tkd.threshold = 0.1;
+            })),
+            ("heidi.seed-rts", Case::new(|c| { inversion(I::Rts)(c); c.cfg.inversion.apply_heidi = true })),
+            ("heidi.seed-regularised", Case::new(|c| { inversion(I::Medi)(c); c.cfg.inversion.apply_heidi = true })),
+            ("heidi.tkd-cone", Case::new(|c| { inversion(I::Tkd)(c); c.cfg.inversion.apply_heidi = true })),
+            ("heidi.tsvd-cone", Case::new(|c| { inversion(I::Tsvd)(c); c.cfg.inversion.apply_heidi = true })),
             ("rts.bg-vsharp", Case::new(background(B::Pdf))),
             ("xqsm.bg-resharp", Case::new(inversion(I::Xqsm))),
             ("qsmnet.bg-vsharp", Case::new(|c| { inversion(I::Qsmnet)(c); background(B::Lbv)(c) })),
@@ -1568,7 +1662,11 @@ mod tests {
             ("star.te-sum", Case::new(|c| { inversion(I::Star)(c); c.cfg.inversion.star.te = crate::EchoTime::First })),
             ("medi.te-spacing", Case::new(|c| { inversion(I::Medi)(c); c.cfg.inversion.medi.te = crate::EchoTime::First })),
             ("tfi.te-spacing", Case::new(|c| { inversion(I::Tfi)(c); c.cfg.inversion.tfi.te = crate::EchoTime::Last })),
-            ("heidi.te-last", Case::new(|c| { inversion(I::Heidi)(c); c.cfg.inversion.heidi.te = crate::EchoTime::First })),
+            ("heidi.te-last", Case::new(|c| {
+                inversion(I::Lsqr)(c);
+                c.cfg.inversion.apply_heidi = true;
+                c.cfg.inversion.heidi.te = crate::EchoTime::First;
+            })),
             ("sti.bg-vsharp", Case::new(|c| { inversion(I::Star)(c); background(B::Pdf)(c) })),
             ("sti.vsharp-no-deconvolve", Case::new(|c| { inversion(I::Ilsqr)(c); c.cfg.bg_removal.vsharp.deconvolve = true })),
             ("sti.vsharp-radius", Case::new(|c| { inversion(I::Ilsqr)(c); c.cfg.bg_removal.vsharp.max_radius = 8.0 })),

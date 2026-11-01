@@ -161,10 +161,6 @@ pub enum InversionAlgorithm {
     /// Minimally regularised LSQR with residual-field and global-offset unknowns
     /// (Schweser 2010).
     Lsqr,
-    /// Homogeneity Enabled Incremental Dipole Inversion (Schweser 2012). Seeds
-    /// itself from [`InversionAlgorithm::Lsqr`], then fills the dipole cone under
-    /// a field-derived weighted-TV prior.
-    Heidi,
     /// xQSM deep-learning dipole inversion (requires the `onnx` feature and the
     /// `xqsm` model weights; see [`crate::models`]).
     Xqsm,
@@ -556,9 +552,16 @@ pub struct InversionConfig {
     /// AMP-PE (`b0` is overridden from scan metadata by the dispatcher).
     pub amp_pe: AmpPeParams,
     /// Minimally regularised LSQR (`b0` is overridden from scan metadata by the
-    /// dispatcher). Also supplies HEIDI's seed map.
+    /// dispatcher). Also HEIDI's reference seed.
     pub lsqr: LsqrQsmParams,
-    /// HEIDI cone filling.
+    /// HEIDI (Schweser 2012) as streaking reduction after the inversion: its cone fill
+    /// ([`crate::inversion::heidi_cone_fill`]) keeps the well-conditioned k-space of the method's
+    /// χ and refills the dipole cone under a field-derived weighted-TV prior. With
+    /// [`InversionAlgorithm::Lsqr`] this is HEIDI as published, run as the authors' pipeline runs
+    /// it ([`crate::inversion::heidi()`]: the unmasked LSQR seed on LSQR's grid). Other seeds:
+    /// see the HEIDI module docs (*Any seed*), the `heidi.*` rules and [`heidi_seed_problem`](super::heidi_seed_problem).
+    pub apply_heidi: bool,
+    /// HEIDI's parameters, used with [`Self::apply_heidi`].
     pub heidi: HeidiParams,
     /// Overlap-tiling for the deep-learning inversions, as `(core, halo)` in voxels. `None`
     /// (default) runs the net whole-volume; `Some` runs it patch-by-patch (bounded memory) via the
@@ -625,7 +628,6 @@ impl InversionConfig {
             | A::Hdqsm
             | A::AmpPe
             | A::Lsqr
-            | A::Heidi
             | A::Xqsm
             | A::Qsmnet
             | A::QsmnetPlus
@@ -634,6 +636,16 @@ impl InversionConfig {
             | A::Lpcnn
             | A::ModlQsm => InversionInput::LocalField,
         }
+    }
+
+    /// Whether HEIDI's cone fill runs on the method's result after the inversion, rather than
+    /// inside it: [`Self::apply_heidi`] with any seed but LSQR, whose reference recipe
+    /// ([`crate::inversion::heidi()`]) [`run_dipole_inversion`](super::run_dipole_inversion) runs as
+    /// one step. [`run_dipole_inversion`](super::run_dipole_inversion) applies it either way; a
+    /// host that combines several inversions (two-pass) runs them with `apply_heidi` off when this
+    /// holds and fills the combined map with [`run_heidi_cone_fill`](super::run_heidi_cone_fill).
+    pub fn cone_fill_after(&self) -> bool {
+        self.apply_heidi && self.algorithm != InversionAlgorithm::Lsqr
     }
 
     /// The background removal the selected method's authors run in front of it, for a
@@ -677,6 +689,7 @@ impl Default for InversionConfig {
             hdqsm: HdQsmParams::default(),
             amp_pe: AmpPeParams::default(),
             lsqr: LsqrQsmParams::default(),
+            apply_heidi: false,
             heidi: HeidiParams::default(),
             tile: None,
         }
@@ -756,8 +769,7 @@ impl InversionAlgorithm {
             | InversionAlgorithm::Whqsm
             | InversionAlgorithm::Hdqsm
             | InversionAlgorithm::AmpPe
-            | InversionAlgorithm::Lsqr
-            | InversionAlgorithm::Heidi => OrientationSupport::Arbitrary,
+            | InversionAlgorithm::Lsqr => OrientationSupport::Arbitrary,
             InversionAlgorithm::Xqsm
             | InversionAlgorithm::Qsmnet
             | InversionAlgorithm::QsmnetPlus
@@ -837,13 +849,13 @@ impl InversionAlgorithm {
             Self::Tkd | Self::Tsvd | Self::Tikhonov | Self::Tv | Self::Rts | Self::Nltv
             | Self::Medi | Self::Tfi | Self::Ilsqr | Self::Star | Self::Tgv | Self::Qsmart | Self::Ndi
             | Self::Fansi | Self::FansiTgv | Self::L1qsm | Self::Whqsm | Self::Hdqsm
-            | Self::AmpPe | Self::Lsqr | Self::Heidi => None,
+            | Self::AmpPe | Self::Lsqr => None,
         }
     }
     pub const VARIANTS: &'static [Self] = &[
         Self::Tkd, Self::Tsvd, Self::Tikhonov, Self::Tv, Self::Rts, Self::Nltv, Self::Medi,
         Self::Tfi, Self::Ilsqr, Self::Star, Self::Tgv, Self::Qsmart, Self::Ndi, Self::Fansi, Self::FansiTgv,
-        Self::L1qsm, Self::Whqsm, Self::Hdqsm, Self::AmpPe, Self::Lsqr, Self::Heidi,
+        Self::L1qsm, Self::Whqsm, Self::Hdqsm, Self::AmpPe, Self::Lsqr,
         Self::Xqsm, Self::Qsmnet,
         Self::QsmnetPlus, Self::Autoqsm, Self::Qsmgan, Self::Ir2qsm, Self::Lpcnn, Self::ModlQsm,
         Self::Nextqsm, Self::Iqsm, Self::IqsmPlus,
@@ -955,7 +967,6 @@ impl InversionAlgorithm {
             Self::Hdqsm => "hdqsm",
             Self::AmpPe => "amp-pe",
             Self::Lsqr => "lsqr",
-            Self::Heidi => "heidi",
             Self::Xqsm => "xqsm",
             Self::Qsmnet => "qsmnet",
             Self::QsmnetPlus => "qsmnet-plus",
@@ -1242,7 +1253,7 @@ mod orientation_tests {
             InversionAlgorithm::Star, InversionAlgorithm::Tgv, InversionAlgorithm::Qsmart, InversionAlgorithm::Ndi,
             InversionAlgorithm::Fansi, InversionAlgorithm::FansiTgv, InversionAlgorithm::L1qsm,
             InversionAlgorithm::Whqsm, InversionAlgorithm::Hdqsm, InversionAlgorithm::AmpPe,
-            InversionAlgorithm::Lsqr, InversionAlgorithm::Heidi,
+            InversionAlgorithm::Lsqr,
         ] {
             assert_eq!(a.orientation_support(), OrientationSupport::Arbitrary, "{a:?}");
             assert!(!a.orientation_support().requires_axial(), "{a:?}");
@@ -1315,7 +1326,7 @@ mod inversion_input_tests {
             (A::Tfi, TotalField), (A::Ilsqr, LocalField), (A::Star, LocalField), (A::Qsmart, TotalField),
             (A::Ndi, LocalField), (A::Fansi, LocalField), (A::FansiTgv, LocalField),
             (A::L1qsm, LocalField), (A::Whqsm, LocalField), (A::Hdqsm, LocalField),
-            (A::AmpPe, LocalField), (A::Lsqr, LocalField), (A::Heidi, LocalField),
+            (A::AmpPe, LocalField), (A::Lsqr, LocalField),
             (A::Xqsm, LocalField), (A::Qsmnet, LocalField), (A::QsmnetPlus, LocalField),
             (A::Autoqsm, TotalField), (A::Qsmgan, LocalField), (A::Ir2qsm, LocalField),
             (A::Lpcnn, LocalField), (A::ModlQsm, LocalField), (A::Nextqsm, TotalField),
@@ -1623,13 +1634,13 @@ mod slice_gap_coverage {
             }
         }
         // if the scan stops finding stages the test has quietly stopped testing anything
-        // Background removal, dipole inversion, the four single-step DL reconstructions
-        // (NeXtQSM, iQSM, iQSM+, iQFM), TGV, chi-separation and QSMART: nine stages convolve on
-        // the grid and must refuse a gap. If this count drops, the source scan has stopped
-        // seeing stages rather than the stages having stopped needing the check.
+        // Background removal, dipole inversion, HEIDI's cone fill, the four single-step DL
+        // reconstructions (NeXtQSM, iQSM, iQSM+, iQFM), TGV, chi-separation and QSMART: ten stages
+        // convolve on the grid and must refuse a gap. If this count drops, the source scan has
+        // stopped seeing stages rather than the stages having stopped needing the check.
         assert_eq!(
-            checked, 9,
-            "expected 9 checking stages, scanned {checked}; either a stage was added without \
+            checked, 10,
+            "expected 10 checking stages, scanned {checked}; either a stage was added without \
              the check and without an exemption, or the source scan has broken"
         );
     }

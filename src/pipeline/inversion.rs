@@ -90,6 +90,25 @@ pub fn run_dipole_inversion(
     magnitude: Option<&[f64]>,
     progress: &mut dyn FnMut(usize, usize),
 ) -> Result<Vec<f64>, PipelineError> {
+    if let Some(problem) = heidi_seed_problem(config) {
+        return Err(PipelineError::InvalidConfig(problem));
+    }
+    let chi = invert(field_ppm, mask, metadata, config, magnitude, &mut *progress)?;
+    if config.cone_fill_after() {
+        return run_heidi_cone_fill(&chi, field_ppm, mask, metadata, config, progress);
+    }
+    Ok(chi)
+}
+
+/// [`run_dipole_inversion`] without HEIDI's cone fill after a non-LSQR seed.
+fn invert(
+    field_ppm: &[f64],
+    mask: &[u8],
+    metadata: &ScanMetadata,
+    config: &InversionConfig,
+    magnitude: Option<&[f64]>,
+    progress: &mut dyn FnMut(usize, usize),
+) -> Result<Vec<f64>, PipelineError> {
     // The dipole kernel is an FFT on a uniform grid, so a gapped volume is refused.
     metadata.require_contiguous_slices()?;
     let grid = metadata.grid();
@@ -293,6 +312,18 @@ pub fn run_dipole_inversion(
             )
             .map_err(|e| PipelineError::InvalidConfig(e.0))?
         }
+        InversionAlgorithm::Lsqr if config.apply_heidi => {
+            // LSQR+HEIDI, as published: qsm_heidi's inversion_lsqr.m, then inversion_heidi.m on
+            // the unmasked seed and the same cropped grid. The field strength sets the seed's
+            // residual weighting.
+            let lsqr_params = crate::inversion::LsqrQsmParams {
+                b0: metadata.field_strength,
+                ..config.lsqr.clone()
+            };
+            crate::inversion::heidi(
+                field_ppm, mask, magnitude, &grid, bdir, &lsqr_params, &heidi_params(config, metadata)?, progress,
+            )
+        }
         InversionAlgorithm::Lsqr => {
             let params = crate::inversion::LsqrQsmParams {
                 b0: metadata.field_strength,
@@ -300,27 +331,6 @@ pub fn run_dipole_inversion(
             };
             crate::inversion::lsqr_qsm(
                 field_ppm, mask, magnitude, &grid, bdir, &params, progress,
-            )
-        }
-        InversionAlgorithm::Heidi => {
-            // HEIDI runs its own LSQR seed (qsm_heidi's inversion_lsqr.m, then
-            // inversion_heidi.m on the same cropped grid); the field strength sets the
-            // seed's residual weighting.
-            let lsqr_params = crate::inversion::LsqrQsmParams {
-                b0: metadata.field_strength,
-                ..config.lsqr.clone()
-            };
-            // NESTA's result depends on χ's scale in upstream's phase units (see the HEIDI
-            // module docs): field strength and echo times are scan parameters from metadata,
-            // and config.heidi.te picks the echo time of the field (by default the last, as
-            // qsm_heidi's phase2susceptibilityfactor uses).
-            let heidi_params = crate::inversion::HeidiParams {
-                b0: metadata.field_strength,
-                echo_times: scan_echo_times("HEIDI", config.heidi.te, metadata)?,
-                ..config.heidi.clone()
-            };
-            crate::inversion::heidi(
-                field_ppm, mask, magnitude, &grid, bdir, &lsqr_params, &heidi_params, progress,
             )
         }
         InversionAlgorithm::Xqsm => run_xqsm(field_ppm, mask, &grid, config.tile, progress)?,
@@ -347,6 +357,92 @@ pub fn run_dipole_inversion(
     };
 
     Ok(chi)
+}
+
+/// HEIDI's parameters with the scan's: NESTA's result depends on χ's scale in upstream's phase
+/// units (see the HEIDI module docs), so the field strength and echo times come from metadata,
+/// and `config.heidi.te` picks the echo time of the field (by default the last, as qsm_heidi's
+/// phase2susceptibilityfactor uses).
+fn heidi_params(config: &InversionConfig, metadata: &ScanMetadata) -> Result<crate::inversion::HeidiParams, PipelineError> {
+    Ok(crate::inversion::HeidiParams {
+        b0: metadata.field_strength,
+        echo_times: scan_echo_times("HEIDI", config.heidi.te, metadata)?,
+        ..config.heidi.clone()
+    })
+}
+
+/// Why HEIDI's cone fill cannot follow `config`'s inversion, if it cannot (`None` when HEIDI is
+/// off or the seed is allowed). The hard errors of [`run_heidi_cone_fill`], for hosts to check
+/// at plan time:
+///
+/// - the method has no local field to fill the cone from (the total-field and phase methods);
+/// - TKD's or TSVD's threshold is above HEIDI's cone threshold: the coefficients they truncated
+///   would be kept as data (upstream: "DipoleFilter parameter must not be larger that Cone
+///   threshold", `computesusceptibility_heidi.m` L922-923).
+///
+/// The softer advice on seeds (LSQR is the reference; regularised seeds are discouraged) is in
+/// the `heidi.*` rules ([`super::rules`]).
+pub fn heidi_seed_problem(config: &InversionConfig) -> Option<String> {
+    if !config.apply_heidi {
+        return None;
+    }
+    let cone = config.heidi.cone_threshold;
+    let truncation = match config.algorithm {
+        InversionAlgorithm::Tkd => Some(("TKD", config.tkd.threshold)),
+        InversionAlgorithm::Tsvd => Some(("TSVD", config.tsvd.threshold)),
+        _ => None,
+    };
+    if let Some((name, threshold)) = truncation {
+        if threshold > cone {
+            return Some(format!(
+                "HEIDI after {name}: {name}'s threshold ({threshold}) is above HEIDI's cone threshold \
+                 ({cone}), so coefficients {name} truncated would be kept as data; lower it to {cone} or less"
+            ));
+        }
+    }
+    (config.input(1) != InversionInput::LocalField).then(|| {
+        format!("HEIDI needs the local field the seed was inverted from; {} has none", config.algorithm.id())
+    })
+}
+
+/// HEIDI's cone fill on a seed χ map: streaking reduction after `config`'s inversion
+/// ([`crate::inversion::heidi_cone_fill`]). [`run_dipole_inversion`] calls it when
+/// [`InversionConfig::cone_fill_after`] holds; a host that combines several inversions (two-pass)
+/// runs them with `apply_heidi` off and calls this once on the combined map.
+///
+/// # Arguments
+/// * `chi_seed` - The inversion's χ in ppm
+/// * `field_ppm` - The local field the seed was inverted from
+/// * `mask` - The mask the seed was inverted on (for two-pass, the main pass's)
+/// * `metadata` - Scan metadata (field strength, echo times)
+/// * `config` - The inversion's config: its algorithm is checked with [`heidi_seed_problem`],
+///   and `heidi` holds the cone fill's parameters
+/// * `progress` - Progress callback (current_iter, max_iter)
+pub fn run_heidi_cone_fill(
+    chi_seed: &[f64],
+    field_ppm: &[f64],
+    mask: &[u8],
+    metadata: &ScanMetadata,
+    config: &InversionConfig,
+    progress: &mut dyn FnMut(usize, usize),
+) -> Result<Vec<f64>, PipelineError> {
+    if let Some(problem) = heidi_seed_problem(&InversionConfig { apply_heidi: true, ..config.clone() }) {
+        return Err(PipelineError::InvalidConfig(problem));
+    }
+    metadata.require_contiguous_slices()?;
+    let grid = metadata.grid();
+    let n_voxels = grid.n_total();
+    for (got, what) in [(chi_seed.len(), "seed"), (field_ppm.len(), "field"), (mask.len(), "mask")] {
+        if got != n_voxels {
+            return Err(PipelineError::InvalidInput(format!(
+                "HEIDI's {what} has {got} voxels, the scan {n_voxels}"
+            )));
+        }
+    }
+    let params = heidi_params(config, metadata)?;
+    Ok(crate::inversion::heidi_cone_fill(
+        field_ppm, mask, chi_seed, &grid, metadata.b0_direction, &params, progress,
+    ))
 }
 
 /// Source the xQSM weights and run inference. Requires the `onnx` feature;
@@ -1082,9 +1178,57 @@ mod tests {
     fn test_inversion_heidi() {
         // A short NESTA budget: the default runs all 8 x 500 iterations (tolerance eps).
         let heidi = crate::inversion::HeidiParams { continuation_steps: 2, inner_iterations: 20, ..Default::default() };
-        let chi = make_inversion_test_with(InversionConfig { algorithm: InversionAlgorithm::Heidi, heidi, ..Default::default() });
+        let chi = make_inversion_test_with(InversionConfig { algorithm: InversionAlgorithm::Lsqr, apply_heidi: true, heidi, ..Default::default() });
         assert_eq!(chi.len(), 8 * 8 * 8);
         assert!(chi.iter().all(|v| v.is_finite()));
+    }
+
+    /// The hard errors of HEIDI after another inversion: a truncation threshold above the
+    /// cone's, and a method with no local field.
+    #[test]
+    fn heidi_seed_problems() {
+        let mut c = InversionConfig { algorithm: InversionAlgorithm::Tkd, ..Default::default() };
+        assert_eq!(heidi_seed_problem(&c), None, "HEIDI off");
+        c.apply_heidi = true;
+        assert!(heidi_seed_problem(&c).is_some(), "TKD's default 0.15 is above the cone's 0.1");
+        c.tkd.threshold = 0.1;
+        assert_eq!(heidi_seed_problem(&c), None);
+        c.heidi.cone_threshold = 0.05;
+        assert!(heidi_seed_problem(&c).is_some(), "checks the configured cone threshold");
+        c.algorithm = InversionAlgorithm::Tsvd;
+        c.tsvd.threshold = 0.2;
+        assert!(heidi_seed_problem(&c).is_some());
+        for a in [InversionAlgorithm::Tfi, InversionAlgorithm::Qsmart, InversionAlgorithm::Tgv, InversionAlgorithm::Iqsm] {
+            let c = InversionConfig { algorithm: a, apply_heidi: true, ..Default::default() };
+            assert!(heidi_seed_problem(&c).is_some(), "{a:?} has no local field");
+        }
+        for a in [InversionAlgorithm::Lsqr, InversionAlgorithm::Rts, InversionAlgorithm::Medi, InversionAlgorithm::Ndi] {
+            let c = InversionConfig { algorithm: a, apply_heidi: true, ..Default::default() };
+            assert_eq!(heidi_seed_problem(&c), None, "{a:?}");
+        }
+    }
+
+    /// HEIDI after TKD: `run_dipole_inversion` fills the cone of TKD's result, and refuses a TKD
+    /// threshold above the cone's.
+    #[test]
+    fn heidi_after_tkd() {
+        let heidi = crate::inversion::HeidiParams { continuation_steps: 2, inner_iterations: 5, ..Default::default() };
+        let mut config = InversionConfig { algorithm: InversionAlgorithm::Tkd, apply_heidi: true, heidi, ..Default::default() };
+        assert!(config.cone_fill_after());
+        let meta = ScanMetadata {
+            dims: (8, 8, 8), voxel_size: (1.0, 1.0, 1.0),
+            echo_times: vec![0.005], field_strength: 3.0, b0_direction: (0.0, 0.0, 1.0),
+            slice_geometry: None,
+            affine: None,
+        };
+        let r = run_dipole_inversion(&[0.01; 512], &[1u8; 512], &meta, &config, None, &mut |_, _| {});
+        assert!(matches!(r, Err(PipelineError::InvalidConfig(_))), "TKD 0.15 > cone 0.1 must be refused");
+        config.tkd.threshold = 0.1;
+        let chi = make_inversion_test_with(config.clone());
+        assert!(chi.iter().all(|v| v.is_finite()));
+        config.apply_heidi = false;
+        let tkd = make_inversion_test_with(config);
+        assert_ne!(chi, tkd, "the cone was not filled");
     }
 
     /// HEIDI runs LSQR first, so its progress must advance monotonically across
@@ -1100,7 +1244,8 @@ mod tests {
             affine: None,
         };
         let config = InversionConfig {
-            algorithm: InversionAlgorithm::Heidi,
+            algorithm: InversionAlgorithm::Lsqr,
+            apply_heidi: true,
             heidi: crate::inversion::HeidiParams {
                 continuation_steps: 2,
                 inner_iterations: 4,
