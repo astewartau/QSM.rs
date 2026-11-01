@@ -27,6 +27,8 @@
 //! diffusion." IEEE TPAMI, 12(7):629-639. https://doi.org/10.1109/34.56205
 
 use crate::Grid;
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
 
 /// Parameters for [`gradient_anisotropic_diffusion`].
 #[cfg_attr(feature = "introspection", derive(serde::Serialize))]
@@ -39,12 +41,18 @@ pub struct AnisotropicDiffusionParams {
     /// Conductance, as a multiple of the image's own RMS gradient. Larger values
     /// smooth across stronger edges.
     pub conductance: f64,
+    /// ITK 3.20's arithmetic, for parity with code that runs its executable (qsm_heidi's
+    /// HEIDI): a `float` image, and the mean squared gradient summed in `float` with the
+    /// volume's edges and corners counted more than once
+    /// ([`gradient_anisotropic_diffusion_itk`]). Off by default: the float sum underestimates
+    /// the mean (by about 1 % on a whole-brain volume), and so `K`.
+    pub reference_itk: bool,
 }
 
 impl Default for AnisotropicDiffusionParams {
     fn default() -> Self {
         // ITK's own defaults.
-        Self { iterations: 2, time_step: 0.125, conductance: 1.0 }
+        Self { iterations: 2, time_step: 0.125, conductance: 1.0, reference_itk: false }
     }
 }
 
@@ -63,8 +71,10 @@ fn clamp_step(pos: usize, delta: isize, n: usize) -> usize {
 
 /// Mean squared central-difference gradient magnitude over the volume.
 ///
-/// This is ITK's `CalculateAverageGradientMagnitudeSquared`, and sets the
-/// conductance scale `K` for the sweep that follows.
+/// This is ITK's `CalculateAverageGradientMagnitudeSquared`, and sets the conductance scale `K`
+/// for the sweep that follows. It is the true mean, in double precision: ITK 3.20 sums in
+/// `float` and counts the voxels on the volume's edges and corners two or three times
+/// ([`gradient_anisotropic_diffusion_itk`] does both).
 fn average_gradient_magnitude_squared(u: &[f64], nx: usize, ny: usize, nz: usize) -> f64 {
     let n_total = nx * ny * nz;
     if n_total == 0 {
@@ -94,6 +104,29 @@ fn average_gradient_magnitude_squared(u: &[f64], nx: usize, ny: usize, nz: usize
     total / n_total as f64
 }
 
+/// Every voxel in the order ITK 3.20's `CalculateAverageGradientMagnitudeSquared` visits them:
+/// the interior, then the faces x−, x+, y−, y+, z−, z+, each a full slab (edges and corners
+/// repeat), in raster order.
+fn for_each_itk_face_voxel((nx, ny, nz): (usize, usize, usize), visit: &mut dyn FnMut(usize, usize, usize)) {
+    let mut region = |x: std::ops::Range<usize>, y: std::ops::Range<usize>, z: std::ops::Range<usize>| {
+        for k in z {
+            for j in y.clone() {
+                for i in x.clone() {
+                    visit(i, j, k);
+                }
+            }
+        }
+    };
+    let inner = |n: usize| if n > 2 { 1..n - 1 } else { 0..0 };
+    region(inner(nx), inner(ny), inner(nz));
+    region(0..1, 0..ny, 0..nz);
+    region(nx - 1..nx, 0..ny, 0..nz);
+    region(0..nx, 0..1, 0..nz);
+    region(0..nx, ny - 1..ny, 0..nz);
+    region(0..nx, 0..ny, 0..1);
+    region(0..nx, 0..ny, nz - 1..nz);
+}
+
 /// Apply gradient anisotropic diffusion to a 3D volume.
 ///
 /// # Arguments
@@ -108,6 +141,9 @@ pub fn gradient_anisotropic_diffusion(
     grid: &Grid,
     params: &AnisotropicDiffusionParams,
 ) -> Vec<f64> {
+    if params.reference_itk {
+        return gradient_anisotropic_diffusion_itk(data, grid, params);
+    }
     let (nx, ny, nz) = grid.dims;
     let n_total = nx * ny * nz;
     assert_eq!(data.len(), n_total, "data length must match grid dimensions");
@@ -194,6 +230,109 @@ pub fn gradient_anisotropic_diffusion(
     u
 }
 
+/// ITK 3.20's `GradientAnisotropicDiffusionImageFilter` on a `float` image, as the executable
+/// qsm_heidi ships runs it: [`gradient_anisotropic_diffusion`]'s scheme, with ITK's arithmetic.
+///
+/// - The image is `float` (f32) throughout; each update is computed in double from f32
+///   differences (`NumericTraits<float>::RealType`), stored as f32, and added as
+///   `o += float(update · Δt)` (`DenseFiniteDifferenceImageFilter::ThreadedApplyUpdate`).
+/// - `⟨|∇u|²⟩` is accumulated in f32 (`ScalarAnisotropicDiffusionFunction::
+///   CalculateAverageGradientMagnitudeSquared`, `PixelType accumulator`), in ITK's order;
+///   `K = float(⟨|∇u|²⟩ · c² · −2)`.
+///
+/// Voxel spacing is ignored and out-of-bounds neighbours are clamped, as in
+/// [`gradient_anisotropic_diffusion`].
+pub fn gradient_anisotropic_diffusion_itk(
+    data: &[f64],
+    grid: &Grid,
+    params: &AnisotropicDiffusionParams,
+) -> Vec<f64> {
+    let (nx, ny, nz) = grid.dims;
+    let n_total = nx * ny * nz;
+    assert_eq!(data.len(), n_total, "data length must match grid dimensions");
+    let mut u: Vec<f32> = data.iter().map(|&v| v as f32).collect();
+    if n_total == 0 || params.iterations == 0 {
+        return u.iter().map(|&v| v as f64).collect();
+    }
+    let idx = |i: usize, j: usize, k: usize| i + nx * (j + ny * k);
+    let mut update = vec![0.0f32; n_total];
+    for _ in 0..params.iterations {
+        let avg = itk_average_gradient_magnitude_squared(&u, (nx, ny, nz));
+        let k_scale = (avg * params.conductance * params.conductance * -2.0) as f32 as f64;
+        let at = |u: &[f32], i: usize, j: usize, k: usize, d: [isize; 3]| -> f32 {
+            u[idx(clamp_step(i, d[0], nx), clamp_step(j, d[1], ny), clamp_step(k, d[2], nz))]
+        };
+        crate::maybe_par_chunks_mut!(update, nx * ny).enumerate().for_each(|(k, slab)| {
+            let u = &u;
+            for j in 0..ny {
+                for i in 0..nx {
+                    let unit = |a: usize| -> [isize; 3] { let mut d = [0; 3]; d[a] = 1; d };
+                    let c = u[idx(i, j, k)];
+                    let mut dx = [0.0f64; 3];
+                    for (a, dxa) in dx.iter_mut().enumerate() {
+                        let e = unit(a);
+                        let m = [-e[0], -e[1], -e[2]];
+                        *dxa = ((at(u, i, j, k, e) - at(u, i, j, k, m)) / 2.0f32) as f64;
+                    }
+                    let mut delta = 0.0f64;
+                    for a in 0..3 {
+                        let e = unit(a);
+                        let m = [-e[0], -e[1], -e[2]];
+                        let fwd = (at(u, i, j, k, e) - c) as f64;
+                        let bwd = (c - at(u, i, j, k, m)) as f64;
+                        let (mut acc, mut acc_d) = (0.0f64, 0.0f64);
+                        for b in 0..3 {
+                            if b == a {
+                                continue;
+                            }
+                            let f = unit(b);
+                            let add = |x: [isize; 3], y: [isize; 3]| [x[0] + y[0], x[1] + y[1], x[2] + y[2]];
+                            let neg = [-f[0], -f[1], -f[2]];
+                            let aug = ((at(u, i, j, k, add(e, f)) - at(u, i, j, k, add(e, neg))) / 2.0f32) as f64;
+                            let dim = ((at(u, i, j, k, add(m, f)) - at(u, i, j, k, add(m, neg))) / 2.0f32) as f64;
+                            acc += 0.25 * (dx[b] + aug) * (dx[b] + aug);
+                            acc_d += 0.25 * (dx[b] + dim) * (dx[b] + dim);
+                        }
+                        let (cx, cxd) = if k_scale == 0.0 {
+                            (0.0, 0.0)
+                        } else {
+                            (((fwd * fwd + acc) / k_scale).exp(), ((bwd * bwd + acc_d) / k_scale).exp())
+                        };
+                        delta += fwd * cx - bwd * cxd;
+                    }
+                    slab[i + nx * j] = delta as f32;
+                }
+            }
+        });
+        for (o, &d) in u.iter_mut().zip(&update) {
+            *o += (d as f64 * params.time_step) as f32;
+        }
+    }
+    u.iter().map(|&v| v as f64).collect()
+}
+
+/// [`average_gradient_magnitude_squared`] in ITK's float arithmetic: f32 sums in ITK's order,
+/// f32 division.
+fn itk_average_gradient_magnitude_squared(u: &[f32], (nx, ny, nz): (usize, usize, usize)) -> f64 {
+    let idx = |i: usize, j: usize, k: usize| i + nx * (j + ny * k);
+    let (mut acc, mut count) = (0.0f32, 0.0f32);
+    let mut visit = |i: usize, j: usize, k: usize| {
+        count += 1.0;
+        let pairs = [
+            (idx(clamp_step(i, 1, nx), j, k), idx(clamp_step(i, -1, nx), j, k)),
+            (idx(i, clamp_step(j, 1, ny), k), idx(i, clamp_step(j, -1, ny), k)),
+            (idx(i, j, clamp_step(k, 1, nz)), idx(i, j, clamp_step(k, -1, nz))),
+        ];
+        for (p, m) in pairs {
+            // `val / -2.0f` in float, through a double, back to float; squared and summed in float.
+            let v = ((u[p] - u[m]) / -2.0f32) as f64 as f32;
+            acc += v * v;
+        }
+    };
+    for_each_itk_face_voxel((nx, ny, nz), &mut visit);
+    (acc / count) as f64
+}
+
 /// Central difference along `axis` at `(i, j, k)`, with clamped boundaries.
 #[inline]
 fn central(
@@ -239,6 +378,21 @@ mod tests {
         }
     }
 
+    /// ITK's float arithmetic gives an f32 result close to the double one: its mean squared
+    /// gradient differs slightly, and nothing else.
+    #[test]
+    fn reference_itk_is_float_and_close() {
+        let g = grid(12);
+        let data: Vec<f64> = (0..g.n_total()).map(|i| ((i as f64) * 0.37).sin() + (i % 7) as f64 * 0.1).collect();
+        let p = AnisotropicDiffusionParams { iterations: 3, time_step: 0.05, conductance: 1.0, reference_itk: false };
+        let a = gradient_anisotropic_diffusion(&data, &g, &p);
+        let b = gradient_anisotropic_diffusion(&data, &g, &AnisotropicDiffusionParams { reference_itk: true, ..p });
+        assert!(b.iter().all(|&v| v == v as f32 as f64), "an f32 image");
+        assert_ne!(a, b);
+        let max = a.iter().zip(&b).map(|(x, y)| (x - y).abs()).fold(0.0, f64::max);
+        assert!(max < 1e-2, "{max}");
+    }
+
     #[test]
     fn zero_iterations_is_identity() {
         let g = grid(5);
@@ -271,6 +425,7 @@ mod tests {
             iterations: 5,
             time_step: 0.05,
             conductance: 1.0,
+            reference_itk: false,
         };
         let out = gradient_anisotropic_diffusion(&data, &g, &params);
 

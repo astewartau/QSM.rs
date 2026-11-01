@@ -37,7 +37,15 @@
 //! * the cone is `|D| > 0.1` (the driver's `PostProcCone.threshold`) with `D` the
 //!   spatial-domain unit dipole response ([`super::lsqr_qsm::spatial_dipole_kernel`]);
 //! * NESTA runs with the driver's tolerance, machine epsilon, so every continuation step uses
-//!   all of its inner iterations (8 × 500).
+//!   all of its inner iterations (8 × 500);
+//! * the homogeneity masks are built from the phase denoised by ITK 3.20's gradient
+//!   anisotropic diffusion (the executable `diffusionimagefilter.m` runs, 5 iterations, time
+//!   step 0.05, conductance 1), in the phase's units. That executable works in `float` and sums
+//!   the mean squared gradient that sets its conductance scale in `float`, which underestimates
+//!   it (by about 1 % on a whole brain); QSM.rs computes it in double by default, and
+//!   [`AnisotropicDiffusionParams::reference_itk`] reproduces the executable bit for bit. The
+//!   two give the same masks but for the voxels at the gradient thresholds (about 0.07 % on an
+//!   in-vivo brain, QSM-CI parity case `s005001-cbic-prisma-bridge-run1`).
 //!
 //! Units: the field is in ppm and χ comes back in ppm. The gradient and Laplacian
 //! thresholds below are therefore in ppm/mm and ppm/voxel², independent of echo
@@ -147,8 +155,9 @@ pub struct HeidiParams {
     /// Field-Laplacian threshold in ppm per voxel² (the stencil is in voxel units,
     /// matching upstream).
     pub laplacian_threshold: f64,
-    /// Anisotropic-diffusion smoothing applied to the field before the gradients
-    /// are taken. `None` skips it.
+    /// Anisotropic-diffusion smoothing applied to the field (in upstream's phase units) before
+    /// the gradients are taken. `None` skips it. Its `reference_itk` reproduces the ITK
+    /// executable upstream runs (see the module docs).
     pub denoise: Option<AnisotropicDiffusionParams>,
     /// TV weight kept at voxels that read as an edge in *every* direction.
     ///
@@ -205,6 +214,7 @@ impl Default for HeidiParams {
                 iterations: 5,
                 time_step: 0.05,
                 conductance: 1.0,
+                reference_itk: false,
             }),
             gradient_mask_floor: 0.0,
             continuation_steps: 8,
@@ -377,8 +387,15 @@ pub fn homogeneity_masks(
     let mut field = local_field.to_vec();
     apply_mask_zero(&mut field, mask);
 
+    // Upstream denoises the phase (`diffusionimagefilter` on `phase .* mask`), so the
+    // diffusion runs in its units; it is scale-free but for rounding, which ITK's float
+    // arithmetic (`reference_itk`) makes visible.
     let smoothed = match &params.denoise {
-        Some(d) => gradient_anisotropic_diffusion(&field, grid, d),
+        Some(d) => {
+            let to_phase = -GAMMA * params.te.seconds(&params.echo_times, "HEIDI") * params.b0 * 1e-6;
+            let phase: Vec<f64> = field.iter().map(|v| v * to_phase).collect();
+            gradient_anisotropic_diffusion(&phase, grid, d).into_iter().map(|v| v / to_phase).collect()
+        }
         None => field,
     };
 
