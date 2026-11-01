@@ -840,7 +840,8 @@ const HEIDI_NO_LOCAL_FIELD: &[Value] = &[
     Choice("tfi"), Choice("tgv"), Choice("qsmart"), Choice("autoqsm"), Choice("nextqsm"),
     Choice("iqsm"), Choice("iqsm-plus"),
 ];
-/// Seeds whose region outside the cone is near data-consistent (the HEIDI module docs, *Any seed*).
+/// Seeds whose region outside the cone is near data-consistent (the HEIDI module docs, *Any
+/// seed*), but for LSQR (the reference) and RTS (`heidi.seed-rts`).
 const HEIDI_UNREGULARISED_SEEDS: &[Value] =
     &[Choice("tkd"), Choice("tsvd"), Choice("tikhonov"), Choice("ndi")];
 /// Seeds whose regularisation outside the cone HEIDI would keep.
@@ -850,7 +851,6 @@ const HEIDI_REGULARISED_SEEDS: &[Value] = &[
     Choice("star"), Choice("xqsm"), Choice("qsmnet"), Choice("qsmnet-plus"), Choice("qsmgan"),
     Choice("ir2qsm"), Choice("lpcnn"), Choice("modl-qsm"),
 ];
-const LSQR: &[Value] = &[Choice("lsqr")];
 /// Upstream's error when a truncating seed's threshold is above the cone's.
 const HEIDI_CONE_SOURCE: &str = "qsm_heidi computesusceptibility_heidi.m L922-923 (4592631); QSM.rs heidi.rs docs (Any seed)";
 
@@ -1411,15 +1411,35 @@ pub static RULES: &[Rule] = &[
                  inverted from; this method has none",
         source: "QSM.rs heidi.rs docs (Any seed); run_heidi_cone_fill",
     },
-    recommend("heidi.seed-lsqr", &[HEIDI_ON, inv(HEIDI_UNREGULARISED_SEEDS)], "inversion.algorithm", LSQR,
-        "HEIDI as published keeps the well-conditioned k-space of a minimally regularised LSQR \
-         solution and fills only the cone",
-        "Schweser et al. 2012 NeuroImage 62:2083 (HEIDI); qsm_heidi makefile, inversion_lsqr.m then inversion_heidi.m (4592631)"),
-    reference("heidi.seed-rts", &[HEIDI_ON, inv(&[Choice("rts")])], "inversion.algorithm", LSQR,
-        "HEIDI's reference seed is LSQR; RTS already splits k-space at the cone and fills it with \
-         TV of its own",
-        "Schweser et al. 2012 NeuroImage 62:2083 (HEIDI); Kames et al. 2018 NeuroImage 167:276 (RTS)"),
-    discourage("heidi.seed-regularised", &[HEIDI_ON, inv(HEIDI_REGULARISED_SEEDS)], "inversion.algorithm",
+    // The seed rules name the seeds they are about in `expect` (none of them), not in `when`, so
+    // each fires on its own seeds only and is resolved by the seed it names.
+    Rule {
+        id: "heidi.seed-lsqr",
+        when: &[HEIDI_ON],
+        setting: "inversion.algorithm",
+        expect: Test::NoneOf { values: HEIDI_UNREGULARISED_SEEDS },
+        default: Choice("lsqr"),
+        unit: Unit::None,
+        strength: Strength::Recommended,
+        basis: Basis::Stated,
+        reason: "HEIDI as published keeps the well-conditioned k-space of a minimally regularised \
+                 LSQR solution and fills only the cone",
+        source: "Schweser et al. 2012 NeuroImage 62:2083 (HEIDI); qsm_heidi makefile, inversion_lsqr.m then inversion_heidi.m (4592631)",
+    },
+    Rule {
+        id: "heidi.seed-rts",
+        when: &[HEIDI_ON],
+        setting: "inversion.algorithm",
+        expect: Test::NoneOf { values: &[Choice("rts")] },
+        default: Choice("lsqr"),
+        unit: Unit::None,
+        strength: Strength::Reference,
+        basis: Basis::ReferenceChoice,
+        reason: "HEIDI's reference seed is LSQR; RTS already splits k-space at the cone and fills it \
+                 with TV of its own",
+        source: "Schweser et al. 2012 NeuroImage 62:2083 (HEIDI); Kames et al. 2018 NeuroImage 167:276 (RTS)",
+    },
+    discourage("heidi.seed-regularised", &[HEIDI_ON], "inversion.algorithm",
         HEIDI_REGULARISED_SEEDS, Choice("lsqr"), Basis::Stated,
         "HEIDI replaces only the dipole cone, so this method's regularisation outside the cone is \
          kept; HEIDI takes that region from a minimally regularised, near data-consistent solution",
