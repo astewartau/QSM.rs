@@ -118,7 +118,11 @@
 //! - **The verified QSM-CI `chi-sep-ilsqr` container** (QSMxT/QSM-CI#306; its own STI Suite QSM,
 //!   `tests/chi_sep_ilsqr_qsmci_parity.rs`, regenerated in Actions by
 //!   `tests/data/chi_sep_ilsqr_qsmci_small.py`): χ+ and |χ−| to relative L2 3·10⁻⁸ on a 24×22×18
-//!   phantom, the container's float32 output (measured 2026-10-30).
+//!   phantom, the container's float32 output (measured 2026-10-30). On `chisep-mc` and the
+//!   in-vivo scan above, given the container's own QSM (its intermediate) and its `CF`
+//!   (42.5774 MHz/T·B0): χ+ and |χ−| to relative L2 2.6·10⁻⁸ and 2.5·10⁻⁸, max |Δ| 7·10⁻⁹ and
+//!   3·10⁻⁸ ppm, its float32 rounding (`examples/chi_sep_file.rs`, measured 2026-11-01). QSM-CI's
+//!   `chisep-ilsqr` / `chisep-ilsqr-qsmrs` parity pair checks this on `chisep-mc`.
 //!
 //! The residual is rounding inside the iterations. QSM.rs evaluates the same expressions with its
 //! own FFT and, where that saves work, in a different order (step 1's operator applies `Dc∘Dc`
