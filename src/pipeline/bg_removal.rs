@@ -2,7 +2,7 @@
 //!
 //! Dispatcher that calls the appropriate background removal algorithm
 //! based on configuration, including algorithm-specific parameter defaults
-//! (V-SHARP radii computation, LBV max_iter, iSMV radius).
+//! (V-SHARP radii computation, LBV's scan parameters, iSMV radius).
 
 use super::config::*;
 
@@ -78,9 +78,15 @@ pub fn run_bg_removal(
             (local, mask.to_vec())
         }
         BgRemovalAlgorithm::Lbv => {
-            crate::bgremove::lbv(
-                field_ppm, mask, &grid, &config.lbv, progress,
-            )
+            // LBV's tol is absolute in MEDI's units (radians over the echo spacing by default),
+            // so it converts the field itself; field strength and echo times are scan
+            // parameters from metadata.
+            let params = crate::bgremove::LbvParams {
+                b0: metadata.field_strength,
+                echo_times: super::inversion::scan_echo_times("LBV", config.lbv.te, metadata)?,
+                ..config.lbv.clone()
+            };
+            crate::bgremove::lbv(field_ppm, mask, &grid, &params, progress)?
         }
         BgRemovalAlgorithm::Ismv => {
             crate::bgremove::ismv(

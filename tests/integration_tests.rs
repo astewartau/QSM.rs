@@ -347,14 +347,13 @@ fn test_bgremove_lbv() {
     let (vsx, vsy, vsz) = data.voxel_size;
 
     let grid = Grid::new(nx, ny, nz, vsx, vsy, vsz);
-    let max_iter = (3 * nx.max(ny).max(nz)).max(500);
     let ((result, eroded_mask), elapsed) = run_timed!("LBV", bgremove::lbv(
         &data.fieldmap,
         &data.mask,
         &grid,
-        &LbvParams { tol: 1e-6, max_iter: Some(max_iter) },
+        &LbvParams { b0: data.field_strength, echo_times: data.echo_times.clone(), ..LbvParams::default() },
         |_, _| {},
-    ));
+    ).expect("lbv"));
 
     let res = TestResult::new("LBV", &result, &data.fieldmap_local, &data.mask, data.dims);
     res.print_with_time(elapsed);
@@ -2036,11 +2035,11 @@ fn benchmark_all_algorithms() {
     ).expect("ismv"));
     TestResult::new("iSMV", &result, &data.fieldmap_local, &data.mask, data.dims).print_with_time(elapsed);
 
-    // LBV (using defaults: tol=1e-6, adaptive max_iter)
-    let lbv_max_iter = (3 * nx.max(ny).max(nz)).max(500);
+    // LBV (LBV.m's defaults, with the scan's field strength and echo times)
+    let lbv_params = LbvParams { b0: data.field_strength, echo_times: data.echo_times.clone(), ..LbvParams::default() };
     let ((result, _), elapsed) = run_timed!("LBV", bgremove::lbv(
-        &data.fieldmap, &data.mask, &grid, &LbvParams { tol: 1e-6, max_iter: Some(lbv_max_iter) }, |_, _| {}
-    ));
+        &data.fieldmap, &data.mask, &grid, &lbv_params, |_, _| {}
+    ).expect("lbv"));
     TestResult::new("LBV", &result, &data.fieldmap_local, &data.mask, data.dims).print_with_time(elapsed);
 
     // -------------------------------------------------------------------------
@@ -2201,10 +2200,10 @@ fn test_all_combinations() {
     bfr_results.push(BfrResult { name: "iSMV".into(), local_field: result, mask, elapsed });
 
     // LBV
-    let lbv_max_iter = (3 * nx.max(ny).max(nz)).max(500);
+    let lbv_params = LbvParams { b0: data.field_strength, echo_times: data.echo_times.clone(), ..LbvParams::default() };
     let ((result, mask), elapsed) = run_timed!("LBV", bgremove::lbv(
-        &data.fieldmap, &data.mask, &grid, &LbvParams { tol: 1e-6, max_iter: Some(lbv_max_iter) }, |_, _| {}
-    ));
+        &data.fieldmap, &data.mask, &grid, &lbv_params, |_, _| {}
+    ).expect("lbv"));
     TestResult::new("LBV", &result, &data.fieldmap_local, &data.mask, data.dims).print_with_time(elapsed);
     bfr_results.push(BfrResult { name: "LBV".into(), local_field: result, mask, elapsed });
 

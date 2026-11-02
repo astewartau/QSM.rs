@@ -83,7 +83,7 @@ pub use resharp::{resharp, ResharpParams};
 pub use vsharp::{vsharp, VsharpBall, VsharpGrid, VsharpParams};
 pub use pdf::{pdf, DipoleKernelSpace, PdfParams};
 pub use ismv::{ismv, IsmvParams, IsmvVariant};
-pub use lbv::{lbv, LbvParams};
+pub use lbv::{lbv, lbv_multigrid, LbvParams, LbvPrecision};
 pub use sdf::{sdf, sdf_curvature, sdf_simple, SdfParams};
 pub use iharperella::{
     harperella, iharperella,
