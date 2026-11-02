@@ -151,10 +151,10 @@ fn amp_pe_matches_the_amp_pe_container() {
         }
         let nrmse = 100.0 * (d2 / b2).sqrt();
         println!("{:?} db{} nlevel {}: NRMSE {nrmse:.3e} %, max |Δ| {dmax:.3e} ppm", c.dims, c.wave_order, c.nlevel);
-        // Not to rounding: 1.09 % and 1.41 % (max |Δ| 3.5e-3, 2.4e-3 ppm), an open gap
-        // (astewartau/QSM.rs#363), most likely QSM.rs's exact operator norms where the original
-        // estimates them with two random probes (`src/inversion/amp_pe.rs`). Held at the size
-        // measured; tighten once settled.
+        // Not to rounding: 1.09 % and 1.41 % (max |Δ| 3.5e-3, 2.4e-3 ppm), the documented parity
+        // (astewartau/QSM.rs#363, #371): QSM.rs computes the two operator norms exactly where the
+        // original estimates them with two random probes, and keeps the exact norms by decision
+        // (`src/inversion/amp_pe.rs`). The limits hold it at that size.
         let (nrmse_max, dmax_max) = if c.magnitude { (1.3, 4e-3) } else { (1.6, 2.8e-3) };
         assert!(nrmse <= nrmse_max && dmax <= dmax_max, "{:?}: NRMSE {nrmse} % (limit {nrmse_max}), max |Δ| {dmax} (limit {dmax_max})", c.dims);
     }

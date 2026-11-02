@@ -19,10 +19,11 @@
 #   python3 tests/data/qsmart_qsmci_small.py tests/data/qsmart_qsmci_small.bin
 #
 # machine-dependent: STI Suite's QSM_iLSQR is single-precision LSQR and rounds differently on
-# different CPUs (see tests/data/ilsqr_sti_qsmci_small.py), and the stages after it carry that. On a
-# GitHub-hosted runner (regenerate-fixtures, 2026-10-30) the phantom, vasc_only, R_0 and tfs
-# reproduce the committed .bin (made on an Intel i5-11500) exactly, lfs1 and lfs2 to 4e-14
-# relative, and chi1, chi2 and chimap move by 1.3e-6, 1.3e-5 and 1.3e-5 relative.
+# different CPUs (see tests/data/ilsqr_sti_qsmci_small.py), and the stages after it carry that. The
+# committed .bin was made with v3 on an Intel i5-11500. v4 on a GitHub-hosted runner
+# (regenerate-fixtures run 41384288424, 2026-11-02) reproduces the phantom and every intermediate
+# up to lfs1 and lfs2 exactly, and moves chi1, chi2 and chimap by 1.2e-6, 1.8e-5 and 1.8e-5
+# relative (v3 on a runner, 2026-10-30: the same, with lfs1 and lfs2 at 4e-14).
 #
 # Needs numpy, nibabel and podman or docker (CONTAINER_ENGINE overrides; the regenerate-fixtures
 # workflow runs it in Actions). The phantom (built here, seeded): a 36x36x28 grid at 1 mm, B0 3 T

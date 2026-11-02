@@ -78,6 +78,11 @@
 //!   STI's own spread between CPUs (its χ moves by 3.6e-4 and 1.2e-4 relative between the
 //!   workstation that made the fixture and a GitHub-hosted runner). That fixture is regenerated
 //!   in Actions by `tests/data/ilsqr_sti_qsmci_small.py`.
+//! - Inside QSMART (`tests/qsmart_qsmci_parity.rs`, 2026-11-02: QSMART's call, 50 iterations,
+//!   STI's default padding, field in rad/s, on the QSMART toolbox's own SDF local fields of a
+//!   36×36×28 vessel phantom): 0.15 % and 0.094 % NRMSE for the two stages (r 0.9999988,
+//!   0.9999996), in either precision, and χ moves by only 4e-5 % for a float32-level change of the
+//!   field. Neither precision nor input rounding, then: an open gap (astewartau/QSM.rs#396).
 //!
 //! Until 2026-10-30 the FastQSM kernel was closed without IPT's padding (−∞ beyond the array
 //! for the dilation, +∞ for the erosion, on the unpadded 7³ ball), which kept 32 dilated

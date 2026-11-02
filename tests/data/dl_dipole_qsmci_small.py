@@ -29,6 +29,11 @@
 # GitHub-hosted runner (regenerate-fixtures, 2026-10-30) all seven move, by 2e-7 to 9e-7 relative
 # (max |Δ| up to 5.2e-7 ppm), well inside the tests' limits.
 #
+# modl-qsm's entry was regenerated on 2026-11-02 (regenerate-fixtures run 41384288424, a
+# GitHub-hosted runner) after its wrapper began writing χ as float32 instead of through the mask's
+# uint8 header (QSMxT/QSM-CI#331); the other six are the i5-11500's, which that run reproduced to
+# 5e-7 relative (qsmnet, qsmnet-plus and lpcnn exactly).
+#
 # Needs numpy, nibabel, network access (GitHub) and podman or docker (CONTAINER_ENGINE overrides; the
 # regenerate-fixtures workflow runs it in Actions, where each image is removed after use, since
 # together they take ~25 GB; REMOVE_IMAGES=1 does that elsewhere). The inputs are the box's local

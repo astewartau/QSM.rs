@@ -26,6 +26,11 @@
 # TensorFlow originals of tests/data/dl_dipole_qsmci_small.py do (measured there at up to 1.3e-6
 # relative), and SUSEP-Net moves by 1e-7 relative even on one machine (above).
 #
+# chisepnet's χ+ and χ− were regenerated on 2026-11-02 (regenerate-fixtures run 41384288424, a
+# GitHub-hosted runner) after its wrapper began setting negative χ+ and |χ−| to 0, as the authors'
+# test.py does (QSMxT/QSM-CI#333); SUSEP-Net's and R2PRIMEnet's are as before, which that run
+# reproduced to 2.3e-7 relative (R2PRIMEnet exactly).
+#
 # Needs numpy, nibabel, network access (GitHub) and podman or docker (CONTAINER_ENGINE overrides; the
 # regenerate-fixtures workflow runs it in Actions, where each image is removed after its last use;
 # REMOVE_IMAGES=1 does that elsewhere). B0 = 2.8946 T along z, 1 mm voxels, identity affine. Layout

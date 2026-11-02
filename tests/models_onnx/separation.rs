@@ -17,9 +17,10 @@ fn separation_originals(mask: &[u8]) -> Vec<Vec<f64>> {
     originals("dl_separation_qsmci_small.bin", mask, 5)
 }
 
-/// Not to rounding for χ+: 1.7 % NRMSE (χ− 0.045 %), an open gap (astewartau/QSM.rs#330). The
-/// original runs SNU's fixed-patch `240904_xsepnet.onnx`, QSM.rs its own export of it. The limits
-/// hold it at the size measured; tighten them once it is found.
+/// To rounding: χ+ 5.8e-5 %, χ− 3.4e-5 % (max |Δ| 2.4e-7 ppm). The original runs SNU's
+/// fixed-patch `240904_xsepnet.onnx`, QSM.rs its own export of it, which gives the same outputs.
+/// The 1.7 % before was the entry's missing zero-truncation (astewartau/QSM.rs#330, fixed in
+/// QSMxT/QSM-CI#333).
 #[test]
 fn chisepnet_matches_its_original() {
     let d = invivo();
@@ -31,8 +32,8 @@ fn chisepnet_matches_its_original() {
     .unwrap();
     // QSM.rs returns χ− signed (≤ 0); the original writes its magnitude.
     let neg: Vec<f64> = neg.iter().map(|v| -v).collect();
-    assert_parity("χ-sepnet χ+", &pos, &d.mask, &orig[0], 1.9, 1.3e-2);
-    assert_parity("χ-sepnet χ−", &neg, &d.mask, &orig[1], 6e-2, 3.5e-3);
+    assert_parity("χ-sepnet χ+", &pos, &d.mask, &orig[0], 1e-3, 1e-6);
+    assert_parity("χ-sepnet χ−", &neg, &d.mask, &orig[1], 1e-3, 1e-6);
 }
 
 #[test]

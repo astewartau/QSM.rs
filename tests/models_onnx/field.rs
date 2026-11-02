@@ -55,14 +55,16 @@ fn autoqsm_matches_its_original() {
     assert_parity("AutoQSM", &chi, &d.mask, &field_originals(&d.mask)[0], 1e-3, 2e-6);
 }
 
-/// Not to rounding: 0.12 % NRMSE, max |Δ| 0.058 ppm, an open gap (astewartau/QSM.rs#330). The
-/// limits hold it at the size measured; tighten them once it is found.
+/// Not to rounding, but at the package's own spread: 0.12 % NRMSE, max |Δ| 0.058 ppm. The nextqsm
+/// package itself moves by 0.10 % (max |Δ| 0.058 ppm) on this box between two CPUs, because its
+/// regulariser goes through `sign(VarNet(x))` (`src/inversion/nextqsm.rs`, astewartau/QSM.rs#330).
+/// The limits sit just above that floor.
 #[test]
 fn nextqsm_matches_its_original() {
     let d = invivo();
     let w = qsm_core::models::weights("nextqsm").expect("nextqsm weights");
     let chi = qsm_core::inversion::nextqsm(&d.total_field, &d.mask, &grid(), B0_DIR, &w[0], &w[1]).unwrap();
-    assert_parity("NeXtQSM", &chi, &d.mask, &field_originals(&d.mask)[1], 0.15, 0.07);
+    assert_parity("NeXtQSM", &chi, &d.mask, &field_originals(&d.mask)[1], 0.14, 0.065);
 }
 
 #[test]

@@ -64,9 +64,10 @@
 //! `tests/models_onnx/dipole.rs` runs it on a 36×32×28 box of in-vivo data (1 mm, 2.89 T, across
 //! the brain's edge) against its original's verified QSM-CI entry, MoDL-QSM 111a493 (`modl-qsm`)
 //! (QSMxT/QSM-CI#316; the fixture is regenerated in Actions by
-//! `tests/data/dl_dipole_qsmci_small.py`): **NRMSE 1.5 %**, r 0.99986, max |Δ| 4.3e-4 ppm (measured
-//! 2026-10-30; 3.8 % on QSM-CI's 128×160×96 case). Not rounding, and not yet explained: an open gap
-//! (astewartau/QSM.rs#330). The test holds it at its measured size, to be tightened once found.
+//! `tests/data/dl_dipole_qsmci_small.py`, from the entry that writes χ as float32,
+//! QSMxT/QSM-CI#331): **NRMSE 0.0002 %**, r 1.0000000, max |Δ| 3.2e-7 ppm (measured 2026-11-02),
+//! float32 rounding. The 1.5 % first measured was the entry's uint8 output (above;
+//! astewartau/QSM.rs#330).
 
 use num_complex::Complex64;
 
