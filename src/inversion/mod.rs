@@ -75,7 +75,7 @@ pub use nltv::{nltv, NltvParams};
 pub use rts::{rts, RtsParams};
 pub use medi::{extract_csf, medi, EchoMagnitudes, MediParams};
 pub use msmv::{msmv, MsmvOutput, MsmvParams};
-pub use tfi::{tfi, TfiParams};
+pub use tfi::{tfi, TfiKernel, TfiParams, TfiPrecision};
 pub use tgv::{
     tgv_qsm, TgvInput, TgvParams, get_default_alpha, get_default_iterations, rad_per_ppm,
 };

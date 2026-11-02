@@ -71,13 +71,45 @@
 
 use num_complex::Complex64;
 use crate::fft::Fft3dWorkspace;
-use crate::kernels::dipole::dipole_kernel;
+use crate::kernels::dipole::{dipole_kernel, dipole_kernel_medi};
 use crate::{EchoTime, Grid};
 
 use super::medi::{
     bounding_box, cgsolve, dataterm_mask, dconv, dconv_weighted, fgrad, gradient_mask, par_fill,
     par_update, reg, CgBuffers, EchoMagnitudes,
 };
+
+/// Which dipole kernel [`tfi`] uses: they differ only on grids with an odd number of voxels
+/// along some axis.
+#[cfg_attr(feature = "introspection", derive(serde::Serialize))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum TfiKernel {
+    /// `1/3 − (k·B0)²/|k|²` sampled on the DFT frequency grid ([`dipole_kernel`]), zero at DC,
+    /// on every grid. The default.
+    #[default]
+    Dft,
+    /// `dipole_kernel.m` exactly as MATLAB builds it ([`dipole_kernel_medi`]): on an odd axis its
+    /// `-N/2:N/2-1` grid samples half a frequency step off the DFT grid, with no zero at DC. The
+    /// parity option for the MEDI toolbox's TFI on odd grids (astewartau/QSM.rs#407).
+    MediOddGrid,
+}
+
+/// Arithmetic of [`tfi`]'s Gauss-Newton iterations.
+#[cfg_attr(feature = "introspection", derive(serde::Serialize))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum TfiPrecision {
+    /// Double precision throughout. The default.
+    #[default]
+    Double,
+    /// MATLAB's single precision, as `MEDI_L1.m` ends up running: it makes the data weight from
+    /// `tempn = single(N_std)`, and MATLAB's mixed arithmetic then makes the weight, the data,
+    /// every operator output, every CG vector and the iterate single (an array op with one
+    /// single operand is single). Here: every array is f32, with f32 FFTs, and the double
+    /// operands (`P`, the edge mask, `ε`, after MERIT the reweighted data weight) are rounded to
+    /// single where they meet a single one; inner products are accumulated in double and
+    /// rounded. The parity option for the MEDI toolbox's TFI (astewartau/QSM.rs#407).
+    Single,
+}
 
 /// TFI parameters (2024 `MEDI_L1.m` / `parse_QSM_input.m` defaults; `P_B` and the linear data
 /// term from Liu et al. 2017)
@@ -115,6 +147,19 @@ pub struct TfiParams {
     /// (`x/(2*pi*delta_TE*CF)*1e6`), which its readers set to `TE(2) - TE(1)`, or TE for one echo
     /// (`Read_Siemens_DICOM.m` lines 176-178).
     pub te: EchoTime,
+    /// Dipole kernel (default [`TfiKernel::Dft`]). `MEDI_L1.m` calls `dipole_kernel.m`, whose
+    /// k-space grid is half a step off on axes with an odd number of voxels; there it is not the
+    /// dipole field. On QSM-CI's simulated head (164×205×205) that scales χ by ~1.3 against the
+    /// DFT-grid kernel and fits the true χ worse (in the mask, demeaned: NRMSE 71.4 % against
+    /// 62.1 %, r 0.718 against 0.785), so the DFT-grid kernel is the default and
+    /// [`TfiKernel::MediOddGrid`] the parity option. On even grids they are the same.
+    pub kernel: TfiKernel,
+    /// Arithmetic (default [`TfiPrecision::Double`]). `MEDI_L1.m` runs in single precision, by
+    /// accident of `tempn = single(N_std)` (see [`TfiPrecision::Single`]); the CG solves at
+    /// `cg_tol` 0.01 then stop at different points from double precision, which moves χ by about
+    /// 1 % (KKI travelling head) from the same inputs. Double precision solves the same equations
+    /// more accurately, so it is the default and single precision the parity option.
+    pub precision: TfiPrecision,
 }
 
 impl Default for TfiParams {
@@ -133,6 +178,8 @@ impl Default for TfiParams {
             b0: 3.0,
             echo_times: vec![0.005],
             te: EchoTime::Spacing,
+            kernel: TfiKernel::Dft,
+            precision: TfiPrecision::Double,
         }
     }
 }
@@ -202,7 +249,14 @@ fn tfi_l1(
     // N_std = N_std.*Mask; tempn = N_std
     let mut n_std: Vec<f64> = (0..n).map(|i| if mask[i] { n_std[i] } else { 0.0 }).collect();
 
-    let d: Vec<Complex64> = dipole_kernel(grid, bdir).iter().map(|&v| Complex64::new(v, 0.0)).collect();
+    // D = dipole_kernel(matrix_size, voxel_size, B0_dir): see TfiKernel
+    let dk = match params.kernel {
+        TfiKernel::Dft => dipole_kernel(grid, bdir),
+        TfiKernel::MediOddGrid => {
+            let n = (bdir.0 * bdir.0 + bdir.1 * bdir.1 + bdir.2 * bdir.2).sqrt();
+            dipole_kernel_medi(grid, (bdir.0 / n, bdir.1 / n, bdir.2 / n))
+        }
+    };
     let mut m = vec![0.0f64; n];
     dataterm_mask(params.data_weighting, &n_std, &mask, &mut m);
     // opts.wG = gradient_mask(...); with a preconditioner, opts.wG = wG.*Mask
@@ -214,8 +268,12 @@ fn tfi_l1(
             }
         });
     }
+    if params.precision == TfiPrecision::Single {
+        return tfi_single(&rdf, &mask, &p, n_std, &dk, &wg, grid, ppm_to_rad, params, progress);
+    }
     // m, and with it w2, is zero outside the mask (SNR weighting), so the Dconv(P dx) in A(dx)
     // is only needed, and the Dconv after the weighting only has input, inside its bounding box.
+    let d: Vec<Complex64> = dk.iter().map(|&v| Complex64::new(v, 0.0)).collect();
     let mbox = if params.data_weighting == 0 {
         [0..grid.nx(), 0..grid.ny(), 0..grid.nz()]
     } else {
@@ -336,6 +394,286 @@ fn tfi_l1(
     // x = P(x)/(2*pi*delta_TE*CF)*1e6.*Mask
     par_update(&mut x, |i, v| *v = if mask[i] { p[i] * *v / ppm_to_rad } else { 0.0 });
     x
+}
+
+/// [`tfi_l1`] in MATLAB's single precision ([`TfiPrecision::Single`]): `MEDI_L1.m` line for line
+/// with MATLAB's types. `tempn = single(N_std)` makes the data weight `m`, and with it the data
+/// `b0 = m.*RDF`, single; from there every product with a single operand is single, so the
+/// operator, the right-hand side, `cgsolve.m`'s vectors and scalars, `dx` and the iterate `x`
+/// (`x + dx`) are single. Double operands (`P`, the edge mask, `ε`, the kernel, and after MERIT
+/// the data weight and data, which `dataterm_mask` remakes from `double(N_std)`) are rounded to
+/// single where they meet a single one. FFTs are single precision.
+#[allow(clippy::too_many_arguments)]
+fn tfi_single(
+    rdf: &[f64],
+    mask: &[bool],
+    p: &[f64],
+    mut n_std: Vec<f64>,
+    dk: &[f64],
+    wg: &[Vec<f64>; 3],
+    grid: &Grid,
+    ppm_to_rad: f64,
+    params: &TfiParams,
+    mut progress: impl FnMut(usize, usize),
+) -> Vec<f64> {
+    use num_complex::Complex32;
+    let n = grid.n_total();
+    let (nx, ny, nz) = grid.dims;
+    let vs = [grid.vsx() as f32, grid.vsy() as f32, grid.vsz() as f32];
+    let mut fft = crate::fft::Fft3dWorkspaceF32::new(nx, ny, nz);
+    let mut buf = vec![Complex32::new(0.0, 0.0); n];
+    let d: Vec<f32> = dk.iter().map(|&v| v as f32).collect();
+    let p32: Vec<f32> = p.iter().map(|&v| v as f32).collect();
+    let wg32: Vec<Vec<f32>> = wg.iter().map(|c| c.iter().map(|&v| v as f32).collect()).collect();
+    // e = 0.000001*PH(P(ones)) (reg_MEDI.m), double, rounded where it meets single
+    let e: Vec<f32> = p.iter().map(|&v| (1e-6 * v * v) as f32).collect();
+    let lambda2 = (2.0 * params.lambda) as f32;
+    let linear = params.linear;
+
+    // Dconv = @(dx) real(ifftn(D.*fftn(dx))), single
+    let mut dconv = |x: &[f32], out: &mut [f32]| {
+        for (c, &v) in buf.iter_mut().zip(x) {
+            *c = Complex32::new(v, 0.0);
+        }
+        fft.fft3d(&mut buf);
+        for (c, &dv) in buf.iter_mut().zip(&d) {
+            *c *= dv;
+        }
+        fft.ifft3d(&mut buf);
+        for (o, c) in out.iter_mut().zip(&buf) {
+            *o = c.re;
+        }
+    };
+    let nxy = nx * ny;
+    // fgrad.m, single
+    let fgrad = |x: &[f32], g: &mut [Vec<f32>; 3]| {
+        for k in 0..nz {
+            for j in 0..ny {
+                for i in 0..nx {
+                    let q = i + nx * j + nxy * k;
+                    g[0][q] = if i + 1 < nx { (x[q + 1] - x[q]) / vs[0] } else { 0.0 };
+                    g[1][q] = if j + 1 < ny { (x[q + nx] - x[q]) / vs[1] } else { 0.0 };
+                    g[2][q] = if k + 1 < nz { (x[q + nxy] - x[q]) / vs[2] } else { 0.0 };
+                }
+            }
+        }
+    };
+    // bdiv.m, single
+    let bdiv = |g: &[Vec<f32>; 3], out: &mut [f32]| {
+        for k in 0..nz {
+            for j in 0..ny {
+                for i in 0..nx {
+                    let q = i + nx * j + nxy * k;
+                    let tx = (if i + 1 < nx { g[0][q] } else { 0.0 }) - (if i > 0 { g[0][q - 1] } else { 0.0 });
+                    let ty = (if j + 1 < ny { g[1][q] } else { 0.0 }) - (if j > 0 { g[1][q - nx] } else { 0.0 });
+                    let tz = (if k + 1 < nz { g[2][q] } else { 0.0 }) - (if k > 0 { g[2][q - nxy] } else { 0.0 });
+                    out[q] = -(tx / vs[0] + ty / vs[1] + tz / vs[2]);
+                }
+            }
+        }
+    };
+    // inner products: accumulated in double, returned single
+    let dot = |a: &[f32], b: &[f32]| -> f32 { a.iter().zip(b).map(|(&x, &y)| x as f64 * y as f64).sum::<f64>() as f32 };
+
+    // m = dataterm_mask(mode, single(N_std), Mask): single
+    let dataterm_single = |n_std: &[f64]| -> Vec<f32> {
+        if params.data_weighting == 0 {
+            return vec![1.0; n];
+        }
+        let mut w: Vec<f32> = (0..n)
+            .map(|i| {
+                let v = (mask[i] as u8 as f32) / (n_std[i] as f32);
+                if mask[i] && v.is_finite() { v } else { 0.0 }
+            })
+            .collect();
+        let count = mask.iter().filter(|&&m| m).count() as f64;
+        let mean = (w.iter().zip(mask).filter(|(_, &m)| m).map(|(&v, _)| v as f64).sum::<f64>() / count) as f32;
+        w.iter_mut().for_each(|v| *v /= mean);
+        w
+    };
+    let mut m: Vec<f32> = dataterm_single(&n_std);
+    // b0 = B(m, RDF): m.*RDF (linear) or m.*exp(1i*RDF), single
+    let data = |m: &[f32]| -> Vec<Complex32> {
+        (0..n)
+            .map(|i| {
+                if linear { Complex32::new(m[i] * rdf[i] as f32, 0.0) } else { m[i] * Complex32::new(0.0, rdf[i] as f32).exp() }
+            })
+            .collect()
+    };
+    let mut b0 = data(&m);
+
+    let mut x = vec![0.0f32; n];
+    let mut px = vec![0.0f32; n];
+    let mut t = vec![0.0f32; n];
+    let mut t2 = vec![0.0f32; n];
+    let mut g = [vec![0.0f32; n], vec![0.0f32; n], vec![0.0f32; n]];
+    let mut wvw = [vec![0.0f32; n], vec![0.0f32; n], vec![0.0f32; n]];
+    let mut w = vec![Complex32::new(0.0, 0.0); n];
+    let mut w2 = vec![0.0f32; n];
+    let mut b = vec![0.0f32; n];
+    let mut rv = vec![0.0f32; n];
+    let (mut cx, mut cr, mut cd, mut cq) = (vec![0.0f32; n], vec![0.0f32; n], vec![0.0f32; n], vec![0.0f32; n]);
+    let mut pq = vec![0.0f32; n];
+    let mut regout = vec![0.0f32; n];
+    let model = |m: f32, dpx: f32| -> Complex32 {
+        if linear { Complex32::new(m * dpx, 0.0) } else { m * Complex32::new(0.0, dpx).exp() }
+    };
+    let mask_idx: Vec<usize> = (0..n).filter(|&i| mask[i]).collect();
+    let total = params.max_iter * params.cg_max_iter;
+    let mut res_norm_ratio = f32::INFINITY;
+    let mut iter = 0;
+    while res_norm_ratio > params.tol as f32 && iter < params.max_iter {
+        iter += 1;
+        for i in 0..n {
+            px[i] = p32[i] * x[i];
+        }
+        dconv(&px, &mut t);
+        for i in 0..n {
+            w[i] = model(m[i], t[i]);
+        }
+        // reg_MEDI: Vr = 1./sqrt(abs(wG.*grad(real(P(x)))).^2 + e)
+        fgrad(&px, &mut g);
+        for c in 0..3 {
+            for i in 0..n {
+                let u = wg32[c][i] * g[c][i];
+                let vr = 1.0 / (u * u + e[i]).sqrt();
+                wvw[c][i] = wg32[c][i] * vr * wg32[c][i];
+            }
+        }
+        if linear {
+            for i in 0..n {
+                w2[i] = m[i] * m[i];
+            }
+        } else {
+            for i in 0..n {
+                w2[i] = w[i].norm_sqr();
+            }
+        }
+        // reg(dx) = PH(div(wG.*Vr.*wG.*grad(real(P(dx)))))
+        let regop = |q: &[f32], out: &mut [f32], pq: &mut [f32], g: &mut [Vec<f32>; 3]| {
+            for i in 0..n {
+                pq[i] = p32[i] * q[i];
+            }
+            fgrad(pq, g);
+            for c in 0..3 {
+                for i in 0..n {
+                    g[c][i] *= wvw[c][i];
+                }
+            }
+            bdiv(g, out);
+            for i in 0..n {
+                out[i] *= p32[i];
+            }
+        };
+        // b = reg(x) + 2*lambda*PH(Dconv(real(conj(m).*(w-b0)))) (or the exponential term's)
+        for i in 0..n {
+            rv[i] = if linear {
+                m[i] * (w[i] - b0[i]).re
+            } else {
+                (w[i].conj() * Complex32::new(0.0, -1.0) * (w[i] - b0[i])).re
+            };
+        }
+        dconv(&rv, &mut t);
+        regop(&x, &mut b, &mut pq, &mut g);
+        for i in 0..n {
+            b[i] = -(b[i] + lambda2 * (p32[i] * t[i]));
+        }
+        // A = @(dx) reg(dx) + 2*lambda*PH(Dconv(w2.*Dconv(P(dx)))); dx = cgsolve(A, -b)
+        let mut apply = |q: &[f32], out: &mut [f32]| {
+            regop(q, &mut regout, &mut pq, &mut g);
+            for i in 0..n {
+                pq[i] = p32[i] * q[i];
+            }
+            dconv(&pq, &mut t);
+            for i in 0..n {
+                t[i] *= w2[i];
+            }
+            dconv(&t, &mut t2);
+            for i in 0..n {
+                out[i] = regout[i] + lambda2 * (p32[i] * t2[i]);
+            }
+        };
+        // cgsolve.m, single
+        let base = (iter - 1) * params.cg_max_iter;
+        let tol = params.cg_tol as f32;
+        cx.fill(0.0);
+        cr.copy_from_slice(&b);
+        cd.copy_from_slice(&b);
+        let mut delta = dot(&cr, &cr);
+        let delta0 = dot(&b, &b);
+        let mut numiter = 0;
+        while numiter < params.cg_max_iter && delta > tol * tol * delta0 {
+            apply(&cd, &mut cq);
+            let alpha = delta / dot(&cd, &cq);
+            for i in 0..n {
+                cx[i] += alpha * cd[i];
+            }
+            if (numiter + 1) % 50 == 0 {
+                apply(&cx, &mut cq);
+                for i in 0..n {
+                    cr[i] = b[i] - cq[i];
+                }
+            } else {
+                for i in 0..n {
+                    cr[i] -= alpha * cq[i];
+                }
+            }
+            let delta_old = delta;
+            delta = dot(&cr, &cr);
+            let beta = delta / delta_old;
+            for i in 0..n {
+                cd[i] = cr[i] + beta * cd[i];
+            }
+            numiter += 1;
+            progress(base + numiter, total);
+        }
+        // res_norm_ratio = norm(dx)/norm(x); x = x + dx
+        res_norm_ratio = dot(&cx, &cx).sqrt() / dot(&x, &x).sqrt();
+        for i in 0..n {
+            x[i] += cx[i];
+        }
+
+        if params.merit {
+            for i in 0..n {
+                px[i] = p32[i] * x[i];
+            }
+            dconv(&px, &mut t);
+            // wres = W(m, P(x)) - b0, single; mean and std over the mask in single
+            let wres: Vec<Complex32> = mask_idx.iter().map(|&i| model(m[i], t[i]) - b0[i]).collect();
+            let cnt = mask_idx.len() as f64;
+            let mean = {
+                let s = wres.iter().fold(num_complex::Complex64::new(0.0, 0.0), |a, v| a + num_complex::Complex64::new(v.re as f64, v.im as f64));
+                Complex32::new((s.re / cnt) as f32, (s.im / cnt) as f32)
+            };
+            let a: Vec<f32> = wres.iter().map(|&v| (v - mean).norm()).collect();
+            let am = (a.iter().map(|&v| v as f64).sum::<f64>() / cnt) as f32;
+            let sd = ((a.iter().map(|&v| ((v - am) as f64).powi(2)).sum::<f64>() / (cnt - 1.0)).sqrt()) as f32;
+            let factor = sd * 6.0;
+            // N_std(Mask==1) = N_std(Mask==1).*wres(Mask==1).^2: single product, stored double
+            for (q, &i) in mask_idx.iter().enumerate() {
+                let r = (a[q] / factor).max(1.0);
+                n_std[i] = ((n_std[i] as f32) * (r * r)) as f64;
+            }
+            // tempn = double(N_std); m = dataterm_mask(...) in double, b0 = B(m, RDF) in double,
+            // both rounded to single where they meet the single iterate
+            let mut md = vec![0.0f64; n];
+            dataterm_mask(params.data_weighting, &n_std, mask, &mut md);
+            m = md.iter().map(|&v| v as f32).collect();
+            b0 = (0..n)
+                .map(|i| {
+                    if linear {
+                        Complex32::new((md[i] * rdf[i]) as f32, 0.0)
+                    } else {
+                        let z = md[i] * num_complex::Complex64::new(0.0, rdf[i]).exp();
+                        Complex32::new(z.re as f32, z.im as f32)
+                    }
+                })
+                .collect();
+        }
+    }
+    progress(total, total);
+    let scale = ppm_to_rad as f32;
+    (0..n).map(|i| if mask[i] { (p32[i] * x[i] / scale) as f64 } else { 0.0 }).collect()
 }
 
 #[cfg(test)]

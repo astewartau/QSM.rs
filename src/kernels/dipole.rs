@@ -78,6 +78,38 @@ pub fn dipole_kernel(
     d
 }
 
+/// The MEDI toolbox's `dipole_kernel.m` k-space kernel exactly as MATLAB builds it: the grid
+/// `-N/2:N/2-1` per axis divided by `N·voxel`, `D = 1/3 − (k·B0)²/|k|²` (0 where `k = 0`), then
+/// `fftshift`. `bdir` is used as given (MATLAB does not normalise it).
+///
+/// On an axis with an even number of voxels this is [`dipole_kernel`] (to rounding). On an odd
+/// axis `-N/2:N/2-1` runs over half-integers, so every sample sits half a frequency step off the
+/// DFT grid and index 0 holds `k = −1/2` rather than DC; the kernel is then not
+/// Hermitian-symmetric and has no zero at DC. [`dipole_kernel`] samples the DFT grid. Ports of
+/// MEDI functions that run on odd grids use this one where they must reproduce `dipole_kernel.m`.
+pub fn dipole_kernel_medi(grid: &Grid, bdir: (f64, f64, f64)) -> Vec<f64> {
+    let (nx, ny, nz) = grid.dims;
+    let (vsx, vsy, vsz) = grid.voxel_size;
+    // fftshift(-N/2:N/2-1)(i) = -N/2 + mod(i + floor(N/2), N), divided by N*voxel as MATLAB does
+    let axis = |n: usize, vs: f64| -> Vec<f64> {
+        (0..n).map(|i| (-(n as f64) / 2.0 + ((i + n / 2) % n) as f64) / (n as f64 * vs)).collect()
+    };
+    let (kx, ky, kz) = (axis(nx, vsx), axis(ny, vsy), axis(nz, vsz));
+    let (bx, by, bz) = bdir;
+    let mut d = vec![0.0; nx * ny * nz];
+    for k in 0..nz {
+        for j in 0..ny {
+            for i in 0..nx {
+                let (x, y, z) = (kx[i], ky[j], kz[k]);
+                let kb = x * bx + y * by + z * bz;
+                let k2 = x * x + y * y + z * z;
+                d[i + nx * (j + ny * k)] = if k2 == 0.0 { 0.0 } else { 1.0 / 3.0 - kb * kb / k2 };
+            }
+        }
+    }
+    d
+}
+
 // ============================================================================
 // F32 (Single Precision) Dipole Kernel Functions
 // ============================================================================
@@ -146,6 +178,22 @@ mod tests {
 
     fn grid(n: usize) -> Grid {
         Grid::new(n, n, n, 1.0, 1.0, 1.0)
+    }
+
+    #[test]
+    fn medi_kernel_is_the_dft_kernel_on_even_grids_and_off_grid_on_odd() {
+        let b = (0.1, 0.2, 0.97f64);
+        let n = (b.0 * b.0 + b.1 * b.1 + b.2 * b.2).sqrt();
+        let b = (b.0 / n, b.1 / n, b.2 / n);
+        let even = Grid::new(8, 6, 4, 1.0, 1.1, 1.2);
+        for (x, y) in dipole_kernel(&even, b).iter().zip(dipole_kernel_medi(&even, b)) {
+            assert!((x - y).abs() < 1e-15, "{x} {y}");
+        }
+        // odd x: index 0 holds kx = -1/2 step, so D(0) = 1/3 - (bx/2)^2/(1/2)^2 = 1/3 - bx^2
+        let odd = Grid::new(7, 6, 4, 1.0, 1.0, 1.0);
+        let d = dipole_kernel_medi(&odd, b);
+        assert!((d[0] - (1.0 / 3.0 - b.0 * b.0)).abs() < 1e-15, "{}", d[0]);
+        assert_eq!(dipole_kernel(&odd, b)[0], 0.0);
     }
 
     #[test]
