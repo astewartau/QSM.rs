@@ -31,6 +31,29 @@
 //!
 //! Not ported: the R2*-based preconditioner (eq. 4), zero padding and the CSF zero reference.
 //!
+//! # Parity
+//! Against TFI as the verified QSM-CI `tfi-cornell` container runs it (MEDI 2024.11.26 `MEDI_L1.m`
+//! with a preconditioner, identical to licensed MATLAB R2023b), astewartau/QSM.rs#407. Two
+//! departures are deliberate, each with the original's behaviour as an option:
+//! - **Dipole kernel on odd grids** ([`TfiKernel`]). `dipole_kernel.m` builds its k grid as
+//!   `-N/2:N/2-1`, half a frequency step off the DFT grid on an odd axis, so it is not the dipole
+//!   kernel there. On QSM-CI's simulated head (164×205×205) that alone made the port's χ 0.77× the
+//!   original's (42 % NRMSE); with [`TfiKernel::MediOddGrid`] 2.5 %. The DFT-grid kernel fits the
+//!   true χ better (demeaned, in the mask: NRMSE 62.1 % against 71.4 %, r 0.785 against 0.718), so it
+//!   stays the default. On even grids the two are the same.
+//! - **Precision** ([`TfiPrecision`]). `MEDI_L1.m` runs in single precision (`tempn =
+//!   single(N_std)` makes the data weight single, and MATLAB's mixed arithmetic carries that into
+//!   everything). On the fixture's small odd phantom (`tests/tfi_cornell_parity.rs`) the port with
+//!   both options is 2.9e-6 relative after one Gauss-Newton step and 4.7e-4 with all defaults; in
+//!   double precision 4.7e-3.
+//!
+//! Beyond that the original is not reproducible at full size: its 100-iteration CG solves at
+//! `cg_tol` 0.01 in single precision amplify rounding. In the same container, 1e-7 relative noise
+//! on the simulated head's total field moves its χ by 1.6 % NRMSE, and the container on another
+//! CPU (QSM-CI's runner against this VM) differs from itself by 2.8 % on the KKI travelling head.
+//! On the reference's own inputs the port with both options is 3.6 % (sim) and 1.26 % (KKI) from
+//! it; with the DFT-grid kernel in double precision, 42 % and 1.25 %.
+//!
 //! # Reference pipeline
 //! From Liu et al. 2017 (Methods, in-vivo experiments); not stated above:
 //! - Brain mask (the `M` where `P = 1`): BET. Field map: nonlinear (complex) field estimation
