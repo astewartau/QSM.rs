@@ -374,8 +374,8 @@ fn dipole_inversion() {
                 let config = InversionConfig { qsmart, ..config };
                 run_qsmart(field, &p.mask, None, Some(&mag), &m, &config, QsmReference::Mean, &mut no_progress())
             }
-            // MEDI and TFI require the magnitude of every echo (stacked, echo slowest)
-            InversionAlgorithm::Medi | InversionAlgorithm::Tfi => {
+            // MEDI, TFI and HD-QSM require the magnitude of every echo (stacked, echo slowest)
+            InversionAlgorithm::Medi | InversionAlgorithm::Tfi | InversionAlgorithm::Hdqsm => {
                 let echoes: Vec<f64> = p.mag_refs().concat();
                 run_dipole_inversion(field, &p.mask, &m, &config, Some(&echoes), &mut no_progress())
             }
