@@ -61,28 +61,45 @@
 //! reference uses single and it does no harm): on whole heads both agree with STI equally
 //! well (QSM-CI's sim and KKI travelling head: 0.0024 % and 0.017 % NRMSE in either
 //! precision). LSQR stopped after a fixed number of iterations amplifies rounding, though, so
-//! on small noisy volumes only single precision follows STI (below: 0.17 % against 10.6 %).
+//! on small noisy volumes only single precision follows STI (below: 0.17 % against 10.4 %).
 //!
 //! # Agreement with STI Suite
 //!
-//! `tests/ilsqr_sti_parity.rs` (measured 2026-10-30):
+//! `tests/ilsqr_sti_parity.rs` (measured 2026-10-30; re-measured 2026-11-02 after the dipole
+//! kernel's rounding, below):
 //! - Against the re-implementation of `QSM_iLSQR` the algorithm was recovered with
 //!   (`tests/data/ilsqr_sti_clone.m`, double precision, 5 iterations per solve): max |Δ| 5.7e-14
 //!   ppm on a 20×20×14 phantom (noise, phase outside the mask). This pins the algorithm.
 //! - Against STI's own output on that phantom (licensed MATLAB R2023b, 100 iterations):
 //!   [`IlsqrPrecision::Single`] χ NRMSE 0.17 %, initial LSQR solution 0.010 %; double precision
-//!   χ 10.6 % (r 0.9948), initial 0.36 %.
+//!   χ 10.4 % (r 0.9950), initial 0.36 %.
 //! - Against the verified QSM-CI `ilsqr-sti` container (QSMxT/QSM-CI#304) at its call (100
 //!   iterations, `padsize` 12 and 8) on two noise-free 32×32×24 / 32×28×28 phantoms: double
-//!   NRMSE 0.12 % and 0.072 % (r 0.9999993, 0.9999997); single 0.032 % and 0.019 %, which is
-//!   STI's own spread between CPUs (its χ moves by 3.6e-4 and 1.2e-4 relative between the
-//!   workstation that made the fixture and a GitHub-hosted runner). That fixture is regenerated
-//!   in Actions by `tests/data/ilsqr_sti_qsmci_small.py`.
+//!   NRMSE 0.12 % and 0.071 % (r 0.9999993, 0.9999997); single 0.032 % and 0.0055 % (0.019 %
+//!   before the dipole kernel's rounding), at or below STI's own spread between CPUs (its χ
+//!   moves by 3.6e-4 and 1.2e-4 relative between the workstation that made the fixture and a
+//!   GitHub-hosted runner). That fixture is regenerated in Actions by
+//!   `tests/data/ilsqr_sti_qsmci_small.py`.
 //! - Inside QSMART (`tests/qsmart_qsmci_parity.rs`, 2026-11-02: QSMART's call, 50 iterations,
 //!   STI's default padding, field in rad/s, on the QSMART toolbox's own SDF local fields of a
-//!   36×36×28 vessel phantom): 0.15 % and 0.094 % NRMSE for the two stages (r 0.9999988,
-//!   0.9999996), in either precision, and χ moves by only 4e-5 % for a float32-level change of the
-//!   field. Neither precision nor input rounding, then: an open gap (astewartau/QSM.rs#396).
+//!   36×36×28 vessel phantom): 1.0e-4 % and 1.0e-3 % NRMSE for the two stages, once QSMART's
+//!   own γ mismatch is applied (it makes the field with γ = 2.675e8 rad/s/T and STI turns it
+//!   back with 2π·42.575 MHz/T, so the original's χ is 2.2e-5 low; QSM.rs keeps one γ and
+//!   does not reproduce that: 2.5e-3 % without it). That is STI's single-precision floor (its
+//!   own χ moves by 1.3e-4 % / 1.3e-3 % between CPUs there).
+//!
+//! **Dipole kernel rounding** (astewartau/QSM.rs#396, 2026-11-02). Until then the kernel's
+//! k-space coordinates were [`crate::fft::fftfreq`]'s, `i·(1/(n·vs))`; STI computes
+//! `i/(n·vs)`. The two round differently, and on the lattice points of the magic angle
+//! (`k_x² + k_y² = 2k_z²` for `H` = z) that decides whether `D` is 0 or −5.6e-17. FastQSM
+//! takes `sign(D)`, so the FastQSM prior and from it the gradient weights moved (at ~1,600
+//! voxels per axis on the QSMART phantom), while the initial solution agreed to 1e-10 %.
+//! Inside QSMART (48³ grid, 64 of its 266 magic-angle points differing in sign) χ was 0.15 %
+//! and 0.094 % NRMSE from STI's for the two stages, in either precision; found by dumping the
+//! MATLAB re-implementation's intermediates on QSMART's call (which reproduces STI there to
+//! 2.6e-5 % / 5.7e-4 %; with fftfreq's coordinates it gives the same 0.15 % / 0.094 %).
+//! Neither sign pattern is better than the other (both are rounding), so the kernel follows
+//! STI's arithmetic (`sti_dipole_kernel`).
 //!
 //! Until 2026-10-30 the FastQSM kernel was closed without IPT's padding (−∞ beyond the array
 //! for the dilation, +∞ for the erosion, on the unpadded 7³ ball), which kept 32 dilated
@@ -269,7 +286,6 @@ use num_complex::{Complex32, Complex64};
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 use crate::fft::{Box3, Fft3dWorkspace, Fft3dWorkspaceF32, FftOpts};
-use crate::kernels::dipole::dipole_kernel;
 use crate::Grid;
 
 // ============================================================================
@@ -949,8 +965,8 @@ fn ilsqr_with(
         }
     }
     let inside: Vec<usize> = (0..nt).filter(|&l| m[l] > 0.0).collect();
-    let pgrid = Grid::new(n[0], n[1], n[2], vs[0], vs[1], vs[2]);
-    let dk = dipole_kernel(&pgrid, bdir);
+    let [kx, ky, kz] = [0, 1, 2].map(|d| sti_freqs(n[d], vs[d]));
+    let dk = sti_dipole_kernel(n, [&kx, &ky, &kz], bdir);
     tracer.dims(n);
     let ws = RefCell::new(Fft3dWorkspace::new(n[0], n[1], n[2]));
     let fft = |a: &mut [Complex64]| tracer.fft(|| ws.borrow_mut().fft3d(a));
@@ -963,9 +979,6 @@ fn ilsqr_with(
     fft(&mut p_k[..]);
 
     // 2. Laplacian weights: |F⁻¹(k² F φ)| with STI's 1e6 at DC, ranked in the mask
-    let kx = crate::fft::fftfreq(n[0], vs[0]);
-    let ky = crate::fft::fftfreq(n[1], vs[1]);
-    let kz = crate::fft::fftfreq(n[2], vs[2]);
     let mut lap: Vec<Complex64> = p_k.clone();
     crate::maybe_par_iter_mut!(lap).enumerate().for_each(|(l, z)| {
         let (i, j, k) = (l % n[0], (l / n[0]) % n[1], l / (n[0] * n[1]));
@@ -1516,6 +1529,44 @@ fn artefact_solve_single(n: [usize; 3], x1: &[f64], m: &[f64], gw: &[Vec<f64>], 
     (xsa.iter().map(|z| z.re).collect(), out)
 }
 
+/// STI's k-space coordinates (cycles/mm) on the unshifted layout of an even axis of `n` voxels:
+/// the signed index *divided* by `n·vs`, as STI computes `(-n/2:n/2-1)/(n*vs)`.
+///
+/// [`crate::fft::fftfreq`] multiplies by `1/(n·vs)` instead (numpy's arithmetic), which rounds
+/// differently. That decides the dipole kernel at the lattice points on the magic angle
+/// (k_x² + k_y² = 2k_z² for H = z, e.g. (1, 1, 1)): there `D` is 0 or ±5.6e-17 by rounding
+/// alone, and FastQSM takes `sign(D)` of it. On QSMART's call (48³ grid, 64 of 266 such points
+/// differing in sign) the multiplied coordinates put iLSQR's χ 0.15 % / 0.094 % NRMSE from
+/// STI's, while STI's own division reproduces it (astewartau/QSM.rs#396). Neither sign pattern
+/// is better reasoned than the other (both are rounding), so this follows STI.
+fn sti_freqs(n: usize, vs: f64) -> Vec<f64> {
+    let nv = n as f64 * vs;
+    (0..n).map(|i| if 2 * i < n { i as f64 / nv } else { (i as f64 - n as f64) / nv }).collect()
+}
+
+/// STI's dipole kernel `D = 1/3 − (k·H)² / |k|²` (0 at DC) on the unshifted padded grid, in
+/// STI's arithmetic: `k` from [`sti_freqs`], `k·H = k_x H_x + k_y H_y + k_z H_z` and
+/// `|k|² = k_x² + k_y² + k_z²` in that order, and `H` used as given when it is a unit vector
+/// (normalised otherwise). See [`sti_freqs`] for why the rounding matters.
+fn sti_dipole_kernel(n: [usize; 3], k: [&[f64]; 3], bdir: (f64, f64, f64)) -> Vec<f64> {
+    let (mut hx, mut hy, mut hz) = bdir;
+    let norm = (hx * hx + hy * hy + hz * hz).sqrt();
+    if (norm - 1.0).abs() > 1e-12 {
+        (hx, hy, hz) = (hx / norm, hy / norm, hz / norm);
+    }
+    let mut d = vec![0.0; n[0] * n[1] * n[2]];
+    crate::maybe_par_iter_mut!(d).enumerate().for_each(|(l, o)| {
+        let (i, j, kk) = (l % n[0], (l / n[0]) % n[1], l / (n[0] * n[1]));
+        let (a, b, c) = (k[0][i], k[1][j], k[2][kk]);
+        let k2 = a * a + b * b + c * c;
+        if k2 != 0.0 {
+            let kh = a * hx + b * hy + c * hz;
+            *o = 1.0 / 3.0 - kh * kh / k2;
+        }
+    });
+    d
+}
+
 fn sign0(v: f64) -> f64 {
     if v > 0.0 { 1.0 } else if v < 0.0 { -1.0 } else { 0.0 }
 }
@@ -1523,6 +1574,7 @@ fn sign0(v: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::kernels::dipole::dipole_kernel;
 
     #[test]
     fn test_lsqr_simple() {
@@ -1620,6 +1672,26 @@ mod tests {
             for d in 0..3 { assert_eq!([lo[d] + 1, hi[d] + 1], want[d], "dims {:?} box {:?}..{:?}", dims, lo1, hi1); }
         }
         assert!(sti_bounding_box(&[0u8; 8], (2, 2, 2)).is_none());
+    }
+
+    #[test]
+    fn test_sti_dipole_kernel_rounds_as_sti() {
+        // On the magic angle D is 0 or ±5.6e-17 by rounding alone, and FastQSM takes its sign.
+        // STI divides the index by n·vs: (5, 5, 5) and (7, 7, 7) on 48³ give −5.6e-17, (7, 23, 17)
+        // and (17, 17, 17) give 0 (multiplying by 1/(n·vs), as fftfreq does, swaps them).
+        let n = [48; 3];
+        let k = sti_freqs(48, 1.0);
+        let d = sti_dipole_kernel(n, [&k, &k, &k], (0.0, 0.0, 1.0));
+        let at = |i: usize, j: usize, l: usize| d[i + 48 * (j + 48 * l)];
+        assert_eq!(at(5, 5, 5), -5.551115123125783e-17);
+        assert_eq!(at(7, 7, 7), -5.551115123125783e-17);
+        assert_eq!(at(7, 23, 17), 0.0);
+        assert_eq!(at(17, 17, 17), 0.0);
+        assert_eq!(at(0, 0, 0), 0.0);
+        assert_eq!(k[47], -1.0 / 48.0);
+        // away from the cone it is the usual kernel
+        let usual = dipole_kernel(&Grid::new(48, 48, 48, 1.0, 1.0, 1.0), (0.0, 0.0, 1.0));
+        assert!(d.iter().zip(&usual).all(|(a, b)| (a - b).abs() < 1e-15));
     }
 
     #[test]

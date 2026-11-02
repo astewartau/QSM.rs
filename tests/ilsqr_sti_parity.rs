@@ -94,7 +94,8 @@ fn ilsqr_matches_sti_suite() {
     // The fixture is QSM_iLSQR without 'niter', i.e. STI's function default of 100. This case
     // (noise, phase outside the mask, 20×20×14) is sensitive to rounding: measured 2026-10-30,
     // in STI's single precision χ NRMSE 0.17 % (initial solution 0.010 %); in double precision
-    // 10.6 % (initial 0.36 %), r 0.9948.
+    // 10.6 % (initial 0.36 %), r 0.9948; 10.4 %, r 0.9950 since the dipole kernel rounds as STI's
+    // (2026-11-02, astewartau/QSM.rs#396).
     let (chi, x1) = run(&fx, 100, IlsqrPrecision::Single);
     let (e, e1) = (nrmse(&chi, &fx.sti.0), nrmse(&x1, &fx.sti.1));
     println!("single vs STI: chi NRMSE {e:.2e}, initial {e1:.2e}");
@@ -165,7 +166,8 @@ fn against_container(precision: IlsqrPrecision) -> Vec<(f64, f64)> {
 
 #[test]
 fn ilsqr_defaults_match_the_ilsqr_sti_container() {
-    // Measured 2026-10-30: NRMSE 0.12 % (r 0.9999993) and 0.072 % (r 0.9999997). Before
+    // Measured 2026-10-30: NRMSE 0.12 % (r 0.9999993) and 0.072 % (r 0.9999997); 0.071 % for
+    // the second since the dipole kernel rounds as STI's (astewartau/QSM.rs#396). Before
     // FastQSM's closing followed IPT's imclose it was 3.4 % and 1.6 % (astewartau/QSM.rs#329).
     // The rest is STI's single-precision LSQR (next test).
     for (c, (e, r)) in QSMCI_CASES.iter().zip(against_container(IlsqrPrecision::Double)) {
@@ -176,7 +178,8 @@ fn ilsqr_defaults_match_the_ilsqr_sti_container() {
 
 #[test]
 fn ilsqr_single_precision_matches_the_ilsqr_sti_container() {
-    // Measured 2026-10-30: NRMSE 0.032 % and 0.019 %, the size of STI's own CPU dependence on
+    // Measured 2026-11-02: NRMSE 0.032 % and 0.0055 % (0.019 % before the dipole kernel rounded
+    // as STI's, astewartau/QSM.rs#396), at or below STI's own CPU dependence on
     // these cases (3.6e-4 and 1.2e-4 relative between the CPU that made the fixture and a
     // GitHub-hosted runner, tests/data/ilsqr_sti_qsmci_small.py).
     for (c, (e, r)) in QSMCI_CASES.iter().zip(against_container(IlsqrPrecision::Single)) {

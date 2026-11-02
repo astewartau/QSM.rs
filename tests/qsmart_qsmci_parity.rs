@@ -34,6 +34,11 @@ const B0: f64 = 3.0;
 const TES: [f64; 3] = [0.004, 0.008, 0.012];
 /// QSMART's `params.ppm`: γ·B0/1e6 with its γ = 2.675e8 rad/s/T.
 const PPM: f64 = 2.675e8 * B0 / 1e6;
+/// The toolbox's χ against QSM.rs's: QSMART hands `QSM_iLSQR` its field in rad/s made with its γ
+/// (2.675e8 rad/s/T), and STI converts back to ppm with its own (2π·42.575 MHz/T), so the original's
+/// χ is this much (−2.2e-5) off the χ the field implies. QSM.rs converts with one γ throughout and
+/// does not reproduce it; the iLSQR comparisons apply it to QSM.rs's χ, so that they test shape.
+const ORIGINAL_GAMMA_RATIO: f64 = 2.675e8 / (2.0 * std::f64::consts::PI * 42.575e6);
 
 struct Fixture {
     mask: Vec<u8>,
@@ -193,14 +198,16 @@ fn ilsqr_stages_match_qsmart() {
     let w = mask_r0(&f);
     let m1: Vec<u8> = w.iter().map(|&v| u8::from(v > 0.5)).collect();
     let m2: Vec<u8> = w.iter().zip(&f.vasc_only).map(|(&v, &t)| u8::from(v > 0.5 && t > 0.5)).collect();
-    // Not to rounding: 0.15 % and 0.094 % (max |Δ| 1.2e-4, 1.5e-4 ppm). Not the LSQR precision
-    // (`IlsqrPrecision::Single` gives the same), nor the float32 input (χ moves by 4e-5 % for it):
-    // an open gap of `src/inversion/ilsqr.rs` on this phantom (astewartau/QSM.rs#396). Held at the
-    // size measured.
+    // With QSMART's γ ratio applied (`ORIGINAL_GAMMA_RATIO`; without it 2.5e-3 % and 2.6e-3 %):
+    // 1.0e-4 % and 1.0e-3 % (max |Δ| 3e-8, 4.5e-7 ppm), STI's single-precision LSQR, which moves
+    // STI's own chi1 / chi2 by 1.3e-4 % / 1.3e-3 % between CPUs (`qsmart_qsmci_small.py`). Until
+    // astewartau/QSM.rs#396 0.15 % and 0.094 %: the dipole kernel's rounding on the magic angle,
+    // where FastQSM takes sign(D) (see `src/inversion/ilsqr.rs`, *Agreement with STI Suite*).
+    let scaled = |chi: Vec<f64>| -> Vec<f64> { chi.into_iter().map(|v| v * ORIGINAL_GAMMA_RATIO).collect() };
     let (chi1, ..) = ilsqr(&f.lfs1, &m1, &grid(), (0.0, 0.0, 1.0), &ilsqr_params(), |_, _| {});
-    assert_parity("iLSQR stage 1", &chi1, &f.chi1, &m1, 0.17, 1.5e-4);
+    assert_parity("iLSQR stage 1", &scaled(chi1), &f.chi1, &m1, 5e-4, 3e-7);
     let (chi2, ..) = ilsqr(&f.lfs2, &m2, &grid(), (0.0, 0.0, 1.0), &ilsqr_params(), |_, _| {});
-    assert_parity("iLSQR stage 2", &chi2, &f.chi2, &m2, 0.11, 1.8e-4);
+    assert_parity("iLSQR stage 2", &scaled(chi2), &f.chi2, &m2, 3e-3, 3e-6);
 }
 
 #[test]
@@ -238,6 +245,7 @@ fn run_qsmart_matches_qsmart_end_to_end() {
         ..Default::default()
     };
     let chi = run_qsmart(&f.tfs, &f.mask, Some(&r0), Some(&vmag), &meta, &config, QsmReference::None, &mut ()).unwrap();
-    // iLSQR's gap (above): 0.094 %. Held at the size measured.
-    assert_parity("run_qsmart", &chi, &f.chi, &f.mask, 0.11, 1.8e-4);
+    // As iLSQR stage 2 (above), with QSMART's γ ratio applied.
+    let chi: Vec<f64> = chi.into_iter().map(|v| v * ORIGINAL_GAMMA_RATIO).collect();
+    assert_parity("run_qsmart", &chi, &f.chi, &f.mask, 3e-3, 3e-6);
 }
