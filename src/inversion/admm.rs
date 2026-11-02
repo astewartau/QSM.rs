@@ -189,8 +189,9 @@ pub fn prepare_admm_spectral(
     (fft_ws, inv_a, l_complex)
 }
 
-/// Pre-compute spectral operators shared by the FANSI-family nonlinear solvers
-/// (NDI, nlTV, nlTGV, L1-QSM, WH-QSM, HD-QSM).
+/// Pre-compute the continuous-kernel spectral operators of the nonlinear solvers that are
+/// not FANSI's (QSM.jl's NLTV, AMP-PE). The FANSI-family ports take their kernel from
+/// [`prepare_fansi_kernel`] instead.
 ///
 /// Unlike [`prepare_admm_spectral`], this does not bake the data term into an RHS,
 /// because those solvers carry a separately-updated data auxiliary variable. It
@@ -221,6 +222,97 @@ pub fn prepare_fansi_spectral(
     fft_ws.fft3d(&mut l_complex);
     let ee2: Vec<f64> = l_complex.iter().map(|c| c.re).collect();
     (fft_ws, k_kernel, ee2)
+}
+
+/// The dipole kernel a FANSI-family solver (NDI, nlTV, nlTGV, L1-QSM, WH-QSM, HD-QSM) uses.
+///
+/// FANSI's solvers take the kernel as an input (`params.K`), and every FANSI script, like the
+/// QSM-CI wrappers of the verified originals (FANSI-toolbox 93044a3, HD-QSM c456a94), builds it
+/// with `dipole_kernel_angulated(N, voxel_size, B0_dir)`, whose default `mode = 1` is the
+/// discrete kernel [`FansiKernel::Discrete`]. HDQSM.m ships no kernel and is "based on" FANSI;
+/// its wrapper uses the same function. The discrete kernel is consistent with the unit
+/// forward differences these solvers regularise with (both come from the same `E_j`).
+///
+/// Decision (Ashley, 2026-11-02; QSM.rs#399–#403): the FANSI-family ports use FANSI's own
+/// discrete kernel by default, as the originals do; the continuous kernel the rest of the crate
+/// uses is kept as an option. Measured with the continuous kernel against the verified originals
+/// (QSM-CI parity run 41384710780, sim / KKI χ NRMSE): NDI 10.6 / 9.5 %, nlTV 11.0 / 9.5 %,
+/// nlTGV 11.0 / 9.6 %, L1-QSM 14.4 / 15.5 %, WH-QSM 21.4 / 50.7 %, HD-QSM 9.1 / 7.1 %; a numpy
+/// transcription of `ndi.m` on the original's own inputs is 0.0001 % from it with the discrete
+/// kernel and 10.6 % with the continuous one.
+/// With the discrete kernel every pair is at rounding (each method's module docs, "Parity"). The
+/// phantom measurements quoted in the methods' `te` docs were made with the continuous kernel.
+#[cfg_attr(feature = "introspection", derive(serde::Serialize))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum FansiKernel {
+    /// FANSI's `dipole_kernel_angulated` mode 1 (FANSI-toolbox 93044a3): the kernel of unit
+    /// forward differences, `E_j = (1 - exp(2*pi*i*k_j/N_j)) / r_j` with the voxel size `r`
+    /// normalised by its maximum, `D = 1/3 - |sum_j E_j*b_j|^2 / sum_j |E_j|^2`, `D(0) = 0`
+    /// ([`fansi_dipole_kernel`]).
+    #[default]
+    Discrete,
+    /// The continuous kernel `1/3 - (k.b)^2/|k|^2` of [`crate::kernels::dipole::dipole_kernel`]
+    /// (`dipole_kernel_angulated` mode 0 up to its `k` normalisation).
+    Continuous,
+}
+
+impl FansiKernel {
+    /// The kernel in FFT order, `i + nx*(j + ny*k)`.
+    pub fn build(self, grid: &Grid, bdir: (f64, f64, f64)) -> Vec<f64> {
+        match self {
+            FansiKernel::Discrete => fansi_dipole_kernel(grid, bdir),
+            FansiKernel::Continuous => dipole_kernel(grid, bdir),
+        }
+    }
+}
+
+/// FANSI's discrete dipole kernel, `dipole_kernel_angulated(N, spatial_res, B0_dir)` with its
+/// default `mode = 1` (FANSI-toolbox 93044a3):
+///
+/// ```matlab
+/// spatial_res = spatial_res/max(spatial_res(:));
+/// E_j = (1 - exp(2i*pi*k_j/N_j)) / spatial_res(j);    % k_j = 0..N_j-1
+/// kernel = 1/3 - |E1*B0(1) + E2*B0(2) + E3*B0(3)|^2 ./ (|E1|^2 + |E2|^2 + |E3|^2);
+/// kernel(1,1,1) = 0;
+/// ```
+///
+/// `bdir` is normalised first (the QSM-CI wrappers pass `B0_dir/norm(B0_dir)`). MATLAB builds
+/// it in single precision (`N = single(N)`); this is double, as the crate's other kernels.
+/// FFT order, `i + nx*(j + ny*k)`.
+pub fn fansi_dipole_kernel(grid: &Grid, bdir: (f64, f64, f64)) -> Vec<f64> {
+    let (nx, ny, nz) = grid.dims;
+    let (vx, vy, vz) = grid.voxel_size;
+    let vmax = vx.max(vy).max(vz);
+    let (bx, by, bz) = bdir;
+    let bn = (bx * bx + by * by + bz * bz).sqrt();
+    let b = [bx / bn, by / bn, bz / bn];
+    let e = |k: usize, n: usize, r: f64| {
+        let a = 2.0 * std::f64::consts::PI * k as f64 / n as f64;
+        Complex64::new(1.0 - a.cos(), -a.sin()) / (r / vmax)
+    };
+    let ex: Vec<Complex64> = (0..nx).map(|i| e(i, nx, vx)).collect();
+    let ey: Vec<Complex64> = (0..ny).map(|j| e(j, ny, vy)).collect();
+    let ez: Vec<Complex64> = (0..nz).map(|k| e(k, nz, vz)).collect();
+    let mut d = Vec::with_capacity(nx * ny * nz);
+    for e3 in &ez {
+        for e2 in &ey {
+            for e1 in &ex {
+                let lap = e1.norm_sqr() + e2.norm_sqr() + e3.norm_sqr();
+                let proj = (e1 * b[0] + e2 * b[1] + e3 * b[2]).norm_sqr();
+                d.push(if lap > 0.0 { 1.0 / 3.0 - proj / lap } else { 0.0 });
+            }
+        }
+    }
+    d
+}
+
+/// [`Fft3dWorkspace`] and the FANSI-family dipole kernel `kernel` selects (see [`FansiKernel`]).
+pub fn prepare_fansi_kernel(
+    grid: &Grid,
+    bdir: (f64, f64, f64),
+    kernel: FansiKernel,
+) -> (Fft3dWorkspace, Vec<f64>) {
+    (Fft3dWorkspace::new(grid.nx(), grid.ny(), grid.nz()), kernel.build(grid, bdir))
 }
 
 /// FANSI's `EE2 = |E1|^2 + |E2|^2 + |E3|^2` with `E_j = 1 - exp(2*pi*i*k_j/N_j)`: the
@@ -263,3 +355,34 @@ pub fn fansi_magnitude_weight(mask: &[u8], magnitude: &[f64]) -> Vec<f64> {
         })
         .collect()
 }
+
+#[cfg(test)]
+mod fansi_kernel_tests {
+    use super::*;
+
+    /// `dipole_kernel_angulated` mode 1, written out for one bin: B0 oblique, anisotropic voxels
+    /// (normalised by the largest), DC 0, and the continuous kernel differs.
+    #[test]
+    fn discrete_kernel_matches_dipole_kernel_angulated() {
+        let grid = Grid::new(6, 5, 4, 0.5, 1.0, 2.0);
+        let b = (0.3, 0.1, 0.9);
+        let d = fansi_dipole_kernel(&grid, b);
+        assert_eq!(d[0], 0.0);
+        let bn = (0.3f64 * 0.3 + 0.1 * 0.1 + 0.9 * 0.9).sqrt();
+        let (i, j, k) = (2usize, 3usize, 1usize);
+        let ee = |kk: usize, n: usize, r: f64| {
+            let a = 2.0 * std::f64::consts::PI * kk as f64 / n as f64;
+            (Complex64::new(1.0, 0.0) - Complex64::new(0.0, a).exp()) / (r / 2.0)
+        };
+        let (e1, e2, e3) = (ee(i, 6, 0.5), ee(j, 5, 1.0), ee(k, 4, 2.0));
+        let lap = e1.norm_sqr() + e2.norm_sqr() + e3.norm_sqr();
+        let proj = (e1 * (0.3 / bn) + e2 * (0.1 / bn) + e3 * (0.9 / bn)).norm_sqr();
+        let want = 1.0 / 3.0 - proj / lap;
+        let got = d[i + 6 * (j + 5 * k)];
+        assert!((got - want).abs() < 1e-14, "{got} vs {want}");
+        let c = FansiKernel::Continuous.build(&grid, b);
+        assert!((c[i + 6 * (j + 5 * k)] - got).abs() > 1e-3);
+        assert_eq!(FansiKernel::default(), FansiKernel::Discrete);
+    }
+}
+

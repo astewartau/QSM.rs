@@ -33,12 +33,31 @@
 //! `weight = m0.*mask./cnoise`, divided by its maximum, where `m0` is the proton density
 //! from its nonlinear T2* fit (`nlT2sTV`) and `cnoise` the complex-domain noise from its
 //! nonlinear multi-echo field fit (`nlme_L2gradient`). The dipole stage has neither map. The
-//! default ([`WhQsmWeight::Flat`]) is `WH_nlTV.m`'s own default when no weight is given: 1 in
-//! the mask (`W = ones(N)`, lines 70-75). The magnitude weights are options:
+//! default ([`WhQsmWeight::Flat`]) is `WH_nlTV.m`'s own default when no weight is given: 1 over
+//! the whole volume (`W = ones(N)`, lines 70-75), with the mask given separately (it confines
+//! `x` and the harmonic penalty `beta`), as the QSM-CI original runs it. The data term outside
+//! the mask is part of the method: an earlier port weighted only the mask, which with the
+//! continuous kernel left it 21.4 % / 50.7 % (sim / KKI χ NRMSE) from the verified original;
+//! a numpy transcription of `WH_nlTV.m` on the original's own inputs with the mask as the
+//! weight diverges on sim, and with `ones(N)` and FANSI's kernel it is 0.0006 % from it
+//! (QSM.rs#402). The magnitude weights are options:
 //! [`WhQsmWeight::MaxNormalised`] is the example's formula with the magnitude for `m0` and no
 //! noise term, `mask.*mag / max(mask.*mag)`, and [`WhQsmWeight::InVivo`] FANSI's
 //! `script_invivo.m` form, `min(2*mask*mag/max(mag), 1)`, as NDI uses. How the weight and the
 //! echo time ([`WhQsmParams::te`]) interact on the phantom is noted there.
+//!
+//! # Newton safeguard
+//! The inner Newton step for `z2` (`WH_nlTV.m` l. 258-268) minimises, voxel by voxel,
+//! `W*(1 - cos(z2 - phase)) + mu2/2*(z2 - rhs/mu2)^2`, whose minimiser lies within `W/mu2` of
+//! `rhs/mu2` (where the derivative `W*sin(z2 - phase) + mu2*(z2 - rhs/mu2)` vanishes). With
+//! the flat weight, a field that is non-zero outside the mask (QSM-CI's simulated local
+//! field, up to ~6 rad) puts some voxels where `W*cos + mu2` nears 0, and the unguarded step
+//! bounces: on that sim the original's Newton happened to settle after ~24 inner steps, while
+//! the port's (same formula, FFT rounding apart) ran to its 50-step cap at 1e16 and the solve
+//! went NaN. The port clamps each Newton iterate to that interval. This changes nothing where
+//! the step stays inside it (it does wherever the original converges normally), and the fixed
+//! point is the same minimiser; it is not in `WH_nlTV.m`. With it the port is 0.0006 % (sim)
+//! and 0.0009 % (KKI, no clamping needed) from the verified original (χ in radians, QSM.rs#402).
 //!
 //! # Finite differences
 //! As in `WH_nlTV.m`, the gradient and Laplacian are unit-spacing differences whatever the
@@ -53,12 +72,21 @@
 //! defaults for beta (150) and muh (5), not the script's beta of 200. Without `params.mask`,
 //! `WH_nlTV.m` takes the mask as `W > 0`; here the mask is always given.
 //!
+//! # Parity
+//! Against the verified original (QSM-CI pair `whqsm`; FANSI-toolbox 93044a3, identical to
+//! licensed MATLAB R2023b), final-map χ NRMSE at both sides' defaults on QSM-CI's simulated head
+//! and the KKI travelling head (QSM-CI parity run 41403629314, QSM.rs#399–#403): sim 0.0018 %, KKI 0.0038 %, from
+//! 21.4 % / 50.7 % (sim / KKI) before. Two causes: the kernel, and `WH_nlTV.m`'s flat weight over the whole volume (see Data weight); the Newton safeguard keeps the sim run from diverging (see Newton safeguard). What remains is
+//! single (MATLAB) vs double (here) precision and FANSI's γ, 42.58 against the crate's 42.576
+//! (the wrappers keep theirs). Fixture: `tests/fansi_qsmci_parity.rs` (relative L2 below 1e-5
+//! on an oblique, anisotropic phantom).
+//!
 //! # Pipeline rules
 //!
 //! The facts above that a configuration can depart from are published as rules in
 //! [`crate::pipeline::rules::RULES`] (each with its strength, basis, reason and source): `fansi.no-laplacian-multi-echo`, `whqsm.flat-weight-te-spacing`, `whqsm.magnitude-weight-te-spacing`.
 
-use crate::inversion::admm::{fansi_unit_ee2, prepare_fansi_spectral};
+use crate::inversion::admm::{fansi_unit_ee2, prepare_fansi_kernel, FansiKernel};
 use crate::utils::gradient::{bdiv_inplace, fgrad_inplace};
 use crate::utils::{apply_mask_zero, shrink};
 use crate::{EchoTime, Grid};
@@ -68,8 +96,9 @@ use num_complex::Complex64;
 #[cfg_attr(feature = "introspection", derive(serde::Serialize))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum WhQsmWeight {
-    /// 1 in the mask, no magnitude: `WH_nlTV.m`'s own default when `params.weight` is not
-    /// given (`W = ones(N)`, then squared; lines 70-75).
+    /// 1 everywhere, no magnitude: `WH_nlTV.m`'s own default when `params.weight` is not
+    /// given (`W = ones(N)`, then squared; lines 70-75). The data term covers the whole
+    /// volume; the mask still confines `x` and the harmonic penalty.
     #[default]
     Flat,
     /// `mask.*mag / max(mask.*mag)`: FANSI's WH-QSM example (`script_DICOM_Philips.m`)
@@ -121,12 +150,19 @@ pub struct WhQsmParams {
     /// multi-echo example, `script_DICOM_Philips.m`, scales the field by `deltaTE =
     /// TE(echo2) - TE(echo1)` (FANSI-toolbox 93044a3, line 364) before `WH_nlTV` (line 436), but
     /// with a weight from M0 and the fit noise, and its comment on that line says "You may use
-    /// also any individual echo time". With the default flat weight ([`WhQsmWeight::Flat`]),
-    /// a field at the echo spacing diverges on the qsm-forward phantom (echoes 4/12/20/28 ms:
-    /// r 0.07), as `WH_nlTV`'s Newton step does once the phase nears ±π; at the first echo it
-    /// gives XSIM 0.754, NRMSE 35.5%. With a magnitude weight the echo spacing does better than
+    /// also any individual echo time". With the default flat weight ([`WhQsmWeight::Flat`]), the
+    /// first echo does better: on QSM-CI's simulated head (7 T, echoes 4/12/20/28 ms, its true
+    /// local field and mask; FANSI's kernel, the flat weight over the whole volume, QSM.rs#402)
+    /// χ NRMSE 33.6 % and r 0.945 at the first echo against 42.0 % and 0.914 at the spacing.
+    /// (Before QSM.rs#402, with the continuous kernel and the weight only in the mask, the
+    /// spacing diverged on the qsm-forward phantom, r 0.07, and the first echo gave XSIM 0.754,
+    /// NRMSE 35.5 %.) With a magnitude weight the echo spacing does better than
     /// the first echo (echo-1 magnitude, [`WhQsmWeight::MaxNormalised`]: XSIM 0.673 vs 0.637).
     pub te: EchoTime,
+    /// The dipole kernel. Default [`FansiKernel::Discrete`], FANSI's
+    /// `dipole_kernel_angulated` as the original is run with; [`FansiKernel::Continuous`] is
+    /// the crate's continuous kernel (see [`FansiKernel`] for the decision and the measurements).
+    pub kernel: FansiKernel,
 }
 
 impl Default for WhQsmParams {
@@ -146,6 +182,7 @@ impl Default for WhQsmParams {
             b0: 3.0,
             echo_times: vec![0.02],
             te: EchoTime::First,
+            kernel: FansiKernel::Discrete,
         }
     }
 }
@@ -198,14 +235,14 @@ pub fn whqsm(
     // Spectral operators: k = real dipole kernel D(k) (DC=0), ee2 = FANSI's EE2. WH_nlTV.m's
     // E1..E3 are unit-spacing differences whatever the voxel size, so the gradient and
     // divergence below run on a unit-voxel grid too; only the dipole kernel uses the voxel size.
-    let (mut fft_ws, k, _) = prepare_fansi_spectral(grid, bdir);
+    let (mut fft_ws, k) = prepare_fansi_kernel(grid, bdir, params.kernel);
     let ee2 = fansi_unit_ee2(grid.dims);
     let ugrid = Grid::new(grid.nx(), grid.ny(), grid.nz(), 1.0, 1.0, 1.0);
 
     let mask_f: Vec<f64> = mask.iter().map(|&m| if m != 0 { 1.0 } else { 0.0 }).collect();
 
-    // W = weight.^2 (WH_nlTV.m line 75), weight as `params.weight` says: the mask
-    // (WH_nlTV.m's ones), or from the magnitude.
+    // W = weight.^2 (WH_nlTV.m line 75), weight as `params.weight` says: ones over the whole
+    // volume (WH_nlTV.m's default), or from the magnitude (zero outside the mask).
     assert!(
         !params.weight.needs_magnitude() || magnitude.is_some(),
         "WH-QSM: the {:?} weight needs the magnitude", params.weight
@@ -221,6 +258,9 @@ pub fn whqsm(
     });
     let w: Vec<f64> = (0..n)
         .map(|i| {
+            if params.weight == WhQsmWeight::Flat {
+                return 1.0;
+            }
             if mask[i] == 0 {
                 return 0.0;
             }
@@ -389,8 +429,14 @@ pub fn whqsm(
                     let dphi = z2[i] - phase[i];
                     let numr = w[i] * dphi.sin() + mu2 * z2[i] - real_scratch[i];
                     let denr = w[i] * dphi.cos() + mu2;
-                    let u = numr / denr;
-                    z2[i] -= u;
+                    // Safeguard (not in WH_nlTV.m): keep the iterate in the interval that holds
+                    // the minimiser, |z2 - rhs/mu2| <= W/mu2 (from W*sin(z2-phase) +
+                    // mu2*(z2 - rhs/mu2) = 0). See "Newton safeguard" in the module docs.
+                    let r = real_scratch[i] / mu2;
+                    let b = w[i] / mu2;
+                    let z_new = (z2[i] - numr / denr).clamp(r - b, r + b);
+                    let u = z2[i] - z_new;
+                    z2[i] = z_new;
                     upd_norm2 += u * u;
                 }
                 let upd_norm = upd_norm2.sqrt();

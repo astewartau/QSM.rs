@@ -44,12 +44,21 @@
 //! not reused from FANSI or WH-QSM (L442-443). `nlL1TV.m` defaults: mu1 = 100*alpha1, mu2 = mu3
 //! = 1, 50 iterations, tolUpdate 1, weight ones (L48-112).
 //!
+//! # Parity
+//! Against the verified original (QSM-CI pair `l1qsm`; FANSI-toolbox 93044a3, identical to
+//! licensed MATLAB R2023b), final-map χ NRMSE at both sides' defaults on QSM-CI's simulated head
+//! and the KKI travelling head (QSM-CI parity run 41403629314, QSM.rs#399–#403): sim 0.0022 %, KKI 0.0026 %, from
+//! 14.4 % / 15.5 % (sim / KKI) before. The kernel was the whole gap (a numpy `nlL1TV.m` with FANSI's kernel is 0.0004 % from the original on sim; the `isPrecond` start and the 0.05 floor already matched). What remains is
+//! single (MATLAB) vs double (here) precision and FANSI's γ, 42.58 against the crate's 42.576
+//! (the wrappers keep theirs). Fixture: `tests/fansi_qsmci_parity.rs` (relative L2 below 1e-5
+//! on an oblique, anisotropic phantom).
+//!
 //! # Pipeline rules
 //!
 //! The facts above that a configuration can depart from are published as rules in
 //! [`crate::pipeline::rules::RULES`] (each with its strength, basis, reason and source): `fansi.no-laplacian-multi-echo`, `l1qsm.te-first`.
 
-use crate::inversion::admm::{fansi_magnitude_weight, fansi_ppm_to_rad, fansi_unit_ee2, prepare_fansi_spectral};
+use crate::inversion::admm::{fansi_magnitude_weight, fansi_ppm_to_rad, fansi_unit_ee2, prepare_fansi_kernel, FansiKernel};
 use crate::utils::gradient::{bdiv_inplace, fgrad_inplace};
 use crate::utils::{apply_mask_zero, shrink};
 use crate::{EchoTime, Grid};
@@ -101,6 +110,10 @@ pub struct L1QsmParams {
     /// (lines 109-113): with a flat weight its NRMSE on that phantom exceeds 100% at either
     /// echo time (0.738 / 108% / 0.636 at the first echo).
     pub te: EchoTime,
+    /// The dipole kernel. Default [`FansiKernel::Discrete`], FANSI's
+    /// `dipole_kernel_angulated` as the original is run with; [`FansiKernel::Continuous`] is
+    /// the crate's continuous kernel (see [`FansiKernel`] for the decision and the measurements).
+    pub kernel: FansiKernel,
 }
 
 impl Default for L1QsmParams {
@@ -117,6 +130,7 @@ impl Default for L1QsmParams {
             b0: 3.0,
             echo_times: vec![0.02],
             te: EchoTime::First,
+            kernel: FansiKernel::Discrete,
         }
     }
 }
@@ -150,7 +164,7 @@ pub fn l1qsm(
 ) -> Vec<f64> {
     let n = grid.n_total();
 
-    let (mut fft_ws, k, _) = prepare_fansi_spectral(grid, bdir);
+    let (mut fft_ws, k) = prepare_fansi_kernel(grid, bdir, params.kernel);
     // FANSI's E1..E3 are unit-spacing differences.
     let ee2 = fansi_unit_ee2(grid.dims);
     let ugrid = Grid::new(grid.nx(), grid.ny(), grid.nz(), 1.0, 1.0, 1.0);

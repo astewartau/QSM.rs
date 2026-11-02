@@ -46,6 +46,15 @@
 //!   (L457-461), 300 iterations (L463). `ndi.m` itself defaults the weight to ones (L51-56).
 //! - The defaults here are `ndi.m`'s (tau 2, alpha 1e-5, 100 iterations).
 //!
+//! # Parity
+//! Against the verified original (QSM-CI pair `ndi`; FANSI-toolbox 93044a3, identical to
+//! licensed MATLAB R2023b), final-map χ NRMSE at both sides' defaults on QSM-CI's simulated head
+//! and the KKI travelling head (QSM-CI parity run 41403629314, QSM.rs#399–#403): sim 0.0011 %, KKI 0.00009 %, from
+//! 10.6 % / 9.5 % (sim / KKI) before. The kernel was the whole gap. What remains is
+//! single (MATLAB) vs double (here) precision and FANSI's γ, 42.58 against the crate's 42.576
+//! (the wrappers keep theirs). Fixture: `tests/fansi_qsmci_parity.rs` (relative L2 below 1e-5
+//! on an oblique, anisotropic phantom).
+//!
 //! # Pipeline rules
 //!
 //! The facts above that a configuration can depart from are published as rules in
@@ -54,7 +63,7 @@
 use crate::fft::Fft3dWorkspace;
 use crate::utils::apply_mask_zero;
 use crate::{EchoTime, Grid};
-use super::admm::prepare_fansi_spectral;
+use super::admm::{prepare_fansi_kernel, FansiKernel};
 use num_complex::Complex64;
 
 /// NDI algorithm parameters
@@ -86,6 +95,10 @@ pub struct NdiParams {
     /// (lines 51-56): with a flat weight NDI is worse on that phantom (0.628 / 57.5% / 0.822 at
     /// the first echo).
     pub te: EchoTime,
+    /// The dipole kernel. Default [`FansiKernel::Discrete`], FANSI's
+    /// `dipole_kernel_angulated` as the original is run with; [`FansiKernel::Continuous`] is
+    /// the crate's continuous kernel (see [`FansiKernel`] for the decision and the measurements).
+    pub kernel: FansiKernel,
 }
 
 impl Default for NdiParams {
@@ -99,6 +112,7 @@ impl Default for NdiParams {
             b0: 3.0,
             echo_times: vec![0.02],
             te: EchoTime::First,
+            kernel: FansiKernel::Discrete,
         }
     }
 }
@@ -201,7 +215,7 @@ pub fn ndi(
 ) -> Vec<f64> {
     let n = grid.n_total();
 
-    let (mut fft_ws, k_kernel, _ee2) = prepare_fansi_spectral(grid, bdir);
+    let (mut fft_ws, k_kernel) = prepare_fansi_kernel(grid, bdir, params.kernel);
 
     // ppm -> radians, as FANSI expects.
     // FANSI's scripts use `gyro = 2*pi*42.58`; QSM.rs uses GAMMA_BAR_MHZ_PER_T, which is closer
