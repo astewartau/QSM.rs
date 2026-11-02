@@ -28,7 +28,7 @@ pub use romeo::{
     RomeoParams, RomeoWeightType,
 };
 pub use bestpath::{unwrap_bestpath, BestPathParams};
-pub use prelude::{unwrap_prelude, PreludeParams};
+pub use prelude::{unwrap_prelude, PreludeLabelling, PreludeParams};
 pub use slicewise::{
     unwrap_slicewise, unwrap_slicewise_multi_echo, enforce_inter_echo_consistency,
     SliceWiseParams,
@@ -50,7 +50,9 @@ pub enum UnwrapMethod {
     /// algorithm, not ROMEO run with best-path weights — for that, set
     /// [`RomeoParams::bestpath`].
     BestPath,
-    /// PRELUDE (Jenkinson); see [`unwrap_prelude`]. The unwrapper the literature
-    /// benchmarks against, kept so those comparisons can be read against this crate.
-    Prelude,
+    /// PRELUDE (Jenkinson) with its settings; see [`unwrap_prelude`]. The unwrapper the
+    /// literature benchmarks against. It carries its [`PreludeParams`] so that every caller
+    /// that takes an `UnwrapMethod` (MCPC-3D-S's HIP unwrapping, the slice-wise unwrapper) runs
+    /// it with the caller's settings, not silently with the defaults.
+    Prelude(PreludeParams),
 }

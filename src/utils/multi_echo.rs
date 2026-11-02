@@ -91,7 +91,7 @@ use crate::error::{check_len, InputError};
 use crate::unwrap::romeo::{unwrap_romeo, RomeoParams};
 use crate::unwrap::laplacian::{laplacian_unwrap, LaplacianSolver};
 use crate::unwrap::bestpath::{unwrap_bestpath, BestPathParams};
-use crate::unwrap::prelude::{unwrap_prelude, PreludeParams};
+use crate::unwrap::prelude::unwrap_prelude;
 use crate::unwrap::UnwrapMethod;
 
 const TWO_PI: f64 = 2.0 * PI;
@@ -313,9 +313,7 @@ pub fn phase_offset_removal(
         UnwrapMethod::BestPath => {
             unwrap_bestpath(&hip_phase, &mask, &BestPathParams::default(), grid)
         }
-        UnwrapMethod::Prelude => {
-            unwrap_prelude(&hip_phase, &mask, grid, &PreludeParams::default())
-        }
+        UnwrapMethod::Prelude(params) => unwrap_prelude(&hip_phase, &mask, grid, &params),
     };
     drop(hip_phase);
     drop(weight);
@@ -567,7 +565,7 @@ pub fn mcpc3ds_combine<P: AsRef<[f64]>, M: AsRef<[f64]>>(
         UnwrapMethod::Romeo => unwrap_romeo(&hip_phase, &weight, None, 0.0, 0.0, &mask, &RomeoParams::default(), grid),
         UnwrapMethod::Laplacian => laplacian_unwrap(&hip_phase, &mask, grid, LaplacianSolver::Dct),
         UnwrapMethod::BestPath => unwrap_bestpath(&hip_phase, &mask, &BestPathParams::default(), grid),
-        UnwrapMethod::Prelude => unwrap_prelude(&hip_phase, &mask, grid, &PreludeParams::default()),
+        UnwrapMethod::Prelude(params) => unwrap_prelude(&hip_phase, &mask, grid, &params),
     };
     drop(hip_phase);
     drop(weight);
@@ -2524,6 +2522,26 @@ mod tests {
     // =========================================================================
     // mcpc3ds_single_coil
     // =========================================================================
+
+    /// `UnwrapMethod::Prelude` carries its settings into the HIP unwrap: a single partition
+    /// labelled over the volume leaves a wrapping HIP as one region, so the offset it estimates
+    /// differs from the defaults', which unwrap it.
+    #[test]
+    fn phase_offset_removal_runs_prelude_with_the_given_settings() {
+        use crate::unwrap::{PreludeLabelling, PreludeParams};
+        let (nx, ny, nz) = (16, 8, 8);
+        let tes = [0.005, 0.010, 0.015];
+        let (_, mags, _) = make_synthetic_multi_echo(nx, ny, nz, &tes);
+        let phases: Vec<Vec<f64>> = tes.iter()
+            .map(|&te| (0..nx * ny * nz).map(|i| { let t = 300.0 * ((i % nx) as f64 - 7.5) * te; t.sin().atan2(t.cos()) }).collect())
+            .collect();
+        let run = |p: PreludeParams| {
+            phase_offset_removal(&phases, &mags, &tes, [1.0; 3], [0, 1], UnwrapMethod::Prelude(p), &grid(nx, ny, nz)).1
+        };
+        let one = PreludeParams { num_phase_partitions: 1, labelling: PreludeLabelling::Volume, correct_global: false };
+        assert_eq!(run(PreludeParams::default()), run(PreludeParams::default()));
+        assert_ne!(run(PreludeParams::default()), run(one));
+    }
 
     #[test]
     fn test_phase_offset_removal_output_sizes() {

@@ -12,57 +12,110 @@
 //!
 //! The literature generally reports it as slower and less accurate than
 //! [`unwrap_romeo`](super::unwrap_romeo) — Dymerska et al., *Magn Reson Med*
-//! 2021;85(4):2294–2308, <https://doi.org/10.1002/mrm.28563>. **That comparison is
-//! against FSL's implementation, and it does not transfer to this one.** Measured on
-//! the `bids/` phantom (164×205×205, 1.31M in-mask voxels, release build), per echo:
+//! 2021;85(4):2294–2308, <https://doi.org/10.1002/mrm.28563>. That comparison ran FSL's
+//! implementation. The accuracy half carries over, since this module gives FSL's output (below);
+//! the speed half does not. FSL's `prelude` at its defaults took 31 min for the KKI travelling
+//! head's five echoes (256×256×128, 1.52M in-mask voxels); this module takes 4.6 s for the same
+//! output (release build, `parallel`, 8 cores; 0.8–1.1 s per echo). On the `bids/` phantom
+//! (164×205×205, 1.31M in-mask voxels) it takes 0.40 s for the first echo and 1.45 s for the
+//! last at the defaults. With full-3D labelling at 6 partitions it took, per echo:
 //!
 //! | | first echo | last echo |
 //! |---|---|---|
-//! | PRELUDE | 0.19 s | 0.34 s |
+//! | PRELUDE (full 3D, 6 partitions) | 0.19 s | 0.34 s |
 //! | ROMEO | 0.34 s | 0.29 s |
 //! | best path | 0.32 s | 0.33 s |
 //! | Laplacian | 0.46 s | 0.55 s |
 //!
-//! and the local-field correlations after an identical V-SHARP are 0.615 (PRELUDE),
+//! and the local-field correlations after an identical V-SHARP were 0.615 (PRELUDE),
 //! 0.608 (Laplacian), 0.602 (best path), 0.592 (ROMEO) — a spread narrower than any
 //! of them is from ground truth, which is the agreement the comparison is for rather
-//! than a ranking. So treat this module as a baseline because of what it is, not
-//! because it is slow; on this data it is not.
+//! than a ranking.
 //!
 //! # Reference pipeline
 //!
-//! The report's only parameter is the number of phase partitions (§2.4), 6 here as in its
-//! example ([`PreludeParams::default`]). Nothing in the
-//! algorithm depends on voxel size, field strength or orientation. It is not selectable in the
-//! QSM pipeline's `field_mapping.unwrapping_algorithm`; it is available as
-//! [`UnwrapMethod::Prelude`](super::UnwrapMethod::Prelude) to the slice-wise unwrapper and to
+//! The original is FSL's `prelude` (Jenkinson's own implementation, fsl-fugue), and the defaults
+//! ([`PreludeParams::default`]) are its defaults: **8 phase partitions** (its `-n`; the report's
+//! worked example uses 6) and **initial regions labelled slice by slice**, then merged in 3D,
+//! on any volume over 64 voxels along either in-plane axis, and over the whole volume on
+//! smaller ones ([`PreludeLabelling::Auto`]). `--labelslices` labels slice by slice whatever the
+//! size ([`PreludeLabelling::Slices`]), and `-f` over the whole volume
+//! ([`PreludeLabelling::Volume`]). On the in-vivo and simulated volumes measured its output has
+//! a median in-mask wrap count of 0, which [`PreludeParams::correct_global`] (on by default)
+//! reproduces (see "The global constant" below). FSL's own
+//! masking from the magnitude (when no mask is given) is not reproduced; a mask is required here.
+//! Nothing in the algorithm depends on voxel size, field strength or orientation. The QSM
+//! pipeline offers it as [`UnwrappingAlgorithm::Prelude`](crate::pipeline::UnwrappingAlgorithm::Prelude)
+//! (each echo on its own, then whole turns aligned between echoes); it is also
+//! [`UnwrapMethod::Prelude`](super::UnwrapMethod::Prelude) for the slice-wise unwrapper and
 //! MCPC-3D-S's HIP unwrapping.
+//!
+//! **Why slice labelling is the default** (QSM.rs#397, Ashley's decision 2026-11-02): it is the
+//! original's default on every in-vivo volume (FSL's switch to full 3D below 65 voxels in-plane
+//! is kept too, as [`PreludeLabelling::Auto`], so that small volumes also give FSL's output), and
+//! on the KKI travelling head's late echoes full-3D labelling lets
+//! regions straddle wraps that slice labelling does not. Measured as the share of in-mask voxels
+//! whose echo-to-echo step `u_e − u_{e−1}` is not `wrap(φ_e − φ_{e−1})` plus the most common
+//! 2π multiple (a temporal-consistency check that needs no ground truth; lower is better), KKI
+//! echoes 2→5:
+//!
+//! | labelling, partitions | e2 | e3 | e4 | e5 |
+//! |---|---|---|---|---|
+//! | full 3D, 6 (`prelude -f -n 6`) | 3.21 % | 3.48 % | 12.36 % | 6.87 % |
+//! | full 3D, 8 (`prelude -f`) | 3.21 % | 3.47 % | 4.66 % | 11.93 % |
+//! | slices, 6 (`prelude -n 6`) | 3.21 % | 3.47 % | 3.45 % | 3.45 % |
+//! | **slices, 8 (defaults)** | 3.21 % | 3.47 % | 3.45 % | 3.46 % |
+//!
+//! On the simulation (4 echoes at 7 T) the labelling makes no difference to it (5.5–5.7 % for
+//! all; its 8 ms echo spacing sets that floor). Full-3D labelling is kept for parity with
+//! `prelude -f`.
 //!
 //! # Against FSL's `prelude`
 //!
 //! FSL's binary was run as a black box (QSM-CI's `algorithms/_fsl-prelude`: fsl-fugue 2603.0 from
 //! FSL's conda channel; its source was not read) and compared with this module inside the mask,
-//! on QSM-CI's simulation (4 echoes), the KKI travelling head (5 echoes) and the Prisma travelling
-//! head's first echo (QSMxT/QSM-CI#302, 2026-11-02, at this module's a44046e):
+//! each echo on its own, on QSM-CI's simulation (164×205×205, 4 echoes, 1.31M in-mask voxels),
+//! the KKI travelling head (256×256×128, 5 echoes, 1.52M) and the Prisma travelling head's first
+//! echo (184×256×128, 1.70M) (QSMxT/QSM-CI#302, QSM.rs#397; measured 2026-11-02). Counted is
+//! every in-mask voxel whose wrap count differs from FSL's, beyond one offset per connected
+//! component of the mask:
 //!
-//! - **`prelude -f` (full 3D) is this algorithm.** Every in-mask voxel of every echo takes the
-//!   same wrap count as here, at 6 and at 8 partitions (`-n`), on all three; on the Prisma echo
-//!   the output is identical voxel for voxel. FSL writes 0 outside the mask, and its median
-//!   wrap count in the mask is 0 on every echo, as with [`PreludeParams::correct_global`]
-//!   (without it, KKI's fifth echo comes out 2π from FSL's).
-//! - **FSL's defaults are not.** Without `-f`, `prelude` uses 8 partitions (its `-v` output
-//!   says so; 6 is only the report's example) and labels its initial regions slice by slice,
-//!   then merges them in 3D: the default and `--labelslices` start from the same region count,
-//!   more than `-f` gives. That is the planar restriction the report's §4.1 mentions and this
-//!   module does not implement (see the deviations below). At 6 partitions the default mode
-//!   takes another wrap count than this module in 0.007–0.16 % of the simulation's voxels
-//!   (echoes 2–4) and in 10.1 % and 13.3 % on KKI's echoes 4 and 5; on the Prisma echo, against
-//!   FSL's full defaults at 8 partitions, in 0.02 %.
-//! - **`prelude -s`** (everything slice by slice) differs from
-//!   [`unwrap_slicewise`](super::unwrap_slicewise) with [`UnwrapMethod::Prelude`](super::UnwrapMethod::Prelude):
-//!   FSL writes 0 in small in-slice components (14k and 23k in-mask voxels on the simulation and
-//!   KKI) and, beyond a per-component offset, 0.1–0.6 % of the remaining voxels take another wrap
-//!   count.
+//! | here | FSL | sim | KKI | Prisma e1 |
+//! |---|---|---|---|---|
+//! | **defaults** (auto = slices here, 8) | `prelude` | 0 on all 4 echoes | 0 on all 5 echoes | 0 |
+//! | slices, 6 | `prelude -n 6` | 0 on all 4 echoes | 0 on echoes 1–4; 7 voxels (0.0005 %) on echo 5 | — |
+//! | full 3D, 8 | `prelude -f` | 0 on all 4 echoes | 0 on all 5 echoes | 0 |
+//! | full 3D, 6 | `prelude -f -n 6` | 0 on all 4 echoes | 0 on all 5 echoes | — |
+//!
+//! At the defaults the output is FSL's exactly, global constant included (largest difference 0
+//! after FSL's single-precision output), and the region counts agree: FSL's `-v` reports 13111,
+//! 23565, 40070, 59635 and 82032 initial regions on KKI's echoes at its defaults (4739 to 40265
+//! with `-f`), which is what 4-connected labelling of the third axis's slices gives, and not the
+//! other two axes'. FSL writes 0 outside the mask. FSL's default run took 31 min on KKI and,
+//! with the simulation's four echoes in one 4-D run, did not finish; run one echo at a time it
+//! took 72 s, 492 s and 1964 s on echoes 2 to 4 (31618 to 118208 regions); this module takes
+//! 0.4 to 1.5 s per echo there.
+//!
+//! **When FSL's default labels slices** ([`PreludeLabelling::Auto`]): only when the volume is over
+//! 64 voxels along its first or second axis. 64×64×5, 64×64×64, 64×64×128, 40×36×200 and
+//! 20×20×300 volumes were labelled in full 3D (`-v` region count equal to `-f`'s), and 65×10×20,
+//! 10×65×20, 65×65×20, 128×32×20 and 256×256×8 slice by slice (equal to `--labelslices`'),
+//! whatever the voxel size (0.4, 1, 3 mm) or the mask's extent (a 128-wide volume masked to its
+//! first 38 columns is still labelled by slices).
+//!
+//! **The global constant.** Each connected set of regions comes out of the merge with an arbitrary
+//! whole number of turns. FSL's output on the three volumes above has a median in-mask wrap count
+//! of 0, which [`PreludeParams::correct_global`] gives; on the small noisy phantoms of
+//! `tests/prelude_fsl_parity.rs` FSL's constant is up to two turns off that median (and is not the
+//! mean, the mode, the first voxel's, the centre voxel's or the largest region's either). No rule
+//! was found for it, so the fixture compares wrap counts up to that one offset: every voxel of all
+//! eight runs (defaults, `--labelslices`, `-f`, `-n 6`, on a 72- and a 64-wide phantom) matches.
+//!
+//! `prelude -s` (everything slice by slice, no 3D merge) differs from
+//! [`unwrap_slicewise`](super::unwrap_slicewise) with [`UnwrapMethod::Prelude`](super::UnwrapMethod::Prelude):
+//! FSL writes 0 in small in-slice components (14k and 23k in-mask voxels on the simulation and
+//! KKI) and, beyond a per-component offset, 0.1–0.6 % of the remaining voxels take another wrap
+//! count. Slice-wise unwrapping is this crate's own, so that is information only.
 //!
 //! # Provenance
 //!
@@ -72,7 +125,10 @@
 //! the licence reaches "the Software or any derivative of it", so transliterating it
 //! would encumber this MIT crate. The report specifies the whole algorithm, down to
 //! the data-structure choices, so nothing had to be reverse-engineered. Equation
-//! numbers in the comments below refer to it.
+//! numbers in the comments below refer to it. The slice labelling is the planar restriction
+//! of the report's §4.1; that it is FSL's default, with 8 partitions, and
+//! that it labels slices of the third axis, was established by running FSL's binary as a black
+//! box (its `-v` output and region counts; see above), not from its code.
 //!
 //! # The algorithm
 //!
@@ -81,12 +137,17 @@
 //! volume is first cut into regions that are each assumed wrap-free, and every region
 //! gets a single offset.
 //!
-//! 1. **Initial regions** (§2.4). Split `[-π, π)` into `num_phase_partitions` equal
+//! 1. **Initial regions** (§2.4, §4.1). Split `[-π, π)` into `num_phase_partitions` equal
 //!    bins. For each bin, mask the in-mask voxels whose wrapped phase falls in it and
-//!    label the 6-connected components; every component across every bin becomes a
+//!    label the connected components: within each slice of the third axis, 4-connected
+//!    ([`PreludeLabelling::Slices`]; what the default [`PreludeLabelling::Auto`] does on
+//!    in-vivo volumes), or over the volume, 6-connected ([`PreludeLabelling::Volume`]). Every component across every bin (and slice) becomes a
 //!    region with its own id. Two voxels in one region therefore differ in wrapped
 //!    phase by less than one bin width, so a region straddling a wrap is unlikely —
-//!    and the narrower the bin, the less likely still.
+//!    and the narrower the bin, the less likely still. Limiting a region to one slice also
+//!    cuts the chance of two distant areas at the same phase being labelled one region
+//!    (§4.1), which is how a full-3D region comes to straddle a wrap. The merge below is 3D
+//!    either way.
 //!
 //! 2. **Cost** (eq 2–4). Across the interface between regions A and B the cost is
 //!    `Σ (φ_Aj − φ_Bk + 2π·M_AB)²`, summed over interfacing voxel pairs, with
@@ -129,13 +190,6 @@
 //!   thousands a high-resolution 3D volume can produce, where `O(R·C)` dominates
 //!   everything else. The merge *order* is identical — the heap returns the same
 //!   maximum — only the way it is found differs.
-//! - **Regions are not restricted to be planar.** §4.1 notes that FSL does this on
-//!   large volumes, to cut the chance of two distant areas at the same phase being
-//!   labelled one region; FSL's `prelude` does it by default (see "Against FSL's
-//!   `prelude`" above). Not implemented yet. The failure it guards against does show on
-//!   KKI's fourth and fifth echoes, where full-3D labelling leaves 4.7–12.4 % of voxels with
-//!   an echo-to-echo step at odds with the wrapped echo difference, against 3.45 % with FSL's
-//!   default labelling (astewartau/QSM.rs#397).
 //! - **Masked voxels keep their original wrapped phase** on output, matching
 //!   [`unwrap_bestpath`](super::unwrap_bestpath) and [`unwrap_romeo`](super::unwrap_romeo).
 //!
@@ -159,36 +213,99 @@ const TWO_PI: f64 = 2.0 * PI;
 /// mask, or carrying a non-finite phase.
 const NO_REGION: u32 = u32::MAX;
 
+/// How the initial regions are labelled (§2.4, §4.1): which voxels of one phase partition count
+/// as connected.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "introspection", derive(serde::Serialize))]
+pub enum PreludeLabelling {
+    /// FSL `prelude`'s default: [`Slices`](Self::Slices) when the volume is more than
+    /// [`AUTO_SLICES_ABOVE`] voxels along either in-plane axis (the first two), otherwise
+    /// [`Volume`](Self::Volume). Every in-vivo acquisition is over that size, so in practice
+    /// this is slice labelling; small test volumes get FSL's full-3D labelling, as FSL gives
+    /// them. The rule was found by running FSL's binary on volumes of different shapes (module
+    /// docs).
+    #[default]
+    Auto,
+    /// Label each partition's connected components **within each slice** (4-connected in the
+    /// first two axes' plane, one slice of the third axis at a time), then merge the regions in
+    /// 3D. FSL's `--labelslices`, and its default on volumes over [`AUTO_SLICES_ABOVE`] voxels
+    /// in-plane: the planar restriction of the report's §4.1.
+    Slices,
+    /// Label each partition's 6-connected components over the whole volume, then merge them.
+    /// FSL `prelude -f`; the algorithm as the report's §2.4 states it.
+    Volume,
+}
+
+/// The in-plane size above which [`PreludeLabelling::Auto`] labels slice by slice: FSL `prelude`
+/// labels a 64×64×N volume in full 3D and a 65×N×M or N×65×M one slice by slice, whatever the
+/// slice count, voxel size or mask.
+pub const AUTO_SLICES_ABOVE: usize = 64;
+
+impl PreludeLabelling {
+    /// Stable id (`"auto"`, `"slices"`, `"volume"`).
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Slices => "slices",
+            Self::Volume => "volume",
+        }
+    }
+
+    /// The labelling used on a volume of `dims`: [`Auto`](Self::Auto) resolved, the others as
+    /// they are.
+    pub fn resolve(self, dims: (usize, usize, usize)) -> Self {
+        match self {
+            Self::Auto if dims.0 > AUTO_SLICES_ABOVE || dims.1 > AUTO_SLICES_ABOVE => Self::Slices,
+            Self::Auto => Self::Volume,
+            other => other,
+        }
+    }
+}
+
 /// Parameters for [`unwrap_prelude`].
+///
+/// The defaults are FSL `prelude`'s: 8 partitions, regions labelled slice by slice on volumes
+/// over 64 voxels in-plane. With them this module gives FSL's default output (see the module
+/// docs for the measured agreement).
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[cfg_attr(feature = "introspection", derive(serde::Serialize))]
 pub struct PreludeParams {
     /// Number of equal bins the phase range `[-π, π)` is cut into when forming the
-    /// initial regions (default: 6, the report's example; FSL's `prelude` defaults to 8).
+    /// initial regions (default: 8, FSL `prelude`'s default, its `-n`; the report's
+    /// worked example uses 6).
     ///
     /// More partitions means narrower bins, so a connected component is less likely
     /// to contain a wrap — at the price of more, smaller regions and a longer merge.
     /// Fewer means larger regions that are more likely to straddle a wrap, which the
     /// merge cannot undo: a region is committed to a single offset by construction.
     /// Must be at least 1; at 1 every in-mask component is one region and nothing is
-    /// unwrapped at all.
+    /// unwrapped within it.
     pub num_phase_partitions: usize,
+    /// How the initial regions are labelled (default: [`PreludeLabelling::Auto`], FSL
+    /// `prelude`'s default, which is slice by slice on any in-vivo volume;
+    /// [`PreludeLabelling::Slices`] is `prelude --labelslices`, [`PreludeLabelling::Volume`] is
+    /// `prelude -f`).
+    pub labelling: PreludeLabelling,
     /// Subtract the median wrap count from the result so the unwrapped phase stays
-    /// centred near the input range (default: false).
+    /// centred near the input range (default: true).
     ///
     /// Without it each connected set of regions carries an arbitrary integer multiple
-    /// of 2π. Mirrors [`BestPathParams::correct_global`](super::BestPathParams::correct_global)
-    /// and [`RomeoParams::correct_global`](super::RomeoParams::correct_global), which
-    /// default to false for the same reason: it is a convention, not a correction, and
-    /// multi-echo callers usually impose their own.
+    /// of 2π. The default is on because FSL's `prelude` output has a median in-mask wrap count
+    /// of 0 on every volume measured (see the module docs), so this is what reproduces it; it
+    /// also gives a multi-echo caller echoes whose constants are already near each other
+    /// before whole turns are aligned between them. Same operation as
+    /// [`BestPathParams::correct_global`](super::BestPathParams::correct_global) and
+    /// [`RomeoParams::correct_global`](super::RomeoParams::correct_global), which default to
+    /// false because their originals do not do it.
     pub correct_global: bool,
 }
 
 impl Default for PreludeParams {
     fn default() -> Self {
         Self {
-            num_phase_partitions: 6,
-            correct_global: false,
+            num_phase_partitions: 8,
+            labelling: PreludeLabelling::Auto,
+            correct_global: true,
         }
     }
 }
@@ -311,7 +428,7 @@ pub fn unwrap_prelude(
     }
 
     let (region_of, n_regions) =
-        label_regions(phase, mask, grid.dims, params.num_phase_partitions);
+        label_regions(phase, mask, grid.dims, params.num_phase_partitions, params.labelling);
     if n_regions == 0 {
         return unwrapped;
     }
@@ -353,6 +470,10 @@ fn phase_partition(v: f64, width: f64, partitions: usize) -> Option<usize> {
 /// Partition the phase range, label the connected components of each partition, and
 /// hand every component across every partition a unique region id (§2.4).
 ///
+/// With [`PreludeLabelling::Slices`] (or [`PreludeLabelling::Auto`] on a volume it resolves to
+/// slices for) a component is connected within one slice of the third axis only (4-connected in-plane), so no region spans two slices; the merge is 3D either way.
+/// Ids run partition by partition, and within a partition slice by slice.
+///
 /// Returns the per-voxel region map, [`NO_REGION`] where there is none, and the
 /// number of regions created.
 fn label_regions(
@@ -360,13 +481,28 @@ fn label_regions(
     mask: &[u8],
     dims: (usize, usize, usize),
     partitions: usize,
+    labelling: PreludeLabelling,
 ) -> (Vec<u32>, usize) {
     let n_total = phase.len();
+    let (nx, ny, nz) = dims;
+    let nxy = nx * ny;
     let width = TWO_PI / partitions as f64;
 
     let mut region_of = vec![NO_REGION; n_total];
     let mut partition_mask = vec![0u8; n_total];
     let mut next_id: u32 = 0;
+
+    // Label `partition_mask[range]` as a volume of `dims` and give its components the next ids.
+    let mut assign = |partition_mask: &[u8], offset: usize, dims: (usize, usize, usize)| {
+        let (labels, sizes) = label_components(partition_mask, dims, Connectivity::Face);
+        for (i, &l) in labels.iter().enumerate() {
+            if l != 0 {
+                region_of[offset + i] = next_id + l - 1;
+            }
+        }
+        // `sizes[0]` is the background slot, so the component count is one less.
+        next_id += (sizes.len() - 1) as u32;
+    };
 
     for bin in 0..partitions {
         for i in 0..n_total {
@@ -375,14 +511,18 @@ fn label_regions(
             partition_mask[i] = u8::from(inside);
         }
 
-        let (labels, sizes) = label_components(&partition_mask, dims, Connectivity::Face);
-        for i in 0..n_total {
-            if labels[i] != 0 {
-                region_of[i] = next_id + labels[i] - 1;
+        match labelling.resolve(dims) {
+            PreludeLabelling::Volume | PreludeLabelling::Auto => assign(&partition_mask, 0, dims),
+            // A single-slice volume's face neighbours are its in-plane 4-neighbours.
+            PreludeLabelling::Slices => {
+                for z in 0..nz {
+                    let slice = &partition_mask[z * nxy..(z + 1) * nxy];
+                    if slice.iter().any(|&v| v != 0) {
+                        assign(slice, z * nxy, (nx, ny, 1));
+                    }
+                }
             }
         }
-        // `sizes[0]` is the background slot, so the component count is one less.
-        next_id += (sizes.len() - 1) as u32;
     }
 
     (region_of, next_id as usize)
@@ -906,7 +1046,14 @@ mod tests {
             turns[turns.len() / 2]
         };
 
-        let plain = unwrap_prelude(&wrapped, &mask, &g, &PreludeParams::default());
+        // Full-3D labelling at 6 partitions: a setting where the arbitrary constant this
+        // volume ends up with is not already zero.
+        let base = PreludeParams {
+            num_phase_partitions: 6,
+            labelling: PreludeLabelling::Volume,
+            correct_global: false,
+        };
+        let plain = unwrap_prelude(&wrapped, &mask, &g, &base);
         assert_ne!(
             median_turns(&plain), 0.0,
             "the uncorrected result was already centred, so the test proves nothing"
@@ -916,7 +1063,7 @@ mod tests {
             &wrapped,
             &mask,
             &g,
-            &PreludeParams { correct_global: true, ..PreludeParams::default() },
+            &PreludeParams { correct_global: true, ..base },
         );
         assert_eq!(median_turns(&centred), 0.0, "corrected result is not centred");
 
@@ -939,7 +1086,11 @@ mod tests {
             &wrapped,
             &mask,
             &grid(nx, ny, nz),
-            &PreludeParams { num_phase_partitions: 1, ..PreludeParams::default() },
+            &PreludeParams {
+                num_phase_partitions: 1,
+                labelling: PreludeLabelling::Volume,
+                ..PreludeParams::default()
+            },
         );
         assert_eq!(out, wrapped);
     }
@@ -971,7 +1122,7 @@ mod tests {
 
         for partitions in [2usize, 3, 6, 12] {
             let (region_of, n_regions) =
-                label_regions(&wrapped, &mask, (nx, ny, nz), partitions);
+                label_regions(&wrapped, &mask, (nx, ny, nz), partitions, PreludeLabelling::Volume);
             assert!(n_regions > 0);
             let width = TWO_PI / partitions as f64;
             let mut lo = vec![f64::INFINITY; n_regions];
@@ -1000,11 +1151,70 @@ mod tests {
 
         let counts: Vec<usize> = [2usize, 4, 6, 12, 24]
             .iter()
-            .map(|&p| label_regions(&wrapped, &mask, (nx, ny, nz), p).1)
+            .map(|&p| label_regions(&wrapped, &mask, (nx, ny, nz), p, PreludeLabelling::Volume).1)
             .collect();
         for w in counts.windows(2) {
             assert!(w[1] > w[0], "region counts are not increasing: {counts:?}");
         }
+    }
+
+    #[test]
+    fn slice_labelling_keeps_every_region_in_one_slice() {
+        let (nx, ny, nz) = (16, 16, 8);
+        let nxy = nx * ny;
+        // Shallow along z, so the 3D components run through several slices.
+        let (_, wrapped) = wrap_field(nx, ny, nz, |i, j, k| 0.7 * i + 0.3 * j + 0.2 * k);
+        let mask = vec![1u8; nx * ny * nz];
+
+        for partitions in [1usize, 3, 8] {
+            let (slices, n_slices) =
+                label_regions(&wrapped, &mask, (nx, ny, nz), partitions, PreludeLabelling::Slices);
+            let (_, n_volume) =
+                label_regions(&wrapped, &mask, (nx, ny, nz), partitions, PreludeLabelling::Volume);
+            let mut slice_of = vec![usize::MAX; n_slices];
+            for (i, &r) in slices.iter().enumerate() {
+                assert_ne!(r, NO_REGION, "voxel {i} was left unlabelled");
+                let z = i / nxy;
+                let s = &mut slice_of[r as usize];
+                assert!(*s == usize::MAX || *s == z, "region {r} spans slices {s} and {z}");
+                *s = z;
+            }
+            // Each slice's partitions are labelled on their own, so a 3D component through
+            // several slices becomes at least one region per slice.
+            assert!(n_slices >= nz && n_slices > n_volume, "{n_slices} vs {n_volume}");
+        }
+    }
+
+    #[test]
+    fn slice_labelling_still_merges_across_slices() {
+        // One partition: each slice is a single region and the merge across z is all that
+        // unwraps, so a field that wraps only along z checks the 3D merge.
+        let (nx, ny, nz) = (6, 6, 12);
+        let (truth, wrapped) = wrap_field(nx, ny, nz, |_, _, k| 1.3 * k);
+        let mask = vec![1u8; nx * ny * nz];
+        let params = PreludeParams {
+            num_phase_partitions: 1,
+            labelling: PreludeLabelling::Slices,
+            ..PreludeParams::default()
+        };
+        let out = unwrap_prelude(&wrapped, &mask, &grid(nx, ny, nz), &params);
+        assert_unwrapped_to_constant(&out, &truth, &mask, 1e-9);
+    }
+
+    #[test]
+    fn the_defaults_are_fsls() {
+        let p = PreludeParams::default();
+        assert_eq!(p.num_phase_partitions, 8);
+        assert_eq!(p.labelling, PreludeLabelling::Auto);
+        assert!(p.correct_global);
+        let auto = PreludeLabelling::Auto;
+        assert_eq!(auto.resolve((64, 64, 200)), PreludeLabelling::Volume);
+        assert_eq!(auto.resolve((65, 10, 20)), PreludeLabelling::Slices);
+        assert_eq!(auto.resolve((10, 65, 20)), PreludeLabelling::Slices);
+        assert_eq!(PreludeLabelling::Slices.resolve((8, 8, 8)), PreludeLabelling::Slices);
+        assert_eq!(PreludeLabelling::Volume.resolve((256, 256, 8)), PreludeLabelling::Volume);
+        let ids: Vec<_> = [auto, PreludeLabelling::Slices, PreludeLabelling::Volume].map(|l| l.id()).into();
+        assert_eq!(ids, ["auto", "slices", "volume"]);
     }
 
     #[test]
@@ -1057,7 +1267,7 @@ mod tests {
             "test mask has {in_mask} voxels, not the report's ~31566"
         );
 
-        let (region_of, n_regions) = label_regions(&wrapped, &mask, (nx, ny, nz), 6);
+        let (region_of, n_regions) = label_regions(&wrapped, &mask, (nx, ny, nz), 6, PreludeLabelling::Volume);
         let mut sizes = vec![0usize; n_regions];
         for &r in &region_of {
             if r != NO_REGION {
@@ -1259,10 +1469,11 @@ mod tests {
         mask: &[u8],
         dims: (usize, usize, usize),
         partitions: usize,
+        labelling: PreludeLabelling,
     ) -> Vec<f64> {
         let (nx, ny, nz) = dims;
         let nxy = nx * ny;
-        let (region_of, n_regions) = label_regions(phase, mask, dims, partitions);
+        let (region_of, n_regions) = label_regions(phase, mask, dims, partitions, labelling);
 
         // Turns committed so far per region, and which merged set it belongs to.
         let mut turns = vec![0i64; n_regions];
@@ -1401,14 +1612,18 @@ mod tests {
         for (field_name, phase) in [("smooth", &smooth), ("noisy", &noisy)] {
             for (mask_name, mask) in [("full", &full), ("split", &split), ("blob", &blob)] {
                 for partitions in [2usize, 4, 6, 9] {
-                    let params = PreludeParams {
-                        num_phase_partitions: partitions,
-                        correct_global: false,
-                    };
-                    let fast = unwrap_prelude(phase, mask, &g, &params);
-                    let slow = merge_from_scratch_each_step(phase, mask, dims, partitions);
-                    println!("{field_name}/{mask_name}/{partitions} partitions");
-                    assert_same_solution(&fast, &slow, mask, dims);
+                    for labelling in [PreludeLabelling::Volume, PreludeLabelling::Slices] {
+                        let params = PreludeParams {
+                            num_phase_partitions: partitions,
+                            labelling,
+                            correct_global: false,
+                        };
+                        let fast = unwrap_prelude(phase, mask, &g, &params);
+                        let slow =
+                            merge_from_scratch_each_step(phase, mask, dims, partitions, labelling);
+                        println!("{field_name}/{mask_name}/{partitions} partitions, {labelling:?}");
+                        assert_same_solution(&fast, &slow, mask, dims);
+                    }
                 }
             }
         }

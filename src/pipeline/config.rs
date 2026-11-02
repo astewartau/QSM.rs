@@ -19,6 +19,7 @@ use crate::separation::{
     R2starQsmParams, SusepNetParams, WaveSepParams,
 };
 use crate::unwrap::romeo::RomeoParams;
+use crate::unwrap::PreludeParams;
 use crate::unwrap::LaplacianSolver;
 use crate::utils::multi_echo::{B0WeightType, EchoQuality, FitPpmComplexParams, LinearFitParams, RobustFitParams};
 use crate::utils::QsmartParams;
@@ -33,6 +34,12 @@ use crate::utils::QsmartParams;
 pub enum UnwrappingAlgorithm {
     Romeo,
     Laplacian,
+    /// PRELUDE ([`crate::unwrap::unwrap_prelude`], with
+    /// [`FieldMappingConfig::prelude_params`]): each echo unwrapped spatially on its own, as
+    /// FSL's `prelude` unwraps one volume, then whole turns aligned between echoes
+    /// ([`crate::unwrap::correct_multi_echo_wraps`]). The magnitude is not used: FSL's `prelude`
+    /// uses it only to make a mask when none is given, and here the mask is always given.
+    Prelude,
 }
 
 /// Whether an algorithm is valid when B0 does not lie along the voxel `+z` axis.
@@ -456,6 +463,11 @@ pub struct FieldMappingConfig {
     /// magnitude, no temporal re-unwrapping), which with the rest of this default config is the
     /// CLI's B0 pipeline. Which of the two QSMxT should default to is being measured (QSM.rs#319).
     pub romeo_params: RomeoParams,
+    /// PRELUDE's settings, used when `unwrapping_algorithm` is [`UnwrappingAlgorithm::Prelude`]
+    /// (default [`PreludeParams::default`]: FSL `prelude`'s defaults, 8 phase partitions with
+    /// regions labelled slice by slice, and the median wrap count removed per echo as FSL's
+    /// output has it).
+    pub prelude_params: PreludeParams,
 }
 
 /// The ROMEO command line's default phase-offset smoothing sigma, in mm (the default of
@@ -482,6 +494,7 @@ impl Default for FieldMappingConfig {
             laplacian_solver: LaplacianSolver::Dct,
             laplacian_unmasked: false,
             romeo_params: RomeoParams::default(),
+            prelude_params: PreludeParams::default(),
         }
     }
 }
@@ -887,11 +900,12 @@ impl SeparationAlgorithm {
 // the same choices, so a host's mapping is the identity wherever the two agree.
 
 impl UnwrappingAlgorithm {
-    /// Stable id (`"romeo"`, `"laplacian"`).
+    /// Stable id (`"romeo"`, `"laplacian"`, `"prelude"`).
     pub fn id(self) -> &'static str {
         match self {
             Self::Romeo => "romeo",
             Self::Laplacian => "laplacian",
+            Self::Prelude => "prelude",
         }
     }
 }

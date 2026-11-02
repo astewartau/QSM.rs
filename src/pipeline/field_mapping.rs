@@ -294,6 +294,13 @@ fn field_mapping_with_offset(
                 &config.romeo_params, &grid,
             )
         }
+        UnwrappingAlgorithm::Prelude => {
+            let mut u: Vec<Vec<f64>> = corrected.iter()
+                .map(|p| crate::unwrap::unwrap_prelude(p, mask, &grid, &config.prelude_params))
+                .collect();
+            align_per_echo_constants(&mut u, tes, mask, UnwrappingAlgorithm::Prelude);
+            u
+        }
     };
 
     // Step 4: B0 estimation
@@ -464,9 +471,10 @@ fn field_mapping_direct(
             hz_to_ppm(&b0_hz, metadata.field_strength)
         }
         B0EstimationMethod::LinearFit(params) => {
-            // Laplacian only: ROMEO's whole-turn alignment would change what this path has
-            // always computed for it.
-            if is_laplacian {
+            // Not ROMEO's: its whole-turn alignment would change what this path has always
+            // computed for it. PRELUDE's echoes are unwrapped independently, so their turns are
+            // aligned as for the weighted mean.
+            if config.unwrapping_algorithm != UnwrappingAlgorithm::Romeo {
                 align_per_echo_constants(&mut unwrapped, tes, mask, config.unwrapping_algorithm);
             }
             let uw_refs: Vec<&[f64]> = unwrapped.iter().map(|u| u.as_slice()).collect();
@@ -586,7 +594,8 @@ fn align_per_echo_constants(
                 remove_masked_mean(u, mask);
             }
         }
-        UnwrappingAlgorithm::Romeo => {
+        // Each echo's spatial unwrap leaves a whole number of turns undetermined.
+        UnwrappingAlgorithm::Romeo | UnwrappingAlgorithm::Prelude => {
             crate::unwrap::correct_multi_echo_wraps(unwrapped, tes, mask);
         }
     }
@@ -787,6 +796,9 @@ fn field_mapping_complex_fit(
                 mask, &config.romeo_params, &grid,
             )
         }
+        UnwrappingAlgorithm::Prelude => {
+            crate::unwrap::unwrap_prelude(&fit.field, mask, &grid, &config.prelude_params)
+        }
     };
 
     progress(3, 4);
@@ -828,6 +840,9 @@ fn unwrap_single(
                 mask, &config.romeo_params, &grid,
             )
         }
+        UnwrappingAlgorithm::Prelude => {
+            crate::unwrap::unwrap_prelude(phase, mask, &grid, &config.prelude_params)
+        }
     }
 }
 
@@ -849,6 +864,64 @@ mod tests {
             slice_geometry: None,
             affine: None,
         }
+    }
+
+    /// PRELUDE in the field-mapping stage: each echo unwrapped spatially, whole turns aligned
+    /// between echoes, then every echo combination. A wrapped linear field whose median wrap
+    /// count is 0 in every echo comes back exactly, on every path.
+    #[test]
+    fn prelude_recovers_a_wrapped_field_on_every_path() {
+        let (nx, ny, nz) = (16, 12, 6);
+        let n = nx * ny * nz;
+        let tes = vec![0.005, 0.010, 0.015, 0.020];
+        let meta = ScanMetadata {
+            dims: (nx, ny, nz), voxel_size: (1.0, 1.0, 1.0), echo_times: tes.clone(),
+            field_strength: 3.0, b0_direction: (0.0, 0.0, 1.0), slice_geometry: None, affine: None,
+        };
+        // rad/s, symmetric about 0, wrapping several times by the last echo.
+        let freq: Vec<f64> = (0..n).map(|i| 90.0 * ((i % nx) as f64 - 7.5) + 30.0 * ((i / nx % ny) as f64 - 5.5)).collect();
+        let phases: Vec<Vec<f64>> = tes.iter()
+            .map(|&te| freq.iter().map(|f| { let t = f * te; t.sin().atan2(t.cos()) }).collect())
+            .collect();
+        assert!(phases[3].iter().zip(&freq).any(|(p, f)| (p - f * 0.020).abs() > 1.0), "the field does not wrap");
+        let p: Vec<&[f64]> = phases.iter().map(|v| v.as_slice()).collect();
+        let ones = vec![1.0; n];
+        let mags: Vec<&[f64]> = (0..4).map(|_| ones.as_slice()).collect();
+        let mask = vec![1u8; n];
+        let truth = rads_to_ppm(&freq, 3.0);
+        let base = FieldMappingConfig { unwrapping_algorithm: UnwrappingAlgorithm::Prelude, phase_offset_removal: false, ..Default::default() };
+        let close = |got: &[f64], tol: f64, what: &str| {
+            let worst = got.iter().zip(&truth).map(|(a, b)| (a - b).abs()).fold(0.0, f64::max);
+            assert!(worst < tol, "{what}: off by {worst} ppm");
+        };
+        for b0 in [
+            B0EstimationMethod::default(),
+            B0EstimationMethod::LinearFit(LinearFitParams { estimate_offset: false }),
+            B0EstimationMethod::RobustFit(RobustFitParams::default()),
+        ] {
+            let config = FieldMappingConfig { b0_estimation: b0.clone(), ..base.clone() };
+            let got = run_field_mapping(&p, Some(&mags), &mask, &meta, &config, &mut |_, _| {}).unwrap();
+            close(&got.b0_field_ppm, 1e-9, b0.id());
+        }
+        // MCPC-3D-S first: its smoothed offset estimate is not exactly zero at the edges.
+        let offset = FieldMappingConfig { phase_offset_removal: true, ..base.clone() };
+        close(&run_field_mapping(&p, Some(&mags), &mask, &meta, &offset, &mut |_, _| {}).unwrap().b0_field_ppm, 1e-3, "mcpc-3d-s");
+        // One echo, and the complex fit (unwrapped once, per echo spacing).
+        close(&run_field_mapping(&p[..1], Some(&mags[..1]), &mask, &meta.echo(0), &base, &mut |_, _| {}).unwrap().b0_field_ppm, 1e-9, "single echo");
+        let complex = FieldMappingConfig { b0_estimation: B0EstimationMethod::ComplexFit(Default::default()), ..base.clone() };
+        close(&run_field_mapping(&p, Some(&mags), &mask, &meta, &complex, &mut |_, _| {}).unwrap().b0_field_ppm, 1e-3, "complex fit");
+        // The settings reach the unwrapper: a single partition labelled over the volume makes one
+        // region, which unwraps nothing.
+        let one = FieldMappingConfig {
+            prelude_params: crate::unwrap::PreludeParams {
+                num_phase_partitions: 1,
+                labelling: crate::unwrap::PreludeLabelling::Volume,
+                correct_global: false,
+            },
+            ..base.clone()
+        };
+        let got = run_field_mapping(&p[..1], None, &mask, &meta.echo(0), &one, &mut |_, _| {}).unwrap();
+        assert_eq!(got.b0_field_ppm, rads_to_ppm(&p[0].iter().map(|v| v / tes[0]).collect::<Vec<_>>(), 3.0));
     }
 
     #[test]

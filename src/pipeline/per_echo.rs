@@ -111,7 +111,7 @@ mod tests {
         let phases: Vec<Vec<f64>> = tes.iter().map(|&t| freq.iter().map(|f| f * t).collect()).collect();
         let refs: Vec<&[f64]> = phases.iter().map(|p| p.as_slice()).collect();
         let mask = vec![1u8; n];
-        for alg in [UnwrappingAlgorithm::Romeo, UnwrappingAlgorithm::Laplacian] {
+        for alg in [UnwrappingAlgorithm::Romeo, UnwrappingAlgorithm::Laplacian, UnwrappingAlgorithm::Prelude] {
             let single = FieldMappingConfig { unwrapping_algorithm: alg, ..Default::default() };
             let config = FieldMappingConfig {
                 b0_estimation: crate::pipeline::config::B0EstimationMethod::RobustFit(Default::default()),
