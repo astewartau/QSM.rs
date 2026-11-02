@@ -70,7 +70,15 @@ if not image:
     image = "localhost/qsm-ci/fsl-prelude:2603.0"
     with tempfile.TemporaryDirectory() as ctx:
         for path, sha in FILES.items():
-            open(f"{ctx}/{os.path.basename(path)}", "wb").write(qsmci_file(path, sha))
+            data = qsmci_file(path, sha)
+            if path.endswith("Dockerfile"):
+                # The micromamba base image's SHELL runs with pipefail under docker (podman's
+                # default OCI format ignores SHELL), and `prelude` with no arguments exits 1, so the
+                # Dockerfile's install check fails there. Same check, without that exit status.
+                check = b'/opt/fsl/bin/prelude 2>&1 | grep -q "Part of FSL"'
+                assert data.count(check) == 1, "the Dockerfile's install check changed"
+                data = data.replace(check, b'{ /opt/fsl/bin/prelude 2>&1 || true; } | grep -q "Part of FSL"')
+            open(f"{ctx}/{os.path.basename(path)}", "wb").write(data)
         subprocess.run([engine, "build", "-t", image, ctx], check=True)
 affine = np.diag([1.0, 1.0, 1.0, 1.0])
 with open(sys.argv[1], "wb") as f:
