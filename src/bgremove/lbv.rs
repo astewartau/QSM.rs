@@ -69,7 +69,9 @@
 //! `tests/data/lbv_cornell_small.bin` (`tests/lbv_cornell_parity.rs`; made with the container by
 //! `tests/data/lbv_cornell_small.py`), which also covers `peel`, explicit depths, another `tol`
 //! and other relaxation counts. The default, double precision, against the same mex: NRMSE
-//! 0.00077 % in silico and 0.0011 % in vivo (max |Δ| 5.9e-6 and 4.4e-6 rad).
+//! 0.00077 % in silico and 0.0011 % in vivo (max |Δ| 5.9e-6 and 4.4e-6 rad). QSM-CI's `lbv` pair
+//! (QSMxT, default double precision, run 41423039167): NRMSE 7.7e-4 % in silico and 0.0018 % on
+//! KKI (max |Δ| 3.9e-7 and 2.0e-6 ppm).
 //!
 //! Not ported: with `peel` > 0 mexMGv6 also writes the peeled mask to `mask_p<peel>.bin` in the
 //! working directory (and crashes MATLAB where it cannot write there).
