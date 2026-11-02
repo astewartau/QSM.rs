@@ -59,8 +59,7 @@
 //! licensed MATLAB R2023b), final-map χ NRMSE at both sides' defaults on QSM-CI's simulated head
 //! and the KKI travelling head (QSM-CI parity run 41403629314, QSM.rs#399–#403): sim 0.0015 %, KKI 0.00086 %, from
 //! 9.1 % / 7.1 % (sim / KKI) before. Three causes: the kernel, the Eq. 2 magnitude (QSMxT gave the root sum of squares) and the masked input. What remains is
-//! single (MATLAB) vs double (here) precision and FANSI's γ, 42.58 against the crate's 42.576
-//! (the wrappers keep theirs). Fixture: `tests/fansi_qsmci_parity.rs` (relative L2 below 1e-5
+//! single (MATLAB) vs double (here) precision (HD-QSM works in ppm, so no γ). Fixture: `tests/fansi_qsmci_parity.rs` (relative L2 below 1e-5
 //! on an oblique, anisotropic phantom).
 //!
 //! # Pipeline rules
