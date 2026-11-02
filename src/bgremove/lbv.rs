@@ -408,7 +408,7 @@ impl<T: Real> Mg<T> {
             let nxy = nx * ny;
             let s = 1usize << d;
             let (mask, interior) = if d == 0 {
-                (mask0.clone(), interior0.clone())
+                (mask0.clone(), std::mem::take(&mut interior0))
             } else {
                 // the coarse mask samples the peeled level-0 mask
                 let mut m = vec![false; n];
@@ -425,26 +425,24 @@ impl<T: Real> Mg<T> {
             let interior: Vec<usize> = (0..n).filter(|&i| interior[i]).collect();
 
             // ρ_d: the Laplacian of the total field sampled onto this level, with the finest
-            // voxel size, in initializeRho's order of operations.
-            let mut ti = vec![T::ZERO; n];
-            let mut tj = vec![T::ZERO; n];
-            let mut tk = vec![T::ZERO; n];
+            // voxel size, in initializeRho's order of operations (its tmpi/tmpj/tmpk are the
+            // sample times aux3, formed here where they are used: the same products).
+            let mut t = vec![T::ZERO; n];
             for z in 0..nz {
                 for y in 0..ny {
                     for x in 0..nx {
-                        let j = x + y * nx + z * nxy;
-                        let t = T::from_f64(ifreq[fine_index(x, y, z, s)]);
-                        ti[j] = t * aux3[0];
-                        tj[j] = t * aux3[1];
-                        tk[j] = t * aux3[2];
+                        t[x + y * nx + z * nxy] = T::from_f64(ifreq[fine_index(x, y, z, s)]);
                     }
                 }
             }
             let mut rho = vec![T::ZERO; n];
+            let [a0, a1, a2] = aux3;
             for &j in &interior {
-                rho[j] = tk[j + nxy] + tk[j - nxy] + tj[j + nx] + tj[j - nx] + ti[j + 1] + ti[j - 1]
-                    - T::TWO * (ti[j] + tj[j] + tk[j]);
+                rho[j] = t[j + nxy] * a2 + t[j - nxy] * a2 + t[j + nx] * a1 + t[j - nx] * a1 + t[j + 1] * a0
+                    + t[j - 1] * a0
+                    - T::TWO * (t[j] * a0 + t[j] * a1 + t[j] * a2);
             }
+            drop(t);
 
             levels.push(Level { nx, ny, nz, mask, interior, rho, v: vec![T::ZERO; n], res: vec![T::ZERO; n] });
             // (1 + n) / 2
