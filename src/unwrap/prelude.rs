@@ -82,7 +82,7 @@
 //!
 //! | here | FSL | sim | KKI | Prisma e1 |
 //! |---|---|---|---|---|
-//! | **defaults** (auto = slices here, 8) | `prelude` | 0 on echoes 1–3 (echo 4: below) | 0 on all 5 echoes | 0 |
+//! | **defaults** (auto = slices here, 8) | `prelude` | 0 on all 4 echoes | 0 on all 5 echoes | 0 |
 //! | slices, 6 | `prelude -n 6` | 0 on all 4 echoes | 0 on echoes 1–4; 7 voxels (0.0005 %) on echo 5 | — |
 //! | full 3D, 8 | `prelude -f` | 0 on all 4 echoes | 0 on all 5 echoes | 0 |
 //! | full 3D, 6 | `prelude -f -n 6` | 0 on all 4 echoes | 0 on all 5 echoes | — |
@@ -93,8 +93,8 @@
 //! with `-f`), which is what 4-connected labelling of the third axis's slices gives, and not the
 //! other two axes'. FSL writes 0 outside the mask. FSL's default run took 31 min on KKI and,
 //! with the simulation's four echoes in one 4-D run, did not finish; run one echo at a time it
-//! took 72 s and 492 s on echoes 2 and 3; echo 4 (118208 regions) was still running when this was
-//! written.
+//! took 72 s, 492 s and 1964 s on echoes 2 to 4 (31618 to 118208 regions); this module takes
+//! 0.4 to 1.5 s per echo there.
 //!
 //! **When FSL's default labels slices** ([`PreludeLabelling::Auto`]): only when the volume is over
 //! 64 voxels along its first or second axis. 64×64×5, 64×64×64, 64×64×128, 40×36×200 and
