@@ -1412,7 +1412,9 @@ pub static RULES: &[Rule] = &[
         source: "QSM.rs heidi.rs docs (Any seed); run_heidi_cone_fill",
     },
     // The seed rules name the seeds they are about in `expect` (none of them), not in `when`, so
-    // each fires on its own seeds only and is resolved by the seed it names.
+    // each fires on its own seeds only and is resolved by the seed it names. Every seed but LSQR
+    // is offered LSQR: recommended for the unregularised seeds and RTS, discouraged (with the
+    // reason) for the regularised ones, required where there is no local field.
     Rule {
         id: "heidi.seed-lsqr",
         when: &[HEIDI_ON],
@@ -1433,8 +1435,8 @@ pub static RULES: &[Rule] = &[
         expect: Test::NoneOf { values: &[Choice("rts")] },
         default: Choice("lsqr"),
         unit: Unit::None,
-        strength: Strength::Reference,
-        basis: Basis::ReferenceChoice,
+        strength: Strength::Recommended,
+        basis: Basis::Stated,
         reason: "HEIDI's reference seed is LSQR; RTS already splits k-space at the cone and fills it \
                  with TV of its own",
         source: "Schweser et al. 2012 NeuroImage 62:2083 (HEIDI); Kames et al. 2018 NeuroImage 167:276 (RTS)",
@@ -1552,6 +1554,23 @@ mod tests {
     }
     fn linear_fit(c: &mut Case) {
         c.cfg.field_mapping.b0_estimation = B0EstimationMethod::LinearFit(Default::default());
+    }
+
+    /// With HEIDI on, every inversion but LSQR gets a finding that offers LSQR: recommended,
+    /// discouraged (with its reason) or required, never only information.
+    #[test]
+    fn heidi_offers_lsqr_for_every_other_seed() {
+        for &a in InversionAlgorithm::VARIANTS {
+            let mut case = Case::new(|c| { inversion(a)(c); c.cfg.inversion.apply_heidi = true });
+            // TKD/TSVD at the cone threshold, so their truncation rule does not fire too.
+            case.cfg.inversion.tkd.threshold = 0.1;
+            case.cfg.inversion.tsvd.threshold = 0.1;
+            let lsqr = evaluate(&case.input(), &case.facts).into_iter().filter(|f| {
+                f.rule.setting == "inversion.algorithm" && f.rule.id.starts_with("heidi.")
+                    && f.rule.default == Choice("lsqr") && f.rule.strength > Strength::Reference
+            }).count();
+            assert_eq!(lsqr > 0, a != InversionAlgorithm::Lsqr, "{a:?}: {:?}", case.ids());
+        }
     }
 
     /// A configuration that violates each rule, keyed by rule id.
