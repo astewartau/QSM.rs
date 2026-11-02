@@ -420,7 +420,7 @@ pub const SETTINGS: &[(&str, &str)] = &[
     ("bg_removal.ismv.tol", "iSMV's stopping tolerance (IsmvParams::tol); only with iSMV"),
     ("bg_removal.ismv.max_iter", "iSMV's iteration cap (IsmvParams::max_iter); no cap reads as +∞ (null in JSON); only with iSMV"),
     ("bg_removal.resharp.radius", "RESHARP's kernel radius, mm; only with RESHARP"),
-    ("bg_removal.resharp.max_iter", "RESHARP's CG iteration cap; only with RESHARP"),
+    ("bg_removal.resharp.max_iter", "RESHARP's cgs iteration cap; only with RESHARP"),
     ("bg_removal.pdf.n_cg", "PDF's CG iteration cap (PdfParams::n_cg); only with PDF"),
     ("inversion.algorithm", "Dipole inversion (InversionAlgorithm::id)"),
     ("inversion.star.pad", "STAR-QSM padding per side, voxels (StarParams::pad)"),
@@ -1250,7 +1250,7 @@ pub static RULES: &[Rule] = &[
         unit: Unit::None,
         strength: Strength::Reference,
         basis: Basis::ReferenceChoice,
-        reason: "RESHARP's author's code allows its CG solve up to 200 iterations",
+        reason: "RESHARP's author's code allows its cgs solve up to 200 iterations",
         source: "sunhongfu/QSM background_field_removal/resharp.m l. 32-34, 92",
     },
     Rule {

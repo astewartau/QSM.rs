@@ -22,6 +22,16 @@
 //! followed by TV (`tvdi`) or iLSQR. [`ResharpParams::default`] follows `resharp.m`'s own
 //! defaults (3 mm, λ = 1e-4, at most 200 iterations), not this driver's λ and iterations.
 //!
+//! # Parity
+//! Against `resharp.m` as the verified QSM-CI `resharp` container runs it (identical to licensed
+//! MATLAB R2023b): the fixture `tests/resharp_sunhongfu_parity.rs` (anisotropic voxels; converged,
+//! another kernel and λ, and a 5-iteration cap) agrees to 1e-14 relative with identical eroded
+//! masks, and the QSM-CI `resharp` pair (QSM-CI's simulated head and the KKI travelling head)
+//! agrees at the container's float32 output (KKI 2.5e-6 % NRMSE, astewartau/QSM.rs#404). Until
+//! #404 the port solved by conjugate gradients, which stops unconverged at 200 iterations where
+//! `cgs` converges (3.06 % on KKI); it also used a ball of radius `r` mm instead of `resharp.m`'s
+//! `round(r/voxel)`-voxel ellipsoid, and did not pad.
+//!
 //! Reference:
 //! Sun, H. and Wilman, A.H. (2013).
 //! "Background field removal using spherical mean value filtering and Tikhonov regularization."
@@ -35,8 +45,8 @@
 use num_complex::Complex64;
 use crate::Grid;
 use crate::fft::{fft3d, ifft3d, fft_real_kernel};
-use crate::kernels::smv::{smv_kernel, erode_mask_smv};
-use crate::solvers::cg_solve_with_progress;
+use crate::kernels::smv::erode_mask_smv;
+use crate::solvers::cgs_solve_with_progress;
 
 /// RESHARP algorithm parameters.
 ///
@@ -58,19 +68,17 @@ use crate::solvers::cg_solve_with_progress;
 #[cfg_attr(feature = "introspection", derive(serde::Serialize))]
 #[derive(Clone, Debug)]
 pub struct ResharpParams {
-    /// SMV kernel radius in mm (default 3, `resharp.m`'s `ker_rad`). QSM.rs previously used 6 mm,
-    /// which had no source.
+    /// SMV kernel radius in mm (default 3, `resharp.m`'s `ker_rad`); per axis it is
+    /// `round(radius/voxel)` voxels, at least 2 ([`resharp_kernel_radii`]), so the kernel is an
+    /// ellipsoid on anisotropic voxels. QSM.rs previously used 6 mm, which had no source.
     pub radius: f64,
     /// Tikhonov regularization parameter (default 1e-4, `resharp.m`'s `tik_reg`)
     pub tik_reg: f64,
-    /// Relative residual tolerance of the solve (default 1e-6, as `resharp.m` passes to `cgs`)
+    /// Relative residual tolerance of the `cgs` solve (default 1e-6, as `resharp.m` passes it)
     pub tol: f64,
-    /// Maximum solver iterations (default 200, `resharp.m`'s `iter_num`). `resharp.m` solves the
-    /// same normal equations `(H'H + λ)x = H'H y` with MATLAB's `cgs`; this runs conjugate
-    /// gradients (the matrix is symmetric positive definite), one operator call per iteration
-    /// where `cgs` makes two, so the cap is the author's count, not the same amount of work.
-    /// QSM.rs previously defaulted to 30, which had no source and stopped well short of the
-    /// tolerance.
+    /// Maximum `cgs` iterations (default 200, `resharp.m`'s `iter_num`), each making two operator
+    /// calls as MATLAB's `cgs` does. QSM.rs previously defaulted to 30, which had no source and
+    /// stopped well short of the tolerance.
     pub max_iter: usize,
 }
 
@@ -85,7 +93,52 @@ impl Default for ResharpParams {
     }
 }
 
-/// RESHARP background field removal
+/// The kernel radius in voxels per axis, as `resharp.m` (l. 37-42): `round(radius/voxel)`, at
+/// least 2.
+pub fn resharp_kernel_radii(grid: &Grid, radius: f64) -> [usize; 3] {
+    let (vx, vy, vz) = grid.voxel_size;
+    // MATLAB's round: half away from zero, as f64::round.
+    [vx, vy, vz].map(|v| ((radius / v).round() as usize).max(2))
+}
+
+/// `resharp.m`'s kernel (l. 43-45): the voxels of the `rx×ry×rz` ellipsoid
+/// (`X²/rx² + Y²/ry² + Z²/rz² ≤ 1`, in voxels), normalised to sum 1, centred at index (0,0,0)
+/// of an `n` grid for FFT use (Fortran order).
+fn resharp_kernel(n: (usize, usize, usize), r: [usize; 3]) -> Vec<f64> {
+    let (nx, ny, nz) = n;
+    let [rx, ry, rz] = r.map(|v| v as i64);
+    let mut s = vec![0.0; nx * ny * nz];
+    let mut count = 0.0;
+    let wrap = |d: i64, n: usize| if d < 0 { (d + n as i64) as usize } else { d as usize };
+    for z in -rz..=rz {
+        for y in -ry..=ry {
+            for x in -rx..=rx {
+                let e = (x * x) as f64 / (rx * rx) as f64 + (y * y) as f64 / (ry * ry) as f64
+                    + (z * z) as f64 / (rz * rz) as f64;
+                if e <= 1.0 {
+                    s[wrap(x, nx) + nx * (wrap(y, ny) + ny * wrap(z, nz))] = 1.0;
+                    count += 1.0;
+                }
+            }
+        }
+    }
+    s.iter_mut().for_each(|v| *v /= count);
+    s
+}
+
+/// RESHARP background field removal, as `resharp.m` (sunhongfu/QSM c75b138).
+///
+/// Like `resharp.m`, it zero-pads the field and mask by the kernel radius (l. 52-53), erodes
+/// the mask to the voxels whose kernel-weighted mean of the mask exceeds 0.999999 (l. 57-60),
+/// solves `(H'H + λ)x = H'H y` (`H = M·ifft(DKER·fft(·))`, `DKER = δ − kernel`) with MATLAB's
+/// `cgs` at tolerance 1e-6 ([`crate::solvers::cgs_solve_with_progress`]: conjugate gradients
+/// squared with `cgs`'s stopping rules and returned iterate, l. 92), masks the result and crops
+/// the padding. `resharp.m` builds `DKER` from the kernel stored at index `(r+1)` and undoes the
+/// shift with `circshift`; this centres the kernel at index 0, the same operator.
+///
+/// Parity (QSMxT/QSM-CI `resharp` pair, run in astewartau/QSM.rs#404): the port previously ran
+/// conjugate gradients, which a numpy `resharp.m` showed to be exactly the 3.06 % (KKI) /
+/// 0.65 % (sim) gap: CG stops unconverged at 200 iterations where `cgs` converges in 199.
 ///
 /// # Arguments
 /// * `field` - Unwrapped total field (nx * ny * nz)
@@ -104,37 +157,43 @@ pub fn resharp(
     mut progress: impl FnMut(usize, usize),
 ) -> (Vec<f64>, Vec<u8>) {
     let (nx, ny, nz) = grid.dims;
-    let n_total = nx * ny * nz;
+    let r = resharp_kernel_radii(grid, params.radius);
+    let (px, py, pz) = (nx + 2 * r[0], ny + 2 * r[1], nz + 2 * r[2]);
+    let n_pad = px * py * pz;
+    let pidx = |i: usize, j: usize, k: usize| (i + r[0]) + px * ((j + r[1]) + py * (k + r[2]));
 
-    // Generate SMV kernel and FFT
-    let s_kernel = smv_kernel(grid, params.radius);
-    let s_fft = fft_real_kernel(&s_kernel, nx, ny, nz);
+    let mut field_p = vec![0.0; n_pad];
+    let mut mask_p = vec![0u8; n_pad];
+    for k in 0..nz {
+        for j in 0..ny {
+            for i in 0..nx {
+                let s = i + nx * (j + ny * k);
+                field_p[pidx(i, j, k)] = field[s];
+                mask_p[pidx(i, j, k)] = mask[s];
+            }
+        }
+    }
+    let pgrid = Grid::new(px, py, pz, grid.voxel_size.0, grid.voxel_size.1, grid.voxel_size.2);
 
-    // DKER = 1 - S (high-pass / delta-kernel) in k-space
+    let s_kernel = resharp_kernel((px, py, pz), r);
+    let s_fft = fft_real_kernel(&s_kernel, px, py, pz);
+    // DKER = 1 - S (delta minus kernel) in k-space
     let dker: Vec<f64> = s_fft.iter().map(|&s| 1.0 - s).collect();
 
-    // Erode mask via SMV convolution
-    let eroded_mask = erode_mask_smv(mask, &s_fft, grid, 1.0 - 1e-7_f64.sqrt());
-    let eroded_mask_f64: Vec<f64> = eroded_mask.iter()
-        .map(|&m| m as f64)
-        .collect();
+    // resharp.m: mask_ero(convn(mask, ker, 'same') > 0.999999) = 1
+    let eroded_p = erode_mask_smv(&mask_p, &s_fft, &pgrid, 0.999999);
+    let eroded_f64: Vec<f64> = eroded_p.iter().map(|&m| m as f64).collect();
 
-    // Compute RHS: b = H'(H(field))
-    // H(x) = M * ifft(DKER * fft(x))
-    // H'(y) = ifft(DKER * fft(M * y))   [DKER is real so conj(DKER) = DKER]
-    //
-    // b = ifft(DKER * fft(M * ifft(DKER * fft(field))))
-    let b = apply_ht_h(&dker, &eroded_mask_f64, field, nx, ny, nz);
+    // b = H'(H(field))
+    let b = apply_ht_h(&dker, &eroded_f64, &field_p, px, py, pz);
 
-    // Solve (H'H + λI)x = b via CG
     let tik_reg = params.tik_reg;
-    let x0 = vec![0.0; n_total];
-    let x = cg_solve_with_progress(
+    let x0 = vec![0.0; n_pad];
+    let (x, _report) = cgs_solve_with_progress(
         |x_vec| {
-            let mut result = apply_ht_h(&dker, &eroded_mask_f64, x_vec, nx, ny, nz);
-            // Add Tikhonov term: + λx
-            for i in 0..n_total {
-                result[i] += tik_reg * x_vec[i];
+            let mut result = apply_ht_h(&dker, &eroded_f64, x_vec, px, py, pz);
+            for (ri, &xi) in result.iter_mut().zip(x_vec) {
+                *ri += tik_reg * xi;
             }
             result
         },
@@ -145,12 +204,20 @@ pub fn resharp(
         &mut progress,
     );
 
-    // Apply eroded mask to result
-    let local_field: Vec<f64> = x.iter()
-        .enumerate()
-        .map(|(i, &v)| if eroded_mask[i] == 1 { v } else { 0.0 })
-        .collect();
-
+    let mut local_field = vec![0.0; nx * ny * nz];
+    let mut eroded_mask = vec![0u8; nx * ny * nz];
+    for k in 0..nz {
+        for j in 0..ny {
+            for i in 0..nx {
+                let p = pidx(i, j, k);
+                let s = i + nx * (j + ny * k);
+                if eroded_p[p] == 1 {
+                    local_field[s] = x[p];
+                    eroded_mask[s] = 1;
+                }
+            }
+        }
+    }
     (local_field, eroded_mask)
 }
 
