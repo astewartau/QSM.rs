@@ -28,7 +28,7 @@ pub use romeo::{
     RomeoParams, RomeoWeightType,
 };
 pub use bestpath::{unwrap_bestpath, BestPathParams};
-pub use prelude::{unwrap_prelude, PreludeParams};
+pub use prelude::{unwrap_prelude, PreludeLabelling, PreludeParams};
 pub use slicewise::{
     unwrap_slicewise, unwrap_slicewise_multi_echo, enforce_inter_echo_consistency,
     SliceWiseParams,

@@ -15,7 +15,7 @@
 //! periodic-boundary flags, so there are no reference defaults to match beyond those
 //! [`BestPathParams`] documents. It assumes nothing about voxel size, field strength or
 //! orientation (reliabilities are unscaled second differences). It is not selectable in the
-//! QSM pipeline's `field_mapping.unwrapping_algorithm` (ROMEO or Laplacian); it is available as
+//! QSM pipeline's `field_mapping.unwrapping_algorithm` (ROMEO, Laplacian or PRELUDE); it is available as
 //! [`UnwrapMethod::BestPath`](super::UnwrapMethod::BestPath) to the slice-wise unwrapper and to
 //! MCPC-3D-S's HIP unwrapping, and its reliabilities as ROMEO's `:bestpath` weights.
 //!

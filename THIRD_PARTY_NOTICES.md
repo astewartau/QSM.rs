@@ -75,6 +75,11 @@ deliberate rather than an oversight: the FSL licence permits non-commercial use 
 and extends to "the Software or any derivative of it", which is incompatible with this
 crate's MIT licence. Anyone extending `prelude.rs` should work from the report too.
 
+FSL's `prelude` *binary* was run as a black box to compare outputs (QSM.rs#397). What that
+established (its default of 8 phase partitions and slice-by-slice region labelling, the report's
+§4.1 planar restriction) came from its documented options, its `-v` output and its results, not
+from its code.
+
 ---
 
 ## MRtrix3 — `mrdegibbs` (`cpp/core/degibbs/unring1d.h`, `unring2d.h`, `unring3d.h`)
