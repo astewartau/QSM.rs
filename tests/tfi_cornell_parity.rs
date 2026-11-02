@@ -53,7 +53,8 @@ fn tfi_matches_the_tfi_cornell_container() {
         println!("{name}: max|Δ| {max:.2e} ppm, relative L2 {rel:.2e} (default kernel: {rel_dft:.2e}, double precision: {rel_double:.2e})");
         // Measured 2026-11-02: one step 2.9e-6 (single-precision rounding), defaults 4.7e-4 (double
         // precision 4.7e-3). MATLAB itself moves 7e-4 on this case for 1e-7 relative noise on the
-        // field: the 100-iteration CG solves at cg_tol 0.01 amplify rounding.
+        // field, and the container differs from itself by 3.0e-4 on another CPU: the 100-iteration
+        // CG solves at cg_tol 0.01 in single precision amplify rounding.
         assert!(rel < 2e-3, "{name}: max|Δ| {max:e}, relative L2 {rel:e}");
         assert!(rel_dft > 10.0 * rel, "{name}: the default kernel should not match on an odd grid");
     }

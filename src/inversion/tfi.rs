@@ -45,7 +45,7 @@
 //!   single(N_std)` makes the data weight single, and MATLAB's mixed arithmetic carries that into
 //!   everything). On the fixture's small odd phantom (`tests/tfi_cornell_parity.rs`) the port with
 //!   both options is 2.9e-6 relative after one Gauss-Newton step and 4.7e-4 with all defaults; in
-//!   double precision 4.7e-3.
+//!   double precision 4.7e-3. The container itself differs by 3.0e-4 there on another CPU.
 //!
 //! Beyond that the original is not reproducible at full size: its 100-iteration CG solves at
 //! `cg_tol` 0.01 in single precision amplify rounding. In the same container, 1e-7 relative noise

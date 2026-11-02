@@ -17,6 +17,9 @@
 # only, so it is the same bits; its field (radians) divided by medi_phantom.rs's ppm_to_rad is the
 # total field. The odd grid is what exercises dipole_kernel.m's half-step k grid. Layout
 # (little-endian, column-major over the 31×36×27 grid, n voxels): per case in CASES order, χ (f32).
+# machine-dependent: the container's MATLAB runtime runs MEDI_L1 in single precision with MKL FFTs,
+# which round differently on other CPUs; a GitHub-hosted runner's regeneration differed by 1.1e-6
+# (one step) and 3.0e-4 (defaults) relative, about the port's own distance from it.
 import json, os, shutil, struct, subprocess, sys, tempfile
 import numpy as np, nibabel as nib
 
