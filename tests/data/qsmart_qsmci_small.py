@@ -2,9 +2,12 @@
 # verified QSM-CI container runs it, on a small multi-echo vessel phantom, with every intermediate,
 # for tests/qsmart_qsmci_parity.rs.
 #
-# Original: ghcr.io/astewartau/qsm-ci/matlab-qsmart@sha256:e0e8bc6957c5346905136bfb02d330ca5f66eab510bf2a9893015a9dc4e0c3f6
-# (qsmart-matlab v3: bit-identical to licensed MATLAB R2023b with the real Image Processing Toolbox
-# in the final χ and every intermediate, in silico and in vivo; QSMxT/QSM-CI#296). Its recon.m runs
+# Original: ghcr.io/astewartau/qsm-ci/matlab-qsmart@sha256:01f36e868bcacf494914b498b8f1cfc39480e533b0b654519e4476c19e532493
+# (qsmart-matlab v4: bit-identical to licensed MATLAB R2023b with the real Image Processing Toolbox
+# in the final χ and every intermediate, in silico and in vivo; QSMxT/QSM-CI#296). v4 runs on the
+# matrix as given, as the authors' QSMART.m does; v3 zero-padded odd dimensions to even. This grid is
+# even in every dimension, so the two give the same output here, and the offset adjustment's
+# k-grid choice (QSM.rs's `QsmartOffsetGrid`, which only differs on odd grids) does not arise. Its recon.m runs
 # QSMART.m's pipeline at Demo_QSMART.m's settings (γ = 2.675e8 rad/s/T, Frangi scales 0.5-6 in
 # steps of 0.5, C 500, bottom-hat radius 8, fit_threshold 40, SDF radius 8, σ (10, 0) then (8, 2),
 # lower limit 0.6, curvature constant 500, STI Suite's QSM_iLSQR at 'niter' 50):
@@ -33,7 +36,7 @@
 import json, os, shutil, subprocess, sys, tempfile
 import numpy as np, nibabel as nib
 
-IMAGE = "ghcr.io/astewartau/qsm-ci/matlab-qsmart@sha256:e0e8bc6957c5346905136bfb02d330ca5f66eab510bf2a9893015a9dc4e0c3f6"
+IMAGE = "ghcr.io/astewartau/qsm-ci/matlab-qsmart@sha256:01f36e868bcacf494914b498b8f1cfc39480e533b0b654519e4476c19e532493"
 DIMS = (36, 36, 28)
 B0, TE = 3.0, [0.004, 0.008, 0.012]
 GYRO = 2.675e8  # QSMART's γ (rad/s/T), as recon.m's params.gyro

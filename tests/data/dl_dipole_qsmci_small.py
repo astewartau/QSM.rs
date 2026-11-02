@@ -38,7 +38,7 @@
 import hashlib, json, os, shutil, subprocess, sys, tempfile, urllib.request
 import numpy as np, nibabel as nib
 
-QSMCI_COMMIT = "271a49bbc24d70c8e31e1642d79f6d5ac74a368d"  # QSMxT/QSM-CI#316
+QSMCI_COMMIT = "a6057fceb60b3e2833772afc0ba430a146fda700"  # QSMxT/QSM-CI#316
 ENTRIES = {
     "xqsm": ("ghcr.io/astewartau/qsm-ci/xqsm@sha256:f28dabe6f7f41db967133a022f3eb5205d2a2bbb5fab78117d58b1fb84b26444",
              {"run.sh": "637a9bfbfaea4d6c7b365a6e8b9baf8c1921ee4b02587e132cafca0990fad6a2"}, {}),
@@ -56,7 +56,7 @@ ENTRIES = {
                 "recon.py": "611330c14d2e8d2336ce4772feed6a5b24b9a93b16ecd40d472c656becd37a98"}, {}),
     "modl-qsm": ("ghcr.io/astewartau/qsm-ci/modl-qsm@sha256:75ada9f042b203a3398731efd1a552a974b1176dec8e1e30c683bffdeb73063e",
                  {"run.sh": "0342835e5fb88efc7ed8b5825e04817862c9099695c9e46a260a6c0e9ab68464",
-                  "recon.py": "c11dda54603e415688df651d89bdc8bcc7a055cab74cb28595e15b63a1c082ba"}, {}),
+                  "recon.py": "3069986eaeeefa9f1a97124100fdadd9914e6e08a09b3c467067e8e784191ede"}, {}),
     "ir2qsm": ("ghcr.io/astewartau/qsm-ci/ir2qsm@sha256:7df8887acc7cdfac4ea3ec845377c3d0b595975c3d240cd1ee63e826908c98ca",
                {"run.sh": "0d98845bfefde941ba3ca6890b90194b1c0a25abb3a9d5037e4125a31f55c822",
                 "ir2qsm_infer.py": "b8606150df8f19443062ef4e14044a426b6932dfc0dc7e3151295335fd538db4"},
