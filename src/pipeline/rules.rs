@@ -1468,8 +1468,8 @@ pub static RULES: &[Rule] = &[
         "DECOMPOSE's χ of each echo was reconstructed with STAR-QSM",
         "Chen et al. 2021 NeuroImage 242:118477 (DECOMPOSE), §3.6"),
     recommend("decompose.qsm-per-echo", &[sep(&[Choice("decompose")])], "qsm_per_echo", &[Bool(true)],
-        "DECOMPOSE's authors use the QSM of each echo, χ(t), instead of the average QSM across \
-         echoes, and state that a TE-dependent QSM input is necessary",
+        "DECOMPOSE's authors reconstruct a QSM for each echo, χ(t), rather than one QSM from all \
+         echoes combined, and state that a TE-dependent QSM input is necessary",
         "Chen et al. 2021 NeuroImage 242:118477 (DECOMPOSE), §2.2, §4.1; STAR-QSM per echo §3.6"),
     measured_better("decompose.unwrap-7t",
         &[sep(&[Choice("decompose")]), fact_at_least(Fact::FieldStrength, DECOMPOSE_UNWRAP_FROM_T)],
