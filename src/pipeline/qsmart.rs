@@ -55,11 +55,16 @@
 //! identical; the total field (Laplacian unwrapping and the echo fit) differs by a constant 4.3e-3
 //! ppm, the Laplacian's free constant, and by NRMSE 0.024 % without it; SDF stage 1 by 3.8e-5 %
 //! and stage 2 by 1.6e-5 % (float32 rounding of the fixture; the 10.9 % / 2.1 % before
-//! astewartau/QSM.rs#370 were the curvature step, #320); iLSQR stage 1 by 0.15 % and stage 2 by
-//! 0.094 % (not precision or input rounding: an open gap, astewartau/QSM.rs#396; see
-//! [`ilsqr`](fn@crate::inversion::ilsqr)); and the offset adjustment is identical (2e-7 %, float32
-//! rounding of the fixture). End to end from the container's total field and `R_0`, [`run_qsmart`]
-//! is **0.094 %** from the toolbox's χ (14.7 % before #370). On QSM-CI's full-size data, the
+//! astewartau/QSM.rs#370 were the curvature step, #320); iLSQR stage 1 by 1.0e-4 % and stage 2 by
+//! 1.0e-3 %, STI's single-precision floor (0.15 % / 0.094 % before astewartau/QSM.rs#396, the
+//! dipole kernel's rounding on the magic angle; see [`ilsqr`](fn@crate::inversion::ilsqr)); and
+//! the offset adjustment is identical (2e-7 %, float32 rounding of the fixture). End to end from
+//! the container's total field and `R_0`, [`run_qsmart`] is **1.0e-3 %** from the toolbox's χ
+//! (14.7 % before #370, 0.094 % before #396). These iLSQR numbers apply the original's γ
+//! mismatch: QSMART turns ppm into rad/s with its γ = 2.675e8 rad/s/T, and STI's `QSM_iLSQR`
+//! turns rad/s back with 2π·42.575 MHz/T, so the original's χ is 2.2e-5 (relative) below the χ
+//! its field implies. QSM.rs uses one γ throughout and does not reproduce that (2.5e-3 %
+//! without it). On QSM-CI's full-size data, the
 //! `qsmart` parity pair (QSMxT/QSM-CI#355, total field and `R_0` fed, `qsmart-reference` offset
 //! grid on the odd-sized sim) is 0.359 % on the sim and 0.779 % on the KKI travelling head.
 //!
