@@ -135,7 +135,7 @@ use std::f64::consts::PI;
 use crate::Grid;
 use super::laplacian::{laplacian_unwrap, wrap, LaplacianSolver};
 use super::{
-    unwrap_bestpath, unwrap_prelude, unwrap_romeo, BestPathParams, PreludeParams, RomeoParams,
+    unwrap_bestpath, unwrap_prelude, unwrap_romeo, BestPathParams, RomeoParams,
     UnwrapMethod,
 };
 use crate::grid::SliceLayout;
@@ -156,8 +156,6 @@ pub struct SliceWiseParams {
     pub romeo: RomeoParams,
     /// Parameters for [`UnwrapMethod::BestPath`]; ignored by the other methods.
     pub bestpath: BestPathParams,
-    /// Parameters for [`UnwrapMethod::Prelude`]; ignored by the other methods.
-    pub prelude: PreludeParams,
     /// Make each slice's leftover `2*pi*k` the same across echoes, so a fit across echoes
     /// cancels it (default: true). Multi-echo only; see the module docs.
     pub enforce_inter_echo_consistency: bool,
@@ -169,7 +167,6 @@ impl Default for SliceWiseParams {
             slice_axis: 2,
             romeo: RomeoParams::default(),
             bestpath: BestPathParams::default(),
-            prelude: PreludeParams::default(),
             enforce_inter_echo_consistency: true,
         }
     }
@@ -319,7 +316,7 @@ pub fn unwrap_slicewise(
             // components, so the pieces are already independent. The same holds for
             // PRELUDE: regions only interface within a connected piece of the mask.
             UnwrapMethod::BestPath => unwrap_bestpath(&p, &k, &params.bestpath, &layout.grid),
-            UnwrapMethod::Prelude => unwrap_prelude(&p, &k, &layout.grid, &params.prelude),
+            UnwrapMethod::Prelude(prelude) => unwrap_prelude(&p, &k, &layout.grid, &prelude),
             UnwrapMethod::Laplacian => {
                 let mut u = laplacian_unwrap(&p, &k, &layout.grid, LaplacianSolver::Dct);
                 let (labels, n_components) = label_components(&k, layout.d0, layout.d1);
