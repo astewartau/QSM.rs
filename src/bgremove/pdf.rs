@@ -42,6 +42,16 @@
 //! `pdf` uses the kernel centred on the voxel grid instead. With `n_pad > 0` (the default)
 //! every axis is even and the kernels are `dipole_kernel.m`'s.
 //!
+//! # Parity
+//! Against `PDF.m` as the verified QSM-CI `pdf-cornell` container runs it (MEDI 2024.11.26,
+//! identical to licensed MATLAB R2023b), at `PDF.m`'s defaults, local field NRMSE: KKI travelling
+//! head (oblique B0, `imagespace`) 2e-5 %; with the reference's own `ifreq` and `N_std`, QSM-CI's
+//! simulated head (B0 along z, so the k-space kernel) 0.007 % and KKI with `space = kspace`
+//! 0.026 %. At the 30-iteration cap the k-space path is rounding-sensitive (a 1-ulp change of the
+//! input moves `PDF.m` itself by up to 0.03 %), so the CG's inner products are summed with
+//! compensation (see `dot`); with a plain sum the port was 0.61 % / 0.74 % off
+//! (astewartau/QSM.rs#405). Fixture: `tests/pdf_cornell_parity.rs`.
+//!
 //! # Reference pipeline
 //! MEDI's pipeline script (`README.m` of the 2024.11.26 release, line 124) runs
 //! `PDF(iFreq, N_std, Mask, matrix_size, voxel_size, B0_dir)` with `PDF.m`'s defaults (`tol`
@@ -293,8 +303,28 @@ fn zero_inside(v: &mut [f64], inside: &[bool]) {
     }
 }
 
+/// Inner product with Neumaier-compensated summation, so the sum is accurate to about one
+/// rounding whatever the length (a plain left-to-right sum over the millions of background
+/// voxels carries ~1e-13 relative error).
+///
+/// `cgsolve.m` on `PDF.m`'s normal equations is very sensitive to rounding where the k-space
+/// kernel is used (B0 along an axis, or `space = kspace`): by the 30th iteration it amplifies a
+/// 1e-13 difference in `α` at the first iteration to ~10 % in `α`, concentrated in a few voxels
+/// (QSM-CI's simulated head: one voxel near (89, 95, 46)). MATLAB's MKL `ddot` and numpy's BLAS
+/// sum in blocks and stay within ~1e-16 of the exact sum; a plain sum did not, and was what made
+/// the port differ from `PDF.m` by 0.61 % (sim) and 0.74 % (KKI, `kspace`) at the 30-iteration
+/// cap (astewartau/QSM.rs#405). With this sum: 0.007 % and 0.026 %, inside `PDF.m`'s own
+/// rounding spread (a numpy `PDF.m` is 0.003 % / 0.03 % from MATLAB, and moves 0.03 % on KKI for
+/// a 1-ulp change of its input).
 fn dot(a: &[f64], b: &[f64]) -> f64 {
-    a.iter().zip(b).map(|(x, y)| x * y).sum()
+    let (mut s, mut c) = (0.0f64, 0.0f64);
+    for (x, y) in a.iter().zip(b) {
+        let p = x * y;
+        let t = s + p;
+        c += if s.abs() >= p.abs() { (s - t) + p } else { (p - t) + s };
+        s = t;
+    }
+    s + c
 }
 
 /// `cgsolve.m` (Romberg; as modified for MEDI) from x0 = 0: conjugate gradients on `A x = b`,
