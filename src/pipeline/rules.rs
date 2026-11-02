@@ -422,6 +422,7 @@ pub const SETTINGS: &[(&str, &str)] = &[
     ("bg_removal.resharp.radius", "RESHARP's kernel radius, mm; only with RESHARP"),
     ("bg_removal.resharp.max_iter", "RESHARP's CG iteration cap; only with RESHARP"),
     ("bg_removal.pdf.n_cg", "PDF's CG iteration cap (PdfParams::n_cg); only with PDF"),
+    ("bg_removal.lbv.tol", "LBV's coarsest-grid stopping tolerance, radians over the echo spacing (LbvParams::tol); only with LBV"),
     ("inversion.algorithm", "Dipole inversion (InversionAlgorithm::id)"),
     ("inversion.star.pad", "STAR-QSM padding per side, voxels (StarParams::pad)"),
     ("inversion.ilsqr.max_iter", "iLSQR's LSQR iteration cap (IlsqrParams::max_iter); only with iLSQR"),
@@ -513,6 +514,7 @@ pub fn current(input: &RuleInput, facts: &ScanFacts, setting: &str) -> Option<Ve
     let resharp = bg(super::config::BgRemovalAlgorithm::Resharp);
     let ismv = bg(super::config::BgRemovalAlgorithm::Ismv);
     let pdf = bg(super::config::BgRemovalAlgorithm::Pdf);
+    let lbv = bg(super::config::BgRemovalAlgorithm::Lbv);
     use super::config::InversionAlgorithm as A;
     let alg = |a: &[A]| a.contains(&c.inversion.algorithm);
     let qsmart = alg(&[A::Qsmart]);
@@ -594,6 +596,7 @@ pub fn current(input: &RuleInput, facts: &ScanFacts, setting: &str) -> Option<Ve
         "bg_removal.resharp.radius" => gated(resharp, Current::Number(c.bg_removal.resharp.radius)),
         "bg_removal.resharp.max_iter" => gated(resharp, Current::Number(c.bg_removal.resharp.max_iter as f64)),
         "bg_removal.pdf.n_cg" => gated(pdf, Current::Number(c.bg_removal.pdf.n_cg as f64)),
+        "bg_removal.lbv.tol" => gated(lbv, Current::Number(c.bg_removal.lbv.tol)),
         "inversion.whqsm.weight" => gated(
             alg(&[A::Whqsm]),
             Current::Choice(match c.inversion.whqsm.weight {
@@ -826,6 +829,7 @@ const BET: &[Value] = &[Choice("bet")];
 /// The CG iteration count `pdf.cg-iterations` suggests (measured; see `PdfParams::n_cg`).
 const PDF_SUGGESTED_N_CG: f64 = 300.0;
 const PDF: &[Value] = &[Choice("pdf")];
+const LBV: &[Value] = &[Choice("lbv")];
 const VSHARP: &[Value] = &[Choice("vsharp")];
 const LAPLACIAN: &[Value] = &[Choice("laplacian")];
 const ROMEO: &[Value] = &[Choice("romeo")];
@@ -1271,6 +1275,12 @@ pub static RULES: &[Rule] = &[
                  vs pdf-qsmrs on the simulated head); PDF.m default n_CG 30, MEDI toolbox \
                  2024.11.26",
     },
+    // A settings file from before the multigrid port can hold the SOR solver's 1e-6, a relative
+    // tolerance; the setting is kept as given and this suggests LBV.m's own (QSM.rs#406).
+    reference("lbv.tolerance", &[bg(LBV)], "bg_removal.lbv.tol", &[Number(0.01)],
+        "LBV.m stops its coarsest grid's relaxation when the summed absolute update falls to 0.01 \
+         (radians over the echo spacing)",
+        "MEDI toolbox 2024.11.26 functions/_LBV/LBV.m:29-31; QSM.rs LbvParams::tol"),
     reference("ismv-qsmjl.tolerance", &[method("bg_removal.ismv.variant", &[Choice("qsmjl")])],
         "bg_removal.ismv.tol", &[Number(1e-3)],
         "QSM.jl's ismv stops when the residual falls to 1e-3 of the first",
@@ -1713,6 +1723,7 @@ mod tests {
             ("resharp.radius", Case::new(|c| { background(B::Resharp)(c); c.cfg.bg_removal.resharp.radius = 6.0 })),
             ("resharp.iterations", Case::new(|c| { background(B::Resharp)(c); c.cfg.bg_removal.resharp.max_iter = 30 })),
             ("pdf.cg-iterations", Case::new(background(B::Pdf))),
+            ("lbv.tolerance", Case::new(|c| { background(B::Lbv)(c); c.cfg.bg_removal.lbv.tol = 1e-6 })),
             ("ismv-qsmjl.tolerance", Case::new(|c| { background(B::Ismv)(c); c.cfg.bg_removal.ismv.variant = crate::bgremove::IsmvVariant::QsmJl })),
             ("ismv-qsmjl.max-iterations", Case::new(|c| { background(B::Ismv)(c); c.cfg.bg_removal.ismv.variant = crate::bgremove::IsmvVariant::QsmJl })),
             ("sti.unwrap-laplacian", Case::new(inversion(I::Ilsqr))),
@@ -2033,6 +2044,25 @@ mod tests {
         // Not in play without iSMV.
         let off = Case::new(|c| c.cfg.bg_removal.ismv.variant = IsmvVariant::QsmJl);
         assert!(off.ids().is_empty(), "{:?}", off.ids());
+    }
+
+    /// LBV's tolerance is kept as given: at LBV.m's 0.01 nothing is said; another (the SOR
+    /// solver's old 1e-6) gets LBV.m's value suggested; without LBV it is not in play.
+    #[test]
+    fn lbv_tolerance_is_suggested_not_rewritten() {
+        let with = |tol: f64| Case::new(move |c| {
+            c.cfg.bg_removal.algorithm = BgRemovalAlgorithm::Lbv;
+            c.cfg.bg_removal.lbv.tol = tol;
+        });
+        assert!(!with(0.01).ids().contains(&"lbv.tolerance"));
+        let old = with(1e-6);
+        assert!(old.ids().contains(&"lbv.tolerance"), "{:?}", old.ids());
+        let f = evaluate(&old.input(), &old.facts);
+        let r = f.iter().find(|f| f.rule.id == "lbv.tolerance").unwrap();
+        assert_eq!(r.current, vec![Current::Number(1e-6)]);
+        assert_eq!(r.rule.strength, Strength::Reference);
+        let off = Case::new(|c| c.cfg.bg_removal.lbv.tol = 1e-6);
+        assert!(!off.ids().contains(&"lbv.tolerance"));
     }
 
     /// On a per-echo reconstruction the settings that combine or compare echoes are not in play.

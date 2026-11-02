@@ -118,7 +118,9 @@ pub struct LbvParams {
     /// Stopping tolerance of the coarsest-grid relaxation (`tol`, default 0.01): the
     /// relaxation repeats while the summed absolute update over the coarsest interior exceeds
     /// it. Absolute, in MEDI's units: radians accumulated over the echo time [`te`](Self::te)
-    /// picks. Must be finite and ≥ 0.
+    /// picks. Must be finite and ≥ 0. Any other value is kept as given; the rule
+    /// `lbv.tolerance` ([`crate::pipeline::rules::RULES`]) suggests LBV.m's 0.01 (e.g. to a
+    /// settings file holding the earlier SOR solver's relative 1e-6).
     pub tol: f64,
     /// Coarsest multigrid level (`depth`). `None` (LBV.m's −1, the default): `⌊log2 m⌋ − 3`
     /// for the smallest dimension `m`, at least 0. At most 8.
