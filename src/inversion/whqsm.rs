@@ -58,7 +58,7 @@
 //! The facts above that a configuration can depart from are published as rules in
 //! [`crate::pipeline::rules::RULES`] (each with its strength, basis, reason and source): `fansi.no-laplacian-multi-echo`, `whqsm.flat-weight-te-spacing`, `whqsm.magnitude-weight-te-spacing`.
 
-use crate::inversion::admm::{fansi_unit_ee2, prepare_fansi_spectral};
+use crate::inversion::admm::{fansi_unit_ee2, prepare_fansi_kernel, FansiKernel};
 use crate::utils::gradient::{bdiv_inplace, fgrad_inplace};
 use crate::utils::{apply_mask_zero, shrink};
 use crate::{EchoTime, Grid};
@@ -127,6 +127,10 @@ pub struct WhQsmParams {
     /// gives XSIM 0.754, NRMSE 35.5%. With a magnitude weight the echo spacing does better than
     /// the first echo (echo-1 magnitude, [`WhQsmWeight::MaxNormalised`]: XSIM 0.673 vs 0.637).
     pub te: EchoTime,
+    /// The dipole kernel. Default [`FansiKernel::Discrete`], FANSI's
+    /// `dipole_kernel_angulated` as the original is run with; [`FansiKernel::Continuous`] is
+    /// the crate's continuous kernel (see [`FansiKernel`] for the decision and the measurements).
+    pub kernel: FansiKernel,
 }
 
 impl Default for WhQsmParams {
@@ -146,6 +150,7 @@ impl Default for WhQsmParams {
             b0: 3.0,
             echo_times: vec![0.02],
             te: EchoTime::First,
+            kernel: FansiKernel::Discrete,
         }
     }
 }
@@ -198,7 +203,7 @@ pub fn whqsm(
     // Spectral operators: k = real dipole kernel D(k) (DC=0), ee2 = FANSI's EE2. WH_nlTV.m's
     // E1..E3 are unit-spacing differences whatever the voxel size, so the gradient and
     // divergence below run on a unit-voxel grid too; only the dipole kernel uses the voxel size.
-    let (mut fft_ws, k, _) = prepare_fansi_spectral(grid, bdir);
+    let (mut fft_ws, k) = prepare_fansi_kernel(grid, bdir, params.kernel);
     let ee2 = fansi_unit_ee2(grid.dims);
     let ugrid = Grid::new(grid.nx(), grid.ny(), grid.nz(), 1.0, 1.0, 1.0);
 

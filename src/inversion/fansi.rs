@@ -69,7 +69,7 @@
 //! The facts above that a configuration can depart from are published as rules in
 //! [`crate::pipeline::rules::RULES`] (each with its strength, basis, reason and source): `fansi.no-laplacian-multi-echo`, `fansi.te-spacing`.
 
-use crate::inversion::admm::{fansi_magnitude_weight, fansi_ppm_to_rad, fansi_unit_ee2, prepare_fansi_spectral};
+use crate::inversion::admm::{fansi_magnitude_weight, fansi_ppm_to_rad, fansi_unit_ee2, prepare_fansi_kernel, FansiKernel};
 use crate::utils::gradient::{bdiv_inplace, fgrad_inplace};
 use crate::utils::{apply_mask_zero, shrink};
 use crate::{EchoTime, Grid};
@@ -117,6 +117,10 @@ pub struct FansiParams {
     pub te: EchoTime,
     /// Select nlTGV (`true`) or nlTV (`false`).
     pub is_tgv: bool,
+    /// The dipole kernel. Default [`FansiKernel::Discrete`], FANSI's
+    /// `dipole_kernel_angulated` as the original is run with; [`FansiKernel::Continuous`] is
+    /// the crate's continuous kernel (see [`FansiKernel`] for the decision and the measurements).
+    pub kernel: FansiKernel,
 }
 
 impl Default for FansiParams {
@@ -134,6 +138,7 @@ impl Default for FansiParams {
             echo_times: vec![0.02],
             te: EchoTime::Spacing,
             is_tgv: false,
+            kernel: FansiKernel::Discrete,
         }
     }
 }
@@ -203,7 +208,7 @@ fn nltv(
 ) -> Vec<f64> {
     let n = grid.n_total();
 
-    let (mut fft_ws, k, _) = prepare_fansi_spectral(grid, bdir);
+    let (mut fft_ws, k) = prepare_fansi_kernel(grid, bdir, params.kernel);
     // FANSI's E1..E3 are unit-spacing differences.
     let ee2 = fansi_unit_ee2(grid.dims);
     let ugrid = Grid::new(grid.nx(), grid.ny(), grid.nz(), 1.0, 1.0, 1.0);
@@ -401,8 +406,7 @@ fn nltgv(
     let n = grid.n_total();
     let (nx, ny, nz) = (grid.nx(), grid.ny(), grid.nz());
 
-    // Reuse only the real dipole kernel K from the shared prep.
-    let (mut fft_ws, k, _ee2) = prepare_fansi_spectral(grid, bdir);
+    let (mut fft_ws, k) = prepare_fansi_kernel(grid, bdir, params.kernel);
 
     // Local unscaled spectral gradient multipliers, MATLAB order i+j*nx+k*nx*ny.
     let mut e1 = vec![Complex64::new(0.0, 0.0); n];

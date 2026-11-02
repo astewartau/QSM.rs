@@ -49,7 +49,7 @@
 //! The facts above that a configuration can depart from are published as rules in
 //! [`crate::pipeline::rules::RULES`] (each with its strength, basis, reason and source): `fansi.no-laplacian-multi-echo`, `l1qsm.te-first`.
 
-use crate::inversion::admm::{fansi_magnitude_weight, fansi_ppm_to_rad, fansi_unit_ee2, prepare_fansi_spectral};
+use crate::inversion::admm::{fansi_magnitude_weight, fansi_ppm_to_rad, fansi_unit_ee2, prepare_fansi_kernel, FansiKernel};
 use crate::utils::gradient::{bdiv_inplace, fgrad_inplace};
 use crate::utils::{apply_mask_zero, shrink};
 use crate::{EchoTime, Grid};
@@ -101,6 +101,10 @@ pub struct L1QsmParams {
     /// (lines 109-113): with a flat weight its NRMSE on that phantom exceeds 100% at either
     /// echo time (0.738 / 108% / 0.636 at the first echo).
     pub te: EchoTime,
+    /// The dipole kernel. Default [`FansiKernel::Discrete`], FANSI's
+    /// `dipole_kernel_angulated` as the original is run with; [`FansiKernel::Continuous`] is
+    /// the crate's continuous kernel (see [`FansiKernel`] for the decision and the measurements).
+    pub kernel: FansiKernel,
 }
 
 impl Default for L1QsmParams {
@@ -117,6 +121,7 @@ impl Default for L1QsmParams {
             b0: 3.0,
             echo_times: vec![0.02],
             te: EchoTime::First,
+            kernel: FansiKernel::Discrete,
         }
     }
 }
@@ -150,7 +155,7 @@ pub fn l1qsm(
 ) -> Vec<f64> {
     let n = grid.n_total();
 
-    let (mut fft_ws, k, _) = prepare_fansi_spectral(grid, bdir);
+    let (mut fft_ws, k) = prepare_fansi_kernel(grid, bdir, params.kernel);
     // FANSI's E1..E3 are unit-spacing differences.
     let ee2 = fansi_unit_ee2(grid.dims);
     let ugrid = Grid::new(grid.nx(), grid.ny(), grid.nz(), 1.0, 1.0, 1.0);

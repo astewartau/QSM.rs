@@ -76,7 +76,7 @@ pub(crate) fn scan_echo_times(
 ///   (total field)
 /// * `metadata` - Scan metadata
 /// * `config` - Inversion configuration
-/// * `magnitude` - Combined magnitude image; MEDI and TFI instead require the magnitude of every
+/// * `magnitude` - Combined magnitude image; MEDI, TFI and HD-QSM instead require the magnitude of every
 ///   echo, stacked with the echo slowest
 /// * `progress` - Progress callback (current_iter, max_iter)
 ///
@@ -292,9 +292,23 @@ fn invert(
             )
         }
         InversionAlgorithm::Hdqsm => {
-            // The magnitude, when present, is the data weight (HDQSM.m usage example).
+            // The data weight is the paper's Eq. 2 combination of every echo's magnitude
+            // (hdqsm_magnitude), as the original is run with; the echoes are required.
+            let te = &metadata.echo_times;
+            let n_echoes = te.len();
+            let echoes = match magnitude {
+                Some(m) if n_echoes > 0 && m.len() == n_voxels * n_echoes => m,
+                Some(m) => return Err(PipelineError::InvalidInput(format!(
+                    "HD-QSM needs the magnitude of every echo ({n_echoes} volumes, {} values); got {} values",
+                    n_voxels * n_echoes, m.len(),
+                ))),
+                None => return Err(PipelineError::InvalidInput(format!(
+                    "HD-QSM needs the magnitude of every echo ({n_echoes} volumes)"
+                ))),
+            };
+            let mag = crate::inversion::hdqsm_magnitude(echoes, te);
             crate::inversion::hdqsm(
-                field_ppm, mask, magnitude, &grid, bdir, &config.hdqsm, progress,
+                field_ppm, mask, Some(&mag), &grid, bdir, &config.hdqsm, progress,
             )
         }
         InversionAlgorithm::AmpPe => {
@@ -1069,6 +1083,34 @@ mod tests {
         // the magnitude is required
         let r = run_dipole_inversion(&field, &mask, &meta, &config, None, &mut |_, _| {});
         assert!(matches!(r, Err(PipelineError::InvalidInput(_))));
+    }
+
+    /// HD-QSM takes every echo's magnitude and weights by their Eq. 2 combination: the
+    /// pipeline's result is `hdqsm` given `hdqsm_magnitude`; a combined magnitude or none is
+    /// refused.
+    #[test]
+    fn test_inversion_hdqsm_takes_the_echo_magnitudes() {
+        let n = 8 * 8 * 8;
+        let field: Vec<f64> = (0..n).map(|i| 0.01 * ((i % 7) as f64 - 3.0)).collect();
+        let mask = vec![1u8; n];
+        let echoes: Vec<f64> = (0..2 * n).map(|i| 1.0 + (i % 5) as f64).collect();
+        let meta = ScanMetadata {
+            dims: (8, 8, 8), voxel_size: (1.0, 1.0, 1.0),
+            echo_times: vec![0.005, 0.01], field_strength: 3.0, b0_direction: (0.0, 0.0, 1.0),
+            slice_geometry: None,
+            affine: None,
+        };
+        let hdqsm = crate::inversion::HdQsmParams { max_iter_l1: 2, max_iter_l2: 2, ..Default::default() };
+        let config = InversionConfig { algorithm: InversionAlgorithm::Hdqsm, hdqsm: hdqsm.clone(), ..Default::default() };
+        let chi = run_dipole_inversion(&field, &mask, &meta, &config, Some(&echoes), &mut |_, _| {}).unwrap();
+        let mag = crate::inversion::hdqsm_magnitude(&echoes, &meta.echo_times);
+        let grid = meta.grid();
+        let direct = crate::inversion::hdqsm(&field, &mask, Some(&mag), &grid, meta.b0_direction, &hdqsm, |_, _| {});
+        assert_eq!(chi, direct);
+        for magnitude in [Some(&echoes[..n]), None] {
+            let r = run_dipole_inversion(&field, &mask, &meta, &config, magnitude, &mut |_, _| {});
+            assert!(matches!(r, Err(PipelineError::InvalidInput(_))));
+        }
     }
 
     #[test]

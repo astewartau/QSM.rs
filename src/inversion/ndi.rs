@@ -54,7 +54,7 @@
 use crate::fft::Fft3dWorkspace;
 use crate::utils::apply_mask_zero;
 use crate::{EchoTime, Grid};
-use super::admm::prepare_fansi_spectral;
+use super::admm::{prepare_fansi_kernel, FansiKernel};
 use num_complex::Complex64;
 
 /// NDI algorithm parameters
@@ -86,6 +86,10 @@ pub struct NdiParams {
     /// (lines 51-56): with a flat weight NDI is worse on that phantom (0.628 / 57.5% / 0.822 at
     /// the first echo).
     pub te: EchoTime,
+    /// The dipole kernel. Default [`FansiKernel::Discrete`], FANSI's
+    /// `dipole_kernel_angulated` as the original is run with; [`FansiKernel::Continuous`] is
+    /// the crate's continuous kernel (see [`FansiKernel`] for the decision and the measurements).
+    pub kernel: FansiKernel,
 }
 
 impl Default for NdiParams {
@@ -99,6 +103,7 @@ impl Default for NdiParams {
             b0: 3.0,
             echo_times: vec![0.02],
             te: EchoTime::First,
+            kernel: FansiKernel::Discrete,
         }
     }
 }
@@ -201,7 +206,7 @@ pub fn ndi(
 ) -> Vec<f64> {
     let n = grid.n_total();
 
-    let (mut fft_ws, k_kernel, _ee2) = prepare_fansi_spectral(grid, bdir);
+    let (mut fft_ws, k_kernel) = prepare_fansi_kernel(grid, bdir, params.kernel);
 
     // ppm -> radians, as FANSI expects.
     // FANSI's scripts use `gyro = 2*pi*42.58`; QSM.rs uses GAMMA_BAR_MHZ_PER_T, which is closer

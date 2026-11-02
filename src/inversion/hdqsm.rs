@@ -8,9 +8,23 @@
 //!
 //! # Data weight
 //! `w` is the magnitude normalised as in HDQSM.m's usage example,
-//! `mask.*mag/max(mag)`, or the mask when there is no magnitude (the paper
-//! allows either). The paper (Eq. 2) builds the magnitude from the echoes as
-//! `sum(TE_i*mag_i^2) / sum(TE_i*mag_i)`; combining the echoes is the caller's job.
+//! `mask.*mag/max(mag)`, or the mask when there is no magnitude (HDQSM.m: "Not used if not
+//! specified"). The magnitude is the paper's Eq. 2 echo combination,
+//! `sum(TE_i*mag_i^2) / sum(TE_i*mag_i)` ([`hdqsm_magnitude`]), which the QSM-CI original
+//! (HD-QSM c456a94) uses too; the pipeline makes it from every echo's magnitude and requires
+//! them (QSM.rs#403: QSMxT gave the port the root sum of squares, part of a 9.1 % / 7.1 % gap
+//! on sim / KKI).
+//!
+//! # Input
+//! The field is masked first, as in HDQSM.m's usage example (`params.input =
+//! mask.*phase_use/phase_scale`) and the QSM-CI original. It matters where a local field is
+//! non-zero outside the mask (stage 1's L1 term and the stage-2 discrepancy see it).
+//!
+//! # Dipole kernel
+//! HDQSM.m takes the kernel as an input and ships none; it is "based on" FANSI, and the
+//! original is run with FANSI's `dipole_kernel_angulated` (mode 1, discrete). That is the
+//! default here ([`HdQsmParams::kernel`], [`FansiKernel`] has the decision and the
+//! measurements); the continuous kernel is an option.
 //!
 //! # Finite differences
 //! As in HDQSM.m, the gradients are unit-spacing forward differences whatever
@@ -46,7 +60,7 @@
 //! [`crate::pipeline::rules::RULES`] (each with its strength, basis, reason and source): `hdqsm.bg-pdf`.
 
 use num_complex::Complex64;
-use crate::inversion::admm::{fansi_unit_ee2, prepare_fansi_spectral};
+use crate::inversion::admm::{fansi_unit_ee2, prepare_fansi_kernel, FansiKernel};
 use crate::utils::gradient::{bdiv_inplace, fgrad_inplace};
 use crate::utils::{apply_mask_zero, shrink};
 use crate::Grid;
@@ -78,6 +92,10 @@ pub struct HdQsmParams {
     pub max_iter_l2: usize,
     /// Stage-2 percent-update stopping tolerance (HDQSM.m `tol_update`, default 1e-2).
     pub tol_update: f64,
+    /// The dipole kernel. Default [`FansiKernel::Discrete`], FANSI's
+    /// `dipole_kernel_angulated` as the QSM-CI original is run with (HDQSM.m ships no kernel); [`FansiKernel::Continuous`] is
+    /// the crate's continuous kernel (see [`FansiKernel`] for the decision and the measurements).
+    pub kernel: FansiKernel,
     // Stage-1 alpha_l1 / mu1_l1 are sqrt(alpha_l2) / sqrt(mu1_l2), as in HDQSM.m.
 }
 
@@ -90,8 +108,36 @@ impl Default for HdQsmParams {
             max_iter_l1: 20,
             max_iter_l2: 80,
             tol_update: 1e-2,
+            kernel: FansiKernel::Discrete,
         }
     }
+}
+
+/// HD-QSM's magnitude, the paper's Eq. 2 echo combination (Lambert et al. 2022), as the
+/// QSM-CI original computes it: `mag_use = sum(TE.*mag.^2, 4) ./ sum(TE.*mag, 4)`, with
+/// non-finite values (no signal in any echo) set to 0.
+///
+/// `echoes` holds every echo's magnitude stacked with the echo slowest (`echo_times.len()`
+/// volumes); the result is one volume.
+///
+/// # Panics
+/// If `echoes.len()` is not a multiple of `echo_times.len()`, or there are no echo times.
+pub fn hdqsm_magnitude(echoes: &[f64], echo_times: &[f64]) -> Vec<f64> {
+    let ne = echo_times.len();
+    assert!(ne > 0 && echoes.len() % ne == 0, "HD-QSM: {} magnitude values for {ne} echoes", echoes.len());
+    let n = echoes.len() / ne;
+    (0..n)
+        .map(|i| {
+            let (mut num, mut den) = (0.0, 0.0);
+            for (e, &te) in echo_times.iter().enumerate() {
+                let m = echoes[e * n + i];
+                num += te * m * m;
+                den += te * m;
+            }
+            let v = num / den;
+            if v.is_finite() { v } else { 0.0 }
+        })
+        .collect()
 }
 
 /// L2 norm of a slice.
@@ -136,8 +182,8 @@ fn apply_dipole(
 /// # Arguments
 /// * `local_field` - Local field values in ppm (nx * ny * nz).
 /// * `mask` - Binary ROI mask (nx * ny * nz), 1 = inside.
-/// * `magnitude` - Magnitude image, the data weight (see module docs); `None` weights every
-///   voxel in the mask by 1
+/// * `magnitude` - Magnitude image, the data weight (see module docs; the pipeline passes
+///   [`hdqsm_magnitude`]); `None` weights every voxel in the mask by 1
 /// * `grid` - Volume grid (dimensions and voxel sizes).
 /// * `bdir` - B0 field direction.
 /// * `params` - HD-QSM parameters.
@@ -156,7 +202,7 @@ pub fn hdqsm(
 ) -> Vec<f64> {
     let n = grid.n_total();
     let mu1_l2 = params.mu1_l2.unwrap_or(100.0 * params.alpha_l2);
-    let (mut fft_ws, k, _) = prepare_fansi_spectral(grid, bdir);
+    let (mut fft_ws, k) = prepare_fansi_kernel(grid, bdir, params.kernel);
     // HDQSM.m's finite differences are on unit spacing whatever the voxel size
     // (E_j = 1 - exp(2*pi*i*k_j/N_j)); the dipole kernel keeps the voxel size.
     let ee2 = fansi_unit_ee2(grid.dims);
@@ -180,6 +226,10 @@ pub fn hdqsm(
             }
         })
         .collect();
+
+    // input = mask.*field (HDQSM.m usage example).
+    let masked_field: Vec<f64> = (0..n).map(|i| if mask[i] != 0 { local_field[i] } else { 0.0 }).collect();
+    let local_field = &masked_field[..];
 
     let total_iter = params.max_iter_l1 + params.max_iter_l2;
     let mut global_iter = 0usize;
@@ -428,6 +478,16 @@ pub fn hdqsm(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Eq. 2: sum(TE*mag^2)/sum(TE*mag) per voxel, 0 where there is no signal.
+    #[test]
+    fn test_hdqsm_magnitude_eq2() {
+        // two voxels, two echoes (echo slowest)
+        let m = hdqsm_magnitude(&[2.0, 0.0, 1.0, 0.0], &[0.01, 0.02]);
+        let want = (0.01 * 4.0 + 0.02 * 1.0) / (0.01 * 2.0 + 0.02 * 1.0);
+        assert!((m[0] - want).abs() < 1e-15);
+        assert_eq!(m[1], 0.0);
+    }
 
     #[test]
     fn test_hdqsm_zero_field() {
