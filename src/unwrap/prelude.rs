@@ -32,12 +32,37 @@
 //! # Reference pipeline
 //!
 //! The report's only parameter is the number of phase partitions (§2.4), 6 here as in its
-//! example ([`PreludeParams::default`]). FSL's command-line defaults (its own masking, 2D or 3D
-//! mode) are not reproduced, since FSL's code was not consulted (see below). Nothing in the
+//! example ([`PreludeParams::default`]). Nothing in the
 //! algorithm depends on voxel size, field strength or orientation. It is not selectable in the
 //! QSM pipeline's `field_mapping.unwrapping_algorithm`; it is available as
 //! [`UnwrapMethod::Prelude`](super::UnwrapMethod::Prelude) to the slice-wise unwrapper and to
 //! MCPC-3D-S's HIP unwrapping.
+//!
+//! # Against FSL's `prelude`
+//!
+//! FSL's binary was run as a black box (QSM-CI's `algorithms/_fsl-prelude`: fsl-fugue 2603.0 from
+//! FSL's conda channel; its source was not read) and compared with this module inside the mask,
+//! on QSM-CI's simulation (4 echoes), the KKI travelling head (5 echoes) and the Prisma travelling
+//! head's first echo (QSMxT/QSM-CI#302, 2026-11-02, at this module's a44046e):
+//!
+//! - **`prelude -f` (full 3D) is this algorithm.** Every in-mask voxel of every echo takes the
+//!   same wrap count as here, at 6 and at 8 partitions (`-n`), on all three; on the Prisma echo
+//!   the output is identical voxel for voxel. FSL writes 0 outside the mask, and its median
+//!   wrap count in the mask is 0 on every echo, as with [`PreludeParams::correct_global`]
+//!   (without it, KKI's fifth echo comes out 2π from FSL's).
+//! - **FSL's defaults are not.** Without `-f`, `prelude` uses 8 partitions (its `-v` output
+//!   says so; 6 is only the report's example) and labels its initial regions slice by slice,
+//!   then merges them in 3D: the default and `--labelslices` start from the same region count,
+//!   more than `-f` gives. That is the planar restriction the report's §4.1 mentions and this
+//!   module does not implement (see the deviations below). At 6 partitions the default mode
+//!   takes another wrap count than this module in 0.007–0.16 % of the simulation's voxels
+//!   (echoes 2–4) and in 10.1 % and 13.3 % on KKI's echoes 4 and 5; on the Prisma echo, against
+//!   FSL's full defaults at 8 partitions, in 0.02 %.
+//! - **`prelude -s`** (everything slice by slice) differs from
+//!   [`unwrap_slicewise`](super::unwrap_slicewise) with [`UnwrapMethod::Prelude`](super::UnwrapMethod::Prelude):
+//!   FSL writes 0 in small in-slice components (14k and 23k in-mask voxels on the simulation and
+//!   KKI) and, beyond a per-component offset, 0.1–0.6 % of the remaining voxels take another wrap
+//!   count.
 //!
 //! # Provenance
 //!
@@ -106,8 +131,11 @@
 //!   maximum — only the way it is found differs.
 //! - **Regions are not restricted to be planar.** §4.1 notes that FSL does this on
 //!   large volumes, to cut the chance of two distant areas at the same phase being
-//!   labelled one region. Not implemented: it is a mitigation for a failure mode we
-//!   have not observed, and it would change results on every volume.
+//!   labelled one region; FSL's `prelude` does it by default (see "Against FSL's
+//!   `prelude`" above). Not implemented yet. The failure it guards against does show on
+//!   KKI's fourth and fifth echoes, where full-3D labelling leaves 4.7–12.4 % of voxels with
+//!   an echo-to-echo step at odds with the wrapped echo difference, against 3.45 % with FSL's
+//!   default labelling (astewartau/QSM.rs#397).
 //! - **Masked voxels keep their original wrapped phase** on output, matching
 //!   [`unwrap_bestpath`](super::unwrap_bestpath) and [`unwrap_romeo`](super::unwrap_romeo).
 //!
@@ -136,7 +164,7 @@ const NO_REGION: u32 = u32::MAX;
 #[cfg_attr(feature = "introspection", derive(serde::Serialize))]
 pub struct PreludeParams {
     /// Number of equal bins the phase range `[-π, π)` is cut into when forming the
-    /// initial regions (default: 6, the report's example and FSL's default).
+    /// initial regions (default: 6, the report's example; FSL's `prelude` defaults to 8).
     ///
     /// More partitions means narrower bins, so a connected component is less likely
     /// to contain a wrap — at the price of more, smaller regions and a longer merge.
