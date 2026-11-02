@@ -15,6 +15,8 @@
 # only, so it is the same bits; its field (radians) divided by medi_phantom.rs's ppm_to_rad is the
 # total field. Layout (little-endian, column-major over the whole 32×36×28 grid, n voxels): per case
 # in CASES order, PDF's rdf (f64, radians over the echo spacing).
+# machine-dependent: the container's MATLAB runtime (MKL FFTs and BLAS) rounds differently on other
+# CPUs; a GitHub-hosted runner's regeneration differed by up to 1e-14 relative.
 import json, os, shutil, struct, subprocess, sys, tempfile
 import numpy as np, nibabel as nib
 
