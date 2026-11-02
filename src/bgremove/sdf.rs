@@ -31,14 +31,16 @@
 //!
 //! # Agreement with the original
 //!
-//! `tests/qsmart_qsmci_parity.rs` (measured 2026-10-30) runs QSMART's stages on the inputs the
-//! verified QSM-CI `qsmart-matlab` v3 container (QSMxT/QSM-CI#296, bit-identical to licensed
+//! `tests/qsmart_qsmci_parity.rs` (measured 2026-11-02) runs QSMART's stages on the inputs the
+//! verified QSM-CI `qsmart-matlab` v4 container (QSMxT/QSM-CI#296, #355, bit-identical to licensed
 //! MATLAB) gave its own, on a 36×36×28 vessel phantom at 3 T; the fixture is regenerated in Actions
 //! by `tests/data/qsmart_qsmci_small.py`. Given the toolbox's total field and `mask·R_0` (and stage
-//! 2 its vessel mask), [`sdf`] is **10.9 %** from `QSMART_SDF` stage 1 (r 0.9939, max |Δ| 4.6e-3
-//! ppm) and **2.1 %** from stage 2 (r 0.99977): an open gap (astewartau/QSM.rs#320), not rounding.
-//! Stage 1's widths are QSM.rs's reading of the toolbox (σ1 = σ2 = 10, above); with σ2 = 0, as
-//! `recon.m`'s `s1.sdf_sigma2`, it is 149 % off, so the gap is elsewhere.
+//! 2 its vessel mask), [`sdf`] is **3.8e-5 %** from `QSMART_SDF` stage 1 (max |Δ| 5e-9 ppm) and
+//! **1.6e-5 %** from stage 2 (max |Δ| 2.7e-8 ppm): the fixture's float32 storage. The 10.9 % and
+//! 2.1 % measured before were the curvature step's triangulation and arithmetic
+//! (astewartau/QSM.rs#320, fixed by #370; see [`crate::utils::curvature`]). Stage 1's widths are
+//! the toolbox's (σ1 = σ2 = 10, above); with σ2 = 0, as `recon.m`'s `s1.sdf_sigma2`, it is 149 %
+//! off.
 
 use crate::Grid;
 use crate::utils::curvature::calculate_curvature_proximity;

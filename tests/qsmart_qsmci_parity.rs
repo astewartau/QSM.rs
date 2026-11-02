@@ -1,6 +1,7 @@
 //! QSMART stage by stage against the authors' MATLAB toolbox (QSMART v1.0), as the verified QSM-CI
-//! `qsmart-matlab` v3 container runs it (QSMxT/QSM-CI#296, bit-identical to licensed MATLAB R2023b in
-//! every intermediate), astewartau/QSM.rs#317.
+//! `qsmart-matlab` v4 container runs it (QSMxT/QSM-CI#296, #355: bit-identical to licensed MATLAB
+//! R2023b in every intermediate; v4 no longer pads odd dimensions, which this even grid never had),
+//! astewartau/QSM.rs#317.
 //!
 //! `tests/data/qsmart_qsmci_small.bin`, made by `tests/data/qsmart_qsmci_small.py` (which builds the
 //! phantom and holds the digest; regenerated in Actions by `.github/workflows/regenerate-fixtures.yml`):
@@ -172,9 +173,8 @@ fn sdf_stage1_matches_qsmart() {
     let f = load();
     let ones = vec![1.0; f.mask.len()];
     let lfs1 = sdf(&f.tfs, &mask_r0(&f), &ones, &grid(), &sdf_params(1), |_, _| {});
-    // An open gap (astewartau/QSM.rs#320): 10.9 % from the container's own total field. Held at
-    // the size measured; tighten once found.
-    assert_parity("SDF stage 1", &lfs1, &f.lfs1, &f.mask, 11.5, 5e-3);
+    // To the fixture's float32 storage: 3.8e-5 % (astewartau/QSM.rs#320, fixed by #370).
+    assert_parity("SDF stage 1", &lfs1, &f.lfs1, &f.mask, 1e-4, 1e-8);
 }
 
 #[test]
@@ -183,8 +183,8 @@ fn sdf_stage2_matches_qsmart() {
     let w = mask_r0(&f);
     let field: Vec<f64> = f.tfs.iter().zip(&w).map(|(t, m)| t * m).collect();
     let lfs2 = sdf(&field, &w, &f.vasc_only, &grid(), &sdf_params(2), |_, _| {});
-    // An open gap (astewartau/QSM.rs#320): 2.1 %, as stage 1.
-    assert_parity("SDF stage 2", &lfs2, &f.lfs2, &f.mask, 2.3, 8.5e-3);
+    // To the fixture's float32 storage: 1.6e-5 %, as stage 1.
+    assert_parity("SDF stage 2", &lfs2, &f.lfs2, &f.mask, 1e-4, 5e-8);
 }
 
 #[test]
@@ -193,12 +193,14 @@ fn ilsqr_stages_match_qsmart() {
     let w = mask_r0(&f);
     let m1: Vec<u8> = w.iter().map(|&v| u8::from(v > 0.5)).collect();
     let m2: Vec<u8> = w.iter().zip(&f.vasc_only).map(|(&v, &t)| u8::from(v > 0.5 && t > 0.5)).collect();
-    // STI Suite's single-precision LSQR at 50 iterations: the gap of `src/inversion/ilsqr.rs`
-    // (3.4 % and 1.6 % on tests/ilsqr_sti_parity.rs's phantoms; astewartau/QSM.rs#329).
+    // Not to rounding: 0.15 % and 0.094 % (max |Δ| 1.2e-4, 1.5e-4 ppm). Not the LSQR precision
+    // (`IlsqrPrecision::Single` gives the same), nor the float32 input (χ moves by 4e-5 % for it):
+    // an open gap of `src/inversion/ilsqr.rs` on this phantom (astewartau/QSM.rs#396). Held at the
+    // size measured.
     let (chi1, ..) = ilsqr(&f.lfs1, &m1, &grid(), (0.0, 0.0, 1.0), &ilsqr_params(), |_, _| {});
-    assert_parity("iLSQR stage 1", &chi1, &f.chi1, &m1, 7.0, 6e-3);
+    assert_parity("iLSQR stage 1", &chi1, &f.chi1, &m1, 0.17, 1.5e-4);
     let (chi2, ..) = ilsqr(&f.lfs2, &m2, &grid(), (0.0, 0.0, 1.0), &ilsqr_params(), |_, _| {});
-    assert_parity("iLSQR stage 2", &chi2, &f.chi2, &m2, 2.6, 2e-3);
+    assert_parity("iLSQR stage 2", &chi2, &f.chi2, &m2, 0.11, 1.8e-4);
 }
 
 #[test]
@@ -236,6 +238,6 @@ fn run_qsmart_matches_qsmart_end_to_end() {
         ..Default::default()
     };
     let chi = run_qsmart(&f.tfs, &f.mask, Some(&r0), Some(&vmag), &meta, &config, QsmReference::None, &mut ()).unwrap();
-    // SDF's and iLSQR's gaps compounded (above): 14.7 %. Held at the size measured.
-    assert_parity("run_qsmart", &chi, &f.chi, &f.mask, 15.5, 3.5e-2);
+    // iLSQR's gap (above): 0.094 %. Held at the size measured.
+    assert_parity("run_qsmart", &chi, &f.chi, &f.mask, 0.11, 1.8e-4);
 }

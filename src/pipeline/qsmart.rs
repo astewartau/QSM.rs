@@ -48,16 +48,20 @@
 //!
 //! # Agreement with the original
 //!
-//! `tests/qsmart_qsmci_parity.rs` (measured 2026-10-30) runs each stage on the inputs the verified
-//! QSM-CI `qsmart-matlab` v3 container (QSMxT/QSM-CI#296, bit-identical to licensed MATLAB) gave
-//! its own, on a 36×36×28 vessel phantom at 3 T; the fixture is regenerated in Actions by
+//! `tests/qsmart_qsmci_parity.rs` (measured 2026-11-02) runs each stage on the inputs the verified
+//! QSM-CI `qsmart-matlab` v4 container (QSMxT/QSM-CI#296, #355, bit-identical to licensed MATLAB)
+//! gave its own, on a 36×36×28 vessel phantom at 3 T; the fixture is regenerated in Actions by
 //! `tests/data/qsmart_qsmci_small.py`. Against the toolbox's intermediates: the vessel mask is
 //! identical; the total field (Laplacian unwrapping and the echo fit) differs by a constant 4.3e-3
-//! ppm, the Laplacian's free constant, and by NRMSE 0.024 % without it; SDF stage 1 by **10.9 %**
-//! and stage 2 by **2.1 %** (an open gap, astewartau/QSM.rs#320); iLSQR stage 1 by 6.5 % and stage
-//! 2 by 2.4 % (STI Suite's single-precision LSQR, see [`ilsqr`](fn@crate::inversion::ilsqr)); and
-//! the offset adjustment is identical (2e-7 %, float32 rounding of the fixture). End to end from
-//! the container's total field and `R_0`, [`run_qsmart`] is 14.7 % from the toolbox's χ.
+//! ppm, the Laplacian's free constant, and by NRMSE 0.024 % without it; SDF stage 1 by 3.8e-5 %
+//! and stage 2 by 1.6e-5 % (float32 rounding of the fixture; the 10.9 % / 2.1 % before
+//! astewartau/QSM.rs#370 were the curvature step, #320); iLSQR stage 1 by 0.15 % and stage 2 by
+//! 0.094 % (not precision or input rounding: an open gap, astewartau/QSM.rs#396; see
+//! [`ilsqr`](fn@crate::inversion::ilsqr)); and the offset adjustment is identical (2e-7 %, float32
+//! rounding of the fixture). End to end from the container's total field and `R_0`, [`run_qsmart`]
+//! is **0.094 %** from the toolbox's χ (14.7 % before #370). On QSM-CI's full-size data, the
+//! `qsmart` parity pair (QSMxT/QSM-CI#355, total field and `R_0` fed, `qsmart-reference` offset
+//! grid on the odd-sized sim) is 0.359 % on the sim and 0.779 % on the KKI travelling head.
 //!
 //! # Pipeline rules
 //!

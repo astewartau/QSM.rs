@@ -49,13 +49,13 @@ fn qsmgan_matches_its_original() {
     assert_parity("QSMGAN", &chi, &d.mask, &dipole_originals(&d.mask)[4], 1e-3, 1e-6);
 }
 
-/// Not to rounding: 1.5 % NRMSE, an open gap (astewartau/QSM.rs#330). The limits hold it at the
-/// size measured (1.49 %, max |Δ| 4.3e-4 ppm); tighten them once it is found.
+/// To rounding: 1.9e-4 % (max |Δ| 3.2e-7 ppm). The 1.49 % before was the entry's uint8 output
+/// (astewartau/QSM.rs#330, fixed in QSMxT/QSM-CI#331).
 #[test]
 fn modl_qsm_matches_its_original() {
     let d = invivo();
     let chi = qsm_core::inversion::modl_qsm(&d.local_field, &d.mask, &grid(), B0_DIR, &weights("modl-qsm")).unwrap();
-    assert_parity("MoDL-QSM", &chi, &d.mask, &dipole_originals(&d.mask)[5], 1.6, 5e-4);
+    assert_parity("MoDL-QSM", &chi, &d.mask, &dipole_originals(&d.mask)[5], 1e-3, 1e-6);
 }
 
 /// The original runs with `add_noise=false`: the authors' `IR2Unet.forward` adds noise in the

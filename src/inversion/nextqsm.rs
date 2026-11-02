@@ -52,9 +52,10 @@
 //! brain's edge) against its original's verified QSM-CI entry, nextqsm 1.0.6 (`nextqsm`)
 //! (QSMxT/QSM-CI#316; the fixture is regenerated in Actions by
 //! `tests/data/dl_field_qsmci_small.py`): **NRMSE 0.12 %**, r 0.9999993, max |Δ| 0.058 ppm
-//! (measured 2026-10-30; 0.97 % on QSM-CI's 128×160×96 case, 3.1 % on a 64³ box). Not rounding, and
-//! not yet explained: an open gap (astewartau/QSM.rs#330). The test holds it at its measured size,
-//! to be tightened once found.
+//! (measured 2026-10-30; 0.97 % on QSM-CI's 128×160×96 case, 3.1 % on a 64³ box). Not rounding, but
+//! the size of the package's own CPU-to-CPU spread (0.10 %, max |Δ| 0.058 ppm on this box, under
+//! Parity above): the method's sensitivity to float32 rounding, not a port difference
+//! (astewartau/QSM.rs#330). The test holds it just above that floor.
 //!
 //! # Pipeline rules
 //!

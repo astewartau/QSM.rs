@@ -26,6 +26,11 @@
 # TensorFlow originals of tests/data/dl_dipole_qsmci_small.py do (measured there at up to 1.3e-6
 # relative), and SUSEP-Net moves by 1e-7 relative even on one machine (above).
 #
+# chisepnet's χ+ and χ− were regenerated on 2026-11-02 (regenerate-fixtures run 41384288424, a
+# GitHub-hosted runner) after its wrapper began setting negative χ+ and |χ−| to 0, as the authors'
+# test.py does (QSMxT/QSM-CI#333); SUSEP-Net's and R2PRIMEnet's are as before, which that run
+# reproduced to 2.3e-7 relative (R2PRIMEnet exactly).
+#
 # Needs numpy, nibabel, network access (GitHub) and podman or docker (CONTAINER_ENGINE overrides; the
 # regenerate-fixtures workflow runs it in Actions, where each image is removed after its last use;
 # REMOVE_IMAGES=1 does that elsewhere). B0 = 2.8946 T along z, 1 mm voxels, identity affine. Layout
@@ -34,11 +39,11 @@
 import hashlib, json, os, shutil, subprocess, sys, tempfile, urllib.request
 import numpy as np, nibabel as nib
 
-QSMCI_COMMIT = "271a49bbc24d70c8e31e1642d79f6d5ac74a368d"  # QSMxT/QSM-CI#316
+QSMCI_COMMIT = "a6057fceb60b3e2833772afc0ba430a146fda700"  # QSMxT/QSM-CI#316
 ENTRIES = {
     "chisepnet": ("ghcr.io/astewartau/qsm-ci/chi-sepnet@sha256:9588a43b6f99e310ef4c16bc26a8dc59751d7527bf62a1d914dfba82c788bc88",
                   {"run.sh": "3428ffd3d0758f0f8cb8a8eb59bf75de6b6f53d9f5a937cd9c37539a32ba6c8f",
-                   "recon.py": "050a5c80fe6087effef115ab73f95b8848971b3f1b751d05ca507505bff872b8"}),
+                   "recon.py": "5765de017a1b4c38357f668e9689f57ac64bbee2be1567ad78882c591ad5d7ec"}),
     "susep-net": ("ghcr.io/astewartau/qsm-ci/susep-net@sha256:b4d175563f6b32f84b3af163a1ac5975cc8397393457c2ef83367db11056d975",
                   {"run.sh": "a11690bb80e2d68d2f2e867d7d65c328fe4d51bb44d209cfb72f5cea3cc9230b",
                    "recon.py": "b0fe56e0ff2b409fa3d7cd784039bae5019ab71db38c41e1b286cea63f342d91",

@@ -21,8 +21,8 @@
 //! - everything after unwrapping is compared at matched settings and input (case 4: the masked
 //!   high-pass, the `mag·TE`-weighted echo combination and the tanh phase mask);
 //! - the magnitude is compared with and without sensitivity correction (cases 2 and 1; the CLEAR
-//!   sensitivity estimate, `getsensitivity`, carries the gap astewartau/QSM.rs#319 records for
-//!   `makehomogeneous`, which is built on it);
+//!   sensitivity estimate, `getsensitivity`, is the one `makehomogeneous` is built on,
+//!   astewartau/QSM.rs#319, #355);
 //! - `calculate_swi` end to end against `calculateSWI` (cases 1 and 3) measures what the deliberate
 //!   unwrapping difference does to the phase mask, without and with wraps. It is held at its
 //!   measured size, not hidden.
@@ -180,14 +180,12 @@ fn clearswi_after_unwrapping_matches_clearswi_jl() {
     let params = SwiParams::default();
     let filtered: Vec<Vec<f64>> = unwrapped.iter().map(|u| highpass_filter(u, mask, &grid(), params.hp_sigma)).collect();
     let combined = calculate_b0_weighted(&filtered, &mag, &tes_s(), mask, params.echo_weighting, &grid());
-    // Not to rounding: the masked high-pass. `highpass_filter`'s masked smoothing is 1.9 % (NRMSE in
-    // the mask, one echo) from MriResearchTools' `gaussiansmooth3d(...; mask)`, an open gap
-    // (astewartau/QSM.rs#319; `makehomogeneous`'s 3.3 % there runs on the same smoothing). The echo
-    // combination matches MriResearchTools exactly (tests/mritools_parity.rs). Held at the size
-    // measured (5.6 % and 0.65 %); tighten once found.
-    check("after unwrapping: filtered phase", &at_mask(&combined, mask), &after.filtered, 6.0, 1.1);
+    // To rounding (2e-14 % and 4e-15 %): the masked high-pass (MriResearchTools'
+    // `gaussiansmooth3d(...; mask)`, 1.9 % before astewartau/QSM.rs#355 fixed its NaN box filter,
+    // #319), the echo combination and the tanh phase mask.
+    check("after unwrapping: filtered phase", &at_mask(&combined, mask), &after.filtered, 1e-12, 1e-12);
     let phase_mask = create_phase_mask(&combined, mask, params.scaling, params.strength);
-    check("after unwrapping: phase mask", &phase_mask, &after.phase_mask, 0.7, 0.14);
+    check("after unwrapping: phase mask", &phase_mask, &after.phase_mask, 1e-12, 1e-12);
 }
 
 #[test]
@@ -195,18 +193,18 @@ fn swi_magnitude_matches_clearswi_jl() {
     let (originals, _) = load();
     // Combination (RSS) and softplus: to rounding.
     check("magnitude, no sensitivity correction", &run(1).magnitude, &originals[1].magnitude, 1e-12, 1e-12);
-    // The CLEAR sensitivity estimate (`get_sensitivity`, MriResearchTools' `getsensitivity`): 4.4 %,
-    // the gap astewartau/QSM.rs#319 records for `makehomogeneous`, which is built on it. Held.
-    check("magnitude, CLEAR sensitivity", &run(0).magnitude, &originals[0].magnitude, 4.6, 0.2);
+    // The CLEAR sensitivity estimate (`get_sensitivity`, MriResearchTools' `getsensitivity`): to
+    // rounding (2e-14 %; 4.4 % before astewartau/QSM.rs#355 fixed `makehomogeneous`, #319).
+    check("magnitude, CLEAR sensitivity", &run(0).magnitude, &originals[0].magnitude, 1e-12, 1e-12);
 }
 
 #[test]
 fn calculate_swi_differs_from_calculate_swi_jl_by_the_documented_unwrapping() {
     let (originals, _) = load();
-    // The deliberate unwrapping difference plus the high-pass gap above, without wraps (case 1:
-    // 18 % in the filtered phase, 2.2 % in the phase mask) and with (case 3: 45 % and 4.1 %).
-    // Held at the sizes measured.
-    for (c, filtered_max, mask_max) in [(0, (19.0, 1.45), (2.4, 0.35)), (2, (46.0, 12.5), (4.3, 0.36))] {
+    // The deliberate unwrapping difference alone (everything after it matches to rounding, above),
+    // without wraps (case 1: 17 % in the filtered phase, 2.1 % in the phase mask) and with (case 3:
+    // 43 % and 3.8 %). Held at the sizes measured.
+    for (c, filtered_max, mask_max) in [(0, (17.5, 1.0), (2.2, 0.33)), (2, (44.0, 12.5), (3.9, 0.31))] {
         let (o, r) = (&originals[c], run(c));
         assert_eq!(r.mask, o.mask, "case {}: the phase mask's mask", c + 1);
         let name = format!("case {}: filtered phase", c + 1);

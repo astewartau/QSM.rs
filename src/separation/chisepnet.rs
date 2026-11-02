@@ -124,11 +124,10 @@
 //! `tests/models_onnx/separation.rs` runs it on a 36×32×28 box of in-vivo data (1 mm, 2.89 T,
 //! across the brain's edge) against its original's verified QSM-CI entry, SNU-LIST's
 //! `240904_xsepnet.onnx` in QSM-CI's sliding window (`chisepnet`) (QSMxT/QSM-CI#316; the fixture is
-//! regenerated in Actions by `tests/data/dl_separation_qsmci_small.py`): at the authors'
-//! 192×192×128 patch, **χ+ NRMSE 1.7 %** (r 0.99982, max |Δ| 0.011 ppm), χ− NRMSE 0.045 % (max |Δ|
-//! 0.003 ppm) (measured 2026-10-30; 2.5 % and 1.5 % on QSM-CI's 128×160×96 case). Not rounding: the
-//! original runs SNU's fixed-patch ONNX, this crate its own export, whose hash differs; an open gap
-//! (astewartau/QSM.rs#330). The test holds it at its measured size, to be tightened once found. The
+//! regenerated in Actions by `tests/data/dl_separation_qsmci_small.py`, from the entry with the
+//! authors' zero-truncation, QSMxT/QSM-CI#333): at the authors' 192×192×128 patch, **χ+ NRMSE
+//! 5.8e-5 %**, χ− 3.4e-5 % (max |Δ| 2.4e-7 ppm; measured 2026-11-02), float32 rounding. The 1.7 % /
+//! 0.045 % first measured was the entry's missing truncation (above; astewartau/QSM.rs#330). The
 //! patch matters for parity: a volume smaller than the patch is zero-padded up to it, and the
 //! network's activations in that padding differ from the convolutions' own zero padding, so a
 //! smaller [`ChiSepNetParams::patch`] changes the result near the volume's far edges.

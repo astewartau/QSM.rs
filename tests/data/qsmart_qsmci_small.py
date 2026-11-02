@@ -2,9 +2,12 @@
 # verified QSM-CI container runs it, on a small multi-echo vessel phantom, with every intermediate,
 # for tests/qsmart_qsmci_parity.rs.
 #
-# Original: ghcr.io/astewartau/qsm-ci/matlab-qsmart@sha256:e0e8bc6957c5346905136bfb02d330ca5f66eab510bf2a9893015a9dc4e0c3f6
-# (qsmart-matlab v3: bit-identical to licensed MATLAB R2023b with the real Image Processing Toolbox
-# in the final χ and every intermediate, in silico and in vivo; QSMxT/QSM-CI#296). Its recon.m runs
+# Original: ghcr.io/astewartau/qsm-ci/matlab-qsmart@sha256:01f36e868bcacf494914b498b8f1cfc39480e533b0b654519e4476c19e532493
+# (qsmart-matlab v4: bit-identical to licensed MATLAB R2023b with the real Image Processing Toolbox
+# in the final χ and every intermediate, in silico and in vivo; QSMxT/QSM-CI#296). v4 runs on the
+# matrix as given, as the authors' QSMART.m does; v3 zero-padded odd dimensions to even. This grid is
+# even in every dimension, so the two give the same output here, and the offset adjustment's
+# k-grid choice (QSM.rs's `QsmartOffsetGrid`, which only differs on odd grids) does not arise. Its recon.m runs
 # QSMART.m's pipeline at Demo_QSMART.m's settings (γ = 2.675e8 rad/s/T, Frangi scales 0.5-6 in
 # steps of 0.5, C 500, bottom-hat radius 8, fit_threshold 40, SDF radius 8, σ (10, 0) then (8, 2),
 # lower limit 0.6, curvature constant 500, STI Suite's QSM_iLSQR at 'niter' 50):
@@ -16,10 +19,11 @@
 #   python3 tests/data/qsmart_qsmci_small.py tests/data/qsmart_qsmci_small.bin
 #
 # machine-dependent: STI Suite's QSM_iLSQR is single-precision LSQR and rounds differently on
-# different CPUs (see tests/data/ilsqr_sti_qsmci_small.py), and the stages after it carry that. On a
-# GitHub-hosted runner (regenerate-fixtures, 2026-10-30) the phantom, vasc_only, R_0 and tfs
-# reproduce the committed .bin (made on an Intel i5-11500) exactly, lfs1 and lfs2 to 4e-14
-# relative, and chi1, chi2 and chimap move by 1.3e-6, 1.3e-5 and 1.3e-5 relative.
+# different CPUs (see tests/data/ilsqr_sti_qsmci_small.py), and the stages after it carry that. The
+# committed .bin was made with v3 on an Intel i5-11500. v4 on a GitHub-hosted runner
+# (regenerate-fixtures run 41384288424, 2026-11-02) reproduces the phantom and every intermediate
+# up to lfs1 and lfs2 exactly, and moves chi1, chi2 and chimap by 1.2e-6, 1.8e-5 and 1.8e-5
+# relative (v3 on a runner, 2026-10-30: the same, with lfs1 and lfs2 at 4e-14).
 #
 # Needs numpy, nibabel and podman or docker (CONTAINER_ENGINE overrides; the regenerate-fixtures
 # workflow runs it in Actions). The phantom (built here, seeded): a 36x36x28 grid at 1 mm, B0 3 T
@@ -33,7 +37,7 @@
 import json, os, shutil, subprocess, sys, tempfile
 import numpy as np, nibabel as nib
 
-IMAGE = "ghcr.io/astewartau/qsm-ci/matlab-qsmart@sha256:e0e8bc6957c5346905136bfb02d330ca5f66eab510bf2a9893015a9dc4e0c3f6"
+IMAGE = "ghcr.io/astewartau/qsm-ci/matlab-qsmart@sha256:01f36e868bcacf494914b498b8f1cfc39480e533b0b654519e4476c19e532493"
 DIMS = (36, 36, 28)
 B0, TE = 3.0, [0.004, 0.008, 0.012]
 GYRO = 2.675e8  # QSMART's γ (rad/s/T), as recon.m's params.gyro
