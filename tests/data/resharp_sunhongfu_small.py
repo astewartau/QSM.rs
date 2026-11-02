@@ -15,6 +15,8 @@
 # (round(3/1.2) = 3) and the 2 mm one 2×2×2 (round(1.67)). Layout (little-endian, column-major over
 # the whole 32×36×28 grid, n voxels): per case in CASES order, the local field (f64), then the
 # eroded mask (u8).
+# machine-dependent: the container's MATLAB runtime (MKL FFTs and BLAS) rounds differently on other
+# CPUs; a GitHub-hosted runner's regeneration differed by up to 7e-15 relative (masks identical).
 import json, os, shutil, struct, subprocess, sys, tempfile
 import numpy as np, nibabel as nib
 
