@@ -100,6 +100,24 @@
 //! compartment amplitudes set the gain, and they are only weakly identifiable
 //! from data that carries no sub-voxel compartment signature.
 //!
+//! **Even on its own model the fit underestimates.** Data generated noise-free from the signal
+//! model above was given as the per-echo QSM, χ(TE) = −∠S(TE) / ((2/3)·γ·B0·TE) (Eq. 4). That is
+//! 400 voxels with C± 0.05–0.4, χ± ±(0.01–0.15) ppm, R2*₀ 15–25 s⁻¹, at 3 T with 16 echoes from
+//! 2.7 to 46.2 ms; no phase wraps. Measured 2026-11-01, `n_inner` 10:
+//!
+//! ```text
+//!                   r vs Eq. 6/7 at the truth   median out/truth   slope through 0   exactly 0
+//!   χ+ (vs PCS)     0.85                        0.71               0.86              44 / 400
+//!   χ− (vs DCS)     0.83                        0.70               0.85              48 / 400
+//! ```
+//!
+//! The fitted C± and χ± correlate with the truth at only r 0.15–0.40. The 10-pass alternation
+//! stops at a fixed point short of the global minimum from the reference's start values. On such
+//! data that minimum is exact: a global fit of all six parameters recovers the truth. MATLAB R2023b, running
+//! the reference loop (the QSM-CI `decompose-qsm` code) on the same voxels, gives the same table.
+//! This port is within 0.6 ppb of it in every voxel (NRMSE 0.47 % χ+, 0.29 % χ−). So the
+//! underestimate belongs to the method, not to the port.
+//!
 //! **Output mapping.** The port fits what the authors fit: their `ydata =
 //! squeeze(y_data(i,j,k,:))'` is MATLAB's conjugate transpose, so the fit is to conj(y), in their
 //! parameter order and with their bounds and initial values. Conjugating the data mirrors the fit
