@@ -240,6 +240,8 @@ pub fn prepare_fansi_spectral(
 /// nlTGV 11.0 / 9.6 %, L1-QSM 14.4 / 15.5 %, WH-QSM 21.4 / 50.7 %, HD-QSM 9.1 / 7.1 %; a numpy
 /// transcription of `ndi.m` on the original's own inputs is 0.0001 % from it with the discrete
 /// kernel and 10.6 % with the continuous one.
+/// With the discrete kernel every pair is at rounding (each method's module docs, "Parity"). The
+/// phantom measurements quoted in the methods' `te` docs were made with the continuous kernel.
 #[cfg_attr(feature = "introspection", derive(serde::Serialize))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum FansiKernel {

@@ -46,6 +46,15 @@
 //!   (L457-461), 300 iterations (L463). `ndi.m` itself defaults the weight to ones (L51-56).
 //! - The defaults here are `ndi.m`'s (tau 2, alpha 1e-5, 100 iterations).
 //!
+//! # Parity
+//! Against the verified original (QSM-CI pair `ndi`; FANSI-toolbox 93044a3, identical to
+//! licensed MATLAB R2023b), final-map χ NRMSE at both sides' defaults on QSM-CI's simulated head
+//! and the KKI travelling head (QSM-CI parity run 41403629314, QSM.rs#399–#403): sim 0.0011 %, KKI 0.00009 %, from
+//! 10.6 % / 9.5 % (sim / KKI) before. The kernel was the whole gap. What remains is
+//! single (MATLAB) vs double (here) precision and FANSI's γ, 42.58 against the crate's 42.576
+//! (the wrappers keep theirs). Fixture: `tests/fansi_qsmci_parity.rs` (relative L2 below 1e-5
+//! on an oblique, anisotropic phantom).
+//!
 //! # Pipeline rules
 //!
 //! The facts above that a configuration can depart from are published as rules in

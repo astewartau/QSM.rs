@@ -64,6 +64,15 @@
 //!   `script_cosmos_phantom.m` L88, `script_qsmchallenge.m` L106-108); the mask-only weights in
 //!   the demos go to the linear `wTV`/`wTGV`.
 //!
+//! # Parity
+//! Against the verified original (QSM-CI pair `fansi-nltv`, `fansi-nltgv`; FANSI-toolbox 93044a3, identical to
+//! licensed MATLAB R2023b), final-map χ NRMSE at both sides' defaults on QSM-CI's simulated head
+//! and the KKI travelling head (QSM-CI parity run 41403629314, QSM.rs#399–#403): nlTV sim 0.0069 %, KKI 0.0030 %; nlTGV sim 0.0063 %, KKI 0.0039 %, from
+//! nlTV 11.0 % / 9.5 %, nlTGV 11.0 % / 9.6 % (sim / KKI) before. The kernel was the whole gap. What remains is
+//! single (MATLAB) vs double (here) precision and FANSI's γ, 42.58 against the crate's 42.576
+//! (the wrappers keep theirs). Fixture: `tests/fansi_qsmci_parity.rs` (relative L2 below 1e-5
+//! on an oblique, anisotropic phantom).
+//!
 //! # Pipeline rules
 //!
 //! The facts above that a configuration can depart from are published as rules in

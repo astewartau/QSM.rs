@@ -54,6 +54,15 @@
 //! pad. HDQSM.m's header says `tol_update` defaults to 1.0, its code to 1e-2 (L68-72); the code
 //! value is used here.
 //!
+//! # Parity
+//! Against the verified original (QSM-CI pair `hdqsm`; FANSI-toolbox 93044a3 / HD-QSM c456a94, identical to
+//! licensed MATLAB R2023b), final-map χ NRMSE at both sides' defaults on QSM-CI's simulated head
+//! and the KKI travelling head (QSM-CI parity run 41403629314, QSM.rs#399–#403): sim 0.0015 %, KKI 0.00086 %, from
+//! 9.1 % / 7.1 % (sim / KKI) before. Three causes: the kernel, the Eq. 2 magnitude (QSMxT gave the root sum of squares) and the masked input. What remains is
+//! single (MATLAB) vs double (here) precision and FANSI's γ, 42.58 against the crate's 42.576
+//! (the wrappers keep theirs). Fixture: `tests/fansi_qsmci_parity.rs` (relative L2 below 1e-5
+//! on an oblique, anisotropic phantom).
+//!
 //! # Pipeline rules
 //!
 //! The facts above that a configuration can depart from are published as rules in
@@ -124,7 +133,7 @@ impl Default for HdQsmParams {
 /// If `echoes.len()` is not a multiple of `echo_times.len()`, or there are no echo times.
 pub fn hdqsm_magnitude(echoes: &[f64], echo_times: &[f64]) -> Vec<f64> {
     let ne = echo_times.len();
-    assert!(ne > 0 && echoes.len() % ne == 0, "HD-QSM: {} magnitude values for {ne} echoes", echoes.len());
+    assert!(ne > 0 && echoes.len().is_multiple_of(ne), "HD-QSM: {} magnitude values for {ne} echoes", echoes.len());
     let n = echoes.len() / ne;
     (0..n)
         .map(|i| {

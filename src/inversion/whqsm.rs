@@ -72,6 +72,15 @@
 //! defaults for beta (150) and muh (5), not the script's beta of 200. Without `params.mask`,
 //! `WH_nlTV.m` takes the mask as `W > 0`; here the mask is always given.
 //!
+//! # Parity
+//! Against the verified original (QSM-CI pair `whqsm`; FANSI-toolbox 93044a3, identical to
+//! licensed MATLAB R2023b), final-map χ NRMSE at both sides' defaults on QSM-CI's simulated head
+//! and the KKI travelling head (QSM-CI parity run 41403629314, QSM.rs#399–#403): sim 0.0018 %, KKI 0.0038 %, from
+//! 21.4 % / 50.7 % (sim / KKI) before. Two causes: the kernel, and `WH_nlTV.m`'s flat weight over the whole volume (see Data weight); the Newton safeguard keeps the sim run from diverging (see Newton safeguard). What remains is
+//! single (MATLAB) vs double (here) precision and FANSI's γ, 42.58 against the crate's 42.576
+//! (the wrappers keep theirs). Fixture: `tests/fansi_qsmci_parity.rs` (relative L2 below 1e-5
+//! on an oblique, anisotropic phantom).
+//!
 //! # Pipeline rules
 //!
 //! The facts above that a configuration can depart from are published as rules in
@@ -141,10 +150,13 @@ pub struct WhQsmParams {
     /// multi-echo example, `script_DICOM_Philips.m`, scales the field by `deltaTE =
     /// TE(echo2) - TE(echo1)` (FANSI-toolbox 93044a3, line 364) before `WH_nlTV` (line 436), but
     /// with a weight from M0 and the fit noise, and its comment on that line says "You may use
-    /// also any individual echo time". With the default flat weight ([`WhQsmWeight::Flat`]),
-    /// a field at the echo spacing diverges on the qsm-forward phantom (echoes 4/12/20/28 ms:
-    /// r 0.07), as `WH_nlTV`'s Newton step does once the phase nears ±π; at the first echo it
-    /// gives XSIM 0.754, NRMSE 35.5%. With a magnitude weight the echo spacing does better than
+    /// also any individual echo time". With the default flat weight ([`WhQsmWeight::Flat`]), the
+    /// first echo does better: on QSM-CI's simulated head (7 T, echoes 4/12/20/28 ms, its true
+    /// local field and mask; FANSI's kernel, the flat weight over the whole volume, QSM.rs#402)
+    /// χ NRMSE 33.6 % and r 0.945 at the first echo against 42.0 % and 0.914 at the spacing.
+    /// (Before QSM.rs#402, with the continuous kernel and the weight only in the mask, the
+    /// spacing diverged on the qsm-forward phantom, r 0.07, and the first echo gave XSIM 0.754,
+    /// NRMSE 35.5 %.) With a magnitude weight the echo spacing does better than
     /// the first echo (echo-1 magnitude, [`WhQsmWeight::MaxNormalised`]: XSIM 0.673 vs 0.637).
     pub te: EchoTime,
     /// The dipole kernel. Default [`FansiKernel::Discrete`], FANSI's

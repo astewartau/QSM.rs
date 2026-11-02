@@ -1375,8 +1375,8 @@ pub static RULES: &[Rule] = &[
     discourage("whqsm.flat-weight-te-spacing",
         &[inv(&[Choice("whqsm")]), method("inversion.whqsm.weight", &[Choice("flat")]), MULTI_ECHO],
         "inversion.whqsm.te", &[Choice("spacing")], Choice("first"), Basis::Measured,
-        "With the flat weight, WH-QSM at the echo spacing diverges (r 0.07 on the phantom): its \
-         Newton step fails once the phase nears ±π",
+        "With the flat weight, WH-QSM did worse at the echo spacing than at the first echo on the \
+         simulated head (NRMSE 42.0 vs 33.6 %, r 0.914 vs 0.945)",
         "QSM.rs WhQsmParams::te docs (#276)"),
     measured_better("whqsm.magnitude-weight-te-spacing",
         &[inv(&[Choice("whqsm")]),
