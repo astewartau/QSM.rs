@@ -213,6 +213,7 @@ pub fn run_qsmart(
         lower_lim: qsmart_params.sdf_lower_lim,
         curv_constant: qsmart_params.sdf_curv_constant,
         use_curvature: true,
+        vessel_proximity: false,
     };
     let lfs1 = crate::bgremove::sdf::sdf(
         field_ppm, &weighted_mask, &ones_vasc, &grid, &sdf_params1, |_, _| {},
@@ -233,6 +234,7 @@ pub fn run_qsmart(
         lower_lim: qsmart_params.sdf_lower_lim,
         curv_constant: qsmart_params.sdf_curv_constant,
         use_curvature: true,
+        vessel_proximity: true,
     };
     let field_weighted: Vec<f64> = field_ppm.iter()
         .zip(weighted_mask.iter())

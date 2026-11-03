@@ -350,6 +350,7 @@ fn invert(
         InversionAlgorithm::Xqsm => run_xqsm(field_ppm, mask, &grid, config.tile, progress)?,
         InversionAlgorithm::Qsmnet => run_qsmnet(field_ppm, mask, &grid, "qsmnet", config.tile, progress)?,
         InversionAlgorithm::QsmnetPlus => run_qsmnet(field_ppm, mask, &grid, "qsmnet-plus", config.tile, progress)?,
+        InversionAlgorithm::Qsmnetme => run_qsmnetme(field_ppm, mask, &grid, bdir, config.tile)?,
         InversionAlgorithm::Autoqsm => run_autoqsm(field_ppm, mask, &grid)?,
         InversionAlgorithm::Qsmgan => run_qsmgan(field_ppm, mask, &grid)?,
         InversionAlgorithm::Ir2qsm => run_ir2qsm(field_ppm, mask, &grid, config.tile, progress)?,
@@ -599,6 +600,43 @@ fn run_qsmnet(
 ) -> Result<Vec<f64>, PipelineError> {
     Err(PipelineError::InvalidConfig(
         "QSMnet requires building qsm-core with the 'onnx' feature".into(),
+    ))
+}
+
+/// Source the QSMnetME weights and run it by the authors' route (requires the `onnx` feature).
+/// `tile` (the deep-learning inversions' `(core, halo)`) turns the toolbox's whole-volume pass into
+/// a sliding window of `core + 2·halo` rounded up to a multiple of 16, for memory-limited hosts.
+#[cfg(feature = "onnx")]
+fn run_qsmnetme(
+    local_field_ppm: &[f64],
+    mask: &[u8],
+    grid: &crate::Grid,
+    bdir: (f64, f64, f64),
+    tile: Option<(usize, usize)>,
+) -> Result<Vec<f64>, PipelineError> {
+    let bytes = crate::models::primary_weight("qsmnetme").map_err(PipelineError::InvalidConfig)?;
+    let params = crate::inversion::QsmnetmeParams {
+        patch: tile.map(|(core, halo)| {
+            let p = (core + 2 * halo).max(16).div_ceil(16) * 16;
+            (p, p, p)
+        }),
+    };
+    crate::inversion::qsmnetme(
+        local_field_ppm, mask, grid, bdir, &bytes, &crate::inversion::QsmnetmeNorm::default(), &params,
+    )
+    .map_err(|e| PipelineError::AlgorithmError(e.to_string()))
+}
+
+#[cfg(not(feature = "onnx"))]
+fn run_qsmnetme(
+    _local_field_ppm: &[f64],
+    _mask: &[u8],
+    _grid: &crate::Grid,
+    _bdir: (f64, f64, f64),
+    _tile: Option<(usize, usize)>,
+) -> Result<Vec<f64>, PipelineError> {
+    Err(PipelineError::InvalidConfig(
+        "QSMnetME requires building qsm-core with the 'onnx' feature".into(),
     ))
 }
 

@@ -103,6 +103,16 @@ const NATIVE: &[(&str, [usize; 3], u64)] = &[
     ("r2primenet", [160, 160, 96], 2_138_620_361),
     ("r2primenet", [192, 192, 128], 3_997_387_849),
     ("r2primenet", [192, 256, 128], 5_290_255_433),
+    // QSMnetME's graph is R2PRIMEnet's (the same 49 nodes, shapes and byte count; only the weights
+    // differ), and tract's memory depends on the graph, not the weight values: R2PRIMEnet's peaks.
+    ("qsmnetme", [32, 32, 32], 128_191_738),
+    ("qsmnetme", [64, 64, 64], 320_442_371),
+    ("qsmnetme", [96, 96, 96], 838_998_871),
+    ("qsmnetme", [128, 128, 64], 976_913_876),
+    ("qsmnetme", [128, 128, 128], 1_843_959_255),
+    ("qsmnetme", [160, 160, 96], 2_138_620_361),
+    ("qsmnetme", [192, 192, 128], 3_997_387_849),
+    ("qsmnetme", [192, 256, 128], 5_290_255_433),
     ("chi-sepnet", [32, 32, 32], 128_462_687),
     ("chi-sepnet", [64, 64, 64], 322_548_458),
     ("chi-sepnet", [96, 96, 96], 846_085_694),
@@ -158,6 +168,9 @@ const WASM: &[(&str, [usize; 3], u64)] = &[
     ("susep-net", [96, 96, 96], 2_467_000_000),
     ("r2primenet", [64, 64, 64], 490_000_000),
     ("r2primenet", [128, 128, 64], 1_398_000_000),
+    // QSMnetME: R2PRIMEnet's graph (see NATIVE).
+    ("qsmnetme", [64, 64, 64], 490_000_000),
+    ("qsmnetme", [128, 128, 64], 1_398_000_000),
     ("chi-sepnet", [64, 64, 64], 490_000_000),
     ("chi-sepnet", [128, 128, 64], 1_398_000_000),
     ("hd-bet", [64, 128, 128], 1_461_000_000),

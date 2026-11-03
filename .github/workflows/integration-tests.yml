@@ -450,6 +450,7 @@ jobs:
                       xqsm)       dl="$dl test_dl_xqsm models_onnx" ;;
                       qsmnet)     dl="$dl test_dl_qsmnet models_onnx" ;;
                       qsmnet-plus) dl="$dl test_dl_qsmnet_plus models_onnx" ;;
+                      qsmnetme)   dl="$dl models_onnx" ;;
                       autoqsm)    dl="$dl test_dl_autoqsm models_onnx" ;;
                       iqsm)       dl="$dl test_dl_iqsm models_onnx" ;;
                       iqsm-plus)  dl="$dl test_dl_iqsm_plus models_onnx" ;;
@@ -477,6 +478,9 @@ jobs:
               src/inversion/iqfm.rs)     dl="$dl test_dl_iqfm models_onnx" ;;
               src/inversion/xqsm.rs)     dl="$dl test_dl_xqsm models_onnx" ;;
               src/inversion/qsmnet.rs)   dl="$dl test_dl_qsmnet test_dl_qsmnet_plus models_onnx" ;;
+              # The χ-separation toolbox's route (QSMnetME and χ-sepnet's default).
+              src/inversion/qsmnetme.rs|src/utils/chisep_frame.rs|src/utils/interp3.rs)
+                                         dl="$dl models_onnx"; chisep="$chisep chisep_xsepnet" ;;
               src/inversion/autoqsm.rs)  dl="$dl test_dl_autoqsm models_onnx" ;;
               # iQFM and iQSM+ reuse iQSM's preprocessing.
               src/inversion/iqsm.rs)     dl="$dl test_dl_iqsm test_dl_iqsm_plus test_dl_iqfm models_onnx" ;;

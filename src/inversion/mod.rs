@@ -45,6 +45,7 @@ pub mod tiled;
 pub mod xqsm;
 #[cfg(feature = "onnx")]
 pub mod qsmnet;
+pub mod qsmnetme;
 #[cfg(feature = "onnx")]
 pub mod autoqsm;
 pub mod iqsm_echo_weighting;
@@ -106,6 +107,9 @@ pub use tiled::{
 pub use xqsm::{xqsm, xqsm_tiled};
 #[cfg(feature = "onnx")]
 pub use qsmnet::{qsmnet, qsmnet_tiled, QsmnetNorm};
+pub use qsmnetme::{QsmnetmeNorm, QsmnetmeParams};
+#[cfg(feature = "onnx")]
+pub use qsmnetme::qsmnetme;
 #[cfg(feature = "onnx")]
 pub use autoqsm::autoqsm;
 #[cfg(feature = "onnx")]

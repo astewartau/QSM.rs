@@ -1,5 +1,10 @@
 //! χ-sepnet deep-learning χ-separation (`onnx` feature).
 //!
+//! Two entry points. [`chisepnet_toolbox`] is the authors' route, the χ-separation toolbox
+//! v1.1.3's `chi_sepnet_general` (see *The authors' route* below), and the pipeline's default
+//! ([`ChiSepNetRoute::Toolbox`]). [`chisepnet`] is the network alone on the acquired grid with the
+//! caller's QSM ([`ChiSepNetRoute::Native`]), described first.
+//!
 //! χ-sepnet (SNU-LIST) is a 3D U-Net that maps a 3-channel patch — [QSM (χ_total,
 //! ppm), local field (ppm), R2′/Dr] each z-scored by training statistics — to
 //! paramagnetic (χ+) and diamagnetic (χ−) source magnitudes (z-scored). The network
@@ -89,7 +94,7 @@
 //! - The same run shows that the toolbox's χ-sepnet path works differently from this function.
 //!   It takes the local field in Hz and R2′ (not a QSM). It makes the QSM channel itself with its
 //!   own `240904_QSMnet.onnx`, after rotating to B0 (`CalculateRotMat`) and resampling to 1 mm
-//!   (`interp3`). That is the QSMnetME step covered under *Reference pipeline* below.
+//!   (`interp3`): [`chisepnet_toolbox`], *The authors' route* below.
 //!
 //! # Reference pipeline
 //!
@@ -103,15 +108,17 @@
 //!   local field. The toolbox driver instead runs V-SHARP `smvsize = 12` after echo averaging
 //!   (`Chisep_script.m:113-139`); the two disagree (open question).
 //! - **QSM channel:** QSMnetME, a QSMnet trained on multi-echo data, applied to the local field
-//!   (§2.2.2). QSMnetME is not in QSM.rs.
+//!   (§2.2.2): [`crate::inversion::qsmnetme`], which [`chisepnet_toolbox`] runs.
 //! - **R2' channel:** R2* by ARLO; R2 by StimFit dictionary matching of a 2D multi-echo SE with
 //!   stimulated-echo correction (QSM.rs: `r2_epg`); R2' = R2* − R2 with negatives set to 0. With
 //!   GRE only, R2PRIMEnet ([`crate::relaxometry`]) predicts R2'.
 //! - **Resolution:** trained at 1 mm isotropic. The toolbox either interpolates the inputs to
 //!   1 mm and returns 1 mm maps, or runs a resolution-generalisation pipeline for QSMnetME
 //!   (`Chisep_script.m:188-195`, `chi_sepnet_general` vs `..._wResolGen`). The README says the
-//!   networks handle resolutions above 0.6 mm. This function runs on the native grid with
-//!   neither.
+//!   networks handle resolutions above 0.6 mm. [`chisepnet_toolbox`] runs the first (the
+//!   script's `resgen = false`; despite the script's comment it returns its maps on the acquired
+//!   grid); [`chisepnet`] runs on the native grid with neither. The resolution-generalisation
+//!   branch (`chi_sepnet_general_new_wResolGen`) is not ported.
 //! - **Field strength:** 3 T only. At 7 T the authors keep this 3 T network and feed it the 7 T
 //!   local field, a QSMnetME QSM and a *3 T-equivalent* R2' from R2PRIMEnet7T (Kim J. et al.,
 //!   arXiv:2410.12239, §2.2.1). They name the choice of D_r at 7 T as unresolved (§4). Feeding a
@@ -131,6 +138,45 @@
 //! patch matters for parity: a volume smaller than the patch is zero-padded up to it, and the
 //! network's activations in that padding differ from the convolutions' own zero padding, so a
 //! smaller [`ChiSepNetParams::patch`] changes the result near the volume's far edges.
+//!
+//! # The authors' route
+//!
+//! [`chisepnet_toolbox`] is `chi_sepnet_general` of the toolbox v1.1.3, which `Chisep_script.m`
+//! calls with `resgen = false` (l. 194). The P-code was probed as a black box in licensed MATLAB
+//! R2023b (QSM.rs#377, 2026-11-03; method in [`crate::utils::chisep_frame`]): the inputs go into
+//! the training frame (B0 along the third axis, 1 mm, centred, padded to multiples of 16), QSMnetME
+//! makes the QSM channel there ([`crate::inversion::qsmnetme`]), R2′ is the measured map or, for
+//! R2*, R2PRIMEnet's output, χ-sepnet runs once over the whole frame, and χ± come back onto the
+//! acquired grid. The steps and what was measured for each are listed on [`chisepnet_toolbox`].
+//! Findings that settle earlier open points:
+//!
+//! - **Output grid.** The toolbox returns its maps on the acquired grid (`interp3 'spline'` at
+//!   `R⁻¹·x`), not at 1 mm as the script's comment says, so no resampling of our own is involved.
+//! - **R2* is not clipped** before R2PRIMEnet, and R2PRIMEnet's output reaches χ-sepnet unclipped
+//!   (the toolbox clips its de-normalised copy, which it does not use).
+//! - **Whole volume, no tiling**: the toolbox replaces each network's input layer to fit the frame.
+//!   [`ChiSepNetParams::frame_patch`] tiles instead, for 32-bit hosts (not the authors').
+//! - **B0 direction**: the toolbox does not normalise it; a non-unit vector gives it a slightly
+//!   non-orthogonal rotation. QSM.rs normalises first (identical for unit vectors). For B0 = −ẑ the
+//!   toolbox's rotation is `NaN`; QSM.rs takes the half turn about the first axis.
+//! - **7 T**: the authors feed χ-sepnet a 3 T-equivalent R2′ from R2PRIMEnet7T (toolbox v1.2's
+//!   `R2PNET_7T.onnx`, only through SNU's form, not in v1.1.3 and not available to us). So the
+//!   R2* route refuses fields outside 3 T ± [`B0_TOLERANCE_T`](crate::relaxometry::B0_TOLERANCE_T),
+//!   unless [`ChiSepNetParams::ignore_field_mismatch`]; a measured R2′ is taken at any field.
+//! - **Not part of the route**: `Chisep_script.m` Tukey-windows the complex multi-echo data in
+//!   k-space before everything (`tukey_fac` 0.4 for Siemens and GE, 0 for Philips, l. 69-73), so its
+//!   R2* fit and phase see windowed data. That happens upstream of the field and R2* maps this
+//!   function takes; it is the caller's (QSMxT has no such step).
+//!
+//! **Agreement with the toolbox.** On the probe volumes (64×60×48 at 0.8×0.9×1.1 mm with B0 along
+//! (0.1, 0.2, 0.97)/|·| and R2*, and at 1.1×0.7×0.9 mm with B0 along (−0.15, 0.05, 0.95)/|·| and R2′;
+//! MATLAB R2023b with the networks computed by ONNX Runtime), [`chisepnet_toolbox`] matches the
+//! toolbox's χ+ to 5.0e-5 % / 5.2e-5 % NRMSE and χ− to 5.0e-5 % / 5.1e-5 % (max |Δ| 1.8e-7 ppm):
+//! float32 rounding, tract against ONNX Runtime. QSM-CI's Python reproduction
+//! (`algorithms/chisepnet/chisep_route.py`) matches the toolbox to 1.4e-5 to 2.1e-5 %.
+//! `tests/models_onnx/snu_route.rs` checks [`chisepnet_toolbox`] (R2′ and R2*) and
+//! [`crate::inversion::qsmnetme`] against that reproduction on the in-vivo box, as acquired and
+//! with a tilted, anisotropic geometry (`tests/data/dl_snu_route_small.py`).
 //!
 //! # Pipeline rules
 //!
@@ -160,38 +206,71 @@ pub const WASM_PATCH: (usize, usize, usize) = (128, 128, 64);
 /// without `onnx`) so a host can check a patch, or state the rule, without restating the number.
 pub const POOL_MULTIPLE: usize = 16;
 
-/// Inference parameters for [`chisepnet`].
+/// Which route χ-sepnet's inputs take ([`ChiSepNetParams::route`]).
+#[cfg_attr(feature = "introspection", derive(serde::Serialize))]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ChiSepNetRoute {
+    /// The authors' route, `chi_sepnet_general` of the χ-separation toolbox v1.1.3
+    /// ([`chisepnet_toolbox`]): the inputs resampled into the training frame (B0 along the third
+    /// axis, 1 mm), the QSM channel made by QSMnetME there, R2′ from R2PRIMEnet when only R2* is
+    /// given, the whole volume in one pass, and the maps resampled back. The default.
+    #[default]
+    Toolbox,
+    /// The network alone on the acquired grid ([`chisepnet`]): the caller's QSM and R2′, a
+    /// sliding window of [`ChiSepNetParams::patch`], no resampling. QSM-CI's first χ-sepnet entry
+    /// ran it this way (with the ground-truth χ as the QSM).
+    Native,
+}
+
+/// Inference parameters for [`chisepnet`] and [`chisepnet_toolbox`].
 #[cfg_attr(feature = "introspection", derive(serde::Serialize))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ChiSepNetParams {
-    /// Sliding-window patch `(D, H, W)`; each dimension a multiple of 16. Defaults to
-    /// [`AUTHORS_PATCH`]; WASM hosts pass [`WASM_PATCH`].
+    /// The input route; see [`ChiSepNetRoute`]. Defaults to the authors' ([`ChiSepNetRoute::Toolbox`]).
+    pub route: ChiSepNetRoute,
+    /// [`ChiSepNetRoute::Native`]'s sliding-window patch `(D, H, W)`; each dimension a multiple of
+    /// 16. Defaults to [`AUTHORS_PATCH`]; WASM hosts pass [`WASM_PATCH`].
     pub patch: (usize, usize, usize),
+    /// [`ChiSepNetRoute::Toolbox`]: `None` (default) runs each network on the whole training-frame
+    /// volume in one pass, as the toolbox does; `Some(patch)` runs a sliding window of that patch
+    /// instead, for hosts that cannot hold the whole volume's activations (not the authors').
+    pub frame_patch: Option<(usize, usize, usize)>,
+    /// [`ChiSepNetRoute::Toolbox`] given R2*: run R2PRIMEnet even when the field strength is
+    /// outside [`B0_TOLERANCE_T`](crate::relaxometry::B0_TOLERANCE_T) of its 3 T training (see
+    /// [`R2PrimeNetParams::ignore_field_mismatch`](crate::relaxometry::R2PrimeNetParams)). Off
+    /// by default.
+    pub ignore_field_mismatch: bool,
 }
 
 impl Default for ChiSepNetParams {
     fn default() -> Self {
-        Self { patch: AUTHORS_PATCH }
+        Self { route: ChiSepNetRoute::Toolbox, patch: AUTHORS_PATCH, frame_patch: None, ignore_field_mismatch: false }
     }
 }
 
 impl ChiSepNetParams {
-    /// Settings for a 32-bit (WASM) heap: the defaults with [`WASM_PATCH`].
+    /// Settings for a 32-bit (WASM) heap: the defaults with [`WASM_PATCH`] for both routes.
     pub fn low_memory() -> Self {
-        Self { patch: WASM_PATCH }
+        Self { patch: WASM_PATCH, frame_patch: Some(WASM_PATCH), ..Self::default() }
     }
 
-    /// Check the patch: every dimension a positive multiple of 16 (the network's four pooling
+    /// Check the patches: every dimension a positive multiple of 16 (the network's four pooling
     /// levels). [`chisepnet`] panics on what this refuses.
     pub fn validate(&self) -> Result<(), String> {
-        let (d, h, w) = self.patch;
-        for (axis, v) in [("D", d), ("H", h), ("W", w)] {
-            if v == 0 || v % POOL_MULTIPLE != 0 {
-                return Err(format!(
-                    "χ-sepnet patch {axis} = {v} must be a positive multiple of {POOL_MULTIPLE} \
-                     (four pooling levels)"
-                ));
+        let check = |name: &str, (d, h, w): (usize, usize, usize)| -> Result<(), String> {
+            for (axis, v) in [("D", d), ("H", h), ("W", w)] {
+                if v == 0 || v % POOL_MULTIPLE != 0 {
+                    return Err(format!(
+                        "χ-sepnet {name} {axis} = {v} must be a positive multiple of {POOL_MULTIPLE} \
+                         (four pooling levels)"
+                    ));
+                }
             }
+            Ok(())
+        };
+        check("patch", self.patch)?;
+        if let Some(p) = self.frame_patch {
+            check("frame patch", p)?;
         }
         Ok(())
     }
@@ -342,6 +421,141 @@ pub fn chisepnet(
     Ok((chi_pos, chi_neg, chi_total))
 }
 
+/// χ-sepnet's R2 input for [`chisepnet_toolbox`].
+#[derive(Clone, Copy, Debug)]
+pub enum ChiSepNetR2<'a> {
+    /// A measured R2′ (Hz): χ-sepnet-R2′.
+    R2Prime(&'a [f64]),
+    /// R2* (Hz): χ-sepnet-R2*, with R2′ predicted by R2PRIMEnet inside the route.
+    R2Star(&'a [f64]),
+}
+
+/// The weights [`chisepnet_toolbox`] runs: χ-sepnet, QSMnetME, and R2PRIMEnet for
+/// [`ChiSepNetR2::R2Star`].
+#[derive(Clone, Copy, Debug)]
+pub struct ChiSepNetToolboxModels<'a> {
+    pub chisepnet: &'a [u8],
+    pub qsmnetme: &'a [u8],
+    pub r2primenet: Option<&'a [u8]>,
+}
+
+/// χ-sepnet by the authors' route: the χ-separation toolbox v1.1.3's `chi_sepnet_general`
+/// (`Chisep_script.m`:177-194), recovered by black-box probing in licensed MATLAB R2023b
+/// (QSM.rs#377; method in [`crate::utils::chisep_frame`]). Unlike [`chisepnet`] it takes no QSM:
+///
+/// 1. the local field, the R2 map and the mask go into the training frame
+///    ([`TrainingFrame`](crate::utils::chisep_frame::TrainingFrame): B0 along the third axis,
+///    1 mm, `interp3 'spline'` / `'linear'` > 0.5);
+/// 2. the QSM channel is QSMnetME's ([`crate::inversion::qsmnetme`], whose field channel is
+///    χ-sepnet's field channel too);
+/// 3. the R2′ channel is `(R2′/Dr − mean)/std` for a measured R2′, or, given R2*, R2PRIMEnet's
+///    raw z-scored output for `(R2*/Dr − r2star_mean)/r2star_std`. Neither is clipped: the
+///    toolbox clips its de-normalised R2′ (`max(·, 0)`) but feeds χ-sepnet the unclipped channel,
+///    and does not clip negative R2* before R2PRIMEnet (measured: the channels matched the
+///    unclipped forms to float32 rounding, 2 040 and 4 691 negative frame voxels). These are
+///    intermediates the route never returns, so QSM.rs's rule against negative R2′ maps
+///    (applied by [`r2primenet`](crate::relaxometry::r2primenet)) does not reach them;
+/// 4. every channel is 0 outside the frame mask; χ-sepnet runs on the whole frame;
+///    `χ± = max(std·y + mean, 0)` inside the frame mask;
+/// 5. each map is resampled back onto the acquired grid (`interp3 'spline'`), set to 0 where
+///    negative (the spline overshoots) and outside the mask. `χ_total = χ+ − |χ−|`.
+///
+/// `local_field_ppm` is in ppm (the toolbox takes Hz and divides by `CF·1e-6`; the same).
+/// `b0_tesla` is only checked for [`ChiSepNetR2::R2Star`]: R2PRIMEnet is trained at 3 T and the
+/// v1.1.3 toolbox has no 7 T network (v1.2's `R2PNET_7T.onnx` is not available to us), so other
+/// field strengths are refused unless [`ChiSepNetParams::ignore_field_mismatch`] is set.
+///
+/// Returns `(χ+ ≥ 0, χ− ≤ 0, χ_total)` in ppm on the acquired grid.
+#[cfg(feature = "onnx")]
+#[allow(clippy::too_many_arguments)]
+pub fn chisepnet_toolbox(
+    local_field_ppm: &[f64],
+    r2: ChiSepNetR2,
+    mask: &[u8],
+    grid: &Grid,
+    b0_dir: (f64, f64, f64),
+    b0_tesla: f64,
+    models: &ChiSepNetToolboxModels,
+    norm: &ChiSepNetNorm,
+    params: &ChiSepNetParams,
+) -> Result<super::ChiSepMaps, OnnxError> {
+    use crate::relaxometry::{R2PrimeNetNorm, B0_TOLERANCE_T, TRAINED_B0_T};
+    use crate::utils::chisep_frame::{run_net, TrainingFrame};
+    let n = grid.n_total();
+    assert_eq!(local_field_ppm.len(), n, "field length must match grid");
+    assert_eq!(mask.len(), n, "mask length must match grid");
+    params.validate().map_err(OnnxError::Domain)?;
+    let r2_map = match r2 {
+        ChiSepNetR2::R2Prime(v) | ChiSepNetR2::R2Star(v) => v,
+    };
+    assert_eq!(r2_map.len(), n, "R2 map length must match grid");
+    if matches!(r2, ChiSepNetR2::R2Star(_)) {
+        if !params.ignore_field_mismatch && (b0_tesla - TRAINED_B0_T).abs() > B0_TOLERANCE_T {
+            return Err(OnnxError::Domain(format!(
+                "χ-sepnet-R2* predicts R2' with R2PRIMEnet, whose weights are trained at {TRAINED_B0_T} T, \
+                 and this R2* map is from {b0_tesla} T: outside the training distribution. Give a \
+                 measured R2' (χ-sepnet-R2'), or set ChiSepNetParams::ignore_field_mismatch."
+            )));
+        }
+        if models.r2primenet.is_none() {
+            return Err(OnnxError::Domain("χ-sepnet-R2* needs the R2PRIMEnet weights".into()));
+        }
+    }
+
+    let frame = TrainingFrame::new(grid.dims, grid.voxel_size, b0_dir);
+    let dims = frame.dims();
+    let fmask = frame.mask_to_frame(mask);
+    let field = frame.to_frame(local_field_ppm);
+    let r2f = frame.to_frame(r2_map);
+
+    // QSM channel: QSMnetME (its z-scored field input is χ-sepnet's field channel).
+    let qnorm = crate::inversion::QsmnetmeNorm { field: norm.field, chi: norm.qsm };
+    let qsmnetme = OnnxModel::load(models.qsmnetme)?;
+    let (qsm, field_ch) = crate::inversion::qsmnetme::qsmnetme_in_frame(&field, &fmask, dims, &qsmnetme, &qnorm, params.frame_patch)?;
+    drop(qsmnetme);
+    let masked = |v: f64, m: u8| if m != 0 { v as f32 } else { 0.0 };
+    let qsm_ch: Vec<f32> = qsm.iter().zip(&fmask).map(|(&q, &m)| masked((q - norm.qsm.0) / norm.qsm.1, m)).collect();
+    drop(qsm);
+
+    // R2′ channel.
+    let r2p_ch: Vec<f32> = match r2 {
+        ChiSepNetR2::R2Prime(_) => r2f
+            .iter()
+            .zip(&fmask)
+            .map(|(&v, &m)| masked((v / norm.dr - norm.r2prime.0) / norm.r2prime.1, m))
+            .collect(),
+        ChiSepNetR2::R2Star(_) => {
+            let rn = R2PrimeNetNorm::default();
+            let x: Vec<f32> = r2f.iter().zip(&fmask).map(|(&v, &m)| masked((v / norm.dr - rn.r2star.0) / rn.r2star.1, m)).collect();
+            let net = OnnxModel::load(models.r2primenet.expect("checked above"))?;
+            let y = run_net(&net, std::slice::from_ref(&x), dims, 1, params.frame_patch)?;
+            y[0].iter().zip(&fmask).map(|(&v, &m)| if m != 0 { v } else { 0.0 }).collect()
+        }
+    };
+    drop(r2f);
+    drop(field);
+
+    let net = OnnxModel::load(models.chisepnet)?;
+    let y = run_net(&net, &[qsm_ch, field_ch, r2p_ch], dims, 2, params.frame_patch)?;
+    drop(net);
+    let source = |c: usize, (mean, std): (f64, f64)| -> Vec<f64> {
+        y[c].iter().zip(&fmask).map(|(&v, &m)| if m != 0 { (v as f64 * std + mean).max(0.0) } else { 0.0 }).collect()
+    };
+    let pos_f = source(0, norm.chi_pos);
+    let neg_f = source(1, norm.chi_neg);
+    let pos = frame.to_native(&pos_f);
+    let neg = frame.to_native(&neg_f);
+    let mut chi_pos = vec![0.0; n];
+    let mut chi_neg = vec![0.0; n];
+    let mut chi_total = vec![0.0; n];
+    for i in 0..n {
+        if mask[i] != 0 {
+            (chi_pos[i], chi_neg[i], chi_total[i]) = super::sources_from_magnitudes(pos[i], neg[i]);
+        }
+    }
+    Ok((chi_pos, chi_neg, chi_total))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -354,7 +568,7 @@ mod tests {
         assert!(ChiSepNetParams::default().validate().is_ok());
         assert!(ChiSepNetParams::low_memory().validate().is_ok());
         for bad in [(0, 128, 64), (128, 120, 64), (128, 128, 8)] {
-            let e = ChiSepNetParams { patch: bad }.validate().unwrap_err();
+            let e = ChiSepNetParams { patch: bad, ..Default::default() }.validate().unwrap_err();
             assert!(e.contains("multiple of 16"), "{e}");
         }
     }

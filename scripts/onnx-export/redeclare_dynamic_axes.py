@@ -15,6 +15,7 @@ misalign.
 
     python redeclare_dynamic_axes.py <toolbox>/models/240531_R2PRIMEnet.onnx r2primenet.onnx
     python redeclare_dynamic_axes.py <toolbox>/models/240904_xsepnet.onnx   chi-sepnet.onnx
+    python redeclare_dynamic_axes.py <toolbox>/models/240904_QSMnet.onnx    qsmnetme.onnx
 
 Needs: numpy, onnx, onnxruntime.
 """

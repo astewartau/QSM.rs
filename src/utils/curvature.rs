@@ -46,6 +46,20 @@
 //! triangles and of their vertices, which no public interface fixes. Here they don't change any
 //! smoothing width.
 //!
+//! At full size they are the whole of SDF's difference from the original (astewartau/QSM.rs#409,
+//! measured 2026-11-03 on QSM-CI's simulated head and KKI): of 6,011 / 9,003 flat vertices,
+//! MATLAB's defect is exactly 0 at 5,576 / 8,249, negative at 228 / 372 and positive (weight 1) at
+//! 207 / 382, all within 8e-15 of 0 (every other vertex is ≥ 3.9e-5 away). QSM.rs's sums give a
+//! different weight at 321 / 590 of them, which moves 764 / 2,518 voxels of stage 1 to a
+//! neighbouring smoothing width (local field 0.075 % / 0.13 %, χ 0.36 % / 0.78 % after both
+//! stages); with MATLAB's weights every width is MATLAB's. MATLAB sums each vertex's angles in
+//! the order of `vertexAttachments` over CGAL's triangle list, whose order and vertex rotation
+//! (the first vertex of a row is its smallest only a third of the time) come from CGAL's
+//! insertion and memory layout, not from the geometry. Setting every flat vertex's curvature to
+//! exactly 0 (what `curvatures.m` computes in exact arithmetic) mismatches only MATLAB's 207 / 382
+//! positive ones, but all in one direction, and moves 2,163 voxels in sim instead of 764: worse,
+//! so the rounded sums stay.
+//!
 //! ## Reference pipeline
 //!
 //! QSMART's `calculate_curvature.m` (Syeda, October 2020) takes the surface as the brain mask

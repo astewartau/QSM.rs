@@ -128,7 +128,7 @@ fn mask_r0(f: &Fixture) -> Vec<f64> {
 fn sdf_params(stage: usize) -> SdfParams {
     let q = QsmartParams::for_field_strength(B0);
     let (sigma1, sigma2) = if stage == 1 { (q.sdf_sigma1_stage1, q.sdf_sigma2_stage1) } else { (q.sdf_sigma1_stage2, q.sdf_sigma2_stage2) };
-    SdfParams { sigma1, sigma2, lower_lim: q.sdf_lower_lim, curv_constant: q.sdf_curv_constant, use_curvature: true }
+    SdfParams { sigma1, sigma2, lower_lim: q.sdf_lower_lim, curv_constant: q.sdf_curv_constant, use_curvature: true, vessel_proximity: stage == 2 }
 }
 
 fn ilsqr_params() -> IlsqrParams {

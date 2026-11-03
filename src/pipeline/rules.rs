@@ -422,6 +422,7 @@ pub const SETTINGS: &[(&str, &str)] = &[
     ("bg_removal.resharp.radius", "RESHARP's kernel radius, mm; only with RESHARP"),
     ("bg_removal.resharp.max_iter", "RESHARP's cgs iteration cap; only with RESHARP"),
     ("bg_removal.pdf.n_cg", "PDF's CG iteration cap (PdfParams::n_cg); only with PDF"),
+    ("bg_removal.lbv.tol", "LBV's coarsest-grid stopping tolerance, radians over the echo spacing (LbvParams::tol); only with LBV"),
     ("inversion.algorithm", "Dipole inversion (InversionAlgorithm::id)"),
     ("inversion.star.pad", "STAR-QSM padding per side, voxels (StarParams::pad)"),
     ("inversion.ilsqr.max_iter", "iLSQR's LSQR iteration cap (IlsqrParams::max_iter); only with iLSQR"),
@@ -513,6 +514,7 @@ pub fn current(input: &RuleInput, facts: &ScanFacts, setting: &str) -> Option<Ve
     let resharp = bg(super::config::BgRemovalAlgorithm::Resharp);
     let ismv = bg(super::config::BgRemovalAlgorithm::Ismv);
     let pdf = bg(super::config::BgRemovalAlgorithm::Pdf);
+    let lbv = bg(super::config::BgRemovalAlgorithm::Lbv);
     use super::config::InversionAlgorithm as A;
     let alg = |a: &[A]| a.contains(&c.inversion.algorithm);
     let qsmart = alg(&[A::Qsmart]);
@@ -594,6 +596,7 @@ pub fn current(input: &RuleInput, facts: &ScanFacts, setting: &str) -> Option<Ve
         "bg_removal.resharp.radius" => gated(resharp, Current::Number(c.bg_removal.resharp.radius)),
         "bg_removal.resharp.max_iter" => gated(resharp, Current::Number(c.bg_removal.resharp.max_iter as f64)),
         "bg_removal.pdf.n_cg" => gated(pdf, Current::Number(c.bg_removal.pdf.n_cg as f64)),
+        "bg_removal.lbv.tol" => gated(lbv, Current::Number(c.bg_removal.lbv.tol)),
         "inversion.whqsm.weight" => gated(
             alg(&[A::Whqsm]),
             Current::Choice(match c.inversion.whqsm.weight {
@@ -826,12 +829,15 @@ const BET: &[Value] = &[Choice("bet")];
 /// The CG iteration count `pdf.cg-iterations` suggests (measured; see `PdfParams::n_cg`).
 const PDF_SUGGESTED_N_CG: f64 = 300.0;
 const PDF: &[Value] = &[Choice("pdf")];
+const LBV: &[Value] = &[Choice("lbv")];
 const VSHARP: &[Value] = &[Choice("vsharp")];
 const LAPLACIAN: &[Value] = &[Choice("laplacian")];
 const ROMEO: &[Value] = &[Choice("romeo")];
 const COMPLEX_FIT: &[Value] = &[Choice("complex-fit")];
 const WEIGHTED_AVG: &[Value] = &[Choice("weighted-avg")];
 const CHI_SEP_TOOLBOX: &[Value] = &[Choice("chi-sep-ilsqr"), Choice("chi-sep-medi"), Choice("chi-sepnet")];
+/// QSMnetME: the χ-separation toolbox's QSM network, trained on that toolbox's pipeline.
+const QSMNETME: &[Value] = &[Choice("qsmnetme")];
 const STI: &[Value] = &[Choice("star"), Choice("ilsqr")];
 /// HEIDI's cone fill is on (`inversion.apply_heidi`): the trigger of the `heidi.*` rules.
 const HEIDI_ON: Condition = method("inversion.apply_heidi", &[Bool(true)]);
@@ -848,8 +854,8 @@ const HEIDI_UNREGULARISED_SEEDS: &[Value] =
 const HEIDI_REGULARISED_SEEDS: &[Value] = &[
     Choice("medi"), Choice("tv"), Choice("nltv"), Choice("fansi"), Choice("fansi-tgv"),
     Choice("l1qsm"), Choice("whqsm"), Choice("hdqsm"), Choice("amp-pe"), Choice("ilsqr"),
-    Choice("star"), Choice("xqsm"), Choice("qsmnet"), Choice("qsmnet-plus"), Choice("qsmgan"),
-    Choice("ir2qsm"), Choice("lpcnn"), Choice("modl-qsm"),
+    Choice("star"), Choice("xqsm"), Choice("qsmnet"), Choice("qsmnet-plus"), Choice("qsmnetme"),
+    Choice("qsmgan"), Choice("ir2qsm"), Choice("lpcnn"), Choice("modl-qsm"),
 ];
 /// Upstream's error when a truncating seed's threshold is above the cone's.
 const HEIDI_CONE_SOURCE: &str = "qsm_heidi computesusceptibility_heidi.m L922-923 (4592631); QSM.rs heidi.rs docs (Any seed)";
@@ -919,6 +925,9 @@ pub static RULES: &[Rule] = &[
     reference("chi-sep.mask-bet", &[sep(CHI_SEP_TOOLBOX)], "masking.generator", BET,
         "The χ-separation toolbox and χ-sepnet mask with BET",
         "χ-separation toolbox Chisep_script.m:79-82; Kim et al. 2025 (χ-sepnet, arXiv:2409.14030) §2.1.1"),
+    reference("qsmnetme.mask-bet", &[inv(QSMNETME)], "masking.generator", BET,
+        "QSMnetME runs in the χ-separation toolbox, which masks with BET",
+        "χ-separation toolbox Chisep_script.m:79-82; Kim et al. 2025 (χ-sepnet) §2.1.1"),
     reference("qsmart.mask-bet", &[inv(&[Choice("qsmart")])], "masking.generator", BET,
         "QSMART's authors mask with FSL bet2 -f 0.2 on the N4-corrected first-echo magnitude",
         "Yaghmaie et al. 2021 NeuroImage 231:117701 (QSMART) §3.1; QSMART brainmask.m l. 7-33"),
@@ -1015,6 +1024,10 @@ pub static RULES: &[Rule] = &[
     reference("chi-sep.unwrap-romeo", &[sep(CHI_SEP_TOOLBOX)],
         "field_mapping.unwrapping_algorithm", ROMEO,
         "The χ-separation toolbox and χ-sepnet unwrap each echo with ROMEO",
+        "χ-separation toolbox Chisep_script.m:99-111; Kim et al. 2025 (χ-sepnet) §2.1.1"),
+    reference("qsmnetme.unwrap-romeo", &[inv(QSMNETME)],
+        "field_mapping.unwrapping_algorithm", ROMEO,
+        "QSMnetME's toolbox unwraps each echo with ROMEO",
         "χ-separation toolbox Chisep_script.m:99-111; Kim et al. 2025 (χ-sepnet) §2.1.1"),
     reference("sti.unwrap-laplacian", &[inv(STI)], "field_mapping.unwrapping_algorithm", LAPLACIAN,
         "STI Suite's QSM_GUI unwraps each echo with MRPhaseUnwrap (Laplacian)",
@@ -1130,6 +1143,14 @@ pub static RULES: &[Rule] = &[
         "field_mapping.b0_estimation.weighting", &[Choice("assumed-decay")],
         "The toolbox weights the echoes by TE·exp(−TE/T2*) with T2* = 40 ms (AssumedDecay, 0.04 s)",
         "χ-separation toolbox Chisep_script.m:113-123"),
+    reference("qsmnetme.echo-combination", &[inv(QSMNETME), MULTI_ECHO],
+        "field_mapping.b0_estimation", WEIGHTED_AVG,
+        "QSMnetME's toolbox combines the unwrapped echoes by a weighted average",
+        "χ-separation toolbox Chisep_script.m:113-123; Kim et al. 2025 (χ-sepnet) §2.1.1"),
+    reference("qsmnetme.echo-weights", &[inv(QSMNETME), MULTI_ECHO],
+        "field_mapping.b0_estimation.weighting", &[Choice("assumed-decay")],
+        "QSMnetME's toolbox weights the echoes by TE·exp(−TE/T2*) with T2* = 40 ms (AssumedDecay, 0.04 s)",
+        "χ-separation toolbox Chisep_script.m:113-123"),
     // ---------------------------------------------------------------- Background field removal
     reference("hdqsm.bg-pdf", &[inv(&[Choice("hdqsm")])], "bg_removal.algorithm", PDF,
         "HD-QSM's in-vivo pipeline removes the background with PDF",
@@ -1158,6 +1179,9 @@ pub static RULES: &[Rule] = &[
         "Lai et al. MICCAI 2020 (LPCNN), Dataset Acquisition and Preprocessing"),
     reference("chi-sep.bg-vsharp", &[sep(CHI_SEP_TOOLBOX)], "bg_removal.algorithm", VSHARP,
         "The χ-separation toolbox and χ-sepnet remove the background with V-SHARP",
+        "χ-separation toolbox Chisep_script.m:136-139; Kim et al. 2025 (χ-sepnet) §2.1.1"),
+    reference("qsmnetme.bg-vsharp", &[inv(QSMNETME)], "bg_removal.algorithm", VSHARP,
+        "QSMnetME's toolbox removes the background with V-SHARP",
         "χ-separation toolbox Chisep_script.m:136-139; Kim et al. 2025 (χ-sepnet) §2.1.1"),
     reference("r2star-qsm.bg-pdf", &[sep(&[Choice("r2star-qsm")])], "bg_removal.algorithm", PDF,
         "R2*-QSM's local field was from PDF",
@@ -1271,6 +1295,12 @@ pub static RULES: &[Rule] = &[
                  vs pdf-qsmrs on the simulated head); PDF.m default n_CG 30, MEDI toolbox \
                  2024.11.26",
     },
+    // A settings file from before the multigrid port can hold the SOR solver's 1e-6, a relative
+    // tolerance; the setting is kept as given and this suggests LBV.m's own (QSM.rs#406).
+    reference("lbv.tolerance", &[bg(LBV)], "bg_removal.lbv.tol", &[Number(0.01)],
+        "LBV.m stops its coarsest grid's relaxation when the summed absolute update falls to 0.01 \
+         (radians over the echo spacing)",
+        "MEDI toolbox 2024.11.26 functions/_LBV/LBV.m:29-31; QSM.rs LbvParams::tol"),
     reference("ismv-qsmjl.tolerance", &[method("bg_removal.ismv.variant", &[Choice("qsmjl")])],
         "bg_removal.ismv.tol", &[Number(1e-3)],
         "QSM.jl's ismv stops when the residual falls to 1e-3 of the first",
@@ -1590,6 +1620,7 @@ mod tests {
             ("iqsm.mask-bet", Case::new(inversion(I::Iqsm))),
             ("bfrnet.mask-bet", Case::new(background(B::Bfrnet))),
             ("chi-sep.mask-bet", Case::new(separation(S::ChiSepMedi))),
+            ("qsmnetme.mask-bet", Case::new(inversion(I::Qsmnetme))),
             ("decompose.mask-bet", Case::new(separation(S::Decompose))),
             ("mindgrab.wasm-heap", Case::new(|c| {
                 c.cfg.masking.sections[0].generator = MaskOp::MindGrab(Default::default());
@@ -1622,6 +1653,10 @@ mod tests {
                 separation(S::ChiSepIlsqr)(c);
                 c.cfg.field_mapping.unwrapping_algorithm = UnwrappingAlgorithm::Laplacian;
             })),
+            ("qsmnetme.unwrap-romeo", Case::new(|c| {
+                inversion(I::Qsmnetme)(c);
+                c.cfg.field_mapping.unwrapping_algorithm = UnwrappingAlgorithm::Laplacian;
+            })),
             ("field-mapping.phase-offsets", Case::new(|c| c.cfg.field_mapping.phase_offset_removal = false)),
             ("field-mapping.bipolar-needs-three-echoes", Case::new(|c| {
                 c.cfg.field_mapping.bipolar_correction = true;
@@ -1642,6 +1677,8 @@ mod tests {
             ("autoqsm.echo-weights", Case::new(inversion(I::Autoqsm))),
             ("chi-sep.echo-combination", Case::new(|c| { separation(S::ChiSepNet)(c); linear_fit(c) })),
             ("chi-sep.echo-weights", Case::new(separation(S::ChiSepIlsqr))),
+            ("qsmnetme.echo-combination", Case::new(|c| { inversion(I::Qsmnetme)(c); linear_fit(c) })),
+            ("qsmnetme.echo-weights", Case::new(inversion(I::Qsmnetme))),
             ("hdqsm.bg-pdf", Case::new(inversion(I::Hdqsm))),
             ("amp-pe.bg-pdf", Case::new(inversion(I::AmpPe))),
             ("lsqr.bg-sharp", Case::new(inversion(I::Lsqr))),
@@ -1661,6 +1698,7 @@ mod tests {
             ("qsmgan.bg-vsharp", Case::new(|c| { inversion(I::Qsmgan)(c); background(B::Lbv)(c) })),
             ("lpcnn.bg-vsharp", Case::new(|c| { inversion(I::Lpcnn)(c); background(B::Lbv)(c) })),
             ("chi-sep.bg-vsharp", Case::new(|c| { separation(S::ChiSepIlsqr)(c); background(B::Pdf)(c) })),
+            ("qsmnetme.bg-vsharp", Case::new(|c| { inversion(I::Qsmnetme)(c); background(B::Pdf)(c) })),
             ("r2star-qsm.bg-pdf", Case::new(separation(S::R2starQsm))),
             ("decompose.bg-vsharp", Case::new(|c| { separation(S::Decompose)(c); background(B::Pdf)(c) })),
             ("star.padding", Case::new(|c| {
@@ -1713,6 +1751,7 @@ mod tests {
             ("resharp.radius", Case::new(|c| { background(B::Resharp)(c); c.cfg.bg_removal.resharp.radius = 6.0 })),
             ("resharp.iterations", Case::new(|c| { background(B::Resharp)(c); c.cfg.bg_removal.resharp.max_iter = 30 })),
             ("pdf.cg-iterations", Case::new(background(B::Pdf))),
+            ("lbv.tolerance", Case::new(|c| { background(B::Lbv)(c); c.cfg.bg_removal.lbv.tol = 1e-6 })),
             ("ismv-qsmjl.tolerance", Case::new(|c| { background(B::Ismv)(c); c.cfg.bg_removal.ismv.variant = crate::bgremove::IsmvVariant::QsmJl })),
             ("ismv-qsmjl.max-iterations", Case::new(|c| { background(B::Ismv)(c); c.cfg.bg_removal.ismv.variant = crate::bgremove::IsmvVariant::QsmJl })),
             ("sti.unwrap-laplacian", Case::new(inversion(I::Ilsqr))),
@@ -2033,6 +2072,25 @@ mod tests {
         // Not in play without iSMV.
         let off = Case::new(|c| c.cfg.bg_removal.ismv.variant = IsmvVariant::QsmJl);
         assert!(off.ids().is_empty(), "{:?}", off.ids());
+    }
+
+    /// LBV's tolerance is kept as given: at LBV.m's 0.01 nothing is said; another (the SOR
+    /// solver's old 1e-6) gets LBV.m's value suggested; without LBV it is not in play.
+    #[test]
+    fn lbv_tolerance_is_suggested_not_rewritten() {
+        let with = |tol: f64| Case::new(move |c| {
+            c.cfg.bg_removal.algorithm = BgRemovalAlgorithm::Lbv;
+            c.cfg.bg_removal.lbv.tol = tol;
+        });
+        assert!(!with(0.01).ids().contains(&"lbv.tolerance"));
+        let old = with(1e-6);
+        assert!(old.ids().contains(&"lbv.tolerance"), "{:?}", old.ids());
+        let f = evaluate(&old.input(), &old.facts);
+        let r = f.iter().find(|f| f.rule.id == "lbv.tolerance").unwrap();
+        assert_eq!(r.current, vec![Current::Number(1e-6)]);
+        assert_eq!(r.rule.strength, Strength::Reference);
+        let off = Case::new(|c| c.cfg.bg_removal.lbv.tol = 1e-6);
+        assert!(!off.ids().contains(&"lbv.tolerance"));
     }
 
     /// On a per-echo reconstruction the settings that combine or compare echoes are not in play.

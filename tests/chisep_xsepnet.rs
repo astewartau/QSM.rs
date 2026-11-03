@@ -21,7 +21,7 @@ use common::{
 use qsm_core::pipeline::{
     run_separation, ScanMetadata, SeparationAlgorithm, SeparationConfig, SeparationInputs,
 };
-use qsm_core::separation::{chisepnet, ChiSepNetNorm, ChiSepNetParams, SusepNetParams};
+use qsm_core::separation::{chisepnet, ChiSepNetNorm, ChiSepNetParams, ChiSepNetRoute, SusepNetParams};
 use std::time::Instant;
 
 #[test]
@@ -185,8 +185,9 @@ fn test_chisepnet_low_memory_patch() {
     low_memory_matches_default(
         &ph,
         "chisepnet",
-        SeparationConfig { algorithm: alg, ..Default::default() },
-        SeparationConfig { algorithm: alg, chi_sepnet: ChiSepNetParams::low_memory(), ..Default::default() },
+        // The network on the acquired grid (ChiSepNetRoute::Native), where the patch applies.
+        SeparationConfig { algorithm: alg, chi_sepnet: ChiSepNetParams { route: ChiSepNetRoute::Native, ..Default::default() }, ..Default::default() },
+        SeparationConfig { algorithm: alg, chi_sepnet: ChiSepNetParams { route: ChiSepNetRoute::Native, ..ChiSepNetParams::low_memory() }, ..Default::default() },
         // Measured: r = 0.9989 (χ+) / 0.9965 (χ−), rel. err. 0.036 / 0.047.
         0.995,
         0.06,

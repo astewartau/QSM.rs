@@ -177,6 +177,10 @@ pub enum InversionAlgorithm {
     /// QSMnet+ deep-learning dipole inversion (susceptibility-scaling augmented;
     /// requires the `onnx` feature and the `qsmnet-plus` weights).
     QsmnetPlus,
+    /// QSMnetME deep-learning dipole inversion, the χ-separation toolbox's QSM network, by the
+    /// toolbox's route (rotation to B0 along z and 1 mm resampling inside; requires the `onnx`
+    /// feature and the `qsmnetme` weights; see [`crate::inversion::qsmnetme`]).
+    Qsmnetme,
     /// AutoQSM single-step reconstruction (requires the `onnx` feature and the
     /// `autoqsm` weights). NOTE: takes the **total** field — it does its own
     /// background removal, so the `local_field_ppm` argument should be the total field.
@@ -644,6 +648,7 @@ impl InversionConfig {
             | A::Xqsm
             | A::Qsmnet
             | A::QsmnetPlus
+            | A::Qsmnetme
             | A::Qsmgan
             | A::Ir2qsm
             | A::Lpcnn
@@ -784,7 +789,9 @@ impl InversionAlgorithm {
             | InversionAlgorithm::Whqsm
             | InversionAlgorithm::Hdqsm
             | InversionAlgorithm::AmpPe
-            | InversionAlgorithm::Lsqr => OrientationSupport::Arbitrary,
+            | InversionAlgorithm::Lsqr
+            // QSMnetME's route rotates the field into its training frame (B0 along z) itself.
+            | InversionAlgorithm::Qsmnetme => OrientationSupport::Arbitrary,
             InversionAlgorithm::Xqsm
             | InversionAlgorithm::Qsmnet
             | InversionAlgorithm::QsmnetPlus
@@ -815,9 +822,11 @@ impl SeparationAlgorithm {
             | SeparationAlgorithm::WaveSep
             | SeparationAlgorithm::Decompose
             | SeparationAlgorithm::HcChisep => OrientationSupport::NotApplicable,
-            SeparationAlgorithm::SusepNet | SeparationAlgorithm::ChiSepNet => {
-                OrientationSupport::AxialOnly
-            }
+            // χ-sepnet's default route (ChiSepNetRoute::Toolbox) rotates its inputs into the
+            // training frame itself, as the authors' toolbox does; the Native route expects
+            // B0 along z, which is the caller's to arrange.
+            SeparationAlgorithm::ChiSepNet => OrientationSupport::Arbitrary,
+            SeparationAlgorithm::SusepNet => OrientationSupport::AxialOnly,
         }
     }
 }
@@ -853,6 +862,7 @@ impl InversionAlgorithm {
             Self::Xqsm => Some("xqsm"),
             Self::Qsmnet => Some("qsmnet"),
             Self::QsmnetPlus => Some("qsmnet-plus"),
+            Self::Qsmnetme => Some("qsmnetme"),
             Self::Autoqsm => Some("autoqsm"),
             Self::Qsmgan => Some("qsmgan"),
             Self::Ir2qsm => Some("ir2qsm"),
@@ -872,7 +882,7 @@ impl InversionAlgorithm {
         Self::Tfi, Self::Ilsqr, Self::Star, Self::Tgv, Self::Qsmart, Self::Ndi, Self::Fansi, Self::FansiTgv,
         Self::L1qsm, Self::Whqsm, Self::Hdqsm, Self::AmpPe, Self::Lsqr,
         Self::Xqsm, Self::Qsmnet,
-        Self::QsmnetPlus, Self::Autoqsm, Self::Qsmgan, Self::Ir2qsm, Self::Lpcnn, Self::ModlQsm,
+        Self::QsmnetPlus, Self::Qsmnetme, Self::Autoqsm, Self::Qsmgan, Self::Ir2qsm, Self::Lpcnn, Self::ModlQsm,
         Self::Nextqsm, Self::Iqsm, Self::IqsmPlus,
     ];
 }
@@ -986,6 +996,7 @@ impl InversionAlgorithm {
             Self::Xqsm => "xqsm",
             Self::Qsmnet => "qsmnet",
             Self::QsmnetPlus => "qsmnet-plus",
+            Self::Qsmnetme => "qsmnetme",
             Self::Autoqsm => "autoqsm",
             Self::Qsmgan => "qsmgan",
             Self::Ir2qsm => "ir2qsm",
@@ -1269,7 +1280,7 @@ mod orientation_tests {
             InversionAlgorithm::Star, InversionAlgorithm::Tgv, InversionAlgorithm::Qsmart, InversionAlgorithm::Ndi,
             InversionAlgorithm::Fansi, InversionAlgorithm::FansiTgv, InversionAlgorithm::L1qsm,
             InversionAlgorithm::Whqsm, InversionAlgorithm::Hdqsm, InversionAlgorithm::AmpPe,
-            InversionAlgorithm::Lsqr,
+            InversionAlgorithm::Lsqr, InversionAlgorithm::Qsmnetme,
         ] {
             assert_eq!(a.orientation_support(), OrientationSupport::Arbitrary, "{a:?}");
             assert!(!a.orientation_support().requires_axial(), "{a:?}");
@@ -1306,12 +1317,10 @@ mod orientation_tests {
     /// No background removal or separation method should ever force a resample on its own.
     #[test]
     fn only_learned_methods_force_a_resample() {
-        for a in [SeparationAlgorithm::ChiSepIlsqr, SeparationAlgorithm::ChiSepMedi] {
+        for a in [SeparationAlgorithm::ChiSepIlsqr, SeparationAlgorithm::ChiSepMedi, SeparationAlgorithm::ChiSepNet] {
             assert_eq!(a.orientation_support(), OrientationSupport::Arbitrary, "{a:?}");
         }
-        for a in [SeparationAlgorithm::SusepNet, SeparationAlgorithm::ChiSepNet] {
-            assert!(a.orientation_support().requires_axial(), "{a:?}");
-        }
+        assert!(SeparationAlgorithm::SusepNet.orientation_support().requires_axial());
         for a in [
             SeparationAlgorithm::R2starQsm, SeparationAlgorithm::WaveSep,
             SeparationAlgorithm::Decompose, SeparationAlgorithm::HcChisep,
@@ -1343,7 +1352,7 @@ mod inversion_input_tests {
             (A::Ndi, LocalField), (A::Fansi, LocalField), (A::FansiTgv, LocalField),
             (A::L1qsm, LocalField), (A::Whqsm, LocalField), (A::Hdqsm, LocalField),
             (A::AmpPe, LocalField), (A::Lsqr, LocalField),
-            (A::Xqsm, LocalField), (A::Qsmnet, LocalField), (A::QsmnetPlus, LocalField),
+            (A::Xqsm, LocalField), (A::Qsmnet, LocalField), (A::QsmnetPlus, LocalField), (A::Qsmnetme, LocalField),
             (A::Autoqsm, TotalField), (A::Qsmgan, LocalField), (A::Ir2qsm, LocalField),
             (A::Lpcnn, LocalField), (A::ModlQsm, LocalField), (A::Nextqsm, TotalField),
             (A::Iqsm, WrappedPhase), (A::IqsmPlus, WrappedPhase), (A::Medi, LocalField),
