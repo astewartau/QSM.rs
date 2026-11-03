@@ -1103,10 +1103,6 @@ pub static RULES: &[Rule] = &[
         "field_mapping.b0_estimation", COMPLEX_FIT,
         "MEDI's field map and its noise weight N_std come from Fit_ppm_complex",
         "MEDI toolbox 2024.11.26 README.m:87,140; dataterm_mask.m:23-27"),
-    reference("complex-fit.unwrap-region-growing", &[method("field_mapping.b0_estimation", COMPLEX_FIT)],
-        "field_mapping.unwrapping_algorithm", &[Choice("medi-region-growing")],
-        "MEDI's pipeline unwraps Fit_ppm_complex's field with its region-growing unwrapPhase",
-        "MEDI toolbox 2024.11.26 README.m:80-95; unwrapPhase.m, mexUnwrap.c"),
     reference("pdf.field-complex-fit", &[bg(PDF)],
         "field_mapping.b0_estimation", COMPLEX_FIT,
         "PDF is weighted by Fit_ppm_complex's noise map N_std",
@@ -1671,9 +1667,6 @@ mod tests {
                 c.cfg.field_mapping.unwrapping_algorithm = UnwrappingAlgorithm::Laplacian;
             })),
             ("medi.field-complex-fit", Case::new(inversion(I::Medi))),
-            ("complex-fit.unwrap-region-growing", Case::new(|c| {
-                c.cfg.field_mapping.b0_estimation = B0EstimationMethod::ComplexFit(Default::default());
-            })),
             ("pdf.field-complex-fit", Case::new(background(B::Pdf))),
             ("r2star-qsm.field-complex-fit", Case::new(separation(S::R2starQsm))),
             ("amp-pe.echo-combination", Case::new(|c| { inversion(I::AmpPe)(c); linear_fit(c) })),
@@ -1938,7 +1931,6 @@ mod tests {
             c.cfg.bg_removal.algorithm = BgRemovalAlgorithm::Pdf;
             c.cfg.masking.sections[0].generator = MaskOp::Bet(Default::default());
             c.cfg.field_mapping.b0_estimation = B0EstimationMethod::ComplexFit(Default::default());
-            c.cfg.field_mapping.unwrapping_algorithm = UnwrappingAlgorithm::MediRegionGrowing;
             c.cfg.bg_removal.pdf.n_cg = 300;
         });
         assert!(c.ids().is_empty(), "{:?}", c.ids());

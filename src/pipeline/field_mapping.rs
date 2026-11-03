@@ -53,7 +53,7 @@
 //! # Pipeline rules
 //!
 //! The facts above that a configuration can depart from are published as rules in
-//! [`crate::pipeline::rules::RULES`] (each with its strength, basis, reason and source): `field-mapping.phase-offsets`, `complex-fit.unwrap-region-growing`, `field-mapping.bipolar-needs-three-echoes`, `field-mapping.bipolar-not-with-laplacian`, `field-mapping.phase-offset-sigma`.
+//! [`crate::pipeline::rules::RULES`] (each with its strength, basis, reason and source): `field-mapping.phase-offsets`, `field-mapping.bipolar-needs-three-echoes`, `field-mapping.bipolar-not-with-laplacian`, `field-mapping.phase-offset-sigma`.
 
 use super::config::*;
 use super::phase_utils::{hz_to_ppm, rads_to_ppm};

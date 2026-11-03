@@ -83,9 +83,12 @@
 //!
 //! # Pipeline rules
 //!
-//! [`crate::pipeline::rules::RULES`] has `complex-fit.unwrap-region-growing` (a `Reference`
-//! rule: MEDI's pipeline unwraps `Fit_ppm_complex`'s field with this method), which fires only
-//! when the complex fit is chosen; ROMEO stays the default unwrapper.
+//! None yet (2026-11-03, when the port landed as an option). MEDI's pipeline unwraps
+//! `Fit_ppm_complex`'s field with this method, so a `Reference` rule triggered by the complex fit
+//! (or by MEDI) would be sourced. It was left out because QSMxT shows a method's reference values
+//! in a pop-up with Apply preselected when the method is chosen: choosing MEDI would then switch
+//! its unwrapping from ROMEO (QSMxT's default) to this one on one keypress. Whether it should is
+//! a separate decision; ROMEO stays the default unwrapper.
 //!
 //! # Use
 //!
