@@ -15,8 +15,8 @@
 #   python3 tests/data/medi_unwrap_cornell_small.py tests/data/medi_unwrap_cornell_small.bin
 #
 # Needs numpy, nibabel and podman or docker (CONTAINER_ENGINE overrides; the regenerate-fixtures
-# workflow runs it in Actions). The fixture stores the phantoms' inputs as well, so the test
-# never rebuilds them.
+# workflow runs it in Actions). The phantoms are built with + - * /, floor and the hash only, so
+# they are the same bits everywhere; the fixture stores them too, so the test never rebuilds them.
 #
 # What the phantoms exercise in mexUnwrap.c:
 # - magnitude plateaus (iMag takes few distinct values), so the max-heap meets many ties and its
@@ -82,9 +82,11 @@ def phantom(dims, tes, salt):
                           + 0.04 / dte * hsh(p, salt + 2)
     mags, phases = [], []
     for e, te in enumerate(tes):
-        mags.append(level * np.exp(-25.0 * te))
+        # Decay by an exact factor per echo, and wrap with + - * / and floor only, so the inputs
+        # are the same bits on every machine (np.exp / np.angle are not).
+        mags.append(level * (1.0 - 0.125 * e))
         ph = 2.0 * np.pi * freq * te + 0.3 + 0.05 * np.array([hsh(p, salt + 10 + e) for p in range(n)])
-        phases.append(np.angle(np.exp(1j * ph)))
+        phases.append(ph - 2.0 * np.pi * np.floor((ph + np.pi) / (2.0 * np.pi)))
     return mags, phases
 
 
