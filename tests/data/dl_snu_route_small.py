@@ -35,7 +35,7 @@
 import hashlib, importlib.util, os, sys, tempfile, urllib.request
 import numpy as np
 
-QSMCI_COMMIT = "d43555925c8e957717e0cfdeaa81a5ac4dca4735"  # QSMxT/QSM-CI parity/qsmnetme-377
+QSMCI_COMMIT = "654de46eab295c7bd1e5338ef1c9a00fa0e5aab0"  # QSMxT/QSM-CI main (#389 merged)
 ROUTE_SHA = "ee244927ac0f7e723d1fc1cbd85543f220316c8ac7a27c8d0a3439642450dbcc"
 HF_REVISION = "e7116c8b8be0ad0aa4155d68cb2f9c23363be362"
 NETS = {"qsmnet": ("qsmnetme.onnx", "c2f030b625b2fc83f3ae45b38c996e006a069444d2da32d2b6022045c92c01e5"),
