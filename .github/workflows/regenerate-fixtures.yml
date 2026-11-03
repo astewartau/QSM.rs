@@ -94,6 +94,13 @@ jobs:
       - name: Install numpy and nibabel
         run: pip install numpy==2.5.4 nibabel==5.4.2
 
+      # A Python generator that runs its reference in-process (no container) names its own pinned
+      # packages in a header line `# pip: <requirement> ...`.
+      - name: Install the generator's own packages
+        run: |
+          req=$(sed -n 's/^# pip: //p' "tests/data/$NAME.py" 2>/dev/null | head -1)
+          if [ -n "$req" ]; then pip install $req; fi
+
       - name: Generate
         env:
           CONTAINER_ENGINE: docker

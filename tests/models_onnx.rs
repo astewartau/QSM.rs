@@ -136,6 +136,8 @@ mod dipole;
 mod field;
 #[path = "models_onnx/separation.rs"]
 mod separation;
+#[path = "models_onnx/snu_route.rs"]
+mod snu_route;
 
 // ---------------------------------------------------------------------------------------------
 // Manual tests.

@@ -836,6 +836,8 @@ const ROMEO: &[Value] = &[Choice("romeo")];
 const COMPLEX_FIT: &[Value] = &[Choice("complex-fit")];
 const WEIGHTED_AVG: &[Value] = &[Choice("weighted-avg")];
 const CHI_SEP_TOOLBOX: &[Value] = &[Choice("chi-sep-ilsqr"), Choice("chi-sep-medi"), Choice("chi-sepnet")];
+/// QSMnetME: the χ-separation toolbox's QSM network, trained on that toolbox's pipeline.
+const QSMNETME: &[Value] = &[Choice("qsmnetme")];
 const STI: &[Value] = &[Choice("star"), Choice("ilsqr")];
 /// HEIDI's cone fill is on (`inversion.apply_heidi`): the trigger of the `heidi.*` rules.
 const HEIDI_ON: Condition = method("inversion.apply_heidi", &[Bool(true)]);
@@ -852,8 +854,8 @@ const HEIDI_UNREGULARISED_SEEDS: &[Value] =
 const HEIDI_REGULARISED_SEEDS: &[Value] = &[
     Choice("medi"), Choice("tv"), Choice("nltv"), Choice("fansi"), Choice("fansi-tgv"),
     Choice("l1qsm"), Choice("whqsm"), Choice("hdqsm"), Choice("amp-pe"), Choice("ilsqr"),
-    Choice("star"), Choice("xqsm"), Choice("qsmnet"), Choice("qsmnet-plus"), Choice("qsmgan"),
-    Choice("ir2qsm"), Choice("lpcnn"), Choice("modl-qsm"),
+    Choice("star"), Choice("xqsm"), Choice("qsmnet"), Choice("qsmnet-plus"), Choice("qsmnetme"),
+    Choice("qsmgan"), Choice("ir2qsm"), Choice("lpcnn"), Choice("modl-qsm"),
 ];
 /// Upstream's error when a truncating seed's threshold is above the cone's.
 const HEIDI_CONE_SOURCE: &str = "qsm_heidi computesusceptibility_heidi.m L922-923 (4592631); QSM.rs heidi.rs docs (Any seed)";
@@ -923,6 +925,9 @@ pub static RULES: &[Rule] = &[
     reference("chi-sep.mask-bet", &[sep(CHI_SEP_TOOLBOX)], "masking.generator", BET,
         "The χ-separation toolbox and χ-sepnet mask with BET",
         "χ-separation toolbox Chisep_script.m:79-82; Kim et al. 2025 (χ-sepnet, arXiv:2409.14030) §2.1.1"),
+    reference("qsmnetme.mask-bet", &[inv(QSMNETME)], "masking.generator", BET,
+        "QSMnetME runs in the χ-separation toolbox, which masks with BET",
+        "χ-separation toolbox Chisep_script.m:79-82; Kim et al. 2025 (χ-sepnet) §2.1.1"),
     reference("qsmart.mask-bet", &[inv(&[Choice("qsmart")])], "masking.generator", BET,
         "QSMART's authors mask with FSL bet2 -f 0.2 on the N4-corrected first-echo magnitude",
         "Yaghmaie et al. 2021 NeuroImage 231:117701 (QSMART) §3.1; QSMART brainmask.m l. 7-33"),
@@ -1019,6 +1024,10 @@ pub static RULES: &[Rule] = &[
     reference("chi-sep.unwrap-romeo", &[sep(CHI_SEP_TOOLBOX)],
         "field_mapping.unwrapping_algorithm", ROMEO,
         "The χ-separation toolbox and χ-sepnet unwrap each echo with ROMEO",
+        "χ-separation toolbox Chisep_script.m:99-111; Kim et al. 2025 (χ-sepnet) §2.1.1"),
+    reference("qsmnetme.unwrap-romeo", &[inv(QSMNETME)],
+        "field_mapping.unwrapping_algorithm", ROMEO,
+        "QSMnetME's toolbox unwraps each echo with ROMEO",
         "χ-separation toolbox Chisep_script.m:99-111; Kim et al. 2025 (χ-sepnet) §2.1.1"),
     reference("sti.unwrap-laplacian", &[inv(STI)], "field_mapping.unwrapping_algorithm", LAPLACIAN,
         "STI Suite's QSM_GUI unwraps each echo with MRPhaseUnwrap (Laplacian)",
@@ -1134,6 +1143,14 @@ pub static RULES: &[Rule] = &[
         "field_mapping.b0_estimation.weighting", &[Choice("assumed-decay")],
         "The toolbox weights the echoes by TE·exp(−TE/T2*) with T2* = 40 ms (AssumedDecay, 0.04 s)",
         "χ-separation toolbox Chisep_script.m:113-123"),
+    reference("qsmnetme.echo-combination", &[inv(QSMNETME), MULTI_ECHO],
+        "field_mapping.b0_estimation", WEIGHTED_AVG,
+        "QSMnetME's toolbox combines the unwrapped echoes by a weighted average",
+        "χ-separation toolbox Chisep_script.m:113-123; Kim et al. 2025 (χ-sepnet) §2.1.1"),
+    reference("qsmnetme.echo-weights", &[inv(QSMNETME), MULTI_ECHO],
+        "field_mapping.b0_estimation.weighting", &[Choice("assumed-decay")],
+        "QSMnetME's toolbox weights the echoes by TE·exp(−TE/T2*) with T2* = 40 ms (AssumedDecay, 0.04 s)",
+        "χ-separation toolbox Chisep_script.m:113-123"),
     // ---------------------------------------------------------------- Background field removal
     reference("hdqsm.bg-pdf", &[inv(&[Choice("hdqsm")])], "bg_removal.algorithm", PDF,
         "HD-QSM's in-vivo pipeline removes the background with PDF",
@@ -1162,6 +1179,9 @@ pub static RULES: &[Rule] = &[
         "Lai et al. MICCAI 2020 (LPCNN), Dataset Acquisition and Preprocessing"),
     reference("chi-sep.bg-vsharp", &[sep(CHI_SEP_TOOLBOX)], "bg_removal.algorithm", VSHARP,
         "The χ-separation toolbox and χ-sepnet remove the background with V-SHARP",
+        "χ-separation toolbox Chisep_script.m:136-139; Kim et al. 2025 (χ-sepnet) §2.1.1"),
+    reference("qsmnetme.bg-vsharp", &[inv(QSMNETME)], "bg_removal.algorithm", VSHARP,
+        "QSMnetME's toolbox removes the background with V-SHARP",
         "χ-separation toolbox Chisep_script.m:136-139; Kim et al. 2025 (χ-sepnet) §2.1.1"),
     reference("r2star-qsm.bg-pdf", &[sep(&[Choice("r2star-qsm")])], "bg_removal.algorithm", PDF,
         "R2*-QSM's local field was from PDF",
@@ -1600,6 +1620,7 @@ mod tests {
             ("iqsm.mask-bet", Case::new(inversion(I::Iqsm))),
             ("bfrnet.mask-bet", Case::new(background(B::Bfrnet))),
             ("chi-sep.mask-bet", Case::new(separation(S::ChiSepMedi))),
+            ("qsmnetme.mask-bet", Case::new(inversion(I::Qsmnetme))),
             ("decompose.mask-bet", Case::new(separation(S::Decompose))),
             ("mindgrab.wasm-heap", Case::new(|c| {
                 c.cfg.masking.sections[0].generator = MaskOp::MindGrab(Default::default());
@@ -1632,6 +1653,10 @@ mod tests {
                 separation(S::ChiSepIlsqr)(c);
                 c.cfg.field_mapping.unwrapping_algorithm = UnwrappingAlgorithm::Laplacian;
             })),
+            ("qsmnetme.unwrap-romeo", Case::new(|c| {
+                inversion(I::Qsmnetme)(c);
+                c.cfg.field_mapping.unwrapping_algorithm = UnwrappingAlgorithm::Laplacian;
+            })),
             ("field-mapping.phase-offsets", Case::new(|c| c.cfg.field_mapping.phase_offset_removal = false)),
             ("field-mapping.bipolar-needs-three-echoes", Case::new(|c| {
                 c.cfg.field_mapping.bipolar_correction = true;
@@ -1652,6 +1677,8 @@ mod tests {
             ("autoqsm.echo-weights", Case::new(inversion(I::Autoqsm))),
             ("chi-sep.echo-combination", Case::new(|c| { separation(S::ChiSepNet)(c); linear_fit(c) })),
             ("chi-sep.echo-weights", Case::new(separation(S::ChiSepIlsqr))),
+            ("qsmnetme.echo-combination", Case::new(|c| { inversion(I::Qsmnetme)(c); linear_fit(c) })),
+            ("qsmnetme.echo-weights", Case::new(inversion(I::Qsmnetme))),
             ("hdqsm.bg-pdf", Case::new(inversion(I::Hdqsm))),
             ("amp-pe.bg-pdf", Case::new(inversion(I::AmpPe))),
             ("lsqr.bg-sharp", Case::new(inversion(I::Lsqr))),
@@ -1671,6 +1698,7 @@ mod tests {
             ("qsmgan.bg-vsharp", Case::new(|c| { inversion(I::Qsmgan)(c); background(B::Lbv)(c) })),
             ("lpcnn.bg-vsharp", Case::new(|c| { inversion(I::Lpcnn)(c); background(B::Lbv)(c) })),
             ("chi-sep.bg-vsharp", Case::new(|c| { separation(S::ChiSepIlsqr)(c); background(B::Pdf)(c) })),
+            ("qsmnetme.bg-vsharp", Case::new(|c| { inversion(I::Qsmnetme)(c); background(B::Pdf)(c) })),
             ("r2star-qsm.bg-pdf", Case::new(separation(S::R2starQsm))),
             ("decompose.bg-vsharp", Case::new(|c| { separation(S::Decompose)(c); background(B::Pdf)(c) })),
             ("star.padding", Case::new(|c| {

@@ -61,7 +61,7 @@ fn chisepnet_is_insensitive_to_array_orientation() {
 
     let run = |field: &[f64], qsm: &[f64], r2p: &[f64], mask: &[u8], grid: &Grid| {
         chisepnet(field, qsm, r2p, mask, grid, &w, &ChiSepNetNorm::default(),
-                  &ChiSepNetParams { patch })
+                  &ChiSepNetParams { patch, ..Default::default() })
             .expect("chisepnet")
     };
     let (ref_pos, ref_neg, _) =

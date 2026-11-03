@@ -20,8 +20,9 @@
 //!   to the χ-separation toolbox's `137·(B0/2.9)` (from the authors' code). `WaveSep` keeps
 //!   137 Hz/ppm at every field, while `R2starQsm` and `HcChisep` scale theirs by B0/3;
 //!   those choices do not come from the authors.
-//! - `ChiSepNet` is trained at 3 T and 1 mm, and its authors' QSM channel is QSMnetME, which
-//!   QSM.rs does not have.
+//! - `ChiSepNet` runs the authors' route by default ([`ChiSepNetRoute::Toolbox`](crate::separation::ChiSepNetRoute)):
+//!   its own QSMnetME QSM (so [`SeparationInputs::qsm`] is not read), R2′ from a measured map or
+//!   R2PRIMEnet on R2*, in the 3 T, 1 mm training frame.
 
 use super::config::*;
 use crate::separation::{
@@ -164,11 +165,22 @@ pub fn run_separation(
             )?
         }
         SeparationAlgorithm::ChiSepNet => {
-            let r2prime = need(inputs.r2prime, "r2prime")?;
             config.chi_sepnet.validate().map_err(PipelineError::InvalidConfig)?;
-            run_chi_sepnet(
-                inputs.local_field_ppm, inputs.qsm, r2prime, mask, &grid, &config.chi_sepnet,
-            )?
+            match config.chi_sepnet.route {
+                crate::separation::ChiSepNetRoute::Native => {
+                    let r2prime = need(inputs.r2prime, "r2prime")?;
+                    run_chi_sepnet(
+                        inputs.local_field_ppm, inputs.qsm, r2prime, mask, &grid, &config.chi_sepnet,
+                    )?
+                }
+                // The authors' route makes its own QSM (QSMnetME) and, from R2*, its own R2′
+                // (R2PRIMEnet), as the toolbox's script does: a measured R2′ when there is one,
+                // else R2* (`Chisep_script.m`:177-185).
+                crate::separation::ChiSepNetRoute::Toolbox => run_chi_sepnet_toolbox(
+                    inputs.local_field_ppm, inputs.r2prime, inputs.r2star, mask, &grid, bdir, b0,
+                    &config.chi_sepnet,
+                )?,
+            }
         }
     };
 
@@ -239,6 +251,61 @@ fn run_chi_sepnet(
     _r2prime: &[f64],
     _mask: &[u8],
     _grid: &crate::Grid,
+    _params: &crate::separation::ChiSepNetParams,
+) -> Result<crate::separation::ChiSepMaps, PipelineError> {
+    Err(PipelineError::InvalidConfig(
+        "χ-sepnet requires building qsm-core with the 'onnx' feature".into(),
+    ))
+}
+
+/// Source the weights and run χ-sepnet by the authors' route ([`crate::separation::chisepnet_toolbox`]).
+#[cfg(feature = "onnx")]
+#[allow(clippy::too_many_arguments)]
+fn run_chi_sepnet_toolbox(
+    local_field_ppm: &[f64],
+    r2prime: Option<&[f64]>,
+    r2star: Option<&[f64]>,
+    mask: &[u8],
+    grid: &crate::Grid,
+    bdir: (f64, f64, f64),
+    b0_tesla: f64,
+    params: &crate::separation::ChiSepNetParams,
+) -> Result<crate::separation::ChiSepMaps, PipelineError> {
+    use crate::separation::{ChiSepNetR2, ChiSepNetToolboxModels};
+    let r2 = match (r2prime, r2star) {
+        (Some(v), _) => ChiSepNetR2::R2Prime(v),
+        (None, Some(v)) => ChiSepNetR2::R2Star(v),
+        (None, None) => {
+            return Err(PipelineError::InvalidInput(
+                "χ-sepnet needs a measured R2' (χ-sepnet-R2') or an R2* map (χ-sepnet-R2*)".into(),
+            ))
+        }
+    };
+    let weight = |id: &str| crate::models::primary_weight(id).map_err(PipelineError::InvalidConfig);
+    let chisepnet = weight("chi-sepnet")?;
+    let qsmnetme = weight("qsmnetme")?;
+    let r2primenet = match r2 {
+        ChiSepNetR2::R2Star(_) => Some(weight("r2primenet")?),
+        ChiSepNetR2::R2Prime(_) => None,
+    };
+    let models = ChiSepNetToolboxModels { chisepnet: &chisepnet, qsmnetme: &qsmnetme, r2primenet: r2primenet.as_deref() };
+    crate::separation::chisepnet_toolbox(
+        local_field_ppm, r2, mask, grid, bdir, b0_tesla, &models,
+        &crate::separation::ChiSepNetNorm::default(), params,
+    )
+    .map_err(|e| PipelineError::AlgorithmError(e.to_string()))
+}
+
+#[cfg(not(feature = "onnx"))]
+#[allow(clippy::too_many_arguments)]
+fn run_chi_sepnet_toolbox(
+    _local_field_ppm: &[f64],
+    _r2prime: Option<&[f64]>,
+    _r2star: Option<&[f64]>,
+    _mask: &[u8],
+    _grid: &crate::Grid,
+    _bdir: (f64, f64, f64),
+    _b0_tesla: f64,
     _params: &crate::separation::ChiSepNetParams,
 ) -> Result<crate::separation::ChiSepMaps, PipelineError> {
     Err(PipelineError::InvalidConfig(
@@ -482,7 +549,8 @@ mod tests {
     fn dl_patches_from_config() {
         use crate::separation::{chisepnet, ChiSepNetParams, SusepNetParams};
         let d = SeparationConfig::default();
-        assert_eq!(d.chi_sepnet, ChiSepNetParams { patch: chisepnet::AUTHORS_PATCH });
+        assert_eq!(d.chi_sepnet, ChiSepNetParams { patch: chisepnet::AUTHORS_PATCH, ..Default::default() });
+        assert_eq!(d.chi_sepnet.route, crate::separation::ChiSepNetRoute::Toolbox);
         assert_eq!(d.susep_net, SusepNetParams { patch: None });
 
         let (nx, ny, nz) = (6, 6, 6);
@@ -495,7 +563,7 @@ mod tests {
         let bad = [
             SeparationConfig {
                 algorithm: SeparationAlgorithm::ChiSepNet,
-                chi_sepnet: ChiSepNetParams { patch: (128, 120, 64) },
+                chi_sepnet: ChiSepNetParams { patch: (128, 120, 64), ..Default::default() },
                 ..Default::default()
             },
             SeparationConfig {

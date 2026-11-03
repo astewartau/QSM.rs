@@ -1015,6 +1015,9 @@ fn dl_sep_r2primenet() {
 #[cfg(feature = "onnx")]
 fn separation_config(algorithm: SeparationAlgorithm, patch: Option<(usize, usize, usize)>) -> SeparationConfig {
     let mut config = SeparationConfig { algorithm, ..Default::default() };
+    // χ-sepnet's network on the acquired grid: the patch is what these cases measure (its default
+    // route, the toolbox's, adds QSMnetME and the training-frame resampling around it).
+    config.chi_sepnet.route = qsm_core::separation::ChiSepNetRoute::Native;
     if let Some(p) = patch {
         config.susep_net.patch = Some(p);
         config.chi_sepnet.patch = p;
