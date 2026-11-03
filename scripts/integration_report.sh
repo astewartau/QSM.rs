@@ -47,7 +47,8 @@ emit_table() {
   echo ""
 }
 
-# Susceptibility-map rows, tag appended to the method name. RESULT format:
+# Susceptibility-map rows, tag appended to the method name unless the name already says it
+# ("TGV (full pipeline)"). RESULT format:
 # name,nrmse%,detrend%,tissue%,blood%,dgm%,dgm_lin,calc_dev,streak,corr,xsim,time
 emit_chi_rows() {
   local tag="$1"; shift
@@ -55,10 +56,12 @@ emit_chi_rows() {
     file="metrics/${test}.csv"
     [ -f "$file" ] || continue
     all_results "$file" | while IFS=',' read -r name nrmse dt tissue blood dgm dgm_lin calc_dev streak corr xsim time; do
+      local t="$tag"
+      case "$name" in *"${tag# — }"*) [ -n "$tag" ] && t="" ;; esac
       if [ "$nrmse" = "-" ] || [ -z "$nrmse" ]; then
-        echo "| ${name}${tag} | :x: Failed | - | - | - | - | - | - | - | - | - | - |"
+        echo "| ${name}${t} | :x: Failed | - | - | - | - | - | - | - | - | - | - |"
       else
-        echo "| ${name}${tag} | ${nrmse} | ${dt} | ${tissue} | ${blood} | ${dgm} | ${dgm_lin} | ${calc_dev} | ${streak} | ${corr} | ${xsim} | $(fmt_time "$time") |"
+        echo "| ${name}${t} | ${nrmse} | ${dt} | ${tissue} | ${blood} | ${dgm} | ${dgm_lin} | ${calc_dev} | ${streak} | ${corr} | ${xsim} | $(fmt_time "$time") |"
       fi
     done
   done

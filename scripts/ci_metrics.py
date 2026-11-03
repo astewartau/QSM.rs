@@ -63,10 +63,10 @@ ROW_LAYOUTS = {
 # that has the old name is compared under the new one, so a relabelling does not drop the row
 # from the comparison. An entry can go once every main record in use has the new name.
 ROW_RENAMES = {
-    ("test_pipeline_two_pass", "RTS single pass"): "RTS (full pipeline, single pass)",
+    ("test_pipeline_two_pass", "RTS single pass"): "RTS (full pipeline; single pass)",
     ("test_combined_tgv", "TGV (from field)"): "TGV (from ground-truth total field)",
     ("test_pipeline_tgv", "TGV"): "TGV (full pipeline)",
-    ("test_pipeline_tgv_single_echo", "TGV (single echo)"): "TGV (single echo, from wrapped phase)",
+    ("test_pipeline_tgv_single_echo", "TGV (single echo)"): "TGV (single echo; from wrapped phase)",
 }
 # Utilities: only the last column (time) is a measurement.
 UTILITY_TESTS = {"test_bias_correction", "test_n4_bias_correction", "test_swi", "test_smwi",

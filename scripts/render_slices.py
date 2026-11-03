@@ -22,6 +22,7 @@ Usage:
 import math
 import struct
 import sys
+import textwrap
 from pathlib import Path
 
 import numpy as np
@@ -78,7 +79,7 @@ NAMES = {
     "pipeline_harperella": "HARPERELLA",
     "pipeline_iharperella": "iHARPERELLA",
     "pipeline_tgv": "TGV (full pipeline)",
-    "pipeline_tgv_single_echo": "TGV (single echo, from wrapped phase)",
+    "pipeline_tgv_single_echo": "TGV (single echo; from wrapped phase)",
     "pipeline_qsmart": "QSMART",
     "pipeline_qsmart_tikhonov": "QSMART (Tikhonov)",
     "swi": "CLEAR-SWI",
@@ -147,7 +148,7 @@ NAMES = {
     "dl_autoqsm": "AutoQSM",
     "dl_iqsm": "iQSM",
     "dl_iqsm_plus": "iQSM+",
-    "pipeline_rts_single_pass": "RTS (full pipeline, single pass)",
+    "pipeline_rts_single_pass": "RTS (full pipeline; single pass)",
     "pipeline_two_pass": "RTS two-pass",
     "dl_mindgrab": "MindGrab",
     "dl_rs2net": "RS2-Net (scaled phantom)",
@@ -685,7 +686,9 @@ def render_montage(input_dir, stem, title, unit, window, rows, row_labels, outpu
             if outline is not None and outline.shape == data.shape and not slug.startswith("diff:"):
                 ax.contour(outline.astype(float), levels=[0.5], colors=OUTLINE, linewidths=0.6)
             is_truth = "truth" in slug
-            ax.set_title(label, fontsize=9,
+            # Wrapped to the panel's width: a label that says where a method starts ("TGV (from
+            # ground-truth total field)") would otherwise run into its neighbours'.
+            ax.set_title(textwrap.fill(label, 22), fontsize=9,
                          fontweight="bold" if is_truth else "normal",
                          color="#0a7d3a" if is_truth else "black")
             if per_panel or slug.startswith("diff:"):

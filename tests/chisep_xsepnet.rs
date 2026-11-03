@@ -73,6 +73,7 @@ fn test_chisep_susepnet() {
     // box is 127×169×149 voxels): the same voxels are scored, with less padding around them.
     let in_mask = |ph: &ChiSepPhantom| ph.mask.iter().filter(|&&m| m != 0).count();
     let whole = in_mask(&ph);
+    let full = (ph.mask.clone(), ph.dims);
     let ph = crop(&ph, (144, 176, 168));
     assert_eq!(in_mask(&ph), whole, "the crop cuts into the brain mask");
     let cfg = SeparationConfig { algorithm: SeparationAlgorithm::SusepNet, ..Default::default() };
@@ -81,8 +82,9 @@ fn test_chisep_susepnet() {
     let dia_mag: Vec<f64> = chi_neg.iter().map(|&v| -v).collect();
     chisep_score("SUSEP-Net χ+", &chi_pos, &ph.gt_para, &ph.mask, ph.dims, secs);
     chisep_score("SUSEP-Net χ−", &dia_mag, &ph.gt_dia, &ph.mask, ph.dims, secs);
-    save_center_slices(&chi_pos, &ph.mask, ph.dims, "chisep_susepnet_para");
-    save_center_slices(&dia_mag, &ph.mask, ph.dims, "chisep_susepnet_dia");
+    // The figure panels on the phantom's grid, like the other methods'.
+    save_center_slices(&uncrop(&chi_pos, ph.dims, full.1), &full.0, full.1, "chisep_susepnet_para");
+    save_center_slices(&uncrop(&dia_mag, ph.dims, full.1), &full.0, full.1, "chisep_susepnet_dia");
 
     assert!(chi_pos.iter().all(|v| v.is_finite()), "SUSEP-Net produced non-finite χ+");
     assert!(dia_mag.iter().all(|v| v.is_finite()), "SUSEP-Net produced non-finite χ−");
@@ -129,6 +131,21 @@ fn crop(ph: &ChiSepPhantom, dims: (usize, usize, usize)) -> ChiSepPhantom {
         cf: ph.cf,
         bdir: ph.bdir,
     }
+}
+
+/// A [`crop`]ped map put back at the centre of the `full` grid, 0 outside the crop.
+fn uncrop(v: &[f64], dims: (usize, usize, usize), full: (usize, usize, usize)) -> Vec<f64> {
+    let ((cx, cy, cz), (nx, ny, nz)) = (dims, full);
+    let (ox, oy, oz) = ((nx - cx) / 2, (ny - cy) / 2, (nz - cz) / 2);
+    let mut out = vec![0.0; nx * ny * nz];
+    for z in 0..cz {
+        for y in 0..cy {
+            for x in 0..cx {
+                out[(x + ox) + nx * ((y + oy) + ny * (z + oz))] = v[x + cx * (y + cy * z)];
+            }
+        }
+    }
+    out
 }
 
 /// `‖a − b‖ / ‖b‖` over the mask.

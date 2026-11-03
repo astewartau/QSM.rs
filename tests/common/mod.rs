@@ -335,10 +335,17 @@ impl TestResult {
     /// Print machine-readable CSV line for CI metric collection.
     /// Fields: name, rmse, nrmse(range), nrmse_challenge(%), correlation, xsim, time.
     pub fn print_ci_metrics(&self, elapsed: std::time::Duration) {
+        assert_result_name(&self.name);
         println!("RESULT:{},{:.6},{:.4},{:.2},{:.4},{:.4},{:.2}",
             self.name, self.rmse, self.nrmse, self.nrmse_challenge, self.correlation, self.xsim,
             elapsed.as_secs_f64());
     }
+}
+
+/// A `RESULT:` row is comma-separated and read by field position (scripts/integration_report.sh,
+/// scripts/ci_metrics.py), so a comma in its name would shift every value after it.
+pub fn assert_result_name(name: &str) {
+    assert!(!name.contains(','), "RESULT name {name:?} has a comma, which splits its row");
 }
 
 /// Save center orthogonal slices of a 3D volume for CI visualization.
@@ -874,6 +881,7 @@ impl ChallengeMetrics {
 
     /// Print machine-readable CSV line for CI metric collection (unified RESULT format)
     pub fn print_ci_metrics(&self, elapsed: std::time::Duration) {
+        assert_result_name(&self.name);
         println!("RESULT:{},{:.2},{:.2},{:.2},{:.2},{:.2},{:.4},{:.4},{:.4},{:.4},{:.4},{:.2}",
             self.name, self.nrmse, self.nrmse_detrend, self.nrmse_tissue,
             self.nrmse_blood, self.nrmse_dgm, self.dgm_linearity,
@@ -1036,6 +1044,7 @@ pub fn chisep_score(
     let corr = correlation(recon, truth, mask);
     let xs = xsim(recon, truth, mask, dims);
     let nr = nrmse(recon, truth, mask) * 100.0;
+    assert_result_name(label);
     println!("  {:22}  corr {:.4}   xsim {:.4}   nrmse {:.1}%", label, corr, xs, nr);
     println!("RESULT:{},{:.4},{:.4},{:.1},{:.2}", label, corr, xs, nr, time_s);
 }
