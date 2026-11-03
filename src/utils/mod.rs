@@ -33,6 +33,8 @@ pub mod connected;
 pub mod union_find;
 pub mod morphology;
 pub mod resample;
+pub mod interp3;
+pub mod chisep_frame;
 pub mod simd_ops;
 pub mod r2star;
 pub mod epg;

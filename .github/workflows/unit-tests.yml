@@ -213,7 +213,7 @@ jobs:
             # The stages, and the networks that stand in for one: BFR, inversion, separation.
             stages)
               features="onnx simd"; cache=onnx-simd; filter="--skip dl_mask --skip dl_seg"
-              models="bfrnet iqfm xqsm qsmnet qsmnet-plus qsmgan lpcnn ir2qsm modl-qsm autoqsm nextqsm"
+              models="bfrnet iqfm xqsm qsmnet qsmnet-plus qsmnetme qsmgan lpcnn ir2qsm modl-qsm autoqsm nextqsm"
               models="$models iqsm iqsm-plus r2primenet susep-net chi-sepnet" ;;
             masking)
               features="onnx simd"; cache=onnx-simd; filter="dl_mask"; models="hd-bet rs2-net" ;;

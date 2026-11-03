@@ -162,6 +162,39 @@ const MODELS: &[ModelSpec] = &[
         memory: mem(398_000_000, 796_200_000, 443_000_000, 842, 1_008_000_000, 1068),
     },
     ModelSpec {
+        id: "qsmnetme",
+        name: "QSMnetME",
+        stage: ModelStage::DipoleInversion,
+        status: WeightStatus::Available,
+        origin: Framework::Onnx,
+        description: "The SNU-LIST χ-separation toolbox's QSM network (already ONNX): a \
+                      QSMnet-style 3D U-Net trained on multi-echo data, run by the toolbox's \
+                      route (field rotated to B0 along z and resampled to 1 mm, z-scored with \
+                      the χ-sepnet field statistics, whole volume, mapped back). Spatial axes \
+                      re-declared dynamic (the toolbox ships a fixed 192×192×128 input). \
+                      Normalization constants are baked into the Rust glue (QsmnetmeNorm).",
+        paper: "Kim et al., Hum Brain Mapp 2025 (doi:10.1002/hbm.70136)",
+        source: "https://github.com/SNU-LIST/chi-separation",
+        license: "",
+        // χ-separation toolbox v1.1.3 `models/240904_QSMnet.onnx` (SHA-256 de2f2c23…) with its
+        // spatial axes re-declared dynamic by scripts/onnx-export/redeclare_dynamic_axes.py:
+        // identical output at the declared 192×192×128. Mirrored on Hugging Face
+        // (qsmxt/qsm-onnx-weights, commit e7116c8); anonymous download + SHA-256 checked.
+        files: &[WeightFile {
+            name: "qsmnetme.onnx",
+            url: "https://huggingface.co/qsmxt/qsm-onnx-weights/resolve/main/qsmnetme.onnx",
+            sha256: "c2f030b625b2fc83f3ae45b38c996e006a069444d2da32d2b6022045c92c01e5",
+            bytes: 90_307_128,
+        }],
+        inputs: &["field"],
+        outputs: &["chi"],
+        size_divisor: 16,
+        tile_bytes_per_voxel: None,
+        // The same graph as R2PRIMEnet's (same layers, shapes and byte count; other weights), so
+        // its measured memory figures.
+        memory: mem(90_500_000, 181_200_000, 114_000_000, 825, 188_000_000, 1155),
+    },
+    ModelSpec {
         id: "qsmgan",
         name: "QSMGAN",
         stage: ModelStage::DipoleInversion,
@@ -473,7 +506,8 @@ const MODELS: &[ModelSpec] = &[
         origin: Framework::Onnx,
         description: "SNU-LIST χ-separation network (already ONNX): a fully-convolutional \
                       3D U-Net mapping [QSM, local field, R2′/Dr] (z-scored) → [χ+, χ−], \
-                      run as an overlapping sliding window. Spatial axes re-declared dynamic \
+                      run by the toolbox's route (training frame, QSMnetME QSM channel, whole \
+                      volume) or alone as an overlapping sliding window. Spatial axes re-declared dynamic \
                       (the authors ship a fixed 192×192×128 input) so 32-bit hosts can use a \
                       smaller patch. Normalization constants (Dr=114) are baked into the Rust \
                       glue (ChiSepNetNorm).",

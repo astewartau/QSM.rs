@@ -118,11 +118,14 @@ four pooling levels.
 ```
 python redeclare_dynamic_axes.py <toolbox>/models/240531_R2PRIMEnet.onnx r2primenet.onnx
 python redeclare_dynamic_axes.py <toolbox>/models/240904_xsepnet.onnx   chi-sepnet.onnx
+python redeclare_dynamic_axes.py <toolbox>/models/240904_QSMnet.onnx    qsmnetme.onnx
 ```
 
 Hosted on `qsmxt/qsm-onnx-weights`: `r2primenet.onnx` 90,307,128 bytes, sha256
 `44cb5e67d1c68dae87a5f532e501dc0d4bf627d91f9c8ba35a56df5ac7ec3cd0`; `chi-sepnet.onnx`
-90,314,172 bytes, sha256 `5b442fdfdb88f50ec9149b384dabd0d2d9adb6983947d9cfa58382b78676bed9`. Redistribution permission
+90,314,172 bytes, sha256 `5b442fdfdb88f50ec9149b384dabd0d2d9adb6983947d9cfa58382b78676bed9`; `qsmnetme.onnx` (QSMnetME,
+from `240904_QSMnet.onnx`, sha256 `de2f2c23…`) 90,307,128 bytes, sha256
+`c2f030b625b2fc83f3ae45b38c996e006a069444d2da32d2b6022045c92c01e5` (HF commit e7116c8). Redistribution permission
 was obtained from the authors; the toolbox itself is behind their Google form. The normalisation
 constants baked into `R2PrimeNetNorm` come from the toolbox's
 `xsepnet_train_patch_norm_factor_inplane_largedegree_romeo_arlo.mat` — the same file χ-sepnet

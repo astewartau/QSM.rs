@@ -90,11 +90,11 @@ pub use hc_chisep::{hc_chisep, HcChisepParams};
 pub use r2star_qsm::{r2star_qsm, r2star_qsm_from_magnitude, R2starQsmParams};
 pub use wavesep::{wavesep, WaveSepParams};
 pub use susep_net::{SusepNetNorm, SusepNetParams};
-pub use chisepnet::{ChiSepNetNorm, ChiSepNetParams};
+pub use chisepnet::{ChiSepNetNorm, ChiSepNetParams, ChiSepNetR2, ChiSepNetRoute, ChiSepNetToolboxModels};
 #[cfg(feature = "onnx")]
 pub use susep_net::susep_net;
 #[cfg(feature = "onnx")]
-pub use chisepnet::chisepnet;
+pub use chisepnet::{chisepnet, chisepnet_toolbox};
 
 #[cfg(test)]
 mod tests {
