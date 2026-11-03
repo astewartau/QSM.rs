@@ -98,11 +98,11 @@ impl TrainingFrame {
     pub fn new(dims: (usize, usize, usize), voxel_size: (f64, f64, f64), b0_dir: (f64, f64, f64)) -> Self {
         let n = [dims.0, dims.1, dims.2];
         let vs = [voxel_size.0, voxel_size.1, voxel_size.2];
-        let native = UniformAxes { n, origin: std::array::from_fn(|d| -((n[d] - 1) as f64) * vs[d] / 2.0), step: vs };
+        let native = UniformAxes { n, origin: std::array::from_fn(|d| -(n[d].saturating_sub(1) as f64) * vs[d] / 2.0), step: vs };
         let m: [usize; 3] = std::array::from_fn(|d| frame_len(n[d], vs[d]));
         let frame = UniformAxes {
             n: m,
-            origin: std::array::from_fn(|d| -((m[d] - 1) as f64) * FRAME_RES_MM / 2.0),
+            origin: std::array::from_fn(|d| -(m[d].saturating_sub(1) as f64) * FRAME_RES_MM / 2.0),
             step: [FRAME_RES_MM; 3],
         };
         let rot = rotation_to_b0(b0_dir);
