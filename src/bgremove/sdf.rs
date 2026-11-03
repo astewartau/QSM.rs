@@ -41,6 +41,16 @@
 //! (astewartau/QSM.rs#320, fixed by #370; see [`crate::utils::curvature`]). Stage 1's widths are
 //! the toolbox's (σ1 = σ2 = 10, above); with σ2 = 0, as `recon.m`'s `s1.sdf_sigma2`, it is 149 %
 //! off.
+//!
+//! At full size (QSM-CI's simulated head, 164×205×205, and KKI, 256×256×128; measured 2026-11-03,
+//! astewartau/QSM.rs#409) the local fields are 0.075 % / 0.20 % (sim, stage 1 / 2) and
+//! 0.13 % / 0.73 % (KKI) from the original's. An instrumented copy of `sdf_curvature.m` and
+//! `calculate_curvature.m` under licensed MATLAB R2023b reproduces the container to 5e-15 %, and
+//! given MATLAB's curvature map `curvI`, [`sdf`]'s smoothing widths are MATLAB's in every voxel of
+//! both stages and both cases. All of the difference is the curvature weight of flat surface
+//! vertices (see [`crate::utils::curvature`]): 321 of 6,011 (sim) and 590 of 9,003 (KKI) get 1
+//! where MATLAB gives 0 or the reverse, which moves 764 / 2,518 voxels to a neighbouring width in
+//! stage 1. The proximity's rounding to two decimals and the vessel-proximity step add nothing.
 
 use crate::Grid;
 use crate::utils::curvature::calculate_curvature_proximity;
@@ -62,6 +72,12 @@ pub struct SdfParams {
     pub curv_constant: f64,
     /// Whether to use curvature-based edge refinement
     pub use_curvature: bool,
+    /// Whether to weight the proximity map by the vessel proximity (the Gaussian of `vasc_only`
+    /// with width `sigma2`). `sdf_curvature.m` does this in stage 2 only (`if stage==2`, l. 17);
+    /// stage 1 passes no vessels and skips it, though its `sigma2` is 10. (Multiplying stage 1 by
+    /// the Gaussian of all-ones, as QSM.rs did before, changes the proximity by an ulp and, on
+    /// QSM-CI's full-size cases, no smoothing width.)
+    pub vessel_proximity: bool,
 }
 
 impl Default for SdfParams {
@@ -75,6 +91,7 @@ impl Default for SdfParams {
             lower_lim: 0.6,
             curv_constant: 500.0,
             use_curvature: true,
+            vessel_proximity: false,
         }
     }
 }
@@ -89,6 +106,7 @@ impl SdfParams {
             lower_lim: 0.6,
             curv_constant: 500.0,
             use_curvature: true,
+            vessel_proximity: false,
         }
     }
 
@@ -100,6 +118,7 @@ impl SdfParams {
             lower_lim: 0.6,
             curv_constant: 500.0,
             use_curvature: true,
+            vessel_proximity: true,
         }
     }
 }
@@ -172,7 +191,7 @@ pub fn sdf(
     };
 
     // Calculate vasculature proximity (prox2) for stage 2
-    let prox_final = if params.sigma2 > 0.0 {
+    let prox_final = if params.vessel_proximity && params.sigma2 > 0.0 {
         let prox2 = gaussian_smooth_3d_masked_f64(vasc_only, mask, nx, ny, nz, &[params.sigma2, params.sigma2, params.sigma2]);
         // Multiply prox * prox2
         prox.iter().zip(prox2.iter()).map(|(&p, &p2)| p * p2).collect()
@@ -511,7 +530,7 @@ mod tests {
         let mut vasc = vec![0.0; n];
         vasc[centre] = 1.0;
         let tfs: Vec<f64> = (0..n).map(|i| 1.0 + 0.01 * (i % nx) as f64).collect();
-        let params = SdfParams { sigma1: 1.0, sigma2: 4.0, use_curvature: false, ..SdfParams::default() };
+        let params = SdfParams { sigma1: 1.0, sigma2: 4.0, use_curvature: false, vessel_proximity: true, ..SdfParams::default() };
         let lfs = sdf(&tfs, &mask, &vasc, &grid, &params, |_, _| {});
         assert_eq!(lfs[centre], 0.0);
     }

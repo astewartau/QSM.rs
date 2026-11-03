@@ -670,6 +670,7 @@ fn test_qsmart_05_sdf_stage1() {
         lower_lim: SDF_LOWER_LIM,
         curv_constant: SDF_CURV_CONSTANT,
         use_curvature: true,
+        vessel_proximity: false,
     };
 
     let lfs_stage1_rust = sdf(
@@ -696,6 +697,7 @@ fn test_qsmart_05_sdf_stage1() {
         lower_lim: SDF_LOWER_LIM,
         curv_constant: SDF_CURV_CONSTANT,
         use_curvature: true,
+        vessel_proximity: false,
     };
     let lfs_stage1_old = sdf(&data.tfs, &data.mask, &ones, &grid, &params_stage1_old, |_, _| {});
     let result_old = compare_volumes("SDF S1 (sigma2=10)", &lfs_stage1_old, matlab_lfs1, &data.mask);
@@ -897,6 +899,7 @@ fn test_qsmart_06_sdf_stage2() {
         lower_lim: SDF_LOWER_LIM,
         curv_constant: SDF_CURV_CONSTANT,
         use_curvature: true,
+        vessel_proximity: true,
     };
 
     let lfs_stage2_rust = sdf(
@@ -1202,6 +1205,7 @@ fn test_qsmart_full_pipeline() {
         lower_lim: SDF_LOWER_LIM,
         curv_constant: SDF_CURV_CONSTANT,
         use_curvature: true,
+        vessel_proximity: false,
     };
 
     let lfs_stage1 = sdf(&data.tfs, &data.mask, &ones, &grid, &params_stage1, |_, _| {});
@@ -1233,6 +1237,7 @@ fn test_qsmart_full_pipeline() {
         lower_lim: SDF_LOWER_LIM,
         curv_constant: SDF_CURV_CONSTANT,
         use_curvature: true,
+        vessel_proximity: true,
     };
 
     let lfs_stage2 = sdf(&data.tfs, &data.mask, &vasc_only, &grid, &params_stage2, |_, _| {});
