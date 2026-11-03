@@ -571,6 +571,7 @@ const CASES: &[(&str, &str)] = &[
     ("xqsm", "dl_inv_xqsm"),
     ("qsmnet", "dl_inv_qsmnet"),
     ("qsmnet-plus", "dl_inv_qsmnet_plus"),
+    ("qsmnetme", "dl_inv_qsmnetme"),
     ("qsmgan", "dl_inv_qsmgan"),
     ("lpcnn", "dl_inv_lpcnn"),
     ("ir2qsm", "dl_inv_ir2qsm"),
@@ -905,6 +906,15 @@ fn dl_inv_qsmnet() {
 #[test]
 fn dl_inv_qsmnet_plus() {
     dl_inversion(InversionAlgorithm::QsmnetPlus, None);
+}
+
+/// QSMnetME by the χ-separation toolbox's route: the phantom's 1 mm training frame in one pass,
+/// and as a sliding window of 16³ (`tile` 8 + 2×4), the browser's way.
+#[cfg(feature = "onnx")]
+#[test]
+fn dl_inv_qsmnetme() {
+    dl_inversion(InversionAlgorithm::Qsmnetme, None);
+    dl_inversion(InversionAlgorithm::Qsmnetme, Some((8, 4)));
 }
 
 /// QSMGAN runs fixed 64³ → 48³ patches, so the phantom costs one 64³ pass.
