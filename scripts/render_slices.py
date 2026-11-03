@@ -22,6 +22,7 @@ Usage:
 import math
 import struct
 import sys
+import textwrap
 from pathlib import Path
 
 import numpy as np
@@ -67,7 +68,7 @@ NAMES = {
     "sti_msa": "STI (MSA)",
     "inversion_cosmos_noisy": "COSMOS (noisy)",
     "bet": "BET",
-    "combined_tgv": "TGV (Combined)",
+    "combined_tgv": "TGV (from ground-truth total field)",
     "bias_correction": "Bias Correction (makehomogeneous)",
     "n4_bias_correction": "Bias Correction (N4)",
     "ground_truth_total_field": "Ground truth total field",
@@ -77,8 +78,8 @@ NAMES = {
     "unwrap_raw_prelude": "PRELUDE (unwrapped)",
     "pipeline_harperella": "HARPERELLA",
     "pipeline_iharperella": "iHARPERELLA",
-    "pipeline_tgv": "TGV",
-    "pipeline_tgv_single_echo": "TGV (single echo)",
+    "pipeline_tgv": "TGV (full pipeline)",
+    "pipeline_tgv_single_echo": "TGV (single echo; from wrapped phase)",
     "pipeline_qsmart": "QSMART",
     "pipeline_qsmart_tikhonov": "QSMART (Tikhonov)",
     "swi": "CLEAR-SWI",
@@ -134,6 +135,8 @@ NAMES = {
     "dl_hdbet": "HD-BET",
     "chisep_xsepnet_para": "xSepNet χ+",
     "chisep_xsepnet_dia": "xSepNet χ− (magnitude)",
+    "chisep_susepnet_para": "SUSEP-Net χ+",
+    "chisep_susepnet_dia": "SUSEP-Net χ− (magnitude)",
     "chisep_medi_para": "chi_sep_medi χ+",
     "chisep_medi_dia": "chi_sep_medi χ− (magnitude)",
     "inversion_medi_msmv": "MEDI-mSMV",
@@ -141,10 +144,11 @@ NAMES = {
     "dl_xqsm": "xQSM",
     "dl_qsmnet": "QSMnet",
     "dl_qsmnet_plus": "QSMnet+",
+    "dl_qsmnetme": "QSMnetME",
     "dl_autoqsm": "AutoQSM",
     "dl_iqsm": "iQSM",
     "dl_iqsm_plus": "iQSM+",
-    "pipeline_rts_single_pass": "RTS single pass",
+    "pipeline_rts_single_pass": "RTS (full pipeline; single pass)",
     "pipeline_two_pass": "RTS two-pass",
     "dl_mindgrab": "MindGrab",
     "dl_rs2net": "RS2-Net (scaled phantom)",
@@ -171,6 +175,7 @@ DIFF_LABELS = {
 MONTAGE_LABELS = {
     "chisep_para": "chi-sep iLSQR", "chisep_dia": "chi-sep iLSQR",
     "chisep_xsepnet_para": "xSepNet", "chisep_xsepnet_dia": "xSepNet",
+    "chisep_susepnet_para": "SUSEP-Net", "chisep_susepnet_dia": "SUSEP-Net",
     "chisep_medi_para": "chi-sep MEDI", "chisep_medi_dia": "chi-sep MEDI",
     "relaxchisep_r2starqsm_para": "R2*-QSM", "relaxchisep_r2starqsm_dia": "R2*-QSM",
     "relaxchisep_wavesep_para": "WaveSep", "relaxchisep_wavesep_dia": "WaveSep",
@@ -351,7 +356,7 @@ MONTAGES = [
          "inversion_lsqr", "inversion_heidi"],
         ["inversion_tkd_cropped", "inversion_star", "inversion_medi_msmv"],
         ["dl_qsmgan", "dl_lpcnn", "dl_ir2qsm", "dl_modl_qsm", "dl_xqsm", "dl_qsmnet"],
-        ["dl_qsmnet_plus", "dl_nextqsm", "dl_autoqsm", "dl_iqsm", "dl_iqsm_plus"],
+        ["dl_qsmnet_plus", "dl_qsmnetme", "dl_nextqsm", "dl_autoqsm", "dl_iqsm", "dl_iqsm_plus"],
         ["inversion_cosmos", "sti_mms"],
         ["combined_tgv", "combined_tfi", "pipeline_tgv", "pipeline_tgv_single_echo", "pipeline_qsmart",
          "pipeline_qsmart_tikhonov"],
@@ -362,10 +367,10 @@ MONTAGES = [
         "spans (BFR+dipole / full pipeline)", "spans (BFR+dipole / full pipeline)"]),
     ("stage_chisep", "χ-separation", "ppm", (0, 0.1), [
         ["chisep_para_truth", "chisep_para", "chisep_medi_para", "chisep_xsepnet_para",
-         "relaxchisep_r2starqsm_para", "relaxchisep_wavesep_para",
+         "chisep_susepnet_para", "relaxchisep_r2starqsm_para", "relaxchisep_wavesep_para",
          "relaxchisep_decompose_para", "relaxchisep_hcchisep_para"],
         ["chisep_dia_truth", "chisep_dia", "chisep_medi_dia", "chisep_xsepnet_dia",
-         "relaxchisep_r2starqsm_dia", "relaxchisep_wavesep_dia",
+         "chisep_susepnet_dia", "relaxchisep_r2starqsm_dia", "relaxchisep_wavesep_dia",
          "relaxchisep_decompose_dia", "relaxchisep_hcchisep_dia"],
     ], ["χ+ (para)", "χ− (dia, magnitude)"]),
 ]
@@ -681,7 +686,9 @@ def render_montage(input_dir, stem, title, unit, window, rows, row_labels, outpu
             if outline is not None and outline.shape == data.shape and not slug.startswith("diff:"):
                 ax.contour(outline.astype(float), levels=[0.5], colors=OUTLINE, linewidths=0.6)
             is_truth = "truth" in slug
-            ax.set_title(label, fontsize=9,
+            # Wrapped to the panel's width: a label that says where a method starts ("TGV (from
+            # ground-truth total field)") would otherwise run into its neighbours'.
+            ax.set_title(textwrap.fill(label, 22), fontsize=9,
                          fontweight="bold" if is_truth else "normal",
                          color="#0a7d3a" if is_truth else "black")
             if per_panel or slug.startswith("diff:"):

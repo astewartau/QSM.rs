@@ -59,6 +59,15 @@ ROW_LAYOUTS = {
     "Echo quality": ["score_spread", "score_spread_clean", "echo_flagged", "fraction_downweighted"],
     "SynthSeg window vs whole": ["mean_structure_dice", "min_structure_dice"],
 }
+# Result rows renamed since main records were made: {(test, old name): new name}. A main record
+# that has the old name is compared under the new one, so a relabelling does not drop the row
+# from the comparison. An entry can go once every main record in use has the new name.
+ROW_RENAMES = {
+    ("test_pipeline_two_pass", "RTS single pass"): "RTS (full pipeline; single pass)",
+    ("test_combined_tgv", "TGV (from field)"): "TGV (from ground-truth total field)",
+    ("test_pipeline_tgv", "TGV"): "TGV (full pipeline)",
+    ("test_pipeline_tgv_single_echo", "TGV (single echo)"): "TGV (single echo; from wrapped phase)",
+}
 # Utilities: only the last column (time) is a measurement.
 UTILITY_TESTS = {"test_bias_correction", "test_n4_bias_correction", "test_swi", "test_smwi",
                  "test_r2star_t2star", "test_dl_r2primenet"}
@@ -222,6 +231,7 @@ def compare(cur_path, base_path):
             gone_tests.append(test)  # not selected for this PR, usually
             continue
         bt, ct = base["tests"][test], cur["tests"][test]
+        bt = {**bt, "rows": {ROW_RENAMES.get((test, r), r): v for r, v in bt["rows"].items()}}
         if bt.get("status") != ct.get("status"):
             flagged.append((":warning:", test, "", "status", bt.get("status"), ct.get("status"), ""))
         for row in ct["rows"]:

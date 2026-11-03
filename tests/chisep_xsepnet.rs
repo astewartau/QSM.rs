@@ -1,4 +1,4 @@
-//! Integration test: χ-sepnet (deep learning) on the QSM-CI chisep phantom,
+//! Integration test: χ-sepnet and SUSEP-Net (deep learning) on the QSM-CI chisep phantom,
 //! scored with the QSM-CI metrics (correlation / XSIM / NRMSE per source map) so
 //! results flow into the same summary comment as the classical χ-separation
 //! methods. Weights are fetched from the registry at run time (needs the
@@ -21,7 +21,7 @@ use common::{
 use qsm_core::pipeline::{
     run_separation, ScanMetadata, SeparationAlgorithm, SeparationConfig, SeparationInputs,
 };
-use qsm_core::separation::{chisepnet, ChiSepNetNorm, ChiSepNetParams, ChiSepNetRoute, SusepNetParams};
+use qsm_core::separation::{ChiSepNetParams, ChiSepNetRoute, SusepNetParams};
 use std::time::Instant;
 
 #[test]
@@ -34,25 +34,14 @@ fn test_chisep_xsepnet() {
     let (nx, ny, nz) = ph.dims;
     println!("[INFO] phantom {}x{}x{}", nx, ny, nz);
 
-    let spec = qsm_core::models::find_model("chi-sepnet").expect("chi-sepnet in registry");
-    let w = qsm_core::models::primary_weight_bytes(spec)
-        .expect("chi-sepnet weights (set $QSM_MODEL_DIR or build with 'download')");
-
-    // Feed the provided conventional QSM χ_total (the network's QSM input channel),
-    // the local field and R2′ — matching the SNU-LIST recon.py.
-    let t = Instant::now();
-    let (chi_pos, chi_neg, _tot) = chisepnet(
-        &ph.local_field_ppm,
-        &ph.chi_total,
-        &ph.r2prime,
-        &ph.mask,
-        &ph.grid,
-        &w,
-        &ChiSepNetNorm::default(),
-        &ChiSepNetParams::default(),
-    )
-    .expect("chisepnet");
-    let secs = t.elapsed().as_secs_f64();
+    // As `qsmxt run` runs χ-sepnet by default: the toolbox route (`ChiSepNetRoute::Toolbox`),
+    // which makes its own QSM channel with QSMnetME from the local field and takes the measured
+    // R2′. The phantom's `chimap` (`SeparationInputs::qsm`) is its ground-truth χ, so the route
+    // that fed it as the QSM channel (`Native`, QSM-CI's first χ-sepnet entry) scored χ-sepnet on
+    // an input no acquisition has; the toolbox route does not read it.
+    let cfg = SeparationConfig { algorithm: SeparationAlgorithm::ChiSepNet, ..Default::default() };
+    assert_eq!(cfg.chi_sepnet.route, ChiSepNetRoute::Toolbox);
+    let (chi_pos, chi_neg, secs) = separate(&ph, &cfg);
 
     // χ− is returned signed (≤0); the ground truth stores it as a positive magnitude.
     let dia_mag: Vec<f64> = chi_neg.iter().map(|&v| -v).collect();
@@ -63,7 +52,45 @@ fn test_chisep_xsepnet() {
 
     assert!(chi_pos.iter().all(|v| v.is_finite()), "chisepnet produced non-finite χ+");
     assert!(dia_mag.iter().all(|v| v.is_finite()), "chisepnet produced non-finite χ−");
+    // Measured: r = 0.772 (χ+) / 0.606 (|χ−|); 0.940 / 0.795 when fed the ground-truth χ.
     assert_chisep_separated("chisepnet", &chi_pos, &dia_mag, &ph.gt_para, &ph.gt_dia, &ph.mask, 0.5, 0.5);
+}
+
+#[test]
+#[ignore]
+fn test_chisep_susepnet() {
+    let Some(ph) = load_chisep_phantom() else {
+        common::skip_for_missing_data("chisep phantom not found");
+        return;
+    };
+    // As `qsmxt run --chi-separation-algorithm susep-net` runs it: [QSM, R2′, local field] through
+    // `run_separation`, in one whole-volume pass (its default). Its QSM input is the run's QSM;
+    // here, as for the QSM-based methods of chisep_relaxometry_qsmci, that is the phantom's
+    // `chimap`, its ground-truth χ, so this scores the network given a perfect QSM.
+    //
+    // The pass on the whole 164×205×205 phantom peaks at 15.5 GB, about all a CI runner has,
+    // so it runs on the centred 144×176×168 box, which holds the whole brain mask (its bounding
+    // box is 127×169×149 voxels): the same voxels are scored, with less padding around them.
+    let in_mask = |ph: &ChiSepPhantom| ph.mask.iter().filter(|&&m| m != 0).count();
+    let whole = in_mask(&ph);
+    let full = (ph.mask.clone(), ph.dims);
+    let ph = crop(&ph, (144, 176, 168));
+    assert_eq!(in_mask(&ph), whole, "the crop cuts into the brain mask");
+    let cfg = SeparationConfig { algorithm: SeparationAlgorithm::SusepNet, ..Default::default() };
+    let (chi_pos, chi_neg, secs) = separate(&ph, &cfg);
+
+    let dia_mag: Vec<f64> = chi_neg.iter().map(|&v| -v).collect();
+    chisep_score("SUSEP-Net χ+", &chi_pos, &ph.gt_para, &ph.mask, ph.dims, secs);
+    chisep_score("SUSEP-Net χ−", &dia_mag, &ph.gt_dia, &ph.mask, ph.dims, secs);
+    // The figure panels on the phantom's grid, like the other methods'.
+    save_center_slices(&uncrop(&chi_pos, ph.dims, full.1), &full.0, full.1, "chisep_susepnet_para");
+    save_center_slices(&uncrop(&dia_mag, ph.dims, full.1), &full.0, full.1, "chisep_susepnet_dia");
+
+    assert!(chi_pos.iter().all(|v| v.is_finite()), "SUSEP-Net produced non-finite χ+");
+    assert!(dia_mag.iter().all(|v| v.is_finite()), "SUSEP-Net produced non-finite χ−");
+    // Measured on this crop: r = 0.889 (χ+) / 0.850 (|χ−|), 4 min and 9.9 GB (on the whole
+    // phantom 0.889 / 0.851, 8 min and 15.5 GB).
+    assert_chisep_separated("SUSEP-Net", &chi_pos, &dia_mag, &ph.gt_para, &ph.gt_dia, &ph.mask, 0.5, 0.5);
 }
 
 /// The centred `dims` box of the phantom's maps (the magnitudes, which these tests do not read,
@@ -104,6 +131,21 @@ fn crop(ph: &ChiSepPhantom, dims: (usize, usize, usize)) -> ChiSepPhantom {
         cf: ph.cf,
         bdir: ph.bdir,
     }
+}
+
+/// A [`crop`]ped map put back at the centre of the `full` grid, 0 outside the crop.
+fn uncrop(v: &[f64], dims: (usize, usize, usize), full: (usize, usize, usize)) -> Vec<f64> {
+    let ((cx, cy, cz), (nx, ny, nz)) = (dims, full);
+    let (ox, oy, oz) = ((nx - cx) / 2, (ny - cy) / 2, (nz - cz) / 2);
+    let mut out = vec![0.0; nx * ny * nz];
+    for z in 0..cz {
+        for y in 0..cy {
+            for x in 0..cx {
+                out[(x + ox) + nx * ((y + oy) + ny * (z + oz))] = v[x + cx * (y + cy * z)];
+            }
+        }
+    }
+    out
 }
 
 /// `‖a − b‖ / ‖b‖` over the mask.

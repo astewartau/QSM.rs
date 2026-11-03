@@ -47,7 +47,8 @@ emit_table() {
   echo ""
 }
 
-# Susceptibility-map rows, tag appended to the method name. RESULT format:
+# Susceptibility-map rows, tag appended to the method name unless the name already says it
+# ("TGV (full pipeline)"). RESULT format:
 # name,nrmse%,detrend%,tissue%,blood%,dgm%,dgm_lin,calc_dev,streak,corr,xsim,time
 emit_chi_rows() {
   local tag="$1"; shift
@@ -55,10 +56,12 @@ emit_chi_rows() {
     file="metrics/${test}.csv"
     [ -f "$file" ] || continue
     all_results "$file" | while IFS=',' read -r name nrmse dt tissue blood dgm dgm_lin calc_dev streak corr xsim time; do
+      local t="$tag"
+      case "$name" in *"${tag# — }"*) [ -n "$tag" ] && t="" ;; esac
       if [ "$nrmse" = "-" ] || [ -z "$nrmse" ]; then
-        echo "| ${name}${tag} | :x: Failed | - | - | - | - | - | - | - | - | - | - |"
+        echo "| ${name}${t} | :x: Failed | - | - | - | - | - | - | - | - | - | - |"
       else
-        echo "| ${name}${tag} | ${nrmse} | ${dt} | ${tissue} | ${blood} | ${dgm} | ${dgm_lin} | ${calc_dev} | ${streak} | ${corr} | ${xsim} | $(fmt_time "$time") |"
+        echo "| ${name}${t} | ${nrmse} | ${dt} | ${tissue} | ${blood} | ${dgm} | ${dgm_lin} | ${calc_dev} | ${streak} | ${corr} | ${xsim} | $(fmt_time "$time") |"
       fi
     done
   done
@@ -321,7 +324,7 @@ if [ -f "metrics/multislice_2d.csv" ]; then
   echo ""
 fi
 
-if TABLE=$(emit_chi_table test_dl_qsmgan test_dl_lpcnn test_dl_ir2qsm test_dl_modl_qsm test_dl_xqsm test_dl_qsmnet test_dl_qsmnet_plus test_dl_nextqsm test_dl_autoqsm test_dl_iqsm test_dl_iqsm_plus); then
+if TABLE=$(emit_chi_table test_dl_qsmgan test_dl_lpcnn test_dl_ir2qsm test_dl_modl_qsm test_dl_xqsm test_dl_qsmnet test_dl_qsmnet_plus test_dl_qsmnetme test_dl_nextqsm test_dl_autoqsm test_dl_iqsm test_dl_iqsm_plus); then
   echo "### Deep Learning — Dipole Inversion"
   echo "*Compared against ground truth susceptibility map. Local field in, except NeXtQSM and AutoQSM (total field) and iQSM / iQSM+ (wrapped phase). The phantom is out of distribution for every network, so these are regression numbers, not accuracy claims.*"
   echo ""
@@ -412,7 +415,7 @@ chisep_files=(metrics/chisep_qsmci.csv metrics/chisep_relaxometry_qsmci.csv metr
 rows=$(emit_chisep_rows "${chisep_files[@]}")
 if [ -n "$rows" ]; then
   echo "### χ-Separation"
-  echo "*Paramagnetic (χ+) / diamagnetic (χ−) source maps vs ground truth (QSM-CI chisep phantom). The R2PRIMEnet row is its R2′ against the phantom's reference R2′ (a 3 T network on a 7 T phantom: off-distribution by construction).*"
+  echo "*Paramagnetic (χ+) / diamagnetic (χ−) source maps vs ground truth (QSM-CI chisep phantom). The R2PRIMEnet row is its R2′ against the phantom's reference R2′ (a 3 T network on a 7 T phantom: off-distribution by construction). χ-sepnet makes its own QSM input (QSMnetME, the χ-separation toolbox's route); the methods that take a QSM (R2*-QSM, WaveSep, DECOMPOSE, HC-ChiSep, SUSEP-Net, and χ-sepnet's low-memory rows, the network alone on the acquired grid) are given the phantom's ground-truth χ.*"
   echo ""
   echo "| Map | Correlation | XSIM | NRMSE% | Time |"
   echo "|-----|-------------|------|--------|------|"
