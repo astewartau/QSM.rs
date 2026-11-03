@@ -189,7 +189,7 @@ fn separate(ph: &ChiSepPhantom, cfg: &SeparationConfig) -> (Vec<f64>, Vec<f64>, 
 }
 
 /// A deep-learning separation at its 32-bit (WASM) patch against the same method at its default
-/// (χ-sepnet: the authors' 192×192×128 patch; SUSEP-Net: the whole volume). Tiling changes what
+/// (χ-sepnet: the toolbox route's whole-frame passes; SUSEP-Net: the whole volume). Tiling changes what
 /// each voxel's receptive field sees, so the two are not identical; this pins how close they are
 /// (`min_corr` per source map against the default, and `max_rel_err` = ‖low − default‖/‖default‖)
 /// and scores the low-memory result against the ground truth like the default.
@@ -206,13 +206,16 @@ fn low_memory_matches_default(
     let dia: Vec<f64> = ln.iter().map(|&v| -v).collect();
     chisep_score(&format!("{name} χ+ (low-memory patch)"), &lp, &ph.gt_para, &ph.mask, ph.dims, lsecs);
     chisep_score(&format!("{name} χ− (low-memory patch)"), &dia, &ph.gt_dia, &ph.mask, ph.dims, lsecs);
-    for (map, low, def) in [("χ+", &lp, &dp), ("χ−", &ln, &dn)] {
-        let r = correlation(low, def, &ph.mask);
-        let e = rel_err(low, def, &ph.mask);
+    // Both maps are reported before either is checked.
+    let maps = [("χ+", &lp, &dp), ("χ−", &ln, &dn)].map(|(map, low, def)| {
+        let (r, e) = (correlation(low, def, &ph.mask), rel_err(low, def, &ph.mask));
         println!(
             "[INFO] {name} {map}: low-memory vs default r = {r:.5}, rel. err = {e:.4} \
              ({lsecs:.1} s vs {dsecs:.1} s)"
         );
+        (map, low, r, e)
+    });
+    for (map, low, r, e) in maps {
         assert!(low.iter().all(|v| v.is_finite()), "{name} {map}: non-finite");
         assert!(r >= min_corr, "{name} {map}: r = {r:.5} < {min_corr}");
         assert!(e <= max_rel_err, "{name} {map}: rel. err = {e:.4} > {max_rel_err}");
@@ -224,15 +227,21 @@ fn low_memory_matches_default(
 fn test_chisepnet_low_memory_patch() {
     let Some(ph) = load_chisep_phantom() else { return };
     let alg = SeparationAlgorithm::ChiSepNet;
+    assert_eq!(ChiSepNetParams::low_memory().route, ChiSepNetRoute::Toolbox);
     low_memory_matches_default(
         &ph,
         "chisepnet",
-        // The network on the acquired grid (ChiSepNetRoute::Native), where the patch applies.
-        SeparationConfig { algorithm: alg, chi_sepnet: ChiSepNetParams { route: ChiSepNetRoute::Native, ..Default::default() }, ..Default::default() },
-        SeparationConfig { algorithm: alg, chi_sepnet: ChiSepNetParams { route: ChiSepNetRoute::Native, ..ChiSepNetParams::low_memory() }, ..Default::default() },
-        // Measured: r = 0.9989 (χ+) / 0.9965 (χ−), rel. err. 0.036 / 0.047.
-        0.995,
-        0.06,
+        // The toolbox route, as `qsmxt run` runs χ-sepnet (QSMnetME makes the QSM channel, so the
+        // phantom's ground-truth χ is not read). `low_memory()` keeps that route and runs QSMnetME
+        // and χ-sepnet in WASM_PATCH windows over the training frame (`frame_patch`) instead of
+        // one whole-frame pass.
+        SeparationConfig { algorithm: alg, ..Default::default() },
+        SeparationConfig { algorithm: alg, chi_sepnet: ChiSepNetParams::low_memory(), ..Default::default() },
+        // Measured: r = 0.9905 (χ+) / 0.9828 (χ−), rel. err. 0.095 / 0.098, 336 s against 144 s
+        // (two windowed networks, QSMnetME and χ-sepnet, against two whole-frame passes; on
+        // ChiSepNetRoute::Native, χ-sepnet's patch alone gave 0.9989 / 0.9965, 0.036 / 0.047).
+        0.975,
+        0.12,
     );
 }
 

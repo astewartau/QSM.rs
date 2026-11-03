@@ -198,8 +198,10 @@ pub const AUTHORS_PATCH: (usize, usize, usize) = (192, 192, 128);
 
 /// A patch that fits a 32-bit (WASM) heap. Peak memory, measured natively (single-threaded) on a
 /// 184×256×128 volume: 1.7 GB at this patch, 4.5 GB at [`AUTHORS_PATCH`]. On the QSM-CI
-/// χ-separation phantom it agrees with the authors' patch to r ≥ 0.996 on both maps
-/// (`tests/chisep_xsepnet.rs`).
+/// χ-separation phantom it agrees with the authors' patch to r ≥ 0.996 on both maps on
+/// [`ChiSepNetRoute::Native`]; as [`ChiSepNetParams::frame_patch`] on the default
+/// [`ChiSepNetRoute::Toolbox`] (QSMnetME and χ-sepnet both windowed) it agrees with the
+/// whole-frame passes to r = 0.990 (χ+) / 0.983 (χ−) (`tests/chisep_xsepnet.rs`).
 pub const WASM_PATCH: (usize, usize, usize) = (128, 128, 64);
 
 /// Four pooling levels, so every patch dimension must be a multiple of this. Public (and built
