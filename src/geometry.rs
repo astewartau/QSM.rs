@@ -824,7 +824,7 @@ pub struct ResampledComplex {
 pub const QSMXT8_NOISE_FILL_FRACTION: f64 = 0.1;
 
 /// Options for [`resample_complex_to_axial`].
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct AxialResampleParams {
     /// Replace exactly-zero phase with uniform noise on `(-π, π]` when at least this fraction of
     /// the output is zero, as QSMxT 8.x did ([`QSMXT8_NOISE_FILL_FRACTION`]). Default `None`: the
@@ -836,12 +836,6 @@ pub struct AxialResampleParams {
     /// where the mask reaches the edge of the resampled field of view it shifts χ by a few percent
     /// with the noise seed, which adds variance between scans of the same subject.
     pub noise_fill_fraction: Option<f64>,
-}
-
-impl Default for AxialResampleParams {
-    fn default() -> Self {
-        Self { noise_fill_fraction: None }
-    }
 }
 
 /// Resample a continuous volume (magnitude, unwrapped field, χ) to a cardinal-aligned grid.
