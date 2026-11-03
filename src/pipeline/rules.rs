@@ -1361,17 +1361,17 @@ pub static RULES: &[Rule] = &[
         "inversion.fansi.te", &[Choice("spacing")],
         "FANSI's multi-echo script converts at a TE difference; at the echo spacing nlTV and nlTGV \
          did better than at the first echo on every metric on the phantom",
-        "FANSI-toolbox script_DICOM_Philips.m L364, L370; QSM.rs FansiParams::te docs (#276)"),
+        "FANSI-toolbox script_DICOM_Philips.m L364, L370; QSM.rs FansiParams::te docs (#276, #418)"),
     measured_better("ndi.te-first", &[inv(&[Choice("ndi")]), MULTI_ECHO],
         "inversion.ndi.te", &[Choice("first")],
         "FANSI's script allows any single echo time; the first echo gave NDI its best NRMSE and \
          correlation on the phantom",
-        "FANSI-toolbox script_DICOM_Philips.m L364; QSM.rs NdiParams::te docs (#276)"),
+        "FANSI-toolbox script_DICOM_Philips.m L364; QSM.rs NdiParams::te docs (#276, #418)"),
     measured_better("l1qsm.te-first", &[inv(&[Choice("l1qsm")]), MULTI_ECHO],
         "inversion.l1qsm.te", &[Choice("first")],
         "FANSI's script allows any single echo time; the first echo did better than the spacing \
-         on the phantom (XSIM 0.782 vs 0.776, NRMSE 37.4 vs 40.2 %)",
-        "FANSI-toolbox script_DICOM_Philips.m L364; QSM.rs L1QsmParams::te docs (#276)"),
+         on the phantom (XSIM 0.776 vs 0.764, NRMSE 38.9 vs 46.9 %)",
+        "FANSI-toolbox script_DICOM_Philips.m L364; QSM.rs L1QsmParams::te docs (#276, #418)"),
     discourage("whqsm.flat-weight-te-spacing",
         &[inv(&[Choice("whqsm")]), method("inversion.whqsm.weight", &[Choice("flat")]), MULTI_ECHO],
         "inversion.whqsm.te", &[Choice("spacing")], Choice("first"), Basis::Measured,
@@ -1383,8 +1383,8 @@ pub static RULES: &[Rule] = &[
           method("inversion.whqsm.weight", &[Choice("max-normalised"), Choice("in-vivo")]), MULTI_ECHO],
         "inversion.whqsm.te", &[Choice("spacing")],
         "With a magnitude weight, the echo spacing did better than the first echo on the phantom \
-         (XSIM 0.673 vs 0.637); FANSI's script converts at a TE difference with a magnitude-derived weight",
-        "QSM.rs WhQsmParams::te docs (#276); FANSI-toolbox script_DICOM_Philips.m L364, L436"),
+         (XSIM 0.676 vs 0.638); FANSI's script converts at a TE difference with a magnitude-derived weight",
+        "QSM.rs WhQsmParams::te docs (#276, #418); FANSI-toolbox script_DICOM_Philips.m L364, L436"),
     reference("star.te-sum", &[inv(&[Choice("star")]), MULTI_ECHO], "inversion.star.te", &[Choice("sum")],
         "STI Suite's QSM_GUI gives QSM_star the summed phase with TE = ΣTE",
         "STI Suite 3.0 QSM_GUI, probed (recorded in QSM.rs StarParams::te, #276)"),
