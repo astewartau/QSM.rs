@@ -23,6 +23,39 @@
 //! Instance normalisation runs over the whole volume, so the network cannot be tiled: one pass
 //! holds a few 15-channel 256³ activations (≈1 GB each in `f32`).
 //!
+//! # Instance-norm statistics (why the graph is restated)
+//!
+//! Each block normalises every channel by its mean and variance over all 256³ = 16.8 M voxels
+//! (`ReduceMean` over axes 2–4 in `mindgrab.onnx`). tract sums such a reduction in `f32` along
+//! one long lane (a handful of running accumulators, each over millions of voxels; consecutive
+//! reductions, and reductions split by reshapes, are merged back into that one lane), and once a
+//! running sum is large the small terms lose most of their bits. On the KKI s002001
+//! bridge-run1 head (QSM-CI's MindGrab pair) the first block's per-channel variances came out
+//! up to 2.2 % off and its means 0.11 % off, against `f64`. Over 25 blocks that moved the
+//! logit margin (brain − background) by up to 1.28 (mean 0.035), and 533 conformed voxels
+//! whose `f64` margin was within 0.90 of zero took the other class: the 517 voxels by which the
+//! port's mask differed from brainchop-cli's after the reslice. brainchop-cli (tinygrad) is
+//! within 1e-4 of the `f64` margins everywhere, with no voxel of another class: its result is
+//! the network's, and the port's was tract's rounding. Measured 2026-11-03, the network
+//! evaluated in `f64` (numpy) from the same weights and input.
+//!
+//! [`mindgrab`] therefore loads the graph with every such `ReduceMean` restated as an
+//! `AveragePool` of 16³ windows (stride 16) followed by the `ReduceMean` of the 16³ window means
+//! ([`pool_instance_norm_means`]). The windows tile the 256³ cube exactly, so the mean of the
+//! window means is the same mean; each sum now runs over 4 096 terms, which tract does not
+//! merge with the reduction after it. The variances then agree with `f64` to 6e-6, the margins
+//! to 5e-4, and the mask is brainchop-cli's to the voxel (0 of 16.8 M conformed voxels, 0 of
+//! 8.4 M on the input grid). Same runtime and peak memory. The hosted weights are unchanged,
+//! so the edit is made on the parsed protobuf at load time (`OnnxModel::load_edited`).
+//!
+//! # Normalisation arithmetic
+//!
+//! brainchop's `qnormalize` works in `f32`: numpy's quantiles of the `f32` volume are `f32`,
+//! and `(v − q_low) / (q_high − q_low + 1e-3)` is evaluated in `f32`. [`normalize`] does the
+//! same (quantiles in `f64`, rounded to `f32`). In `f64` throughout, 1.28 M of the 16.8 M inputs
+//! were one `f32` ulp off brainchop's, which changed no voxel of the mask; in `f32` the
+//! network input is brainchop's bit for bit.
+//!
 //! # Reference pipeline
 //!
 //! - **Contrast and resolution.** Any: the image is conformed to 256³ at 1 mm whatever its
@@ -101,7 +134,7 @@ pub fn mindgrab(
         .ok_or_else(|| OnnxError::Shape("MindGrab needs a non-singular affine".into()))?;
     let input = normalize(&conformed.data);
 
-    let model = OnnxModel::load(model_onnx)?;
+    let model = OnnxModel::load_edited(model_onnx, pool_instance_norm_means)?;
     let n = CONFORM_DIM;
     let shape = vec![1, 1, n, n, n];
     let passes = if params.flip_tta { 2 } else { 1 };
@@ -374,9 +407,11 @@ fn normalize(data: &[u8]) -> Vec<f32> {
         let a = at(lo);
         if frac == 0.0 { a } else { a + (at(lo + 1) - a) * frac }
     };
-    let (qlow, qhigh) = (quantile(0.02), quantile(0.98));
-    let denom = qhigh - qlow + 1e-3;
-    let lut: Vec<f32> = (0..256).map(|v| ((v as f64 - qlow) / denom).clamp(0.0, 1.0) as f32).collect();
+    // numpy's quantiles of an f32 volume are f32, and qnormalize's arithmetic is f32 (see the
+    // module docs, *Normalisation arithmetic*).
+    let (qlow, qhigh) = (quantile(0.02) as f32, quantile(0.98) as f32);
+    let denom = qhigh - qlow + 1e-3f32;
+    let lut: Vec<f32> = (0..256).map(|v| ((v as f32 - qlow) / denom).clamp(0.0, 1.0)).collect();
 
     let n = CONFORM_DIM;
     let mut out = vec![0.0f32; n * n * n];
@@ -388,6 +423,56 @@ fn normalize(data: &[u8]) -> Vec<f32> {
         }
     }
     out
+}
+
+/// Side of the `AveragePool` window [`pool_instance_norm_means`] puts in front of each
+/// instance-norm mean: it divides [`CONFORM_DIM`], so the windows tile the cube exactly.
+const NORM_POOL: usize = 16;
+
+/// Restate every `ReduceMean` over the spatial axes `[2, 3, 4]` (instance normalisation's mean and
+/// variance) as an `AveragePool` of [`NORM_POOL`]³ windows, stride [`NORM_POOL`], followed by the
+/// same `ReduceMean` over the window means. Mathematically the same mean (equal windows tiling the
+/// cube); numerically it keeps tract's `f32` sums short (module docs, *Instance-norm
+/// statistics*). Fails if the graph has no such reduction, so a re-exported graph cannot skip it
+/// silently.
+#[cfg(feature = "onnx")]
+fn pool_instance_norm_means(proto: &mut tract_onnx::pb::ModelProto) -> Result<(), OnnxError> {
+    use tract_onnx::pb::{attribute_proto::AttributeType, AttributeProto, NodeProto};
+    let graph = proto.graph.as_mut().ok_or_else(|| OnnxError::Load("MindGrab: ONNX model has no graph".into()))?;
+    let ints = |name: &str| AttributeProto {
+        name: name.into(),
+        r#type: AttributeType::Ints as i32,
+        ints: vec![NORM_POOL as i64; 3],
+        ..Default::default()
+    };
+    let mut rewritten = 0;
+    let mut nodes = Vec::with_capacity(graph.node.len() + 64);
+    for node in std::mem::take(&mut graph.node) {
+        let spatial_mean = node.op_type == "ReduceMean"
+            && node.input.len() == 1
+            && node.attribute.iter().any(|a| a.name == "axes" && a.ints == [2, 3, 4])
+            && node.attribute.iter().all(|a| a.name != "keepdims" || a.i == 1);
+        if !spatial_mean {
+            nodes.push(node);
+            continue;
+        }
+        let pooled = format!("{}/window_means", node.output[0]);
+        nodes.push(NodeProto {
+            input: node.input.clone(),
+            output: vec![pooled.clone()],
+            name: format!("{}/window_means", node.name),
+            op_type: "AveragePool".into(),
+            attribute: vec![ints("kernel_shape"), ints("strides")],
+            ..Default::default()
+        });
+        nodes.push(NodeProto { input: vec![pooled], ..node });
+        rewritten += 1;
+    }
+    graph.node = nodes;
+    if rewritten == 0 {
+        return Err(OnnxError::Load("MindGrab: no instance-norm ReduceMean over axes [2, 3, 4] to restate".into()));
+    }
+    Ok(())
 }
 
 /// Two-class logits `(1, 2, x, y, z)` (C order) → column-major mask: class 1 where its logit
@@ -495,7 +580,9 @@ mod tests {
             lo + (hi - lo) * (p - p.floor())
         };
         let (ql, qh) = (q(0.02), q(0.98));
-        let want = |v: f64| ((v - ql) / (qh - ql + 1e-3)).clamp(0.0, 1.0) as f32;
+        // in f32, as qnormalize computes it
+        let (ql, qh) = (ql as f32, qh as f32);
+        let want = |v: f64| ((v as f32 - ql) / (qh - ql + 1e-3f32)).clamp(0.0, 1.0);
         // voxel x=200, y=0, z=0 has value 200, lands at C-order index 200 * n * n
         assert_eq!(out[200 * n * n], want(200.0));
         assert_eq!(out[0], 0.0);
@@ -508,6 +595,103 @@ mod tests {
         let v: Vec<f32> = (0..n * n * n).map(|i| (i % 977) as f32).collect();
         assert_eq!(flip_axis0(&flip_axis0(&v, 1), 1), v);
         assert_eq!(flip_axis0(&v, 1)[0], v[(n - 1) * n * n]);
+    }
+
+    /// A one-node graph: the instance-norm mean (`ReduceMean` over axes 2–4, keepdims) of a
+    /// `(1, 1, n, n, n)` input.
+    #[cfg(feature = "onnx")]
+    fn spatial_mean_graph() -> tract_onnx::pb::ModelProto {
+        use tract_onnx::pb::*;
+        let attr = |name: &str, ints: Vec<i64>, i: i64, t: attribute_proto::AttributeType| AttributeProto {
+            name: name.into(),
+            r#type: t as i32,
+            ints,
+            i,
+            ..Default::default()
+        };
+        // an f32 tensor of unknown dims (the run binds the shape)
+        let value = |name: &str, rank: usize| ValueInfoProto {
+            name: name.into(),
+            r#type: Some(TypeProto {
+                value: Some(type_proto::Value::TensorType(type_proto::Tensor {
+                    elem_type: tensor_proto::DataType::Float as i32,
+                    shape: Some(TensorShapeProto {
+                        dim: (0..rank)
+                            .map(|d| tensor_shape_proto::Dimension {
+                                value: Some(tensor_shape_proto::dimension::Value::DimParam(format!("d{d}"))),
+                                ..Default::default()
+                            })
+                            .collect(),
+                    }),
+                })),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        ModelProto {
+            ir_version: 8,
+            opset_import: vec![OperatorSetIdProto { domain: String::new(), version: 17 }],
+            graph: Some(GraphProto {
+                name: "spatial_mean".into(),
+                node: vec![NodeProto {
+                    input: vec!["x".into()],
+                    output: vec!["m".into()],
+                    name: "mean".into(),
+                    op_type: "ReduceMean".into(),
+                    attribute: vec![
+                        attr("axes", vec![2, 3, 4], 0, attribute_proto::AttributeType::Ints),
+                        attr("keepdims", vec![], 1, attribute_proto::AttributeType::Int),
+                    ],
+                    ..Default::default()
+                }],
+                input: vec![value("x", 5)],
+                output: vec![value("m", 5)],
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    /// The restated instance-norm mean is the `f64` mean to `f32` precision on a 256³ volume,
+    /// where tract's own `ReduceMean` is not (module docs, *Instance-norm statistics*). The
+    /// volume is a head-like layout: a constant background around a varying block, values ~0.1,
+    /// as squared deviations are.
+    #[test]
+    #[cfg(feature = "onnx")]
+    fn restated_instance_norm_mean_is_accurate() {
+        let n = CONFORM_DIM;
+        let x: Vec<f32> = (0..n * n * n)
+            .map(|i| {
+                let (a, b, c) = (i % n, (i / n) % n, i / (n * n));
+                let inside = [a, b, c].iter().all(|&v| (40..216).contains(&v));
+                if inside { 0.1 + 0.05 * ((i * 7919 % 1009) as f32 / 1009.0) } else { 0.003 }
+            })
+            .collect();
+        let exact = x.iter().map(|&v| v as f64).sum::<f64>() / x.len() as f64;
+        let mean_of = |proto: &tract_onnx::pb::ModelProto| -> f64 {
+            let model = OnnxModel::from_proto(proto).unwrap();
+            model.run_single(&Tensor::new(vec![1, 1, n, n, n], x.clone())).unwrap().data[0] as f64
+        };
+        let plain = mean_of(&spatial_mean_graph());
+        let mut proto = spatial_mean_graph();
+        pool_instance_norm_means(&mut proto).unwrap();
+        assert_eq!(proto.graph.as_ref().unwrap().node.len(), 2, "one AveragePool in front of the mean");
+        let pooled = mean_of(&proto);
+        let (e_plain, e_pooled) = ((plain - exact).abs() / exact, (pooled - exact).abs() / exact);
+        eprintln!("relative error of the mean: tract ReduceMean {e_plain:.2e}, restated {e_pooled:.2e}");
+        // Measured: 1.4e-2 for tract's ReduceMean, 2.7e-6 restated.
+        assert!(e_pooled < 1e-5, "restated mean off by {e_pooled:.2e}");
+        // If tract's own reduction became this accurate, the restatement could go.
+        assert!(e_plain > 1e-3, "tract's ReduceMean is now accurate ({e_plain:.2e}): restatement unneeded?");
+    }
+
+    /// A graph without an instance-norm mean is refused, so a re-export cannot skip the restatement.
+    #[test]
+    #[cfg(feature = "onnx")]
+    fn restatement_refuses_a_graph_without_spatial_means() {
+        let mut proto = spatial_mean_graph();
+        proto.graph.as_mut().unwrap().node[0].op_type = "ReduceMax".into();
+        assert!(pool_instance_norm_means(&mut proto).is_err());
     }
 
     // ---- parity against brainchop-cli's own pipeline: see tests/models_onnx.rs (mindgrab_*) ----
