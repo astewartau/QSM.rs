@@ -127,7 +127,7 @@ jobs:
           all_chisep='["chisep_qsmci","chisep_relaxometry_qsmci","chisep_xsepnet","chisep_r2primenet","chisep_orientation"]'
           # Deep-learning models (in tests/dl_models.rs; weights fetched from the registry), and
           # `models_onnx`, the whole binary of their ports' fixture tests against the originals.
-          all_dl='["models_onnx","test_dl_qsmgan","test_dl_lpcnn","test_dl_ir2qsm","test_dl_modl_qsm","test_dl_nextqsm","test_dl_iqfm","test_dl_hdbet","test_dl_r2primenet","test_dl_xqsm","test_dl_qsmnet","test_dl_qsmnet_plus","test_dl_autoqsm","test_dl_iqsm","test_dl_iqsm_plus","test_dl_bfrnet","test_dl_mindgrab","test_dl_rs2net","test_dl_synthseg","test_dl_synthseg_window"]'
+          all_dl='["models_onnx","test_dl_qsmgan","test_dl_lpcnn","test_dl_ir2qsm","test_dl_modl_qsm","test_dl_nextqsm","test_dl_iqfm","test_dl_hdbet","test_dl_r2primenet","test_dl_xqsm","test_dl_qsmnet","test_dl_qsmnet_plus","test_dl_qsmnetme","test_dl_autoqsm","test_dl_iqsm","test_dl_iqsm_plus","test_dl_bfrnet","test_dl_mindgrab","test_dl_rs2net","test_dl_synthseg","test_dl_synthseg_window"]'
           all_dl_names=$(echo "$all_dl" | jq -r '.[]' | tr '\n' ' ')
           # Ignored tests deliberately not run here: the manual benchmark and combinatorial sweep
           # (combinatorial-tests.yml).
@@ -450,7 +450,8 @@ jobs:
                       xqsm)       dl="$dl test_dl_xqsm models_onnx" ;;
                       qsmnet)     dl="$dl test_dl_qsmnet models_onnx" ;;
                       qsmnet-plus) dl="$dl test_dl_qsmnet_plus models_onnx" ;;
-                      qsmnetme)   dl="$dl models_onnx" ;;
+                      # χ-sepnet's default route makes its QSM channel with QSMnetME.
+                      qsmnetme)   dl="$dl test_dl_qsmnetme models_onnx"; chisep="$chisep chisep_xsepnet" ;;
                       autoqsm)    dl="$dl test_dl_autoqsm models_onnx" ;;
                       iqsm)       dl="$dl test_dl_iqsm models_onnx" ;;
                       iqsm-plus)  dl="$dl test_dl_iqsm_plus models_onnx" ;;
@@ -480,7 +481,7 @@ jobs:
               src/inversion/qsmnet.rs)   dl="$dl test_dl_qsmnet test_dl_qsmnet_plus models_onnx" ;;
               # The χ-separation toolbox's route (QSMnetME and χ-sepnet's default).
               src/inversion/qsmnetme.rs|src/utils/chisep_frame.rs|src/utils/interp3.rs)
-                                         dl="$dl models_onnx"; chisep="$chisep chisep_xsepnet" ;;
+                                         dl="$dl test_dl_qsmnetme models_onnx"; chisep="$chisep chisep_xsepnet" ;;
               src/inversion/autoqsm.rs)  dl="$dl test_dl_autoqsm models_onnx" ;;
               # iQFM and iQSM+ reuse iQSM's preprocessing.
               src/inversion/iqsm.rs)     dl="$dl test_dl_iqsm test_dl_iqsm_plus test_dl_iqfm models_onnx" ;;

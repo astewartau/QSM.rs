@@ -311,6 +311,23 @@ fn test_dl_qsmnet_plus() {
     report_chi("QSMnet+", "dl_qsmnet_plus", &chi, &data, t.elapsed());
 }
 
+/// QSMnetME by the χ-separation toolbox's route, as `InversionAlgorithm::Qsmnetme` runs it (the
+/// field resampled into its 1 mm, B0-along-z training frame and the map resampled back).
+#[test]
+#[ignore]
+fn test_dl_qsmnetme() {
+    let data = TestData::load().expect("test data");
+    let grid = grid_of(&data);
+    let w = weights("qsmnetme");
+    let t = Instant::now();
+    let chi = inversion::qsmnetme(
+        &data.fieldmap_local, &data.mask, &grid, data.b0_dir, &w,
+        &inversion::QsmnetmeNorm::default(), &inversion::QsmnetmeParams::default(),
+    )
+    .expect("qsmnetme");
+    report_chi("QSMnetME", "dl_qsmnetme", &chi, &data, t.elapsed());
+}
+
 /// AutoQSM takes the TOTAL field: it does its own background removal.
 #[test]
 #[ignore]

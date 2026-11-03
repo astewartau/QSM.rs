@@ -1458,9 +1458,9 @@ fn test_combined_tgv() {
 
     let elapsed = start.elapsed();
 
-    let res = TestResult::new("TGV (from field)", &result, &data.chi, &data.mask, data.dims);
+    let res = TestResult::new("TGV (from ground-truth total field)", &result, &data.chi, &data.mask, data.dims);
     res.print_with_time(elapsed);
-    let challenge = ChallengeMetrics::compute("TGV (from field)", &result, &data.chi, &data.mask, &data.segmentation, data.dims);
+    let challenge = ChallengeMetrics::compute("TGV (from ground-truth total field)", &result, &data.chi, &data.mask, &data.segmentation, data.dims);
     challenge.print();
     challenge.print_ci_metrics(elapsed);
     common::save_center_slices(&result, &common::valid_support(&result, &data.mask), data.dims, "combined_tgv");
@@ -1834,9 +1834,9 @@ fn test_pipeline_tgv() {
 
     let elapsed = start.elapsed();
 
-    let res = TestResult::new("TGV", &result, &data.chi, &data.mask, data.dims);
+    let res = TestResult::new("TGV (full pipeline)", &result, &data.chi, &data.mask, data.dims);
     res.print_with_time(elapsed);
-    let challenge = ChallengeMetrics::compute("TGV", &result, &data.chi, &data.mask, &data.segmentation, data.dims);
+    let challenge = ChallengeMetrics::compute("TGV (full pipeline)", &result, &data.chi, &data.mask, &data.segmentation, data.dims);
     challenge.print();
     challenge.print_ci_metrics(elapsed);
     common::save_center_slices(&result, &common::valid_support(&result, &data.mask), data.dims, "pipeline_tgv");
@@ -1870,9 +1870,9 @@ fn test_pipeline_tgv_single_echo() {
         .expect("valid TGV input");
     let elapsed = start.elapsed();
 
-    let res = TestResult::new("TGV (single echo)", &result, &data.chi, &data.mask, data.dims);
+    let res = TestResult::new("TGV (single echo, from wrapped phase)", &result, &data.chi, &data.mask, data.dims);
     res.print_with_time(elapsed);
-    let challenge = ChallengeMetrics::compute("TGV (single echo)", &result, &data.chi, &data.mask, &data.segmentation, data.dims);
+    let challenge = ChallengeMetrics::compute("TGV (single echo, from wrapped phase)", &result, &data.chi, &data.mask, &data.segmentation, data.dims);
     challenge.print();
     challenge.print_ci_metrics(elapsed);
     common::save_center_slices(&result, &common::valid_support(&result, &data.mask), data.dims, "pipeline_tgv_single_echo");
@@ -3935,7 +3935,7 @@ fn test_pipeline_two_pass() {
     let elapsed = start.elapsed();
 
     for (name, slug, chi, t) in [
-        ("RTS single pass", "pipeline_rts_single_pass", &filled_chi, single_elapsed),
+        ("RTS (full pipeline, single pass)", "pipeline_rts_single_pass", &filled_chi, single_elapsed),
         ("RTS two-pass", "pipeline_two_pass", &combined, elapsed),
     ] {
         let challenge = ChallengeMetrics::compute(name, chi, &data.chi, &data.mask, &data.segmentation, data.dims);
