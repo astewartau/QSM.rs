@@ -53,7 +53,7 @@
 //! # Pipeline rules
 //!
 //! The facts above that a configuration can depart from are published as rules in
-//! [`crate::pipeline::rules::RULES`] (each with its strength, basis, reason and source): `field-mapping.phase-offsets`, `field-mapping.bipolar-needs-three-echoes`, `field-mapping.bipolar-not-with-laplacian`, `field-mapping.phase-offset-sigma`.
+//! [`crate::pipeline::rules::RULES`] (each with its strength, basis, reason and source): `field-mapping.phase-offsets`, `complex-fit.unwrap-region-growing`, `field-mapping.bipolar-needs-three-echoes`, `field-mapping.bipolar-not-with-laplacian`, `field-mapping.phase-offset-sigma`.
 
 use super::config::*;
 use super::phase_utils::{hz_to_ppm, rads_to_ppm};
@@ -172,6 +172,8 @@ pub fn run_field_mapping(
             }
         }
     }
+
+    require_magnitude_for_medi(config, magnitudes)?;
 
     match &config.b0_estimation {
         B0EstimationMethod::WeightedAvg { weighting: B0WeightType::AssumedDecay { t2star_s } } => {
@@ -299,6 +301,16 @@ fn field_mapping_with_offset(
                 .map(|p| crate::unwrap::unwrap_prelude(p, mask, &grid, &config.prelude_params))
                 .collect();
             align_per_echo_constants(&mut u, tes, mask, UnwrappingAlgorithm::Prelude);
+            u
+        }
+        UnwrappingAlgorithm::MediRegionGrowing => {
+            // Each echo on its own over the whole array (no mask, as unwrapPhase), ordered by
+            // MEDI's iMag; then whole turns aligned, as for PRELUDE.
+            let imag = rss_magnitude(mag_slices);
+            let mut u: Vec<Vec<f64>> = corrected.iter()
+                .map(|p| crate::unwrap::unwrap_medi_region_growing(p, &imag, &grid))
+                .collect();
+            align_per_echo_constants(&mut u, tes, mask, UnwrappingAlgorithm::MediRegionGrowing);
             u
         }
     };
@@ -432,6 +444,15 @@ fn field_mapping_direct(
     progress(1, 4);
     let is_laplacian = config.unwrapping_algorithm == UnwrappingAlgorithm::Laplacian;
     let region = LaplacianRegion::new(config, mask);
+    // The magnitude the unwrapper is given: echo 1's for ROMEO; MEDI's iMag (root-sum-of-squares
+    // of the echoes) for MEDI's region growing, as on the other paths.
+    let imag;
+    let quality: &[f64] = if config.unwrapping_algorithm == UnwrappingAlgorithm::MediRegionGrowing {
+        imag = rss_magnitude(mag_slices);
+        &imag
+    } else {
+        mag_slices.first().copied().unwrap_or(&[])
+    };
     let mut unwrapped: Vec<Vec<f64>> = Vec::with_capacity(n_echoes);
     for e in 0..n_echoes {
         let masked;
@@ -442,7 +463,7 @@ fn field_mapping_direct(
             phases[e]
         };
         let uw = unwrap_single(
-            phase, mag_slices.first().copied().unwrap_or(&[]),
+            phase, quality,
             region.keep(mask), config, nx, ny, nz, vsx, vsy, vsz,
             if e + 1 < n_echoes { Some(phases[e + 1]) } else { None },
             tes[e],
@@ -472,8 +493,8 @@ fn field_mapping_direct(
         }
         B0EstimationMethod::LinearFit(params) => {
             // Not ROMEO's: its whole-turn alignment would change what this path has always
-            // computed for it. PRELUDE's echoes are unwrapped independently, so their turns are
-            // aligned as for the weighted mean.
+            // computed for it. PRELUDE's and MEDI's region growing's echoes are unwrapped
+            // independently, so their turns are aligned as for the weighted mean.
             if config.unwrapping_algorithm != UnwrappingAlgorithm::Romeo {
                 align_per_echo_constants(&mut unwrapped, tes, mask, config.unwrapping_algorithm);
             }
@@ -595,7 +616,7 @@ fn align_per_echo_constants(
             }
         }
         // Each echo's spatial unwrap leaves a whole number of turns undetermined.
-        UnwrappingAlgorithm::Romeo | UnwrappingAlgorithm::Prelude => {
+        UnwrappingAlgorithm::Romeo | UnwrappingAlgorithm::Prelude | UnwrappingAlgorithm::MediRegionGrowing => {
             crate::unwrap::correct_multi_echo_wraps(unwrapped, tes, mask);
         }
     }
@@ -723,6 +744,7 @@ pub fn run_field_mapping_per_echo(
     if mask.len() != n_voxels {
         return Err(PipelineError::DimensionMismatch { expected: n_voxels, got: mask.len() });
     }
+    require_magnitude_for_medi(config, magnitudes)?;
     let uniform = vec![1.0f64; n_voxels];
     let mut out = Vec::with_capacity(n_echoes);
     for (e, p) in phases.iter().enumerate() {
@@ -745,10 +767,12 @@ pub fn run_field_mapping_per_echo(
 /// The noise map (`dp1`, MEDI's `N_std`) is converted the same way, to ppm. The fit itself is
 /// returned too ([`FieldMappingResult::complex_fit`]: `iFreq_raw` and `N_std` in MEDI's units).
 ///
-/// MEDI's unwrapper is a region-growing method that is not ported; the configured
-/// `unwrapping_algorithm` is used instead. ROMEO gets MEDI's `iMag` (root-sum-of-squares of the
-/// echo magnitudes) as its magnitude. Laplacian unwrapping is done as on the other paths: phase
-/// zeroed outside the mask first, masked mean removed after (it leaves a constant undetermined).
+/// The configured `unwrapping_algorithm` unwraps it. [`UnwrappingAlgorithm::MediRegionGrowing`]
+/// is MEDI's own `unwrapPhase(iMag, iFreq_raw, matrix_size)`, with `iMag` the root-sum-of-squares
+/// of the echo magnitudes and no mask, so with it this is MEDI's field map (QSM-CI's
+/// `fit-ppm-complex-cornell`; `tests/medi_unwrap_cornell_parity.rs`). ROMEO gets the same `iMag`
+/// as its magnitude. Laplacian unwrapping is done as on the other paths: phase zeroed outside the
+/// mask first, masked mean removed after (it leaves a constant undetermined).
 fn field_mapping_complex_fit(
     phases: &[&[f64]],
     magnitudes: Option<&[&[f64]]>,
@@ -786,18 +810,17 @@ fn field_mapping_complex_fit(
             u
         }
         UnwrappingAlgorithm::Romeo => {
-            // iMag = sqrt(sum(abs(iField).^2, 4))
-            let n = fit.field.len();
-            let imag: Vec<f64> = (0..n)
-                .map(|i| mags.iter().map(|m| m[i] * m[i]).sum::<f64>().sqrt())
-                .collect();
             crate::unwrap::unwrap_romeo(
-                &fit.field, &imag, None, fit.echo_spacing, 0.0,
+                &fit.field, &rss_magnitude(mags), None, fit.echo_spacing, 0.0,
                 mask, &config.romeo_params, &grid,
             )
         }
         UnwrappingAlgorithm::Prelude => {
             crate::unwrap::unwrap_prelude(&fit.field, mask, &grid, &config.prelude_params)
+        }
+        // iFreq = unwrapPhase(iMag, iFreq_raw, matrix_size): no mask.
+        UnwrappingAlgorithm::MediRegionGrowing => {
+            crate::unwrap::unwrap_medi_region_growing(&fit.field, &rss_magnitude(mags), &grid)
         }
     };
 
@@ -843,7 +866,32 @@ fn unwrap_single(
         UnwrappingAlgorithm::Prelude => {
             crate::unwrap::unwrap_prelude(phase, mask, &grid, &config.prelude_params)
         }
+        // No mask, as MEDI's unwrapPhase; `mag` is the quality map the caller chose.
+        UnwrappingAlgorithm::MediRegionGrowing => {
+            crate::unwrap::unwrap_medi_region_growing(phase, mag, &grid)
+        }
     }
+}
+
+/// MEDI's `iMag = sqrt(sum(abs(iField).^2, 4))`: the root-sum-of-squares of the echo magnitudes.
+fn rss_magnitude(mags: &[&[f64]]) -> Vec<f64> {
+    let n = mags.first().map_or(0, |m| m.len());
+    (0..n).map(|i| mags.iter().map(|m| m[i] * m[i]).sum::<f64>().sqrt()).collect()
+}
+
+/// MEDI's region growing orders its growth by the magnitude and has no fallback without one
+/// (`unwrapPhase(iMag, ...)`), so a run without magnitudes is refused rather than grown over a
+/// uniform magnitude, where every voxel would tie.
+fn require_magnitude_for_medi(
+    config: &FieldMappingConfig,
+    magnitudes: Option<&[&[f64]]>,
+) -> Result<(), PipelineError> {
+    if config.unwrapping_algorithm == UnwrappingAlgorithm::MediRegionGrowing && magnitudes.is_none() {
+        return Err(PipelineError::InvalidInput(
+            "MEDI's region-growing unwrapping needs the magnitude".into(),
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -922,6 +970,65 @@ mod tests {
         };
         let got = run_field_mapping(&p[..1], None, &mask, &meta.echo(0), &one, &mut |_, _| {}).unwrap();
         assert_eq!(got.b0_field_ppm, rads_to_ppm(&p[0].iter().map(|v| v / tes[0]).collect::<Vec<_>>(), 3.0));
+    }
+
+    /// MEDI's region growing in the field-mapping stage, on every path: each echo unwrapped over
+    /// the whole array (no mask) and whole turns aligned between echoes, a single echo, and the
+    /// complex fit unwrapped once. The seed's phase is inside (-π, π] in every echo, so the field
+    /// comes back to single-precision rounding. Without the magnitude it is refused.
+    #[test]
+    fn medi_region_growing_recovers_a_wrapped_field_on_every_path() {
+        let (nx, ny, nz) = (16, 12, 6);
+        let n = nx * ny * nz;
+        let tes = vec![0.005, 0.010, 0.015, 0.020];
+        let meta = ScanMetadata {
+            dims: (nx, ny, nz), voxel_size: (1.0, 1.0, 1.0), echo_times: tes.clone(),
+            field_strength: 3.0, b0_direction: (0.0, 0.0, 1.0), slice_geometry: None, affine: None,
+        };
+        let freq: Vec<f64> = (0..n).map(|i| 90.0 * ((i % nx) as f64 - 7.5) + 30.0 * ((i / nx % ny) as f64 - 5.5)).collect();
+        let phases: Vec<Vec<f64>> = tes.iter()
+            .map(|&te| freq.iter().map(|f| { let t = f * te; t.sin().atan2(t.cos()) }).collect())
+            .collect();
+        let p: Vec<&[f64]> = phases.iter().map(|v| v.as_slice()).collect();
+        let mag: Vec<f64> = (0..n).map(|i| 1.0 + (i % 5) as f64).collect();
+        let mags: Vec<&[f64]> = (0..4).map(|_| mag.as_slice()).collect();
+        // The mask plays no part in the unwrapping; it only limits the echo combination.
+        let mut mask = vec![0u8; n];
+        mask[n / 4..3 * n / 4].fill(1);
+        let truth = rads_to_ppm(&freq, 3.0);
+        let base = FieldMappingConfig {
+            unwrapping_algorithm: UnwrappingAlgorithm::MediRegionGrowing, phase_offset_removal: false, ..Default::default()
+        };
+        let close = |got: &[f64], tol: f64, what: &str| {
+            let worst = (0..n).filter(|&i| mask[i] != 0).map(|i| (got[i] - truth[i]).abs()).fold(0.0, f64::max);
+            assert!(worst < tol, "{what}: off by {worst} ppm");
+        };
+        for b0 in [
+            B0EstimationMethod::default(),
+            B0EstimationMethod::LinearFit(LinearFitParams { estimate_offset: false }),
+            B0EstimationMethod::RobustFit(RobustFitParams::default()),
+        ] {
+            let config = FieldMappingConfig { b0_estimation: b0.clone(), ..base.clone() };
+            let got = run_field_mapping(&p, Some(&mags), &mask, &meta, &config, &mut |_, _| {}).unwrap();
+            close(&got.b0_field_ppm, 1e-6, b0.id());
+        }
+        let offset = FieldMappingConfig { phase_offset_removal: true, ..base.clone() };
+        close(&run_field_mapping(&p, Some(&mags), &mask, &meta, &offset, &mut |_, _| {}).unwrap().b0_field_ppm, 1e-3, "mcpc-3d-s");
+        close(&run_field_mapping(&p[..1], Some(&mags[..1]), &mask, &meta.echo(0), &base, &mut |_, _| {}).unwrap().b0_field_ppm, 1e-6, "single echo");
+        let complex = FieldMappingConfig { b0_estimation: B0EstimationMethod::ComplexFit(Default::default()), ..base.clone() };
+        close(&run_field_mapping(&p, Some(&mags), &mask, &meta, &complex, &mut |_, _| {}).unwrap().b0_field_ppm, 1e-3, "complex fit");
+        // The complex fit is unwrapped as MEDI's unwrapPhase(iMag, iFreq_raw, matrix_size).
+        let got = run_field_mapping(&p, Some(&mags), &mask, &meta, &complex, &mut |_, _| {}).unwrap();
+        let fit = got.complex_fit.as_ref().unwrap();
+        let imag: Vec<f64> = mag.iter().map(|m| (4.0 * m * m).sqrt()).collect();
+        let ifreq = crate::unwrap::unwrap_medi_region_growing(&fit.field, &imag, &meta.grid());
+        assert_eq!(got.b0_field_ppm, rads_to_ppm(&ifreq.iter().map(|v| v / fit.echo_spacing).collect::<Vec<_>>(), 3.0));
+        for e in [
+            run_field_mapping(&p, None, &mask, &meta, &base, &mut |_, _| {}).err().unwrap(),
+            run_field_mapping_per_echo(&p, None, &mask, &meta, &base, &mut |_, _| {}).err().unwrap(),
+        ] {
+            assert!(matches!(e, PipelineError::InvalidInput(_)), "{e:?}");
+        }
     }
 
     #[test]

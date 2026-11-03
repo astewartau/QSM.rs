@@ -317,6 +317,12 @@ pub fn unwrap_slicewise(
             // PRELUDE: regions only interface within a connected piece of the mask.
             UnwrapMethod::BestPath => unwrap_bestpath(&p, &k, &params.bestpath, &layout.grid),
             UnwrapMethod::Prelude(prelude) => unwrap_prelude(&p, &k, &layout.grid, &prelude),
+            // Each slice grown from its own middle, over the whole slice (no mask), ordered by
+            // the slice's magnitude.
+            UnwrapMethod::MediRegionGrowing => {
+                assert!(!mag_slice.is_empty(), "MEDI's region growing needs the magnitude");
+                crate::unwrap::unwrap_medi_region_growing(&p, mag_slice, &layout.grid)
+            }
             UnwrapMethod::Laplacian => {
                 let mut u = laplacian_unwrap(&p, &k, &layout.grid, LaplacianSolver::Dct);
                 let (labels, n_components) = label_components(&k, layout.d0, layout.d1);
@@ -691,6 +697,21 @@ mod tests {
             let err = max_inplane_gradient_error(&u, &truth);
             assert!(err < 0.05, "{name}: in-plane structure lost, max gradient error {err}");
         }
+    }
+
+    /// MEDI's region growing slice by slice, with a magnitude (its quality map): the in-plane
+    /// structure comes back through the slice offsets, to its single precision.
+    #[test]
+    fn slicewise_medi_region_growing_uses_the_magnitude() {
+        let b = field();
+        let truth = true_phase(&b, &slice_offsets(false), TES[3]);
+        let wrapped = wrap_all(&truth);
+        let mag: Vec<f64> = (0..wrapped.len()).map(|i| 1.0 + (i % 3) as f64).collect();
+        let u = unwrap_slicewise(
+            &wrapped, &mag, &full_mask(), UnwrapMethod::MediRegionGrowing, &SliceWiseParams::default(), &grid(),
+        );
+        let err = max_inplane_gradient_error(&u, &truth);
+        assert!(err < 1e-4, "in-plane structure lost, max gradient error {err}");
     }
 
     #[test]

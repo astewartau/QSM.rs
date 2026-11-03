@@ -314,6 +314,7 @@ pub fn phase_offset_removal(
             unwrap_bestpath(&hip_phase, &mask, &BestPathParams::default(), grid)
         }
         UnwrapMethod::Prelude(params) => unwrap_prelude(&hip_phase, &mask, grid, &params),
+        UnwrapMethod::MediRegionGrowing => crate::unwrap::unwrap_medi_region_growing(&hip_phase, &weight, grid),
     };
     drop(hip_phase);
     drop(weight);
@@ -566,6 +567,7 @@ pub fn mcpc3ds_combine<P: AsRef<[f64]>, M: AsRef<[f64]>>(
         UnwrapMethod::Laplacian => laplacian_unwrap(&hip_phase, &mask, grid, LaplacianSolver::Dct),
         UnwrapMethod::BestPath => unwrap_bestpath(&hip_phase, &mask, &BestPathParams::default(), grid),
         UnwrapMethod::Prelude(params) => unwrap_prelude(&hip_phase, &mask, grid, &params),
+        UnwrapMethod::MediRegionGrowing => crate::unwrap::unwrap_medi_region_growing(&hip_phase, &weight, grid),
     };
     drop(hip_phase);
     drop(weight);
