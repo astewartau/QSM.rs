@@ -87,13 +87,16 @@ pub struct NdiParams {
     /// Which echo time the radian conversion uses. Default [`EchoTime::First`]. FANSI's
     /// multi-echo example, `script_DICOM_Philips.m`, scales the field by `deltaTE = TE(echo2) -
     /// TE(echo1)` (FANSI-toolbox 93044a3, line 364) before `ndi` (lines 459, 465), and its comment
-    /// on that line says "You may use also any individual echo time". On the qsm-forward phantom (echoes 4/12/20/28 ms; XSIM / NRMSE / r),
-    /// the magnitude weight at the first echo gives the best NRMSE and r (0.636 / 51.4% / 0.858)
-    /// against 0.637 / 53.3% / 0.846 at the echo spacing.
+    /// on that line says "You may use also any individual echo time". On the qsm-forward phantom
+    /// (echoes 4/12/20/28 ms; FANSI's discrete kernel, measured for QSM.rs#418 with the integration tests' settings; XSIM / NRMSE / r), the magnitude weight at the first
+    /// echo gives the best NRMSE and r (0.635 / 52.0% / 0.854) against 0.636 / 54.0% / 0.842 at
+    /// the echo spacing. (With the continuous kernel, #276: 0.636 / 51.4% / 0.858 against
+    /// 0.637 / 53.3% / 0.846.)
     ///
     /// The magnitude weight is required, although `ndi.m` weights by ones when given none
-    /// (lines 51-56): with a flat weight NDI is worse on that phantom (0.628 / 57.5% / 0.822 at
-    /// the first echo).
+    /// (lines 51-56): with a flat weight NDI is worse on that phantom (0.625 / 58.8% / 0.818 at
+    /// the first echo, 0.630 / 57.3% / 0.825 at the spacing; continuous kernel 0.628 / 57.5% /
+    /// 0.822 at the first echo).
     pub te: EchoTime,
     /// The dipole kernel. Default [`FansiKernel::Discrete`], FANSI's
     /// `dipole_kernel_angulated` as the original is run with; [`FansiKernel::Continuous`] is

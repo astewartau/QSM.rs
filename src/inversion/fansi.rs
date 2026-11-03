@@ -116,13 +116,15 @@ pub struct FansiParams {
     /// TE(echo2) - TE(echo1)` (FANSI-toolbox 93044a3, line 364) before `nlTV`/`nlTGV` (lines 370,
     /// 421). That script's `echo1 = 2`, `echo2 = 4` (lines 224-225) make it twice the spacing of
     /// its evenly spaced echoes; its comment adds "You may use also any individual echo time".
-    /// On the qsm-forward phantom (echoes 4/12/20/28 ms; XSIM / NRMSE / r), the magnitude weight does better at the echo spacing than
-    /// at the first echo on every metric: nlTV 0.802 / 39.8% / 0.918 vs 0.797 / 43.0% / 0.903,
-    /// nlTGV (50 iterations) 0.767 / 40.1% / 0.916 vs 0.765 / 42.8% / 0.904.
+    /// On the qsm-forward phantom (echoes 4/12/20/28 ms; FANSI's discrete kernel, measured for QSM.rs#418 with the integration tests' settings; XSIM / NRMSE / r), the
+    /// magnitude weight does better at the echo spacing than at the first echo on every metric:
+    /// nlTV 0.801 / 40.7% / 0.914 vs 0.799 / 43.6% / 0.901, nlTGV (50 iterations) 0.768 / 41.0% /
+    /// 0.912 vs 0.767 / 43.0% / 0.903. (With the continuous kernel, #276: nlTV 0.802 / 39.8% /
+    /// 0.918 vs 0.797 / 43.0% / 0.903, nlTGV 0.767 / 40.1% / 0.916 vs 0.765 / 42.8% / 0.904.)
     ///
     /// The magnitude weight is required, although `nlTV.m` and `nlTGV.m` weight by ones when
     /// given none (`nlTV.m` lines 213, 274; `nlTGV.m` lines 350, 365): with a flat weight both
-    /// diverge on that phantom at either echo time.
+    /// diverge on that phantom at either echo time, with either kernel.
     pub te: EchoTime,
     /// Select nlTGV (`true`) or nlTV (`false`).
     pub is_tgv: bool,

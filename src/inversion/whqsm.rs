@@ -157,7 +157,9 @@ pub struct WhQsmParams {
     /// (Before QSM.rs#402, with the continuous kernel and the weight only in the mask, the
     /// spacing diverged on the qsm-forward phantom, r 0.07, and the first echo gave XSIM 0.754,
     /// NRMSE 35.5 %.) With a magnitude weight the echo spacing does better than
-    /// the first echo (echo-1 magnitude, [`WhQsmWeight::MaxNormalised`]: XSIM 0.673 vs 0.637).
+    /// the first echo (echo-1 magnitude, [`WhQsmWeight::MaxNormalised`]; qsm-forward phantom,
+    /// integration-test settings, FANSI's kernel, QSM.rs#418; XSIM / NRMSE / r 0.676 / 48.9% /
+    /// 0.876 vs 0.638 / 49.9% / 0.873; with the continuous kernel, #276: XSIM 0.673 vs 0.637).
     pub te: EchoTime,
     /// The dipole kernel. Default [`FansiKernel::Discrete`], FANSI's
     /// `dipole_kernel_angulated` as the original is run with; [`FansiKernel::Continuous`] is
