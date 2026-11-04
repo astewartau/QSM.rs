@@ -37,13 +37,21 @@
 //!   [`RomeoParams::romeo_cli`](crate::unwrap::RomeoParams::romeo_cli) sets those, and with it
 //!   the result matches the CLI up to the CLI's single-precision arithmetic (see
 //!   [`crate::unwrap::romeo`], *Agreement with the reference*).
+//! - **Where MCPC-3D-S's offset is undefined.** As in the reference, the corrected phase is NaN
+//!   there, ROMEO does not grow through it, and the field is undefined: the result's
+//!   [`FieldMappingResult::valid_mask`] is the brain mask less those voxels, the field is 0 on the
+//!   rest of the brain mask, and every later stage must work in `valid_mask`
+//!   ([`crate::utils::phase_offset_removal`] has the measurements; until 2026-11 those voxels kept
+//!   their raw phase, which caused ring artefacts on GE and Philips data). On every other path
+//!   `valid_mask` is the brain mask.
 //! - **Offset removal off, or Laplacian unwrapping.** Phase-offset removal and bipolar correction
 //!   run only with ROMEO (`do_offset` below); with Laplacian they are skipped whatever the
-//!   config says. Without them each echo is unwrapped on its own (the template and `individual`
-//!   settings of `romeo_params` are not used), with echo 1's magnitude and the next echo as
-//!   `phase2` (none for the last echo), and the per-echo constants aligned before combining (see
-//!   `field_mapping_direct`). ROMEO.jl's individual mode uses each echo's own magnitude and the
-//!   previous echo as `phase2` (echo 2 for echo 1) (`src/unwrapping.jl:151-160`).
+//!   config says. Without them ROMEO unwraps the raw echoes exactly as on the offset-removal path
+//!   ([`crate::unwrap::unwrap_romeo_multi_echo`] with `romeo_params`: template or individual
+//!   mode, each echo's own magnitude, ROMEO.jl's `phase2`; until 2026-11 this path unwrapped each
+//!   echo with echo 1's magnitude and the next echo as `phase2` whatever the mode), and the
+//!   per-echo whole turns are aligned before combining (see `field_mapping_direct`; a no-op
+//!   whenever ROMEO's own global correction ran or the echoes were unwrapped temporally).
 //! - **Bipolar correction** is opt-in in the reference too (`argparse.jl:71-76`, "requires ≥ 3
 //!   echoes"); with fewer than 3 echoes it is skipped here silently.
 //!
@@ -240,7 +248,14 @@ pub fn run_field_mapping(
     }
 }
 
-/// Path A: Multi-echo with phase offset removal
+/// Path A: Multi-echo with phase offset removal.
+///
+/// MCPC-3D-S ([`crate::utils::phase_offset_removal`]) leaves the phase NaN where its offset is
+/// undefined, as MriResearchTools does. ROMEO is given that NaN phase and the brain mask, exactly
+/// as ROMEO.jl is in the authors' pipeline, so it never grows through those voxels. The other
+/// unwrappers (QSM.rs's options here) take no NaN: they get the phase zeroed there and the mask
+/// `brain ∩ valid`. The echoes are combined inside `brain ∩ valid`, the field is 0 outside it, and
+/// that mask is returned as [`FieldMappingResult::valid_mask`].
 #[allow(clippy::too_many_arguments)]
 fn field_mapping_with_offset(
     phases: &[&[f64]],
@@ -259,16 +274,18 @@ fn field_mapping_with_offset(
     // Step 1: Phase offset removal
     progress(1, 4);
     let grid = crate::Grid::new(nx, ny, nz, vsx, vsy, vsz);
-    let (mut corrected, phase_offset) = crate::utils::phase_offset_removal(
-        phases, mag_slices, tes,
-        config.phase_offset_sigma_voxels((vsx, vsy, vsz)), [0, 1],
-        crate::unwrap::UnwrapMethod::Romeo,
-        &grid,
-    );
+    let crate::utils::PhaseOffsetRemoval { phases: mut corrected, offset: mut phase_offset, valid: offset_valid } =
+        crate::utils::phase_offset_removal(
+            phases, mag_slices, tes,
+            config.phase_offset_sigma_voxels((vsx, vsy, vsz)), [0, 1],
+            crate::unwrap::UnwrapMethod::Romeo,
+            &grid,
+        );
+    let valid_mask: Vec<u8> = mask.iter().zip(&offset_valid).map(|(&m, &v)| u8::from(m != 0 && v != 0)).collect();
 
     // Step 2: Bipolar correction (optional, >= 3 echoes), inside MCPC-3D-S's own mask
     // `robustmask(sqrt(|hip|))`, as `mcpc3ds` passes it to `bipolar_correction!`
-    // (`mcpc3ds.jl:55`), not the brain mask (QSM.rs#330).
+    // (`mcpc3ds.jl:55`), not the brain mask (QSM.rs#330). NaN phase stays NaN, as there.
     if config.bipolar_correction && n_echoes >= 3 {
         let mcpc_mask = crate::utils::mcpc3ds_mask(phases, mag_slices, [0, 1], &grid);
         crate::utils::bipolar_correction(
@@ -279,7 +296,13 @@ fn field_mapping_with_offset(
 
     // Step 3: Multi-echo unwrapping
     progress(2, 4);
-    let unwrapped: Vec<Vec<f64>> = match config.unwrapping_algorithm {
+    if config.unwrapping_algorithm != UnwrappingAlgorithm::Romeo {
+        // Only ROMEO takes NaN as "no data"; the others get 0 there and the valid mask.
+        for p in corrected.iter_mut() {
+            p.iter_mut().for_each(|v| if !v.is_finite() { *v = 0.0 });
+        }
+    }
+    let mut unwrapped: Vec<Vec<f64>> = match config.unwrapping_algorithm {
         UnwrappingAlgorithm::Laplacian => {
             // Neumann, not the ROI-masked variant: this stage wants unwrapping only.
             // Background removal is a later stage, and the masked variant would remove it
@@ -287,7 +310,7 @@ fn field_mapping_with_offset(
             // outside the mask first (MCPC-3D-S corrects every voxel, and the Laplacian unwrap
             // takes the whole array), as on the direct path.
             corrected.iter()
-                .map(|p| crate::unwrap::laplacian_unwrap(&mask_phase(p, mask), mask, &grid, config.laplacian_solver))
+                .map(|p| crate::unwrap::laplacian_unwrap(&mask_phase(p, &valid_mask), &valid_mask, &grid, config.laplacian_solver))
                 .collect()
         }
         UnwrappingAlgorithm::Romeo => {
@@ -298,9 +321,9 @@ fn field_mapping_with_offset(
         }
         UnwrappingAlgorithm::Prelude => {
             let mut u: Vec<Vec<f64>> = corrected.iter()
-                .map(|p| crate::unwrap::unwrap_prelude(p, mask, &grid, &config.prelude_params))
+                .map(|p| crate::unwrap::unwrap_prelude(p, &valid_mask, &grid, &config.prelude_params))
                 .collect();
-            align_per_echo_constants(&mut u, tes, mask, UnwrappingAlgorithm::Prelude);
+            align_per_echo_constants(&mut u, tes, &valid_mask, UnwrappingAlgorithm::Prelude);
             u
         }
         UnwrappingAlgorithm::MediRegionGrowing => {
@@ -310,35 +333,51 @@ fn field_mapping_with_offset(
             let mut u: Vec<Vec<f64>> = corrected.iter()
                 .map(|p| crate::unwrap::unwrap_medi_region_growing(p, &imag, &grid))
                 .collect();
-            align_per_echo_constants(&mut u, tes, mask, UnwrappingAlgorithm::MediRegionGrowing);
+            align_per_echo_constants(&mut u, tes, &valid_mask, UnwrappingAlgorithm::MediRegionGrowing);
             u
         }
     };
+    drop(corrected);
+    // Nothing is combined outside `brain ∩ valid`, and no NaN reaches the combinations.
+    for u in unwrapped.iter_mut() {
+        u.iter_mut().for_each(|v| if !v.is_finite() { *v = 0.0 });
+    }
+    phase_offset.iter_mut().for_each(|v| if !v.is_finite() { *v = 0.0 });
 
     // Step 4: B0 estimation
     progress(3, 4);
     let mut robust_fit = None;
     if let B0EstimationMethod::QsmartEchofit { fit_threshold } = config.b0_estimation {
         progress(4, 4);
-        return Ok(FieldMappingResult { phase_offset: Some(phase_offset), ..qsmart_fit(&unwrapped, mag_slices, metadata, fit_threshold) });
+        let mut r = qsmart_fit(&unwrapped, mag_slices, &valid_mask, metadata, fit_threshold);
+        // `echofit.m` fits every voxel; the ones with no defined phase have no field.
+        for (i, &ok) in offset_valid.iter().enumerate() {
+            if ok == 0 {
+                r.b0_field_ppm[i] = 0.0;
+                if let Some(rel) = r.reliability.as_mut() {
+                    rel[i] = 0;
+                }
+            }
+        }
+        return Ok(FieldMappingResult { phase_offset: Some(phase_offset), ..r });
     }
     let b0_hz = match &config.b0_estimation {
         B0EstimationMethod::WeightedAvg { weighting } => {
             crate::utils::calculate_b0_weighted(
-                &unwrapped, mag_slices, tes, mask,
+                &unwrapped, mag_slices, tes, &valid_mask,
                 *weighting, &grid,
             )
         }
         B0EstimationMethod::LinearFit(params) => {
             let uw_refs: Vec<&[f64]> = unwrapped.iter().map(|u| u.as_slice()).collect();
             let fit = crate::utils::multi_echo_linear_fit(
-                &uw_refs, mag_slices, tes, mask,
+                &uw_refs, mag_slices, tes, &valid_mask,
                 params.estimate_offset,
             );
             crate::utils::field_to_hz(&fit.field)
         }
         B0EstimationMethod::RobustFit(params) => {
-            let (field_rads, report) = robust_fit_echoes(&unwrapped, mag_slices, tes, mask, params);
+            let (field_rads, report) = robust_fit_echoes(&unwrapped, mag_slices, tes, &valid_mask, params);
             robust_fit = Some(report);
             crate::utils::field_to_hz(&field_rads)
         }
@@ -349,6 +388,7 @@ fn field_mapping_with_offset(
     progress(4, 4);
     Ok(FieldMappingResult {
         b0_field_ppm: hz_to_ppm(&b0_hz, metadata.field_strength),
+        valid_mask,
         phase_offset: Some(phase_offset),
         robust_fit,
         reliability: None,
@@ -373,10 +413,13 @@ fn field_mapping_with_offset(
 ///     subtracted from every echo. Echo `e` is `TEₑ·ω + cₑ` inside the mask; demeaned it is
 ///     `TEₑ·(ω − ω̄)` for every echo, which loses only a global constant field `ω̄` (removed by
 ///     background removal and referencing anyway).
-///   - ROMEO fixes each echo up to a whole number of turns, so each echo's median wrap count
-///     relative to the TE-scaled previous echo is removed
+///   - ROMEO ([`unwrap_romeo_multi_echo`](crate::unwrap::unwrap_romeo_multi_echo) with
+///     `romeo_params`, as on the offset-removal path) fixes each echo up to a whole number of
+///     turns, so each echo's median wrap count relative to the TE-scaled previous echo is removed
 ///     ([`correct_multi_echo_wraps`](crate::unwrap::correct_multi_echo_wraps)); this is a no-op
-///     when the echoes are already consistent.
+///     when the echoes are already consistent (temporal unwrapping, or individual unwrapping with
+///     `correct_global`, which already ends with it). Kept for individual mode without global
+///     correction, where the authors' `calculateB0_unwrapped` would average echoes a turn apart.
 ///
 ///   Then `B0 = Σ w (φ/TE) / Σ w` with the variant's `weighting`.
 ///
@@ -444,8 +487,9 @@ fn field_mapping_direct(
     progress(1, 4);
     let is_laplacian = config.unwrapping_algorithm == UnwrappingAlgorithm::Laplacian;
     let region = LaplacianRegion::new(config, mask);
-    // The magnitude the unwrapper is given: echo 1's for ROMEO; MEDI's iMag (root-sum-of-squares
-    // of the echoes) for MEDI's region growing, as on the other paths.
+    // The magnitude the per-echo unwrappers are given: MEDI's iMag (root-sum-of-squares of the
+    // echoes) for MEDI's region growing, as on the other paths; unused by Laplacian and PRELUDE.
+    // ROMEO takes the multi-echo route below, with each echo's own.
     let imag;
     let quality: &[f64] = if config.unwrapping_algorithm == UnwrappingAlgorithm::MediRegionGrowing {
         imag = rss_magnitude(mag_slices);
@@ -453,24 +497,28 @@ fn field_mapping_direct(
     } else {
         mag_slices.first().copied().unwrap_or(&[])
     };
-    let mut unwrapped: Vec<Vec<f64>> = Vec::with_capacity(n_echoes);
-    for e in 0..n_echoes {
-        let masked;
-        let phase: &[f64] = if region.zero_outside {
-            masked = mask_phase(phases[e], mask);
-            &masked
-        } else {
-            phases[e]
-        };
-        let uw = unwrap_single(
-            phase, quality,
-            region.keep(mask), config, nx, ny, nz, vsx, vsy, vsz,
-            if e + 1 < n_echoes { Some(phases[e + 1]) } else { None },
-            tes[e],
-            if e + 1 < n_echoes { tes[e + 1] } else { 0.0 },
-        );
-        unwrapped.push(uw);
-    }
+    let mut unwrapped: Vec<Vec<f64>> = if config.unwrapping_algorithm == UnwrappingAlgorithm::Romeo {
+        // ROMEO.jl's multi-echo `unwrap` with the configured mode, as on the offset-removal path:
+        // each echo's own magnitude and, in individual mode, the previous echo as `phase2`
+        // (`src/unwrapping.jl`). Until 2026-11 this path unwrapped every echo with echo 1's
+        // magnitude and the *next* echo as `phase2`, whatever the mode (47 % of voxels > 0.01 ppm
+        // from ROMEO.jl on a GE scan, 7 % on a Siemens one; Q0748 audit, workstream C).
+        let grid = crate::Grid::new(nx, ny, nz, vsx, vsy, vsz);
+        crate::unwrap::unwrap_romeo_multi_echo(phases, mag_slices, tes, mask, &config.romeo_params, &grid)
+    } else {
+        (0..n_echoes)
+            .map(|e| {
+                let masked;
+                let phase: &[f64] = if region.zero_outside {
+                    masked = mask_phase(phases[e], mask);
+                    &masked
+                } else {
+                    phases[e]
+                };
+                unwrap_single(phase, quality, region.keep(mask), config, nx, ny, nz, vsx, vsy, vsz)
+            })
+            .collect()
+    };
 
     progress(3, 4);
     if let B0EstimationMethod::QsmartEchofit { fit_threshold } = config.b0_estimation {
@@ -478,7 +526,7 @@ fn field_mapping_direct(
             align_per_echo_constants(&mut unwrapped, tes, mask, config.unwrapping_algorithm);
         }
         progress(4, 4);
-        return Ok(qsmart_fit(&unwrapped, mag_slices, metadata, fit_threshold));
+        return Ok(qsmart_fit(&unwrapped, mag_slices, mask, metadata, fit_threshold));
     }
     let mut robust_fit = None;
     let b0_field_ppm = match &config.b0_estimation {
@@ -526,6 +574,7 @@ fn field_mapping_direct(
     progress(4, 4);
     Ok(FieldMappingResult {
         b0_field_ppm,
+        valid_mask: mask.to_vec(),
         phase_offset: None,
         robust_fit,
         field_noise_ppm: None,
@@ -541,6 +590,7 @@ fn field_mapping_direct(
 fn qsmart_fit(
     unwrapped: &[Vec<f64>],
     mag_slices: &[&[f64]],
+    valid_mask: &[u8],
     metadata: &ScanMetadata,
     fit_threshold: crate::utils::QsmartFitThreshold,
 ) -> FieldMappingResult {
@@ -549,6 +599,7 @@ fn qsmart_fit(
     let fit = crate::utils::qsmart_echofit(&uw, mag_slices, &metadata.echo_times, &metadata.grid(), ppm, fit_threshold);
     FieldMappingResult {
         b0_field_ppm: fit.field_ppm,
+        valid_mask: valid_mask.to_vec(),
         phase_offset: None,
         robust_fit: None,
         reliability: Some(fit.reliability),
@@ -652,10 +703,10 @@ fn field_mapping_single_echo(
     progress: &mut dyn FnMut(usize, usize),
 ) -> Result<FieldMappingResult, PipelineError> {
     progress(1, 4);
-    let unwrapped = unwrap_one_echo(phase, mag, mask, metadata.echo_times[0], config, nx, ny, nz, vsx, vsy, vsz);
+    let unwrapped = unwrap_one_echo(phase, mag, mask, config, nx, ny, nz, vsx, vsy, vsz);
     if let B0EstimationMethod::QsmartEchofit { fit_threshold } = config.b0_estimation {
         progress(4, 4);
-        return Ok(qsmart_fit(&[unwrapped], &[mag], metadata, fit_threshold));
+        return Ok(qsmart_fit(&[unwrapped], &[mag], mask, metadata, fit_threshold));
     }
     progress(4, 4);
     Ok(single_echo_result(&unwrapped, mask, metadata.echo_times[0], metadata.field_strength, config))
@@ -669,7 +720,6 @@ fn unwrap_one_echo(
     phase: &[f64],
     mag: &[f64],
     mask: &[u8],
-    te: f64,
     config: &FieldMappingConfig,
     nx: usize, ny: usize, nz: usize,
     vsx: f64, vsy: f64, vsz: f64,
@@ -682,7 +732,7 @@ fn unwrap_one_echo(
     } else {
         phase
     };
-    unwrap_single(phase, mag, region.keep(mask), config, nx, ny, nz, vsx, vsy, vsz, None, te, 0.0)
+    unwrap_single(phase, mag, region.keep(mask), config, nx, ny, nz, vsx, vsy, vsz)
 }
 
 /// One echo's field from its unwrapped phase: the masked mean a Laplacian unwrap leaves
@@ -703,6 +753,7 @@ fn single_echo_result(
     let field_rads: Vec<f64> = unwrapped.iter().map(|&v| v / te).collect();
     FieldMappingResult {
         b0_field_ppm: rads_to_ppm(&field_rads, field_strength),
+        valid_mask: mask.to_vec(),
         phase_offset: None,
         robust_fit: None,
         reliability: None,
@@ -754,7 +805,7 @@ pub fn run_field_mapping_per_echo(
         }
         progress(e, n_echoes);
         let te = metadata.echo_times[e];
-        let unwrapped = unwrap_one_echo(p, mag, mask, te, config, nx, ny, nz, vsx, vsy, vsz);
+        let unwrapped = unwrap_one_echo(p, mag, mask, config, nx, ny, nz, vsx, vsy, vsz);
         out.push(single_echo_result(&unwrapped, mask, te, metadata.field_strength, config));
     }
     progress(n_echoes, n_echoes);
@@ -831,6 +882,7 @@ fn field_mapping_complex_fit(
     progress(4, 4);
     Ok(FieldMappingResult {
         b0_field_ppm,
+        valid_mask: mask.to_vec(),
         phase_offset: None,
         robust_fit: None,
         reliability: None,
@@ -840,7 +892,7 @@ fn field_mapping_complex_fit(
     })
 }
 
-/// Unwrap a single echo using the configured algorithm.
+/// Unwrap a single echo on its own using the configured algorithm (ROMEO without `phase2`).
 #[allow(clippy::too_many_arguments)]
 fn unwrap_single(
     phase: &[f64],
@@ -849,8 +901,6 @@ fn unwrap_single(
     config: &FieldMappingConfig,
     nx: usize, ny: usize, nz: usize,
     vsx: f64, vsy: f64, vsz: f64,
-    phase2: Option<&[f64]>,
-    te1: f64, te2: f64,
 ) -> Vec<f64> {
     let grid = crate::Grid::new(nx, ny, nz, vsx, vsy, vsz);
     match config.unwrapping_algorithm {
@@ -859,7 +909,7 @@ fn unwrap_single(
         }
         UnwrappingAlgorithm::Romeo => {
             crate::unwrap::unwrap_romeo(
-                phase, mag, phase2, te1, te2,
+                phase, mag, None, 0.0, 0.0,
                 mask, &config.romeo_params, &grid,
             )
         }
@@ -2029,7 +2079,7 @@ mod tests {
         // Path A: ROMEO with phase-offset removal (the default unwrapping).
         let cfg = robust_cfg(UnwrappingAlgorithm::Romeo, true);
         let got = run(&cfg);
-        let (corrected, _) = crate::utils::phase_offset_removal(
+        let crate::utils::PhaseOffsetRemoval { phases: corrected, .. } = crate::utils::phase_offset_removal(
             &ph, &mg, &TES4, cfg.phase_offset_sigma_voxels((1.0, 1.0, 1.0)), [0, 1],
             crate::unwrap::UnwrapMethod::Romeo, &grid,
         );
@@ -2049,13 +2099,11 @@ mod tests {
         assert_eq!(got.b0_field_ppm, rads_to_ppm(&want.fit.field, 3.0));
         assert_eq!(got.robust_fit.expect("Laplacian path report").robust_weights, want.robust_weights);
 
-        // Path B: ROMEO without phase-offset removal: per-echo unwrap, wrap alignment, fit.
+        // Path B: ROMEO without phase-offset removal: ROMEO.jl's multi-echo unwrap, wrap
+        // alignment, fit.
         let cfg = robust_cfg(UnwrappingAlgorithm::Romeo, false);
         let got = run(&cfg);
-        let mut uw: Vec<Vec<f64>> = (0..TES4.len()).map(|e| unwrap_single(
-            &ph[e], &mg[0], &mask, &cfg, N, N, N, 1.0, 1.0, 1.0,
-            ph.get(e + 1).map(|p| p.as_slice()), TES4[e], TES4.get(e + 1).copied().unwrap_or(0.0),
-        )).collect();
+        let mut uw = crate::unwrap::unwrap_romeo_multi_echo(&ph, &mg, &TES4, &mask, &cfg.romeo_params, &grid);
         crate::unwrap::correct_multi_echo_wraps(&mut uw, &TES4, &mask);
         let want = crate::utils::multi_echo_robust_fit(&uw, &mg, &TES4, &mask, &params);
         assert_eq!(got.b0_field_ppm, rads_to_ppm(&want.fit.field, 3.0));

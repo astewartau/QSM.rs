@@ -18,8 +18,11 @@
 //!   (`echoes=[1,2]`), unwraps the HIP with ROMEO weighted by `sqrt(|HIP|)` inside its own
 //!   `robustmask` of that weight, scales by `TE₁/ΔTE`, smooths the offset with
 //!   `gaussiansmooth3d_phase` at `sigma=[10,10,5]` *voxels*, and removes it from every echo
-//!   (`src/mcpc3ds.jl:16-17,39-52`). [`phase_offset_removal`] takes the caller's mask instead of
-//!   making a `robustmask`. The pipeline's default sigma (`field_mapping.phase_offset_sigma_mm`)
+//!   (`src/mcpc3ds.jl:16-17,39-52`). [`phase_offset_removal`] makes the same `robustmask` and,
+//!   as `mcpc3ds`, leaves the offset and the corrected phase NaN where the masked smoothing
+//!   cannot reach; it returns those voxels as invalid ([`PhaseOffsetRemoval::valid`]; until
+//!   2026-11 they kept their raw phase, which caused ring artefacts on GE and Philips data, see
+//!   [`phase_offset_removal`]). The pipeline's default sigma (`field_mapping.phase_offset_sigma_mm`)
 //!   is the ROMEO CLI's 7 mm per axis divided by the voxel size (not `mcpc3ds`'s `[10, 10, 5]`
 //!   voxels); the CLI says to reduce it "to a few voxels" on a small field of view and 0 along a
 //!   single-slice axis (ROMEO.jl `ext/RomeoApp/argparse.jl:79-91`, `caller.jl:137-141`).
@@ -249,9 +252,31 @@ pub fn mcpc3ds_mask(
     crate::utils::robust_mask(&weight, grid)
 }
 
+/// Result of [`phase_offset_removal`] (MCPC-3D-S on coil-combined echoes).
+#[derive(Clone, Debug)]
+pub struct PhaseOffsetRemoval {
+    /// The offset-corrected phase per echo, wrapped to [-π, π]; **NaN** wherever the offset is
+    /// undefined (`valid == 0`), as in MriResearchTools' `mcpc3ds`.
+    pub phases: Vec<Vec<f64>>,
+    /// The smoothed phase offset; NaN where it is undefined.
+    pub offset: Vec<f64>,
+    /// 1 where the smoothed offset is defined: MCPC-3D-S's own `robustmask` of `sqrt(|HIP|)`
+    /// plus the margin the masked smoothing extrapolates into. Only these voxels carry a phase
+    /// the field can be estimated from; restrict every later step to them (the pipeline returns
+    /// `brain mask ∩ valid` as [`FieldMappingResult::valid_mask`](crate::pipeline::FieldMappingResult::valid_mask)).
+    pub valid: Vec<u8>,
+}
+
+impl PhaseOffsetRemoval {
+    /// Number of voxels of `mask` outside [`valid`](Self::valid).
+    pub fn excluded_from(&self, mask: &[u8]) -> usize {
+        mask.iter().zip(&self.valid).filter(|(&m, &v)| m != 0 && v == 0).count()
+    }
+}
+
 /// Remove phase offset from multi-echo phase data using HIP (Hermitian Inner Product):
 /// MCPC-3D-S, as MriResearchTools.jl's `mcpc3ds` does it for one channel (`src/mcpc3ds.jl:38-57`,
-/// 771eadf).
+/// 771eadf; v3.8.0).
 ///
 /// 1. `hip = conj(echo₁)·echo₂` over the whole volume, `weight = sqrt(|hip|)`.
 /// 2. `mask = robustmask(weight)` ([`robust_mask`](crate::utils::robust_mask)); `mcpc3ds` makes
@@ -261,8 +286,28 @@ pub fn mcpc3ds_mask(
 ///    evolved by `TE₁`; the offset is `φ₁` minus that, at every voxel.
 /// 4. The offset smoothed inside the same mask with MriResearchTools' `gaussiansmooth3d_phase`
 ///    ([`nan_box_smooth_3d_phase`]), and removed from every echo at every voxel
-///    (`combinewithPO`). Outside the mask the reference's offset (and corrected phase) is NaN;
-///    here the offset is 0 there.
+///    (`combinewithPO`).
+///
+/// # Where the offset is undefined
+///
+/// The masked smoothing leaves the offset NaN outside its mask, beyond the margin it
+/// extrapolates into, and so the reference's corrected phase is NaN there too. ROMEO.jl then
+/// never grows through those voxels: every edge that touches a NaN phase has a NaN weight, which
+/// `rescale` makes invalid (ROMEO.jl `src/weights.jl`), so they stay NaN and so does their B0
+/// (`calculateB0_unwrapped`). This function returns exactly that: NaN phase and offset there, and
+/// [`PhaseOffsetRemoval::valid`] marking the voxels that are defined.
+///
+/// Until 2026-11 QSM.rs set the offset to 0 there instead and kept the raw phase. That was QSM.rs's
+/// own deviation and it was wrong: a brain mask is not inside MCPC-3D-S's mask (scalp, the
+/// periphery and, on Philips, the scanner-masked background lie outside it), and the raw phase
+/// there carries the full coil-combination offset. On GE (real/imaginary, 7 echoes) and Philips
+/// (8 echoes) 3 T data those few voxels (0.6 % and 1.7 % of the brain mask) bridged the ROMEO
+/// growth, gave each echo a path-dependent number of turns and left ring artefacts in the field
+/// and in χ; given the same NaN→raw semantics, ROMEO.jl reproduces those rings almost voxel for
+/// voxel, and with its own NaN semantics it does not (χ correlation with Laplacian-unwrapped χ
+/// 0.21 → 0.78 on the GE scan; Q0748 audit, workstream C, ROMEO.jl 1.6.0 / MriResearchTools 3.8.0,
+/// 2026-11-04). On Siemens adaptive-combine data, with small offsets, those voxels were harmless.
+/// No option keeps the old behaviour.
 ///
 /// # Arguments
 /// * `phases` - Wrapped phase per echo (n_echoes arrays of nx*ny*nz)
@@ -273,10 +318,6 @@ pub fn mcpc3ds_mask(
 /// * `unwrap_method` - Method to unwrap the HIP phase (`mcpc3ds` uses ROMEO; the others are
 ///   QSM.rs options)
 /// * `grid` - Volume grid (dimensions and voxel sizes)
-///
-/// # Returns
-/// `(corrected_phases, phase_offset)`: the offset-corrected phases and the smoothed offset, over
-/// the whole volume.
 pub fn phase_offset_removal(
     phases: &[impl AsRef<[f64]>],
     mags: &[impl AsRef<[f64]>],
@@ -285,7 +326,7 @@ pub fn phase_offset_removal(
     echoes: [usize; 2],
     unwrap_method: UnwrapMethod,
     grid: &Grid,
-) -> (Vec<Vec<f64>>, Vec<f64>) {
+) -> PhaseOffsetRemoval {
     let (nx, ny, nz) = grid.dims;
     let n_echoes = phases.len();
     let n_total = nx * ny * nz;
@@ -327,23 +368,22 @@ pub fn phase_offset_removal(
     drop(unwrapped_hip);
 
     // mcpc3ds.jl:51: po .= gaussiansmooth3d_phase(po, sigma; mask): MriResearchTools' NaN-aware
-    // box filter with mask (4 passes, alternating direction), [`nan_box_smooth_3d_phase`].
-    // Outside its mask the reference's offset is NaN, and so is its corrected phase; here the
-    // offset is 0 there, so those voxels keep their phase (nothing downstream uses them inside
-    // a brain mask, which lies inside this mask).
-    let mut phase_offset_smoothed = nan_box_smooth_3d_phase(&phase_offset, sigma, &mask, grid);
+    // box filter with mask (4 passes, alternating direction), [`nan_box_smooth_3d_phase`]. NaN
+    // where it cannot extrapolate, as in the reference (see *Where the offset is undefined*).
+    let offset = nan_box_smooth_3d_phase(&phase_offset, sigma, &mask, grid);
     drop(phase_offset);
-    phase_offset_smoothed.iter_mut().for_each(|v| if !v.is_finite() { *v = 0.0 });
+    let valid: Vec<u8> = offset.iter().map(|v| u8::from(v.is_finite())).collect();
 
-    // combinewithPO for one channel: angle(|c|·c·exp(−i·po)) = wrap(φ − po), at every voxel
+    // combinewithPO for one channel: angle(|c|·c·exp(−i·po)) = wrap(φ − po), at every voxel; NaN
+    // where po is NaN
     let corrected_phases = (0..n_echoes)
         .map(|e| {
             let p = phases[e].as_ref();
-            (0..n_total).map(|i| wrap_to_pi(p[i] - phase_offset_smoothed[i])).collect()
+            (0..n_total).map(|i| wrap_to_pi(p[i] - offset[i])).collect()
         })
         .collect();
 
-    (corrected_phases, phase_offset_smoothed)
+    PhaseOffsetRemoval { phases: corrected_phases, offset, valid }
 }
 
 /// Box-filter widths approximating a Gaussian of `sigma` (voxels) with `n` passes — the
@@ -582,7 +622,11 @@ pub fn mcpc3ds_combine<P: AsRef<[f64]>, M: AsRef<[f64]>>(
         for i in 0..n {
             po[i] = if mask[i] > 0 { p1[i] - scale * unwrapped_hip[i] } else { 0.0 };
         }
-        // Smooth as MriResearchTools does (NaN-aware box passes); NaN far outside the mask → 0.
+        // Smooth as MriResearchTools does (NaN-aware box passes). Where the smoothed offset is
+        // undefined MriResearchTools' `combinewithPO` gives NaN; here those voxels are combined
+        // with offset 0 (kept: the combination's magnitude is still wanted for masking there).
+        // The field mapping that follows runs its own MCPC-3D-S on the combined echoes and marks
+        // its own undefined voxels invalid ([`phase_offset_removal`]).
         let mut po_s = nan_box_smooth_3d_phase(&po, sigma, &mask, grid);
         for v in po_s.iter_mut() {
             if !v.is_finite() { *v = 0.0; }
@@ -2538,7 +2582,7 @@ mod tests {
             .map(|&te| (0..nx * ny * nz).map(|i| { let t = 300.0 * ((i % nx) as f64 - 7.5) * te; t.sin().atan2(t.cos()) }).collect())
             .collect();
         let run = |p: PreludeParams| {
-            phase_offset_removal(&phases, &mags, &tes, [1.0; 3], [0, 1], UnwrapMethod::Prelude(p), &grid(nx, ny, nz)).1
+            phase_offset_removal(&phases, &mags, &tes, [1.0; 3], [0, 1], UnwrapMethod::Prelude(p), &grid(nx, ny, nz)).offset
         };
         let one = PreludeParams { num_phase_partitions: 1, labelling: PreludeLabelling::Volume, correct_global: false };
         assert_eq!(run(PreludeParams::default()), run(PreludeParams::default()));
@@ -2553,7 +2597,7 @@ mod tests {
         let (phases, mags, _mask) = make_synthetic_multi_echo(nx, ny, nz, &tes);
 
         let sigma = [1.0, 1.0, 1.0];
-        let (corrected, offset) = phase_offset_removal(
+        let crate::utils::PhaseOffsetRemoval { phases: corrected, offset, .. } = phase_offset_removal(
             &phases, &mags, &tes, sigma, [0, 1], UnwrapMethod::Romeo, &grid(nx, ny, nz),
         );
 
@@ -2572,7 +2616,7 @@ mod tests {
         let (phases, mags, _mask) = make_synthetic_multi_echo(nx, ny, nz, &tes);
 
         let sigma = [1.0, 1.0, 1.0];
-        let (corrected, offset) = phase_offset_removal(
+        let crate::utils::PhaseOffsetRemoval { phases: corrected, offset, .. } = phase_offset_removal(
             &phases, &mags, &tes, sigma, [0, 1], UnwrapMethod::Romeo, &grid(nx, ny, nz),
         );
 
@@ -2593,7 +2637,7 @@ mod tests {
         let (phases, mags, _mask) = make_synthetic_multi_echo(nx, ny, nz, &tes);
 
         let sigma = [1.0, 1.0, 1.0];
-        let (corrected, _) = phase_offset_removal(
+        let crate::utils::PhaseOffsetRemoval { phases: corrected, .. } = phase_offset_removal(
             &phases, &mags, &tes, sigma, [0, 1], UnwrapMethod::Romeo, &grid(nx, ny, nz),
         );
 
@@ -2619,7 +2663,7 @@ mod tests {
         let mags: Vec<Vec<f64>> = (0..3).map(|_| vec![1.0; n]).collect();
 
         let sigma = [1.0, 1.0, 1.0];
-        let (corrected, _offset) = phase_offset_removal(
+        let crate::utils::PhaseOffsetRemoval { phases: corrected, offset: _offset, .. } = phase_offset_removal(
             &phases, &mags, &tes, sigma, [0, 1], UnwrapMethod::Romeo, &grid(nx, ny, nz),
         );
 
@@ -2646,7 +2690,7 @@ mod tests {
         let sigma = [1.0, 1.0, 1.0];
 
         // Step 1: Phase offset removal
-        let (corrected, offset) = phase_offset_removal(
+        let crate::utils::PhaseOffsetRemoval { phases: corrected, offset, .. } = phase_offset_removal(
             &phases, &mags, &tes, sigma, [0, 1],
             UnwrapMethod::Romeo, &grid(nx, ny, nz),
         );
@@ -2680,7 +2724,7 @@ mod tests {
         let (phases, mags, mask) = make_synthetic_multi_echo(nx, ny, nz, &tes);
         let sigma = [1.0, 1.0, 1.0];
 
-        let (corrected, _) = phase_offset_removal(
+        let crate::utils::PhaseOffsetRemoval { phases: corrected, .. } = phase_offset_removal(
             &phases, &mags, &tes, sigma, [0, 1],
             UnwrapMethod::Romeo, &grid(nx, ny, nz),
         );
@@ -2766,7 +2810,7 @@ mod tests {
         let (phases, mags, mask) = make_synthetic_multi_echo(nx, ny, nz, &tes);
 
         let sigma = [1.0, 1.0, 1.0];
-        let (corrected, _offset) = phase_offset_removal(
+        let crate::utils::PhaseOffsetRemoval { phases: corrected, offset: _offset, .. } = phase_offset_removal(
             &phases, &mags, &tes, sigma, [0, 1], UnwrapMethod::Romeo, &grid(nx, ny, nz),
         );
 
@@ -2846,7 +2890,7 @@ mod tests {
         let (phases, mags, mask) = make_synthetic_multi_echo(nx, ny, nz, &tes);
         let sigma = [1.0, 1.0, 1.0];
 
-        let (mut corrected, _) = phase_offset_removal(
+        let crate::utils::PhaseOffsetRemoval { phases: mut corrected, .. } = phase_offset_removal(
             &phases, &mags, &tes, sigma, [0, 1],
             UnwrapMethod::Romeo, &grid(nx, ny, nz),
         );

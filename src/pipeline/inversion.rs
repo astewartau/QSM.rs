@@ -886,7 +886,8 @@ pub fn run_iqfm(
 /// ([`TgvInput::WrappedPhase`](crate::inversion::TgvInput::WrappedPhase)), and TGV handles
 /// unwrapping as well. Either way the scan's field strength is passed, α are in the
 /// reference's rad units at that TE and B0, and TGV also does background removal and
-/// inversion.
+/// inversion. A multi-echo field is defined only in its
+/// [`valid_mask`](super::FieldMappingResult::valid_mask), so TGV runs (and χ is non-zero) there.
 ///
 /// # Returns
 /// Susceptibility map in ppm (unreferenced — call `apply_reference` after)
@@ -922,25 +923,28 @@ pub fn run_tgv(
         )));
     }
 
-    let chi_ppm = if phases.len() > 1 {
+    let (chi_ppm, chi_mask) = if phases.len() > 1 {
         let field_result = super::field_mapping::run_field_mapping(
             phases, magnitudes, mask, metadata,
             field_mapping_config, &mut |_, _| {},
         )?;
-        crate::inversion::tgv_qsm(
+        // The field is defined only in `valid_mask` (MCPC-3D-S may leave part of the brain mask
+        // without a phase offset), so TGV and the referencing work there.
+        let chi = crate::inversion::tgv_qsm(
             TgvInput::FieldPpm { field: &field_result.b0_field_ppm, echo_times, b0_t },
-            mask, &grid, tgv_params, (bx, by, bz), &mut *progress,
-        )?
+            &field_result.valid_mask, &grid, tgv_params, (bx, by, bz), &mut *progress,
+        )?;
+        (chi, field_result.valid_mask)
     } else {
         let input = TgvInput::WrappedPhase {
             phase: phases[0],
             te_s,
             b0_t,
         };
-        crate::inversion::tgv_qsm(input, mask, &grid, tgv_params, (bx, by, bz), &mut *progress)?
+        (crate::inversion::tgv_qsm(input, mask, &grid, tgv_params, (bx, by, bz), &mut *progress)?, mask.to_vec())
     };
 
-    Ok(super::referencing::apply_reference(&chi_ppm, mask, reference))
+    Ok(super::referencing::apply_reference(&chi_ppm, &chi_mask, reference))
 }
 
 #[cfg(test)]
