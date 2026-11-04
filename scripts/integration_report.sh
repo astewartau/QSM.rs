@@ -415,7 +415,7 @@ chisep_files=(metrics/chisep_qsmci.csv metrics/chisep_relaxometry_qsmci.csv metr
 rows=$(emit_chisep_rows "${chisep_files[@]}")
 if [ -n "$rows" ]; then
   echo "### χ-Separation"
-  echo "*Paramagnetic (χ+) / diamagnetic (χ−) source maps vs ground truth (QSM-CI chisep phantom). The R2PRIMEnet row is its R2′ against the phantom's reference R2′ (a 3 T network on a 7 T phantom: off-distribution by construction). χ-sepnet makes its own QSM input (QSMnetME, the χ-separation toolbox's route); the methods that take a QSM (R2*-QSM, WaveSep, DECOMPOSE, HC-ChiSep, SUSEP-Net, and χ-sepnet's low-memory rows, the network alone on the acquired grid) are given the phantom's ground-truth χ.*"
+  echo "*Paramagnetic (χ+) / diamagnetic (χ−) source maps vs ground truth (QSM-CI chisep phantom). The R2PRIMEnet row is its R2′ against the phantom's reference R2′ (a 3 T network on a 7 T phantom: off-distribution by construction). χ-sepnet makes its own QSM input (QSMnetME, the χ-separation toolbox's route), in its low-memory rows too; the methods that take a QSM (R2*-QSM, WaveSep, DECOMPOSE, HC-ChiSep, SUSEP-Net) are given the phantom's ground-truth χ.*"
   echo ""
   echo "| Map | Correlation | XSIM | NRMSE% | Time |"
   echo "|-----|-------------|------|--------|------|"

@@ -46,10 +46,11 @@ from pathlib import Path
 # runners (2026-10-23: runs 39888473649, 39902014692, 39895862373). Only the packing reads them;
 # a runner can be several times slower or faster than this on the day. A unit missing here
 # (a new test) is packed as DEFAULT_SECONDS. chisep_xsepnet and test_dl_qsmnetme: from their first
-# run with their current tests on the hosted runners (2026-11-03: run 41582227855).
+# run with their current tests on the hosted runners (2026-11-03: runs 41582227855; chisep_xsepnet
+# with its low-memory test on the toolbox route, 41646170021).
 SECONDS = {
     "chisep_orientation": 377, "chisep_qsmci": 1027, "chisep_r2primenet": 100,
-    "chisep_relaxometry_qsmci": 253, "chisep_xsepnet": 708,
+    "chisep_relaxometry_qsmci": 253, "chisep_xsepnet": 823,
     "models_onnx": 60, "multislice_2d": 1, "oblique_sagittal": 1,
     "test_bet": 2, "test_bgremove_ismv": 11, "test_bgremove_lbv": 12,
     "test_bgremove_pdf": 20, "test_bgremove_resharp": 80, "test_bgremove_sharp": 2,
