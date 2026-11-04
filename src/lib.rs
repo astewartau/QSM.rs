@@ -168,7 +168,7 @@ pub mod fieldmap {
     pub use crate::utils::multi_echo::{
         phase_offset_removal, mcpc3ds_combine, calculate_b0_weighted, multi_echo_linear_fit,
         bipolar_correction, field_to_hz, nan_box_smooth_3d, nan_box_smooth_3d_phase, gaussian_box_sizes,
-        PhaseOffsetParams, CoilCombinationResult, LinearFitParams, LinearFitResult, B0WeightType,
+        PhaseOffsetParams, PhaseOffsetRemoval, CoilCombinationResult, LinearFitParams, LinearFitResult, B0WeightType,
         multi_echo_robust_fit, RobustFitParams, RobustFitResult, RobustLoss, EchoQuality,
         fit_ppm_complex, fit_ppm_complex_noise, FitPpmComplexParams, FitPpmComplexResult,
         echo_spacing_problem, FIT_PPM_COMPLEX_SPACING_TOLERANCE_S,
@@ -236,7 +236,10 @@ pub mod unring {
 /// morphological operations (erode/dilate/close/fill-holes, signal-gated erosion) and sphere
 /// masks.
 pub mod mask {
-    pub use crate::utils::mask::{create_sphere_mask, apply_mask_zero};
+    pub use crate::utils::mask::{
+        create_sphere_mask, apply_mask_zero, scanner_masked_phase, ScannerMaskedPhase,
+        SCANNER_FILL_MIN_FRACTION,
+    };
     pub use crate::utils::threshold::otsu_threshold;
     pub use crate::utils::morphology::{
         erode_mask, dilate_mask, morphological_close, fill_holes,

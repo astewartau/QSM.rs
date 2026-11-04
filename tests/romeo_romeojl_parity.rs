@@ -83,7 +83,7 @@ fn romeo_and_mcpc3ds_match_the_julia_packages() {
             }
         }
     }
-    let (corrected, _) = phase_offset_removal(&phase, &mag, &TES, [7.0; 3], [0, 1], UnwrapMethod::Romeo, &grid);
+    let qsm_core::utils::PhaseOffsetRemoval { phases: corrected, .. } = phase_offset_removal(&phase, &mag, &TES, [7.0; 3], [0, 1], UnwrapMethod::Romeo, &grid);
     for (e, c) in corrected.iter().enumerate() {
         let want: Vec<f64> = (0..inside.len()).map(|i| f64::from_le_bytes(raw[o + 8 * i..o + 8 * i + 8].try_into().unwrap())).collect();
         o += 8 * inside.len();

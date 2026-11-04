@@ -43,7 +43,17 @@
 //! - **`correct_global`** is off by default in both the API and the CLI (`src/unwrapping.jl:43`,
 //!   `argparse.jl:129-135`). (QSMxT's Python releases ran the CLI with
 //!   `--individual-unwrapping --correct-global`, `qsmxt/interfaces/nipype_interface_romeo.py:66`;
-//!   that is QSMxT's choice, not ROMEO's default.)
+//!   that is QSMxT's choice, not ROMEO's default.) Where it applies, as in ROMEO.jl's 3D `unwrap!`:
+//!   to a single volume, to the template echo before the others are unwrapped temporally from
+//!   it, and in individual mode to each echo and then across echoes
+//!   ([`correct_multi_echo_wraps`]); see `unwrap_individual` for the two places (threads and even
+//!   medians) where QSM.rs is deterministic and ROMEO.jl is not.
+//! - **Undefined phase (NaN).** ROMEO.jl takes NaN phase (e.g. MCPC-3D-S's output where its
+//!   offset is undefined, [`crate::utils::phase_offset_removal`]) as "no data": any edge touching
+//!   it gets a NaN weight, which `rescale` makes invalid, so the growth never reaches it and it
+//!   stays NaN; the global corrections skip non-finite voxels. QSM.rs does the same, including
+//!   Julia's NaN-propagating `max(0, x)` in the gradient-coherence and phase-linearity weights
+//!   (phase linearity is 0.5 next to a NaN, as in ROMEO.jl; before 2026-11 it was 0 here).
 //! - **Mask.** The CLI unwraps inside `robustmask` of the template echo's magnitude by default
 //!   (`argparse.jl:38-42`, `caller.jl:201-204`), a magnitude threshold with hole filling
 //!   (MriResearchTools `src/masking.jl:7-29`), not a brain mask; with no magnitude it unwraps
@@ -74,6 +84,20 @@
 //! MriResearchTools 771eadf in the QSM-CI `julia-qsm` image `sha256:b3c048ac…`). Given the
 //! CLI's own MCPC-3D-S output on the QSM-CI in-vivo travelling-head scan (Prisma 2.89 T, 1 mm,
 //! five echoes), QSM.rs's template unwrapping gives the CLI's unwrapped echoes exactly.
+//!
+//! `tests/romeo_validity_romeojl_parity.rs` (ROMEO.jl 1.6.0, MriResearchTools 3.8.0, same image, one
+//! Julia thread) adds a phantom whose brain mask reaches past MCPC-3D-S's mask: the NaN validity,
+//! individual mode with and without global correction, and template mode with and without it,
+//! on the corrected and on the raw phase, all give ROMEO.jl's turns at every voxel and its B0 to
+//! 1e-14 (measured 2026-11-04). **Known gap:** template mode's re-unwrapping of uncertain voxels
+//! (`temporal_uncertain_unwrapping > 0`, the API default) is not yet ROMEO.jl's. ROMEO.jl rates the
+//! voxels with `voxelquality` (Float32 weights before binning, no mask, the sum over six edges
+//! divided by six, NaN for an edge touching a NaN) and grows from every voxel it marks visited,
+//! those outside the mask included (`temporal_uncertain_unwrapping!`); `temporal_uncertain_rewrap`
+//! uses [`voxel_quality_romeo`] (binned weights, in-mask neighbours only) and grows from the
+//! certain voxels inside the mask. On that phantom 14 of 3,000 voxels of echoes 2 and 3 differ
+//! after MCPC-3D-S and 850 of 3,392 on the raw phase; the fixture's template cases therefore set
+//! it to 0 (the CLI's default). QSMxT's default (individual mode) does not use it.
 //!
 //! The `romeo` CLI itself reads the NIfTI phase and magnitude as Float32 and computes in single
 //! precision; QSM.rs computes in f64 (kept: double precision throughout, Ashley 2026-10-28).
@@ -401,17 +425,19 @@ pub fn calculate_weights_romeo_with_flags(
 
             // 1. Phase coherence: 1 - |wrap(diff)| / π
             if flags[0] {
-                let pc = 1.0 - wrap_angle(phase[idx_n] - phase[idx]).abs() / PI;
+                let pc = 1.0 - gamma(phase[idx_n] - phase[idx]).abs() / PI;
                 weight *= 0.1 + 0.9 * pc;
             }
 
             // 2. Phase gradient coherence (multi-echo)
             if f_pgc {
                 let phase2_data = phase2.unwrap();
-                let wrapped_p1 = wrap_angle(phase[idx_n] - phase[idx]);
-                let wrapped_p2 = wrap_angle(phase2_data[idx_n] - phase2_data[idx]);
-                // ROMEO.jl: γ(P2[i] - P2[j]) * TEs[1] / TEs[2], left to right
-                let pgc = (1.0 - (wrapped_p1 - wrapped_p2 * te1 / te2).abs()).max(0.0);
+                let wrapped_p1 = gamma(phase[idx_n] - phase[idx]);
+                let wrapped_p2 = gamma(phase2_data[idx_n] - phase2_data[idx]);
+                // ROMEO.jl: γ(P2[i] - P2[j]) * TEs[1] / TEs[2], left to right; its
+                // `max(0, x)` keeps a NaN (Julia's `max` propagates NaN, Rust's `f64::max` drops
+                // it), so a NaN phase2 makes the edge invalid there and here.
+                let pgc = julia_max0(1.0 - (wrapped_p1 - wrapped_p2 * te1 / te2).abs());
                 weight *= 0.1 + 0.9 * pgc;
             }
 
@@ -498,8 +524,31 @@ fn phase_linearity_edge(
 #[inline]
 fn phase_linearity_triplet(a: f64, b: f64, c: f64) -> f64 {
     let second_deriv = wrap_angle(a - 2.0 * b + c);
-    let pl = (1.0 - (second_deriv / 2.0).abs()).max(0.0);
+    // `max(0, …)` with Julia's NaN propagation, then ROMEO.jl's `isnan(pl) && return 0.5`: a NaN
+    // phase on either side of an edge (e.g. where MCPC-3D-S's offset is undefined) gives 0.5.
+    // With Rust's `f64::max` the NaN became 0 and the 0.5 branch was dead (fixed 2026-11).
+    let pl = julia_max0(1.0 - (second_deriv / 2.0).abs());
     if pl.is_nan() { 0.5 } else { pl }
+}
+
+/// ROMEO.jl's `γ` (`src/utility.jl`): one wrap only, `x ± 2π` when `x` is outside [−π, π].
+/// For the difference of two wrapped phases it is the full wrap; for an unwrapped `phase2` (the
+/// previous echo in individual mode) it is not, and ROMEO.jl's weights are this one's.
+#[inline]
+fn gamma(x: f64) -> f64 {
+    if x < -PI {
+        x + TWO_PI
+    } else if x > PI {
+        x - TWO_PI
+    } else {
+        x
+    }
+}
+
+/// Julia's `max(0, x)`: NaN stays NaN (Rust's `f64::max(0.0)` would return 0).
+#[inline]
+fn julia_max0(x: f64) -> f64 {
+    if x.is_nan() { x } else { x.max(0.0) }
 }
 
 /// Rescale a weight in `[0, 1]` (1 best) to the queue priority, as ROMEO.jl bins it.
@@ -833,26 +882,42 @@ pub fn unwrap_romeo(
         phase2, if phase2.is_some() { Some((te1, te2)) } else { None },
     );
 
+    finish_3d_unwrap(&mut unwrapped, &mut visited, num_regions, &weights, mask, params, nx, ny, nz);
+    unwrapped
+}
+
+/// What ROMEO.jl's 3D `unwrap!` does after the growth (`src/unwrapping.jl`, `src/algorithm.jl`):
+/// region merging and correction, then, with `correct_global`, `wrapped .-= 2π·median(round(φ[mask]
+/// / 2π))`. Its multi-echo modes call that same 3D `unwrap!` for the template echo and for every
+/// echo in individual mode, so all three paths finish here.
+#[allow(clippy::too_many_arguments)]
+fn finish_3d_unwrap(
+    unwrapped: &mut [f64],
+    visited: &mut [u8],
+    num_regions: u8,
+    weights: &[u8],
+    mask: &[u8],
+    params: &RomeoParams,
+    nx: usize, ny: usize, nz: usize,
+) {
     if params.merge_regions && num_regions > 1 {
         let remaining = merge_regions_post(
-            &mut unwrapped, &mut visited, num_regions, &weights, nx, ny, nz,
+            unwrapped, visited, num_regions, weights, nx, ny, nz,
         );
         if params.correct_regions {
             // correct_regions on remaining regions
             for &r in &remaining {
-                correct_regions(&mut unwrapped, &visited, r);
+                correct_regions(unwrapped, visited, r);
             }
         }
     } else if params.correct_regions && num_regions > 0 {
-        correct_regions(&mut unwrapped, &visited, num_regions);
+        correct_regions(unwrapped, visited, num_regions);
     }
 
     // correctglobal for 3D: subtract median n·2π offset
     if params.correct_global {
-        correct_global_offset(&mut unwrapped, mask);
+        correct_global_offset(unwrapped, mask);
     }
-
-    unwrapped
 }
 
 /// Unwrap 4D multi-echo phase data using ROMEO.
@@ -945,11 +1010,14 @@ fn unwrap_template<P: AsRef<[f64]>, M: AsRef<[f64]>>(
     // ROMEO.jl: `unwrap!(view(wrapped, :, :, :, template); args..., weights)` with phase2 and
     // TEs, so the seed's 2π count is set from phase2 (`seedcorrection!`).
     let mut visited = vec![0u8; n_total];
-    grow_region_unwrap_full(
+    let num_regions = grow_region_unwrap_full(
         &mut result[template], &weights, mask, &mut visited,
         nx, ny, nz, params.wrap_addition, params.max_seeds,
         Some(phases[p2ref].as_ref()), Some((tes[template], tes[p2ref])),
     );
+    // The rest of that 3D `unwrap!`: region handling and, with `correct_global`, the template's
+    // global turn (until 2026-11 neither ran on the template echo here).
+    finish_3d_unwrap(&mut result[template], &mut visited, num_regions, &weights, mask, params, nx, ny, nz);
 
     // Temporally unwrap other echoes outward from template
     // Order: template-1, template-2, ..., 0, template+1, template+2, ..., n-1
@@ -995,11 +1063,37 @@ fn unwrap_template<P: AsRef<[f64]>, M: AsRef<[f64]>>(
 // Individual multi-echo unwrapping
 // =========================================================================
 
-/// Individual multi-echo unwrapping.
+/// Individual multi-echo unwrapping: ROMEO.jl's `unwrap_individual!` (`src/unwrapping.jl`,
+/// v1.6.0).
 ///
-/// Each echo is spatially unwrapped independently using its neighboring echo
-/// as a phase2 reference for weight calculation. Optionally corrects global
-/// 2π offsets between echoes using median wrap counting.
+/// Each echo is spatially unwrapped on its own, with its own magnitude and the previous echo (echo
+/// 2 for echo 1) as `phase2` for the gradient-coherence weight and the seed's turn. With
+/// `correct_global`, as in ROMEO.jl, two corrections follow:
+/// 1. per echo, inside the 3D `unwrap!` that `unwrap_individual!` calls with all its keyword
+///    arguments: `wrapped .-= 2π·median(round(φ[mask] / 2π))` (finite voxels only), so each
+///    echo's median turn is 0;
+/// 2. then across echoes, `correct_multi_echo_wraps!` ([`correct_multi_echo_wraps`]).
+///
+/// Step 1 was missing here until 2026-11; on the data where it was measured (Q0748 audit,
+/// workstream C) every echo's median turn was already 0, so it changed nothing there, but in
+/// general it sets echo 1's global turn and with it every echo's.
+///
+/// **`phase2` and threads.** ROMEO.jl runs the echoes in a `Threads.@threads` loop and reads
+/// `phase2 = wrapped[:,:,:,e2]` while the loop unwraps `wrapped` in place, so whether echo `i`
+/// sees echo `i − 1` wrapped or already unwrapped depends on the thread schedule (≈1 % of voxels of
+/// a 16-echo 7 T scan's last echo varied between runs; Q0748 audit). Here the echoes run in order,
+/// which is ROMEO.jl with one thread, the deterministic reading of its code: echo `i ≥ 2` sees
+/// echo `i − 1` unwrapped (and globally corrected), echo 1 sees echo 2 wrapped. It matters beyond
+/// the seed's turn because ROMEO.jl's `γ` wraps only once (`src/utility.jl`), so the
+/// gradient-coherence weight of an unwrapped `phase2` differs where neighbours differ by more than
+/// 3π (on `tests/romeo_validity_romeojl_parity.rs`'s phantom, 46 voxels of echo 3 changed their
+/// turns between the two readings). Until 2026-11 QSM.rs always read the wrapped echo (and ran the
+/// echoes in parallel), which is what ROMEO.jl reads when the echoes start at the same time.
+///
+/// **Medians.** ROMEO.jl's `median` of an even number of turn counts averages the two middle
+/// ones, which can give a half turn (a shift by π); here the upper middle count is taken, so the
+/// correction is always a whole number of turns. The two agree whenever the middle counts are
+/// equal, as they are on any real mask.
 fn unwrap_individual<P: AsRef<[f64]> + Sync, M: AsRef<[f64]> + Sync>(
     phases: &[P],
     mags: &[M],
@@ -1010,35 +1104,26 @@ fn unwrap_individual<P: AsRef<[f64]> + Sync, M: AsRef<[f64]> + Sync>(
 ) -> Vec<Vec<f64>> {
     let n_echoes = phases.len();
 
-    // Each echo is unwrapped independently, so the echoes
-    // fan out across threads (under the `parallel` feature). Order is preserved
-    // by the parallel `collect`.
-    let echo_indices: Vec<usize> = (0..n_echoes).collect();
-    let mut result: Vec<Vec<f64>> = maybe_par_iter!(echo_indices)
-        .map(|&i| {
-            // Neighboring echo as phase2 reference (matching ROMEO.jl)
-            let e2 = if i == 0 { 1 } else { i - 1 };
-
-            let mag = if mags.is_empty() { &[] as &[f64] } else { mags[i].as_ref() };
-            let weights = compute_weights_from_params(
-                params,
-                phases[i].as_ref(),
-                mag,
-                Some(phases[e2].as_ref()),
-                tes[i], tes[e2],
-                mask, nx, ny, nz,
-            );
-
-            let mut unwrapped = phases[i].as_ref().to_vec();
-            let mut visited = vec![0u8; nx * ny * nz];
-            grow_region_unwrap_full(
-                &mut unwrapped, &weights, mask, &mut visited,
-                nx, ny, nz, params.wrap_addition, params.max_seeds,
-                Some(phases[e2].as_ref()), Some((tes[i], tes[e2])),
-            );
-            unwrapped
-        })
-        .collect();
+    // ROMEO.jl's loop, in echo order (as with one Julia thread): `unwrap!` works on `wrapped` in
+    // place, so echo i ≥ 2's `phase2` is echo i − 1 as already unwrapped (and, with
+    // `correct_global`, already corrected); echo 1's is echo 2, still wrapped.
+    let mut result: Vec<Vec<f64>> = phases.iter().map(|p| p.as_ref().to_vec()).collect();
+    for i in 0..n_echoes {
+        let e2 = if i == 0 { 1 } else { i - 1 };
+        let phase2 = result[e2].clone();
+        let mag = if mags.is_empty() { &[] as &[f64] } else { mags[i].as_ref() };
+        let weights = compute_weights_from_params(
+            params, &result[i], mag, Some(&phase2), tes[i], tes[e2], mask, nx, ny, nz,
+        );
+        let mut visited = vec![0u8; nx * ny * nz];
+        let num_regions = grow_region_unwrap_full(
+            &mut result[i], &weights, mask, &mut visited,
+            nx, ny, nz, params.wrap_addition, params.max_seeds,
+            Some(&phase2), Some((tes[i], tes[e2])),
+        );
+        // ROMEO.jl's 3D `unwrap!` inside `unwrap_individual!`: regions, then `correctglobal`
+        finish_3d_unwrap(&mut result[i], &mut visited, num_regions, &weights, mask, params, nx, ny, nz);
+    }
 
     if params.correct_global {
         correct_multi_echo_wraps(&mut result, tes, mask);

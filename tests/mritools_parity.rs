@@ -157,7 +157,7 @@ fn mritools_ports_match_mritools() {
     // MCPC-3D-S with bipolar correction, as the pipeline's field mapping runs them: `mcpc3ds`
     // corrects the bipolar artefact inside its own `robustmask(sqrt(|hip|))`, not the brain mask.
     let sigma = [7.0, 7.0, 7.0 / 1.5];
-    let (mut phases, _) = phase_offset_removal(&p.wrapped, &p.mag, &TES, sigma, [0, 1], UnwrapMethod::Romeo, &grid);
+    let qsm_core::utils::PhaseOffsetRemoval { mut phases, .. } = phase_offset_removal(&p.wrapped, &p.mag, &TES, sigma, [0, 1], UnwrapMethod::Romeo, &grid);
     let mcpc_mask = mcpc3ds_mask(&p.wrapped, &p.mag, [0, 1], &grid);
     bipolar_correction(&mut phases, &p.mag, &TES, &mcpc_mask, sigma, &grid);
     for (e, ph) in phases.iter().enumerate() {

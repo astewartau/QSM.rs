@@ -1207,9 +1207,16 @@ impl ScanMetadata {
 
 /// Results from field mapping stage
 pub struct FieldMappingResult {
-    /// B0 field map in ppm
+    /// B0 field map in ppm; 0 outside [`valid_mask`](Self::valid_mask) (inside `mask`).
     pub b0_field_ppm: Vec<f64>,
-    /// Phase offset map (if phase offset removal was used)
+    /// Where the field is defined: the brain mask passed in, less the voxels where MCPC-3D-S's
+    /// phase offset is undefined ([`PhaseOffsetRemoval::valid`](crate::utils::PhaseOffsetRemoval::valid))
+    /// when phase-offset removal ran; the brain mask itself on every other path. The reference
+    /// (MriResearchTools' `mcpc3ds` → ROMEO.jl → `calculateB0_unwrapped`) leaves the field NaN
+    /// there, so later stages (background removal, inversion, referencing) must work in this mask,
+    /// not in the brain mask.
+    pub valid_mask: Vec<u8>,
+    /// Phase offset map (if phase offset removal was used); 0 where it is undefined.
     pub phase_offset: Option<Vec<f64>>,
     /// What the robust fit found, when [`B0EstimationMethod::RobustFit`] combined the echoes;
     /// `None` for every other method.
