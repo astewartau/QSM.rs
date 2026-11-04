@@ -215,6 +215,49 @@ pub enum Fact {
     HdBetWasmBytes,
     /// Voxels of the grid SynthSeg's network sees for this scan ([`synthseg_network_grid`]).
     SynthSegNetworkVoxels,
+    /// The scanner's manufacturer ([`Manufacturer::id`]: `"siemens"`, `"ge"`, `"philips"` or
+    /// `"other"`), from the BIDS sidecar's `Manufacturer` (DICOM (0008,0070)).
+    Manufacturer,
+}
+
+/// A scanner manufacturer, as far as a rule distinguishes them.
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Manufacturer {
+    Siemens,
+    Ge,
+    Philips,
+    /// Any other (Canon, Toshiba, United Imaging, Hitachi, Bruker, ...).
+    Other,
+}
+
+impl Manufacturer {
+    /// The manufacturer a BIDS `Manufacturer` value (DICOM (0008,0070)) names, as dcm2niix and the
+    /// scanners spell it: `"Siemens"`, `"SIEMENS"`, `"Siemens Healthineers"`; `"GE"`,
+    /// `"GE MEDICAL SYSTEMS"`, `"General Electric"`; `"Philips"`, `"Philips Medical Systems"`,
+    /// `"Philips Healthcare"`. Case and surrounding spaces do not matter; anything else is
+    /// [`Manufacturer::Other`].
+    pub fn from_name(name: &str) -> Self {
+        let m = name.trim().to_uppercase();
+        if m.starts_with("SIEMENS") {
+            Manufacturer::Siemens
+        } else if m == "GE" || m.starts_with("GE ") || m.contains("GENERAL ELECTRIC") {
+            Manufacturer::Ge
+        } else if m.starts_with("PHILIPS") {
+            Manufacturer::Philips
+        } else {
+            Manufacturer::Other
+        }
+    }
+
+    pub fn id(self) -> &'static str {
+        match self {
+            Manufacturer::Siemens => "siemens",
+            Manufacturer::Ge => "ge",
+            Manufacturer::Philips => "philips",
+            Manufacturer::Other => "other",
+        }
+    }
 }
 
 impl Fact {
@@ -333,17 +376,21 @@ pub struct ScanFacts {
     pub voxel_size: Option<(f64, f64, f64)>,
     /// Matrix size in voxels.
     pub dims: Option<(usize, usize, usize)>,
+    /// The scanner's manufacturer, from the sidecar ([`Manufacturer::from_name`]).
+    pub manufacturer: Option<Manufacturer>,
     pub target: Target,
 }
 
 impl ScanFacts {
-    /// Every fact of a scan, on `target`.
+    /// Every fact of a scan's metadata, on `target`. [`ScanMetadata`](super::config::ScanMetadata)
+    /// does not carry the manufacturer; a host that read it sets [`Self::manufacturer`].
     pub fn from_metadata(m: &super::config::ScanMetadata, target: Target) -> Self {
         Self {
             field_strength: Some(m.field_strength),
             echo_count: Some(m.echo_times.len()),
             voxel_size: Some(m.voxel_size),
             dims: Some(m.dims),
+            manufacturer: None,
             target,
         }
     }
@@ -373,6 +420,7 @@ impl ScanFacts {
                 let d = synthseg_network_grid(&grid, input.segmentation?);
                 Some(Current::Number(d.iter().map(|&v| v as f64).product()))
             }
+            Fact::Manufacturer => self.manufacturer.map(|m| Current::Choice(m.id())),
         }
     }
 }
@@ -447,7 +495,9 @@ pub const SETTINGS: &[(&str, &str)] = &[
     ("inversion.qsmart.ilsqr_pad_mm", "QSMART's iLSQR padding, mm; only with QSMART"),
     ("reference", "QSM referencing (QsmReference: mean or none)"),
     ("qsm_per_echo", "A QSM per echo, and their mean, instead of one QSM from the echo-combined field (QsmPipelineConfig::qsm_per_echo, bool)"),
+    ("tukey_window", "Taper ratio of the χ-separation toolbox's k-space Tukey window on the complex echoes, 0 = none (QsmPipelineConfig::tukey_window)"),
     ("separation.algorithm", "χ-separation (SeparationAlgorithm::id)"),
+    ("separation.chi_sepnet.route", "χ-sepnet's input route: toolbox or native (ChiSepNetRoute::id); only with χ-sepnet"),
     ("separation.decompose.unwrap_phase", "DECOMPOSE's phase unwrapping along the echoes (DecomposeParams::unwrap_phase, bool); only with DECOMPOSE"),
     ("separation.decompose.chi_bound", "DECOMPOSE's bound on |χ| in the fit (DecomposeChiBound::id): ppm (a fixed bound, the authors' 0.5) or echo-spacing (π / ((2/3)·γ·B0·ΔTE_max), computed from the scan); only with DECOMPOSE"),
     ("segmentation.inference", "SynthSeg inference: full-volume, low-memory (SynthSegInference::LOW_MEMORY) or sliding-window"),
@@ -546,6 +596,7 @@ pub fn current(input: &RuleInput, facts: &ScanFacts, setting: &str) -> Option<Ve
         "field_mapping.phase_offset_removal" => gated(combines, Current::Bool(c.field_mapping.phase_offset_removal)),
         "field_mapping.bipolar_correction" => gated(combines, Current::Bool(c.field_mapping.bipolar_correction)),
         "qsm_per_echo" => one(Current::Bool(c.qsm_per_echo)),
+        "tukey_window" => one(Current::Number(c.tukey_window)),
         "reference" => one(Current::Choice(match c.reference {
             super::config::QsmReference::Mean => "mean",
             super::config::QsmReference::None => "none",
@@ -641,6 +692,12 @@ pub fn current(input: &RuleInput, facts: &ScanFacts, setting: &str) -> Option<Ve
         "separation.algorithm" => {
             input.separation.map(|s| Current::Choice(s.algorithm.id())).into_iter().collect()
         }
+        "separation.chi_sepnet.route" => input
+            .separation
+            .filter(|s| s.algorithm == super::config::SeparationAlgorithm::ChiSepNet)
+            .map(|s| Current::Choice(s.chi_sepnet.route.id()))
+            .into_iter()
+            .collect(),
         "separation.decompose.unwrap_phase" => input
             .separation
             .filter(|s| s.algorithm == super::config::SeparationAlgorithm::Decompose)
@@ -731,6 +788,9 @@ const fn fact_at_least(fact: Fact, min: f64) -> Condition {
 }
 const fn fact_at_most(fact: Fact, max: f64) -> Condition {
     C::Fact { fact, is: Test::Range { min: None, max: Some(max) } }
+}
+const fn manufacturer(values: &'static [Value]) -> Condition {
+    C::Fact { fact: Fact::Manufacturer, is: Test::OneOf { values } }
 }
 const ON_WASM: Condition = C::Fact { fact: Fact::Target, is: Test::OneOf { values: &[Choice("wasm")] } };
 const MULTI_ECHO: Condition = fact_at_least(Fact::EchoCount, 2.0);
@@ -836,6 +896,12 @@ const ROMEO: &[Value] = &[Choice("romeo")];
 const COMPLEX_FIT: &[Value] = &[Choice("complex-fit")];
 const WEIGHTED_AVG: &[Value] = &[Choice("weighted-avg")];
 const CHI_SEP_TOOLBOX: &[Value] = &[Choice("chi-sep-ilsqr"), Choice("chi-sep-medi"), Choice("chi-sepnet")];
+/// χ-sepnet's toolbox route (`ChiSepNetRoute::Toolbox`).
+const CHI_SEPNET_TOOLBOX_ROUTE: Condition = method("separation.chi_sepnet.route", &[Choice("toolbox")]);
+/// The taper ratio the χ-separation toolbox recommends for Siemens and GE data.
+pub const CHISEP_TUKEY_SIEMENS_GE: f64 = 0.4;
+const TUKEY_SOURCE: &str = "χ-separation toolbox v1.1.3 Chisep_script.m:69-73 \
+    (\"tukey_fac = 0.4; % Recommendation: Siemens, GE: 0.4, Philips: 0\"); QSM.rs utils::tukey_window docs";
 /// QSMnetME: the χ-separation toolbox's QSM network, trained on that toolbox's pipeline.
 const QSMNETME: &[Value] = &[Choice("qsmnetme")];
 const STI: &[Value] = &[Choice("star"), Choice("ilsqr")];
@@ -1533,6 +1599,18 @@ pub static RULES: &[Rule] = &[
         "separation.algorithm", &[Choice("chi-sepnet")], Choice("chi-sep-ilsqr"), Basis::Stated,
         "χ-sepnet's authors state the networks process resolutions coarser than 0.6 mm",
         "SNU-LIST/chi-separation README; Kim et al. 2024 (arXiv:2410.12239) §4"),
+    recommend("chi-sepnet.tukey-siemens-ge",
+        &[sep(&[Choice("chi-sepnet")]), CHI_SEPNET_TOOLBOX_ROUTE, manufacturer(&[Choice("siemens"), Choice("ge")])],
+        "tukey_window", &[Number(CHISEP_TUKEY_SIEMENS_GE)],
+        "The χ-separation toolbox Tukey-windows the complex echoes in k-space before everything \
+         else, and recommends a taper ratio of 0.4 for Siemens and GE data",
+        TUKEY_SOURCE),
+    recommend("chi-sepnet.tukey-philips",
+        &[sep(&[Choice("chi-sepnet")]), CHI_SEPNET_TOOLBOX_ROUTE, manufacturer(&[Choice("philips")])],
+        "tukey_window", &[Number(0.0)],
+        "The χ-separation toolbox recommends no Tukey windowing (a taper ratio of 0) for Philips \
+         data",
+        TUKEY_SOURCE),
 ];
 
 #[cfg(test)]
@@ -1546,6 +1624,7 @@ mod tests {
             echo_count: Some(4),
             voxel_size: Some((1.0, 1.0, 1.0)),
             dims: Some((192, 256, 160)),
+            manufacturer: Some(Manufacturer::Siemens),
             target: Target::Native,
         }
     }
@@ -1802,6 +1881,12 @@ mod tests {
                 separation(S::ChiSepNet)(c);
                 c.facts.voxel_size = Some((0.5, 0.5, 0.5));
             })),
+            ("chi-sepnet.tukey-siemens-ge", Case::new(separation(S::ChiSepNet))),
+            ("chi-sepnet.tukey-philips", Case::new(|c| {
+                separation(S::ChiSepNet)(c);
+                c.facts.manufacturer = Some(Manufacturer::Philips);
+                c.cfg.tukey_window = 0.4;
+            })),
         ]
     }
 
@@ -1957,6 +2042,53 @@ mod tests {
             c.cfg.bg_removal.algorithm = BgRemovalAlgorithm::Pdf;
         });
         assert!(!total_field.ids().contains(&id), "{:?}", total_field.ids());
+    }
+
+    /// χ-sepnet's toolbox route suggests the toolbox's Tukey window by manufacturer: 0.4 for
+    /// Siemens and GE, 0 for Philips; nothing on the native route, for other or unknown
+    /// manufacturers, or once followed.
+    #[test]
+    fn chi_sepnet_suggests_the_vendor_tukey_window() {
+        use crate::separation::ChiSepNetRoute;
+        let ids = |m: Option<Manufacturer>, route: ChiSepNetRoute, tukey: f64| Case::new(|c| {
+            separation(SeparationAlgorithm::ChiSepNet)(c);
+            c.sep.as_mut().unwrap().chi_sepnet.route = route;
+            c.facts.manufacturer = m;
+            c.cfg.tukey_window = tukey;
+        }).ids().into_iter().filter(|id| id.starts_with("chi-sepnet.tukey")).collect::<Vec<_>>();
+        let (sg, ph) = ("chi-sepnet.tukey-siemens-ge", "chi-sepnet.tukey-philips");
+        use Manufacturer::*;
+        use ChiSepNetRoute::*;
+        assert_eq!(ids(Some(Siemens), Toolbox, 0.0), [sg]);
+        assert_eq!(ids(Some(Ge), Toolbox, 0.2), [sg]);
+        assert!(ids(Some(Ge), Toolbox, 0.4).is_empty());
+        assert_eq!(ids(Some(Philips), Toolbox, 0.4), [ph]);
+        assert!(ids(Some(Philips), Toolbox, 0.0).is_empty());
+        assert!(ids(Some(Other), Toolbox, 0.0).is_empty());
+        assert!(ids(None, Toolbox, 0.0).is_empty());
+        assert!(ids(Some(Siemens), Native, 0.0).is_empty());
+        let r = RULES.iter().find(|r| r.id == sg).unwrap();
+        assert_eq!((r.strength, r.basis, r.default), (Strength::Recommended, Basis::Stated, Number(0.4)));
+        assert!(r.needs_scan());
+        // Not with other separation methods.
+        let other = Case::new(|c| {
+            separation(SeparationAlgorithm::ChiSepIlsqr)(c);
+            c.facts.manufacturer = Some(Siemens);
+        });
+        assert!(!other.ids().iter().any(|id| id.starts_with("chi-sepnet.tukey")));
+    }
+
+    #[test]
+    fn manufacturers_are_read_as_dcm2niix_writes_them() {
+        use Manufacturer::*;
+        for (name, m) in [
+            ("Siemens", Siemens), ("SIEMENS", Siemens), ("Siemens Healthineers", Siemens),
+            ("GE", Ge), ("GE MEDICAL SYSTEMS", Ge), ("General Electric", Ge), (" ge ", Ge),
+            ("Philips", Philips), ("Philips Medical Systems", Philips), ("Philips Healthcare", Philips),
+            ("Canon_MEC", Other), ("TOSHIBA", Other), ("UIH", Other), ("GEMINI", Other), ("", Other),
+        ] {
+            assert_eq!(Manufacturer::from_name(name), m, "{name:?}");
+        }
     }
 
     /// The JSON form carries everything the evaluation uses.

@@ -1084,6 +1084,13 @@ pub struct QsmPipelineConfig {
     /// echo combination ([`FieldMappingConfig::b0_estimation`]), phase-offset removal and bipolar
     /// correction then do not run. Default `false`: one QSM from the combined field.
     pub qsm_per_echo: bool,
+    /// Taper ratio of the SNU χ-separation toolbox's k-space Tukey window
+    /// ([`crate::utils::tukey_window`]), which the host applies to every echo's magnitude and
+    /// phase on the acquired grid before anything else reads them
+    /// ([`tukey_window_mag_phase`](crate::utils::tukey_window::tukey_window_mag_phase)). The
+    /// toolbox recommends 0.4 for Siemens and GE and 0 for Philips (rules
+    /// `chi-sepnet.tukey-siemens-ge` and `chi-sepnet.tukey-philips`). Default 0: no windowing.
+    pub tukey_window: f64,
 }
 
 impl Default for QsmPipelineConfig {
@@ -1095,6 +1102,7 @@ impl Default for QsmPipelineConfig {
             inversion: InversionConfig::default(),
             reference: QsmReference::Mean,
             qsm_per_echo: false,
+            tukey_window: 0.0,
         }
     }
 }

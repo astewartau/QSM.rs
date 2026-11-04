@@ -8,6 +8,7 @@
 //! - Real/imaginary to magnitude/phase conversion with slice-chopping correction
 //! - Multi-echo field mapping (phase offset removal, B0 estimation)
 //! - Bias field correction (makehomogeneous; N4 as in ANTs)
+//! - The SNU χ-separation toolbox's k-space Tukey windowing of the complex echoes
 //! - Frangi vesselness filter for vessel detection, and MATLAB's `fibermetric`
 //! - Surface curvature calculation
 //! - Vasculature mask generation
@@ -38,6 +39,7 @@ pub mod chisep_frame;
 pub mod simd_ops;
 pub mod r2star;
 pub mod epg;
+pub mod tukey_window;
 pub mod r2primenet;
 #[cfg(feature = "onnx")]
 pub(crate) mod sliding;
