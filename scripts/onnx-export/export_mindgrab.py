@@ -13,7 +13,9 @@ released weights are run through tinygrad:
     mean / variance reductions so the graph uses only ReduceMean, Sub, Mul, Sqrt, Div.
 
 The network is fully convolutional (padding = dilation), so the spatial axes are exported as
-dynamic; it is run on brainchop's 256^3 conformed volume.
+dynamic; it is run on brainchop's 256^3 conformed volume. QSM.rs restates each instance-norm
+ReduceMean as a 16^3 AveragePool and a ReduceMean when it loads this graph, because tract's f32
+sum over 256^3 voxels is too inaccurate (bet::mindgrab, "Instance-norm statistics").
 
     python export_mindgrab.py --config model.json --weights model.pth --out mindgrab.onnx
 """

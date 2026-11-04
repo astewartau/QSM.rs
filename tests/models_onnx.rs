@@ -296,7 +296,8 @@ fn rs2net_matches_python_reference() {
 /// MindGrab end-to-end parity: `bet::mindgrab` (tract + the Rust conform / normalise /
 /// largest-component / reslice pipeline) vs `brainchop --skull-strip`'s pipeline (niimath
 /// conform / bwlabel / reslice, the same graph under ONNX Runtime) on an in-vivo GRE magnitude.
-/// `scripts/onnx-export/ref_mindgrab.py` writes `mag.nii` and `ref_mask.nii.gz`.
+/// `scripts/onnx-export/ref_mindgrab.py` writes `mag.nii` and `ref_mask.nii.gz`; brainchop-cli's
+/// own mask (QSM-CI's `mindgrab` entry, with its root-sum-of-squares `mag.nii`) serves too.
 ///
 /// ```bash
 /// MINDGRAB_ONNX=/path/mindgrab.onnx MINDGRAB_REF_DIR=/path/ref \
@@ -332,7 +333,10 @@ fn mindgrab_matches_brainchop() {
     let dice = 2.0 * inter as f64 / (a + b) as f64;
     println!("{:?} @ {:?} mm  Dice vs reference {dice:.6}  differing voxels {diff}  ({:.1}s)",
         mag.dims, mag.voxel_size, t.elapsed().as_secs_f64());
-    assert!(dice > 0.999, "Dice {dice}");
+    // Measured on the KKI s002001 bridge-run1 head against brainchop-cli 31150c3's own mask
+    // (QSM-CI's `mindgrab` entry): 0 differing voxels, once the instance-norm means are restated
+    // for tract (bet::mindgrab, *Instance-norm statistics*); 517 before.
+    assert!(dice > 0.9999, "Dice {dice}");
 }
 
 /// Parity: `separation::susep_net` (tract; column-major↔NCDHW repack, pad-to-8, de-normalise)

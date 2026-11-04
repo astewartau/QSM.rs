@@ -169,6 +169,28 @@ impl OnnxModel {
         Ok(Self { model })
     }
 
+    /// Like [`load`](Self::load), with `edit` applied to the parsed ONNX protobuf before tract
+    /// translates it: for a model whose graph must be restated so that tract computes it
+    /// accurately (see [`crate::bet::mindgrab`]), without re-hosting its weights.
+    pub fn load_edited(
+        bytes: &[u8],
+        edit: impl FnOnce(&mut tract_onnx::pb::ModelProto) -> Result<(), OnnxError>,
+    ) -> Result<Self, OnnxError> {
+        let onnx = tract_onnx::onnx();
+        let mut proto = onnx
+            .proto_model_for_read(&mut std::io::Cursor::new(bytes))
+            .map_err(|e| OnnxError::Load(format!("{e:#}")))?;
+        edit(&mut proto)?;
+        Self::from_proto(&proto)
+    }
+
+    /// Translate an already-parsed ONNX protobuf.
+    pub(crate) fn from_proto(proto: &tract_onnx::pb::ModelProto) -> Result<Self, OnnxError> {
+        let model =
+            tract_onnx::onnx().model_for_proto_model(proto).map_err(|e| OnnxError::Load(format!("{e:#}")))?;
+        Ok(Self { model })
+    }
+
     /// Run the model with `inputs` bound to graph inputs in order; returns every
     /// graph output as an `f32` [`Tensor`].
     pub fn run(&self, inputs: &[Tensor]) -> Result<Vec<Tensor>, OnnxError> {
