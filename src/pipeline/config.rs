@@ -40,6 +40,24 @@ pub enum UnwrappingAlgorithm {
     /// ([`crate::unwrap::correct_multi_echo_wraps`]). The magnitude is not used: FSL's `prelude`
     /// uses it only to make a mask when none is given, and here the mask is always given.
     Prelude,
+    /// MEDI's region growing ([`crate::unwrap::unwrap_medi_region_growing`], MEDI toolbox
+    /// `unwrapPhase` / `mexUnwrap.c`), bit-identical to the original. As in MEDI it takes no
+    /// mask: it grows over the whole array from the middle of the field of view, through voxels
+    /// above 0.5 % of the largest magnitude, and the brain mask is applied only after. It needs
+    /// the magnitude (a run without one is [`PipelineError::InvalidInput`]),
+    /// as its quality map:
+    /// - with [`B0EstimationMethod::ComplexFit`], MEDI's `iMag`, the root-sum-of-squares of the
+    ///   echo magnitudes, unwrapping the fit per echo spacing: MEDI's field map
+    ///   (`README.m:80-95`);
+    /// - on the multi-echo paths, each echo is unwrapped on its own with that same `iMag`, then
+    ///   whole turns are aligned between echoes
+    ///   ([`crate::unwrap::correct_multi_echo_wraps`]), as for PRELUDE. MEDI never unwraps
+    ///   echoes one by one, so this use is QSM.rs's own; `iMag` is used because it is what MEDI
+    ///   orders its growth by;
+    /// - for a single echo, and per echo
+    ///   ([`super::per_echo::run_field_mapping_per_echo`]), that
+    ///   echo's magnitude (its `iMag`).
+    MediRegionGrowing,
 }
 
 /// Whether an algorithm is valid when B0 does not lie along the voxel `+z` axis.
@@ -910,12 +928,13 @@ impl SeparationAlgorithm {
 // the same choices, so a host's mapping is the identity wherever the two agree.
 
 impl UnwrappingAlgorithm {
-    /// Stable id (`"romeo"`, `"laplacian"`, `"prelude"`).
+    /// Stable id (`"romeo"`, `"laplacian"`, `"prelude"`, `"medi-region-growing"`).
     pub fn id(self) -> &'static str {
         match self {
             Self::Romeo => "romeo",
             Self::Laplacian => "laplacian",
             Self::Prelude => "prelude",
+            Self::MediRegionGrowing => "medi-region-growing",
         }
     }
 }

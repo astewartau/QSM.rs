@@ -8,6 +8,9 @@
 //!   ([`BestPathParams`])
 //! - [`unwrap_prelude`] — PRELUDE, best-pair-first region merging ([`PreludeParams`]);
 //!   the literature's reference unwrapper, kept as a baseline rather than a default
+//! - [`unwrap_medi_region_growing`] — MEDI's `unwrapPhase` (`mexUnwrap.c`, Tian Liu):
+//!   magnitude-ordered region growing from the middle of the field of view, no mask, single
+//!   precision, bit-identical to the MEDI toolbox
 //! - [`laplacian_unwrap`] — Laplacian unwrapping, with a [`LaplacianSolver`]: `Dct` (default;
 //!   unweighted least squares, Neumann BC on the array) or `Fft { pad }` (Schofield & Zhu sin/cos
 //!   method on the zero-padded volume, which reproduces STI Suite 3.0's `MRPhaseUnwrap`)
@@ -20,6 +23,7 @@ pub mod romeo;
 pub mod bestpath;
 pub mod laplacian;
 pub mod prelude;
+pub mod medi_region_growing;
 pub mod slicewise;
 
 pub use romeo::{
@@ -29,6 +33,7 @@ pub use romeo::{
 };
 pub use bestpath::{unwrap_bestpath, BestPathParams};
 pub use prelude::{unwrap_prelude, PreludeLabelling, PreludeParams};
+pub use medi_region_growing::{unwrap_medi_region_growing, MEDI_NOISE_RATIO};
 pub use slicewise::{
     unwrap_slicewise, unwrap_slicewise_multi_echo, enforce_inter_echo_consistency,
     SliceWiseParams,
@@ -55,4 +60,9 @@ pub enum UnwrapMethod {
     /// that takes an `UnwrapMethod` (MCPC-3D-S's HIP unwrapping, the slice-wise unwrapper) runs
     /// it with the caller's settings, not silently with the defaults.
     Prelude(PreludeParams),
+    /// MEDI's region growing; see [`unwrap_medi_region_growing`]. The mask is not used (MEDI's
+    /// `unwrapPhase` takes none) and the magnitude is its quality map, so the callers that take
+    /// an `UnwrapMethod` pass theirs: MCPC-3D-S's HIP unwrapping its weight `sqrt(|HIP|)`, the
+    /// slice-wise unwrapper each slice's magnitude (required there).
+    MediRegionGrowing,
 }
