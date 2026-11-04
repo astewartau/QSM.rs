@@ -98,8 +98,12 @@ jobs:
       # packages in a header line `# pip: <requirement> ...`.
       - name: Install the generator's own packages
         run: |
-          req=$(sed -n 's/^# pip: //p' "tests/data/$NAME.py" 2>/dev/null | head -1)
-          if [ -n "$req" ]; then pip install $req; fi
+          # A .jl generator has no .py to read, and sed's failure on it would stop the step (bash -e,
+          # pipefail).
+          if [ -f "tests/data/$NAME.py" ]; then
+            req=$(sed -n 's/^# pip: //p' "tests/data/$NAME.py" | head -1)
+            if [ -n "$req" ]; then pip install $req; fi
+          fi
 
       - name: Generate
         env:
