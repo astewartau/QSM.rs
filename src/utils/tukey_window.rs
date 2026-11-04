@@ -52,12 +52,18 @@
 //!
 //! # Vendor defaults
 //!
-//! The script's recommendation is 0.4 for Siemens and GE and 0 (no windowing) for Philips. It is
-//! published as the rules `chi-sepnet.tukey-siemens-ge` and `chi-sepnet.tukey-philips`
-//! ([`crate::pipeline::rules`], on [`QsmPipelineConfig::tukey_window`](crate::pipeline::QsmPipelineConfig::tukey_window)
-//! and the scan's [`Manufacturer`](crate::pipeline::rules::Manufacturer)), for χ-sepnet's toolbox
-//! route only. The script applies the same windowing ahead of its χ-separation-MEDI and -iLSQR
-//! calls too; no rule says so for them yet. Hosts apply it themselves, to every echo's magnitude
+//! The script's recommendation is 0.4 for Siemens and GE and 0 (no windowing) for Philips. The
+//! script applies the window before all three of its χ-separation methods (χ-sepnet, χ-sep-MEDI
+//! and χ-sep-iLSQR), so it is published as the rules `chi-sep.tukey-siemens-ge` and
+//! `chi-sep.tukey-philips` (with χ-sep-MEDI or χ-sep-iLSQR) and `chi-sepnet.tukey-siemens-ge` and
+//! `chi-sepnet.tukey-philips` (with χ-sepnet's toolbox route; its native route is not the
+//! toolbox's pipeline) ([`crate::pipeline::rules`], on
+//! [`QsmPipelineConfig::tukey_window`](crate::pipeline::QsmPipelineConfig::tukey_window) and the
+//! scan's [`Manufacturer`](crate::pipeline::rules::Manufacturer)). They are
+//! [`Kind::Reference`](crate::pipeline::rules::Kind::Reference) rules, the authors' setting: the
+//! comment says "Recommendation" but gives no reason why these values are better, so a host
+//! shows them and does not preselect them (decided 2026-11-04; QSM.rs#424 first had them as
+//! recommendations for χ-sepnet only). Hosts apply it themselves, to every echo's magnitude
 //! and phase on the acquired grid, before anything else reads them
 //! ([`tukey_window_mag_phase`]). The default is no windowing (factor 0).
 

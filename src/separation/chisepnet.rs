@@ -168,7 +168,8 @@
 //!   mask, R2* fit and phase see windowed data. That happens upstream of the field and R2* maps
 //!   this function takes, so it is the caller's: [`crate::utils::tukey_window`] ports it, and the
 //!   rules `chi-sepnet.tukey-siemens-ge` and `chi-sepnet.tukey-philips` suggest the authors' value
-//!   by manufacturer on this route.
+//!   by manufacturer on this route, as the authors' setting (`Kind::Reference`: shown, never
+//!   preselected).
 //!
 //! **Agreement with the toolbox.** On the probe volumes (64×60×48 at 0.8×0.9×1.1 mm with B0 along
 //! (0.1, 0.2, 0.97)/|·| and R2*, and at 1.1×0.7×0.9 mm with B0 along (−0.15, 0.05, 0.95)/|·| and R2′;
