@@ -29,31 +29,49 @@
 //!   statement about background removal. This keeps two rules from disagreeing about one setting
 //!   except where two chosen methods genuinely want different things, and then the host sees both
 //!   findings with their triggers.
+//! - **Two kinds of rule** ([`Rule::kind`], a [`Kind`]; decided 2026-11-04). A host must be able
+//!   to tell "this is what the method's authors did" from "this is better, for this reason",
+//!   because only the second is advice:
+//!   - [`Kind::Reference`], **the original authors' setting**: their code, paper or README does
+//!     or instructs it, and nobody has shown that it is needed or better. Following it reproduces
+//!     their pipeline; departing from it is a legitimate choice. E.g. QSMART's `bet2 -f 0.2` in
+//!     `brainmask.m`, MEDI's region-growing unwrapper after its complex fit, a network trained on
+//!     V-SHARP fields, or a toolbox default such as `Chisep_script.m`'s Tukey window, even where
+//!     the code's comment calls it a "Recommendation".
+//!   - [`Kind::Reasoned`], **a reasoned recommendation**: there is a stated reason why the
+//!     setting is needed or better (the method cannot run, a combination is known to fail, the
+//!     authors explain why, or QSM.rs measured it), and the reason is in [`Rule::reason`]. E.g.
+//!     HEIDI's LSQR seed (the cone fill keeps everything outside the cone), PDF's `n_cg` (measured).
+//!
+//!   The kind is fixed by the [`Strength`]: [`Strength::Reference`] is the reference kind, every
+//!   other strength is reasoned. It is one field rather than two so that the two cannot
+//!   disagree. The JSON form carries both (`"kind"` and `"strength"`).
 //! - **Strength**, and the basis it rests on ([`Rule::basis`], a [`Basis`]):
 //!   - [`Strength::Required`]: the method cannot run correctly otherwise (e.g. it does not fit
 //!     the heap). Usually measured.
-//!   - [`Strength::Recommended`]: the authors explicitly recommend it (their paper, README or a
-//!     comment in their code says so; [`Basis::Stated`]), or QSM.rs measured a benefit and
-//!     recorded it in the method's docs ([`Basis::Measured`]).
+//!   - [`Strength::Recommended`]: the authors say why it is needed or better (their paper, README
+//!     or a comment in their code gives the reason; [`Basis::Stated`]), or QSM.rs measured a
+//!     benefit and recorded it in the method's docs ([`Basis::Measured`]).
 //!   - [`Strength::Discouraged`]: a combination known to fail, stated by the authors or measured
 //!     (or a setting QSM.rs ignores in that combination, [`Basis::Implementation`]).
-//!   - [`Strength::Reference`]: what the reference pipeline used, where the authors never said
-//!     it is needed or better: their code or paper simply does it
-//!     ([`Basis::ReferenceChoice`]), e.g. QSMART's `bet2 -f 0.2` in `brainmask.m`, or a network
-//!     trained on V-SHARP fields.
+//!   - [`Strength::Reference`]: the original authors' setting ([`Kind::Reference`]): their code
+//!     or paper simply does it ([`Basis::ReferenceChoice`]), or their README or a code comment
+//!     instructs it without saying why ([`Basis::Stated`]).
 //!
 //!   Precedence is `Required > Recommended > Discouraged > Reference` (`Strength: Ord`). A
-//!   statement or measurement outranks a bare reference choice; a recommendation outranks a
-//!   discouragement because a recommendation names the value to use, while a discouragement
-//!   only names one to avoid. This module reports every finding and leaves resolving them to
-//!   the host.
-//! - **Intended front-end handling** (QSMxT/QSMxT#419, astewartau/qsmbly#194):
+//!   reason outranks a bare reference choice; a recommendation outranks a discouragement because
+//!   a recommendation names the value to use, while a discouragement only names one to avoid.
+//!   This module reports every finding and leaves resolving them to the host.
+//! - **Intended front-end handling** (QSMxT/QSMxT#419, astewartau/qsmbly#194; 2026-11-04):
 //!   - `Required`: keeps the host's "forces" behaviour; the run does not proceed as configured.
-//!   - `Recommended` and `Discouraged`: a modal when a change creates the finding (apply the
-//!     default, choose another allowed value, or ignore), a badge on the setting afterwards.
-//!   - `Reference`: **never a modal**, only an info marker on the setting. Still recorded in
-//!     the run record, and listed in the methods' Note section in a softer form ("differs from
-//!     the reference pipeline"), separately from departures from recommendations.
+//!   - `Recommended` and `Discouraged` (reasoned): offered as a change, labelled as a
+//!     recommendation with its reason, with the recommended value **preselected**; a host's
+//!     "accept recommendations" applies them. A badge on the setting afterwards.
+//!   - `Reference`: shown (e.g. when its method is chosen), labelled as the original authors'
+//!     setting, but **never preselected** and never applied by "accept recommendations"; a host
+//!     applies it only when the user picks it or asks for the authors' settings explicitly.
+//!     Recorded in the run record, and listed in the methods' Note section in a softer form
+//!     ("differs from the reference pipeline"), separately from departures from recommendations.
 //! - **Rules that restate a default.** Since #293 most methods' own defaults are their reference
 //!   values, so many `Reference` rules (STAR's padding and TE, RESHARP's radius and iterations,
 //!   iLSQR's iterations and padding, QSMART's iLSQR settings, the reference echo times) hold on
@@ -102,23 +120,50 @@ use crate::segment::synthseg::{synthseg_network_grid, SynthSegInference, SynthSe
 #[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum Strength {
-    /// What the method's reference pipeline used, where the authors never said it is needed or
-    /// better (their code or paper simply does it). Informational.
+    /// The original authors' setting: what the method's reference pipeline does or instructs,
+    /// where nobody has said why it is needed or better ([`Kind::Reference`]). Never preselected.
     Reference,
-    /// A combination known to fail (measured, or stated by the authors).
+    /// A combination known to fail (measured, or stated by the authors with the reason).
     Discouraged,
-    /// The authors explicitly recommend it (paper, README or code comment), or QSM.rs measured a
-    /// benefit and recorded it in the method's docs.
+    /// Better for a stated reason: the authors say why (paper, README or code comment), or
+    /// QSM.rs measured a benefit and recorded it in the method's docs.
     Recommended,
     /// The method cannot run correctly otherwise.
     Required,
+}
+
+impl Strength {
+    /// The kind of suggestion a rule of this strength is: [`Kind::Reference`] for
+    /// [`Strength::Reference`], [`Kind::Reasoned`] for every other.
+    pub const fn kind(self) -> Kind {
+        match self {
+            Strength::Reference => Kind::Reference,
+            Strength::Discouraged | Strength::Recommended | Strength::Required => Kind::Reasoned,
+        }
+    }
+}
+
+/// Whether a rule is the original authors' setting or a reasoned recommendation (see the module
+/// docs, *Two kinds of rule*). Fixed by the rule's [`Strength`] ([`Strength::kind`]).
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum Kind {
+    /// The original authors' setting: their code, paper or README does or instructs it, without
+    /// a reason why it is needed or better. A host shows it, labelled as the authors' setting,
+    /// and never preselects or bulk-applies it.
+    Reference,
+    /// Needed or better for the reason in [`Rule::reason`]: a hard requirement, a known failure,
+    /// the authors' stated reason, or a QSM.rs measurement. A host preselects it.
+    Reasoned,
 }
 
 /// What a rule rests on.
 #[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum Basis {
-    /// The authors say so: their paper, README or a comment in their code.
+    /// The authors say so: their paper, README or a comment in their code. With
+    /// [`Strength::Reference`], they instruct it without saying why; otherwise they give the
+    /// reason.
     Stated,
     /// QSM.rs measured it (memory, accuracy), and the measurement is in the method's docs.
     Measured,
@@ -292,7 +337,9 @@ pub enum Unit {
 }
 
 /// A rule: when [`Self::when`] holds, [`Self::setting`] should pass [`Self::expect`].
-#[derive(Serialize, Clone, Copy, Debug, PartialEq)]
+///
+/// Serialised with every field and its [`Kind`] (`"kind"`, from the strength).
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Rule {
     /// Stable identifier, `<method>.<what>` in kebab case.
     pub id: &'static str,
@@ -324,9 +371,33 @@ impl Rule {
         &self.when[0]
     }
 
+    /// The original authors' setting, or a reasoned recommendation ([`Strength::kind`]).
+    pub fn kind(&self) -> Kind {
+        self.strength.kind()
+    }
+
     /// Whether the rule can only fire once the scan is known.
     pub fn needs_scan(&self) -> bool {
         self.when.iter().any(|c| matches!(c, Condition::Fact { fact, .. } if fact.needs_scan()))
+    }
+}
+
+impl Serialize for Rule {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut m = s.serialize_struct("Rule", 11)?;
+        m.serialize_field("id", self.id)?;
+        m.serialize_field("when", self.when)?;
+        m.serialize_field("setting", self.setting)?;
+        m.serialize_field("expect", &self.expect)?;
+        m.serialize_field("default", &self.default)?;
+        m.serialize_field("unit", &self.unit)?;
+        m.serialize_field("kind", &self.kind())?;
+        m.serialize_field("strength", &self.strength)?;
+        m.serialize_field("basis", &self.basis)?;
+        m.serialize_field("reason", self.reason)?;
+        m.serialize_field("source", self.source)?;
+        m.end()
     }
 }
 
@@ -824,7 +895,8 @@ const fn one_of(
     }
 }
 
-/// What the authors explicitly recommend.
+/// A reasoned recommendation the authors make: they say why it is needed or better, and
+/// `reason` says it.
 const fn recommend(
     id: &'static str,
     when: &'static [Condition],
@@ -848,7 +920,8 @@ const fn measured_better(
     one_of(id, when, setting, values, Strength::Recommended, Basis::Measured, reason, source)
 }
 
-/// What the reference pipeline used, without the authors saying it is needed or better.
+/// The original authors' setting: what their code or paper does, without saying it is needed or
+/// better.
 const fn reference(
     id: &'static str,
     when: &'static [Condition],
@@ -858,6 +931,19 @@ const fn reference(
     source: &'static str,
 ) -> Rule {
     one_of(id, when, setting, values, Strength::Reference, Basis::ReferenceChoice, reason, source)
+}
+
+/// The original authors' setting as their README or a code comment instructs it ("do X", "we
+/// recommend X"), without saying why it is needed or better: still [`Kind::Reference`].
+const fn reference_stated(
+    id: &'static str,
+    when: &'static [Condition],
+    setting: &'static str,
+    values: &'static [Value],
+    reason: &'static str,
+    source: &'static str,
+) -> Rule {
+    one_of(id, when, setting, values, Strength::Reference, Basis::Stated, reason, source)
 }
 
 /// A discouraged choice: `setting` should be none of `avoid`; `default` replaces it.
@@ -902,6 +988,13 @@ const CHI_SEPNET_TOOLBOX_ROUTE: Condition = method("separation.chi_sepnet.route"
 pub const CHISEP_TUKEY_SIEMENS_GE: f64 = 0.4;
 const TUKEY_SOURCE: &str = "χ-separation toolbox v1.1.3 Chisep_script.m:69-73 \
     (\"tukey_fac = 0.4; % Recommendation: Siemens, GE: 0.4, Philips: 0\"); QSM.rs utils::tukey_window docs";
+const TUKEY_SIEMENS_GE_REASON: &str = "The χ-separation toolbox Tukey-windows the complex echoes in \
+    k-space before everything else, with a taper ratio of 0.4 for Siemens and GE data";
+const TUKEY_PHILIPS_REASON: &str = "The χ-separation toolbox uses no Tukey windowing (a taper ratio of 0) \
+    for Philips data";
+/// The χ-separation toolbox's iterative methods (χ-sepnet has two routes; only its toolbox route
+/// is the toolbox's pipeline).
+const CHI_SEP_TOOLBOX_ITERATIVE: &[Value] = &[Choice("chi-sep-ilsqr"), Choice("chi-sep-medi")];
 /// QSMnetME: the χ-separation toolbox's QSM network, trained on that toolbox's pipeline.
 const QSMNETME: &[Value] = &[Choice("qsmnetme")];
 const STI: &[Value] = &[Choice("star"), Choice("ilsqr")];
@@ -970,7 +1063,7 @@ pub static RULES: &[Rule] = &[
     reference("amp-pe.mask-bet", &[inv(&[Choice("amp-pe")])], "masking.generator", BET,
         "AMP-PE's pipeline masks with BET (0.5) on the RSS magnitude, then erodes 2 mm",
         "QSM_AMP_PE qsm_multi_echo_combined.m L71-81"),
-    recommend("qsmnet.mask-bet", &[inv(&[Choice("qsmnet"), Choice("qsmnet-plus")])], "masking.generator", BET,
+    reference_stated("qsmnet.mask-bet", &[inv(&[Choice("qsmnet"), Choice("qsmnet-plus")])], "masking.generator", BET,
         "QSMnet's README instructs BET (FSL) brain extraction before its input is made",
         "SNU-LIST/QSMnet README.md:64-68 (Process flow)"),
     reference("qsmgan.mask-bet", &[inv(&[Choice("qsmgan")])], "masking.generator", BET,
@@ -1071,7 +1164,7 @@ pub static RULES: &[Rule] = &[
         "FANSI's authors advise against Laplacian unwrapping for multi-echo data: it removes \
          harmonic components of the phase",
         "FANSI-toolbox script_DICOM_Philips.m L196-197 (93044a3)"),
-    recommend("qsmnet.unwrap-laplacian", &[inv(&[Choice("qsmnet"), Choice("qsmnet-plus")])],
+    reference_stated("qsmnet.unwrap-laplacian", &[inv(&[Choice("qsmnet"), Choice("qsmnet-plus")])],
         "field_mapping.unwrapping_algorithm", LAPLACIAN,
         "QSMnet's README instructs Laplacian phase unwrapping (STI Suite)",
         "SNU-LIST/QSMnet README.md:64-68 (Process flow)"),
@@ -1165,6 +1258,15 @@ pub static RULES: &[Rule] = &[
         "field_mapping.bipolar_correction", &[Bool(true)], Bool(false), Basis::Implementation,
         "Bipolar correction is not applied on the Laplacian path",
         "QSM.rs pipeline::field_mapping docs"),
+    // MEDI's README.m unwraps Fit_ppm_complex's field with unwrapPhase. ROMEO stays the default
+    // unwrapper (QSMxT's too); this is only the authors' pairing, offered when the complex fit is
+    // chosen and never preselected (2026-11-04).
+    reference("complex-fit.unwrap-region-growing", &[method("field_mapping.b0_estimation", COMPLEX_FIT)],
+        "field_mapping.unwrapping_algorithm", &[Choice("medi-region-growing")],
+        "MEDI's pipeline unwraps Fit_ppm_complex's field with its region-growing unwrapPhase \
+         (mexUnwrap.c), on the root-sum-of-squares magnitude",
+        "MEDI toolbox 2024.11.26 README.m:80-95; functions/unwrapPhase.m, mexUnwrap.c (QSM.rs \
+         unwrap::medi_region_growing docs)"),
     reference("medi.field-complex-fit", &[inv(&[Choice("medi")])],
         "field_mapping.b0_estimation", COMPLEX_FIT,
         "MEDI's field map and its noise weight N_std come from Fit_ppm_complex",
@@ -1234,7 +1336,7 @@ pub static RULES: &[Rule] = &[
     reference("xqsm.bg-resharp", &[inv(&[Choice("xqsm")])], "bg_removal.algorithm", &[Choice("resharp")],
         "xQSM's in-vivo pipeline removes the background with RESHARP",
         "Gao et al. 2021 NMR Biomed 34:e4461 (xQSM), in-vivo experiments"),
-    recommend("qsmnet.bg-vsharp", &[inv(&[Choice("qsmnet"), Choice("qsmnet-plus")])], "bg_removal.algorithm",
+    reference_stated("qsmnet.bg-vsharp", &[inv(&[Choice("qsmnet"), Choice("qsmnet-plus")])], "bg_removal.algorithm",
         VSHARP, "QSMnet's README instructs 3D V-SHARP (STI Suite) background removal",
         "SNU-LIST/QSMnet README.md:64-68 (Process flow), :75"),
     reference("qsmgan.bg-vsharp", &[inv(&[Choice("qsmgan")])], "bg_removal.algorithm", VSHARP,
@@ -1312,7 +1414,7 @@ pub static RULES: &[Rule] = &[
         unit: Unit::None,
         strength: Strength::Reference,
         basis: Basis::ReferenceChoice,
-        reason: "QSM_iLSQR runs 100 iterations when called without niter, as UK Biobank's pipeline and STI Suite's STI_Templates.m call it",
+        reason: "QSM_iLSQR runs 100 iterations when called without niter, as STI Suite's STI_Templates.m calls it",
         source: "STI Suite 3.0 QSM_iLSQR default, probed (bitwise equal to niter 100); STI_Templates.m l. 115; UK Biobank pipeline (QSM.rs IlsqrParams::max_iter)",
     },
     Rule {
@@ -1599,18 +1701,21 @@ pub static RULES: &[Rule] = &[
         "separation.algorithm", &[Choice("chi-sepnet")], Choice("chi-sep-ilsqr"), Basis::Stated,
         "χ-sepnet's authors state the networks process resolutions coarser than 0.6 mm",
         "SNU-LIST/chi-separation README; Kim et al. 2024 (arXiv:2410.12239) §4"),
-    recommend("chi-sepnet.tukey-siemens-ge",
+    // The toolbox's Tukey window, before all three of its χ-separation methods (Chisep_script.m
+    // l. 69-73 run ahead of the χ-sepnet, χ-sep-MEDI and χ-sep-iLSQR calls). The script's comment
+    // calls the vendor values a "Recommendation" but gives no reason: the authors' setting.
+    reference_stated("chi-sep.tukey-siemens-ge",
+        &[sep(CHI_SEP_TOOLBOX_ITERATIVE), manufacturer(&[Choice("siemens"), Choice("ge")])],
+        "tukey_window", &[Number(CHISEP_TUKEY_SIEMENS_GE)], TUKEY_SIEMENS_GE_REASON, TUKEY_SOURCE),
+    reference_stated("chi-sep.tukey-philips",
+        &[sep(CHI_SEP_TOOLBOX_ITERATIVE), manufacturer(&[Choice("philips")])],
+        "tukey_window", &[Number(0.0)], TUKEY_PHILIPS_REASON, TUKEY_SOURCE),
+    reference_stated("chi-sepnet.tukey-siemens-ge",
         &[sep(&[Choice("chi-sepnet")]), CHI_SEPNET_TOOLBOX_ROUTE, manufacturer(&[Choice("siemens"), Choice("ge")])],
-        "tukey_window", &[Number(CHISEP_TUKEY_SIEMENS_GE)],
-        "The χ-separation toolbox Tukey-windows the complex echoes in k-space before everything \
-         else, and recommends a taper ratio of 0.4 for Siemens and GE data",
-        TUKEY_SOURCE),
-    recommend("chi-sepnet.tukey-philips",
+        "tukey_window", &[Number(CHISEP_TUKEY_SIEMENS_GE)], TUKEY_SIEMENS_GE_REASON, TUKEY_SOURCE),
+    reference_stated("chi-sepnet.tukey-philips",
         &[sep(&[Choice("chi-sepnet")]), CHI_SEPNET_TOOLBOX_ROUTE, manufacturer(&[Choice("philips")])],
-        "tukey_window", &[Number(0.0)],
-        "The χ-separation toolbox recommends no Tukey windowing (a taper ratio of 0) for Philips \
-         data",
-        TUKEY_SOURCE),
+        "tukey_window", &[Number(0.0)], TUKEY_PHILIPS_REASON, TUKEY_SOURCE),
 ];
 
 #[cfg(test)]
@@ -1882,6 +1987,15 @@ mod tests {
                 c.facts.voxel_size = Some((0.5, 0.5, 0.5));
             })),
             ("chi-sepnet.tukey-siemens-ge", Case::new(separation(S::ChiSepNet))),
+            ("chi-sep.tukey-siemens-ge", Case::new(separation(S::ChiSepMedi))),
+            ("chi-sep.tukey-philips", Case::new(|c| {
+                separation(S::ChiSepIlsqr)(c);
+                c.facts.manufacturer = Some(Manufacturer::Philips);
+                c.cfg.tukey_window = 0.4;
+            })),
+            ("complex-fit.unwrap-region-growing", Case::new(|c| {
+                c.cfg.field_mapping.b0_estimation = B0EstimationMethod::ComplexFit(Default::default());
+            })),
             ("chi-sepnet.tukey-philips", Case::new(|c| {
                 separation(S::ChiSepNet)(c);
                 c.facts.manufacturer = Some(Manufacturer::Philips);
@@ -1948,6 +2062,26 @@ mod tests {
         }
     }
 
+    /// Each rule's kind follows its strength: only `Reference` rules are the authors' setting,
+    /// and the JSON form says which.
+    #[test]
+    fn kinds_follow_strengths() {
+        for r in RULES {
+            assert_eq!(r.kind() == Kind::Reference, r.strength == Strength::Reference, "{}", r.id);
+        }
+        let json = serde_json::to_value(RULES).unwrap();
+        for (r, j) in RULES.iter().zip(json.as_array().unwrap()) {
+            assert_eq!(j["kind"], serde_json::to_value(r.kind()).unwrap(), "{}", r.id);
+        }
+        let kind = |id: &str| RULES.iter().find(|r| r.id == id).unwrap().kind();
+        // Ashley's examples (2026-11-04): the authors' pairing vs better for a stated reason.
+        assert_eq!(kind("complex-fit.unwrap-region-growing"), Kind::Reference);
+        assert_eq!(kind("chi-sepnet.tukey-siemens-ge"), Kind::Reference);
+        assert_eq!(kind("qsmnet.bg-vsharp"), Kind::Reference);
+        assert_eq!(kind("heidi.seed-lsqr"), Kind::Reasoned);
+        assert_eq!(kind("pdf.cg-iterations"), Kind::Reasoned);
+    }
+
     /// Precedence, and the basis matching each strength.
     #[test]
     fn strengths_order_and_rest_on_their_basis() {
@@ -1955,7 +2089,7 @@ mod tests {
         assert!(Required > Recommended && Recommended > Discouraged && Discouraged > Reference);
         for r in RULES {
             match r.strength {
-                Reference => assert_eq!(r.basis, Basis::ReferenceChoice, "{}", r.id),
+                Reference => assert!(matches!(r.basis, Basis::ReferenceChoice | Basis::Stated), "{}", r.id),
                 Recommended => assert!(matches!(r.basis, Basis::Stated | Basis::Measured), "{}", r.id),
                 Required | Discouraged => assert_ne!(r.basis, Basis::ReferenceChoice, "{}", r.id),
             }
@@ -2016,6 +2150,7 @@ mod tests {
             c.cfg.bg_removal.algorithm = BgRemovalAlgorithm::Pdf;
             c.cfg.masking.sections[0].generator = MaskOp::Bet(Default::default());
             c.cfg.field_mapping.b0_estimation = B0EstimationMethod::ComplexFit(Default::default());
+            c.cfg.field_mapping.unwrapping_algorithm = UnwrappingAlgorithm::MediRegionGrowing;
             c.cfg.bg_removal.pdf.n_cg = 300;
         });
         assert!(c.ids().is_empty(), "{:?}", c.ids());
@@ -2044,9 +2179,10 @@ mod tests {
         assert!(!total_field.ids().contains(&id), "{:?}", total_field.ids());
     }
 
-    /// χ-sepnet's toolbox route suggests the toolbox's Tukey window by manufacturer: 0.4 for
-    /// Siemens and GE, 0 for Philips; nothing on the native route, for other or unknown
-    /// manufacturers, or once followed.
+    /// χ-sepnet's toolbox route, χ-sep-MEDI and χ-sep-iLSQR suggest the toolbox's Tukey window by
+    /// manufacturer (the authors' setting, never preselected): 0.4 for Siemens and GE, 0 for
+    /// Philips; nothing on χ-sepnet's native route, with other separation methods, for other or
+    /// unknown manufacturers, or once followed.
     #[test]
     fn chi_sepnet_suggests_the_vendor_tukey_window() {
         use crate::separation::ChiSepNetRoute;
@@ -2068,14 +2204,47 @@ mod tests {
         assert!(ids(None, Toolbox, 0.0).is_empty());
         assert!(ids(Some(Siemens), Native, 0.0).is_empty());
         let r = RULES.iter().find(|r| r.id == sg).unwrap();
-        assert_eq!((r.strength, r.basis, r.default), (Strength::Recommended, Basis::Stated, Number(0.4)));
+        assert_eq!((r.strength, r.basis, r.default), (Strength::Reference, Basis::Stated, Number(0.4)));
         assert!(r.needs_scan());
-        // Not with other separation methods.
-        let other = Case::new(|c| {
-            separation(SeparationAlgorithm::ChiSepIlsqr)(c);
-            c.facts.manufacturer = Some(Siemens);
-        });
-        assert!(!other.ids().iter().any(|id| id.starts_with("chi-sepnet.tukey")));
+        // χ-sep-MEDI and χ-sep-iLSQR: the same values, under their own rule ids.
+        let tukey = |a: SeparationAlgorithm, m: Manufacturer, t: f64| Case::new(|c| {
+            separation(a)(c);
+            c.facts.manufacturer = Some(m);
+            c.cfg.tukey_window = t;
+        }).ids().into_iter().filter(|id| id.contains(".tukey")).collect::<Vec<_>>();
+        for a in [SeparationAlgorithm::ChiSepMedi, SeparationAlgorithm::ChiSepIlsqr] {
+            assert_eq!(tukey(a, Siemens, 0.0), ["chi-sep.tukey-siemens-ge"], "{a:?}");
+            assert_eq!(tukey(a, Ge, 0.0), ["chi-sep.tukey-siemens-ge"], "{a:?}");
+            assert!(tukey(a, Ge, 0.4).is_empty(), "{a:?}");
+            assert_eq!(tukey(a, Philips, 0.4), ["chi-sep.tukey-philips"], "{a:?}");
+            assert!(tukey(a, Philips, 0.0).is_empty() && tukey(a, Other, 0.0).is_empty(), "{a:?}");
+        }
+        // Not with the other separation methods.
+        for a in [SeparationAlgorithm::Decompose, SeparationAlgorithm::R2starQsm, SeparationAlgorithm::SusepNet] {
+            assert!(tukey(a, Siemens, 0.0).is_empty(), "{a:?}");
+        }
+        for id in ["chi-sep.tukey-siemens-ge", "chi-sep.tukey-philips", "chi-sepnet.tukey-philips"] {
+            assert_eq!(RULES.iter().find(|r| r.id == id).unwrap().kind(), Kind::Reference, "{id}");
+        }
+    }
+
+    /// The complex fit (MEDI's Fit_ppm_complex) suggests MEDI's region-growing unwrapper as the
+    /// authors' setting: a reference rule, silent once followed or without the complex fit, and
+    /// ROMEO stays the default unwrapper.
+    #[test]
+    fn complex_fit_suggests_medi_region_growing_as_the_authors_setting() {
+        let id = "complex-fit.unwrap-region-growing";
+        let r = RULES.iter().find(|r| r.id == id).unwrap();
+        assert_eq!((r.kind(), r.basis, r.default), (Kind::Reference, Basis::ReferenceChoice, Choice("medi-region-growing")));
+        let with = |b0: B0EstimationMethod, u: UnwrappingAlgorithm| Case::new(|c| {
+            c.cfg.field_mapping.b0_estimation = b0;
+            c.cfg.field_mapping.unwrapping_algorithm = u;
+        }).ids().contains(&id);
+        let fit = || B0EstimationMethod::ComplexFit(Default::default());
+        assert!(with(fit(), UnwrappingAlgorithm::Romeo) && with(fit(), UnwrappingAlgorithm::Laplacian));
+        assert!(!with(fit(), UnwrappingAlgorithm::MediRegionGrowing));
+        assert!(!with(B0EstimationMethod::default(), UnwrappingAlgorithm::Romeo));
+        assert_eq!(FieldMappingConfig::default().unwrapping_algorithm, UnwrappingAlgorithm::Romeo);
     }
 
     #[test]
@@ -2096,6 +2265,7 @@ mod tests {
     fn serialises_to_json() {
         let json = serde_json::to_value(RULES).unwrap();
         let star = json.as_array().unwrap().iter().find(|r| r["id"] == "star.padding").unwrap();
+        assert_eq!(star["kind"], "reference");
         assert_eq!(star["strength"], "reference");
         assert_eq!(star["basis"], "reference_choice");
         assert_eq!(star["setting"], "inversion.star.pad");

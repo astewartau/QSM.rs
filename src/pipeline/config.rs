@@ -256,9 +256,11 @@ pub enum B0EstimationMethod {
     RobustFit(RobustFitParams),
     /// MEDI's field map: the complex fit of `Fit_ppm_complex.m`
     /// ([`fit_ppm_complex`](crate::utils::fit_ppm_complex)) to the wrapped echoes, then spatial
-    /// unwrapping of the fitted phase per echo spacing with `unwrapping_algorithm` (MEDI uses its
-    /// region-growing `unwrapPhase`, which is not ported; ROMEO is given MEDI's `iMag`, the
-    /// root-sum-of-squares of the echo magnitudes), then division by the echo spacing.
+    /// unwrapping of the fitted phase per echo spacing with `unwrapping_algorithm`, then division
+    /// by the echo spacing. MEDI uses its region-growing `unwrapPhase`
+    /// ([`UnwrappingAlgorithm::MediRegionGrowing`]); the rule `complex-fit.unwrap-region-growing`
+    /// offers it as the authors' setting, never preselected, and ROMEO (given MEDI's `iMag`, the
+    /// root-sum-of-squares of the echo magnitudes) stays the default.
     ///
     /// This replaces the per-echo path rather than combining unwrapped echoes: the fit has its own
     /// phase offset (`p0`), so `phase_offset_removal` does not apply and is not run;
@@ -1107,8 +1109,9 @@ pub struct QsmPipelineConfig {
     /// ([`crate::utils::tukey_window`]), which the host applies to every echo's magnitude and
     /// phase on the acquired grid before anything else reads them
     /// ([`tukey_window_mag_phase`](crate::utils::tukey_window::tukey_window_mag_phase)). The
-    /// toolbox recommends 0.4 for Siemens and GE and 0 for Philips (rules
-    /// `chi-sepnet.tukey-siemens-ge` and `chi-sepnet.tukey-philips`). Default 0: no windowing.
+    /// toolbox uses 0.4 for Siemens and GE and 0 for Philips, before all three of its χ-separation
+    /// methods (the authors' setting: rules `chi-sep.tukey-*` and `chi-sepnet.tukey-*`). Default
+    /// 0: no windowing.
     pub tukey_window: f64,
 }
 
