@@ -457,7 +457,9 @@ fn bits_hash(v: &[f64]) -> u64 {
 
 #[test]
 fn complex_resampling_is_the_same_on_every_target() {
-    use qsm_core::geometry::{resample_complex_onto, resample_complex_to_axial, AxialResampleParams};
+    use qsm_core::geometry::{
+        resample_complex_onto, resample_complex_to_axial, AxialResampleParams, QSMXT8_NOISE_FILL_FRACTION,
+    };
     let dims = (20, 18, 16);
     let n = dims.0 * dims.1 * dims.2;
     // tilted 20 degrees about x, as an oblique acquisition is
@@ -488,16 +490,17 @@ fn complex_resampling_is_the_same_on_every_target() {
 
     // where there is no signal (outside the source, or zero magnitude) the phase is 0
     let plain = resample_complex_to_axial(
-        &magnitude, &phase, dims.0, dims.1, dims.2, &affine, &AxialResampleParams { noise_fill_fraction: None },
+        &magnitude, &phase, dims.0, dims.1, dims.2, &affine, &AxialResampleParams::default(),
     );
     for (m, p) in plain.magnitude.iter().zip(&plain.phase) {
         assert!(*m != 0.0 || p.to_bits() == 0, "phase {p} where there is no signal");
     }
 
-    // the default fills the empty corners with noise seeded from a hash of the phase, so one
+    // the opt-in fill puts noise seeded from a hash of the phase in the empty corners, so one
     // differing bit anywhere changes the whole fill
     let axial = resample_complex_to_axial(
-        &magnitude, &phase, dims.0, dims.1, dims.2, &affine, &AxialResampleParams::default(),
+        &magnitude, &phase, dims.0, dims.1, dims.2, &affine,
+        &AxialResampleParams { noise_fill_fraction: Some(QSMXT8_NOISE_FILL_FRACTION) },
     );
     assert_ne!(axial.phase, plain.phase, "the noise fill should have run");
     let (back_mag, back_phase) =

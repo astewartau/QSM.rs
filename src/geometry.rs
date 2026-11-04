@@ -819,20 +819,23 @@ pub struct ResampledComplex {
     pub affine: [f64; 16],
 }
 
+/// The zero fraction above which QSMxT 8.x filled resampled phase with noise, for a caller that
+/// opts in to that behaviour through [`AxialResampleParams::noise_fill_fraction`].
+pub const QSMXT8_NOISE_FILL_FRACTION: f64 = 0.1;
+
 /// Options for [`resample_complex_to_axial`].
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct AxialResampleParams {
     /// Replace exactly-zero phase with uniform noise on `(-π, π]` when at least this fraction of
-    /// the output is zero. Resampling an oblique volume leaves empty corners, and a large block of
-    /// identical zeros is not something a region-growing unwrapper handles gracefully. `None`
-    /// disables the fill. Default `Some(0.1)`, matching QSMxT 8.x.
+    /// the output is zero, as QSMxT 8.x did ([`QSMXT8_NOISE_FILL_FRACTION`]). Default `None`: the
+    /// empty corners of an oblique volume stay at zero.
+    ///
+    /// The fill was meant to keep a region-growing unwrapper away from a large block of identical
+    /// zeros, but the corners have zero magnitude, so ROMEO's magnitude coherence already makes
+    /// their edges invalid. With the object inside the field of view the fill changes nothing;
+    /// where the mask reaches the edge of the resampled field of view it shifts χ by a few percent
+    /// with the noise seed, which adds variance between scans of the same subject.
     pub noise_fill_fraction: Option<f64>,
-}
-
-impl Default for AxialResampleParams {
-    fn default() -> Self {
-        Self { noise_fill_fraction: Some(0.1) }
-    }
 }
 
 /// Resample a continuous volume (magnitude, unwrapped field, χ) to a cardinal-aligned grid.
@@ -1520,14 +1523,14 @@ mod tests {
         let mag = vec![50.0; n];
         let pha: Vec<f64> = (0..n).map(|i| wrap(0.4 * (i % nx) as f64)).collect();
 
-        let p = AxialResampleParams::default();
+        let p = AxialResampleParams { noise_fill_fraction: Some(QSMXT8_NOISE_FILL_FRACTION) };
         let a1 = resample_complex_to_axial(&mag, &pha, nx, ny, nz, &a, &p);
         let a2 = resample_complex_to_axial(&mag, &pha, nx, ny, nz, &a, &p);
         assert_eq!(a1.phase, a2.phase, "same input must give the same volume");
         assert!(a1.phase.iter().all(|v| v.is_finite() && v.abs() <= PI + 1e-9));
 
-        // Without the fill, the empty corners stay at exactly zero.
-        let off = resample_complex_to_axial(&mag, &pha, nx, ny, nz, &a, &AxialResampleParams { noise_fill_fraction: None });
+        // By default there is no fill, so the empty corners stay at exactly zero.
+        let off = resample_complex_to_axial(&mag, &pha, nx, ny, nz, &a, &AxialResampleParams::default());
         assert!(off.phase.contains(&0.0));
         assert!(off.phase.iter().filter(|v| **v == 0.0).count() > a1.phase.iter().filter(|v| **v == 0.0).count());
     }
