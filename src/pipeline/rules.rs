@@ -78,6 +78,13 @@
 //!   the default config and fire only when a user departs from it. They are kept: they say what
 //!   the departure is from and why, which the methods Note needs. A host that also shows
 //!   "differs from default" should show one or the other for these, not both.
+//! - **Text a user sees** (#431). Hosts show [`Rule::reason`] and [`Rule::source`] verbatim. The
+//!   reason says what the method does and why, plainly. Neither names the toolbox a reference
+//!   was recovered from (STI Suite and its functions), the pipelines it was checked against (UK
+//!   Biobank) or older QSMxT versions; a paper is a fine citation, and where the record is a
+//!   probe of closed code the source points at the QSM.rs docs holding it. The provenance stays
+//!   in a comment beside the rule and in the method's docs. The ids are not covered: `sti.*`
+//!   stays, as the ids are how hosts and saved settings name a rule.
 //! - **Data, not code.** Conditions and expectations are values ([`Condition`], [`Test`],
 //!   [`Value`]) over named settings and scan facts, not closures, so the JSON form says
 //!   everything the Rust evaluation does. The only code is [`current`] (a setting's value in a
@@ -358,10 +365,10 @@ pub struct Rule {
     /// What the rule rests on: a statement by the authors, a QSM.rs measurement, the reference's
     /// choice, or QSM.rs's implementation.
     pub basis: Basis,
-    /// One line: why.
+    /// One line: why. Hosts show it verbatim (see the module docs, *Text a user sees*).
     pub reason: &'static str,
     /// The authors' code (file, line) or paper (section), or the QSM.rs docs recording the
-    /// measurement.
+    /// measurement. Hosts show it verbatim (see the module docs, *Text a user sees*).
     pub source: &'static str,
 }
 
@@ -1164,9 +1171,10 @@ pub static RULES: &[Rule] = &[
         "FANSI's authors advise against Laplacian unwrapping for multi-echo data: it removes \
          harmonic components of the phase",
         "FANSI-toolbox script_DICOM_Philips.m L196-197 (93044a3)"),
+    // QSMnet's README names STI Suite for its Laplacian unwrapping.
     reference_stated("qsmnet.unwrap-laplacian", &[inv(&[Choice("qsmnet"), Choice("qsmnet-plus")])],
         "field_mapping.unwrapping_algorithm", LAPLACIAN,
-        "QSMnet's README instructs Laplacian phase unwrapping (STI Suite)",
+        "QSMnet's README instructs Laplacian phase unwrapping",
         "SNU-LIST/QSMnet README.md:64-68 (Process flow)"),
     reference("autoqsm.unwrap-laplacian", &[inv(&[Choice("autoqsm")])],
         "field_mapping.unwrapping_algorithm", LAPLACIAN,
@@ -1188,19 +1196,27 @@ pub static RULES: &[Rule] = &[
         "field_mapping.unwrapping_algorithm", ROMEO,
         "QSMnetME's toolbox unwraps each echo with ROMEO",
         "χ-separation toolbox Chisep_script.m:99-111; Kim et al. 2025 (χ-sepnet) §2.1.1"),
+    // STI Suite's QSM_GUI unwraps each echo with MRPhaseUnwrap (Laplacian): STI Suite 3.0 QSM_GUI,
+    // probed headless (recorded in QSM.rs laplacian.rs docs).
     reference("sti.unwrap-laplacian", &[inv(STI)], "field_mapping.unwrapping_algorithm", LAPLACIAN,
-        "STI Suite's QSM_GUI unwraps each echo with MRPhaseUnwrap (Laplacian)",
-        "STI Suite 3.0 QSM_GUI, probed headless (recorded in QSM.rs laplacian.rs docs)"),
+        "The iLSQR and STAR-QSM authors' pipeline unwraps each echo with Laplacian unwrapping",
+        "QSM.rs unwrap::laplacian docs (Reference pipeline)"),
+    // MRPhaseUnwrap is the FFT Schofield-Zhu solver with 12 voxels of padding: STI Suite 3.0
+    // MRPhaseUnwrap, probed (recorded in QSM.rs LaplacianSolver::Fft docs).
     reference("sti.laplacian-solver",
         &[inv(STI), method("field_mapping.unwrapping_algorithm", LAPLACIAN)],
         "field_mapping.laplacian_solver", &[Choice("fft-12")],
-        "MRPhaseUnwrap is the FFT Schofield-Zhu solver with 12 voxels of padding",
-        "STI Suite 3.0 MRPhaseUnwrap, probed (recorded in QSM.rs LaplacianSolver::Fft docs)"),
+        "The iLSQR and STAR-QSM authors' Laplacian unwrapping is the FFT Schofield-Zhu solver with 12 \
+         voxels of padding",
+        "Schofield & Zhu 2003 Opt. Lett. 28:1194; QSM.rs LaplacianSolver::Fft docs"),
+    // STI Suite's QSM_GUI gives MRPhaseUnwrap the raw wrapped phase, not the phase masked first:
+    // STI Suite 3.0 QSM_GUI, probed headless (recorded in QSM.rs laplacian.rs docs).
     reference("sti.unwrap-unmasked",
         &[inv(STI), method("field_mapping.unwrapping_algorithm", LAPLACIAN)],
         "field_mapping.laplacian_unmasked", &[Bool(true)],
-        "STI Suite's QSM_GUI gives MRPhaseUnwrap the raw wrapped phase, not the phase masked first",
-        "STI Suite 3.0 QSM_GUI, probed headless (recorded in QSM.rs laplacian.rs docs)"),
+        "The iLSQR and STAR-QSM authors' pipeline unwraps the raw wrapped phase, not the phase masked \
+         first",
+        "QSM.rs unwrap::laplacian docs (Reference pipeline)"),
     reference("qsmart.unwrap-laplacian", &[inv(&[Choice("qsmart")])],
         "field_mapping.unwrapping_algorithm", LAPLACIAN,
         "QSMART unwraps each echo with Laplacian unwrapping (lapunwrap.m)",
@@ -1220,14 +1236,18 @@ pub static RULES: &[Rule] = &[
         "field_mapping.b0_estimation", &[Choice("qsmart-echofit")],
         "QSMART's total field and reliability map R_0 come from echofit.m",
         "QSMART QSMART.m l. 26; echofit.m"),
+    // STI Suite's QSM_GUI sums the unwrapped echoes and divides by the summed echo times: STI Suite
+    // 3.0 QSM_GUI, probed headless (recorded in QSM.rs star.rs docs).
     reference("sti.echo-combination", &[inv(STI), MULTI_ECHO],
         "field_mapping.b0_estimation", WEIGHTED_AVG,
-        "STI Suite's QSM_GUI sums the unwrapped echoes and divides by the summed echo times",
-        "STI Suite 3.0 QSM_GUI, probed headless (recorded in QSM.rs star.rs docs)"),
+        "The iLSQR and STAR-QSM authors' pipeline sums the unwrapped echoes and divides by the summed \
+         echo times",
+        "QSM.rs inversion::star docs (Reference pipeline)"),
+    // STI Suite 3.0 QSM_GUI, probed headless (recorded in QSM.rs star.rs docs).
     reference("sti.echo-weights", &[inv(STI), MULTI_ECHO],
         "field_mapping.b0_estimation.weighting", &[Choice("tes")],
         "Σφ/ΣTE is the TE-weighted mean of φ/TE",
-        "STI Suite 3.0 QSM_GUI, probed headless (recorded in QSM.rs star.rs docs)"),
+        "QSM.rs inversion::star docs (Reference pipeline)"),
     recommend("field-mapping.phase-offsets",
         &[method("field_mapping.b0_estimation", WEIGHTED_AVG),
           method("field_mapping.unwrapping_algorithm", ROMEO), MULTI_ECHO],
@@ -1336,8 +1356,9 @@ pub static RULES: &[Rule] = &[
     reference("xqsm.bg-resharp", &[inv(&[Choice("xqsm")])], "bg_removal.algorithm", &[Choice("resharp")],
         "xQSM's in-vivo pipeline removes the background with RESHARP",
         "Gao et al. 2021 NMR Biomed 34:e4461 (xQSM), in-vivo experiments"),
+    // QSMnet's README names STI Suite for its 3D V-SHARP.
     reference_stated("qsmnet.bg-vsharp", &[inv(&[Choice("qsmnet"), Choice("qsmnet-plus")])], "bg_removal.algorithm",
-        VSHARP, "QSMnet's README instructs 3D V-SHARP (STI Suite) background removal",
+        VSHARP, "QSMnet's README instructs 3D V-SHARP background removal",
         "SNU-LIST/QSMnet README.md:64-68 (Process flow), :75"),
     reference("qsmgan.bg-vsharp", &[inv(&[Choice("qsmgan")])], "bg_removal.algorithm", VSHARP,
         "QSMGAN was trained on V-SHARP local fields",
@@ -1357,13 +1378,19 @@ pub static RULES: &[Rule] = &[
     reference("decompose.bg-vsharp", &[sep(&[Choice("decompose")])], "bg_removal.algorithm", VSHARP,
         "DECOMPOSE's pipeline removes the background with V-SHARP",
         "Chen et al. 2021 NeuroImage 242:118477 (DECOMPOSE), §3.6"),
+    // STI Suite's QSM_GUI feeds iLSQR and STAR-QSM the V-SHARP local field: STI Suite 3.0 QSM_GUI,
+    // probed headless (recorded in QSM.rs star.rs and ilsqr.rs docs).
     reference("sti.bg-vsharp", &[inv(STI)], "bg_removal.algorithm", VSHARP,
-        "STI Suite's QSM_GUI feeds iLSQR and STAR-QSM the V-SHARP local field",
-        "STI Suite 3.0 QSM_GUI, probed headless (recorded in QSM.rs star.rs and ilsqr.rs docs)"),
+        "The iLSQR and STAR-QSM authors' pipeline inverts the V-SHARP local field",
+        "QSM.rs inversion::star and inversion::ilsqr docs (Reference pipeline)"),
+    // STI Suite's V_SHARP does not deconvolve: STI Suite 3.0 V_SHARP, probed (recorded in QSM.rs
+    // vsharp.rs docs).
     reference("sti.vsharp-no-deconvolve", &[inv(STI), bg(VSHARP)], "bg_removal.vsharp.deconvolve",
         &[Bool(false)],
-        "STI Suite's V_SHARP does not deconvolve",
-        "STI Suite 3.0 V_SHARP, probed (recorded in QSM.rs vsharp.rs docs)"),
+        "The iLSQR and STAR-QSM authors' V-SHARP does not deconvolve",
+        "QSM.rs bgremove::vsharp docs (Reference pipeline)"),
+    // STI Suite's QSM_GUI runs V_SHARP with smvsize 12 mm (also V_SHARP's default): STI Suite 3.0
+    // QSM_GUI and V_SHARP, probed (recorded in QSM.rs vsharp.rs docs).
     Rule {
         id: "sti.vsharp-radius",
         when: &[inv(STI), bg(VSHARP)],
@@ -1373,13 +1400,17 @@ pub static RULES: &[Rule] = &[
         unit: Unit::Mm,
         strength: Strength::Reference,
         basis: Basis::ReferenceChoice,
-        reason: "STI Suite's QSM_GUI runs V_SHARP with smvsize 12 mm (also V_SHARP's default)",
-        source: "STI Suite 3.0 QSM_GUI and V_SHARP, probed (recorded in QSM.rs vsharp.rs docs)",
+        reason: "The iLSQR and STAR-QSM authors' pipeline runs V-SHARP with a 12 mm kernel radius (also its default)",
+        source: "QSM.rs bgremove::vsharp docs (Reference pipeline)",
     },
+    // STI Suite's V_SHARP estimates the background on a 1 mm grid: STI Suite 3.0 V_SHARP (recorded
+    // in QSM.rs vsharp.rs docs).
     reference("sti.vsharp-grid", &[inv(STI), bg(VSHARP)], "bg_removal.vsharp.grid",
         &[Choice("isotropic-1mm")],
-        "STI Suite's V_SHARP estimates the background on a 1 mm grid",
-        "STI Suite 3.0 V_SHARP (recorded in QSM.rs vsharp.rs docs)"),
+        "The iLSQR and STAR-QSM authors' V-SHARP estimates the background on a 1 mm grid",
+        "QSM.rs bgremove::vsharp docs (Reference pipeline)"),
+    // STI Suite's V_SHARP drops the voxels only its 1 mm ball fits: STI Suite 3.0 V_SHARP, probed
+    // (ukb-qsmxt docs/08 step 4; QSM.rs VsharpParams, #293).
     Rule {
         id: "sti.vsharp-min-radius",
         when: &[inv(STI), bg(VSHARP)],
@@ -1389,10 +1420,12 @@ pub static RULES: &[Rule] = &[
         unit: Unit::Mm,
         strength: Strength::Reference,
         basis: Basis::ReferenceChoice,
-        reason: "STI Suite's V_SHARP drops the voxels only its 1 mm ball fits, so its radii in \
-                 effect run down to 2 mm",
-        source: "STI Suite 3.0 V_SHARP, probed (ukb-qsmxt docs/08 step 4; QSM.rs VsharpParams, #293)",
+        reason: "The iLSQR and STAR-QSM authors' V-SHARP drops the voxels only its 1 mm ball fits, so its \
+                 radii in effect run down to 2 mm",
+        source: "QSM.rs VsharpParams docs (#293)",
     },
+    // STI Suite's V_SHARP steps its kernel radius by 1 mm: STI Suite 3.0 V_SHARP, probed (ukb-qsmxt
+    // docs/08; QSM.rs VsharpParams, #293).
     Rule {
         id: "sti.vsharp-radius-step",
         when: &[inv(STI), bg(VSHARP)],
@@ -1402,9 +1435,12 @@ pub static RULES: &[Rule] = &[
         unit: Unit::Mm,
         strength: Strength::Reference,
         basis: Basis::ReferenceChoice,
-        reason: "STI Suite's V_SHARP steps its kernel radius by 1 mm",
-        source: "STI Suite 3.0 V_SHARP, probed (ukb-qsmxt docs/08; QSM.rs VsharpParams, #293)",
+        reason: "The iLSQR and STAR-QSM authors' V-SHARP steps its kernel radius by 1 mm",
+        source: "QSM.rs VsharpParams docs (#293)",
     },
+    // QSM_iLSQR runs 100 iterations when called without niter, as STI Suite's STI_Templates.m calls
+    // it: STI Suite 3.0 QSM_iLSQR default, probed (bitwise equal to niter 100); STI_Templates.m
+    // l. 115; UK Biobank pipeline (QSM.rs IlsqrParams::max_iter).
     Rule {
         id: "sti.ilsqr-iterations",
         when: &[inv(&[Choice("ilsqr")])],
@@ -1414,9 +1450,11 @@ pub static RULES: &[Rule] = &[
         unit: Unit::None,
         strength: Strength::Reference,
         basis: Basis::ReferenceChoice,
-        reason: "QSM_iLSQR runs 100 iterations when called without niter, as STI Suite's STI_Templates.m calls it",
-        source: "STI Suite 3.0 QSM_iLSQR default, probed (bitwise equal to niter 100); STI_Templates.m l. 115; UK Biobank pipeline (QSM.rs IlsqrParams::max_iter)",
+        reason: "The iLSQR authors' code runs 100 iterations unless told otherwise",
+        source: "QSM.rs IlsqrParams::max_iter docs",
     },
+    // STI Suite's QSM_GUI calls QSM_iLSQR with padsize [12 12 12]: STI Suite 3.0 QSM_GUI, probed
+    // headless (QSM.rs IlsqrParams::pad_mm, #293).
     Rule {
         id: "sti.ilsqr-pad",
         when: &[inv(&[Choice("ilsqr")])],
@@ -1426,8 +1464,8 @@ pub static RULES: &[Rule] = &[
         unit: Unit::Mm,
         strength: Strength::Reference,
         basis: Basis::ReferenceChoice,
-        reason: "STI Suite's QSM_GUI calls QSM_iLSQR with padsize [12 12 12]",
-        source: "STI Suite 3.0 QSM_GUI, probed headless (QSM.rs IlsqrParams::pad_mm, #293)",
+        reason: "The iLSQR authors' pipeline pads by 12 mm per side",
+        source: "QSM.rs IlsqrParams::pad_mm docs (#293)",
     },
     reference("resharp.radius", &[bg(&[Choice("resharp")])], "bg_removal.resharp.radius",
         &[Number(3.0)],
@@ -1478,6 +1516,8 @@ pub static RULES: &[Rule] = &[
         "QSM.jl's ismv stops after at most 500 iterations",
         "QSM.jl src/bgremove/ismv.jl:40 (fde4b92); QSM.rs IsmvParams::qsmjl"),
     // ---------------------------------------------------------------- Dipole inversion
+    // STI Suite 3.0's QSM_GUI passes padsize [8 8 20] to QSM_star on every grid: STI Suite 3.0
+    // QSM_GUI (probed headless, recorded in QSM.rs StarParams::pad, #283).
     Rule {
         id: "star.padding",
         when: &[inv(&[Choice("star")])],
@@ -1487,13 +1527,15 @@ pub static RULES: &[Rule] = &[
         unit: Unit::Voxels,
         strength: Strength::Reference,
         basis: Basis::ReferenceChoice,
-        reason: "STI Suite 3.0's QSM_GUI passes padsize [8 8 20] to QSM_star on every grid",
-        source: "STI Suite 3.0 QSM_GUI (probed headless, recorded in QSM.rs StarParams::pad, #283)",
+        reason: "The STAR-QSM authors' pipeline pads by [8 8 20] voxels on every grid",
+        source: "QSM.rs StarParams::pad docs (#283)",
     },
+    // QSMART's two stages invert with STI Suite's iLSQR (QSM_iLSQR).
     reference("qsmart.inner-inversion", &[inv(&[Choice("qsmart")])], "inversion.qsmart.inversion",
         &[Choice("ilsqr")],
-        "QSMART's two stages invert with STI Suite's iLSQR",
+        "QSMART's two stages invert with iLSQR",
         "Yaghmaie et al. 2021 §3.4; QSMART QSMART.m l. 32-39"),
+    // QSMART calls STI Suite's QSM_iLSQR with 'niter', 50.
     Rule {
         id: "qsmart.ilsqr-iterations",
         when: &[inv(&[Choice("qsmart")])],
@@ -1503,9 +1545,11 @@ pub static RULES: &[Rule] = &[
         unit: Unit::None,
         strength: Strength::Reference,
         basis: Basis::ReferenceChoice,
-        reason: "QSMART calls QSM_iLSQR with 'niter', 50",
+        reason: "QSMART runs iLSQR with 50 iterations",
         source: "QSMART QSMART.m l. 32-33; Yaghmaie et al. 2021 §3.4",
     },
+    // QSMART calls QSM_iLSQR without 'padsize', so STI Suite's default padding applies: QSMART
+    // QSMART.m l. 32; STI Suite QSM_iLSQR default, probed (QSM.rs ilsqr.rs docs).
     Rule {
         id: "qsmart.ilsqr-pad",
         when: &[inv(&[Choice("qsmart")])],
@@ -1515,8 +1559,9 @@ pub static RULES: &[Rule] = &[
         unit: Unit::Mm,
         strength: Strength::Reference,
         basis: Basis::ReferenceChoice,
-        reason: "QSMART calls QSM_iLSQR without 'padsize', so STI Suite's default padding applies",
-        source: "QSMART QSMART.m l. 32; STI Suite QSM_iLSQR default, probed (QSM.rs ilsqr.rs docs)",
+        reason: "QSMART runs iLSQR without setting its padding, so iLSQR's own default of 6 mm per \
+                 side applies",
+        source: "QSMART QSMART.m l. 32; QSM.rs inversion::ilsqr docs (Padding)",
     },
     // ---------------------------------------------------------------- MEDI (#288)
     reference("medi.bg-pdf",
@@ -1583,9 +1628,11 @@ pub static RULES: &[Rule] = &[
         "With a magnitude weight, the echo spacing did better than the first echo on the phantom \
          (XSIM 0.676 vs 0.638); FANSI's script converts at a TE difference with a magnitude-derived weight",
         "QSM.rs WhQsmParams::te docs (#276, #418); FANSI-toolbox script_DICOM_Philips.m L364, L436"),
+    // STI Suite's QSM_GUI gives QSM_star the summed phase with TE = ΣTE: STI Suite 3.0 QSM_GUI,
+    // probed (recorded in QSM.rs StarParams::te, #276).
     reference("star.te-sum", &[inv(&[Choice("star")]), MULTI_ECHO], "inversion.star.te", &[Choice("sum")],
-        "STI Suite's QSM_GUI gives QSM_star the summed phase with TE = ΣTE",
-        "STI Suite 3.0 QSM_GUI, probed (recorded in QSM.rs StarParams::te, #276)"),
+        "The STAR-QSM authors' pipeline inverts the summed phase with TE = ΣTE",
+        "QSM.rs StarParams::te docs (#276)"),
     reference("medi.te-spacing", &[inv(&[Choice("medi")]), MULTI_ECHO], "inversion.medi.te", &[Choice("spacing")],
         "MEDI_L1 converts with delta_TE = TE(2) − TE(1)",
         "MEDI toolbox 2024.11.26 MEDI_L1.m:202; Read_DICOM.m:166-168"),
@@ -1649,13 +1696,16 @@ pub static RULES: &[Rule] = &[
     heidi_truncation("heidi.tsvd-cone", &[HEIDI_ON, inv(&[Choice("tsvd")]), HEIDI_DEFAULT_CONE],
         "inversion.tsvd.threshold"),
     // ---------------------------------------------------------------- χ-separation inputs
+    // The χ-separation toolbox feeds it STI Suite iLSQR QSM (Chisep_script.m:145,170).
     reference("chi-sep-ilsqr.qsm-ilsqr", &[sep(&[Choice("chi-sep-ilsqr")])], "inversion.algorithm",
         &[Choice("ilsqr")],
-        "The χ-separation toolbox feeds it STI Suite iLSQR QSM",
+        "The χ-separation toolbox feeds it iLSQR QSM",
         "χ-separation toolbox v1.1.3 Chisep_script.m:145,170"),
+    // The χ-separation toolbox initialises χ-separation-MEDI from STI Suite iLSQR QSM
+    // (Chisep_script.m:145,158).
     reference("chi-sep-medi.qsm-ilsqr", &[sep(&[Choice("chi-sep-medi")])], "inversion.algorithm",
         &[Choice("ilsqr")],
-        "The χ-separation toolbox initialises χ-separation-MEDI from STI Suite iLSQR QSM",
+        "The χ-separation toolbox initialises χ-separation-MEDI from iLSQR QSM",
         "χ-separation toolbox v1.1.3 Chisep_script.m:145,158"),
     reference("r2star-qsm.qsm-medi", &[sep(&[Choice("r2star-qsm")])], "inversion.algorithm",
         &[Choice("medi")],
@@ -2041,6 +2091,20 @@ mod tests {
     /// scan facts. χ-separation is not part of the default pipeline: its default method's rules
     /// fire on the default QSM settings, because the χ-separation toolbox's pipeline differs
     /// from them.
+    /// Hosts show the reason and source verbatim: no reference toolbox, pipeline or old version.
+    #[test]
+    fn visible_text_names_no_tool_provenance() {
+        let unsaid = ["STI", "QSM_GUI", "QSM_iLSQR", "QSM_star", "MRPhaseUnwrap", "V_SHARP",
+                      "Biobank", "UKB", "ukb-qsmxt"];
+        for r in RULES {
+            for text in [r.reason, r.source] {
+                for word in unsaid {
+                    assert!(!text.contains(word), "{}: {word} in {text:?}", r.id);
+                }
+            }
+        }
+    }
+
     #[test]
     fn default_config_raises_nothing() {
         for facts in [ScanFacts::default(), facts()] {
