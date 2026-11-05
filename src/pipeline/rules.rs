@@ -1391,7 +1391,7 @@ pub static RULES: &[Rule] = &[
         basis: Basis::ReferenceChoice,
         reason: "STI Suite's V_SHARP drops the voxels only its 1 mm ball fits, so its radii in \
                  effect run down to 2 mm",
-        source: "STI Suite 3.0 V_SHARP, probed (ukb-qsmxt docs/08 step 4; QSM.rs VsharpParams, #293)",
+        source: "STI Suite 3.0 V_SHARP, probed (QSM.rs VsharpParams, #293)",
     },
     Rule {
         id: "sti.vsharp-radius-step",
@@ -1403,7 +1403,7 @@ pub static RULES: &[Rule] = &[
         strength: Strength::Reference,
         basis: Basis::ReferenceChoice,
         reason: "STI Suite's V_SHARP steps its kernel radius by 1 mm",
-        source: "STI Suite 3.0 V_SHARP, probed (ukb-qsmxt docs/08; QSM.rs VsharpParams, #293)",
+        source: "STI Suite 3.0 V_SHARP, probed (QSM.rs VsharpParams, #293)",
     },
     Rule {
         id: "sti.ilsqr-iterations",
