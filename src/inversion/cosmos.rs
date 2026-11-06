@@ -64,6 +64,35 @@
 //! COSMOS is widely treated as a susceptibility ground truth; those three are what that
 //! status actually rests on, not the orientation count.
 //!
+//! # When the orientations are too close
+//!
+//! The closed form divides by `sum_t |D_t|^2`, so its noise gain at a frequency is
+//! `1 / sqrt(sum_t |D_t|^2)`. A single orientation's cone of `|D| < 0.1` ([`CONE_THRESHOLD`])
+//! is where that gain exceeds 10, and with `lambda = 0` nothing damps it. Orientations only
+//! help where they move that cone, so the question for a set is how much of it the set still
+//! leaves ill-conditioned: [`uncovered_cone`], the share of a single orientation's cone where
+//! `sum_t |D_t|^2` is still below `CONE_THRESHOLD^2`. One orientation leaves all of it. Three
+//! pointing the same way leave 57%: repeats average the noise down by `sqrt(3)`, which narrows
+//! the cone, but they cover none of it. The share falls further as the directions tilt apart.
+//!
+//! The largest angle between directions is not the measure: two orientations always leave
+//! the curves where their cones intersect, and three that tilt about one axis leave more than
+//! three spread around B0. Measured with [`uncovered_cone`]:
+//!
+//! | Directions | Uncovered |
+//! |---|---|
+//! | Three runs of one head position, re-registered (B0 within 1.1°, 2.6°, 3.3° of each other) | 55% |
+//! | Two orientations 5° / 10° / 15° / 20° apart | 64% / 35% / 22% / 16% |
+//! | Three of the twelve in-vivo orientations of Bilgic et al. (2015): median, worst | 0.4%, 28% |
+//! | Three at 30° to each other, all twelve of Bilgic et al. | 0% |
+//!
+//! The first is what three runs of a single-orientation protocol give: registration recovers
+//! the head's small movements between them, and COSMOS from those directions is a
+//! single-orientation inversion with no regularization, its cone filled with amplified noise.
+//! [`MAX_UNCOVERED_CONE`] is the share above which a set is that rather than a
+//! multi-orientation acquisition: it refuses the first two rows below about 13°, and passes
+//! designed acquisitions and most real triples.
+//!
 //! # Units and gauge
 //!
 //! Local (tissue) field in ppm in, susceptibility in ppm out, matching the rest of the crate.
@@ -92,6 +121,57 @@ use crate::solvers::cg_solve;
 use crate::utils::apply_mask_zero;
 use crate::Grid;
 use num_complex::Complex64;
+
+/// The dipole kernel magnitude below which a frequency is ill-conditioned: where one
+/// orientation's noise gain, `1 / |D|`, exceeds 10. The cone [`uncovered_cone`] measures.
+pub const CONE_THRESHOLD: f64 = 0.1;
+
+/// The most of a single orientation's cone a direction set may leave ill-conditioned and still
+/// be treated as multi-orientation (module docs, *When the orientations are too close*).
+pub const MAX_UNCOVERED_CONE: f64 = 0.25;
+
+/// The share of a single orientation's ill-conditioned cone (`|D| < CONE_THRESHOLD`) that the
+/// directions `bdirs` still leave ill-conditioned: where `sum_t |D_t|^2 < CONE_THRESHOLD^2`.
+/// 1 for one direction; 0 when the set covers the cone. Repeats of one direction only average
+/// noise: three leave 57%. Directions need
+/// not be unit length; a zero one is skipped.
+///
+/// Computed over a Fibonacci lattice of 200 000 directions on the sphere, which is the measure
+/// of k-space by direction (the kernel depends on direction only); the share is good to about
+/// 0.005.
+pub fn uncovered_cone(bdirs: &[(f64, f64, f64)]) -> f64 {
+    let dirs: Vec<(f64, f64, f64)> = bdirs
+        .iter()
+        .filter_map(|&(x, y, z)| {
+            let n = (x * x + y * y + z * z).sqrt();
+            (n > 0.0).then(|| (x / n, y / n, z / n))
+        })
+        .collect();
+    if dirs.is_empty() {
+        return 1.0;
+    }
+    const POINTS: usize = 200_000;
+    let golden = std::f64::consts::PI * (3.0 - 5.0f64.sqrt());
+    let tau2 = CONE_THRESHOLD * CONE_THRESHOLD;
+    let mut ill = 0usize;
+    for i in 0..POINTS {
+        let z = 1.0 - 2.0 * (i as f64 + 0.5) / POINTS as f64;
+        let r = (1.0 - z * z).sqrt();
+        let (y, x) = (golden * i as f64).sin_cos();
+        let k = (r * x, r * y, z);
+        let sum: f64 = dirs.iter().map(|b| {
+            let c = k.0 * b.0 + k.1 * b.1 + k.2 * b.2;
+            let d = 1.0 / 3.0 - c * c;
+            d * d
+        }).sum();
+        if sum < tau2 {
+            ill += 1;
+        }
+    }
+    // One orientation's cone, exactly: |1/3 - cos^2| < t, a band of cos on the uniform sphere.
+    let single = (1.0 / 3.0 + CONE_THRESHOLD).sqrt() - (1.0 / 3.0 - CONE_THRESHOLD).sqrt();
+    (ill as f64 / POINTS as f64 / single).min(1.0)
+}
 
 /// COSMOS parameters.
 #[cfg_attr(feature = "introspection", derive(serde::Serialize))]
@@ -318,6 +398,37 @@ pub fn cosmos_weighted<F: AsRef<[f64]>, W: AsRef<[f64]>>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One orientation, or several that agree, leave the whole cone; a spread set covers it.
+    #[test]
+    fn uncovered_cone_runs_from_one_to_none() {
+        assert!((uncovered_cone(&[(0.0, 0.0, 1.0)]) - 1.0).abs() < 0.01);
+        // Three repeats average the noise down by sqrt(3): the cone of |D| < 0.1 / sqrt(3).
+        let t = CONE_THRESHOLD / 3.0f64.sqrt();
+        let repeats = ((1.0f64 / 3.0 + t).sqrt() - (1.0f64 / 3.0 - t).sqrt())
+            / ((1.0f64 / 3.0 + CONE_THRESHOLD).sqrt() - (1.0f64 / 3.0 - CONE_THRESHOLD).sqrt());
+        let u = uncovered_cone(&[(0.0, 0.0, 1.0); 3]);
+        assert!((u - repeats).abs() < 0.01 && u > MAX_UNCOVERED_CONE, "repeats only average noise: {u}");
+        assert!((uncovered_cone(&[(0.0, 0.0, 2.0)]) - 1.0).abs() < 0.01, "length does not matter");
+        assert_eq!(uncovered_cone(&spread_bdirs()), 0.0);
+        assert_eq!(uncovered_cone(&[]), 1.0);
+    }
+
+    /// The module docs' table: three re-registered runs of one head position are refused, two
+    /// orientations tilt apart past the limit near 13 degrees, and designed sets pass.
+    #[test]
+    fn uncovered_cone_matches_the_docs() {
+        let runs = [(0.0, 0.0, 1.0), (0.003, -0.019, 1.0), (-0.042, 0.016, 0.999)];
+        let u = uncovered_cone(&runs);
+        assert!((u - 0.55).abs() < 0.02 && u > MAX_UNCOVERED_CONE, "{u}");
+        let pair = |deg: f64| uncovered_cone(&[(0.0, 0.0, 1.0), (deg.to_radians().sin(), 0.0, deg.to_radians().cos())]);
+        for (deg, want) in [(5.0, 0.64), (10.0, 0.35), (15.0, 0.22), (20.0, 0.16)] {
+            assert!((pair(deg) - want).abs() < 0.02, "{deg} degrees: {}", pair(deg));
+        }
+        assert!(pair(10.0) > MAX_UNCOVERED_CONE && pair(15.0) < MAX_UNCOVERED_CONE);
+        let thirty = [(0.0, 0.0, 1.0), (0.0, 0.5, 0.866), (0.5, 0.0, 0.866)];
+        assert!(uncovered_cone(&thirty) < 0.001);
+    }
 
     /// A spread of B0 directions wide enough to condition the inversion: straight along z,
     /// then 60 degrees off it in each of two perpendicular planes.

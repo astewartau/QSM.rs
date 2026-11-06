@@ -67,7 +67,7 @@ pub mod modl_qsm;
 #[cfg(feature = "onnx")]
 pub mod nextqsm;
 
-pub use cosmos::{cosmos, cosmos_weighted, CosmosParams};
+pub use cosmos::{cosmos, cosmos_weighted, uncovered_cone, CosmosParams, CONE_THRESHOLD, MAX_UNCOVERED_CONE};
 pub use sti::{sti, sti_forward, tensor_maps, StiParams, SusceptibilityTensor, TensorMaps, N_TENSOR};
 pub use tkd::{tkd, tsvd, TkdParams};
 pub use tikhonov::{tikhonov, TikhonovParams, Regularization};
