@@ -64,9 +64,10 @@
 //! large error in the outer three voxels of the brain: against ROMEO's field on the QSM-CI
 //! travelling heads, the high-pass SD of the difference is about 0.07 ppm there, 0.02 ppm three to
 //! eight voxels in, and 0.003 ppm deeper (QSM.rs#439). Background removal that erodes the edge
-//! (SHARP, V-SHARP, RESHARP) drops most of it; PDF and LBV keep it and iSMV holds it fixed, so
-//! with them it spreads into the brain. The `laplacian.non-eroding-bfr` rule (Discouraged,
-//! measured) suggests ROMEO for those three; nothing changes on its own.
+//! (SHARP, V-SHARP, RESHARP) drops most of it; PDF and LBV keep it, so with them it spreads into
+//! the brain. The `laplacian.non-eroding-bfr` rule (Discouraged, measured) suggests ROMEO for
+//! those two; nothing changes on its own. (iSMV holds its boundary band fixed; the evidence for it
+//! is mixed so far, see the rule's constant.)
 //!
 //! # Pipeline rules
 //!
