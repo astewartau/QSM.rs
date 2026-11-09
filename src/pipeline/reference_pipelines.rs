@@ -49,7 +49,8 @@ pub struct ReferencePipeline {
     /// What a host calls it ("MEDI toolbox"); with a method when one toolbox has several
     /// ("STI Suite · iLSQR").
     pub name: &'static str,
-    /// The toolbox and the version its pipeline is taken from ("MEDI toolbox 2024.11.26").
+    /// The toolbox and the version its pipeline is taken from ("MEDI toolbox 2024.11.26"), as a
+    /// methods sentence names it ("Processing followed the MEDI toolbox 2024.11.26 pipeline").
     pub toolbox: &'static str,
     /// The method choices that start it, as rule settings and values ([`SETTINGS`](super::rules::SETTINGS)).
     pub choose: &'static [(&'static str, Value)],
@@ -96,7 +97,7 @@ pub static REFERENCE_PIPELINES: &[ReferencePipeline] = &[
     ReferencePipeline {
         id: "heidi",
         name: "HEIDI package",
-        toolbox: "qsm_heidi 4592631",
+        toolbox: "HEIDI package (qsm_heidi 4592631)",
         choose: &[("inversion.algorithm", Choice("lsqr")), ("inversion.apply_heidi", Bool(true))],
         source: "qsm_heidi makefile and def.sh (4592631); Schweser et al. 2012 NeuroImage 62:2083",
         not_reproduced: &[],
