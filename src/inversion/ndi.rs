@@ -102,6 +102,60 @@ pub struct NdiParams {
     /// `dipole_kernel_angulated` as the original is run with; [`FansiKernel::Continuous`] is
     /// the crate's continuous kernel (see [`FansiKernel`] for the decision and the measurements).
     pub kernel: FansiKernel,
+    /// What the magnitude is divided by in the data weight `min(2·mag/scale, 1)²`. Default
+    /// [`NdiWeightNorm::GlobalMax`], FANSI `script_invivo.m`'s `max(mag)`;
+    /// [`NdiWeightNorm::MaskP999`] is an option. See [`NdiWeightNorm`].
+    pub weight_norm: NdiWeightNorm,
+}
+
+/// The scale NDI's magnitude weight is normalised by, `W = min(2·mask·mag/scale, 1)²`.
+///
+/// FANSI's `script_invivo.m` divides by `max(mag)`, the image's largest magnitude
+/// ([`GlobalMax`](Self::GlobalMax), the default and the parity setting). In vivo that maximum is
+/// often outside the brain (a bright scalp or vessel voxel, measured 2.3–5× the brain's 99.9th
+/// percentile on the QSM-CI travelling heads), so the in-brain weight, and with NDI's fixed
+/// iteration count the fraction of the field it fits, varies between scans: NDI's χ scale
+/// against iLSQR on the same field ranged 0.43–0.91 over the MGH pilot scans.
+/// [`MaskP999`](Self::MaskP999) divides by the 99.9th percentile of the magnitude inside the mask
+/// instead, which gave 1.04–1.07 on those scans. On QSM-CI's simulated head (7 T, whose
+/// magnitude maximum is inside the brain) it is 21 % (χ NRMSE) from the original and slightly
+/// further from the truth (NRMSE 53.9 % against 52.0 %, r 0.846 against 0.856) with a better
+/// regional slope (0.84 against 0.78). A trade-off, so an option (2026-11-09,
+/// `~/work/emtp-v11/regressions-dipole.md`).
+#[cfg_attr(feature = "introspection", derive(serde::Serialize))]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum NdiWeightNorm {
+    /// `max(mag)` over the whole image (FANSI `script_invivo.m`).
+    #[default]
+    GlobalMax,
+    /// The 99.9th percentile of the magnitude inside the mask.
+    MaskP999,
+}
+
+impl NdiWeightNorm {
+    /// Stable id: `"global-max"` or `"mask-p999"`.
+    pub fn id(self) -> &'static str {
+        match self {
+            NdiWeightNorm::GlobalMax => "global-max",
+            NdiWeightNorm::MaskP999 => "mask-p999",
+        }
+    }
+
+    /// The scale for `magnitude` within `mask` (0 if there is nothing to scale by).
+    pub fn scale(self, magnitude: &[f64], mask: &[u8]) -> f64 {
+        match self {
+            NdiWeightNorm::GlobalMax => magnitude.iter().cloned().fold(0.0f64, f64::max),
+            NdiWeightNorm::MaskP999 => {
+                let mut v: Vec<f64> = magnitude.iter().zip(mask).filter(|(_, &m)| m != 0).map(|(&x, _)| x).collect();
+                if v.is_empty() {
+                    return 0.0;
+                }
+                // nearest-rank 99.9th percentile
+                let k = ((0.999 * v.len() as f64).ceil() as usize).clamp(1, v.len()) - 1;
+                *v.select_nth_unstable_by(k, |a, b| a.total_cmp(b)).1
+            }
+        }
+    }
 }
 
 impl Default for NdiParams {
@@ -116,6 +170,7 @@ impl Default for NdiParams {
             echo_times: vec![0.02],
             te: EchoTime::First,
             kernel: FansiKernel::Discrete,
+            weight_norm: NdiWeightNorm::GlobalMax,
         }
     }
 }
@@ -226,8 +281,9 @@ pub fn ndi(
     let ppm_to_rad = 2.0 * std::f64::consts::PI * crate::constants::GAMMA_BAR_MHZ_PER_T * params.b0 * params.te.seconds(&params.echo_times, "NDI");
     let phase: Vec<f64> = local_field.iter().map(|&f| f * ppm_to_rad).collect();
 
-    // W = min(2*mask*mag/max(mag), 1) (FANSI script_invivo.m), squared as in ndi.m.
-    let mag_max = magnitude.iter().cloned().fold(0.0f64, f64::max);
+    // W = min(2*mask*mag/max(mag), 1) (FANSI script_invivo.m), squared as in ndi.m; the scale
+    // is `params.weight_norm` (default the global max, as there).
+    let mag_max = params.weight_norm.scale(magnitude, mask);
     let w: Vec<f64> = (0..n)
         .map(|i| {
             if mask[i] == 0 || mag_max <= 0.0 {
@@ -332,5 +388,32 @@ mod tests {
         for (i, &val) in chi.iter().enumerate() {
             assert!(val.is_finite(), "Chi should be finite at index {}", i);
         }
+    }
+
+    /// The in-mask 99.9th percentile ignores an outlier outside the mask; the global max does not.
+    /// A brain scaled by an outlier gives a different result, unless `MaskP999` is used.
+    #[test]
+    fn weight_norm_ignores_outside_outliers() {
+        let n = 1000;
+        let mut mag: Vec<f64> = (0..n).map(|i| 1.0 + (i % 100) as f64 / 100.0).collect();
+        let mask: Vec<u8> = (0..n).map(|i| u8::from(i < 900)).collect();
+        mag[950] = 50.0; // outside the mask
+        assert_eq!(NdiWeightNorm::GlobalMax.scale(&mag, &mask), 50.0);
+        let p = NdiWeightNorm::MaskP999.scale(&mag, &mask);
+        assert!((1.98..=1.99).contains(&p), "{p}");
+        assert_eq!(NdiWeightNorm::MaskP999.scale(&mag, &[0u8; 1000]), 0.0);
+        assert_eq!(NdiParams::default().weight_norm, NdiWeightNorm::GlobalMax);
+
+        let m = 8;
+        let grid = Grid::new(m, m, m, 1.0, 1.0, 1.0);
+        let field: Vec<f64> = (0..m * m * m).map(|i| ((i * 37) % 17) as f64 * 1e-3).collect();
+        let bmask: Vec<u8> = (0..m * m * m).map(|i| u8::from(i % m > 0 && i % m < m - 1)).collect();
+        let base: Vec<f64> = vec![1.0; m * m * m];
+        let mut spiky = base.clone();
+        spiky[0] = 10.0; // outside bmask (i % m == 0)
+        let run = |mag: &[f64], w| ndi(&field, &bmask, mag, &grid, (0.0, 0.0, 1.0),
+            &NdiParams { max_iter: 10, weight_norm: w, ..Default::default() }, |_, _| {});
+        assert_eq!(run(&base, NdiWeightNorm::MaskP999), run(&spiky, NdiWeightNorm::MaskP999));
+        assert_ne!(run(&base, NdiWeightNorm::GlobalMax), run(&spiky, NdiWeightNorm::GlobalMax));
     }
 }
