@@ -18,10 +18,11 @@
 //!   cancels between the two, so the result is in the input's units.
 //! - **Boundary rim**: brain voxels with more than one voxel outside the brain among the 146
 //!   neighbours of STI's `ball3D(3)` (the offsets with `1 ≤ |d|² ≤ 10` voxels²), i.e.
-//!   `SMVFiltering(mask, 3) < 0.99`. Within the rim, the 20 % of Laplacian values largest in
-//!   magnitude are set to zero (the paper's "large Laplacian values near the boundary of the
-//!   brain ... were considered inaccurate and set to zero"). Outside the brain the Laplacian is
-//!   zero.
+//!   `SMVFiltering(mask, 3) < 0.99`. Within the rim, STI's iHARPERELLA sets the 20 % of
+//!   Laplacian values largest in magnitude to zero (the paper's "large Laplacian values near the
+//!   boundary of the brain ... were considered inaccurate and set to zero"). Outside the brain
+//!   the Laplacian is zero. [`HarperellaRim`] chooses between that and zeroing the whole rim:
+//!   iHARPERELLA defaults to STI's rule, HARPERELLA (no original code) to the whole rim.
 //! - **Solver**: MATLAB's `lsqr` (no preconditioner, zero initial guess) at tolerance `tol`
 //!   for at most `max_iter` iterations; STI passes 0.001 and `niter` (default 40).
 //! - **Padding**: `pad` zero voxels on each side (STI's `padsize`, default 0).
@@ -125,11 +126,52 @@ pub struct HarperellaParams {
     pub tol: f64,
     /// Zero padding in voxels on each side (STI's `padsize`, default 0)
     pub pad: [usize; 3],
+    /// Which Laplacian values in the boundary rim are set to zero (default
+    /// [`HarperellaRim::Whole`]; see [`HarperellaRim`]).
+    pub rim: HarperellaRim,
 }
 
 impl Default for HarperellaParams {
     fn default() -> Self {
-        Self { radius: 10.0, max_iter: 40, tol: 1e-3, pad: [0, 0, 0] }
+        Self { radius: 10.0, max_iter: 40, tol: 1e-3, pad: [0, 0, 0], rim: HarperellaRim::Whole }
+    }
+}
+
+/// Which Laplacian values in the boundary rim (the brain voxels with more than one voxel outside
+/// the brain among STI's `ball3D(3)` neighbours; see the module docs) are set to zero before the
+/// exterior Laplacian is estimated.
+///
+/// The HARPERELLA paper: "large Laplacian values near the boundary of the brain (<3 voxels from
+/// the boundary) were considered inaccurate and set to zero", which does not say how large.
+/// STI Suite 3.0's `iHARPERELLA` zeroes the 20 % largest in magnitude
+/// ([`StiLargest`](Self::StiLargest)). The rim's Laplacian is mostly not tissue: on a field map
+/// that is zero outside the mask it holds the step at the mask edge, and on a whole-FOV phase the
+/// noise outside the brain, and keeping 80 % of it leaves a large error at the edge that spreads
+/// inwards as a smooth background ([`Whole`](Self::Whole) avoids it).
+///
+/// Measured (2026-11-09, QSM-CI travelling heads, ROMEO field, QSM.rs's defaults otherwise;
+/// local field against ROMEO + V-SHARP more than 8 voxels from the edge): HARPERELLA r 0.61 / 0.66
+/// (GE / Philips) with [`StiLargest`](Self::StiLargest), 0.82 / 0.84 with [`Whole`](Self::Whole);
+/// the edge band's SD falls from 0.048 / 0.039 ppm to 0.013 / 0.012 ppm. iHARPERELLA 0.90 / 0.93
+/// and 0.93 / 0.96. QSM.rs before 2026-10-22 zeroed the whole rim (of a 3-voxel erosion).
+#[cfg_attr(feature = "introspection", derive(serde::Serialize))]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum HarperellaRim {
+    /// Zero every rim value. HARPERELLA's default (the paper's sentence, read as the whole band).
+    #[default]
+    Whole,
+    /// Zero the 20 % of rim values largest in magnitude, as STI Suite 3.0's `iHARPERELLA` does.
+    /// iHARPERELLA's default (its original), and the STI reading of HARPERELLA's paper.
+    StiLargest,
+}
+
+impl HarperellaRim {
+    /// Stable id: `"whole"` or `"sti"`.
+    pub fn id(self) -> &'static str {
+        match self {
+            HarperellaRim::Whole => "whole",
+            HarperellaRim::StiLargest => "sti",
+        }
     }
 }
 
@@ -143,11 +185,14 @@ pub struct IharperellaParams {
     pub tol: f64,
     /// Zero padding in voxels on each side (STI's `padsize`, default 0)
     pub pad: [usize; 3],
+    /// Which Laplacian values in the boundary rim are set to zero (default
+    /// [`HarperellaRim::StiLargest`], STI's `iHARPERELLA`; [`HarperellaRim::Whole`] is an option).
+    pub rim: HarperellaRim,
 }
 
 impl Default for IharperellaParams {
     fn default() -> Self {
-        Self { max_iter: 40, tol: 1e-3, pad: [0, 0, 0] }
+        Self { max_iter: 40, tol: 1e-3, pad: [0, 0, 0], rim: HarperellaRim::StiLargest }
     }
 }
 
@@ -162,7 +207,7 @@ struct Work {
 }
 
 impl Work {
-    fn new(data: &[f64], mask: &[u8], grid: &Grid, pad: [usize; 3], wrapped: bool) -> Self {
+    fn new(data: &[f64], mask: &[u8], grid: &Grid, pad: [usize; 3], wrapped: bool, rim_rule: HarperellaRim) -> Self {
         let (nx, ny, nz) = grid.dims;
         let dims = (nx + 2 * pad[0], ny + 2 * pad[1], nz + 2 * pad[2]);
         let vs = grid.voxel_size;
@@ -181,7 +226,10 @@ impl Work {
             if m == 0 { *l = 0.0; }
         }
         let rim = sti_rim(&pm, dims);
-        drop_large_rim_values(&mut lap, &rim);
+        match rim_rule {
+            HarperellaRim::StiLargest => drop_large_rim_values(&mut lap, &rim),
+            HarperellaRim::Whole => lap.iter_mut().zip(&rim).filter(|(_, &r)| r != 0).for_each(|(l, _)| *l = 0.0),
+        }
         Self { dims, vs, mask: pm, k2, lap, rim }
     }
 
@@ -217,8 +265,10 @@ impl Work {
 ///
 /// STI Suite 3.0 does not include HARPERELLA, so where the paper is silent this uses what STI's
 /// iHARPERELLA does (module docs): the spectral Laplacian and its inverse (the paper's Eq. 6
-/// is the same inverse), the boundary rim and its 20 % of large values set to zero (the paper:
-/// "large Laplacian values near the boundary of the brain (<3 voxels from the boundary)"),
+/// is the same inverse), and its boundary rim. In that rim the paper sets "large Laplacian values
+/// near the boundary of the brain (<3 voxels from the boundary)" to zero; HARPERELLA's default
+/// zeroes the whole rim ([`HarperellaRim::Whole`], measured better in vivo; STI's 20 % rule is
+/// [`HarperellaRim::StiLargest`]),
 /// MATLAB `lsqr` at tolerance 0.001 (the paper: "the preconditioned LSQR method", preconditioner
 /// unstated), and no padding by default (the paper pads, size unstated).
 ///
@@ -244,7 +294,7 @@ pub fn harperella(
 ) -> Result<(Vec<f64>, Vec<u8>), InputError> {
     let (data, rad_per_ppm) = input.data(mask, grid)?;
     let wrapped = rad_per_ppm.is_some();
-    let w = Work::new(data, mask, grid, params.pad, wrapped);
+    let w = Work::new(data, mask, grid, params.pad, wrapped, params.rim);
     let (nx, ny, nz) = w.dims;
     let (vsx, vsy, vsz) = w.vs;
     let n = w.n();
@@ -316,7 +366,7 @@ pub fn iharperella(
     mut progress: impl FnMut(usize, usize),
 ) -> Result<(Vec<f64>, Vec<u8>), InputError> {
     let (data, rad_per_ppm) = input.data(mask, grid)?;
-    let w = Work::new(data, mask, grid, params.pad, rad_per_ppm.is_some());
+    let w = Work::new(data, mask, grid, params.pad, rad_per_ppm.is_some(), params.rim);
     let dims = w.dims;
     let n = w.n();
     let ext: Vec<f64> = w.mask.iter().map(|&m| if m == 0 { 1.0 } else { 0.0 }).collect();
@@ -620,6 +670,33 @@ mod tests {
         let rim = sti_rim(&mask, dims);
         // voxels with both holes in their ball: offsets to both within |d|² <= 10
         assert!(rim[at(6, 8, 8)] == 1 && rim[at(1, 8, 8)] == 1 && rim[at(8, 8, 8)] == 0);
+    }
+
+    /// `HarperellaRim::Whole` zeroes every rim value and nothing else; the defaults differ by
+    /// method (HARPERELLA: the whole rim; iHARPERELLA: STI's 20 %).
+    #[test]
+    fn whole_rim_rule_zeroes_the_rim_only() {
+        assert_eq!(HarperellaParams::default().rim, HarperellaRim::Whole);
+        assert_eq!(IharperellaParams::default().rim, HarperellaRim::StiLargest);
+        let n = 12;
+        let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
+        let mask: Vec<u8> = (0..n * n * n).map(|l| {
+            let (i, j, k) = (l % n, (l / n) % n, l / (n * n));
+            u8::from((2..n - 2).contains(&i) && (2..n - 2).contains(&j) && (2..n - 2).contains(&k))
+        }).collect();
+        let field: Vec<f64> = (0..n * n * n).map(|l| ((l * 7919) % 101) as f64 * 1e-3).collect();
+        let whole = Work::new(&field, &mask, &grid, [0; 3], false, HarperellaRim::Whole);
+        let sti = Work::new(&field, &mask, &grid, [0; 3], false, HarperellaRim::StiLargest);
+        let rim_n = whole.rim.iter().filter(|&&r| r != 0).count();
+        assert!(rim_n > 0);
+        for l in 0..whole.lap.len() {
+            if whole.rim[l] != 0 {
+                assert_eq!(whole.lap[l], 0.0);
+            } else {
+                assert_eq!(whole.lap[l], sti.lap[l], "outside the rim both rules agree");
+            }
+        }
+        assert!(sti.lap.iter().zip(&sti.rim).filter(|(v, &r)| r != 0 && **v != 0.0).count() > 0);
     }
 
     /// The rim keeps round(0.8 N) values and zeroes the rest, the largest in magnitude.

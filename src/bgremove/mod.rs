@@ -87,7 +87,7 @@ pub use lbv::{lbv, lbv_multigrid, LbvParams, LbvPrecision};
 pub use sdf::{sdf, sdf_curvature, sdf_simple, SdfParams};
 pub use iharperella::{
     harperella, iharperella,
-    HarperellaInput, HarperellaParams, IharperellaParams,
+    HarperellaInput, HarperellaParams, HarperellaRim, IharperellaParams,
 };
 #[cfg(feature = "onnx")]
 pub use bfrnet::{bfrnet, bfrnet_tiled};
