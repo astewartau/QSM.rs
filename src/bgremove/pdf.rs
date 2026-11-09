@@ -115,10 +115,20 @@ pub struct PdfParams {
     /// - on a Philips 3 T travelling-head scan the local field kept a large residual background
     ///   (correlation with V-SHARP 0.54 at 30 iterations, 0.83 at 300), while a GE scan was
     ///   unaffected (0.85 at 30, 0.84 at 300); neither scan reached `tol` within 300;
-    /// - on QSM-CI's simulated head (QSM Challenge 2.0, 7 T), MEDI's own `PDF.m` at its
-    ///   defaults (the `pdf-cornell` container, identical to licensed MATLAB) scored about
-    ///   100 % NRMSE against the true local field, and QSM.rs's PDF at 300 iterations 44 %
-    ///   (QSMxT/QSM-CI#322).
+    /// - on QSM-CI's simulated head (QSM Challenge 2.0, 7 T; measured 2026-11-09 with this port,
+    ///   true total field) the local field's NRMSE is 100.6 % at 30 iterations and 83.5 % at 100
+    ///   or 300, where `tol` 0.1 stops CG before the 100th; with `tol` 1e-5 it is 61.1 % at 100
+    ///   and 58.0 % at 300. RTS χ XSIM barely moves (0.476, 0.479, 0.480, 0.473), χ NRMSE does
+    ///   (85.8 %, 77.6 %, 67.6 %, 67.3 %). The 44 % quoted here before (QSMxT/QSM-CI#322) was
+    ///   QSM.rs v0.39's own PDF solver, not this port.
+    ///
+    /// Across scanners (2026-11-09; 14 travelling-head scans, ROMEO field, RTS) 300 iterations
+    /// changed the Philips scans and left the Siemens and GE scans as they were at 30: Philips
+    /// caudate χ 61 → 40 ppb and thalamus 19 → −4 ppb (V-SHARP: about 0), and on the Laplacian
+    /// field map a broad shading went (caudate 95–98 → 42–43 ppb). So the regional slopes between
+    /// scanners agree less at 300 (median |slope − 1| 4.7 % → 16.7 %; Laplacian field 4.1 % →
+    /// 94.6 %): at 30 the scanners share a similar unconverged residual. The images are cleaner
+    /// at 300, which is why the suggestion stays; lower cross-scanner agreement is its known cost.
     ///
     /// 300 costs about 30 s more per 1 mm whole-brain scan. The mSMV authors run 100 (with
     /// `tol` 0; see the module docs, Reference pipeline).
