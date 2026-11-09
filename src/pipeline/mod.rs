@@ -50,6 +50,7 @@ pub mod qsmart;
 pub mod two_pass;
 pub mod per_echo;
 pub mod rules;
+pub mod reference_pipelines;
 
 pub use config::*;
 pub use phase_utils::{
