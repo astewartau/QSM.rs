@@ -80,8 +80,8 @@
 //! 4. **Output** `L = (iFreq − F2).*M` (its real part; `iSMV.m` returns the complex array) and
 //!    `M`. The local field is zero outside the eroded mask `M`, not only outside the input mask.
 //!
-//! `tdcsmv.m` has two more places where it cannot run as written; both changes leave every
-//! input it handles unchanged:
+//! `tdcsmv.m` has four more places where it cannot run as written or builds an off-centre
+//! sphere; each change leaves every input it handles correctly unchanged:
 //!
 //! - It uses `voxel_size(1)` for the second axis too (sub-voxel grid, offsets and extent), so on
 //!   voxels with `vs₁ ≠ vs₂` its sphere has the wrong size along that axis. Here the second axis
@@ -92,6 +92,21 @@
 //!   it. For a voxel size with no such `w` (a header value like 0.93750006) that loop never ends
 //!   in MATLAB (`int16` saturates at 32767). Here the search stops at
 //!   [`TDCSMV_MAX_SUBVOXEL`] and falls back to `w = 10`, `tdcsmv.m`'s own isotropic choice.
+//! - Its sub-voxel samples along each axis are `-d/2+0.5 : 1 : d/2-0.5` with `d = vs·w`. When
+//!   `d` is not an integer (`w` is chosen for `vs₁` only, so `vs₃·w` often is not, and neither
+//!   is `vs₁·w` after the fallback above), MATLAB's colon drops the last sample and the samples
+//!   are off-centre, so the sphere is shifted and asymmetric. iSMV applies it a few hundred times
+//!   and the shift accumulates into a smooth error in the background estimate. Here a
+//!   non-integer `d` gets `round(d)` samples centred on the voxel (spacing `d/round(d)`); an
+//!   integer `d` keeps `tdcsmv.m`'s samples exactly.
+//! - `vs₁ = vs₃` is an exact comparison, so a header voxel size one single-precision step
+//!   off 1 mm (Philips: 1 × 1 × 0.99999994 mm) took the other branch: `w = 2` instead of 20,
+//!   and `d = 1.99999988` along z, a single sample at −0.5, a sphere 0.24 voxel off-centre.
+//!   Here the comparison allows a relative difference of [`TDCSMV_EQUAL_REL_TOL`] (1e-5).
+//!   Measured on the QSM-CI travelling heads (ROMEO field, default iSMV): on every KKI
+//!   (Philips) scan the shipped kernel's local field correlated 0.07–0.12 with V-SHARP's and had
+//!   five times its SD; with the header's 0.99999994 set to 1 the correlation was 0.95 and the
+//!   SD matched. Scans with exact voxel sizes (GE, Siemens) were unaffected.
 //!
 //! A sphere that does not fit the array (MATLAB would grow `f` and then fail on the size
 //! mismatch) wraps around it periodically.
@@ -161,6 +176,11 @@ use crate::utils::vec_norm;
 /// Largest sub-voxel factor `tdcsmv.m`'s search for an integral `voxel_size(1)·w` tries before
 /// falling back to 10 (MATLAB's loop would not end). See the [module docs](self#ismvm-step-by-step).
 pub const TDCSMV_MAX_SUBVOXEL: u32 = 64;
+
+/// Relative difference below which `tdcsmv.m`'s `voxel_size(1)==voxel_size(3)` holds here:
+/// NIfTI stores voxel sizes in single precision, so 1 mm can arrive as 0.99999994 (one
+/// single-precision step, 6e-8). See [`tdcsmv`].
+pub const TDCSMV_EQUAL_REL_TOL: f64 = 1e-5;
 
 /// `iSMV.m`'s erosion threshold: `M = ifftn(fftn(Mask).*a) > .999`.
 const LAB_ERODE_THRESHOLD: f64 = 0.999;
@@ -294,16 +314,19 @@ pub fn ismv(
 /// at the FFT origin, normalised to sum 1 (image space; `tdcsmv.m` returns its `fftn`).
 ///
 /// Each voxel within the sphere's reach gets the fraction of its `w`-per-edge sub-voxel samples
-/// inside the sphere. Two changes, unchanged on every input `tdcsmv.m` runs on (see the
-/// [module docs](self#ismvm-step-by-step)): the second axis uses `voxel_size.1` (`tdcsmv.m`
-/// uses `voxel_size(1)` for it), and the search for `w` stops at [`TDCSMV_MAX_SUBVOXEL`].
+/// inside the sphere. Four changes, unchanged on every input `tdcsmv.m` handles correctly (see
+/// the [module docs](self#ismvm-step-by-step)): the second axis uses `voxel_size.1` (`tdcsmv.m`
+/// uses `voxel_size(1)` for it), the search for `w` stops at [`TDCSMV_MAX_SUBVOXEL`],
+/// `voxel_size(1) == voxel_size(3)` allows header rounding ([`TDCSMV_EQUAL_REL_TOL`]), and
+/// each axis's sub-voxel samples are centred on the voxel when `voxel_size·w` is not an integer.
 /// Placement wraps around the array (`tdcsmv.m` places at `end/2+1+offset` and `fftshift`s,
 /// which is the same on even sizes).
 pub fn tdcsmv(dims: (usize, usize, usize), voxel_size: (f64, f64, f64), radius: f64) -> Vec<f64> {
     let (nx, ny, nz) = dims;
     let (v1, v2, v3) = voxel_size;
     // if (voxel_size(1)==voxel_size(3)) w = 10; else smallest w with int16(g*w) == single(g*w)
-    let mut w: u32 = if v1 == v3 {
+    // (equal up to header rounding here: 1 vs 0.99999994 mm took the other branch, see below)
+    let mut w: u32 = if (v1 - v3).abs() <= TDCSMV_EQUAL_REL_TOL * v1.abs().max(v3.abs()) {
         10
     } else {
         let int16 = |x: f64| x.round().clamp(-32768.0, 32767.0);
@@ -320,15 +343,26 @@ pub fn tdcsmv(dims: (usize, usize, usize), voxel_size: (f64, f64, f64), radius: 
     let n1 = (radius / v1).ceil() as i64;
     let n2 = (radius / v2).ceil() as i64;
     let zmax = ((radius + v3 / 2.0) / v3).floor() as i64;
-    // meshgrid(-d/2+d1 : ps : d/2-d2) with ps = 1, d1 = d2 = 0.5 (MATLAB colon semantics)
+    // meshgrid(-d/2+d1 : ps : d/2-d2) with ps = 1, d1 = d2 = 0.5 (MATLAB colon semantics).
+    // That is the centres of d unit sub-voxels when d (= voxel_size·w) is an integer. When it is
+    // not, MATLAB's colon drops the last sample and the grid is off-centre: at 1 × 1 × 0.99999994
+    // mm (a Philips header), w = 2, d = 1.99999988 along z and the only sample is at -0.5, so the
+    // sphere sits 0.24 voxel off-centre in z, and iSMV, which applies it a few hundred times,
+    // drifts the background estimate (QSM-CI travelling heads, every KKI scan: local field
+    // correlation 0.07-0.12 with V-SHARP, 0.95 at 1 mm exactly). So a non-integer d gets
+    // round(d) samples centred on the voxel, at a spacing of d/round(d).
     let colon = |d: f64| -> Vec<f64> {
         let (a, b) = (-d / 2.0 + 0.5, d / 2.0 - 0.5);
-        if b < a {
-            return Vec::new();
-        }
         let tol = 3.0 * f64::EPSILON * a.abs().max(b.abs());
-        let count = ((b - a) + tol).floor() as usize + 1;
-        (0..count).map(|i| a + i as f64).collect()
+        if (d - d.round()).abs() <= tol {
+            if b < a {
+                return Vec::new();
+            }
+            let count = ((b - a) + tol).floor() as usize + 1;
+            return (0..count).map(|i| a + i as f64).collect();
+        }
+        let count = d.round().max(1.0);
+        (0..count as usize).map(|i| (i as f64 + 0.5) * d / count - d / 2.0).collect()
     };
     let (px, py, pz) = (colon(dx), colon(dy), colon(dz));
     let wrap = |o: i64, m: usize| o.rem_euclid(m as i64) as usize;
@@ -591,6 +625,33 @@ mod tests {
         let k1 = tdcsmv((8, 8, 8), (1.0, 1.0, 1.0), 1.0);
         let nonzero: Vec<usize> = (0..512).filter(|&l| k1[l] != 0.0).collect();
         assert_eq!(nonzero, vec![0, 64, 7 * 64]);
+    }
+
+    #[test]
+    fn tdcsmv_is_centred_on_header_rounding_and_non_integer_subgrids() {
+        let at = |k: &[f64], n: i64, i: i64, j: i64, l: i64| {
+            k[(i.rem_euclid(n) + n * (j.rem_euclid(n) + n * l.rem_euclid(n))) as usize]
+        };
+        // 1 × 1 × 0.99999994 mm (a Philips header) is 1 mm: the same sphere, not one 0.24 voxel off
+        let iso = tdcsmv((24, 24, 24), (1.0, 1.0, 1.0), 6.0);
+        let hdr = tdcsmv((24, 24, 24), (1.0, 1.0, 0.999_999_94), 6.0);
+        let worst = iso.iter().zip(&hdr).map(|(a, b)| (a - b).abs()).fold(0.0, f64::max);
+        assert!(worst < 1e-15, "max |Δ| {worst}");
+        // vs₃·w not an integer (w = 2 for vs₁ = 1, d = 2.4 along z): still symmetric, centroid 0
+        for vs in [(1.0, 1.0, 1.2), (0.937_500_06, 0.937_500_06, 2.0)] {
+            let k = tdcsmv((24, 24, 24), vs, 5.0);
+            let mut centroid = [0.0f64; 3];
+            for l in -11..12i64 {
+                for j in -11..12i64 {
+                    for i in -11..12i64 {
+                        let v = at(&k, 24, i, j, l);
+                        assert!((v - at(&k, 24, -i, -j, -l)).abs() < 1e-15, "{vs:?} at {i},{j},{l}");
+                        centroid = [centroid[0] + v * i as f64, centroid[1] + v * j as f64, centroid[2] + v * l as f64];
+                    }
+                }
+            }
+            assert!(centroid.iter().all(|c| c.abs() < 1e-12), "{vs:?}: centroid {centroid:?}");
+        }
     }
 
     #[test]
