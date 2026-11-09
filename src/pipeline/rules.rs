@@ -978,6 +978,9 @@ const PDF: &[Value] = &[Choice("pdf")];
 const LBV: &[Value] = &[Choice("lbv")];
 const VSHARP: &[Value] = &[Choice("vsharp")];
 const LAPLACIAN: &[Value] = &[Choice("laplacian")];
+/// Background removal that keeps the brain's edge (PDF, LBV) or holds it fixed (iSMV's boundary
+/// band), so an error in the field map's rim reaches the whole brain (`laplacian.non-eroding-bfr`).
+const RIM_SENSITIVE_BFR: &[Value] = &[Choice("pdf"), Choice("lbv"), Choice("ismv")];
 const ROMEO: &[Value] = &[Choice("romeo")];
 const COMPLEX_FIT: &[Value] = &[Choice("complex-fit")];
 const WEIGHTED_AVG: &[Value] = &[Choice("weighted-avg")];
@@ -1252,6 +1255,18 @@ pub static RULES: &[Rule] = &[
         "field_mapping.bipolar_correction", &[Bool(true)], Bool(false), Basis::Stated,
         "Bipolar correction needs echoes 1–3; with fewer it is skipped",
         "ROMEO.jl argparse.jl:71-76; MriResearchTools.jl mcpc3ds.jl:110-119"),
+    // QSM.rs#439. Measured 2026-11-09: QSM-CI simulated head (RTS χ XSIM, Laplacian / ROMEO
+    // field) and the travelling heads (inter-scanner median |a−1|, Laplacian / ROMEO).
+    discourage("laplacian.non-eroding-bfr", &[bg(RIM_SENSITIVE_BFR)],
+        "field_mapping.unwrapping_algorithm", LAPLACIAN, Choice("romeo"), Basis::Measured,
+        "The Laplacian field map of the masked phase has a large error in the brain's outer three \
+         voxels. PDF and LBV keep that rim and iSMV holds it fixed, so the error spreads into the \
+         brain: on QSM-CI's simulated head χ XSIM fell from 0.29 to 0.13 (PDF), 0.28 to 0.11 (LBV) \
+         and 0.24 to 0.12 (iSMV) against ROMEO's field, and across scanners regional χ agreed far \
+         less (median |slope − 1| 29 % against 8 % for PDF, 18 % against 7 % for LBV). ROMEO, a \
+         background removal that erodes the rim (SHARP, V-SHARP, RESHARP), or eroding the mask by a \
+         few voxels avoids it",
+        "QSM.rs#439 (QSM-CI simulated head and harmonization travelling heads, v11)"),
     discourage("field-mapping.bipolar-not-with-laplacian",
         &[method("field_mapping.bipolar_correction", &[Bool(true)]),
           method("field_mapping.unwrapping_algorithm", LAPLACIAN)],
@@ -1845,6 +1860,10 @@ mod tests {
             ("field-mapping.bipolar-needs-three-echoes", Case::new(|c| {
                 c.cfg.field_mapping.bipolar_correction = true;
                 c.facts.echo_count = Some(2);
+            })),
+            ("laplacian.non-eroding-bfr", Case::new(|c| {
+                background(B::Lbv)(c);
+                c.cfg.field_mapping.unwrapping_algorithm = UnwrappingAlgorithm::Laplacian;
             })),
             ("field-mapping.bipolar-not-with-laplacian", Case::new(|c| {
                 c.cfg.field_mapping.bipolar_correction = true;

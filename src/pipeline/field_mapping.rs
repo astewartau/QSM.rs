@@ -58,10 +58,20 @@
 //! Field strength enters only in the conversion to ppm; nothing assumes a resolution or B0
 //! direction.
 //!
+//! # Laplacian field map and the brain's edge
+//!
+//! Laplacian unwrapping of the masked phase (the default; `laplacian_unmasked` off) leaves a
+//! large error in the outer three voxels of the brain: against ROMEO's field on the QSM-CI
+//! travelling heads, the high-pass SD of the difference is about 0.07 ppm there, 0.02 ppm three to
+//! eight voxels in, and 0.003 ppm deeper (QSM.rs#439). Background removal that erodes the edge
+//! (SHARP, V-SHARP, RESHARP) drops most of it; PDF and LBV keep it and iSMV holds it fixed, so
+//! with them it spreads into the brain. The `laplacian.non-eroding-bfr` rule (Discouraged,
+//! measured) suggests ROMEO for those three; nothing changes on its own.
+//!
 //! # Pipeline rules
 //!
 //! The facts above that a configuration can depart from are published as rules in
-//! [`crate::pipeline::rules::RULES`] (each with its strength, basis, reason and source): `field-mapping.phase-offsets`, `field-mapping.bipolar-needs-three-echoes`, `field-mapping.bipolar-not-with-laplacian`, `field-mapping.phase-offset-sigma`.
+//! [`crate::pipeline::rules::RULES`] (each with its strength, basis, reason and source): `field-mapping.phase-offsets`, `field-mapping.bipolar-needs-three-echoes`, `field-mapping.bipolar-not-with-laplacian`, `field-mapping.phase-offset-sigma`, `laplacian.non-eroding-bfr`.
 
 use super::config::*;
 use super::phase_utils::{hz_to_ppm, rads_to_ppm};
