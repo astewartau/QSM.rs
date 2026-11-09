@@ -45,6 +45,9 @@
 //! noise term, `mask.*mag / max(mask.*mag)`, and [`WhQsmWeight::InVivo`] FANSI's
 //! `script_invivo.m` form, `min(2*mask*mag/max(mag), 1)`, as NDI uses. How the weight and the
 //! echo time ([`WhQsmParams::te`]) interact on the phantom is noted there.
+//! [`WhQsmWeight::FlatInMask`] (1 in the mask, no magnitude) is an in-vivo option: it drops the
+//! data term outside the brain, which in vivo carries residual background (measurements on the
+//! variant).
 //!
 //! # Newton safeguard
 //! The inner Newton step for `z2` (`WH_nlTV.m` l. 258-268) minimises, voxel by voxel,
@@ -107,12 +110,21 @@ pub enum WhQsmWeight {
     /// `min(2*mask*mag/max(mag), 1)`: FANSI's `script_invivo.m`, as NDI uses. Needs the
     /// magnitude.
     InVivo,
+    /// 1 inside the mask, 0 outside, no magnitude: the flat weight without its data term
+    /// outside the brain. Not the original (see the module docs, *Data weight*). In vivo the
+    /// whole-volume data term adds smooth shading: on the MGH pilot scans (ROMEO + V-SHARP field)
+    /// WH-QSM's correlation with iLSQR rose from 0.58–0.60 to 0.72–0.75 and the scale against it
+    /// from 1.29–1.37 to 1.04–1.20. On QSM-CI's simulated head (whose local field is true outside
+    /// the mask too) it is 16 % (χ NRMSE) from the original and further from the truth (38.2 %
+    /// against 33.6 %, r 0.927 against 0.945). A trade-off, so an option (2026-11-09,
+    /// `~/work/emtp-v11/regressions-dipole.md`).
+    FlatInMask,
 }
 
 impl WhQsmWeight {
     /// Whether this weight is made from the magnitude.
     pub fn needs_magnitude(self) -> bool {
-        !matches!(self, WhQsmWeight::Flat)
+        !matches!(self, WhQsmWeight::Flat | WhQsmWeight::FlatInMask)
     }
 }
 
@@ -251,7 +263,7 @@ pub fn whqsm(
     );
     let magnitude = if params.weight.needs_magnitude() { magnitude } else { None };
     let mag_max = magnitude.map_or(0.0, |m| match params.weight {
-        WhQsmWeight::Flat => 0.0,
+        WhQsmWeight::Flat | WhQsmWeight::FlatInMask => 0.0,
         WhQsmWeight::MaxNormalised => (0..n)
             .filter(|&i| mask[i] != 0)
             .map(|i| m[i])
@@ -268,7 +280,7 @@ pub fn whqsm(
             }
             let v = match magnitude {
                 Some(m) if mag_max > 0.0 => match params.weight {
-                    WhQsmWeight::Flat => 1.0,
+                    WhQsmWeight::Flat | WhQsmWeight::FlatInMask => 1.0,
                     WhQsmWeight::MaxNormalised => m[i] / mag_max,
                     WhQsmWeight::InVivo => (2.0 * m[i] / mag_max).min(1.0),
                 },
@@ -595,5 +607,26 @@ mod tests {
         let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
         let p = WhQsmParams { weight: WhQsmWeight::MaxNormalised, max_iter: 1, ..Default::default() };
         whqsm(&[0.0; 64], &[1u8; 64], None, &grid, (0.0, 0.0, 1.0), &p, |_, _| {});
+    }
+
+    /// `FlatInMask` needs no magnitude, equals a uniform magnitude weight (1 in the mask, 0
+    /// outside), and differs from the whole-volume `Flat` default when the mask is not everything.
+    #[test]
+    fn test_whqsm_flat_in_mask_weight() {
+        assert!(!WhQsmWeight::FlatInMask.needs_magnitude());
+        let n = 8;
+        let field: Vec<f64> = (0..n * n * n).map(|i| ((i % 7) as f64 - 3.0) * 0.01).collect();
+        let mask: Vec<u8> = (0..n * n * n).map(|i| u8::from(i % n > 1 && i % n < n - 2)).collect();
+        let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
+        let params = WhQsmParams { max_iter: 10, ..Default::default() };
+        let run = |weight, mag: Option<&[f64]>| {
+            whqsm(&field, &mask, mag, &grid, (0.0, 0.0, 1.0), &WhQsmParams { weight, ..params.clone() }, |_, _| {})
+        };
+        let in_mask = run(WhQsmWeight::FlatInMask, None);
+        let uniform = run(WhQsmWeight::MaxNormalised, Some(&vec![2.0; n * n * n]));
+        for (x, y) in in_mask.iter().zip(&uniform) {
+            assert!((x - y).abs() < 1e-12);
+        }
+        assert_ne!(in_mask, run(WhQsmWeight::Flat, None));
     }
 }

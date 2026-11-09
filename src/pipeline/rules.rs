@@ -725,6 +725,7 @@ pub fn current(input: &RuleInput, facts: &ScanFacts, setting: &str) -> Option<Ve
                 crate::inversion::WhQsmWeight::Flat => "flat",
                 crate::inversion::WhQsmWeight::MaxNormalised => "max-normalised",
                 crate::inversion::WhQsmWeight::InVivo => "in-vivo",
+                crate::inversion::WhQsmWeight::FlatInMask => "flat-in-mask",
             }),
         ),
         "inversion.star.te" => gated(alg(&[A::Star]), Current::Choice(echo_time_id(c.inversion.star.te))),
