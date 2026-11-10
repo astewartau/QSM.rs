@@ -384,6 +384,15 @@ pub enum MaskOp {
     Close {
         radius: usize,
     },
+    /// Keep only the mask voxels whose section input is at least `value` (a refinement): QSMART's
+    /// `mask(BET_map < mag_threshold) = 0`, `BET_map` being BET's brain image of that input.
+    MinIntensity {
+        value: f64,
+    },
+    /// MATLAB's `bwmorph3(mask, 'majority')`: a voxel is in the mask when at least 14 of the 27
+    /// voxels of its 3×3×3 neighbourhood (itself included) are, voxels beyond the volume counting
+    /// as out. One pass, as QSMART's `brainmask.m` runs it.
+    Majority,
     FillHoles {
         max_size: usize,
     },
@@ -421,6 +430,7 @@ impl MaskOp {
             Self::MindGrab(_) => Some("mindgrab"),
             Self::Threshold { .. } | Self::Bet(_) | Self::Erode { .. } | Self::Dilate { .. }
             | Self::Close { .. } | Self::FillHoles { .. } | Self::GaussianSmooth { .. }
+            | Self::MinIntensity { .. } | Self::Majority
             | Self::SignalErode(_) => None,
         }
     }
@@ -1021,6 +1031,8 @@ impl MaskOp {
             Self::Erode { .. } => "erode",
             Self::Dilate { .. } => "dilate",
             Self::Close { .. } => "close",
+            Self::MinIntensity { .. } => "min-intensity",
+            Self::Majority => "majority",
             Self::FillHoles { .. } => "fill-holes",
             Self::GaussianSmooth { .. } => "gaussian-smooth",
             Self::SignalErode(_) => "signal-erode",

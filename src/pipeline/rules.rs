@@ -552,6 +552,9 @@ pub const SETTINGS: &[(&str, &str)] = &[
     ("masking.inhomogeneity_correction", "The host's correction of the magnitude before masking (InhomogeneityCorrection::id): none, makehomogeneous or n4"),
     ("masking.bet.fractional_intensity", "Each BET step's fractional intensity threshold (BetParams::fractional_intensity)"),
     ("masking.erosion", "Each mask section's erosion: the voxels its Erode refinements take off in total (0 = none)"),
+    ("masking.min_intensity", "Each mask section's lowest input intensity kept (its MinIntensity refinement; 0 = none)"),
+    ("masking.majority", "Each mask section's 3×3×3 majority filter (its Majority refinement, bool)"),
+    ("masking.close_radius", "Each mask section's closing radius, voxels (its Close refinement; 0 = none)"),
     ("masking.hd_bet.inference", "Each HD-BET step's inference: full-volume, sliding-window (HdBetInference::SLIDING_WINDOW), low-memory (HdBetInference::LOW_MEMORY) or custom-window"),
     ("field_mapping.unwrapping_algorithm", "Phase unwrapping (UnwrappingAlgorithm::id)"),
     ("field_mapping.b0_estimation", "Echo combination (B0EstimationMethod::id)"),
@@ -710,6 +713,18 @@ pub fn current(input: &RuleInput, facts: &ScanFacts, setting: &str) -> Option<Ve
                 Current::Number(n as f64)
             })
             .collect(),
+        "masking.min_intensity" => c.masking.sections.iter().map(|s| Current::Number(
+            s.refinements.iter().find_map(|op| match op {
+                super::config::MaskOp::MinIntensity { value } => Some(*value),
+                _ => None,
+            }).unwrap_or(0.0))).collect(),
+        "masking.majority" => c.masking.sections.iter().map(|s| Current::Bool(
+            s.refinements.iter().any(|op| matches!(op, super::config::MaskOp::Majority)))).collect(),
+        "masking.close_radius" => c.masking.sections.iter().map(|s| Current::Number(
+            s.refinements.iter().find_map(|op| match op {
+                super::config::MaskOp::Close { radius } => Some(*radius as f64),
+                _ => None,
+            }).unwrap_or(0.0))).collect(),
         "masking.hd_bet.inference" => hd_bet_steps(c)
             .map(|p| {
                 Current::Choice(match p.inference {
@@ -1271,6 +1286,16 @@ pub static RULES: &[Rule] = &[
         "QSMART brainmask.m l. 10-11"),
     reference("qsmart.bet-f", &[inv(&[Choice("qsmart")])], "masking.bet.fractional_intensity",
         &[Number(0.2)], "QSMART runs bet2 with -f 0.2", "QSMART brainmask.m l. 14"),
+    // brainmask.m l. 24-33, after BET: the threshold on BET's brain image (v1.0's fixed 100,
+    // adaptive_threshold 0), the majority filter, and a closing with strel('sphere', 2).
+    reference("qsmart.mask-threshold", &[inv(&[Choice("qsmart")])], "masking.min_intensity",
+        &[Number(100.0)], "QSMART removes the BET mask's voxels whose magnitude is below 100 (QSMART v1.0's mag_threshold)",
+        "QSMART brainmask.m l. 24-29; Demo_QSMART.m l. 35, 38"),
+    reference("qsmart.mask-majority", &[inv(&[Choice("qsmart")])], "masking.majority", &[Bool(true)],
+        "QSMART smooths its mask with bwmorph3(mask, 'majority')", "QSMART brainmask.m l. 30"),
+    reference("qsmart.mask-close", &[inv(&[Choice("qsmart")])], "masking.close_radius", &[Number(2.0)],
+        "QSMART closes its mask with a sphere of radius 2 voxels (sph_radius1)",
+        "QSMART brainmask.m l. 31-33; Demo_QSMART.m l. 36"),
     reference("qsmart.mask-no-erosion", &[inv(&[Choice("qsmart")])], "masking.erosion", &[Number(0.0)],
         "QSMART does not erode its mask: avoiding erosion is what its spatially dependent filtering is for",
         "QSMART brainmask.m l. 7-33; Yaghmaie et al. 2021 NeuroImage 231:117701 §1, §5"),
@@ -2127,6 +2152,9 @@ mod tests {
                 c.cfg.masking.sections[0].generator = MaskOp::Bet(Default::default());
             })),
             ("qsmart.mask-no-erosion", Case::new(inversion(I::Qsmart))),
+            ("qsmart.mask-threshold", Case::new(inversion(I::Qsmart))),
+            ("qsmart.mask-majority", Case::new(inversion(I::Qsmart))),
+            ("qsmart.mask-close", Case::new(inversion(I::Qsmart))),
             ("mindgrab.wasm-heap", Case::new(|c| {
                 c.cfg.masking.sections[0].generator = MaskOp::MindGrab(Default::default());
                 c.facts.target = Target::Wasm;

@@ -191,6 +191,38 @@ pub(crate) fn dilate_ball(mask: &[u8], nx: usize, ny: usize, nz: usize, radius: 
     dilated
 }
 
+/// MATLAB's `bwmorph3(mask, 'majority')`, one pass: a voxel is set when at least 14 of the 27
+/// voxels of its 3×3×3 neighbourhood (itself included) are set, voxels beyond the volume counting
+/// as unset. QSMART's `brainmask.m` runs it on BET's mask. (Whether MATLAB also sets an unset voxel
+/// with 14 set neighbours, as here and as 2-D `bwmorph`'s majority does, is to be confirmed
+/// against MATLAB.)
+pub fn majority(mask: &[u8], grid: &Grid) -> Vec<u8> {
+    let (nx, ny, nz) = grid.dims;
+    let at = |x: isize, y: isize, z: isize| -> u32 {
+        if x < 0 || y < 0 || z < 0 || x >= nx as isize || y >= ny as isize || z >= nz as isize {
+            return 0;
+        }
+        u32::from(mask[x as usize + y as usize * nx + z as usize * nx * ny] != 0)
+    };
+    let mut out = vec![0u8; mask.len()];
+    for z in 0..nz as isize {
+        for y in 0..ny as isize {
+            for x in 0..nx as isize {
+                let mut count = 0;
+                for dz in -1..=1 {
+                    for dy in -1..=1 {
+                        for dx in -1..=1 {
+                            count += at(x + dx, y + dy, z + dz);
+                        }
+                    }
+                }
+                out[x as usize + y as usize * nx + z as usize * nx * ny] = u8::from(count >= 14);
+            }
+        }
+    }
+    out
+}
+
 /// Morphological closing (dilation followed by erosion) with a spherical structuring element
 /// of `radius` voxels.
 pub fn morphological_close(mask: &[u8], grid: &Grid, radius: i32) -> Vec<u8> {
@@ -545,4 +577,25 @@ mod tests {
         let component = flood_fill_component(&mask, &mut visited, start, n, n, n);
         assert_eq!(component.len(), 3, "Should find 3 connected zero voxels");
     }
+
+    /// `bwmorph3`'s majority: set where at least 14 of the 27 voxels around (and at) a voxel
+    /// are, beyond the volume counting as unset.
+    #[test]
+    fn majority_keeps_what_most_of_its_neighbourhood_is() {
+        let grid = Grid::new(5, 5, 5, 1.0, 1.0, 1.0);
+        let idx = |x: usize, y: usize, z: usize| x + 5 * y + 25 * z;
+        // A full 5³ cube: its corners have 8 set of 27 and go; faces' middles keep 18.
+        let full = vec![1u8; 125];
+        let m = majority(&full, &grid);
+        assert_eq!((m[idx(0, 0, 0)], m[idx(2, 2, 0)], m[idx(2, 2, 2)], m[idx(0, 2, 2)]), (0, 1, 1, 1));
+        assert_eq!(m[idx(0, 0, 2)], 0, "an edge's middle has 12 set");
+        // A single hole in the middle is filled; a lone voxel goes.
+        let mut holed = full.clone();
+        holed[idx(2, 2, 2)] = 0;
+        assert_eq!(majority(&holed, &grid)[idx(2, 2, 2)], 1);
+        let mut lone = vec![0u8; 125];
+        lone[idx(2, 2, 2)] = 1;
+        assert!(majority(&lone, &grid).iter().all(|&v| v == 0));
+    }
+
 }

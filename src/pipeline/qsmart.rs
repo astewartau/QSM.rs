@@ -73,7 +73,7 @@
 //! # Pipeline rules
 //!
 //! The facts above that a configuration can depart from are published as rules in
-//! [`crate::pipeline::rules::RULES`] (each with its strength, basis, reason and source): `qsmart.mask-bet`, `qsmart.unwrap-laplacian`, `qsmart.laplacian-solver`, `qsmart.unwrap-unmasked`, `qsmart.field-echofit`, `qsmart.inner-inversion`, `qsmart.ilsqr-iterations`, `qsmart.ilsqr-pad`, `qsmart.ilsqr-single` (STI's single-precision iLSQR), `qsmart.fit-threshold` (v1.0's fixed 40), `qsmart.offset-grid` (`adjust_offset.m`'s grid), `qsmart.reference-none` (`QSMART.m` l. 43-45 ends
+//! [`crate::pipeline::rules::RULES`] (each with its strength, basis, reason and source): `qsmart.mask-bet`, `qsmart.unwrap-laplacian`, `qsmart.laplacian-solver`, `qsmart.unwrap-unmasked`, `qsmart.field-echofit`, `qsmart.inner-inversion`, `qsmart.ilsqr-iterations`, `qsmart.ilsqr-pad`, `qsmart.ilsqr-single` (STI's single-precision iLSQR), `qsmart.fit-threshold` (v1.0's fixed 40), `qsmart.offset-grid` (`adjust_offset.m`'s grid), `qsmart.mask-input`, `qsmart.mask-n4`, `qsmart.bet-f`, `qsmart.mask-threshold`, `qsmart.mask-majority`, `qsmart.mask-close`, `qsmart.mask-no-erosion` (brainmask.m's recipe: [`MaskOp::MinIntensity`], [`MaskOp::Majority`], [`MaskOp::Close`]), `qsmart.reference-none` (`QSMART.m` l. 43-45 ends
 //! with `adjust_offset`'s combined χ; nothing references it afterwards).
 
 use super::config::*;

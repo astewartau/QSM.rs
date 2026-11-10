@@ -40,7 +40,7 @@
 
 use super::config::*;
 use super::phase_utils::rss_combine;
-use crate::utils::morphology::{erode_mask, dilate_mask, morphological_close, fill_holes, signal_gated_erosion};
+use crate::utils::morphology::{erode_mask, dilate_mask, morphological_close, fill_holes, majority, signal_gated_erosion};
 
 /// Check every volume is the grid's size.
 fn check_volumes(name: &str, volumes: &[&[f64]], n_voxels: usize) -> Result<(), PipelineError> {
@@ -251,6 +251,16 @@ pub fn apply_mask_ops(
             }
             MaskOp::Close { radius } => {
                 mask = morphological_close(&mask, &grid, *radius as i32);
+            }
+            MaskOp::MinIntensity { value } => {
+                for (m, &v) in mask.iter_mut().zip(input_data) {
+                    if v.is_nan() || v < *value {
+                        *m = 0;
+                    }
+                }
+            }
+            MaskOp::Majority => {
+                mask = majority(&mask, &grid);
             }
             MaskOp::FillHoles { max_size } => {
                 let effective_size = if *max_size == 0 { n_voxels / 20 } else { *max_size };
