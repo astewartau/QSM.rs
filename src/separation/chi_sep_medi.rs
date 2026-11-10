@@ -143,9 +143,29 @@
 //!   Philips (l. 70-73); `mag` = root-sum-of-squares over echoes (l. 75).
 //! - `N_std` from `Preprocessing4Phase(mag, phase)` (l. 76), which is MEDI's `Fit_ppm_complex`
 //!   noise map (probed: equal to 3·10⁻¹⁸; QSM.rs [`crate::utils::fit_ppm_complex_noise`]).
-//! - Mask: MEDI's `BET` on `mag` (l. 82); R2* by ARLO with more than three equally spaced echoes,
-//!   NNLS otherwise (l. 87-93); `mask_CSF = extract_CSF(r2star, mask, voxel_size)` (MEDI's
-//!   `extract_CSF.m`, l. 96; QSM.rs [`crate::inversion::extract_csf`]).
+//! - Mask: MEDI's `BET` on `mag` (l. 82).
+//! - R2* (l. 87-93): `r2star_arlo(mag_multi_echo, TE*1000, mask_brain)` if `use_arlo(TE)`, else
+//!   `r2star_nnls(...)`, with the comment "Use ARLO (More than three equi-spaced TE needed)". In
+//!   fact the script always runs **`r2star_nnls`**: it documents `TE` as a row vector (l. 64,
+//!   `TE = [0.00xx, 0.00xx, ...]`), and `use_arlo` (`functions/supportfunc/use_arlo.p`) is true
+//!   only for a *column* vector of three or more equally spaced echo times. Probed 2026-11-10 in
+//!   licensed MATLAB R2023b Update 5 (23.2.0.2459199), toolbox v1.1.3: `[4;8;12]` and
+//!   `[5;11;17;23;29]` (ms or s) true, `[4;8]` and `[5;11;17;23;30]` false; every row false,
+//!   including `[5 10 15 20 25]`, `[5 11 17 23 29]` (ms) and `[0.004 0.008 0.012 0.016 0.02]`
+//!   (s). QSM-CI's reference run of the script's pipeline (QSMxT/QSM-CI `toolbox-pipeline-chisep`,
+//!   which reads `TE` as a row) ran `r2star_nnls` too: its R2* is never negative and is a bounded
+//!   mono-exponential fit. QSM.rs: [`crate::utils::r2star::chisep_nnls`] (its docs give the
+//!   algorithm and the agreement, NRMSE 1.1e-6 in vivo); a host chooses it with
+//!   [`ChiSepMediParams::csf_r2star`] ([`csf_r2star`]), which defaults to ARLO.
+//! - `mask_CSF = extract_CSF(r2star, mask, voxel_size)` (MEDI's `extract_CSF.m`, l. 96; QSM.rs
+//!   [`crate::inversion::extract_csf`]), R2* < 5 Hz. The R2* method matters here: on the in-vivo
+//!   s005001 Prisma scan (TE 5:6:29 ms) the CSF mask has 11,186 voxels from the NNLS R2* and
+//!   10,824 from ARLO, 962 voxels apart. Run on the toolbox's own intermediates, χ-separation-MEDI's
+//!   χ+ and |χ−| differ from the toolbox's by NRMSE 0.58 % and 0.51 % with the ARLO mask and by
+//!   1.5·10⁻⁸ and 1.6·10⁻⁸ (its float32 output) with the NNLS one (2026-11-10;
+//!   [`crate::utils::r2star::chisep_nnls`] gives that NNLS mask exactly: no voxel's R2* crosses
+//!   5 Hz). The script's χ-sepnet-R2* (l. 177-185, no R2′ given) takes the same `r2star`;
+//!   [`ChiSepMediParams::csf_r2star`] covers only the CSF mask.
 //! - ROMEO with phase-offset correction and weighted echo averaging, `W = TE·exp(−TE/40 ms)`
 //!   (l. 99-123); V-SHARP `smvsize` 12 (l. 136-139); the local field in Hz (l. 139).
 //! - QSM: STI Suite `QSM_iLSQR(..., 'padsize', [12 12 12])` (l. 145), unreferenced, passed as
@@ -171,7 +191,8 @@
 //! The facts above that a configuration can depart from are published as rules in
 //! [`crate::pipeline::rules::RULES`] (each with its strength, basis, reason and source):
 //! `chi-sep.mask-bet`, `chi-sep.bet-as-stored` (MEDI's BET.m: no FSL left-right flip), `chi-sep.unwrap-romeo`, the mritools `romeo` command line's settings (`chi-sep.romeo-weights`, `chi-sep.romeo-template`, `chi-sep.romeo-template-echo`, `chi-sep.romeo-no-global-correction`, `chi-sep.romeo-no-uncertain-rewrap`; [`crate::unwrap::RomeoParams::romeo_cli`]), `chi-sep.echo-combination`, `chi-sep.echo-weights`,
-//! `chi-sep.bg-vsharp`, `chi-sep-medi.qsm-ilsqr`, and by manufacturer `chi-sep.tukey-not-philips`
+//! `chi-sep.bg-vsharp`, `chi-sep-medi.qsm-ilsqr`, `chi-sep-medi.csf-r2star-nnls` (the CSF mask's
+//! R2* by `r2star_nnls`, [`ChiSepCsfR2star::Nnls`]), and by manufacturer `chi-sep.tukey-not-philips`
 //! and `chi-sep.tukey-philips` (`Chisep_script.m` Tukey-windows the echoes before this method as
 //! before χ-sepnet; [`crate::utils::tukey_window`]). All are the authors' setting
 //! (`Kind::Reference`).
@@ -283,6 +304,70 @@ pub struct ChiSepMediParams {
     /// unreferenced: the script subtracts nothing from it before `option_data.qsm = QSM` (l.
     /// 158), so a host passes iLSQR's own output, not a referenced map.
     pub qsm_ilsqr: crate::inversion::IlsqrParams,
+    /// How the host computes the R2* its CSF mask ([`ChiSepMediInputs::mask_csf`]) is extracted
+    /// from ([`csf_r2star`]). Default [`ChiSepCsfR2star::Arlo`]; `Chisep_script.m` as written
+    /// runs [`ChiSepCsfR2star::Nnls`] (see *Reference pipeline* in the module docs).
+    pub csf_r2star: ChiSepCsfR2star,
+}
+
+/// The R2* method the CSF mask of χ-separation-MEDI is extracted from
+/// ([`ChiSepMediParams::csf_r2star`], [`csf_r2star`]). The host applies it; it is part of the
+/// parameters so rules can say what the toolbox's script does.
+#[cfg_attr(feature = "introspection", derive(serde::Serialize))]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ChiSepCsfR2star {
+    /// ARLO ([`crate::utils::r2star::arlo`], MEDI's `arlo.m`): what `Chisep_script.m`'s comment
+    /// says it uses with three or more equally spaced echoes, and what MEDI's own pipeline uses
+    /// for its CSF mask. Needs three or more echoes. The default.
+    #[default]
+    Arlo,
+    /// The toolbox's `r2star_nnls` ([`crate::utils::r2star::chisep_nnls`]): what
+    /// `Chisep_script.m` runs with its echo times as it documents them (a row vector, for which
+    /// `use_arlo` is always false).
+    Nnls,
+}
+
+impl ChiSepCsfR2star {
+    /// Stable id: `"arlo"` or `"nnls"` (the pipeline rules' `separation.chi_sep_medi.csf_r2star`).
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::Arlo => "arlo",
+            Self::Nnls => "nnls",
+        }
+    }
+
+    /// Why this method cannot use these echo times, or `None` if it can.
+    pub fn echo_times_problem(self, echo_times: &[f64]) -> Option<String> {
+        match self {
+            Self::Arlo => crate::utils::r2star::arlo_echo_times_problem(echo_times),
+            Self::Nnls => crate::utils::r2star::chisep_nnls_echo_times_problem(echo_times),
+        }
+    }
+}
+
+/// The R2* (Hz) a host extracts χ-separation-MEDI's CSF mask from
+/// ([`crate::inversion::extract_csf`]), by `method`: [`ChiSepCsfR2star::Arlo`] on every voxel
+/// (`arlo.m` is unmasked; `extract_CSF` looks only inside the mask), or
+/// [`ChiSepCsfR2star::Nnls`] inside `mask` (0 outside), as the toolbox's `r2star_nnls` does.
+///
+/// * `magnitude` - The echo magnitudes, `echo_times.len()` volumes of `mask.len()` voxels
+///   stacked with the echo slowest
+/// * `echo_times` - Echo times in seconds
+/// * `mask` - The brain mask (`Chisep_script.m`'s `mask_brain`, BET's)
+///
+/// # Errors
+/// [`ChiSepCsfR2star::echo_times_problem`], mismatched lengths, and those of
+/// [`crate::utils::r2star::chisep_nnls`].
+pub fn csf_r2star(
+    method: ChiSepCsfR2star,
+    magnitude: &[f64],
+    echo_times: &[f64],
+    mask: &[bool],
+) -> Result<Vec<f64>, InputError> {
+    match method {
+        ChiSepCsfR2star::Arlo => crate::utils::r2star::arlo(magnitude, echo_times, mask.len()),
+        ChiSepCsfR2star::Nnls => crate::utils::r2star::chisep_nnls(magnitude, echo_times, mask),
+    }
 }
 
 impl Default for ChiSepMediParams {
@@ -299,6 +384,7 @@ impl Default for ChiSepMediParams {
             cg_tol: 0.05,
             cg_max_iter: 100,
             qsm_ilsqr: super::chi_sep_ilsqr::chisep_toolbox_ilsqr(),
+            csf_r2star: ChiSepCsfR2star::Arlo,
         }
     }
 }
