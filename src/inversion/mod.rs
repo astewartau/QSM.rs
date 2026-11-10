@@ -88,7 +88,7 @@ pub use star::{star_qsm, StarParams, STAR_GUI_PAD, QSM_STAR_DEFAULT_PAD, STI_TEM
 pub use lsqr_qsm::{lsqr_qsm, LsqrQsmParams, RESIDUAL_WEIGHTING_PER_TESLA};
 pub use heidi::{cone_fill_iterations, heidi, heidi_cone_fill, homogeneity_masks, HeidiParams, HomogeneityMasks};
 pub use admm::FansiKernel;
-pub use ndi::{ndi, NdiParams};
+pub use ndi::{ndi, NdiParams, NdiWeightNorm};
 pub use fansi::{fansi, FansiParams};
 pub use l1qsm::{l1qsm, L1QsmParams};
 pub use whqsm::{whqsm, WhQsmParams, WhQsmWeight};
