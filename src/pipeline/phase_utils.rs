@@ -49,8 +49,10 @@ pub fn scale_phases_to_pi<T: AsMut<[f64]>>(echoes: &mut [T]) {
             }
         }
     }
+    // No range: constant, or nothing finite (then -inf - inf = -inf); NaN cannot arise but is
+    // treated the same.
     let range = max_val - min_val;
-    if !(range >= 1e-10) {
+    if range.is_nan() || range < 1e-10 {
         return;
     }
     let tol = PHASE_RADIANS_TOL;
