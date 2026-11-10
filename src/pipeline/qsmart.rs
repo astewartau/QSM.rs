@@ -55,7 +55,13 @@
 //! gave its own, on a 36×36×28 vessel phantom at 3 T; the fixture is regenerated in Actions by
 //! `tests/data/qsmart_qsmci_small.py`. Against the toolbox's intermediates: the vessel mask is
 //! identical; the total field (Laplacian unwrapping and the echo fit) differs by a constant 4.3e-3
-//! ppm, the Laplacian's free constant, and by NRMSE 0.024 % without it; SDF stage 1 by 3.8e-5 %
+//! ppm, the Laplacian's free constant, and by NRMSE 0.024 % without it. That constant is per echo:
+//! `lapunwrap.m` divides by `(k2 + eps)`, so its DC bin is FFT rounding over eps, an arbitrary
+//! offset in each echo's unwrapped phase that this port sets to 0. After the magnitude-weighted
+//! fit the offsets are no longer one constant, and where the fit residual sits at the threshold they
+//! flip `R_0` (in vivo, s005001 Prisma: −0.0018 to −0.0090 rad, total field 0.24 % NRMSE, 596 `R_0`
+//! voxels, 7 in the mask; adding the offsets reproduces the toolbox's total field to 1.6e-15;
+//! QSMxT/QSM-CI#421). They depend on FFTW's rounding and cannot be reproduced; SDF stage 1 by 3.8e-5 %
 //! and stage 2 by 1.6e-5 % (float32 rounding of the fixture; the 10.9 % / 2.1 % before
 //! astewartau/QSM.rs#370 were the curvature step, #320); iLSQR stage 1 by 1.0e-4 % and stage 2 by
 //! 1.0e-3 %, STI's single-precision floor (0.15 % / 0.094 % before astewartau/QSM.rs#396, the
@@ -73,7 +79,7 @@
 //! # Pipeline rules
 //!
 //! The facts above that a configuration can depart from are published as rules in
-//! [`crate::pipeline::rules::RULES`] (each with its strength, basis, reason and source): `qsmart.mask-bet`, `qsmart.unwrap-laplacian`, `qsmart.laplacian-solver`, `qsmart.unwrap-unmasked`, `qsmart.field-echofit`, `qsmart.inner-inversion`, `qsmart.ilsqr-iterations`, `qsmart.ilsqr-pad`, `qsmart.ilsqr-single` (STI's single-precision iLSQR), `qsmart.fit-threshold` (v1.0's fixed 40), `qsmart.offset-grid` (`adjust_offset.m`'s grid), `qsmart.mask-input`, `qsmart.mask-n4`, `qsmart.bet-f`, `qsmart.mask-threshold`, `qsmart.mask-majority`, `qsmart.mask-close`, `qsmart.mask-no-erosion` (brainmask.m's recipe: [`MaskOp::MinIntensity`], [`MaskOp::Majority`], [`MaskOp::Close`]), `qsmart.reference-none` (`QSMART.m` l. 43-45 ends
+//! [`crate::pipeline::rules::RULES`] (each with its strength, basis, reason and source): `qsmart.mask-bet`, `qsmart.unwrap-laplacian`, `qsmart.laplacian-solver`, `qsmart.unwrap-unmasked`, `qsmart.field-echofit`, `qsmart.inner-inversion`, `qsmart.ilsqr-iterations`, `qsmart.ilsqr-pad`, `qsmart.ilsqr-single` (STI's single-precision iLSQR), `qsmart.fit-threshold` (v1.0's fixed 40), `qsmart.offset-grid` (`adjust_offset.m`'s grid), `qsmart.mask-input`, `qsmart.mask-n4`, `qsmart.mask-n4-make-nii` (N4 on make_nii's axis-aligned header, [`N4Geometry::MakeNii`](crate::pipeline::config::N4Geometry::MakeNii)), `qsmart.bet-f`, `qsmart.mask-threshold`, `qsmart.mask-majority`, `qsmart.mask-close`, `qsmart.mask-no-erosion` (brainmask.m's recipe: [`MaskOp::MinIntensity`], [`MaskOp::Majority`], [`MaskOp::Close`]), `qsmart.reference-none` (`QSMART.m` l. 43-45 ends
 //! with `adjust_offset`'s combined χ; nothing references it afterwards).
 
 use super::config::*;

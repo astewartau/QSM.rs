@@ -550,6 +550,7 @@ pub const SETTINGS: &[(&str, &str)] = &[
     ("masking.generator", "Each mask section's generator (MaskOp::id)"),
     ("masking.input", "Each mask section's input image (MaskingInput::id): magnitude-first, magnitude (RSS over echoes), magnitude-last or phase-quality"),
     ("masking.inhomogeneity_correction", "The host's correction of the magnitude before masking (InhomogeneityCorrection::id): none, makehomogeneous or n4"),
+    ("masking.n4_geometry", "The image geometry the host gives N4 before masking (N4Geometry::id): scanner or make-nii"),
     ("masking.bet.fractional_intensity", "Each BET step's fractional intensity threshold (BetParams::fractional_intensity)"),
     ("masking.bet.orientation", "Which way round each BET step sees the left-right axis (BetOrientation::id): fsl (as FSL reads the file) or as-stored"),
     ("masking.erosion", "Each mask section's erosion: the voxels its Erode refinements take off in total (0 = none)"),
@@ -688,6 +689,7 @@ pub fn current(input: &RuleInput, facts: &ScanFacts, setting: &str) -> Option<Ve
         }
         "masking.input" => c.masking.sections.iter().map(|s| Current::Choice(s.input.id())).collect(),
         "masking.inhomogeneity_correction" => one(Current::Choice(c.masking.inhomogeneity_correction.id())),
+        "masking.n4_geometry" => one(Current::Choice(c.masking.n4_geometry.id())),
         "masking.bet.fractional_intensity" => c
             .masking
             .sections
@@ -1309,6 +1311,10 @@ pub static RULES: &[Rule] = &[
     reference("qsmart.mask-n4", &[inv(&[Choice("qsmart")])], "masking.inhomogeneity_correction",
         &[Choice("n4")], "QSMART corrects the first echo's magnitude with ANTs' N4BiasFieldCorrection before BET",
         "QSMART brainmask.m l. 10-11"),
+    reference("qsmart.mask-n4-make-nii", &[inv(&[Choice("qsmart")])], "masking.n4_geometry",
+        &[Choice("make-nii")], "QSMART hands N4 the magnitude in a file written by make_nii, whose \
+         axis-aligned header decides where N4's shrunk grid falls",
+        "QSMART brainmask.m l. 8-11 (make_nii(mag1_sos, vox); save_nii; N4BiasFieldCorrection -i mag1_sos.nii)"),
     reference("qsmart.bet-f", &[inv(&[Choice("qsmart")])], "masking.bet.fractional_intensity",
         &[Number(0.2)], "QSMART runs bet2 with -f 0.2", "QSMART brainmask.m l. 14"),
     // brainmask.m l. 24-33, after BET: the threshold on BET's brain image (v1.0's fixed 100,
@@ -2180,6 +2186,7 @@ mod tests {
             ("decompose.mask-no-erosion", Case::new(separation(S::Decompose))),
             ("qsmart.mask-input", Case::new(inversion(I::Qsmart))),
             ("qsmart.mask-n4", Case::new(inversion(I::Qsmart))),
+            ("qsmart.mask-n4-make-nii", Case::new(inversion(I::Qsmart))),
             ("qsmart.bet-f", Case::new(|c| {
                 inversion(I::Qsmart)(c);
                 c.cfg.masking.sections[0].generator = MaskOp::Bet(Default::default());
