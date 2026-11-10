@@ -578,7 +578,7 @@ pub fn decompose(
             // transpose, so they fit conj(y), y[e] = mag_norm · exp(−i·(2/3)·χ(TE_e)·γ·B0·TE_e).
             let (mut sum_re, mut sum_im) = (0.0, 0.0);
             let scale = params.normalisation.divisor(&magnitude[i * ne..(i + 1) * ne], te, gmax);
-            if !(scale > 0.0) {
+            if scale.is_nan() || scale <= 0.0 {
                 return (i, 0.0, 0.0);
             }
             for e in 0..ne {
