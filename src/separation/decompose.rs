@@ -162,6 +162,28 @@
 //! 4, 0.26 s on 6, 0.23 s on 12. (With bounded LM to 400 iterations: 28.0 s, 8.0 s, 6.4 s on 1,
 //! 4, 6 threads; `lsqcurvefit`'s 1e-6 tolerances end each stage far sooner than LM's 1e-12.)
 //!
+//! # The paper's fit
+//!
+//! [`DecomposeParams::paper`] is Chen et al. 2021's fit, which the DECOMPOSE pipeline uses
+//! (rule `decompose.fit-paper`; decided 2026-11-10); the default stays the reference
+//! implementation's, which QSM-CI's `decompose-qsm` container runs.
+//!
+//! - **Stage 5.1** ([`DecomposeStageSolver::LsqlinSumToOne`]): the amplitudes with
+//!   `C+ + C− + C₀ = 1`, `0 ≤ C ≤ 1`, solved exactly on the simplex instead of by `lsqlin`'s
+//!   interior-point iterations. The minimum is unique when the three compartments' signals are
+//!   independent, so `lsqlin` reaches the same point to its tolerance (to be confirmed against
+//!   MATLAB's `lsqlin`).
+//! - **Stage 5.2** ([`DecomposeStageSolver::LsqlinLog`]): R2*₀ in closed form, since the log
+//!   residual is linear in it.
+//! - **Stage 5.3**: `lsqnonlin` trust-region-reflective, which is the `lsqcurvefit` port.
+//! - **Scale** ([`DecomposeNormalisation::ExtrapolatedS0`]): the sum-to-one constraint makes the
+//!   model 1 at `TE = 0`, so each voxel is divided by its `S(0)`, extrapolated from the first two
+//!   echoes. The paper does not say how it scales the data; this is QSM.rs's reading (Ashley,
+//!   2026-11-10).
+//! - **Initial values and tolerances**: the paper gives none, so they are the reference
+//!   implementation's (`C = [0.3 0.3 0.4]`, `R2*₀ = 25`, `χ = [0.05 −0.05]`, MATLAB's default
+//!   tolerances).
+//!
 //! # Reference pipeline
 //!
 //! Chen et al. 2021 (NeuroImage 242:118477, §3.6 "Image preparation and QSM reconstruction"; PMC8720043):
@@ -194,7 +216,7 @@
 //! # Pipeline rules
 //!
 //! The facts above that a configuration can depart from are published as rules in
-//! [`crate::pipeline::rules::RULES`] (each with its strength, basis, reason and source): `decompose.mask-bet`, `decompose.mask-input` (the first echo's magnitude, §3.6), `decompose.mask-no-correction`, `decompose.mask-no-erosion`, `decompose.unwrap-laplacian`, `decompose.bg-vsharp`, `decompose.qsm-star`, `decompose.qsm-per-echo` (Recommended: stated by the authors, §2.2 and §4.1), `decompose.reference-mean`, and at 7 T `decompose.unwrap-7t` and `decompose.chi-bound-7t` (Recommended: measured, *At 7 T* above).
+//! [`crate::pipeline::rules::RULES`] (each with its strength, basis, reason and source): `decompose.mask-bet`, `decompose.mask-input` (the first echo's magnitude, §3.6), `decompose.mask-no-correction`, `decompose.mask-no-erosion`, `decompose.unwrap-laplacian`, `decompose.bg-vsharp`, `decompose.qsm-star`, `decompose.qsm-per-echo` (Recommended: stated by the authors, §2.2 and §4.1), `decompose.fit-paper`, `decompose.reference-mean`, and at 7 T `decompose.unwrap-7t` and `decompose.chi-bound-7t` (Recommended: measured, *At 7 T* above).
 
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
@@ -231,6 +253,57 @@ pub struct DecomposeParams {
     pub unwrap_phase: bool,
     /// The solver of each of the three stages (see [`DecomposeStageSolvers`]).
     pub solvers: DecomposeStageSolvers,
+    /// How the magnitude is scaled before the fit (see [`DecomposeNormalisation`]). Default: the
+    /// reference implementation's global maximum.
+    pub normalisation: DecomposeNormalisation,
+}
+
+/// How [`decompose`] scales the magnitude before fitting it.
+///
+/// The paper's stage 5.1 constrains `C+ + C− + C₀ = 1`, so the model is 1 at `TE = 0` and each
+/// voxel's data must be scaled to `S(0) = 1`. The paper does not say how (Chen et al. 2021, §2.2,
+/// §3.1); the reference implementation, which has no sum-to-one constraint, divides by the global
+/// maximum.
+#[cfg_attr(feature = "introspection", derive(serde::Serialize))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum DecomposeNormalisation {
+    /// Divide every voxel by the largest magnitude in the volume (`DECOMPOSE_analysis.m`).
+    #[default]
+    GlobalMax,
+    /// Divide each voxel by its own first-echo magnitude (`S(TE₁) = 1`).
+    FirstEcho,
+    /// Divide each voxel by its signal at `TE = 0`, extrapolated mono-exponentially from the first
+    /// two echoes, `S₀ = M₁·(M₁/M₂)^(TE₁/(TE₂−TE₁))`; by `M₁` where that is not a decay
+    /// (`M₂ ≥ M₁`, or a zero). QSM.rs's reading of "S(0) = 1", which the paper leaves unstated.
+    ExtrapolatedS0,
+}
+
+impl DecomposeNormalisation {
+    /// Stable id: `global-max`, `first-echo` or `extrapolated-s0`.
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::GlobalMax => "global-max",
+            Self::FirstEcho => "first-echo",
+            Self::ExtrapolatedS0 => "extrapolated-s0",
+        }
+    }
+
+    /// The divisor for one voxel's magnitudes `m` at echo times `te`, given the volume's maximum.
+    fn divisor(self, m: &[f64], te: &[f64], gmax: f64) -> f64 {
+        match self {
+            Self::GlobalMax => gmax,
+            Self::FirstEcho => m[0],
+            Self::ExtrapolatedS0 => {
+                let (m1, m2) = (m[0], m[1]);
+                if m1 > 0.0 && m2 > 0.0 && m2 < m1 {
+                    let s0 = m1 * (m1 / m2).powf(te[0] / (te[1] - te[0]));
+                    if s0.is_finite() { s0 } else { m1 }
+                } else {
+                    m1
+                }
+            }
+        }
+    }
 }
 
 /// Which solver fits each stage of the alternating fit.
@@ -240,8 +313,8 @@ pub struct DecomposeParams {
 /// three stages, and that is the default here. The paper (Chen et al. 2021, §3.1) describes a
 /// different choice: Eq. 5.1 (the amplitudes, with `C+ + C− + C₀ = 1`) and Eq. 5.2 (R2*₀) by
 /// `lsqlin`'s interior-point method, and only Eq. 5.3 (χ±) by `lsqnonlin` trust-region-reflective
-/// with a supplied Jacobian sparsity pattern. Those solvers are not ported (yet); this is where
-/// they would be selected.
+/// with a supplied Jacobian sparsity pattern. [`DecomposeStageSolvers::paper`] selects those
+/// (see each [`DecomposeStageSolver`] for how it reproduces them).
 #[cfg_attr(feature = "introspection", derive(serde::Serialize))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DecomposeStageSolvers {
@@ -260,13 +333,70 @@ impl Default for DecomposeStageSolvers {
     }
 }
 
+impl DecomposeStageSolvers {
+    /// The paper's solvers (Chen et al. 2021, §2.2, §3.1): Eq. 5.1 by `lsqlin` with
+    /// `C+ + C− + C₀ = 1` and `0 ≤ C ≤ 1`, Eq. 5.2 by `lsqlin` on the log signal, Eq. 5.3 by
+    /// `lsqnonlin` trust-region-reflective.
+    pub fn paper() -> Self {
+        Self {
+            amplitudes: DecomposeStageSolver::LsqlinSumToOne,
+            r2star: DecomposeStageSolver::LsqlinLog,
+            chi: DecomposeStageSolver::LsqcurvefitTrustRegionReflective,
+        }
+    }
+
+    /// Checks that each stage has a solver it can use: [`DecomposeStageSolver::LsqlinSumToOne`]
+    /// only for the amplitudes and [`DecomposeStageSolver::LsqlinLog`] only for R2*₀ (stage 3 is
+    /// not linear).
+    pub fn validate(&self) -> Result<(), InputError> {
+        use DecomposeStageSolver as S;
+        let bad = |stage: &str, s: S| InputError::new(format!("DECOMPOSE: {s:?} cannot fit the {stage}"));
+        if self.amplitudes == S::LsqlinLog {
+            return Err(bad("amplitudes", self.amplitudes));
+        }
+        if self.r2star == S::LsqlinSumToOne {
+            return Err(bad("R2*0 stage", self.r2star));
+        }
+        if self.chi != S::LsqcurvefitTrustRegionReflective {
+            return Err(bad("χ stage", self.chi));
+        }
+        Ok(())
+    }
+}
+
 /// A stage solver for [`decompose`].
 #[cfg_attr(feature = "introspection", derive(serde::Serialize))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DecomposeStageSolver {
     /// MATLAB `lsqcurvefit` with its default options (trust-region-reflective, finite-difference
-    /// Jacobian): [`lsq_trust_region_reflective`]. The reference implementation's solver.
+    /// Jacobian): [`lsq_trust_region_reflective`]. The reference implementation's solver. The
+    /// paper's stage-5.3 solver, `lsqnonlin` trust-region-reflective with a Jacobian sparsity
+    /// pattern, is the same algorithm on the same residual: `lsqcurvefit` is `lsqnonlin` on
+    /// `fun(x, TE) − ydata`, and a sparsity pattern only groups the finite differences, which
+    /// for two parameters with a dense Jacobian changes nothing.
     LsqcurvefitTrustRegionReflective,
+    /// The paper's stage 5.1 (amplitudes only): `lsqlin`, linear least squares of the complex
+    /// signal in `[C+, C−, C₀]` with `C+ + C− + C₀ = 1` and `0 ≤ C ≤ 1`.
+    ///
+    /// Solved exactly instead of by `lsqlin`'s interior-point iterations. The problem is a convex
+    /// quadratic on the probability simplex (`0 ≤ C` and `ΣC = 1` imply `C ≤ 1`); every face of
+    /// the simplex is tried (the three vertices, three edges and the interior: the
+    /// equality-constrained least squares on that face, from its KKT system) and the feasible
+    /// solution with the smallest residual is the minimum. When the three compartments' signals
+    /// are linearly independent the objective is strictly convex and its minimum unique, so
+    /// `lsqlin` converges to this point and differs from it only by its tolerances (to be checked
+    /// against MATLAB's `lsqlin`). When they are not (χ+ or χ− at 0 makes that compartment's
+    /// signal equal C₀'s), the minimum is a set; interior-point methods tend to its centre, and
+    /// a tiny ridge (1e-12 of the trace) makes this the minimum-norm point, which splits equal
+    /// compartments equally. The reconstruction (PSC, DSC) does not depend on that split.
+    LsqlinSumToOne,
+    /// The paper's stage 5.2 (R2*₀ only): `lsqlin` on the log signal, `R2*₀ ≥ 0`. All three
+    /// compartments decay with `exp(−R2*₀·t)`, so `log S(t) = −R2*₀·t + log S|_{R2*₀=0}(t)`:
+    /// the real part of the log residual is linear in R2*₀ and its imaginary part does not
+    /// depend on it. The least-squares R2*₀ is `Σt(L−ℓ)/Σt²` (`L` the model's log magnitude at
+    /// R2*₀ = 0, `ℓ` the data's), clamped at 0: the exact minimum of this one-dimensional
+    /// convex problem, which `lsqlin` reaches to its tolerance.
+    LsqlinLog,
 }
 
 /// The bound on |χ| in DECOMPOSE's stage-3 search (`[0, −bound]` to `[bound, 0]`), see the
@@ -288,6 +418,7 @@ impl DecomposeParams {
     /// [`EchoSpacing`](DecomposeChiBound::EchoSpacing) bound depends on the echo times, and
     /// [`decompose`] checks it.
     pub fn validate(&self) -> Result<(), InputError> {
+        self.solvers.validate()?;
         if let DecomposeChiBound::Ppm(_) = self.chi_bound {
             self.chi_bound.resolve(self.b0, &[])?;
         }
@@ -345,6 +476,35 @@ impl Default for DecomposeParams {
             lsqcurvefit: LsqTrrOptions::default(),
             unwrap_phase: false,
             solvers: DecomposeStageSolvers::default(),
+            normalisation: DecomposeNormalisation::default(),
+        }
+    }
+}
+
+impl DecomposeParams {
+    /// Which fit this is, as rules name it: `paper` ([`Self::paper`]'s solvers and
+    /// normalisation), `reference-code` (the reference implementation's, the default) or
+    /// `custom` (any other combination).
+    pub fn fit_id(&self) -> &'static str {
+        let p = Self::paper();
+        let d = Self::default();
+        if self.solvers == p.solvers && self.normalisation == p.normalisation {
+            "paper"
+        } else if self.solvers == d.solvers && self.normalisation == d.normalisation {
+            "reference-code"
+        } else {
+            "custom"
+        }
+    }
+
+    /// The paper's fit (Chen et al. 2021): its stage solvers ([`DecomposeStageSolvers::paper`])
+    /// on per-voxel `S(0) = 1` data ([`DecomposeNormalisation::ExtrapolatedS0`]). The paper
+    /// gives no initial values or tolerances; those stay the reference implementation's.
+    pub fn paper() -> Self {
+        Self {
+            solvers: DecomposeStageSolvers::paper(),
+            normalisation: DecomposeNormalisation::ExtrapolatedS0,
+            ..Self::default()
         }
     }
 }
@@ -392,7 +552,7 @@ pub fn decompose(
     let te = echo_times;
     let upper = params.chi_bound.resolve(b0, te)?;
 
-    // Global-max magnitude normalisation (matches the reference).
+    // The magnitude's scale (`params.normalisation`): the reference's global maximum by default.
     let gmax = magnitude.iter().cloned().fold(0.0_f64, f64::max).max(1e-30);
 
     // Reconstruction denominator: (2/3)·γ·B0·ΣTE.
@@ -417,8 +577,12 @@ pub fn decompose(
             // The authors' `ydata = squeeze(y_data(i,j,k,:))'`: MATLAB's `'` is the conjugate
             // transpose, so they fit conj(y), y[e] = mag_norm · exp(−i·(2/3)·χ(TE_e)·γ·B0·TE_e).
             let (mut sum_re, mut sum_im) = (0.0, 0.0);
+            let scale = params.normalisation.divisor(&magnitude[i * ne..(i + 1) * ne], te, gmax);
+            if scale.is_nan() || scale <= 0.0 {
+                return (i, 0.0, 0.0);
+            }
             for e in 0..ne {
-                let m = magnitude[i * ne + e] / gmax;
+                let m = magnitude[i * ne + e] / scale;
                 let ph = -(2.0 / 3.0) * chi_per_echo[i * ne + e] * GAMMA * b0 * te[e];
                 let y = (m * fdlibm::cos(ph), m * fdlibm::sin(ph));
                 ws.yc[e] = (y.0, -y.1);
@@ -550,7 +714,7 @@ fn fit_voxel(
         let q = p;
         let mut x = p.c;
         match params.solvers.amplitudes {
-            DecomposeStageSolver::LsqcurvefitTrustRegionReflective => lsq_trust_region_reflective(
+            DecomposeStageSolver::LsqcurvefitTrustRegionReflective => { lsq_trust_region_reflective(
             |x: &[f64], out: &mut [f64]| {
                 let q = Fit { c: [x[0], x[1], x[2]], ..q };
                 for e in 0..ne {
@@ -565,14 +729,16 @@ fn fit_voxel(
             opts,
             &mut ws.s1,
             |_| {},
-        ),
+        ); }
+            DecomposeStageSolver::LsqlinSumToOne => x = amplitudes_sum_to_one(te, yc, &q, b0),
+            DecomposeStageSolver::LsqlinLog => unreachable!("validated"),
         };
         p.c = x;
         // Stage 2: objective2, R2*₀ against log(ydata).
         let q = p;
         let mut x = [p.r0];
         match params.solvers.r2star {
-            DecomposeStageSolver::LsqcurvefitTrustRegionReflective => lsq_trust_region_reflective(
+            DecomposeStageSolver::LsqcurvefitTrustRegionReflective => { lsq_trust_region_reflective(
             |x: &[f64], out: &mut [f64]| log_resid(&Fit { r0: x[0], ..q }, out),
             &mut x,
             &[0.0],
@@ -580,14 +746,20 @@ fn fit_voxel(
             opts,
             &mut ws.s2,
             |_| {},
-        ),
+        ); }
+            DecomposeStageSolver::LsqlinLog => {
+                if let Some(r0) = r2star_log_linear(te, logyc, &q, b0) {
+                    x = [r0];
+                }
+            }
+            DecomposeStageSolver::LsqlinSumToOne => unreachable!("validated"),
         };
         p.r0 = x[0];
         // Stage 3: objective3, [χ+, χ−] against log(ydata).
         let q = p;
         let mut x = p.chi;
         match params.solvers.chi {
-            DecomposeStageSolver::LsqcurvefitTrustRegionReflective => lsq_trust_region_reflective(
+            DecomposeStageSolver::LsqcurvefitTrustRegionReflective => { lsq_trust_region_reflective(
             |x: &[f64], out: &mut [f64]| log_resid(&Fit { chi: [x[0], x[1]], ..q }, out),
             &mut x,
             &[0.0, -upper],
@@ -595,11 +767,124 @@ fn fit_voxel(
             opts,
             &mut ws.s3,
             |_| {},
-        ),
+        ); }
+            DecomposeStageSolver::LsqlinSumToOne | DecomposeStageSolver::LsqlinLog => unreachable!("validated"),
         };
         p.chi = x;
     }
     p
+}
+
+/// Stage 5.1 of the paper, exactly ([`DecomposeStageSolver::LsqlinSumToOne`]): the amplitudes
+/// minimising `‖Σ_j C_j·b_j(t) − conj(y)‖²` over `C ≥ 0`, `ΣC = 1`, with `b_j` compartment `j`'s
+/// signal at unit amplitude under `q`'s R2*₀ and χ.
+fn amplitudes_sum_to_one(te: &[f64], yc: &[(f64, f64)], q: &Fit, b0: f64) -> [f64; 3] {
+    // Normal equations G = AᵀA, h = Aᵀb over the stacked [Re; Im] rows (the sign convention of
+    // the imaginary rows does not change the sums).
+    let mut g = [[0.0f64; 3]; 3];
+    let mut h = [0.0f64; 3];
+    let mut bb = 0.0;
+    for (e, &t) in te.iter().enumerate() {
+        let cols: [(f64, f64); 3] = std::array::from_fn(|j| {
+            let mut c = [0.0; 3];
+            c[j] = 1.0;
+            signal_model(t, &Fit { c, ..*q }, b0)
+        });
+        for j in 0..3 {
+            for k in 0..3 {
+                g[j][k] += cols[j].0 * cols[k].0 + cols[j].1 * cols[k].1;
+            }
+            h[j] += cols[j].0 * yc[e].0 + cols[j].1 * yc[e].1;
+        }
+        bb += yc[e].0 * yc[e].0 + yc[e].1 * yc[e].1;
+    }
+    let ridge = 1e-12 * (g[0][0] + g[1][1] + g[2][2]).max(f64::MIN_POSITIVE);
+    let objective = |c: &[f64; 3]| {
+        let mut f = bb;
+        for j in 0..3 {
+            f -= 2.0 * h[j] * c[j];
+            for k in 0..3 {
+                f += c[j] * g[j][k] * c[k];
+            }
+        }
+        f
+    };
+    let mut best: Option<([f64; 3], f64)> = None;
+    // Every non-empty support: the face where the other amplitudes are 0.
+    for support in 1u8..8 {
+        let idx: Vec<usize> = (0..3).filter(|j| support & (1 << j) != 0).collect();
+        let m = idx.len();
+        // KKT of min cᵀGc − 2hᵀc s.t. Σc = 1 on the support: [2G 1; 1ᵀ 0][c; λ] = [2h; 1].
+        let mut a = [[0.0f64; 5]; 4];
+        for (r, &j) in idx.iter().enumerate() {
+            for (s, &k) in idx.iter().enumerate() {
+                a[r][s] = 2.0 * (g[j][k] + if j == k { ridge } else { 0.0 });
+            }
+            a[r][m] = 1.0;
+            a[m][r] = 1.0;
+            a[r][m + 1] = 2.0 * h[j];
+        }
+        a[m][m + 1] = 1.0;
+        let Some(sol) = solve_small(&mut a, m + 1) else { continue };
+        let mut c = [0.0; 3];
+        for (r, &j) in idx.iter().enumerate() {
+            c[j] = sol[r];
+        }
+        if c.iter().any(|&v| v < 0.0 || !v.is_finite()) {
+            continue;
+        }
+        let f = objective(&c);
+        if best.is_none_or(|(_, fb)| f < fb) {
+            best = Some((c, f));
+        }
+    }
+    best.map_or(q.c, |(c, _)| c)
+}
+
+/// Gaussian elimination with partial pivoting on the `n × (n+1)` augmented system in `a`, its
+/// right-hand side in column `n` (`n ≤ 4`); `None` if it is singular.
+fn solve_small(a: &mut [[f64; 5]; 4], n: usize) -> Option<[f64; 4]> {
+    for col in 0..n {
+        let piv = (col..n).max_by(|&r, &s| a[r][col].abs().total_cmp(&a[s][col].abs()))?;
+        if a[piv][col].abs() < 1e-300 {
+            return None;
+        }
+        a.swap(col, piv);
+        for r in col + 1..n {
+            let f = a[r][col] / a[col][col];
+            for k in col..=n {
+                a[r][k] -= f * a[col][k];
+            }
+        }
+    }
+    let mut x = [0.0; 4];
+    for r in (0..n).rev() {
+        let mut v = a[r][n];
+        for k in r + 1..n {
+            v -= a[r][k] * x[k];
+        }
+        x[r] = v / a[r][r];
+    }
+    Some(x)
+}
+
+/// Stage 5.2 of the paper, exactly ([`DecomposeStageSolver::LsqlinLog`]): the R2*₀ ≥ 0
+/// minimising the log residual, `Σt(L − ℓ)/Σt²` clamped at 0 (see the variant's docs). `None`
+/// when the model's log magnitude is not finite at some echo (a zero signal), leaving R2*₀ as it
+/// was.
+fn r2star_log_linear(te: &[f64], logyc: &[(f64, f64)], q: &Fit, b0: f64) -> Option<f64> {
+    let q0 = Fit { r0: 0.0, ..*q };
+    let (mut num, mut den) = (0.0, 0.0);
+    for (e, &t) in te.iter().enumerate() {
+        let z = signal_model(t, &q0, b0);
+        let l = fdlibm::log_abs(z.0, z.1);
+        if !l.is_finite() {
+            return None;
+        }
+        num += t * (l - logyc[e].0);
+        den += t * t;
+    }
+    Some((num / den).max(0.0))
 }
 
 /// MATLAB's complex `log(z)` as `(log|z|, angle z)`: FDLIBM's `atan2` and MATLAB's rule for the
@@ -712,6 +997,7 @@ mod tests {
             lsqcurvefit: LsqTrrOptions::default(),
             unwrap_phase: false,
             solvers: Default::default(),
+            normalisation: Default::default(),
         };
         let truth = Fit {
             c: [0.5, 0.1, 0.4],
@@ -790,6 +1076,7 @@ mod tests {
             lsqcurvefit: LsqTrrOptions::default(),
             unwrap_phase: true,
             solvers: Default::default(),
+            normalisation: Default::default(),
         };
         let threshold = PI / ((2.0 / 3.0) * GAMMA * b0 * te[te.len() - 1]);
         assert!(
@@ -846,6 +1133,7 @@ mod tests {
             lsqcurvefit: LsqTrrOptions::default(),
             unwrap_phase: true,
             solvers: Default::default(),
+            normalisation: Default::default(),
         };
         let (dr_pos, dr_neg, r2) = (320.0_f64, 397.0_f64, 30.0_f64);
         let chim = -0.015_f64;
@@ -870,7 +1158,7 @@ mod tests {
         let te = [0.004, 0.012, 0.020, 0.028];
         let b0 = 7.0;
         let ne = te.len();
-        let params = DecomposeParams { b0, n_inner: 4, chi_bound: DecomposeChiBound::Ppm(0.5), lsqcurvefit: LsqTrrOptions::default(), unwrap_phase: false, solvers: Default::default() };
+        let params = DecomposeParams { b0, n_inner: 4, chi_bound: DecomposeChiBound::Ppm(0.5), lsqcurvefit: LsqTrrOptions::default(), unwrap_phase: false, solvers: Default::default(), normalisation: Default::default() };
 
         // A real signal for the fitted voxels.
         let (cp, cm, c0, chip, chim, r0) = (0.4, 0.2, 0.4, 0.06, -0.05, 22.0);
@@ -1046,4 +1334,99 @@ mod tests {
         eprintln!("{ok} of {total} stage calls identical (counts, exit flag, every evaluation to 1e-6); by stage [differ, same]: {by_stage:?}");
         eprintln!("bit-identical throughout (every evaluation point and sum of squares) by stage: {bit_same:?}");
     }
+
+    /// Stage 5.1 solved exactly: on noise-free data whose amplitudes sum to one it returns them,
+    /// and on any data its residual is no larger than at any point of a fine grid on the simplex.
+    #[test]
+    fn paper_amplitudes_are_the_simplex_minimum() {
+        let te = [0.003, 0.006, 0.009, 0.012, 0.015, 0.018];
+        let b0 = 3.0;
+        let q = Fit { c: [0.0; 3], r0: 20.0, chi: [0.12, -0.08] };
+        let truth = [0.25, 0.15, 0.6];
+        let yc: Vec<(f64, f64)> = te.iter().map(|&t| signal_model(t, &Fit { c: truth, ..q }, b0)).collect();
+        let c = amplitudes_sum_to_one(&te, &yc, &q, b0);
+        for j in 0..3 {
+            assert!((c[j] - truth[j]).abs() < 1e-9, "{c:?}");
+        }
+        // Data outside the model (scaled up and with a phase ramp): compare with a grid search.
+        let yc: Vec<(f64, f64)> = yc.iter().enumerate()
+            .map(|(e, &(re, im))| { let (s, k) = (1.7, 0.3 * e as f64); (s * (re * k.cos() - im * k.sin()), s * (re * k.sin() + im * k.cos())) })
+            .collect();
+        let resid = |c: [f64; 3]| -> f64 {
+            te.iter().zip(&yc).map(|(&t, y)| { let z = signal_model(t, &Fit { c, ..q }, b0); (z.0 - y.0).powi(2) + (z.1 - y.1).powi(2) }).sum()
+        };
+        let c = amplitudes_sum_to_one(&te, &yc, &q, b0);
+        assert!((c.iter().sum::<f64>() - 1.0).abs() < 1e-12 && c.iter().all(|&v| v >= 0.0), "{c:?}");
+        let n = 200;
+        for i in 0..=n {
+            for j in 0..=n - i {
+                let g = [i as f64 / n as f64, j as f64 / n as f64, (n - i - j) as f64 / n as f64];
+                assert!(resid(c) <= resid(g) + 1e-12, "{c:?} worse than {g:?}");
+            }
+        }
+    }
+
+    /// Stage 5.2 solved exactly: the closed form is the minimum of the log residual over R2*₀ ≥ 0.
+    #[test]
+    fn paper_r2star_is_the_log_residual_minimum() {
+        let te = [0.003, 0.006, 0.009, 0.012, 0.015, 0.018];
+        let b0 = 3.0;
+        let q = Fit { c: [0.3, 0.2, 0.5], r0: 0.0, chi: [0.1, -0.05] };
+        let logyc: Vec<(f64, f64)> = te.iter().enumerate()
+            .map(|(e, &t)| { let z = signal_model(t, &Fit { r0: 31.0, ..q }, b0); let l = matlab_log(z); (l.0 + 0.01 * (e % 2) as f64, l.1) })
+            .collect();
+        let resid = |r0: f64| -> f64 {
+            let mut out = vec![0.0; 2 * te.len()];
+            for (e, &t) in te.iter().enumerate() {
+                let l = matlab_log(signal_model(t, &Fit { r0, ..q }, b0));
+                out[e] = l.0 - logyc[e].0;
+                out[te.len() + e] = l.1 - logyc[e].1;
+            }
+            out.iter().map(|v| v * v).sum()
+        };
+        let r0 = r2star_log_linear(&te, &logyc, &q, b0).unwrap();
+        assert!((r0 - 31.0).abs() < 2.0, "{r0}");
+        for k in 0..2000 {
+            let g = k as f64 * 0.05;
+            assert!(resid(r0) <= resid(g) + 1e-12, "{r0} worse than {g}");
+        }
+        // Data decaying slower than the model at R2*₀ = 0 clamps at the bound.
+        let rising: Vec<(f64, f64)> = logyc.iter().zip(&te).map(|(&(lr, la), &t)| (lr + 40.0 * t, la)).collect();
+        assert_eq!(r2star_log_linear(&te, &rising, &q, b0), Some(0.0));
+    }
+
+    /// The paper's fit runs end to end, and a solver on a stage it cannot fit is refused.
+    #[test]
+    fn paper_solvers_run_and_are_validated() {
+        let te = [0.0027, 0.0056, 0.0085, 0.0114, 0.0143, 0.0172];
+        let b0 = 3.0;
+        let truth = Fit { c: [0.2, 0.1, 0.7], r0: 18.0, chi: [0.1, -0.05] };
+        let mag: Vec<f64> = te.iter().map(|&t| { let z = signal_model(t, &truth, b0); 800.0 * (z.0 * z.0 + z.1 * z.1).sqrt() }).collect();
+        let chi = per_echo(&[0.03], te.len());
+        let params = DecomposeParams { b0, ..DecomposeParams::paper() };
+        let (pos, neg, _) = decompose(&chi, &mag, &te, &[1u8], &params, |_, _| {}).unwrap();
+        assert!(pos[0].is_finite() && neg[0].is_finite() && pos[0] >= 0.0 && neg[0] <= 0.0, "{pos:?} {neg:?}");
+
+        use DecomposeStageSolver as S;
+        for solvers in [
+            DecomposeStageSolvers { amplitudes: S::LsqlinLog, ..DecomposeStageSolvers::paper() },
+            DecomposeStageSolvers { r2star: S::LsqlinSumToOne, ..DecomposeStageSolvers::paper() },
+            DecomposeStageSolvers { chi: S::LsqlinLog, ..DecomposeStageSolvers::paper() },
+        ] {
+            assert!(DecomposeParams { solvers, ..DecomposeParams::paper() }.validate().is_err(), "{solvers:?}");
+        }
+    }
+
+    /// The per-voxel scales: the first echo, and S(0) extrapolated from the first two echoes
+    /// (falling back to the first echo where they do not decay).
+    #[test]
+    fn normalisation_divisors() {
+        let te = [0.005, 0.010, 0.015];
+        let m = [600.0, 300.0, 150.0];
+        assert_eq!(DecomposeNormalisation::GlobalMax.divisor(&m, &te, 1000.0), 1000.0);
+        assert_eq!(DecomposeNormalisation::FirstEcho.divisor(&m, &te, 1000.0), 600.0);
+        assert!((DecomposeNormalisation::ExtrapolatedS0.divisor(&m, &te, 1000.0) - 1200.0).abs() < 1e-9);
+        assert_eq!(DecomposeNormalisation::ExtrapolatedS0.divisor(&[300.0, 600.0, 1.0], &te, 1000.0), 300.0);
+    }
+
 }
