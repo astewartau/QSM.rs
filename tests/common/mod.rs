@@ -101,10 +101,21 @@ pub fn correlation(a: &[f64], b: &[f64], mask: &[u8]) -> f64 {
 ///   L = 1.0 (native ppm range), K1 = 0.01, K2 = 0.001
 /// Local statistics computed in 5×5×5 uniform windows.
 ///
+/// Both maps are demeaned within the mask (and zeroed outside it) first, as `nrmse_challenge`
+/// is: the χ reference is arbitrary, so an overall offset is not an error. QSM-CI's scorer
+/// (`eval/qsm_eval.py`) does the same; keep the two in step.
+///
 /// Reference: Milovic et al., "XSIM: A structural similarity index measure
 /// optimized for MRI QSM", Magn Reson Med. 2025;93:411-421.
 pub fn xsim(a: &[f64], b: &[f64], mask: &[u8], dims: (usize, usize, usize)) -> f64 {
     let (nx, ny, nz) = dims;
+    let demean = |x: &[f64]| -> Vec<f64> {
+        let (s, n) = x.iter().zip(mask).filter(|(_, &m)| m != 0)
+            .fold((0.0, 0usize), |(s, n), (&v, _)| (s + v, n + 1));
+        let mu = if n > 0 { s / n as f64 } else { 0.0 };
+        x.iter().zip(mask).map(|(&v, &m)| if m != 0 { v - mu } else { 0.0 }).collect()
+    };
+    let (a, b) = (demean(a), demean(b));
     // XSIM parameters: L=1, K1=0.01, K2=0.001
     let c1: f64 = 1e-4;  // (K1 * L)² = (0.01)²
     let c2: f64 = 1e-6;  // (K2 * L)² = (0.001)²
