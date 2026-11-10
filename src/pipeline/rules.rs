@@ -1817,7 +1817,8 @@ pub static RULES: &[Rule] = &[
     // ---------------------------------------------------------------- Dipole inversion
     Rule {
         id: "star.padding",
-        when: &[inv(&[Choice("star")])],
+        // DECOMPOSE's pipeline calls QSM_star itself, not through the GUI (decompose.star-pad).
+        when: &[inv(&[Choice("star")]), unless_sep(&[Choice("decompose")])],
         setting: "inversion.star.pad",
         expect: Test::OneOf { values: &[Value::Vector(&[8.0, 8.0, 20.0])] },
         default: Value::Vector(&[8.0, 8.0, 20.0]),
@@ -2039,6 +2040,22 @@ pub static RULES: &[Rule] = &[
         &[Choice("star")],
         "DECOMPOSE's χ of each echo was reconstructed with STAR-QSM",
         "Chen et al. 2021 NeuroImage 242:118477 (DECOMPOSE), §3.6"),
+    Rule {
+        id: "decompose.star-pad",
+        when: &[sep(&[Choice("decompose")]), inv(&[Choice("star")])],
+        setting: "inversion.star.pad",
+        expect: Test::OneOf { values: &[Value::Vector(&[0.0, 0.0, 0.0])] },
+        default: Value::Vector(&[0.0, 0.0, 0.0]),
+        unit: Unit::Voxels,
+        strength: Strength::Reference,
+        basis: Basis::ReferenceChoice,
+        reason: "DECOMPOSE's paper reconstructs each echo \"with functions in STI Suite V3.0\" and gives \
+                 no parameters, so QSM_star runs as the function does without 'padsize': no padding \
+                 (not the GUI's [8 8 20])",
+        source: "Chen et al. 2021 NeuroImage 242:118477 (DECOMPOSE), §3.6; STI Suite 3.0 QSM_star's \
+                 own default, probed (QSM.rs StarParams::pad, QSM_STAR_DEFAULT_PAD); Ashley \
+                 2026-11-10 (decision 56)",
+    },
     recommend("decompose.qsm-per-echo", &[sep(&[Choice("decompose")])], "qsm_per_echo", &[Bool(true)],
         "DECOMPOSE's authors reconstruct a QSM for each echo, χ(t), rather than one QSM from all \
          echoes combined, and state that a TE-dependent QSM input is necessary",
@@ -2463,6 +2480,11 @@ mod tests {
             ("qsmart.ilsqr-pad", Case::new(|c| { inversion(I::Qsmart)(c); c.cfg.inversion.qsmart.ilsqr_pad_mm = 12.0 })),
             ("r2star-qsm.qsm-medi", Case::new(separation(S::R2starQsm))),
             ("decompose.qsm-star", Case::new(separation(S::Decompose))),
+            ("decompose.star-pad", Case::new(|c| {
+                separation(S::Decompose)(c);
+                c.cfg.inversion.algorithm = I::Star;
+                c.cfg.inversion.star.pad = [8, 8, 20];
+            })),
             ("decompose.qsm-per-echo", Case::new(separation(S::Decompose))),
             ("decompose.unwrap-7t", Case::new(|c| {
                 separation(S::Decompose)(c);

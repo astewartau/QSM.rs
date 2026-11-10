@@ -197,8 +197,13 @@
 //!   TE-dependent QSM as the input", §4.1). A host gets it from a per-echo reconstruction
 //!   ([`crate::pipeline::per_echo`]). The signal model (Eq. 4) is
 //!   `y(t) = M(t)·exp(−i·(2/3)·χ(t)·γ·B0·t)` with the per-echo χ(t), not one echo-combined χ.
-//!   [`decompose`] takes that per-echo χ. (The authors' script runs STAR-QSM per echo at
-//!   `padsize` 12 after `MRPhaseUnwrap` and `V_SHARP(smvsize 25)` of that echo.)
+//!   [`decompose`] takes that per-echo χ. The paper gives no STAR parameters ("functions in STI
+//!   Suite V3.0"), so its pipeline runs `QSM_star` as the function does without `'padsize'`: no
+//!   padding (rule `decompose.star-pad`; [`crate::inversion::star::QSM_STAR_DEFAULT_PAD`]), not
+//!   the GUI's [8 8 20]. On the in-vivo s005001 Prisma scan the GUI padding moved each echo's χ by
+//!   2.6–5.0 % NRMSE and χ± by about 1.2 points (QSMxT/QSM-CI#421). (The authors' script runs
+//!   STAR-QSM per echo at `padsize` 12 after `MRPhaseUnwrap` and `V_SHARP(smvsize 25)` of that
+//!   echo; the pipeline follows the paper, Ashley 2026-11-10.)
 //! - **Referencing:** χ referenced to the whole-brain mean.
 //! - **Constants:** `0.5 > |χ+|, |χ−| > 0` (§2.2, [`DecomposeParams::chi_bound`]'s default), and
 //!   `a = 323.5 Hz/ppm` at 3 T (§2.1), which the formula above reproduces and which scales with
@@ -216,7 +221,7 @@
 //! # Pipeline rules
 //!
 //! The facts above that a configuration can depart from are published as rules in
-//! [`crate::pipeline::rules::RULES`] (each with its strength, basis, reason and source): `decompose.mask-bet`, `decompose.mask-input` (the first echo's magnitude, §3.6), `decompose.mask-no-correction`, `decompose.mask-no-erosion`, `decompose.unwrap-laplacian`, `decompose.bg-vsharp`, `decompose.qsm-star`, `decompose.qsm-per-echo` (Recommended: stated by the authors, §2.2 and §4.1), `decompose.fit-paper`, `decompose.reference-mean`, and at 7 T `decompose.unwrap-7t` and `decompose.chi-bound-7t` (Recommended: measured, *At 7 T* above).
+//! [`crate::pipeline::rules::RULES`] (each with its strength, basis, reason and source): `decompose.mask-bet`, `decompose.mask-input` (the first echo's magnitude, §3.6), `decompose.mask-no-correction`, `decompose.mask-no-erosion`, `decompose.unwrap-laplacian`, `decompose.bg-vsharp`, `decompose.qsm-star`, `decompose.star-pad` (STAR unpadded, `QSM_star`'s own default), `decompose.qsm-per-echo` (Recommended: stated by the authors, §2.2 and §4.1), `decompose.fit-paper`, `decompose.reference-mean`, and at 7 T `decompose.unwrap-7t` and `decompose.chi-bound-7t` (Recommended: measured, *At 7 T* above).
 
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
