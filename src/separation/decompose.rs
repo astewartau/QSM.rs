@@ -194,7 +194,7 @@
 //! # Pipeline rules
 //!
 //! The facts above that a configuration can depart from are published as rules in
-//! [`crate::pipeline::rules::RULES`] (each with its strength, basis, reason and source): `decompose.mask-bet`, `decompose.unwrap-laplacian`, `decompose.bg-vsharp`, `decompose.qsm-star`, `decompose.qsm-per-echo` (Recommended: stated by the authors, §2.2 and §4.1), `decompose.reference-mean`, and at 7 T `decompose.unwrap-7t` and `decompose.chi-bound-7t` (Recommended: measured, *At 7 T* above).
+//! [`crate::pipeline::rules::RULES`] (each with its strength, basis, reason and source): `decompose.mask-bet`, `decompose.mask-input` (the first echo's magnitude, §3.6), `decompose.mask-no-correction`, `decompose.mask-no-erosion`, `decompose.unwrap-laplacian`, `decompose.bg-vsharp`, `decompose.qsm-star`, `decompose.qsm-per-echo` (Recommended: stated by the authors, §2.2 and §4.1), `decompose.reference-mean`, and at 7 T `decompose.unwrap-7t` and `decompose.chi-bound-7t` (Recommended: measured, *At 7 T* above).
 
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;

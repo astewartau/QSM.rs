@@ -1093,6 +1093,9 @@ const fn discourage(
 const BET: &[Value] = &[Choice("bet")];
 const MEDI_MASK_SOURCE: &str = "MEDI toolbox README.m (iMag = sqrt(sum(abs(iField).^2,4)); Mask = BET(iMag, ...)), \
     l. 92 and 111 in the 2020 fork at ~/code/ref/medi; BET.m calls the bet2 mex";
+const DECOMPOSE_MASK_SOURCE: &str = "Chen et al. 2021 NeuroImage 242:118477 (DECOMPOSE), §3.6 (\"The GRE \
+    magnitude images of the first echo was used to mask and extract the brain tissue using ... BET\"); \
+    BET's f, erosion and correction are not stated";
 const CHI_SEP_MASK_SOURCE: &str = "χ-separation toolbox v1.1.3 Chisep_script.m:75 (mag = sqrt(sum(abs(mag_multi_echo).^2,4))), :82 (BET)";
 /// The CG iteration count `pdf.cg-iterations` suggests (measured; see `PdfParams::n_cg`).
 const PDF_SUGGESTED_N_CG: f64 = 300.0;
@@ -1241,6 +1244,18 @@ pub static RULES: &[Rule] = &[
         CHI_SEP_MASK_SOURCE),
     reference("chi-sep.mask-no-erosion", &[sep(CHI_SEP_TOOLBOX)], "masking.erosion", &[Number(0.0)],
         "The χ-separation toolbox uses BET's mask as it is, without eroding it", CHI_SEP_MASK_SOURCE),
+    // DECOMPOSE's paper describes BET on the first echo's magnitude and nothing more: no
+    // correction before it and no erosion after it are stated, so none is what its pipeline runs.
+    reference("decompose.mask-input", &[sep(&[Choice("decompose")])], "masking.input",
+        &[Choice("magnitude-first")], "DECOMPOSE's authors run BET on the first echo's GRE magnitude",
+        DECOMPOSE_MASK_SOURCE),
+    reference("decompose.mask-no-correction", &[sep(&[Choice("decompose")])],
+        "masking.inhomogeneity_correction", &[Choice("none")],
+        "DECOMPOSE's authors run BET on the first echo's magnitude; no bias-field correction is described",
+        DECOMPOSE_MASK_SOURCE),
+    reference("decompose.mask-no-erosion", &[sep(&[Choice("decompose")])], "masking.erosion", &[Number(0.0)],
+        "DECOMPOSE's authors extract the brain with BET; no erosion of its mask is described",
+        DECOMPOSE_MASK_SOURCE),
     reference("qsmart.mask-input", &[inv(&[Choice("qsmart")])], "masking.input", &[Choice("magnitude-first")],
         "QSMART runs BET on the first echo's magnitude (root-sum-of-squares over coils)",
         "QSMART brainmask.m l. 7"),
@@ -2087,6 +2102,9 @@ mod tests {
             ("chi-sep.mask-input", Case::new(separation(S::ChiSepIlsqr))),
             ("chi-sep.mask-no-correction", Case::new(separation(S::ChiSepNet))),
             ("chi-sep.mask-no-erosion", Case::new(separation(S::ChiSepMedi))),
+            ("decompose.mask-input", Case::new(separation(S::Decompose))),
+            ("decompose.mask-no-correction", Case::new(separation(S::Decompose))),
+            ("decompose.mask-no-erosion", Case::new(separation(S::Decompose))),
             ("qsmart.mask-input", Case::new(inversion(I::Qsmart))),
             ("qsmart.mask-n4", Case::new(inversion(I::Qsmart))),
             ("qsmart.bet-f", Case::new(|c| {
