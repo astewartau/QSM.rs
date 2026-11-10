@@ -117,7 +117,9 @@ pub enum WhQsmWeight {
     /// from 1.29–1.37 to 1.04–1.20. On QSM-CI's simulated head (whose local field is true outside
     /// the mask too) it is 16 % (χ NRMSE) from the original and further from the truth (38.2 %
     /// against 33.6 %, r 0.927 against 0.945). A trade-off, so an option (2026-11-09,
-    /// `~/work/emtp-v11/regressions-dipole.md`).
+    /// `~/work/emtp-v11/regressions-dipole.md`). The rules offer it in place of `Flat` for in-vivo
+    /// data without preselecting it (`whqsm.flat-in-mask-in-vivo`,
+    /// [`Strength::Suggested`](crate::pipeline::rules::Strength::Suggested); decided 2026-11-10).
     FlatInMask,
 }
 

@@ -54,11 +54,15 @@
 //!     benefit and recorded it in the method's docs ([`Basis::Measured`]).
 //!   - [`Strength::Discouraged`]: a combination known to fail, stated by the authors or measured
 //!     (or a setting QSM.rs ignores in that combination, [`Basis::Implementation`]).
+//!   - [`Strength::Suggested`]: QSM.rs measured a benefit on some data but not all (better in
+//!     vivo, slightly worse on QSM-CI's simulated head), so it is offered with its reason but
+//!     not preselected ([`Basis::Measured`]; decided 2026-11-10). E.g. NDI's in-mask weight
+//!     normaliser and WH-QSM's in-mask flat weight.
 //!   - [`Strength::Reference`]: the original authors' setting ([`Kind::Reference`]): their code
 //!     or paper simply does it ([`Basis::ReferenceChoice`]), or their README or a code comment
 //!     instructs it without saying why ([`Basis::Stated`]).
 //!
-//!   Precedence is `Required > Recommended > Discouraged > Reference` (`Strength: Ord`). A
+//!   Precedence is `Required > Recommended > Discouraged > Suggested > Reference` (`Strength: Ord`). A
 //!   reason outranks a bare reference choice; a recommendation outranks a discouragement because
 //!   a recommendation names the value to use, while a discouragement only names one to avoid.
 //!   This module reports every finding and leaves resolving them to the host.
@@ -67,6 +71,9 @@
 //!   - `Recommended` and `Discouraged` (reasoned): offered as a change, labelled as a
 //!     recommendation with its reason, with the recommended value **preselected**; a host's
 //!     "accept recommendations" applies them. A badge on the setting afterwards.
+//!   - `Suggested` (reasoned): offered and labelled as a recommendation with its reason, like
+//!     `Recommended`, but **not preselected** and not applied by "accept recommendations"; a host
+//!     applies it only when the user picks it ([`Strength::preselected`]).
 //!   - `Reference`: shown (e.g. when its method is chosen), labelled as the original authors'
 //!     setting, but **never preselected** and never applied by "accept recommendations"; a host
 //!     applies it only when the user picks it or asks for the authors' settings explicitly.
@@ -115,7 +122,7 @@ use crate::segment::synthseg::{synthseg_network_grid, SynthSegInference, SynthSe
 // Types
 // =========================================================================
 
-/// How strongly a rule applies. Ordered `Reference < Discouraged < Recommended < Required`, so
+/// How strongly a rule applies. Ordered `Reference < Suggested < Discouraged < Recommended < Required`, so
 /// `max` is the finding that takes precedence on a setting (see the module docs, *Strength*).
 #[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(rename_all = "snake_case")]
@@ -123,6 +130,10 @@ pub enum Strength {
     /// The original authors' setting: what the method's reference pipeline does or instructs,
     /// where nobody has said why it is needed or better ([`Kind::Reference`]). Never preselected.
     Reference,
+    /// Better for a measured reason on some data but not all (e.g. better in vivo, slightly worse
+    /// on QSM-CI's simulated head): offered with its reason, but never preselected
+    /// ([`Strength::preselected`]).
+    Suggested,
     /// A combination known to fail (measured, or stated by the authors with the reason).
     Discouraged,
     /// Better for a stated reason: the authors say why (paper, README or code comment), or
@@ -138,8 +149,16 @@ impl Strength {
     pub const fn kind(self) -> Kind {
         match self {
             Strength::Reference => Kind::Reference,
-            Strength::Discouraged | Strength::Recommended | Strength::Required => Kind::Reasoned,
+            Strength::Suggested | Strength::Discouraged | Strength::Recommended | Strength::Required => {
+                Kind::Reasoned
+            }
         }
+    }
+
+    /// Whether a host offers this rule's change preselected, and its "accept recommendations"
+    /// applies it: every reasoned strength but [`Strength::Suggested`].
+    pub const fn preselected(self) -> bool {
+        matches!(self, Strength::Discouraged | Strength::Recommended | Strength::Required)
     }
 }
 
@@ -153,7 +172,8 @@ pub enum Kind {
     /// and never preselects or bulk-applies it.
     Reference,
     /// Needed or better for the reason in [`Rule::reason`]: a hard requirement, a known failure,
-    /// the authors' stated reason, or a QSM.rs measurement. A host preselects it.
+    /// the authors' stated reason, or a QSM.rs measurement. A host preselects it, except a
+    /// [`Strength::Suggested`] one ([`Strength::preselected`]).
     Reasoned,
 }
 
@@ -344,7 +364,8 @@ pub enum Unit {
 
 /// A rule: when [`Self::when`] holds, [`Self::setting`] should pass [`Self::expect`].
 ///
-/// Serialised with every field and its [`Kind`] (`"kind"`, from the strength).
+/// Serialised with every field, its [`Kind`] (`"kind"`) and whether a host preselects it
+/// (`"preselected"`), both from the strength.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Rule {
     /// Stable identifier, `<method>.<what>` in kebab case.
@@ -391,7 +412,7 @@ impl Rule {
 impl Serialize for Rule {
     fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeStruct;
-        let mut m = s.serialize_struct("Rule", 11)?;
+        let mut m = s.serialize_struct("Rule", 12)?;
         m.serialize_field("id", self.id)?;
         m.serialize_field("when", self.when)?;
         m.serialize_field("setting", self.setting)?;
@@ -400,6 +421,7 @@ impl Serialize for Rule {
         m.serialize_field("unit", &self.unit)?;
         m.serialize_field("kind", &self.kind())?;
         m.serialize_field("strength", &self.strength)?;
+        m.serialize_field("preselected", &self.strength.preselected())?;
         m.serialize_field("basis", &self.basis)?;
         m.serialize_field("reason", self.reason)?;
         m.serialize_field("source", self.source)?;
@@ -547,12 +569,14 @@ pub const SETTINGS: &[(&str, &str)] = &[
     ("bg_removal.resharp.radius", "RESHARP's kernel radius, mm; only with RESHARP"),
     ("bg_removal.resharp.max_iter", "RESHARP's cgs iteration cap; only with RESHARP"),
     ("bg_removal.pdf.n_cg", "PDF's CG iteration cap (PdfParams::n_cg); only with PDF"),
+    ("bg_removal.iharperella.rim", "iHARPERELLA's boundary-rim rule: sti or whole (HarperellaRim::id); only with iHARPERELLA"),
     ("bg_removal.lbv.tol", "LBV's coarsest-grid stopping tolerance, radians over the echo spacing (LbvParams::tol); only with LBV"),
     ("inversion.algorithm", "Dipole inversion (InversionAlgorithm::id)"),
     ("inversion.star.pad", "STAR-QSM padding per side, voxels (StarParams::pad)"),
     ("inversion.ilsqr.max_iter", "iLSQR's LSQR iteration cap (IlsqrParams::max_iter); only with iLSQR"),
     ("inversion.ilsqr.pad_mm", "iLSQR's padding, mm (IlsqrParams::pad_mm); only with iLSQR"),
-    ("inversion.whqsm.weight", "WH-QSM's data weight: flat, max-normalised or in-vivo (WhQsmWeight); only with WH-QSM"),
+    ("inversion.whqsm.weight", "WH-QSM's data weight: flat, flat-in-mask, max-normalised or in-vivo (WhQsmWeight); only with WH-QSM"),
+    ("inversion.ndi.weight_norm", "NDI's magnitude-weight normaliser: global-max or mask-p999 (NdiWeightNorm::id); only with NDI"),
     ("inversion.star.te", "Echo time STAR-QSM converts at (EchoTime: first, last, spacing, sum, seconds); only with STAR"),
     ("inversion.fansi.te", "Echo time FANSI nlTV/nlTGV convert at (EchoTime); only with fansi or fansi-tgv"),
     ("inversion.ndi.te", "Echo time NDI converts at (EchoTime); only with NDI"),
@@ -725,6 +749,11 @@ pub fn current(input: &RuleInput, facts: &ScanFacts, setting: &str) -> Option<Ve
         "bg_removal.resharp.max_iter" => gated(resharp, Current::Number(c.bg_removal.resharp.max_iter as f64)),
         "bg_removal.pdf.n_cg" => gated(pdf, Current::Number(c.bg_removal.pdf.n_cg as f64)),
         "bg_removal.lbv.tol" => gated(lbv, Current::Number(c.bg_removal.lbv.tol)),
+        "bg_removal.iharperella.rim" => gated(
+            bg(super::config::BgRemovalAlgorithm::Iharperella),
+            Current::Choice(c.bg_removal.iharperella.rim.id()),
+        ),
+        "inversion.ndi.weight_norm" => gated(alg(&[A::Ndi]), Current::Choice(c.inversion.ndi.weight_norm.id())),
         "inversion.whqsm.weight" => gated(
             alg(&[A::Whqsm]),
             Current::Choice(match c.inversion.whqsm.weight {
@@ -934,6 +963,19 @@ const fn measured_better(
     source: &'static str,
 ) -> Rule {
     one_of(id, when, setting, values, Strength::Recommended, Basis::Measured, reason, source)
+}
+
+/// What QSM.rs measured to be better on some data but not all ([`Strength::Suggested`]): offered
+/// with its reason, never preselected.
+const fn suggest(
+    id: &'static str,
+    when: &'static [Condition],
+    setting: &'static str,
+    values: &'static [Value],
+    reason: &'static str,
+    source: &'static str,
+) -> Rule {
+    one_of(id, when, setting, values, Strength::Suggested, Basis::Measured, reason, source)
 }
 
 /// The original authors' setting: what their code or paper does, without saying it is needed or
@@ -1594,6 +1636,28 @@ pub static RULES: &[Rule] = &[
         "With the prefilter off, MEDI fits the unfiltered field with the SMV-filtered kernel: \
          NRMSE 280-740 % on the phantom after PDF, V-SHARP or LBV, and 481 % in the authors' MATLAB",
         "QSM.rs inversion::msmv docs and MsmvParams::prefilter (#285)"),
+    // ---------------------------------------------------------------- Boundary rim and in-vivo weights (v11, #437, #438)
+    measured_better("iharperella.whole-rim", &[bg(&[Choice("iharperella")])],
+        "bg_removal.iharperella.rim", &[Choice("whole")],
+        "On a field map the brain's boundary rim holds the step at the mask edge; zeroing the whole \
+         rim rather than STI's 20 % largest values made iHARPERELLA more reproducible across \
+         scanners (travelling heads, inter-scanner median |slope - 1| 7.1 vs 3.8 %) and better on \
+         the simulated head from a ROMEO field (XSIM 0.295 vs 0.244)",
+        "QSM.rs bgremove::harperella HarperellaRim docs (#438)"),
+    suggest("ndi.weight-norm-in-vivo", &[inv(&[Choice("ndi")])],
+        "inversion.ndi.weight_norm", &[Choice("mask-p999")],
+        "In vivo the magnitude's maximum is often outside the brain (2.3-5x the brain's 99.9th \
+         percentile), so FANSI's max-normalised weight, and NDI's scale, vary from scan to scan; \
+         normalising by the in-mask 99.9th percentile gave scales 1.04-1.07 against iLSQR (0.43-0.91). \
+         Slightly worse on the simulated head (NRMSE 53.9 vs 52.0 %), whose maximum is in the brain",
+        "QSM.rs inversion::ndi NdiWeightNorm docs (#437)"),
+    suggest("whqsm.flat-in-mask-in-vivo",
+        &[inv(&[Choice("whqsm")]), method("inversion.whqsm.weight", &[Choice("flat")])],
+        "inversion.whqsm.weight", &[Choice("flat-in-mask")],
+        "In vivo the flat weight's data term outside the brain adds smooth shading; the weight \
+         inside the mask only gave r 0.72-0.75 with iLSQR (0.58-0.60). Slightly worse on the \
+         simulated head (NRMSE 38.2 vs 33.6 %), whose local field is true outside the mask too",
+        "QSM.rs inversion::whqsm WhQsmWeight::FlatInMask docs (#437)"),
     // ---------------------------------------------------------------- Echo time of the ppm↔rad conversion (#276)
     // With one echo every choice is the same time, so these need several.
     measured_better("fansi.te-spacing", &[inv(&[Choice("fansi"), Choice("fansi-tgv")]), MULTI_ECHO],
@@ -1828,6 +1892,22 @@ mod tests {
         c.cfg.field_mapping.b0_estimation = B0EstimationMethod::LinearFit(Default::default());
     }
 
+    /// A suggestion is reasoned (it gives a reason) but never preselected; every other reasoned
+    /// strength is, and the JSON says so.
+    #[test]
+    fn suggested_is_reasoned_and_not_preselected() {
+        assert_eq!(Strength::Suggested.kind(), Kind::Reasoned);
+        assert!(!Strength::Suggested.preselected() && !Strength::Reference.preselected());
+        assert!(Strength::Discouraged.preselected() && Strength::Recommended.preselected() && Strength::Required.preselected());
+        assert!(Strength::Reference < Strength::Suggested && Strength::Suggested < Strength::Discouraged);
+        let ndi = RULES.iter().find(|r| r.id == "ndi.weight-norm-in-vivo").unwrap();
+        let json = serde_json::to_value(ndi).unwrap();
+        assert_eq!((json["kind"].as_str(), json["strength"].as_str(), json["preselected"].as_bool()),
+            (Some("reasoned"), Some("suggested"), Some(false)));
+        let rim = RULES.iter().find(|r| r.id == "iharperella.whole-rim").unwrap();
+        assert_eq!(serde_json::to_value(rim).unwrap()["preselected"].as_bool(), Some(true));
+    }
+
     /// With HEIDI on, every inversion but LSQR gets a finding that offers LSQR: recommended,
     /// discouraged (with its reason) or required, never only information.
     #[test]
@@ -1976,6 +2056,9 @@ mod tests {
             })),
             ("fansi.te-spacing", Case::new(|c| { inversion(I::FansiTgv)(c); c.cfg.inversion.fansi.te = crate::EchoTime::First })),
             ("ndi.te-first", Case::new(|c| { inversion(I::Ndi)(c); c.cfg.inversion.ndi.te = crate::EchoTime::Spacing })),
+            ("iharperella.whole-rim", Case::new(background(B::Iharperella))),
+            ("ndi.weight-norm-in-vivo", Case::new(inversion(I::Ndi))),
+            ("whqsm.flat-in-mask-in-vivo", Case::new(inversion(I::Whqsm))),
             ("l1qsm.te-first", Case::new(|c| { inversion(I::L1qsm)(c); c.cfg.inversion.l1qsm.te = crate::EchoTime::Sum })),
             ("whqsm.flat-weight-te-spacing", Case::new(|c| { inversion(I::Whqsm)(c); c.cfg.inversion.whqsm.te = crate::EchoTime::Spacing })),
             ("whqsm.magnitude-weight-te-spacing", Case::new(|c| {
@@ -2151,11 +2234,12 @@ mod tests {
     #[test]
     fn strengths_order_and_rest_on_their_basis() {
         use Strength::*;
-        assert!(Required > Recommended && Recommended > Discouraged && Discouraged > Reference);
+        assert!(Required > Recommended && Recommended > Discouraged && Discouraged > Suggested && Suggested > Reference);
         for r in RULES {
             match r.strength {
                 Reference => assert!(matches!(r.basis, Basis::ReferenceChoice | Basis::Stated), "{}", r.id),
                 Recommended => assert!(matches!(r.basis, Basis::Stated | Basis::Measured), "{}", r.id),
+                Suggested => assert_eq!(r.basis, Basis::Measured, "{}", r.id),
                 Required | Discouraged => assert_ne!(r.basis, Basis::ReferenceChoice, "{}", r.id),
             }
         }

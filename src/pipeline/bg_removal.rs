@@ -41,6 +41,24 @@ pub fn run_bg_removal(
         });
     }
 
+    // Erode the mask first if asked (BgRemovalConfig::erode_voxels); the field is left whole.
+    let pre_eroded;
+    let mask: &[u8] = if config.erode_voxels > 0 {
+        if mask.len() != n_voxels {
+            return Err(PipelineError::DimensionMismatch { expected: n_voxels, got: mask.len() });
+        }
+        pre_eroded = crate::utils::morphology::erode_mask(mask, &grid, config.erode_voxels);
+        if !pre_eroded.iter().any(|&m| m != 0) {
+            return Err(PipelineError::InvalidConfig(format!(
+                "eroding the mask by {} voxels before background removal leaves no voxels",
+                config.erode_voxels
+            )));
+        }
+        &pre_eroded
+    } else {
+        mask
+    };
+
     let (local_field, eroded_mask) = match config.algorithm {
         BgRemovalAlgorithm::Vsharp => {
             if let crate::bgremove::VsharpGrid::Isotropic { spacing_mm } = config.vsharp.working_grid(&grid) {
@@ -266,6 +284,44 @@ mod tests {
                 Err(other) => panic!("{algorithm:?} gave {other:?}, not InvalidInput"),
                 Ok(_) => panic!("{algorithm:?} accepted a gapped volume"),
             }
+        }
+    }
+
+    /// `erode_voxels` shrinks the mask before the method runs; the field stays whole, and the
+    /// stage's output mask is inside the eroded one.
+    #[test]
+    fn erode_voxels_erodes_the_mask_before_background_removal() {
+        let n1 = 20;
+        let n = n1 * n1 * n1;
+        let meta = ScanMetadata {
+            dims: (n1, n1, n1), voxel_size: (1.0, 1.0, 1.0),
+            echo_times: vec![0.005], field_strength: 3.0, b0_direction: (0.0, 0.0, 1.0),
+            slice_geometry: None,
+            affine: None,
+        };
+        let c = (n1 as f64 - 1.0) / 2.0;
+        let mask: Vec<u8> = (0..n).map(|l| {
+            let (i, j, k) = ((l % n1) as f64, ((l / n1) % n1) as f64, (l / (n1 * n1)) as f64);
+            u8::from((i - c).powi(2) + (j - c).powi(2) + (k - c).powi(2) <= 8.0f64.powi(2))
+        }).collect();
+        let field: Vec<f64> = (0..n).map(|l| (l % 7) as f64 * 1e-3).collect();
+        let grid = meta.grid();
+        let eroded = crate::utils::morphology::erode_mask(&mask, &grid, 2);
+        for algorithm in [BgRemovalAlgorithm::Iharperella, BgRemovalAlgorithm::Sharp] {
+            let base = BgRemovalConfig { algorithm, ..Default::default() };
+            let config = BgRemovalConfig { erode_voxels: 2, ..base.clone() };
+            let r = run_bg_removal(&field, &mask, &meta, &config, None, &mut |_, _| {}).unwrap();
+            assert!(r.eroded_mask.iter().zip(&eroded).all(|(&o, &e)| o == 0 || e != 0), "{algorithm:?}");
+            // the same as running the method on the eroded mask directly
+            let direct = run_bg_removal(&field, &eroded, &meta, &base, None, &mut |_, _| {}).unwrap();
+            assert_eq!(r.local_field_ppm, direct.local_field_ppm, "{algorithm:?}");
+            assert_eq!(r.eroded_mask, direct.eroded_mask, "{algorithm:?}");
+        }
+        let all_gone = BgRemovalConfig { algorithm: BgRemovalAlgorithm::Sharp, erode_voxels: 20, ..Default::default() };
+        match run_bg_removal(&field, &mask, &meta, &all_gone, None, &mut |_, _| {}) {
+            Err(PipelineError::InvalidConfig(msg)) => assert!(msg.contains("leaves no voxels"), "{msg}"),
+            Err(other) => panic!("{other:?}"),
+            Ok(_) => panic!("ran on an empty mask"),
         }
     }
 

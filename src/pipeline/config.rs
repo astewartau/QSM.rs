@@ -542,6 +542,24 @@ pub struct BgRemovalConfig {
     /// with bounded memory ([`bfrnet_tiled`](crate::bgremove::bfrnet_tiled)). Ignored by the
     /// classical methods.
     pub tile: Option<(usize, usize)>,
+    /// Erode the brain mask by this many voxels (6-connected,
+    /// [`erode_mask`](crate::utils::morphology::erode_mask)) after field mapping, before background
+    /// removal. 0 (default) leaves it as it is.
+    ///
+    /// Not part of any method. QSMxT offers it as an option (QSMxT decision, 10 Nov 2026), because
+    /// the masked field map's outer voxels carry the step at the mask edge. Methods that take the
+    /// Laplacian of the field inside the mask (HARPERELLA, iHARPERELLA) and methods that keep the
+    /// brain's edge (PDF, LBV) carry that error inwards. The field is not changed, so the voxels
+    /// between the two masks are still there for the method's own boundary terms. Eroding in the
+    /// masking stage instead does not help, because the field map is then masked to the smaller mask.
+    ///
+    /// Measured (v11 background-removal sweep, 14 travelling-head scans, ROMEO field, RTS):
+    /// iHARPERELLA inter-scanner median |a−1| 7.1 % → 3.0 % with 3 voxels. On the QSM-CI simulated
+    /// head, χ XSIM 0.244 → 0.274 despite losing 9 % of the brain's voxels. No rule suggests it
+    /// yet. That waits for confirmation as a harmonization-campaign variant, and Laplacian +
+    /// PDF/LBV still need testing. The eroded mask is the stage's output mask
+    /// ([`BgRemovalResult::eroded_mask`]), so the inversion runs on it too.
+    pub erode_voxels: usize,
 }
 
 impl Default for BgRemovalConfig {
@@ -558,6 +576,7 @@ impl Default for BgRemovalConfig {
             iharperella: IharperellaParams::default(),
             sdf: SdfParams::default(),
             tile: None,
+            erode_voxels: 0,
         }
     }
 }
