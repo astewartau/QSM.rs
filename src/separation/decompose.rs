@@ -171,8 +171,24 @@
 //! - **Stage 5.1** ([`DecomposeStageSolver::LsqlinSumToOne`]): the amplitudes with
 //!   `C+ + C− + C₀ = 1`, `0 ≤ C ≤ 1`, solved exactly on the simplex instead of by `lsqlin`'s
 //!   interior-point iterations. The minimum is unique when the three compartments' signals are
-//!   independent, so `lsqlin` reaches the same point to its tolerance (to be confirmed against
-//!   MATLAB's `lsqlin`).
+//!   independent, so `lsqlin` reaches the same point to its tolerance. Within one pass that holds;
+//!   over the 10 passes it does not. The exact solve puts amplitudes at exactly 0 (26 % of them
+//!   in vivo), which freezes that compartment's χ in stage 5.3, while `lsqlin` leaves them at
+//!   about 1e-9 and stage 5.3 can still move them. The alternation has not converged in most
+//!   voxels, so the difference carries through. On the in-vivo s005001 Prisma scan, against QSM-CI's
+//!   MATLAB of the paper (real `lsqlin`), χ+ and χ− differ by 8.3 % and 7.7 % NRMSE. An
+//!   interior-point stand-in moves by 8 % / 6 % between tolerances 1e-8 and 1e-10, so the fit
+//!   depends on stage 5.1's last digits there. **Against a known truth the solvers do not
+//!   differ.** Each was run on 2,000 voxels simulated from the paper's signal model (TE 5:6:29 ms,
+//!   2.89 T; C± 0.02–0.45, R2*₀ 10–60 s⁻¹, |χ±| 0.01–0.15 ppm), noise-free and at SNR 200/100/50:
+//!   this exact solve, the interior-point stand-ins and MATLAB R2023b's `lsqlin` (recon.m's fit
+//!   loop, run verbatim). All give χ+ and χ− at about 74 % NRMSE from the truth, the same to 0.1
+//!   point. The solvers differ by about 1 % of the truth, while two noise draws at SNR 100 differ
+//!   by 22 % (QSMxT/QSM-CI#421, 2026-11-10). The exact solve is kept (Ashley, decision 57).
+//! - **How well the paper's fit recovers χ±:** poorly, whatever the solver. In that simulation,
+//!   χ+ and χ− correlate 0.23 / 0.21 with their truth and −0.56 with the other compartment's
+//!   (cross-talk). The fitted amplitudes are 124–129 % NRMSE from theirs and R2*₀ 44 %, even
+//!   without noise.
 //! - **Stage 5.2** ([`DecomposeStageSolver::LsqlinLog`]): R2*₀ in closed form, since the log
 //!   residual is linear in it.
 //! - **Stage 5.3**: `lsqnonlin` trust-region-reflective, which is the `lsqcurvefit` port.
@@ -389,8 +405,10 @@ pub enum DecomposeStageSolver {
     /// equality-constrained least squares on that face, from its KKT system) and the feasible
     /// solution with the smallest residual is the minimum. When the three compartments' signals
     /// are linearly independent the objective is strictly convex and its minimum unique, so
-    /// `lsqlin` converges to this point and differs from it only by its tolerances (to be checked
-    /// against MATLAB's `lsqlin`). When they are not (χ+ or χ− at 0 makes that compartment's
+    /// `lsqlin` converges to this point and differs from it only by its tolerances; over the
+    /// paper's 10 alternating passes those differences carry through in degenerate voxels, with no
+    /// effect on accuracy against a known truth (see the module docs, *The paper's fit*). When they
+    /// are not (χ+ or χ− at 0 makes that compartment's
     /// signal equal C₀'s), the minimum is a set; interior-point methods tend to its centre, and
     /// a tiny ridge (1e-12 of the trace) makes this the minimum-norm point, which splits equal
     /// compartments equally. The reconstruction (PSC, DSC) does not depend on that split.
