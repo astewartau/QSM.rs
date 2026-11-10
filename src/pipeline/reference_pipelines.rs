@@ -31,9 +31,9 @@
 //! - **Scan-dependent rules apply on the scan.** A rule with a scan condition (MEDI's echo-time
 //!   choice needs more than one echo) is part of the pipeline only when the scan is known to meet
 //!   it, as everywhere in [`rules`](super::rules).
-//! - **What cannot be reproduced is said.** [`ReferencePipeline::not_reproduced`] lists the
-//!   steps of the toolbox's pipeline QSM.rs does not reproduce, for the host to show before the
-//!   pipeline is chosen. Every pipeline here is reproduced in full today.
+//! - **Parity is checked, not declared.** Whether a pipeline reproduces its toolbox is measured
+//!   by QSM-CI's whole-pipeline parity track (QSMxT/QSM-CI#421), against each toolbox's own
+//!   pipeline run end to end; a QSMxT release waits on it.
 //! - **Which pipelines.** A toolbox whose own code runs a whole pipeline around its method, with
 //!   rules for it: the MEDI toolbox, STI Suite (its iLSQR and STAR-QSM), QSMART, the HEIDI
 //!   package, the χ-separation toolbox (its three methods) and DECOMPOSE. A method that is only
@@ -59,8 +59,6 @@ pub struct ReferencePipeline {
     pub choose: &'static [(&'static str, Value)],
     /// Where the pipeline is written down: the toolbox's script, README or paper.
     pub source: &'static str,
-    /// Steps of the toolbox's pipeline that QSM.rs does not reproduce, one line each.
-    pub not_reproduced: &'static [&'static str],
 }
 
 /// The catalogue, in the order a host lists it.
@@ -71,7 +69,6 @@ pub static REFERENCE_PIPELINES: &[ReferencePipeline] = &[
         toolbox: "MEDI toolbox 2024.11.26",
         choose: &[("inversion.algorithm", Choice("medi"))],
         source: "MEDI toolbox 2024.11.26 README.m:80-144",
-        not_reproduced: &[],
     },
     ReferencePipeline {
         id: "sti-suite-ilsqr",
@@ -79,7 +76,6 @@ pub static REFERENCE_PIPELINES: &[ReferencePipeline] = &[
         toolbox: "STI Suite 3.0",
         choose: &[("inversion.algorithm", Choice("ilsqr"))],
         source: "STI Suite 3.0 QSM_GUI, probed headless (QSM.rs ilsqr.rs and vsharp.rs docs)",
-        not_reproduced: &[],
     },
     ReferencePipeline {
         id: "sti-suite-star",
@@ -87,7 +83,6 @@ pub static REFERENCE_PIPELINES: &[ReferencePipeline] = &[
         toolbox: "STI Suite 3.0",
         choose: &[("inversion.algorithm", Choice("star"))],
         source: "STI Suite 3.0 QSM_GUI, probed headless (QSM.rs star.rs and vsharp.rs docs)",
-        not_reproduced: &[],
     },
     ReferencePipeline {
         id: "qsmart",
@@ -95,7 +90,6 @@ pub static REFERENCE_PIPELINES: &[ReferencePipeline] = &[
         toolbox: "QSMART",
         choose: &[("inversion.algorithm", Choice("qsmart"))],
         source: "QSMART QSMART.m; Yaghmaie et al. 2021 NeuroImage 231:117701",
-        not_reproduced: &[],
     },
     ReferencePipeline {
         id: "heidi",
@@ -103,7 +97,6 @@ pub static REFERENCE_PIPELINES: &[ReferencePipeline] = &[
         toolbox: "HEIDI package (qsm_heidi 4592631)",
         choose: &[("inversion.algorithm", Choice("lsqr")), ("inversion.apply_heidi", Bool(true))],
         source: "qsm_heidi makefile and def.sh (4592631); Schweser et al. 2012 NeuroImage 62:2083",
-        not_reproduced: &[],
     },
     ReferencePipeline {
         id: "chi-sep-ilsqr",
@@ -111,7 +104,6 @@ pub static REFERENCE_PIPELINES: &[ReferencePipeline] = &[
         toolbox: "χ-separation toolbox 1.1.3",
         choose: &[("separation.algorithm", Choice("chi-sep-ilsqr"))],
         source: "χ-separation toolbox v1.1.3 Chisep_script.m",
-        not_reproduced: &[],
     },
     ReferencePipeline {
         id: "chi-sep-medi",
@@ -119,7 +111,6 @@ pub static REFERENCE_PIPELINES: &[ReferencePipeline] = &[
         toolbox: "χ-separation toolbox 1.1.3",
         choose: &[("separation.algorithm", Choice("chi-sep-medi"))],
         source: "χ-separation toolbox v1.1.3 Chisep_script.m",
-        not_reproduced: &[],
     },
     ReferencePipeline {
         id: "chi-sepnet",
@@ -127,7 +118,6 @@ pub static REFERENCE_PIPELINES: &[ReferencePipeline] = &[
         toolbox: "χ-separation toolbox 1.1.3",
         choose: &[("separation.algorithm", Choice("chi-sepnet")), ("separation.chi_sepnet.route", Choice("toolbox"))],
         source: "χ-separation toolbox v1.1.3 Chisep_script.m; Kim et al. 2025 (χ-sepnet)",
-        not_reproduced: &[],
     },
     ReferencePipeline {
         id: "decompose",
@@ -138,7 +128,6 @@ pub static REFERENCE_PIPELINES: &[ReferencePipeline] = &[
         // (`decompose.qsm-per-echo`) is a reasoned one: see the decision above.
         choose: &[("separation.algorithm", Choice("decompose")), ("qsm_per_echo", Bool(true))],
         source: "Chen et al. 2021 NeuroImage 242:118477 (DECOMPOSE), §2.2, §3.6, §4.1",
-        not_reproduced: &[],
     },
 ];
 

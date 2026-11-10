@@ -322,6 +322,12 @@ pub enum Condition {
     Setting { setting: &'static str, is: Test },
     /// A scan or host fact passes `is` (an unknown fact never holds).
     Fact { fact: Fact, is: Test },
+    /// No value of a setting passes `is`: the [`Condition::Setting`] it names does not hold. A
+    /// setting not in play has no value, so this holds. It scopes a rule out of a choice that has
+    /// its own value for the setting: STI Suite's field-mapping rules do not apply under the
+    /// χ-separation toolbox, which runs STI Suite's iLSQR but maps the field its own way
+    /// (`sti.unwrap-laplacian`). Never a rule's trigger.
+    Unless { setting: &'static str, is: Test },
 }
 
 /// The unit of a rule's setting, for numbers and vectors.
@@ -815,6 +821,7 @@ fn holds(cond: &Condition, input: &RuleInput, facts: &ScanFacts) -> bool {
             current(input, facts, setting).unwrap_or_default().iter().any(|v| is.passes(v))
         }
         Condition::Fact { fact, is } => facts.fact(*fact, input).is_some_and(|v| is.passes(&v)),
+        Condition::Unless { setting, is } => !holds(&Condition::Setting { setting, is: *is }, input, facts),
     }
 }
 
@@ -855,6 +862,10 @@ const fn bg(values: &'static [Value]) -> Condition {
 const fn sep(values: &'static [Value]) -> Condition {
     method("separation.algorithm", values)
 }
+/// None of these χ-separation methods is chosen (χ-separation off holds too).
+const fn unless_sep(values: &'static [Value]) -> Condition {
+    C::Unless { setting: "separation.algorithm", is: Test::OneOf { values } }
+}
 const fn fact_at_least(fact: Fact, min: f64) -> Condition {
     C::Fact { fact, is: Test::Range { min: Some(min), max: None } }
 }
@@ -863,6 +874,10 @@ const fn fact_at_most(fact: Fact, max: f64) -> Condition {
 }
 const fn manufacturer(values: &'static [Value]) -> Condition {
     C::Fact { fact: Fact::Manufacturer, is: Test::OneOf { values } }
+}
+/// A known manufacturer other than these (an unknown one does not hold).
+const fn not_manufacturer(values: &'static [Value]) -> Condition {
+    C::Fact { fact: Fact::Manufacturer, is: Test::NoneOf { values } }
 }
 const ON_WASM: Condition = C::Fact { fact: Fact::Target, is: Test::OneOf { values: &[Choice("wasm")] } };
 const MULTI_ECHO: Condition = fact_at_least(Fact::EchoCount, 2.0);
@@ -991,12 +1006,13 @@ const WEIGHTED_AVG: &[Value] = &[Choice("weighted-avg")];
 const CHI_SEP_TOOLBOX: &[Value] = &[Choice("chi-sep-ilsqr"), Choice("chi-sep-medi"), Choice("chi-sepnet")];
 /// χ-sepnet's toolbox route (`ChiSepNetRoute::Toolbox`).
 const CHI_SEPNET_TOOLBOX_ROUTE: Condition = method("separation.chi_sepnet.route", &[Choice("toolbox")]);
-/// The taper ratio the χ-separation toolbox recommends for Siemens and GE data.
-pub const CHISEP_TUKEY_SIEMENS_GE: f64 = 0.4;
+/// The χ-separation toolbox's taper ratio (`tukey_fac`): its script's value, which its comment
+/// leaves for every manufacturer but Philips (0).
+pub const CHISEP_TUKEY: f64 = 0.4;
 const TUKEY_SOURCE: &str = "χ-separation toolbox v1.1.3 Chisep_script.m:69-73 \
     (\"tukey_fac = 0.4; % Recommendation: Siemens, GE: 0.4, Philips: 0\"); QSM.rs utils::tukey_window docs";
-const TUKEY_SIEMENS_GE_REASON: &str = "The χ-separation toolbox Tukey-windows the complex echoes in \
-    k-space before everything else, with a taper ratio of 0.4 for Siemens and GE data";
+const TUKEY_NOT_PHILIPS_REASON: &str = "The χ-separation toolbox Tukey-windows the complex echoes in \
+    k-space before everything else, with a taper ratio of 0.4; its comment sets 0 for Philips only";
 const TUKEY_PHILIPS_REASON: &str = "The χ-separation toolbox uses no Tukey windowing (a taper ratio of 0) \
     for Philips data";
 /// The χ-separation toolbox's iterative methods (χ-sepnet has two routes; only its toolbox route
@@ -1195,7 +1211,10 @@ pub static RULES: &[Rule] = &[
         "field_mapping.unwrapping_algorithm", ROMEO,
         "QSMnetME's toolbox unwraps each echo with ROMEO",
         "χ-separation toolbox Chisep_script.m:99-111; Kim et al. 2025 (χ-sepnet) §2.1.1"),
-    reference("sti.unwrap-laplacian", &[inv(STI)], "field_mapping.unwrapping_algorithm", LAPLACIAN,
+    // Scoped out of the χ-separation toolbox: it runs STI Suite's iLSQR (`chi-sep-*.qsm-ilsqr`)
+    // but unwraps with ROMEO (`chi-sep.unwrap-romeo`), so this rule is not its pipeline's.
+    reference("sti.unwrap-laplacian", &[inv(STI), unless_sep(CHI_SEP_TOOLBOX)],
+        "field_mapping.unwrapping_algorithm", LAPLACIAN,
         "STI Suite's QSM_GUI unwraps each echo with MRPhaseUnwrap (Laplacian)",
         "STI Suite 3.0 QSM_GUI, probed headless (recorded in QSM.rs laplacian.rs docs)"),
     reference("sti.laplacian-solver",
@@ -1231,7 +1250,9 @@ pub static RULES: &[Rule] = &[
         "field_mapping.b0_estimation", WEIGHTED_AVG,
         "STI Suite's QSM_GUI sums the unwrapped echoes and divides by the summed echo times",
         "STI Suite 3.0 QSM_GUI, probed headless (recorded in QSM.rs star.rs docs)"),
-    reference("sti.echo-weights", &[inv(STI), MULTI_ECHO],
+    // Scoped out of the χ-separation toolbox, which weights the echoes its own way
+    // (`chi-sep.echo-weights`).
+    reference("sti.echo-weights", &[inv(STI), MULTI_ECHO, unless_sep(CHI_SEP_TOOLBOX)],
         "field_mapping.b0_estimation.weighting", &[Choice("tes")],
         "Σφ/ΣTE is the TE-weighted mean of φ/TE",
         "STI Suite 3.0 QSM_GUI, probed headless (recorded in QSM.rs star.rs docs)"),
@@ -1348,7 +1369,7 @@ pub static RULES: &[Rule] = &[
     reference("lsqr.bg-sharp", &[inv(&[Choice("lsqr")])], "bg_removal.algorithm",
         &[Choice("sharp")],
         "The authors' LSQR/HEIDI pipeline inverts a SHARP local field",
-        "qsm_heidi makefile L14-20, def.sh (4592631)"),
+        "qsm_heidi makefile L16-23, def.sh (4592631)"),
     reference("rts.bg-vsharp", &[inv(&[Choice("rts")])], "bg_removal.algorithm", VSHARP,
         "RTS's author's toolbox (QSM.jl) runs V-SHARP before it",
         "QSM.jl README.md:49 (fde4b92)"),
@@ -1712,6 +1733,19 @@ pub static RULES: &[Rule] = &[
         &[Choice("mean")],
         "DECOMPOSE's χ is referenced to the whole-brain mean",
         "Chen et al. 2021 NeuroImage 242:118477 (DECOMPOSE), §3.6"),
+    // ---------------------------------------------------------------- Referencing
+    // Toolboxes whose pipeline ends at the inversion's own output: nothing is subtracted after it.
+    reference("medi.reference-none", &[inv(&[Choice("medi")])], "reference", &[Choice("none")],
+        "MEDI's pipeline references χ inside MEDI_L1 (MEDI+0 subtracts the mean over the \
+         ventricular CSF; with fewer than three echoes there is no CSF mask and nothing is \
+         subtracted), and nothing after it",
+        "MEDI toolbox 2024.11.26 MEDI_L1.m:204-207; arlo.m:22-26 (QSM.rs inversion::medi docs, MEDI+0)"),
+    reference("qsmart.reference-none", &[inv(&[Choice("qsmart")])], "reference", &[Choice("none")],
+        "QSMART's result is adjust_offset's combined χ, which nothing references afterwards",
+        "QSMART QSMART.m l. 43-45; adjust_offset.m"),
+    reference("heidi.reference-none", &[HEIDI_ON, inv(&[Choice("lsqr")])], "reference", &[Choice("none")],
+        "The authors' LSQR/HEIDI pipeline saves HEIDI's χ in ppm without referencing it",
+        "qsm_heidi inversion_heidi.m L55-65 (4592631)"),
     reference("susep-net.qsm-iqsm-plus", &[sep(&[Choice("susep-net")])], "inversion.algorithm",
         &[Choice("iqsm-plus")],
         "SUSEP-Net's in-vivo QSM input is from iQSM+",
@@ -1723,16 +1757,20 @@ pub static RULES: &[Rule] = &[
         "SNU-LIST/chi-separation README; Kim et al. 2024 (arXiv:2410.12239) §4"),
     // The toolbox's Tukey window, before all three of its χ-separation methods (Chisep_script.m
     // l. 69-73 run ahead of the χ-sepnet, χ-sep-MEDI and χ-sep-iLSQR calls). The script's comment
-    // calls the vendor values a "Recommendation" but gives no reason: the authors' setting.
-    reference_stated("chi-sep.tukey-siemens-ge",
-        &[sep(CHI_SEP_TOOLBOX_ITERATIVE), manufacturer(&[Choice("siemens"), Choice("ge")])],
-        "tukey_window", &[Number(CHISEP_TUKEY_SIEMENS_GE)], TUKEY_SIEMENS_GE_REASON, TUKEY_SOURCE),
+    // calls the vendor values a "Recommendation" but gives no reason: the authors' setting. The
+    // script's value is 0.4 ("Siemens, GE: 0.4, Philips: 0"), so every known manufacturer but
+    // Philips gets 0.4 (Canon and the others too: 0.4 is what the script runs unless the user
+    // changes it for Philips). An unknown manufacturer fires neither rule, and the window stays
+    // at the host's default.
+    reference_stated("chi-sep.tukey-not-philips",
+        &[sep(CHI_SEP_TOOLBOX_ITERATIVE), not_manufacturer(&[Choice("philips")])],
+        "tukey_window", &[Number(CHISEP_TUKEY)], TUKEY_NOT_PHILIPS_REASON, TUKEY_SOURCE),
     reference_stated("chi-sep.tukey-philips",
         &[sep(CHI_SEP_TOOLBOX_ITERATIVE), manufacturer(&[Choice("philips")])],
         "tukey_window", &[Number(0.0)], TUKEY_PHILIPS_REASON, TUKEY_SOURCE),
-    reference_stated("chi-sepnet.tukey-siemens-ge",
-        &[sep(&[Choice("chi-sepnet")]), CHI_SEPNET_TOOLBOX_ROUTE, manufacturer(&[Choice("siemens"), Choice("ge")])],
-        "tukey_window", &[Number(CHISEP_TUKEY_SIEMENS_GE)], TUKEY_SIEMENS_GE_REASON, TUKEY_SOURCE),
+    reference_stated("chi-sepnet.tukey-not-philips",
+        &[sep(&[Choice("chi-sepnet")]), CHI_SEPNET_TOOLBOX_ROUTE, not_manufacturer(&[Choice("philips")])],
+        "tukey_window", &[Number(CHISEP_TUKEY)], TUKEY_NOT_PHILIPS_REASON, TUKEY_SOURCE),
     reference_stated("chi-sepnet.tukey-philips",
         &[sep(&[Choice("chi-sepnet")]), CHI_SEPNET_TOOLBOX_ROUTE, manufacturer(&[Choice("philips")])],
         "tukey_window", &[Number(0.0)], TUKEY_PHILIPS_REASON, TUKEY_SOURCE),
@@ -2010,8 +2048,11 @@ mod tests {
                 separation(S::ChiSepNet)(c);
                 c.facts.voxel_size = Some((0.5, 0.5, 0.5));
             })),
-            ("chi-sepnet.tukey-siemens-ge", Case::new(separation(S::ChiSepNet))),
-            ("chi-sep.tukey-siemens-ge", Case::new(separation(S::ChiSepMedi))),
+            ("medi.reference-none", Case::new(inversion(I::Medi))),
+            ("qsmart.reference-none", Case::new(inversion(I::Qsmart))),
+            ("heidi.reference-none", Case::new(|c| { inversion(I::Lsqr)(c); c.cfg.inversion.apply_heidi = true })),
+            ("chi-sepnet.tukey-not-philips", Case::new(separation(S::ChiSepNet))),
+            ("chi-sep.tukey-not-philips", Case::new(separation(S::ChiSepMedi))),
             ("chi-sep.tukey-philips", Case::new(|c| {
                 separation(S::ChiSepIlsqr)(c);
                 c.facts.manufacturer = Some(Manufacturer::Philips);
@@ -2043,7 +2084,7 @@ mod tests {
             assert!(matches!(r.trigger(), Condition::Setting { .. }), "{}: the trigger is a choice", r.id);
             assert!(known(r.setting), "{}: {} not in SETTINGS", r.id, r.setting);
             for c in r.when {
-                if let Condition::Setting { setting, .. } = c {
+                if let Condition::Setting { setting, .. } | Condition::Unless { setting, .. } = c {
                     assert!(known(setting), "{}: {setting} not in SETTINGS", r.id);
                 }
             }
@@ -2100,7 +2141,7 @@ mod tests {
         let kind = |id: &str| RULES.iter().find(|r| r.id == id).unwrap().kind();
         // Ashley's examples (2026-11-04): the authors' pairing vs better for a stated reason.
         assert_eq!(kind("complex-fit.unwrap-region-growing"), Kind::Reference);
-        assert_eq!(kind("chi-sepnet.tukey-siemens-ge"), Kind::Reference);
+        assert_eq!(kind("chi-sepnet.tukey-not-philips"), Kind::Reference);
         assert_eq!(kind("qsmnet.bg-vsharp"), Kind::Reference);
         assert_eq!(kind("heidi.seed-lsqr"), Kind::Reasoned);
         assert_eq!(kind("pdf.cg-iterations"), Kind::Reasoned);
@@ -2204,9 +2245,9 @@ mod tests {
     }
 
     /// χ-sepnet's toolbox route, χ-sep-MEDI and χ-sep-iLSQR suggest the toolbox's Tukey window by
-    /// manufacturer (the authors' setting, never preselected): 0.4 for Siemens and GE, 0 for
-    /// Philips; nothing on χ-sepnet's native route, with other separation methods, for other or
-    /// unknown manufacturers, or once followed.
+    /// manufacturer (the authors' setting, never preselected): 0 for Philips, the script's 0.4
+    /// for every other known manufacturer; nothing on χ-sepnet's native route, with other
+    /// separation methods, for an unknown manufacturer, or once followed.
     #[test]
     fn chi_sepnet_suggests_the_vendor_tukey_window() {
         use crate::separation::ChiSepNetRoute;
@@ -2216,7 +2257,7 @@ mod tests {
             c.facts.manufacturer = m;
             c.cfg.tukey_window = tukey;
         }).ids().into_iter().filter(|id| id.starts_with("chi-sepnet.tukey")).collect::<Vec<_>>();
-        let (sg, ph) = ("chi-sepnet.tukey-siemens-ge", "chi-sepnet.tukey-philips");
+        let (sg, ph) = ("chi-sepnet.tukey-not-philips", "chi-sepnet.tukey-philips");
         use Manufacturer::*;
         use ChiSepNetRoute::*;
         assert_eq!(ids(Some(Siemens), Toolbox, 0.0), [sg]);
@@ -2224,7 +2265,7 @@ mod tests {
         assert!(ids(Some(Ge), Toolbox, 0.4).is_empty());
         assert_eq!(ids(Some(Philips), Toolbox, 0.4), [ph]);
         assert!(ids(Some(Philips), Toolbox, 0.0).is_empty());
-        assert!(ids(Some(Other), Toolbox, 0.0).is_empty());
+        assert_eq!(ids(Some(Other), Toolbox, 0.0), [sg]);
         assert!(ids(None, Toolbox, 0.0).is_empty());
         assert!(ids(Some(Siemens), Native, 0.0).is_empty());
         let r = RULES.iter().find(|r| r.id == sg).unwrap();
@@ -2237,19 +2278,132 @@ mod tests {
             c.cfg.tukey_window = t;
         }).ids().into_iter().filter(|id| id.contains(".tukey")).collect::<Vec<_>>();
         for a in [SeparationAlgorithm::ChiSepMedi, SeparationAlgorithm::ChiSepIlsqr] {
-            assert_eq!(tukey(a, Siemens, 0.0), ["chi-sep.tukey-siemens-ge"], "{a:?}");
-            assert_eq!(tukey(a, Ge, 0.0), ["chi-sep.tukey-siemens-ge"], "{a:?}");
-            assert!(tukey(a, Ge, 0.4).is_empty(), "{a:?}");
+            for m in [Siemens, Ge, Other] {
+                assert_eq!(tukey(a, m, 0.0), ["chi-sep.tukey-not-philips"], "{a:?} {m:?}");
+                assert!(tukey(a, m, 0.4).is_empty(), "{a:?} {m:?}");
+            }
             assert_eq!(tukey(a, Philips, 0.4), ["chi-sep.tukey-philips"], "{a:?}");
-            assert!(tukey(a, Philips, 0.0).is_empty() && tukey(a, Other, 0.0).is_empty(), "{a:?}");
+            assert!(tukey(a, Philips, 0.0).is_empty(), "{a:?}");
         }
         // Not with the other separation methods.
         for a in [SeparationAlgorithm::Decompose, SeparationAlgorithm::R2starQsm, SeparationAlgorithm::SusepNet] {
             assert!(tukey(a, Siemens, 0.0).is_empty(), "{a:?}");
         }
-        for id in ["chi-sep.tukey-siemens-ge", "chi-sep.tukey-philips", "chi-sepnet.tukey-philips"] {
+        for id in ["chi-sep.tukey-not-philips", "chi-sep.tukey-philips", "chi-sepnet.tukey-philips"] {
             assert_eq!(RULES.iter().find(|r| r.id == id).unwrap().kind(), Kind::Reference, "{id}");
         }
+    }
+
+    /// The toolboxes that reference nothing after their inversion (MEDI, QSMART, LSQR with HEIDI)
+    /// ask for no referencing; HEIDI only with its own seed, and DECOMPOSE keeps the mean.
+    #[test]
+    fn toolboxes_that_reference_nothing_after_the_inversion() {
+        let fires = |c: Case, id: &str| c.ids().contains(&id);
+        let with = |a: InversionAlgorithm, heidi: bool, reference: QsmReference| Case::new(|c| {
+            inversion(a)(c);
+            c.cfg.inversion.apply_heidi = heidi;
+            c.cfg.reference = reference;
+        });
+        use InversionAlgorithm as I;
+        for (id, a) in [("medi.reference-none", I::Medi), ("qsmart.reference-none", I::Qsmart)] {
+            assert!(fires(with(a, false, QsmReference::Mean), id), "{id}");
+            assert!(!fires(with(a, false, QsmReference::None), id), "{id}");
+        }
+        assert!(fires(with(I::Lsqr, true, QsmReference::Mean), "heidi.reference-none"));
+        assert!(!fires(with(I::Lsqr, true, QsmReference::None), "heidi.reference-none"));
+        assert!(!fires(with(I::Tkd, true, QsmReference::Mean), "heidi.reference-none"));
+        assert!(!fires(with(I::Lsqr, false, QsmReference::Mean), "heidi.reference-none"));
+        for id in ["medi.reference-none", "qsmart.reference-none", "heidi.reference-none"] {
+            let r = RULES.iter().find(|r| r.id == id).unwrap();
+            assert_eq!((r.kind(), r.default), (Kind::Reference, Choice("none")), "{id}");
+        }
+        let decompose = Case::new(|c| { separation(SeparationAlgorithm::Decompose)(c); c.cfg.reference = QsmReference::None });
+        assert!(fires(decompose, "decompose.reference-mean"));
+    }
+
+    /// The reference rules that apply to `case` (their conditions hold and their setting is in
+    /// play), whether or not it follows them.
+    fn applying(case: &Case) -> Vec<&'static Rule> {
+        RULES.iter().filter(|r| r.strength == Strength::Reference).filter(|r| {
+            r.when.iter().all(|c| holds(c, &case.input(), &case.facts))
+                && !current(&case.input(), &case.facts, r.setting).unwrap_or_default().is_empty()
+        }).collect()
+    }
+
+    /// Pairs of reference rules that apply to `case` and want different values of one setting.
+    fn conflicts(case: &Case) -> Vec<(&'static str, &'static str)> {
+        let rules = applying(case);
+        let d = |r: &Rule| match r.default {
+            Value::Bool(b) => Current::Bool(b),
+            Value::Number(x) => Current::Number(x),
+            Value::Choice(s) => Current::Choice(s),
+            Value::Vector(v) => Current::Vector(v.to_vec()),
+        };
+        let mut out = Vec::new();
+        for (i, a) in rules.iter().enumerate() {
+            for b in &rules[i + 1..] {
+                if a.setting == b.setting && !(b.expect.passes(&d(a)) && a.expect.passes(&d(b))) {
+                    out.push((a.id, b.id));
+                }
+            }
+        }
+        out
+    }
+
+    /// The χ-separation toolbox runs STI Suite's iLSQR but maps the field its own way, so under
+    /// its methods STI Suite's field-mapping rules do not apply: no two reference rules disagree,
+    /// and once the toolbox's field mapping is followed no STI Suite rule is departed from (a
+    /// host's methods text would otherwise say ROMEO differs from iLSQR's reference). STI Suite's
+    /// V-SHARP rules still apply: the toolbox calls STI Suite's V_SHARP.
+    #[test]
+    fn chi_sep_toolbox_methods_and_sti_suite_agree() {
+        use crate::separation::ChiSepNetRoute;
+        let toolbox = |a: SeparationAlgorithm, inv_a: InversionAlgorithm, followed: bool| Case::new(move |c| {
+            separation(a)(c);
+            c.sep.as_mut().unwrap().chi_sepnet.route = ChiSepNetRoute::Toolbox;
+            inversion(inv_a)(c);
+            if followed {
+                c.cfg.field_mapping.unwrapping_algorithm = UnwrappingAlgorithm::Romeo;
+                c.cfg.field_mapping.b0_estimation = B0EstimationMethod::WeightedAvg {
+                    weighting: crate::utils::multi_echo::B0WeightType::assumed_decay_default(),
+                };
+                c.cfg.field_mapping.phase_offset_removal = true;
+                c.cfg.bg_removal.algorithm = BgRemovalAlgorithm::Vsharp;
+            }
+        });
+        for a in [SeparationAlgorithm::ChiSepIlsqr, SeparationAlgorithm::ChiSepMedi, SeparationAlgorithm::ChiSepNet] {
+            for inv_a in [InversionAlgorithm::Ilsqr, InversionAlgorithm::Star] {
+                for followed in [false, true] {
+                    let case = toolbox(a, inv_a, followed);
+                    assert!(conflicts(&case).is_empty(), "{a:?} {inv_a:?}: {:?}", conflicts(&case));
+                    if followed {
+                        let sti: Vec<_> = case.ids().into_iter().filter(|id| id.starts_with("sti.")).collect();
+                        assert!(sti.is_empty(), "{a:?} {inv_a:?}: {sti:?}");
+                    }
+                }
+            }
+            let case = toolbox(a, InversionAlgorithm::Ilsqr, true);
+            assert!(applying(&case).iter().any(|r| r.id == "sti.vsharp-radius"), "{a:?}");
+            assert!(!applying(&case).iter().any(|r| r.id == "sti.echo-weights"), "{a:?}");
+        }
+        // Without χ-separation, and under DECOMPOSE (STAR-QSM with Laplacian, as STI Suite), they apply.
+        assert!(Case::new(inversion(InversionAlgorithm::Ilsqr)).ids().contains(&"sti.unwrap-laplacian"));
+        let decompose = Case::new(|c| { separation(SeparationAlgorithm::Decompose)(c); inversion(InversionAlgorithm::Star)(c) });
+        assert!(applying(&decompose).iter().any(|r| r.id == "sti.unwrap-laplacian"));
+        assert!(conflicts(&decompose).is_empty(), "{:?}", conflicts(&decompose));
+    }
+
+    /// `Unless` holds when the setting is not in play, and serialises with its tag.
+    #[test]
+    fn unless_holds_when_the_setting_is_not_in_play() {
+        let cond = unless_sep(CHI_SEP_TOOLBOX);
+        let plain = Case::new(|_| {});
+        assert!(holds(&cond, &plain.input(), &plain.facts));
+        let chisep = Case::new(separation(SeparationAlgorithm::ChiSepMedi));
+        assert!(!holds(&cond, &chisep.input(), &chisep.facts));
+        let decompose = Case::new(separation(SeparationAlgorithm::Decompose));
+        assert!(holds(&cond, &decompose.input(), &decompose.facts));
+        assert_eq!(serde_json::to_value(cond).unwrap()["on"], "unless");
     }
 
     /// The complex fit (MEDI's Fit_ppm_complex) suggests MEDI's region-growing unwrapper as the

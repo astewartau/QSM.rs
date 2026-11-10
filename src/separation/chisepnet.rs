@@ -167,7 +167,7 @@
 //!   k-space before everything (`tukey_fac` 0.4 for Siemens and GE, 0 for Philips, l. 69-73), so its
 //!   mask, R2* fit and phase see windowed data. That happens upstream of the field and R2* maps
 //!   this function takes, so it is the caller's: [`crate::utils::tukey_window`] ports it, and the
-//!   rules `chi-sepnet.tukey-siemens-ge` and `chi-sepnet.tukey-philips` suggest the authors' value
+//!   rules `chi-sepnet.tukey-not-philips` and `chi-sepnet.tukey-philips` suggest the authors' value
 //!   by manufacturer on this route, as the authors' setting (`Kind::Reference`: shown, never
 //!   preselected).
 //!
@@ -184,7 +184,7 @@
 //! # Pipeline rules
 //!
 //! The facts above that a configuration can depart from are published as rules in
-//! [`crate::pipeline::rules::RULES`] (each with its strength, basis, reason and source): `chi-sep.mask-bet`, `chi-sep.unwrap-romeo`, `chi-sep.echo-combination`, `chi-sep.echo-weights`, `chi-sep.bg-vsharp`, `chi-sepnet.min-resolution`, `chi-sepnet.tukey-siemens-ge`, `chi-sepnet.tukey-philips`.
+//! [`crate::pipeline::rules::RULES`] (each with its strength, basis, reason and source): `chi-sep.mask-bet`, `chi-sep.unwrap-romeo`, `chi-sep.echo-combination`, `chi-sep.echo-weights`, `chi-sep.bg-vsharp`, `chi-sepnet.min-resolution`, `chi-sepnet.tukey-not-philips`, `chi-sepnet.tukey-philips`.
 
 // The parameters are plain Rust, so configs can carry them; only inference needs `onnx`.
 #![cfg_attr(not(feature = "onnx"), allow(dead_code))]

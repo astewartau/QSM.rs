@@ -187,6 +187,7 @@
 //! - Inversion: `MEDI_L1('lambda',1000,'lambda_CSF',100,'merit','smv',5)` (README.m:144), which
 //!   equals the 2024 defaults (`parse_QSM_input.m:10-20`: MERIT and SMV on, radius 5 mm). The
 //!   2020 release's `parse_QSM_input.m` defaulted to MERIT and SMV off.
+//! - Referencing: only MEDI+0's, inside `MEDI_L1` (`MEDI_L1.m:204-207`); nothing after it.
 //! - ppm conversion: `delta_TE` is `TE(2) − TE(1)`, or `TE` for one echo (`Read_DICOM.m:166-168`),
 //!   and `CF` is read from the DICOM header; QSM.rs uses `CF = γ·B0`.
 //! - Field strength: nothing in `MEDI_L1`, `PDF`, `extract_CSF` or `arlo` depends on it beyond
@@ -213,7 +214,9 @@
 //! # Pipeline rules
 //!
 //! The facts above that a configuration can depart from are published as rules in
-//! [`crate::pipeline::rules::RULES`] (each with its strength, basis, reason and source): `medi.mask-bet`, `medi.field-complex-fit`, `medi.te-spacing`, `medi-msmv.three-echoes`, `medi-msmv.bg-removal`, `medi-msmv.prefilter`, `medi.bg-pdf`.
+//! [`crate::pipeline::rules::RULES`] (each with its strength, basis, reason and source): `medi.mask-bet`, `medi.field-complex-fit`, `medi.te-spacing`, `medi-msmv.three-echoes`, `medi-msmv.bg-removal`, `medi-msmv.prefilter`, `medi.bg-pdf`, `medi.reference-none` (MEDI+0 is the pipeline's referencing:
+//! `MEDI_L1.m:204-207` subtracts the CSF mean, with fewer than three echoes nothing, and README.m
+//! subtracts nothing after it, so a host's own referencing is not applied).
 
 use num_complex::Complex64;
 #[cfg(feature = "parallel")]

@@ -52,10 +52,13 @@
 //!
 //! # Vendor defaults
 //!
-//! The script's recommendation is 0.4 for Siemens and GE and 0 (no windowing) for Philips. The
-//! script applies the window before all three of its χ-separation methods (χ-sepnet, χ-sep-MEDI
-//! and χ-sep-iLSQR), so it is published as the rules `chi-sep.tukey-siemens-ge` and
-//! `chi-sep.tukey-philips` (with χ-sep-MEDI or χ-sep-iLSQR) and `chi-sepnet.tukey-siemens-ge` and
+//! The script sets `tukey_fac = 0.4` with the comment "Recommendation: Siemens, GE: 0.4,
+//! Philips: 0". Its value is 0.4 for any scanner unless the user changes it for Philips, so the
+//! rules give 0 for Philips and 0.4 for every other known manufacturer (Canon and the others
+//! too, decided 2026-11-10); with the manufacturer unknown neither fires and the host's default
+//! stays. The script applies the window before all three of its χ-separation methods (χ-sepnet,
+//! χ-sep-MEDI and χ-sep-iLSQR), so it is published as the rules `chi-sep.tukey-not-philips` and
+//! `chi-sep.tukey-philips` (with χ-sep-MEDI or χ-sep-iLSQR) and `chi-sepnet.tukey-not-philips` and
 //! `chi-sepnet.tukey-philips` (with χ-sepnet's toolbox route; its native route is not the
 //! toolbox's pipeline) ([`crate::pipeline::rules`], on
 //! [`QsmPipelineConfig::tukey_window`](crate::pipeline::QsmPipelineConfig::tukey_window) and the
