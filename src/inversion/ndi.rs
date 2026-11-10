@@ -121,7 +121,9 @@ pub struct NdiParams {
 /// magnitude maximum is inside the brain) it is 21 % (χ NRMSE) from the original and slightly
 /// further from the truth (NRMSE 53.9 % against 52.0 %, r 0.846 against 0.856) with a better
 /// regional slope (0.84 against 0.78). A trade-off, so an option (2026-11-09,
-/// `~/work/emtp-v11/regressions-dipole.md`).
+/// `~/work/emtp-v11/regressions-dipole.md`). The rules offer it for in-vivo data without
+/// preselecting it (`ndi.weight-norm-in-vivo`, [`Strength::Suggested`](crate::pipeline::rules::Strength::Suggested);
+/// decided 2026-11-10).
 #[cfg_attr(feature = "introspection", derive(serde::Serialize))]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum NdiWeightNorm {

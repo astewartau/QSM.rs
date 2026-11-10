@@ -154,6 +154,12 @@ impl Default for HarperellaParams {
 /// (GE / Philips) with [`StiLargest`](Self::StiLargest), 0.82 / 0.84 with [`Whole`](Self::Whole);
 /// the edge band's SD falls from 0.048 / 0.039 ppm to 0.013 / 0.012 ppm. iHARPERELLA 0.90 / 0.93
 /// and 0.93 / 0.96. QSM.rs before 2026-10-22 zeroed the whole rim (of a 3-voxel erosion).
+///
+/// iHARPERELLA keeps STI's rule as its default (the original, and the parity setting), and the
+/// rules recommend the whole rim for it (`iharperella.whole-rim`, Recommended, measured; decided
+/// 2026-11-10). Travelling-head inter-scanner median |slope − 1| was 7.1 % with STI's rule and
+/// 3.8 % with the whole rim. On QSM-CI's simulated head from a ROMEO field, RTS χ XSIM was 0.244
+/// and 0.295. It is slightly worse only on the noise-free true total field, which has no edge step.
 #[cfg_attr(feature = "introspection", derive(serde::Serialize))]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum HarperellaRim {
