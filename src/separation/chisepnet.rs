@@ -184,7 +184,7 @@
 //! # Pipeline rules
 //!
 //! The facts above that a configuration can depart from are published as rules in
-//! [`crate::pipeline::rules::RULES`] (each with its strength, basis, reason and source): `chi-sep.mask-bet`, `chi-sep.unwrap-romeo`, `chi-sep.echo-combination`, `chi-sep.echo-weights`, `chi-sep.bg-vsharp`, `chi-sepnet.min-resolution`, `chi-sepnet.tukey-not-philips`, `chi-sepnet.tukey-philips`.
+//! [`crate::pipeline::rules::RULES`] (each with its strength, basis, reason and source): `chi-sep.mask-bet`, `chi-sep.bet-as-stored` (MEDI's BET.m: no FSL left-right flip), `chi-sep.unwrap-romeo`, `chi-sep.echo-combination`, `chi-sep.echo-weights`, `chi-sep.bg-vsharp`, `chi-sepnet.min-resolution`, `chi-sepnet.tukey-not-philips`, `chi-sepnet.tukey-philips`.
 
 // The parameters are plain Rust, so configs can carry them; only inference needs `onnx`.
 #![cfg_attr(not(feature = "onnx"), allow(dead_code))]
