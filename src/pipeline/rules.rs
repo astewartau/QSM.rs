@@ -1475,12 +1475,13 @@ pub static RULES: &[Rule] = &[
         basis: Basis::Measured,
         reason: "A tuning value: PDF.m's 30 CG iterations can stop far from convergence. At 300, \
                  a Philips 3 T scan's local field correlated 0.83 with V-SHARP's, against 0.54 \
-                 at 30 (a GE scan: 0.84 against 0.85), and on QSM-CI's simulated head NRMSE was \
-                 44 %, against about 100 % for MEDI's PDF.m at 30; neither scan converged \
-                 within 300. Costs about 30 s more per 1 mm whole-brain scan",
-        source: "QSM.rs PdfParams::n_cg docs (travelling-head scans); QSMxT/QSM-CI#322 (pdf-cornell \
-                 vs pdf-qsmrs on the simulated head); PDF.m default n_CG 30, MEDI toolbox \
-                 2024.11.26",
+                 at 30 (a GE scan: 0.84 against 0.85), and Philips scans lost a residual \
+                 background that Siemens and GE scans did not have (so scanners can agree less \
+                 at 300 than at 30, where they share it). On QSM-CI's simulated head the local \
+                 field's NRMSE fell from 101 % to 84 % (58 % with a tolerance of 1e-5 as well). \
+                 Costs about 30 s more per 1 mm whole-brain scan",
+        source: "QSM.rs PdfParams::n_cg docs (travelling-head scans and the simulated head, \
+                 2026-11-09); PDF.m default n_CG 30, MEDI toolbox 2024.11.26",
     },
     // A settings file from before the multigrid port can hold the SOR solver's 1e-6, a relative
     // tolerance; the setting is kept as given and this suggests LBV.m's own (QSM.rs#406).
