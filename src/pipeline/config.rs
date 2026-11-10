@@ -273,8 +273,8 @@ pub enum B0EstimationMethod {
     /// unwrapped echoes, with no per-echo constant removed after Laplacian unwrapping (with ROMEO,
     /// whole turns between echoes are aligned, as for the weighted mean). Also returns QSMART's
     /// reliability map `R_0` ([`FieldMappingResult::reliability`]): voxels whose fit residual,
-    /// box-filtered over ~1 mm, reaches `fit_threshold` (by default the 99th percentile of the
-    /// blurred residual, as QSMART's authors run it; see
+    /// box-filtered over ~1 mm, reaches `fit_threshold` (by default `QSMART_toolbox_v1.0`'s fixed
+    /// 40; see
     /// [`QsmartFitThreshold`](crate::utils::QsmartFitThreshold)). The field is converted to ppm
     /// with QSMART's γ = 2.675e8 rad/s/T.
     ///

@@ -28,8 +28,10 @@
 //! - **Total field**: `echofit.m`, magnitude-weighted zero-intercept fit of phase against TE,
 //!   divided by `γ·B0/1e6` with γ = 2.675e8 rad/s/T and B0 = `qsm_params.field` (7 in the demo);
 //!   the reliability map `R_0` from the box-blurred residual (`fit_threshold` 40 in
-//!   `Demo_QSMART.m` with `adaptive_threshold` 0; the 99th percentile in the October 2020 demo
-//!   and the authors' 7T run): [`B0EstimationMethod::QsmartEchofit`].
+//!   `QSMART_toolbox_v1.0`'s `Demo_QSMART.m` with `adaptive_threshold` 0, the default; the 99th
+//!   percentile in the October 2020 demo and the authors' 7T run): [`B0EstimationMethod::QsmartEchofit`].
+//!   QSM.rs follows v1.0's thresholds (decided 2026-11-10), here and for the mask's magnitude
+//!   threshold (100).
 //! - **Vessel magnitude**: mean over echoes of the coil-combined magnitude, then N4
 //!   (`vasculature_mask.m` l. 8–14): [`qsmart_vessel_magnitude`](crate::utils::qsmart_vessel_magnitude).
 //! - **Inversion**: STI Suite **v2.2**'s `QSM_iLSQR` (paper §3.4, "number of iterations = 50"),
@@ -71,7 +73,7 @@
 //! # Pipeline rules
 //!
 //! The facts above that a configuration can depart from are published as rules in
-//! [`crate::pipeline::rules::RULES`] (each with its strength, basis, reason and source): `qsmart.mask-bet`, `qsmart.unwrap-laplacian`, `qsmart.laplacian-solver`, `qsmart.unwrap-unmasked`, `qsmart.field-echofit`, `qsmart.inner-inversion`, `qsmart.ilsqr-iterations`, `qsmart.ilsqr-pad`, `qsmart.reference-none` (`QSMART.m` l. 43-45 ends
+//! [`crate::pipeline::rules::RULES`] (each with its strength, basis, reason and source): `qsmart.mask-bet`, `qsmart.unwrap-laplacian`, `qsmart.laplacian-solver`, `qsmart.unwrap-unmasked`, `qsmart.field-echofit`, `qsmart.inner-inversion`, `qsmart.ilsqr-iterations`, `qsmart.ilsqr-pad`, `qsmart.ilsqr-single` (STI's single-precision iLSQR), `qsmart.fit-threshold` (v1.0's fixed 40), `qsmart.offset-grid` (`adjust_offset.m`'s grid), `qsmart.reference-none` (`QSMART.m` l. 43-45 ends
 //! with `adjust_offset`'s combined χ; nothing references it afterwards).
 
 use super::config::*;
