@@ -187,6 +187,10 @@
 //!
 //! The facts above that a configuration can depart from are published as rules in
 //! [`crate::pipeline::rules::RULES`] (each with its strength, basis, reason and source): `sti.unwrap-laplacian`, `sti.laplacian-solver`, `sti.echo-combination`, `sti.echo-weights`, `sti.bg-vsharp`, `sti.vsharp-no-deconvolve`, `sti.vsharp-radius`, `sti.vsharp-grid`, `sti.vsharp-min-radius`, `sti.vsharp-radius-step`.
+//! `sti.unwrap-laplacian` and `sti.echo-weights` do not apply under the χ-separation toolbox's
+//! methods, which run STI Suite's iLSQR but unwrap with ROMEO and weight the echoes their own
+//! way (`chi-sep.unwrap-romeo`, `chi-sep.echo-weights`); its V-SHARP is STI Suite's, so the
+//! V-SHARP rules do.
 
 use num_complex::Complex64;
 use crate::error::InputError;

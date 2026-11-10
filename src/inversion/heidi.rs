@@ -102,14 +102,16 @@
 //!
 //! # Reference pipeline
 //! Same inputs as [`super::lsqr_qsm`](mod@super::lsqr_qsm) (qsm_heidi commit 4592631): a SHARP-corrected local field
-//! (`makefile` L14-20, `background_correction_sharp.mat`), the magnitude, the LSQR result, and
+//! (`makefile` L16-23, `background_correction_sharp.mat`), the magnitude, the LSQR result, and
 //! the mask `mask_tissue .* mask_phase .* phsInput.mask` (`inversion_heidi.m`). The echo time for
 //! the phase units is the last one (`phase2susceptibilityfactor.m` L70-71), as the pipeline sets.
 //!
 //! # Pipeline rules
 //!
 //! The facts above that a configuration can depart from are published as rules in
-//! [`crate::pipeline::rules::RULES`] (each with its strength, basis, reason and source): `lsqr.bg-sharp`, `heidi.te-last`.
+//! [`crate::pipeline::rules::RULES`] (each with its strength, basis, reason and source):
+//! `lsqr.bg-sharp`, `heidi.te-last`, and with the LSQR seed `heidi.reference-none` (`inversion_heidi.m`
+//! L55-65 converts HEIDI's χ to ppm, flips its sign, crops and saves it, with no referencing).
 
 use num_complex::Complex64;
 

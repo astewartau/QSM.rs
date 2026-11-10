@@ -53,7 +53,7 @@
 //!
 //! # Reference pipeline
 //! qsm_heidi (<https://gitlab.com/R01NS114227/qsm_heidi>, commit 4592631): the `makefile`
-//! (L14-20) and `def.sh` feed `inversion_lsqr.m` a SHARP-corrected local field
+//! (L16-23) and `def.sh` feed `inversion_lsqr.m` a SHARP-corrected local field
 //! (`background_correction_sharp.mat`, phase in rad), the magnitude, and masks made by an
 //! upstream step not in the repository (`create_masks.mat`). The mask the inversion uses is the
 //! product of a tissue mask, a phase mask and the background-removal mask

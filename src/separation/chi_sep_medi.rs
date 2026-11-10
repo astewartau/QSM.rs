@@ -148,8 +148,8 @@
 //!   `extract_CSF.m`, l. 96; QSM.rs [`crate::inversion::extract_csf`]).
 //! - ROMEO with phase-offset correction and weighted echo averaging, `W = TE·exp(−TE/40 ms)`
 //!   (l. 99-123); V-SHARP `smvsize` 12 (l. 136-139); the local field in Hz (l. 139).
-//! - QSM: STI Suite `QSM_iLSQR(..., 'padsize', [12 12 12])` (l. 145), passed as `option_data.qsm`
-//!   (l. 158).
+//! - QSM: STI Suite `QSM_iLSQR(..., 'padsize', [12 12 12])` (l. 145), unreferenced, passed as
+//!   `option_data.qsm` (l. 158); its settings are [`ChiSepMediParams::qsm_ilsqr`].
 //! - R2′ is the user's (the script's input; its README offers a pseudo-R2 map otherwise).
 //!
 //! The toolbox's GUI (`WrapperChisepMEDI.p`, probed with a stand-in app object) differs: it
@@ -171,7 +171,7 @@
 //! The facts above that a configuration can depart from are published as rules in
 //! [`crate::pipeline::rules::RULES`] (each with its strength, basis, reason and source):
 //! `chi-sep.mask-bet`, `chi-sep.unwrap-romeo`, `chi-sep.echo-combination`, `chi-sep.echo-weights`,
-//! `chi-sep.bg-vsharp`, `chi-sep-medi.qsm-ilsqr`, and by manufacturer `chi-sep.tukey-siemens-ge`
+//! `chi-sep.bg-vsharp`, `chi-sep-medi.qsm-ilsqr`, and by manufacturer `chi-sep.tukey-not-philips`
 //! and `chi-sep.tukey-philips` (`Chisep_script.m` Tukey-windows the echoes before this method as
 //! before χ-sepnet; [`crate::utils::tukey_window`]). All are the authors' setting
 //! (`Kind::Reference`).
@@ -273,6 +273,16 @@ pub struct ChiSepMediParams {
     /// Conjugate-gradient iterations at most, per source and Gauss-Newton step
     /// (`params.cg_max_iter`; default 100).
     pub cg_max_iter: usize,
+    /// iLSQR settings for the conventional QSM (`option_data.qsm`) that χ-separation-MEDI is
+    /// initialised with, for hosts that reconstruct it (the pipeline takes the QSM as an input).
+    /// `Chisep_script.m` makes one QSM for both of its iterative methods: STI Suite's
+    /// `QSM_iLSQR(local_field, mask, ..., 'padsize', [12 12 12])` (l. 145), so 100 iterations and
+    /// 12 mm padding, the same default as
+    /// [`ChiSepIlsqrParams::qsm_ilsqr`](super::ChiSepIlsqrParams::qsm_ilsqr)
+    /// ([`chisep_toolbox_ilsqr`](super::chi_sep_ilsqr::chisep_toolbox_ilsqr)). That QSM is
+    /// unreferenced: the script subtracts nothing from it before `option_data.qsm = QSM` (l.
+    /// 158), so a host passes iLSQR's own output, not a referenced map.
+    pub qsm_ilsqr: crate::inversion::IlsqrParams,
 }
 
 impl Default for ChiSepMediParams {
@@ -288,6 +298,7 @@ impl Default for ChiSepMediParams {
             max_iter: 30,
             cg_tol: 0.05,
             cg_max_iter: 100,
+            qsm_ilsqr: super::chi_sep_ilsqr::chisep_toolbox_ilsqr(),
         }
     }
 }
@@ -785,6 +796,9 @@ mod tests {
         let p = ChiSepMediParams::default();
         assert_eq!((p.lambda, p.lambda_csf, p.pad, p.tol, p.max_iter, p.cg_tol, p.cg_max_iter), (1.0, 1.0, 5, 0.03, 30, 0.05, 100));
         assert_eq!((p.dr_pos, p.dr_neg), (None, None));
+        // The one QSM `Chisep_script.m` makes for both iterative methods: χ-sep-iLSQR's.
+        let q = super::super::chisep_toolbox_ilsqr();
+        assert_eq!((p.qsm_ilsqr.max_iter, p.qsm_ilsqr.pad_mm), (q.max_iter, q.pad_mm));
         let (dp, dn) = ChiSepMediParams { cf: 127.74e6, ..p.clone() }.dr();
         assert_eq!((dp, dn), (141.7241379310345, 141.7241379310345));
         let (dp, dn) = ChiSepMediParams { dr_pos: Some(120.0), dr_neg: Some(150.0), ..p }.dr();
