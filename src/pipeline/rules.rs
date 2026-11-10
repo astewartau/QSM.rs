@@ -617,6 +617,7 @@ pub const SETTINGS: &[(&str, &str)] = &[
     ("tukey_window", "Taper ratio of the χ-separation toolbox's k-space Tukey window on the complex echoes, 0 = none (QsmPipelineConfig::tukey_window)"),
     ("separation.algorithm", "χ-separation (SeparationAlgorithm::id)"),
     ("separation.chi_sepnet.route", "χ-sepnet's input route: toolbox or native (ChiSepNetRoute::id); only with χ-sepnet"),
+    ("separation.chi_sep_medi.csf_r2star", "The R2* method the host extracts χ-separation-MEDI's CSF mask from (ChiSepCsfR2star::id): arlo or nnls (the χ-separation toolbox's r2star_nnls); only with χ-separation-MEDI"),
     ("separation.decompose.unwrap_phase", "DECOMPOSE's phase unwrapping along the echoes (DecomposeParams::unwrap_phase, bool); only with DECOMPOSE"),
     ("separation.decompose.fit", "DECOMPOSE's fit (DecomposeParams::fit_id): reference-code (Tim Ho's script: lsqcurvefit for every stage, global-max scale), paper (Chen et al. 2021's solvers on per-voxel S(0) = 1 data) or custom; only with DECOMPOSE"),
     ("separation.decompose.chi_bound", "DECOMPOSE's bound on |χ| in the fit (DecomposeChiBound::id): ppm (a fixed bound, the authors' 0.5) or echo-spacing (π / ((2/3)·γ·B0·ΔTE_max), computed from the scan); only with DECOMPOSE"),
@@ -911,6 +912,12 @@ pub fn current(input: &RuleInput, facts: &ScanFacts, setting: &str) -> Option<Ve
             .separation
             .filter(|s| s.algorithm == super::config::SeparationAlgorithm::ChiSepNet)
             .map(|s| Current::Choice(s.chi_sepnet.route.id()))
+            .into_iter()
+            .collect(),
+        "separation.chi_sep_medi.csf_r2star" => input
+            .separation
+            .filter(|s| s.algorithm == super::config::SeparationAlgorithm::ChiSepMedi)
+            .map(|s| Current::Choice(s.chi_sep_medi.csf_r2star.id()))
             .into_iter()
             .collect(),
         "separation.decompose.unwrap_phase" => input
@@ -2031,6 +2038,20 @@ pub static RULES: &[Rule] = &[
         &[Choice("ilsqr")],
         "The χ-separation toolbox initialises χ-separation-MEDI from STI Suite iLSQR QSM",
         "χ-separation toolbox v1.1.3 Chisep_script.m:145,158"),
+    // Chisep_script.m:87-93 picks r2star_arlo when use_arlo(TE) and r2star_nnls otherwise, and
+    // documents TE as a row vector (l. 64). use_arlo is true only for a column vector of three or
+    // more equally spaced echo times: every row vector gives false (probed 2026-11-10, licensed
+    // MATLAB R2023b Update 5, toolbox v1.1.3 use_arlo.p). So the script as written always runs
+    // r2star_nnls; its R2* feeds extract_CSF for chi_sep_MEDI's CSF mask (l. 96, 159). QSM.rs
+    // separation::chi_sep_medi docs, *Reference pipeline*.
+    reference("chi-sep-medi.csf-r2star-nnls", &[sep(&[Choice("chi-sep-medi")])],
+        "separation.chi_sep_medi.csf_r2star", &[Choice("nnls")],
+        "The χ-separation toolbox's script computes the R2* for its CSF mask with its NNLS fit: it \
+         uses ARLO only when use_arlo(TE) is true, and with the echo times written as the script \
+         documents them (a row) use_arlo is always false",
+        "χ-separation toolbox v1.1.3 Chisep_script.m:64,87-93,96; use_arlo.p probed 2026-11-10 in \
+         MATLAB R2023b Update 5 (true only for a column of ≥ 3 equally spaced echo times); QSM.rs \
+         separation::chi_sep_medi docs"),
     reference("r2star-qsm.qsm-medi", &[sep(&[Choice("r2star-qsm")])], "inversion.algorithm",
         &[Choice("medi")],
         "R2*-QSM's χ was reconstructed with MEDI",
@@ -2368,6 +2389,7 @@ mod tests {
             })),
             ("chi-sep-ilsqr.qsm-ilsqr", Case::new(separation(S::ChiSepIlsqr))),
             ("chi-sep-medi.qsm-ilsqr", Case::new(separation(S::ChiSepMedi))),
+            ("chi-sep-medi.csf-r2star-nnls", Case::new(separation(S::ChiSepMedi))),
             ("medi.bg-pdf", Case::new(inversion(I::Medi))),
             ("sti.vsharp-min-radius", Case::new(|c| { inversion(I::Ilsqr)(c); c.cfg.bg_removal.vsharp.min_radius = 1.0 })),
             ("sti.vsharp-radius-step", Case::new(|c| { inversion(I::Star)(c); c.cfg.bg_removal.vsharp.radius_step = 2.0 })),

@@ -51,7 +51,7 @@
 //! - [`swi`] — susceptibility weighted imaging (CLEAR-SWI, SMWI)
 //! - [`complex`] — real/imaginary input to magnitude/phase
 //! - [`fieldmap`] — multi-echo phase combination and B0 field mapping
-//! - [`r2star`] — R2\*/T2\* mapping (ARLO)
+//! - [`r2star`] — R2\*/T2\* mapping (ARLO; the χ-separation toolbox's NNLS fit)
 //! - [`mask`] — mask thresholding and morphology
 //! - [`homogeneity`] — receive-field bias correction
 //!
@@ -175,10 +175,11 @@ pub mod fieldmap {
     };
 }
 
-/// R2\*/T2\* mapping from multi-echo magnitude (ARLO).
+/// R2\*/T2\* mapping from multi-echo magnitude (ARLO; the χ-separation toolbox's NNLS fit).
 pub mod r2star {
     pub use crate::utils::r2star::{
-        arlo, arlo_echo_times_problem, t2star_from_r2star,
+        arlo, arlo_echo_times_problem, chisep_nnls, chisep_nnls_echo_times_problem, chisep_nnls_options,
+        t2star_from_r2star, CHISEP_NNLS_LB, CHISEP_NNLS_TOL, CHISEP_NNLS_UB, CHISEP_NNLS_X0,
     };
 }
 

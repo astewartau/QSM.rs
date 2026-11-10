@@ -110,6 +110,10 @@
 //! the last iterations of unbounded Rosenbrock) reach the same solution to 1e-6 or better, in a
 //! different number of iterations for three of them.
 //!
+//! It also runs the χ-separation toolbox's `r2star_nnls` ([`crate::utils::r2star::chisep_nnls`],
+//! a two-parameter `lsqnonlin` per voxel), where 294 of 300 MATLAB fits take the same path; that
+//! module's docs give the agreement.
+//!
 //! # References
 //!
 //! 1. Coleman, T.F. & Li, Y. (1996). An interior trust region approach for nonlinear
