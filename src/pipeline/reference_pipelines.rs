@@ -17,14 +17,17 @@
 //!   rule whose trigger the pipeline did not set (one the user's other settings trigger) is not
 //!   part of it. QSM.rs has no setter by setting path (the rules are data over a host's config),
 //!   so the host does the applying; QSMxT's `qsmxt_engine::pipelines` is the reference host.
-//! - **The stages a pipeline sets start from the defaults.** Since #293 each method's defaults
-//!   are its reference values, so a stage the pipeline touches is reset to the defaults before
-//!   the rules apply: a value the user changed there (MEDI's λ) is not silently kept under the
-//!   toolbox's name. Stages it does not touch stay as they are.
-//! - **Reasoned rules are not part of a pipeline.** A pipeline is what the authors ran. A
-//!   reasoned rule its choices trigger (PDF's measured `pdf.cg-iterations`) is still reported by
-//!   [`evaluate`](super::rules::evaluate), and the host shows it, but the pipeline keeps the
-//!   authors' value.
+//! - **A pipeline starts from the defaults.** Since #293 each method's defaults are its
+//!   reference values, so every reconstruction stage is reset to the defaults before the rules
+//!   apply, whichever stages the pipeline touches: a value the user changed (MEDI's λ), or a
+//!   method a pipeline chosen before set (DECOMPOSE), is not silently kept under the toolbox's
+//!   name. What is not reconstruction (the input, which outputs to make, how to run) stays.
+//! - **Reasoned rules are not part of a pipeline, unless the authors ran them.** A pipeline is
+//!   what the authors ran. A reasoned rule its choices trigger (PDF's measured
+//!   `pdf.cg-iterations`) is still reported by [`evaluate`](super::rules::evaluate), and the host
+//!   shows it, but the pipeline keeps the authors' value. A reasoned rule that is itself what the
+//!   authors ran, with their reason (DECOMPOSE's per-echo QSM, `decompose.qsm-per-echo`), is
+//!   one of the pipeline's choices.
 //! - **Scan-dependent rules apply on the scan.** A rule with a scan condition (MEDI's echo-time
 //!   choice needs more than one echo) is part of the pipeline only when the scan is known to meet
 //!   it, as everywhere in [`rules`](super::rules).
@@ -130,8 +133,11 @@ pub static REFERENCE_PIPELINES: &[ReferencePipeline] = &[
         id: "decompose",
         name: "DECOMPOSE",
         toolbox: "DECOMPOSE",
-        choose: &[("separation.algorithm", Choice("decompose"))],
-        source: "Chen et al. 2021 NeuroImage 242:118477 (DECOMPOSE), §3.6",
+        // A QSM per echo is what its authors ran (§2.2, §4.1: a TE-dependent QSM input is
+        // necessary), so it is one of the pipeline's choices, though its rule
+        // (`decompose.qsm-per-echo`) is a reasoned one: see the decision above.
+        choose: &[("separation.algorithm", Choice("decompose")), ("qsm_per_echo", Bool(true))],
+        source: "Chen et al. 2021 NeuroImage 242:118477 (DECOMPOSE), §2.2, §3.6, §4.1",
         not_reproduced: &[],
     },
 ];
@@ -166,5 +172,16 @@ mod tests {
         }
         assert_eq!(reference_pipeline("medi-toolbox").map(|p| p.name), Some("MEDI toolbox"));
         assert!(reference_pipeline("nope").is_none());
+    }
+
+    /// DECOMPOSE's pipeline is a QSM per echo, as its authors ran it: the value its
+    /// (reasoned) rule asks for.
+    #[test]
+    fn decompose_runs_a_qsm_per_echo() {
+        let p = reference_pipeline("decompose").unwrap();
+        let rule = RULES.iter().find(|r| r.id == "decompose.qsm-per-echo").expect("the rule");
+        assert_ne!(rule.strength, Strength::Reference);
+        let chosen = p.choose.iter().find(|(s, _)| *s == rule.setting).map(|(_, v)| v);
+        assert!(matches!((&rule.expect, chosen), (Test::OneOf { values }, Some(v)) if values.contains(v)), "{chosen:?}");
     }
 }
