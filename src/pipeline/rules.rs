@@ -1741,7 +1741,7 @@ pub static RULES: &[Rule] = &[
     // script's value is 0.4 ("Siemens, GE: 0.4, Philips: 0"), so every known manufacturer but
     // Philips gets 0.4 (Canon and the others too: 0.4 is what the script runs unless the user
     // changes it for Philips). An unknown manufacturer fires neither rule, and the window stays
-    // at the host's default; the pipelines say so in `not_reproduced`.
+    // at the host's default.
     reference_stated("chi-sep.tukey-not-philips",
         &[sep(CHI_SEP_TOOLBOX_ITERATIVE), not_manufacturer(&[Choice("philips")])],
         "tukey_window", &[Number(CHISEP_TUKEY)], TUKEY_NOT_PHILIPS_REASON, TUKEY_SOURCE),

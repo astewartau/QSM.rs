@@ -31,13 +31,9 @@
 //! - **Scan-dependent rules apply on the scan.** A rule with a scan condition (MEDI's echo-time
 //!   choice needs more than one echo) is part of the pipeline only when the scan is known to meet
 //!   it, as everywhere in [`rules`](super::rules).
-//! - **What cannot be reproduced is said.** No pipeline here is reproduced in full.
-//!   [`ReferencePipeline::not_reproduced`] lists, one short plain line each, every step of the
-//!   toolbox's pipeline that QSM.rs does not reproduce today: steps not yet ported, settings no
-//!   rule can express yet, steps outside the toolbox's published code, and choices still to be
-//!   made (said neutrally, naming what is followed). The host shows them before the pipeline is
-//!   chosen. Each line is taken from the toolbox-pipeline audit of 2026-11-10, which has the
-//!   toolbox file and line behind it; a line goes when what it says is fixed.
+//! - **Parity is checked, not declared.** Whether a pipeline reproduces its toolbox is measured
+//!   by QSM-CI's whole-pipeline parity track (QSMxT/QSM-CI#421), against each toolbox's own
+//!   pipeline run end to end; a QSMxT release waits on it.
 //! - **Which pipelines.** A toolbox whose own code runs a whole pipeline around its method, with
 //!   rules for it: the MEDI toolbox, STI Suite (its iLSQR and STAR-QSM), QSMART, the HEIDI
 //!   package, the χ-separation toolbox (its three methods) and DECOMPOSE. A method that is only
@@ -63,9 +59,6 @@ pub struct ReferencePipeline {
     pub choose: &'static [(&'static str, Value)],
     /// Where the pipeline is written down: the toolbox's script, README or paper.
     pub source: &'static str,
-    /// Steps of the toolbox's pipeline that QSM.rs does not reproduce, one short line each, for
-    /// a host to show before the pipeline is chosen (see the module docs).
-    pub not_reproduced: &'static [&'static str],
 }
 
 /// The catalogue, in the order a host lists it.
@@ -76,14 +69,6 @@ pub static REFERENCE_PIPELINES: &[ReferencePipeline] = &[
         toolbox: "MEDI toolbox 2024.11.26",
         choose: &[("inversion.algorithm", Choice("medi"))],
         source: "MEDI toolbox 2024.11.26 README.m:80-144",
-        not_reproduced: &[
-            "Brain mask: the toolbox runs BET on the magnitude without bias correction and does not erode the mask",
-            "Central frequency: the toolbox converts to ppm with the scanner's imaging frequency, not γ·B0",
-            "Uncombined coils: the toolbox's Fit_ppm_complex combines them itself; here the coils must be combined first",
-            "Two echoes: the toolbox's CSF mask covers the whole central brain; here MEDI runs without the CSF term",
-            "Odd matrix sizes: the toolbox's SMV kernel is half a voxel off; here odd axes are padded by one voxel",
-            "Outside the mask: the toolbox leaves minus the CSF mean there; here it is 0",
-        ],
     },
     ReferencePipeline {
         id: "sti-suite-ilsqr",
@@ -91,13 +76,6 @@ pub static REFERENCE_PIPELINES: &[ReferencePipeline] = &[
         toolbox: "STI Suite 3.0",
         choose: &[("inversion.algorithm", Choice("ilsqr"))],
         source: "STI Suite 3.0 QSM_GUI, probed headless (QSM.rs ilsqr.rs and vsharp.rs docs)",
-        not_reproduced: &[
-            "Brain mask: the mask STI Suite's QSM_GUI makes is not reproduced",
-            "Precision: STI Suite runs iLSQR in single precision; here it runs in double",
-            "Field mapping: STI Suite keeps the unwrapped field outside the mask and removes no per-echo mean",
-            "Iterations: STI Suite's GUI runs iLSQR for 40 iterations, its STI_Templates.m for 100; this follows STI_Templates.m",
-            "Referencing: whether STI Suite references χ is not confirmed",
-        ],
     },
     ReferencePipeline {
         id: "sti-suite-star",
@@ -105,11 +83,6 @@ pub static REFERENCE_PIPELINES: &[ReferencePipeline] = &[
         toolbox: "STI Suite 3.0",
         choose: &[("inversion.algorithm", Choice("star"))],
         source: "STI Suite 3.0 QSM_GUI, probed headless (QSM.rs star.rs and vsharp.rs docs)",
-        not_reproduced: &[
-            "Brain mask: the mask STI Suite's QSM_GUI makes is not reproduced",
-            "Field mapping: STI Suite keeps the unwrapped field outside the mask and removes no per-echo mean",
-            "Referencing: whether STI Suite references χ is not confirmed",
-        ],
     },
     ReferencePipeline {
         id: "qsmart",
@@ -117,13 +90,6 @@ pub static REFERENCE_PIPELINES: &[ReferencePipeline] = &[
         toolbox: "QSMART",
         choose: &[("inversion.algorithm", Choice("qsmart"))],
         source: "QSMART QSMART.m; Yaghmaie et al. 2021 NeuroImage 231:117701",
-        not_reproduced: &[
-            "Brain mask: QSMART's recipe (BET f 0.2 on N4-corrected echo 1, threshold, majority filter, closing) is not reproduced",
-            "Phase: geme_cmb's phase-offset removal and POEM coil combination are not reproduced",
-            "Precision: QSMART runs iLSQR in single precision; here it runs in double",
-            "γ: QSMART's demo converts to ppm with 2.675e8 rad/s/T; here 42.576 MHz/T",
-            "adjust_offset: QSMART's k-space grid differs on odd matrix sizes; here the FFT grid is used",
-        ],
     },
     ReferencePipeline {
         id: "heidi",
@@ -131,11 +97,6 @@ pub static REFERENCE_PIPELINES: &[ReferencePipeline] = &[
         toolbox: "HEIDI package (qsm_heidi 4592631)",
         choose: &[("inversion.algorithm", Choice("lsqr")), ("inversion.apply_heidi", Bool(true))],
         source: "qsm_heidi makefile and def.sh (4592631); Schweser et al. 2012 NeuroImage 62:2083",
-        not_reproduced: &[
-            "Unwarping, masks and phase preprocessing: the authors run them outside the qsm_heidi repository; not reproduced",
-            "SHARP: the authors' settings are not in the qsm_heidi repository",
-            "LSQR weight: the toolbox weights by the magnitude without bias correction",
-        ],
     },
     ReferencePipeline {
         id: "chi-sep-ilsqr",
@@ -143,14 +104,6 @@ pub static REFERENCE_PIPELINES: &[ReferencePipeline] = &[
         toolbox: "χ-separation toolbox 1.1.3",
         choose: &[("separation.algorithm", Choice("chi-sep-ilsqr"))],
         source: "χ-separation toolbox v1.1.3 Chisep_script.m",
-        not_reproduced: &[
-            "Brain mask: the toolbox runs BET on the magnitude without bias correction and does not erode the mask",
-            "ROMEO: the toolbox runs the ROMEO command line at its defaults on the uneroded mask",
-            "Central frequency: the toolbox uses the scanner's imaging frequency for ppm and the relaxometric constants",
-            "Tukey window: 0.4, or 0 on Philips, is set only when the scanner's manufacturer is known",
-            "R2*: the toolbox's R2* fits (r2star_arlo, r2star_nnls) are P-coded and not confirmed",
-            "R2′: the toolbox takes R2′ from the user; here it is measured or predicted",
-        ],
     },
     ReferencePipeline {
         id: "chi-sep-medi",
@@ -158,15 +111,6 @@ pub static REFERENCE_PIPELINES: &[ReferencePipeline] = &[
         toolbox: "χ-separation toolbox 1.1.3",
         choose: &[("separation.algorithm", Choice("chi-sep-medi"))],
         source: "χ-separation toolbox v1.1.3 Chisep_script.m",
-        not_reproduced: &[
-            "Brain mask: the toolbox runs BET on the magnitude without bias correction and does not erode the mask",
-            "ROMEO: the toolbox runs the ROMEO command line at its defaults on the uneroded mask",
-            "Central frequency: the toolbox uses the scanner's imaging frequency for ppm and the relaxometric constants",
-            "Tukey window: 0.4, or 0 on Philips, is set only when the scanner's manufacturer is known",
-            "R2*: the toolbox's R2* fits (r2star_arlo, r2star_nnls) are P-coded and not confirmed",
-            "R2′: the toolbox takes R2′ from the user; here it is measured or predicted",
-            "CSF mask: the script's CSF mask line is commented out; here MEDI's extract_CSF is used",
-        ],
     },
     ReferencePipeline {
         id: "chi-sepnet",
@@ -174,14 +118,6 @@ pub static REFERENCE_PIPELINES: &[ReferencePipeline] = &[
         toolbox: "χ-separation toolbox 1.1.3",
         choose: &[("separation.algorithm", Choice("chi-sepnet")), ("separation.chi_sepnet.route", Choice("toolbox"))],
         source: "χ-separation toolbox v1.1.3 Chisep_script.m; Kim et al. 2025 (χ-sepnet)",
-        not_reproduced: &[
-            "Brain mask: the toolbox runs BET on the magnitude without bias correction and does not erode the mask",
-            "ROMEO: the toolbox runs the ROMEO command line at its defaults on the uneroded mask",
-            "Central frequency: the toolbox uses the scanner's imaging frequency for ppm and the relaxometric constants",
-            "Tukey window: 0.4, or 0 on Philips, is set only when the scanner's manufacturer is known",
-            "R2*: the toolbox's R2* fits (r2star_arlo, r2star_nnls) are P-coded and not confirmed",
-            "Resolution: the toolbox's resolution-generalisation branch (resgen) is not ported",
-        ],
     },
     ReferencePipeline {
         id: "decompose",
@@ -192,11 +128,6 @@ pub static REFERENCE_PIPELINES: &[ReferencePipeline] = &[
         // (`decompose.qsm-per-echo`) is a reasoned one: see the decision above.
         choose: &[("separation.algorithm", Choice("decompose")), ("qsm_per_echo", Bool(true))],
         source: "Chen et al. 2021 NeuroImage 242:118477 (DECOMPOSE), §2.2, §3.6, §4.1",
-        not_reproduced: &[
-            "The paper and the authors' script differ; this pipeline follows the paper, with STI Suite's settings where it gives none",
-            "From the paper: BET on the first echo's magnitude and the constrained interior-point fit are not reproduced",
-            "From the script: V-SHARP 25 mm, STAR-QSM padding 12, no referencing and B0 from the imaging frequency are not followed",
-        ],
     },
 ];
 
@@ -230,18 +161,6 @@ mod tests {
         }
         assert_eq!(reference_pipeline("medi-toolbox").map(|p| p.name), Some("MEDI toolbox"));
         assert!(reference_pipeline("nope").is_none());
-    }
-
-    /// Every pipeline says what it does not reproduce, one short line each.
-    #[test]
-    fn every_pipeline_says_what_it_does_not_reproduce() {
-        for p in REFERENCE_PIPELINES {
-            assert!(!p.not_reproduced.is_empty(), "{}", p.id);
-            for line in p.not_reproduced {
-                assert!(!line.is_empty() && line.chars().count() <= 120 && !line.contains('\n'), "{}: {line}", p.id);
-                assert!(!line.ends_with('.'), "{}: {line}", p.id);
-            }
-        }
     }
 
     /// DECOMPOSE's pipeline is a QSM per echo, as its authors ran it: the value its
