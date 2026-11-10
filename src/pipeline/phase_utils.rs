@@ -6,53 +6,82 @@ use std::f64::consts::PI;
 
 use crate::constants::GAMMA_BAR_HZ_PER_T;
 
-/// Scale phase data to [-pi, pi] range in-place.
-///
-/// If data is already approximately in [-pi, pi] (within 10% tolerance),
-/// leaves it unchanged. Otherwise linearly maps from [min, max] to [-pi, pi].
-/// NaN/Inf values are replaced with 0.
+/// Bring one phase volume into radians in `[-π, π]`, in place: [`scale_phases_to_pi`] for a
+/// single echo. Use [`scale_phases_to_pi`] for multi-echo phase, so every echo gets the same
+/// conversion.
 pub fn scale_phase_to_pi(data: &mut [f64]) {
-    if data.is_empty() {
-        return;
-    }
+    scale_phases_to_pi(&mut [data]);
+}
 
+/// Bring multi-echo phase into radians in `[-π, π]`, in place, with ONE conversion shared by
+/// every echo. Non-finite values become 0.
+///
+/// Phase reaches QSM.rs in radians or in a scanner's or converter's own units. The rule is
+/// chosen from the finite minimum and maximum over all echoes together:
+///
+/// 1. **Already radians** (every value within `[-π, π]`, give or take [`PHASE_RADIANS_TOL`]):
+///    left exactly as it is. This includes phase that does not reach ±π, such as phase that does
+///    not wrap (short echoes, a good shim, a small field of view, synthetic phantoms) or phase
+///    that was unwrapped or processed before. An earlier rule stretched any volume whose minimum
+///    and maximum were not near ±π onto `[-π, π]`, one echo at a time; on such phase that
+///    changed every value and scaled each echo differently, destroying the field (a non-wrapping
+///    phantom's complex-fit field came out at 1e-8 ppm with correlation 0.06 to the truth).
+/// 2. **Radians in `[0, 2π]`** (minimum ≥ −tolerance, maximum ≤ 2π + tolerance): values above π
+///    are wrapped by −2π. The same angles, so nothing a field map sees changes; a linear map to
+///    `[-π, π]` would instead add π to every echo, which is wrong for a single-echo field φ/TE.
+/// 3. **Anything else** (integer DICOM phase such as 0..4095 or −4096..4095, degrees): mapped
+///    linearly from `[min, max]` over ALL echoes onto `[-π, π]`. Integer phase of every echo
+///    spans its full range, so the shared range is the scanner's; one scale and offset for every
+///    echo keeps the phase differences between echoes, which per-echo ranges would not.
+///
+/// A volume with no range (constant, or nothing finite) is left as it is (after the non-finite
+/// values are zeroed).
+pub fn scale_phases_to_pi<T: AsMut<[f64]>>(echoes: &mut [T]) {
     let mut min_val = f64::INFINITY;
     let mut max_val = f64::NEG_INFINITY;
-    for &v in data.iter() {
-        if v.is_finite() {
-            if v < min_val {
-                min_val = v;
-            }
-            if v > max_val {
-                max_val = v;
+    for echo in echoes.iter_mut() {
+        for v in echo.as_mut().iter_mut() {
+            if v.is_finite() {
+                min_val = min_val.min(*v);
+                max_val = max_val.max(*v);
+            } else {
+                *v = 0.0;
             }
         }
     }
-
-    // Replace non-finite values with 0
-    for v in data.iter_mut() {
-        if !v.is_finite() {
-            *v = 0.0;
-        }
-    }
-
+    // No range: constant, or nothing finite (then -inf - inf = -inf); NaN cannot arise but is
+    // treated the same.
     let range = max_val - min_val;
-    if range < 1e-10 {
+    if range.is_nan() || range < 1e-10 {
         return;
     }
-
-    // Check if already approximately in [-pi, pi]
-    let tol = 0.1 * PI;
-    if (min_val + PI).abs() < tol && (max_val - PI).abs() < tol {
+    let tol = PHASE_RADIANS_TOL;
+    if min_val >= -PI - tol && max_val <= PI + tol {
         return;
     }
-
-    // Linearly rescale to [-pi, pi]
+    if min_val >= -tol && max_val <= 2.0 * PI + tol {
+        for echo in echoes.iter_mut() {
+            for v in echo.as_mut().iter_mut() {
+                if *v > PI {
+                    *v -= 2.0 * PI;
+                }
+            }
+        }
+        return;
+    }
     let scale = 2.0 * PI / range;
-    for v in data.iter_mut() {
-        *v = (*v - min_val) * scale - PI;
+    for echo in echoes.iter_mut() {
+        for v in echo.as_mut().iter_mut() {
+            *v = (*v - min_val) * scale - PI;
+        }
     }
 }
+
+/// How far outside `[-π, π]` (or `[0, 2π]`) phase may reach and still be taken as radians by
+/// [`scale_phases_to_pi`]: float32 storage and converters' rescale slopes put ±π a little off.
+/// 10 %, as the earlier rule's "near ±π" test; far below any other unit's range (degrees reach
+/// 180, integer phase 4095).
+pub const PHASE_RADIANS_TOL: f64 = 0.1 * PI;
 
 /// Convert field from Hz to ppm.
 pub fn hz_to_ppm(field_hz: &[f64], field_strength: f64) -> Vec<f64> {
@@ -118,6 +147,61 @@ pub fn rss_combine(magnitudes: &[&[f64]]) -> Result<Vec<f64>, crate::error::Inpu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Phase that does not wrap (it never reaches ±π) is radians already: left untouched, every
+    /// echo. The old rule stretched each echo onto [-π, π] separately.
+    #[test]
+    fn scale_phases_leaves_non_wrapping_radians_alone() {
+        let mut echoes = vec![vec![0.23, 0.30, 0.42], vec![0.16, 0.30, 0.55], vec![0.03, 0.30, 0.80]];
+        let original = echoes.clone();
+        scale_phases_to_pi(&mut echoes);
+        assert_eq!(echoes, original);
+        // float32-rounded ±π is still radians
+        let mut edge = vec![vec![-(PI as f32) as f64, 0.0, (PI as f32) as f64]];
+        let original = edge.clone();
+        scale_phases_to_pi(&mut edge);
+        assert_eq!(edge, original);
+    }
+
+    /// Integer phase maps to [-π, π] with one scale and offset for every echo: the same count is
+    /// the same angle in every echo, whatever range each echo happens to cover.
+    #[test]
+    fn scale_phases_maps_integer_phase_identically_across_echoes() {
+        for (lo, hi) in [(0.0, 4095.0), (-4096.0, 4095.0)] {
+            let mid = ((lo + hi) / 2.0f64).round();
+            // echo 2 does not reach either end
+            let mut echoes = vec![vec![lo, mid, hi], vec![mid - 100.0, mid, mid + 100.0]];
+            scale_phases_to_pi(&mut echoes);
+            let map = |v: f64| (v - lo) * 2.0 * PI / (hi - lo) - PI;
+            assert!((echoes[0][0] + PI).abs() < 1e-12 && (echoes[0][2] - PI).abs() < 1e-12);
+            assert_eq!(echoes[0][1], echoes[1][1], "the same count, the same angle");
+            for (got, v) in echoes[1].iter().zip([mid - 100.0, mid, mid + 100.0]) {
+                assert!((got - map(v)).abs() < 1e-12, "{lo}..{hi}: {got} vs {}", map(v));
+            }
+        }
+    }
+
+    /// Radians in [0, 2π) are wrapped, not shifted: the same angles, so no echo gains π.
+    #[test]
+    fn scale_phases_wraps_zero_to_two_pi() {
+        let mut echoes = vec![vec![0.0, 1.0, 4.0, 2.0 * PI - 1e-3], vec![0.5, 3.0, 5.0, 6.0]];
+        let original = echoes.clone();
+        scale_phases_to_pi(&mut echoes);
+        for (e, o) in echoes.iter().flatten().zip(original.iter().flatten()) {
+            assert!((-PI..=PI).contains(e), "{e}");
+            assert!(((e - o).rem_euclid(2.0 * PI)).min((o - e).rem_euclid(2.0 * PI)) < 1e-12, "{e} vs {o}");
+        }
+        assert_eq!(echoes[0][1], 1.0);
+    }
+
+    /// Degrees are not radians: mapped linearly, shared across echoes.
+    #[test]
+    fn scale_phases_maps_degrees() {
+        let mut echoes = vec![vec![-180.0, 0.0, 180.0], vec![-90.0, 90.0, 0.0]];
+        scale_phases_to_pi(&mut echoes);
+        assert!((echoes[1][0] + PI / 2.0).abs() < 1e-12 && (echoes[1][1] - PI / 2.0).abs() < 1e-12);
+        assert!(echoes[1][2].abs() < 1e-12);
+    }
 
     #[test]
     fn test_scale_phase_already_in_range() {

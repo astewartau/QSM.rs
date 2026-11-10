@@ -54,7 +54,7 @@ pub mod reference_pipelines;
 
 pub use config::*;
 pub use phase_utils::{
-    scale_phase_to_pi, hz_to_ppm, rads_to_ppm, ppm_to_hz, ppm_to_rads, rss_combine,
+    scale_phase_to_pi, scale_phases_to_pi, PHASE_RADIANS_TOL, hz_to_ppm, rads_to_ppm, ppm_to_hz, ppm_to_rads, rss_combine,
 };
 pub use referencing::apply_reference;
 pub use masking::{apply_mask_ops, build_mask_section, resolve_masking_input, run_masking, section_magnitude};

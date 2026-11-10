@@ -464,11 +464,7 @@ fn tiled_phase_nets_and_bfrnet_track_whole_volume() {
     let n = nx * ny * nz;
     let echo = |v: &[f64], e: usize| v[e * n..(e + 1) * n].to_vec();
     let mut phases: Vec<Vec<f64>> = (0..ne).map(|e| echo(&phase, e)).collect();
-    for p in &mut phases {
-        if p.iter().any(|v| v.abs() > 3.2) {
-            scale_phase_to_pi(p);
-        }
-    }
+    scale_phases_to_pi(&mut phases);
     let mags: Vec<Vec<f64>> = (0..ne).map(|e| echo(&mag, e)).collect();
     let meta = ScanMetadata {
         dims: (nx, ny, nz),
