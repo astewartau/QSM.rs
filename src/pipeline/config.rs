@@ -355,6 +355,36 @@ impl InhomogeneityCorrection {
     }
 }
 
+/// The image geometry the host gives N4 when [`InhomogeneityCorrection::N4`] corrects the
+/// magnitude before masking. N4 runs on a shrunk image whose voxel offsets ITK derives from the
+/// header ([`crate::utils::ItkGeometry::shrink_offsets`]), so the geometry changes the correction.
+/// Like the correction itself, the host applies it; it is part of the config so rules can say what
+/// a toolbox's pipeline does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum N4Geometry {
+    /// The scanner's header ([`crate::utils::ItkGeometry::from_nifti_header`]), as ANTs reads the
+    /// acquired NIfTI.
+    #[default]
+    Scanner,
+    /// The axis-aligned header MATLAB's `make_nii(img, vox)` writes
+    /// ([`crate::utils::ItkGeometry::make_nii`]): what QSMART hands ANTs (`brainmask.m` writes
+    /// `mag1_sos.nii` with it). On the in-vivo s005001 Prisma scan, whose sform carries a 5e-12
+    /// off-diagonal term, ITK's shrink offsets are (2,1,2) with the scanner's header and (2,2,2)
+    /// with this one, and N4 differs from ANTs on QSMART's file by 1.14 % and 0.0003 % NRMSE
+    /// (QSMxT/QSM-CI#421, 2026-11-10).
+    MakeNii,
+}
+
+impl N4Geometry {
+    /// Stable id, as rules and hosts name it.
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::Scanner => "scanner",
+            Self::MakeNii => "make-nii",
+        }
+    }
+}
+
 /// Threshold method for mask generation
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum MaskThresholdMethod {
@@ -461,6 +491,8 @@ impl MaskSection {
 #[derive(Clone, Debug)]
 pub struct MaskingConfig {
     pub inhomogeneity_correction: InhomogeneityCorrection,
+    /// The geometry N4 is given when [`Self::inhomogeneity_correction`] is N4.
+    pub n4_geometry: N4Geometry,
     pub homogeneity_sigma_mm: f64,
     pub homogeneity_nbox: usize,
     pub sections: Vec<MaskSection>,
@@ -470,6 +502,7 @@ impl Default for MaskingConfig {
     fn default() -> Self {
         Self {
             inhomogeneity_correction: InhomogeneityCorrection::Makehomogeneous,
+            n4_geometry: N4Geometry::Scanner,
             homogeneity_sigma_mm: 7.0,
             homogeneity_nbox: 15,
             sections: vec![MaskSection {
