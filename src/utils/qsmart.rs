@@ -225,11 +225,13 @@ pub fn adjust_offset(
 pub const QSMART_GYRO: f64 = 2.675e8;
 
 /// QSMART's fixed echo-fit residual threshold for `R_0` (`Demo_QSMART.m`'s `fit_threshold`,
-/// used when its `adaptive_threshold` is off).
+/// used when its `adaptive_threshold` is off, as it is in `QSMART_toolbox_v1.0`'s demo): the
+/// default.
 pub const QSMART_FIT_THRESHOLD: f64 = 40.0;
 
 /// QSMART's adaptive echo-fit threshold: the percentile of the blurred residual
-/// (`fit_thresh_percentile`) that its authors use.
+/// (`fit_thresh_percentile`) in the authors' October 2020 human demo and their 7 T run. Not the
+/// default: QSM.rs follows `QSMART_toolbox_v1.0` (decided 2026-11-10).
 pub const QSMART_FIT_PERCENTILE: f64 = 99.0;
 
 /// How [`qsmart_echofit`] sets the residual threshold for `R_0` (`echofit.m`'s
@@ -238,16 +240,17 @@ pub const QSMART_FIT_PERCENTILE: f64 = 99.0;
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum QsmartFitThreshold {
     /// Adaptive: the given percentile (0–100] of the nonzero blurred residuals over the whole
-    /// volume, as MATLAB's `prctile(fit_residual_blur(fit_residual_blur~=0), p)`. QSMART's authors
-    /// run with [`QSMART_FIT_PERCENTILE`] (99); the default.
+    /// volume, as MATLAB's `prctile(fit_residual_blur(fit_residual_blur~=0), p)`. The authors'
+    /// October 2020 demo runs [`QSMART_FIT_PERCENTILE`] (99).
     Percentile(f64),
-    /// A fixed residual threshold ([`QSMART_FIT_THRESHOLD`] = 40 in `Demo_QSMART.m`).
+    /// A fixed residual threshold: the default, [`QSMART_FIT_THRESHOLD`] = 40, is what
+    /// `QSMART_toolbox_v1.0`'s `Demo_QSMART.m` runs (`adaptive_threshold` 0, `fit_threshold` 40).
     Absolute(f64),
 }
 
 impl Default for QsmartFitThreshold {
     fn default() -> Self {
-        QsmartFitThreshold::Percentile(QSMART_FIT_PERCENTILE)
+        QsmartFitThreshold::Absolute(QSMART_FIT_THRESHOLD)
     }
 }
 
@@ -307,8 +310,9 @@ pub struct QsmartEchofit {
 
 /// QSMART's `echofit.m` (zero intercept): fits the unwrapped phase of each echo to its echo time,
 /// weighted by magnitude, and marks voxels whose blurred fit residual reaches the threshold as
-/// unreliable (`R_0` = 0). The threshold is `fit_threshold`: by default the 99th percentile of the
-/// blurred residual ([`QsmartFitThreshold::Percentile`], as the authors run it), or a fixed value.
+/// unreliable (`R_0` = 0). The threshold is `fit_threshold`: by default the fixed 40 of
+/// `QSMART_toolbox_v1.0` ([`QsmartFitThreshold::Absolute`]), or a percentile of the blurred
+/// residual.
 ///
 /// `phases` are unwrapped phases in radians, `magnitudes` the matching magnitudes, one volume per
 /// echo; `echo_times` in seconds; `ppm` converts rad/s to ppm (QSMART: `gyro * B0 / 1e6` with
@@ -602,7 +606,7 @@ mod tests {
         assert_eq!(fit.fit_threshold, want);
         let excluded = fit.reliability.iter().filter(|&&r| r == 0).count();
         assert!(excluded > 0 && excluded < n / 2, "{excluded}");
-        assert_eq!(QsmartFitThreshold::default(), QsmartFitThreshold::Percentile(99.0));
+        assert_eq!(QsmartFitThreshold::default(), QsmartFitThreshold::Absolute(40.0));
         assert!(QsmartFitThreshold::Percentile(0.0).validate().is_err());
         assert!(QsmartFitThreshold::Percentile(101.0).validate().is_err());
         assert!(QsmartFitThreshold::Absolute(0.0).validate().is_err());

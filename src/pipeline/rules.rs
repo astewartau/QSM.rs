@@ -548,10 +548,15 @@ impl<'a> RuleInput<'a> {
 /// Every setting path a rule may name, with what it is. [`current`] reads each of them.
 pub const SETTINGS: &[(&str, &str)] = &[
     ("masking.generator", "Each mask section's generator (MaskOp::id)"),
+    ("masking.input", "Each mask section's input image (MaskingInput::id): magnitude-first, magnitude (RSS over echoes), magnitude-last or phase-quality"),
+    ("masking.inhomogeneity_correction", "The host's correction of the magnitude before masking (InhomogeneityCorrection::id): none, makehomogeneous or n4"),
+    ("masking.bet.fractional_intensity", "Each BET step's fractional intensity threshold (BetParams::fractional_intensity)"),
+    ("masking.erosion", "Each mask section's erosion: the voxels its Erode refinements take off in total (0 = none)"),
     ("masking.hd_bet.inference", "Each HD-BET step's inference: full-volume, sliding-window (HdBetInference::SLIDING_WINDOW), low-memory (HdBetInference::LOW_MEMORY) or custom-window"),
     ("field_mapping.unwrapping_algorithm", "Phase unwrapping (UnwrappingAlgorithm::id)"),
     ("field_mapping.b0_estimation", "Echo combination (B0EstimationMethod::id)"),
     ("field_mapping.b0_estimation.weighting", "Weighted average's per-echo weight (B0WeightType, by `weight_id`); only with weighted-avg"),
+    ("field_mapping.b0_estimation.qsmart_fit_threshold", "QSMART echo fit's residual threshold for R_0 (QsmartFitThreshold): absolute-40 (QSMART_toolbox_v1.0), absolute (another value), percentile-99 (the October 2020 demo) or percentile (another); only with qsmart-echofit"),
     ("field_mapping.phase_offset_removal", "MCPC-3D-S phase-offset removal before unwrapping (bool)"),
     ("field_mapping.phase_offset_sigma_mm", "MCPC-3D-S smoothing sigma per axis, mm; only with phase-offset removal"),
     ("field_mapping.bipolar_correction", "Bipolar readout correction (bool)"),
@@ -575,6 +580,7 @@ pub const SETTINGS: &[(&str, &str)] = &[
     ("inversion.star.pad", "STAR-QSM padding per side, voxels (StarParams::pad)"),
     ("inversion.ilsqr.max_iter", "iLSQR's LSQR iteration cap (IlsqrParams::max_iter); only with iLSQR"),
     ("inversion.ilsqr.pad_mm", "iLSQR's padding, mm (IlsqrParams::pad_mm); only with iLSQR"),
+    ("inversion.ilsqr.precision", "iLSQR's arithmetic: double or single (IlsqrPrecision); with iLSQR, or QSMART inverting with iLSQR"),
     ("inversion.whqsm.weight", "WH-QSM's data weight: flat, flat-in-mask, max-normalised or in-vivo (WhQsmWeight); only with WH-QSM"),
     ("inversion.ndi.weight_norm", "NDI's magnitude-weight normaliser: global-max or mask-p999 (NdiWeightNorm::id); only with NDI"),
     ("inversion.star.te", "Echo time STAR-QSM converts at (EchoTime: first, last, spacing, sum, seconds); only with STAR"),
@@ -589,11 +595,13 @@ pub const SETTINGS: &[(&str, &str)] = &[
     ("inversion.apply_heidi", "HEIDI's cone fill after the inversion (InversionConfig::apply_heidi, bool)"),
     ("inversion.heidi.cone_threshold", "HEIDI's cone threshold, |D| (HeidiParams::cone_threshold); only with HEIDI"),
     ("inversion.heidi.te", "Echo time HEIDI converts at (EchoTime); only with HEIDI"),
+    ("inversion.heidi.denoise_itk", "HEIDI's anisotropic diffusion in ITK's float arithmetic (AnisotropicDiffusionParams::reference_itk, bool); only with HEIDI's denoising on"),
     ("inversion.tkd.threshold", "TKD's truncation threshold, |D| (TkdParams::threshold); only with TKD"),
     ("inversion.tsvd.threshold", "TSVD's truncation threshold, |D| (TkdParams::threshold); only with TSVD"),
     ("inversion.qsmart.inversion", "QSMART's inner inversion (InversionAlgorithm::id); only with QSMART"),
     ("inversion.qsmart.ilsqr_max_iter", "QSMART's iLSQR iteration count; only with QSMART"),
     ("inversion.qsmart.ilsqr_pad_mm", "QSMART's iLSQR padding, mm; only with QSMART"),
+    ("inversion.qsmart.offset_grid", "QSMART's offset-adjustment dipole grid: fft or qsmart-reference (QsmartOffsetGrid::id); only with QSMART"),
     ("reference", "QSM referencing (QsmReference: mean or none)"),
     ("qsm_per_echo", "A QSM per echo, and their mean, instead of one QSM from the echo-combined field (QsmPipelineConfig::qsm_per_echo, bool)"),
     ("tukey_window", "Taper ratio of the χ-separation toolbox's k-space Tukey window on the complex echoes, 0 = none (QsmPipelineConfig::tukey_window)"),
@@ -673,6 +681,34 @@ pub fn current(input: &RuleInput, facts: &ScanFacts, setting: &str) -> Option<Ve
         "masking.generator" => {
             c.masking.sections.iter().map(|s| Current::Choice(s.generator.id())).collect()
         }
+        "masking.input" => c.masking.sections.iter().map(|s| Current::Choice(s.input.id())).collect(),
+        "masking.inhomogeneity_correction" => one(Current::Choice(c.masking.inhomogeneity_correction.id())),
+        "masking.bet.fractional_intensity" => c
+            .masking
+            .sections
+            .iter()
+            .flat_map(|s| std::iter::once(&s.generator).chain(&s.refinements))
+            .filter_map(|op| match op {
+                super::config::MaskOp::Bet(p) => Some(Current::Number(p.fractional_intensity)),
+                _ => None,
+            })
+            .collect(),
+        "masking.erosion" => c
+            .masking
+            .sections
+            .iter()
+            .map(|s| {
+                let n: usize = s
+                    .refinements
+                    .iter()
+                    .map(|op| match op {
+                        super::config::MaskOp::Erode { iterations } => *iterations,
+                        _ => 0,
+                    })
+                    .sum();
+                Current::Number(n as f64)
+            })
+            .collect(),
         "masking.hd_bet.inference" => hd_bet_steps(c)
             .map(|p| {
                 Current::Choice(match p.inference {
@@ -691,6 +727,18 @@ pub fn current(input: &RuleInput, facts: &ScanFacts, setting: &str) -> Option<Ve
         "field_mapping.b0_estimation.weighting" => match &c.field_mapping.b0_estimation {
             super::config::B0EstimationMethod::WeightedAvg { weighting } if combines => {
                 one(Current::Choice(weight_id(weighting)))
+            }
+            _ => vec![],
+        },
+        "field_mapping.b0_estimation.qsmart_fit_threshold" => match &c.field_mapping.b0_estimation {
+            super::config::B0EstimationMethod::QsmartEchofit { fit_threshold } if combines => {
+                use crate::utils::QsmartFitThreshold as T;
+                one(Current::Choice(match *fit_threshold {
+                    T::Absolute(t) if t == crate::utils::QSMART_FIT_THRESHOLD => "absolute-40",
+                    T::Absolute(_) => "absolute",
+                    T::Percentile(p) if p == crate::utils::QSMART_FIT_PERCENTILE => "percentile-99",
+                    T::Percentile(_) => "percentile",
+                }))
             }
             _ => vec![],
         },
@@ -730,6 +778,14 @@ pub fn current(input: &RuleInput, facts: &ScanFacts, setting: &str) -> Option<Ve
         ),
         "inversion.ilsqr.max_iter" => gated(alg(&[A::Ilsqr]), Current::Number(c.inversion.ilsqr.max_iter as f64)),
         "inversion.ilsqr.pad_mm" => gated(alg(&[A::Ilsqr]), Current::Number(c.inversion.ilsqr.pad_mm)),
+        // QSMART's two stages take their iLSQR precision from `inversion.ilsqr` (`run_qsmart`).
+        "inversion.ilsqr.precision" => gated(
+            alg(&[A::Ilsqr]) || (qsmart && c.inversion.qsmart.inversion == A::Ilsqr),
+            Current::Choice(match c.inversion.ilsqr.precision {
+                crate::inversion::IlsqrPrecision::Double => "double",
+                crate::inversion::IlsqrPrecision::Single => "single",
+            }),
+        ),
         "bg_removal.vsharp.grid" => gated(
             vsharp,
             Current::Choice(match c.bg_removal.vsharp.grid {
@@ -780,6 +836,10 @@ pub fn current(input: &RuleInput, facts: &ScanFacts, setting: &str) -> Option<Ve
         "inversion.apply_heidi" => one(Current::Bool(c.inversion.apply_heidi)),
         "inversion.heidi.cone_threshold" => gated(c.inversion.apply_heidi, Current::Number(c.inversion.heidi.cone_threshold)),
         "inversion.heidi.te" => gated(c.inversion.apply_heidi, Current::Choice(echo_time_id(c.inversion.heidi.te))),
+        "inversion.heidi.denoise_itk" => match &c.inversion.heidi.denoise {
+            Some(d) if c.inversion.apply_heidi => one(Current::Bool(d.reference_itk)),
+            _ => vec![],
+        },
         "inversion.tkd.threshold" => gated(alg(&[A::Tkd]), Current::Number(c.inversion.tkd.threshold)),
         "inversion.tsvd.threshold" => gated(alg(&[A::Tsvd]), Current::Number(c.inversion.tsvd.threshold)),
         "inversion.qsmart.inversion" => gated(qsmart, Current::Choice(c.inversion.qsmart.inversion.id())),
@@ -787,6 +847,7 @@ pub fn current(input: &RuleInput, facts: &ScanFacts, setting: &str) -> Option<Ve
             gated(qsmart, Current::Number(c.inversion.qsmart.ilsqr_max_iter as f64))
         }
         "inversion.qsmart.ilsqr_pad_mm" => gated(qsmart, Current::Number(c.inversion.qsmart.ilsqr_pad_mm)),
+        "inversion.qsmart.offset_grid" => gated(qsmart, Current::Choice(c.inversion.qsmart.adjust_offset_grid.id())),
         "bg_removal.algorithm" => gated(
             inv_input.needs_bg_removal(),
             Current::Choice(c.bg_removal.algorithm.id()),
@@ -1030,6 +1091,12 @@ const fn discourage(
 }
 
 const BET: &[Value] = &[Choice("bet")];
+const MEDI_MASK_SOURCE: &str = "MEDI toolbox README.m (iMag = sqrt(sum(abs(iField).^2,4)); Mask = BET(iMag, ...)), \
+    l. 92 and 111 in the 2020 fork at ~/code/ref/medi; BET.m calls the bet2 mex";
+const DECOMPOSE_MASK_SOURCE: &str = "Chen et al. 2021 NeuroImage 242:118477 (DECOMPOSE), §3.6 (\"The GRE \
+    magnitude images of the first echo was used to mask and extract the brain tissue using ... BET\"); \
+    BET's f, erosion and correction are not stated";
+const CHI_SEP_MASK_SOURCE: &str = "χ-separation toolbox v1.1.3 Chisep_script.m:75 (mag = sqrt(sum(abs(mag_multi_echo).^2,4))), :82 (BET)";
 /// The CG iteration count `pdf.cg-iterations` suggests (measured; see `PdfParams::n_cg`).
 const PDF_SUGGESTED_N_CG: f64 = 300.0;
 const PDF: &[Value] = &[Choice("pdf")];
@@ -1158,6 +1225,48 @@ pub static RULES: &[Rule] = &[
     reference("decompose.mask-bet", &[sep(&[Choice("decompose")])], "masking.generator", BET,
         "DECOMPOSE's pipeline masks with FSL BET",
         "Chen et al. 2021 NeuroImage 242:118477 (DECOMPOSE), §3.6"),
+    // The rest of each toolbox's mask recipe: what BET reads, how that image is corrected, and
+    // what is done to the mask after. QSMxT's `bet` preset (BET on the corrected RSS, then a
+    // 2-voxel erosion) does none of these toolboxes' recipes.
+    reference("medi.mask-input", &[inv(&[Choice("medi")])], "masking.input", &[Choice("magnitude")],
+        "The MEDI toolbox runs BET on the root-sum-of-squares magnitude over echoes",
+        MEDI_MASK_SOURCE),
+    reference("medi.mask-no-correction", &[inv(&[Choice("medi")])], "masking.inhomogeneity_correction",
+        &[Choice("none")], "The MEDI toolbox runs BET on the magnitude as read, with no bias-field correction",
+        MEDI_MASK_SOURCE),
+    reference("medi.mask-no-erosion", &[inv(&[Choice("medi")])], "masking.erosion", &[Number(0.0)],
+        "The MEDI toolbox uses BET's mask as it is, without eroding it", MEDI_MASK_SOURCE),
+    reference("chi-sep.mask-input", &[sep(CHI_SEP_TOOLBOX)], "masking.input", &[Choice("magnitude")],
+        "The χ-separation toolbox runs MEDI's BET on the root-sum-of-squares magnitude over echoes",
+        CHI_SEP_MASK_SOURCE),
+    reference("chi-sep.mask-no-correction", &[sep(CHI_SEP_TOOLBOX)], "masking.inhomogeneity_correction",
+        &[Choice("none")], "The χ-separation toolbox runs BET on the magnitude as read, with no bias-field correction",
+        CHI_SEP_MASK_SOURCE),
+    reference("chi-sep.mask-no-erosion", &[sep(CHI_SEP_TOOLBOX)], "masking.erosion", &[Number(0.0)],
+        "The χ-separation toolbox uses BET's mask as it is, without eroding it", CHI_SEP_MASK_SOURCE),
+    // DECOMPOSE's paper describes BET on the first echo's magnitude and nothing more: no
+    // correction before it and no erosion after it are stated, so none is what its pipeline runs.
+    reference("decompose.mask-input", &[sep(&[Choice("decompose")])], "masking.input",
+        &[Choice("magnitude-first")], "DECOMPOSE's authors run BET on the first echo's GRE magnitude",
+        DECOMPOSE_MASK_SOURCE),
+    reference("decompose.mask-no-correction", &[sep(&[Choice("decompose")])],
+        "masking.inhomogeneity_correction", &[Choice("none")],
+        "DECOMPOSE's authors run BET on the first echo's magnitude; no bias-field correction is described",
+        DECOMPOSE_MASK_SOURCE),
+    reference("decompose.mask-no-erosion", &[sep(&[Choice("decompose")])], "masking.erosion", &[Number(0.0)],
+        "DECOMPOSE's authors extract the brain with BET; no erosion of its mask is described",
+        DECOMPOSE_MASK_SOURCE),
+    reference("qsmart.mask-input", &[inv(&[Choice("qsmart")])], "masking.input", &[Choice("magnitude-first")],
+        "QSMART runs BET on the first echo's magnitude (root-sum-of-squares over coils)",
+        "QSMART brainmask.m l. 7"),
+    reference("qsmart.mask-n4", &[inv(&[Choice("qsmart")])], "masking.inhomogeneity_correction",
+        &[Choice("n4")], "QSMART corrects the first echo's magnitude with ANTs' N4BiasFieldCorrection before BET",
+        "QSMART brainmask.m l. 10-11"),
+    reference("qsmart.bet-f", &[inv(&[Choice("qsmart")])], "masking.bet.fractional_intensity",
+        &[Number(0.2)], "QSMART runs bet2 with -f 0.2", "QSMART brainmask.m l. 14"),
+    reference("qsmart.mask-no-erosion", &[inv(&[Choice("qsmart")])], "masking.erosion", &[Number(0.0)],
+        "QSMART does not erode its mask: avoiding erosion is what its spatially dependent filtering is for",
+        "QSMART brainmask.m l. 7-33; Yaghmaie et al. 2021 NeuroImage 231:117701 §1, §5"),
     Rule {
         id: "mindgrab.wasm-heap",
         when: &[method("masking.generator", &[Choice("mindgrab")]), ON_WASM],
@@ -1288,6 +1397,11 @@ pub static RULES: &[Rule] = &[
         "field_mapping.b0_estimation", &[Choice("qsmart-echofit")],
         "QSMART's total field and reliability map R_0 come from echofit.m",
         "QSMART QSMART.m l. 26; echofit.m"),
+    reference("qsmart.fit-threshold",
+        &[inv(&[Choice("qsmart")]), method("field_mapping.b0_estimation", &[Choice("qsmart-echofit")])],
+        "field_mapping.b0_estimation.qsmart_fit_threshold", &[Choice("absolute-40")],
+        "QSMART_toolbox_v1.0's demo cuts R_0 at a fixed echo-fit residual of 40 (adaptive_threshold 0)",
+        "QSMART Demo_QSMART.m l. 38, 46; echofit.m l. 96-101"),
     reference("sti.echo-combination", &[inv(STI), MULTI_ECHO],
         "field_mapping.b0_estimation", WEIGHTED_AVG,
         "STI Suite's QSM_GUI sums the unwrapped echoes and divides by the summed echo times",
@@ -1487,18 +1601,40 @@ pub static RULES: &[Rule] = &[
         reason: "STI Suite's V_SHARP steps its kernel radius by 1 mm",
         source: "STI Suite 3.0 V_SHARP, probed (QSM.rs VsharpParams, #293)",
     },
+    // STI Suite's pipeline is its QSM_GUI's (decided 2026-11-10), not STI_Templates.m's: 40
+    // iterations. The χ-separation toolbox calls QSM_iLSQR without 'niter' (100), so this rule is
+    // scoped out of it (`chi-sep.ilsqr-iterations`).
     Rule {
         id: "sti.ilsqr-iterations",
-        when: &[inv(&[Choice("ilsqr")])],
+        when: &[inv(&[Choice("ilsqr")]), unless_sep(CHI_SEP_TOOLBOX)],
+        setting: "inversion.ilsqr.max_iter",
+        expect: Test::OneOf { values: &[Number(crate::inversion::STI_GUI_NITER as f64)] },
+        default: Number(crate::inversion::STI_GUI_NITER as f64),
+        unit: Unit::None,
+        strength: Strength::Reference,
+        basis: Basis::ReferenceChoice,
+        reason: "STI Suite's QSM_GUI calls QSM_iLSQR with niter 40",
+        source: "STI Suite 3.0 QSM_GUI, probed headless (QSM.rs ilsqr.rs docs, Reference pipeline; STI_GUI_NITER)",
+    },
+    Rule {
+        id: "chi-sep.ilsqr-iterations",
+        when: &[sep(CHI_SEP_TOOLBOX_ITERATIVE), inv(&[Choice("ilsqr")])],
         setting: "inversion.ilsqr.max_iter",
         expect: Test::OneOf { values: &[Number(crate::inversion::STI_DEFAULT_NITER as f64)] },
         default: Number(crate::inversion::STI_DEFAULT_NITER as f64),
         unit: Unit::None,
         strength: Strength::Reference,
         basis: Basis::ReferenceChoice,
-        reason: "QSM_iLSQR runs 100 iterations when called without niter, as STI Suite's STI_Templates.m calls it",
-        source: "STI Suite 3.0 QSM_iLSQR default, probed (bitwise equal to niter 100); STI_Templates.m l. 115; UK Biobank pipeline (QSM.rs IlsqrParams::max_iter)",
+        reason: "The χ-separation toolbox calls QSM_iLSQR without niter, so it runs 100 iterations",
+        source: "χ-separation toolbox v1.1.3 Chisep_script.m:145; STI Suite 3.0 QSM_iLSQR default, probed (bitwise equal to niter 100)",
     },
+    // Single precision is STI Suite's own arithmetic, so it is part of STI Suite's pipeline and of
+    // QSMART's (which calls STI's QSM_iLSQR), and of nothing else: the χ-separation toolbox also
+    // calls QSM_iLSQR, but its pipeline keeps QSM.rs's double precision (decided 2026-11-10).
+    reference("sti.ilsqr-single", &[inv(&[Choice("ilsqr")]), unless_sep(CHI_SEP_TOOLBOX)],
+        "inversion.ilsqr.precision", &[Choice("single")],
+        "STI Suite's QSM_iLSQR runs both LSQR solves in single precision",
+        "STI Suite 3.0 QSM_iLSQR, probed (QSM.rs ilsqr.rs docs, Performance and precision)"),
     Rule {
         id: "sti.ilsqr-pad",
         when: &[inv(&[Choice("ilsqr")])],
@@ -1601,6 +1737,16 @@ pub static RULES: &[Rule] = &[
         reason: "QSMART calls QSM_iLSQR without 'padsize', so STI Suite's default padding applies",
         source: "QSMART QSMART.m l. 32; STI Suite QSM_iLSQR default, probed (QSM.rs ilsqr.rs docs)",
     },
+    reference("qsmart.ilsqr-single",
+        &[inv(&[Choice("qsmart")]), method("inversion.qsmart.inversion", &[Choice("ilsqr")])],
+        "inversion.ilsqr.precision", &[Choice("single")],
+        "QSMART's two stages call STI Suite's QSM_iLSQR, which runs both LSQR solves in single precision",
+        "QSMART QSMART.m l. 32-39; STI Suite QSM_iLSQR, probed (QSM.rs ilsqr.rs docs, Performance and precision)"),
+    reference("qsmart.offset-grid", &[inv(&[Choice("qsmart")])], "inversion.qsmart.offset_grid",
+        &[Choice("qsmart-reference")],
+        "QSMART's adjust_offset.m builds its dipole kernel on its own grid (-N/2:N/2-1), half a \
+         step off the FFT grid on odd matrix sizes",
+        "QSMART adjust_offset.m; QSM.rs QsmartOffsetGrid::QsmartReference docs (#386)"),
     // ---------------------------------------------------------------- MEDI (#288)
     reference("medi.bg-pdf",
         &[inv(&[Choice("medi")]), method("inversion.medi.msmv", &[Bool(false)])],
@@ -1744,6 +1890,11 @@ pub static RULES: &[Rule] = &[
                  with TV of its own",
         source: "Schweser et al. 2012 NeuroImage 62:2083 (HEIDI); Kames et al. 2018 NeuroImage 167:276 (RTS)",
     },
+    reference("heidi.denoise-itk-float", &[HEIDI_ON, inv(&[Choice("lsqr")])], "inversion.heidi.denoise_itk",
+        &[Bool(true)],
+        "The HEIDI package denoises the field with ITK's GradientAnisotropicDiffusion executable, \
+         which works in float",
+        "qsm_heidi computesusceptibility_heidi.m L1439, diffusionimagefilter.m L129-134 (4592631); QSM.rs heidi.rs docs (AnisotropicDiffusionParams::reference_itk)"),
     discourage("heidi.seed-regularised", &[HEIDI_ON], "inversion.algorithm",
         HEIDI_REGULARISED_SEEDS, Choice("lsqr"), Basis::Stated,
         "HEIDI replaces only the dipole cone, so this method's regularisation outside the cone is \
@@ -1944,6 +2095,23 @@ mod tests {
             ("chi-sep.mask-bet", Case::new(separation(S::ChiSepMedi))),
             ("qsmnetme.mask-bet", Case::new(inversion(I::Qsmnetme))),
             ("decompose.mask-bet", Case::new(separation(S::Decompose))),
+            // The default mask (phase quality, makehomogeneous, Otsu, erode 1) departs from each.
+            ("medi.mask-input", Case::new(inversion(I::Medi))),
+            ("medi.mask-no-correction", Case::new(inversion(I::Medi))),
+            ("medi.mask-no-erosion", Case::new(inversion(I::Medi))),
+            ("chi-sep.mask-input", Case::new(separation(S::ChiSepIlsqr))),
+            ("chi-sep.mask-no-correction", Case::new(separation(S::ChiSepNet))),
+            ("chi-sep.mask-no-erosion", Case::new(separation(S::ChiSepMedi))),
+            ("decompose.mask-input", Case::new(separation(S::Decompose))),
+            ("decompose.mask-no-correction", Case::new(separation(S::Decompose))),
+            ("decompose.mask-no-erosion", Case::new(separation(S::Decompose))),
+            ("qsmart.mask-input", Case::new(inversion(I::Qsmart))),
+            ("qsmart.mask-n4", Case::new(inversion(I::Qsmart))),
+            ("qsmart.bet-f", Case::new(|c| {
+                inversion(I::Qsmart)(c);
+                c.cfg.masking.sections[0].generator = MaskOp::Bet(Default::default());
+            })),
+            ("qsmart.mask-no-erosion", Case::new(inversion(I::Qsmart))),
             ("mindgrab.wasm-heap", Case::new(|c| {
                 c.cfg.masking.sections[0].generator = MaskOp::MindGrab(Default::default());
                 c.facts.target = Target::Wasm;
@@ -2036,7 +2204,22 @@ mod tests {
             ("medi.bg-pdf", Case::new(inversion(I::Medi))),
             ("sti.vsharp-min-radius", Case::new(|c| { inversion(I::Ilsqr)(c); c.cfg.bg_removal.vsharp.min_radius = 1.0 })),
             ("sti.vsharp-radius-step", Case::new(|c| { inversion(I::Star)(c); c.cfg.bg_removal.vsharp.radius_step = 2.0 })),
-            ("sti.ilsqr-iterations", Case::new(|c| { inversion(I::Ilsqr)(c); c.cfg.inversion.ilsqr.max_iter = 40 })),
+            ("sti.ilsqr-iterations", Case::new(inversion(I::Ilsqr))),
+            ("chi-sep.ilsqr-iterations", Case::new(|c| {
+                separation(S::ChiSepIlsqr)(c);
+                inversion(I::Ilsqr)(c);
+                c.cfg.inversion.ilsqr.max_iter = 40;
+            })),
+            ("sti.ilsqr-single", Case::new(inversion(I::Ilsqr))),
+            ("qsmart.ilsqr-single", Case::new(inversion(I::Qsmart))),
+            ("qsmart.offset-grid", Case::new(inversion(I::Qsmart))),
+            ("qsmart.fit-threshold", Case::new(|c| {
+                inversion(I::Qsmart)(c);
+                c.cfg.field_mapping.b0_estimation = B0EstimationMethod::QsmartEchofit {
+                    fit_threshold: crate::utils::QsmartFitThreshold::Percentile(99.0),
+                };
+            })),
+            ("heidi.denoise-itk-float", Case::new(|c| { inversion(I::Lsqr)(c); c.cfg.inversion.apply_heidi = true })),
             ("sti.ilsqr-pad", Case::new(|c| { inversion(I::Ilsqr)(c); c.cfg.inversion.ilsqr.pad_mm = 6.0 })),
             ("field-mapping.phase-offset-sigma", Case::new(|c| c.cfg.field_mapping.phase_offset_sigma_mm = [10.0, 10.0, 5.0])),
             ("medi-msmv.three-echoes", Case::new(|c| {

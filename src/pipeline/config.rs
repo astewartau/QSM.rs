@@ -273,8 +273,8 @@ pub enum B0EstimationMethod {
     /// unwrapped echoes, with no per-echo constant removed after Laplacian unwrapping (with ROMEO,
     /// whole turns between echoes are aligned, as for the weighted mean). Also returns QSMART's
     /// reliability map `R_0` ([`FieldMappingResult::reliability`]): voxels whose fit residual,
-    /// box-filtered over ~1 mm, reaches `fit_threshold` (by default the 99th percentile of the
-    /// blurred residual, as QSMART's authors run it; see
+    /// box-filtered over ~1 mm, reaches `fit_threshold` (by default `QSMART_toolbox_v1.0`'s fixed
+    /// 40; see
     /// [`QsmartFitThreshold`](crate::utils::QsmartFitThreshold)). The field is converted to ppm
     /// with QSMART's γ = 2.675e8 rad/s/T.
     ///
@@ -314,6 +314,45 @@ pub enum MaskingInput {
     Magnitude,
     MagnitudeLast,
     PhaseQuality,
+}
+
+impl MaskingInput {
+    /// Stable id, as rules and hosts name it.
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::MagnitudeFirst => "magnitude-first",
+            Self::Magnitude => "magnitude",
+            Self::MagnitudeLast => "magnitude-last",
+            Self::PhaseQuality => "phase-quality",
+        }
+    }
+}
+
+/// How the host corrects the magnitude for receive-coil inhomogeneity before a mask is made from
+/// it. QSM.rs does not apply it itself (the host prepares the magnitude); it is part of the config
+/// so that rules can say what a toolbox's pipeline does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum InhomogeneityCorrection {
+    /// No correction: the toolboxes that run BET on the raw magnitude (MEDI, the χ-separation
+    /// toolbox, DECOMPOSE).
+    None,
+    /// MriResearchTools' `makehomogeneous` box filter
+    /// ([`MaskingConfig::homogeneity_sigma_mm`], [`MaskingConfig::homogeneity_nbox`]).
+    #[default]
+    Makehomogeneous,
+    /// ANTs' N4 bias-field correction ([`crate::utils::n4`]), as QSMART's `brainmask.m` runs it.
+    N4,
+}
+
+impl InhomogeneityCorrection {
+    /// Stable id, as rules and hosts name it.
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Makehomogeneous => "makehomogeneous",
+            Self::N4 => "n4",
+        }
+    }
 }
 
 /// Threshold method for mask generation
@@ -411,7 +450,7 @@ impl MaskSection {
 /// Masking configuration
 #[derive(Clone, Debug)]
 pub struct MaskingConfig {
-    pub inhomogeneity_correction: bool,
+    pub inhomogeneity_correction: InhomogeneityCorrection,
     pub homogeneity_sigma_mm: f64,
     pub homogeneity_nbox: usize,
     pub sections: Vec<MaskSection>,
@@ -420,7 +459,7 @@ pub struct MaskingConfig {
 impl Default for MaskingConfig {
     fn default() -> Self {
         Self {
-            inhomogeneity_correction: true,
+            inhomogeneity_correction: InhomogeneityCorrection::Makehomogeneous,
             homogeneity_sigma_mm: 7.0,
             homogeneity_nbox: 15,
             sections: vec![MaskSection {

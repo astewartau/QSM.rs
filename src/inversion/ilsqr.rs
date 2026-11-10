@@ -160,6 +160,8 @@
 //!   `ilsqr-sti` container (which calls it without `'niter'`) differed by 17–18 % NRMSE at 40
 //!   and 1–2 % at 100 (astewartau/QSM.rs#329); that 1–2 % was the FastQSM closing (see
 //!   *Agreement with STI Suite*).
+//!   STI Suite's pipeline is the GUI's (decided 2026-11-10), so the `sti.ilsqr-iterations` rule
+//!   gives 40 and the `sti-suite-ilsqr` pipeline runs 40; the default stays the function's 100.
 //! - **Masking**: the GUI's "Single button for QSM" path builds the mask by thresholding the
 //!   magnitude (`Support_Functions/CreateMask.m`: rescale, threshold, largest connected
 //!   component, fill holes; then the P-coded `Getmasking`/`PolishMask`), not with BET.
@@ -182,7 +184,7 @@
 //! # Pipeline rules
 //!
 //! The facts above that a configuration can depart from are published as rules in
-//! [`crate::pipeline::rules::RULES`] (each with its strength, basis, reason and source): `sti.unwrap-laplacian`, `sti.laplacian-solver`, `sti.echo-combination`, `sti.echo-weights`, `sti.bg-vsharp`, `sti.vsharp-no-deconvolve`, `sti.vsharp-radius`, `sti.vsharp-grid`, `sti.ilsqr-iterations`, `sti.ilsqr-pad`.
+//! [`crate::pipeline::rules::RULES`] (each with its strength, basis, reason and source): `sti.unwrap-laplacian`, `sti.laplacian-solver`, `sti.echo-combination`, `sti.echo-weights`, `sti.bg-vsharp`, `sti.vsharp-no-deconvolve`, `sti.vsharp-radius`, `sti.vsharp-grid`, `sti.ilsqr-iterations` (the GUI's 40), `sti.ilsqr-pad`, `sti.ilsqr-single` (STI's single precision). In the χ-separation toolbox's pipeline, `chi-sep.ilsqr-iterations` (100) replaces `sti.ilsqr-iterations`, and precision stays double.
 //! `sti.unwrap-laplacian` and `sti.echo-weights` do not apply under the χ-separation toolbox's
 //! methods, which run STI Suite's iLSQR but unwrap with ROMEO and weight the echoes their own
 //! way (`chi-sep.unwrap-romeo`, `chi-sep.echo-weights`); its V-SHARP is STI Suite's, so the

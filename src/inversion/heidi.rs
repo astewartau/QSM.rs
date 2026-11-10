@@ -111,7 +111,9 @@
 //! The facts above that a configuration can depart from are published as rules in
 //! [`crate::pipeline::rules::RULES`] (each with its strength, basis, reason and source):
 //! `lsqr.bg-sharp`, `heidi.te-last`, and with the LSQR seed `heidi.reference-none` (`inversion_heidi.m`
-//! L55-65 converts HEIDI's χ to ppm, flips its sign, crops and saves it, with no referencing).
+//! L55-65 converts HEIDI's χ to ppm, flips its sign, crops and saves it, with no referencing) and
+//! `heidi.denoise-itk-float` (the package's denoising is ITK's float executable, so the HEIDI
+//! pipeline turns [`AnisotropicDiffusionParams::reference_itk`] on; elsewhere it stays off).
 
 use num_complex::Complex64;
 
