@@ -391,7 +391,8 @@ pub enum MaskOp {
     },
     /// MATLAB's `bwmorph3(mask, 'majority')`: a voxel is in the mask when at least 14 of the 27
     /// voxels of its 3×3×3 neighbourhood (itself included) are, voxels beyond the volume counting
-    /// as out. One pass, as QSMART's `brainmask.m` runs it.
+    /// as out. One pass, as QSMART's `brainmask.m` runs it; identical to MATLAB R2023b's
+    /// (`utils::morphology::majority`).
     Majority,
     FillHoles {
         max_size: usize,

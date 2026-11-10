@@ -193,9 +193,9 @@ pub(crate) fn dilate_ball(mask: &[u8], nx: usize, ny: usize, nz: usize, radius: 
 
 /// MATLAB's `bwmorph3(mask, 'majority')`, one pass: a voxel is set when at least 14 of the 27
 /// voxels of its 3×3×3 neighbourhood (itself included) are set, voxels beyond the volume counting
-/// as unset. QSMART's `brainmask.m` runs it on BET's mask. (Whether MATLAB also sets an unset voxel
-/// with 14 set neighbours, as here and as 2-D `bwmorph`'s majority does, is to be confirmed
-/// against MATLAB.)
+/// as unset. QSMART's `brainmask.m` runs it on BET's mask. An unset voxel with 14 set neighbours is
+/// set too. Probed in MATLAB R2023b (Update 5, on Bunya, 2026-11-10): those hand cases, and a
+/// random 40×36×30 mask, identical voxel for voxel.
 pub fn majority(mask: &[u8], grid: &Grid) -> Vec<u8> {
     let (nx, ny, nz) = grid.dims;
     let at = |x: isize, y: isize, z: isize| -> u32 {
