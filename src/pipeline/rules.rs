@@ -548,6 +548,10 @@ impl<'a> RuleInput<'a> {
 /// Every setting path a rule may name, with what it is. [`current`] reads each of them.
 pub const SETTINGS: &[(&str, &str)] = &[
     ("masking.generator", "Each mask section's generator (MaskOp::id)"),
+    ("masking.input", "Each mask section's input image (MaskingInput::id): magnitude-first, magnitude (RSS over echoes), magnitude-last or phase-quality"),
+    ("masking.inhomogeneity_correction", "The host's correction of the magnitude before masking (InhomogeneityCorrection::id): none, makehomogeneous or n4"),
+    ("masking.bet.fractional_intensity", "Each BET step's fractional intensity threshold (BetParams::fractional_intensity)"),
+    ("masking.erosion", "Each mask section's erosion: the voxels its Erode refinements take off in total (0 = none)"),
     ("masking.hd_bet.inference", "Each HD-BET step's inference: full-volume, sliding-window (HdBetInference::SLIDING_WINDOW), low-memory (HdBetInference::LOW_MEMORY) or custom-window"),
     ("field_mapping.unwrapping_algorithm", "Phase unwrapping (UnwrappingAlgorithm::id)"),
     ("field_mapping.b0_estimation", "Echo combination (B0EstimationMethod::id)"),
@@ -677,6 +681,34 @@ pub fn current(input: &RuleInput, facts: &ScanFacts, setting: &str) -> Option<Ve
         "masking.generator" => {
             c.masking.sections.iter().map(|s| Current::Choice(s.generator.id())).collect()
         }
+        "masking.input" => c.masking.sections.iter().map(|s| Current::Choice(s.input.id())).collect(),
+        "masking.inhomogeneity_correction" => one(Current::Choice(c.masking.inhomogeneity_correction.id())),
+        "masking.bet.fractional_intensity" => c
+            .masking
+            .sections
+            .iter()
+            .flat_map(|s| std::iter::once(&s.generator).chain(&s.refinements))
+            .filter_map(|op| match op {
+                super::config::MaskOp::Bet(p) => Some(Current::Number(p.fractional_intensity)),
+                _ => None,
+            })
+            .collect(),
+        "masking.erosion" => c
+            .masking
+            .sections
+            .iter()
+            .map(|s| {
+                let n: usize = s
+                    .refinements
+                    .iter()
+                    .map(|op| match op {
+                        super::config::MaskOp::Erode { iterations } => *iterations,
+                        _ => 0,
+                    })
+                    .sum();
+                Current::Number(n as f64)
+            })
+            .collect(),
         "masking.hd_bet.inference" => hd_bet_steps(c)
             .map(|p| {
                 Current::Choice(match p.inference {
@@ -1059,6 +1091,9 @@ const fn discourage(
 }
 
 const BET: &[Value] = &[Choice("bet")];
+const MEDI_MASK_SOURCE: &str = "MEDI toolbox README.m (iMag = sqrt(sum(abs(iField).^2,4)); Mask = BET(iMag, ...)), \
+    l. 92 and 111 in the 2020 fork at ~/code/ref/medi; BET.m calls the bet2 mex";
+const CHI_SEP_MASK_SOURCE: &str = "χ-separation toolbox v1.1.3 Chisep_script.m:75 (mag = sqrt(sum(abs(mag_multi_echo).^2,4))), :82 (BET)";
 /// The CG iteration count `pdf.cg-iterations` suggests (measured; see `PdfParams::n_cg`).
 const PDF_SUGGESTED_N_CG: f64 = 300.0;
 const PDF: &[Value] = &[Choice("pdf")];
@@ -1187,6 +1222,36 @@ pub static RULES: &[Rule] = &[
     reference("decompose.mask-bet", &[sep(&[Choice("decompose")])], "masking.generator", BET,
         "DECOMPOSE's pipeline masks with FSL BET",
         "Chen et al. 2021 NeuroImage 242:118477 (DECOMPOSE), §3.6"),
+    // The rest of each toolbox's mask recipe: what BET reads, how that image is corrected, and
+    // what is done to the mask after. QSMxT's `bet` preset (BET on the corrected RSS, then a
+    // 2-voxel erosion) does none of these toolboxes' recipes.
+    reference("medi.mask-input", &[inv(&[Choice("medi")])], "masking.input", &[Choice("magnitude")],
+        "The MEDI toolbox runs BET on the root-sum-of-squares magnitude over echoes",
+        MEDI_MASK_SOURCE),
+    reference("medi.mask-no-correction", &[inv(&[Choice("medi")])], "masking.inhomogeneity_correction",
+        &[Choice("none")], "The MEDI toolbox runs BET on the magnitude as read, with no bias-field correction",
+        MEDI_MASK_SOURCE),
+    reference("medi.mask-no-erosion", &[inv(&[Choice("medi")])], "masking.erosion", &[Number(0.0)],
+        "The MEDI toolbox uses BET's mask as it is, without eroding it", MEDI_MASK_SOURCE),
+    reference("chi-sep.mask-input", &[sep(CHI_SEP_TOOLBOX)], "masking.input", &[Choice("magnitude")],
+        "The χ-separation toolbox runs MEDI's BET on the root-sum-of-squares magnitude over echoes",
+        CHI_SEP_MASK_SOURCE),
+    reference("chi-sep.mask-no-correction", &[sep(CHI_SEP_TOOLBOX)], "masking.inhomogeneity_correction",
+        &[Choice("none")], "The χ-separation toolbox runs BET on the magnitude as read, with no bias-field correction",
+        CHI_SEP_MASK_SOURCE),
+    reference("chi-sep.mask-no-erosion", &[sep(CHI_SEP_TOOLBOX)], "masking.erosion", &[Number(0.0)],
+        "The χ-separation toolbox uses BET's mask as it is, without eroding it", CHI_SEP_MASK_SOURCE),
+    reference("qsmart.mask-input", &[inv(&[Choice("qsmart")])], "masking.input", &[Choice("magnitude-first")],
+        "QSMART runs BET on the first echo's magnitude (root-sum-of-squares over coils)",
+        "QSMART brainmask.m l. 7"),
+    reference("qsmart.mask-n4", &[inv(&[Choice("qsmart")])], "masking.inhomogeneity_correction",
+        &[Choice("n4")], "QSMART corrects the first echo's magnitude with ANTs' N4BiasFieldCorrection before BET",
+        "QSMART brainmask.m l. 10-11"),
+    reference("qsmart.bet-f", &[inv(&[Choice("qsmart")])], "masking.bet.fractional_intensity",
+        &[Number(0.2)], "QSMART runs bet2 with -f 0.2", "QSMART brainmask.m l. 14"),
+    reference("qsmart.mask-no-erosion", &[inv(&[Choice("qsmart")])], "masking.erosion", &[Number(0.0)],
+        "QSMART does not erode its mask: avoiding erosion is what its spatially dependent filtering is for",
+        "QSMART brainmask.m l. 7-33; Yaghmaie et al. 2021 NeuroImage 231:117701 §1, §5"),
     Rule {
         id: "mindgrab.wasm-heap",
         when: &[method("masking.generator", &[Choice("mindgrab")]), ON_WASM],
@@ -2015,6 +2080,20 @@ mod tests {
             ("chi-sep.mask-bet", Case::new(separation(S::ChiSepMedi))),
             ("qsmnetme.mask-bet", Case::new(inversion(I::Qsmnetme))),
             ("decompose.mask-bet", Case::new(separation(S::Decompose))),
+            // The default mask (phase quality, makehomogeneous, Otsu, erode 1) departs from each.
+            ("medi.mask-input", Case::new(inversion(I::Medi))),
+            ("medi.mask-no-correction", Case::new(inversion(I::Medi))),
+            ("medi.mask-no-erosion", Case::new(inversion(I::Medi))),
+            ("chi-sep.mask-input", Case::new(separation(S::ChiSepIlsqr))),
+            ("chi-sep.mask-no-correction", Case::new(separation(S::ChiSepNet))),
+            ("chi-sep.mask-no-erosion", Case::new(separation(S::ChiSepMedi))),
+            ("qsmart.mask-input", Case::new(inversion(I::Qsmart))),
+            ("qsmart.mask-n4", Case::new(inversion(I::Qsmart))),
+            ("qsmart.bet-f", Case::new(|c| {
+                inversion(I::Qsmart)(c);
+                c.cfg.masking.sections[0].generator = MaskOp::Bet(Default::default());
+            })),
+            ("qsmart.mask-no-erosion", Case::new(inversion(I::Qsmart))),
             ("mindgrab.wasm-heap", Case::new(|c| {
                 c.cfg.masking.sections[0].generator = MaskOp::MindGrab(Default::default());
                 c.facts.target = Target::Wasm;
