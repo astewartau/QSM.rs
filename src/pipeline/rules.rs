@@ -979,6 +979,12 @@ const PDF: &[Value] = &[Choice("pdf")];
 const LBV: &[Value] = &[Choice("lbv")];
 const VSHARP: &[Value] = &[Choice("vsharp")];
 const LAPLACIAN: &[Value] = &[Choice("laplacian")];
+/// Background removal that keeps the brain's edge, so an error in the field map's rim reaches the
+/// whole brain (`laplacian.non-eroding-bfr`). iSMV (which holds its boundary band fixed) is not
+/// included: on QSM-CI's simulated head Laplacian + iSMV was much worse than ROMEO + iSMV (χ XSIM
+/// 0.12 against 0.24), but on 14 travelling-head scans with the fixed kernel (#436) it was as
+/// reproducible (median |slope − 1| 2.8 % against 3.3 %); revisit with the full re-run.
+const RIM_SENSITIVE_BFR: &[Value] = &[Choice("pdf"), Choice("lbv")];
 const ROMEO: &[Value] = &[Choice("romeo")];
 const COMPLEX_FIT: &[Value] = &[Choice("complex-fit")];
 const WEIGHTED_AVG: &[Value] = &[Choice("weighted-avg")];
@@ -1253,6 +1259,18 @@ pub static RULES: &[Rule] = &[
         "field_mapping.bipolar_correction", &[Bool(true)], Bool(false), Basis::Stated,
         "Bipolar correction needs echoes 1–3; with fewer it is skipped",
         "ROMEO.jl argparse.jl:71-76; MriResearchTools.jl mcpc3ds.jl:110-119"),
+    // QSM.rs#439. Measured 2026-11-09: QSM-CI simulated head (RTS χ XSIM, Laplacian / ROMEO
+    // field) and the travelling heads (inter-scanner median |a−1|, Laplacian / ROMEO).
+    discourage("laplacian.non-eroding-bfr", &[bg(RIM_SENSITIVE_BFR)],
+        "field_mapping.unwrapping_algorithm", LAPLACIAN, Choice("romeo"), Basis::Measured,
+        "The Laplacian field map of the masked phase has a large error in the brain's outer three \
+         voxels. PDF and LBV keep that rim, so the error spreads into the brain: on QSM-CI's \
+         simulated head χ XSIM fell from 0.29 to 0.13 (PDF) and 0.28 to 0.11 (LBV) against ROMEO's \
+         field, and across scanners (RTS, travelling heads) regional χ agreed far less: median \
+         |slope − 1| 40 % against 7 % (PDF) and 15 % against 8 % (LBV). ROMEO, a background \
+         removal that erodes the rim (SHARP, V-SHARP, RESHARP), or eroding the mask by a few voxels \
+         avoids it",
+        "QSM.rs#439 (QSM-CI simulated head and harmonization travelling heads, v11)"),
     discourage("field-mapping.bipolar-not-with-laplacian",
         &[method("field_mapping.bipolar_correction", &[Bool(true)]),
           method("field_mapping.unwrapping_algorithm", LAPLACIAN)],
@@ -1846,6 +1864,10 @@ mod tests {
             ("field-mapping.bipolar-needs-three-echoes", Case::new(|c| {
                 c.cfg.field_mapping.bipolar_correction = true;
                 c.facts.echo_count = Some(2);
+            })),
+            ("laplacian.non-eroding-bfr", Case::new(|c| {
+                background(B::Lbv)(c);
+                c.cfg.field_mapping.unwrapping_algorithm = UnwrappingAlgorithm::Laplacian;
             })),
             ("field-mapping.bipolar-not-with-laplacian", Case::new(|c| {
                 c.cfg.field_mapping.bipolar_correction = true;
