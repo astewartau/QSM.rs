@@ -170,7 +170,7 @@
 //!
 //! The facts above that a configuration can depart from are published as rules in
 //! [`crate::pipeline::rules::RULES`] (each with its strength, basis, reason and source):
-//! `chi-sep.mask-bet`, `chi-sep.bet-as-stored` (MEDI's BET.m: no FSL left-right flip), `chi-sep.unwrap-romeo`, `chi-sep.echo-combination`, `chi-sep.echo-weights`,
+//! `chi-sep.mask-bet`, `chi-sep.bet-as-stored` (MEDI's BET.m: no FSL left-right flip), `chi-sep.unwrap-romeo`, the mritools `romeo` command line's settings (`chi-sep.romeo-weights`, `chi-sep.romeo-template`, `chi-sep.romeo-template-echo`, `chi-sep.romeo-no-global-correction`, `chi-sep.romeo-no-uncertain-rewrap`; [`crate::unwrap::RomeoParams::romeo_cli`]), `chi-sep.echo-combination`, `chi-sep.echo-weights`,
 //! `chi-sep.bg-vsharp`, `chi-sep-medi.qsm-ilsqr`, and by manufacturer `chi-sep.tukey-not-philips`
 //! and `chi-sep.tukey-philips` (`Chisep_script.m` Tukey-windows the echoes before this method as
 //! before χ-sepnet; [`crate::utils::tukey_window`]). All are the authors' setting

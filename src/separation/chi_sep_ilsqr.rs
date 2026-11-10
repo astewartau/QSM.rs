@@ -44,7 +44,8 @@
 //!    [ArH(Dc(w_mag.*r), d+) + AfH(Dc(w_phs.*f)); ArH(Dc(w_mag.*r), d−) − AfH(Dc(w_phs.*f))]` for
 //!    the concatenated `[x+ x−]` (tolerance `cg_tol_LSQR`, at most `cg_max_iter_LSQR` iterations).
 //!    The start is the voxelwise solution from the QSM `χ`: `x+ = max((r + d−·χ)/(d+ + d−), 0)`,
-//!    `x− = max((r − d+·χ)/(d+ + d−), 0)`, masked. (Without a QSM the toolbox uses `χ = 0`.)
+//!    `x− = max((r − d+·χ)/(d+ + d−), 0)`, **not masked** (see *R2′ outside the mask*). (Without a
+//!    QSM the toolbox uses `χ = 0`.)
 //! 5. **Step 2, streaking artefacts** (`chi_sep_iLSQR_step2_func`), per source:
 //!    - a fast QSM `χ_fs` of the field: `W = clamp((|D|^0.001 − a)/(b − a), 0, 1)` with `a`, `b`
 //!      the `prctile`s 1 and 30 of `|D|^0.001` over the whole grid; `K` the k-space smoothing by a
@@ -54,8 +55,8 @@
 //!      Then `k = fftn(χ2.*m)`, `χ3 = real(ifftn(W.*k + (1 − W).*K(k))).*m`, and `χ_fs = c₁ + c₂·χ3`
 //!      with `(c₁, c₂)` the least-squares fit of `χ3` to the TKD solution (threshold 1/8, masked)
 //!      over the whole grid;
-//!    - R2′ smoothed in k-space by a Tukey window (`tukeywin(N, 0.5)` per axis, applied as
-//!      `fftshift(ifftshift(fftn(r)).*w)`);
+//!    - R2′ masked, then smoothed in k-space by a Tukey window (`tukeywin(N, 0.5)` per axis,
+//!      applied as `fftshift(ifftshift(fftn(r.*m)).*w)`);
 //!    - gradient weights `W_G± = clamp((hi − |g±|)/(hi − lo), 0, 1)·m` per axis, `lo`/`hi` the
 //!      `prctile`s 50/70 of `|g±|` inside the mask, `g+ = (∇r_s + d−·∇χ_fs)/(d+ + d−)`,
 //!      `g− = (∇r_s − d+·∇χ_fs)/(d+ + d−)` (∇: MEDI's `fgrad` with the voxel size, on the masked
@@ -92,6 +93,31 @@
 //! zero `mask_Unrel_Mag`/`mask_Unrel_Phs`), so its runs start step 1 from zero; QSM.rs does not
 //! offer that path.
 //!
+//! # R2′ outside the mask
+//!
+//! `Chisep_script.m` passes R2′ as the user has it, usually nonzero outside the brain, and the
+//! toolbox uses some of it. Probed with QSM-CI's verified `chisep-ilsqr` container (its
+//! `chi_sep_iLSQR` given the same local field, QSM and mask, with R2′ changed only outside the mask,
+//! on a 40×36×28 phantom; QSMxT/QSM-CI#421, 2026-11-10): R2′ more than one voxel from the mask
+//! changes nothing (relative change ≤ 8·10⁻¹⁰, rounding), the voxels just past the mask along +x,
+//! +y or +z change χ by 3.6 %, exactly as much as R2′ everywhere outside, and those just past it
+//! along −x, −y or −z only where they are also on a + side. That is two things the toolbox does:
+//!
+//! - step 2 smooths the **masked** R2′ (`r.*m`), so the smoothed R2′ and the weights `W_G` never
+//!   see R2′ outside the mask;
+//! - step 1 starts from the **unmasked** voxelwise solution, which outside the mask (where the QSM
+//!   is 0) is `x± = max(r, 0)/(d+ + d−)`. The data terms ignore it there (their weights and
+//!   `x+ − x−` are 0), so `pcg` carries it into step 1's output, and step 2's forward differences
+//!   at the mask's edge (`fgrad(x)` in its right-hand side) read it one voxel past the mask along
+//!   +x, +y and +z.
+//!
+//! Before 2026-11-10 QSM.rs smoothed the unmasked R2′ and masked the start. That is the same
+//! whenever R2′ is zero outside the mask (every earlier comparison), but with R2′ outside it
+//! differed from the toolbox by up to 11 % (χ+) / 40 % (|χ−|) on that phantom and by 5.95 % /
+//! 5.86 % in vivo (*Agreement with the toolbox*). The NNLS iterations restart step 1 from the
+//! previous iterate, which step 2 has masked, so only the first step 1 carries R2′ outside the
+//! mask. The test `r2prime_outside_the_mask_as_the_toolbox` checks this behaviour.
+//!
 //! # Units
 //!
 //! The toolbox takes the local field in Hz and converts it to ppm; [`chi_sep_ilsqr`] takes it in
@@ -123,6 +149,19 @@
 //!   (42.5774 MHz/T·B0): χ+ and |χ−| to relative L2 2.6·10⁻⁸ and 2.5·10⁻⁸, max |Δ| 7·10⁻⁹ and
 //!   3·10⁻⁸ ppm, its float32 rounding (`examples/chi_sep_file.rs`, measured 2026-11-01). QSM-CI's
 //!   `chisep-ilsqr` / `chisep-ilsqr-qsmrs` parity pair checks this on `chisep-mc`.
+//! - **R2′ outside the mask** (2026-11-10, QSMxT/QSM-CI#421): the toolbox's whole pipeline
+//!   (`Chisep_script.m`, QSM-CI's `toolbox-pipeline-chisep` image, bit-identical to licensed
+//!   MATLAB) on the in-vivo travelling-head scan above, with the user's R2′ unmasked as the script
+//!   passes it; QSM.rs given that run's local field, QSM (float32), mask and CF: χ+ and |χ−| to
+//!   relative L2 2.5·10⁻⁸ (max |Δ| 6·10⁻⁸ and 1.1·10⁻⁷ ppm, the float32 output), where before the
+//!   fix it differed by 5.95 % / 5.86 %, most at the mask's edge. With R2′ masked to that mask on
+//!   both sides (which moves the toolbox's own χ+ / |χ−| by 0.96 % / 0.80 %), to the float32
+//!   output's rounding before and after. On the probe phantom of *R2′ outside the mask*, 18
+//!   patterns of R2′ outside the mask (none, constant, random, negative, near, far, single shells,
+//!   each side, single voxels of 1000 Hz): χ+ and |χ−| to ≤ 3·10⁻⁸ (the container's float32), the
+//!   f64 total to ≤ 1.3·10⁻⁹, except R2′ only past the +x faces, 8·10⁻⁷ (|χ−| 2·10⁻⁶): that
+//!   phantom's NNLS loop does not converge in 11 iterations and returns its best iterate, which
+//!   amplifies rounding.
 //!
 //! The residual is rounding inside the iterations. QSM.rs evaluates the same expressions with its
 //! own FFT and, where that saves work, in a different order (step 1's operator applies `Dc∘Dc`
@@ -188,8 +227,8 @@
 //! `chi_sep_MEDI` (see [`super::chi_sep_medi`]'s *Reference pipeline*): Tukey windowing, MEDI's
 //! `BET`, ROMEO with weighted echo averaging (`W = TE·exp(−TE/40 ms)`), V-SHARP `smvsize` 12, the
 //! local field in Hz (l. 139), and the QSM from STI Suite `QSM_iLSQR(..., 'padsize', [12 12 12])`
-//! (l. 145, [`chisep_toolbox_ilsqr`]) passed as `option_data.qsm` (l. 170). R2′ is the user's.
-//! `N_std` (l. 76) is passed (l. 171) but not used.
+//! (l. 145, [`chisep_toolbox_ilsqr`]) passed as `option_data.qsm` (l. 170). R2′ is the user's,
+//! passed unmasked (see *R2′ outside the mask*). `N_std` (l. 76) is passed (l. 171) but not used.
 //!
 //! Reference: Shin, H.-G., Lee, J., Yun, Y. H., Yoo, S. H., Jang, J., Oh, S.-H., Nam, Y., Jung,
 //! S., Kim, S., Fukunaga, M., Kim, W., Choi, H. J., Lee, J. (2021). "χ-separation: Magnetic
@@ -202,7 +241,7 @@
 //!
 //! The facts above that a configuration can depart from are published as rules in
 //! [`crate::pipeline::rules::RULES`] (each with its strength, basis, reason and source):
-//! `chi-sep.mask-bet`, `chi-sep.bet-as-stored` (MEDI's BET.m: no FSL left-right flip), `chi-sep.unwrap-romeo`, `chi-sep.echo-combination`, `chi-sep.echo-weights`,
+//! `chi-sep.mask-bet`, `chi-sep.bet-as-stored` (MEDI's BET.m: no FSL left-right flip), `chi-sep.unwrap-romeo`, the mritools `romeo` command line's settings (`chi-sep.romeo-weights`, `chi-sep.romeo-template`, `chi-sep.romeo-template-echo`, `chi-sep.romeo-no-global-correction`, `chi-sep.romeo-no-uncertain-rewrap`; [`crate::unwrap::RomeoParams::romeo_cli`]), `chi-sep.echo-combination`, `chi-sep.echo-weights`,
 //! `chi-sep.bg-vsharp`, `chi-sep-ilsqr.qsm-ilsqr`, and by manufacturer `chi-sep.tukey-not-philips`
 //! and `chi-sep.tukey-philips` (`Chisep_script.m` Tukey-windows the echoes before this method as
 //! before χ-sepnet; [`crate::utils::tukey_window`]). All are the authors' setting
@@ -397,9 +436,10 @@ pub fn chi_sep_ilsqr(
     {
         let q = pb.pad_input(inputs.qsm);
         let (a, b) = x0.split_at_mut(n);
-        let m = &pb.m;
-        par_fill(a, |i| ((r[i] + drn * q[i]) / (drp + drn)).max(0.0) * f64::from(m[i]));
-        par_fill(b, |i| ((r[i] - drp * q[i]) / (drp + drn)).max(0.0) * f64::from(m[i]));
+        // Not masked, as in the toolbox: outside the mask (where the QSM is 0) both sources start
+        // at R2′/(d+ + d−), which step 1's output keeps there (module docs, *R2′ outside the mask*).
+        par_fill(a, |i| ((r[i] + drn * q[i]) / (drp + drn)).max(0.0));
+        par_fill(b, |i| ((r[i] - drp * q[i]) / (drp + drn)).max(0.0));
     }
     drop(r);
     let mut x = pb.step1(&mut ws, Start::Owned(x0), params.cg_tol_lsqr, params.cg_max_iter_lsqr);
@@ -1101,12 +1141,13 @@ impl Problem {
         x3
     }
 
-    /// R2′ (ppm) smoothed by a Tukey window in k-space:
-    /// `real(ifftn(fftshift(ifftshift(fftn(r)).*w)))`
+    /// R2′ (ppm) masked, then smoothed by a Tukey window in k-space:
+    /// `real(ifftn(fftshift(ifftshift(fftn(r.*m)).*w)))`
     fn tukey_lpf(&self, ws: &mut Workspace, r: &[f64]) -> Vec<f64> {
         let (nx, ny, nz) = self.dims;
         let (wx, wy, wz) = (tukeywin(nx, TUKEY_RATIO), tukeywin(ny, TUKEY_RATIO), tukeywin(nz, TUKEY_RATIO));
-        par_fill(&mut ws.c, |i| Complex64::new(r[i], 0.0));
+        let m = &self.m;
+        par_fill(&mut ws.c, |i| Complex64::new(r[i] * f64::from(m[i]), 0.0));
         ws.fft.fft3d(&mut ws.c);
         circshift(&mut ws.c, self.dims, false);
         par_rows(&mut ws.c, self.dims, |j, k, _, row| {
@@ -1903,5 +1944,50 @@ mod tests {
             }
         }
         assert!(p.iter().any(|&v| v > 0.01) && q.iter().any(|&v| v < -0.01));
+    }
+
+    /// R2′ outside the mask counts as in the toolbox (see *R2′ outside the mask*): the smoothed
+    /// R2′ of step 2 never sees it, and the result depends on it only at the voxels just past the
+    /// mask along +x, +y or +z, through step 1's unmasked start.
+    #[test]
+    fn r2prime_outside_the_mask_as_the_toolbox() {
+        let (grid, field, r2p, chi, mask) = small_phantom();
+        let (nx, ny, _) = grid.dims;
+        // just past the mask along +x, +y or +z: the forward differences at the mask's edge read it
+        let plus = |l: usize| {
+            let (i, j, k) = (l % nx, (l / nx) % ny, l / (nx * ny));
+            mask[l] == 0
+                && ((i > 0 && mask[l - 1] != 0) || (j > 0 && mask[l - nx] != 0) || (k > 0 && mask[l - nx * ny] != 0))
+        };
+        let with = |keep: &dyn Fn(usize) -> bool| -> Vec<f64> {
+            let outside = |l: usize| 5.0 + 50.0 * ((l as f64) * 0.37).sin().abs();
+            (0..mask.len()).map(|l| if mask[l] == 0 && keep(l) { outside(l) } else { r2p[l] }).collect()
+        };
+        let params = ChiSepIlsqrParams { pad: [4; 3], ..Default::default() };
+        let run = |r: &[f64]| {
+            let inputs = ChiSepIlsqrInputs { local_field: &field, r2prime: r, qsm: &chi, mask: &mask };
+            let (p, q, _) = chi_sep_ilsqr(&inputs, &grid, (0.0, 0.0, 1.0), &params, |_, _| {}).unwrap();
+            (p, q)
+        };
+        let rel = |a: &(Vec<f64>, Vec<f64>), b: &(Vec<f64>, Vec<f64>)| {
+            let d: f64 = a.0.iter().zip(&b.0).chain(a.1.iter().zip(&b.1)).map(|(x, y)| (x - y) * (x - y)).sum();
+            let n: f64 = b.0.iter().chain(&b.1).map(|y| y * y).sum();
+            (d / n).sqrt()
+        };
+        let all = with(&|_| true);
+        // step 2's smoothed R2′ is that of the R2′ inside the mask
+        let smoothed = |r: &[f64]| {
+            let inputs = ChiSepIlsqrInputs { local_field: &field, r2prime: r, qsm: &chi, mask: &mask };
+            let (pb, _, _) = Problem::new(&inputs, &grid, (0.0, 0.0, 1.0), &params);
+            pb.rm.data
+        };
+        assert!(smoothed(&r2p).iter().zip(&smoothed(&all)).all(|(a, b)| a.to_bits() == b.to_bits()));
+        let base = run(&r2p);
+        let everywhere = run(&all);
+        let only_plus = run(&with(&plus));
+        let elsewhere = run(&with(&|l| !plus(l)));
+        assert!(rel(&everywhere, &base) > 1e-3, "{}", rel(&everywhere, &base));
+        assert!(rel(&everywhere, &only_plus) < 1e-12, "{}", rel(&everywhere, &only_plus));
+        assert!(rel(&elsewhere, &base) < 1e-12, "{}", rel(&elsewhere, &base));
     }
 }

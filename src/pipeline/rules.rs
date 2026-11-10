@@ -559,6 +559,11 @@ pub const SETTINGS: &[(&str, &str)] = &[
     ("masking.close_radius", "Each mask section's closing radius, voxels (its Close refinement; 0 = none)"),
     ("masking.hd_bet.inference", "Each HD-BET step's inference: full-volume, sliding-window (HdBetInference::SLIDING_WINDOW), low-memory (HdBetInference::LOW_MEMORY) or custom-window"),
     ("field_mapping.unwrapping_algorithm", "Phase unwrapping (UnwrappingAlgorithm::id)"),
+    ("field_mapping.romeo.weights", "ROMEO's edge weights (RomeoParams::weights_id): romeo4 (ROMEO.jl's :romeo), romeo3 (the romeo command line's with a magnitude: no phase linearity), romeo2, romeo6, bestpath or custom; only with ROMEO"),
+    ("field_mapping.romeo.individual", "ROMEO unwraps each echo on its own instead of temporally from a template echo (RomeoParams::individual, bool); only with ROMEO on multi-echo field mapping"),
+    ("field_mapping.romeo.template", "ROMEO's template echo, counted from 1 as ROMEO's --template (RomeoParams::template + 1); only with ROMEO's template unwrapping"),
+    ("field_mapping.romeo.correct_global", "ROMEO's global 2π correction (RomeoParams::correct_global, bool); only with ROMEO"),
+    ("field_mapping.romeo.temporal_uncertain_unwrapping", "ROMEO's quality threshold for re-unwrapping uncertain voxels spatially, 0 = off (RomeoParams::temporal_uncertain_unwrapping); only with ROMEO's template unwrapping"),
     ("field_mapping.b0_estimation", "Echo combination (B0EstimationMethod::id)"),
     ("field_mapping.b0_estimation.weighting", "Weighted average's per-echo weight (B0WeightType, by `weight_id`); only with weighted-avg"),
     ("field_mapping.b0_estimation.qsmart_fit_threshold", "QSMART echo fit's residual threshold for R_0 (QsmartFitThreshold): absolute-40 (QSMART_toolbox_v1.0), absolute (another value), percentile-99 (the October 2020 demo) or percentile (another); only with qsmart-echofit"),
@@ -672,6 +677,10 @@ pub fn current(input: &RuleInput, facts: &ScanFacts, setting: &str) -> Option<Ve
     let inv_input = c.inversion.input(if c.qsm_per_echo { 1 } else { facts.echo_count.unwrap_or(1) });
     // Field mapping that combines or compares echoes: not on a per-echo reconstruction.
     let combines = inv_input.needs_field_mapping() && !c.qsm_per_echo;
+    // ROMEO unwraps the field map
+    let romeo = inv_input.needs_field_mapping()
+        && c.field_mapping.unwrapping_algorithm == super::config::UnwrappingAlgorithm::Romeo;
+    let rp = &c.field_mapping.romeo_params;
     let one = |v: Current| vec![v];
     let gated = |on: bool, v: Current| if on { vec![v] } else { vec![] };
     let bg = |a: super::config::BgRemovalAlgorithm| inv_input.needs_bg_removal() && c.bg_removal.algorithm == a;
@@ -752,6 +761,15 @@ pub fn current(input: &RuleInput, facts: &ScanFacts, setting: &str) -> Option<Ve
             inv_input.needs_field_mapping(),
             Current::Choice(c.field_mapping.unwrapping_algorithm.id()),
         ),
+        "field_mapping.romeo.weights" => gated(romeo, Current::Choice(rp.weights_id())),
+        "field_mapping.romeo.individual" => gated(romeo && combines, Current::Bool(rp.individual)),
+        "field_mapping.romeo.template" => {
+            gated(romeo && combines && !rp.individual, Current::Number((rp.template + 1) as f64))
+        }
+        "field_mapping.romeo.correct_global" => gated(romeo, Current::Bool(rp.correct_global)),
+        "field_mapping.romeo.temporal_uncertain_unwrapping" => {
+            gated(romeo && combines && !rp.individual, Current::Number(rp.temporal_uncertain_unwrapping))
+        }
         "field_mapping.b0_estimation" => gated(combines, Current::Choice(c.field_mapping.b0_estimation.id())),
         "field_mapping.b0_estimation.weighting" => match &c.field_mapping.b0_estimation {
             super::config::B0EstimationMethod::WeightedAvg { weighting } if combines => {
@@ -1150,6 +1168,17 @@ const LAPLACIAN: &[Value] = &[Choice("laplacian")];
 /// reproducible (median |slope − 1| 2.8 % against 3.3 %); revisit with the full re-run.
 const RIM_SENSITIVE_BFR: &[Value] = &[Choice("pdf"), Choice("lbv")];
 const ROMEO: &[Value] = &[Choice("romeo")];
+/// ROMEO unwraps the field map: the trigger of the ROMEO-settings rules.
+const ROMEO_UNWRAPS: Condition = method("field_mapping.unwrapping_algorithm", ROMEO);
+/// What the χ-separation toolbox's ROMEO call resolves to (QSM.rs unwrap::romeo docs, *Pipelines
+/// that run the CLI*).
+const ROMEO_CLI_SOURCE: &str = "χ-separation toolbox v1.1.3 Chisep_script.m:99-111 (mritools ROMEO.m:     -p -o -m -t -k --phase-offset-correction on -q); mritools 4.7.1 romeo's settings_romeo.txt for that call     (individual-unwrapping false, template 1, correct-global false, temporal-uncertain-unwrapping 0.0);     QSMxT/QSM-CI#421";
+const ROMEO_CLI_WEIGHTS_SOURCE: &str = "χ-separation toolbox v1.1.3 Chisep_script.m:99-111 (no -w, a magnitude     given); ROMEO.jl ext/RomeoApp/caller.jl:49-55 (the default romeo becomes romeo3 with a magnitude); mritools     4.7.1 romeo's settings_romeo.txt for that call (weights: romeo3); QSMxT/QSM-CI#421";
+const ROMEO_CLI_WEIGHTS_REASON: &str = "The χ-separation toolbox runs mritools' romeo command line with a     magnitude and no -w, so its weights are romeo3: phase coherence, phase gradient coherence and magnitude     coherence, without phase linearity";
+const ROMEO_CLI_TEMPLATE_REASON: &str = "The χ-separation toolbox runs mritools' romeo command line without     --individual-unwrapping: it unwraps a template echo spatially and the others temporally from it";
+const ROMEO_CLI_TEMPLATE_ECHO_REASON: &str = "The χ-separation toolbox runs mritools' romeo command line     without --template, so the first echo is the template";
+const ROMEO_CLI_GLOBAL_REASON: &str = "The χ-separation toolbox runs mritools' romeo command line without     --correct-global";
+const ROMEO_CLI_UNCERTAIN_REASON: &str = "The χ-separation toolbox runs mritools' romeo command line without     --temporal-uncertain-unwrapping, whose command-line default (0) leaves uncertain voxels as the temporal     unwrapping gives them";
 const COMPLEX_FIT: &[Value] = &[Choice("complex-fit")];
 const WEIGHTED_AVG: &[Value] = &[Choice("weighted-avg")];
 const CHI_SEP_TOOLBOX: &[Value] = &[Choice("chi-sep-ilsqr"), Choice("chi-sep-medi"), Choice("chi-sepnet")];
@@ -1425,6 +1454,32 @@ pub static RULES: &[Rule] = &[
         "field_mapping.unwrapping_algorithm", ROMEO,
         "QSMnetME's toolbox unwraps each echo with ROMEO",
         "χ-separation toolbox Chisep_script.m:99-111; Kim et al. 2025 (χ-sepnet) §2.1.1"),
+    // The toolbox runs mritools' `romeo` command line with no -w, -i, -g, --template or
+    // --temporal-uncertain-unwrapping: the CLI's settings (RomeoParams::romeo_cli). Measured on the
+    // QSM-CI in-vivo travelling-head scan (QSMxT/QSM-CI#421): total field 23 % NRMSE from the
+    // toolbox's with QSMxT's ROMEO settings, 0.00 % with these.
+    reference("chi-sep.romeo-weights", &[sep(CHI_SEP_TOOLBOX), ROMEO_UNWRAPS],
+        "field_mapping.romeo.weights", &[Choice("romeo3")], ROMEO_CLI_WEIGHTS_REASON, ROMEO_CLI_WEIGHTS_SOURCE),
+    reference("chi-sep.romeo-template", &[sep(CHI_SEP_TOOLBOX), ROMEO_UNWRAPS, MULTI_ECHO],
+        "field_mapping.romeo.individual", &[Bool(false)], ROMEO_CLI_TEMPLATE_REASON, ROMEO_CLI_SOURCE),
+    reference("chi-sep.romeo-template-echo", &[sep(CHI_SEP_TOOLBOX), ROMEO_UNWRAPS, MULTI_ECHO],
+        "field_mapping.romeo.template", &[Number(1.0)], ROMEO_CLI_TEMPLATE_ECHO_REASON, ROMEO_CLI_SOURCE),
+    reference("chi-sep.romeo-no-global-correction", &[sep(CHI_SEP_TOOLBOX), ROMEO_UNWRAPS],
+        "field_mapping.romeo.correct_global", &[Bool(false)], ROMEO_CLI_GLOBAL_REASON, ROMEO_CLI_SOURCE),
+    reference("chi-sep.romeo-no-uncertain-rewrap", &[sep(CHI_SEP_TOOLBOX), ROMEO_UNWRAPS, MULTI_ECHO],
+        "field_mapping.romeo.temporal_uncertain_unwrapping", &[Number(0.0)], ROMEO_CLI_UNCERTAIN_REASON,
+        ROMEO_CLI_SOURCE),
+    reference("qsmnetme.romeo-weights", &[inv(QSMNETME), ROMEO_UNWRAPS],
+        "field_mapping.romeo.weights", &[Choice("romeo3")], ROMEO_CLI_WEIGHTS_REASON, ROMEO_CLI_WEIGHTS_SOURCE),
+    reference("qsmnetme.romeo-template", &[inv(QSMNETME), ROMEO_UNWRAPS, MULTI_ECHO],
+        "field_mapping.romeo.individual", &[Bool(false)], ROMEO_CLI_TEMPLATE_REASON, ROMEO_CLI_SOURCE),
+    reference("qsmnetme.romeo-template-echo", &[inv(QSMNETME), ROMEO_UNWRAPS, MULTI_ECHO],
+        "field_mapping.romeo.template", &[Number(1.0)], ROMEO_CLI_TEMPLATE_ECHO_REASON, ROMEO_CLI_SOURCE),
+    reference("qsmnetme.romeo-no-global-correction", &[inv(QSMNETME), ROMEO_UNWRAPS],
+        "field_mapping.romeo.correct_global", &[Bool(false)], ROMEO_CLI_GLOBAL_REASON, ROMEO_CLI_SOURCE),
+    reference("qsmnetme.romeo-no-uncertain-rewrap", &[inv(QSMNETME), ROMEO_UNWRAPS, MULTI_ECHO],
+        "field_mapping.romeo.temporal_uncertain_unwrapping", &[Number(0.0)], ROMEO_CLI_UNCERTAIN_REASON,
+        ROMEO_CLI_SOURCE),
     // Scoped out of the χ-separation toolbox: it runs STI Suite's iLSQR (`chi-sep-*.qsm-ilsqr`)
     // but unwraps with ROMEO (`chi-sep.unwrap-romeo`), so this rule is not its pipeline's.
     reference("sti.unwrap-laplacian", &[inv(STI), unless_sep(CHI_SEP_TOOLBOX)],
@@ -2230,6 +2285,34 @@ mod tests {
                 inversion(I::Qsmnetme)(c);
                 c.cfg.field_mapping.unwrapping_algorithm = UnwrappingAlgorithm::Laplacian;
             })),
+            ("chi-sep.romeo-weights", Case::new(separation(S::ChiSepIlsqr))),
+            ("chi-sep.romeo-template", Case::new(|c| {
+                separation(S::ChiSepMedi)(c);
+                c.cfg.field_mapping.romeo_params.individual = true;
+            })),
+            ("chi-sep.romeo-template-echo", Case::new(|c| {
+                separation(S::ChiSepNet)(c);
+                c.cfg.field_mapping.romeo_params.template = 2;
+            })),
+            ("chi-sep.romeo-no-global-correction", Case::new(|c| {
+                separation(S::ChiSepIlsqr)(c);
+                c.cfg.field_mapping.romeo_params.correct_global = true;
+            })),
+            ("chi-sep.romeo-no-uncertain-rewrap", Case::new(separation(S::ChiSepMedi))),
+            ("qsmnetme.romeo-weights", Case::new(inversion(I::Qsmnetme))),
+            ("qsmnetme.romeo-template", Case::new(|c| {
+                inversion(I::Qsmnetme)(c);
+                c.cfg.field_mapping.romeo_params.individual = true;
+            })),
+            ("qsmnetme.romeo-template-echo", Case::new(|c| {
+                inversion(I::Qsmnetme)(c);
+                c.cfg.field_mapping.romeo_params.template = 1;
+            })),
+            ("qsmnetme.romeo-no-global-correction", Case::new(|c| {
+                inversion(I::Qsmnetme)(c);
+                c.cfg.field_mapping.romeo_params.correct_global = true;
+            })),
+            ("qsmnetme.romeo-no-uncertain-rewrap", Case::new(inversion(I::Qsmnetme))),
             ("field-mapping.phase-offsets", Case::new(|c| c.cfg.field_mapping.phase_offset_removal = false)),
             ("field-mapping.bipolar-needs-three-echoes", Case::new(|c| {
                 c.cfg.field_mapping.bipolar_correction = true;
@@ -2570,6 +2653,40 @@ mod tests {
             c.cfg.bg_removal.pdf.n_cg = 300;
         });
         assert!(c.ids().is_empty(), "{:?}", c.ids());
+    }
+
+    /// The χ-separation toolbox's ROMEO is the command line's ([`RomeoParams::romeo_cli`]): with
+    /// those settings no ROMEO rule fires; the template rules are silent in individual mode, and
+    /// all of them when ROMEO does not unwrap.
+    #[test]
+    fn chi_sep_romeo_is_the_command_line() {
+        use crate::unwrap::RomeoParams;
+        let romeo = |c: &Case| c.ids().into_iter().filter(|id| id.contains(".romeo-")).collect::<Vec<_>>();
+        for s in [SeparationAlgorithm::ChiSepIlsqr, SeparationAlgorithm::ChiSepMedi, SeparationAlgorithm::ChiSepNet] {
+            let c = Case::new(|c| {
+                separation(s)(c);
+                c.cfg.field_mapping.romeo_params = RomeoParams::romeo_cli();
+            });
+            assert!(romeo(&c).is_empty(), "{s:?}: {:?}", romeo(&c));
+            let c = Case::new(|c| {
+                separation(s)(c);
+                c.cfg.field_mapping.romeo_params.individual = true;
+            });
+            assert_eq!(romeo(&c), ["chi-sep.romeo-weights", "chi-sep.romeo-template"], "{s:?}");
+            let c = Case::new(|c| {
+                separation(s)(c);
+                c.cfg.field_mapping.unwrapping_algorithm = UnwrappingAlgorithm::Laplacian;
+            });
+            assert!(romeo(&c).is_empty(), "{s:?}: {:?}", romeo(&c));
+        }
+        let c = Case::new(|c| {
+            inversion(InversionAlgorithm::Qsmnetme)(c);
+            c.cfg.field_mapping.romeo_params = RomeoParams::romeo_cli();
+        });
+        assert!(romeo(&c).is_empty(), "{:?}", romeo(&c));
+        assert_eq!(RomeoParams::romeo_cli().weights_id(), "romeo3");
+        assert_eq!(RomeoParams::default().weights_id(), "romeo4");
+        assert_eq!(RomeoParams { mag_weight: true, ..RomeoParams::default() }.weights_id(), "custom");
     }
 
     /// PDF's iteration count: the default is PDF.m's 30, and 300 (or more) is a measured

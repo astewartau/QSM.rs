@@ -48,6 +48,18 @@
 //!   it, and in individual mode to each echo and then across echoes
 //!   ([`correct_multi_echo_wraps`]); see `unwrap_individual` for the two places (threads and even
 //!   medians) where QSM.rs is deterministic and ROMEO.jl is not.
+//! - **Pipelines that run the CLI.** The χ-separation toolbox v1.1.3 (`Chisep_script.m`
+//!   l. 99-111, the same lines before χ-sep-MEDI, χ-sep-iLSQR, χ-sepnet and QSMnetME) unwraps with
+//!   mritools' `ROMEO.m`, which runs the `romeo` binary with only the phase, magnitude, mask, echo
+//!   times, `--phase-offset-correction on` and `-q` (no `-w`, `-i`, `-g`, `--template` or
+//!   `--temporal-uncertain-unwrapping`). mritools 4.7.1's `romeo` records what that resolves to
+//!   (its `settings_romeo.txt`): weights `romeo3`, `individual-unwrapping: false`, `template: 1`,
+//!   `correct-global: false`, `temporal-uncertain-unwrapping: 0.0`, i.e.
+//!   [`RomeoParams::romeo_cli`]. The pipeline rules `chi-sep.romeo-*` and `qsmnetme.romeo-*` give
+//!   those (settings `field_mapping.romeo.*`). On the QSM-CI in-vivo travelling-head scan, QSMxT's
+//!   χ-separation pipeline with QSMxT's ROMEO settings (individual unwrapping, global correction,
+//!   `romeo4`, temporal re-unwrapping 0.5) gave a total field 23 % NRMSE from the toolbox's; with
+//!   these, 0.00 % (max |Δ| 6.6·10⁻⁵ ppm; QSMxT/QSM-CI#421, 2026-11-10).
 //! - **Undefined phase (NaN).** ROMEO.jl takes NaN phase (e.g. MCPC-3D-S's output where its
 //!   offset is undefined, [`crate::utils::phase_offset_removal`]) as "no data": any edge touching
 //!   it gets a NaN weight, which `rescale` makes invalid, so the growth never reaches it and it
@@ -267,6 +279,23 @@ impl RomeoParams {
             mag_weight2: f[5],
             ..Default::default()
         }
+    }
+
+    /// The ROMEO.jl weight preset these weights are, as the pipeline rules name it
+    /// (`field_mapping.romeo.weights`): `"romeo4"` (ROMEO.jl's `:romeo` and `:romeo4`,
+    /// [`RomeoParams::default`]), `"romeo3"` (the command line's with a magnitude,
+    /// [`RomeoParams::romeo_cli`]), `"romeo2"`, `"romeo6"`, `"bestpath"`, or `"custom"` for any
+    /// other combination of the flags.
+    pub fn weights_id(&self) -> &'static str {
+        use RomeoWeightType as W;
+        if self.bestpath {
+            return "bestpath";
+        }
+        let f = self.weight_flags();
+        [(W::Romeo4, "romeo4"), (W::Romeo3, "romeo3"), (W::Romeo2, "romeo2"), (W::Romeo6, "romeo6")]
+            .into_iter()
+            .find(|(w, _)| w.weight_flags() == f)
+            .map_or("custom", |(_, id)| id)
     }
 
     /// Convert the boolean fields to the 6-element flag array used internally.
