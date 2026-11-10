@@ -14,7 +14,7 @@
 //! first echo's magnitude), as CLEARSWI.jl does.
 
 use qsm_core::io::{read_nifti_file, save_nifti_to_file};
-use qsm_core::pipeline::scale_phase_to_pi;
+use qsm_core::pipeline::scale_phases_to_pi;
 use qsm_core::swi::{calculate_swi, create_mip, SwiParams, SwiUnwrap};
 use qsm_core::utils::B0WeightType;
 use qsm_core::Grid;
@@ -55,9 +55,8 @@ fn main() {
     let mags = read(mags.expect("--mag is required"));
     let mut phases = read(phases.expect("--phase is required"));
     if !raw_phase {
-        for p in &mut phases {
-            scale_phase_to_pi(&mut p.data);
-        }
+        let mut data: Vec<&mut [f64]> = phases.iter_mut().map(|p| p.data.as_mut_slice()).collect();
+        scale_phases_to_pi(&mut data);
     }
     let h = &mags[0];
     let grid = Grid::new(h.dims.0, h.dims.1, h.dims.2, h.voxel_size.0, h.voxel_size.1, h.voxel_size.2);
