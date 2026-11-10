@@ -214,7 +214,7 @@
 //! # Pipeline rules
 //!
 //! The facts above that a configuration can depart from are published as rules in
-//! [`crate::pipeline::rules::RULES`] (each with its strength, basis, reason and source): `medi.mask-bet`, `medi.field-complex-fit`, `medi.te-spacing`, `medi-msmv.three-echoes`, `medi-msmv.bg-removal`, `medi-msmv.prefilter`, `medi.bg-pdf`, `medi.reference-none` (MEDI+0 is the pipeline's referencing:
+//! [`crate::pipeline::rules::RULES`] (each with its strength, basis, reason and source): `medi.mask-bet`, `medi.bet-as-stored` (BET.m hands the bet2 mex an array: no FSL left-right flip; [`crate::bet::BetOrientation`]), `medi.field-complex-fit`, `medi.te-spacing`, `medi-msmv.three-echoes`, `medi-msmv.bg-removal`, `medi-msmv.prefilter`, `medi.bg-pdf`, `medi.reference-none` (MEDI+0 is the pipeline's referencing:
 //! `MEDI_L1.m:204-207` subtracts the CSF mean, with fewer than three echoes nothing, and README.m
 //! subtracts nothing after it, so a host's own referencing is not applied).
 

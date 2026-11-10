@@ -551,6 +551,7 @@ pub const SETTINGS: &[(&str, &str)] = &[
     ("masking.input", "Each mask section's input image (MaskingInput::id): magnitude-first, magnitude (RSS over echoes), magnitude-last or phase-quality"),
     ("masking.inhomogeneity_correction", "The host's correction of the magnitude before masking (InhomogeneityCorrection::id): none, makehomogeneous or n4"),
     ("masking.bet.fractional_intensity", "Each BET step's fractional intensity threshold (BetParams::fractional_intensity)"),
+    ("masking.bet.orientation", "Which way round each BET step sees the left-right axis (BetOrientation::id): fsl (as FSL reads the file) or as-stored"),
     ("masking.erosion", "Each mask section's erosion: the voxels its Erode refinements take off in total (0 = none)"),
     ("masking.min_intensity", "Each mask section's lowest input intensity kept (its MinIntensity refinement; 0 = none)"),
     ("masking.majority", "Each mask section's 3×3×3 majority filter (its Majority refinement, bool)"),
@@ -694,6 +695,16 @@ pub fn current(input: &RuleInput, facts: &ScanFacts, setting: &str) -> Option<Ve
             .flat_map(|s| std::iter::once(&s.generator).chain(&s.refinements))
             .filter_map(|op| match op {
                 super::config::MaskOp::Bet(p) => Some(Current::Number(p.fractional_intensity)),
+                _ => None,
+            })
+            .collect(),
+        "masking.bet.orientation" => c
+            .masking
+            .sections
+            .iter()
+            .flat_map(|s| std::iter::once(&s.generator).chain(&s.refinements))
+            .filter_map(|op| match op {
+                super::config::MaskOp::Bet(p) => Some(Current::Choice(p.orientation.id())),
                 _ => None,
             })
             .collect(),
@@ -1118,6 +1129,11 @@ const MEDI_MASK_SOURCE: &str = "MEDI toolbox README.m (iMag = sqrt(sum(abs(iFiel
 const DECOMPOSE_MASK_SOURCE: &str = "Chen et al. 2021 NeuroImage 242:118477 (DECOMPOSE), §3.6 (\"The GRE \
     magnitude images of the first echo was used to mask and extract the brain tissue using ... BET\"); \
     BET's f, erosion and correction are not stated";
+const MEDI_BET_SOURCE: &str = "MEDI toolbox 2024.11.26 functions/bet2/BET.m (tmp = bet2(fM, matrix_size, \
+    voxel_size); fM is the double array, reshaped) and bet2.cpp's mexFunction (copies it into a volume<float> \
+    voxel by voxel, no orientation); FSL fslio.c FslGetLeftRightOrder2 / read_volume's makeradiological() \
+    for the flip a file gets. Measured against the mex 2026-11-10 (QSM-CI#421): identical masks as stored, \
+    3,680 of 1.55 M voxels differ with the flip";
 const CHI_SEP_MASK_SOURCE: &str = "χ-separation toolbox v1.1.3 Chisep_script.m:75 (mag = sqrt(sum(abs(mag_multi_echo).^2,4))), :82 (BET)";
 /// The CG iteration count `pdf.cg-iterations` suggests (measured; see `PdfParams::n_cg`).
 const PDF_SUGGESTED_N_CG: f64 = 300.0;
@@ -1258,6 +1274,10 @@ pub static RULES: &[Rule] = &[
         MEDI_MASK_SOURCE),
     reference("medi.mask-no-erosion", &[inv(&[Choice("medi")])], "masking.erosion", &[Number(0.0)],
         "The MEDI toolbox uses BET's mask as it is, without eroding it", MEDI_MASK_SOURCE),
+    reference("medi.bet-as-stored", &[inv(&[Choice("medi")])], "masking.bet.orientation", &[Choice("as-stored")],
+        "MEDI's BET.m hands the bet2 mex the MATLAB array, so bet2 sees the voxels as stored; FSL's own \
+         bet reverses x of a neurological file first. The two masks differ at the brain's edge",
+        MEDI_BET_SOURCE),
     reference("chi-sep.mask-input", &[sep(CHI_SEP_TOOLBOX)], "masking.input", &[Choice("magnitude")],
         "The χ-separation toolbox runs MEDI's BET on the root-sum-of-squares magnitude over echoes",
         CHI_SEP_MASK_SOURCE),
@@ -1266,6 +1286,11 @@ pub static RULES: &[Rule] = &[
         CHI_SEP_MASK_SOURCE),
     reference("chi-sep.mask-no-erosion", &[sep(CHI_SEP_TOOLBOX)], "masking.erosion", &[Number(0.0)],
         "The χ-separation toolbox uses BET's mask as it is, without eroding it", CHI_SEP_MASK_SOURCE),
+    reference("chi-sep.bet-as-stored", &[sep(CHI_SEP_TOOLBOX)], "masking.bet.orientation", &[Choice("as-stored")],
+        "The χ-separation toolbox masks with MEDI's BET.m, which hands the bet2 mex the MATLAB array, so \
+         bet2 sees the voxels as stored; FSL's own bet reverses x of a neurological file first",
+        "χ-separation toolbox v1.1.3 Chisep_script.m:82 (mask_brain = BET(mag, matrix_size, voxel_size)), \
+         which is MEDI's BET.m and bet2 mex (see medi.bet-as-stored)"),
     // DECOMPOSE's paper describes BET on the first echo's magnitude and nothing more: no
     // correction before it and no erosion after it are stated, so none is what its pipeline runs.
     reference("decompose.mask-input", &[sep(&[Choice("decompose")])], "masking.input",
@@ -2139,9 +2164,17 @@ mod tests {
             ("medi.mask-input", Case::new(inversion(I::Medi))),
             ("medi.mask-no-correction", Case::new(inversion(I::Medi))),
             ("medi.mask-no-erosion", Case::new(inversion(I::Medi))),
+            ("medi.bet-as-stored", Case::new(|c| {
+                inversion(I::Medi)(c);
+                c.cfg.masking.sections[0].generator = MaskOp::Bet(Default::default());
+            })),
             ("chi-sep.mask-input", Case::new(separation(S::ChiSepIlsqr))),
             ("chi-sep.mask-no-correction", Case::new(separation(S::ChiSepNet))),
             ("chi-sep.mask-no-erosion", Case::new(separation(S::ChiSepMedi))),
+            ("chi-sep.bet-as-stored", Case::new(|c| {
+                separation(S::ChiSepMedi)(c);
+                c.cfg.masking.sections[0].generator = MaskOp::Bet(Default::default());
+            })),
             ("decompose.mask-input", Case::new(separation(S::Decompose))),
             ("decompose.mask-no-correction", Case::new(separation(S::Decompose))),
             ("decompose.mask-no-erosion", Case::new(separation(S::Decompose))),

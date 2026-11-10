@@ -32,8 +32,11 @@
 //!   - `-f`, `-w` and `-g` are rounded to single precision, as bet2 reads them;
 //!   - the mask is `make_mask_from_mesh`: the triangles drawn as bet2's `draw_mesh` draws them,
 //!     then a 6-connected spread from the mesh's mean point, with no hole filling;
+//!   - the image is rounded to single precision first: bet2 holds it as `volume<float>`, whether
+//!     FSL read it from a file or MEDI's mex copied it from a MATLAB double array;
 //!   - FSL reverses x of a neurologically stored image (positive determinant) before bet2 runs
-//!     ([`FslLeftRightOrder`]).
+//!     ([`FslLeftRightOrder`]); bet2 handed an array, as MEDI's `BET.m` hands its mex one, sees
+//!     it as stored ([`BetOrientation`]).
 //! - **Agreement with bet2** (Bostrix/FSL-BET2 d5acd7f built from source; measured 2026-10-31):
 //!   - **Travelling head:** on `prisma-bridge-run1`'s echo-1 magnitude after ANTs N4, the masks
 //!     are **identical**, at `-f 0.5` and at `-f 0.2` (0 of 6.0 M voxels differ). Before the
@@ -41,6 +44,12 @@
 //!   - **Synthetic head** of `tests/bet_bet2_parity.rs`: Dice 0.9991 (`-f 0.5`, 5 voxels) and
 //!     1.0000 (`-f 0.2`). That piecewise-constant head is sensitive at this level. Before the
 //!     port: 0.9903 and 0.9922.
+//!   - **MEDI's bet2 mex** (MEDI toolbox 2024.11.26, licensed R2023b and its compiled container;
+//!     measured 2026-11-10, QSM-CI#421): on `prisma-bridge-run1`'s 5-echo RSS magnitude
+//!     (184×256×128, 1 mm, neurological header), `BET(iMag, matrix_size, voxel_size)` and this
+//!     port with [`BetOrientation::AsStored`] give **identical** masks (0 of 1.55 M voxels
+//!     differ). With the FSL flip they differ in 3,680; with the flip and without the
+//!     single-precision rounding (this port before both), in 8,312 (Dice 0.9973).
 //!   - **Undefined behaviour in bet2:** a sample index outside the whole volume buffer is read
 //!     as 0 here.
 //! - **In QSM pipelines.** MEDI runs BET on `iMag = sqrt(sum(abs(iField).^2,4))`, the RSS over
@@ -609,6 +618,43 @@ pub struct BetParams {
     /// Prefer [`super::rs2_net`] where the weights can be fetched: on an in-vivo mouse GRE it
     /// follows the inner skull, where scaled BET still leaks into the skull base.
     pub voxel_scale: f64,
+    /// Which way round BET sees the image's left-right axis (default: as FSL reads the file).
+    pub orientation: BetOrientation,
+}
+
+/// Which way round BET sees the image's left-right axis.
+///
+/// The mesh is not symmetric, so the two give different masks (on a 1 mm in-vivo head, 3,680 of
+/// 1.55 M voxels at the brain's edge; see the module docs).
+#[cfg_attr(feature = "introspection", derive(serde::Serialize))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum BetOrientation {
+    /// As FSL's `bet`/`bet2` read a NIfTI file: x reversed when the header is neurological
+    /// ([`FslLeftRightOrder::from_affine`]).
+    #[default]
+    Fsl,
+    /// The voxels in the order they are stored, whatever the header says: what bet2 does when it
+    /// is handed an array rather than a file, as MEDI's `BET.m` hands the bet2 mex the MATLAB
+    /// array (MEDI toolbox `functions/bet2/BET.m`, `bet2.cpp`'s `mexFunction`).
+    AsStored,
+}
+
+impl BetOrientation {
+    /// Stable id, as rules and hosts name it.
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::Fsl => "fsl",
+            Self::AsStored => "as-stored",
+        }
+    }
+
+    /// The order BET runs in, for an image with this voxel-to-world `affine`.
+    pub fn order(self, affine: Option<&[f64; 16]>) -> FslLeftRightOrder {
+        match self {
+            Self::Fsl => FslLeftRightOrder::from_affine(affine),
+            Self::AsStored => FslLeftRightOrder::Radiological,
+        }
+    }
 }
 
 impl Default for BetParams {
@@ -620,6 +666,7 @@ impl Default for BetParams {
             iterations: 1000,
             subdivisions: 4,
             voxel_scale: 1.0,
+            orientation: BetOrientation::Fsl,
         }
     }
 }
@@ -675,6 +722,12 @@ pub fn run_bet<F>(
 where
     F: FnMut(usize, usize),
 {
+    // bet2 holds the image as `volume<float>`: a file is read into single precision, and the mex
+    // MEDI calls copies its double array into one. The surface is sensitive at that level (a
+    // few thousand voxels at the edge of a 1 mm head; see the module docs), so BET always
+    // starts from the rounded image.
+    let single: Vec<f64> = data.iter().map(|&v| v as f32 as f64).collect();
+    let data = single.as_slice();
     match order {
         FslLeftRightOrder::Radiological => run_bet_as_stored(data, grid, params, progress),
         FslLeftRightOrder::Neurological => {
@@ -1047,7 +1100,7 @@ mod tests {
         let mask = run_bet(
             &data,
             &grid,
-            &BetParams { fractional_intensity: 0.5, smoothness: 1.0, gradient_threshold: 0.0, iterations: 50, subdivisions: 1, voxel_scale: 1.0 },
+            &BetParams { fractional_intensity: 0.5, smoothness: 1.0, gradient_threshold: 0.0, iterations: 50, subdivisions: 1, voxel_scale: 1.0, ..BetParams::default() },
             FslLeftRightOrder::Radiological, |_, _| {},
         );
 
@@ -1073,7 +1126,7 @@ mod tests {
         let (data, nx, ny, nz) = make_sphere_volume(16, 6.0, 200.0);
         let base = BetParams {
             fractional_intensity: 0.5, smoothness: 1.0, gradient_threshold: 0.0,
-            iterations: 50, subdivisions: 1, voxel_scale: 1.0,
+            iterations: 50, subdivisions: 1, voxel_scale: 1.0, ..BetParams::default()
         };
 
         // Anisotropic voxels, so a scale applied to the wrong axis would show up.
@@ -1098,7 +1151,7 @@ mod tests {
         let grid = Grid::new(nx, ny, nz, 1.0, 1.0, 1.0);
         let base = BetParams {
             fractional_intensity: 0.5, smoothness: 1.0, gradient_threshold: 0.0,
-            iterations: 50, subdivisions: 1, voxel_scale: 1.0,
+            iterations: 50, subdivisions: 1, voxel_scale: 1.0, ..BetParams::default()
         };
         let unscaled = run_bet(&data, &grid, &base, FslLeftRightOrder::Radiological, |_, _| {});
 
@@ -1117,7 +1170,7 @@ mod tests {
         let mask = run_bet(
             &data,
             &grid,
-            &BetParams { fractional_intensity: 0.5, smoothness: 1.0, gradient_threshold: 0.3, iterations: 50, subdivisions: 1, voxel_scale: 1.0 },
+            &BetParams { fractional_intensity: 0.5, smoothness: 1.0, gradient_threshold: 0.3, iterations: 50, subdivisions: 1, voxel_scale: 1.0, ..BetParams::default() },
             FslLeftRightOrder::Radiological, |_, _| {},
         );
 
@@ -1137,7 +1190,7 @@ mod tests {
         let mask = run_bet(
             &data,
             &grid,
-            &BetParams { fractional_intensity: 0.5, smoothness: 1.0, gradient_threshold: 0.0, iterations: 50, subdivisions: 1, voxel_scale: 1.0 },
+            &BetParams { fractional_intensity: 0.5, smoothness: 1.0, gradient_threshold: 0.0, iterations: 50, subdivisions: 1, voxel_scale: 1.0, ..BetParams::default() },
             FslLeftRightOrder::Radiological, |current, total| {
                 progress_calls.push((current, total));
             },
@@ -1168,13 +1221,13 @@ mod tests {
         let mask_small = run_bet(
             &data,
             &grid,
-            &BetParams { fractional_intensity: 0.7, smoothness: 1.0, gradient_threshold: 0.0, iterations: 50, subdivisions: 1, voxel_scale: 1.0 },
+            &BetParams { fractional_intensity: 0.7, smoothness: 1.0, gradient_threshold: 0.0, iterations: 50, subdivisions: 1, voxel_scale: 1.0, ..BetParams::default() },
             FslLeftRightOrder::Radiological, |_, _| {},
         );
         let mask_large = run_bet(
             &data,
             &grid,
-            &BetParams { fractional_intensity: 0.3, smoothness: 1.0, gradient_threshold: 0.0, iterations: 50, subdivisions: 1, voxel_scale: 1.0 },
+            &BetParams { fractional_intensity: 0.3, smoothness: 1.0, gradient_threshold: 0.0, iterations: 50, subdivisions: 1, voxel_scale: 1.0, ..BetParams::default() },
             FslLeftRightOrder::Radiological, |_, _| {},
         );
 
@@ -1194,7 +1247,7 @@ mod tests {
         let mask = run_bet(
             &data,
             &grid,
-            &BetParams { fractional_intensity: 0.5, smoothness: 1.0, gradient_threshold: 0.0, iterations: 50, subdivisions: 1, voxel_scale: 1.0 },
+            &BetParams { fractional_intensity: 0.5, smoothness: 1.0, gradient_threshold: 0.0, iterations: 50, subdivisions: 1, voxel_scale: 1.0, ..BetParams::default() },
             FslLeftRightOrder::Radiological, |_, _| {},
         );
 

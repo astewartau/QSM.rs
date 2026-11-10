@@ -238,9 +238,9 @@ pub fn apply_mask_ops(
                 let mag_data = magnitude.ok_or_else(|| {
                     PipelineError::InvalidInput("BET requires magnitude data".into())
                 })?;
-                // bet2 flips neurologically stored images (FSL's read_volume); the order comes
-                // from the scan's affine.
-                let order = crate::bet::FslLeftRightOrder::from_affine(metadata.affine.as_ref());
+                // FSL flips neurologically stored images before bet2 (read_volume), unless the
+                // params ask for the image as stored (bet2 handed an array, as MEDI's BET.m does).
+                let order = params.orientation.order(metadata.affine.as_ref());
                 mask = crate::bet::run_bet(mag_data, &grid, params, order, |_, _| {});
             }
             MaskOp::Erode { iterations } => {
@@ -836,13 +836,16 @@ mod tests {
     fn test_bet_op_passes_every_bet_param_through() {
         use crate::bet::{run_bet, BetParams};
         let n = 20;
-        let meta = ScanMetadata { dims: (n, n, n), ..test_metadata() };
+        // A neurological header (identity affine), so the orientation matters.
+        let identity = [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0];
+        let meta = ScanMetadata { dims: (n, n, n), affine: Some(identity), ..test_metadata() };
         let grid = meta.grid();
         // A bright ellipsoid on a dim background, with a soft edge so the surface parameters matter.
         let c = (n as f64 - 1.0) / 2.0;
         let mag: Vec<f64> = (0..n * n * n).map(|idx| {
             let (i, j, k) = (idx % n, (idx / n) % n, idx / (n * n));
-            let r = (((i as f64 - c) / 7.0).powi(2) + ((j as f64 - c) / 6.0).powi(2)
+            // Off centre in x, so reversing x changes what BET sees.
+            let r = (((i as f64 - c - 1.5) / 7.0).powi(2) + ((j as f64 - c) / 6.0).powi(2)
                 + ((k as f64 - c) / 5.0).powi(2)).sqrt();
             10.0 + 190.0 / (1.0 + ((r - 1.0) * 2.5).exp())
         }).collect();
@@ -856,9 +859,10 @@ mod tests {
             BetParams { gradient_threshold: 0.5, ..base.clone() },
             BetParams { iterations: 5, ..base.clone() },
             BetParams { subdivisions: 2, ..base.clone() },
+            BetParams { orientation: crate::bet::BetOrientation::AsStored, ..base.clone() },
         ];
         for params in variants {
-            let direct = run_bet(&mag, &grid, &params, crate::bet::FslLeftRightOrder::from_affine(meta.affine.as_ref()), |_, _| {});
+            let direct = run_bet(&mag, &grid, &params, params.orientation.order(meta.affine.as_ref()), |_, _| {});
             assert!(direct != base_mask, "{params:?} should change the mask, or this test proves nothing");
             let op = MaskOp::Bet(params.clone());
             let via_op = apply_mask_ops(vec![1; n * n * n], &[op], &mag, Some(&mag), &meta).unwrap();

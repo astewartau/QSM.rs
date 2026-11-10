@@ -1409,6 +1409,7 @@ fn test_bet() {
             iterations: 1000,
             subdivisions: 4,
             voxel_scale: 1.0,
+            ..BetParams::default()
         },
         bet::FslLeftRightOrder::Radiological, |_, _| {},
     ));
