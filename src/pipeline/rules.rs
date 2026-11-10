@@ -608,6 +608,7 @@ pub const SETTINGS: &[(&str, &str)] = &[
     ("separation.algorithm", "χ-separation (SeparationAlgorithm::id)"),
     ("separation.chi_sepnet.route", "χ-sepnet's input route: toolbox or native (ChiSepNetRoute::id); only with χ-sepnet"),
     ("separation.decompose.unwrap_phase", "DECOMPOSE's phase unwrapping along the echoes (DecomposeParams::unwrap_phase, bool); only with DECOMPOSE"),
+    ("separation.decompose.fit", "DECOMPOSE's fit (DecomposeParams::fit_id): reference-code (Tim Ho's script: lsqcurvefit for every stage, global-max scale), paper (Chen et al. 2021's solvers on per-voxel S(0) = 1 data) or custom; only with DECOMPOSE"),
     ("separation.decompose.chi_bound", "DECOMPOSE's bound on |χ| in the fit (DecomposeChiBound::id): ppm (a fixed bound, the authors' 0.5) or echo-spacing (π / ((2/3)·γ·B0·ΔTE_max), computed from the scan); only with DECOMPOSE"),
     ("segmentation.inference", "SynthSeg inference: full-volume, low-memory (SynthSegInference::LOW_MEMORY) or sliding-window"),
     ("segmentation.inference.patch", "SynthSeg window edge, voxels at 1 mm (SlidingWindow::patch)"),
@@ -870,6 +871,12 @@ pub fn current(input: &RuleInput, facts: &ScanFacts, setting: &str) -> Option<Ve
             .separation
             .filter(|s| s.algorithm == super::config::SeparationAlgorithm::Decompose)
             .map(|s| Current::Bool(s.decompose.unwrap_phase))
+            .into_iter()
+            .collect(),
+        "separation.decompose.fit" => input
+            .separation
+            .filter(|s| s.algorithm == super::config::SeparationAlgorithm::Decompose)
+            .map(|s| Current::Choice(s.decompose.fit_id()))
             .into_iter()
             .collect(),
         "separation.decompose.chi_bound" => input
@@ -1944,6 +1951,14 @@ pub static RULES: &[Rule] = &[
         "Chen et al. 2021 NeuroImage 242:118477 (DECOMPOSE), §2.2; measured on the QSM-CI 7 T \
          chisep phantom, χ− r 0.75 → 0.85 with this bound alone, χ+ r 0.66 → 0.90 with \
          unwrapping (QSM.rs separation::decompose docs, At 7 T)"),
+    // DECOMPOSE's pipeline is its paper's (decided 2026-11-10), not Tim Ho's script.
+    reference("decompose.fit-paper", &[sep(&[Choice("decompose")])], "separation.decompose.fit",
+        &[Choice("paper")],
+        "DECOMPOSE's paper fits the amplitudes with C+ + C− + C₀ = 1 and the amplitudes and R2*₀ by \
+         linear least squares (lsqlin), χ± by lsqnonlin; the data are scaled to S(0) = 1 per voxel \
+         (QSM.rs's reading: the paper does not say how)",
+        "Chen et al. 2021 NeuroImage 242:118477 (DECOMPOSE), §2.2 Eq. 5.1-5.3, §3.1; QSM.rs \
+         separation::decompose docs (DecomposeStageSolver, DecomposeNormalisation)"),
     reference("decompose.reference-mean", &[sep(&[Choice("decompose")])], "reference",
         &[Choice("mean")],
         "DECOMPOSE's χ is referenced to the whole-brain mean",
@@ -2194,6 +2209,7 @@ mod tests {
             ("chi-sep.bg-vsharp", Case::new(|c| { separation(S::ChiSepIlsqr)(c); background(B::Pdf)(c) })),
             ("qsmnetme.bg-vsharp", Case::new(|c| { inversion(I::Qsmnetme)(c); background(B::Pdf)(c) })),
             ("r2star-qsm.bg-pdf", Case::new(separation(S::R2starQsm))),
+            ("decompose.fit-paper", Case::new(separation(S::Decompose))),
             ("decompose.bg-vsharp", Case::new(|c| { separation(S::Decompose)(c); background(B::Pdf)(c) })),
             ("star.padding", Case::new(|c| {
                 c.cfg.inversion.algorithm = I::Star;
