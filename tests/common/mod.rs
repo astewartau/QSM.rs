@@ -102,12 +102,23 @@ pub fn correlation(a: &[f64], b: &[f64], mask: &[u8]) -> f64 {
 /// Local statistics computed in 5×5×5 uniform windows.
 ///
 /// Both maps are demeaned within the mask (and zeroed outside it) first, as `nrmse_challenge`
-/// is: the χ reference is arbitrary, so an overall offset is not an error. QSM-CI's scorer
-/// (`eval/qsm_eval.py`) does the same; keep the two in step.
+/// is: the χ reference is arbitrary, so an overall offset is not an error. χ-separation sources
+/// and R2′ use `xsim_raw` instead (they have a true zero). QSM-CI's scorer (`eval/qsm_eval.py`)
+/// does the same; keep the two in step.
 ///
 /// Reference: Milovic et al., "XSIM: A structural similarity index measure
 /// optimized for MRI QSM", Magn Reson Med. 2025;93:411-421.
 pub fn xsim(a: &[f64], b: &[f64], mask: &[u8], dims: (usize, usize, usize)) -> f64 {
+    xsim_with(a, b, mask, dims, true)
+}
+
+/// XSIM without demeaning, for maps with a true zero: χ-separation sources (an offset is a false
+/// source) and R2′. QSM-CI scores χ-separation this way and reports no XSIM for R2′.
+pub fn xsim_raw(a: &[f64], b: &[f64], mask: &[u8], dims: (usize, usize, usize)) -> f64 {
+    xsim_with(a, b, mask, dims, false)
+}
+
+fn xsim_with(a: &[f64], b: &[f64], mask: &[u8], dims: (usize, usize, usize), demean_maps: bool) -> f64 {
     let (nx, ny, nz) = dims;
     let demean = |x: &[f64]| -> Vec<f64> {
         let (s, n) = x.iter().zip(mask).filter(|(_, &m)| m != 0)
@@ -115,7 +126,7 @@ pub fn xsim(a: &[f64], b: &[f64], mask: &[u8], dims: (usize, usize, usize)) -> f
         let mu = if n > 0 { s / n as f64 } else { 0.0 };
         x.iter().zip(mask).map(|(&v, &m)| if m != 0 { v - mu } else { 0.0 }).collect()
     };
-    let (a, b) = (demean(a), demean(b));
+    let (a, b) = if demean_maps { (demean(a), demean(b)) } else { (a.to_vec(), b.to_vec()) };
     // XSIM parameters: L=1, K1=0.01, K2=0.001
     let c1: f64 = 1e-4;  // (K1 * L)² = (0.01)²
     let c2: f64 = 1e-6;  // (K2 * L)² = (0.001)²
@@ -1053,7 +1064,7 @@ pub fn chisep_score(
     time_s: f64,
 ) {
     let corr = correlation(recon, truth, mask);
-    let xs = xsim(recon, truth, mask, dims);
+    let xs = xsim_raw(recon, truth, mask, dims);  // χ-separation sources and R2′ have a true zero
     let nr = nrmse(recon, truth, mask) * 100.0;
     assert_result_name(label);
     println!("  {:22}  corr {:.4}   xsim {:.4}   nrmse {:.1}%", label, corr, xs, nr);
