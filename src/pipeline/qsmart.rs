@@ -76,6 +76,18 @@
 //! `qsmart` parity pair (QSMxT/QSM-CI#355, total field and `R_0` fed, `qsmart-reference` offset
 //! grid on the odd-sized sim) is 0.359 % on the sim and 0.779 % on the KKI travelling head.
 //!
+//! **The whole pipeline is sensitive to rounding in N4.** QSMART's mask is BET on the N4-corrected
+//! first echo, and BET moves its edge on differences far below N4's accuracy. Every later stage
+//! (vessel detection, both SDF stages, both inversions) follows the mask. The QSM-CI reference of
+//! QSMART v1.0's own pipeline (`toolbox-pipeline-qsmart`, verified bit-identical to licensed
+//! MATLAB) was run on the in-vivo s005001 Prisma scan twice: once with ANTs' N4 at 32+ threads, once
+//! at 1 thread, everything else identical. The masks differ in 3,131 of 1.59 M voxels (Dice
+//! 0.9990). χ differs by 15.1 % NRMSE over the mask, and by 9.1 % and 6.0 % inside it eroded by 3
+//! and 6 voxels (QSMxT/QSM-CI#421, 2026-11-10). QSMxT's `qsmart` pipeline, whose N4 is this
+//! crate's port ([`crate::utils::n4`], 0.0003 % from ANTs on QSMART's file), is 14.6 % from the
+//! single-threaded reference (9.2 % and 6.6 % eroded): within the reference's own spread. A
+//! comparison of QSMART's χ maps from different N4 builds or thread counts should expect that much.
+//!
 //! # Pipeline rules
 //!
 //! The facts above that a configuration can depart from are published as rules in
