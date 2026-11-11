@@ -174,6 +174,20 @@
 //! mask is the GUI's magnitude-threshold mask (not BET), and its eroded mask and output go to
 //! `QSM_star` or `QSM_iLSQR` with `TE` = the sum of the echo times.
 //!
+//! **STI's fit test, and the voxels its rounding drops** (spied in licensed R2023b, 2026-11-11,
+//! QSMxT/QSM-CI#421). STI's `V_SHARP` convolves the cropped mask with each ball in single
+//! precision (`fftnc`/`ifftnc`), and its output mask is exactly `|S₂∗mask − 1| < 1e-6` for its 2 mm
+//! ball: on an in-vivo 3 T scan (1 mm, 5 echoes) that rule gives its mask with no voxel apart, and the
+//! 1 mm ball (R = 1, also convolved) does not enter it. Float32 rounding of that convolution puts
+//! a few interior voxels just outside the tolerance (there 4 of 1,276,574, at 1.01–1.07e-6 from 1,
+//! where every other voxel is within 2.4e-7), so STI's eroded mask has isolated holes that do not
+//! depend on the field (the same holes with the real field, noise or ones). PolishMask's fill puts
+//! them back in the mask with a local field of 0, and through iLSQR they are that scan's whole
+//! STI-pipeline gap (χ NRMSE 0.30 %, max |Δ| 0.020 ppm). This module tests in f64, exactly, and
+//! keeps those voxels: the holes come from FFTW's single-precision rounding at that grid size,
+//! which no other FFT reproduces, so they are not copied. They are a parity floor of STI Suite's
+//! pipeline (QSM-CI sets its limits from it), not a difference in the algorithm.
+//!
 //! Reference:
 //! Wu, B., Li, W., Guidon, A., Liu, C. (2012).
 //! "Whole brain susceptibility mapping using compressed sensing."
@@ -744,7 +758,9 @@ fn vsharp_padded(
     let mut final_mask = vec![0u8; n_total];
 
     // A ball fits where S∗mask reaches 1. STI's test admits no missing voxel (its eroded mask
-    // is reproduced exactly with a tolerance far below one voxel of a 2 mm ball, 1/32).
+    // is reproduced exactly with a tolerance far below one voxel of a 2 mm ball, 1/32). STI
+    // itself tests |S₂∗mask − 1| < 1e-6 in single precision, whose rounding drops a few interior
+    // voxels; that is not copied (module docs, *STI's fit test*).
     let delta = match ball {
         VsharpBall::StiSuite => 1.0 - 1e-9,
         VsharpBall::QsmJl => QSMJL_SMV_DELTA,
