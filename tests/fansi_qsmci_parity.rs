@@ -87,8 +87,12 @@ fn ndi_nltv_nltgv_l1qsm_match_the_fansi_containers() {
     for (c, is_tgv) in [(1, false), (2, true)] {
         let p = FansiParams { b0: B0, echo_times: te.clone(), is_tgv, ..Default::default() };
         assert_eq!(p.te, EchoTime::Spacing);
+        assert!(p.newton_guard);
         let chi = fansi(&x.field_fansi, &x.mask, &x.rss, &g, B0_DIR, &p, |_, _| {});
         check(CASES[c], &in_mask(&chi, &x.mask, spacing), &fx[c], TOL);
+        // The Newton guard (on by default) never acts here: bit-for-bit FANSI's unguarded step.
+        let original = fansi(&x.field_fansi, &x.mask, &x.rss, &g, B0_DIR, &FansiParams { newton_guard: false, ..p }, |_, _| {});
+        assert_eq!(chi, original, "{}: the Newton guard changed the result", CASES[c]);
     }
 
     let p = L1QsmParams { b0: B0, echo_times: te.clone(), ..Default::default() };
