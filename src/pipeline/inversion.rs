@@ -395,8 +395,8 @@ fn heidi_params(config: &InversionConfig, metadata: &ScanMetadata) -> Result<cra
 ///   would be kept as data (upstream: "DipoleFilter parameter must not be larger that Cone
 ///   threshold", `computesusceptibility_heidi.m` L922-923).
 ///
-/// The softer advice on seeds (LSQR is the reference; regularised seeds are discouraged) is in
-/// the `heidi.*` rules ([`super::rules`]).
+/// The softer advice on seeds (LSQR is the authors' seed; a regularised seed is suggested
+/// against, not preselected) is in the `heidi.*` rules ([`super::rules`]).
 pub fn heidi_seed_problem(config: &InversionConfig) -> Option<String> {
     if !config.apply_heidi {
         return None;

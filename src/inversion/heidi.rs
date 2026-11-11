@@ -93,7 +93,11 @@
 //!   regularised seed (MEDI, TV and the FANSI family, NLTV, iLSQR, STAR, AMP-PE, the
 //!   deep-learning methods) keeps its regularisation outside the cone, as only the cone is
 //!   replaced. The pipeline publishes this as the `heidi.seed-*` rules
-//!   ([`crate::pipeline::rules::RULES`]).
+//!   ([`crate::pipeline::rules::RULES`]), sized by the measurements below (decided 2026-11-11):
+//!   for the minimally regularised seeds LSQR is offered only as the authors' setting
+//!   (`heidi.seed-lsqr`, Reference); for the regularised seeds a minimally regularised method is
+//!   suggested with the author's reason but not preselected (`heidi.seed-regularised`,
+//!   Suggested), as neither data set shows a clear loss from keeping them.
 //! * **Measured** (2026-11-11; `examples/heidi_cone_fill_file.rs`). QSM-CI's simulated head
 //!   (7 T, isolated dipole stage: the true local field and mask), every seed as QSM-CI publishes
 //!   it (TKD and TSVD at threshold 0.1, which HEIDI accepts), HEIDI at its defaults, scored with

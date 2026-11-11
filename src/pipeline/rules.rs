@@ -57,7 +57,9 @@
 //!   - [`Strength::Suggested`]: QSM.rs measured a benefit on some data but not all (better in
 //!     vivo, slightly worse on QSM-CI's simulated head), so it is offered with its reason but
 //!     not preselected ([`Basis::Measured`]; decided 2026-11-10). E.g. NDI's in-mask weight
-//!     normaliser and WH-QSM's in-mask flat weight.
+//!     normaliser and WH-QSM's in-mask flat weight. Also advice an author states with its
+//!     reason where QSM.rs's measurements do not show a clear benefit on all data
+//!     ([`Basis::Stated`]; decided 2026-11-11): HEIDI's seed (`heidi.seed-regularised`).
 //!   - [`Strength::Reference`]: the original authors' setting ([`Kind::Reference`]): their code
 //!     or paper simply does it ([`Basis::ReferenceChoice`]), or their README or a code comment
 //!     instructs it without saying why ([`Basis::Stated`]).
@@ -131,7 +133,8 @@ pub enum Strength {
     /// where nobody has said why it is needed or better ([`Kind::Reference`]). Never preselected.
     Reference,
     /// Better for a measured reason on some data but not all (e.g. better in vivo, slightly worse
-    /// on QSM-CI's simulated head): offered with its reason, but never preselected
+    /// on QSM-CI's simulated head), or for an author's stated reason that QSM.rs's measurements
+    /// do not clearly confirm: offered with its reason, but never preselected
     /// ([`Strength::preselected`]).
     Suggested,
     /// A combination known to fail (measured, or stated by the authors with the reason).
@@ -2069,11 +2072,25 @@ pub static RULES: &[Rule] = &[
         "The HEIDI package denoises the field with ITK's GradientAnisotropicDiffusion executable, \
          which works in float",
         "qsm_heidi computesusceptibility_heidi.m L1439, diffusionimagefilter.m L129-134 (4592631); QSM.rs heidi.rs docs (AnisotropicDiffusionParams::reference_itk)"),
-    discourage("heidi.seed-regularised", &[HEIDI_ON], "inversion.algorithm",
-        HEIDI_REGULARISED_SEEDS, Choice("lsqr"), Basis::Stated,
-        "HEIDI replaces only the dipole cone, so this method's regularisation outside the cone is \
-         kept; HEIDI takes that region from a minimally regularised, near data-consistent solution",
-        "Schweser et al. 2012 NeuroImage 62:2083 (HEIDI); QSM.rs heidi.rs docs (Any seed)"),
+    // Not preselected (decided 2026-11-11): the reason is the HEIDI author's, but the measurements
+    // (HEIDI module docs, *Any seed*) show no clear loss from keeping a regularised seed under
+    // HEIDI. On QSM-CI's simulated head, after HEIDI, FANSI nlTV (0.708) and L1-QSM (0.721)
+    // beat LSQR (0.575), while TV (0.390), HD-QSM (0.554), iR2QSM (0.540) and NLTV (0.578)
+    // trail it; in vivo, FANSI nlTV with HEIDI looks much like TKD or LSQR with HEIDI.
+    Rule {
+        id: "heidi.seed-regularised",
+        when: &[HEIDI_ON],
+        setting: "inversion.algorithm",
+        expect: Test::NoneOf { values: HEIDI_REGULARISED_SEEDS },
+        default: Choice("lsqr"),
+        unit: Unit::None,
+        strength: Strength::Suggested,
+        basis: Basis::Stated,
+        reason: "This method smooths its result, which also changes the parts of the data that \
+                 HEIDI keeps as they are; HEIDI cannot undo that. HEIDI's author recommends a \
+                 method with little or no smoothing, such as LSQR or TKD",
+        source: "HEIDI's author (personal communication, 2026-11-11); Schweser et al. 2012 NeuroImage 62:2083 (HEIDI); QSM.rs heidi.rs docs (Any seed: measured on QSM-CI's simulated head and in vivo, 2026-11-11)",
+    },
     heidi_truncation("heidi.tkd-cone", &[HEIDI_ON, inv(&[Choice("tkd")]), HEIDI_DEFAULT_CONE],
         "inversion.tkd.threshold"),
     heidi_truncation("heidi.tsvd-cone", &[HEIDI_ON, inv(&[Choice("tsvd")]), HEIDI_DEFAULT_CONE],
@@ -2723,7 +2740,7 @@ mod tests {
             match r.strength {
                 Reference => assert!(matches!(r.basis, Basis::ReferenceChoice | Basis::Stated), "{}", r.id),
                 Recommended => assert!(matches!(r.basis, Basis::Stated | Basis::Measured), "{}", r.id),
-                Suggested => assert_eq!(r.basis, Basis::Measured, "{}", r.id),
+                Suggested => assert!(matches!(r.basis, Basis::Measured | Basis::Stated), "{}", r.id),
                 Required | Discouraged => assert_ne!(r.basis, Basis::ReferenceChoice, "{}", r.id),
             }
         }
