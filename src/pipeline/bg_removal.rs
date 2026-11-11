@@ -146,10 +146,29 @@ pub fn run_bg_removal(
         }
     };
 
+    // STI Suite QSM_GUI's PolishMask (BgRemovalConfig::polish_mask).
+    let (local_field, eroded_mask) = if config.polish_mask {
+        let polished = polish_mask(&eroded_mask, &grid);
+        let local = local_field.iter().zip(&polished).map(|(&v, &m)| if m != 0 { v } else { 0.0 }).collect();
+        (local, polished)
+    } else {
+        (local_field, eroded_mask)
+    };
+
     Ok(BgRemovalResult {
         local_field_ppm: local_field,
         eroded_mask,
     })
+}
+
+/// STI Suite 3.0 QSM_GUI's `PolishMask` (P-code): the largest 26-connected component, holes
+/// filled as `imfill(·, 'holes')` does. Read off in licensed MATLAB R2023b (2026-11-11) from its
+/// inputs and outputs on the QSM-CI in-vivo scan, before and after V-SHARP: both calls reproduced
+/// voxel for voxel.
+pub fn polish_mask(mask: &[u8], grid: &crate::Grid) -> Vec<u8> {
+    let largest = crate::utils::connected::largest_component(
+        mask, grid.dims, crate::utils::connected::Connectivity::Full);
+    crate::utils::morphology::fill_holes(&largest, grid, usize::MAX)
 }
 
 /// Source the BFRnet weights and run inference, whole-volume or tiled (`tile`). Requires the
@@ -192,6 +211,22 @@ fn run_bfrnet(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// PolishMask keeps the largest 26-connected component (a corner-touching voxel belongs to
+    /// it) and fills its enclosed hole; a separate blob goes.
+    #[test]
+    fn polish_mask_keeps_the_largest_component_with_its_holes_filled() {
+        let grid = crate::Grid::new(7, 7, 7, 1.0, 1.0, 1.0);
+        let idx = |i: usize, j: usize, k: usize| i + 7 * (j + 7 * k);
+        let mut m = vec![0u8; 343];
+        for k in 1..4 { for j in 1..4 { for i in 1..4 { m[idx(i, j, k)] = 1; } } }
+        m[idx(2, 2, 2)] = 0; // an enclosed hole
+        m[idx(4, 4, 4)] = 1; // touches the cube at a corner only
+        m[idx(6, 6, 6)] = 1; // a separate blob
+        let p = polish_mask(&m, &grid);
+        assert_eq!((p[idx(2, 2, 2)], p[idx(4, 4, 4)], p[idx(6, 6, 6)]), (1, 1, 0));
+        assert_eq!(p.iter().filter(|&&v| v != 0).count(), 28);
+    }
 
     #[test]
     fn test_bg_removal_dispatches_vsharp() {

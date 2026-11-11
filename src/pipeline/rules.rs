@@ -557,6 +557,9 @@ pub const SETTINGS: &[(&str, &str)] = &[
     ("masking.min_intensity", "Each mask section's lowest input intensity kept (its MinIntensity refinement; 0 = none)"),
     ("masking.majority", "Each mask section's 3×3×3 majority filter (its Majority refinement, bool)"),
     ("masking.close_radius", "Each mask section's closing radius, voxels (its Close refinement; 0 = none)"),
+    ("masking.threshold_method", "Each threshold generator's method (MaskThresholdMethod::id): otsu, fixed, percentile or sti-gui; only for a threshold section"),
+    ("masking.largest_component", "Each mask section keeps only its largest 26-connected component (its LargestComponent refinement, bool)"),
+    ("masking.imfill", "Each mask section's holes filled whatever their size, as MATLAB's imfill(·, 'holes') (its Imfill refinement, bool)"),
     ("masking.hd_bet.inference", "Each HD-BET step's inference: full-volume, sliding-window (HdBetInference::SLIDING_WINDOW), low-memory (HdBetInference::LOW_MEMORY) or custom-window"),
     ("field_mapping.unwrapping_algorithm", "Phase unwrapping (UnwrappingAlgorithm::id)"),
     ("field_mapping.romeo.weights", "ROMEO's edge weights (RomeoParams::weights_id): romeo4 (ROMEO.jl's :romeo), romeo3 (the romeo command line's with a magnitude: no phase linearity), romeo2, romeo6, bestpath or custom; only with ROMEO"),
@@ -574,6 +577,7 @@ pub const SETTINGS: &[(&str, &str)] = &[
     ("field_mapping.laplacian_unmasked", "Laplacian unwrapping on the raw phase over the whole volume, not the phase zeroed outside the mask (bool); only with Laplacian unwrapping"),
     ("bg_removal.algorithm", "Background field removal (BgRemovalAlgorithm::id)"),
     ("bg_removal.vsharp.deconvolve", "V-SHARP's TSVD deconvolution (bool); only with V-SHARP"),
+    ("bg_removal.polish_mask", "STI Suite QSM_GUI's PolishMask after background removal: largest 26-connected component, holes filled (BgRemovalConfig::polish_mask, bool)"),
     ("bg_removal.vsharp.max_radius", "V-SHARP's largest kernel radius, mm; only with V-SHARP"),
     ("bg_removal.vsharp.min_radius", "V-SHARP's smallest kernel radius, mm; only with V-SHARP"),
     ("bg_removal.vsharp.radius_step", "V-SHARP's step between kernel radii, mm; only with V-SHARP"),
@@ -743,6 +747,14 @@ pub fn current(input: &RuleInput, facts: &ScanFacts, setting: &str) -> Option<Ve
             }).unwrap_or(0.0))).collect(),
         "masking.majority" => c.masking.sections.iter().map(|s| Current::Bool(
             s.refinements.iter().any(|op| matches!(op, super::config::MaskOp::Majority)))).collect(),
+        "masking.threshold_method" => c.masking.sections.iter().filter_map(|s| match &s.generator {
+            super::config::MaskOp::Threshold { method, .. } => Some(Current::Choice(method.id())),
+            _ => None,
+        }).collect(),
+        "masking.largest_component" => c.masking.sections.iter().map(|s| Current::Bool(
+            s.refinements.iter().any(|op| matches!(op, super::config::MaskOp::LargestComponent)))).collect(),
+        "masking.imfill" => c.masking.sections.iter().map(|s| Current::Bool(
+            s.refinements.iter().any(|op| matches!(op, super::config::MaskOp::Imfill)))).collect(),
         "masking.close_radius" => c.masking.sections.iter().map(|s| Current::Number(
             s.refinements.iter().find_map(|op| match op {
                 super::config::MaskOp::Close { radius } => Some(*radius as f64),
@@ -817,6 +829,7 @@ pub fn current(input: &RuleInput, facts: &ScanFacts, setting: &str) -> Option<Ve
             Current::Bool(c.field_mapping.laplacian_unmasked),
         ),
         "bg_removal.vsharp.deconvolve" => gated(vsharp, Current::Bool(c.bg_removal.vsharp.deconvolve)),
+        "bg_removal.polish_mask" => gated(inv_input.needs_bg_removal(), Current::Bool(c.bg_removal.polish_mask)),
         "bg_removal.vsharp.max_radius" => gated(vsharp, Current::Number(c.bg_removal.vsharp.max_radius)),
         "bg_removal.vsharp.min_radius" => gated(vsharp, Current::Number(c.bg_removal.vsharp.min_radius)),
         "bg_removal.vsharp.radius_step" => gated(vsharp, Current::Number(c.bg_removal.vsharp.radius_step)),
@@ -1206,6 +1219,12 @@ const CHI_SEP_TOOLBOX_ITERATIVE: &[Value] = &[Choice("chi-sep-ilsqr"), Choice("c
 /// QSMnetME: the χ-separation toolbox's QSM network, trained on that toolbox's pipeline.
 const QSMNETME: &[Value] = &[Choice("qsmnetme")];
 const STI: &[Value] = &[Choice("star"), Choice("ilsqr")];
+const STI_NOT_REFERENCE_NONE: &[Value] =
+    &[Choice("decompose"), Choice("chi-sep-ilsqr"), Choice("chi-sep-medi"), Choice("chi-sepnet")];
+const STI_GUI_MASK_SOURCE: &str = "STI Suite 3.0 QSM_GUI driven headless with every call logged, licensed MATLAB \
+    R2023b, 2026-11-11 (QSM-CI#421 STI probe; thresh_tool.m l. 15-36, 84-89, 143; mythresh and \
+    PolishMask are P-code, read off from their logged inputs and outputs); QSM.rs \
+    utils::sti_gui_threshold, pipeline::bg_removal::polish_mask";
 /// HEIDI's cone fill is on (`inversion.apply_heidi`): the trigger of the `heidi.*` rules.
 const HEIDI_ON: Condition = method("inversion.apply_heidi", &[Bool(true)]);
 /// Inversions with no local field to fill the cone from (the total-field and phase methods).
@@ -1304,6 +1323,36 @@ pub static RULES: &[Rule] = &[
     // The rest of each toolbox's mask recipe: what BET reads, how that image is corrected, and
     // what is done to the mask after. QSMxT's `bet` preset (BET on the corrected RSS, then a
     // 2-voxel erosion) does none of these toolboxes' recipes.
+    // STI Suite 3.0 QSM_GUI's "Thresholding" mask, which its iLSQR runs on (the STI pipeline is
+    // the GUI's iLSQR path, decisions 15(2), 27). Its "single button" (STAR-QSM) masks with
+    // Getmasking instead, which is P-code that calls no traceable function, so these rules are
+    // iLSQR's only. The GUI stores the mask with only the slices up to its bounding box's last
+    // (126 of 128 on the QSM-CI scan) and V-SHARP takes it so; not copied (the missing slices are
+    // outside the mask), unless parity shows it matters.
+    reference("sti.mask-threshold", &[inv(&[Choice("ilsqr")]), unless_sep(CHI_SEP_TOOLBOX)],
+        "masking.generator", &[Choice("threshold")],
+        "STI Suite's QSM_GUI masks by thresholding the magnitude", STI_GUI_MASK_SOURCE),
+    reference("sti.mask-threshold-gui",
+        &[inv(&[Choice("ilsqr")]), unless_sep(CHI_SEP_TOOLBOX), method("masking.generator", &[Choice("threshold")])],
+        "masking.threshold_method", &[Choice("sti-gui")],
+        "QSM_GUI's threshold is the level its thresh_tool starts at: Otsu (graythresh) on the middle \
+         slice, scaled to that slice's maximum", STI_GUI_MASK_SOURCE),
+    reference("sti.mask-input", &[inv(&[Choice("ilsqr")]), unless_sep(CHI_SEP_TOOLBOX)], "masking.input",
+        &[Choice("magnitude-last")], "QSM_GUI thresholds the last echo's magnitude (the last volume loaded)",
+        STI_GUI_MASK_SOURCE),
+    reference("sti.mask-no-correction", &[inv(&[Choice("ilsqr")]), unless_sep(CHI_SEP_TOOLBOX)],
+        "masking.inhomogeneity_correction", &[Choice("none")],
+        "QSM_GUI thresholds the magnitude as loaded, with no bias-field correction", STI_GUI_MASK_SOURCE),
+    reference("sti.mask-largest-component", &[inv(&[Choice("ilsqr")]), unless_sep(CHI_SEP_TOOLBOX)],
+        "masking.largest_component", &[Bool(true)],
+        "QSM_GUI keeps the thresholded mask's largest connected component (bwlabeln, regionprops)",
+        STI_GUI_MASK_SOURCE),
+    reference("sti.mask-imfill", &[inv(&[Choice("ilsqr")]), unless_sep(CHI_SEP_TOOLBOX)],
+        "masking.imfill", &[Bool(true)],
+        "QSM_GUI fills every hole of that component (regionprops' FilledImage)", STI_GUI_MASK_SOURCE),
+    reference("sti.mask-no-erosion", &[inv(&[Choice("ilsqr")]), unless_sep(CHI_SEP_TOOLBOX)],
+        "masking.erosion", &[Number(0.0)],
+        "QSM_GUI does not erode its mask (V-SHARP erodes it)", STI_GUI_MASK_SOURCE),
     reference("medi.mask-input", &[inv(&[Choice("medi")])], "masking.input", &[Choice("magnitude")],
         "The MEDI toolbox runs BET on the root-sum-of-squares magnitude over echoes",
         MEDI_MASK_SOURCE),
@@ -1681,6 +1730,14 @@ pub static RULES: &[Rule] = &[
     reference("sti.bg-vsharp", &[inv(STI)], "bg_removal.algorithm", VSHARP,
         "STI Suite's QSM_GUI feeds iLSQR and STAR-QSM the V-SHARP local field",
         "STI Suite 3.0 QSM_GUI, probed headless (recorded in QSM.rs star.rs and ilsqr.rs docs)"),
+    // STI Suite QSM_GUI runs PolishMask on V-SHARP's mask before either inversion (probed headless,
+    // licensed MATLAB R2023b, 2026-11-11; QSM.rs pipeline::bg_removal::polish_mask). Not the
+    // χ-separation toolbox, whose script calls V_SHARP itself.
+    reference("sti.vsharp-polish-mask", &[inv(STI), bg(VSHARP), unless_sep(CHI_SEP_TOOLBOX)],
+        "bg_removal.polish_mask", &[Bool(true)],
+        "STI Suite's QSM_GUI polishes V-SHARP's mask (largest connected component, holes filled) \
+         and inverts the field inside it",
+        STI_GUI_MASK_SOURCE),
     reference("sti.vsharp-no-deconvolve", &[inv(STI), bg(VSHARP)], "bg_removal.vsharp.deconvolve",
         &[Bool(false)],
         "STI Suite's V_SHARP does not deconvolve",
@@ -2122,6 +2179,14 @@ pub static RULES: &[Rule] = &[
     reference("qsmart.reference-none", &[inv(&[Choice("qsmart")])], "reference", &[Choice("none")],
         "QSMART's result is adjust_offset's combined χ, which nothing references afterwards",
         "QSMART QSMART.m l. 43-45; adjust_offset.m"),
+    // STI Suite QSM_GUI keeps QSM_iLSQR's and QSM_star's output as they return it (the GUI's
+    // stored χ equals the function's output exactly; probed 2026-11-11). Not DECOMPOSE, which
+    // runs STAR-QSM per echo and references its own χ (decompose.reference-mean), nor the
+    // χ-separation toolbox, whose script is its own pipeline (chi-sep.reference-none).
+    reference("sti.reference-none", &[inv(STI), unless_sep(STI_NOT_REFERENCE_NONE)], "reference",
+        &[Choice("none")],
+        "STI Suite's QSM_GUI keeps the inversion's χ as it is, without referencing it",
+        STI_GUI_MASK_SOURCE),
     reference("heidi.reference-none", &[HEIDI_ON, inv(&[Choice("lsqr")])], "reference", &[Choice("none")],
         "The authors' LSQR/HEIDI pipeline saves HEIDI's χ in ppm without referencing it",
         "qsm_heidi inversion_heidi.m L55-65 (4592631)"),
@@ -2286,6 +2351,18 @@ mod tests {
             })),
             ("qsmart.mask-no-erosion", Case::new(inversion(I::Qsmart))),
             ("qsmart.mask-threshold", Case::new(inversion(I::Qsmart))),
+            ("sti.mask-threshold", Case::new(|c| {
+                inversion(I::Ilsqr)(c);
+                c.cfg.masking.sections[0].generator = MaskOp::Bet(Default::default());
+            })),
+            ("sti.mask-threshold-gui", Case::new(inversion(I::Ilsqr))),
+            ("sti.mask-input", Case::new(inversion(I::Ilsqr))),
+            ("sti.mask-no-correction", Case::new(inversion(I::Ilsqr))),
+            ("sti.mask-largest-component", Case::new(inversion(I::Ilsqr))),
+            ("sti.mask-imfill", Case::new(inversion(I::Ilsqr))),
+            ("sti.mask-no-erosion", Case::new(inversion(I::Ilsqr))),
+            ("sti.vsharp-polish-mask", Case::new(inversion(I::Star))),
+            ("sti.reference-none", Case::new(inversion(I::Ilsqr))),
             ("qsmart.mask-majority", Case::new(inversion(I::Qsmart))),
             ("qsmart.mask-close", Case::new(inversion(I::Qsmart))),
             ("mindgrab.wasm-heap", Case::new(|c| {

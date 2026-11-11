@@ -216,6 +216,12 @@ pub fn apply_mask_ops(
                     MaskThresholdMethod::Otsu => {
                         crate::utils::otsu_threshold(input_data, 256)
                     }
+                    MaskThresholdMethod::StiGui => {
+                        mask = crate::utils::sti_gui_threshold(input_data, metadata.dims)
+                            .ok_or_else(|| PipelineError::InvalidInput(
+                                "STI Suite's thresholding needs a non-zero middle slice".into()))?;
+                        continue;
+                    }
                     MaskThresholdMethod::Fixed => value.unwrap_or(0.5),
                     MaskThresholdMethod::Percentile => {
                         let pct = value.unwrap_or(75.0) / 100.0;
@@ -261,6 +267,13 @@ pub fn apply_mask_ops(
             }
             MaskOp::Majority => {
                 mask = majority(&mask, &grid);
+            }
+            MaskOp::LargestComponent => {
+                mask = crate::utils::connected::largest_component(
+                    &mask, metadata.dims, crate::utils::connected::Connectivity::Full);
+            }
+            MaskOp::Imfill => {
+                mask = fill_holes(&mask, &grid, usize::MAX);
             }
             MaskOp::FillHoles { max_size } => {
                 let effective_size = if *max_size == 0 { n_voxels / 20 } else { *max_size };
