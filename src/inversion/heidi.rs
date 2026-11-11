@@ -84,13 +84,64 @@
 //!   passes the field and the seed in Hz/2π, a factor `(2π)²·TE` (≈ 0.8 at TE = 20 ms) from
 //!   those; the factor moves the gradient thresholds and NESTA's absolute final μ only.
 //! * **Seed suitability.** The paper takes the well-conditioned region from a minimally
-//!   regularised inversion and only the cone from the TV prior. A seed whose region outside the
-//!   cone is close to data-consistent fits that: LSQR (the reference, which [`heidi`] runs), and
+//!   regularised inversion and only the cone from the TV prior. HEIDI's author (personal
+//!   communication, 2026-11-11) adds why: HEIDI needs k-space outside the cone unaltered, and a
+//!   regularised method alters the well-conditioned coefficients too (to satisfy its spatial
+//!   prior), which HEIDI keeps as data and cannot recover by design. A seed whose region outside
+//!   the cone is close to data-consistent fits: LSQR (the reference, which [`heidi`] runs), and
 //!   TKD, TSVD, small-λ Tikhonov, NDI and RTS (RTS already splits k-space the same way). A
 //!   regularised seed (MEDI, TV and the FANSI family, NLTV, iLSQR, STAR, AMP-PE, the
 //!   deep-learning methods) keeps its regularisation outside the cone, as only the cone is
 //!   replaced. The pipeline publishes this as the `heidi.seed-*` rules
 //!   ([`crate::pipeline::rules::RULES`]).
+//! * **Measured** (2026-11-11; `examples/heidi_cone_fill_file.rs`). QSM-CI's simulated head
+//!   (7 T, isolated dipole stage: the true local field and mask), every seed as QSM-CI publishes
+//!   it (TKD and TSVD at threshold 0.1, which HEIDI accepts), HEIDI at its defaults, scored with
+//!   QSM-CI's scorer. XSIM / NRMSE % / calcification streak, seed → seed with HEIDI:
+//!
+//!   | seed | without HEIDI | with HEIDI |
+//!   |---|---|---|
+//!   | LSQR | 0.604 / 51.1 / 0.027 | 0.574 / 52.8 / 0.017 ([`heidi`], unmasked seed: 0.575 / 52.7 / 0.017) |
+//!   | TKD | 0.779 / 38.5 / 0.029 | 0.640 / 49.1 / 0.018 |
+//!   | TSVD | 0.726 / 40.3 / 0.023 | 0.638 / 49.0 / 0.017 |
+//!   | Tikhonov | 0.754 / 38.7 / 0.027 | 0.625 / 48.7 / 0.017 |
+//!   | NDI | 0.672 / 51.8 / 0.079 | 0.674 / 52.0 / 0.050 |
+//!   | RTS | 0.704 / 41.5 / 0.015 | 0.607 / 49.6 / 0.022 |
+//!   | MEDI | 0.563 / 62.6 / 0.027 | 0.562 / 61.6 / 0.028 |
+//!   | TV | 0.483 / 47.7 / 0.008 | 0.390 / 56.8 / 0.008 |
+//!   | NLTV | 0.722 / 38.5 / 0.017 | 0.578 / 49.3 / 0.015 |
+//!   | FANSI nlTV | 0.872 / 39.8 / 0.032 | 0.708 / 50.6 / 0.022 |
+//!   | FANSI nlTGV | 0.867 / 40.0 / 0.032 | 0.706 / 50.7 / 0.022 |
+//!   | L1-QSM | 0.858 / 38.5 / 0.033 | 0.721 / 48.6 / 0.030 |
+//!   | WH-QSM | 0.862 / 33.2 / 0.020 | 0.658 / 49.0 / 0.020 |
+//!   | HD-QSM | 0.686 / 39.1 / 0.004 | 0.554 / 49.7 / 0.005 |
+//!   | AMP-PE | 0.694 / 52.5 / 0.029 | 0.658 / 54.8 / 0.029 |
+//!   | iLSQR | 0.724 / 40.8 / 0.013 | 0.632 / 49.1 / 0.012 |
+//!   | STAR | 0.622 / 48.9 / 0.030 | 0.593 / 51.1 / 0.022 |
+//!   | xQSM | 0.662 / 49.8 / 0.016 | 0.570 / 54.9 / 0.013 |
+//!   | QSMnet | 0.674 / 49.0 / 0.029 | 0.613 / 53.3 / 0.032 |
+//!   | QSMnet+ | 0.584 / 52.8 / 0.012 | 0.533 / 56.3 / 0.015 |
+//!   | QSMnet-ME | 0.483 / 62.4 / 0.061 | 0.467 / 62.9 / 0.048 |
+//!   | QSMGAN | 0.266 / 77.5 / 0.050 | 0.265 / 77.0 / 0.065 |
+//!   | iR2QSM | 0.719 / 41.2 / 0.012 | 0.540 / 53.6 / 0.012 |
+//!   | LPCNN | 0.662 / 45.7 / 0.026 | 0.564 / 53.1 / 0.026 |
+//!   | MoDL-QSM | 0.494 / 59.1 / 0.056 | 0.436 / 62.5 / 0.053 |
+//!
+//!   The phantom has almost no strong sources (one 24-voxel calcification near −2.1 ppm; 25
+//!   voxels in the mask above 0.5 ppm), so it shows HEIDI's streak reduction (the streak column,
+//!   30–40 % lower for the minimally regularised seeds) but not its overall benefit: over the
+//!   whole brain the TV cone fill costs XSIM for almost every seed. What it does show: LSQR is
+//!   not a better HEIDI seed than the other minimally regularised methods, and the regularised
+//!   seeds lose the most. In vivo (EMTP travelling head, 3 T, 0.8 mm) HEIDI removes the visible
+//!   streaking after TKD and after LSQR alike, and the two results look the same; after FANSI
+//!   nlTV (a regularised seed, whose own result there is visibly streaked) HEIDI removes most of
+//!   the streaking too, and the result looks much like the other two.
+//! * **Masked or unmasked seed.** The authors' pipeline seeds HEIDI with LSQR's unmasked
+//!   `susceptibilityRaw` (`inversion_lsqr.m` L60), as [`heidi`] does; `Wrapper_QSM_HEIDI4all` and
+//!   [`heidi_cone_fill`] take the method's masked result. Re-running every seed whose output mask
+//!   can be switched off (LSQR, TKD, TSVD, Tikhonov, RTS, NDI, TV, NLTV, FANSI nlTV and nlTGV,
+//!   L1-QSM, HD-QSM) without it changed XSIM by at most 0.001 on the simulated head, so the
+//!   masked seed is kept. MEDI, WH-QSM, AMP-PE, iLSQR, STAR and the networks mask intrinsically.
 //! * **Truncated seeds.** TKD and TSVD zero or clip `|D| < threshold`; with that threshold above
 //!   the cone threshold, truncated coefficients would be kept as if they were data. Upstream
 //!   stops with an error there ("DipoleFilter parameter must not be larger that Cone threshold",
