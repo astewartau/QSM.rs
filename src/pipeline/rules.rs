@@ -41,7 +41,7 @@
 //!   - [`Kind::Reasoned`], **a reasoned recommendation**: there is a stated reason why the
 //!     setting is needed or better (the method cannot run, a combination is known to fail, the
 //!     authors explain why, or QSM.rs measured it), and the reason is in [`Rule::reason`]. E.g.
-//!     HEIDI's LSQR seed (the cone fill keeps everything outside the cone), PDF's `n_cg` (measured).
+//!     no smoothing method ahead of HEIDI (its author's reason), PDF's `n_cg` (measured).
 //!
 //!   The kind is fixed by the [`Strength`]: [`Strength::Reference`] is the reference kind, every
 //!   other strength is reasoned. It is one field rather than two so that the two cannot
@@ -57,7 +57,9 @@
 //!   - [`Strength::Suggested`]: QSM.rs measured a benefit on some data but not all (better in
 //!     vivo, slightly worse on QSM-CI's simulated head), so it is offered with its reason but
 //!     not preselected ([`Basis::Measured`]; decided 2026-11-10). E.g. NDI's in-mask weight
-//!     normaliser and WH-QSM's in-mask flat weight.
+//!     normaliser and WH-QSM's in-mask flat weight. Also advice an author states with its
+//!     reason where QSM.rs's measurements do not show a clear benefit on all data
+//!     ([`Basis::Stated`]; decided 2026-11-11): HEIDI's seed (`heidi.seed-regularised`).
 //!   - [`Strength::Reference`]: the original authors' setting ([`Kind::Reference`]): their code
 //!     or paper simply does it ([`Basis::ReferenceChoice`]), or their README or a code comment
 //!     instructs it without saying why ([`Basis::Stated`]).
@@ -131,7 +133,8 @@ pub enum Strength {
     /// where nobody has said why it is needed or better ([`Kind::Reference`]). Never preselected.
     Reference,
     /// Better for a measured reason on some data but not all (e.g. better in vivo, slightly worse
-    /// on QSM-CI's simulated head): offered with its reason, but never preselected
+    /// on QSM-CI's simulated head), or for an author's stated reason that QSM.rs's measurements
+    /// do not clearly confirm: offered with its reason, but never preselected
     /// ([`Strength::preselected`]).
     Suggested,
     /// A combination known to fail (measured, or stated by the authors with the reason).
@@ -1232,10 +1235,11 @@ const HEIDI_NO_LOCAL_FIELD: &[Value] = &[
     Choice("tfi"), Choice("tgv"), Choice("qsmart"), Choice("autoqsm"), Choice("nextqsm"),
     Choice("iqsm"), Choice("iqsm-plus"),
 ];
-/// Seeds whose region outside the cone is near data-consistent (the HEIDI module docs, *Any
-/// seed*), but for LSQR (the reference) and RTS (`heidi.seed-rts`).
+/// Minimally regularised seeds other than LSQR (the reference): their k-space outside the cone
+/// is near data-consistent (the HEIDI module docs, *Any seed*). RTS is one: its first step is a
+/// TKD-like division outside the cone, and its TV changes only the cone.
 const HEIDI_UNREGULARISED_SEEDS: &[Value] =
-    &[Choice("tkd"), Choice("tsvd"), Choice("tikhonov"), Choice("ndi")];
+    &[Choice("tkd"), Choice("tsvd"), Choice("tikhonov"), Choice("ndi"), Choice("rts")];
 /// Seeds whose regularisation outside the cone HEIDI would keep.
 const HEIDI_REGULARISED_SEEDS: &[Value] = &[
     Choice("medi"), Choice("tv"), Choice("nltv"), Choice("fansi"), Choice("fansi-tgv"),
@@ -2044,9 +2048,11 @@ pub static RULES: &[Rule] = &[
         source: "QSM.rs heidi.rs docs (Any seed); run_heidi_cone_fill",
     },
     // The seed rules name the seeds they are about in `expect` (none of them), not in `when`, so
-    // each fires on its own seeds only and is resolved by the seed it names. Every seed but LSQR
-    // is offered LSQR: recommended for the unregularised seeds and RTS, discouraged (with the
-    // reason) for the regularised ones, required where there is no local field.
+    // each fires on its own seeds only and is resolved by the seed it names. Measured on QSM-CI's
+    // simulated head (HEIDI module docs, *Any seed*: XSIM of each seed with HEIDI), LSQR is not a
+    // better seed than the other minimally regularised methods (LSQR 0.575; TKD 0.640, TSVD 0.638,
+    // Tikhonov 0.625, NDI 0.674, RTS 0.607), and in vivo TKD and LSQR give the same streak-free
+    // result; so for those, LSQR is offered only as the authors' setting, not preselected.
     Rule {
         id: "heidi.seed-lsqr",
         when: &[HEIDI_ON],
@@ -2054,35 +2060,37 @@ pub static RULES: &[Rule] = &[
         expect: Test::NoneOf { values: HEIDI_UNREGULARISED_SEEDS },
         default: Choice("lsqr"),
         unit: Unit::None,
-        strength: Strength::Recommended,
-        basis: Basis::Stated,
-        reason: "HEIDI as published keeps the well-conditioned k-space of a minimally regularised \
-                 LSQR solution and fills only the cone",
-        source: "Schweser et al. 2012 NeuroImage 62:2083 (HEIDI); qsm_heidi makefile, inversion_lsqr.m then inversion_heidi.m (4592631)",
-    },
-    Rule {
-        id: "heidi.seed-rts",
-        when: &[HEIDI_ON],
-        setting: "inversion.algorithm",
-        expect: Test::NoneOf { values: &[Choice("rts")] },
-        default: Choice("lsqr"),
-        unit: Unit::None,
-        strength: Strength::Recommended,
-        basis: Basis::Stated,
-        reason: "HEIDI's reference seed is LSQR; RTS already splits k-space at the cone and fills it \
-                 with TV of its own",
-        source: "Schweser et al. 2012 NeuroImage 62:2083 (HEIDI); Kames et al. 2018 NeuroImage 167:276 (RTS)",
+        strength: Strength::Reference,
+        basis: Basis::ReferenceChoice,
+        reason: "HEIDI's authors run it after LSQR. Other methods with little or no smoothing, \
+                 such as this one, work as well: HEIDI needs the data outside the cone left as \
+                 measured, and they leave it so",
+        source: "Schweser et al. 2012 NeuroImage 62:2083 (HEIDI); qsm_heidi makefile, inversion_lsqr.m then inversion_heidi.m (4592631); QSM.rs heidi.rs docs (Any seed: measured on QSM-CI's simulated head and in vivo, 2026-11-11)",
     },
     reference("heidi.denoise-itk-float", &[HEIDI_ON, inv(&[Choice("lsqr")])], "inversion.heidi.denoise_itk",
         &[Bool(true)],
         "The HEIDI package denoises the field with ITK's GradientAnisotropicDiffusion executable, \
          which works in float",
         "qsm_heidi computesusceptibility_heidi.m L1439, diffusionimagefilter.m L129-134 (4592631); QSM.rs heidi.rs docs (AnisotropicDiffusionParams::reference_itk)"),
-    discourage("heidi.seed-regularised", &[HEIDI_ON], "inversion.algorithm",
-        HEIDI_REGULARISED_SEEDS, Choice("lsqr"), Basis::Stated,
-        "HEIDI replaces only the dipole cone, so this method's regularisation outside the cone is \
-         kept; HEIDI takes that region from a minimally regularised, near data-consistent solution",
-        "Schweser et al. 2012 NeuroImage 62:2083 (HEIDI); QSM.rs heidi.rs docs (Any seed)"),
+    // Not preselected (decided 2026-11-11): the reason is the HEIDI author's, but the measurements
+    // (HEIDI module docs, *Any seed*) show no clear loss from keeping a regularised seed under
+    // HEIDI. On QSM-CI's simulated head, after HEIDI, FANSI nlTV (0.708) and L1-QSM (0.721)
+    // beat LSQR (0.575), while TV (0.390), HD-QSM (0.554), iR2QSM (0.540) and NLTV (0.578)
+    // trail it; in vivo, FANSI nlTV with HEIDI looks much like TKD or LSQR with HEIDI.
+    Rule {
+        id: "heidi.seed-regularised",
+        when: &[HEIDI_ON],
+        setting: "inversion.algorithm",
+        expect: Test::NoneOf { values: HEIDI_REGULARISED_SEEDS },
+        default: Choice("lsqr"),
+        unit: Unit::None,
+        strength: Strength::Suggested,
+        basis: Basis::Stated,
+        reason: "This method smooths its result, which also changes the parts of the data that \
+                 HEIDI keeps as they are; HEIDI cannot undo that. HEIDI's author recommends a \
+                 method with little or no smoothing, such as LSQR or TKD",
+        source: "HEIDI's author (personal communication, 2026-11-11); Schweser et al. 2012 NeuroImage 62:2083 (HEIDI); QSM.rs heidi.rs docs (Any seed: measured on QSM-CI's simulated head and in vivo, 2026-11-11)",
+    },
     heidi_truncation("heidi.tkd-cone", &[HEIDI_ON, inv(&[Choice("tkd")]), HEIDI_DEFAULT_CONE],
         "inversion.tkd.threshold"),
     heidi_truncation("heidi.tsvd-cone", &[HEIDI_ON, inv(&[Choice("tsvd")]), HEIDI_DEFAULT_CONE],
@@ -2301,8 +2309,9 @@ mod tests {
         assert_eq!(serde_json::to_value(rim).unwrap()["preselected"].as_bool(), Some(true));
     }
 
-    /// With HEIDI on, every inversion but LSQR gets a finding that offers LSQR: recommended,
-    /// discouraged (with its reason) or required, never only information.
+    /// With HEIDI on, every inversion but LSQR gets a `heidi.*` finding that offers LSQR (the
+    /// authors' seed): at least as the authors' setting, more strongly for the regularised and
+    /// the total-field methods.
     #[test]
     fn heidi_offers_lsqr_for_every_other_seed() {
         for &a in InversionAlgorithm::VARIANTS {
@@ -2310,11 +2319,15 @@ mod tests {
             // TKD/TSVD at the cone threshold, so their truncation rule does not fire too.
             case.cfg.inversion.tkd.threshold = 0.1;
             case.cfg.inversion.tsvd.threshold = 0.1;
-            let lsqr = evaluate(&case.input(), &case.facts).into_iter().filter(|f| {
+            let lsqr: Vec<Strength> = evaluate(&case.input(), &case.facts).into_iter().filter(|f| {
                 f.rule.setting == "inversion.algorithm" && f.rule.id.starts_with("heidi.")
-                    && f.rule.default == Choice("lsqr") && f.rule.strength > Strength::Reference
-            }).count();
-            assert_eq!(lsqr > 0, a != InversionAlgorithm::Lsqr, "{a:?}: {:?}", case.ids());
+                    && f.rule.default == Choice("lsqr")
+            }).map(|f| f.rule.strength).collect();
+            assert_eq!(!lsqr.is_empty(), a != InversionAlgorithm::Lsqr, "{a:?}: {:?}", case.ids());
+            let minimal = HEIDI_UNREGULARISED_SEEDS.contains(&Choice(a.id()));
+            if a != InversionAlgorithm::Lsqr {
+                assert_eq!(lsqr.iter().all(|&s| s == Strength::Reference), minimal, "{a:?}: {lsqr:?}");
+            }
         }
     }
 
@@ -2476,7 +2489,6 @@ mod tests {
                 c.cfg.inversion.apply_heidi = true;
                 c.cfg.inversion.tkd.threshold = 0.1;
             })),
-            ("heidi.seed-rts", Case::new(|c| { inversion(I::Rts)(c); c.cfg.inversion.apply_heidi = true })),
             ("heidi.seed-regularised", Case::new(|c| { inversion(I::Medi)(c); c.cfg.inversion.apply_heidi = true })),
             ("heidi.tkd-cone", Case::new(|c| { inversion(I::Tkd)(c); c.cfg.inversion.apply_heidi = true })),
             ("heidi.tsvd-cone", Case::new(|c| { inversion(I::Tsvd)(c); c.cfg.inversion.apply_heidi = true })),
@@ -2714,7 +2726,8 @@ mod tests {
         assert_eq!(kind("complex-fit.unwrap-region-growing"), Kind::Reference);
         assert_eq!(kind("chi-sepnet.tukey-not-philips"), Kind::Reference);
         assert_eq!(kind("qsmnet.bg-vsharp"), Kind::Reference);
-        assert_eq!(kind("heidi.seed-lsqr"), Kind::Reasoned);
+        assert_eq!(kind("heidi.seed-lsqr"), Kind::Reference);
+        assert_eq!(kind("heidi.seed-regularised"), Kind::Reasoned);
         assert_eq!(kind("pdf.cg-iterations"), Kind::Reasoned);
     }
 
@@ -2727,7 +2740,7 @@ mod tests {
             match r.strength {
                 Reference => assert!(matches!(r.basis, Basis::ReferenceChoice | Basis::Stated), "{}", r.id),
                 Recommended => assert!(matches!(r.basis, Basis::Stated | Basis::Measured), "{}", r.id),
-                Suggested => assert_eq!(r.basis, Basis::Measured, "{}", r.id),
+                Suggested => assert!(matches!(r.basis, Basis::Measured | Basis::Stated), "{}", r.id),
                 Required | Discouraged => assert_ne!(r.basis, Basis::ReferenceChoice, "{}", r.id),
             }
         }
