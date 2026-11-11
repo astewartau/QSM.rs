@@ -229,6 +229,8 @@
 //! local field in Hz (l. 139), and the QSM from STI Suite `QSM_iLSQR(..., 'padsize', [12 12 12])`
 //! (l. 145, [`chisep_toolbox_ilsqr`]) passed as `option_data.qsm` (l. 170). R2′ is the user's,
 //! passed unmasked (see *R2′ outside the mask*). `N_std` (l. 76) is passed (l. 171) but not used.
+//! The QSM is used as `QSM_iLSQR` returns it: the script subtracts no mean from it (rule
+//! `chi-sep.reference-none`; on the QSM-CI in-vivo Prisma scan its mean in the mask is 9.75e-5 ppm).
 //!
 //! Reference: Shin, H.-G., Lee, J., Yun, Y. H., Yoo, S. H., Jang, J., Oh, S.-H., Nam, Y., Jung,
 //! S., Kim, S., Fukunaga, M., Kim, W., Choi, H. J., Lee, J. (2021). "χ-separation: Magnetic

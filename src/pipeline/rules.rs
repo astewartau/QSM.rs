@@ -2125,6 +2125,19 @@ pub static RULES: &[Rule] = &[
     reference("heidi.reference-none", &[HEIDI_ON, inv(&[Choice("lsqr")])], "reference", &[Choice("none")],
         "The authors' LSQR/HEIDI pipeline saves HEIDI's χ in ppm without referencing it",
         "qsm_heidi inversion_heidi.m L55-65 (4592631)"),
+    // The χ-separation toolbox's script reconstructs its QSM with STI Suite's QSM_iLSQR and hands
+    // it straight to chi_sep_iLSQR / chi_sep_MEDI as option_data.qsm: nothing is subtracted. On the
+    // QSM-CI in-vivo s005001 Prisma scan the toolbox's QSM (QSM-CI toolbox-pipeline-chisep v3) has
+    // a mean of 9.75e-5 ppm in the brain mask; mean referencing it was the whole 0.23 % NRMSE gap
+    // of QSMxT's published QSM against it, with χ+ and |χ−| equal to ≤ 0.0011 % (QSM-CI#425,
+    // 2026-11-11). Only with the toolbox's own iLSQR as the run's QSM: χ-sepnet's pipeline makes
+    // no QSM, and a QSM by another method is not the toolbox's.
+    reference("chi-sep.reference-none",
+        &[sep(CHI_SEP_TOOLBOX_ITERATIVE), inv(&[Choice("ilsqr")])], "reference", &[Choice("none")],
+        "The χ-separation toolbox's script uses its iLSQR QSM as QSM_iLSQR returns it, without \
+         referencing it",
+        "χ-separation toolbox v1.1.3 Chisep_script.m:145,158,170; QSM-CI toolbox-pipeline-chisep \
+         in vivo (QSM-CI#425)"),
     reference("susep-net.qsm-iqsm-plus", &[sep(&[Choice("susep-net")])], "inversion.algorithm",
         &[Choice("iqsm-plus")],
         "SUSEP-Net's in-vivo QSM input is from iQSM+",
@@ -2528,6 +2541,10 @@ mod tests {
             ("medi.reference-none", Case::new(inversion(I::Medi))),
             ("qsmart.reference-none", Case::new(inversion(I::Qsmart))),
             ("heidi.reference-none", Case::new(|c| { inversion(I::Lsqr)(c); c.cfg.inversion.apply_heidi = true })),
+            ("chi-sep.reference-none", Case::new(|c| {
+                separation(S::ChiSepIlsqr)(c);
+                c.cfg.inversion.algorithm = I::Ilsqr;
+            })),
             ("chi-sepnet.tukey-not-philips", Case::new(separation(S::ChiSepNet))),
             ("chi-sep.tukey-not-philips", Case::new(separation(S::ChiSepMedi))),
             ("chi-sep.tukey-philips", Case::new(|c| {
@@ -2831,6 +2848,16 @@ mod tests {
         }
         let decompose = Case::new(|c| { separation(SeparationAlgorithm::Decompose)(c); c.cfg.reference = QsmReference::None });
         assert!(fires(decompose, "decompose.reference-mean"));
+        // The χ-separation toolbox's iterative methods, with its iLSQR QSM only.
+        let chisep = |s: SeparationAlgorithm, a: InversionAlgorithm| Case::new(move |c| {
+            separation(s)(c);
+            c.cfg.inversion.algorithm = a;
+        });
+        for s in [SeparationAlgorithm::ChiSepIlsqr, SeparationAlgorithm::ChiSepMedi] {
+            assert!(fires(chisep(s, I::Ilsqr), "chi-sep.reference-none"), "{s:?}");
+            assert!(!fires(chisep(s, I::Rts), "chi-sep.reference-none"), "{s:?}");
+        }
+        assert!(!fires(chisep(SeparationAlgorithm::ChiSepNet, I::Ilsqr), "chi-sep.reference-none"));
     }
 
     /// The reference rules that apply to `case` (their conditions hold and their setting is in
