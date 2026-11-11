@@ -34,6 +34,53 @@
 //!
 //! The finite differences are FANSI's, on unit spacing whatever the voxel size.
 //!
+//! # Newton guard
+//! The fidelity auxiliary `z2` is found per voxel by Newton's method on
+//! `g(z2) = W*sin(z2 - phase) + mu2*z2 - rhs = 0`, with `W` the squared weight and
+//! `rhs = mu2*(D x + s2)` (`nlTV.m` L159, `nlTGV.m` L270, FANSI-toolbox 93044a3). FANSI takes the
+//! full Newton step with no safeguard, as QSM.jl's `nltv` does (see [`super::nltv`](mod@super::nltv)).
+//! Its derivative `W*cos(z2 - phase) + mu2` reaches 0 where `W` is about `mu2` (with the
+//! default `mu2 = 1`, a saturated weight: magnitude at least half the maximum, as in bright
+//! vessels) and the residual `z2 - phase` is near ±π; one such voxel takes a step of any size,
+//! which the x-update's FFT spreads over the volume.
+//!
+//! By default ([`FansiParams::newton_guard`]) each Newton iterate is kept in
+//! `[(rhs - W)/mu2, (rhs + W)/mu2]`, which brackets the root:
+//! - every root lies in it: at a root `mu2*z2 - rhs = -W*sin(z2 - phase)`, so
+//!   `|z2 - rhs/mu2| <= W/mu2`;
+//! - it holds a root: `g` at the lower end is `W*(sin(.) - 1) <= 0`, at the upper end
+//!   `W*(sin(.) + 1) >= 0`;
+//! - the root is unique for `W <= mu2` (always with the default `mu2 = 1`, since the weight is at
+//!   most 1): `g' >= mu2 - W >= 0`, zero only at isolated points. (With `mu2` below the weight
+//!   there can be several roots; all are in the bracket.)
+//!
+//! The guard is exact, not a tuning: an iterate inside the bracket is not changed (the step and
+//! the `delta` stopping test are bit-for-bit FANSI's), and a root is never outside it, so the
+//! fixed point is the same. Only an iterate that has left every root's neighbourhood is moved,
+//! to the bracket's end. It is the same safeguard as [`super::whqsm`](mod@super::whqsm)'s.
+//!
+//! Evidence (EMTP travelling heads, 11 Nov 2026): on a single-echo acquisition (TE 17 ms, 0.8 mm,
+//! 2.89 T; ROMEO + V-SHARP local field; radians at the 17 ms echo):
+//! - nlTV unguarded: max |χ| in the mask 1.8e8 ppm, 2.93 M of 2.93 M mask voxels above 10 ppm.
+//!   The blow-up happens in the first iterations, and the solve then stops at iteration 4 on
+//!   FANSI's own update test (8.9e-5 %), so the diverged map passes as converged.
+//!   Guarded: max 2.11 ppm, none above 10 ppm (p1/p99 −0.095/0.135 ppm), and the map looks like
+//!   a normal susceptibility map. It runs to the 150-iteration cap with the update still falling
+//!   (0.12 % against the 0.1 % tolerance). Clamping acts on 473 Newton iterates in the second
+//!   iteration, 23 by the 40th and 5-11 from the 100th on.
+//! - nlTGV unguarded: max 1.6e17 ppm, every mask voxel above 10 ppm, stopped as converged at
+//!   iteration 8. Guarded: max 2.12 ppm, none above 10 ppm (p1/p99 −0.094/0.135 ppm). The map is
+//!   sensible. It runs to the 150-iteration cap, with the update falling from 2.1 % (20th)
+//!   to 0.23 % (150th) but not monotonically (0.35-0.38 % between the 80th and 120th).
+//!   Clamping acts on 463 Newton iterates in the second iteration and 3-12 from the 80th on.
+//!
+//! On the fixture of `tests/fansi_qsmci_parity.rs` the guard never acts (the test asserts the
+//! guarded result is bit-for-bit the unguarded one), so the agreement with FANSI below is
+//! unchanged. Set `newton_guard: false` for FANSI's unguarded step. Safeguarded Newton with
+//! bisection (a bracket that shrinks at each step) would also converge in the few voxels that
+//! keep being clamped. It was not adopted because it can change iterates that stay inside the
+//! original bracket, and so would not be bit-for-bit FANSI's where FANSI converges.
+//!
 //! # Reference pipeline
 //! FANSI-toolbox at commit 93044a3 (<https://gitlab.com/cmilovic/FANSI-toolbox>). Its only
 //! full pipeline is `script_DICOM_Philips.m` (3T Philips, 5 echoes, TE1 4.0 ms, spacing 3.7 ms,
@@ -132,6 +179,11 @@ pub struct FansiParams {
     /// `dipole_kernel_angulated` as the original is run with; [`FansiKernel::Continuous`] is
     /// the crate's continuous kernel (see [`FansiKernel`] for the decision and the measurements).
     pub kernel: FansiKernel,
+    /// Keep each Newton iterate of the `z2` subproblem inside the interval that brackets its
+    /// root, `[(rhs - W)/mu2, (rhs + W)/mu2]` (default `true`; see the module docs, *Newton
+    /// guard*). `false` is `nlTV.m`/`nlTGV.m`'s unguarded step, for parity: it is the same
+    /// wherever the iterates stay in the bracket, and diverges where they do not.
+    pub newton_guard: bool,
 }
 
 impl Default for FansiParams {
@@ -150,6 +202,7 @@ impl Default for FansiParams {
             te: EchoTime::Spacing,
             is_tgv: false,
             kernel: FansiKernel::Discrete,
+            newton_guard: true,
         }
     }
 }
@@ -171,6 +224,27 @@ fn phase_and_weight(
     let phase = local_field.iter().map(|&f| f * ppm_to_rad).collect();
     let w = fansi_magnitude_weight(mask, magnitude).into_iter().map(|v| v * v).collect();
     (ppm_to_rad, phase, w)
+}
+
+/// The Newton update `z2 -= update` of the fidelity subproblem: FANSI's `step`, or with `guard`
+/// the step that lands on the nearer end of the root's bracket `[(rhs - w)/mu2, (rhs + w)/mu2]`
+/// when FANSI's would leave it (module docs, *Newton guard*). Inside the bracket it returns
+/// `step` itself, so the iterate and the `delta` stopping test are bit-for-bit FANSI's.
+#[inline]
+fn newton_update(z2: f64, step: f64, rhs: f64, w: f64, mu2: f64, guard: bool) -> f64 {
+    if !guard {
+        return step;
+    }
+    let (lo, hi) = ((rhs - w) / mu2, (rhs + w) / mu2);
+    let next = z2 - step;
+    // Comparisons rather than f64::clamp, which panics on NaN bounds.
+    if next < lo {
+        z2 - lo
+    } else if next > hi {
+        z2 - hi
+    } else {
+        step
+    }
 }
 
 /// L2 norm of a real slice.
@@ -365,7 +439,7 @@ fn nltv(
                 let a = z2[i] - phase[i];
                 let numer = w[i] * a.sin() + mu2 * z2[i] - rhs_z2[i];
                 let denom = w[i] * a.cos() + mu2;
-                update[i] = numer / denom;
+                update[i] = newton_update(z2[i], numer / denom, rhs_z2[i], w[i], mu2, params.newton_guard);
                 z2[i] -= update[i];
             }
             delta = if norm_old > 0.0 {
@@ -897,7 +971,7 @@ fn nltgv(
                 let a = z2[i] - phase[i];
                 let numer = w[i] * a.sin() + mu2 * z2[i] - rhs_z2[i];
                 let denom = w[i] * a.cos() + mu2;
-                update[i] = numer / denom;
+                update[i] = newton_update(z2[i], numer / denom, rhs_z2[i], w[i], mu2, params.newton_guard);
                 z2[i] -= update[i];
             }
             delta = if norm_old > 0.0 {
@@ -992,6 +1066,51 @@ mod tests {
 
         for &val in chi.iter() {
             assert!(val.abs() < 1e-6, "Zero field should give ~zero chi, got {}", val);
+        }
+    }
+
+    /// A smooth field of amplitude `amp` ppm on an 8³ grid; with a flat magnitude the data weight
+    /// is 1 = mu2 everywhere, so wherever the residual nears ±π the Newton step is singular.
+    fn saturated_case(amp: f64) -> (Vec<f64>, Vec<u8>, Vec<f64>, Grid) {
+        let n = 8;
+        let c = n as f64 / 2.0;
+        let field = (0..n * n * n)
+            .map(|i| {
+                let (x, y, z) = ((i % n) as f64 - c, ((i / n) % n) as f64 - c, (i / n / n) as f64 - c);
+                amp * (0.7 * x).sin() * (0.5 * y).cos() * (0.9 * z).sin()
+            })
+            .collect();
+        (field, vec![1u8; n * n * n], vec![1.0; n * n * n], Grid::new(n, n, n, 1.0, 1.0, 1.0))
+    }
+
+    fn max_abs(v: &[f64]) -> f64 {
+        v.iter().fold(0.0f64, |a, &x| if x.is_finite() { a.max(x.abs()) } else { f64::INFINITY })
+    }
+
+    fn run_saturated(amp: f64, is_tgv: bool, newton_guard: bool) -> Vec<f64> {
+        let (field, mask, mag, grid) = saturated_case(amp);
+        let p = FansiParams { b0: 3.0, echo_times: vec![0.02], max_iter: 30, is_tgv, newton_guard, ..FansiParams::default() };
+        fansi(&field, &mask, &mag, &grid, (0.0, 0.0, 1.0), &p, |_, _| {})
+    }
+
+    #[test]
+    fn newton_guard_stops_the_divergence() {
+        // 0.15 ppm is 2.4 rad at 3 T and 20 ms: nlTV.m's and nlTGV.m's unguarded step diverges,
+        // the guarded one stays at the field's scale.
+        for is_tgv in [false, true] {
+            let (original, guarded) = (max_abs(&run_saturated(0.15, is_tgv, false)), max_abs(&run_saturated(0.15, is_tgv, true)));
+            assert!(original > 1e6, "tgv {is_tgv}: the unguarded step should diverge here, max |chi| {original}");
+            assert!(guarded < 2.0, "tgv {is_tgv}: guarded max |chi| {guarded}");
+        }
+    }
+
+    #[test]
+    fn newton_guard_is_exact_inside_the_bracket() {
+        // At 0.05 ppm the iterates never leave the bracket: bit-for-bit the unguarded result.
+        for is_tgv in [false, true] {
+            let guarded = run_saturated(0.05, is_tgv, true);
+            assert!(max_abs(&guarded) > 0.05);
+            assert_eq!(guarded, run_saturated(0.05, is_tgv, false), "tgv {is_tgv}");
         }
     }
 
