@@ -163,3 +163,72 @@ mod tests {
         assert_eq!(otsu_threshold(&data, 256), 5.0);
     }
 }
+
+/// STI Suite 3.0 QSM_GUI's "Thresholding" mask, before its component and hole steps: the
+/// magnitude above the level its `thresh_tool` starts at, which the GUI keeps unless the user
+/// drags it. `None` when the middle slice is all zero (no level).
+///
+/// Read off in licensed MATLAB R2023b (2026-11-11) by driving the GUI headless with every call
+/// logged (QSM-CI#421 STI probe; `thresh_tool.m` is source, the GUI's `mythresh` is P-code). On
+/// the QSM-CI in-vivo s005001 Prisma scan the level (40.156864) and the mask (1,569,188 voxels)
+/// are reproduced exactly:
+/// 1. The GUI hands `thresh_tool` the middle axial slice of `input` (the last echo's magnitude:
+///    the GUI's `Mag` is the last volume loaded), scaled so its maximum is 256, in single
+///    precision. The middle slice was z = 64 (1-based) of 128; for an odd slice count the GUI's
+///    choice was not probed and `ceil(nz/2)` (MATLAB `round(nz/2)`) is assumed.
+/// 2. `thresh_tool` (lines 15-36, 84-89, 143): `im = round(S/max(S)*512)`, `lo`/`hi` its limits,
+///    [`graythresh`]`((im - lo)/(hi - lo))`, `my_level = level·(hi-lo) + lo`, returned as
+///    `my_level/512·max(S)`.
+/// 3. The mask is `input/max(slice)·256 > level` over the whole volume, in single precision.
+pub fn sti_gui_threshold(input: &[f64], dims: (usize, usize, usize)) -> Option<Vec<u8>> {
+    let (nx, ny, nz) = dims;
+    if nz == 0 || input.len() != nx * ny * nz {
+        return None;
+    }
+    let z = nz.div_ceil(2) - 1;
+    let slice = &input[z * nx * ny..(z + 1) * nx * ny];
+    let slice_max = slice.iter().map(|&v| v as f32).fold(f32::NEG_INFINITY, f32::max);
+    if slice_max.is_nan() || slice_max <= 0.0 {
+        return None;
+    }
+    let scaled = |v: f64| (v as f32) / slice_max * 256.0;
+    // thresh_tool: max_colors = max(S) = 256; im = round(S/max_colors*512).
+    let max_colors = slice.iter().map(|&v| scaled(v)).fold(f32::NEG_INFINITY, f32::max);
+    let im: Vec<f32> = slice.iter().map(|&v| (scaled(v) / max_colors * 512.0).round()).collect();
+    let lo = im.iter().copied().fold(f32::INFINITY, f32::min) as f64;
+    let hi = im.iter().copied().fold(f32::NEG_INFINITY, f32::max) as f64;
+    // graythresh (im2uint8, 256-bin Otsu) on the image normalised to its limits.
+    let norm: Vec<f64> = im.iter().map(|&v| if hi > lo { (v as f64 - lo) / (hi - lo) } else { 0.0 }).collect();
+    let level = graythresh(&norm);
+    let my_level = level * (hi - lo) + lo;
+    // levelUpdated = level/512*max_colors: a double times a single is single in MATLAB.
+    let level_256 = ((my_level / 512.0) as f32) * max_colors;
+    Some(input.iter().map(|&v| u8::from(scaled(v) > level_256)).collect())
+}
+
+#[cfg(test)]
+mod sti_gui_tests {
+    use super::sti_gui_threshold;
+
+    /// The level is Otsu's on the middle slice, scaled to that slice's maximum, and applies to the
+    /// whole volume: a two-level slice splits between its levels, and a voxel elsewhere is in
+    /// the mask exactly when it is above the same level.
+    #[test]
+    fn thresholds_the_volume_at_the_middle_slices_level() {
+        let (nx, ny, nz) = (4, 4, 3);
+        let mut v = vec![0.0; nx * ny * nz];
+        // Middle slice (z = 1): half at 10, half at 100.
+        for i in 0..nx * ny {
+            v[nx * ny + i] = if i < 8 { 10.0 } else { 100.0 };
+        }
+        // Other slices: values either side of the level, and above the slice's maximum. Otsu's
+        // maxima span every bin between the two levels, so the level is their mean bin, 54.8 here.
+        v[0] = 60.0;
+        v[1] = 5.0;
+        v[2 * nx * ny] = 300.0;
+        let m = sti_gui_threshold(&v, (nx, ny, nz)).unwrap();
+        assert_eq!(&m[nx * ny..2 * nx * ny], &[0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1][..]);
+        assert_eq!((m[0], m[1], m[2 * nx * ny]), (1, 0, 1));
+        assert!(sti_gui_threshold(&vec![0.0; nx * ny * nz], (nx, ny, nz)).is_none());
+    }
+}

@@ -93,9 +93,15 @@
 //!   `[12 12 12]` by 8–15 % relative, on three grids (64×64×48 at 1×1×1.5 mm and at 1 mm,
 //!   54×60×40 at 0.8×0.9×2 mm). `[12, 12, 12]` ([`STI_TEMPLATES_STAR_PAD`]) is the default that
 //!   `STI_Templates.m` lists, not what the function does.
-//! - **Masking**: the GUI thresholds the magnitude (`Support_Functions/CreateMask.m`: rescale,
-//!   threshold, largest connected component, fill holes; then the P-coded
-//!   `Getmasking`/`PolishMask`), not BET.
+//! - **Masking** (probed headless with every call logged, licensed MATLAB R2023b, 2026-11-11):
+//!   the GUI's "Thresholding" (the path its iLSQR takes) thresholds the last echo's magnitude at
+//!   `thresh_tool`'s starting level, keeps the largest 26-connected component and fills its holes
+//!   ([`crate::utils::sti_gui_threshold`], [`MaskOp::LargestComponent`](crate::pipeline::MaskOp::LargestComponent),
+//!   [`MaskOp::Imfill`](crate::pipeline::MaskOp::Imfill); rules `sti.mask-*`). Its "single
+//!   button", the STAR-QSM path, masks with the P-coded `Getmasking` instead, which calls no
+//!   traceable function and is not ported. Both then run `PolishMask` on V-SHARP's mask
+//!   ([`crate::pipeline::bg_removal::polish_mask`], rule `sti.vsharp-polish-mask`) and invert
+//!   inside the polished mask. Not BET.
 //! - **Data**: the v3.0 manual's test data are 3T multi-echo human brain GRE (0.9×0.9×2 mm,
 //!   3 echoes), single-echo human and mouse brain, and 2D GRE-EPI.
 //!

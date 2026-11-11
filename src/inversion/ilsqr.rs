@@ -144,8 +144,13 @@
 //! - **Chain** (the GUI's "3D GRE data" then "iLSQR" buttons): `MRPhaseUnwrap` on the raw,
 //!   unmasked phase of every echo (default `padsize`, 12 voxels), the unwrapped echoes
 //!   **summed**, `V_SHARP(Σφ, mask, 'smvsize', 12)` (12 is the GUI's "Radius" field default),
-//!   then `QSM_iLSQR` on V-SHARP's eroded mask. See [`crate::unwrap::laplacian`] and
-//!   [`crate::bgremove::vsharp`](mod@crate::bgremove::vsharp) for those stages.
+//!   then `QSM_iLSQR` on V-SHARP's eroded mask after `PolishMask`
+//!   ([`crate::pipeline::bg_removal::polish_mask`]), the local field zeroed outside it. See
+//!   [`crate::unwrap::laplacian`] and [`crate::bgremove::vsharp`](mod@crate::bgremove::vsharp) for
+//!   those stages. Re-probed 2026-11-11 on the QSM-CI in-vivo s005001 Prisma scan through the
+//!   "Thresholding", "V-SHARP" and "iLSQR" buttons: the same chain, `MRPhaseUnwrap` given the 4-D
+//!   single-precision phase, and the GUI keeps `QSM_iLSQR`'s output as it is (no mean subtracted).
+//!   Its mask is in [`crate::utils::sti_gui_threshold`] (and the STAR-QSM docs, *Masking*).
 //! - **TE**: the GUI passes `TE` = the **sum** of the echo times (its "sum_TE" field: 30 ms for
 //!   4 + 10 + 16), matching the summed phase. For iLSQR this only sets the unit of χ.
 //! - **Parameters the GUI passes** (as a `params` struct): `niter` 40, `padsize` [12 12 12],

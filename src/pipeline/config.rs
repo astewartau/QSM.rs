@@ -391,6 +391,22 @@ pub enum MaskThresholdMethod {
     Otsu,
     Fixed,
     Percentile,
+    /// STI Suite 3.0 QSM_GUI's "Thresholding": the level its `thresh_tool` starts at, which the
+    /// GUI keeps unless the user drags it ([`crate::utils::sti_gui_threshold`]). The value is
+    /// ignored.
+    StiGui,
+}
+
+impl MaskThresholdMethod {
+    /// Stable id, as rules and hosts name it.
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::Otsu => "otsu",
+            Self::Fixed => "fixed",
+            Self::Percentile => "percentile",
+            Self::StiGui => "sti-gui",
+        }
+    }
 }
 
 /// A single mask operation (generator or refinement)
@@ -426,6 +442,15 @@ pub enum MaskOp {
     FillHoles {
         max_size: usize,
     },
+    /// Keep only the largest 26-connected component (MATLAB `bwlabeln`'s default connectivity,
+    /// the largest `regionprops` `Area`; a tie goes to the component met first in the raster
+    /// scan, as MATLAB's `max` takes the first). STI Suite QSM_GUI's mask and its `PolishMask`.
+    LargestComponent,
+    /// MATLAB `imfill(mask, 'holes')` in 3-D: every background region that does not reach the
+    /// volume's edge through face neighbours is filled, whatever its size (unlike
+    /// [`MaskOp::FillHoles`], which has a size cap). `regionprops`' `FilledImage` of a single
+    /// component is the same mask: a region reaching its bounding box's face reaches the edge.
+    Imfill,
     GaussianSmooth {
         sigma_mm: f64,
     },
@@ -460,7 +485,7 @@ impl MaskOp {
             Self::MindGrab(_) => Some("mindgrab"),
             Self::Threshold { .. } | Self::Bet(_) | Self::Erode { .. } | Self::Dilate { .. }
             | Self::Close { .. } | Self::FillHoles { .. } | Self::GaussianSmooth { .. }
-            | Self::MinIntensity { .. } | Self::Majority
+            | Self::MinIntensity { .. } | Self::Majority | Self::LargestComponent | Self::Imfill
             | Self::SignalErode(_) => None,
         }
     }
@@ -642,6 +667,13 @@ pub struct BgRemovalConfig {
     /// PDF/LBV still need testing. The eroded mask is the stage's output mask
     /// ([`BgRemovalResult::eroded_mask`]), so the inversion runs on it too.
     pub erode_voxels: usize,
+    /// After background removal, keep the largest 26-connected component of the stage's mask and
+    /// fill its holes ([`MaskOp::LargestComponent`], [`MaskOp::Imfill`]), and zero the local field
+    /// outside it: STI Suite 3.0 QSM_GUI's `PolishMask`, which it runs on V-SHARP's mask before
+    /// its inversions (probed headless 2026-11-11, licensed MATLAB R2023b: on the QSM-CI in-vivo
+    /// s005001 Prisma scan, 1,276,570 → 1,265,491 voxels, reproduced voxel for voxel by these two
+    /// operations). The polished mask is the stage's output mask. Off by default.
+    pub polish_mask: bool,
 }
 
 impl Default for BgRemovalConfig {
@@ -659,6 +691,7 @@ impl Default for BgRemovalConfig {
             sdf: SdfParams::default(),
             tile: None,
             erode_voxels: 0,
+            polish_mask: false,
         }
     }
 }
@@ -1067,6 +1100,8 @@ impl MaskOp {
             Self::MinIntensity { .. } => "min-intensity",
             Self::Majority => "majority",
             Self::FillHoles { .. } => "fill-holes",
+            Self::LargestComponent => "largest-component",
+            Self::Imfill => "imfill",
             Self::GaussianSmooth { .. } => "gaussian-smooth",
             Self::SignalErode(_) => "signal-erode",
             Self::HdBet(_) => "hd-bet",
