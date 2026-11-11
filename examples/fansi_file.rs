@@ -1,7 +1,7 @@
 //! Run FANSI nlTV / nlTGV or L1-QSM (nlL1TV) on NIfTI files, for parity checks against FANSI in
 //! MATLAB. Takes the local field in ppm and writes susceptibility in ppm, as the pipeline does.
 //!
-//! usage: fansi_file <nltv|nltgv|l1qsm> <field_ppm.nii[.gz]> <mask.nii[.gz]> <magnitude.nii[.gz]> <chi_out.nii.gz> <TE_ms> <B0_T> <Hx> <Hy> <Hz> [alpha1] [lambda]
+//! usage: fansi_file <nltv|nltgv|l1qsm> <field_ppm.nii[.gz]> <mask.nii[.gz]> <magnitude.nii[.gz]> <chi_out.nii.gz> <TE_ms> <B0_T> <Hx> <Hy> <Hz> [alpha1] [lambda] [--original-newton]
 use qsm_core::inversion::{fansi, l1qsm, FansiParams, L1QsmParams};
 use qsm_core::EchoTime;
 use qsm_core::io::{read_nifti_file, save_nifti_to_file};
@@ -9,7 +9,10 @@ use qsm_core::Grid;
 use std::path::Path;
 
 fn main() {
-    let a: Vec<String> = std::env::args().collect();
+    // --original-newton: the reference's unguarded Newton step (`newton_guard: false`)
+    let all: Vec<String> = std::env::args().collect();
+    let original_newton = all.iter().any(|s| s == "--original-newton");
+    let a: Vec<String> = all.into_iter().filter(|s| s != "--original-newton").collect();
     if !(11..=13).contains(&a.len()) {
         eprintln!("usage: {} <nltv|nltgv|l1qsm> <field_ppm> <mask> <magnitude> <chi_out> <TE_ms> <B0_T> <Hx> <Hy> <Hz> [alpha1] [lambda]", a[0]);
         std::process::exit(2);
@@ -31,7 +34,7 @@ fn main() {
             l1qsm(&f.data, &mask, &magnitude, &grid, bdir, &p, |i, _| last = i)
         }
         method @ ("nltv" | "nltgv") => {
-            let mut p = FansiParams { te, b0, is_tgv: method == "nltgv", ..Default::default() };
+            let mut p = FansiParams { te, b0, is_tgv: method == "nltgv", newton_guard: !original_newton, ..Default::default() };
             if a.len() > 11 { p.alpha1 = num(11); }
             fansi(&f.data, &mask, &magnitude, &grid, bdir, &p, |i, _| last = i)
         }

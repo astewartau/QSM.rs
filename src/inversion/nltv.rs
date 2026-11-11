@@ -22,7 +22,8 @@
 //!   of `x` before forming `D x` for the Newton step, and with `W = 1` and `mu = 1` the Newton
 //!   step's derivative `W^2/mu*cos(z - f) + 1` reaches zero: QSM.jl itself diverges on fields of
 //!   more than a few radians (the qsm-forward 7T phantom). This port therefore requires the
-//!   magnitude.
+//!   magnitude. The magnitude weight does not remove the singular step everywhere, though: see
+//!   *Newton guard* below.
 //! - QSM.jl takes the data weight `W` from the caller and gives no rule for making it. Here
 //!   `W = min(2*mask*mag/max(mag), 1)`, the normalisation of FANSI's in vivo example by the same
 //!   authors as the paper (and of [`super::ndi`]); QSM.jl squares it.
@@ -50,6 +51,51 @@
 //! `similar` and never initialised, and on small arrays (which reuse freed memory) its output is
 //! NaN and differs between runs. The fresh, zeroed allocations of the in-vivo arrays start it at
 //! zero, as this port does.
+//!
+//! # Newton guard
+//! The data subproblem is solved per voxel by Newton's method on
+//! `g(z) = w*sin(z - f) + z - v = 0`, with `w = W^2/mu` and `v = D x + u` (QSM.jl
+//! `src/inversion/nltv.jl` L361-363, fde4b92). QSM.jl takes the full Newton step with no
+//! safeguard, and so does FANSI's `nlTV.m` (L159; see [`super::fansi`](mod@super::fansi)). Its
+//! derivative `g'(z) = W^2/mu*cos(z - f) + 1` reaches 0 where the weight is about 1 (with the
+//! default `mu = 1`, any voxel whose magnitude is at least half the maximum: bright vessels) and
+//! the residual `z - f` is near ±π. One such voxel takes a step of any size, and the x-update's
+//! FFT spreads it over the whole volume.
+//!
+//! By default ([`NltvParams::newton_guard`]) each Newton iterate is kept in the interval
+//! `[v - w, v + w]`, which brackets the root:
+//! - every root lies in it: at a root `z - v = -w*sin(z - f)`, so `|z - v| <= w`;
+//! - it holds a root: `g(v - w) = w*(sin(.) - 1) <= 0` and `g(v + w) = w*(sin(.) + 1) >= 0`;
+//! - the root is unique for `w <= 1` (`mu >= W^2`, so always with the default `mu = 1`, since
+//!   `W <= 1`): `g' >= 1 - w >= 0`, and zero only at isolated points, so `g` is strictly
+//!   increasing. (With `mu < 1` the subproblem can have several roots; all are in the bracket.)
+//!
+//! The guard is exact, not a tuning: an iterate inside the bracket is not changed (the step and
+//! the Newton stopping test are bit-for-bit QSM.jl's), and a root is never outside it, so the
+//! fixed point is the same. Only an iterate that has left every root's neighbourhood is
+//! moved, to the bracket's end.
+//!
+//! Evidence (EMTP travelling heads, 11 Nov 2026): on a single-echo acquisition (TE 17 ms,
+//! 0.8 mm, 2.89 T; ROMEO + V-SHARP local field), where 1 ppm is 13.2 rad and 37 voxels have
+//! `W > 0.99` and `|f| > π/2`, the unguarded solver returned χ up to 1.5e8 ppm, with every
+//! mask voxel above 10 ppm; guarded, max |χ| in the mask is 1.34 ppm and none is above 10 ppm
+//! (p1/p99 −0.066/0.107 ppm; the same field converted at 5 ms instead gives max 1.27 ppm), and
+//! the map looks like a normal susceptibility map.
+//!
+//! Convergence there: the guarded solve runs to the 250-iteration cap. Clamping acts on 953
+//! Newton iterates in the second ADMM iteration, 67 by the 50th and 25-40 per iteration from
+//! the 100th on: a few voxels oscillate between the bracket's ends within the 10 Newton steps
+//! allowed, and the relative update of `x` levels off at about 2.6e-3 (tolerance 1e-3).
+//! The map is sensible regardless. A possible refinement is safeguarded Newton with bisection
+//! (shrinking the bracket by the sign of `g` at each step), which converges for monotone `g`.
+//! It was not adopted because it can also change iterates that stay inside the original bracket,
+//! so it would not be bit-for-bit QSM.jl wherever the original converges.
+//! On the 1 mm travelling-head scan of *Agreement with QSM.jl* below (ROMEO + V-SHARP local field,
+//! radians at the 5 ms first echo) the unguarded step does leave the bracket: in 872 Newton
+//! iterates over the solve (71 in the second iteration, under 10 after the 20th). But those
+//! voxels come back to the same root within the 10 Newton steps, and the guarded result
+//! equals the unguarded one to 9.3e-10 ppm max |Δ| (NRMSE 1.5e-9 %, float32 output, both 198
+//! iterations): float32 rounding, the same order as the agreement with QSM.jl itself. Set `newton_guard: false` for QSM.jl's unguarded step.
 //!
 //! # Units
 //! Like the other inversions, NLTV takes the local field in ppm and returns ppm. The nonlinear
@@ -106,6 +152,11 @@ pub struct NltvParams {
     /// pad that axis, `≥ 0` pads it by at least that many voxels, rounded up to QSM.jl's fast
     /// FFT size (see [`with_qsmjl_padding`](crate::utils::padding::with_qsmjl_padding)).
     pub pad: [i64; 3],
+    /// Keep each Newton iterate of the data subproblem inside the interval that brackets its root,
+    /// `[v - W^2/mu, v + W^2/mu]` (default `true`; see the module docs, *Newton guard*). `false`
+    /// is QSM.jl's unguarded step, for parity: it is the same wherever the iterates stay in the
+    /// bracket, and diverges where they do not.
+    pub newton_guard: bool,
 }
 
 impl Default for NltvParams {
@@ -122,6 +173,7 @@ impl Default for NltvParams {
             echo_times: vec![0.02],
             te: EchoTime::First,
             pad: crate::utils::padding::QSMJL_PAD,
+            newton_guard: true,
         }
     }
 }
@@ -158,6 +210,7 @@ pub fn nltv(
     let mu = params.mu;
     let lambda_over_rho = params.lambda / rho;
     let tol_newton2 = params.tol_newton * params.tol_newton;
+    let guard = params.newton_guard;
 
     // ppm -> radians, as the nonlinear data term needs.
     let ppm_to_rad = 2.0 * std::f64::consts::PI * crate::constants::GAMMA_BAR_MHZ_PER_T * params.b0 * params.te.seconds(&params.echo_times, "NLTV");
@@ -250,7 +303,8 @@ pub fn nltv(
             }
         }
 
-        // Data term: v = D x + u_e; Newton on W^2/mu sin(z - f) + z - v = 0, from z = v
+        // Data term: v = D x + u_e; Newton on W^2/mu sin(z - f) + z - v = 0, from z = v,
+        // guarded to the root's bracket [v - W^2/mu, v + W^2/mu] (module docs, Newton guard)
         for i in 0..n {
             work[i] = x_hat[i] * d[i];
         }
@@ -266,8 +320,19 @@ pub fn nltv(
             for i in 0..n {
                 let (v, w, z) = (ue[i], w2[i], ze[i]);
                 let (s, c) = (z - fp[i]).sin_cos();
-                let delta = (w * s + z - v) / (w * c + 1.0);
-                ze[i] = z - delta;
+                let mut delta = (w * s + z - v) / (w * c + 1.0);
+                let mut znew = z - delta;
+                if guard {
+                    // Only an iterate outside the bracket changes, so inside it the step (and
+                    // the stopping test's norm) stay bit-for-bit QSM.jl's. Comparisons rather
+                    // than f64::clamp, which panics on NaN bounds.
+                    let clamped = if znew < v - w { v - w } else if znew > v + w { v + w } else { znew };
+                    if clamped != znew {
+                        znew = clamped;
+                        delta = z - znew;
+                    }
+                }
+                ze[i] = znew;
                 nd += delta * delta;
                 nz += z * z;
             }
@@ -330,6 +395,51 @@ mod tests {
         let c = nltv(&field, &mask, &mag2, &grid, (0.1, 0.0, 1.0), &p, |_, _| {});
         assert!(a.iter().all(|v| v.is_finite()));
         assert!(a.iter().zip(&c).any(|(x, y)| (x - y).abs() > 1e-9));
+    }
+
+    /// A smooth field of amplitude `amp` ppm on an 8³ grid; with a flat magnitude the data weight
+    /// is 1 everywhere, so wherever the residual nears ±π the Newton step is singular.
+    fn saturated_case(amp: f64) -> (Vec<f64>, Vec<u8>, Vec<f64>, Grid) {
+        let n = 8;
+        let c = n as f64 / 2.0;
+        let field = (0..n * n * n)
+            .map(|i| {
+                let (x, y, z) = ((i % n) as f64 - c, ((i / n) % n) as f64 - c, (i / n / n) as f64 - c);
+                amp * (0.7 * x).sin() * (0.5 * y).cos() * (0.9 * z).sin()
+            })
+            .collect();
+        (field, vec![1u8; n * n * n], vec![1.0; n * n * n], Grid::new(n, n, n, 1.0, 1.0, 1.0))
+    }
+
+    fn max_abs(v: &[f64]) -> f64 {
+        v.iter().fold(0.0f64, |a, &x| if x.is_finite() { a.max(x.abs()) } else { f64::INFINITY })
+    }
+
+    #[test]
+    fn nltv_newton_guard_stops_the_divergence() {
+        // 0.15 ppm is 2.4 rad at 3 T and 20 ms: QSM.jl's unguarded step diverges, the guarded
+        // one stays at the field's scale.
+        let (field, mask, mag, grid) = saturated_case(0.15);
+        let run = |newton_guard| {
+            let p = NltvParams { b0: 3.0, echo_times: vec![0.02], max_iter: 30, newton_guard, ..NltvParams::default() };
+            nltv(&field, &mask, &mag, &grid, (0.0, 0.0, 1.0), &p, |_, _| {})
+        };
+        let (original, guarded) = (max_abs(&run(false)), max_abs(&run(true)));
+        assert!(original > 1e6, "the unguarded step should diverge here, max |chi| {original}");
+        assert!(guarded < 2.0, "guarded max |chi| {guarded}");
+    }
+
+    #[test]
+    fn nltv_newton_guard_is_exact_inside_the_bracket() {
+        // At 0.05 ppm the iterates never leave the bracket: bit-for-bit the unguarded result.
+        let (field, mask, mag, grid) = saturated_case(0.05);
+        let run = |newton_guard| {
+            let p = NltvParams { b0: 3.0, echo_times: vec![0.02], max_iter: 30, newton_guard, ..NltvParams::default() };
+            nltv(&field, &mask, &mag, &grid, (0.0, 0.0, 1.0), &p, |_, _| {})
+        };
+        let guarded = run(true);
+        assert!(max_abs(&guarded) > 0.05);
+        assert_eq!(guarded, run(false));
     }
 
     #[test]
