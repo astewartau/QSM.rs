@@ -1274,7 +1274,7 @@ mod tests {
         let mut c = InversionConfig { algorithm: InversionAlgorithm::Tkd, ..Default::default() };
         assert_eq!(heidi_seed_problem(&c), None, "HEIDI off");
         c.apply_heidi = true;
-        assert!(heidi_seed_problem(&c).is_some(), "TKD's default 0.15 is above the cone's 0.1");
+        assert!(heidi_seed_problem(&c).is_some(), "TKD's default threshold is above the cone's 0.1");
         c.tkd.threshold = 0.1;
         assert_eq!(heidi_seed_problem(&c), None);
         c.heidi.cone_threshold = 0.05;
@@ -1306,7 +1306,7 @@ mod tests {
             affine: None,
         };
         let r = run_dipole_inversion(&[0.01; 512], &[1u8; 512], &meta, &config, None, &mut |_, _| {});
-        assert!(matches!(r, Err(PipelineError::InvalidConfig(_))), "TKD 0.15 > cone 0.1 must be refused");
+        assert!(matches!(r, Err(PipelineError::InvalidConfig(_))), "TKD's default threshold > cone 0.1 must be refused");
         config.tkd.threshold = 0.1;
         let chi = make_inversion_test_with(config.clone());
         assert!(chi.iter().all(|v| v.is_finite()));

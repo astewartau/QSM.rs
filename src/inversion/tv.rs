@@ -12,7 +12,8 @@
 //! https://doi.org/10.1002/mrm.25029
 //!
 //! Reference implementation: https://github.com/kamesy/QSM.jl (`tv`), whose defaults these
-//! are: `lambda = 1e-3`, `rho = 100*lambda`, `tol = 1e-3`, 250 iterations. Like QSM.jl, the
+//! are except `lambda` (QSM.jl: `lambda = 1e-3`, `rho = 100*lambda`, `tol = 1e-3`, 250
+//! iterations; this port's `lambda` is 3e-4, see "Default lambda" below). Like QSM.jl, the
 //! field is in ppm and the first x-update starts from the scaled split variable set to the
 //! gradient of the field. QSM.jl's optional data and TV weights (`W`, `Wtv`) are not ported;
 //! their default (`nothing`) is what this function computes.
@@ -50,17 +51,47 @@
 //! # Reference pipeline
 //! QSM.jl's README pipeline (commit fde4b92, L35-52: BET on the last echo, 5-voxel erosion,
 //! Laplacian unwrapping, V-SHARP), as for [`super::rts`](mod@super::rts).
+//!
+//! # Default lambda: 3e-4 (QSM.jl: 1e-3)
+//!
+//! `lambda` is tuning, not algorithm: [`TvParams::default`] uses 3e-4 (QSMxT decision 124,
+//! 2026-11-12), and the QSM.jl parity tests pass QSM.jl's 1e-3 explicitly ([`QSMJL_LAMBDA`]).
+//! `rho` stays `100*lambda`, so it follows.
+//!
+//! Evidence. QSMxT's qsm-qc visual ratings preferred 2e-4; the default was changed only after the
+//! QSM challenge data agreed (QSMxT `invert`, local field given, lambda swept 1e-4–1e-3; QSM-CI
+//! `qsm_eval`; XSIM primary). XSIM / NRMSE (%) at 1e-3 → 3e-4:
+//!
+//! | Data (reference)                          | XSIM          | NRMSE         |
+//! |-------------------------------------------|---------------|---------------|
+//! | 2016 challenge (χ33)                      | 0.266 → 0.307 | 74.9 → 94.8   |
+//! | 2016 challenge (COSMOS)                   | 0.386 → 0.472 | 58.0 → 71.3   |
+//! | Challenge 2.0 Sim1 SNR1                   | 0.291 → 0.601 | 58.5 → 55.3   |
+//! | Challenge 2.0 Sim1 SNR2                   | 0.290 → 0.605 | 57.3 → 49.7   |
+//! | Challenge 2.0 Sim2 SNR1                   | 0.509 → 0.716 | 52.1 → 47.0   |
+//! | Challenge 2.0 Sim2 SNR2                   | 0.509 → 0.724 | 51.7 → 44.7   |
+//! | QSM-CI simulation (2019 head model, 7 T)  | 0.483 → 0.769 | 47.7 → 31.8   |
+//!
+//! XSIM improves on all of them, as do NRMSE on the simulations and the deep-grey-matter slope
+//! (`|1−slope|` 0.054–0.061 → 0.011–0.025). On the 2016 in-vivo data RMSE and HFEN get worse
+//! (HFEN 69.8 → 89.8 vs χ33): the 2016 challenge's RMSE/HFEN are known to reward
+//! over-smoothed maps, which is what 1e-3 gives. Smaller values (1e-4, 2e-4) score higher XSIM on
+//! the simulations but lower on the 2016 data (χ33 XSIM 0.234 / 0.286), so 3e-4 is the
+//! compromise. Figures and metrics: QSMxT tune-check, 2026-11-12 (`qsmxt-ecosystem/tune-check/`).
 
 use crate::utils::{shrink, apply_mask_zero};
 use crate::utils::gradient::fgrad_inplace;
 use crate::Grid;
 use super::admm::{AdmmBuffers, admm_step, prepare_admm_spectral};
 
+/// QSM.jl's default `lambda` for `tv`, for parity runs.
+pub const QSMJL_LAMBDA: f64 = 1e-3;
+
 /// TV-ADMM algorithm parameters
 #[cfg_attr(feature = "introspection", derive(serde::Serialize))]
 #[derive(Clone, Debug)]
 pub struct TvParams {
-    /// Regularization parameter
+    /// Regularization parameter (default 3e-4; QSM.jl's is 1e-3, see the module docs)
     pub lambda: f64,
     /// ADMM penalty parameter; `None` is QSM.jl's `100*lambda`
     pub rho: Option<f64>,
@@ -77,7 +108,7 @@ pub struct TvParams {
 impl Default for TvParams {
     fn default() -> Self {
         Self {
-            lambda: 1e-3,
+            lambda: 3e-4,
             rho: None,
             tol: 1e-3,
             max_iter: 250,

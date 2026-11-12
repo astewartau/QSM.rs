@@ -13,7 +13,7 @@ use qsm_core::Grid;
 use qsm_core::bet;
 use qsm_core::bet::BetParams;
 use qsm_core::inversion;
-use qsm_core::inversion::{tgv_qsm, TgvInput, TgvParams, ilsqr, IlsqrParams, TkdParams, STI_DEFAULT_PAD_MM};
+use qsm_core::inversion::{tgv_qsm, TgvInput, TgvParams, ilsqr, IlsqrParams, TkdParams, TsvdParams, STI_DEFAULT_PAD_MM};
 use qsm_core::inversion::{TvParams, NltvParams, RtsParams, EchoMagnitudes, MediParams, TfiParams, TikhonovParams};
 use qsm_core::inversion::{NdiParams, FansiParams, L1QsmParams, WhQsmParams, HdQsmParams, AmpPeParams};
 use qsm_core::inversion::{LsqrQsmParams, HeidiParams};
@@ -482,7 +482,7 @@ fn test_inversion_tsvd() {
         &data.mask,
         &grid,
         data.b0_dir,
-        &TkdParams { threshold: 0.2, ..Default::default() },
+        &TsvdParams { threshold: 0.2, ..Default::default() },
     ));
 
     let res = TestResult::new("TSVD", &result, &data.chi, &data.mask, data.dims);
@@ -2062,7 +2062,7 @@ fn benchmark_all_algorithms() {
 
     // TSVD
     let (result, elapsed) = run_timed!("TSVD", inversion::tsvd(
-        &data.fieldmap_local, &data.mask, &grid, data.b0_dir, &TkdParams { threshold: 0.2, ..Default::default() }
+        &data.fieldmap_local, &data.mask, &grid, data.b0_dir, &TsvdParams { threshold: 0.2, ..Default::default() }
     ));
     TestResult::new("TSVD", &result, &data.chi, &data.mask, data.dims).print_with_time(elapsed);
     inversion_results.push(("TSVD".to_string(), result, elapsed));
@@ -2244,7 +2244,7 @@ fn test_all_combinations() {
 
         // TSVD
         let (result, elapsed) = run_timed!("TSVD", inversion::tsvd(
-            &bfr.local_field, &bfr.mask, &grid, data.b0_dir, &TkdParams { threshold: 0.2, ..Default::default() }
+            &bfr.local_field, &bfr.mask, &grid, data.b0_dir, &TsvdParams { threshold: 0.2, ..Default::default() }
         ));
         let c = ChallengeMetrics::compute("TSVD", &result, &data.chi, &bfr.mask, &data.segmentation, data.dims);
         emit_row(&mut csv, &bfr.name, "TSVD", &c, bt, elapsed.as_secs_f64());

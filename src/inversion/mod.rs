@@ -69,9 +69,9 @@ pub mod nextqsm;
 
 pub use cosmos::{cosmos, cosmos_weighted, uncovered_cone, CosmosParams, CONE_THRESHOLD, MAX_UNCOVERED_CONE};
 pub use sti::{sti, sti_forward, tensor_maps, StiParams, SusceptibilityTensor, TensorMaps, N_TENSOR};
-pub use tkd::{tkd, tsvd, TkdParams};
+pub use tkd::{tkd, tsvd, TkdParams, TsvdParams, QSMJL_THRESHOLD as TKD_QSMJL_THRESHOLD};
 pub use tikhonov::{tikhonov, TikhonovParams, Regularization};
-pub use tv::{tv_admm, TvParams};
+pub use tv::{tv_admm, TvParams, QSMJL_LAMBDA as TV_QSMJL_LAMBDA};
 pub use nltv::{nltv, NltvParams};
 pub use rts::{rts, RtsParams};
 pub use medi::{extract_csf, medi, EchoMagnitudes, MediParams};

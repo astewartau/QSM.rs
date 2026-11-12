@@ -42,9 +42,41 @@
 //!
 //! # Reference pipeline
 //! QSM.jl (commit fde4b92) `tkd`/`tsvd` (`src/inversion/direct.jl` L1-96), threshold 0.15 for
-//! both: TKD replaces `1/D` by `sign(D)/thr` where `|D| <= thr`, TSVD by 0. QSM.jl's README
+//! both: TKD replaces `1/D` by `sign(D)/thr` where `|D| <= thr`, TSVD by 0. This port follows
+//! that truncation exactly (Shmueli 2009 gives no code; QSM.m's `tkd` is the same). QSM.jl's README
 //! pipeline (L35-52: BET on the last echo, 5-voxel erosion, Laplacian unwrapping, V-SHARP) is the
 //! one its inversions are shown with; see [`super::rts`](mod@super::rts).
+//!
+//! # Default threshold: 0.25 for TKD (QSM.jl: 0.15), 0.15 for TSVD
+//!
+//! The threshold is tuning, not algorithm: [`TkdParams::default`] uses 0.25 (QSMxT decision 125,
+//! 2026-11-12), and the QSM.jl parity tests pass QSM.jl's 0.15 explicitly ([`QSMJL_THRESHOLD`]).
+//! TSVD keeps QSM.jl's 0.15 ([`TsvdParams::default`]): only TKD was re-tuned.
+//!
+//! Evidence. QSMxT's qsm-qc visual ratings preferred 0.25; the default was changed only after
+//! 0.25 also scored better on the QSM challenge data (QSMxT `invert`, local field given, threshold
+//! swept 0.1–0.4; QSM-CI `qsm_eval`; XSIM primary). XSIM / NRMSE (%) at 0.15 → 0.25:
+//!
+//! | Data (reference)                          | XSIM          | NRMSE         | DGM `|1−slope|` |
+//! |-------------------------------------------|---------------|---------------|-----------------|
+//! | 2016 challenge (χ33)                      | 0.222 → 0.303 | 123.6 → 97.6  | –               |
+//! | 2016 challenge (COSMOS)                   | 0.352 → 0.469 | 99.3 → 74.7   | –               |
+//! | Challenge 2.0 Sim1 SNR1                   | 0.431 → 0.516 | 98.7 → 78.2   | 0.104 → 0.200   |
+//! | Challenge 2.0 Sim1 SNR2                   | 0.575 → 0.629 | 78.3 → 65.7   | 0.103 → 0.199   |
+//! | Challenge 2.0 Sim2 SNR1                   | 0.570 → 0.598 | 68.9 → 60.0   | 0.110 → 0.184   |
+//! | Challenge 2.0 Sim2 SNR2                   | 0.638 → 0.643 | 60.3 → 55.3   | 0.106 → 0.181   |
+//! | QSM-CI simulation (2019 head model, 7 T)  | 0.786 → 0.743 | 36.3 → 39.1   | 0.123 → 0.193   |
+//!
+//! Caveats. A larger threshold underestimates χ more (TKD's known bias): the deep-grey-matter
+//! regression slope moves further from 1 on every simulated set (last column), so for
+//! quantitative ROI values a smaller threshold (or a regularised method) is the better choice.
+//! The near-noise-free QSM-CI phantom prefers 0.15 on every metric. Beyond 0.25 XSIM keeps rising
+//! on the 2016 data and Sim1 but falls on Sim2 (0.3: 0.591/0.628), and the slope bias grows
+//! (0.4: 0.35–0.37), so 0.25 is the compromise. Figures and metrics: QSMxT tune-check, 2026-11-12
+//! (`qsmxt-ecosystem/tune-check/`).
+//!
+//! With HEIDI's cone fill after TKD or TSVD the threshold must be at most HEIDI's cone threshold
+//! (0.1); the `heidi.tkd-cone`/`heidi.tsvd-cone` rules require it, whatever the default.
 
 use num_complex::Complex64;
 use crate::fft::{fft3d, ifft3d};
@@ -52,11 +84,14 @@ use crate::kernels::dipole::dipole_kernel;
 use crate::utils::apply_mask_zero;
 use crate::Grid;
 
+/// QSM.jl's default threshold for both `tkd` and `tsvd` (`direct.jl`), for parity runs.
+pub const QSMJL_THRESHOLD: f64 = 0.15;
+
 /// TKD algorithm parameters
 #[cfg_attr(feature = "introspection", derive(serde::Serialize))]
 #[derive(Clone, Debug)]
 pub struct TkdParams {
-    /// Truncation threshold (typically 0.1-0.2)
+    /// Truncation threshold on `|D|` (default 0.25; QSM.jl's is 0.15, see the module docs)
     pub threshold: f64,
     /// Zero padding per axis, QSM.jl's `pad` (default `[0, 0, 0]`, QSM.jl's): `< 0` does not
     /// pad that axis, `≥ 0` pads it by at least that many voxels, rounded up to QSM.jl's fast
@@ -66,7 +101,23 @@ pub struct TkdParams {
 
 impl Default for TkdParams {
     fn default() -> Self {
-        Self { threshold: 0.15, pad: crate::utils::padding::QSMJL_PAD }
+        Self { threshold: 0.25, pad: crate::utils::padding::QSMJL_PAD }
+    }
+}
+
+/// TSVD algorithm parameters
+#[cfg_attr(feature = "introspection", derive(serde::Serialize))]
+#[derive(Clone, Debug)]
+pub struct TsvdParams {
+    /// Truncation threshold on `|D|` (default 0.15, QSM.jl's)
+    pub threshold: f64,
+    /// Zero padding per axis, as [`TkdParams::pad`] (default `[0, 0, 0]`, QSM.jl's)
+    pub pad: [i64; 3],
+}
+
+impl Default for TsvdParams {
+    fn default() -> Self {
+        Self { threshold: QSMJL_THRESHOLD, pad: crate::utils::padding::QSMJL_PAD }
     }
 }
 
@@ -163,7 +214,7 @@ pub fn tsvd(
     mask: &[u8],
     grid: &Grid,
     bdir: (f64, f64, f64),
-    params: &TkdParams,
+    params: &TsvdParams,
 ) -> Vec<f64> {
     crate::utils::padding::with_qsmjl_padding(local_field, mask, grid, params.pad, |f, m, g| {
         tsvd_unpadded(f, m, g, bdir, params)
@@ -176,7 +227,7 @@ fn tsvd_unpadded(
     mask: &[u8],
     grid: &Grid,
     bdir: (f64, f64, f64),
-    params: &TkdParams,
+    params: &TsvdParams,
 ) -> Vec<f64> {
     let (nx, ny, nz) = grid.dims;
     let n_total = grid.n_total();
@@ -286,7 +337,7 @@ mod tests {
         let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
 
         let chi_tkd = tkd(&field, &mask, &grid, (0.0, 0.0, 1.0), &TkdParams { threshold: 0.15, ..Default::default() });
-        let chi_tsvd = tsvd(&field, &mask, &grid, (0.0, 0.0, 1.0), &TkdParams { threshold: 0.15, ..Default::default() });
+        let chi_tsvd = tsvd(&field, &mask, &grid, (0.0, 0.0, 1.0), &TsvdParams { threshold: 0.15, ..Default::default() });
 
         // They should be different
         let diff: f64 = chi_tkd.iter().zip(chi_tsvd.iter())
