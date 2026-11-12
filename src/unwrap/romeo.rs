@@ -37,6 +37,13 @@
 //!   and the CLI says it "might be necessary if there is large movement (timeseries) or
 //!   phase-offset-correction is not applicable" (`argparse.jl:95-100`). Both match
 //!   [`RomeoParams::default`] (`template: 0`, `individual: false`).
+//! - **Individual mode is the more fragile one.** Each echo is grown on its own, so each can
+//!   settle a region a whole 2π cycle off independently, and the global correction across echoes
+//!   only fixes offsets of whole echoes. Within a thin or ragged mask (e.g. a phase-quality mask
+//!   with a scalp ring), tiny input differences, such as MCPC-3D-S's f64 vs ROMEO.jl's Float32
+//!   or ROMEO.jl run with several threads, can flip whole lobes of single echoes; ROMEO.jl does
+//!   the same on such input (QSMxT, 2026-11-12, on two in-vivo scans). Template mode was clean on
+//!   the same input and is the default here and in ROMEO.jl.
 //! - **`temporal_uncertain_unwrapping`.** 0.5 in the API (`src/unwrapping.jl:52,70`), which
 //!   [`RomeoParams::default`] and CLEAR-SWI's `romeo_combine` use; the CLI's default is 0 and it
 //!   marks the option EXPERIMENTAL (`argparse.jl:165-172`); [`RomeoParams::romeo_cli`] has 0.
@@ -109,7 +116,7 @@
 //! uses [`voxel_quality_romeo`] (binned weights, in-mask neighbours only) and grows from the
 //! certain voxels inside the mask. On that phantom 14 of 3,000 voxels of echoes 2 and 3 differ
 //! after MCPC-3D-S and 850 of 3,392 on the raw phase; the fixture's template cases therefore set
-//! it to 0 (the CLI's default). QSMxT's default (individual mode) does not use it.
+//! it to 0 (the CLI's default), and so does QSMxT's default.
 //!
 //! The `romeo` CLI itself reads the NIfTI phase and magnitude as Float32 and computes in single
 //! precision; QSM.rs computes in f64 (kept: double precision throughout, Ashley 2026-10-28).
