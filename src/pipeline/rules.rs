@@ -560,7 +560,7 @@ pub const SETTINGS: &[(&str, &str)] = &[
     ("masking.min_intensity", "Each mask section's lowest input intensity kept (its MinIntensity refinement; 0 = none)"),
     ("masking.majority", "Each mask section's 3×3×3 majority filter (its Majority refinement, bool)"),
     ("masking.close_radius", "Each mask section's closing radius, voxels (its Close refinement; 0 = none)"),
-    ("masking.threshold_method", "Each threshold generator's method (MaskThresholdMethod::id): otsu, fixed, percentile or sti-gui; only for a threshold section"),
+    ("masking.threshold_method", "Each mask section's threshold method (MaskThresholdMethod::id): otsu, fixed, percentile or sti-gui; none for a section whose generator is not a threshold"),
     ("masking.largest_component", "Each mask section keeps only its largest 26-connected component (its LargestComponent refinement, bool)"),
     ("masking.imfill", "Each mask section's holes filled whatever their size, as MATLAB's imfill(·, 'holes') (its Imfill refinement, bool)"),
     ("masking.hd_bet.inference", "Each HD-BET step's inference: full-volume, sliding-window (HdBetInference::SLIDING_WINDOW), low-memory (HdBetInference::LOW_MEMORY) or custom-window"),
@@ -750,10 +750,13 @@ pub fn current(input: &RuleInput, facts: &ScanFacts, setting: &str) -> Option<Ve
             }).unwrap_or(0.0))).collect(),
         "masking.majority" => c.masking.sections.iter().map(|s| Current::Bool(
             s.refinements.iter().any(|op| matches!(op, super::config::MaskOp::Majority)))).collect(),
-        "masking.threshold_method" => c.masking.sections.iter().filter_map(|s| match &s.generator {
-            super::config::MaskOp::Threshold { method, .. } => Some(Current::Choice(method.id())),
-            _ => None,
-        }).collect(),
+        // A section that is not thresholded reads `none`, so a rule on the threshold method is in
+        // play whatever the mask (`sti.mask-threshold-gui` fires on a BET mask too): one rule then
+        // says both "threshold" and "at which level", and no generator rule restates the first.
+        "masking.threshold_method" => c.masking.sections.iter().map(|s| Current::Choice(match &s.generator {
+            super::config::MaskOp::Threshold { method, .. } => method.id(),
+            _ => "none",
+        })).collect(),
         "masking.largest_component" => c.masking.sections.iter().map(|s| Current::Bool(
             s.refinements.iter().any(|op| matches!(op, super::config::MaskOp::LargestComponent)))).collect(),
         "masking.imfill" => c.masking.sections.iter().map(|s| Current::Bool(
@@ -1333,14 +1336,21 @@ pub static RULES: &[Rule] = &[
     // iLSQR's only. The GUI stores the mask with only the slices up to its bounding box's last
     // (126 of 128 on the QSM-CI scan) and V-SHARP takes it so; not copied (the missing slices are
     // outside the mask), unless parity shows it matters.
-    reference("sti.mask-threshold", &[inv(&[Choice("ilsqr")]), unless_sep(CHI_SEP_TOOLBOX)],
-        "masking.generator", &[Choice("threshold")],
-        "STI Suite's QSM_GUI masks by thresholding the magnitude", STI_GUI_MASK_SOURCE),
-    reference("sti.mask-threshold-gui",
-        &[inv(&[Choice("ilsqr")]), unless_sep(CHI_SEP_TOOLBOX), method("masking.generator", &[Choice("threshold")])],
+    //
+    // One rule says how the GUI thresholds: the level its thresh_tool starts at (graythresh on
+    // the middle slice of the last echo, scaled so that slice's maximum is 256; the STI probe
+    // reproduced its level and mask exactly, utils::sti_gui_threshold). Until 2026-11-12 a second
+    // rule, `sti.mask-threshold`, also wanted `masking.generator = threshold` under the same
+    // trigger. Both were about one choice, and a host shows "threshold" as its default threshold
+    // (Otsu over the whole image, QSMxT's), so under iLSQR its Masking help said both "authors'
+    // setting: Otsu threshold" and "differs from thresh_tool's starting level" (orchestrator
+    // decision 112). The threshold method now reads `none` on a section that is not a threshold
+    // ([`current`]), so this rule alone fires on a BET mask as well, and its value says the whole
+    // thing. `no_two_rules_on_one_choice_disagree` keeps it that way.
+    reference("sti.mask-threshold-gui", &[inv(&[Choice("ilsqr")]), unless_sep(CHI_SEP_TOOLBOX)],
         "masking.threshold_method", &[Choice("sti-gui")],
-        "QSM_GUI's threshold is the level its thresh_tool starts at: Otsu (graythresh) on the middle \
-         slice, scaled to that slice's maximum", STI_GUI_MASK_SOURCE),
+        "STI Suite's QSM_GUI masks the magnitude above the level its threshold tool starts at",
+        STI_GUI_MASK_SOURCE),
     reference("sti.mask-input", &[inv(&[Choice("ilsqr")]), unless_sep(CHI_SEP_TOOLBOX)], "masking.input",
         &[Choice("magnitude-last")], "QSM_GUI thresholds the last echo's magnitude (the last volume loaded)",
         STI_GUI_MASK_SOURCE),
@@ -2377,10 +2387,6 @@ mod tests {
             })),
             ("qsmart.mask-no-erosion", Case::new(inversion(I::Qsmart))),
             ("qsmart.mask-threshold", Case::new(inversion(I::Qsmart))),
-            ("sti.mask-threshold", Case::new(|c| {
-                inversion(I::Ilsqr)(c);
-                c.cfg.masking.sections[0].generator = MaskOp::Bet(Default::default());
-            })),
             ("sti.mask-threshold-gui", Case::new(inversion(I::Ilsqr))),
             ("sti.mask-input", Case::new(inversion(I::Ilsqr))),
             ("sti.mask-no-correction", Case::new(inversion(I::Ilsqr))),
@@ -2962,12 +2968,7 @@ mod tests {
     /// Pairs of reference rules that apply to `case` and want different values of one setting.
     fn conflicts(case: &Case) -> Vec<(&'static str, &'static str)> {
         let rules = applying(case);
-        let d = |r: &Rule| match r.default {
-            Value::Bool(b) => Current::Bool(b),
-            Value::Number(x) => Current::Number(x),
-            Value::Choice(s) => Current::Choice(s),
-            Value::Vector(v) => Current::Vector(v.to_vec()),
-        };
+        let d = default_of;
         let mut out = Vec::new();
         for (i, a) in rules.iter().enumerate() {
             for b in &rules[i + 1..] {
@@ -3020,6 +3021,147 @@ mod tests {
         let decompose = Case::new(|c| { separation(SeparationAlgorithm::Decompose)(c); inversion(InversionAlgorithm::Star)(c) });
         assert!(applying(&decompose).iter().any(|r| r.id == "sti.unwrap-laplacian"));
         assert!(conflicts(&decompose).is_empty(), "{:?}", conflicts(&decompose));
+    }
+
+    /// A rule's default as the value it sets.
+    fn default_of(r: &Rule) -> Current {
+        match r.default {
+            Value::Bool(b) => Current::Bool(b),
+            Value::Number(x) => Current::Number(x),
+            Value::Choice(s) => Current::Choice(s),
+            Value::Vector(v) => Current::Vector(v.to_vec()),
+        }
+    }
+
+    /// What a rule chooses: (choice, whether a value passes, the value applying it sets).
+    type Choosing = (&'static str, Box<dyn Fn(&Current) -> bool>, Current);
+
+    /// The choices a rule makes: its setting, except that a mask section's generator and its
+    /// threshold method are one choice, the generator, named `threshold:<method>` for a threshold
+    /// (hosts offer each threshold method as a generator of its own: QSMxT's "Otsu threshold",
+    /// "STI Suite threshold"). A rule asking only for `threshold` passes every method, and
+    /// applying it gives Otsu's, QSM.rs's default threshold. BET's and HD-BET's parameters are in
+    /// play only on their generator's section, so a rule on one also chooses that generator.
+    fn choices(r: &'static Rule) -> Vec<Choosing> {
+        let generator = |v: &Current| match v {
+            Current::Choice(g) => Current::Choice(g.split_once(':').map_or(g, |(g, _)| g)),
+            other => other.clone(),
+        };
+        let threshold = |m: &str| Current::Choice(Box::leak(format!("threshold:{m}").into_boxed_str()));
+        match (r.setting, r.default) {
+            ("masking.generator", Choice(g)) => vec![(
+                "masking.generator",
+                Box::new(move |v| r.expect.passes(&generator(v))),
+                if g == "threshold" { threshold(MaskThresholdMethod::Otsu.id()) } else { Current::Choice(g) },
+            )],
+            ("masking.threshold_method", Choice(m)) => vec![(
+                "masking.generator",
+                Box::new(move |v| r.expect.passes(&match v {
+                    Current::Choice(g) => Current::Choice(g.strip_prefix("threshold:").unwrap_or("none")),
+                    other => other.clone(),
+                })),
+                threshold(m),
+            )],
+            (s, _) => {
+                let mut out: Vec<Choosing> = vec![(s, Box::new(move |v| r.expect.passes(v)), default_of(r))];
+                let step = if s.starts_with("masking.bet.") {
+                    Some("bet")
+                } else if s.starts_with("masking.hd_bet.") {
+                    Some("hd-bet")
+                } else {
+                    None
+                };
+                if let Some(g) = step {
+                    out.push(("masking.generator", Box::new(move |v| generator(v) == Current::Choice(g)), Current::Choice(g)));
+                }
+                out
+            }
+        }
+    }
+
+    /// Whether two rules' conditions can all hold at once: no setting or fact is required to be
+    /// one of two disjoint sets of values, or both one of a set and not one of it (`Unless`).
+    fn compatible(a: &Rule, b: &Rule) -> bool {
+        let one_of = |t: &Test| match t { Test::OneOf { values } => Some(*values), _ => None };
+        let disjoint = |x: &[Value], y: &[Value]| !x.iter().any(|v| y.contains(v));
+        let within = |x: &[Value], y: &[Value]| x.iter().all(|v| y.contains(v));
+        let clash = |c: &Condition, d: &Condition| match (c, d) {
+            (C::Setting { setting: s, is }, C::Setting { setting: t, is: js }) if s == t => {
+                matches!((one_of(is), one_of(js)), (Some(x), Some(y)) if disjoint(x, y))
+            }
+            (C::Setting { setting: s, is }, C::Unless { setting: t, is: js })
+            | (C::Unless { setting: t, is: js }, C::Setting { setting: s, is }) if s == t => {
+                matches!((one_of(is), one_of(js)), (Some(x), Some(y)) if within(x, y))
+            }
+            (C::Fact { fact: f, is }, C::Fact { fact: g, is: js }) if f == g => match (is, js) {
+                (Test::OneOf { values: x }, Test::OneOf { values: y }) => disjoint(x, y),
+                (Test::OneOf { values: x }, Test::NoneOf { values: y })
+                | (Test::NoneOf { values: y }, Test::OneOf { values: x }) => within(x, y),
+                (Test::Range { min: lo, max: hi }, Test::Range { min: lo2, max: hi2 }) => {
+                    matches!((lo, hi2), (Some(l), Some(h)) if l > h) || matches!((lo2, hi), (Some(l), Some(h)) if l > h)
+                }
+                _ => false,
+            },
+            _ => false,
+        };
+        !a.when.iter().any(|c| b.when.iter().any(|d| clash(c, d)))
+    }
+
+    /// No two rules with the same trigger want different values for one choice (decision 112:
+    /// `sti.mask-threshold` wanted a threshold mask, which a host shows as its own default
+    /// threshold, while `sti.mask-threshold-gui` wanted QSM_GUI's level; the help showed both).
+    ///
+    /// "The same trigger" is a trigger on the same setting with a value in common, so iLSQR's
+    /// rules and STI Suite's (iLSQR or STAR-QSM) are compared too. Pairs whose other conditions
+    /// cannot hold together (the χ-separation toolbox's Tukey window on Philips and elsewhere)
+    /// are not. "One choice" is a setting, except that a mask's generator and its threshold
+    /// method are one ([`choices`]). Every strength is compared: two rules of
+    /// one method that disagree are one rule too many, whatever their strengths. Rules with
+    /// different triggers may still disagree (MEDI and STI Suite want different masks); a host
+    /// shows both findings with their triggers (module docs, *Scoped to the triggering choice*).
+    #[test]
+    fn no_two_rules_on_one_choice_disagree() {
+        let trigger_values = |r: &Rule| match r.trigger() {
+            C::Setting { setting, is: Test::OneOf { values } } => Some((*setting, *values)),
+            _ => None,
+        };
+        let mut out = Vec::new();
+        for (i, a) in RULES.iter().enumerate() {
+            for b in &RULES[i + 1..] {
+                let (Some((sa, va)), Some((sb, vb))) = (trigger_values(a), trigger_values(b)) else { continue };
+                if sa != sb || !va.iter().any(|v| vb.contains(v)) || !compatible(a, b) {
+                    continue;
+                }
+                for (setting, ea, da) in choices(a) {
+                    for (other, eb, db) in choices(b) {
+                        if setting == other && !(eb(&da) && ea(&db)) {
+                            out.push(format!("{} and {} on {setting}", a.id, b.id));
+                        }
+                    }
+                }
+            }
+        }
+        assert!(out.is_empty(), "{}", out.join("\n"));
+    }
+
+    /// STI Suite's mask is one rule: on a BET mask under iLSQR it fires with the threshold
+    /// method `none`, and no rule asks for the generator on its own.
+    #[test]
+    fn sti_suite_thresholds_in_one_rule() {
+        let bet = Case::new(|c| {
+            inversion(InversionAlgorithm::Ilsqr)(c);
+            c.cfg.masking.sections[0].generator = MaskOp::Bet(Default::default());
+        });
+        let findings = evaluate(&bet.input(), &bet.facts);
+        let f = findings.iter().find(|f| f.rule.id == "sti.mask-threshold-gui").expect("fires on a BET mask");
+        assert_eq!(f.current, [Current::Choice("none")]);
+        assert!(!findings.iter().any(|f| f.rule.id.starts_with("sti.") && f.rule.setting == "masking.generator"),
+            "{:?}", bet.ids());
+        let gui = Case::new(|c| {
+            inversion(InversionAlgorithm::Ilsqr)(c);
+            c.cfg.masking.sections[0].generator = MaskOp::Threshold { method: MaskThresholdMethod::StiGui, value: None };
+        });
+        assert!(!gui.ids().contains(&"sti.mask-threshold-gui"), "{:?}", gui.ids());
     }
 
     /// `Unless` holds when the setting is not in play, and serialises with its tag.
