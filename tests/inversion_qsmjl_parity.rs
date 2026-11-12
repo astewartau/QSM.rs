@@ -109,8 +109,10 @@ const CASES: [Case; 14] = [
 ];
 
 /// QSM.jl `rts`'s defaults, spelled out so the test also pins `RtsParams::default()` below.
+// QSM.jl's `rts`, including its convergence check at iteration 1, which stops the axial
+// "QSM.jl defaults" case there (rts.rs module docs; without it that case differs by 11 % L2).
 const QSMJL_RTS: RtsParams =
-    RtsParams { delta: 0.15, mu: 1e5, rho: 10.0, tol: 1e-2, max_iter: 20, lsmr_iter: 4, tau: 0.7, gamma: 5.0, pad: [0; 3] };
+    RtsParams { delta: 0.15, mu: 1e5, rho: 10.0, tol: 1e-2, max_iter: 20, lsmr_iter: 4, tau: 0.7, gamma: 5.0, pad: [0; 3], check_first_iteration: true };
 
 /// The generator's `phantom(n, v)`: field (zero outside the mask) and mask.
 fn phantom(n: [usize; 3], v: [f64; 3]) -> (Vec<f64>, Vec<u8>) {
@@ -167,6 +169,8 @@ fn defaults_are_qsm_jls() {
     let t = TvParams::default();
     assert_eq!((t.lambda, t.rho, t.tol, t.max_iter, t.pad), (1e-3, None, 1e-3, 250, [0; 3]));
     let (r, q) = (RtsParams::default(), QSMJL_RTS);
+    // The one deviation: the convergence check starts at iteration 2 (rts.rs module docs).
+    assert!(!r.check_first_iteration && q.check_first_iteration);
     assert_eq!(
         (r.delta, r.mu, r.rho, r.tol, r.max_iter, r.lsmr_iter, r.tau, r.gamma, r.pad),
         (q.delta, q.mu, q.rho, q.tol, q.max_iter, q.lsmr_iter, q.tau, q.gamma, q.pad)

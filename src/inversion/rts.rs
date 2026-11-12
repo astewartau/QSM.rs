@@ -45,6 +45,32 @@
 //! the Hermitian spectrum QSM.jl's `irfft` reads from its stored half
 //! ([`crate::fft::c2r_spectrum`]; see *Half spectrum* below).
 //!
+//! # First-iteration convergence check (deviation, default)
+//!
+//! QSM.jl's step 2 starts its ADMM with `v = ∇x₁` (x₁ the masked step-1 map) and multiplier
+//! `p = 0`, and checks `‖x − x₀‖ < tol‖x‖` right after the x-update, before the first shrinkage.
+//! At iteration 1 that x-update gets `F⁻¹(iA·F(∇ᵀ∇x₁) + F̂)`, which on every non-DC coefficient
+//! is `x₁` itself: `ρL/(ρL + m)·x̂₁ + m/(ρL + m)·x̂₁ = x̂₁` (with `L = F(∇ᵀ∇)`); only the DC
+//! coefficient, where `L = 0` and `m = 0`, is zeroed. So iteration 1's "relative change" is
+//! `|DC(x₁)| / ‖x₁ − DC(x₁)‖`, the mean of the step-1 map inside the padded array, not a
+//! measure of convergence. When it is below `tol` (1e-2) QSM.jl returns the step-1 map with only
+//! its mean removed: four LSMR iterations, no TV, and `delta`, `mu`, `rho` have no effect.
+//!
+//! Whether that happens depends on the data (QSMxT RTS triage, 2026-11-12): iteration-1 values
+//! were 4.6e-3 on the KKI travelling head (run 2, QSMxT V-SHARP field: stops, reproduced to 8e-7
+//! against QSMxT's χ), 1.3e-2 on the QSM-CI simulation, 1.9e-2 on the QSM-CI Prisma scan and
+//! 2.9e-2–1.6e-1 on iSMV fields (TV runs). On the simulation the TV step matters: XSIM 0.704 with
+//! it, 0.663 for step 1 only. On KKI, letting TV run changes χ by 22 % (relative L2) and makes
+//! `delta` matter again (0.6 vs 0.15: 95 % relative L2), where QSM.jl's result ignores it.
+//!
+//! QSM.m's `rts.m` (Kames's older MATLAB code) does not have this: it checks primal and dual
+//! residuals after the y-update (with over-relaxation), so its TV step always acts; its notes say
+//! the paper used the difference of iterates. The paper describes a two-step method whose second
+//! step is the TV solve, so skipping it is not the published algorithm. This port therefore
+//! starts the check at iteration 2 by default (an unequivocal fix: iteration 1 can still be the
+//! last when `max_iter` is 1). [`RtsParams::check_first_iteration`] restores QSM.jl's check for
+//! parity; `tests/inversion_qsmjl_parity.rs` uses it for every QSM.jl case.
+//!
 //! # Half spectrum (tilted B0)
 //!
 //! QSM.jl applies its k-space multipliers on FFTW's real-to-complex half spectrum and inverts
@@ -77,7 +103,8 @@ use crate::utils::apply_mask_zero;
 use crate::utils::gradient::{bdiv_inplace, fgrad_inplace};
 use crate::Grid;
 
-/// RTS algorithm parameters (QSM.jl `rts` keywords and defaults)
+/// RTS algorithm parameters (QSM.jl `rts` keywords and defaults, plus
+/// [`check_first_iteration`](Self::check_first_iteration))
 #[cfg_attr(feature = "introspection", derive(serde::Serialize))]
 #[derive(Clone, Debug)]
 pub struct RtsParams {
@@ -101,6 +128,11 @@ pub struct RtsParams {
     /// pad that axis, `≥ 0` pads it by at least that many voxels, rounded up to QSM.jl's fast
     /// FFT size (see [`with_qsmjl_padding`](crate::utils::padding::with_qsmjl_padding)).
     pub pad: [i64; 3],
+    /// Allow the convergence check to stop at the first ADMM iteration, as QSM.jl does
+    /// (default `false`: the check starts at iteration 2). Iteration 1's relative change only
+    /// measures the DC term of the step-1 map, so QSM.jl can return step 1 unchanged; see
+    /// *First-iteration convergence check* in the module docs. `true` is for parity runs only.
+    pub check_first_iteration: bool,
 }
 
 impl Default for RtsParams {
@@ -115,6 +147,7 @@ impl Default for RtsParams {
             tau: 0.7,
             gamma: 5.0,
             pad: crate::utils::padding::QSMJL_PAD,
+            check_first_iteration: false,
         }
     }
 }
@@ -400,14 +433,16 @@ fn rts_unpadded(
             x[i] = work[i].re;
         }
 
-        // convergence check
+        // convergence check; not at iteration 1 unless asked to (QSM.jl's behaviour): there
+        // x - x0 is only the DC term of the step-1 map (see the module docs)
         let (mut ndx2, mut nx2) = (0.0, 0.0);
         for i in 0..n {
             let (a, b) = (x[i], x0[i]);
             ndx2 += (a - b) * (a - b);
             nx2 += a * a;
         }
-        if ndx2.sqrt() < params.tol * nx2.sqrt() || it == params.max_iter {
+        let may_stop = it > 1 || params.check_first_iteration;
+        if (may_stop && ndx2.sqrt() < params.tol * nx2.sqrt()) || it == params.max_iter {
             progress(it, it);
             break;
         }
@@ -485,6 +520,35 @@ mod tests {
 
         for (i, &val) in chi.iter().enumerate() {
             assert!(val.is_finite(), "Chi should be finite at index {}", i);
+        }
+    }
+
+    /// Iteration 1's relative change is only the DC term of the step-1 map: by default the
+    /// check does not stop there, `check_first_iteration` (QSM.jl) does, and returns the step-1
+    /// map with its mean removed.
+    #[test]
+    fn test_rts_first_iteration_check() {
+        let n = 8;
+        let field: Vec<f64> = (0..n * n * n).map(|i| ((i * 37 % 101) as f64 - 50.0) * 1e-3).collect();
+        let mask = vec![1u8; n * n * n];
+        let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
+        let last = |p: &RtsParams| {
+            let mut last = 0;
+            let chi = rts(&field, &mask, &grid, (0.0, 0.0, 1.0), p, |it, _| last = it);
+            (last, chi)
+        };
+        // A tolerance any relative change meets, so the first iteration allowed to stop does.
+        let qsmjl = RtsParams { tol: 1e3, pad: [-1; 3], check_first_iteration: true, ..Default::default() };
+        let (it_qsmjl, chi_qsmjl) = last(&qsmjl);
+        let (it_default, chi_default) = last(&RtsParams { check_first_iteration: false, ..qsmjl.clone() });
+        assert_eq!((it_qsmjl, it_default), (1, 2));
+        assert_ne!(chi_qsmjl, chi_default);
+
+        // QSM.jl's iteration 1 is the step-1 map minus its mean.
+        let step1 = rts(&field, &mask, &grid, (0.0, 0.0, 1.0), &RtsParams { max_iter: 0, ..qsmjl.clone() }, |_, _| {});
+        let mean = step1.iter().sum::<f64>() / step1.len() as f64;
+        for (a, b) in chi_qsmjl.iter().zip(&step1) {
+            assert!((a - (b - mean)).abs() < 1e-12, "{a} vs {}", b - mean);
         }
     }
 
