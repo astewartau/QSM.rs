@@ -9,7 +9,7 @@
 //!   heidi_cone_fill_file <tkd|tsvd> <field_ppm> <mask> <threshold> <chi_out> <B0_T> <Hx> <Hy> <Hz>
 //! (H = B0 direction in voxel axes; `tkd`/`tsvd` write the seed at the given threshold, at its
 //! other defaults, e.g. 0.1 so that HEIDI accepts it)
-use qsm_core::inversion::{heidi_cone_fill, tkd, tsvd, HeidiParams, TkdParams};
+use qsm_core::inversion::{heidi_cone_fill, tkd, tsvd, HeidiParams, TkdParams, TsvdParams};
 use qsm_core::io::{read_nifti_file, save_nifti_to_file};
 use qsm_core::Grid;
 use std::path::Path;
@@ -37,11 +37,10 @@ fn main() {
             heidi_cone_fill(&f.data, &mask, &seed, &grid, bdir, &params, |_, _| {})
         }
         "tkd" | "tsvd" => {
-            let params = TkdParams { threshold: num(&a[4]), ..TkdParams::default() };
             if a[1] == "tkd" {
-                tkd(&f.data, &mask, &grid, bdir, &params)
+                tkd(&f.data, &mask, &grid, bdir, &TkdParams { threshold: num(&a[4]), ..TkdParams::default() })
             } else {
-                tsvd(&f.data, &mask, &grid, bdir, &params)
+                tsvd(&f.data, &mask, &grid, bdir, &TsvdParams { threshold: num(&a[4]), ..TsvdParams::default() })
             }
         }
         other => panic!("unknown mode {other}"),

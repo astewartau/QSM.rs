@@ -14,7 +14,7 @@
 //! there (f64, ppm, column-major).
 
 use qsm_core::inversion::{
-    rts, tikhonov, tkd, tsvd, tv_admm, Regularization, RtsParams, TikhonovParams, TkdParams, TvParams,
+    rts, tikhonov, tkd, tsvd, tv_admm, Regularization, RtsParams, TikhonovParams, TkdParams, TsvdParams, TvParams,
 };
 use qsm_core::Grid;
 
@@ -28,7 +28,7 @@ const NOPAD: [i64; 3] = [-1; 3];
 
 enum Method {
     Tkd(TkdParams),
-    Tsvd(TkdParams),
+    Tsvd(TsvdParams),
     Tikh(TikhonovParams),
     Tv(TvParams),
     Rts(RtsParams),
@@ -51,7 +51,7 @@ const CASES: [Case; 14] = [
         bdir: OBLIQUE,
         method: Method::Tkd(TkdParams { threshold: 0.15, pad: NOPAD }),
     },
-    Case { name: "tsvd, QSM.jl defaults", dims: N, vs: ANISO, bdir: AXIAL, method: Method::Tsvd(TkdParams { threshold: 0.15, pad: [0; 3] }) },
+    Case { name: "tsvd, QSM.jl defaults", dims: N, vs: ANISO, bdir: AXIAL, method: Method::Tsvd(TsvdParams { threshold: 0.15, pad: [0; 3] }) },
     Case {
         name: "tikh, QSM.jl defaults",
         dims: N,
@@ -83,7 +83,7 @@ const CASES: [Case; 14] = [
     },
     // Tilted B0 on even sizes: QSM.jl's half-spectrum Nyquist planes (astewartau/QSM.rs#329).
     Case { name: "tkd, oblique B0, even sizes, QSM.jl defaults", dims: N, vs: ANISO, bdir: OBLIQUE, method: Method::Tkd(TkdParams { threshold: 0.15, pad: [0; 3] }) },
-    Case { name: "tsvd, oblique B0, even sizes, QSM.jl defaults", dims: N, vs: ANISO, bdir: OBLIQUE, method: Method::Tsvd(TkdParams { threshold: 0.15, pad: [0; 3] }) },
+    Case { name: "tsvd, oblique B0, even sizes, QSM.jl defaults", dims: N, vs: ANISO, bdir: OBLIQUE, method: Method::Tsvd(TsvdParams { threshold: 0.15, pad: [0; 3] }) },
     Case {
         name: "tikh, oblique B0, even sizes, QSM.jl defaults",
         dims: N,
@@ -158,14 +158,18 @@ fn load_qsmjl() -> Vec<Vec<f64>> {
 }
 
 #[test]
-fn defaults_are_qsm_jls() {
+fn defaults_are_qsm_jls_except_retuned() {
+    // TKD's threshold and TV's lambda were re-tuned (tkd.rs/tv.rs module docs); the parity cases
+    // above pass QSM.jl's values explicitly. The rest are QSM.jl's.
     let t = TkdParams::default();
+    assert_eq!((t.threshold, t.pad), (0.25, [0; 3]));
+    let t = TsvdParams::default();
     assert_eq!((t.threshold, t.pad), (0.15, [0; 3]));
     let t = TikhonovParams::default();
     assert!(matches!(t.reg, Regularization::Identity));
     assert_eq!((t.lambda, t.pad), (1e-2, [0; 3]));
     let t = TvParams::default();
-    assert_eq!((t.lambda, t.rho, t.tol, t.max_iter, t.pad), (1e-3, None, 1e-3, 250, [0; 3]));
+    assert_eq!((t.lambda, t.rho, t.tol, t.max_iter, t.pad), (3e-4, None, 1e-3, 250, [0; 3]));
     let (r, q) = (RtsParams::default(), QSMJL_RTS);
     assert_eq!(
         (r.delta, r.mu, r.rho, r.tol, r.max_iter, r.lsmr_iter, r.tau, r.gamma, r.pad),

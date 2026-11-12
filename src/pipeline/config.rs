@@ -10,7 +10,7 @@ use crate::bgremove::{
     HarperellaParams, IharperellaParams,
 };
 use crate::inversion::{
-    IlsqrParams, MediParams, NltvParams, RtsParams, TgvParams, TikhonovParams, TkdParams, TvParams,
+    IlsqrParams, MediParams, NltvParams, RtsParams, TgvParams, TikhonovParams, TkdParams, TsvdParams, TvParams,
     NdiParams, FansiParams, L1QsmParams, WhQsmParams, HdQsmParams, TfiParams, AmpPeParams,
     LsqrQsmParams, HeidiParams, StarParams,
 };
@@ -701,7 +701,7 @@ impl Default for BgRemovalConfig {
 pub struct InversionConfig {
     pub algorithm: InversionAlgorithm,
     pub tkd: TkdParams,
-    pub tsvd: TkdParams,
+    pub tsvd: TsvdParams,
     pub tikhonov: TikhonovParams,
     pub tv: TvParams,
     pub rts: RtsParams,
@@ -845,7 +845,7 @@ impl Default for InversionConfig {
         Self {
             algorithm: InversionAlgorithm::Rts,
             tkd: TkdParams::default(),
-            tsvd: TkdParams::default(),
+            tsvd: TsvdParams::default(),
             tikhonov: TikhonovParams::default(),
             tv: TvParams::default(),
             rts: RtsParams::default(),

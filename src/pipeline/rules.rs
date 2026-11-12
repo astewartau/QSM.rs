@@ -614,7 +614,7 @@ pub const SETTINGS: &[(&str, &str)] = &[
     ("inversion.heidi.te", "Echo time HEIDI converts at (EchoTime); only with HEIDI"),
     ("inversion.heidi.denoise_itk", "HEIDI's anisotropic diffusion in ITK's float arithmetic (AnisotropicDiffusionParams::reference_itk, bool); only with HEIDI's denoising on"),
     ("inversion.tkd.threshold", "TKD's truncation threshold, |D| (TkdParams::threshold); only with TKD"),
-    ("inversion.tsvd.threshold", "TSVD's truncation threshold, |D| (TkdParams::threshold); only with TSVD"),
+    ("inversion.tsvd.threshold", "TSVD's truncation threshold, |D| (TsvdParams::threshold); only with TSVD"),
     ("inversion.qsmart.inversion", "QSMART's inner inversion (InversionAlgorithm::id); only with QSMART"),
     ("inversion.qsmart.ilsqr_max_iter", "QSMART's iLSQR iteration count; only with QSMART"),
     ("inversion.qsmart.ilsqr_pad_mm", "QSMART's iLSQR padding, mm; only with QSMART"),
