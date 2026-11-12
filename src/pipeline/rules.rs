@@ -1994,13 +1994,26 @@ pub static RULES: &[Rule] = &[
          normalising by the in-mask 99.9th percentile gave scales 1.04-1.07 against iLSQR (0.43-0.91). \
          Slightly worse on the simulated head (NRMSE 53.9 vs 52.0 %), whose maximum is in the brain",
         "QSM.rs inversion::ndi NdiWeightNorm docs (#437)"),
-    suggest("whqsm.flat-in-mask-in-vivo",
+    // WH-QSM's data weight inside the mask only (decision 120, 2026-11-12): Recommended and
+    // preselected for all data, while the authors' whole-volume `Flat` stays QSM.rs's default and
+    // the parity/reference setting. Measured on QSM-CI's simulated head through realistic chains
+    // (ground-truth total field -> background removal -> WH-QSM), flat -> flat-in-mask XSIM:
+    // PDF 0.442 -> 0.535, LBV 0.572 -> 0.640, V-SHARP 0.522 -> 0.536, RESHARP 0.558 -> 0.584. On
+    // the EMTP travelling-head harmonization (30 chains), inter-scanner deviation
+    // 8.6 -> 6.8 %, against the bridge scanner 10.1 -> 6.1 %, test-retest 2.2 -> 1.9 %; 28 of 30
+    // chains better. The one case where flat is better is the dipole-only sim, whose input is
+    // the ground-truth local field (true outside the mask too): NRMSE 33.6 vs 38.2 %. Earlier
+    // (2026-11-10, #437/#448) this was a not-preselected in-vivo suggestion
+    // (`whqsm.flat-in-mask-in-vivo`). Triage: ~/work/handovers/2026-11-11/status/whqsm-triage.md.
+    measured_better("whqsm.flat-in-mask",
         &[inv(&[Choice("whqsm")]), method("inversion.whqsm.weight", &[Choice("flat")])],
         "inversion.whqsm.weight", &[Choice("flat-in-mask")],
-        "In vivo the flat weight's data term outside the brain adds smooth shading; the weight \
-         inside the mask only gave r 0.72-0.75 with iLSQR (0.58-0.60). Slightly worse on the \
-         simulated head (NRMSE 38.2 vs 33.6 %), whose local field is true outside the mask too",
-        "QSM.rs inversion::whqsm WhQsmWeight::FlatInMask docs (#437)"),
+        "Weighting the data inside the brain only removes smooth shading that the flat weight's \
+         data outside the brain adds. It did better after every background removal on the \
+         simulated head (XSIM 0.535 vs 0.442 after PDF) and was more consistent across scanners \
+         (6.8 vs 8.6 % on travelling heads). The authors' flat weight did better only when given \
+         the true local field",
+        "QSM.rs inversion::whqsm WhQsmWeight::FlatInMask docs (#437); decision 120"),
     // ---------------------------------------------------------------- Echo time of the ppm↔rad conversion (#276)
     // With one echo every choice is the same time, so these need several.
     measured_better("fansi.te-spacing", &[inv(&[Choice("fansi"), Choice("fansi-tgv")]), MULTI_ECHO],
@@ -2319,6 +2332,18 @@ mod tests {
         assert_eq!(serde_json::to_value(rim).unwrap()["preselected"].as_bool(), Some(true));
     }
 
+    /// WH-QSM's in-mask weight is recommended and preselected for all data (decision 120), while
+    /// the authors' flat weight stays the default.
+    #[test]
+    fn whqsm_flat_in_mask_is_recommended() {
+        assert_eq!(crate::inversion::WhQsmWeight::default(), crate::inversion::WhQsmWeight::Flat);
+        let rule = RULES.iter().find(|r| r.id == "whqsm.flat-in-mask").unwrap();
+        let json = serde_json::to_value(rule).unwrap();
+        assert_eq!((json["strength"].as_str(), json["preselected"].as_bool()),
+            (Some("recommended"), Some(true)));
+        assert!(RULES.iter().all(|r| r.id != "whqsm.flat-in-mask-in-vivo"));
+    }
+
     /// With HEIDI on, every inversion but LSQR gets a `heidi.*` finding that offers LSQR (the
     /// authors' seed): at least as the authors' setting, more strongly for the regularised and
     /// the total-field methods.
@@ -2555,7 +2580,7 @@ mod tests {
             ("ndi.te-first", Case::new(|c| { inversion(I::Ndi)(c); c.cfg.inversion.ndi.te = crate::EchoTime::Spacing })),
             ("iharperella.whole-rim", Case::new(background(B::Iharperella))),
             ("ndi.weight-norm-in-vivo", Case::new(inversion(I::Ndi))),
-            ("whqsm.flat-in-mask-in-vivo", Case::new(inversion(I::Whqsm))),
+            ("whqsm.flat-in-mask", Case::new(inversion(I::Whqsm))),
             ("l1qsm.te-first", Case::new(|c| { inversion(I::L1qsm)(c); c.cfg.inversion.l1qsm.te = crate::EchoTime::Sum })),
             ("whqsm.flat-weight-te-spacing", Case::new(|c| { inversion(I::Whqsm)(c); c.cfg.inversion.whqsm.te = crate::EchoTime::Spacing })),
             ("whqsm.magnitude-weight-te-spacing", Case::new(|c| {
