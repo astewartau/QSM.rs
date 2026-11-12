@@ -45,9 +45,9 @@
 //! noise term, `mask.*mag / max(mask.*mag)`, and [`WhQsmWeight::InVivo`] FANSI's
 //! `script_invivo.m` form, `min(2*mask*mag/max(mag), 1)`, as NDI uses. How the weight and the
 //! echo time ([`WhQsmParams::te`]) interact on the phantom is noted there.
-//! [`WhQsmWeight::FlatInMask`] (1 in the mask, no magnitude) is an in-vivo option: it drops the
-//! data term outside the brain, which in vivo carries residual background (measurements on the
-//! variant).
+//! [`WhQsmWeight::FlatInMask`] (1 in the mask, no magnitude) drops the data term outside the
+//! brain, which after background removal carries residual background; the rules recommend it
+//! (measurements on the variant), while `Flat` stays the default and the parity setting.
 //!
 //! # Newton safeguard
 //! The inner Newton step for `z2` (`WH_nlTV.m` l. 258-268) minimises, voxel by voxel,
@@ -116,10 +116,18 @@ pub enum WhQsmWeight {
     /// WH-QSM's correlation with iLSQR rose from 0.58–0.60 to 0.72–0.75 and the scale against it
     /// from 1.29–1.37 to 1.04–1.20. On QSM-CI's simulated head (whose local field is true outside
     /// the mask too) it is 16 % (χ NRMSE) from the original and further from the truth (38.2 %
-    /// against 33.6 %, r 0.927 against 0.945). A trade-off, so an option (2026-11-09,
-    /// `~/work/emtp-v11/regressions-dipole.md`). The rules offer it in place of `Flat` for in-vivo
-    /// data without preselecting it (`whqsm.flat-in-mask-in-vivo`,
-    /// [`Strength::Suggested`](crate::pipeline::rules::Strength::Suggested); decided 2026-11-10).
+    /// against 33.6 %, r 0.927 against 0.945) (2026-11-09, `~/work/emtp-v11/regressions-dipole.md`).
+    /// That sim is the one case where `Flat` is better: its input is the true local field. Through
+    /// realistic chains on the same head (ground-truth total field -> background removal ->
+    /// WH-QSM), flat -> flat-in-mask XSIM is PDF 0.442 -> 0.535, LBV 0.572 -> 0.640, V-SHARP
+    /// 0.522 -> 0.536 and RESHARP 0.558 -> 0.584; on the EMTP travelling-head harmonization
+    /// (30 chains) the inter-scanner deviation fell from 8.6 to 6.8 %, against the bridge
+    /// scanner from 10.1 to 6.1 % and test-retest from 2.2 to 1.9 %, 28 of 30 chains better
+    /// (2026-11-12 triage). So the rules recommend it in place of `Flat` for all data and
+    /// preselect it (`whqsm.flat-in-mask`,
+    /// [`Strength::Recommended`](crate::pipeline::rules::Strength::Recommended); decision 120,
+    /// 2026-11-12, replacing the not-preselected in-vivo suggestion of 2026-11-10). `Flat` stays
+    /// the default, as the authors' setting and the one parity is checked against.
     FlatInMask,
 }
 
