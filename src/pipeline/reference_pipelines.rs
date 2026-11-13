@@ -68,6 +68,11 @@ pub struct ReferencePipeline {
     /// The toolbox and the version its pipeline is taken from ("MEDI toolbox 2024.11.26"), as a
     /// methods sentence names it ("Processing followed the MEDI toolbox 2024.11.26 pipeline").
     pub toolbox: &'static str,
+    /// A known gap between this pipeline and the toolbox's own, in a sentence or two a host shows
+    /// with the pipeline's details (QSMxT's Pipeline tab), or `None`. Plain user-facing text: what
+    /// the toolbox does that this pipeline does not, and what it does instead. A gap is noted here
+    /// only until it is closed; the issue that tracks it is cited where the note is set.
+    pub note: Option<&'static str>,
     /// The method choices that start it, as rule settings and values ([`SETTINGS`](super::rules::SETTINGS)).
     pub choose: &'static [(&'static str, Value)],
     /// Where the pipeline is written down: the toolbox's script, README or paper.
@@ -83,6 +88,13 @@ pub static REFERENCE_PIPELINES: &[ReferencePipeline] = &[
         id: "medi-toolbox",
         name: "MEDI toolbox",
         toolbox: "MEDI toolbox 2024.11.26",
+        // README.m:98 fits bipolar data with Fit_ppm_complex_bipolar; QSMxT can't tell a scan is
+        // bipolar yet, and bipolar correction isn't supported with the complex fit
+        // (QSMxT/QSMxT#564).
+        note: Some(
+            "For bipolar readouts, the MEDI toolbox uses a bipolar echo fit, which is not supported yet. \
+             This pipeline always uses the monopolar fit.",
+        ),
         choose: &[("inversion.algorithm", Choice("medi"))],
         source: "MEDI toolbox 2024.11.26 README.m:80-144",
         reasoned: &[],
@@ -91,6 +103,7 @@ pub static REFERENCE_PIPELINES: &[ReferencePipeline] = &[
         id: "sti-suite-ilsqr",
         name: "STI Suite · iLSQR",
         toolbox: "STI Suite 3.0",
+        note: None,
         choose: &[("inversion.algorithm", Choice("ilsqr"))],
         source: "STI Suite 3.0 QSM_GUI, probed headless (QSM.rs ilsqr.rs and vsharp.rs docs)",
         reasoned: &[],
@@ -99,6 +112,7 @@ pub static REFERENCE_PIPELINES: &[ReferencePipeline] = &[
         id: "sti-suite-star",
         name: "STI Suite · STAR-QSM",
         toolbox: "STI Suite 3.0",
+        note: None,
         choose: &[("inversion.algorithm", Choice("star"))],
         source: "STI Suite 3.0 QSM_GUI, probed headless (QSM.rs star.rs and vsharp.rs docs)",
         reasoned: &[],
@@ -107,6 +121,7 @@ pub static REFERENCE_PIPELINES: &[ReferencePipeline] = &[
         id: "qsmart",
         name: "QSMART",
         toolbox: "QSMART",
+        note: None,
         choose: &[("inversion.algorithm", Choice("qsmart"))],
         source: "QSMART QSMART.m; Yaghmaie et al. 2021 NeuroImage 231:117701",
         // Recommended with QSMART (QSM.rs pipeline::qsmart docs), and what its authors ran.
@@ -116,6 +131,7 @@ pub static REFERENCE_PIPELINES: &[ReferencePipeline] = &[
         id: "heidi",
         name: "HEIDI package",
         toolbox: "HEIDI package (qsm_heidi 4592631)",
+        note: None,
         choose: &[("inversion.algorithm", Choice("lsqr")), ("inversion.apply_heidi", Bool(true))],
         source: "qsm_heidi makefile and def.sh (4592631); Schweser et al. 2012 NeuroImage 62:2083",
         reasoned: &[],
@@ -124,6 +140,7 @@ pub static REFERENCE_PIPELINES: &[ReferencePipeline] = &[
         id: "chi-sep-ilsqr",
         name: "χ-separation toolbox · iLSQR",
         toolbox: "χ-separation toolbox 1.1.3",
+        note: None,
         choose: &[("separation.algorithm", Choice("chi-sep-ilsqr"))],
         source: "χ-separation toolbox v1.1.3 Chisep_script.m",
         reasoned: &[],
@@ -132,6 +149,7 @@ pub static REFERENCE_PIPELINES: &[ReferencePipeline] = &[
         id: "chi-sep-medi",
         name: "χ-separation toolbox · MEDI",
         toolbox: "χ-separation toolbox 1.1.3",
+        note: None,
         choose: &[("separation.algorithm", Choice("chi-sep-medi"))],
         source: "χ-separation toolbox v1.1.3 Chisep_script.m",
         reasoned: &[],
@@ -140,6 +158,7 @@ pub static REFERENCE_PIPELINES: &[ReferencePipeline] = &[
         id: "chi-sepnet",
         name: "χ-separation toolbox · χ-sepnet",
         toolbox: "χ-separation toolbox 1.1.3",
+        note: None,
         choose: &[("separation.algorithm", Choice("chi-sepnet")), ("separation.chi_sepnet.route", Choice("toolbox"))],
         source: "χ-separation toolbox v1.1.3 Chisep_script.m; Kim et al. 2025 (χ-sepnet)",
         reasoned: &[],
@@ -148,6 +167,7 @@ pub static REFERENCE_PIPELINES: &[ReferencePipeline] = &[
         id: "decompose",
         name: "DECOMPOSE",
         toolbox: "DECOMPOSE",
+        note: None,
         // A QSM per echo is what its authors ran (§2.2, §4.1: a TE-dependent QSM input is
         // necessary), so it is one of the pipeline's choices, though its rule
         // (`decompose.qsm-per-echo`) is a reasoned one: see the decision above.
@@ -159,6 +179,7 @@ pub static REFERENCE_PIPELINES: &[ReferencePipeline] = &[
         id: "uk-biobank",
         name: "UK Biobank",
         toolbox: "UK Biobank QSM",
+        note: None,
         choose: &[("inversion.algorithm", Choice("ilsqr")), ("bg_removal.ukb_mask_trim", Bool(true))],
         source: "UK Biobank UKBiobank_QSM.m (git.fmrib.ox.ac.uk/cwang/uk_biobank_qsm_pipeline); Wang et al. 2022 Nat. Neurosci.",
 
@@ -198,6 +219,7 @@ mod tests {
             assert!(ids.insert(p.id), "duplicate pipeline id {}", p.id);
             assert!(p.id.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'), "{}: not kebab-case", p.id);
             assert!(!p.choose.is_empty(), "{}: no choices", p.id);
+            assert!(p.note.is_none_or(|n| !n.trim().is_empty() && n.ends_with('.')), "{}: note must be a sentence", p.id);
             for (setting, _) in p.choose {
                 assert!(SETTINGS.iter().any(|(s, _)| s == setting), "{}: {setting} not in SETTINGS", p.id);
             }
