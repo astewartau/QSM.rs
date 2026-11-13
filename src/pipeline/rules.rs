@@ -576,7 +576,7 @@ pub const SETTINGS: &[(&str, &str)] = &[
     ("field_mapping.phase_offset_removal", "MCPC-3D-S phase-offset removal before unwrapping (bool)"),
     ("field_mapping.phase_offset_sigma_mm", "MCPC-3D-S smoothing sigma per axis, mm; only with phase-offset removal"),
     ("field_mapping.bipolar_correction", "Bipolar readout correction (bool)"),
-    ("field_mapping.laplacian_solver", "Laplacian unwrapping's solver: dct, fft-12 (LaplacianSolver::FFT_DEFAULT_PAD), fft (other padding) or mirror; only with Laplacian unwrapping"),
+    ("field_mapping.laplacian_solver", "Laplacian unwrapping's solver: dct, fft-12 (LaplacianSolver::FFT_DEFAULT_PAD), fft (other padding), mirror or mgpcg; only with Laplacian unwrapping"),
     ("field_mapping.laplacian_unmasked", "Laplacian unwrapping on the raw phase over the whole volume, not the phase zeroed outside the mask (bool); only with Laplacian unwrapping"),
     ("bg_removal.algorithm", "Background field removal (BgRemovalAlgorithm::id)"),
     ("bg_removal.vsharp.deconvolve", "V-SHARP's TSVD deconvolution (bool); only with V-SHARP"),
@@ -826,6 +826,7 @@ pub fn current(input: &RuleInput, facts: &ScanFacts, setting: &str) -> Option<Ve
                     s if s == L::FFT_DEFAULT_PAD => "fft-12",
                     L::Fft { .. } => "fft",
                     L::Mirror => "mirror",
+                    L::Mgpcg => "mgpcg",
                 }),
             )
         }
