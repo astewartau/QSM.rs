@@ -86,6 +86,9 @@
 //! and combined with the configured [`B0WeightType`](crate::utils::B0WeightType). UK Biobank's field map is
 //! `Fft { pad: [64; 3] }` with [`B0WeightType::AssumedDecay`](crate::utils::B0WeightType::AssumedDecay)
 //! at 40 ms.
+//! The rules `ukb.unwrap-laplacian`, `ukb.laplacian-solver` (`fft-64`, [`LaplacianSolver::FFT_UKB_PAD`]) and
+//! `ukb.unwrap-masked` say so for UK Biobank's pipeline, in place of STI Suite's GUI's
+//! `sti.laplacian-solver` and `sti.unwrap-unmasked`.
 //!
 //! [`UnwrapMethod::Laplacian`](super::UnwrapMethod::Laplacian) selects [`laplacian_unwrap`] with
 //! [`LaplacianSolver::Dct`], since the pipeline removes background as a later stage.
@@ -501,6 +504,9 @@ pub enum LaplacianSolver {
 impl LaplacianSolver {
     /// [`LaplacianSolver::Fft`] with STI Suite's default padding, 12 voxels per side.
     pub const FFT_DEFAULT_PAD: LaplacianSolver = LaplacianSolver::Fft { pad: [12, 12, 12] };
+    /// [`Fft`](Self::Fft) with the 64 voxels of padding UK Biobank's pipeline passes
+    /// (`MRPhaseUnwrap(·, 'padsize', [64 64 64])`).
+    pub const FFT_UKB_PAD: LaplacianSolver = LaplacianSolver::Fft { pad: [64, 64, 64] };
 }
 
 /// Laplacian phase unwrapping; **without** background field removal except with

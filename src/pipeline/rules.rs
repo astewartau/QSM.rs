@@ -576,11 +576,13 @@ pub const SETTINGS: &[(&str, &str)] = &[
     ("field_mapping.phase_offset_removal", "MCPC-3D-S phase-offset removal before unwrapping (bool)"),
     ("field_mapping.phase_offset_sigma_mm", "MCPC-3D-S smoothing sigma per axis, mm; only with phase-offset removal"),
     ("field_mapping.bipolar_correction", "Bipolar readout correction (bool)"),
-    ("field_mapping.laplacian_solver", "Laplacian unwrapping's solver: dct, fft-12 (LaplacianSolver::FFT_DEFAULT_PAD), fft (other padding), mirror or mgpcg; only with Laplacian unwrapping"),
+    ("field_mapping.laplacian_solver", "Laplacian unwrapping's solver: dct, fft-12 (LaplacianSolver::FFT_DEFAULT_PAD), fft-64 (LaplacianSolver::FFT_UKB_PAD), fft (other padding), mirror or mgpcg; only with Laplacian unwrapping"),
     ("field_mapping.laplacian_unmasked", "Laplacian unwrapping on the raw phase over the whole volume, not the phase zeroed outside the mask (bool); only with Laplacian unwrapping"),
+    ("field_mapping.laplacian_keep_outside", "The Laplacian-unwrapped, weighted-mean field kept over the whole volume, not only inside the mask (bool); only with Laplacian unwrapping of the masked phase and a weighted mean"),
     ("bg_removal.algorithm", "Background field removal (BgRemovalAlgorithm::id)"),
     ("bg_removal.vsharp.deconvolve", "V-SHARP's TSVD deconvolution (bool); only with V-SHARP"),
     ("bg_removal.polish_mask", "STI Suite QSM_GUI's PolishMask after background removal: largest 26-connected component, holes filled (BgRemovalConfig::polish_mask, bool)"),
+    ("bg_removal.ukb_mask_trim", "UK Biobank's phase-reliability mask trimming before and after background removal (BgRemovalConfig::ukb_mask_trim, bool)"),
     ("bg_removal.vsharp.max_radius", "V-SHARP's largest kernel radius, mm; only with V-SHARP"),
     ("bg_removal.vsharp.min_radius", "V-SHARP's smallest kernel radius, mm; only with V-SHARP"),
     ("bg_removal.vsharp.radius_step", "V-SHARP's step between kernel radii, mm; only with V-SHARP"),
@@ -824,6 +826,7 @@ pub fn current(input: &RuleInput, facts: &ScanFacts, setting: &str) -> Option<Ve
                 Current::Choice(match c.field_mapping.laplacian_solver {
                     L::Dct => "dct",
                     s if s == L::FFT_DEFAULT_PAD => "fft-12",
+                    s if s == L::FFT_UKB_PAD => "fft-64",
                     L::Fft { .. } => "fft",
                     L::Mirror => "mirror",
                     L::Mgpcg => "mgpcg",
@@ -835,8 +838,16 @@ pub fn current(input: &RuleInput, facts: &ScanFacts, setting: &str) -> Option<Ve
                 && c.field_mapping.unwrapping_algorithm == super::config::UnwrappingAlgorithm::Laplacian,
             Current::Bool(c.field_mapping.laplacian_unmasked),
         ),
+        "field_mapping.laplacian_keep_outside" => gated(
+            inv_input.needs_field_mapping()
+                && c.field_mapping.unwrapping_algorithm == super::config::UnwrappingAlgorithm::Laplacian
+                && !c.field_mapping.laplacian_unmasked
+                && matches!(c.field_mapping.b0_estimation, super::config::B0EstimationMethod::WeightedAvg { .. }),
+            Current::Bool(c.field_mapping.laplacian_keep_outside),
+        ),
         "bg_removal.vsharp.deconvolve" => gated(vsharp, Current::Bool(c.bg_removal.vsharp.deconvolve)),
         "bg_removal.polish_mask" => gated(inv_input.needs_bg_removal(), Current::Bool(c.bg_removal.polish_mask)),
+        "bg_removal.ukb_mask_trim" => gated(inv_input.needs_bg_removal(), Current::Bool(c.bg_removal.ukb_mask_trim)),
         "bg_removal.vsharp.max_radius" => gated(vsharp, Current::Number(c.bg_removal.vsharp.max_radius)),
         "bg_removal.vsharp.min_radius" => gated(vsharp, Current::Number(c.bg_removal.vsharp.min_radius)),
         "bg_removal.vsharp.radius_step" => gated(vsharp, Current::Number(c.bg_removal.vsharp.radius_step)),
@@ -1036,6 +1047,15 @@ const fn sep(values: &'static [Value]) -> Condition {
 const fn unless_sep(values: &'static [Value]) -> Condition {
     C::Unless { setting: "separation.algorithm", is: Test::OneOf { values } }
 }
+/// UK Biobank's mask trimming is on: the trigger of the `ukb.*` rules, and what UK Biobank's
+/// toolbox pipeline sets.
+/// UK Biobank's pipeline script, at the commit QSM-CI's verified `ukb-qsm` vendors.
+const UKB_SOURCE: &str = "UK Biobank QSM pipeline UKBiobank_QSM.m l. 158-226 (git.fmrib.ox.ac.uk/cwang/uk_biobank_qsm_pipeline; \
+    Wang et al. 2022, Nat. Neurosci., doi:10.1038/s41593-022-01074-w); QSM.rs utils::phase_reliability";
+const UKB: Condition = method("bg_removal.ukb_mask_trim", &[Bool(true)]);
+/// UK Biobank's mask trimming is off (or not in play): STI Suite's GUI rules that UK Biobank,
+/// which calls STI Suite's functions from its own script, does not follow.
+const NOT_UKB: Condition = C::Unless { setting: "bg_removal.ukb_mask_trim", is: Test::OneOf { values: &[Bool(true)] } };
 const fn fact_at_least(fact: Fact, min: f64) -> Condition {
     C::Fact { fact, is: Test::Range { min: Some(min), max: None } }
 }
@@ -1363,24 +1383,24 @@ pub static RULES: &[Rule] = &[
     // decision 112). The threshold method now reads `none` on a section that is not a threshold
     // ([`current`]), so this rule alone fires on a BET mask as well, and its value says the whole
     // thing. `no_two_rules_on_one_choice_disagree` keeps it that way.
-    reference("sti.mask-threshold-gui", &[inv(&[Choice("ilsqr")]), unless_sep(CHI_SEP_TOOLBOX)],
+    reference("sti.mask-threshold-gui", &[inv(&[Choice("ilsqr")]), unless_sep(CHI_SEP_TOOLBOX), NOT_UKB],
         "masking.threshold_method", &[Choice("sti-gui")],
         "STI Suite's QSM_GUI masks the magnitude above the level its threshold tool starts at",
         STI_GUI_MASK_SOURCE),
-    reference("sti.mask-input", &[inv(&[Choice("ilsqr")]), unless_sep(CHI_SEP_TOOLBOX)], "masking.input",
+    reference("sti.mask-input", &[inv(&[Choice("ilsqr")]), unless_sep(CHI_SEP_TOOLBOX), NOT_UKB], "masking.input",
         &[Choice("magnitude-last")], "QSM_GUI thresholds the last echo's magnitude (the last volume loaded)",
         STI_GUI_MASK_SOURCE),
-    reference("sti.mask-no-correction", &[inv(&[Choice("ilsqr")]), unless_sep(CHI_SEP_TOOLBOX)],
+    reference("sti.mask-no-correction", &[inv(&[Choice("ilsqr")]), unless_sep(CHI_SEP_TOOLBOX), NOT_UKB],
         "masking.inhomogeneity_correction", &[Choice("none")],
         "QSM_GUI thresholds the magnitude as loaded, with no bias-field correction", STI_GUI_MASK_SOURCE),
-    reference("sti.mask-largest-component", &[inv(&[Choice("ilsqr")]), unless_sep(CHI_SEP_TOOLBOX)],
+    reference("sti.mask-largest-component", &[inv(&[Choice("ilsqr")]), unless_sep(CHI_SEP_TOOLBOX), NOT_UKB],
         "masking.largest_component", &[Bool(true)],
         "QSM_GUI keeps the thresholded mask's largest connected component (bwlabeln, regionprops)",
         STI_GUI_MASK_SOURCE),
-    reference("sti.mask-imfill", &[inv(&[Choice("ilsqr")]), unless_sep(CHI_SEP_TOOLBOX)],
+    reference("sti.mask-imfill", &[inv(&[Choice("ilsqr")]), unless_sep(CHI_SEP_TOOLBOX), NOT_UKB],
         "masking.imfill", &[Bool(true)],
         "QSM_GUI fills every hole of that component (regionprops' FilledImage)", STI_GUI_MASK_SOURCE),
-    reference("sti.mask-no-erosion", &[inv(&[Choice("ilsqr")]), unless_sep(CHI_SEP_TOOLBOX)],
+    reference("sti.mask-no-erosion", &[inv(&[Choice("ilsqr")]), unless_sep(CHI_SEP_TOOLBOX), NOT_UKB],
         "masking.erosion", &[Number(0.0)],
         "QSM_GUI does not erode its mask (V-SHARP erodes it)", STI_GUI_MASK_SOURCE),
     reference("medi.mask-input", &[inv(&[Choice("medi")])], "masking.input", &[Choice("magnitude")],
@@ -1585,17 +1605,17 @@ pub static RULES: &[Rule] = &[
         ROMEO_CLI_SOURCE),
     // Scoped out of the χ-separation toolbox: it runs STI Suite's iLSQR (`chi-sep-*.qsm-ilsqr`)
     // but unwraps with ROMEO (`chi-sep.unwrap-romeo`), so this rule is not its pipeline's.
-    reference("sti.unwrap-laplacian", &[inv(STI), unless_sep(CHI_SEP_TOOLBOX)],
+    reference("sti.unwrap-laplacian", &[inv(STI), unless_sep(CHI_SEP_TOOLBOX), NOT_UKB],
         "field_mapping.unwrapping_algorithm", LAPLACIAN,
         "STI Suite's QSM_GUI unwraps each echo with MRPhaseUnwrap (Laplacian)",
         "STI Suite 3.0 QSM_GUI, probed headless (recorded in QSM.rs laplacian.rs docs)"),
     reference("sti.laplacian-solver",
-        &[inv(STI), method("field_mapping.unwrapping_algorithm", LAPLACIAN)],
+        &[inv(STI), method("field_mapping.unwrapping_algorithm", LAPLACIAN), NOT_UKB],
         "field_mapping.laplacian_solver", &[Choice("fft-12")],
         "MRPhaseUnwrap is the FFT Schofield-Zhu solver with 12 voxels of padding",
         "STI Suite 3.0 MRPhaseUnwrap, probed (recorded in QSM.rs LaplacianSolver::Fft docs)"),
     reference("sti.unwrap-unmasked",
-        &[inv(STI), method("field_mapping.unwrapping_algorithm", LAPLACIAN)],
+        &[inv(STI), method("field_mapping.unwrapping_algorithm", LAPLACIAN), NOT_UKB],
         "field_mapping.laplacian_unmasked", &[Bool(true)],
         "STI Suite's QSM_GUI gives MRPhaseUnwrap the raw wrapped phase, not the phase masked first",
         "STI Suite 3.0 QSM_GUI, probed headless (recorded in QSM.rs laplacian.rs docs)"),
@@ -1624,13 +1644,13 @@ pub static RULES: &[Rule] = &[
         "field_mapping.b0_estimation.qsmart_fit_threshold", &[Choice("absolute-40")],
         "QSMART_toolbox_v1.0's demo cuts R_0 at a fixed echo-fit residual of 40 (adaptive_threshold 0)",
         "QSMART Demo_QSMART.m l. 38, 46; echofit.m l. 96-101"),
-    reference("sti.echo-combination", &[inv(STI), MULTI_ECHO],
+    reference("sti.echo-combination", &[inv(STI), MULTI_ECHO, NOT_UKB],
         "field_mapping.b0_estimation", WEIGHTED_AVG,
         "STI Suite's QSM_GUI sums the unwrapped echoes and divides by the summed echo times",
         "STI Suite 3.0 QSM_GUI, probed headless (recorded in QSM.rs star.rs docs)"),
     // Scoped out of the χ-separation toolbox, which weights the echoes its own way
     // (`chi-sep.echo-weights`).
-    reference("sti.echo-weights", &[inv(STI), MULTI_ECHO, unless_sep(CHI_SEP_TOOLBOX)],
+    reference("sti.echo-weights", &[inv(STI), MULTI_ECHO, unless_sep(CHI_SEP_TOOLBOX), NOT_UKB],
         "field_mapping.b0_estimation.weighting", &[Choice("tes")],
         "Σφ/ΣTE is the TE-weighted mean of φ/TE",
         "STI Suite 3.0 QSM_GUI, probed headless (recorded in QSM.rs star.rs docs)"),
@@ -1775,13 +1795,13 @@ pub static RULES: &[Rule] = &[
     reference("decompose.bg-vsharp", &[sep(&[Choice("decompose")])], "bg_removal.algorithm", VSHARP,
         "DECOMPOSE's pipeline removes the background with V-SHARP",
         "Chen et al. 2021 NeuroImage 242:118477 (DECOMPOSE), §3.6"),
-    reference("sti.bg-vsharp", &[inv(STI)], "bg_removal.algorithm", VSHARP,
+    reference("sti.bg-vsharp", &[inv(STI), NOT_UKB], "bg_removal.algorithm", VSHARP,
         "STI Suite's QSM_GUI feeds iLSQR and STAR-QSM the V-SHARP local field",
         "STI Suite 3.0 QSM_GUI, probed headless (recorded in QSM.rs star.rs and ilsqr.rs docs)"),
     // STI Suite QSM_GUI runs PolishMask on V-SHARP's mask before either inversion (probed headless,
     // licensed MATLAB R2023b, 2026-11-11; QSM.rs pipeline::bg_removal::polish_mask). Not the
     // χ-separation toolbox, whose script calls V_SHARP itself.
-    reference("sti.vsharp-polish-mask", &[inv(STI), bg(VSHARP), unless_sep(CHI_SEP_TOOLBOX)],
+    reference("sti.vsharp-polish-mask", &[inv(STI), bg(VSHARP), unless_sep(CHI_SEP_TOOLBOX), NOT_UKB],
         "bg_removal.polish_mask", &[Bool(true)],
         "STI Suite's QSM_GUI polishes V-SHARP's mask (largest connected component, holes filled) \
          and inverts the field inside it",
@@ -1836,7 +1856,7 @@ pub static RULES: &[Rule] = &[
     // scoped out of it (`chi-sep.ilsqr-iterations`).
     Rule {
         id: "sti.ilsqr-iterations",
-        when: &[inv(&[Choice("ilsqr")]), unless_sep(CHI_SEP_TOOLBOX)],
+        when: &[inv(&[Choice("ilsqr")]), unless_sep(CHI_SEP_TOOLBOX), NOT_UKB],
         setting: "inversion.ilsqr.max_iter",
         expect: Test::OneOf { values: &[Number(crate::inversion::STI_GUI_NITER as f64)] },
         default: Number(crate::inversion::STI_GUI_NITER as f64),
@@ -1867,7 +1887,7 @@ pub static RULES: &[Rule] = &[
         "STI Suite 3.0 QSM_iLSQR, probed (QSM.rs ilsqr.rs docs, Performance and precision)"),
     Rule {
         id: "sti.ilsqr-pad",
-        when: &[inv(&[Choice("ilsqr")])],
+        when: &[inv(&[Choice("ilsqr")]), NOT_UKB],
         setting: "inversion.ilsqr.pad_mm",
         expect: Test::OneOf { values: &[Number(crate::inversion::STI_GUI_PAD_MM)] },
         default: Number(crate::inversion::STI_GUI_PAD_MM),
@@ -1877,6 +1897,68 @@ pub static RULES: &[Rule] = &[
         reason: "STI Suite's QSM_GUI calls QSM_iLSQR with padsize [12 12 12]",
         source: "STI Suite 3.0 QSM_GUI, probed headless (QSM.rs IlsqrParams::pad_mm, #293)",
     },
+    // ---------------------------------------------------------------- UK Biobank
+    // UK Biobank's QSM pipeline (UKBiobank_QSM.m), from the point where the coil-combined phase
+    // exists: its phase-reliability mask trimming (the trigger, BgRemovalConfig::ukb_mask_trim)
+    // around STI Suite's MRPhaseUnwrap, V_SHARP and QSM_iLSQR, called as functions with UK
+    // Biobank's own arguments, not through STI Suite's GUI. So the STI GUI's own choices (its
+    // threshold mask, raw-phase unwrapping, summed echoes, PolishMask, 40 iterations and 12 mm
+    // padding) are scoped out of it (NOT_UKB), and these replace them. What the functions do
+    // whoever calls them (V_SHARP's radii, grid and no deconvolution; QSM_iLSQR's single
+    // precision) stays with the `sti.*` rules, which fire here too. UK Biobank's brain mask is its
+    // T1 structural mask registered to the SWI, which the SWI alone cannot give, so no rule names
+    // a mask; nor its coil combination (MCPC-3D-S), which is upstream of a coil-combined phase.
+    reference("ukb.inversion-ilsqr", &[UKB], "inversion.algorithm", &[Choice("ilsqr")],
+        "UK Biobank inverts its trimmed local field with STI Suite's QSM_iLSQR", UKB_SOURCE),
+    reference("ukb.unwrap-laplacian", &[UKB], "field_mapping.unwrapping_algorithm", LAPLACIAN,
+        "UK Biobank unwraps each echo with STI Suite's MRPhaseUnwrap (Laplacian)", UKB_SOURCE),
+    reference("ukb.laplacian-solver", &[UKB, method("field_mapping.unwrapping_algorithm", LAPLACIAN)],
+        "field_mapping.laplacian_solver", &[Choice("fft-64")],
+        "UK Biobank calls MRPhaseUnwrap with padsize [64 64 64]: the FFT Schofield-Zhu solver with 64 voxels of padding",
+        UKB_SOURCE),
+    reference("ukb.unwrap-masked", &[UKB, method("field_mapping.unwrapping_algorithm", LAPLACIAN)],
+        "field_mapping.laplacian_unmasked", &[Bool(false)],
+        "UK Biobank unwraps the phase zeroed outside its (untrimmed) brain mask, mask .* angle(combined)",
+        UKB_SOURCE),
+    reference("ukb.laplacian-keep-outside", &[UKB, method("field_mapping.unwrapping_algorithm", LAPLACIAN)],
+        "field_mapping.laplacian_keep_outside", &[Bool(true)],
+        "UK Biobank hands V_SHARP its combined unwrapped phase over the whole volume, which V_SHARP reads \
+         outside the mask it is given",
+        UKB_SOURCE),
+    reference("ukb.echo-combination", &[UKB, MULTI_ECHO], "field_mapping.b0_estimation", WEIGHTED_AVG,
+        "UK Biobank averages the unwrapped echoes with weights and divides by the same weighted mean echo time",
+        UKB_SOURCE),
+    reference("ukb.echo-weights", &[UKB, MULTI_ECHO], "field_mapping.b0_estimation.weighting",
+        &[Choice("assumed-decay")],
+        "UK Biobank weights the echoes by TE·exp(−TE/T2*) with T2* = 40 ms (AssumedDecay, 0.04 s)", UKB_SOURCE),
+    reference("ukb.bg-vsharp", &[UKB], "bg_removal.algorithm", VSHARP,
+        "UK Biobank removes the background with STI Suite's V_SHARP (smvsize 12)", UKB_SOURCE),
+    Rule {
+        id: "ukb.ilsqr-iterations",
+        when: &[UKB, inv(&[Choice("ilsqr")])],
+        setting: "inversion.ilsqr.max_iter",
+        expect: Test::OneOf { values: &[Number(crate::inversion::STI_DEFAULT_NITER as f64)] },
+        default: Number(crate::inversion::STI_DEFAULT_NITER as f64),
+        unit: Unit::None,
+        strength: Strength::Reference,
+        basis: Basis::ReferenceChoice,
+        reason: "UK Biobank calls QSM_iLSQR without niter, so it runs 100 iterations",
+        source: UKB_SOURCE,
+    },
+    Rule {
+        id: "ukb.ilsqr-pad",
+        when: &[UKB, inv(&[Choice("ilsqr")])],
+        setting: "inversion.ilsqr.pad_mm",
+        expect: Test::OneOf { values: &[Number(crate::inversion::STI_PAD_MM)] },
+        default: Number(crate::inversion::STI_PAD_MM),
+        unit: Unit::Mm,
+        strength: Strength::Reference,
+        basis: Basis::ReferenceChoice,
+        reason: "UK Biobank calls QSM_iLSQR with padsize [64 64 64]",
+        source: UKB_SOURCE,
+    },
+    reference("ukb.reference-none", &[UKB], "reference", &[Choice("none")],
+        "UK Biobank keeps QSM_iLSQR's χ as it is, without referencing it", UKB_SOURCE),
     reference("resharp.radius", &[bg(&[Choice("resharp")])], "bg_removal.resharp.radius",
         &[Number(3.0)],
         "RESHARP's author's code defaults to a 3 mm kernel",
@@ -2248,7 +2330,7 @@ pub static RULES: &[Rule] = &[
     // stored χ equals the function's output exactly; probed 2026-11-11). Not DECOMPOSE, which
     // runs STAR-QSM per echo and references its own χ (decompose.reference-mean), nor the
     // χ-separation toolbox, whose script is its own pipeline (chi-sep.reference-none).
-    reference("sti.reference-none", &[inv(STI), unless_sep(STI_NOT_REFERENCE_NONE)], "reference",
+    reference("sti.reference-none", &[inv(STI), unless_sep(STI_NOT_REFERENCE_NONE), NOT_UKB], "reference",
         &[Choice("none")],
         "STI Suite's QSM_GUI keeps the inversion's χ as it is, without referencing it",
         STI_GUI_MASK_SOURCE),
@@ -2337,6 +2419,10 @@ mod tests {
         }
     }
 
+    /// UK Biobank's mask trimming on (the `ukb.*` rules' trigger).
+    fn ukb(c: &mut Case) {
+        c.cfg.bg_removal.ukb_mask_trim = true;
+    }
     fn inversion(a: InversionAlgorithm) -> impl FnOnce(&mut Case) {
         move |c| c.cfg.inversion.algorithm = a
     }
@@ -2664,6 +2750,27 @@ mod tests {
             })),
             ("sti.echo-combination", Case::new(|c| { inversion(I::Star)(c); linear_fit(c) })),
             ("sti.echo-weights", Case::new(inversion(I::Ilsqr))),
+            ("ukb.inversion-ilsqr", Case::new(ukb)),
+            ("ukb.unwrap-laplacian", Case::new(|c| { ukb(c); inversion(I::Ilsqr)(c) })),
+            ("ukb.laplacian-solver", Case::new(|c| {
+                ukb(c);
+                c.cfg.field_mapping.unwrapping_algorithm = UnwrappingAlgorithm::Laplacian;
+            })),
+            ("ukb.unwrap-masked", Case::new(|c| {
+                ukb(c);
+                c.cfg.field_mapping.unwrapping_algorithm = UnwrappingAlgorithm::Laplacian;
+                c.cfg.field_mapping.laplacian_unmasked = true;
+            })),
+            ("ukb.laplacian-keep-outside", Case::new(|c| {
+                ukb(c);
+                c.cfg.field_mapping.unwrapping_algorithm = UnwrappingAlgorithm::Laplacian;
+            })),
+            ("ukb.echo-combination", Case::new(|c| { ukb(c); linear_fit(c) })),
+            ("ukb.echo-weights", Case::new(ukb)),
+            ("ukb.bg-vsharp", Case::new(|c| { ukb(c); background(B::Pdf)(c) })),
+            ("ukb.ilsqr-iterations", Case::new(|c| { ukb(c); inversion(I::Ilsqr)(c); c.cfg.inversion.ilsqr.max_iter = 40 })),
+            ("ukb.ilsqr-pad", Case::new(|c| { ukb(c); inversion(I::Ilsqr)(c) })),
+            ("ukb.reference-none", Case::new(ukb)),
             ("qsmart.mask-bet", Case::new(inversion(I::Qsmart))),
             ("qsmart.inner-inversion", Case::new(|c| {
                 inversion(I::Qsmart)(c);

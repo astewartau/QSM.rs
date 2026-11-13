@@ -201,6 +201,10 @@
 //!
 //! The facts above that a configuration can depart from are published as rules in
 //! [`crate::pipeline::rules::RULES`] (each with its strength, basis, reason and source): `sti.unwrap-laplacian`, `sti.laplacian-solver`, `sti.echo-combination`, `sti.echo-weights`, `sti.bg-vsharp`, `sti.vsharp-no-deconvolve`, `sti.vsharp-radius`, `sti.vsharp-grid`, `sti.vsharp-min-radius`, `sti.vsharp-radius-step`.
+//! UK Biobank's pipeline calls `V_SHARP(phs_comb, mask, 'voxelsize', voxsz, 'smvsize', 12)` from its own
+//! script, so the `sti.vsharp-*` rules (what `V_SHARP` does) apply to it, while `ukb.bg-vsharp` replaces
+//! `sti.bg-vsharp` and the GUI's PolishMask (`sti.vsharp-polish-mask`) gives way to UK Biobank's
+//! phase-reliability trims of the mask before and after `V_SHARP` ([`crate::utils::phase_reliability`]).
 //! `sti.unwrap-laplacian` and `sti.echo-weights` do not apply under the χ-separation toolbox's
 //! methods, which run STI Suite's iLSQR but unwrap with ROMEO and weight the echoes their own
 //! way (`chi-sep.unwrap-romeo`, `chi-sep.echo-weights`); its V-SHARP is STI Suite's, so the

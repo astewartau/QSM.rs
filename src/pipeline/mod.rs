@@ -60,7 +60,7 @@ pub use referencing::apply_reference;
 pub use masking::{apply_mask_ops, build_mask_section, resolve_masking_input, run_masking, section_magnitude};
 pub use motion::{run_motion_correction, MotionCorrectionConfig, MotionCorrectionResult};
 pub use field_mapping::run_field_mapping;
-pub use bg_removal::run_bg_removal;
+pub use bg_removal::{run_bg_removal, run_bg_removal_trimmed};
 pub use inversion::{heidi_seed_problem, run_dipole_inversion, run_heidi_cone_fill, run_tgv, run_nextqsm, run_iqsm, run_iqsm_plus, run_iqfm};
 pub use separation::{run_separation, SeparationInputs, SeparationResult};
 pub use observer::{Observer, VolumeRef};

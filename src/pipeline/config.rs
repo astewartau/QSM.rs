@@ -593,6 +593,20 @@ pub struct FieldMappingConfig {
     /// whole volume, as QSMART fits them; the other combinations use the voxels inside the mask.
     /// Only with Laplacian unwrapping.
     pub laplacian_unmasked: bool,
+    /// Keep the Laplacian-unwrapped, echo-combined field over the whole volume, not only inside
+    /// the mask (default `false`). Only with Laplacian unwrapping of the masked phase
+    /// (`laplacian_unmasked` off) and [`B0EstimationMethod::WeightedAvg`]: each echo's unwrapped
+    /// phase is kept everywhere (the Poisson solution continues smoothly outside the mask), its
+    /// constant ([`run_field_mapping`](super::run_field_mapping)'s alignment, the mean inside the
+    /// mask) is removed everywhere, and the echoes are combined at every voxel. UK Biobank does
+    /// this: `MRPhaseUnwrap(mask .* phase)` gives the whole volume and its weighted combination
+    /// `phs_comb` goes to `V_SHARP` unmasked, and STI Suite's `V_SHARP` reads the field outside
+    /// the mask it is given. Measured on the QSM-CI in-vivo Prisma scan through UK Biobank's
+    /// trimmed mask: `V_SHARP` given the field zeroed outside the brain mask differs from the one
+    /// given the whole volume at 3,514 voxels by up to 1.1 rad (NRMSE 0.93 %); with the whole
+    /// volume, QSM.rs's `vsharp` matches the `ukb-qsm` container to 2e-6 rad (rule
+    /// `ukb.laplacian-keep-outside`). The field's valid mask is still the brain mask.
+    pub laplacian_keep_outside: bool,
     /// ROMEO's settings (default [`RomeoParams::default`], ROMEO.jl's API defaults).
     /// [`RomeoParams::romeo_cli`] gives the `romeo` command line's (`romeo3` weights with a
     /// magnitude, no temporal re-unwrapping), which with the rest of this default config is the
@@ -628,6 +642,7 @@ impl Default for FieldMappingConfig {
             b0_estimation: B0EstimationMethod::default(),
             laplacian_solver: LaplacianSolver::Dct,
             laplacian_unmasked: false,
+            laplacian_keep_outside: false,
             romeo_params: RomeoParams::default(),
             prelude_params: PreludeParams::default(),
         }
@@ -678,6 +693,21 @@ pub struct BgRemovalConfig {
     /// s005001 Prisma scan, 1,276,570 → 1,265,491 voxels, reproduced voxel for voxel by these two
     /// operations). The polished mask is the stage's output mask. Off by default.
     pub polish_mask: bool,
+    /// UK Biobank's phase-reliability mask trimming around V-SHARP
+    /// ([`crate::utils::phase_reliability`]): before background removal, the brain mask less the
+    /// voxels whose phase is unreliable ([`UKB_TRIM_FIELD`](crate::utils::UKB_TRIM_FIELD)), and
+    /// after it, the stage's mask trimmed again more tightly
+    /// ([`UKB_TRIM_LOCAL`](crate::utils::UKB_TRIM_LOCAL)); the local field is left as background
+    /// removal made it, as UK Biobank hands it to iLSQR.
+    /// Both trims read the two reliability maps of the wrapped first and last echoes over the
+    /// untrimmed mask ([`UkbPhaseReliability`](crate::utils::UkbPhaseReliability)), which the host
+    /// computes and passes to [`run_bg_removal_trimmed`](super::bg_removal::run_bg_removal_trimmed).
+    ///
+    /// UK Biobank unwraps the phase inside the untrimmed mask and trims only then, so the trim
+    /// belongs to this stage, not to masking: field mapping still runs on the whole brain mask.
+    /// Off by default; the `uk-biobank` toolbox pipeline turns it on
+    /// ([`reference_pipelines`](super::reference_pipelines)).
+    pub ukb_mask_trim: bool,
 }
 
 impl Default for BgRemovalConfig {
@@ -696,6 +726,7 @@ impl Default for BgRemovalConfig {
             tile: None,
             erode_voxels: 0,
             polish_mask: false,
+            ukb_mask_trim: false,
         }
     }
 }
@@ -1838,13 +1869,14 @@ mod slice_gap_coverage {
             }
         }
         // if the scan stops finding stages the test has quietly stopped testing anything
-        // Background removal, dipole inversion, HEIDI's cone fill, the four single-step DL
-        // reconstructions (NeXtQSM, iQSM, iQSM+, iQFM), TGV, chi-separation and QSMART: ten stages
-        // convolve on the grid and must refuse a gap. If this count drops, the source scan has
-        // stopped seeing stages rather than the stages having stopped needing the check.
+        // Background removal (run_bg_removal and run_bg_removal_trimmed), dipole inversion,
+        // HEIDI's cone fill, the four single-step DL reconstructions (NeXtQSM, iQSM, iQSM+, iQFM),
+        // TGV, chi-separation and QSMART: eleven stages convolve on the grid and must refuse a
+        // gap. If this count drops, the source scan has stopped seeing stages rather than the
+        // stages having stopped needing the check.
         assert_eq!(
-            checked, 10,
-            "expected 10 checking stages, scanned {checked}; either a stage was added without \
+            checked, 11,
+            "expected 11 checking stages, scanned {checked}; either a stage was added without \
              the check and without an exemption, or the source scan has broken"
         );
     }
