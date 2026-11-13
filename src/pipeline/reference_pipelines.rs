@@ -26,8 +26,13 @@
 //!   what the authors ran. A reasoned rule its choices trigger (PDF's measured
 //!   `pdf.cg-iterations`) is still reported by [`evaluate`](super::rules::evaluate), and the host
 //!   shows it, but the pipeline keeps the authors' value. A reasoned rule that is itself what the
-//!   authors ran, with their reason (DECOMPOSE's per-echo QSM, `decompose.qsm-per-echo`), is
-//!   one of the pipeline's choices.
+//!   authors ran, with their reason, is part of it: either as one of the pipeline's choices
+//!   (DECOMPOSE's per-echo QSM, `decompose.qsm-per-echo`, a method choice that starts it), or,
+//!   when it is a detail of the pipeline rather than a choice that starts it, in
+//!   [`ReferencePipeline::reasoned`], whose rules a host follows like the reference rules (QSMART's
+//!   Laplacian unwrapping, echo fit and unreduced mask, recommended with QSMART since
+//!   2026-11-13). A departure from those is then a departure from the pipeline, not a different
+//!   pipeline.
 //! - **Scan-dependent rules apply on the scan.** A rule with a scan condition (MEDI's echo-time
 //!   choice needs more than one echo) is part of the pipeline only when the scan is known to meet
 //!   it, as everywhere in [`rules`](super::rules).
@@ -59,6 +64,9 @@ pub struct ReferencePipeline {
     pub choose: &'static [(&'static str, Value)],
     /// Where the pipeline is written down: the toolbox's script, README or paper.
     pub source: &'static str,
+    /// Reasoned rules (by id) that are also what the authors ran: a host follows them as it
+    /// follows the reference rules the choices trigger, in [`RULES`](super::rules::RULES) order.
+    pub reasoned: &'static [&'static str],
 }
 
 /// The catalogue, in the order a host lists it.
@@ -69,6 +77,7 @@ pub static REFERENCE_PIPELINES: &[ReferencePipeline] = &[
         toolbox: "MEDI toolbox 2024.11.26",
         choose: &[("inversion.algorithm", Choice("medi"))],
         source: "MEDI toolbox 2024.11.26 README.m:80-144",
+        reasoned: &[],
     },
     ReferencePipeline {
         id: "sti-suite-ilsqr",
@@ -76,6 +85,7 @@ pub static REFERENCE_PIPELINES: &[ReferencePipeline] = &[
         toolbox: "STI Suite 3.0",
         choose: &[("inversion.algorithm", Choice("ilsqr"))],
         source: "STI Suite 3.0 QSM_GUI, probed headless (QSM.rs ilsqr.rs and vsharp.rs docs)",
+        reasoned: &[],
     },
     ReferencePipeline {
         id: "sti-suite-star",
@@ -83,6 +93,7 @@ pub static REFERENCE_PIPELINES: &[ReferencePipeline] = &[
         toolbox: "STI Suite 3.0",
         choose: &[("inversion.algorithm", Choice("star"))],
         source: "STI Suite 3.0 QSM_GUI, probed headless (QSM.rs star.rs and vsharp.rs docs)",
+        reasoned: &[],
     },
     ReferencePipeline {
         id: "qsmart",
@@ -90,6 +101,8 @@ pub static REFERENCE_PIPELINES: &[ReferencePipeline] = &[
         toolbox: "QSMART",
         choose: &[("inversion.algorithm", Choice("qsmart"))],
         source: "QSMART QSMART.m; Yaghmaie et al. 2021 NeuroImage 231:117701",
+        // Recommended with QSMART (QSM.rs pipeline::qsmart docs), and what its authors ran.
+        reasoned: &["qsmart.mask-no-erosion", "qsmart.unwrap-laplacian", "qsmart.field-echofit"],
     },
     ReferencePipeline {
         id: "heidi",
@@ -97,6 +110,7 @@ pub static REFERENCE_PIPELINES: &[ReferencePipeline] = &[
         toolbox: "HEIDI package (qsm_heidi 4592631)",
         choose: &[("inversion.algorithm", Choice("lsqr")), ("inversion.apply_heidi", Bool(true))],
         source: "qsm_heidi makefile and def.sh (4592631); Schweser et al. 2012 NeuroImage 62:2083",
+        reasoned: &[],
     },
     ReferencePipeline {
         id: "chi-sep-ilsqr",
@@ -104,6 +118,7 @@ pub static REFERENCE_PIPELINES: &[ReferencePipeline] = &[
         toolbox: "χ-separation toolbox 1.1.3",
         choose: &[("separation.algorithm", Choice("chi-sep-ilsqr"))],
         source: "χ-separation toolbox v1.1.3 Chisep_script.m",
+        reasoned: &[],
     },
     ReferencePipeline {
         id: "chi-sep-medi",
@@ -111,6 +126,7 @@ pub static REFERENCE_PIPELINES: &[ReferencePipeline] = &[
         toolbox: "χ-separation toolbox 1.1.3",
         choose: &[("separation.algorithm", Choice("chi-sep-medi"))],
         source: "χ-separation toolbox v1.1.3 Chisep_script.m",
+        reasoned: &[],
     },
     ReferencePipeline {
         id: "chi-sepnet",
@@ -118,6 +134,7 @@ pub static REFERENCE_PIPELINES: &[ReferencePipeline] = &[
         toolbox: "χ-separation toolbox 1.1.3",
         choose: &[("separation.algorithm", Choice("chi-sepnet")), ("separation.chi_sepnet.route", Choice("toolbox"))],
         source: "χ-separation toolbox v1.1.3 Chisep_script.m; Kim et al. 2025 (χ-sepnet)",
+        reasoned: &[],
     },
     ReferencePipeline {
         id: "decompose",
@@ -128,6 +145,7 @@ pub static REFERENCE_PIPELINES: &[ReferencePipeline] = &[
         // (`decompose.qsm-per-echo`) is a reasoned one: see the decision above.
         choose: &[("separation.algorithm", Choice("decompose")), ("qsm_per_echo", Bool(true))],
         source: "Chen et al. 2021 NeuroImage 242:118477 (DECOMPOSE), §2.2, §3.6, §4.1",
+        reasoned: &[],
     },
 ];
 
@@ -141,8 +159,21 @@ mod tests {
     use super::super::rules::{Condition, Strength, Test, RULES, SETTINGS};
     use super::*;
 
-    /// Ids are unique kebab-case, every choice is a rule setting, and every pipeline's choices
-    /// trigger at least one of the authors' settings (else it would be a method, not a pipeline).
+    /// QSMART's pipeline follows its recommended group (Laplacian unwrapping, the echo fit, no
+    /// erosion), which is what its authors ran.
+    #[test]
+    fn qsmart_follows_its_recommended_group() {
+        let p = reference_pipeline("qsmart").unwrap();
+        for id in ["qsmart.mask-no-erosion", "qsmart.unwrap-laplacian", "qsmart.field-echofit"] {
+            let r = RULES.iter().find(|r| r.id == id).unwrap();
+            assert_eq!(r.strength, Strength::Recommended, "{id}");
+            assert!(p.reasoned.contains(&id), "{id}");
+        }
+    }
+
+    /// Ids are unique kebab-case, every choice is a rule setting, every pipeline's choices
+    /// trigger at least one of the authors' settings (else it would be a method, not a pipeline),
+    /// and its reasoned rules are reasoned rules its choices trigger.
     #[test]
     fn pipelines_are_well_formed() {
         let mut ids = std::collections::HashSet::new();
@@ -158,6 +189,14 @@ mod tests {
                 p.choose.iter().any(|(s, v)| s == setting && values.contains(v))
             });
             assert!(triggered, "{}: its choices trigger no reference rule", p.id);
+        }
+        for p in REFERENCE_PIPELINES {
+            for id in p.reasoned {
+                let r = RULES.iter().find(|r| r.id == *id).unwrap_or_else(|| panic!("{}: no rule {id}", p.id));
+                assert_ne!(r.strength, Strength::Reference, "{}: {id} is a reference rule, followed anyway", p.id);
+                let Condition::Setting { setting, is: Test::OneOf { values } } = r.trigger() else { panic!("{id}") };
+                assert!(p.choose.iter().any(|(s, v)| s == setting && values.contains(v)), "{}: its choices do not trigger {id}", p.id);
+            }
         }
         assert_eq!(reference_pipeline("medi-toolbox").map(|p| p.name), Some("MEDI toolbox"));
         assert!(reference_pipeline("nope").is_none());
