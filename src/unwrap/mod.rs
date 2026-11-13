@@ -12,8 +12,10 @@
 //!   magnitude-ordered region growing from the middle of the field of view, no mask, single
 //!   precision, bit-identical to the MEDI toolbox
 //! - [`laplacian_unwrap`] — Laplacian unwrapping, with a [`LaplacianSolver`]: `Dct` (default;
-//!   unweighted least squares, Neumann BC on the array) or `Fft { pad }` (Schofield & Zhu sin/cos
-//!   method on the zero-padded volume, which reproduces STI Suite 3.0's `MRPhaseUnwrap`)
+//!   unweighted least squares, Neumann BC on the array), `Fft { pad }` (Schofield & Zhu sin/cos
+//!   method on the zero-padded volume, which reproduces STI Suite 3.0's `MRPhaseUnwrap`),
+//!   `Mirror` (the same on the mirrored volume, QSMART's `lapunwrap.m`) or `Mgpcg` (QSM.jl's
+//!   default: Dirichlet on the mask, multigrid-preconditioned CG; also removes the background)
 //!
 //! All of the above read across slice boundaries. For a 2D multi-slice acquisition, where
 //! each slice carries its own receive phase offset, run one of them per slice with
@@ -49,7 +51,7 @@ pub enum UnwrapMethod {
     Romeo,
     /// Laplacian unwrapping with [`LaplacianSolver::Dct`] (Neumann boundary on the array); see
     /// [`laplacian_unwrap`]. Unwraps only — the background field is left alone. Call
-    /// [`laplacian_unwrap`] directly for [`LaplacianSolver::Fft`].
+    /// [`laplacian_unwrap`] directly for the other [`LaplacianSolver`]s.
     Laplacian,
     /// Best path (3D-SRNCP); see [`unwrap_bestpath`]. The original Abdul-Rahman
     /// algorithm, not ROMEO run with best-path weights — for that, set

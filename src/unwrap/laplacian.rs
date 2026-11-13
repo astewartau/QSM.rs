@@ -4,13 +4,16 @@
 //! neighbouring samples differ by less than π, so the true phase can be recovered by
 //! solving a Poisson equation. Path-independent and fast, unlike region-growing methods.
 //!
-//! [`laplacian_unwrap`] unwraps only; the harmonic (background) component survives and the
-//! result is a total field. It has two solvers, named as in QSM.jl's `unwrap_laplacian`:
+//! [`laplacian_unwrap`] unwraps; with the array-boundary solvers the harmonic (background)
+//! component survives and the result is a total field. Its solvers, named as in QSM.jl's
+//! `unwrap_laplacian` where QSM.jl has them:
 //!
 //! | [`LaplacianSolver`] | ∇²φ estimate | Poisson solve | Reference |
 //! |---|---|---|---|
 //! | [`Dct`](LaplacianSolver::Dct) (default) | finite differences of wrapped neighbour differences | DCT, Neumann boundary on the array | Ghiglia & Romero (1994); QSM.jl `:dct` |
 //! | [`Fft { pad }`](LaplacianSolver::Fft) | `cos φ·∇²(sin φ) − sin φ·∇²(cos φ)`, spectral ∇² (`|k|²`) | FFT, periodic, on the volume zero-padded by `pad` | Schofield & Zhu (2003); STI Suite 3.0 `MRPhaseUnwrap` |
+//! | [`Mirror`](LaplacianSolver::Mirror) | as `Fft` | FFT on the volume mirrored along each axis | Hongfu Sun's `lapunwrap.m` (QSMART) |
+//! | [`Mgpcg`](LaplacianSolver::Mgpcg) | finite differences of wrapped neighbour differences, inside the mask | multigrid-preconditioned CG, Dirichlet (`φ = 0`) outside the mask | Schofield & Zhu (2003) with Zhou et al. (2014); QSM.jl `:mgpcg` (its default) |
 //!
 //! `Dct` is unweighted least-squares unwrapping: the Poisson equation for the wrapped phase
 //! differences, solved under a Neumann condition with a DCT (Ghiglia & Romero 1994). It
@@ -38,6 +41,44 @@
 //! same iron-region ICC, 0.924 against 0.925). They differ in the total field: zero padding puts
 //! a step wherever the phase at the array edge is not zero, which `Fft` turns into a harmonic
 //! error that `Dct` does not have. Hence `Dct` is the default.
+//!
+//! # `Mgpcg`: QSM.jl's default solver
+//!
+//! QSM.jl's `unwrap_laplacian(phas, mask, vsz; solver = :mgpcg)` (`src/unwrap/laplacian.jl:46-88`),
+//! ported exactly:
+//!
+//! 1. `∇²φ` by second-order central differences of the wrapped neighbour differences
+//!    (`wrapped_laplacian`, wrap as QSM.jl's `_wrap`), at the voxels not on the array edge; the
+//!    array-edge voxels get 0 (QSM.jl leaves them so for `:mgpcg`; `:dct` and `:fft` fill them
+//!    with their boundary rules).
+//! 2. Multiplied by the mask (`d2uphas[I] *= mask[I]`).
+//! 3. `∇²u = that` solved on the mask with `u = 0` outside it (homogeneous Dirichlet on the
+//!    ROI) by multigrid-preconditioned conjugate gradients
+//!    ([`solve_poisson_mgpcg`](crate::solvers::mgpcg::solve_poisson_mgpcg); grids, smoothers,
+//!    V-cycle and crop in its module docs) with QSM.jl's settings for this call
+//!    ([`MgpcgParams::for_unwrap`](crate::solvers::mgpcg::MgpcgParams::for_unwrap)): depth
+//!    `max(2, 1 + ⌊log2(min n) − 2⌋)` of the grid it solves on (the mask's bounding box, when
+//!    cropped), `atol = rtol = √eps(Float64)` ≈ 1.49e-8 on the residual norm, at most `max n`
+//!    iterations (of the whole array), the smoother schedule of QSM.jl's LBV
+//!    (`__DEFAULT_LBV_PRE/COARSE/POST`). None of these is a user setting in QSM.jl, so none is
+//!    here.
+//!
+//! The Dirichlet condition makes every harmonic function inside the mask that vanishes on its
+//! boundary layer part of the solution's null space, so this **also removes the background
+//! field**, as LBV does (QSM.jl's docstring: it "combines phase unwrapping and harmonic
+//! background field removing"); the result is a local phase, 0 outside the mask, and the mask
+//! matters (QSM.jl's README erodes its BET mask by 5 voxels first). QSM.jl's own pipeline still
+//! runs V-SHARP afterwards (`README.md:34-49`), so a later background-removal stage is QSM.jl's
+//! practice too. Unlike [`crate::bgremove::lbv`] (MEDI's `LBV.m` and its full-multigrid mex), this
+//! is QSM.jl's MGPCG, and it takes the *wrapped* phase.
+//!
+//! Parity with QSM.jl fde4b92 in the verified QSM-CI `julia-qsm` image (measured 2026-11-13):
+//! `tests/laplacian_qsmjl_parity.rs` on three wrapped phantoms (a mask that is not cropped, one
+//! that is with anisotropic voxels, one that fills the array), max |Δ| 6.7e-16 to 1.1e-15 rad;
+//! a brain-sized one (160×192×144, 1 mm, 1.26 M mask voxels, noise outside the mask), max |Δ|
+//! 2.8e-14 rad, NRMSE 5.6e-16, in 2.0 s here (QSM.jl 4.2 s on one thread). The remaining
+//! differences are rounding: QSM.jl sums its CG inner products over threads, may fuse
+//! multiply-adds, and computes in the input's precision (double here).
 //!
 //! Multi-echo field maps are built by [`crate::pipeline::run_field_mapping`], whose
 //! `laplacian_solver` setting selects the solver: each echo is masked (unless
@@ -75,11 +116,12 @@
 //! - **QSM.jl** (kamesy/QSM.jl, local copy fde4b92): `unwrap_laplacian`'s default solver is
 //!   `:mgpcg`, a Dirichlet condition on the ROI (`uphas[!mask] = 0`) that "combines phase
 //!   unwrapping and harmonic background field removing"; `:dct` and `:fft` are the
-//!   array-boundary options (`src/unwrap/laplacian.jl:6,14-19,28-32`). `:mgpcg` is not ported;
-//!   the default here is `:dct`, which unwraps only. The README's pipeline masks with FSL BET on
-//!   the last echo (`-f 0.5`), erodes the mask by 5 voxels, unwraps every echo with
-//!   `unwrap_laplacian(phas, mask1, vsz)` (so `:mgpcg`), scales echo `e` by `1/(B0·γ·TEₑ)` and
-//!   runs V-SHARP (`README.md:34-49`).
+//!   array-boundary options (`src/unwrap/laplacian.jl:6,14-19,28-32`). `:mgpcg` is
+//!   [`LaplacianSolver::Mgpcg`]; the default here stays `:dct`, which unwraps only (background
+//!   removal is a separate, later stage in QSM.rs's pipelines). The README's pipeline masks with
+//!   FSL BET on the last echo (`-f 0.5`), erodes the mask by 5 voxels, unwraps every echo of the
+//!   raw (unmasked) phase with `unwrap_laplacian(phas, mask1, vsz)` (so `:mgpcg`), scales echo
+//!   `e` by `1/(B0·γ·TEₑ)` and runs V-SHARP (`README.md:34-49`).
 //! - **MriResearchTools.jl / CLEAR-SWI** (korbinian90, 771eadf / 0949bc5): `laplacianunwrap` is
 //!   the Schofield & Zhu sin/cos method with DCT transforms (Neumann, unpadded, no mask, no voxel
 //!   size; `src/laplacianunwrapping.jl:1-20`), so it is neither of the solvers above exactly.
@@ -102,6 +144,10 @@
 //! Li, W., Wu, B., Liu, C. (2011). "Quantitative susceptibility mapping of human brain reflects
 //! spatial variation in tissue composition." NeuroImage, 55(4):1645-1656 (STI Suite's use of
 //! the Schofield & Zhu method). <https://doi.org/10.1016/j.neuroimage.2010.11.088>
+//!
+//! Zhou, D., Liu, T., Spincemaille, P., Wang, Y. (2014). "Background field removal by solving
+//! the Laplacian boundary value problem." NMR in Biomedicine, 27(3):312-319 (the Dirichlet
+//! condition on the ROI that `Mgpcg` uses). <https://doi.org/10.1002/nbm.3064>
 //!
 //! Reference implementation: <https://github.com/kamesy/QSM.jl> (`unwrap_laplacian`).
 
@@ -444,6 +490,12 @@ pub enum LaplacianSolver {
     /// rather than zero-padded. DC → 0 (`lapunwrap.m` divides it by `eps`, a constant that
     /// depends only on rounding).
     Mirror,
+    /// QSM.jl's default `:mgpcg`: the finite-difference wrapped Laplacian (as `Dct`), masked,
+    /// and the Poisson equation solved on the mask with `φ = 0` outside it (homogeneous
+    /// Dirichlet on the ROI) by multigrid-preconditioned CG at QSM.jl's settings. The
+    /// Dirichlet condition also removes the harmonic background inside the mask, so the result
+    /// is a local phase and depends on the mask; see the [module docs](self#mgpcg-qsmjls-default-solver).
+    Mgpcg,
 }
 
 impl LaplacianSolver {
@@ -451,10 +503,13 @@ impl LaplacianSolver {
     pub const FFT_DEFAULT_PAD: LaplacianSolver = LaplacianSolver::Fft { pad: [12, 12, 12] };
 }
 
-/// Laplacian phase unwrapping, **without** background field removal.
+/// Laplacian phase unwrapping; **without** background field removal except with
+/// [`LaplacianSolver::Mgpcg`].
 ///
 /// Solves the Poisson equation over the whole array with the chosen [`LaplacianSolver`] (see
-/// the [module docs](self) for both). Nothing is masked out of the input, so field sources
+/// the [module docs](self) for each). [`LaplacianSolver::Mgpcg`] instead solves it on `mask`
+/// with the phase held at 0 outside it, which also removes the harmonic background there: its
+/// result is a local phase, and `mask` is its region of interest, not only an output mask. Nothing is masked out of the input, so field sources
 /// anywhere in the FOV are retained and the harmonic (background) component survives: the
 /// result is an unwrapped **total** field, suitable for a subsequent background-removal stage.
 /// (With [`LaplacianSolver::Fft`] the total field carries a harmonic error from the zero
@@ -469,15 +524,18 @@ impl LaplacianSolver {
 ///
 /// # Arguments
 /// * `phase` - Wrapped phase (nx * ny * nz)
-/// * `mask` - Binary mask (nx * ny * nz); applied to the *output* only
+/// * `mask` - Binary mask (nx * ny * nz); applied to the *output* only, except for
+///   [`LaplacianSolver::Mgpcg`], where it is the region the equation is solved on
 /// * `grid` - Volume grid (dimensions and voxel sizes)
-/// * `solver` - [`LaplacianSolver::Dct`] (default) or [`LaplacianSolver::Fft`]
+/// * `solver` - [`LaplacianSolver::Dct`] (default), [`LaplacianSolver::Fft`],
+///   [`LaplacianSolver::Mirror`] or [`LaplacianSolver::Mgpcg`]
 ///
 /// # Returns
 /// Unwrapped phase, zero outside `mask`.
 ///
 /// # References
-/// Ghiglia & Romero (1994) for `Dct`; Schofield & Zhu (2003) for `Fft`. See the module docs.
+/// Ghiglia & Romero (1994) for `Dct`; Schofield & Zhu (2003) for `Fft`, `Mirror` and `Mgpcg`;
+/// Zhou et al. (2014) for `Mgpcg`'s Dirichlet condition on the ROI. See the module docs.
 pub fn laplacian_unwrap(
     phase: &[f64],
     mask: &[u8],
@@ -493,8 +551,70 @@ pub fn laplacian_unwrap(
         }
         LaplacianSolver::Fft { pad } => laplacian_unwrap_fft_padded(phase, grid, pad),
         LaplacianSolver::Mirror => laplacian_unwrap_fft_mirrored(phase, grid),
+        LaplacianSolver::Mgpcg => return laplacian_unwrap_mgpcg(phase, mask, grid),
     };
     u.iter().zip(mask).map(|(&v, &m)| if m != 0 { v } else { 0.0 }).collect()
+}
+
+/// QSM.jl's `_wrap`: `rem2pi(x, RoundNearest)` for the neighbour differences of a wrapped
+/// phase (which lie in (−2π, 2π)), with QSM.jl's fallback for larger values.
+#[inline]
+fn wrap_qsmjl(x: f64) -> f64 {
+    use std::f64::consts::{FRAC_1_PI, TAU};
+    let ax = x.abs();
+    if ax < PI {
+        x
+    } else if ax < TAU {
+        x - TAU.copysign(x)
+    } else {
+        let n = (0.5 * FRAC_1_PI * x).round_ties_even();
+        -TAU * n + x
+    }
+}
+
+/// QSM.jl's `wrapped_laplacian`: the 7-point Laplacian of the wrapped neighbour differences at
+/// the voxels not on the array edge (0 on the edge), summed in QSM.jl's order.
+fn wrapped_laplacian_interior(phase: &[f64], grid: &Grid) -> Vec<f64> {
+    let (nx, ny, nz) = grid.dims;
+    let (vsx, vsy, vsz) = grid.voxel_size;
+    let (dx2, dy2, dz2) = (1.0 / (vsx * vsx), 1.0 / (vsy * vsy), 1.0 / (vsz * vsz));
+    let mut d2u = vec![0.0; nx * ny * nz];
+    if nx < 3 || ny < 3 || nz < 3 {
+        return d2u;
+    }
+    let (sy, sz) = (nx, nx * ny);
+    for k in 1..nz - 1 {
+        for j in 1..ny - 1 {
+            for i in 1..nx - 1 {
+                let c = i + j * sy + k * sz;
+                let u = phase[c];
+                let mut d = -dz2 * wrap_qsmjl(u - phase[c - sz]);
+                d += -dy2 * wrap_qsmjl(u - phase[c - sy]);
+                d += -dx2 * wrap_qsmjl(u - phase[c - 1]);
+                d += dx2 * wrap_qsmjl(phase[c + 1] - u);
+                d += dy2 * wrap_qsmjl(phase[c + sy] - u);
+                d += dz2 * wrap_qsmjl(phase[c + sz] - u);
+                d2u[c] = d;
+            }
+        }
+    }
+    d2u
+}
+
+/// QSM.jl's `unwrap_laplacian(…; solver = :mgpcg)`; see the module docs.
+fn laplacian_unwrap_mgpcg(phase: &[f64], mask: &[u8], grid: &Grid) -> Vec<f64> {
+    use crate::solvers::mgpcg::{solve_poisson_mgpcg, MgpcgParams};
+    let n = grid.dims.0 * grid.dims.1 * grid.dims.2;
+    assert_eq!(phase.len(), n, "phase length does not match grid");
+    assert_eq!(mask.len(), n, "mask length does not match grid");
+    let mut d2u = wrapped_laplacian_interior(phase, grid);
+    for (v, &m) in d2u.iter_mut().zip(mask) {
+        if m == 0 {
+            *v = 0.0;
+        }
+    }
+    let params = MgpcgParams::for_unwrap(grid.dims);
+    solve_poisson_mgpcg(&d2u, mask, grid.dims, grid.voxel_size, &params).0
 }
 
 /// Schofield & Zhu sin/cos unwrapping on the zero-padded volume (STI Suite's `MRPhaseUnwrap`).

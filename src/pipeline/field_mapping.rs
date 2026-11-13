@@ -315,9 +315,10 @@ fn field_mapping_with_offset(
     }
     let mut unwrapped: Vec<Vec<f64>> = match config.unwrapping_algorithm {
         UnwrappingAlgorithm::Laplacian => {
-            // Neumann, not the ROI-masked variant: this stage wants unwrapping only.
-            // Background removal is a later stage, and the masked variant would remove it
-            // here first — measurably worse than doing it once, properly. The phase is zeroed
+            // The configured solver; the default `Dct` (Neumann) unwraps only, leaving
+            // background removal to the later stage. `Mgpcg` (QSM.jl's default) is the
+            // ROI-masked variant: it also removes the background here, on `valid_mask`, as QSM.jl
+            // does before its own background removal. The phase is zeroed
             // outside the mask first (MCPC-3D-S corrects every voxel, and the Laplacian unwrap
             // takes the whole array), as on the direct path.
             corrected.iter()
