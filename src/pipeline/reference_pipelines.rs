@@ -161,6 +161,8 @@ pub static REFERENCE_PIPELINES: &[ReferencePipeline] = &[
         toolbox: "UK Biobank QSM",
         choose: &[("inversion.algorithm", Choice("ilsqr")), ("bg_removal.ukb_mask_trim", Bool(true))],
         source: "UK Biobank UKBiobank_QSM.m (git.fmrib.ox.ac.uk/cwang/uk_biobank_qsm_pipeline); Wang et al. 2022 Nat. Neurosci.",
+
+        reasoned: &[],
     },
 ];
 
