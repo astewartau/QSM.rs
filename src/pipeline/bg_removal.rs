@@ -30,6 +30,8 @@ pub fn run_bg_removal(
     magnitude: Option<&[f64]>,
     progress: &mut dyn FnMut(usize, usize),
 ) -> Result<BgRemovalResult, PipelineError> {
+    // Checked again by run_bg_removal_trimmed; here too, so the slice-gap coverage test sees it.
+    metadata.require_contiguous_slices()?;
     run_bg_removal_trimmed(field_ppm, mask, metadata, config, magnitude, None, progress)
 }
 

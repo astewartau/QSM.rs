@@ -1869,13 +1869,14 @@ mod slice_gap_coverage {
             }
         }
         // if the scan stops finding stages the test has quietly stopped testing anything
-        // Background removal, dipole inversion, HEIDI's cone fill, the four single-step DL
-        // reconstructions (NeXtQSM, iQSM, iQSM+, iQFM), TGV, chi-separation and QSMART: ten stages
-        // convolve on the grid and must refuse a gap. If this count drops, the source scan has
-        // stopped seeing stages rather than the stages having stopped needing the check.
+        // Background removal (run_bg_removal and run_bg_removal_trimmed), dipole inversion,
+        // HEIDI's cone fill, the four single-step DL reconstructions (NeXtQSM, iQSM, iQSM+, iQFM),
+        // TGV, chi-separation and QSMART: eleven stages convolve on the grid and must refuse a
+        // gap. If this count drops, the source scan has stopped seeing stages rather than the
+        // stages having stopped needing the check.
         assert_eq!(
-            checked, 10,
-            "expected 10 checking stages, scanned {checked}; either a stage was added without \
+            checked, 11,
+            "expected 11 checking stages, scanned {checked}; either a stage was added without \
              the check and without an exemption, or the source scan has broken"
         );
     }
