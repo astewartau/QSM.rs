@@ -24,7 +24,9 @@
 //!   the unmasked phase (`unwrap_phase.m` l. 5–10):
 //!   [`LaplacianSolver::Mirror`](crate::unwrap::LaplacianSolver::Mirror) with
 //!   [`FieldMappingConfig::laplacian_unmasked`]. These are the field mapping's own settings, not
-//!   QSMART's: the global default stays ROMEO, and the rules below suggest QSMART's choices.
+//!   QSMART's: the global default stays ROMEO, and the rules below recommend Laplacian unwrapping
+//!   with QSMART (*Recommended with QSMART*) and give the solver and unmasked phase as the
+//!   authors' settings.
 //! - **Total field**: `echofit.m`, magnitude-weighted zero-intercept fit of phase against TE,
 //!   divided by `γ·B0/1e6` with γ = 2.675e8 rad/s/T and B0 = `qsm_params.field` (7 in the demo);
 //!   the reliability map `R_0` from the box-blurred residual (`fit_threshold` 40 in
@@ -87,6 +89,49 @@
 //! crate's port ([`crate::utils::n4`], 0.0003 % from ANTs on QSMART's file), is 14.6 % from the
 //! single-threaded reference (9.2 % and 6.6 % eroded): within the reference's own spread. A
 //! comparison of QSMART's χ maps from different N4 builds or thread counts should expect that much.
+//!
+//! # Recommended with QSMART
+//!
+//! Three of the settings above are recommended (preselected) as one group whenever QSMART is the
+//! inversion, rather than offered only as the authors' settings (orchestrator decision 142,
+//! 2026-11-13; rules `qsmart.unwrap-laplacian`, `qsmart.field-echofit`, `qsmart.mask-no-erosion`,
+//! one shared reason): **Laplacian unwrapping, QSMART's echo fit and no mask erosion**. QSMART
+//! keeps the brain's edge, where the phase is least reliable. Laplacian unwrapping is not thrown
+//! off by that phase, and the echo fit's reliability map `R_0` keeps it out of the inversions;
+//! with a path-based unwrapper (ROMEO), errors at the edge become artefacts across the cortex.
+//! The three hold together: the unreduced mask is what makes ROMEO's edge errors reach the
+//! cortex, so recommending one without the others would not help.
+//!
+//! Measured on Bunya (2026-11-13, QSMxT main 22e9351; `/scratch/user/uqaste15/qsmart-refs`, scores
+//! and figures in the project's `2026-11-13-qsmart-refs` folder): QSMxT's `qsmart` pipeline with
+//! one setting changed at a time, on QSM-CI's simulated head (magnitude ×10, see below) and on
+//! the EMTP travelling head s003001 (Siemens Prisma, GE MR750w, Philips Achieva). χ against the
+//! pipeline's own result (NRMSE over its mask), against the ground truth on the simulation (XSIM),
+//! and the RMS of χ in the mask's outer band:
+//!
+//! - **ROMEO instead of Laplacian unwrapping**, with QSMART's mask: χ NRMSE 128-141 % (Prisma),
+//!   583 % (Achieva), 651 % (MR750w), and the 99.5th percentile of |χ| 1.0-1.4 ppm on GE and
+//!   Philips against 0.14-0.16 ppm: a ring of artefact along the cortex. With QSMxT's own eroded
+//!   phase-quality mask, ROMEO and QSMART together do not show it (NRMSE 80-108 %, |χ| p99.5
+//!   0.15-0.18 ppm, the spread of a different mask).
+//! - **A weighted echo average instead of the echo fit**: the outer band's χ RMS rose 24-54 % in
+//!   vivo (31.5 → 39.0 ppb Prisma, 53.7 → 82.5 MR750w, 36.4 → 53.3 Achieva), and XSIM fell on the
+//!   simulation (0.150 → 0.140; 0.223 → 0.214 with Frangi's c at 0.25 × the brain's median, which
+//!   keeps the vessel mask from taking over half the brain).
+//! - **Eroding the mask by one voxel**: XSIM fell on the simulation (0.150 → 0.144; 0.223 → 0.214
+//!   with the scaled c). Its authors' reason is the stronger one: avoiding erosion is what QSMART's
+//!   spatially dependent filtering is for (paper §1, §5), so this rule's basis is Stated.
+//!
+//! The other reference settings stay the authors' settings (`reference`): the parity settings
+//! (precision, grid, N4 geometry, referencing) changed χ by at most 2.4 %, and the mask recipe's
+//! steps by amounts that read as a different mask rather than a better one.
+//!
+//! **The mask's intensity threshold of 100** (`qsmart.mask-threshold`) is a fixed value on the
+//! N4-corrected first echo, so the rule applies only once N4 and a magnitude input are chosen: on
+//! the makehomogeneous-corrected magnitude or the phase-quality map it removed every voxel and the
+//! run stopped. It still removes every voxel of a magnitude whose values are all below 100, such as
+//! QSM-CI's simulated head (maximum ~60; hence the ×10 above); QSMxT stops on an empty mask with a
+//! plain message.
 //!
 //! # Pipeline rules
 //!

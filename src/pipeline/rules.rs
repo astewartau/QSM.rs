@@ -1170,6 +1170,21 @@ const fn discourage(
 }
 
 const BET: &[Value] = &[Choice("bet")];
+/// Mask inputs that are a magnitude image (not the phase-quality map).
+const MAGNITUDE_INPUTS: &[Value] = &[Choice("magnitude"), Choice("magnitude-first"), Choice("magnitude-last")];
+/// The reason shared by QSMART's recommended group (orchestrator decision 142, 2026-11-13):
+/// Laplacian unwrapping, QSMART's echo fit and no mask erosion, recommended (preselected) together
+/// when QSMART is chosen. The evidence is in the QSM.rs `pipeline::qsmart` docs (*Recommended
+/// with QSMART*): on three travelling-head scans ROMEO instead of Laplacian unwrapping, with
+/// QSMART's unreduced mask, put 1-1.4 ppm artefacts in a ring along the cortex (χ NRMSE from
+/// QSMART's own pipeline 128-141 % Siemens, 583 % Philips, 651 % GE); a weighted echo average instead
+/// of the echo fit raised the outer band's χ RMS 24-54 % in vivo and lowered χ XSIM on the
+/// simulated head (0.214 against 0.223); eroding the mask by one voxel lowered it too (0.214
+/// against 0.223), and avoiding erosion is what QSMART's authors built SDF for.
+const QSMART_EDGE_REASON: &str = "QSMART keeps the brain's edge instead of eroding it away. Laplacian \
+    unwrapping is not thrown off by the unreliable phase there, and QSMART's echo fit supplies the \
+    reliability map it uses to handle it. With a path-based unwrapper, errors at the edge become \
+    artefacts across the cortex";
 const MEDI_MASK_SOURCE: &str = "MEDI toolbox README.m (iMag = sqrt(sum(abs(iField).^2,4)); Mask = BET(iMag, ...)), \
     l. 92 and 111 in the 2020 fork at ~/code/ref/medi; BET.m calls the bet2 mex";
 const DECOMPOSE_MASK_SOURCE: &str = "Chen et al. 2021 NeuroImage 242:118477 (DECOMPOSE), §3.6 (\"The GRE \
@@ -1418,17 +1433,34 @@ pub static RULES: &[Rule] = &[
         &[Number(0.2)], "QSMART runs bet2 with -f 0.2", "QSMART brainmask.m l. 14"),
     // brainmask.m l. 24-33, after BET: the threshold on BET's brain image (v1.0's fixed 100,
     // adaptive_threshold 0), the majority filter, and a closing with strel('sphere', 2).
-    reference("qsmart.mask-threshold", &[inv(&[Choice("qsmart")])], "masking.min_intensity",
-        &[Number(100.0)], "QSMART removes the BET mask's voxels whose magnitude is below 100 (QSMART v1.0's mag_threshold)",
+    // The threshold is a fixed intensity, so it only means what QSMART meant on the image QSMART
+    // applies it to: the N4-corrected magnitude BET ran on (orchestrator decision 142, 2026-11-13).
+    // On a makehomogeneous-corrected magnitude (values near 1) or the phase-quality map (0 to 1)
+    // it removes every voxel, so the rule needs N4 and a magnitude input chosen first; a host that
+    // follows the rules offers it once they are (QSMART's pipeline sets them before it). Measured
+    // on Bunya (qsmart-refs, 2026-11-13): with makehomogeneous or the phase-quality input the
+    // threshold of 100 left an empty mask and the run stopped on every scan; with N4 on the first
+    // echo it removed the dark edge on the Siemens scan only. It still empties the mask of a
+    // magnitude whose values are all below 100 (QSM-CI's simulated head, maximum ~60); QSMxT
+    // refuses an empty mask with a plain message. A threshold that does not depend on the
+    // magnitude's scale is a possible later option, not QSMART's.
+    reference("qsmart.mask-threshold",
+        &[inv(&[Choice("qsmart")]), method("masking.inhomogeneity_correction", &[Choice("n4")]),
+          method("masking.input", MAGNITUDE_INPUTS)],
+        "masking.min_intensity",
+        &[Number(100.0)], "QSMART removes the BET mask's voxels whose N4-corrected magnitude is below 100 (QSMART v1.0's mag_threshold)",
         "QSMART brainmask.m l. 24-29; Demo_QSMART.m l. 35, 38"),
     reference("qsmart.mask-majority", &[inv(&[Choice("qsmart")])], "masking.majority", &[Bool(true)],
         "QSMART smooths its mask with bwmorph3(mask, 'majority')", "QSMART brainmask.m l. 30"),
     reference("qsmart.mask-close", &[inv(&[Choice("qsmart")])], "masking.close_radius", &[Number(2.0)],
         "QSMART closes its mask with a sphere of radius 2 voxels (sph_radius1)",
         "QSMART brainmask.m l. 31-33; Demo_QSMART.m l. 36"),
-    reference("qsmart.mask-no-erosion", &[inv(&[Choice("qsmart")])], "masking.erosion", &[Number(0.0)],
-        "QSMART does not erode its mask: avoiding erosion is what its spatially dependent filtering is for",
-        "QSMART brainmask.m l. 7-33; Yaghmaie et al. 2021 NeuroImage 231:117701 §1, §5"),
+    // One of QSMART's recommended group (`QSMART_EDGE_REASON`, decision 142): its authors give
+    // the reason (Stated, decision 102), and QSM.rs's measurement agrees on the simulated head.
+    recommend("qsmart.mask-no-erosion", &[inv(&[Choice("qsmart")])], "masking.erosion", &[Number(0.0)],
+        QSMART_EDGE_REASON,
+        "QSMART brainmask.m l. 7-33; Yaghmaie et al. 2021 NeuroImage 231:117701 §1, §5; \
+         QSM.rs pipeline::qsmart docs (Recommended with QSMART)"),
     Rule {
         id: "mindgrab.wasm-heap",
         when: &[method("masking.generator", &[Choice("mindgrab")]), ON_WASM],
@@ -1566,10 +1598,11 @@ pub static RULES: &[Rule] = &[
         "field_mapping.laplacian_unmasked", &[Bool(true)],
         "STI Suite's QSM_GUI gives MRPhaseUnwrap the raw wrapped phase, not the phase masked first",
         "STI Suite 3.0 QSM_GUI, probed headless (recorded in QSM.rs laplacian.rs docs)"),
-    reference("qsmart.unwrap-laplacian", &[inv(&[Choice("qsmart")])],
-        "field_mapping.unwrapping_algorithm", LAPLACIAN,
-        "QSMART unwraps each echo with Laplacian unwrapping (lapunwrap.m)",
-        "QSMART Demo_QSMART.m l. 32; unwrap_phase.m l. 5-10"),
+    // One of QSMART's recommended group (`QSMART_EDGE_REASON`, decision 142), measured.
+    measured_better("qsmart.unwrap-laplacian", &[inv(&[Choice("qsmart")])],
+        "field_mapping.unwrapping_algorithm", LAPLACIAN, QSMART_EDGE_REASON,
+        "QSMART Demo_QSMART.m l. 32; unwrap_phase.m l. 5-10; QSM.rs pipeline::qsmart docs \
+         (Recommended with QSMART)"),
     reference("qsmart.laplacian-solver",
         &[inv(&[Choice("qsmart")]), method("field_mapping.unwrapping_algorithm", LAPLACIAN)],
         "field_mapping.laplacian_solver", &[Choice("mirror")],
@@ -1581,10 +1614,10 @@ pub static RULES: &[Rule] = &[
         "QSMART unwraps each echo's raw phase over the whole volume, and its echo fit fits every voxel",
         "QSMART unwrap_phase.m l. 5-10; echofit.m"),
     // ---------------------------------------------------------------- Field mapping
-    reference("qsmart.field-echofit", &[inv(&[Choice("qsmart")])],
-        "field_mapping.b0_estimation", &[Choice("qsmart-echofit")],
-        "QSMART's total field and reliability map R_0 come from echofit.m",
-        "QSMART QSMART.m l. 26; echofit.m"),
+    // One of QSMART's recommended group (`QSMART_EDGE_REASON`, decision 142), measured.
+    measured_better("qsmart.field-echofit", &[inv(&[Choice("qsmart")])],
+        "field_mapping.b0_estimation", &[Choice("qsmart-echofit")], QSMART_EDGE_REASON,
+        "QSMART QSMART.m l. 26; echofit.m; QSM.rs pipeline::qsmart docs (Recommended with QSMART)"),
     reference("qsmart.fit-threshold",
         &[inv(&[Choice("qsmart")]), method("field_mapping.b0_estimation", &[Choice("qsmart-echofit")])],
         "field_mapping.b0_estimation.qsmart_fit_threshold", &[Choice("absolute-40")],
@@ -2411,7 +2444,11 @@ mod tests {
                 c.cfg.masking.sections[0].generator = MaskOp::Bet(Default::default());
             })),
             ("qsmart.mask-no-erosion", Case::new(inversion(I::Qsmart))),
-            ("qsmart.mask-threshold", Case::new(inversion(I::Qsmart))),
+            ("qsmart.mask-threshold", Case::new(|c| {
+                inversion(I::Qsmart)(c);
+                c.cfg.masking.inhomogeneity_correction = InhomogeneityCorrection::N4;
+                c.cfg.masking.sections[0].input = MaskingInput::MagnitudeFirst;
+            })),
             ("sti.mask-threshold-gui", Case::new(inversion(I::Ilsqr))),
             ("sti.mask-input", Case::new(inversion(I::Ilsqr))),
             ("sti.mask-no-correction", Case::new(inversion(I::Ilsqr))),
@@ -3261,6 +3298,51 @@ mod tests {
         let pad = j.as_array().unwrap().iter().find(|f| f["id"] == "star.padding").unwrap();
         assert_eq!(pad["current"], serde_json::json!([[12.0, 12.0, 12.0]]));
         assert_eq!(pad["default"], serde_json::json!([8.0, 8.0, 20.0]));
+    }
+
+    /// QSMART's group (decision 142): Laplacian unwrapping, the echo fit and no erosion are
+    /// recommended (preselected) together when QSMART is chosen, with one reason; the rest of its
+    /// pipeline stays the authors' settings.
+    #[test]
+    fn qsmart_recommends_its_edge_group() {
+        let group = ["qsmart.unwrap-laplacian", "qsmart.field-echofit", "qsmart.mask-no-erosion"];
+        let case = Case::new(inversion(InversionAlgorithm::Qsmart));
+        let found = evaluate(&case.input(), &case.facts);
+        for id in group {
+            let f = found.iter().find(|f| f.rule.id == id).unwrap_or_else(|| panic!("{id} not offered"));
+            assert_eq!(f.rule.strength, Strength::Recommended, "{id}");
+            assert!(f.rule.strength.preselected(), "{id}");
+            assert_eq!(f.rule.reason, QSMART_EDGE_REASON, "{id}");
+        }
+        assert_eq!(RULES.iter().find(|r| r.id == "qsmart.mask-no-erosion").unwrap().basis, Basis::Stated);
+        for id in ["qsmart.unwrap-laplacian", "qsmart.field-echofit"] {
+            assert_eq!(RULES.iter().find(|r| r.id == id).unwrap().basis, Basis::Measured, "{id}");
+        }
+        for r in RULES.iter().filter(|r| r.id.starts_with("qsmart.") && !group.contains(&r.id)) {
+            assert_eq!(r.strength, Strength::Reference, "{}", r.id);
+        }
+    }
+
+    /// QSMART's magnitude threshold of 100 (decision 142) applies only to the N4-corrected
+    /// magnitude: never with makehomogeneous, no correction or the phase-quality input, where it
+    /// would empty the mask.
+    #[test]
+    fn qsmart_threshold_only_with_n4_and_a_magnitude() {
+        use super::super::config::InhomogeneityCorrection as H;
+        let id = "qsmart.mask-threshold";
+        let with = |h: H, input: MaskingInput| Case::new(move |c| {
+            inversion(InversionAlgorithm::Qsmart)(c);
+            c.cfg.masking.inhomogeneity_correction = h;
+            c.cfg.masking.sections[0].input = input;
+        }).ids().contains(&id);
+        for input in [MaskingInput::MagnitudeFirst, MaskingInput::Magnitude, MaskingInput::MagnitudeLast] {
+            assert!(with(H::N4, input), "{input:?}");
+            assert!(!with(H::Makehomogeneous, input), "{input:?}");
+            assert!(!with(H::None, input), "{input:?}");
+        }
+        for h in [H::N4, H::Makehomogeneous, H::None] {
+            assert!(!with(h, MaskingInput::PhaseQuality), "{h:?}");
+        }
     }
 
     /// DECOMPOSE's per-echo QSM: recommended with DECOMPOSE (stated by its authors), satisfied

@@ -282,8 +282,10 @@ pub enum B0EstimationMethod {
     /// correction. QSMART unwraps each echo with Laplacian unwrapping on the raw phase
     /// (`unwrap_phase.m`: [`LaplacianSolver::Mirror`],
     /// [`FieldMappingConfig::laplacian_unmasked`]) and does neither of the others; with those
-    /// settings this is QSMART's field map, bit for bit. The rules `qsmart.unwrap-laplacian`,
-    /// `qsmart.laplacian-solver` and `qsmart.unwrap-unmasked` suggest them for a QSMART run.
+    /// settings this is QSMART's field map, bit for bit. For a QSMART run, `qsmart.unwrap-laplacian`
+    /// recommends Laplacian unwrapping (with this echo fit and no mask erosion: QSM.rs
+    /// `pipeline::qsmart` docs, *Recommended with QSMART*), and `qsmart.laplacian-solver` and
+    /// `qsmart.unwrap-unmasked` give the authors' solver and unmasked phase.
     QsmartEchofit {
         /// Residual threshold for `R_0`
         fit_threshold: crate::utils::QsmartFitThreshold,
