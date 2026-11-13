@@ -578,6 +578,7 @@ pub const SETTINGS: &[(&str, &str)] = &[
     ("field_mapping.bipolar_correction", "Bipolar readout correction (bool)"),
     ("field_mapping.laplacian_solver", "Laplacian unwrapping's solver: dct, fft-12 (LaplacianSolver::FFT_DEFAULT_PAD), fft-64 (LaplacianSolver::FFT_UKB_PAD), fft (other padding), mirror or mgpcg; only with Laplacian unwrapping"),
     ("field_mapping.laplacian_unmasked", "Laplacian unwrapping on the raw phase over the whole volume, not the phase zeroed outside the mask (bool); only with Laplacian unwrapping"),
+    ("field_mapping.laplacian_keep_outside", "The Laplacian-unwrapped, weighted-mean field kept over the whole volume, not only inside the mask (bool); only with Laplacian unwrapping of the masked phase and a weighted mean"),
     ("bg_removal.algorithm", "Background field removal (BgRemovalAlgorithm::id)"),
     ("bg_removal.vsharp.deconvolve", "V-SHARP's TSVD deconvolution (bool); only with V-SHARP"),
     ("bg_removal.polish_mask", "STI Suite QSM_GUI's PolishMask after background removal: largest 26-connected component, holes filled (BgRemovalConfig::polish_mask, bool)"),
@@ -836,6 +837,13 @@ pub fn current(input: &RuleInput, facts: &ScanFacts, setting: &str) -> Option<Ve
             inv_input.needs_field_mapping()
                 && c.field_mapping.unwrapping_algorithm == super::config::UnwrappingAlgorithm::Laplacian,
             Current::Bool(c.field_mapping.laplacian_unmasked),
+        ),
+        "field_mapping.laplacian_keep_outside" => gated(
+            inv_input.needs_field_mapping()
+                && c.field_mapping.unwrapping_algorithm == super::config::UnwrappingAlgorithm::Laplacian
+                && !c.field_mapping.laplacian_unmasked
+                && matches!(c.field_mapping.b0_estimation, super::config::B0EstimationMethod::WeightedAvg { .. }),
+            Current::Bool(c.field_mapping.laplacian_keep_outside),
         ),
         "bg_removal.vsharp.deconvolve" => gated(vsharp, Current::Bool(c.bg_removal.vsharp.deconvolve)),
         "bg_removal.polish_mask" => gated(inv_input.needs_bg_removal(), Current::Bool(c.bg_removal.polish_mask)),
@@ -1912,6 +1920,11 @@ pub static RULES: &[Rule] = &[
         "field_mapping.laplacian_unmasked", &[Bool(false)],
         "UK Biobank unwraps the phase zeroed outside its (untrimmed) brain mask, mask .* angle(combined)",
         UKB_SOURCE),
+    reference("ukb.laplacian-keep-outside", &[UKB, method("field_mapping.unwrapping_algorithm", LAPLACIAN)],
+        "field_mapping.laplacian_keep_outside", &[Bool(true)],
+        "UK Biobank hands V_SHARP its combined unwrapped phase over the whole volume, which V_SHARP reads \
+         outside the mask it is given",
+        UKB_SOURCE),
     reference("ukb.echo-combination", &[UKB, MULTI_ECHO], "field_mapping.b0_estimation", WEIGHTED_AVG,
         "UK Biobank averages the unwrapped echoes with weights and divides by the same weighted mean echo time",
         UKB_SOURCE),
@@ -2747,6 +2760,10 @@ mod tests {
                 ukb(c);
                 c.cfg.field_mapping.unwrapping_algorithm = UnwrappingAlgorithm::Laplacian;
                 c.cfg.field_mapping.laplacian_unmasked = true;
+            })),
+            ("ukb.laplacian-keep-outside", Case::new(|c| {
+                ukb(c);
+                c.cfg.field_mapping.unwrapping_algorithm = UnwrappingAlgorithm::Laplacian;
             })),
             ("ukb.echo-combination", Case::new(|c| { ukb(c); linear_fit(c) })),
             ("ukb.echo-weights", Case::new(ukb)),

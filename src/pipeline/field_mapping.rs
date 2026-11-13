@@ -543,12 +543,26 @@ fn field_mapping_direct(
     let mut robust_fit = None;
     let b0_field_ppm = match &config.b0_estimation {
         B0EstimationMethod::WeightedAvg { weighting } => {
-            align_per_echo_constants(&mut unwrapped, tes, mask, config.unwrapping_algorithm);
             let grid = crate::Grid::new(nx, ny, nz, vsx, vsy, vsz);
-            let b0_hz = crate::utils::calculate_b0_weighted(
-                &unwrapped, mag_slices, tes, mask,
-                *weighting, &grid,
-            );
+            let b0_hz = if keeps_outside(config) {
+                // Each echo's constant (its mean inside the mask) removed everywhere, so the field
+                // outside stays continuous with the field inside; combined at every voxel.
+                for u in unwrapped.iter_mut() {
+                    let (sum, n) = u.iter().zip(mask).filter(|(_, &m)| m != 0).fold((0.0, 0usize), |(s, n), (&v, _)| (s + v, n + 1));
+                    if n > 0 {
+                        let mean = sum / n as f64;
+                        u.iter_mut().for_each(|v| *v -= mean);
+                    }
+                }
+                let everywhere = region.keep(mask);
+                crate::utils::calculate_b0_weighted(&unwrapped, mag_slices, tes, everywhere, *weighting, &grid)
+            } else {
+                align_per_echo_constants(&mut unwrapped, tes, mask, config.unwrapping_algorithm);
+                crate::utils::calculate_b0_weighted(
+                    &unwrapped, mag_slices, tes, mask,
+                    *weighting, &grid,
+                )
+            };
             hz_to_ppm(&b0_hz, metadata.field_strength)
         }
         B0EstimationMethod::LinearFit(params) => {
@@ -636,7 +650,7 @@ impl LaplacianRegion {
         let echofit = matches!(config.b0_estimation, B0EstimationMethod::QsmartEchofit { .. });
         LaplacianRegion {
             zero_outside: config.unwrapping_algorithm == UnwrappingAlgorithm::Laplacian && !unmasked,
-            everywhere: (unmasked && echofit).then(|| vec![1; mask.len()]),
+            everywhere: ((unmasked && echofit) || keeps_outside(config)).then(|| vec![1; mask.len()]),
         }
     }
 
@@ -644,6 +658,16 @@ impl LaplacianRegion {
     fn keep<'a>(&'a self, mask: &'a [u8]) -> &'a [u8] {
         self.everywhere.as_deref().unwrap_or(mask)
     }
+}
+
+/// Whether the combined field is kept over the whole volume
+/// ([`FieldMappingConfig::laplacian_keep_outside`]): Laplacian unwrapping of the masked phase,
+/// combined by a weighted mean.
+fn keeps_outside(config: &FieldMappingConfig) -> bool {
+    config.laplacian_keep_outside
+        && config.unwrapping_algorithm == UnwrappingAlgorithm::Laplacian
+        && !config.laplacian_unmasked
+        && matches!(config.b0_estimation, B0EstimationMethod::WeightedAvg { .. })
 }
 
 /// [`multi_echo_robust_fit`](crate::utils::multi_echo_robust_fit) on unwrapped echoes: the field
@@ -1213,6 +1237,39 @@ mod tests {
         let masked = run_field_mapping(&p, None, &mask, &meta, &base, &mut |_, _| {}).unwrap().b0_field_ppm;
         assert_ne!(got, masked);
         assert!(got.iter().zip(&mask).all(|(&f, &k)| k != 0 || f == 0.0));
+    }
+
+    /// Keeping the field outside the mask (UK Biobank) leaves it unchanged inside and continues
+    /// it outside; only with a weighted mean.
+    #[test]
+    fn laplacian_keep_outside_keeps_the_same_field_and_continues_it() {
+        let meta = make_test_metadata(3);
+        let n = 8 * 8 * 8;
+        let phases: Vec<Vec<f64>> = meta.echo_times.iter()
+            .map(|te| (0..n).map(|i| { let t = 400.0 * te * (1.0 + (i as f64 * 0.37).sin()); t.sin().atan2(t.cos()) }).collect())
+            .collect();
+        let p: Vec<&[f64]> = phases.iter().map(|v| v.as_slice()).collect();
+        let mut mask = vec![0u8; n];
+        mask[100..300].fill(1);
+        let base = FieldMappingConfig {
+            unwrapping_algorithm: UnwrappingAlgorithm::Laplacian,
+            b0_estimation: B0EstimationMethod::WeightedAvg { weighting: B0WeightType::assumed_decay_default() },
+            ..Default::default()
+        };
+        let keep = FieldMappingConfig { laplacian_keep_outside: true, ..base.clone() };
+        let inside = run_field_mapping(&p, None, &mask, &meta, &base, &mut |_, _| {}).unwrap();
+        let everywhere = run_field_mapping(&p, None, &mask, &meta, &keep, &mut |_, _| {}).unwrap();
+        for l in 0..n {
+            if mask[l] != 0 {
+                assert!((inside.b0_field_ppm[l] - everywhere.b0_field_ppm[l]).abs() < 1e-12, "voxel {l}");
+            }
+        }
+        assert!(everywhere.b0_field_ppm.iter().zip(&mask).any(|(&f, &k)| k == 0 && f != 0.0));
+        assert_eq!(everywhere.valid_mask, mask);
+        // Ignored with another combination.
+        let fit = FieldMappingConfig { b0_estimation: B0EstimationMethod::LinearFit(Default::default()), ..keep };
+        let fitted = run_field_mapping(&p, None, &mask, &meta, &fit, &mut |_, _| {}).unwrap();
+        assert!(fitted.b0_field_ppm.iter().zip(&mask).all(|(&f, &k)| k != 0 || f == 0.0));
     }
 
     #[test]
