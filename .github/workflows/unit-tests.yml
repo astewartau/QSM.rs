@@ -35,6 +35,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # The coverage run's toolchain, pinned (installed first, so `stable` below stays the
+      # default for the compile check and clippy). TODO: unpin once scripts/coverage_summary.py
+      # handles Rust 1.100's LCOV. With rustc 1.100.0 (2026-11-09), cargo-llvm-cov 0.9.1's report
+      # gains zero-hit line records with no code behind them: on unchanged files, module doc
+      # comments, `use` lines and struct fields, and lines past the end of the file
+      # (src/bet/evolution.rs, 1428 lines, has records up to 1575). The coverable count went from
+      # 30861 to 40665 lines and coverage from 93.1 % to 64.9 % with no change to the code or
+      # its tests (QSM.rs#470's run). Unlike clippy's lints (see the Clippy step), this is not a
+      # finding to fix in the code; the gate would measure something else.
+      - name: Install Rust 1.99.1 for coverage
+        uses: dtolnay/rust-toolchain@1.99.1
+        with:
+          components: llvm-tools-preview
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -120,7 +134,7 @@ jobs:
           CARGO_PROFILE_DEV_OPT_LEVEL: 1
         run: |
           mkdir -p coverage
-          cargo llvm-cov --features parallel --lcov --output-path coverage/lcov.info \
+          cargo +1.99.1 llvm-cov --features parallel --lcov --output-path coverage/lcov.info \
             2>&1 | tee coverage/test.log
 
           # Sum of "N passed" across the test binaries.
@@ -132,7 +146,7 @@ jobs:
         if: inputs.warm_only
         env:
           CARGO_PROFILE_DEV_OPT_LEVEL: 1
-        run: cargo llvm-cov --features parallel --no-report -- --exact warm-caches-runs-no-test
+        run: cargo +1.99.1 llvm-cov --features parallel --no-report -- --exact warm-caches-runs-no-test
 
       # Line coverage of non-test code: LLVM line counts with every `#[cfg(test)]` item
       # dropped (see scripts/coverage_summary.py), which is what tarpaulin's figure excluded
