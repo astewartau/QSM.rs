@@ -697,7 +697,8 @@ pub struct BgRemovalConfig {
     /// ([`crate::utils::phase_reliability`]): before background removal, the brain mask less the
     /// voxels whose phase is unreliable ([`UKB_TRIM_FIELD`](crate::utils::UKB_TRIM_FIELD)), and
     /// after it, the stage's mask trimmed again more tightly
-    /// ([`UKB_TRIM_LOCAL`](crate::utils::UKB_TRIM_LOCAL)), with the local field zeroed outside.
+    /// ([`UKB_TRIM_LOCAL`](crate::utils::UKB_TRIM_LOCAL)); the local field is left as background
+    /// removal made it, as UK Biobank hands it to iLSQR.
     /// Both trims read the two reliability maps of the wrapped first and last echoes over the
     /// untrimmed mask ([`UkbPhaseReliability`](crate::utils::UkbPhaseReliability)), which the host
     /// computes and passes to [`run_bg_removal_trimmed`](super::bg_removal::run_bg_removal_trimmed).
