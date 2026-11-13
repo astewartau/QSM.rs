@@ -19,12 +19,36 @@ use super::config::*;
 ///
 /// # Returns
 /// `BgRemovalResult` with local field in ppm and eroded mask
+///
+/// A config with [`BgRemovalConfig::ukb_mask_trim`] needs the reliability maps: use
+/// [`run_bg_removal_trimmed`]; this refuses it.
 pub fn run_bg_removal(
     field_ppm: &[f64],
     mask: &[u8],
     metadata: &ScanMetadata,
     config: &BgRemovalConfig,
     magnitude: Option<&[f64]>,
+    progress: &mut dyn FnMut(usize, usize),
+) -> Result<BgRemovalResult, PipelineError> {
+    run_bg_removal_trimmed(field_ppm, mask, metadata, config, magnitude, None, progress)
+}
+
+/// [`run_bg_removal`], with UK Biobank's phase-reliability maps for
+/// [`BgRemovalConfig::ukb_mask_trim`] (`reliability`, computed over the untrimmed `mask` with
+/// [`UkbPhaseReliability::compute`](crate::utils::UkbPhaseReliability::compute)). They are
+/// required when the trim is on, and ignored when it is off.
+///
+/// With the trim on: `mask` is trimmed with [`UKB_TRIM_FIELD`](crate::utils::UKB_TRIM_FIELD)
+/// (after `erode_voxels`, if any), background removal runs inside it, and its output mask is
+/// trimmed with [`UKB_TRIM_LOCAL`](crate::utils::UKB_TRIM_LOCAL) (after `polish_mask`, if any),
+/// with the local field zeroed outside: UK Biobank's `UKBiobank_QSM.m` around `V_SHARP`.
+pub fn run_bg_removal_trimmed(
+    field_ppm: &[f64],
+    mask: &[u8],
+    metadata: &ScanMetadata,
+    config: &BgRemovalConfig,
+    magnitude: Option<&[f64]>,
+    reliability: Option<&crate::utils::UkbPhaseReliability>,
     progress: &mut dyn FnMut(usize, usize),
 ) -> Result<BgRemovalResult, PipelineError> {
     // Every background removal here convolves with a kernel defined on the voxel grid, so a
@@ -55,6 +79,30 @@ pub fn run_bg_removal(
             )));
         }
         &pre_eroded
+    } else {
+        mask
+    };
+
+    // UK Biobank's first trim (BgRemovalConfig::ukb_mask_trim).
+    let reliability = match (config.ukb_mask_trim, reliability) {
+        (false, _) => None,
+        (true, None) => return Err(PipelineError::InvalidConfig(
+            "UK Biobank mask trimming needs the phase-reliability maps (run_bg_removal_trimmed)".into())),
+        (true, Some(r)) => {
+            if r.first_echo.len() != n_voxels || r.last_echo.len() != n_voxels || mask.len() != n_voxels {
+                return Err(PipelineError::DimensionMismatch { expected: n_voxels, got: r.first_echo.len().min(r.last_echo.len()).min(mask.len()) });
+            }
+            Some(r)
+        }
+    };
+    let trimmed;
+    let mask: &[u8] = if let Some(r) = reliability {
+        trimmed = r.trim(mask, &grid, &crate::utils::UKB_TRIM_FIELD);
+        if !trimmed.iter().any(|&m| m != 0) {
+            return Err(PipelineError::InvalidInput(
+                "UK Biobank's phase-reliability trim leaves no voxels in the mask".into()));
+        }
+        &trimmed
     } else {
         mask
     };
@@ -151,6 +199,15 @@ pub fn run_bg_removal(
         let polished = polish_mask(&eroded_mask, &grid);
         let local = local_field.iter().zip(&polished).map(|(&v, &m)| if m != 0 { v } else { 0.0 }).collect();
         (local, polished)
+    } else {
+        (local_field, eroded_mask)
+    };
+
+    // UK Biobank's second trim, of the stage's mask (BgRemovalConfig::ukb_mask_trim).
+    let (local_field, eroded_mask) = if let Some(r) = reliability {
+        let trimmed = r.trim(&eroded_mask, &grid, &crate::utils::UKB_TRIM_LOCAL);
+        let local = local_field.iter().zip(&trimmed).map(|(&v, &m)| if m != 0 { v } else { 0.0 }).collect();
+        (local, trimmed)
     } else {
         (local_field, eroded_mask)
     };
@@ -650,5 +707,33 @@ mod tests {
             &mut |_, _| {},
         );
         assert!(result.is_err());
+    }
+
+    /// UK Biobank's trim needs its reliability maps, and with them trims before and after.
+    #[test]
+    fn ukb_trim_needs_the_maps_and_trims_both_masks() {
+        let (n, g) = (24usize, crate::Grid::new(24, 24, 24, 1.0, 1.0, 1.0));
+        let nv = n * n * n;
+        let mask: Vec<u8> = (0..nv).map(|l| {
+            let (i, j, k) = ((l % n) as f64 - 11.5, ((l / n) % n) as f64 - 11.5, (l / (n * n)) as f64 - 11.5);
+            u8::from(i * i + j * j + k * k < 100.0)
+        }).collect();
+        let meta = ScanMetadata {
+            dims: g.dims, voxel_size: g.voxel_size, echo_times: vec![0.01], field_strength: 3.0,
+            b0_direction: (0.0, 0.0, 1.0), slice_geometry: None, affine: None,
+        };
+        let field = vec![0.0; nv];
+        let config = BgRemovalConfig { ukb_mask_trim: true, ..Default::default() };
+        assert!(matches!(run_bg_removal(&field, &mask, &meta, &config, None, &mut |_, _| {}), Err(PipelineError::InvalidConfig(_))));
+        // A uniform phase is reliable everywhere, so the trims only clean up small slices: the
+        // stage is V-SHARP inside the first trim, its mask trimmed by the second.
+        let phase = vec![0.3; nv];
+        let r = crate::utils::UkbPhaseReliability::compute(&[&phase], &mask, &g).unwrap();
+        let trimmed = run_bg_removal_trimmed(&field, &mask, &meta, &config, None, Some(&r), &mut |_, _| {}).unwrap();
+        let first = r.trim(&mask, &g, &crate::utils::UKB_TRIM_FIELD);
+        assert!(first.iter().filter(|&&m| m != 0).count() < mask.iter().filter(|&&m| m != 0).count());
+        let plain = run_bg_removal(&field, &first, &meta, &BgRemovalConfig::default(), None, &mut |_, _| {}).unwrap();
+        assert_eq!(trimmed.eroded_mask, r.trim(&plain.eroded_mask, &g, &crate::utils::UKB_TRIM_LOCAL));
+        assert!(trimmed.eroded_mask.iter().any(|&m| m != 0));
     }
 }

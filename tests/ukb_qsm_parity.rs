@@ -9,12 +9,15 @@
 //! `tests/data/ukb_qsm_small.bin` is made by `tests/data/ukb_qsm_small.py` with that container, so
 //! it can be regenerated in Actions (`.github/workflows/regenerate-fixtures.yml`); the phase is
 //! rebuilt here exactly as the script builds it. Each step is given the container's own input
-//! (its mask, combined phase), so each is compared on its own. UK Biobank's
-//! phase-variance mask trimming is not a QSM.rs port; its masks come from the fixture.
+//! (its mask, combined phase), so each is compared on its own.
+//!
+//! UK Biobank's phase-reliability maps and mask trims (`utils::phase_reliability`) are checked
+//! against the same container on three phantoms (1 mm, 1 × 1 × 1.5 mm and UK Biobank's 0.8 × 0.8
+//! × 3 mm) from `tests/data/ukb_trim_small.bin` (`tests/data/ukb_trim_small.py`).
 
 use qsm_core::bgremove::{vsharp, VsharpParams};
 use qsm_core::unwrap::{laplacian_unwrap, LaplacianSolver};
-use qsm_core::utils::{calculate_b0_weighted, B0WeightType};
+use qsm_core::utils::{calculate_b0_weighted, B0WeightType, UkbPhaseReliability, UKB_TRIM_FIELD, UKB_TRIM_LOCAL};
 use qsm_core::Grid;
 use std::f64::consts::PI;
 
@@ -114,4 +117,61 @@ fn ukb_vsharp_matches_the_ukb_qsm_container() {
     // Before STI's even crop (astewartau/QSM.rs#329, `vsharp` module docs) it was 4.1 %, and this
     // fixture, then holding the combined phase only inside the mask, showed 4.5 %.
     assert!(nrmse < 5e-6, "V-SHARP NRMSE {nrmse:e}");
+}
+
+/// The phantoms of `tests/data/ukb_trim_small.py`, in its order.
+const TRIM_CASES: [([usize; 3], [f64; 3]); 3] =
+    [([32, 30, 24], [1.0, 1.0, 1.0]), ([32, 32, 20], [1.0, 1.0, 1.5]), ([40, 36, 12], [0.8, 0.8, 3.0])];
+
+#[test]
+fn ukb_phase_reliability_and_mask_trims_match_the_ukb_qsm_container() {
+    let raw = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/ukb_trim_small.bin")).expect("fixture");
+    let mut o = 0;
+    for (dims, vs) in TRIM_CASES {
+        let n: usize = dims.iter().product();
+        let nb = n.div_ceil(8);
+        let mut bits = || -> Vec<u8> {
+            let v = (0..n).map(|i| raw[o + i / 8] >> (i % 8) & 1).collect();
+            o += nb;
+            v
+        };
+        let mask = bits();
+        let mut f32s = || -> Vec<f64> {
+            let v = (0..n).map(|i| f32::from_le_bytes(raw[o + 4 * i..o + 4 * i + 4].try_into().unwrap()) as f64).collect();
+            o += 4 * n;
+            v
+        };
+        let (first, last) = (f32s(), f32s());
+        let mut in_mask = || -> Vec<f64> {
+            let mut v = vec![1.0; n];
+            for l in (0..n).filter(|&l| mask[l] != 0) {
+                v[l] = f64::from_le_bytes(raw[o..o + 8].try_into().unwrap());
+                o += 8;
+            }
+            v
+        };
+        let (map, map2) = (in_mask(), in_mask());
+        let mut bits = || -> Vec<u8> {
+            let v = (0..n).map(|i| raw[o + i / 8] >> (i % 8) & 1).collect();
+            o += nb;
+            v
+        };
+        let (trimmed, mask_vsharp, final_mask) = (bits(), bits(), bits());
+
+        let g = Grid::new(dims[0], dims[1], dims[2], vs[0], vs[1], vs[2]);
+        let r = UkbPhaseReliability::compute(&[&first, &last], &mask, &g).unwrap();
+        let max = |a: &[f64], b: &[f64]| a.iter().zip(b).map(|(x, y)| (x - y).abs()).fold(0.0, f64::max);
+        let (d1, d2) = (max(&r.first_echo, &map), max(&r.last_echo, &map2));
+        let differ = |a: &[u8], b: &[u8]| a.iter().zip(b).filter(|(x, y)| x != y).count();
+        let t1 = r.trim(&mask, &g, &UKB_TRIM_FIELD);
+        let t2 = r.trim(&mask_vsharp, &g, &UKB_TRIM_LOCAL);
+        println!("{dims:?} at {vs:?} mm: maps max |Δ| {d1:.1e} / {d2:.1e}; trims differ in {} / {} voxels ({} / {} kept)",
+            differ(&t1, &trimmed), differ(&t2, &final_mask), trimmed.iter().filter(|&&m| m != 0).count(),
+            final_mask.iter().filter(|&&m| m != 0).count());
+        // Measured 2026-11-13: maps within 2e-15 (FFTW against rustfft), both trims identical.
+        assert!(d1 < 1e-12 && d2 < 1e-12, "{dims:?}: maps {d1:e} {d2:e}");
+        assert_eq!(differ(&t1, &trimmed), 0, "{dims:?}: trim before V_SHARP");
+        assert_eq!(differ(&t2, &final_mask), 0, "{dims:?}: trim after V_SHARP");
+    }
+    assert_eq!(o, raw.len(), "fixture length");
 }

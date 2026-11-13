@@ -678,6 +678,20 @@ pub struct BgRemovalConfig {
     /// s005001 Prisma scan, 1,276,570 → 1,265,491 voxels, reproduced voxel for voxel by these two
     /// operations). The polished mask is the stage's output mask. Off by default.
     pub polish_mask: bool,
+    /// UK Biobank's phase-reliability mask trimming around V-SHARP
+    /// ([`crate::utils::phase_reliability`]): before background removal, the brain mask less the
+    /// voxels whose phase is unreliable ([`UKB_TRIM_FIELD`](crate::utils::UKB_TRIM_FIELD)), and
+    /// after it, the stage's mask trimmed again more tightly
+    /// ([`UKB_TRIM_LOCAL`](crate::utils::UKB_TRIM_LOCAL)), with the local field zeroed outside.
+    /// Both trims read the two reliability maps of the wrapped first and last echoes over the
+    /// untrimmed mask ([`UkbPhaseReliability`](crate::utils::UkbPhaseReliability)), which the host
+    /// computes and passes to [`run_bg_removal_trimmed`](super::bg_removal::run_bg_removal_trimmed).
+    ///
+    /// UK Biobank unwraps the phase inside the untrimmed mask and trims only then, so the trim
+    /// belongs to this stage, not to masking: field mapping still runs on the whole brain mask.
+    /// Off by default; the `uk-biobank` toolbox pipeline turns it on
+    /// ([`reference_pipelines`](super::reference_pipelines)).
+    pub ukb_mask_trim: bool,
 }
 
 impl Default for BgRemovalConfig {
@@ -696,6 +710,7 @@ impl Default for BgRemovalConfig {
             tile: None,
             erode_voxels: 0,
             polish_mask: false,
+            ukb_mask_trim: false,
         }
     }
 }

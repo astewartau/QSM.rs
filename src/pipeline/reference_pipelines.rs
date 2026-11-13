@@ -41,9 +41,17 @@
 //!   pipeline run end to end; a QSMxT release waits on it.
 //! - **Which pipelines.** A toolbox whose own code runs a whole pipeline around its method, with
 //!   rules for it: the MEDI toolbox, STI Suite (its iLSQR and STAR-QSM), QSMART, the HEIDI
-//!   package, the χ-separation toolbox (its three methods) and DECOMPOSE. A method that is only
+//!   package, the χ-separation toolbox (its three methods), DECOMPOSE, and UK Biobank's QSM
+//!   pipeline (its own script around STI Suite's functions). A method that is only
 //!   trained on a pipeline (QSMnet's V-SHARP) keeps its reference settings as a method's, not as
 //!   a pipeline of its own.
+//! - **UK Biobank is chosen by name, never by its method.** Its inversion is STI Suite's iLSQR,
+//!   which also starts STI Suite's own pipeline, so iLSQR cannot be its trigger. Its trigger is
+//!   what only UK Biobank does, its phase-reliability mask trimming
+//!   ([`BgRemovalConfig::ukb_mask_trim`](super::config::BgRemovalConfig::ukb_mask_trim)): the
+//!   `ukb.*` rules follow from it, and STI Suite's GUI rules that UK Biobank departs from are
+//!   scoped out of it. Choosing iLSQR alone still gives STI Suite's (13 Nov 2026, decisions 145,
+//!   146 and 148).
 
 use serde::Serialize;
 
@@ -147,6 +155,13 @@ pub static REFERENCE_PIPELINES: &[ReferencePipeline] = &[
         source: "Chen et al. 2021 NeuroImage 242:118477 (DECOMPOSE), §2.2, §3.6, §4.1",
         reasoned: &[],
     },
+    ReferencePipeline {
+        id: "uk-biobank",
+        name: "UK Biobank",
+        toolbox: "UK Biobank QSM pipeline",
+        choose: &[("inversion.algorithm", Choice("ilsqr")), ("bg_removal.ukb_mask_trim", Bool(true))],
+        source: "UK Biobank UKBiobank_QSM.m (git.fmrib.ox.ac.uk/cwang/uk_biobank_qsm_pipeline); Wang et al. 2022 Nat. Neurosci.",
+    },
 ];
 
 /// The pipeline with this id.
@@ -200,6 +215,31 @@ mod tests {
         }
         assert_eq!(reference_pipeline("medi-toolbox").map(|p| p.name), Some("MEDI toolbox"));
         assert!(reference_pipeline("nope").is_none());
+    }
+
+    /// Choosing iLSQR alone is STI Suite's pipeline; UK Biobank's own choices replace the STI
+    /// GUI's settings it departs from, and keep what STI Suite's functions themselves do.
+    #[test]
+    fn uk_biobank_is_not_chosen_by_ilsqr() {
+        use super::super::rules::{evaluate, RuleInput, ScanFacts};
+        use super::super::config::{QsmPipelineConfig, InversionAlgorithm};
+        let facts = ScanFacts { echo_count: Some(2), ..Default::default() };
+        let ids = |cfg: &QsmPipelineConfig| -> Vec<&'static str> {
+            evaluate(&RuleInput::pipeline(cfg), &facts).iter().map(|f| f.rule.id).collect()
+        };
+        let mut sti = QsmPipelineConfig::default();
+        sti.inversion.algorithm = InversionAlgorithm::Ilsqr;
+        let found = ids(&sti);
+        assert!(found.contains(&"sti.ilsqr-iterations") && !found.iter().any(|id| id.starts_with("ukb.")), "{found:?}");
+        let mut ukb = sti.clone();
+        ukb.bg_removal.ukb_mask_trim = true;
+        let found = ids(&ukb);
+        for id in ["ukb.unwrap-laplacian", "ukb.echo-weights", "ukb.ilsqr-pad", "ukb.reference-none", "sti.ilsqr-single"] {
+            assert!(found.contains(&id), "{id} in {found:?}");
+        }
+        for id in ["sti.ilsqr-iterations", "sti.ilsqr-pad", "sti.vsharp-polish-mask", "sti.mask-threshold-gui", "sti.unwrap-unmasked", "sti.echo-weights"] {
+            assert!(!found.contains(&id), "{id} in {found:?}");
+        }
     }
 
     /// DECOMPOSE's pipeline is a QSM per echo, as its authors ran it: the value its

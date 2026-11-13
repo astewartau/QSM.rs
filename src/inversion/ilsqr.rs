@@ -190,6 +190,7 @@
 //!
 //! The facts above that a configuration can depart from are published as rules in
 //! [`crate::pipeline::rules::RULES`] (each with its strength, basis, reason and source): `sti.unwrap-laplacian`, `sti.laplacian-solver`, `sti.echo-combination`, `sti.echo-weights`, `sti.bg-vsharp`, `sti.vsharp-no-deconvolve`, `sti.vsharp-radius`, `sti.vsharp-grid`, `sti.ilsqr-iterations` (the GUI's 40), `sti.ilsqr-pad`, `sti.ilsqr-single` (STI's single precision). In the χ-separation toolbox's pipeline, `chi-sep.ilsqr-iterations` (100) replaces `sti.ilsqr-iterations`, and precision stays double.
+//! In UK Biobank's pipeline, which calls `QSM_iLSQR` from its own script (`UKBiobank_QSM.m`), `ukb.ilsqr-iterations` (100, no `'niter'` passed) and `ukb.ilsqr-pad` (64 mm, `'padsize', [64 64 64]`) replace the GUI's `sti.ilsqr-iterations` and `sti.ilsqr-pad`, and `sti.ilsqr-single` still applies: single precision is `QSM_iLSQR`'s own (decision 148, 13 Nov 2026).
 //! `sti.unwrap-laplacian` and `sti.echo-weights` do not apply under the χ-separation toolbox's
 //! methods, which run STI Suite's iLSQR but unwrap with ROMEO and weight the echoes their own
 //! way (`chi-sep.unwrap-romeo`, `chi-sep.echo-weights`); its V-SHARP is STI Suite's, so the
