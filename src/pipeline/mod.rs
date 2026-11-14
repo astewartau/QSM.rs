@@ -65,4 +65,7 @@ pub use inversion::{heidi_seed_problem, run_dipole_inversion, run_heidi_cone_fil
 pub use separation::{run_separation, SeparationInputs, SeparationResult};
 pub use observer::{Observer, VolumeRef};
 pub use qsmart::run_qsmart;
-pub use two_pass::{combine_two_pass, default_reliable_sections, restrict_reliable_mask};
+pub use two_pass::{
+    combine_two_pass, default_reliable_sections, reliable_sections, restrict_reliable_mask, ReliableBackground,
+    ReliableThreshold, RELIABLE_FIXED_THRESHOLD,
+};
