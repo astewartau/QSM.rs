@@ -100,14 +100,15 @@ fn tgv_matches_the_package_to_float32_rounding() {
     for (case, (want_mask, want)) in CASES.iter().zip(load_tgvjl()) {
         let (field, mask) = phantom(case.dims, case.vs);
         let grid = Grid::new(case.dims[0], case.dims[1], case.dims[2], case.vs[0], case.vs[1], case.vs[2]);
-        // The package's own erosion, w-update divergence and output box
-        // (`TgvParams::reference_edge_erosion`, `reference_divergence`, `reference_output_box`).
+        // The package's defaults (`TgvParams::tgvjl`: regularization = 2) and its own erosion,
+        // w-update divergence and output box (`reference_edge_erosion`, `reference_divergence`,
+        // `reference_output_box`).
         let params = TgvParams {
             iterations: case.iterations,
             reference_divergence: true,
             reference_edge_erosion: true,
             reference_output_box: true,
-            ..Default::default()
+            ..TgvParams::tgvjl()
         };
         let chi = match case.phase_scale {
             Some(scale) => {

@@ -14,8 +14,10 @@
 //!
 //! Reference implementation: https://github.com/korbinian90/QuantitativeSusceptibilityMappingTGV.jl
 //! (`qsm_tgv`). The iteration, step sizes, dipole stencil, mask erosions, Laplacian mean
-//! correction and the defaults (α from `get_default_alpha(2)`, iterations from
-//! `get_default_iterations`, `erosions = 3`, `step_size = 3`) are that package's.
+//! correction and the defaults other than α (iterations from `get_default_iterations`,
+//! `erosions = 3`, `step_size = 3`) are that package's. The default α are α₀ = 0.00636,
+//! α₁ = 0.00212, not the package's `regularization = 2` (α₀ = 0.002, α₁ = 0.003), which
+//! [`TgvParams::tgvjl`] keeps: see *Default weights* below.
 //!
 //! # Units
 //!
@@ -46,7 +48,7 @@
 //! On the QSM-CI in-vivo travelling-head scan (Siemens Prisma 2.89 T, 1 mm, 184×256×128, ROMEO
 //! total field, brain mask touching the first z plane) against the package in the QSM-CI
 //! `julia-qsm` image (`sha256:b3c048ac…`, 6c0886a, 4 threads), both at the package's defaults
-//! (1655 iterations) and with both [`TgvParams::reference_divergence`] and
+//! (`regularization = 2`, 1655 iterations) and with both [`TgvParams::reference_divergence`] and
 //! [`TgvParams::reference_edge_erosion`], over the voxels both return: NRMSE 4.0e-4 % for a wrapped echo (the field as phase
 //! at TE1, the package's `get_laplace_phase_del`), and 3.7e-4 % for [`TgvInput::FieldPpm`]
 //! against the package with its own discrete Laplacian kernel on the unwrapped phase. Both are
@@ -142,6 +144,46 @@
 //! - Bounding box reduction: only process the region containing the mask
 //! - Pre-allocated buffers: all temporary arrays allocated once outside the loop
 //!
+//! # Default weights: α₀ = 0.00636, α₁ = 0.00212 (the package: 0.002, 0.003)
+//!
+//! α are tuning, not algorithm: [`TgvParams::default`] uses α₀ = 0.00636, α₁ = 0.00212
+//! (QSMxT decision 172, 2026-11-16), from our own evaluation, and [`TgvParams::tgvjl`] keeps
+//! the package's `regularization = 2` (α₀ = 0.002, α₁ = 0.003) for the parity runs against it.
+//! Everything else stays the package's. The new weights have the ratio α₀/α₁ = 3 of the
+//! original Python TGV-QSM's (`alpha = [0.003, 0.001]`, which the package's README lists as the
+//! original's settings) at 1.5× the strength of `regularization = 2` (geometric mean of α₀
+//! and α₁: 0.00367 against 0.00245).
+//!
+//! Evidence. On two 3 T travelling-head scans (Siemens Prisma, Philips Achieva; 1 mm) the
+//! `regularization = 2` maps looked over-regularised, and ratio 3 agreed better with iLSQR
+//! (band correlation 0.89–0.90 against 0.86–0.88). The QSM challenge data were then checked
+//! (QSMxT `invert tgv`, local field given at the data's own TE and B0, converted at TE1; QSM-CI
+//! `qsm_eval`; XSIM primary): C = `regularization = 2`, D = ratio 3 at α₀ = 0.003, α₁ = 0.001,
+//! E = ratio 3 at C's strength (0.00424, 0.00141), F = ratio 3 at 1.5× C's strength (the
+//! default). XSIM / NRMSE (%):
+//!
+//! | Data (reference)                          | C             | D             | E             | F (default)   |
+//! |-------------------------------------------|---------------|---------------|---------------|---------------|
+//! | 2016 challenge (χ33)                      | 0.191 / 121.4 | 0.158 / 140.5 | 0.169 / 134.8 | 0.184 / 127.1 |
+//! | 2016 challenge (COSMOS)                   | 0.280 / 102.6 | 0.231 / 120.8 | 0.247 / 115.3 | 0.268 / 108.0 |
+//! | 2016, eroded support only (χ33)           | 0.216 / 123.0 | 0.177 / 143.3 | 0.190 / 137.2 | 0.207 / 129.1 |
+//! | 2016, eroded support only (COSMOS)        | 0.315 / 102.8 | 0.258 / 122.3 | 0.276 / 116.4 | 0.301 / 108.6 |
+//! | Challenge 2.0 Sim1 SNR1                   | 0.404 / 77.5  | 0.458 / 86.3  | 0.461 / 81.8  | 0.444 / 77.3  |
+//! | Challenge 2.0 Sim1 SNR2                   | 0.407 / 74.3  | 0.486 / 79.6  | 0.479 / 76.2  | 0.452 / 72.9  |
+//! | Challenge 2.0 Sim2 SNR1                   | 0.404 / 73.8  | 0.430 / 77.4  | 0.444 / 74.7  | 0.453 / 71.8  |
+//! | Challenge 2.0 Sim2 SNR2                   | 0.408 / 72.9  | 0.449 / 75.0  | 0.458 / 72.7  | 0.463 / 70.3  |
+//! | QSM-CI simulation (2019 head model, 7 T)  | 0.404 / 66.3  | 0.486 / 62.9  | 0.483 / 62.3  | 0.472 / 62.0  |
+//!
+//! F is the only ratio-3 setting that is at least as good as C on both XSIM and NRMSE on every
+//! simulation (XSIM +0.04 to +0.07), and it brings the deep-grey-matter slope closer to 1
+//! (`|1−slope|` 0.056–0.134 → 0.005–0.082). On the 2016 in-vivo data every ratio-3 setting
+//! scores below C, F least (XSIM −0.007 against χ33, −0.012 against COSMOS); the 2016
+//! challenge's metrics are known to favour smoother maps. The 2016 rows "eroded support only"
+//! are scored inside the voxels every setting returns (800,653 of the mask's 933,481), so
+//! TGV's mask erosion is not what ranks them. D scores higher XSIM than F on three simulations
+//! but lowest of all on 2016 and worst NRMSE on Challenge 2.0, so the weaker weights were not
+//! chosen. Metrics: QSMxT tgv-ratio check, 2026-11-16 (`qsmxt-ecosystem/2026-11-16-tgv-ratio/`).
+//!
 //! # Reference pipeline
 //! QuantitativeSusceptibilityMappingTGV.jl, commit 6c0886a:
 //! - Input: one echo's phase in rad, its `TE` and the field strength, plus a brain mask
@@ -158,9 +200,9 @@
 //!   count scales with the voxel volume (`get_default_iterations`, L108-115), and the README says
 //!   the defaults "should lead to good results independently of the acquired resolution".
 //!   `dedimensionalize = false` by default.
-//! - Defaults: `regularization = 2` (α₀ = 0.002, α₁ = 0.003), `step_size = 3`,
-//!   `correct_laplacian = true`. The settings that reproduce the original Python version are
-//!   `step_size = 1`, `iterations = 1000`, `alpha = [0.003, 0.001]`, `erosions = 5`,
+//! - Defaults: `regularization = 2` (α₀ = 0.002, α₁ = 0.003; QSM.rs's default α differ, see
+//!   *Default weights*), `step_size = 3`, `correct_laplacian = true`. The settings that
+//!   reproduce the original Python version are `step_size = 1`, `iterations = 1000`, `alpha = [0.003, 0.001]`, `erosions = 5`,
 //!   `laplacian = get_laplace_phase3`, `correct_laplacian = false` (README).
 //! - Langkammer et al. 2015 (abstract): 3D EPI at 3T and 7T, 1 mm isotropic at 3T.
 
@@ -290,12 +332,18 @@ impl TgvInput<'_> {
 }
 
 /// TGV parameters. `alpha0`/`alpha1` are in the reference's rad units (see the module docs).
+///
+/// [`Default`] is QSM.rs's TGV: the package's settings except α (α₀ = 0.00636, α₁ = 0.00212; see
+/// the module docs, *Default weights*). [`TgvParams::tgvjl`] is the package's defaults
+/// (`regularization = 2`), for parity runs.
 #[cfg_attr(feature = "introspection", derive(serde::Serialize))]
 #[derive(Clone, Debug)]
 pub struct TgvParams {
-    /// First-order TGV weight (gradient term), rad units
+    /// First-order TGV weight (gradient term), rad units (default [`DEFAULT_ALPHA1`]; the
+    /// package's `regularization = 2` is 0.003)
     pub alpha1: f32,
-    /// Second-order TGV weight (symmetric gradient term), rad units
+    /// Second-order TGV weight (symmetric gradient term), rad units (default
+    /// [`DEFAULT_ALPHA0`]; the package's `regularization = 2` is 0.002)
     pub alpha0: f32,
     /// Number of primal-dual iterations; `None` uses [`get_default_iterations`] for the
     /// voxel size and `step_size`, as the reference does.
@@ -335,14 +383,21 @@ pub struct TgvParams {
     pub reference_output_box: bool,
 }
 
+/// QSM.rs's default second-order weight α₀ (rad units). See the module docs, *Default weights*.
+pub const DEFAULT_ALPHA0: f32 = 0.00636;
+/// QSM.rs's default first-order weight α₁ (rad units). See the module docs, *Default weights*.
+pub const DEFAULT_ALPHA1: f32 = 0.00212;
+/// QuantitativeSusceptibilityMappingTGV.jl's default `regularization` level, whose α
+/// ([`get_default_alpha`]: α₀ = 0.002, α₁ = 0.003) [`TgvParams::tgvjl`] uses.
+pub const TGVJL_REGULARIZATION: f32 = 2.0;
+
 impl Default for TgvParams {
     fn default() -> Self {
-        // QuantitativeSusceptibilityMappingTGV.jl defaults: regularization = 2,
-        // erosions = 3, step_size = 3, iterations from the voxel size.
-        let (alpha0, alpha1) = get_default_alpha(2.0);
+        // QuantitativeSusceptibilityMappingTGV.jl's erosions = 3, step_size = 3, iterations
+        // from the voxel size; α are QSM.rs's own (module docs, *Default weights*).
         Self {
-            alpha1,
-            alpha0,
+            alpha1: DEFAULT_ALPHA1,
+            alpha0: DEFAULT_ALPHA0,
             iterations: None,
             erosions: 3,
             step_size: 3.0,
@@ -354,9 +409,21 @@ impl Default for TgvParams {
     }
 }
 
+impl TgvParams {
+    /// QuantitativeSusceptibilityMappingTGV.jl's defaults: α from `regularization = 2`
+    /// ([`get_default_alpha`]`(`[`TGVJL_REGULARIZATION`]`)`: α₀ = 0.002, α₁ = 0.003), and
+    /// otherwise [`TgvParams::default`], whose other settings are the package's. The parity
+    /// runs against the package use these.
+    pub fn tgvjl() -> Self {
+        let (alpha0, alpha1) = get_default_alpha(TGVJL_REGULARIZATION);
+        Self { alpha0, alpha1, ..Self::default() }
+    }
+}
+
 /// Default `(alpha0, alpha1)` for a regularization strength (the reference's
 /// `get_default_alpha`): `max([0.001, 0.001] + [0.001, 0.002]·(regularization − 1), 0)`.
-/// 2 is the default, giving α₀ = 0.002, α₁ = 0.003.
+/// 2 is the package's default, giving α₀ = 0.002, α₁ = 0.003 ([`TgvParams::tgvjl`]); QSM.rs's
+/// default α are not on this scale (α₀ > α₁), see the module docs, *Default weights*.
 pub fn get_default_alpha(regularization: f32) -> (f32, f32) {
     let r = regularization - 1.0;
     ((0.001 + 0.001 * r).max(0.0), (0.001 + 0.002 * r).max(0.0))
@@ -1752,9 +1819,15 @@ mod tests {
         assert!(close(get_default_alpha(3.0), (0.003, 0.005)));
         assert!(close(get_default_alpha(4.0), (0.004, 0.007)));
         assert!(close(get_default_alpha(0.0), (0.0, 0.0)));
+        // QSM.rs's default α (module docs, *Default weights*); the package's otherwise.
         let d = TgvParams::default();
-        assert!(close((d.alpha0, d.alpha1), (0.002, 0.003)));
+        assert!(close((d.alpha0, d.alpha1), (0.00636, 0.00212)));
         assert_eq!((d.iterations, d.erosions, d.step_size), (None, 3, 3.0));
+        // The package's defaults: regularization = 2, everything else as the default.
+        let j = TgvParams::tgvjl();
+        assert!(close((j.alpha0, j.alpha1), (0.002, 0.003)));
+        assert_eq!((j.iterations, j.erosions, j.step_size, j.te), (d.iterations, d.erosions, d.step_size, d.te));
+        assert!(!j.reference_divergence && !j.reference_edge_erosion && !j.reference_output_box);
         assert!((rad_per_ppm(0.004, 7.0) - 7.4907).abs() < 1e-3);
     }
 
