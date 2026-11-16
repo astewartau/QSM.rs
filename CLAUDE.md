@@ -1,7 +1,14 @@
 # Instructions for coding agents
 
-- Read [CONTRIBUTING.md](CONTRIBUTING.md) before changing anything, and follow it. It is the standard for this repository.
-- Never commit or push to `main`. Work on a branch in its own `git worktree`, with its own `CARGO_TARGET_DIR` (never shared between worktrees).
-- Open PRs as drafts. Merging and releases are the maintainer's decision.
-- Record every algorithm decision (default and why, reference file and line, deviations, measurements) in the method's doc comments, not only in the PR body.
-- Do not run `cargo fmt` over code you did not change.
+Read [CONTRIBUTING.md](CONTRIBUTING.md) before changing anything and follow it. The rules most
+often broken:
+
+- Ports follow the original authors' paper **and** code, with the reference's inputs (required,
+  not optional) and defaults. No invented extensions or substitute inputs.
+- Change an algorithm only for an unequivocal improvement, and keep the original behaviour as an
+  option. Trade-offs are options, not defaults.
+- Record every algorithm decision (default and why, reference file and line, deviations,
+  measurements) in the method's doc comments, not only in the PR body.
+- No backwards-compatibility shims; get the API right.
+- Locally run only `cargo check`, the tests for your change and clippy; CI runs the full suite.
+  Do not reformat code you did not change. Never push to `main`; the maintainer merges.
