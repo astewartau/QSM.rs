@@ -460,8 +460,9 @@ pub struct QsmartParams {
     pub frangi_scale_range: [f64; 2],
     /// Frangi scale ratio
     pub frangi_scale_ratio: f64,
-    /// Frangi C parameter
-    pub frangi_c: f64,
+    /// Frangi's c: QSMART v1.0's 500 in magnitude units (default), or relative to the vessel
+    /// magnitude's brain median ([`crate::utils::FrangiC`])
+    pub frangi_c: crate::utils::FrangiC,
     /// iLSQR iteration cap for both LSQR solves: STI's `'niter'`, which QSMART passes as 50
     pub ilsqr_max_iter: usize,
     /// iLSQR zero padding in mm: STI's `'padsize'`, which QSMART leaves at STI's default
@@ -491,7 +492,7 @@ impl Default for QsmartParams {
             // QSMART Demo defaults: FrangiScaleRange=[0.5,6], FrangiScaleRatio=0.5
             frangi_scale_range: [0.5, 6.0],
             frangi_scale_ratio: 0.5,
-            frangi_c: 500.0,
+            frangi_c: crate::utils::FrangiC::default(),
             ilsqr_max_iter: 50,
             ilsqr_pad_mm: crate::inversion::STI_DEFAULT_PAD_MM,
             inversion: InversionAlgorithm::Ilsqr,

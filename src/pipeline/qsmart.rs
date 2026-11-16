@@ -36,6 +36,11 @@
 //!   threshold (100).
 //! - **Vessel magnitude**: mean over echoes of the coil-combined magnitude, then N4
 //!   (`vasculature_mask.m` l. 8–14): [`qsmart_vessel_magnitude`](crate::utils::qsmart_vessel_magnitude).
+//! - **Vessel detection's Frangi c**: v1.0's c = 500, in magnitude intensity units, by default.
+//!   Scanners scale magnitude differently enough that the same c labels 3 % of one scan's brain
+//!   as vessel and 58 % of another's; [`FrangiC::RelativeToMedian`](crate::utils::FrangiC) (QSM.rs's
+//!   option) sets c from the vessel magnitude's brain median instead. See
+//!   [`crate::utils::vasculature`] for the measurements.
 //! - **Inversion**: STI Suite **v2.2**'s `QSM_iLSQR` (paper §3.4, "number of iterations = 50"),
 //!   called on `mask·R_0` (stage 1) and `mask·vessels·R_0` (stage 2); see the comment in
 //!   [`run_qsmart`] for the call.
