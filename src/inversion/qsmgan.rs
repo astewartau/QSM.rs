@@ -12,7 +12,7 @@
 //! * `input_scale = 100`; output head `tanh`, so `χ = atanh(clip(out)) / 10`;
 //! * mask the result.
 //!
-//! The input is the SEPIA-style **local field in ppm** (already background-removed).
+//! The input is the background-removed **local field**; the trained unit is unstated (SEPIA's is Hz).
 //! Weights are not bundled; the caller passes the exported `qsmgan.onnx` bytes.
 //!
 //! # Reference pipeline

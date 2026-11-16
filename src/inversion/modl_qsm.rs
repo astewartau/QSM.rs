@@ -52,6 +52,14 @@
 //!   bits; that quantisation was the whole 1.49 % gap first measured against that entry. The port
 //!   does not reproduce it.
 //!
+//! # Amplitude
+//!
+//! χ comes out at about 0.5× the reference on QSM-CI's simulation and in vivo data (slope
+//! 0.49 / 0.53, r 0.85 / 0.79) and 0.5–0.7× on the authors' own demo outputs (2016 challenge
+//! 0.53, their Prisma data 0.72), where the reverse slope is ≈1: the released network shrinks
+//! values towards the mean. Units and wiring match the authors' code (parity above), so this is
+//! the method as published.
+//!
 //! # Reference pipeline
 //!
 //! The authors' `test/test_tools.py:210-249` (`model_test`) is what the grid requirements above
