@@ -591,7 +591,7 @@ fn test_qsmart_04_vasculature() {
         sphere_radius: VASC_SPHERE_RADIUS,
         frangi_scale_range: FRANGI_SCALE_RANGE,
         frangi_scale_ratio: FRANGI_SCALE_RATIO,
-        frangi_c: FRANGI_C,
+        frangi_c: qsm_core::utils::FrangiC::Absolute(FRANGI_C),
     };
 
     let grid = Grid::new(nx, ny, nz, data.voxel_size.0, data.voxel_size.1, data.voxel_size.2);
@@ -885,7 +885,7 @@ fn test_qsmart_06_sdf_stage2() {
                 sphere_radius: VASC_SPHERE_RADIUS,
                 frangi_scale_range: FRANGI_SCALE_RANGE,
                 frangi_scale_ratio: FRANGI_SCALE_RATIO,
-                frangi_c: FRANGI_C,
+                frangi_c: qsm_core::utils::FrangiC::Absolute(FRANGI_C),
             };
             generate_vasculature_mask(&data.magnitude, &data.mask_u8, &grid, &vasc_params, |_, _| {}).unwrap()
         }
@@ -1184,7 +1184,7 @@ fn test_qsmart_full_pipeline() {
         sphere_radius: VASC_SPHERE_RADIUS,
         frangi_scale_range: FRANGI_SCALE_RANGE,
         frangi_scale_ratio: FRANGI_SCALE_RATIO,
-        frangi_c: FRANGI_C,
+        frangi_c: qsm_core::utils::FrangiC::Absolute(FRANGI_C),
     };
     let vasc_only = generate_vasculature_mask(
         &data.magnitude, &data.mask_u8, &grid, &vasc_params, |_, _| {},

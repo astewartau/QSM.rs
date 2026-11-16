@@ -31,6 +31,38 @@
 //! by `tests/data/qsmart_qsmci_small.py`. From the same magnitudes,
 //! [`crate::utils::qsmart_vessel_magnitude`] then [`generate_vasculature_mask`] give the toolbox's
 //! `vasculature_mask` exactly (0 of 8,312 mask voxels differ; 276 vessel voxels).
+//!
+//! # Frangi's c and the magnitude's intensity scale ([`FrangiC`])
+//!
+//! Frangi's c weighs the Hessian's Frobenius norm S in the vesselness's `1 − exp(−S²/2c²)`
+//! factor. S is in the units of the bottom-hat of the magnitude, so c is in magnitude intensity
+//! units: multiplying the magnitude by 10 gives exactly the vessel mask of dividing c by 10.
+//! QSMART v1.0's c = 500 ([`FrangiC::Absolute`], the default, for parity) was set for its 7 T
+//! data; scanners scale magnitude very differently. Measured 2026-11-12 with QSMART v1.0's own
+//! MATLAB code (`vasculature_mask.m`) on the N4 echo-mean magnitude of six datasets, whose brain
+//! medians range from about 110 to about 360,000:
+//!
+//! | dataset | brain median | c = 500 | c = 50 | c = 0.25 × median |
+//! |---|---|---|---|---|
+//! | 3 T Siemens Skyra | 570 | 58.1 % | 9.8 % | 6.6 % |
+//! | 3 T Siemens Prisma | 110 | 54 % | 4.7 % | 5.1 % |
+//! | 3 T Philips Achieva | 357,000 | 34.6 % | 35.1 % | 5.2 % |
+//! | 3 T GE MR750 | 1,824 | 3.4 % | 16 % | 3.4 % |
+//! | 7 T exemplar (QSMART's, 9 echoes) | 232 | ~50 % | 3 % | 2.6 % |
+//! | QSM-CI simulated head (7 T) | 25 | (Otsu 0) | (Otsu 0) | 2.0 % |
+//!
+//! (percent of the brain mask labelled vessel). When every vesselness value is small,
+//! `graythresh`'s 256 bins over [0, 1] put nearly all of them in the first bin and its threshold
+//! drops to 0, so every voxel with any vesselness becomes vessel: the 35–58 % rows. A fixed c can
+//! only move that between scanners (c = 50 fixes Siemens, does nothing on Philips and raises GE
+//! from 3.4 to 16 %). [`FrangiC::RelativeToMedian`] sets c from the image instead: k times the
+//! median of the vessel magnitude inside the brain mask, k = 0.25 by default
+//! ([`QSMART_RELATIVE_FRANGI_C`]), which gave 2.0–6.6 % on all six (both field strengths, three
+//! vendors, the simulation; 1.2–5.9 % with radius 3 and scales 0.5–2). k = 0.5 let Otsu collapse
+//! again on the Philips data (53 %), k = 0.1 gave 4.2–8.8 %. This is close in spirit to Frangi
+//! et al. 1998's own suggestion of choosing c from the image (half the largest Hessian norm),
+//! but uses the magnitude's median, which outliers barely move. It is QSM.rs's addition, not
+//! QSMART's: an option, with v1.0's c = 500 kept as the default.
 
 use crate::error::InputError;
 use crate::Grid;
@@ -46,8 +78,112 @@ pub struct VasculatureParams {
     pub frangi_scale_range: [f64; 2],
     /// Frangi filter scale ratio (default 0.5)
     pub frangi_scale_ratio: f64,
-    /// Frangi C parameter (default 500)
-    pub frangi_c: f64,
+    /// Frangi's c: QSMART v1.0's 500 in magnitude units by default ([`FrangiC`])
+    pub frangi_c: FrangiC,
+}
+
+/// QSMART v1.0's Frangi c, in magnitude intensity units (`Demo_QSMART.m` l. 43).
+pub const QSMART_FRANGI_C: f64 = 500.0;
+
+/// The default k of [`FrangiC::RelativeToMedian`]: c = 0.25 × the median vessel magnitude in the
+/// brain mask (see the module docs for the measurements behind it).
+pub const QSMART_RELATIVE_FRANGI_C: f64 = 0.25;
+
+/// How QSMART's Frangi c is set (see the module docs, "Frangi's c and the magnitude's intensity
+/// scale").
+#[cfg_attr(feature = "introspection", derive(serde::Serialize))]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum FrangiC {
+    /// c in the magnitude's intensity units, as QSMART v1.0 (default [`QSMART_FRANGI_C`] = 500).
+    /// The vessel mask then depends on how the scanner scales its magnitude.
+    Absolute(f64),
+    /// c = k × the median of the vessel magnitude inside the brain mask (QSM.rs's option;
+    /// default k [`QSMART_RELATIVE_FRANGI_C`] = 0.25), so the vessel mask does not depend on the
+    /// magnitude's intensity scale.
+    RelativeToMedian(f64),
+}
+
+impl Default for FrangiC {
+    fn default() -> Self {
+        FrangiC::Absolute(QSMART_FRANGI_C)
+    }
+}
+
+impl FrangiC {
+    /// The relative mode at its default k.
+    pub const fn relative() -> Self {
+        FrangiC::RelativeToMedian(QSMART_RELATIVE_FRANGI_C)
+    }
+
+    /// Stable id of the mode: `absolute` or `relative`.
+    pub const fn id(self) -> &'static str {
+        match self {
+            FrangiC::Absolute(_) => "absolute",
+            FrangiC::RelativeToMedian(_) => "relative",
+        }
+    }
+
+    /// The c given (absolute) or the factor k (relative).
+    pub const fn value(self) -> f64 {
+        match self {
+            FrangiC::Absolute(c) | FrangiC::RelativeToMedian(c) => c,
+        }
+    }
+
+    /// Checks the value: c or k must be finite and > 0.
+    pub fn validate(self) -> Result<(), InputError> {
+        let v = self.value();
+        if !(v.is_finite() && v > 0.0) {
+            let name = match self {
+                FrangiC::Absolute(_) => "Frangi c",
+                FrangiC::RelativeToMedian(_) => "relative Frangi c (k)",
+            };
+            return Err(InputError::param(name, v, "finite and > 0"));
+        }
+        Ok(())
+    }
+
+    /// The c to use on `magnitude` within `mask`.
+    ///
+    /// # Errors
+    /// If the value is invalid ([`FrangiC::validate`]), or, relative, if the mask is empty or the
+    /// magnitude's median inside it is not > 0.
+    pub fn resolve(self, magnitude: &[f64], mask: &[u8]) -> Result<f64, InputError> {
+        self.validate()?;
+        match self {
+            FrangiC::Absolute(c) => Ok(c),
+            FrangiC::RelativeToMedian(k) => {
+                let mut v: Vec<f64> = magnitude.iter().zip(mask)
+                    .filter(|&(_, &m)| m != 0)
+                    .map(|(&x, _)| x)
+                    .collect();
+                let median = median(&mut v).ok_or_else(|| {
+                    InputError::new("a relative Frangi c needs a non-empty brain mask")
+                })?;
+                if !(median.is_finite() && median > 0.0) {
+                    return Err(InputError::new(format!(
+                        "a relative Frangi c needs a positive magnitude median inside the brain mask (got {median})"
+                    )));
+                }
+                Ok(k * median)
+            }
+        }
+    }
+}
+
+/// Median, as MATLAB's `median` (the mean of the two middle values for an even count); `None`
+/// when empty. NaNs sort last.
+fn median(v: &mut [f64]) -> Option<f64> {
+    let n = v.len();
+    if n == 0 {
+        return None;
+    }
+    let (_, &mut hi, _) = v.select_nth_unstable_by(n / 2, f64::total_cmp);
+    if n % 2 == 1 {
+        return Some(hi);
+    }
+    let lo = v[..n / 2].iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    Some((lo + hi) / 2.0)
 }
 
 impl Default for VasculatureParams {
@@ -57,7 +193,7 @@ impl Default for VasculatureParams {
             // QSMART Demo defaults: FrangiScaleRange=[0.5,6], FrangiScaleRatio=0.5
             frangi_scale_range: [0.5, 6.0],
             frangi_scale_ratio: 0.5,
-            frangi_c: 500.0,
+            frangi_c: FrangiC::default(),
         }
     }
 }
@@ -101,12 +237,14 @@ pub fn generate_vasculature_mask(
     // Step 3: Apply Frangi vesselness filter
     progress_callback(2, 4);
 
+    // c from the vessel magnitude itself (not its bottom-hat) inside the brain mask, when relative.
+    let c = params.frangi_c.resolve(magnitude, mask)?;
     let frangi_params = FrangiParams {
         scale_range: params.frangi_scale_range,
         scale_ratio: params.frangi_scale_ratio,
         alpha: 0.5,
         beta: 0.5,
-        c: params.frangi_c,
+        c,
         black_white: false, // Detect bright structures (after bottom-hat)
     };
 
@@ -423,10 +561,77 @@ mod tests {
             sphere_radius: 2,
             frangi_scale_range: [1.0, 2.0],
             frangi_scale_ratio: 1.0,
-            frangi_c: 100.0,
+            frangi_c: FrangiC::Absolute(100.0),
         };
 
         let result = generate_vasculature_mask(&magnitude, &mask, &grid(10, 10, 10), &params, |_, _| {}).unwrap();
         assert_eq!(result.len(), 1000);
+    }
+
+    /// A 24³ volume with a noisy-free background and two dark tubes (vessels are dark on
+    /// magnitude; the bottom-hat makes them bright), all inside a cubic mask.
+    fn tube_phantom() -> (Vec<f64>, Vec<u8>) {
+        let n = 24;
+        let mut mag = vec![0.0; n * n * n];
+        let mut mask = vec![0u8; n * n * n];
+        for k in 0..n {
+            for j in 0..n {
+                for i in 0..n {
+                    let idx = i + j * n + k * n * n;
+                    let (x, y, z) = (i as f64, j as f64, k as f64);
+                    let mut v = 100.0 + 2.0 * x + y - 0.5 * z;
+                    if (x - 8.0).hypot(y - 12.0) < 1.5 || (y - 15.0).hypot(z - 9.0) < 1.0 {
+                        v *= 0.3;
+                    }
+                    mag[idx] = v;
+                    mask[idx] = u8::from((2..n - 2).contains(&i) && (2..n - 2).contains(&j) && (2..n - 2).contains(&k));
+                }
+            }
+        }
+        (mag, mask)
+    }
+
+    fn vessels(mag: &[f64], mask: &[u8], c: FrangiC) -> Vec<f64> {
+        let params = VasculatureParams { sphere_radius: 3, frangi_scale_range: [0.5, 2.0], frangi_scale_ratio: 0.5, frangi_c: c };
+        generate_vasculature_mask(mag, mask, &grid(24, 24, 24), &params, |_, _| {}).unwrap()
+    }
+
+    #[test]
+    fn absolute_c_is_in_magnitude_units() {
+        // Scaling the magnitude by 8 (exact in single precision) gives the mask of c / 8.
+        let (mag, mask) = tube_phantom();
+        let mag8: Vec<f64> = mag.iter().map(|v| v * 8.0).collect();
+        assert_eq!(vessels(&mag8, &mask, FrangiC::Absolute(40.0)), vessels(&mag, &mask, FrangiC::Absolute(5.0)));
+    }
+
+    #[test]
+    fn relative_c_does_not_depend_on_the_intensity_scale() {
+        let (mag, mask) = tube_phantom();
+        let mag8: Vec<f64> = mag.iter().map(|v| v / 8.0).collect();
+        let a = vessels(&mag, &mask, FrangiC::relative());
+        assert_eq!(a, vessels(&mag8, &mask, FrangiC::relative()));
+        assert!(a.contains(&0.0), "the tubes should be found");
+        // Relative is absolute at k × the in-mask median.
+        let c = FrangiC::relative().resolve(&mag, &mask).unwrap();
+        assert_eq!(a, vessels(&mag, &mask, FrangiC::Absolute(c)));
+    }
+
+    #[test]
+    fn relative_c_is_k_times_the_in_mask_median() {
+        let mag = [1.0, 2.0, 3.0, 4.0, 100.0, 7.0];
+        assert_eq!(FrangiC::RelativeToMedian(0.5).resolve(&mag, &[1, 1, 1, 1, 0, 0]).unwrap(), 0.5 * 2.5);
+        assert_eq!(FrangiC::RelativeToMedian(2.0).resolve(&mag, &[1, 1, 1, 0, 1, 1]).unwrap(), 2.0 * 3.0);
+        assert_eq!(FrangiC::Absolute(500.0).resolve(&mag, &[0; 6]).unwrap(), 500.0);
+    }
+
+    #[test]
+    fn invalid_frangi_c_is_refused() {
+        let mag = [1.0, 2.0];
+        assert!(FrangiC::RelativeToMedian(0.25).resolve(&mag, &[0, 0]).is_err());
+        assert!(FrangiC::RelativeToMedian(0.25).resolve(&[0.0, 0.0], &[1, 1]).is_err());
+        for c in [FrangiC::RelativeToMedian(0.0), FrangiC::Absolute(-1.0), FrangiC::Absolute(f64::NAN)] {
+            assert!(c.resolve(&mag, &[1, 1]).is_err(), "{c:?}");
+        }
+        assert_eq!(FrangiC::default(), FrangiC::Absolute(QSMART_FRANGI_C));
     }
 }
