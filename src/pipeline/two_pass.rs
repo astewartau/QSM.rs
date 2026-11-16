@@ -364,6 +364,8 @@ pub fn fill_eroded_rim(
     metadata: &ScanMetadata,
     progress: impl FnMut(usize, usize),
 ) -> Result<(Vec<f64>, Vec<u8>), PipelineError> {
+    // LBV's Laplacian assumes a uniform grid, as every background-removal stage does.
+    metadata.require_contiguous_slices()?;
     let grid = metadata.grid();
     let n = grid.n_total();
     for (name, len) in [("total field", total_field.len()), ("reliable", reliable.len()), ("local field", local.len()),
