@@ -63,6 +63,20 @@
 //! et al. 1998's own suggestion of choosing c from the image (half the largest Hessian norm),
 //! but uses the magnitude's median, which outliers barely move. It is QSM.rs's addition, not
 //! QSMART's: an option, with v1.0's c = 500 kept as the default.
+//!
+//! **χ with the relative c** (measured 2026-11-16 on Bunya, QSMxT built on this option;
+//! `/scratch/user/uqaste15/qsmart-relc`): on QSM-CI's simulated head (7 T), XSIM rose from 0.150
+//! to 0.211 from the total field (NRMSE 91.9 → 87.5 %, r 0.41 → 0.49) and from 0.150 to 0.223
+//! through QSMxT's QSMART pipeline (magnitude ×10, as the mask's threshold of 100 empties it
+//! otherwise; NRMSE 93.3 → 88.4 %, streaking 0.164 → 0.131), but deep-GM NRMSE rose from 99 to
+//! 113 %. In vivo, through the QSMART pipeline on the EMTP travelling heads, deep-GM χ (thalamus,
+//! caudate, putamen, pallidum, against the same subject's KKI Achieva scan) agreed better on GE
+//! MR750w (mean |Δ| 7.3 → 4.3 ppb, orthogonal-fit |a − 1| over 25 ROIs 0.27 → 0.16), about the
+//! same on Siemens Skyra (3.4 → 2.9 ppb, 0.05 → 0.05) and slightly worse on Siemens Prisma
+//! (4.4 → 4.8 ppb, 0.07 → 0.12). Visually the 7 T exemplar's textured lateral and frontal
+//! cortex is gone and the Siemens scans' posterior-edge spots are weaker. QSM.rs therefore
+//! suggests the relative c with QSMART (rule `qsmart.frangi-c-relative`, Suggested: offered with
+//! its reason, not preselected; decision 173) rather than recommending it.
 
 use crate::error::InputError;
 use crate::Grid;

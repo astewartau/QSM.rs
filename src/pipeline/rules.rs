@@ -621,6 +621,7 @@ pub const SETTINGS: &[(&str, &str)] = &[
     ("inversion.qsmart.ilsqr_max_iter", "QSMART's iLSQR iteration count; only with QSMART"),
     ("inversion.qsmart.ilsqr_pad_mm", "QSMART's iLSQR padding, mm; only with QSMART"),
     ("inversion.qsmart.offset_grid", "QSMART's offset-adjustment dipole grid: fft or qsmart-reference (QsmartOffsetGrid::id); only with QSMART"),
+    ("inversion.qsmart.frangi_c_mode", "How QSMART's Frangi c is set: absolute or relative (FrangiC::id); only with QSMART"),
     ("reference", "QSM referencing (QsmReference: mean or none)"),
     ("qsm_per_echo", "A QSM per echo, and their mean, instead of one QSM from the echo-combined field (QsmPipelineConfig::qsm_per_echo, bool)"),
     ("tukey_window", "Taper ratio of the χ-separation toolbox's k-space Tukey window on the complex echoes, 0 = none (QsmPipelineConfig::tukey_window)"),
@@ -927,6 +928,7 @@ pub fn current(input: &RuleInput, facts: &ScanFacts, setting: &str) -> Option<Ve
         }
         "inversion.qsmart.ilsqr_pad_mm" => gated(qsmart, Current::Number(c.inversion.qsmart.ilsqr_pad_mm)),
         "inversion.qsmart.offset_grid" => gated(qsmart, Current::Choice(c.inversion.qsmart.adjust_offset_grid.id())),
+        "inversion.qsmart.frangi_c_mode" => gated(qsmart, Current::Choice(c.inversion.qsmart.frangi_c.id())),
         "bg_removal.algorithm" => gated(
             inv_input.needs_bg_removal(),
             Current::Choice(c.bg_removal.algorithm.id()),
@@ -2060,6 +2062,19 @@ pub static RULES: &[Rule] = &[
         "QSMART's adjust_offset.m builds its dipole kernel on its own grid (-N/2:N/2-1), half a \
          step off the FFT grid on odd matrix sizes",
         "QSMART adjust_offset.m; QSM.rs QsmartOffsetGrid::QsmartReference docs (#386)"),
+    // Decision 173 (2026-11-16): Suggested, not Recommended, because the in-vivo agreement was
+    // mixed and the simulation's deep-GM NRMSE rose. Fires whenever QSMART is the inversion, so
+    // after the QSMART pipeline too, which keeps v1.0's c (see `utils::vasculature`).
+    suggest("qsmart.frangi-c-relative", &[inv(&[Choice("qsmart")])],
+        "inversion.qsmart.frangi_c_mode", &[Choice("relative")],
+        "QSMART's Frangi c (500) is in magnitude units, and scanners scale magnitude very \
+         differently: with it, 27-63 % of the brain was labelled vessel on Siemens, Philips, 7 T and \
+         simulated data (3-5 % on GE). A c relative to the magnitude's brain median gave 2-9 % on \
+         all of them, and on QSM-CI's simulated head raised XSIM from 0.15 to 0.21-0.22 (NRMSE \
+         92 -> 88 %), though deep-GM NRMSE rose from 99 to 113 %. Across scanners, deep-GM χ \
+         agreed better on GE, the same on Siemens Skyra and slightly worse on Siemens Prisma",
+        "QSM.rs utils::vasculature FrangiC docs (QSMART v1.0 code and QSMxT on six datasets, \
+         travelling heads s003001/s004001 and the simulated head, 2026-11-12/16)"),
     // ---------------------------------------------------------------- MEDI (#288)
     reference("medi.bg-pdf",
         &[inv(&[Choice("medi")]), method("inversion.medi.msmv", &[Bool(false)])],
@@ -2676,6 +2691,7 @@ mod tests {
             ("sti.ilsqr-single", Case::new(inversion(I::Ilsqr))),
             ("qsmart.ilsqr-single", Case::new(inversion(I::Qsmart))),
             ("qsmart.offset-grid", Case::new(inversion(I::Qsmart))),
+            ("qsmart.frangi-c-relative", Case::new(inversion(I::Qsmart))),
             ("qsmart.fit-threshold", Case::new(|c| {
                 inversion(I::Qsmart)(c);
                 c.cfg.field_mapping.b0_estimation = B0EstimationMethod::QsmartEchofit {
@@ -3426,9 +3442,28 @@ mod tests {
         for id in ["qsmart.unwrap-laplacian", "qsmart.field-echofit"] {
             assert_eq!(RULES.iter().find(|r| r.id == id).unwrap().basis, Basis::Measured, "{id}");
         }
-        for r in RULES.iter().filter(|r| r.id.starts_with("qsmart.") && !group.contains(&r.id)) {
+        // The relative Frangi c is suggested (decision 173); the rest are the authors' settings.
+        for r in RULES.iter().filter(|r| r.id.starts_with("qsmart.") && !group.contains(&r.id) && r.id != "qsmart.frangi-c-relative") {
             assert_eq!(r.strength, Strength::Reference, "{}", r.id);
         }
+    }
+
+    /// The relative Frangi c (decision 173) is suggested whenever QSMART is chosen: offered with
+    /// its reason, not preselected, and quiet once chosen.
+    #[test]
+    fn qsmart_suggests_a_relative_frangi_c() {
+        let id = "qsmart.frangi-c-relative";
+        let case = Case::new(inversion(InversionAlgorithm::Qsmart));
+        let f = evaluate(&case.input(), &case.facts).into_iter().find(|f| f.rule.id == id).expect("offered");
+        assert_eq!((f.rule.strength, f.rule.basis), (Strength::Suggested, Basis::Measured));
+        assert!(!f.rule.strength.preselected());
+        let chosen = Case::new(|c| {
+            inversion(InversionAlgorithm::Qsmart)(c);
+            c.cfg.inversion.qsmart.frangi_c = crate::utils::FrangiC::relative();
+        });
+        assert!(!evaluate(&chosen.input(), &chosen.facts).iter().any(|f| f.rule.id == id));
+        let other = Case::new(inversion(InversionAlgorithm::Rts));
+        assert!(!evaluate(&other.input(), &other.facts).iter().any(|f| f.rule.id == id));
     }
 
     /// QSMART's magnitude threshold of 100 (decision 142) applies only to the N4-corrected
