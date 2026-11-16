@@ -1443,7 +1443,7 @@ fn test_combined_tgv() {
     let start = Instant::now();
 
     // TGV takes the total field in ppm, expressed as phase at the first echo time.
-    // QuantitativeSusceptibilityMappingTGV.jl defaults (α in rad units, iterations from the voxel size)
+    // QSM.rs's TGV defaults (α in rad units, α₀ 0.00636 / α₁ 0.00212; iterations from the voxel size)
     let tgv_params = TgvParams::default();
 
     println!("[INFO] Running TGV (from total field map)...");
@@ -1819,7 +1819,7 @@ fn test_pipeline_tgv() {
         .collect();
 
     // Step 3: Run TGV on the field in ppm
-    // QuantitativeSusceptibilityMappingTGV.jl defaults (α in rad units, iterations from the voxel size)
+    // QSM.rs's TGV defaults (α in rad units, α₀ 0.00636 / α₁ 0.00212; iterations from the voxel size)
     let tgv_params = TgvParams::default();
 
     println!("[INFO] Running TGV...");
@@ -1857,7 +1857,7 @@ fn test_pipeline_tgv_single_echo() {
     let (vsx, vsy, vsz) = data.voxel_size;
 
     let start = Instant::now();
-    // QuantitativeSusceptibilityMappingTGV.jl defaults (α in rad units, iterations from the voxel size)
+    // QSM.rs's TGV defaults (α in rad units, α₀ 0.00636 / α₁ 0.00212; iterations from the voxel size)
     let tgv_params = TgvParams::default();
 
     println!("[INFO] Running TGV on echo 1 (wrapped phase)...");
@@ -2303,7 +2303,7 @@ fn test_all_combinations() {
     // --- TGV (from total field map) ---
     {
         let start = Instant::now();
-        // QuantitativeSusceptibilityMappingTGV.jl defaults (α in rad units, iterations from the voxel size)
+        // QSM.rs's TGV defaults (α in rad units, α₀ 0.00636 / α₁ 0.00212; iterations from the voxel size)
         let tgv_params = TgvParams::default();
         let result = tgv_qsm(
             TgvInput::FieldPpm { field: &data.fieldmap, echo_times: &data.echo_times, b0_t: data.field_strength }, &data.mask, &grid,

@@ -5,9 +5,10 @@
 //! usage: tgv_file <field|phase> <input.nii[.gz]> <mask.nii[.gz]> <chi_out.nii.gz> <TE_s> <B0_T> <Hx> <Hy> <Hz> [iterations]
 //!        [--reference-divergence] [--reference-edge-erosion] [--reference-output-box]
 //!
-//! The three flags set [`TgvParams::reference_divergence`],
-//! [`TgvParams::reference_edge_erosion`] and [`TgvParams::reference_output_box`]; with all three,
-//! the package's own code and output are reproduced.
+//! α are the package's defaults ([`TgvParams::tgvjl`], `regularization = 2`). The three flags
+//! set [`TgvParams::reference_divergence`], [`TgvParams::reference_edge_erosion`] and
+//! [`TgvParams::reference_output_box`]; with all three, the package's own code and output are
+//! reproduced.
 use qsm_core::inversion::{tgv_qsm, TgvInput, TgvParams};
 use qsm_core::io::{read_nifti_file, save_nifti_to_file};
 use qsm_core::Grid;
@@ -35,7 +36,7 @@ fn main() {
         other => panic!("input kind must be field or phase, got {other}"),
     };
     let iterations = (a.len() == 11).then(|| num(10) as usize);
-    let params = TgvParams { iterations, reference_divergence, reference_edge_erosion, reference_output_box, ..TgvParams::default() };
+    let params = TgvParams { iterations, reference_divergence, reference_edge_erosion, reference_output_box, ..TgvParams::tgvjl() };
     eprintln!("tgv params: {params:?}");
     let t = std::time::Instant::now();
     let chi = tgv_qsm(input, &mask, &grid, &params, (num(7), num(8), num(9)), |_, _| {}).expect("tgv");
