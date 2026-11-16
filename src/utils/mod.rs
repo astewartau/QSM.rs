@@ -32,6 +32,7 @@ pub mod threshold;
 pub mod mask;
 pub mod phase_reliability;
 pub mod connected;
+pub mod distance;
 pub mod union_find;
 pub mod morphology;
 pub mod resample;
