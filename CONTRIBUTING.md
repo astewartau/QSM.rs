@@ -113,7 +113,8 @@ QSM.rs is where algorithm correctness is tested; QSMxT and qsmbly test only thei
   and must be registered in `.github/workflows/integration-tests.yml` (test list and path map)
   and the figure scripts. `tests/wasm_pipeline.rs` gets a case for each new method.
 - Never delete or weaken an assertion to make a change pass; explain a changed reference value.
-- Locally, run `cargo check`, the tests for your change and clippy. The full suite runs in CI.
+- Locally, build, run clippy and run only the new or changed tests (quick ones). Push early and
+  let CI run the full suite, the `#[ignore]`d integration tests and any repeats.
 
 ## Pull requests
 
