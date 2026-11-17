@@ -7,7 +7,8 @@
 //! rather than on a separately acquired T1w scan.
 //!
 //! This module is a port of the non-robust path of `SynthSeg/predict_synthseg.py` around the
-//! exported network (`synthseg.onnx`, see [`crate::models`]):
+//! exported network (`synthseg.onnx` for SynthSeg 1.0, `synthseg-2.0.onnx` for 2.0; see
+//! [`crate::models`] and [`SynthSegVersion`]):
 //!
 //! 1. resample to 1 mm isotropic (anti-aliased, linear) if the input is not already there;
 //! 2. permute and flip the axes into RAS orientation using the NIfTI affine;
@@ -23,10 +24,23 @@
 //! segmentation); on the echo-combined GRE magnitude the structure volumes come out in the
 //! normal physiological range. For multi-echo data the root-sum-of-squares over echoes works.
 //!
-//! The default whole-volume run reproduces FreeSurfer's `mri_synthseg` (SynthSeg 2.0,
-//! non-robust): on three 1 mm scans (a 184×256×128 GRE magnitude, a 180×241×131 GRE magnitude
-//! and a 176×240×256 MP2RAGE), every label's Dice against it is at least 0.9999 and the soft
-//! volumes agree to 0.03 % on average.
+//! The default whole-volume run reproduces the reference implementations:
+//!
+//! - **SynthSeg 1.0** (the default version): against the upstream Python
+//!   `predict_synthseg.py` with `synthseg_1.0.h5`, every voxel agrees on a 184×256×128 GRE
+//!   magnitude (QSM.rs#104).
+//! - **SynthSeg 2.0** ([`SynthSegVersion::V2`]): against FreeSurfer 7.3.2 `mri_synthseg`
+//!   (SynthSeg 2.0, non-robust, `--cpu`), every label's Dice is at least 0.9999 and the soft
+//!   volumes agree to 0.03 % on average, on three 1 mm scans (a 184×256×128 GRE magnitude, a
+//!   180×241×131 GRE magnitude and a 176×240×256 MP2RAGE; QSM.rs#207, with FreeSurfer's copy of
+//!   the weights). Re-measured with the hosted `synthseg-2.0.onnx` on two public GRE magnitudes
+//!   (echo 1 of `qsmxt example` `prisma-bridge-run1`, 184×256×128 at 1 mm, and
+//!   `cima-local-run1`, 198×224×176 at 0.995×1×1 mm): every label's Dice is at least 0.99999
+//!   (one voxel of 6.0 M differs), and the soft volumes agree to 0.03 % on average, 0.25 % at
+//!   most. Labels are 0 (background) plus the 32 (1.0: 31) structures; background is excluded
+//!   from the Dice figures.
+//!
+//! The robust, parcellation (`--parc`) and QC (`--qc`) networks of SynthSeg 2.0 are not ported.
 //!
 //! Memory is the practical constraint: the network takes about 0.95 KB per voxel of its input at
 //! once (2.2 GB at 128³, 6.0 GB on a 184×256×128 scan padded to 192×256×128, measured natively),
@@ -72,6 +86,11 @@
 //! scans of any contrast and resolution without retraining." Medical Image Analysis, 86:102789.
 //! <https://doi.org/10.1016/j.media.2023.102789>
 //!
+//! SynthSeg 2.0 ([`SynthSegVersion::V2`]):
+//! Billot, B., Magdamo, C., Cheng, Y., Arnold, S.E., Das, S., Iglesias, J.E. (2023). "Robust
+//! machine learning segmentation for large-scale analysis of heterogeneous clinical brain MRI
+//! datasets." PNAS, 120(9):e2216399120. <https://doi.org/10.1073/pnas.2216399120>
+//!
 //! Reference implementation: <https://github.com/BBillot/SynthSeg> (Apache-2.0).
 //!
 //! # Pipeline rules
@@ -112,7 +131,8 @@ const HEAD_THRESHOLD: f32 = 0.1;
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum SynthSegInference {
     /// One network pass over the whole padded volume, as the SynthSeg CLI runs it; the output
-    /// matches FreeSurfer's `mri_synthseg` (every label Dice ≥ 0.9999). Peak memory grows with the
+    /// matches the reference implementations (with SynthSeg 2.0 weights, FreeSurfer's
+    /// `mri_synthseg` at every label Dice ≥ 0.9999; see the module docs). Peak memory grows with the
     /// volume (about 0.95 KB per padded voxel): 6–12 GB on 1 mm head scans, so it does not fit a
     /// 4 GB WASM heap even with the head crop and half-precision posteriors.
     FullVolume,
@@ -148,7 +168,7 @@ pub enum SynthSegInference {
 impl SynthSegInference {
     /// The memory-bounded window, for a 32-bit WASM heap (see [`SynthSegParams::low_memory`]):
     /// 96³ patches overlapping by at least 48. Against FreeSurfer's `mri_synthseg` (which the
-    /// whole volume matches) on three 1 mm scans: mean Dice over the labels 0.984–0.988, lowest
+    /// whole volume matches) on three 1 mm scans, with SynthSeg 2.0 weights (QSM.rs#207): mean Dice over the labels 0.984–0.988, lowest
     /// label 0.93–0.96, single labels' volumes off by up to 6–10 % (the inferior lateral
     /// ventricles and the cerebellum). 128³ windows reach 0.993–0.996 (lowest 0.98, volumes
     /// within 3 %) but, even with half-precision posteriors and the head crop, took a 184×256×128
@@ -464,8 +484,10 @@ struct Preprocessed {
     flip: [bool; 3],
     /// Shape of the volume the alignment consumed (post-resampling, pre-alignment).
     source_dims: [usize; 3],
-    /// Resolution the network saw, mm.
-    res: f64,
+    /// Volume of one voxel the network saw, mm³: 1 after a resample, otherwise the input's own
+    /// voxel volume (SynthSeg skips the resample within 0.05 mm of 1 mm and scales the volumes by
+    /// `np.prod(im_res)`, the unresampled voxel size; `predict_synthseg.py:postprocess`).
+    voxel_volume: f64,
     /// The caller's grid, for mapping the result back.
     out_dims: (usize, usize, usize),
     /// Whether a resample to 1 mm happened (the label map is returned on the caller's grid
@@ -616,7 +638,7 @@ fn preprocess(
         perm,
         flip,
         source_dims: source_dims_cm,
-        res: TARGET_RES,
+        voxel_volume: if needs_resample { TARGET_RES.powi(3) } else { vs[0] * vs[1] * vs[2] },
         out_dims,
         resampled: needs_resample,
     }
@@ -1098,7 +1120,7 @@ fn postprocess<T: Posterior>(mut post: Vec<T>, pre: &Preprocessed, params: &Synt
         }
     }
     drop(post);
-    let voxel_volume = pre.res * pre.res * pre.res;
+    let voxel_volume = pre.voxel_volume;
     volumes.iter_mut().for_each(|v| *v *= voxel_volume);
 
     // Place the valid block in the RAS-aligned volume (background around it: the crop, and
