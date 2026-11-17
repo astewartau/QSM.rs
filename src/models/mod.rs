@@ -88,8 +88,8 @@
 //! `src/models/memory_calibration.rs` holds every measured peak, and its tests check that each
 //! figure covers its measurements and sits within 10 % (or 32 MB) of them. Re-measure after a
 //! tract upgrade or a new export. QSMnet+ shares QSMnet's figures and iQFM shares iQSM's, since
-//! they are the same graphs. SynthSeg 2.0's weights are not hosted, so its figures are SynthSeg
-//! 1.0's plus its 33rd output channel.
+//! they are the same graphs. SynthSeg 2.0's figures are SynthSeg 1.0's plus its 33rd
+//! output channel; its measured peaks match 1.0's to within 0.1 %.
 
 use std::collections::BTreeMap;
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
@@ -814,33 +814,30 @@ mod tests {
         let _g = lock();
         let dir = std::env::temp_dir().join(format!("qsm-provider-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        // A pending model has no registry hash, so any bytes are accepted (as from $QSM_MODEL_DIR).
-        let name = "synthseg-2.0.onnx";
+        // A file with no registry hash (as a not-yet-hosted model's is), so any bytes in the model
+        // dir are taken as given. Registered models all have hashes, so the in-memory copy goes
+        // straight into the provider map, as `provide_weights` puts it there after its check.
+        let name = "provider-precedence-test.onnx";
+        let file = WeightFile { name, url: "", sha256: "", bytes: 0 };
         std::fs::write(dir.join(name), b"from the model dir").unwrap();
         let old = std::env::var_os("QSM_MODEL_DIR");
         std::env::set_var("QSM_MODEL_DIR", &dir);
 
-        assert_eq!(
-            &*primary_weight("synthseg-2.0").unwrap(),
-            b"from the model dir"
-        );
-        assert!(weight_file_present(find_weight_file(name).unwrap()));
+        assert_eq!(&*weight_file_bytes("test", &file).unwrap(), b"from the model dir");
+        assert!(weight_file_present(&file));
 
         let supplied = b"supplied in memory".to_vec();
         let ptr = supplied.as_ptr();
-        provide_weights(name, supplied).unwrap();
-        let got = primary_weight("synthseg-2.0").unwrap();
+        provided_map().insert(name, WeightBytes::new(supplied));
+        let got = weight_file_bytes("test", &file).unwrap();
         assert_eq!(&*got, b"supplied in memory");
         // Handed out by reference: the run sees the host's buffer, not a copy.
         assert_eq!(got.as_ptr(), ptr);
-        assert_eq!(weights("synthseg-2.0").unwrap()[0].as_ptr(), ptr);
+        assert_eq!(weight_file_bytes("test", &file).unwrap().as_ptr(), ptr);
 
         assert!(forget_weights(name));
         assert!(!forget_weights(name));
-        assert_eq!(
-            &*primary_weight("synthseg-2.0").unwrap(),
-            b"from the model dir"
-        );
+        assert_eq!(&*weight_file_bytes("test", &file).unwrap(), b"from the model dir");
 
         match old {
             Some(v) => std::env::set_var("QSM_MODEL_DIR", v),
@@ -880,10 +877,12 @@ mod tests {
     #[test]
     fn prefetch_skips_provided_files() {
         let _g = lock();
-        provide_weights("synthseg-2.0.onnx", b"x".to_vec()).unwrap();
-        // Pending (no URL): without the provided bytes this would have to fail.
-        prefetch_with_progress("synthseg-2.0", &mut |_, _, _| panic!("nothing to fetch")).unwrap();
-        forget_weights("synthseg-2.0.onnx");
+        // Straight into the provider map: `provide_weights` would check these bytes against the
+        // registry hash.
+        provided_map().insert("xqsm.onnx", WeightBytes::new(b"x".to_vec()));
+        let r = prefetch_with_progress("xqsm", &mut |_, _, _| panic!("nothing to fetch"));
+        forget_weights("xqsm.onnx");
+        r.unwrap();
     }
 
     #[test]

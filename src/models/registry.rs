@@ -46,11 +46,6 @@ pub fn find_model(id: &str) -> Option<&'static ModelSpec> {
     MODELS.iter().find(|m| m.id == id)
 }
 
-// A single ONNX weight file whose location is not yet known (Pending model).
-const fn pending_onnx(name: &'static str) -> WeightFile {
-    WeightFile { name, url: "", sha256: "", bytes: 0 }
-}
-
 const MODELS: &[ModelSpec] = &[
     // ---- Background field removal ------------------------------------------
     ModelSpec {
@@ -645,23 +640,36 @@ const MODELS: &[ModelSpec] = &[
         id: "synthseg-2.0",
         name: "SynthSeg 2.0",
         stage: ModelStage::Segmentation,
-        status: WeightStatus::Pending,
+        status: WeightStatus::Available,
         origin: Framework::TensorFlow,
-        description: "SynthSeg 2.0: same architecture as `synthseg` with a 33-label set (adds \
-                      a general CSF class). The upstream weights are not in the SynthSeg \
-                      repository — they ship with FreeSurfer, or come from the UCL download \
-                      linked in the SynthSeg README — so they have to be fetched before \
-                      exporting. Run it with SynthSegVersion::V2.",
+        description: "SynthSeg 2.0: same architecture as `synthseg` (non-robust U-Net) with a \
+                      33-label set (adds a general CSF class). Run it with SynthSegVersion::V2. \
+                      Only the segmentation network is exported: the robust, parcellation and \
+                      QC networks of SynthSeg 2.0 are not ported.",
         paper: "Billot et al., PNAS 120(9):e2216399120 (2023); https://doi.org/10.1073/pnas.2216399120",
         source: "https://github.com/BBillot/SynthSeg",
         license: "Apache-2.0",
-        files: &[pending_onnx("synthseg-2.0.onnx")],
+        // `synthseg_2.0.h5` is not in the SynthSeg repository. Source: the author's 2025-11-17
+        // re-upload of all SynthSeg models (`SynthSeg_models.zip`, sha256 9368746076acb313…,
+        // linked from BBillot/SynthSeg#114, downloaded 2026-11-17), where he gave Apache-2.0
+        // for the weights (2025-11-25). The h5 is byte-identical to FreeSurfer 7.3.2's
+        // `models/synthseg_2.0.h5`:
+        // sha256 f190bfd742f450ef3ca2c9df9ed4d2e0232b3a74471da5e51b7770bacdf80c3e. Exported with scripts/onnx-export/export_synthseg.py
+        // --version 2.0. Mirrored on Hugging Face (qsmxt/qsm-onnx-weights, commit 317cae4).
+        // Verified: anonymous download + SHA-256 match.
+        files: &[WeightFile {
+            name: "synthseg-2.0.onnx",
+            url: "https://huggingface.co/qsmxt/qsm-onnx-weights/resolve/main/synthseg-2.0.onnx",
+            sha256: "c0a09b745d50527fceb36f2a6876991a8e41a11b3daa6eb1aa368c69a96d76d1",
+            bytes: 52_998_426,
+        }],
         inputs: &["image"],
         outputs: &["unet_prediction"],
         size_divisor: 32,
         tile_bytes_per_voxel: None,
-        // Not measured (the weights are not hosted): SynthSeg 1.0's figures, plus its 33rd output
-        // channel (the output tensor and its copies, about 12 B per voxel natively, 16 in WASM).
+        // SynthSeg 1.0's figures plus the 33rd output channel (the output tensor and its copies,
+        // about 12 B per voxel natively, 16 in WASM). Measured on the hosted file
+        // (memory_calibration): the network's peaks equal 1.0's to within 0.1 %.
         memory: mem(53_400_000, 106_800_000, 87_000_000, 931, 132_000_000, 1203),
     },
 ];

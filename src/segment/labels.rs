@@ -15,12 +15,13 @@
 #[cfg_attr(feature = "introspection", derive(serde::Serialize))]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Default)]
 pub enum SynthSegVersion {
-    /// SynthSeg 1.0 (`synthseg_1.0.h5`), 32 labels. The default because its weights ship in
-    /// the SynthSeg repository itself, so the export is reproducible from an Apache-2.0 source.
+    /// SynthSeg 1.0 (`synthseg_1.0.h5`, registry model `synthseg`), 32 labels. The default: its
+    /// weights ship in the SynthSeg repository itself.
     #[default]
     V1,
-    /// SynthSeg 2.0 (`synthseg_2.0.h5`), 33 labels — adds `csf`. The better model, but its
-    /// weights are a separate download (FreeSurfer, or the link in the SynthSeg README).
+    /// SynthSeg 2.0 (`synthseg_2.0.h5`, registry model `synthseg-2.0`), 33 labels — adds `csf`
+    /// (Billot et al., PNAS 2023). Its weights are not in the SynthSeg repository; the hosted
+    /// export comes from the author's own re-upload (see the registry entry). Non-robust only.
     V2,
 }
 
@@ -44,6 +45,14 @@ impl SynthSegVersion {
         match self {
             SynthSegVersion::V1 => &V1,
             SynthSegVersion::V2 => &V2,
+        }
+    }
+
+    /// The [`crate::models`] registry id of this generation's weights.
+    pub fn model_id(self) -> &'static str {
+        match self {
+            SynthSegVersion::V1 => "synthseg",
+            SynthSegVersion::V2 => "synthseg-2.0",
         }
     }
 
@@ -173,6 +182,15 @@ mod tests {
             if let Some(rest) = name.strip_prefix("left ") {
                 assert_eq!(l.names[l.flip[c]], format!("right {rest}"));
             }
+        }
+    }
+
+    #[test]
+    fn each_version_names_hosted_weights() {
+        use crate::models::{find_model, WeightStatus};
+        for v in [SynthSegVersion::V1, SynthSegVersion::V2] {
+            let m = find_model(v.model_id()).expect("registry lists the version's weights");
+            assert_eq!(m.status, WeightStatus::Available, "{}", m.id);
         }
     }
 

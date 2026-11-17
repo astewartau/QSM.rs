@@ -569,6 +569,7 @@ const CASES: &[(&str, &str)] = &[
     ("rs2-net", "dl_mask_rs2_net"),
     ("mindgrab", "dl_mask_mindgrab"),
     ("synthseg", "dl_seg_synthseg"),
+    ("synthseg-2.0", "dl_seg_synthseg_2"),
     ("bfrnet", "dl_bfr_bfrnet"),
     ("iqfm", "dl_bfr_iqfm"),
     ("xqsm", "dl_inv_xqsm"),
@@ -786,8 +787,8 @@ fn synthseg_quick(inference: qsm_core::segment::SynthSegInference) -> qsm_core::
     }
 }
 
-/// SynthSeg as the engine runs it: the weights read back through the registry and handed to
-/// `segment::synthseg`.
+/// SynthSeg as the engine runs it: the weights of `params.version` read back through the
+/// registry and handed to `segment::synthseg`.
 #[cfg(feature = "onnx")]
 fn synthseg_run(
     mag: &[f64],
@@ -795,7 +796,7 @@ fn synthseg_run(
     params: &qsm_core::segment::SynthSegParams,
     progress: impl FnMut(usize, usize),
 ) -> Result<qsm_core::segment::SynthSegResult, String> {
-    let weights = qsm_core::models::primary_weight("synthseg")?;
+    let weights = qsm_core::models::primary_weight(params.version.model_id())?;
     qsm_core::segment::synthseg(mag, grid, &affine(grid.voxel_size), &weights, params, progress)
         .map_err(|e| e.to_string())
 }
@@ -831,6 +832,22 @@ fn dl_seg_synthseg() {
     if let Some(out) = out {
         assert_eq!(out.labels.len(), NV);
         assert_eq!(out.volumes.len(), params.version.n_labels());
+        assert!(out.volumes.iter().all(|v| v.is_finite()));
+    }
+}
+
+/// SynthSeg 2.0 (33 labels) as [`dl_seg_synthseg`] runs 1.0: one 128³ pass.
+#[cfg(feature = "onnx")]
+#[test]
+fn dl_seg_synthseg_2() {
+    use qsm_core::segment::{SynthSegInference, SynthSegParams, SynthSegVersion};
+    let p = Phantom::new();
+    let grid = qsm_core::Grid::new(N, N, N, 1.0, 1.0, 1.0);
+    let params = SynthSegParams { version: SynthSegVersion::V2, ..synthseg_quick(SynthSegInference::FullVolume) };
+    let out = on_provided_weights("synthseg-2.0", || synthseg_run(&p.magnitudes[0], &grid, &params, no_progress()));
+    if let Some(out) = out {
+        assert_eq!(out.labels.len(), NV);
+        assert_eq!(out.volumes.len(), 33);
         assert!(out.volumes.iter().all(|v| v.is_finite()));
     }
 }
@@ -1551,5 +1568,7 @@ mod browser_memory {
         net_mindgrab_192x192x192 => network("mindgrab.onnx", [192, 192, 192]);
         net_synthseg_96x96x96 => network("synthseg.onnx", [96, 96, 96]);
         net_synthseg_128x128x128 => network("synthseg.onnx", [128, 128, 128]);
+        net_synthseg_2_96x96x96 => network("synthseg-2.0.onnx", [96, 96, 96]);
+        net_synthseg_2_128x128x128 => network("synthseg-2.0.onnx", [128, 128, 128]);
     }
 }

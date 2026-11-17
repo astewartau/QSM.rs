@@ -232,7 +232,7 @@ jobs:
             masking)
               features="onnx simd"; cache=onnx-simd; filter="dl_mask"; models="hd-bet rs2-net" ;;
             segmentation)
-              features="onnx simd"; cache=onnx-simd; filter="dl_seg"; models="synthseg" ;;
+              features="onnx simd"; cache=onnx-simd; filter="dl_seg"; models="synthseg synthseg-2.0" ;;
             *)
               echo "::error::unknown wasm32 shard '$SHARD'"; exit 1 ;;
           esac

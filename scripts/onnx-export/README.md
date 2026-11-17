@@ -22,11 +22,38 @@ Environment notes: TensorFlow 2.15 (Keras 2.15) on Python 3.11. The vendored
 NumPy 1.23 (with a correspondingly old SciPy) or drop those two aliases from the
 `isinstance` check on line 335.
 
-SynthSeg 2.0's weights are not in the repository; fetch `synthseg_2.0.h5` from a
-FreeSurfer install or the UCL link in the SynthSeg README, then pass
-`--version 2.0 --weights <path>`.
+SynthSeg 2.0's weights (Billot et al., PNAS 2023) are not in the repository. The author
+re-uploaded all SynthSeg models on 2025-11-17 as `SynthSeg_models.zip` on MIT OneDrive, linked
+from [BBillot/SynthSeg#114](https://github.com/BBillot/SynthSeg/issues/114), and gave Apache-2.0
+for them there (2025-11-25). The share link opens a browser page; with curl, request it once to
+get the anonymous-share cookie, then fetch
+`https://mitprod-my.sharepoint.com/personal/bbillot_mit_edu/_layouts/15/download.aspx?SourceUrl=%2Fpersonal%2Fbbillot%5Fmit%5Fedu%2FDocuments%2FSynthSeg%5Fmodels%2Ezip`
+with that cookie. Then:
 
-Hosted as `synthseg.onnx` on `qsmxt/qsm-onnx-weights`. Verified export: 52,998,326 bytes,
+```
+.venv/bin/python export_synthseg.py --version 2.0 \
+    --weights SynthSeg_models/synthseg_2.0.h5 --out synthseg-2.0.onnx
+```
+
+| file | bytes | sha256 |
+|---|---|---|
+| `SynthSeg_models.zip` (downloaded 2026-11-17) | 343,358,151 | `9368746076acb3132b176f7e0ea7d2894d8df6cc28dd3d7a89415b9b4f5ddebd` |
+| `synthseg_2.0.h5` | 53,079,152 | `f190bfd742f450ef3ca2c9df9ed4d2e0232b3a74471da5e51b7770bacdf80c3e` |
+| `synthseg-2.0.onnx` (hosted) | 52,998,426 | `c0a09b745d50527fceb36f2a6876991a8e41a11b3daa6eb1aa368c69a96d76d1` |
+
+The h5 is byte-identical to FreeSurfer 7.3.2's `models/synthseg_2.0.h5` (as are the zip's
+robust, parcellation and QC networks to FreeSurfer's, none of which is exported). The export
+is not byte-reproducible — tf2onnx numbers its constant-folded nodes differently from run to
+run — but every initializer and the node sequence are identical between runs. Environment:
+Python 3.11, tensorflow-cpu 2.15.1, tf2onnx 1.16.1, onnx 1.17, NumPy 1.23.5.
+
+Verified end to end: `examples/synthseg_run.rs --v2` with the hosted file against FreeSurfer
+7.3.2 `mri_synthseg` (non-robust, `--cpu`) on echo 1 of the public `qsmxt example` acquisitions
+`prisma-bridge-run1` and `cima-local-run1`: 1 voxel of 6,029,312 differs on the first and none
+on the second, every label Dice ≥ 0.99999, soft volumes within 0.03 % on average (0.25 % at
+most).
+
+SynthSeg 1.0 is hosted as `synthseg.onnx` on `qsmxt/qsm-onnx-weights`. Verified export: 52,998,326 bytes,
 sha256 `c2821a74e8a03d4073896b5c2e359b3ef86f9776bacd78e00da1c757aa97bbcc`.
 Against the Keras graph on a real 192×256×128 input the posteriors agree to
 max |diff| 1.0e-5 and the argmax is identical at every voxel.

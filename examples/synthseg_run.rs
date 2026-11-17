@@ -10,7 +10,8 @@
 //! windows, `--head-crop`/`--no-head-crop` the head crop's margin or turn it off, `--f16`/`--f32`
 //! the posteriors' precision.
 //!
-//! Passing `auto` for the model fetches and caches the registry weights (needs `download`).
+//! Passing `auto` for the model fetches and caches the registry weights for the version (`--v1`:
+//! `synthseg`; `--v2`, the default here: `synthseg-2.0`) (needs `download`).
 use qsm_core::io::{read_nifti_file, save_nifti_gz};
 use qsm_core::segment::{synthseg, PosteriorPrecision, SynthSegInference, SynthSegParams, SynthSegVersion};
 use qsm_core::Grid;
@@ -27,12 +28,7 @@ fn main() {
     let number = |f: &str| value(f).map(|v| v.parse::<usize>().unwrap_or_else(|_| panic!("{f} takes a number")));
 
     let img = read_nifti_file(Path::new(positional[0])).expect("read image");
-    let onnx = if positional[1] == "auto" {
-        println!("resolving synthseg weights...");
-        qsm_core::models::primary_weight("synthseg").expect("synthseg weights")
-    } else {
-        std::fs::read(positional[1]).expect("read onnx").into()
-    };
+
     let grid = Grid::new(
         img.dims.0, img.dims.1, img.dims.2,
         img.voxel_size.0, img.voxel_size.1, img.voxel_size.2,
@@ -62,6 +58,13 @@ fn main() {
         params.head_crop = None;
     }
     println!("image {:?} @ {:?} mm, {:?}", img.dims, img.voxel_size, params);
+    let onnx = if positional[1] == "auto" {
+        let id = params.version.model_id();
+        println!("resolving {id} weights...");
+        qsm_core::models::primary_weight(id).expect("synthseg weights")
+    } else {
+        std::fs::read(positional[1]).expect("read onnx").into()
+    };
 
     let t = Instant::now();
     let out = synthseg(&img.data, &grid, &img.affine, &onnx, &params, |d, n| {
