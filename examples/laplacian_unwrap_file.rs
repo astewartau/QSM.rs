@@ -87,6 +87,8 @@ fn main() {
             unwrapping_algorithm: UnwrappingAlgorithm::Laplacian,
             laplacian_solver: solver,
             b0_estimation: B0EstimationMethod::WeightedAvg { weighting },
+            // Each echo's own Laplacian unwrap, as STI Suite and UK Biobank combine them.
+            phase_offset_removal: false,
             ..Default::default()
         };
         let meta = ScanMetadata {

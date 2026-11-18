@@ -552,6 +552,11 @@ impl Default for MaskingConfig {
 #[derive(Clone, Debug)]
 pub struct FieldMappingConfig {
     pub unwrapping_algorithm: UnwrappingAlgorithm,
+    /// Remove the echo-independent phase offset (MCPC-3D-S) before unwrapping multi-echo data
+    /// (default true), with any unwrapper. Laplacian unwrapping does not remove it: it leaves
+    /// the offset's non-harmonic part in the field (see [`crate::pipeline::field_mapping`],
+    /// *Phase offsets and Laplacian unwrapping*). Off is what STI Suite, QSMART and UK Biobank
+    /// do after their own coil combination.
     pub phase_offset_removal: bool,
     /// Gaussian smoothing sigma of the MCPC-3D-S phase offsets, in **mm** per axis (default
     /// [7, 7, 7]); divided by the voxel size to give the smoothing in voxels

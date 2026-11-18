@@ -1225,13 +1225,15 @@ const PDF: &[Value] = &[Choice("pdf")];
 const LBV: &[Value] = &[Choice("lbv")];
 const VSHARP: &[Value] = &[Choice("vsharp")];
 const LAPLACIAN: &[Value] = &[Choice("laplacian")];
-/// Background removal that keeps the brain's edge, so an error in the field map's rim reaches the
-/// whole brain (`laplacian.non-eroding-bfr`). iSMV (which holds its boundary band fixed) is not
-/// included: on QSM-CI's simulated head Laplacian + iSMV was much worse than ROMEO + iSMV (χ XSIM
-/// 0.12 against 0.24), but on 14 travelling-head scans with the fixed kernel (#436) it was as
-/// reproducible (median |slope − 1| 2.8 % against 3.3 %); revisit with the full re-run.
+/// Background removal that fits only a harmonic background and keeps the brain's edge, so the
+/// non-harmonic phase offset a Laplacian unwrap leaves in reaches the whole brain
+/// (`laplacian.non-eroding-bfr`). iSMV is not included: on QSM-CI's simulated head Laplacian + iSMV
+/// without offset removal was much worse than with it (χ XSIM 0.12 against 0.25), but on 14
+/// travelling-head scans with the fixed kernel (#436) it was as reproducible as ROMEO (median
+/// |slope − 1| 2.8 % against 3.3 %); revisit with the full re-run.
 const RIM_SENSITIVE_BFR: &[Value] = &[Choice("pdf"), Choice("lbv")];
 const ROMEO: &[Value] = &[Choice("romeo")];
+const ROMEO_OR_LAPLACIAN: &[Value] = &[Choice("romeo"), Choice("laplacian")];
 /// ROMEO unwraps the field map: the trigger of the ROMEO-settings rules.
 const ROMEO_UNWRAPS: Condition = method("field_mapping.unwrapping_algorithm", ROMEO);
 /// What the χ-separation toolbox's ROMEO call resolves to (QSM.rs unwrap::romeo docs, *Pipelines
@@ -1621,6 +1623,11 @@ pub static RULES: &[Rule] = &[
         "field_mapping.laplacian_unmasked", &[Bool(true)],
         "STI Suite's QSM_GUI gives MRPhaseUnwrap the raw wrapped phase, not the phase masked first",
         "STI Suite 3.0 QSM_GUI, probed headless (recorded in QSM.rs laplacian.rs docs)"),
+    reference("sti.no-phase-offset-removal",
+        &[inv(STI), method("field_mapping.unwrapping_algorithm", LAPLACIAN), MULTI_ECHO, NOT_UKB],
+        "field_mapping.phase_offset_removal", &[Bool(false)],
+        "STI Suite's QSM_GUI unwraps each echo's phase as it is given, with no phase-offset removal first",
+        "STI Suite 3.0 QSM_GUI, probed headless (recorded in QSM.rs laplacian.rs docs)"),
     // One of QSMART's recommended group (`QSMART_EDGE_REASON`, decision 142), measured.
     measured_better("qsmart.unwrap-laplacian", &[inv(&[Choice("qsmart")])],
         "field_mapping.unwrapping_algorithm", LAPLACIAN, QSMART_EDGE_REASON,
@@ -1636,6 +1643,11 @@ pub static RULES: &[Rule] = &[
         "field_mapping.laplacian_unmasked", &[Bool(true)],
         "QSMART unwraps each echo's raw phase over the whole volume, and its echo fit fits every voxel",
         "QSMART unwrap_phase.m l. 5-10; echofit.m"),
+    reference("qsmart.no-phase-offset-removal",
+        &[inv(&[Choice("qsmart")]), method("field_mapping.unwrapping_algorithm", LAPLACIAN), MULTI_ECHO],
+        "field_mapping.phase_offset_removal", &[Bool(false)],
+        "QSMART unwraps each echo's raw phase, with no phase-offset removal first",
+        "QSMART QSMART.m l. 26; unwrap_phase.m l. 5-10"),
     // ---------------------------------------------------------------- Field mapping
     // One of QSMART's recommended group (`QSMART_EDGE_REASON`, decision 142), measured.
     measured_better("qsmart.field-echofit", &[inv(&[Choice("qsmart")])],
@@ -1656,13 +1668,19 @@ pub static RULES: &[Rule] = &[
         "field_mapping.b0_estimation.weighting", &[Choice("tes")],
         "Σφ/ΣTE is the TE-weighted mean of φ/TE",
         "STI Suite 3.0 QSM_GUI, probed headless (recorded in QSM.rs star.rs docs)"),
+    // Laplacian too since 2026-11-18 (decision 192): Laplacian unwrapping removes only the
+    // harmonic part of an echo's phase offset, so the rest stays in the field (QSM.rs
+    // pipeline::field_mapping docs, *Phase offsets and Laplacian unwrapping*).
     recommend("field-mapping.phase-offsets",
         &[method("field_mapping.b0_estimation", WEIGHTED_AVG),
-          method("field_mapping.unwrapping_algorithm", ROMEO), MULTI_ECHO],
+          method("field_mapping.unwrapping_algorithm", ROMEO_OR_LAPLACIAN), MULTI_ECHO],
         "field_mapping.phase_offset_removal", &[Bool(true)],
         "The B0 calculation's authors state that phase offsets have to be removed before it; \
-         ROMEO removes them (MCPC-3D-S) whenever it computes B0 from multi-echo data",
-        "MriResearchTools.jl romeofunctions.jl:3-7; ROMEO.jl caller.jl:80-91"),
+         ROMEO removes them (MCPC-3D-S) whenever it computes B0 from multi-echo data. Laplacian \
+         unwrapping does not remove them: it takes out only their harmonic part, and the rest \
+         stays in the field map",
+        "MriResearchTools.jl romeofunctions.jl:3-7; ROMEO.jl caller.jl:80-91; QSM.rs \
+         pipeline::field_mapping docs (Phase offsets and Laplacian unwrapping)"),
     Rule {
         id: "field-mapping.phase-offset-sigma",
         when: &[method("field_mapping.phase_offset_removal", &[Bool(true)])],
@@ -1680,24 +1698,28 @@ pub static RULES: &[Rule] = &[
         "field_mapping.bipolar_correction", &[Bool(true)], Bool(false), Basis::Stated,
         "Bipolar correction needs echoes 1–3; with fewer it is skipped",
         "ROMEO.jl argparse.jl:71-76; MriResearchTools.jl mcpc3ds.jl:110-119"),
-    // QSM.rs#439. Measured 2026-11-09: QSM-CI simulated head (RTS χ XSIM, Laplacian / ROMEO
-    // field) and the travelling heads (inter-scanner median |a−1|, Laplacian / ROMEO).
-    discourage("laplacian.non-eroding-bfr", &[bg(RIM_SENSITIVE_BFR)],
-        "field_mapping.unwrapping_algorithm", LAPLACIAN, Choice("romeo"), Basis::Measured,
-        "The Laplacian field map of the masked phase has a large error in the brain's outer three \
-         voxels. PDF and LBV keep that rim, so the error spreads into the brain: on QSM-CI's \
-         simulated head χ XSIM fell from 0.29 to 0.13 (PDF) and 0.28 to 0.11 (LBV) against ROMEO's \
-         field, and across scanners (RTS, travelling heads) regional χ agreed far less: median \
-         |slope − 1| 40 % against 7 % (PDF) and 15 % against 8 % (LBV). ROMEO, a background \
-         removal that erodes the rim (SHARP, V-SHARP, RESHARP), or eroding the mask by a few voxels \
-         avoids it",
-        "QSM.rs#439 (QSM-CI simulated head and harmonization travelling heads, v11)"),
-    discourage("field-mapping.bipolar-not-with-laplacian",
+    // QSM.rs#439, decision 192. Measured 2026-11-09 (v11, Laplacian without offset removal against
+    // ROMEO with it: QSM-CI simulated head RTS χ XSIM, travelling heads inter-scanner median |a−1|)
+    // and 2026-11-18 (simulated head, Laplacian with and without offset removal). The error was
+    // first put down to the mask rim; on the simulated head it is the phase offset that Laplacian
+    // unwrapping leaves in (pipeline::field_mapping docs, *Phase offsets and Laplacian unwrapping*).
+    discourage("laplacian.non-eroding-bfr",
+        &[bg(RIM_SENSITIVE_BFR), method("field_mapping.unwrapping_algorithm", LAPLACIAN), MULTI_ECHO],
+        "field_mapping.phase_offset_removal", &[Bool(false)], Bool(true), Basis::Measured,
+        "Laplacian unwrapping without phase-offset removal leaves the non-harmonic part of each echo's \
+         phase offset in the field. PDF and LBV remove only a harmonic background, so they keep it: \
+         on QSM-CI's simulated head χ XSIM (RTS) was 0.14 (PDF) and 0.14 (LBV) without offset removal \
+         and 0.31 and 0.27 with it (ROMEO with it: 0.31 and 0.29), and across scanners (travelling \
+         heads, without it) regional χ agreed far less than with ROMEO: median |slope − 1| 40 % \
+         against 7 % (PDF) and 15 % against 8 % (LBV)",
+        "QSM.rs#439 (QSM-CI simulated head and harmonization travelling heads, v11); QSM.rs \
+         pipeline::field_mapping docs (Phase offsets and Laplacian unwrapping)"),
+    discourage("field-mapping.bipolar-needs-offset-removal",
         &[method("field_mapping.bipolar_correction", &[Bool(true)]),
-          method("field_mapping.unwrapping_algorithm", LAPLACIAN)],
+          method("field_mapping.phase_offset_removal", &[Bool(false)])],
         "field_mapping.bipolar_correction", &[Bool(true)], Bool(false), Basis::Implementation,
-        "Bipolar correction is not applied on the Laplacian path",
-        "QSM.rs pipeline::field_mapping docs"),
+        "Bipolar correction is part of the phase-offset removal (MCPC-3D-S); with that off it is skipped",
+        "MriResearchTools.jl mcpc3ds.jl:55; QSM.rs pipeline::field_mapping docs"),
     // MEDI's README.m unwraps Fit_ppm_complex's field with unwrapPhase. ROMEO stays the default
     // unwrapper (QSMxT's too); this is only the authors' pairing, offered when the complex fit is
     // chosen and never preselected (2026-11-04).
@@ -1921,6 +1943,12 @@ pub static RULES: &[Rule] = &[
     reference("ukb.unwrap-masked", &[UKB, method("field_mapping.unwrapping_algorithm", LAPLACIAN)],
         "field_mapping.laplacian_unmasked", &[Bool(false)],
         "UK Biobank unwraps the phase zeroed outside its (untrimmed) brain mask, mask .* angle(combined)",
+        UKB_SOURCE),
+    reference("ukb.no-phase-offset-removal",
+        &[UKB, method("field_mapping.unwrapping_algorithm", LAPLACIAN), MULTI_ECHO],
+        "field_mapping.phase_offset_removal", &[Bool(false)],
+        "UK Biobank removes the phase offsets when it combines the coils (MCPC-3D-S) and unwraps the \
+         combined echoes with no further offset removal",
         UKB_SOURCE),
     reference("ukb.laplacian-keep-outside", &[UKB, method("field_mapping.unwrapping_algorithm", LAPLACIAN)],
         "field_mapping.laplacian_keep_outside", &[Bool(true)],
@@ -2632,10 +2660,11 @@ mod tests {
             ("laplacian.non-eroding-bfr", Case::new(|c| {
                 background(B::Lbv)(c);
                 c.cfg.field_mapping.unwrapping_algorithm = UnwrappingAlgorithm::Laplacian;
+                c.cfg.field_mapping.phase_offset_removal = false;
             })),
-            ("field-mapping.bipolar-not-with-laplacian", Case::new(|c| {
+            ("field-mapping.bipolar-needs-offset-removal", Case::new(|c| {
                 c.cfg.field_mapping.bipolar_correction = true;
-                c.cfg.field_mapping.unwrapping_algorithm = UnwrappingAlgorithm::Laplacian;
+                c.cfg.field_mapping.phase_offset_removal = false;
             })),
             ("medi.field-complex-fit", Case::new(inversion(I::Medi))),
             ("pdf.field-complex-fit", Case::new(background(B::Pdf))),
@@ -2762,6 +2791,18 @@ mod tests {
             })),
             ("sti.unwrap-unmasked", Case::new(|c| {
                 inversion(I::Ilsqr)(c);
+                c.cfg.field_mapping.unwrapping_algorithm = UnwrappingAlgorithm::Laplacian;
+            })),
+            ("sti.no-phase-offset-removal", Case::new(|c| {
+                inversion(I::Ilsqr)(c);
+                c.cfg.field_mapping.unwrapping_algorithm = UnwrappingAlgorithm::Laplacian;
+            })),
+            ("qsmart.no-phase-offset-removal", Case::new(|c| {
+                inversion(I::Qsmart)(c);
+                c.cfg.field_mapping.unwrapping_algorithm = UnwrappingAlgorithm::Laplacian;
+            })),
+            ("ukb.no-phase-offset-removal", Case::new(|c| {
+                ukb(c);
                 c.cfg.field_mapping.unwrapping_algorithm = UnwrappingAlgorithm::Laplacian;
             })),
             ("sti.echo-combination", Case::new(|c| { inversion(I::Star)(c); linear_fit(c) })),

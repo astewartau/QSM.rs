@@ -303,6 +303,7 @@ fn field_mapping() {
         laplacian_solver: LaplacianSolver::Mirror,
         laplacian_unmasked: true,
         b0_estimation: B0EstimationMethod::QsmartEchofit { fit_threshold: Default::default() },
+        phase_offset_removal: false,
         ..Default::default()
     };
     let r = run_field_mapping(&phases, Some(&mags), &p.mask, &m, &config, &mut no_progress()).unwrap();
