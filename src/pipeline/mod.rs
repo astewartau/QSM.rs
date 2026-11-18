@@ -12,8 +12,8 @@
 //! 3. [`run_dipole_inversion`] — local field → susceptibility (ppm)
 //! 4. [`apply_reference`] — mean subtraction
 //!
-//! Two-pass artefact reduction ([`two_pass`]) runs stages 2-3 a second time against a mask whose
-//! holes are intact, then folds the two reconstructions together.
+//! Two-pass artefact reduction ([`two_pass`]) runs stages 2-3 a second time against a mask with
+//! holes at unreliable voxels, then merges the two reconstructions ([`TwoPassMode`]).
 //!
 //! [`per_echo`] runs stages 1-4 once per echo instead ([`QsmPipelineConfig::qsm_per_echo`]): a
 //! QSM for each echo, and their mean.
@@ -65,4 +65,7 @@ pub use inversion::{heidi_seed_problem, run_dipole_inversion, run_heidi_cone_fil
 pub use separation::{run_separation, SeparationInputs, SeparationResult};
 pub use observer::{Observer, VolumeRef};
 pub use qsmart::run_qsmart;
-pub use two_pass::{combine_two_pass, default_reliable_sections, restrict_reliable_mask};
+pub use two_pass::{
+    combine_two_pass, combine_two_pass_weighted, default_reliable_sections, fill_eroded_rim, local_weights,
+    restrict_reliable_mask, select_source_holes, LocalTwoPassParams, SourceHoles, TwoPassMode,
+};
