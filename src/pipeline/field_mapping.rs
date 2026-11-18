@@ -44,9 +44,10 @@
 //!   ([`crate::utils::phase_offset_removal`] has the measurements; until 2026-11 those voxels kept
 //!   their raw phase, which caused ring artefacts on GE and Philips data). On every other path
 //!   `valid_mask` is the brain mask.
-//! - **Offset removal off, or Laplacian unwrapping.** Phase-offset removal and bipolar correction
-//!   run only with ROMEO (`do_offset` below); with Laplacian they are skipped whatever the
-//!   config says. Without them ROMEO unwraps the raw echoes exactly as on the offset-removal path
+//! - **Offset removal off.** Phase-offset removal and bipolar correction run whenever
+//!   `phase_offset_removal` is on and there is more than one echo, with ROMEO, Laplacian or any
+//!   other unwrapper (`do_offset` below; see *Phase offsets and Laplacian unwrapping*). Without
+//!   them ROMEO unwraps the raw echoes exactly as on the offset-removal path
 //!   ([`crate::unwrap::unwrap_romeo_multi_echo`] with `romeo_params`: template or individual
 //!   mode, each echo's own magnitude, ROMEO.jl's `phase2`; until 2026-11 this path unwrapped each
 //!   echo with echo 1's magnitude and the next echo as `phase2` whatever the mode), and the
@@ -58,21 +59,45 @@
 //! Field strength enters only in the conversion to ppm; nothing assumes a resolution or B0
 //! direction.
 //!
+//! # Phase offsets and Laplacian unwrapping
+//!
+//! Each echo's phase is `TEₑ·ω + φ₀`, with `φ₀` the echo-independent phase offset (coil phase,
+//! transmit phase). Until 2026-11 the Laplacian path skipped MCPC-3D-S on the reasoning that
+//! Laplacian unwrapping removes the offsets "by construction". It does not: a Laplacian unwrap
+//! (`∇⁻²[cos φ ∇² sin φ − sin φ ∇² cos φ]`) returns the phase up to a harmonic function, so it
+//! takes out only the harmonic part of `φ₀`. The rest is smooth but not harmonic, and it reaches
+//! the weighted average of `φ/TE` with the weight of the short echoes. V-SHARP and other SMV
+//! filters remove much of a smooth non-harmonic field near the edge with the background, but PDF
+//! and LBV fit only a harmonic background, so they keep it and it shows up as a broad error in
+//! χ. On QSM-CI's simulated head (QSM Challenge 2.0 head, 7 T, TE 4–28 ms) the local field's NRMSE
+//! after Laplacian unwrapping and PDF was 237 % without offset removal and 107 % with it (LBV:
+//! 213 % and 105 %); ROMEO without offset removal fails the same way. So offset removal now runs
+//! before Laplacian unwrapping too, by default (QSM.rs decision 192, 2026-11-18; the numbers per
+//! background removal and inversion are in the pull request that made the change).
+//!
+//! `phase_offset_removal: false` keeps the old path: each echo unwrapped on its own and its
+//! masked mean removed. It is what STI Suite's `QSM_GUI` and QSMART do on raw echoes and what UK
+//! Biobank does after its own coil combination, so their reference rules
+//! (`sti.no-phase-offset-removal`, `qsmart.no-phase-offset-removal`,
+//! `ukb.no-phase-offset-removal`) turn it off. Keeping the Laplacian field over the whole volume
+//! (`laplacian_keep_outside`, or `laplacian_unmasked` with the QSMART echo fit) needs it off:
+//! MCPC-3D-S defines the corrected phase only inside its mask, so that combination is refused.
+//!
 //! # Laplacian field map and the brain's edge
 //!
-//! Laplacian unwrapping of the masked phase (the default; `laplacian_unmasked` off) leaves a
-//! large error in the outer three voxels of the brain: against ROMEO's field on the QSM-CI
-//! travelling heads, the high-pass SD of the difference is about 0.07 ppm there, 0.02 ppm three to
-//! eight voxels in, and 0.003 ppm deeper (QSM.rs#439). Background removal that erodes the edge
-//! (SHARP, V-SHARP, RESHARP) drops most of it; PDF and LBV keep it, so with them it spreads into
-//! the brain. The `laplacian.non-eroding-bfr` rule (Discouraged, measured) suggests ROMEO for
-//! those two; nothing changes on its own. (iSMV holds its boundary band fixed; the evidence for it
-//! is mixed so far, see the rule's constant.)
+//! Without offset removal, the Laplacian field map differs from ROMEO's most at the brain's edge:
+//! against ROMEO's field on the QSM-CI travelling heads, the high-pass SD of the difference is
+//! about 0.07 ppm in the outer three voxels, 0.02 ppm three to eight voxels in, and 0.003 ppm
+//! deeper (QSM.rs#439, which first put the PDF and LBV failures down to that rim). On the simulated
+//! head the error that matters for PDF, LBV and iSMV is the phase offset left in (above): with
+//! offset removal, Laplacian + PDF/LBV/iSMV score close to ROMEO's (χ XSIM 0.31/0.27/0.25 against
+//! 0.31/0.29/0.25, RTS). The `laplacian.non-eroding-bfr` rule (Discouraged, measured) suggests
+//! offset removal when it is off with PDF or LBV; nothing changes on its own.
 //!
 //! # Pipeline rules
 //!
 //! The facts above that a configuration can depart from are published as rules in
-//! [`crate::pipeline::rules::RULES`] (each with its strength, basis, reason and source): `field-mapping.phase-offsets`, `field-mapping.bipolar-needs-three-echoes`, `field-mapping.bipolar-not-with-laplacian`, `field-mapping.phase-offset-sigma`, `laplacian.non-eroding-bfr`.
+//! [`crate::pipeline::rules::RULES`] (each with its strength, basis, reason and source): `field-mapping.phase-offsets`, `field-mapping.bipolar-needs-three-echoes`, `field-mapping.bipolar-needs-offset-removal`, `field-mapping.phase-offset-sigma`, `laplacian.non-eroding-bfr`.
 
 use super::config::*;
 use super::phase_utils::{hz_to_ppm, rads_to_ppm};
@@ -94,9 +119,10 @@ use crate::utils::B0WeightType;
 /// # UK Biobank's field map
 ///
 /// On offset-free echoes (e.g. MCPC-3D-S coil-combined), Laplacian unwrapping with
-/// `laplacian_solver: LaplacianSolver::Fft { pad: [64; 3] }` and
+/// `laplacian_solver: LaplacianSolver::Fft { pad: [64; 3] }`,
 /// `b0_estimation: B0EstimationMethod::WeightedAvg { weighting: B0WeightType::AssumedDecay { t2star_s: 0.040 } }`
-/// reproduces the UK Biobank QSM pipeline's field map: STI Suite's `MRPhaseUnwrap(mask .* φ)`
+/// and `phase_offset_removal: false` (UK Biobank removes the offsets in its coil combination,
+/// not again after it; rule `ukb.no-phase-offset-removal`) reproduces the UK Biobank QSM pipeline's field map: STI Suite's `MRPhaseUnwrap(mask .* φ)`
 /// per echo, then `Σ Wφ / Σ W·TE` with `W = TE·exp(−TE/T2*)`. It matches up to a global
 /// constant (each echo's masked mean is removed before combining, see the direct path below),
 /// to ≈1e-14 rad in the combined phase on in-vivo two-echo data.
@@ -111,6 +137,7 @@ use crate::utils::B0WeightType;
 ///     b0_estimation: B0EstimationMethod::WeightedAvg {
 ///         weighting: B0WeightType::assumed_decay_default(),
 ///     },
+///     phase_offset_removal: false,
 ///     ..Default::default()
 /// };
 /// # let _ = ukb;
@@ -231,8 +258,19 @@ pub fn run_field_mapping(
         }
     }
 
-    let is_laplacian = config.unwrapping_algorithm == UnwrappingAlgorithm::Laplacian;
-    let do_offset = n_echoes > 1 && config.phase_offset_removal && !is_laplacian;
+    let do_offset = n_echoes > 1 && config.phase_offset_removal;
+    // MCPC-3D-S defines the corrected phase only inside its own mask, so a field kept over the
+    // whole volume (UK Biobank's `laplacian_keep_outside`, QSMART's unmasked echo fit) has nothing
+    // to be computed from outside it. Those pipelines remove no phase offset after the coil
+    // combination; refuse the mix rather than quietly dropping one of the two.
+    if do_offset && LaplacianRegion::new(config, mask).everywhere.is_some() {
+        return Err(PipelineError::InvalidConfig(
+            "keeping the Laplacian-unwrapped field over the whole volume (laplacian_keep_outside, or \
+             laplacian_unmasked with the QSMART echo fit) needs phase_offset_removal off, as in the \
+             UK Biobank and QSMART pipelines: the offset-corrected phase is defined only inside \
+             MCPC-3D-S's mask".into(),
+        ));
+    }
 
     // Create uniform magnitude fallback
     let uniform_mag = vec![1.0f64; n_voxels];
@@ -318,12 +356,22 @@ fn field_mapping_with_offset(
             // The configured solver; the default `Dct` (Neumann) unwraps only, leaving
             // background removal to the later stage. `Mgpcg` (QSM.jl's default) is the
             // ROI-masked variant: it also removes the background here, on `valid_mask`, as QSM.jl
-            // does before its own background removal. The phase is zeroed
-            // outside the mask first (MCPC-3D-S corrects every voxel, and the Laplacian unwrap
-            // takes the whole array), as on the direct path.
-            corrected.iter()
-                .map(|p| crate::unwrap::laplacian_unwrap(&mask_phase(p, &valid_mask), &valid_mask, &grid, config.laplacian_solver))
-                .collect()
+            // does before its own background removal. The phase is zeroed outside the mask first
+            // (MCPC-3D-S corrects every voxel, and the Laplacian unwrap takes the whole array), as
+            // on the direct path, unless `laplacian_unmasked` asks for the whole volume.
+            let mut u: Vec<Vec<f64>> = corrected.iter()
+                .map(|p| {
+                    let input = if config.laplacian_unmasked { p.clone() } else { mask_phase(p, &valid_mask) };
+                    crate::unwrap::laplacian_unwrap(&input, &valid_mask, &grid, config.laplacian_solver)
+                })
+                .collect();
+            // Each echo is fixed only up to a constant of its own, which a weighted mean or a
+            // fit in TE would turn into a field error, so it is removed as on the direct path
+            // (`field_mapping_direct`). QSMART's echo fit aligns nothing, as there.
+            if !matches!(config.b0_estimation, B0EstimationMethod::QsmartEchofit { .. }) {
+                align_per_echo_constants(&mut u, tes, &valid_mask, UnwrappingAlgorithm::Laplacian);
+            }
+            u
         }
         UnwrappingAlgorithm::Romeo => {
             crate::unwrap::unwrap_romeo_multi_echo(
@@ -412,8 +460,7 @@ fn field_mapping_with_offset(
 
 /// Path B: Multi-echo without phase offset removal (per-echo unwrap + B0 estimation).
 ///
-/// Taken whenever offset removal is off: always with Laplacian unwrapping, and with ROMEO when
-/// `phase_offset_removal` is false. Each echo is unwrapped on its own (for Laplacian, with the
+/// Taken for multi-echo data whenever `phase_offset_removal` is false, with any unwrapper. Each echo is unwrapped on its own (for Laplacian, with the
 /// phase zeroed outside `mask` first unless `config.laplacian_unmasked`, and `config.laplacian_solver` as the Poisson solver), and the echoes are then combined with
 /// `config.b0_estimation`, as on the offset-removal path:
 ///
@@ -1143,6 +1190,7 @@ mod tests {
         let want = crate::utils::qsmart_echofit(&uw, &m, &meta.echo_times, &grid, ppm, crate::utils::QsmartFitThreshold::Absolute(thr));
         let config = FieldMappingConfig {
             unwrapping_algorithm: UnwrappingAlgorithm::Laplacian,
+            phase_offset_removal: false,
             laplacian_solver: LaplacianSolver::Mirror,
             laplacian_unmasked: true,
             b0_estimation: B0EstimationMethod::QsmartEchofit { fit_threshold: crate::utils::QsmartFitThreshold::Absolute(thr) },
@@ -1224,7 +1272,7 @@ mod tests {
         let mut mask = vec![0u8; n];
         mask[100..300].fill(1);
         let grid = meta.grid();
-        let base = FieldMappingConfig { unwrapping_algorithm: UnwrappingAlgorithm::Laplacian, ..Default::default() };
+        let base = FieldMappingConfig { unwrapping_algorithm: UnwrappingAlgorithm::Laplacian, phase_offset_removal: false, ..Default::default() };
         let unmasked = FieldMappingConfig { laplacian_unmasked: true, ..base.clone() };
         let got = run_field_mapping(&p, None, &mask, &meta, &unmasked, &mut |_, _| {}).unwrap().b0_field_ppm;
         // As the multi-echo path computes it, from echoes unwrapped on the raw phase.
@@ -1253,6 +1301,7 @@ mod tests {
         mask[100..300].fill(1);
         let base = FieldMappingConfig {
             unwrapping_algorithm: UnwrappingAlgorithm::Laplacian,
+            phase_offset_removal: false,
             b0_estimation: B0EstimationMethod::WeightedAvg { weighting: B0WeightType::assumed_decay_default() },
             ..Default::default()
         };
@@ -1693,6 +1742,7 @@ mod tests {
         for wt in all_weight_types() {
             let cfg = FieldMappingConfig {
                 unwrapping_algorithm: UnwrappingAlgorithm::Laplacian,
+                phase_offset_removal: false,
                 b0_estimation: B0EstimationMethod::WeightedAvg { weighting: wt },
                 ..Default::default()
             };
@@ -1749,6 +1799,7 @@ mod tests {
             let p = LinearFitParams { estimate_offset };
             let cfg = FieldMappingConfig {
                 unwrapping_algorithm: UnwrappingAlgorithm::Laplacian,
+                phase_offset_removal: false,
                 b0_estimation: B0EstimationMethod::LinearFit(p.clone()),
                 laplacian_solver: solver,
                 ..Default::default()
@@ -1765,6 +1816,7 @@ mod tests {
         let one = meta_n(&tes[..1]);
         let cfg = FieldMappingConfig {
             unwrapping_algorithm: UnwrappingAlgorithm::Laplacian,
+            phase_offset_removal: false,
             laplacian_solver: solver,
             ..Default::default()
         };
@@ -1891,6 +1943,7 @@ mod tests {
         let grid = crate::Grid::new(N, N, N, 1.0, 1.0, 1.0);
         let cfg = FieldMappingConfig {
             unwrapping_algorithm: UnwrappingAlgorithm::Laplacian,
+            phase_offset_removal: false,
             b0_estimation: B0EstimationMethod::LinearFit(LinearFitParams::default()),
             ..Default::default()
         };
@@ -1923,6 +1976,7 @@ mod tests {
         let grid = crate::Grid::new(N, N, N, 1.0, 1.0, 1.0);
         let cfg = FieldMappingConfig {
             unwrapping_algorithm: UnwrappingAlgorithm::Laplacian,
+            phase_offset_removal: false,
             ..Default::default()
         };
         let run = |p: &[Vec<f64>]| run_field_mapping(&refs(p), Some(&refs(&mg)), &mask, &meta, &cfg, &mut |_, _| {})
@@ -1998,6 +2052,7 @@ mod tests {
         let run = |solver| {
             let cfg = FieldMappingConfig {
                 unwrapping_algorithm: UnwrappingAlgorithm::Laplacian,
+                phase_offset_removal: false,
                 laplacian_solver: solver,
                 ..Default::default()
             };
@@ -2025,6 +2080,7 @@ mod tests {
         let fft = LaplacianSolver::Fft { pad: [8; 3] };
         let cfg = FieldMappingConfig {
             unwrapping_algorithm: UnwrappingAlgorithm::Laplacian,
+            phase_offset_removal: false,
             laplacian_solver: fft,
             b0_estimation: B0EstimationMethod::WeightedAvg { weighting: B0WeightType::assumed_decay_default() },
             ..Default::default()
@@ -2160,8 +2216,8 @@ mod tests {
         assert_eq!(rep.quality.flagged, want.quality.flagged);
         assert!(got.phase_offset.is_some());
 
-        // Path B: Laplacian (always direct): masked unwrap, demean, fit.
-        let got = run(&robust_cfg(UnwrappingAlgorithm::Laplacian, true));
+        // Path B: Laplacian without phase-offset removal: masked unwrap, demean, fit.
+        let got = run(&robust_cfg(UnwrappingAlgorithm::Laplacian, false));
         let mut uw = masked_unwrap(&ph, &mask, LaplacianSolver::Dct);
         uw.iter_mut().for_each(|u| remove_masked_mean(u, &mask));
         let want = crate::utils::multi_echo_robust_fit(&uw, &mg, &TES4, &mask, &params);
