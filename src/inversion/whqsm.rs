@@ -62,6 +62,26 @@
 //! point is the same minimiser; it is not in `WH_nlTV.m`. With it the port is 0.0006 % (sim)
 //! and 0.0009 % (KKI, no clamping needed) from the verified original (χ in radians, QSM.rs#402).
 //!
+//! The original does not only "happen to settle". In QSM-CI's composed sim pipelines (scored
+//! runs 43895043353 and 43970860704, 16-17 Nov 2026) the verified original returned an all-NaN
+//! map in 35 of its 108 cells (every one at NRMSE 100 %, XSIM 0.002, coverage 0, scored as
+//! zeros), from both field maps and background removals, while the port scored normally on the
+//! same inputs. Reproduced with the original's own image on the PDF local field of the sim
+//! (QSM.rs `pdf`, true total field): in the first outer iteration a handful of mask voxels at a
+//! strong source (phase 2.4-13 rad, `rhs - phase` 2.7-3.4 rad, i.e. near ±π, where the
+//! derivative `1 + cos` vanishes) run the Newton step to its 50-step cap with the update
+//! growing to 1e13; the next x-update's FFT spreads that over the whole volume, and in the
+//! second iteration single-precision `cos` returns exactly -1 at a few hundred voxels, so the
+//! step divides by 0 and everything is NaN from then on. In double precision (a numpy
+//! transcription) the same voxels reach 1e20 and the map is finite but meaningless, so the
+//! cause is the unguarded step, not the precision. The flat weight is what exposes it: with
+//! `W = mu2 = 1` the derivative `W*cos + mu2` reaches 0, whereas the example's
+//! max-normalised magnitude weight keeps `W` below `mu2` almost everywhere (its comment:
+//! "normalization for stability"). With the clamp, the same transcription in single precision
+//! finishes the 150 iterations finite and is 0.09 % (r 0.9999995) from the port's published map
+//! of that cell (XSIM 0.442). `newton_guard: false` ([`WhQsmParams::newton_guard`]) gives
+//! `WH_nlTV.m`'s unguarded step for parity.
+//!
 //! # Finite differences
 //! As in `WH_nlTV.m`, the gradient and Laplacian are unit-spacing differences whatever the
 //! voxel size; only the dipole kernel uses it.
@@ -187,6 +207,11 @@ pub struct WhQsmParams {
     /// `dipole_kernel_angulated` as the original is run with; [`FansiKernel::Continuous`] is
     /// the crate's continuous kernel (see [`FansiKernel`] for the decision and the measurements).
     pub kernel: FansiKernel,
+    /// Keep each Newton iterate of the `z2` subproblem inside the interval that holds its
+    /// minimiser, `|z2 - rhs/mu2| <= W/mu2` (default `true`; see the module docs, *Newton
+    /// safeguard*). `false` is `WH_nlTV.m`'s unguarded step, for parity: it is the same wherever
+    /// the iterates stay in the interval, and diverges where they do not.
+    pub newton_guard: bool,
 }
 
 impl Default for WhQsmParams {
@@ -207,6 +232,7 @@ impl Default for WhQsmParams {
             echo_times: vec![0.02],
             te: EchoTime::First,
             kernel: FansiKernel::Discrete,
+            newton_guard: true,
         }
     }
 }
@@ -453,14 +479,22 @@ pub fn whqsm(
                     let dphi = z2[i] - phase[i];
                     let numr = w[i] * dphi.sin() + mu2 * z2[i] - real_scratch[i];
                     let denr = w[i] * dphi.cos() + mu2;
-                    // Safeguard (not in WH_nlTV.m): keep the iterate in the interval that holds
-                    // the minimiser, |z2 - rhs/mu2| <= W/mu2 (from W*sin(z2-phase) +
-                    // mu2*(z2 - rhs/mu2) = 0). See "Newton safeguard" in the module docs.
-                    let r = real_scratch[i] / mu2;
-                    let b = w[i] / mu2;
-                    let z_new = (z2[i] - numr / denr).clamp(r - b, r + b);
-                    let u = z2[i] - z_new;
-                    z2[i] = z_new;
+                    let u = if params.newton_guard {
+                        // Safeguard (not in WH_nlTV.m): keep the iterate in the interval that
+                        // holds the minimiser, |z2 - rhs/mu2| <= W/mu2 (from W*sin(z2-phase) +
+                        // mu2*(z2 - rhs/mu2) = 0). See "Newton safeguard" in the module docs.
+                        let r = real_scratch[i] / mu2;
+                        let b = w[i] / mu2;
+                        let z_new = (z2[i] - numr / denr).clamp(r - b, r + b);
+                        let u = z2[i] - z_new;
+                        z2[i] = z_new;
+                        u
+                    } else {
+                        // WH_nlTV.m's unguarded step: z2 = z2 - update.
+                        let u = numr / denr;
+                        z2[i] -= u;
+                        u
+                    };
                     upd_norm2 += u * u;
                 }
                 let upd_norm = upd_norm2.sqrt();
@@ -638,5 +672,43 @@ mod tests {
             assert!((x - y).abs() < 1e-12);
         }
         assert_ne!(in_mask, run(WhQsmWeight::Flat, None));
+    }
+
+    /// A smooth field of amplitude `amp` ppm on an 8³ grid; with the flat weight W = 1 = mu2
+    /// everywhere, so wherever the residual nears ±π the Newton derivative `W*cos + mu2` is 0.
+    fn saturated_run(amp: f64, newton_guard: bool) -> Vec<f64> {
+        let n = 8;
+        let c = n as f64 / 2.0;
+        let field: Vec<f64> = (0..n * n * n)
+            .map(|i| {
+                let (x, y, z) = ((i % n) as f64 - c, ((i / n) % n) as f64 - c, (i / n / n) as f64 - c);
+                amp * (0.7 * x).sin() * (0.5 * y).cos() * (0.9 * z).sin()
+            })
+            .collect();
+        let grid = Grid::new(n, n, n, 1.0, 1.0, 1.0);
+        let p = WhQsmParams { b0: 3.0, echo_times: vec![0.02], max_iter: 30, newton_guard, ..Default::default() };
+        whqsm(&field, &vec![1u8; n * n * n], None, &grid, (0.0, 0.0, 1.0), &p, |_, _| {})
+    }
+
+    fn max_abs(v: &[f64]) -> f64 {
+        v.iter().fold(0.0f64, |a, &x| if x.is_finite() { a.max(x.abs()) } else { f64::INFINITY })
+    }
+
+    #[test]
+    fn newton_guard_stops_the_divergence() {
+        // AMP ppm at 3 T and 20 ms (16 rad/ppm): WH_nlTV.m's unguarded step diverges, the
+        // guarded one stays at the field's scale.
+        const AMP: f64 = 0.15;
+        let (original, guarded) = (max_abs(&saturated_run(AMP, false)), max_abs(&saturated_run(AMP, true)));
+        assert!(original > 1e6, "the unguarded step should diverge here, max |chi| {original}");
+        assert!(guarded < 2.0, "guarded max |chi| {guarded}");
+    }
+
+    #[test]
+    fn newton_guard_is_exact_inside_the_bracket() {
+        // At 0.05 ppm the iterates never leave the interval: bit-for-bit the unguarded result.
+        let guarded = saturated_run(0.05, true);
+        assert!(max_abs(&guarded) > 0.01);
+        assert_eq!(guarded, saturated_run(0.05, false));
     }
 }
