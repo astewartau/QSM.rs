@@ -137,7 +137,7 @@ const MODELS: &[ModelSpec] = &[
         origin: Framework::TensorFlow,
         description: "QSMnet retrained with susceptibility-scaling augmentation for \
                       a wider, more linear χ range.",
-        paper: "Jung et al., NeuroImage 2020; doi:10.1016/j.neuroimage.2020.116579",
+        paper: "Jung et al., NeuroImage 2020; doi:10.1016/j.neuroimage.2020.116619",
         source: "https://github.com/SNU-LIST/QSMnet",
         license: "",
         // Clean PyTorch re-export of the TF1.14 QSMnet+_64 checkpoint (same U-Net

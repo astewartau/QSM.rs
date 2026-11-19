@@ -59,7 +59,7 @@
 //!   motivation for susceptibility tensor imaging.
 //! - **Registration.** Misalignment between orientations propagates straight into the result.
 //! - **Rotations about a single axis.** These leave residual streaking that L2 regularization
-//!   suppresses (Schweser & Zivadinov 2024) — one reason `lambda` is exposed.
+//!   suppresses (Gkotsoulias et al. 2024) — one reason `lambda` is exposed.
 //!
 //! COSMOS is widely treated as a susceptibility ground truth; those three are what that
 //! status actually rests on, not the orientation count.
@@ -83,7 +83,7 @@
 //! |---|---|
 //! | Three runs of one head position, re-registered (B0 within 1.1°, 2.6°, 3.3° of each other) | 55% |
 //! | Two orientations 5° / 10° / 15° / 20° apart | 64% / 35% / 22% / 16% |
-//! | Three of the twelve in-vivo orientations of Bilgic et al. (2015): median, worst | 0.4%, 28% |
+//! | Three of the twelve in-vivo orientations of Bilgic et al. (2016): median, worst | 0.4%, 28% |
 //! | Three at 30° to each other, all twelve of Bilgic et al. | 0% |
 //!
 //! The first is what three runs of a single-orientation protocol give: registration recovers
@@ -106,14 +106,12 @@
 //! problem from measured magnetic field map to susceptibility source image in MRI."
 //! Magnetic Resonance in Medicine. 2009;61(1):196-204. <https://doi.org/10.1002/mrm.21828>
 //!
-//! Bilgic B, Fan AP, Polimeni JR, et al. "Fast quantitative susceptibility mapping with
-//! L1-regularization and automatic parameter selection" / "Rapid multi-orientation
-//! quantitative susceptibility mapping." NeuroImage. 2015;111:622-630.
-//! <https://doi.org/10.1016/j.neuroimage.2015.02.036>
+//! Bilgic B, Xie L, Dibb R, et al. "Rapid multi-orientation quantitative susceptibility
+//! mapping." NeuroImage. 2016;125:1131-1141. <https://doi.org/10.1016/j.neuroimage.2015.08.015>
 //!
-//! Schweser F, Zivadinov R. "Chaos and COSMOS - considerations on QSM methods with multiple
-//! and single orientations and effects from local anisotropy." Magnetic Resonance Imaging.
-//! 2024;109:135-146. <https://doi.org/10.1016/j.mri.2024.04.001>
+//! Gkotsoulias DG, Jäger C, Müller R, et al. "Chaos and COSMOS - considerations on QSM methods
+//! with multiple and single orientations and effects from local anisotropy." Magnetic Resonance
+//! Imaging. 2024;110:104-111. <https://doi.org/10.1016/j.mri.2024.04.020>
 
 use crate::fft::{apply_real_kernel, fft3d, ifft3d};
 use crate::kernels::dipole::dipole_kernel;
