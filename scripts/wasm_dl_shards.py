@@ -139,6 +139,9 @@ WIRING = {
         "src/pipeline/bg_removal.rs",
         "src/pipeline/inversion.rs",
         "src/pipeline/separation.rs",
+        # Checks that every method's model ids are registry models (crate::models); runs no
+        # network, so it has no onnx items and adds nothing to the shard's reach.
+        "src/catalogue/tests.rs",
     ],
     "masking": [
         "src/pipeline/config.rs",
