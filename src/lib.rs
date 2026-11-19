@@ -41,6 +41,7 @@
 //!
 //! **High-level pipeline**
 //! - [`pipeline`] — config-driven full reconstruction
+//! - [`catalogue`] — every method's id, name, citations and reference code
 //!
 //! **Algorithm building blocks**
 //! - [`bet`] — brain extraction (BET)
@@ -129,6 +130,11 @@ pub mod constants;
 /// native hosts can also use `$QSM_MODEL_DIR`, the cache, or fetch on use with the `download`
 /// feature. The `onnx` feature runs them via the pure-Rust `tract` engine (native and WASM).
 pub mod models;
+
+// ============================================================================
+// Method catalogue
+// ============================================================================
+pub mod catalogue;
 
 // ============================================================================
 // High-level pipeline

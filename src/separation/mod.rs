@@ -37,7 +37,7 @@ pub const DR_SHIN_2021: f64 = 137.0;
 
 /// χ-separation's relaxometric constant D_r re-measured against COSMOS, in Hz/ppm.
 ///
-/// Kim et al. 2025 (Human Brain Mapping 46(4):e70136) repeated Shin's regression using
+/// Kim et al. 2025 (Human Brain Mapping 46(2):e70136) repeated Shin's regression using
 /// COSMOS-reconstructed χ maps instead of single-orientation QSM and obtained 114 Hz/ppm,
 /// attributing the difference to the QSM algorithm behind the training data. The SNU-LIST
 /// toolbox's own script carries the same note against this value.
@@ -162,7 +162,7 @@ mod tests {
     #[test]
     fn published_relaxivities_are_distinct() {
         assert_eq!(DR_SHIN_2021, 137.0, "Shin et al. 2021, NeuroImage 240:118371");
-        assert_eq!(DR_KIM_2025_COSMOS, 114.0, "Kim et al. 2025, Hum Brain Mapp 46(4):e70136");
+        assert_eq!(DR_KIM_2025_COSMOS, 114.0, "Kim et al. 2025, Hum Brain Mapp 46(2):e70136");
         assert_ne!(DR_SHIN_2021, DR_KIM_2025_COSMOS);
     }
 

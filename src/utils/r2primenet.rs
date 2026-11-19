@@ -75,7 +75,7 @@
 //!
 //! Reference:
 //! Kim, M., Ji, S., Lee, J., et al. (2025). "χ-sepnet: Deep neural network for magnetic
-//! susceptibility source separation." Human Brain Mapping, 46(4):e70136 — R2PRIMEnet is its
+//! susceptibility source separation." Human Brain Mapping, 46(2):e70136 — R2PRIMEnet is its
 //! R2*→R2′ conversion network.
 //!
 //! # Agreement with the original

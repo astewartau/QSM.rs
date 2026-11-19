@@ -53,7 +53,7 @@
 //! hosts that cannot hold that.
 //!
 //! Reference: Kim, M., …, Shin, H.-G., Lee, J. (2025). "χ-sepnet: Deep neural network for magnetic
-//! susceptibility source separation." Human Brain Mapping, 46(4):e70136. doi:10.1002/hbm.70136.
+//! susceptibility source separation." Human Brain Mapping, 46(2):e70136. doi:10.1002/hbm.70136.
 
 #![cfg_attr(not(feature = "onnx"), allow(dead_code))]
 
