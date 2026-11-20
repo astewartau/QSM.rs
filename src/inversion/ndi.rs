@@ -77,7 +77,9 @@ pub struct NdiParams {
     /// Number of iterations (the maximum, with `auto_stop`)
     pub max_iter: usize,
     /// Stop once the high-frequency energy of the estimate along the dipole cone exceeds that
-    /// just off it (FANSI `ndi_auto.m`)
+    /// just off it (FANSI `ndi_auto.m`). The defaults stay `ndi.m`'s with it on; `ndi_auto.m`'s
+    /// own (tau 1, alpha 1e-6, 500 iterations; FANSI-toolbox 93044a3 L32-59) are the reference
+    /// settings the rules offer once it is on (`ndi-auto.*`, decision 203).
     pub auto_stop: bool,
     /// Field strength in Tesla (scan parameter, for the radian conversion)
     pub b0: f64,

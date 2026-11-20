@@ -601,6 +601,10 @@ pub const SETTINGS: &[(&str, &str)] = &[
     ("inversion.ilsqr.pad_mm", "iLSQR's padding, mm (IlsqrParams::pad_mm); only with iLSQR"),
     ("inversion.ilsqr.precision", "iLSQR's arithmetic: double or single (IlsqrPrecision); with iLSQR, or QSMART inverting with iLSQR"),
     ("inversion.whqsm.weight", "WH-QSM's data weight: flat, flat-in-mask, max-normalised or in-vivo (WhQsmWeight); only with WH-QSM"),
+    ("inversion.ndi.auto_stop", "NDI stops by FANSI ndi_auto's cone-energy criterion (NdiParams::auto_stop, bool); only with NDI"),
+    ("inversion.ndi.tau", "NDI's gradient-descent step (NdiParams::tau); only with NDI"),
+    ("inversion.ndi.alpha", "NDI's L2 regularisation weight (NdiParams::alpha); only with NDI"),
+    ("inversion.ndi.max_iter", "NDI's iteration count, the cap with auto-stop (NdiParams::max_iter); only with NDI"),
     ("inversion.ndi.weight_norm", "NDI's magnitude-weight normaliser: global-max or mask-p999 (NdiWeightNorm::id); only with NDI"),
     ("inversion.star.te", "Echo time STAR-QSM converts at (EchoTime: first, last, spacing, sum, seconds); only with STAR"),
     ("inversion.fansi.te", "Echo time FANSI nlTV/nlTGV convert at (EchoTime); only with fansi or fansi-tgv"),
@@ -889,6 +893,10 @@ pub fn current(input: &RuleInput, facts: &ScanFacts, setting: &str) -> Option<Ve
             bg(super::config::BgRemovalAlgorithm::Iharperella),
             Current::Choice(c.bg_removal.iharperella.rim.id()),
         ),
+        "inversion.ndi.auto_stop" => gated(alg(&[A::Ndi]), Current::Bool(c.inversion.ndi.auto_stop)),
+        "inversion.ndi.tau" => gated(alg(&[A::Ndi]), Current::Number(c.inversion.ndi.tau)),
+        "inversion.ndi.alpha" => gated(alg(&[A::Ndi]), Current::Number(c.inversion.ndi.alpha)),
+        "inversion.ndi.max_iter" => gated(alg(&[A::Ndi]), Current::Number(c.inversion.ndi.max_iter as f64)),
         "inversion.ndi.weight_norm" => gated(alg(&[A::Ndi]), Current::Choice(c.inversion.ndi.weight_norm.id())),
         "inversion.whqsm.weight" => gated(
             alg(&[A::Whqsm]),
@@ -1272,6 +1280,13 @@ const STI_GUI_MASK_SOURCE: &str = "STI Suite 3.0 QSM_GUI driven headless with ev
     PolishMask are P-code, read off from their logged inputs and outputs); QSM.rs \
     utils::sti_gui_threshold, pipeline::bg_removal::polish_mask";
 /// HEIDI's cone fill is on (`inversion.apply_heidi`): the trigger of the `heidi.*` rules.
+/// NDI stops by FANSI `ndi_auto.m`'s criterion.
+const NDI_AUTO_STOP: Condition = method("inversion.ndi.auto_stop", &[Bool(true)]);
+const NDI_AUTO_REASON: &str = "With auto-stop, NDI is FANSI's ndi_auto, whose authors run it with \
+    step 1, alpha 1e-6 and up to 500 iterations (the stopping criterion ends it earlier), not \
+    ndi.m's 2, 1e-5 and 100";
+const NDI_AUTO_SOURCE: &str = "FANSI-toolbox 93044a3 Inversion/eNDI/ndi_auto.m L32-36 (alpha 1E-6), \
+    L43-47 (tau 1.0), L55-59 (num_iter 500); decision 203";
 const HEIDI_ON: Condition = method("inversion.apply_heidi", &[Bool(true)]);
 /// Inversions with no local field to fill the cone from (the total-field and phase methods).
 const HEIDI_NO_LOCAL_FIELD: &[Value] = &[
@@ -1938,7 +1953,9 @@ pub static RULES: &[Rule] = &[
     measured_better("ukb.mask-hd-bet", &[UKB], "masking.generator", &[Choice("hd-bet")],
         "UK Biobank's brain mask is its T1 structural mask registered to the SWI, which an SWI run does not \
          have; HD-BET on the magnitude is the closest mask from the SWI alone (about 3.4 mm higher at the \
-         brain's inferior edge on UK Biobank data, and otherwise close)",
+         brain's inferior edge on UK Biobank data, and otherwise close). That comparison ran HD-BET in \
+         192x192x96 sliding windows (step 0.5, no test-time augmentation) with inhomogeneity \
+         correction and signal-gated erosion; a host's HD-BET on the whole volume may differ slightly",
         "QSM.rs pipeline::reference_pipelines docs (UK Biobank, decision 202): SWI-only masks compared with \
          UK Biobank's registered T1 mask"),
     reference("ukb.inversion-ilsqr", &[UKB], "inversion.algorithm", &[Choice("ilsqr")],
@@ -2164,6 +2181,16 @@ pub static RULES: &[Rule] = &[
          inter-scanner median |slope - 1| 8.2 vs 4.9 % from a ROMEO field and 7.1 vs 5.1 % from a \
          Laplacian field",
         "QSM.rs bgremove::harperella docs (EMTP travelling heads, 2026-11-20)"),
+    // NDI with auto-stop runs as FANSI's `ndi_auto.m`, whose own defaults differ from `ndi.m`'s
+    // (decision 203): step 1 and alpha 1e-6 for stability, and 500 iterations as a cap the
+    // stopping criterion ends early. QSM.rs's defaults stay `ndi.m`'s (2 / 1e-5 / 100), which are
+    // for the fixed-iteration NDI; these are offered as the reference settings once auto-stop is on.
+    reference("ndi-auto.tau", &[inv(&[Choice("ndi")]), NDI_AUTO_STOP],
+        "inversion.ndi.tau", &[Number(1.0)], NDI_AUTO_REASON, NDI_AUTO_SOURCE),
+    reference("ndi-auto.alpha", &[inv(&[Choice("ndi")]), NDI_AUTO_STOP],
+        "inversion.ndi.alpha", &[Number(1e-6)], NDI_AUTO_REASON, NDI_AUTO_SOURCE),
+    reference("ndi-auto.max-iter", &[inv(&[Choice("ndi")]), NDI_AUTO_STOP],
+        "inversion.ndi.max_iter", &[Number(500.0)], NDI_AUTO_REASON, NDI_AUTO_SOURCE),
     suggest("ndi.weight-norm-in-vivo", &[inv(&[Choice("ndi")])],
         "inversion.ndi.weight_norm", &[Choice("mask-p999")],
         "In vivo the magnitude's maximum is often outside the brain (2.3-5x the brain's 99.9th \
@@ -2768,6 +2795,9 @@ mod tests {
             ("iharperella.whole-rim", Case::new(background(B::Iharperella))),
             ("harperella.bg-iharperella", Case::new(background(B::Harperella))),
             ("ndi.weight-norm-in-vivo", Case::new(inversion(I::Ndi))),
+            ("ndi-auto.tau", Case::new(|c| { inversion(I::Ndi)(c); c.cfg.inversion.ndi.auto_stop = true })),
+            ("ndi-auto.alpha", Case::new(|c| { inversion(I::Ndi)(c); c.cfg.inversion.ndi.auto_stop = true })),
+            ("ndi-auto.max-iter", Case::new(|c| { inversion(I::Ndi)(c); c.cfg.inversion.ndi.auto_stop = true })),
             ("whqsm.flat-in-mask", Case::new(inversion(I::Whqsm))),
             ("l1qsm.te-first", Case::new(|c| { inversion(I::L1qsm)(c); c.cfg.inversion.l1qsm.te = crate::EchoTime::Sum })),
             ("whqsm.flat-weight-te-spacing", Case::new(|c| { inversion(I::Whqsm)(c); c.cfg.inversion.whqsm.te = crate::EchoTime::Spacing })),
