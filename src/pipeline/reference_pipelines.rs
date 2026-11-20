@@ -52,6 +52,12 @@
 //!   `ukb.*` rules follow from it, and STI Suite's GUI rules that UK Biobank departs from are
 //!   scoped out of it. Choosing iLSQR alone still gives STI Suite's (13 Nov 2026, decisions 145,
 //!   146 and 148).
+//! - **UK Biobank's mask is HD-BET's, on purpose.** UK Biobank masks with its T1 structural brain
+//!   mask (BET) registered to the SWI, which a run from the SWI alone does not have. On UK Biobank
+//!   data, HD-BET on the magnitude came closest to that mask among the SWI-only masks: about 3.4 mm
+//!   higher at the brain's inferior edge, and otherwise close. So the pipeline follows the
+//!   measured rule `ukb.mask-hd-bet` (in [`ReferencePipeline::reasoned`]), its note says so, and
+//!   it runs a deep-learning model ([`ReferencePipeline::models`]) (20 Nov 2026, decision 202).
 
 use serde::Serialize;
 
@@ -184,36 +190,37 @@ pub static REFERENCE_PIPELINES: &[ReferencePipeline] = &[
         // T1 structural brain mask (BET), registered to the SWI, which a run from the SWI alone
         // does not have. HD-BET on the magnitude is the closest SWI-only mask (in a comparison on
         // UK Biobank data it reached about 3.4 mm higher at the brain's inferior edge, and was
-        // otherwise close), so the pipeline chooses it. It needs a deep-learning build
-        // ([`ReferencePipeline::models`]).
+        // otherwise close), so the pipeline follows the measured rule `ukb.mask-hd-bet`. A rule
+        // rather than a choice: another mask is a departure from the pipeline, not another
+        // pipeline. It needs a deep-learning build ([`ReferencePipeline::models`]).
         note: Some(
             "UK Biobank masks with its T1 structural brain mask registered to the SWI, which is not part of an SWI run. \
              This pipeline masks the magnitude with HD-BET instead, the closest mask from the SWI alone.",
         ),
-        choose: &[
-            ("inversion.algorithm", Choice("ilsqr")), ("bg_removal.ukb_mask_trim", Bool(true)),
-            ("masking.generator", Choice("hd-bet")),
-        ],
+        choose: &[("inversion.algorithm", Choice("ilsqr")), ("bg_removal.ukb_mask_trim", Bool(true))],
         source: "UK Biobank UKBiobank_QSM.m (git.fmrib.ox.ac.uk/cwang/uk_biobank_qsm_pipeline); Wang et al. 2022 Nat. Neurosci.; \
                  HD-BET in place of its registered T1 brain mask, an intentional difference",
 
-        reasoned: &[],
+        reasoned: &["ukb.mask-hd-bet"],
     },
 ];
 
 impl ReferencePipeline {
-    /// The deep-learning models its choices run (registry ids, `hd-bet`), so a host built
-    /// without them can say so before the pipeline is chosen rather than fail inside a run.
+    /// The deep-learning models it runs (registry ids, `hd-bet`): those its choices and its
+    /// reasoned rules choose, so a host built without them can say so before the pipeline is
+    /// chosen rather than fail inside a run.
     pub fn models(&self) -> Vec<&'static str> {
         use super::config::{BgRemovalAlgorithm, InversionAlgorithm, MaskOp, SeparationAlgorithm};
-        self.choose.iter().filter_map(|(setting, value)| {
+        let reasoned = self.reasoned.iter().filter_map(|id| super::rules::RULES.iter().find(|r| r.id == *id))
+            .map(|r| (r.setting, r.default));
+        self.choose.iter().copied().chain(reasoned).filter_map(|(setting, value)| {
             let Choice(id) = value else { return None };
-            match *setting {
+            match setting {
                 "masking.generator" => [MaskOp::HdBet(Default::default()), MaskOp::Rs2Net(Default::default()), MaskOp::MindGrab(Default::default())]
-                    .into_iter().find(|op| op.id() == *id).and_then(|op| op.dl_model_id()),
-                "inversion.algorithm" => InversionAlgorithm::VARIANTS.iter().find(|a| a.id() == *id).and_then(|a| a.dl_model_id()),
-                "bg_removal.algorithm" => BgRemovalAlgorithm::VARIANTS.iter().find(|a| a.id() == *id).and_then(|a| a.dl_model_id()),
-                "separation.algorithm" => SeparationAlgorithm::VARIANTS.iter().find(|a| a.id() == *id).and_then(|a| a.dl_model_id()),
+                    .into_iter().find(|op| op.id() == id).and_then(|op| op.dl_model_id()),
+                "inversion.algorithm" => InversionAlgorithm::VARIANTS.iter().find(|a| a.id() == id).and_then(|a| a.dl_model_id()),
+                "bg_removal.algorithm" => BgRemovalAlgorithm::VARIANTS.iter().find(|a| a.id() == id).and_then(|a| a.dl_model_id()),
+                "separation.algorithm" => SeparationAlgorithm::VARIANTS.iter().find(|a| a.id() == id).and_then(|a| a.dl_model_id()),
                 _ => None,
             }
         }).collect()
