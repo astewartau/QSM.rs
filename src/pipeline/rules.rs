@@ -1931,7 +1931,9 @@ pub static RULES: &[Rule] = &[
     // whoever calls them (V_SHARP's radii, grid and no deconvolution; QSM_iLSQR's single
     // precision) stays with the `sti.*` rules, which fire here too. UK Biobank's brain mask is its
     // T1 structural mask registered to the SWI, which the SWI alone cannot give, so no rule names
-    // a mask; nor its coil combination (MCPC-3D-S), which is upstream of a coil-combined phase.
+    // a mask: the pipeline chooses HD-BET on the magnitude in its place, an intentional difference
+    // its note states (reference_pipelines.rs, decision 202), not the authors' setting. Nor does
+    // a rule name its coil combination (MCPC-3D-S), which is upstream of a coil-combined phase.
     reference("ukb.inversion-ilsqr", &[UKB], "inversion.algorithm", &[Choice("ilsqr")],
         "UK Biobank inverts its trimmed local field with STI Suite's QSM_iLSQR", UKB_SOURCE),
     reference("ukb.unwrap-laplacian", &[UKB], "field_mapping.unwrapping_algorithm", LAPLACIAN,
