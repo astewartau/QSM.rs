@@ -1954,10 +1954,20 @@ pub static RULES: &[Rule] = &[
         "UK Biobank's brain mask is its T1 structural mask registered to the SWI, which an SWI run does not \
          have; HD-BET on the magnitude is the closest mask from the SWI alone (about 3.4 mm higher at the \
          brain's inferior edge on UK Biobank data, and otherwise close). That comparison ran HD-BET in \
-         192x192x96 sliding windows (step 0.5, no test-time augmentation) with inhomogeneity \
-         correction and signal-gated erosion; a host's HD-BET on the whole volume may differ slightly",
+         192x192x96 sliding windows (step 0.5, no test-time augmentation) on the \
+         inhomogeneity-corrected magnitude, then signal-gated erosion",
         "QSM.rs pipeline::reference_pipelines docs (UK Biobank, decision 202): SWI-only masks compared with \
          UK Biobank's registered T1 mask"),
+    // The window mode the comparison above measured. HD-BET on the whole volume gave a mask
+    // 0.5-1 % smaller on UK Biobank data, mostly at the inferior edge, which is where the
+    // head-size bias of the comparison came from; so the pipeline keeps the window, while hosts'
+    // HD-BET elsewhere may run on the whole volume.
+    measured_better("ukb.mask-hd-bet-window", &[UKB, method("masking.generator", &[Choice("hd-bet")])],
+        "masking.hd_bet.inference", &[Choice("sliding-window")],
+        "The UK Biobank mask comparison ran HD-BET in 192x192x96 sliding windows; on the whole \
+         volume its mask was 0.5-1 % smaller, mostly at the brain's inferior edge, where the \
+         comparison's head-size bias came from",
+        "QSM.rs pipeline::reference_pipelines docs (UK Biobank, decision 202); UK Biobank QSMxT v9 study"),
     reference("ukb.inversion-ilsqr", &[UKB], "inversion.algorithm", &[Choice("ilsqr")],
         "UK Biobank inverts its trimmed local field with STI Suite's QSM_iLSQR", UKB_SOURCE),
     reference("ukb.unwrap-laplacian", &[UKB], "field_mapping.unwrapping_algorithm", LAPLACIAN,
@@ -2857,6 +2867,10 @@ mod tests {
             ("sti.echo-combination", Case::new(|c| { inversion(I::Star)(c); linear_fit(c) })),
             ("sti.echo-weights", Case::new(inversion(I::Ilsqr))),
             ("ukb.mask-hd-bet", Case::new(ukb)),
+            ("ukb.mask-hd-bet-window", Case::new(|c| {
+                ukb(c);
+                c.cfg.masking.sections[0].generator = MaskOp::HdBet(crate::bet::HdBetParams::default());
+            })),
             ("ukb.inversion-ilsqr", Case::new(ukb)),
             ("ukb.unwrap-laplacian", Case::new(|c| { ukb(c); inversion(I::Ilsqr)(c) })),
             ("ukb.laplacian-solver", Case::new(|c| {

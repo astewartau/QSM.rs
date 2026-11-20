@@ -59,8 +59,10 @@
 //!   sliding windows (step 0.5, no test-time augmentation) on the inhomogeneity-corrected
 //!   magnitude, followed by signal-gated erosion (threshold 0.8, depth cap 5, 1 global erosion,
 //!   bias sigma 12, smallest component 1000), QSMxT's `hd-bet` mask preset of October 2026; the
-//!   preset has since run HD-BET on the whole volume. So the pipeline follows the
-//!   measured rule `ukb.mask-hd-bet` (in [`ReferencePipeline::reasoned`]), its note says so, and
+//!   preset has since run HD-BET on the whole volume, whose mask was 0.5-1 % smaller, mostly at
+//!   the inferior edge, where the comparison's head-size bias came from. So the pipeline follows
+//!   the measured rules `ukb.mask-hd-bet` and `ukb.mask-hd-bet-window` (the sliding window; in
+//!   [`ReferencePipeline::reasoned`]), its note says so, and
 //!   it runs a deep-learning model ([`ReferencePipeline::models`]) (20 Nov 2026, decision 202).
 
 use serde::Serialize;
@@ -205,7 +207,7 @@ pub static REFERENCE_PIPELINES: &[ReferencePipeline] = &[
         source: "UK Biobank UKBiobank_QSM.m (git.fmrib.ox.ac.uk/cwang/uk_biobank_qsm_pipeline); Wang et al. 2022 Nat. Neurosci.; \
                  HD-BET in place of its registered T1 brain mask, an intentional difference",
 
-        reasoned: &["ukb.mask-hd-bet"],
+        reasoned: &["ukb.mask-hd-bet", "ukb.mask-hd-bet-window"],
     },
 ];
 
