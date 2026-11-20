@@ -56,6 +56,15 @@
 //!   V-SHARP, before iLSQR; the mask is the GUI's magnitude threshold of the 3rd or 4th echo.
 //!   STI Suite 3.0's GUI has no iHARPERELLA button (only the function).
 //!
+//! ## Pipeline rules
+//!
+//! - `iharperella.whole-rim` (Recommended, measured): [`HarperellaRim::Whole`] for iHARPERELLA.
+//! - `harperella.bfr-mask-signal-erode` (Suggested, measured): for both methods, refine the mask
+//!   they run in with signal-gated erosion at its defaults
+//!   ([`BgRemovalConfig::mask_refinements`](crate::pipeline::BgRemovalConfig::mask_refinements),
+//!   where the measurements are). The mask's outer voxels hold the step at the mask edge, which
+//!   the Laplacian carries inwards.
+//!
 //! References:
 //! - HARPERELLA: Li, W., Avram, A. V., Wu, B., Xiao, X., Liu, C. (2014). "Integrated
 //!   Laplacian-based phase unwrapping and background phase removal for quantitative

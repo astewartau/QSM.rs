@@ -582,6 +582,7 @@ pub const SETTINGS: &[(&str, &str)] = &[
     ("bg_removal.algorithm", "Background field removal (BgRemovalAlgorithm::id)"),
     ("bg_removal.vsharp.deconvolve", "V-SHARP's TSVD deconvolution (bool); only with V-SHARP"),
     ("bg_removal.polish_mask", "STI Suite QSM_GUI's PolishMask after background removal: largest 26-connected component, holes filled (BgRemovalConfig::polish_mask, bool)"),
+    ("bg_removal.mask_signal_erode", "Signal-gated erosion of the mask background removal runs in: a SignalErode step among BgRemovalConfig::mask_refinements (bool; applying true adds one with SignalErosionParams' defaults)"),
     ("bg_removal.ukb_mask_trim", "UK Biobank's phase-reliability mask trimming before and after background removal (BgRemovalConfig::ukb_mask_trim, bool)"),
     ("bg_removal.vsharp.max_radius", "V-SHARP's largest kernel radius, mm; only with V-SHARP"),
     ("bg_removal.vsharp.min_radius", "V-SHARP's smallest kernel radius, mm; only with V-SHARP"),
@@ -849,6 +850,10 @@ pub fn current(input: &RuleInput, facts: &ScanFacts, setting: &str) -> Option<Ve
         "bg_removal.vsharp.deconvolve" => gated(vsharp, Current::Bool(c.bg_removal.vsharp.deconvolve)),
         "bg_removal.polish_mask" => gated(inv_input.needs_bg_removal(), Current::Bool(c.bg_removal.polish_mask)),
         "bg_removal.ukb_mask_trim" => gated(inv_input.needs_bg_removal(), Current::Bool(c.bg_removal.ukb_mask_trim)),
+        "bg_removal.mask_signal_erode" => gated(
+            inv_input.needs_bg_removal(),
+            Current::Bool(c.bg_removal.mask_refinements.iter().any(|op| matches!(op, super::config::MaskOp::SignalErode(_)))),
+        ),
         "bg_removal.vsharp.max_radius" => gated(vsharp, Current::Number(c.bg_removal.vsharp.max_radius)),
         "bg_removal.vsharp.min_radius" => gated(vsharp, Current::Number(c.bg_removal.vsharp.min_radius)),
         "bg_removal.vsharp.radius_step" => gated(vsharp, Current::Number(c.bg_removal.vsharp.radius_step)),
@@ -2146,6 +2151,18 @@ pub static RULES: &[Rule] = &[
          scanners (travelling heads, inter-scanner median |slope - 1| 7.1 vs 3.8 %) and better on \
          the simulated head from a ROMEO field (XSIM 0.295 vs 0.244)",
         "QSM.rs bgremove::harperella HarperellaRim docs (#438)"),
+    // Decision 201 (2026-11-20): Suggested, not Recommended, because pair by pair it beats plain
+    // 1-voxel erosion only about half the time.
+    suggest("harperella.bfr-mask-signal-erode", &[bg(&[Choice("harperella"), Choice("iharperella")])],
+        "bg_removal.mask_signal_erode", &[Bool(true)],
+        "The mask's outer voxels hold the step at the mask edge, and this method's Laplacian carries \
+         that error inwards. Taking off the low-signal edge voxels (signal-erode, defaults) before \
+         background removal made travelling-head scans agree better: on the 10 that agreed worst, \
+         the median ROI slope error fell from 9.5 to 5.1 % (ROMEO field, iHARPERELLA), 8.4 to 6.9 % \
+         (ROMEO, HARPERELLA), 5.7 to 2.6 % (Laplacian, iHARPERELLA) and 7.9 to 4.8 % (Laplacian, \
+         HARPERELLA), about as well as 3 voxels of erosion while keeping 95 % of the brain rather \
+         than 87 %. Scan by scan it beat 1 voxel of erosion only about half the time",
+        "QSM.rs BgRemovalConfig::mask_refinements docs (EMTP travelling heads, 2026-11-20)"),
     suggest("ndi.weight-norm-in-vivo", &[inv(&[Choice("ndi")])],
         "inversion.ndi.weight_norm", &[Choice("mask-p999")],
         "In vivo the magnitude's maximum is often outside the brain (2.3-5x the brain's 99.9th \
@@ -2748,6 +2765,7 @@ mod tests {
             ("fansi.te-spacing", Case::new(|c| { inversion(I::FansiTgv)(c); c.cfg.inversion.fansi.te = crate::EchoTime::First })),
             ("ndi.te-first", Case::new(|c| { inversion(I::Ndi)(c); c.cfg.inversion.ndi.te = crate::EchoTime::Spacing })),
             ("iharperella.whole-rim", Case::new(background(B::Iharperella))),
+            ("harperella.bfr-mask-signal-erode", Case::new(background(B::Harperella))),
             ("ndi.weight-norm-in-vivo", Case::new(inversion(I::Ndi))),
             ("whqsm.flat-in-mask", Case::new(inversion(I::Whqsm))),
             ("l1qsm.te-first", Case::new(|c| { inversion(I::L1qsm)(c); c.cfg.inversion.l1qsm.te = crate::EchoTime::Sum })),

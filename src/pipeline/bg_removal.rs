@@ -41,7 +41,7 @@ pub fn run_bg_removal(
 /// required when the trim is on, and ignored when it is off.
 ///
 /// With the trim on: `mask` is trimmed with [`UKB_TRIM_FIELD`](crate::utils::UKB_TRIM_FIELD)
-/// (after `erode_voxels`, if any), background removal runs inside it, and its output mask is
+/// (after `mask_refinements`, if any), background removal runs inside it, and its output mask is
 /// trimmed with [`UKB_TRIM_LOCAL`](crate::utils::UKB_TRIM_LOCAL) (after `polish_mask`, if any):
 /// UK Biobank's `UKBiobank_QSM.m` around `V_SHARP`. The local field is not zeroed outside the
 /// trimmed mask: UK Biobank inverts `QSM_iLSQR(dB_vsf, mask_vsf, ...)` with `V_SHARP`'s field
@@ -70,22 +70,13 @@ pub fn run_bg_removal_trimmed(
         });
     }
 
-    // Erode the mask first if asked (BgRemovalConfig::erode_voxels); the field is left whole.
-    let pre_eroded;
-    let mask: &[u8] = if config.erode_voxels > 0 {
-        if mask.len() != n_voxels {
-            return Err(PipelineError::DimensionMismatch { expected: n_voxels, got: mask.len() });
-        }
-        pre_eroded = crate::utils::morphology::erode_mask(mask, &grid, config.erode_voxels);
-        if !pre_eroded.iter().any(|&m| m != 0) {
-            return Err(PipelineError::InvalidConfig(format!(
-                "eroding the mask by {} voxels before background removal leaves no voxels",
-                config.erode_voxels
-            )));
-        }
-        &pre_eroded
-    } else {
+    // Refine the mask first if asked (BgRemovalConfig::mask_refinements); the field is left whole.
+    let refined;
+    let mask: &[u8] = if config.mask_refinements.is_empty() {
         mask
+    } else {
+        refined = refine_mask(mask, metadata, &config.mask_refinements, magnitude)?;
+        &refined
     };
 
     // UK Biobank's first trim (BgRemovalConfig::ukb_mask_trim).
@@ -220,6 +211,44 @@ pub fn run_bg_removal_trimmed(
         local_field_ppm: local_field,
         eroded_mask,
     })
+}
+
+/// [`BgRemovalConfig::mask_refinements`] applied to `mask`, kept inside it. `magnitude` is the
+/// echo stack [`run_bg_removal`] takes; the ops that read an image get its root-sum-of-squares.
+fn refine_mask(
+    mask: &[u8],
+    metadata: &ScanMetadata,
+    ops: &[MaskOp],
+    magnitude: Option<&[f64]>,
+) -> Result<Vec<u8>, PipelineError> {
+    if let Some(op) = ops.iter().find(|op| op.is_generator()) {
+        return Err(PipelineError::InvalidConfig(format!(
+            "the background-removal mask takes refinements only, not the generator {}", op.id())));
+    }
+    let n_voxels = metadata.grid().n_total();
+    let rss = match ops.iter().find(|op| matches!(op, MaskOp::SignalErode(_) | MaskOp::MinIntensity { .. })) {
+        None => None,
+        Some(op) => {
+            let m = magnitude.ok_or_else(|| PipelineError::InvalidInput(format!(
+                "refining the background-removal mask with {} needs the magnitude", op.id())))?;
+            let n_echoes = metadata.echo_times.len().max(1);
+            if m.len() != n_voxels * n_echoes {
+                return Err(PipelineError::DimensionMismatch { expected: n_voxels * n_echoes, got: m.len() });
+            }
+            let echoes: Vec<&[f64]> = m.chunks_exact(n_voxels).collect();
+            Some(super::phase_utils::rss_combine(&echoes)?)
+        }
+    };
+    let image = rss.as_deref().unwrap_or(&[]);
+    let mut refined = super::masking::apply_mask_ops(mask.to_vec(), ops, image, rss.as_deref(), metadata)?;
+    for (r, &m) in refined.iter_mut().zip(mask) {
+        *r &= u8::from(m != 0);
+    }
+    if !refined.iter().any(|&m| m != 0) {
+        return Err(PipelineError::InvalidConfig(
+            "refining the mask before background removal leaves no voxels".into()));
+    }
+    Ok(refined)
 }
 
 /// STI Suite 3.0 QSM_GUI's `PolishMask` (P-code): the largest 26-connected component, holes
@@ -383,10 +412,10 @@ mod tests {
         }
     }
 
-    /// `erode_voxels` shrinks the mask before the method runs; the field stays whole, and the
-    /// stage's output mask is inside the eroded one.
+    /// `mask_refinements` shrink the mask before the method runs; the field stays whole, and the
+    /// stage's output mask is inside the refined one.
     #[test]
-    fn erode_voxels_erodes_the_mask_before_background_removal() {
+    fn mask_refinements_refine_the_mask_before_background_removal() {
         let n1 = 20;
         let n = n1 * n1 * n1;
         let meta = ScanMetadata {
@@ -405,7 +434,7 @@ mod tests {
         let eroded = crate::utils::morphology::erode_mask(&mask, &grid, 2);
         for algorithm in [BgRemovalAlgorithm::Iharperella, BgRemovalAlgorithm::Sharp] {
             let base = BgRemovalConfig { algorithm, ..Default::default() };
-            let config = BgRemovalConfig { erode_voxels: 2, ..base.clone() };
+            let config = BgRemovalConfig { mask_refinements: vec![MaskOp::Erode { iterations: 2 }], ..base.clone() };
             let r = run_bg_removal(&field, &mask, &meta, &config, None, &mut |_, _| {}).unwrap();
             assert!(r.eroded_mask.iter().zip(&eroded).all(|(&o, &e)| o == 0 || e != 0), "{algorithm:?}");
             // the same as running the method on the eroded mask directly
@@ -413,11 +442,83 @@ mod tests {
             assert_eq!(r.local_field_ppm, direct.local_field_ppm, "{algorithm:?}");
             assert_eq!(r.eroded_mask, direct.eroded_mask, "{algorithm:?}");
         }
-        let all_gone = BgRemovalConfig { algorithm: BgRemovalAlgorithm::Sharp, erode_voxels: 20, ..Default::default() };
+        let all_gone = BgRemovalConfig {
+            algorithm: BgRemovalAlgorithm::Sharp, mask_refinements: vec![MaskOp::Erode { iterations: 20 }], ..Default::default()
+        };
         match run_bg_removal(&field, &mask, &meta, &all_gone, None, &mut |_, _| {}) {
             Err(PipelineError::InvalidConfig(msg)) => assert!(msg.contains("leaves no voxels"), "{msg}"),
             Err(other) => panic!("{other:?}"),
             Ok(_) => panic!("ran on an empty mask"),
+        }
+    }
+
+    /// Signal-gated erosion of the background-removal mask gates on the RSS magnitude over the
+    /// echoes, needs the magnitude, and never adds voxels to the field-mapping mask.
+    #[test]
+    fn signal_erode_refinement_reads_the_rss_magnitude_and_stays_inside_the_mask() {
+        let n1 = 20;
+        let n = n1 * n1 * n1;
+        let meta = ScanMetadata {
+            dims: (n1, n1, n1), voxel_size: (1.0, 1.0, 1.0),
+            echo_times: vec![0.005, 0.010], field_strength: 3.0, b0_direction: (0.0, 0.0, 1.0),
+            slice_geometry: None,
+            affine: None,
+        };
+        let c = (n1 as f64 - 1.0) / 2.0;
+        let r2 = |l: usize| {
+            let (i, j, k) = ((l % n1) as f64, ((l / n1) % n1) as f64, (l / (n1 * n1)) as f64);
+            (i - c).powi(2) + (j - c).powi(2) + (k - c).powi(2)
+        };
+        let mask: Vec<u8> = (0..n).map(|l| u8::from(r2(l) <= 8.0f64.powi(2))).collect();
+        // Bright brain with a dark low-signal patch on one side of its edge.
+        let echo = |s: f64| -> Vec<f64> {
+            (0..n).map(|l| if l % n1 < 6 { 0.1 * s } else { s }).collect()
+        };
+        let magnitude: Vec<f64> = [echo(100.0), echo(60.0)].concat();
+        let field: Vec<f64> = (0..n).map(|l| (l % 7) as f64 * 1e-3).collect();
+        let params = crate::utils::morphology::SignalErosionParams { min_component: 1, ..Default::default() };
+        let config = BgRemovalConfig {
+            algorithm: BgRemovalAlgorithm::Sharp,
+            mask_refinements: vec![MaskOp::SignalErode(params.clone())],
+            ..Default::default()
+        };
+        let rss = crate::pipeline::phase_utils::rss_combine(&[&magnitude[..n], &magnitude[n..]]).unwrap();
+        let expected = crate::utils::morphology::signal_gated_erosion(&mask, &rss, &meta.grid(), &params);
+        assert!(expected.iter().filter(|&&m| m != 0).count() < mask.iter().filter(|&&m| m != 0).count());
+        let r = run_bg_removal(&field, &mask, &meta, &config, Some(&magnitude), &mut |_, _| {}).unwrap();
+        let base = BgRemovalConfig { algorithm: BgRemovalAlgorithm::Sharp, ..Default::default() };
+        let direct = run_bg_removal(&field, &expected, &meta, &base, None, &mut |_, _| {}).unwrap();
+        assert_eq!(r.local_field_ppm, direct.local_field_ppm);
+        assert!(r.eroded_mask.iter().zip(&mask).all(|(&o, &m)| o == 0 || m != 0));
+
+        match run_bg_removal(&field, &mask, &meta, &config, None, &mut |_, _| {}) {
+            Err(PipelineError::InvalidInput(msg)) => assert!(msg.contains("signal-erode needs the magnitude"), "{msg}"),
+            other => panic!("{:?}", other.map(|_| ())),
+        }
+        // Dilation cannot reach past the field-mapping mask, where the field is zero.
+        let dilate = BgRemovalConfig { mask_refinements: vec![MaskOp::Dilate { iterations: 2 }], ..base.clone() };
+        let r = run_bg_removal(&field, &mask, &meta, &dilate, None, &mut |_, _| {}).unwrap();
+        assert!(r.eroded_mask.iter().zip(&mask).all(|(&o, &m)| o == 0 || m != 0));
+    }
+
+    #[test]
+    fn mask_refinements_refuse_a_generator() {
+        let n1 = 8;
+        let meta = ScanMetadata {
+            dims: (n1, n1, n1), voxel_size: (1.0, 1.0, 1.0),
+            echo_times: vec![0.005], field_strength: 3.0, b0_direction: (0.0, 0.0, 1.0),
+            slice_geometry: None,
+            affine: None,
+        };
+        let n = n1 * n1 * n1;
+        let config = BgRemovalConfig {
+            algorithm: BgRemovalAlgorithm::Sharp,
+            mask_refinements: vec![MaskOp::Threshold { method: MaskThresholdMethod::Otsu, value: None }],
+            ..Default::default()
+        };
+        match run_bg_removal(&vec![0.0; n], &vec![1; n], &meta, &config, None, &mut |_, _| {}) {
+            Err(PipelineError::InvalidConfig(msg)) => assert!(msg.contains("not the generator threshold"), "{msg}"),
+            other => panic!("{:?}", other.map(|_| ())),
         }
     }
 

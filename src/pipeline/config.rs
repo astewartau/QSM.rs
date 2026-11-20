@@ -479,6 +479,11 @@ pub enum MaskOp {
 }
 
 impl MaskOp {
+    /// Whether this op builds a mask from an image rather than refining the mask it is given.
+    pub fn is_generator(&self) -> bool {
+        matches!(self, Self::Threshold { .. } | Self::Bet(_) | Self::HdBet(_) | Self::Rs2Net(_) | Self::MindGrab(_))
+    }
+
     /// Registry id of the deep-learning model this op runs, if any.
     pub fn dl_model_id(&self) -> Option<&'static str> {
         match self {
@@ -673,24 +678,55 @@ pub struct BgRemovalConfig {
     /// with bounded memory ([`bfrnet_tiled`](crate::bgremove::bfrnet_tiled)). Ignored by the
     /// classical methods.
     pub tile: Option<(usize, usize)>,
-    /// Erode the brain mask by this many voxels (6-connected,
-    /// [`erode_mask`](crate::utils::morphology::erode_mask)) after field mapping, before background
-    /// removal. 0 (default) leaves it as it is.
+    /// Mask operations that refine the mask background removal runs in, applied in order after
+    /// field mapping ([`apply_mask_ops`](super::masking::apply_mask_ops)). Empty (default) leaves
+    /// the mask as it is. Only refinements: a generator ([`MaskOp::Threshold`], [`MaskOp::Bet`],
+    /// [`MaskOp::HdBet`], [`MaskOp::Rs2Net`], [`MaskOp::MindGrab`]) is refused. The result is
+    /// kept inside the field-mapping mask, since the field is zero outside it. Ops that read an
+    /// image ([`MaskOp::SignalErode`], [`MaskOp::MinIntensity`]) read the root-sum-of-squares
+    /// magnitude over the echoes, as a `magnitude` mask section does, so they need the
+    /// magnitude passed to [`run_bg_removal`](super::bg_removal::run_bg_removal).
     ///
-    /// Not part of any method. QSMxT offers it as an option (QSMxT decision, 10 Nov 2026), because
-    /// the masked field map's outer voxels carry the step at the mask edge. Methods that take the
-    /// Laplacian of the field inside the mask (HARPERELLA, iHARPERELLA) and methods that keep the
-    /// brain's edge (PDF, LBV) carry that error inwards. The field is not changed, so the voxels
-    /// between the two masks are still there for the method's own boundary terms. Eroding in the
-    /// masking stage instead does not help, because the field map is then masked to the smaller mask.
+    /// Not part of any method. QSMxT offers erosion here (QSMxT decision, 10 Nov 2026) because
+    /// the masked field map's outer voxels carry the step at the mask edge, and methods that
+    /// take the Laplacian of the field inside the mask (HARPERELLA, iHARPERELLA) or keep the
+    /// brain's edge (PDF, LBV) carry that error inwards. Only the mask changes: the field keeps
+    /// the voxels between the two masks for the method's own boundary terms. Refining in the
+    /// masking stage instead does not help, because the field map is then masked to the
+    /// smaller mask.
     ///
-    /// Measured (v11 background-removal sweep, 14 travelling-head scans, ROMEO field, RTS):
-    /// iHARPERELLA inter-scanner median |a−1| 7.1 % → 3.0 % with 3 voxels. On the QSM-CI simulated
-    /// head, χ XSIM 0.244 → 0.274 despite losing 9 % of the brain's voxels. No rule suggests it
-    /// yet. That waits for confirmation as a harmonization-campaign variant, and Laplacian +
-    /// PDF/LBV still need testing. The eroded mask is the stage's output mask
-    /// ([`BgRemovalResult::eroded_mask`]), so the inversion runs on it too.
-    pub erode_voxels: usize,
+    /// **The inversion runs on the refined mask too.** The refined mask is what the method
+    /// returns its local field in, so it is the stage's output mask
+    /// ([`BgRemovalResult::eroded_mask`]), as with every method's own erosion. Hosts pass that
+    /// mask to the inversion. Keeping the field-mapping mask for the inversion would mean
+    /// fitting χ to a local field that background removal never estimated (zero) in the rim it
+    /// took off. The measurements below were made that way, with the inversion on the refined
+    /// mask.
+    ///
+    /// Measured:
+    /// - **Plain erosion** (v11 background-removal sweep, 14 travelling-head scans, ROMEO
+    ///   field, RTS): with `[Erode { iterations: 3 }]`, iHARPERELLA's inter-scanner median
+    ///   |a−1| went from 7.1 % to 3.0 %. On the QSM-CI simulated head, χ XSIM went from 0.244
+    ///   to 0.274, although 9 % of the brain's voxels were lost.
+    /// - **Signal-gated erosion** (2026-11-20; the 10 EMTP travelling-head acquisitions where
+    ///   (i)HARPERELLA agreed worst, each paired with its bridge scan; masks already HD-BET +
+    ///   signal-erode 0.80:5:1; RTS; ROI means on a region common to every variant; |a−1| of the
+    ///   orthogonal fit, in percentage points). Results for `[SignalErode(default)]` against no
+    ///   refinement and against 1 or 3 voxels of plain erosion. Median |a−1| over the 10 pairs:
+    ///
+    ///   | field map → method | none | erode 1 | erode 3 | signal-erode |
+    ///   |---|---|---|---|---|
+    ///   | ROMEO → iHARPERELLA | 9.5 | 6.4 | 4.2 | 5.1 |
+    ///   | ROMEO → HARPERELLA | 8.4 | 7.6 | 7.8 | 6.9 |
+    ///   | Laplacian → iHARPERELLA | 5.7 | 4.8 | 2.8 | 2.6 |
+    ///   | Laplacian → HARPERELLA | 7.9 | 6.2 | 6.5 | 4.8 |
+    ///   | mask kept | 100 % | 95.6 % | 87.2 % | 94.9 % |
+    ///
+    ///   So signal-gated erosion agrees about as well as 3 voxels of erosion while keeping about
+    ///   as much brain as 1 voxel. Pair by pair it beats 1-voxel erosion only about half the
+    ///   time, so the evidence is modest. The rules suggest it for HARPERELLA and iHARPERELLA
+    ///   (`harperella.bfr-mask-signal-erode`, Suggested). Laplacian + PDF/LBV are not yet tested.
+    pub mask_refinements: Vec<MaskOp>,
     /// After background removal, keep the largest 26-connected component of the stage's mask and
     /// fill its holes ([`MaskOp::LargestComponent`], [`MaskOp::Imfill`]), and zero the local field
     /// outside it: STI Suite 3.0 QSM_GUI's `PolishMask`, which it runs on V-SHARP's mask before
@@ -729,7 +765,7 @@ impl Default for BgRemovalConfig {
             iharperella: IharperellaParams::default(),
             sdf: SdfParams::default(),
             tile: None,
-            erode_voxels: 0,
+            mask_refinements: Vec::new(),
             polish_mask: false,
             ukb_mask_trim: false,
         }
