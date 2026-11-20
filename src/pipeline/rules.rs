@@ -2146,6 +2146,15 @@ pub static RULES: &[Rule] = &[
          scanners (travelling heads, inter-scanner median |slope - 1| 7.1 vs 3.8 %) and better on \
          the simulated head from a ROMEO field (XSIM 0.295 vs 0.244)",
         "QSM.rs bgremove::harperella HarperellaRim docs (#438)"),
+    // Not preselected (decision 201, 2026-11-20): HARPERELLA is a published method, and the gain
+    // comes from one campaign. No toolbox pipeline runs HARPERELLA, so none is exempted.
+    suggest("harperella.bg-iharperella", &[bg(&[Choice("harperella")])],
+        "bg_removal.algorithm", &[Choice("iharperella")],
+        "iHARPERELLA (with the whole rim, as recommended for it) made scans of the same heads on \
+         different scanners agree better than HARPERELLA: travelling heads, 102 scans, \
+         inter-scanner median |slope - 1| 8.2 vs 4.9 % from a ROMEO field and 7.1 vs 5.1 % from a \
+         Laplacian field",
+        "QSM.rs bgremove::harperella docs (EMTP travelling heads, 2026-11-20)"),
     suggest("ndi.weight-norm-in-vivo", &[inv(&[Choice("ndi")])],
         "inversion.ndi.weight_norm", &[Choice("mask-p999")],
         "In vivo the magnitude's maximum is often outside the brain (2.3-5x the brain's 99.9th \
@@ -2748,6 +2757,7 @@ mod tests {
             ("fansi.te-spacing", Case::new(|c| { inversion(I::FansiTgv)(c); c.cfg.inversion.fansi.te = crate::EchoTime::First })),
             ("ndi.te-first", Case::new(|c| { inversion(I::Ndi)(c); c.cfg.inversion.ndi.te = crate::EchoTime::Spacing })),
             ("iharperella.whole-rim", Case::new(background(B::Iharperella))),
+            ("harperella.bg-iharperella", Case::new(background(B::Harperella))),
             ("ndi.weight-norm-in-vivo", Case::new(inversion(I::Ndi))),
             ("whqsm.flat-in-mask", Case::new(inversion(I::Whqsm))),
             ("l1qsm.te-first", Case::new(|c| { inversion(I::L1qsm)(c); c.cfg.inversion.l1qsm.te = crate::EchoTime::Sum })),

@@ -56,6 +56,12 @@
 //!   V-SHARP, before iLSQR; the mask is the GUI's magnitude threshold of the 3rd or 4th echo.
 //!   STI Suite 3.0's GUI has no iHARPERELLA button (only the function).
 //!
+//! ## Pipeline rules
+//!
+//! - `iharperella.whole-rim` (Recommended, measured): [`HarperellaRim::Whole`] for iHARPERELLA.
+//! - `harperella.bg-iharperella` (Suggested, measured): iHARPERELLA in place of HARPERELLA
+//!   ([`harperella`] has the measurements).
+//!
 //! References:
 //! - HARPERELLA: Li, W., Avram, A. V., Wu, B., Xiao, X., Liu, C. (2014). "Integrated
 //!   Laplacian-based phase unwrapping and background phase removal for quantitative
@@ -277,6 +283,12 @@ impl Work {
 /// [`HarperellaRim::StiLargest`]),
 /// MATLAB `lsqr` at tolerance 0.001 (the paper: "the preconditioned LSQR method", preconditioner
 /// unstated), and no padding by default (the paper pads, size unstated).
+///
+/// Measured against iHARPERELLA (2026-11-20, EMTP travelling-heads campaign, 102 scans, RTS;
+/// inter-scanner median |a − 1| of the ROI fit `scan = a · reference`): from a ROMEO field,
+/// HARPERELLA 8.2 % and iHARPERELLA with [`HarperellaRim::Whole`] 4.9 %; from a Laplacian field,
+/// 7.1 % and 5.1 %. The rules suggest iHARPERELLA in its place (`harperella.bg-iharperella`,
+/// Suggested, not preselected: one campaign's data; decision 201).
 ///
 /// # Arguments
 /// * `input` - Wrapped phase (rad) or unwrapped total field (ppm); see [`HarperellaInput`]
