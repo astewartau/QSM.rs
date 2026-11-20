@@ -1930,8 +1930,17 @@ pub static RULES: &[Rule] = &[
     // padding) are scoped out of it (NOT_UKB), and these replace them. What the functions do
     // whoever calls them (V_SHARP's radii, grid and no deconvolution; QSM_iLSQR's single
     // precision) stays with the `sti.*` rules, which fire here too. UK Biobank's brain mask is its
-    // T1 structural mask registered to the SWI, which the SWI alone cannot give, so no rule names
-    // a mask; nor its coil combination (MCPC-3D-S), which is upstream of a coil-combined phase.
+    // T1 structural mask registered to the SWI, which the SWI alone cannot give, so no reference
+    // rule names a mask. `ukb.mask-hd-bet` names HD-BET on the magnitude in its place: a measured
+    // stand-in, not the authors' setting, and an intentional difference the pipeline's note states
+    // (reference_pipelines.rs, decision 202). No rule names its coil combination (MCPC-3D-S),
+    // which is upstream of a coil-combined phase.
+    measured_better("ukb.mask-hd-bet", &[UKB], "masking.generator", &[Choice("hd-bet")],
+        "UK Biobank's brain mask is its T1 structural mask registered to the SWI, which an SWI run does not \
+         have; HD-BET on the magnitude is the closest mask from the SWI alone (about 3.4 mm higher at the \
+         brain's inferior edge on UK Biobank data, and otherwise close)",
+        "QSM.rs pipeline::reference_pipelines docs (UK Biobank, decision 202): SWI-only masks compared with \
+         UK Biobank's registered T1 mask"),
     reference("ukb.inversion-ilsqr", &[UKB], "inversion.algorithm", &[Choice("ilsqr")],
         "UK Biobank inverts its trimmed local field with STI Suite's QSM_iLSQR", UKB_SOURCE),
     reference("ukb.unwrap-laplacian", &[UKB], "field_mapping.unwrapping_algorithm", LAPLACIAN,
@@ -2817,6 +2826,7 @@ mod tests {
             })),
             ("sti.echo-combination", Case::new(|c| { inversion(I::Star)(c); linear_fit(c) })),
             ("sti.echo-weights", Case::new(inversion(I::Ilsqr))),
+            ("ukb.mask-hd-bet", Case::new(ukb)),
             ("ukb.inversion-ilsqr", Case::new(ukb)),
             ("ukb.unwrap-laplacian", Case::new(|c| { ukb(c); inversion(I::Ilsqr)(c) })),
             ("ukb.laplacian-solver", Case::new(|c| {

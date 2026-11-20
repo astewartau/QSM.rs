@@ -52,6 +52,12 @@
 //!   `ukb.*` rules follow from it, and STI Suite's GUI rules that UK Biobank departs from are
 //!   scoped out of it. Choosing iLSQR alone still gives STI Suite's (13 Nov 2026, decisions 145,
 //!   146 and 148).
+//! - **UK Biobank's mask is HD-BET's, on purpose.** UK Biobank masks with its T1 structural brain
+//!   mask (BET) registered to the SWI, which a run from the SWI alone does not have. On UK Biobank
+//!   data, HD-BET on the magnitude came closest to that mask among the SWI-only masks: about 3.4 mm
+//!   higher at the brain's inferior edge, and otherwise close. So the pipeline follows the
+//!   measured rule `ukb.mask-hd-bet` (in [`ReferencePipeline::reasoned`]), its note says so, and
+//!   it runs a deep-learning model ([`ReferencePipeline::models`]) (20 Nov 2026, decision 202).
 
 use serde::Serialize;
 
@@ -68,10 +74,11 @@ pub struct ReferencePipeline {
     /// The toolbox and the version its pipeline is taken from ("MEDI toolbox 2024.11.26"), as a
     /// methods sentence names it ("Processing followed the MEDI toolbox 2024.11.26 pipeline").
     pub toolbox: &'static str,
-    /// A known gap between this pipeline and the toolbox's own, in a sentence or two a host shows
-    /// with the pipeline's details (QSMxT's Pipeline tab), or `None`. Plain user-facing text: what
-    /// the toolbox does that this pipeline does not, and what it does instead. A gap is noted here
-    /// only until it is closed; the issue that tracks it is cited where the note is set.
+    /// A known difference between this pipeline and the toolbox's own, in a sentence or two a host
+    /// shows with the pipeline's details (QSMxT's Pipeline tab), or `None`. Plain user-facing
+    /// text: what the toolbox does that this pipeline does not, and what it does instead. A gap
+    /// is noted here only until it is closed, and the issue that tracks it is cited where the note
+    /// is set; an intentional difference (UK Biobank's mask) says why where it is set.
     pub note: Option<&'static str>,
     /// The method choices that start it, as rule settings and values ([`SETTINGS`](super::rules::SETTINGS)).
     pub choose: &'static [(&'static str, Value)],
@@ -179,13 +186,46 @@ pub static REFERENCE_PIPELINES: &[ReferencePipeline] = &[
         id: "uk-biobank",
         name: "UK Biobank",
         toolbox: "UK Biobank QSM",
-        note: None,
+        // An intentional difference, not a gap to close (decision 202): UK Biobank's mask is its
+        // T1 structural brain mask (BET), registered to the SWI, which a run from the SWI alone
+        // does not have. HD-BET on the magnitude is the closest SWI-only mask (in a comparison on
+        // UK Biobank data it reached about 3.4 mm higher at the brain's inferior edge, and was
+        // otherwise close), so the pipeline follows the measured rule `ukb.mask-hd-bet`. A rule
+        // rather than a choice: another mask is a departure from the pipeline, not another
+        // pipeline. It needs a deep-learning build ([`ReferencePipeline::models`]).
+        note: Some(
+            "UK Biobank masks with its T1 structural brain mask registered to the SWI, which is not part of an SWI run. \
+             This pipeline masks the magnitude with HD-BET instead, the closest mask from the SWI alone.",
+        ),
         choose: &[("inversion.algorithm", Choice("ilsqr")), ("bg_removal.ukb_mask_trim", Bool(true))],
-        source: "UK Biobank UKBiobank_QSM.m (git.fmrib.ox.ac.uk/cwang/uk_biobank_qsm_pipeline); Wang et al. 2022 Nat. Neurosci.",
+        source: "UK Biobank UKBiobank_QSM.m (git.fmrib.ox.ac.uk/cwang/uk_biobank_qsm_pipeline); Wang et al. 2022 Nat. Neurosci.; \
+                 HD-BET in place of its registered T1 brain mask, an intentional difference",
 
-        reasoned: &[],
+        reasoned: &["ukb.mask-hd-bet"],
     },
 ];
+
+impl ReferencePipeline {
+    /// The deep-learning models it runs (registry ids, `hd-bet`): those its choices and its
+    /// reasoned rules choose, so a host built without them can say so before the pipeline is
+    /// chosen rather than fail inside a run.
+    pub fn models(&self) -> Vec<&'static str> {
+        use super::config::{BgRemovalAlgorithm, InversionAlgorithm, MaskOp, SeparationAlgorithm};
+        let reasoned = self.reasoned.iter().filter_map(|id| super::rules::RULES.iter().find(|r| r.id == *id))
+            .map(|r| (r.setting, r.default));
+        self.choose.iter().copied().chain(reasoned).filter_map(|(setting, value)| {
+            let Choice(id) = value else { return None };
+            match setting {
+                "masking.generator" => [MaskOp::HdBet(Default::default()), MaskOp::Rs2Net(Default::default()), MaskOp::MindGrab(Default::default())]
+                    .into_iter().find(|op| op.id() == id).and_then(|op| op.dl_model_id()),
+                "inversion.algorithm" => InversionAlgorithm::VARIANTS.iter().find(|a| a.id() == id).and_then(|a| a.dl_model_id()),
+                "bg_removal.algorithm" => BgRemovalAlgorithm::VARIANTS.iter().find(|a| a.id() == id).and_then(|a| a.dl_model_id()),
+                "separation.algorithm" => SeparationAlgorithm::VARIANTS.iter().find(|a| a.id() == id).and_then(|a| a.dl_model_id()),
+                _ => None,
+            }
+        }).collect()
+    }
+}
 
 /// The pipeline with this id.
 pub fn reference_pipeline(id: &str) -> Option<&'static ReferencePipeline> {
@@ -239,6 +279,20 @@ mod tests {
         }
         assert_eq!(reference_pipeline("medi-toolbox").map(|p| p.name), Some("MEDI toolbox"));
         assert!(reference_pipeline("nope").is_none());
+    }
+
+    /// The pipelines that run a deep-learning model: χ-sepnet's, and UK Biobank's, which masks
+    /// with HD-BET. The others run none.
+    #[test]
+    fn the_models_a_pipeline_runs() {
+        for p in REFERENCE_PIPELINES {
+            let want: &[&str] = match p.id {
+                "uk-biobank" => &["hd-bet"],
+                "chi-sepnet" => &["chi-sepnet"],
+                _ => &[],
+            };
+            assert_eq!(p.models(), want, "{}", p.id);
+        }
     }
 
     /// Choosing iLSQR alone is STI Suite's pipeline; UK Biobank's own choices replace the STI
