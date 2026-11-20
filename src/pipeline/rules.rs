@@ -2150,7 +2150,7 @@ pub static RULES: &[Rule] = &[
     // comes from one campaign. No toolbox pipeline runs HARPERELLA, so none is exempted.
     suggest("harperella.bg-iharperella", &[bg(&[Choice("harperella")])],
         "bg_removal.algorithm", &[Choice("iharperella")],
-        "iHARPERELLA (with the whole rim, as suggested for it) made scans of the same heads on \
+        "iHARPERELLA (with the whole rim, as recommended for it) made scans of the same heads on \
          different scanners agree better than HARPERELLA: travelling heads, 102 scans, \
          inter-scanner median |slope - 1| 8.2 vs 4.9 % from a ROMEO field and 7.1 vs 5.1 % from a \
          Laplacian field",
