@@ -1,7 +1,7 @@
 //! Run WH-QSM (FANSI WH_nlTV.m) on NIfTI files, for parity checks against FANSI.
 //! Takes the local field in ppm and writes susceptibility in ppm, as the pipeline does.
 //!
-//! usage: whqsm_file <field_ppm.nii[.gz]> <mask.nii[.gz]> <magnitude.nii[.gz]|-> <chi_out.nii.gz> <TE_ms> <B0_T> <Hx> <Hy> <Hz> [invivo]
+//! usage: whqsm_file <field_ppm.nii[.gz]> <mask.nii[.gz]> <magnitude.nii[.gz]|-> <chi_out.nii.gz> <TE_ms> <B0_T> <Hx> <Hy> <Hz> [invivo] [--original-newton]
 use qsm_core::inversion::{whqsm, WhQsmParams, WhQsmWeight};
 use qsm_core::EchoTime;
 use qsm_core::io::{read_nifti_file, save_nifti_to_file};
@@ -9,7 +9,10 @@ use qsm_core::Grid;
 use std::path::Path;
 
 fn main() {
-    let a: Vec<String> = std::env::args().collect();
+    // --original-newton: WH_nlTV.m's unguarded Newton step (`newton_guard: false`)
+    let all: Vec<String> = std::env::args().collect();
+    let original_newton = all.iter().any(|s| s == "--original-newton");
+    let a: Vec<String> = all.into_iter().filter(|s| s != "--original-newton").collect();
     if a.len() != 10 && a.len() != 11 {
         eprintln!("usage: {} <field_ppm> <mask> <magnitude|-> <chi_out> <TE_ms> <B0_T> <Hx> <Hy> <Hz> [invivo]", a[0]);
         std::process::exit(2);
@@ -26,7 +29,7 @@ fn main() {
         (Some(_), true) => WhQsmWeight::InVivo,
         (Some(_), false) => WhQsmWeight::MaxNormalised,
     };
-    let params = WhQsmParams { te: EchoTime::Seconds(num(5) * 1e-3), b0: num(6), weight, ..WhQsmParams::default() };
+    let params = WhQsmParams { te: EchoTime::Seconds(num(5) * 1e-3), b0: num(6), weight, newton_guard: !original_newton, ..WhQsmParams::default() };
     let mut last = 0;
     let t = std::time::Instant::now();
     let chi = whqsm(&f.data, &mask, magnitude.as_deref(), &grid, (num(7), num(8), num(9)), &params, |i, _| last = i);
