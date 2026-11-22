@@ -8,7 +8,7 @@ runs natively and in WebAssembly.
 
 | Repository | Owns |
 |---|---|
-| **QSM.rs** | Anything that inspects or transforms image data; algorithm defaults, deviations and the pipeline rules. |
+| **QSM.rs** | Anything that inspects or transforms image data; algorithm defaults, deviations and the pipeline rules; the toolbox pipelines; the method catalogue (names, citations, reference code). |
 | [QSMxT](https://github.com/QSMxT/QSMxT) | Wiring: config, plan-time checks a user sees, how steps link, CLI/TUI, BIDS, provenance, methods text. Simple numerics (ROI statistics, unit conversions). No algorithms. |
 | [qsmbly](https://github.com/astewartau/qsmbly) | The browser UI. Runs QSM.rs through QSMxT's `qsmxt-engine`. |
 
@@ -55,7 +55,10 @@ their pin. No downstream workarounds. Every issue names its owner (`owner: QSM.r
 
 - One module per stage (`bet`, `unwrap`, `bgremove`, `inversion`, `separation`, `swi`, `utils`,
   `models`, `pipeline`), one file per method. A method a host can choose gets a variant in its
-  stage's algorithm enum with a kebab-case `id()`.
+  stage's algorithm enum with a kebab-case `id()`, and an entry in the method catalogue
+  (`src/catalogue/`: id, the authors' name for it, citations checked against Crossref or
+  DataCite, the reference code it follows; see its module docs). Hosts take names and citations
+  from the catalogue, so a citation is fixed there.
 - Each method has a `*Params` struct whose `Default` holds the reference values. Every field's
   doc gives its unit, default and the default's source (reference file and line).
 - Units: seconds, tesla, ppm at the public boundary, mm unless named `*_voxels`. Put the unit in
@@ -83,8 +86,9 @@ agreement with the reference (what was compared, the numbers, which test); devia
 - Cite the paper by section or equation and the code by file and line, with the version.
 - Measured claims give numbers and the data. Cite only public sources and data.
 - Inline comments say *why*, or which reference line the code follows, not what it does.
-- The README is general usage and the algorithm tables only. No changelog or release-notes
-  files: change summaries go in PR bodies, release notes on the GitHub release.
+- The README is general usage and the algorithm tables only, with no counts ("50+ methods").
+  No changelog or release-notes files: change summaries go in PR bodies, release notes on the
+  GitHub release.
 
 ## Pipeline rules
 
@@ -100,6 +104,10 @@ Its module docs are the specification. In short:
 - The first condition is the choice that triggers the rule. Every rule also appears in the
   method's docs, and gets a test case.
 - Rules never change settings themselves, and hosts never change a setting silently.
+- **Toolbox pipelines** (`src/pipeline/reference_pipelines.rs`: STI Suite, MEDI toolbox,
+  QSMART, UK Biobank, ...) are their starting method choices plus the `Reference` rules those
+  choices trigger (and any reasoned rules listed with the pipeline), so the pipelines and the
+  rules cannot disagree. A known difference from the toolbox is stated in its `note`.
 
 ## Tests
 
@@ -113,8 +121,11 @@ QSM.rs is where algorithm correctness is tested; QSMxT and qsmbly test only thei
   and must be registered in `.github/workflows/integration-tests.yml` (test list and path map)
   and the figure scripts. `tests/wasm_pipeline.rs` gets a case for each new method.
 - Never delete or weaken an assertion to make a change pass; explain a changed reference value.
-- Locally, build, run clippy and run only the new or changed tests (quick ones). Push early and
-  let CI run the full suite, the `#[ignore]`d integration tests and any repeats.
+- **Push early.** Locally, build, run clippy (`-D warnings`) and run only the new or changed
+  tests, if they take about 2 minutes at most. CI runs the full suite, the `#[ignore]`d
+  integration tests and any repeats. An expensive re-measurement (e.g. a model's memory
+  calibration) runs as a separate job or is deferred and noted in the PR; it does not hold the
+  PR up.
 
 ## Pull requests
 
