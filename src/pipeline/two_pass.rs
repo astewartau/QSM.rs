@@ -26,7 +26,7 @@
 //! consumers must agree on: the reliable-mask recipe, the hole selection, the rim fill and the
 //! merge.
 //!
-//! ## Why `Local` replaced `Original` as the default (QSMxT v12.1, decision 174)
+//! ## Why `Local` is the default (decision 174)
 //!
 //! Source: QSM QC finding `docs/findings/2026-11-15-two-pass-reliable-mask.md` (qsm-qc repo),
 //! sections "Few, real holes" and "Recipe for QSM.rs". Ashley judged the variant tested there as

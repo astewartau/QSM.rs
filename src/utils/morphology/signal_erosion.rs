@@ -34,6 +34,12 @@ pub struct SignalErosionParams {
     pub depth_cap: usize,
     /// Plain 6-connected erosions applied before the signal gate (default 1). Trims the bright
     /// one-voxel skull/CSF sliver a mask often carries, which no signal gate can catch.
+    ///
+    /// These are not the same as eroding the mask before calling [`signal_gated_erosion`]: the
+    /// coil-bias estimate, the gate and the depth are all computed from the mask as passed in,
+    /// so `global_erosions` spend the `depth_cap` budget and leave the gate unchanged, whereas an
+    /// erosion beforehand shrinks the mask the gate is derived from and measures the depth from
+    /// the new surface.
     pub global_erosions: usize,
     /// Gaussian scale in voxels of the receive-coil bias estimate divided out of the magnitude
     /// (default 12).

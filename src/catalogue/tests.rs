@@ -232,3 +232,87 @@ fn references_are_named_and_linked() {
         }
     }
 }
+
+/// A summary is one plain sentence: trimmed, on one line, ending in a full stop, and no second
+/// sentence after it.
+#[test]
+fn every_method_has_a_one_sentence_summary() {
+    for m in METHODS {
+        let s = m.summary;
+        assert!(!s.trim().is_empty(), "{}: empty summary", m.id);
+        assert_eq!(s.trim(), s, "{}: untrimmed summary", m.id);
+        assert!(!s.contains('\n'), "{}: summary on more than one line", m.id);
+        assert!(s.ends_with('.') && !s.ends_with(".."), "{}: summary {s:?} does not end in a full stop", m.id);
+        let body = &s[..s.len() - 1];
+        assert!(!body.contains(". "), "{}: summary {s:?} is more than one sentence", m.id);
+        assert!(s.split_whitespace().count() >= 4, "{}: summary {s:?} is too short to say anything", m.id);
+        assert_ne!(s, m.name, "{}: summary repeats the name", m.id);
+    }
+}
+
+#[test]
+fn needs_and_skips_have_no_repeats() {
+    for m in METHODS {
+        for (i, n) in m.needs.iter().enumerate() {
+            assert!(!m.needs[..i].contains(n), "{}: {n:?} listed twice", m.id);
+            if let Need::Echoes(k) | Need::Orientations(k) = n {
+                assert!(*k >= 2, "{}: {n:?} says nothing", m.id);
+            }
+        }
+        for (i, s) in m.skips.iter().enumerate() {
+            assert!(!m.skips[..i].contains(s), "{}: skips {s:?} twice", m.id);
+            assert_ne!(*s, m.stage, "{}: skips its own stage", m.id);
+        }
+    }
+}
+
+/// `Need::Axial` is exactly the dispatched methods whose `orientation_support()` is
+/// `AxialOnly`, plus the networks outside those enums that take no B0 direction either (iQFM,
+/// iQSM's sibling; R2PRIMEnet, run on its own).
+#[test]
+fn axial_need_matches_orientation_support() {
+    let axial = |stage, id| find(stage, id).unwrap().needs.contains(&Need::Axial);
+    for a in bg_removal_variants() {
+        assert_eq!(axial(Stage::BackgroundRemoval, a.id()), a.orientation_support().requires_axial(), "{}", a.id());
+    }
+    for a in inversion_variants() {
+        assert_eq!(axial(Stage::Inversion, a.id()), a.orientation_support().requires_axial(), "{}", a.id());
+    }
+    for a in separation_variants() {
+        assert_eq!(axial(Stage::Separation, a.id()), a.orientation_support().requires_axial(), "{}", a.id());
+    }
+    let outside: Vec<_> = METHODS.iter().filter(|m| m.needs.contains(&Need::Axial))
+        .filter(|m| !matches!(m.stage, Stage::BackgroundRemoval | Stage::Inversion | Stage::Separation)
+            || (m.stage, m.id) == (Stage::BackgroundRemoval, "iqfm"))
+        .map(|m| m.id).collect();
+    assert_eq!(outside, ["iqfm", "r2primenet"]);
+}
+
+/// An inversion's `skips` are the stages its [`InversionInput`](crate::pipeline::InversionInput)
+/// leaves out for every echo count (TGV: background removal always, unwrapping only for one echo).
+#[test]
+fn an_inversions_skips_match_what_it_reconstructs_from() {
+    use crate::pipeline::{InversionConfig, InversionInput};
+    let skipped = |input: InversionInput| -> Vec<Stage> {
+        match input {
+            InversionInput::LocalField => vec![],
+            InversionInput::TotalField => vec![Stage::BackgroundRemoval],
+            InversionInput::WrappedPhase => vec![Stage::Unwrapping, Stage::EchoCombination, Stage::BackgroundRemoval],
+        }
+    };
+    for a in inversion_variants() {
+        let cfg = InversionConfig { algorithm: a, ..Default::default() };
+        let always: Vec<Stage> = skipped(cfg.input(1)).into_iter()
+            .filter(|s| (2..=8).all(|n| skipped(cfg.input(n)).contains(s))).collect();
+        let m = find(Stage::Inversion, a.id()).unwrap();
+        let mut listed = m.skips.to_vec();
+        listed.sort_by_key(|s| *s as u8);
+        let mut want = always;
+        want.sort_by_key(|s| *s as u8);
+        assert_eq!(listed, want, "{}", a.id());
+    }
+    // Outside the inversions only iQFM skips anything: it makes the local field from wrapped phase.
+    for m in METHODS.iter().filter(|m| m.stage != Stage::Inversion && !m.skips.is_empty()) {
+        assert_eq!((m.stage, m.id), (Stage::BackgroundRemoval, "iqfm"));
+    }
+}
