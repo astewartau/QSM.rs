@@ -59,8 +59,8 @@ pub fn sharp(
 
 /// SHARP with an explicit absolute kernel radius (mm).
 ///
-/// Internal entry point; the public [`sharp`] wrapper derives the radius from
-/// [`SharpParams`].
+/// Internal entry point shared with V-SHARP; the public [`sharp`] wrapper
+/// derives the radius from [`SharpParams`].
 pub(crate) fn sharp_core(
     field: &[f64],
     mask: &[u8],

@@ -23,8 +23,8 @@
 //! | best path | 0.32 s | 0.33 s |
 //! | Laplacian | 0.46 s | 0.55 s |
 //!
-//! and the local-field correlations after an identical V-SHARP are 0.616 (PRELUDE),
-//! 0.608 (Laplacian), 0.600 (best path), 0.589 (ROMEO) — a spread narrower than any
+//! and the local-field correlations after an identical V-SHARP are 0.615 (PRELUDE),
+//! 0.608 (Laplacian), 0.602 (best path), 0.592 (ROMEO) — a spread narrower than any
 //! of them is from ground truth, which is the agreement the comparison is for rather
 //! than a ranking. So treat this module as a baseline because of what it is, not
 //! because it is slow; on this data it is not.

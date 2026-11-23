@@ -267,7 +267,7 @@ work is unaffected, which is why slice-wise unwrapping does not call it.
 
 | Algorithm | Description | Reference |
 |-----------|-------------|-----------|
-| **V-SHARP** | Variable-radius SHARP — each voxel uses the largest SMV kernel that fits in the mask, background estimated on a 1 mm grid | Li, W., et al. (2011). "Quantitative susceptibility mapping of human brain reflects spatial variation in tissue composition." *NeuroImage*, 55(4):1645-1656. [DOI](https://doi.org/10.1016/j.neuroimage.2010.11.088) |
+| **V-SHARP** | Variable-radius Sophisticated Harmonic Artifact Reduction for Phase data — multi-scale deconvolution for robust background removal | Wu, B., et al. (2012). "Whole brain susceptibility mapping using compressed sensing." *Magnetic Resonance in Medicine*, 67(1):137-147. [DOI](https://doi.org/10.1002/mrm.23000) |
 | **SHARP** | Sophisticated Harmonic Artifact Reduction for Phase data — deconvolution-based harmonic field removal | Schweser, F., et al. (2011). "Quantitative imaging of intrinsic magnetic tissue properties using MRI signal phase." *NeuroImage*, 54(4):2789-2807. [DOI](https://doi.org/10.1016/j.neuroimage.2010.10.070) |
 | **RESHARP** | Regularized SHARP — uses Tikhonov regularization instead of TSVD truncation for more robust SMV deconvolution | Sun, H. and Wilman, A.H. (2013). "Background field removal using spherical mean value filtering and Tikhonov regularization." *Magn Reson Med*, 71(3):1151-1157. [DOI](https://doi.org/10.1002/mrm.24765) |
 | **SMV** | Simple Spherical Mean Value — subtracts the spherical mean of the field for basic background removal | Schweser, F., et al. (2011). "Quantitative imaging of intrinsic magnetic tissue properties using MRI signal phase." *NeuroImage*, 54(4):2789-2807. [DOI](https://doi.org/10.1016/j.neuroimage.2010.10.070) |
@@ -293,8 +293,8 @@ work is unaffected, which is why slice-wise unwrapping does not call it.
 > The combined function zeroes ∇² outside the mask — deleting the exterior sources that
 > generate the background, since a field produced outside the ROI is harmonic inside it —
 > and solves under a homogeneous Dirichlet condition on the ROI. On the test data it reaches
-> **r = 0.887** against the ground-truth local field, against 0.909 for `bgremove::lbv`.
-> `UnwrapMethod::Laplacian` still selects the plain variant, since the
+> **r = 0.887** against the ground-truth local field, against 0.909 for `bgremove::lbv` and
+> 0.879 for V-SHARP. `UnwrapMethod::Laplacian` still selects the plain variant, since the
 > pipeline removes background as a later stage.
 
 ### Grid size and reconstruction cost

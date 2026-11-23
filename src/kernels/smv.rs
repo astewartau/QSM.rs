@@ -1,7 +1,7 @@
 //! Spherical Mean Value (SMV) kernel
 //!
 //! Creates a binary sphere kernel used for background field removal methods
-//! like SHARP, RESHARP and iSMV.
+//! like SHARP and V-SHARP.
 
 use crate::Grid;
 
