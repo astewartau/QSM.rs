@@ -110,11 +110,17 @@ fn compute_vesselness(l1: f64, l2: f64, l3: f64, a: f64, b: f64, c2: f64, black_
 
     // Vesselness function
     // V = (1 - exp(-Ra^2/2alpha^2)) * exp(-Rb^2/2beta^2) * (1 - exp(-S^2/2c^2))
-    let exp_ra = 1.0 - (-ra * ra / a).exp();
-    let exp_rb = (-rb * rb / b).exp();
-    let exp_s = 1.0 - (-s * s / c2).exp();
-
-    let v = exp_ra * exp_rb * exp_s;
+    // AUDIT EXPERIMENT: FrangiFilter3D runs in single precision on QSMART's float32 N4 input
+    static F32: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let v = if *F32.get_or_init(|| std::env::var("QSMRS_FRANGI_F32").is_ok()) {
+        let (ra, rb, s, a, b, c2) = (ra as f32, rb as f32, s as f32, a as f32, b as f32, c2 as f32);
+        ((1.0 - (-(ra * ra / a)).exp()) * (-(rb * rb / b)).exp() * (1.0 - (-(s * s / c2)).exp())) as f64
+    } else {
+        let exp_ra = 1.0 - (-ra * ra / a).exp();
+        let exp_rb = (-rb * rb / b).exp();
+        let exp_s = 1.0 - (-s * s / c2).exp();
+        exp_ra * exp_rb * exp_s
+    };
 
     // Clamp to valid range
     if v.is_finite() { v.clamp(0.0, 1.0) } else { 0.0 }
