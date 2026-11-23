@@ -596,7 +596,7 @@ fn cg_solve_chisep(
         return;
     }
 
-    for _cg_iter in 0..max_iter {
+    for _cg_iter in 0..max_iter { if std::env::var("CGDBG").is_ok() { eprintln!("cg {}", _cg_iter); } // DBG
         apply_chisep_operator(
             ws, d_kernel, mx, my, mz,
             vr_pos, vr_neg, vr_sum,
