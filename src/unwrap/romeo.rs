@@ -104,19 +104,35 @@
 //! CLI's own MCPC-3D-S output on the QSM-CI in-vivo travelling-head scan (Prisma 2.89 T, 1 mm,
 //! five echoes), QSM.rs's template unwrapping gives the CLI's unwrapped echoes exactly.
 //!
-//! `tests/romeo_validity_romeojl_parity.rs` (ROMEO.jl 1.6.0, MriResearchTools 3.8.0, same image, one
-//! Julia thread) adds a phantom whose brain mask reaches past MCPC-3D-S's mask: the NaN validity,
-//! individual mode with and without global correction, and template mode with and without it,
-//! on the corrected and on the raw phase, all give ROMEO.jl's turns at every voxel and its B0 to
-//! 1e-14 (measured 2026-11-04). **Known gap:** template mode's re-unwrapping of uncertain voxels
-//! (`temporal_uncertain_unwrapping > 0`, the API default) is not yet ROMEO.jl's. ROMEO.jl rates the
-//! voxels with `voxelquality` (Float32 weights before binning, no mask, the sum over six edges
-//! divided by six, NaN for an edge touching a NaN) and grows from every voxel it marks visited,
-//! those outside the mask included (`temporal_uncertain_unwrapping!`); `temporal_uncertain_rewrap`
-//! uses [`voxel_quality_romeo`] (binned weights, in-mask neighbours only) and grows from the
-//! certain voxels inside the mask. On that phantom 14 of 3,000 voxels of echoes 2 and 3 differ
-//! after MCPC-3D-S and 850 of 3,392 on the raw phase; the fixture's template cases therefore set
-//! it to 0 (the CLI's default), and so does QSMxT's default.
+//! `tests/romeo_validity_romeojl_parity.rs` (ROMEO.jl 1.6.0, i.e. 08776d4, MriResearchTools 3.8.0,
+//! same image, one Julia thread) adds a phantom whose brain mask reaches past MCPC-3D-S's mask: the
+//! NaN validity, individual mode with and without global correction, and template mode with and
+//! without it and with `temporal_uncertain_unwrapping` 0 and 0.5, on the corrected and on the raw
+//! phase, all give ROMEO.jl's turns at every voxel and its B0 to 1e-14 (measured 2026-11-04; the
+//! 0.5 cases 2026-11-23).
+//!
+//! **Re-unwrapping uncertain voxels** (`temporal_uncertain_unwrapping > 0`, the API default) is
+//! ROMEO.jl's `temporal_uncertain_unwrapping!` since 2026-11-23. Before, QSM.rs ran the temporal
+//! step only inside the mask, rated voxels with [`voxel_quality_romeo`] (binned weights inside the
+//! mask, averaged over in-mask neighbours, so voxels on the mask edge scored higher than in
+//! ROMEO.jl) and grew only from certain voxels inside the mask. On the phantom that left 14 of
+//! 3,000 voxels of echoes 2 and 3 with other turns than ROMEO.jl after MCPC-3D-S, and 850 of 3,392
+//! on the raw phase. Reverting each of the three parts of the fix
+//! on its own, on the phantom (corrected / raw phase, voxels of echo 2 or 3): the temporal step
+//! inside the mask only, 14 / 850; the old voxel quality, 0 / 2; no seeding from outside the mask,
+//! 14 / 850. Now 0 everywhere (see `unwrap_template` and [`temporal_unwrapped_quality`]).
+//! With `temporal_uncertain_unwrapping` 0 nothing changed: inside the mask the result is
+//! ROMEO.jl's, and outside it QSM.rs still returns the input phase where ROMEO.jl returns the
+//! temporally unwrapped one (callers use the mask).
+//!
+//! Two small differences remain in the template echo's weights, both bit-identical to before and
+//! only near the array's faces: QSM.rs's phase linearity tests each linearity triplet against the
+//! 3D bounds and gives 0.9 per missing triplet, while ROMEO.jl's `phaselinearity(P, i, j)`
+//! (`src/weights.jl:29-38`) tests linear indices and gives 0.9 for the whole term when either is
+//! out of range; and QSM.rs's `unwrap_voxel` rounds halves away from zero where Julia's `round`
+//! rounds them to even. Neither changes a turn on the phantoms above, whose masks stay clear of
+//! the array's faces. The re-unwrapping follows ROMEO.jl in both
+//! ([`temporal_unwrapped_quality`], [`grow_region_unwrap_from_seed_edges`]).
 //!
 //! The `romeo` CLI itself reads the NIfTI phase and magnitude as Float32 and computes in single
 //! precision; QSM.rs computes in f64 (kept: double precision throughout, Ashley 2026-10-28).
@@ -218,8 +234,11 @@ pub struct RomeoParams {
     /// Correct global 2π offsets between echoes (default: false).
     /// Recommended when using individual mode.
     pub correct_global: bool,
-    /// Quality threshold for re-unwrapping uncertain voxels after temporal
-    /// unwrapping. Range \[0, 1\], set to 0 to disable. (default: 0.5)
+    /// Template mode only: after each echo's temporal unwrapping, voxels whose ROMEO.jl
+    /// `voxelquality` of the halved phase (in \[0, 1\]) is at most this are re-unwrapped
+    /// spatially from the others (ROMEO.jl's `temporal_uncertain_unwrapping!`, which it calls
+    /// "useful for veins"). Unitless, \[0, 1\]; 0 turns it off. Default 0.5, ROMEO.jl's API
+    /// default (`src/unwrapping.jl:52,70`); the CLI's default is 0 ([`RomeoParams::romeo_cli`]).
     pub temporal_uncertain_unwrapping: f64,
     /// Maximum number of seed regions (default: 1, max: 255).
     pub max_seeds: u8,
