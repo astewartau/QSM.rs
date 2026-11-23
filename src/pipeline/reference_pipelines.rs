@@ -38,7 +38,17 @@
 //!   it, as everywhere in [`rules`](super::rules).
 //! - **Parity is checked, not declared.** Whether a pipeline reproduces its toolbox is measured
 //!   by QSM-CI's whole-pipeline parity track (QSMxT/QSM-CI#421), against each toolbox's own
-//!   pipeline run end to end; a QSMxT release waits on it.
+//!   pipeline run end to end; a QSMxT release waits on it. A pipeline names its QSM-CI pair
+//!   ([`ReferencePipeline::qsmci_pair`]) so a host can show that pair's measured status; nothing
+//!   here claims a pipeline reproduces its toolbox, and nothing lists what it does not.
+//! - **Differences are deliberate, and each has its reason** (23 Nov 2026, decision 217). A
+//!   pipeline lists in [`ReferencePipeline::differences`] only what it does differently from the
+//!   toolbox on purpose, each with why, and [`DIFFERENCES`] what every pipeline does differently
+//!   (the centre frequency, decisions 31 and 149). A difference that is a gap, to be closed, goes
+//!   in [`ReferencePipeline::note`] with the issue that tracks it. Rounding that the toolbox's
+//!   own single-precision or FFT arithmetic introduces (STI Suite's V-SHARP mask, QSMART's
+//!   Laplacian offsets) is not copied; it is listed as a difference, and QSM-CI sets its parity
+//!   limits from it.
 //! - **Which pipelines.** A toolbox whose own code runs a whole pipeline around its method, with
 //!   rules for it: the MEDI toolbox, STI Suite (its iLSQR and STAR-QSM), QSMART, the HEIDI
 //!   package, the χ-separation toolbox (its three methods), DECOMPOSE, and UK Biobank's QSM
@@ -62,12 +72,60 @@
 //!   preset has since run HD-BET on the whole volume, whose mask was 0.5-1 % smaller, mostly at
 //!   the inferior edge, where the comparison's head-size bias came from. So the pipeline follows
 //!   the measured rules `ukb.mask-hd-bet` and `ukb.mask-hd-bet-window` (the sliding window; in
-//!   [`ReferencePipeline::reasoned`]), its note says so, and
+//!   [`ReferencePipeline::reasoned`]), its `differences` say so, and
 //!   it runs a deep-learning model ([`ReferencePipeline::models`]) (20 Nov 2026, decision 202).
 
 use serde::Serialize;
 
 use super::rules::Value::{self, Bool, Choice};
+use crate::catalogue::citations::*;
+use crate::catalogue::Citation;
+
+/// A deliberate difference between a pipeline and its toolbox's own: what this pipeline does, and
+/// why. Plain user-facing text, one sentence each, shown with the pipeline (QSMxT's pipeline
+/// pages and Pipeline tab).
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Difference {
+    /// What this pipeline does that the toolbox does not, or does otherwise.
+    pub what: &'static str,
+    /// Why.
+    pub why: &'static str,
+}
+
+/// Differences from the toolboxes that every pipeline has, because every QSM.rs reconstruction
+/// does it: shown with each pipeline as well as its own [`ReferencePipeline::differences`].
+pub static DIFFERENCES: &[Difference] = &[
+    // Decisions 31 and 149: a host sets `ScanMetadata::field_strength` from ImagingFrequency
+    // (QSMxT does, for every run), toolbox pipelines and QSM-CI's references included. The MEDI
+    // toolbox reads the centre frequency from the DICOM itself (`Read_DICOM.m`), so for it this
+    // changes nothing; the others are given a field strength by their user.
+    Difference {
+        what: "Phase is converted to field in ppm with the scanner's centre frequency (ImagingFrequency) where the scan's \
+               metadata records it, and with the nominal field strength only where it does not.",
+        why: "The centre frequency is the field the scanner actually ran at, while the nominal field strength the toolboxes \
+              are usually given (STI Suite, QSMART, UK Biobank's script) can be several per cent off: Siemens' 3 T systems \
+              run at about 2.89 T, and every susceptibility value scales with it.",
+    },
+];
+
+/// STI Suite's GUI takes B0 along the slice axis unless its user types a direction in
+/// (ilsqr.rs and star.rs docs, *B0 direction*); QSM.rs's iLSQR and STAR-QSM take the scan's.
+const STI_B0_DIRECTION: Difference = Difference {
+    what: "The B0 direction is taken from the scan's orientation.",
+    why: "STI Suite's GUI uses B0 along the slice axis unless its user types a direction in, and its manual asks for the \
+          scan's direction on oblique scans; on axial scans the two are the same.",
+};
+
+/// STI Suite's V_SHARP drops a few interior voxels from its eroded mask through single-precision
+/// FFT rounding; QSM.rs's test is exact and keeps them (vsharp.rs docs, *STI's fit test*;
+/// QSM.rs#463). On QSM-CI's s005001 Prisma scan: 4 of 1,276,574 voxels, the whole χ gap of
+/// QSM-CI's `toolbox-pipeline-sti` pair (NRMSE 0.30 %).
+const STI_VSHARP_MASK: Difference = Difference {
+    what: "V-SHARP's eroded mask is computed exactly, so it keeps a few isolated voxels inside the brain that STI Suite \
+           leaves out.",
+    why: "STI Suite leaves them out through rounding in its single-precision FFTs, which no other FFT matches and which \
+          does not depend on the data; on QSM-CI's in-vivo scan it was 4 of about 1.3 million voxels.",
+};
 
 /// One toolbox pipeline.
 #[derive(Serialize, Clone, Copy, Debug, PartialEq)]
@@ -80,12 +138,24 @@ pub struct ReferencePipeline {
     /// The toolbox and the version its pipeline is taken from ("MEDI toolbox 2024.11.26"), as a
     /// methods sentence names it ("Processing followed the MEDI toolbox 2024.11.26 pipeline").
     pub toolbox: &'static str,
-    /// A known difference between this pipeline and the toolbox's own, in a sentence or two a host
-    /// shows with the pipeline's details (QSMxT's Pipeline tab), or `None`. Plain user-facing
-    /// text: what the toolbox does that this pipeline does not, and what it does instead. A gap
-    /// is noted here only until it is closed, and the issue that tracks it is cited where the note
-    /// is set; an intentional difference (UK Biobank's mask) says why where it is set.
+    /// A known gap between this pipeline and the toolbox's own, in a sentence or two a host shows
+    /// with the pipeline's details (QSMxT's Pipeline tab), or `None`. Plain user-facing text: what
+    /// the toolbox does that this pipeline does not yet, and what it does instead. A gap is noted
+    /// here only until it is closed, and the issue that tracks it is cited where the note is set.
+    /// A deliberate difference goes in [`differences`](Self::differences) instead.
     pub note: Option<&'static str>,
+    /// What this pipeline does differently from the toolbox on purpose, each with its reason
+    /// (besides [`DIFFERENCES`], which every pipeline has). Only deliberate differences: never a
+    /// claim that the rest reproduces the toolbox; QSM-CI measures that
+    /// ([`qsmci_pair`](Self::qsmci_pair)).
+    pub differences: &'static [Difference],
+    /// When to choose it, in one plain sentence.
+    pub use_when: &'static str,
+    /// The papers to cite for it, the main method's first.
+    pub citations: &'static [Citation],
+    /// The QSM-CI parity pair (`parity/thresholds.yml`) that checks this pipeline against the
+    /// toolbox's own, whose measured status a host shows; `None` where QSM-CI has none yet.
+    pub qsmci_pair: Option<&'static str>,
     /// The method choices that start it, as rule settings and values ([`SETTINGS`](super::rules::SETTINGS)).
     pub choose: &'static [(&'static str, Value)],
     /// Where the pipeline is written down: the toolbox's script, README or paper.
@@ -94,6 +164,38 @@ pub struct ReferencePipeline {
     /// follows the reference rules the choices trigger, in [`RULES`](super::rules::RULES) order.
     pub reasoned: &'static [&'static str],
 }
+
+/// QSMART's deliberate differences (QSM.rs `pipeline::qsmart` docs, *Agreement with the original*).
+const QSMART_DIFFERENCES: &[Difference] = &[
+    Difference {
+        what: "One gyromagnetic ratio is used throughout.",
+        why: "QSMART converts the field to rad/s with 2.675e8 rad/s/T and STI Suite's iLSQR inside it converts back with \
+              2π·42.575 MHz/T, which lowers its susceptibility by 0.002 %; the mismatch is not part of the method.",
+    },
+    Difference {
+        what: "Each echo's Laplacian-unwrapped phase has no arbitrary constant added.",
+        why: "QSMART's Laplacian unwrapping leaves each echo a small constant set by FFT rounding, which cannot be matched \
+              and is not part of the method; through the echo fit it moved the total field by 0.24 % on QSM-CI's in-vivo scan.",
+    },
+];
+
+/// DECOMPOSE follows its paper (decision 15(1), 10 Nov 2026): QSM.rs `separation::decompose`
+/// docs, *Reference pipeline*.
+const DECOMPOSE_DIFFERENCES: &[Difference] = &[Difference {
+    what: "The steps before the fit follow the paper (Laplacian unwrapping, V-SHARP, STAR-QSM of each echo) at the \
+           functions' own settings, without the extra settings of the authors' analysis script.",
+    why: "The paper is the method as published and gives no settings for these steps; the authors' script pads STAR-QSM \
+          by 12 voxels and sets V-SHARP's kernel per echo, which changed each echo's susceptibility by 2.6-5 % on QSM-CI's \
+          in-vivo scan.",
+}];
+
+/// UK Biobank's mask (decision 202, module docs, *UK Biobank's mask is HD-BET's, on purpose*).
+const UKB_DIFFERENCES: &[Difference] = &[Difference {
+    what: "The brain mask is HD-BET on the magnitude, in 192×192×96 sliding windows, followed by signal-gated erosion.",
+    why: "UK Biobank masks with its T1 structural brain mask registered to the SWI, which a run from the SWI alone does not \
+          have; on UK Biobank data HD-BET came closest to it of the masks an SWI alone can give (about 3.4 mm higher at the \
+          brain's inferior edge, otherwise close).",
+}];
 
 /// The catalogue, in the order a host lists it.
 pub static REFERENCE_PIPELINES: &[ReferencePipeline] = &[
@@ -108,6 +210,10 @@ pub static REFERENCE_PIPELINES: &[ReferencePipeline] = &[
             "For bipolar readouts, the MEDI toolbox uses a bipolar echo fit, which is not supported yet. \
              This pipeline always uses the monopolar fit.",
         ),
+        differences: &[],
+        use_when: "You want results comparable with the MEDI toolbox's own pipeline: its complex echo fit, PDF and MEDI.",
+        citations: &[LIU2011MEDI, LIU2011PDF],
+        qsmci_pair: Some("toolbox-pipeline-medi-cornell"),
         choose: &[("inversion.algorithm", Choice("medi"))],
         source: "MEDI toolbox 2024.11.26 README.m:80-144",
         reasoned: &[],
@@ -117,6 +223,10 @@ pub static REFERENCE_PIPELINES: &[ReferencePipeline] = &[
         name: "STI Suite · iLSQR",
         toolbox: "STI Suite 3.0",
         note: None,
+        differences: &[STI_B0_DIRECTION, STI_VSHARP_MASK],
+        use_when: "You want results comparable with STI Suite's QSM_GUI run with iLSQR.",
+        citations: &[LI2015, WU2012],
+        qsmci_pair: Some("toolbox-pipeline-sti"),
         choose: &[("inversion.algorithm", Choice("ilsqr"))],
         source: "STI Suite 3.0 QSM_GUI, probed headless (QSM.rs ilsqr.rs and vsharp.rs docs)",
         reasoned: &[],
@@ -125,7 +235,19 @@ pub static REFERENCE_PIPELINES: &[ReferencePipeline] = &[
         id: "sti-suite-star",
         name: "STI Suite · STAR-QSM",
         toolbox: "STI Suite 3.0",
-        note: None,
+        // STI Suite's one-button STAR-QSM path masks with `Getmasking`, P-code that calls no
+        // traceable function (rules.rs, the `sti.mask-*` rules are iLSQR's only); not ported yet
+        // (astewartau/QSM.rs#493).
+        note: Some(
+            "STI Suite's STAR-QSM path makes its brain mask with its own routine, which is not available yet. \
+             This pipeline uses the default mask instead.",
+        ),
+        differences: &[STI_B0_DIRECTION, STI_VSHARP_MASK],
+        use_when: "You want results comparable with STI Suite's QSM_GUI run with STAR-QSM.",
+        citations: &[WEI2015STAR, WU2012],
+        // QSM-CI has a pair for STI Suite's iLSQR pipeline (`toolbox-pipeline-sti`) and for STAR-QSM
+        // alone (`star`), none yet for this pipeline end to end.
+        qsmci_pair: None,
         choose: &[("inversion.algorithm", Choice("star"))],
         source: "STI Suite 3.0 QSM_GUI, probed headless (QSM.rs star.rs and vsharp.rs docs)",
         reasoned: &[],
@@ -135,6 +257,10 @@ pub static REFERENCE_PIPELINES: &[ReferencePipeline] = &[
         name: "QSMART",
         toolbox: "QSMART",
         note: None,
+        differences: QSMART_DIFFERENCES,
+        use_when: "You want results comparable with QSMART's own pipeline, which treats the cortex next to the skull and the veins separately.",
+        citations: &[YAGHMAIE2021],
+        qsmci_pair: Some("toolbox-pipeline-qsmart"),
         choose: &[("inversion.algorithm", Choice("qsmart"))],
         source: "QSMART QSMART.m; Yaghmaie et al. 2021 NeuroImage 231:117701",
         // Recommended with QSMART (QSM.rs pipeline::qsmart docs), and what its authors ran.
@@ -145,6 +271,12 @@ pub static REFERENCE_PIPELINES: &[ReferencePipeline] = &[
         name: "HEIDI package",
         toolbox: "HEIDI package (qsm_heidi 4592631)",
         note: None,
+        differences: &[],
+        use_when: "You want results comparable with the HEIDI package: LSQR, then HEIDI, from a SHARP local field.",
+        citations: &[SCHWESER2012, SCHWESER2010],
+        // The package covers only local field to χ, so its pair is the method pair (`heidi`); the
+        // rest of the pipeline is QSMxT wiring, tested there.
+        qsmci_pair: Some("heidi"),
         choose: &[("inversion.algorithm", Choice("lsqr")), ("inversion.apply_heidi", Bool(true))],
         source: "qsm_heidi makefile and def.sh (4592631); Schweser et al. 2012 NeuroImage 62:2083",
         reasoned: &[],
@@ -154,6 +286,10 @@ pub static REFERENCE_PIPELINES: &[ReferencePipeline] = &[
         name: "χ-separation toolbox · iLSQR",
         toolbox: "χ-separation toolbox 1.1.3",
         note: None,
+        differences: &[],
+        use_when: "You want paramagnetic and diamagnetic maps comparable with the χ-separation toolbox's script, solved with iLSQR, and have an R2′ map or a multi-echo spin-echo scan.",
+        citations: &[SHIN2021CHISEP],
+        qsmci_pair: Some("toolbox-pipeline-chisep-ilsqr"),
         choose: &[("separation.algorithm", Choice("chi-sep-ilsqr"))],
         source: "χ-separation toolbox v1.1.3 Chisep_script.m",
         reasoned: &[],
@@ -163,6 +299,10 @@ pub static REFERENCE_PIPELINES: &[ReferencePipeline] = &[
         name: "χ-separation toolbox · MEDI",
         toolbox: "χ-separation toolbox 1.1.3",
         note: None,
+        differences: &[],
+        use_when: "You want paramagnetic and diamagnetic maps comparable with the χ-separation toolbox's script, solved with MEDI, and have an R2′ map or a multi-echo spin-echo scan.",
+        citations: &[SHIN2021CHISEP],
+        qsmci_pair: Some("toolbox-pipeline-chisep-medi"),
         choose: &[("separation.algorithm", Choice("chi-sep-medi"))],
         source: "χ-separation toolbox v1.1.3 Chisep_script.m",
         reasoned: &[],
@@ -172,6 +312,12 @@ pub static REFERENCE_PIPELINES: &[ReferencePipeline] = &[
         name: "χ-separation toolbox · χ-sepnet",
         toolbox: "χ-separation toolbox 1.1.3",
         note: None,
+        differences: &[],
+        use_when: "You want paramagnetic and diamagnetic maps from the χ-separation toolbox's network, from 3 T gradient-echo data alone or with a measured R2′.",
+        citations: &[KIM2025CHISEPNET, SHIN2021CHISEP],
+        // QSM-CI's `chisepnet` pair checks the network's route (`chi_sepnet_general`), not the
+        // toolbox's field chain before it; there is no whole-pipeline pair yet.
+        qsmci_pair: None,
         choose: &[("separation.algorithm", Choice("chi-sepnet")), ("separation.chi_sepnet.route", Choice("toolbox"))],
         source: "χ-separation toolbox v1.1.3 Chisep_script.m; Kim et al. 2025 (χ-sepnet)",
         reasoned: &[],
@@ -184,6 +330,10 @@ pub static REFERENCE_PIPELINES: &[ReferencePipeline] = &[
         // A QSM per echo is what its authors ran (§2.2, §4.1: a TE-dependent QSM input is
         // necessary), so it is one of the pipeline's choices, though its rule
         // (`decompose.qsm-per-echo`) is a reasoned one: see the decision above.
+        differences: DECOMPOSE_DIFFERENCES,
+        use_when: "You want paramagnetic and diamagnetic maps from multi-echo gradient-echo data alone, with DECOMPOSE as its paper describes it.",
+        citations: &[CHEN2021DECOMPOSE],
+        qsmci_pair: Some("toolbox-pipeline-decompose"),
         choose: &[("separation.algorithm", Choice("decompose")), ("qsm_per_echo", Bool(true))],
         source: "Chen et al. 2021 NeuroImage 242:118477 (DECOMPOSE), §2.2, §3.6, §4.1",
         reasoned: &[],
@@ -192,21 +342,23 @@ pub static REFERENCE_PIPELINES: &[ReferencePipeline] = &[
         id: "uk-biobank",
         name: "UK Biobank",
         toolbox: "UK Biobank QSM",
-        // An intentional difference, not a gap to close (decision 202): UK Biobank's mask is its
-        // T1 structural brain mask (BET), registered to the SWI, which a run from the SWI alone
-        // does not have. HD-BET on the magnitude is the closest SWI-only mask (in a comparison on
-        // UK Biobank data it reached about 3.4 mm higher at the brain's inferior edge, and was
-        // otherwise close), so the pipeline follows the measured rule `ukb.mask-hd-bet`. A rule
-        // rather than a choice: another mask is a departure from the pipeline, not another
-        // pipeline. It needs a deep-learning build ([`ReferencePipeline::models`]).
+        // The mask is a deliberate difference (UKB_DIFFERENCES, decision 202), not a gap. The gap:
+        // on UK Biobank's own geometry (256×288×48, 0.8×0.8×3 mm, B0 tilt 12–26°, 2 echoes) the
+        // local field after V-SHARP is 0.05–0.08 % NRMSE from STI Suite's and χ 0.28–0.41 %, about
+        // 30–40× QSM-CI's limit on its near-isotropic scan (astewartau/QSM.rs#491).
         note: Some(
-            "UK Biobank masks with its T1 structural brain mask registered to the SWI, which is not part of an SWI run. \
-             This pipeline masks the magnitude with HD-BET instead, the closest mask from the SWI alone.",
+            "On UK Biobank's own scans (3 mm slices, oblique), V-SHARP's local field differs slightly from STI Suite's, \
+             which iLSQR amplifies to about 0.3-0.4 % of the susceptibility map; the cause is being investigated.",
         ),
+        differences: UKB_DIFFERENCES,
+        use_when: "You want results comparable with UK Biobank's released susceptibility maps, from the SWI scan alone.",
+        citations: &[WANG2022, LI2015, ISENSEE2019],
+        // Checked on QSM-CI's near-isotropic, non-oblique bridge scan only; a UK Biobank-geometry case
+        // (anisotropic, oblique, 2 echoes) is QSMxT/QSM-CI#467.
+        qsmci_pair: Some("toolbox-pipeline-ukb"),
         choose: &[("inversion.algorithm", Choice("ilsqr")), ("bg_removal.ukb_mask_trim", Bool(true))],
         source: "UK Biobank UKBiobank_QSM.m (git.fmrib.ox.ac.uk/cwang/uk_biobank_qsm_pipeline); Wang et al. 2022 Nat. Neurosci.; \
                  HD-BET in place of its registered T1 brain mask, an intentional difference",
-
         reasoned: &["ukb.mask-hd-bet", "ukb.mask-hd-bet-window"],
     },
 ];
@@ -285,6 +437,42 @@ mod tests {
         }
         assert_eq!(reference_pipeline("medi-toolbox").map(|p| p.name), Some("MEDI toolbox"));
         assert!(reference_pipeline("nope").is_none());
+    }
+
+    fn is_sentence(s: &str) -> bool {
+        s.trim() == s && !s.is_empty() && s.ends_with('.') && !s[..s.len() - 1].contains(". ")
+            && s.starts_with(|c: char| !c.is_lowercase())
+    }
+
+    /// Every pipeline has a one-sentence use-when, citations, its differences (each a sentence
+    /// with a reason), and a QSM-CI pair slug where it has one; the global differences too.
+    #[test]
+    fn every_pipeline_has_its_documentation_fields() {
+        let check = |id: &str, d: &Difference| {
+            assert!(is_sentence(d.what), "{id}: difference {:?} is not a sentence", d.what);
+            assert!(is_sentence(d.why), "{id}: reason {:?} is not a sentence", d.why);
+        };
+        assert!(!DIFFERENCES.is_empty());
+        for d in DIFFERENCES { check("all pipelines", d); }
+        for p in REFERENCE_PIPELINES {
+            assert!(is_sentence(p.use_when), "{}: use_when {:?} is not one sentence", p.id, p.use_when);
+            assert!(!p.citations.is_empty(), "{}: no citations", p.id);
+            for d in p.differences { check(p.id, d); }
+            assert!(p.note.is_none_or(is_sentence_or_two), "{}: note", p.id);
+            if let Some(pair) = p.qsmci_pair {
+                assert!(!pair.is_empty() && pair.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'),
+                    "{}: pair {pair:?} is not a slug", p.id);
+            }
+            let text = [p.use_when].into_iter().chain(p.note).chain(p.differences.iter().flat_map(|d| [d.what, d.why]));
+            for t in text {
+                // Parity is QSM-CI's to report (decision 217): no claims in the text.
+                assert!(!t.to_lowercase().contains("reproduce"), "{}: {t:?} claims parity", p.id);
+            }
+        }
+    }
+
+    fn is_sentence_or_two(n: &str) -> bool {
+        n.trim() == n && !n.is_empty() && n.ends_with('.')
     }
 
     /// The pipelines that run a deep-learning model: χ-sepnet's, and UK Biobank's, which masks

@@ -1,15 +1,17 @@
 //! The method catalogue: what each method QSM.rs implements is called, and whose work it is.
 //!
 //! One [`Method`] per method a host can choose: its stable id (the one the pipeline's enums
-//! return from `id()`), its stage, its display name, the authors' paper(s) ([`Citation`]), the
-//! reference code QSM.rs's implementation follows ([`Reference`]), and the ids of the
-//! deep-learning models it runs ([`crate::models`]). Front ends take names and citations from
-//! here instead of restating them, so a methods section, an algorithm table and a settings
-//! screen agree with each other and with the code.
+//! return from `id()`), its stage, its display name, a one-sentence summary for users, what it
+//! needs from the scan ([`Need`]), the stages it does the work of ([`Method::skips`]), the
+//! authors' paper(s) ([`Citation`]), the reference code QSM.rs's implementation follows
+//! ([`Reference`]), and the ids of the deep-learning models it runs ([`crate::models`]). Front
+//! ends take names, summaries and citations from here instead of restating them, so a methods
+//! section, an algorithm table and a settings screen agree with each other and with the code.
 //!
-//! The catalogue holds identity and provenance only. How a method works, its defaults and their
-//! sources, its deviations from the reference and what was measured are in its module docs; what
-//! it requires or recommends is in [`crate::pipeline::rules`].
+//! The catalogue holds identity, provenance and what a host needs to list a method. How a method
+//! works, its defaults and their sources, its deviations from the reference and what was
+//! measured are in its module docs; what it requires or recommends of the other settings is in
+//! [`crate::pipeline::rules`].
 //!
 //! ```
 //! use qsm_core::catalogue::{self, Stage};
@@ -35,17 +37,24 @@
 //! 1. `id`: the variant's `id()` where the stage has a dispatcher enum (see [`Stage`]); otherwise
 //!    a new kebab-case id.
 //! 2. `name`: the name the authors use.
-//! 3. `citations`: the authors' paper(s), as constants in `citations.rs`, with the DOI checked
+//! 3. `summary`: one plain sentence for users: what the method does, in words a user without
+//!    the paper follows. No history, no comparison with QSM.rs's other methods, no settings.
+//! 4. `needs`: what it needs beyond what every method has ([`Need`]).
+//! 5. `skips`: the stages whose work it does itself ([`Method::skips`]).
+//! 6. `citations`: the authors' paper(s), as constants in `citations.rs`, with the DOI checked
 //!    against its record. A method with no paper (QSM.rs's own, or a generic operation) has none.
-//! 4. `reference`: the code the implementation follows, as its module docs name it (toolbox,
+//! 7. `reference`: the code the implementation follows, as its module docs name it (toolbox,
 //!    release or commit, URL); `None` if it follows the paper alone or is QSM.rs's own.
-//! 5. `models`: the [`ModelSpec`](crate::models::ModelSpec) ids it runs, if any.
+//! 8. `models`: the [`ModelSpec`](crate::models::ModelSpec) ids it runs, if any.
 //!
 //! The tests fail if a dispatcher variant has no entry, if an entry names a model the registry
-//! lacks, if a registry model belongs to no method, or if a DOI is malformed. Adding a variant to a
+//! lacks, if a registry model belongs to no method, if a DOI is malformed, if a summary is empty
+//! or not one sentence, or if `needs` or `skips` disagree with what the pipeline does (an
+//! inversion's [`InversionInput`](crate::pipeline::InversionInput), a method's
+//! [`OrientationSupport`](crate::pipeline::OrientationSupport)). Adding a variant to a
 //! dispatcher enum also fails to compile the test's list of variants until the variant joins it.
 
-mod citations;
+pub(crate) mod citations;
 mod methods;
 
 pub use methods::METHODS;
@@ -110,6 +119,17 @@ pub struct Method {
     pub stage: Stage,
     /// Display name, as the authors write it (`"RTS"`, `"χ-separation (iLSQR)"`).
     pub name: &'static str,
+    /// One plain sentence for users: what the method does. A host shows it next to the name
+    /// (a settings list, a methods index); the method's module docs hold the details.
+    pub summary: &'static str,
+    /// What it needs beyond what every method has; see [`Need`].
+    pub needs: &'static [Need],
+    /// The stages whose work it does itself, so a pipeline running it leaves them out: a
+    /// total-field inversion (TFI, QSMART) skips [`Stage::BackgroundRemoval`], a
+    /// wrapped-phase one (iQSM) also [`Stage::Unwrapping`] and [`Stage::EchoCombination`]. Only
+    /// what it skips whatever the scan: TGV skips unwrapping on a single echo only, so its entry
+    /// lists background removal alone. Empty for most methods.
+    pub skips: &'static [Stage],
     /// The authors' paper(s), the method's own first. Empty for a method with none.
     pub citations: &'static [Citation],
     /// The code QSM.rs's implementation follows, where it follows one.
@@ -118,8 +138,41 @@ pub struct Method {
     pub models: &'static [&'static str],
 }
 
-/// A published work, as structured fields; hosts format it.
+/// Something a method needs beyond what every method has.
+///
+/// Every reconstruction has the phase of each echo, the echo times, the field strength (to
+/// express the field in ppm), the voxel grid with its B0 direction, and a brain mask, so none of
+/// those is listed. A method that only uses something when it is there (ROMEO's magnitude
+/// weights, QSMART's vessel magnitude) does not list it either.
 #[cfg_attr(feature = "introspection", derive(serde::Serialize))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Need {
+    /// The magnitude image (of every echo, for a multi-echo method): the method fails without it.
+    Magnitude,
+    /// At least this many echoes.
+    Echoes(u8),
+    /// Evenly spaced echo times (MEDI's complex fit models the phase by echo index:
+    /// [`echo_spacing_problem`](crate::fieldmap::echo_spacing_problem)).
+    EvenEchoSpacing,
+    /// B0 along the slice axis: an oblique acquisition is resampled to axial first, because the
+    /// method takes no B0 direction (a network trained on axial data). The same as
+    /// [`OrientationSupport::AxialOnly`](crate::pipeline::OrientationSupport::AxialOnly).
+    Axial,
+    /// An R2′ map in Hz: R2* minus R2 from a multi-echo spin-echo scan, or one the user
+    /// supplies, or one R2PRIMEnet predicts from R2*.
+    R2Prime,
+    /// A multi-echo spin-echo acquisition.
+    SpinEcho,
+    /// Scans of the head in at least this many orientations.
+    Orientations(u8),
+}
+
+/// A published work, as structured fields; hosts format it.
+///
+/// Serializable without the `introspection` feature, because a
+/// [`ReferencePipeline`](crate::pipeline::reference_pipelines::ReferencePipeline) carries its
+/// citations and is always serializable.
+#[derive(serde::Serialize)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Citation {
     /// Citation key (`"kames2018"`), the same for every method citing this work.

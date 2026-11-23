@@ -87,7 +87,10 @@ pub enum HdBetInference {
     /// field of view in mm (natively 5.7 GB for 184×256×128 mm, 9.3 GB for 240×240×160 mm; see
     /// [`hd_bet_memory_bytes`]).
     FullVolume,
-    /// Gaussian-weighted sliding window, as nnU-Net (and the HD-BET v2 CLI) runs it.
+    /// Gaussian-weighted sliding window, as nnU-Net (and the HD-BET v2 CLI) runs it. Slower than
+    /// [`FullVolume`](Self::FullVolume): at `(192, 192, 96)` and a step of 0.5, about twice the
+    /// run time on in-vivo head scans (QSMxT's measurement), since the 50 % overlap infers most
+    /// voxels more than once.
     SlidingWindow {
         /// Patch size `(px, py, pz)` in voxels at 1 mm; HD-BET v2 was trained with
         /// `(192, 192, 96)`. Must be multiples of `(32, 32, 16)`. Peak memory follows the patch

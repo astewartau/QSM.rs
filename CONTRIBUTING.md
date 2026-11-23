@@ -56,9 +56,10 @@ their pin. No downstream workarounds. Every issue names its owner (`owner: QSM.r
 - One module per stage (`bet`, `unwrap`, `bgremove`, `inversion`, `separation`, `swi`, `utils`,
   `models`, `pipeline`), one file per method. A method a host can choose gets a variant in its
   stage's algorithm enum with a kebab-case `id()`, and an entry in the method catalogue
-  (`src/catalogue/`: id, the authors' name for it, citations checked against Crossref or
-  DataCite, the reference code it follows; see its module docs). Hosts take names and citations
-  from the catalogue, so a citation is fixed there.
+  (`src/catalogue/`: id, the authors' name for it, a one-sentence summary for users, what it
+  needs from the scan, the stages it does itself, citations checked against Crossref or
+  DataCite, the reference code it follows; see its module docs). Hosts take names, summaries and
+  citations from the catalogue, so they are fixed there.
 - Each method has a `*Params` struct whose `Default` holds the reference values. Every field's
   doc gives its unit, default and the default's source (reference file and line).
 - Units: seconds, tesla, ppm at the public boundary, mm unless named `*_voxels`. Put the unit in
@@ -107,7 +108,9 @@ Its module docs are the specification. In short:
 - **Toolbox pipelines** (`src/pipeline/reference_pipelines.rs`: STI Suite, MEDI toolbox,
   QSMART, UK Biobank, ...) are their starting method choices plus the `Reference` rules those
   choices trigger (and any reasoned rules listed with the pipeline), so the pipelines and the
-  rules cannot disagree. A known difference from the toolbox is stated in its `note`.
+  rules cannot disagree. A deliberate difference from the toolbox goes in its `differences`,
+  with its reason; a gap still to close, in its `note`, with its issue. Never claim a pipeline
+  reproduces its toolbox: its `qsmci_pair` names the QSM-CI pair that measures that.
 
 ## Tests
 

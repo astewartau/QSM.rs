@@ -1947,7 +1947,7 @@ pub static RULES: &[Rule] = &[
     // precision) stays with the `sti.*` rules, which fire here too. UK Biobank's brain mask is its
     // T1 structural mask registered to the SWI, which the SWI alone cannot give, so no reference
     // rule names a mask. `ukb.mask-hd-bet` names HD-BET on the magnitude in its place: a measured
-    // stand-in, not the authors' setting, and an intentional difference the pipeline's note states
+    // stand-in, not the authors' setting, and an intentional difference the pipeline's `differences` state
     // (reference_pipelines.rs, decision 202). No rule names its coil combination (MCPC-3D-S),
     // which is upstream of a coil-combined phase.
     measured_better("ukb.mask-hd-bet", &[UKB], "masking.generator", &[Choice("hd-bet")],
