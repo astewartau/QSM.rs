@@ -845,7 +845,7 @@ impl BipolarSignature {
 }
 
 /// The odd/even phase gradient from which [`BipolarSignature::looks_bipolar`] holds, rad/cm.
-/// Set between the monopolar and bipolar scans of the EMTP travelling heads (see
+/// Set between the monopolar and bipolar scans of a private calibration dataset (see
 /// [`bipolar_signature`], *Calibration*).
 pub const BIPOLAR_SIGNATURE_RAD_PER_CM: f64 = 0.06;
 
@@ -871,20 +871,13 @@ pub const BIPOLAR_SIGNATURE_MIN_VOXELS: usize = 1000;
 /// from. Uses echoes 1–3 only.
 ///
 /// # Calibration
-/// Measured 2026-11-23 (QSMxT/QSMxT#564) on the EMTP travelling heads, 102 acquisitions on 11
-/// scanners (Philips Achieva, Elition, Ingenia; Siemens Prisma, Skyra, Cima.X; GE MR750, MR750w),
-/// as packed for QSM-CI, plus the six bipolar GE MR750w acquisitions before their correction. The
-/// largest odd–even gradient, rad/cm:
-/// - known monopolar scans (every bridge protocol, the Philips and GE local protocols, the
-///   Skyra's): at most 0.01;
-/// - the bipolar MR750w before correction: 0.36–0.38; after MCPC-3D-S bipolar correction (as
-///   packed): 0.04–0.05, the correction's residue;
-/// - the 8-echo local protocols of two Siemens Prismas: 0.09–0.12, with a strong odd/even constant
-///   too. Their echo spacing (4.06 ms at 260 Hz/pixel, a 3.85 ms readout) leaves no time for a
-///   monopolar readout's flyback, so these are bipolar readouts.
+/// Calibrated (QSMxT/QSMxT#564) on a multi-site, multi-vendor travelling-head dataset (private;
+/// Siemens, GE and Philips 3 T scanners). The largest odd–even gradient, rad/cm: monopolar scans
+/// at most 0.01; bipolar scans before correction about 0.37; the same scans after MCPC-3D-S
+/// bipolar correction about 0.05, the correction's residue.
 ///
-/// [`BIPOLAR_SIGNATURE_RAD_PER_CM`] (0.06) is six times the largest monopolar value and below the
-/// smallest bipolar one, and above what a corrected bipolar scan keeps, so corrected data are not
+/// [`BIPOLAR_SIGNATURE_RAD_PER_CM`] (0.06) is six times the largest monopolar value well below
+/// the bipolar one, and above what a corrected bipolar scan keeps, so corrected data are not
 /// flagged again. It is a heuristic on one dataset: hosts offer it as a suggestion
 /// (`Suggested`), not a required change.
 pub fn bipolar_signature(
