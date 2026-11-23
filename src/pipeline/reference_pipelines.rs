@@ -182,6 +182,9 @@ pub struct ReferencePipeline {
     pub qsmci_pair_issue: Option<&'static str>,
     /// The method choices that start it, as rule settings and values ([`SETTINGS`](super::rules::SETTINGS)).
     pub choose: &'static [(&'static str, Value)],
+    /// Why each choice in [`choose`](Self::choose), in the same order: one plain sentence (no
+    /// full stop, as a rule's reason) a host shows on the choice's row.
+    pub choose_reasons: &'static [&'static str],
     /// Where the pipeline is written down, for developers: the toolbox's script and lines, the
     /// QSM.rs docs that record what was probed. Not for users; see [`based_on`](Self::based_on).
     pub source: &'static str,
@@ -255,6 +258,7 @@ pub static REFERENCE_PIPELINES: &[ReferencePipeline] = &[
         qsmci_pair_issue: None,
         based_on: "The MEDI toolbox's example pipeline (README.m) · Liu et al. 2011",
         choose: &[("inversion.algorithm", Choice("medi"))],
+        choose_reasons: &["The MEDI toolbox's pipeline inverts the field with MEDI"],
         source: "MEDI toolbox 2024.11.26 README.m:80-144",
         reasoned: &[],
     },
@@ -271,6 +275,7 @@ pub static REFERENCE_PIPELINES: &[ReferencePipeline] = &[
         qsmci_pair_issue: None,
         based_on: "STI Suite's QSM_GUI, iLSQR path · Li et al. 2015",
         choose: &[("inversion.algorithm", Choice("ilsqr"))],
+        choose_reasons: &["STI Suite's GUI inverts the field with iLSQR"],
         source: "STI Suite 3.0 QSM_GUI, probed headless (QSM.rs ilsqr.rs and vsharp.rs docs)",
         reasoned: &[],
     },
@@ -295,6 +300,7 @@ pub static REFERENCE_PIPELINES: &[ReferencePipeline] = &[
         qsmci_pair_issue: Some("QSMxT/QSM-CI#469"),
         based_on: "STI Suite's QSM_GUI, STAR-QSM path · Wei et al. 2015",
         choose: &[("inversion.algorithm", Choice("star"))],
+        choose_reasons: &["STI Suite's GUI inverts the field with STAR-QSM"],
         source: "STI Suite 3.0 QSM_GUI, probed headless (QSM.rs star.rs and vsharp.rs docs)",
         reasoned: &[],
     },
@@ -311,6 +317,7 @@ pub static REFERENCE_PIPELINES: &[ReferencePipeline] = &[
         qsmci_pair_issue: None,
         based_on: "The QSMART toolbox (QSMART.m) · Yaghmaie et al. 2021",
         choose: &[("inversion.algorithm", Choice("qsmart"))],
+        choose_reasons: &["QSMART inverts the total field in two stages, one for the brain's edge and veins and one for the rest"],
         source: "QSMART QSMART.m; Yaghmaie et al. 2021 NeuroImage 231:117701",
         // Recommended with QSMART (QSM.rs pipeline::qsmart docs), and what its authors ran.
         reasoned: &["qsmart.mask-no-erosion", "qsmart.unwrap-laplacian", "qsmart.field-echofit"],
@@ -330,6 +337,7 @@ pub static REFERENCE_PIPELINES: &[ReferencePipeline] = &[
         qsmci_pair_issue: None,
         based_on: "The HEIDI package (qsm_heidi), LSQR then HEIDI · Schweser et al. 2012",
         choose: &[("inversion.algorithm", Choice("lsqr")), ("inversion.apply_heidi", Bool(true))],
+        choose_reasons: &["The HEIDI package first inverts the local field with LSQR, a least-squares fit with almost no regularisation, which keeps the measured data that HEIDI builds on", "HEIDI then fills in the ill-conditioned part of the data from its surroundings, which reduces streaking"],
         source: "qsm_heidi makefile and def.sh (4592631); Schweser et al. 2012 NeuroImage 62:2083",
         reasoned: &[],
     },
@@ -346,6 +354,7 @@ pub static REFERENCE_PIPELINES: &[ReferencePipeline] = &[
         qsmci_pair_issue: None,
         based_on: "The χ-separation toolbox's script (Chisep_script.m) with iLSQR · Shin et al. 2021",
         choose: &[("separation.algorithm", Choice("chi-sep-ilsqr"))],
+        choose_reasons: &["The χ-separation toolbox's script solves the separation with iLSQR"],
         source: "χ-separation toolbox v1.1.3 Chisep_script.m",
         reasoned: &[],
     },
@@ -362,6 +371,7 @@ pub static REFERENCE_PIPELINES: &[ReferencePipeline] = &[
         qsmci_pair_issue: None,
         based_on: "The χ-separation toolbox's script (Chisep_script.m) with MEDI · Shin et al. 2021",
         choose: &[("separation.algorithm", Choice("chi-sep-medi"))],
+        choose_reasons: &["The χ-separation toolbox's script solves the separation with MEDI"],
         source: "χ-separation toolbox v1.1.3 Chisep_script.m",
         reasoned: &[],
     },
@@ -380,6 +390,7 @@ pub static REFERENCE_PIPELINES: &[ReferencePipeline] = &[
         qsmci_pair_issue: Some("QSMxT/QSM-CI#470"),
         based_on: "The χ-separation toolbox's script (Chisep_script.m) with χ-sepnet · Kim et al. 2025",
         choose: &[("separation.algorithm", Choice("chi-sepnet")), ("separation.chi_sepnet.route", Choice("toolbox"))],
+        choose_reasons: &["The χ-separation toolbox's script separates the sources with its χ-sepnet network", "χ-sepnet runs as the toolbox runs it, turning the inputs to B0 along z and resampling them to 1 mm"],
         source: "χ-separation toolbox v1.1.3 Chisep_script.m; Kim et al. 2025 (χ-sepnet)",
         reasoned: &[],
     },
@@ -399,6 +410,7 @@ pub static REFERENCE_PIPELINES: &[ReferencePipeline] = &[
         qsmci_pair_issue: None,
         based_on: "The DECOMPOSE paper · Chen et al. 2021",
         choose: &[("separation.algorithm", Choice("decompose")), ("qsm_per_echo", Bool(true))],
+        choose_reasons: &["DECOMPOSE separates the sources by fitting a three-compartment model to the multi-echo signal", "DECOMPOSE's authors reconstruct a susceptibility map for each echo, and state that this is necessary"],
         source: "Chen et al. 2021 NeuroImage 242:118477 (DECOMPOSE), §2.2, §3.6, §4.1",
         reasoned: &[],
     },
@@ -424,6 +436,7 @@ pub static REFERENCE_PIPELINES: &[ReferencePipeline] = &[
         qsmci_pair_issue: None,
         based_on: "UK Biobank's QSM pipeline (UKBiobank_QSM.m) · Wang et al. 2022",
         choose: &[("inversion.algorithm", Choice("ilsqr")), ("bg_removal.ukb_mask_trim", Bool(true))],
+        choose_reasons: &["UK Biobank inverts its trimmed local field with STI Suite's iLSQR", "UK Biobank trims its mask to voxels with reliable phase, before and after background removal"],
         source: "UK Biobank UKBiobank_QSM.m (git.fmrib.ox.ac.uk/cwang/uk_biobank_qsm_pipeline); Wang et al. 2022 Nat. Neurosci.; \
                  HD-BET in place of its registered T1 brain mask (decision 202)",
         reasoned: &["ukb.mask-hd-bet", "ukb.mask-hd-bet-window"],
@@ -537,6 +550,10 @@ mod tests {
             assert!(is_sentence(p.use_when), "{}: use_when {:?} is not one sentence", p.id, p.use_when);
             assert!(!p.citations.is_empty(), "{}: no citations", p.id);
             for d in p.differences { check(p.id, d); }
+            assert_eq!(p.choose_reasons.len(), p.choose.len(), "{}: one reason per choice", p.id);
+            for r in p.choose_reasons {
+                assert_eq!(super::super::rules::reason_problem(r), None, "{}: choice reason {r:?}", p.id);
+            }
             assert_eq!(p.note.is_some(), p.note_issue.is_some(), "{}: a note needs its issue, and only a note", p.id);
             assert_eq!(p.qsmci_pair.is_none(), p.qsmci_pair_issue.is_some(), "{}: a missing pair needs its issue", p.id);
             for issue in p.note_issue.into_iter().chain(p.qsmci_pair_issue) {

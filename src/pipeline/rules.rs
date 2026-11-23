@@ -1212,9 +1212,7 @@ const MAGNITUDE_INPUTS: &[Value] = &[Choice("magnitude"), Choice("magnitude-firs
 /// of the echo fit raised the outer band's χ RMS 24-54 % in vivo and lowered χ XSIM on the
 /// simulated head (0.214 against 0.223); eroding the mask by one voxel lowered it too (0.214
 /// against 0.223), and avoiding erosion is what QSMART's authors built SDF for.
-const QSMART_EDGE_REASON: &str = "QSMART keeps the brain's edge instead of eroding it away, and its \
-    Laplacian unwrapping and echo fit are what handle the unreliable phase there. With a path-based \
-    unwrapper, errors at the edge become artefacts across the cortex";
+const QSMART_EDGE_REASON: &str = "QSMART keeps the brain's edge rather than eroding it, and relies on Laplacian unwrapping and its echo fit to handle the unreliable phase there";
 /// The unwrapping and echo-fit rows of QSMART's group: each says what it does for the edge, and
 /// the mask row gives the group's reason (`QSMART_EDGE_REASON`).
 const QSMART_EDGE_UNWRAP_REASON: &str = "Laplacian unwrapping is not thrown off by the unreliable phase \
@@ -1253,12 +1251,11 @@ const ROMEO_UNWRAPS: Condition = method("field_mapping.unwrapping_algorithm", RO
 /// that run the CLI*).
 const ROMEO_CLI_SOURCE: &str = "χ-separation toolbox v1.1.3 Chisep_script.m:99-111 (mritools ROMEO.m: -p -o -m -t -k --phase-offset-correction on -q); mritools 4.7.1 romeo's settings_romeo.txt for that call (individual-unwrapping false, template 1, correct-global false, temporal-uncertain-unwrapping 0.0); QSMxT/QSM-CI#421";
 const ROMEO_CLI_WEIGHTS_SOURCE: &str = "χ-separation toolbox v1.1.3 Chisep_script.m:99-111 (no -w, a magnitude given); ROMEO.jl ext/RomeoApp/caller.jl:49-55 (the default romeo becomes romeo3 with a magnitude); mritools 4.7.1 romeo's settings_romeo.txt for that call (weights: romeo3); QSMxT/QSM-CI#421";
-const ROMEO_CLI_WEIGHTS_REASON: &str = "The χ-separation toolbox runs ROMEO's command line with a magnitude \
-    and its default weights, which leave out phase linearity";
-const ROMEO_CLI_TEMPLATE_REASON: &str = "The χ-separation toolbox runs mritools' romeo command line without --individual-unwrapping: it unwraps a template echo spatially and the others temporally from it";
-const ROMEO_CLI_TEMPLATE_ECHO_REASON: &str = "The χ-separation toolbox runs mritools' romeo command line without --template, so the first echo is the template";
-const ROMEO_CLI_GLOBAL_REASON: &str = "The χ-separation toolbox runs mritools' romeo command line without --correct-global";
-const ROMEO_CLI_UNCERTAIN_REASON: &str = "The χ-separation toolbox runs mritools' romeo command line without --temporal-uncertain-unwrapping, whose command-line default (0) leaves uncertain voxels as the temporal unwrapping gives them";
+const ROMEO_CLI_WEIGHTS_REASON: &str = "The χ-separation toolbox runs ROMEO with its default weights, which leave out phase linearity";
+const ROMEO_CLI_TEMPLATE_REASON: &str = "The χ-separation toolbox's ROMEO unwraps one template echo spatially and the others from it along the echoes";
+const ROMEO_CLI_TEMPLATE_ECHO_REASON: &str = "The χ-separation toolbox's ROMEO uses the first echo as its template";
+const ROMEO_CLI_GLOBAL_REASON: &str = "The χ-separation toolbox's ROMEO does not correct the global 2π offset";
+const ROMEO_CLI_UNCERTAIN_REASON: &str = "The χ-separation toolbox's ROMEO leaves uncertain voxels as unwrapping along the echoes gives them";
 const COMPLEX_FIT: &[Value] = &[Choice("complex-fit")];
 const WEIGHTED_AVG: &[Value] = &[Choice("weighted-avg")];
 const CHI_SEP_TOOLBOX: &[Value] = &[Choice("chi-sep-ilsqr"), Choice("chi-sep-medi"), Choice("chi-sepnet")];
@@ -1269,8 +1266,7 @@ const CHI_SEPNET_TOOLBOX_ROUTE: Condition = method("separation.chi_sepnet.route"
 pub const CHISEP_TUKEY: f64 = 0.4;
 const TUKEY_SOURCE: &str = "χ-separation toolbox v1.1.3 Chisep_script.m:69-73 \
     (\"tukey_fac = 0.4; % Recommendation: Siemens, GE: 0.4, Philips: 0\"); QSM.rs utils::tukey_window docs";
-const TUKEY_NOT_PHILIPS_REASON: &str = "The χ-separation toolbox Tukey-windows the complex echoes in \
-    k-space before everything else, with a taper ratio of 0.4; its comment sets 0 for Philips only";
+const TUKEY_NOT_PHILIPS_REASON: &str = "The χ-separation toolbox smooths the echoes with a Tukey window in k-space (taper 0.4) before anything else, except on Philips data";
 const TUKEY_PHILIPS_REASON: &str = "The χ-separation toolbox uses no Tukey windowing (a taper ratio of 0) \
     for Philips data";
 /// The χ-separation toolbox's iterative methods (χ-sepnet has two routes; only its toolbox route
@@ -1288,9 +1284,7 @@ const STI_GUI_MASK_SOURCE: &str = "STI Suite 3.0 QSM_GUI driven headless with ev
 /// HEIDI's cone fill is on (`inversion.apply_heidi`): the trigger of the `heidi.*` rules.
 /// NDI stops by FANSI `ndi_auto.m`'s criterion.
 const NDI_AUTO_STOP: Condition = method("inversion.ndi.auto_stop", &[Bool(true)]);
-const NDI_AUTO_REASON: &str = "With auto-stop, NDI is FANSI's ndi_auto, whose authors run it with \
-    step 1, alpha 1e-6 and up to 500 iterations (the stopping criterion ends it earlier), not \
-    ndi.m's 2, 1e-5 and 100";
+const NDI_AUTO_REASON: &str = "With auto-stop, NDI runs as FANSI's auto-stopping version, whose authors use step 1, alpha 1e-6 and up to 500 iterations";
 const NDI_AUTO_SOURCE: &str = "FANSI-toolbox 93044a3 Inversion/eNDI/ndi_auto.m L32-36 (alpha 1E-6), \
     L43-47 (tau 1.0), L55-59 (num_iter 500); decision 203";
 const HEIDI_ON: Condition = method("inversion.apply_heidi", &[Bool(true)]);
@@ -1332,8 +1326,7 @@ const fn heidi_truncation(id: &'static str, when: &'static [Condition], setting:
         unit: Unit::None,
         strength: Strength::Required,
         basis: Basis::Stated,
-        reason: "Coefficients the seed truncated (|D| below its threshold) would be kept as data \
-                 where they lie outside HEIDI's cone; upstream stops with an error",
+        reason: "Values the first inversion cut off would be kept as data outside HEIDI's cone; the original package stops with an error",
         source: HEIDI_CONE_SOURCE,
     }
 }
@@ -1347,19 +1340,19 @@ const FANSI_FAMILY: &[Value] =
 pub static RULES: &[Rule] = &[
     // ---------------------------------------------------------------- Brain masking
     reference("medi.mask-bet", &[inv(&[Choice("medi")])], "masking.generator", BET,
-        "MEDI's pipeline masks with FSL BET (bet2, f 0.5) on the root-sum-of-squares magnitude",
+        "MEDI's pipeline masks with FSL's brain extraction (fractional threshold 0.5) on the combined magnitude",
         "MEDI toolbox 2024.11.26 README.m:80,118; functions/bet2/bet2.cpp:136"),
     reference("tfi.mask-bet", &[inv(&[Choice("tfi")])], "masking.generator", BET,
         "TFI's in-vivo ROI is a BET brain mask",
         "Liu et al. 2017 MRM 79:2950 (TFI), Methods"),
     reference("pdf.mask-bet", &[bg(PDF)], "masking.generator", BET,
-        "MEDI's PDF runs inside the BET mask",
+        "MEDI's PDF runs inside the brain extraction's mask",
         "MEDI toolbox 2024.11.26 README.m:118,124"),
     reference("amp-pe.mask-bet", &[inv(&[Choice("amp-pe")])], "masking.generator", BET,
-        "AMP-PE's pipeline masks with BET (0.5) on the RSS magnitude, then erodes 2 mm",
+        "AMP-PE's pipeline masks with brain extraction (fractional threshold 0.5) on the combined magnitude, then erodes 2 mm",
         "QSM_AMP_PE qsm_multi_echo_combined.m L71-81"),
     reference_stated("qsmnet.mask-bet", &[inv(&[Choice("qsmnet"), Choice("qsmnet-plus")])], "masking.generator", BET,
-        "QSMnet's README instructs BET (FSL) brain extraction before its input is made",
+        "QSMnet's instructions extract the brain with FSL's brain extraction before making its input",
         "SNU-LIST/QSMnet README.md:64-68 (Process flow)"),
     reference("qsmgan.mask-bet", &[inv(&[Choice("qsmgan")])], "masking.generator", BET,
         "QSMGAN's training inputs were masked with FSL BET",
@@ -1371,22 +1364,22 @@ pub static RULES: &[Rule] = &[
         "NeXtQSM's in-vivo pipeline masks with FSL BET",
         "Cognolato et al. 2023 Med. Image Anal. 84:102700 (NeXtQSM), §3.2"),
     reference("iqsm.mask-bet", &[inv(&[Choice("iqsm"), Choice("iqsm-plus")])], "masking.generator", BET,
-        "iQSM's default mask is bet2 -f 0.5 on the first-echo magnitude",
+        "iQSM's default mask is FSL's brain extraction (fractional threshold 0.5) on the first echo's magnitude",
         "sunhongfu/iQSM run.py:499-506, bet2_utils.py:47,64"),
     reference("bfrnet.mask-bet", &[bg(&[Choice("bfrnet")])], "masking.generator", BET,
-        "BFRnet's in-vivo masks are bet2 -f 0.2 -w 2, eroded 3 voxels",
+        "BFRnet's in-vivo masks are FSL brain extractions (fractional threshold 0.2), eroded by 3 voxels",
         "Zhu et al. 2023 Z. Med. Phys. (BFRnet), Methods"),
     reference("chi-sep.mask-bet", &[sep(CHI_SEP_TOOLBOX)], "masking.generator", BET,
-        "The χ-separation toolbox and χ-sepnet mask with BET",
+        "The χ-separation toolbox masks with brain extraction",
         "χ-separation toolbox Chisep_script.m:79-82; Kim et al. 2025 (χ-sepnet, arXiv:2409.14030) §2.1.1"),
     reference("qsmnetme.mask-bet", &[inv(QSMNETME)], "masking.generator", BET,
         "QSMnetME runs in the χ-separation toolbox, which masks with BET",
         "χ-separation toolbox Chisep_script.m:79-82; Kim et al. 2025 (χ-sepnet) §2.1.1"),
     reference("qsmart.mask-bet", &[inv(&[Choice("qsmart")])], "masking.generator", BET,
-        "QSMART's authors mask with FSL bet2 -f 0.2 on the N4-corrected first-echo magnitude",
+        "QSMART's authors mask with FSL's brain extraction on the bias-corrected first echo",
         "Yaghmaie et al. 2021 NeuroImage 231:117701 (QSMART) §3.1; QSMART brainmask.m l. 7-33"),
     reference("decompose.mask-bet", &[sep(&[Choice("decompose")])], "masking.generator", BET,
-        "DECOMPOSE's pipeline masks with FSL BET",
+        "DECOMPOSE's authors mask with FSL's brain extraction",
         "Chen et al. 2021 NeuroImage 242:118477 (DECOMPOSE), §3.6"),
     // The rest of each toolbox's mask recipe: what BET reads, how that image is corrected, and
     // what is done to the mask after. QSMxT's `bet` preset (BET on the corrected RSS, then a
@@ -1410,26 +1403,26 @@ pub static RULES: &[Rule] = &[
     // thing. `no_two_rules_on_one_choice_disagree` keeps it that way.
     reference("sti.mask-threshold-gui", &[inv(&[Choice("ilsqr")]), unless_sep(CHI_SEP_TOOLBOX), NOT_UKB],
         "masking.threshold_method", &[Choice("sti-gui")],
-        "STI Suite's QSM_GUI masks the magnitude above the level its threshold tool starts at",
+        "STI Suite's GUI masks the magnitude above the level its threshold tool starts at",
         STI_GUI_MASK_SOURCE),
     reference("sti.mask-input", &[inv(&[Choice("ilsqr")]), unless_sep(CHI_SEP_TOOLBOX), NOT_UKB], "masking.input",
-        &[Choice("magnitude-last")], "QSM_GUI thresholds the last echo's magnitude (the last volume loaded)",
+        &[Choice("magnitude-last")], "STI Suite's GUI thresholds the last echo's magnitude",
         STI_GUI_MASK_SOURCE),
     reference("sti.mask-no-correction", &[inv(&[Choice("ilsqr")]), unless_sep(CHI_SEP_TOOLBOX), NOT_UKB],
         "masking.inhomogeneity_correction", &[Choice("none")],
-        "QSM_GUI thresholds the magnitude as loaded, with no bias-field correction", STI_GUI_MASK_SOURCE),
+        "STI Suite's GUI thresholds the magnitude as loaded, with no bias-field correction", STI_GUI_MASK_SOURCE),
     reference("sti.mask-largest-component", &[inv(&[Choice("ilsqr")]), unless_sep(CHI_SEP_TOOLBOX), NOT_UKB],
         "masking.largest_component", &[Bool(true)],
-        "QSM_GUI keeps the thresholded mask's largest connected component (bwlabeln, regionprops)",
+        "STI Suite's GUI keeps the largest connected piece of the thresholded mask",
         STI_GUI_MASK_SOURCE),
     reference("sti.mask-imfill", &[inv(&[Choice("ilsqr")]), unless_sep(CHI_SEP_TOOLBOX), NOT_UKB],
         "masking.imfill", &[Bool(true)],
-        "QSM_GUI fills every hole of that component (regionprops' FilledImage)", STI_GUI_MASK_SOURCE),
+        "STI Suite's GUI fills every hole in that piece", STI_GUI_MASK_SOURCE),
     reference("sti.mask-no-erosion", &[inv(&[Choice("ilsqr")]), unless_sep(CHI_SEP_TOOLBOX), NOT_UKB],
         "masking.erosion", &[Number(0.0)],
-        "QSM_GUI does not erode its mask (V-SHARP erodes it)", STI_GUI_MASK_SOURCE),
+        "STI Suite's GUI does not erode its mask; V-SHARP erodes it later", STI_GUI_MASK_SOURCE),
     reference("medi.mask-input", &[inv(&[Choice("medi")])], "masking.input", &[Choice("magnitude")],
-        "The MEDI toolbox runs BET on the root-sum-of-squares magnitude over echoes",
+        "The MEDI toolbox runs its brain extraction on the magnitude combined over echoes",
         MEDI_MASK_SOURCE),
     reference("medi.mask-no-correction", &[inv(&[Choice("medi")])], "masking.inhomogeneity_correction",
         &[Choice("none")], "The MEDI toolbox runs BET on the magnitude as read, with no bias-field correction",
@@ -1437,11 +1430,10 @@ pub static RULES: &[Rule] = &[
     reference("medi.mask-no-erosion", &[inv(&[Choice("medi")])], "masking.erosion", &[Number(0.0)],
         "The MEDI toolbox uses BET's mask as it is, without eroding it", MEDI_MASK_SOURCE),
     reference("medi.bet-as-stored", &[inv(&[Choice("medi")])], "masking.bet.orientation", &[Choice("as-stored")],
-        "MEDI's BET.m hands the bet2 mex the MATLAB array, so bet2 sees the voxels as stored; FSL's own \
-         bet reverses x of a neurological file first. The two masks differ at the brain's edge",
+        "The MEDI toolbox runs brain extraction on the image as stored, while FSL's own tool flips a neurologically stored image first; the two masks differ slightly at the brain's edge",
         MEDI_BET_SOURCE),
     reference("chi-sep.mask-input", &[sep(CHI_SEP_TOOLBOX)], "masking.input", &[Choice("magnitude")],
-        "The χ-separation toolbox runs MEDI's BET on the root-sum-of-squares magnitude over echoes",
+        "The χ-separation toolbox runs brain extraction on the magnitude combined over echoes",
         CHI_SEP_MASK_SOURCE),
     reference("chi-sep.mask-no-correction", &[sep(CHI_SEP_TOOLBOX)], "masking.inhomogeneity_correction",
         &[Choice("none")], "The χ-separation toolbox runs BET on the magnitude as read, with no bias-field correction",
@@ -1449,8 +1441,7 @@ pub static RULES: &[Rule] = &[
     reference("chi-sep.mask-no-erosion", &[sep(CHI_SEP_TOOLBOX)], "masking.erosion", &[Number(0.0)],
         "The χ-separation toolbox uses BET's mask as it is, without eroding it", CHI_SEP_MASK_SOURCE),
     reference("chi-sep.bet-as-stored", &[sep(CHI_SEP_TOOLBOX)], "masking.bet.orientation", &[Choice("as-stored")],
-        "The χ-separation toolbox masks with MEDI's BET.m, which hands the bet2 mex the MATLAB array, so \
-         bet2 sees the voxels as stored; FSL's own bet reverses x of a neurological file first",
+        "The χ-separation toolbox runs brain extraction on the image as stored, while FSL's own tool flips a neurologically stored image first",
         "χ-separation toolbox v1.1.3 Chisep_script.m:82 (mask_brain = BET(mag, matrix_size, voxel_size)), \
          which is MEDI's BET.m and bet2 mex (see medi.bet-as-stored)"),
     // DECOMPOSE's paper describes BET on the first echo's magnitude and nothing more: no
@@ -1466,17 +1457,16 @@ pub static RULES: &[Rule] = &[
         "DECOMPOSE's authors extract the brain with BET; no erosion of its mask is described",
         DECOMPOSE_MASK_SOURCE),
     reference("qsmart.mask-input", &[inv(&[Choice("qsmart")])], "masking.input", &[Choice("magnitude-first")],
-        "QSMART runs BET on the first echo's magnitude (root-sum-of-squares over coils)",
+        "QSMART runs brain extraction on the first echo's magnitude",
         "QSMART brainmask.m l. 7"),
     reference("qsmart.mask-n4", &[inv(&[Choice("qsmart")])], "masking.inhomogeneity_correction",
-        &[Choice("n4")], "QSMART corrects the first echo's magnitude with ANTs' N4BiasFieldCorrection before BET",
+        &[Choice("n4")], "QSMART corrects the first echo's magnitude with ANTs' N4 before brain extraction",
         "QSMART brainmask.m l. 10-11"),
     reference("qsmart.mask-n4-make-nii", &[inv(&[Choice("qsmart")])], "masking.n4_geometry",
-        &[Choice("make-nii")], "QSMART hands N4 the magnitude in a file written by make_nii, whose \
-         axis-aligned header decides where N4's shrunk grid falls",
+        &[Choice("make-nii")], "QSMART gives N4 the magnitude with a simplified, axis-aligned image header, which slightly changes N4's correction",
         "QSMART brainmask.m l. 8-11 (make_nii(mag1_sos, vox); save_nii; N4BiasFieldCorrection -i mag1_sos.nii)"),
     reference("qsmart.bet-f", &[inv(&[Choice("qsmart")])], "masking.bet.fractional_intensity",
-        &[Number(0.2)], "QSMART runs bet2 with -f 0.2", "QSMART brainmask.m l. 14"),
+        &[Number(0.2)], "QSMART runs brain extraction with a fractional threshold of 0.2", "QSMART brainmask.m l. 14"),
     // brainmask.m l. 24-33, after BET: the threshold on BET's brain image (v1.0's fixed 100,
     // adaptive_threshold 0), the majority filter, and a closing with strel('sphere', 2).
     // The threshold is a fixed intensity, so it only means what QSMART meant on the image QSMART
@@ -1494,13 +1484,13 @@ pub static RULES: &[Rule] = &[
         &[inv(&[Choice("qsmart")]), method("masking.inhomogeneity_correction", &[Choice("n4")]),
           method("masking.input", MAGNITUDE_INPUTS)],
         "masking.min_intensity",
-        &[Number(100.0)], "QSMART removes the BET mask's voxels whose N4-corrected magnitude is below 100",
+        &[Number(100.0)], "QSMART removes mask voxels whose bias-corrected magnitude is below 100",
         "QSMART brainmask.m l. 24-29; Demo_QSMART.m l. 35, 38"),
     reference("qsmart.mask-majority", &[inv(&[Choice("qsmart")])], "masking.majority", &[Bool(true)],
-        "QSMART smooths its mask with bwmorph3(mask, 'majority')", "QSMART brainmask.m l. 30"),
+        "QSMART smooths its mask with a 3×3×3 majority filter", "QSMART brainmask.m l. 30; bwmorph3(mask, 'majority')"),
     reference("qsmart.mask-close", &[inv(&[Choice("qsmart")])], "masking.close_radius", &[Number(2.0)],
-        "QSMART closes its mask with a sphere of radius 2 voxels (sph_radius1)",
-        "QSMART brainmask.m l. 31-33; Demo_QSMART.m l. 36"),
+        "QSMART closes its mask with a ball of radius 2 voxels",
+        "QSMART brainmask.m l. 31-33; Demo_QSMART.m l. 36; sph_radius1 = 2"),
     // One of QSMART's recommended group (`QSMART_EDGE_REASON`, decision 142): its authors give
     // the reason (Stated, decision 102), and QSM.rs's measurement agrees on the simulated head.
     recommend("qsmart.mask-no-erosion", &[inv(&[Choice("qsmart")])], "masking.erosion", &[Number(0.0)],
@@ -1533,9 +1523,7 @@ pub static RULES: &[Rule] = &[
         unit: Unit::None,
         strength: Strength::Required,
         basis: Basis::Measured,
-        reason: "The configured HD-BET step needs more than a 4 GiB WASM heap on this scan; \
-                 (128, 128, 64) sliding windows peak at about 1.6 GB and agree with the trained \
-                 patch at Dice ≈0.99",
+        reason: "The configured HD-BET step needs more than a 4 GiB WASM heap on this scan; 128×128×64 sliding windows peak at about 1.6 GB and agree with the trained patch size at Dice ≈0.99",
         source: "QSM.rs bet::hdbet, HdBetParams::low_memory and hd_bet_memory_bytes (#280)",
     },
     // ---------------------------------------------------------------- Segmentation
@@ -1632,22 +1620,22 @@ pub static RULES: &[Rule] = &[
     // but unwraps with ROMEO (`chi-sep.unwrap-romeo`), so this rule is not its pipeline's.
     reference("sti.unwrap-laplacian", &[inv(STI), unless_sep(CHI_SEP_TOOLBOX), NOT_UKB],
         "field_mapping.unwrapping_algorithm", LAPLACIAN,
-        "STI Suite's QSM_GUI unwraps each echo with MRPhaseUnwrap (Laplacian)",
+        "STI Suite unwraps each echo with its Laplacian unwrapping",
         "STI Suite 3.0 QSM_GUI, probed headless (recorded in QSM.rs laplacian.rs docs)"),
     reference("sti.laplacian-solver",
         &[inv(STI), method("field_mapping.unwrapping_algorithm", LAPLACIAN), NOT_UKB],
         "field_mapping.laplacian_solver", &[Choice("fft-12")],
-        "STI Suite's MRPhaseUnwrap is the FFT-based Laplacian solver, with 12 voxels of padding",
+        "STI Suite's Laplacian unwrapping is FFT-based, with 12 voxels of padding",
         "STI Suite 3.0 MRPhaseUnwrap, probed (recorded in QSM.rs LaplacianSolver::Fft docs)"),
     reference("sti.unwrap-unmasked",
         &[inv(STI), method("field_mapping.unwrapping_algorithm", LAPLACIAN), NOT_UKB],
         "field_mapping.laplacian_unmasked", &[Bool(true)],
-        "STI Suite's QSM_GUI gives MRPhaseUnwrap the raw wrapped phase, not the phase masked first",
+        "STI Suite's Laplacian unwrapping runs on the raw wrapped phase, not on phase masked first",
         "STI Suite 3.0 QSM_GUI, probed headless (recorded in QSM.rs laplacian.rs docs)"),
     reference("sti.no-phase-offset-removal",
         &[inv(STI), method("field_mapping.unwrapping_algorithm", LAPLACIAN), MULTI_ECHO, NOT_UKB],
         "field_mapping.phase_offset_removal", &[Bool(false)],
-        "STI Suite's QSM_GUI unwraps each echo's phase as it is given, with no phase-offset removal first",
+        "STI Suite unwraps each echo's phase as it is, with no phase-offset removal first",
         "STI Suite 3.0 QSM_GUI, probed headless (recorded in QSM.rs laplacian.rs docs)"),
     // One of QSMART's recommended group (`QSMART_EDGE_REASON`, decision 142), measured.
     measured_better("qsmart.unwrap-laplacian", &[inv(&[Choice("qsmart")])],
@@ -1657,7 +1645,7 @@ pub static RULES: &[Rule] = &[
     reference("qsmart.laplacian-solver",
         &[inv(&[Choice("qsmart")]), method("field_mapping.unwrapping_algorithm", LAPLACIAN)],
         "field_mapping.laplacian_solver", &[Choice("mirror")],
-        "QSMART's lapunwrap.m solves on the mirrored volume",
+        "QSMART's Laplacian unwrapping solves on a mirrored copy of the volume",
         "QSMART unwrap_phase.m l. 5-10, lapunwrap.m"),
     reference("qsmart.unwrap-unmasked",
         &[inv(&[Choice("qsmart")]), method("field_mapping.unwrapping_algorithm", LAPLACIAN)],
@@ -1677,11 +1665,11 @@ pub static RULES: &[Rule] = &[
     reference("qsmart.fit-threshold",
         &[inv(&[Choice("qsmart")]), method("field_mapping.b0_estimation", &[Choice("qsmart-echofit")])],
         "field_mapping.b0_estimation.qsmart_fit_threshold", &[Choice("absolute-40")],
-        "QSMART_toolbox_v1.0's demo cuts R_0 at a fixed echo-fit residual of 40 (adaptive_threshold 0)",
-        "QSMART Demo_QSMART.m l. 38, 46; echofit.m l. 96-101"),
+        "QSMART's example run marks voxels whose echo-fit residual is above 40 as unreliable",
+        "QSMART Demo_QSMART.m l. 38, 46; echofit.m l. 96-101; QSMART_toolbox_v1.0 demo, adaptive_threshold 0"),
     reference("sti.echo-combination", &[inv(STI), MULTI_ECHO, NOT_UKB],
         "field_mapping.b0_estimation", WEIGHTED_AVG,
-        "STI Suite's QSM_GUI sums the unwrapped echoes and divides by the summed echo times",
+        "STI Suite sums the unwrapped echoes and divides by the summed echo times",
         "STI Suite 3.0 QSM_GUI, probed headless (recorded in QSM.rs star.rs docs)"),
     // Scoped out of the χ-separation toolbox, which weights the echoes its own way
     // (`chi-sep.echo-weights`).
@@ -1696,10 +1684,7 @@ pub static RULES: &[Rule] = &[
         &[method("field_mapping.b0_estimation", WEIGHTED_AVG),
           method("field_mapping.unwrapping_algorithm", ROMEO_OR_LAPLACIAN), MULTI_ECHO],
         "field_mapping.phase_offset_removal", &[Bool(true)],
-        "The B0 calculation's authors state that phase offsets have to be removed before it; \
-         ROMEO removes them (MCPC-3D-S) whenever it computes B0 from multi-echo data. Laplacian \
-         unwrapping does not remove them: it takes out only their harmonic part, and the rest \
-         stays in the field map",
+        "The B0 fit's authors state that phase offsets must be removed first, and ROMEO removes them for multi-echo data. Laplacian unwrapping removes only part of them, and the rest stays in the field map",
         "MriResearchTools.jl romeofunctions.jl:3-7; ROMEO.jl caller.jl:80-91; QSM.rs \
          pipeline::field_mapping docs (Phase offsets and Laplacian unwrapping)"),
     Rule {
@@ -1727,12 +1712,7 @@ pub static RULES: &[Rule] = &[
     discourage("laplacian.non-eroding-bfr",
         &[bg(RIM_SENSITIVE_BFR), method("field_mapping.unwrapping_algorithm", LAPLACIAN), MULTI_ECHO],
         "field_mapping.phase_offset_removal", &[Bool(false)], Bool(true), Basis::Measured,
-        "Laplacian unwrapping without phase-offset removal leaves the non-harmonic part of each echo's \
-         phase offset in the field. PDF and LBV remove only a harmonic background, so they keep it: \
-         on QSM-CI's simulated head χ XSIM (RTS) was 0.14 (PDF) and 0.14 (LBV) without offset removal \
-         and 0.31 and 0.27 with it (ROMEO with it: 0.31 and 0.29), and across scanners (travelling \
-         heads, without it) regional χ agreed far less than with ROMEO: median |slope − 1| 40 % \
-         against 7 % (PDF) and 15 % against 8 % (LBV)",
+        "Laplacian unwrapping without phase-offset removal leaves part of each echo's offset in the field, which PDF and LBV keep. On the simulated head this more than halved the susceptibility map's similarity to the truth",
         "QSM.rs#439 (QSM-CI simulated head and harmonization travelling heads, v11); QSM.rs \
          pipeline::field_mapping docs (Phase offsets and Laplacian unwrapping)"),
     discourage("field-mapping.bipolar-needs-offset-removal",
@@ -1746,17 +1726,16 @@ pub static RULES: &[Rule] = &[
     // chosen and never preselected (2026-11-04).
     reference("complex-fit.unwrap-region-growing", &[method("field_mapping.b0_estimation", COMPLEX_FIT)],
         "field_mapping.unwrapping_algorithm", &[Choice("medi-region-growing")],
-        "MEDI's pipeline unwraps Fit_ppm_complex's field with its region-growing unwrapPhase \
-         on the root-sum-of-squares magnitude",
+        "MEDI's pipeline unwraps its complex echo fit's field with its region-growing unwrapping, guided by the combined magnitude",
         "MEDI toolbox 2024.11.26 README.m:80-95; functions/unwrapPhase.m, mexUnwrap.c (QSM.rs \
          unwrap::medi_region_growing docs)"),
     reference("medi.field-complex-fit", &[inv(&[Choice("medi")])],
         "field_mapping.b0_estimation", COMPLEX_FIT,
-        "MEDI's field map and its noise weight N_std come from Fit_ppm_complex",
-        "MEDI toolbox 2024.11.26 README.m:87,140; dataterm_mask.m:23-27"),
+        "MEDI's field map and its noise map both come from its complex echo fit",
+        "MEDI toolbox 2024.11.26 README.m:87,140; dataterm_mask.m:23-27; Fit_ppm_complex gives the field and N_std"),
     reference("pdf.field-complex-fit", &[bg(PDF)],
         "field_mapping.b0_estimation", COMPLEX_FIT,
-        "PDF is weighted by Fit_ppm_complex's noise map N_std",
+        "PDF weights the field by the noise map from MEDI's complex echo fit",
         "MEDI toolbox 2024.11.26 README.m:87,124; PDF.m:74-76"),
     reference("r2star-qsm.field-complex-fit", &[sep(&[Choice("r2star-qsm")])],
         "field_mapping.b0_estimation", COMPLEX_FIT,
@@ -1780,7 +1759,7 @@ pub static RULES: &[Rule] = &[
         "SNU-LIST/QSMnet save_input_data_for_QSMnet.m:22"),
     reference("autoqsm.echo-combination", &[inv(&[Choice("autoqsm")]), MULTI_ECHO],
         "field_mapping.b0_estimation", WEIGHTED_AVG,
-        "AutoQSM's input is ψ = Σφ/(γB0ΣTE)",
+        "AutoQSM's input is the summed phase over the summed echo times",
         "Wei et al. 2019 NeuroImage 201:116064 (AutoQSM), Methods"),
     reference("autoqsm.echo-weights", &[inv(&[Choice("autoqsm")]), MULTI_ECHO],
         "field_mapping.b0_estimation.weighting", &[Choice("tes")],
@@ -1792,7 +1771,7 @@ pub static RULES: &[Rule] = &[
         "χ-separation toolbox Chisep_script.m:113-123; Kim et al. 2025 (χ-sepnet) §2.1.1"),
     reference("chi-sep.echo-weights", &[sep(CHI_SEP_TOOLBOX), MULTI_ECHO],
         "field_mapping.b0_estimation.weighting", &[Choice("assumed-decay")],
-        "The toolbox weights the echoes by TE·exp(−TE/T2*) with T2* = 40 ms",
+        "The χ-separation toolbox weights the echoes by TE·exp(−TE/T2*) with T2* = 40 ms",
         "χ-separation toolbox Chisep_script.m:113-123"),
     reference("qsmnetme.echo-combination", &[inv(QSMNETME), MULTI_ECHO],
         "field_mapping.b0_estimation", WEIGHTED_AVG,
@@ -1811,10 +1790,10 @@ pub static RULES: &[Rule] = &[
         "QSM_AMP_PE README (Overview, step 4); qsm_multi_echo_combined.m L112-139"),
     reference("lsqr.bg-sharp", &[inv(&[Choice("lsqr")])], "bg_removal.algorithm",
         &[Choice("sharp")],
-        "The authors' LSQR/HEIDI pipeline inverts a SHARP local field",
+        "The HEIDI package inverts a local field from SHARP",
         "qsm_heidi makefile L16-23, def.sh (4592631)"),
     reference("rts.bg-vsharp", &[inv(&[Choice("rts")])], "bg_removal.algorithm", VSHARP,
-        "RTS's author's toolbox (QSM.jl) runs V-SHARP before it",
+        "RTS's author's toolbox, QSM.jl, runs V-SHARP before it",
         "QSM.jl README.md:49 (fde4b92)"),
     reference("xqsm.bg-resharp", &[inv(&[Choice("xqsm")])], "bg_removal.algorithm", &[Choice("resharp")],
         "xQSM's in-vivo pipeline removes the background with RESHARP",
@@ -1841,19 +1820,18 @@ pub static RULES: &[Rule] = &[
         "DECOMPOSE's pipeline removes the background with V-SHARP",
         "Chen et al. 2021 NeuroImage 242:118477 (DECOMPOSE), §3.6"),
     reference("sti.bg-vsharp", &[inv(STI), NOT_UKB], "bg_removal.algorithm", VSHARP,
-        "STI Suite's QSM_GUI feeds iLSQR and STAR-QSM the V-SHARP local field",
+        "STI Suite removes the background field with V-SHARP before its inversion",
         "STI Suite 3.0 QSM_GUI, probed headless (recorded in QSM.rs star.rs and ilsqr.rs docs)"),
     // STI Suite QSM_GUI runs PolishMask on V-SHARP's mask before either inversion (probed headless,
     // licensed MATLAB R2023b, 2026-11-11; QSM.rs pipeline::bg_removal::polish_mask). Not the
     // χ-separation toolbox, whose script calls V_SHARP itself.
     reference("sti.vsharp-polish-mask", &[inv(STI), bg(VSHARP), unless_sep(CHI_SEP_TOOLBOX), NOT_UKB],
         "bg_removal.polish_mask", &[Bool(true)],
-        "STI Suite's QSM_GUI polishes V-SHARP's mask (largest connected component, holes filled) \
-         and inverts the field inside it",
+        "STI Suite keeps the largest connected piece of V-SHARP's mask, with its holes filled, and inverts the field inside it",
         STI_GUI_MASK_SOURCE),
     reference("sti.vsharp-no-deconvolve", &[inv(STI), bg(VSHARP)], "bg_removal.vsharp.deconvolve",
         &[Bool(false)],
-        "STI Suite's V_SHARP does not deconvolve",
+        "STI Suite's V-SHARP does not deconvolve",
         "STI Suite 3.0 V_SHARP, probed (recorded in QSM.rs vsharp.rs docs)"),
     Rule {
         id: "sti.vsharp-radius",
@@ -1864,12 +1842,12 @@ pub static RULES: &[Rule] = &[
         unit: Unit::Mm,
         strength: Strength::Reference,
         basis: Basis::ReferenceChoice,
-        reason: "STI Suite's QSM_GUI runs V_SHARP with smvsize 12 mm (also V_SHARP's default)",
+        reason: "STI Suite runs V-SHARP with a 12 mm largest kernel",
         source: "STI Suite 3.0 QSM_GUI and V_SHARP, probed (recorded in QSM.rs vsharp.rs docs)",
     },
     reference("sti.vsharp-grid", &[inv(STI), bg(VSHARP)], "bg_removal.vsharp.grid",
         &[Choice("isotropic-1mm")],
-        "STI Suite's V_SHARP estimates the background on a 1 mm grid",
+        "STI Suite's V-SHARP estimates the background on a 1 mm grid",
         "STI Suite 3.0 V_SHARP (recorded in QSM.rs vsharp.rs docs)"),
     Rule {
         id: "sti.vsharp-min-radius",
@@ -1880,8 +1858,7 @@ pub static RULES: &[Rule] = &[
         unit: Unit::Mm,
         strength: Strength::Reference,
         basis: Basis::ReferenceChoice,
-        reason: "STI Suite's V_SHARP drops the voxels only its 1 mm ball fits, so its radii in \
-                 effect run down to 2 mm",
+        reason: "STI Suite's V-SHARP leaves out the voxels that only its 1 mm kernel fits, so its kernels in effect run down to 2 mm",
         source: "STI Suite 3.0 V_SHARP, probed (QSM.rs VsharpParams, #293)",
     },
     Rule {
@@ -1893,7 +1870,7 @@ pub static RULES: &[Rule] = &[
         unit: Unit::Mm,
         strength: Strength::Reference,
         basis: Basis::ReferenceChoice,
-        reason: "STI Suite's V_SHARP steps its kernel radius by 1 mm",
+        reason: "STI Suite's V-SHARP steps its kernel radius by 1 mm",
         source: "STI Suite 3.0 V_SHARP, probed (QSM.rs VsharpParams, #293)",
     },
     // STI Suite's pipeline is its QSM_GUI's (decided 2026-11-10), not STI_Templates.m's: 40
@@ -1908,7 +1885,7 @@ pub static RULES: &[Rule] = &[
         unit: Unit::None,
         strength: Strength::Reference,
         basis: Basis::ReferenceChoice,
-        reason: "STI Suite's QSM_GUI calls QSM_iLSQR with niter 40",
+        reason: "STI Suite's GUI runs iLSQR for 40 iterations",
         source: "STI Suite 3.0 QSM_GUI, probed headless (QSM.rs ilsqr.rs docs, Reference pipeline; STI_GUI_NITER)",
     },
     Rule {
@@ -1920,7 +1897,7 @@ pub static RULES: &[Rule] = &[
         unit: Unit::None,
         strength: Strength::Reference,
         basis: Basis::ReferenceChoice,
-        reason: "The χ-separation toolbox calls QSM_iLSQR without niter, so it runs 100 iterations",
+        reason: "The χ-separation toolbox runs iLSQR for its default 100 iterations",
         source: "χ-separation toolbox v1.1.3 Chisep_script.m:145; STI Suite 3.0 QSM_iLSQR default, probed (bitwise equal to niter 100)",
     },
     // Single precision is STI Suite's own arithmetic, so it is part of STI Suite's pipeline and of
@@ -1928,7 +1905,7 @@ pub static RULES: &[Rule] = &[
     // calls QSM_iLSQR, but its pipeline keeps QSM.rs's double precision (decided 2026-11-10).
     reference("sti.ilsqr-single", &[inv(&[Choice("ilsqr")]), unless_sep(CHI_SEP_TOOLBOX)],
         "inversion.ilsqr.precision", &[Choice("single")],
-        "STI Suite's QSM_iLSQR runs both LSQR solves in single precision",
+        "STI Suite's iLSQR runs its least-squares solves in single precision",
         "STI Suite 3.0 QSM_iLSQR, probed (QSM.rs ilsqr.rs docs, Performance and precision)"),
     Rule {
         id: "sti.ilsqr-pad",
@@ -1939,7 +1916,7 @@ pub static RULES: &[Rule] = &[
         unit: Unit::Mm,
         strength: Strength::Reference,
         basis: Basis::ReferenceChoice,
-        reason: "STI Suite's QSM_GUI calls QSM_iLSQR with padsize [12 12 12]",
+        reason: "STI Suite's GUI pads iLSQR's grid by 12 mm per side",
         source: "STI Suite 3.0 QSM_GUI, probed headless (QSM.rs IlsqrParams::pad_mm, #293)",
     },
     // ---------------------------------------------------------------- UK Biobank
@@ -1957,9 +1934,7 @@ pub static RULES: &[Rule] = &[
     // (reference_pipelines.rs, decision 202). No rule names its coil combination (MCPC-3D-S),
     // which is upstream of a coil-combined phase.
     measured_better("ukb.mask-hd-bet", &[UKB], "masking.generator", &[Choice("hd-bet")],
-        "UK Biobank masks with its T1 structural brain mask registered to the SWI, which an SWI run does \
-         not have; on UK Biobank data, HD-BET on the magnitude came closest to it of the masks from the \
-         SWI alone (about 3.4 mm higher at the brain's inferior edge, otherwise close)",
+        "UK Biobank's own mask comes from its T1 scan, which an SWI run does not have; HD-BET on the magnitude came closest to it of the masks the SWI alone can give",
         "QSM.rs pipeline::reference_pipelines docs (UK Biobank, decision 202): SWI-only masks compared with \
          UK Biobank's registered T1 mask"),
     // The window mode the comparison above measured. HD-BET on the whole volume gave a mask
@@ -1968,31 +1943,28 @@ pub static RULES: &[Rule] = &[
     // HD-BET elsewhere may run on the whole volume.
     measured_better("ukb.mask-hd-bet-window", &[UKB, method("masking.generator", &[Choice("hd-bet")])],
         "masking.hd_bet.inference", &[Choice("sliding-window")],
-        "HD-BET runs in 192×192×96 sliding windows, as in the comparison behind the HD-BET mask; on \
-         the whole volume its mask was 0.5-1 % smaller at the brain's inferior edge",
+        "HD-BET runs in 192×192×96 sliding windows, as in the comparison that chose it; on the whole volume its mask was slightly smaller at the brain's inferior edge",
         "QSM.rs pipeline::reference_pipelines docs (UK Biobank, decision 202); UK Biobank QSMxT v9 study"),
     reference("ukb.inversion-ilsqr", &[UKB], "inversion.algorithm", &[Choice("ilsqr")],
-        "UK Biobank inverts its trimmed local field with STI Suite's QSM_iLSQR", UKB_SOURCE),
+        "UK Biobank inverts its trimmed local field with STI Suite's iLSQR", UKB_SOURCE),
     reference("ukb.unwrap-laplacian", &[UKB], "field_mapping.unwrapping_algorithm", LAPLACIAN,
-        "UK Biobank unwraps each echo with STI Suite's MRPhaseUnwrap (Laplacian)", UKB_SOURCE),
+        "UK Biobank unwraps each echo with STI Suite's Laplacian unwrapping", UKB_SOURCE),
     reference("ukb.laplacian-solver", &[UKB, method("field_mapping.unwrapping_algorithm", LAPLACIAN)],
         "field_mapping.laplacian_solver", &[Choice("fft-64")],
-        "UK Biobank calls MRPhaseUnwrap with padsize [64 64 64]: the FFT Schofield-Zhu solver with 64 voxels of padding",
+        "UK Biobank's Laplacian unwrapping is FFT-based, with 64 voxels of padding",
         UKB_SOURCE),
     reference("ukb.unwrap-masked", &[UKB, method("field_mapping.unwrapping_algorithm", LAPLACIAN)],
         "field_mapping.laplacian_unmasked", &[Bool(false)],
-        "UK Biobank unwraps the phase zeroed outside its (untrimmed) brain mask, mask .* angle(combined)",
+        "UK Biobank unwraps the phase after setting it to zero outside its untrimmed brain mask",
         UKB_SOURCE),
     reference("ukb.no-phase-offset-removal",
         &[UKB, method("field_mapping.unwrapping_algorithm", LAPLACIAN), MULTI_ECHO],
         "field_mapping.phase_offset_removal", &[Bool(false)],
-        "UK Biobank removes the phase offsets when it combines the coils (MCPC-3D-S) and unwraps the \
-         combined echoes with no further offset removal",
+        "UK Biobank removes phase offsets when it combines the coils, and unwraps the combined echoes with no further offset removal",
         UKB_SOURCE),
     reference("ukb.laplacian-keep-outside", &[UKB, method("field_mapping.unwrapping_algorithm", LAPLACIAN)],
         "field_mapping.laplacian_keep_outside", &[Bool(true)],
-        "UK Biobank hands V_SHARP its combined unwrapped phase over the whole volume, which V_SHARP reads \
-         outside the mask it is given",
+        "UK Biobank gives V-SHARP the unwrapped field over the whole volume, and V-SHARP reads it outside the mask",
         UKB_SOURCE),
     reference("ukb.echo-combination", &[UKB, MULTI_ECHO], "field_mapping.b0_estimation", WEIGHTED_AVG,
         "UK Biobank averages the unwrapped echoes with weights and divides by the same weighted mean echo time",
@@ -2001,7 +1973,7 @@ pub static RULES: &[Rule] = &[
         &[Choice("assumed-decay")],
         "UK Biobank weights the echoes by TE·exp(−TE/T2*) with T2* = 40 ms", UKB_SOURCE),
     reference("ukb.bg-vsharp", &[UKB], "bg_removal.algorithm", VSHARP,
-        "UK Biobank removes the background with STI Suite's V_SHARP (smvsize 12)", UKB_SOURCE),
+        "UK Biobank removes the background with STI Suite's V-SHARP, largest kernel 12 mm", UKB_SOURCE),
     Rule {
         id: "ukb.ilsqr-iterations",
         when: &[UKB, inv(&[Choice("ilsqr")])],
@@ -2011,7 +1983,7 @@ pub static RULES: &[Rule] = &[
         unit: Unit::None,
         strength: Strength::Reference,
         basis: Basis::ReferenceChoice,
-        reason: "UK Biobank calls QSM_iLSQR without niter, so it runs 100 iterations",
+        reason: "UK Biobank runs iLSQR for its default 100 iterations",
         source: UKB_SOURCE,
     },
     Rule {
@@ -2023,11 +1995,11 @@ pub static RULES: &[Rule] = &[
         unit: Unit::Mm,
         strength: Strength::Reference,
         basis: Basis::ReferenceChoice,
-        reason: "UK Biobank calls QSM_iLSQR with padsize [64 64 64]",
+        reason: "UK Biobank pads iLSQR's grid by 64 mm per side",
         source: UKB_SOURCE,
     },
     reference("ukb.reference-none", &[UKB], "reference", &[Choice("none")],
-        "UK Biobank keeps QSM_iLSQR's χ as it is, without referencing it", UKB_SOURCE),
+        "UK Biobank keeps iLSQR's susceptibility as it is, without referencing it", UKB_SOURCE),
     reference("resharp.radius", &[bg(&[Choice("resharp")])], "bg_removal.resharp.radius",
         &[Number(3.0)],
         "RESHARP's author's code defaults to a 3 mm kernel",
@@ -2053,29 +2025,22 @@ pub static RULES: &[Rule] = &[
         unit: Unit::None,
         strength: Strength::Recommended,
         basis: Basis::Measured,
-        reason: "A tuning value: PDF.m's 30 CG iterations can stop far from convergence. At 300, \
-                 a Philips 3 T scan's local field correlated 0.83 with V-SHARP's, against 0.54 \
-                 at 30 (a GE scan: 0.84 against 0.85), and Philips scans lost a residual \
-                 background that Siemens and GE scans did not have (so scanners can agree less \
-                 at 300 than at 30, where they share it). On QSM-CI's simulated head the local \
-                 field's NRMSE fell from 101 % to 84 % (58 % with a tolerance of 1e-5 as well). \
-                 Costs about 30 s more per 1 mm whole-brain scan",
+        reason: "A tuning value: PDF's default 30 iterations can stop far from convergence. At 300, local fields agreed better with V-SHARP's on Philips scans and the simulated head's error fell from 101 % to 84 %",
         source: "QSM.rs PdfParams::n_cg docs (travelling-head scans and the simulated head, \
                  2026-11-09); PDF.m default n_CG 30, MEDI toolbox 2024.11.26",
     },
     // A settings file from before the multigrid port can hold the SOR solver's 1e-6, a relative
     // tolerance; the setting is kept as given and this suggests LBV.m's own (QSM.rs#406).
     reference("lbv.tolerance", &[bg(LBV)], "bg_removal.lbv.tol", &[Number(0.01)],
-        "LBV.m stops its coarsest grid's relaxation when the summed absolute update falls to 0.01 \
-         (radians over the echo spacing)",
+        "LBV's original code stops refining when the summed update falls to 0.01",
         "MEDI toolbox 2024.11.26 functions/_LBV/LBV.m:29-31; QSM.rs LbvParams::tol"),
     reference("ismv-qsmjl.tolerance", &[method("bg_removal.ismv.variant", &[Choice("qsmjl")])],
         "bg_removal.ismv.tol", &[Number(1e-3)],
-        "QSM.jl's ismv stops when the residual falls to 1e-3 of the first",
+        "QSM.jl's iSMV stops when the residual falls to 1e-3 of the first",
         "QSM.jl src/bgremove/ismv.jl:39 (fde4b92); QSM.rs IsmvParams::qsmjl"),
     reference("ismv-qsmjl.max-iterations", &[method("bg_removal.ismv.variant", &[Choice("qsmjl")])],
         "bg_removal.ismv.max_iter", &[Number(500.0)],
-        "QSM.jl's ismv stops after at most 500 iterations",
+        "QSM.jl's iSMV stops after at most 500 iterations",
         "QSM.jl src/bgremove/ismv.jl:40 (fde4b92); QSM.rs IsmvParams::qsmjl"),
     // ---------------------------------------------------------------- Dipole inversion
     Rule {
@@ -2088,7 +2053,7 @@ pub static RULES: &[Rule] = &[
         unit: Unit::Voxels,
         strength: Strength::Reference,
         basis: Basis::ReferenceChoice,
-        reason: "STI Suite 3.0's QSM_GUI passes padsize [8 8 20] to QSM_star on every grid",
+        reason: "STI Suite's GUI pads STAR-QSM's grid by 8, 8 and 20 voxels",
         source: "STI Suite 3.0 QSM_GUI (probed headless, recorded in QSM.rs StarParams::pad, #283)",
     },
     reference("qsmart.inner-inversion", &[inv(&[Choice("qsmart")])], "inversion.qsmart.inversion",
@@ -2104,7 +2069,7 @@ pub static RULES: &[Rule] = &[
         unit: Unit::None,
         strength: Strength::Reference,
         basis: Basis::ReferenceChoice,
-        reason: "QSMART calls QSM_iLSQR with 'niter', 50",
+        reason: "QSMART runs iLSQR for 50 iterations",
         source: "QSMART QSMART.m l. 32-33; Yaghmaie et al. 2021 §3.4",
     },
     Rule {
@@ -2116,30 +2081,24 @@ pub static RULES: &[Rule] = &[
         unit: Unit::Mm,
         strength: Strength::Reference,
         basis: Basis::ReferenceChoice,
-        reason: "QSMART calls QSM_iLSQR without 'padsize', so STI Suite's default padding applies",
+        reason: "QSMART uses iLSQR's default padding",
         source: "QSMART QSMART.m l. 32; STI Suite QSM_iLSQR default, probed (QSM.rs ilsqr.rs docs)",
     },
     reference("qsmart.ilsqr-single",
         &[inv(&[Choice("qsmart")]), method("inversion.qsmart.inversion", &[Choice("ilsqr")])],
         "inversion.ilsqr.precision", &[Choice("single")],
-        "QSMART's two stages call STI Suite's QSM_iLSQR, which runs both LSQR solves in single precision",
+        "QSMART's iLSQR, STI Suite's, runs its least-squares solves in single precision",
         "QSMART QSMART.m l. 32-39; STI Suite QSM_iLSQR, probed (QSM.rs ilsqr.rs docs, Performance and precision)"),
     reference("qsmart.offset-grid", &[inv(&[Choice("qsmart")])], "inversion.qsmart.offset_grid",
         &[Choice("qsmart-reference")],
-        "QSMART's adjust_offset.m builds its dipole kernel on its own grid (-N/2:N/2-1), half a \
-         step off the FFT grid on odd matrix sizes",
+        "QSMART's final offset adjustment builds its dipole kernel half a step off the FFT grid on odd matrix sizes",
         "QSMART adjust_offset.m; QSM.rs QsmartOffsetGrid::QsmartReference docs (#386)"),
     // Decision 173 (2026-11-16): Suggested, not Recommended, because the in-vivo agreement was
     // mixed and the simulation's deep-GM NRMSE rose. Fires whenever QSMART is the inversion, so
     // after the QSMART pipeline too, which keeps v1.0's c (see `utils::vasculature`).
     suggest("qsmart.frangi-c-relative", &[inv(&[Choice("qsmart")])],
         "inversion.qsmart.frangi_c_mode", &[Choice("relative")],
-        "QSMART's Frangi c (500) is in magnitude units, and scanners scale magnitude very \
-         differently: with it, 27-63 % of the brain was labelled vessel on Siemens, Philips, 7 T and \
-         simulated data (3-5 % on GE). A c relative to the magnitude's brain median gave 2-9 % on \
-         all of them, and on QSM-CI's simulated head raised XSIM from 0.15 to 0.21-0.22 (NRMSE \
-         92 -> 88 %), though deep-GM NRMSE rose from 99 to 113 %. Across scanners, deep-GM χ \
-         agreed better on GE, the same on Siemens Skyra and slightly worse on Siemens Prisma",
+        "QSMART's vessel-detection constant is in magnitude units, and scanners scale magnitude very differently, so it labelled 27-63 % of the brain as vessel on most scanners. A constant relative to the brain's median magnitude labelled 2-9 % on all of them",
         "QSM.rs utils::vasculature FrangiC docs (QSMART v1.0 code and QSMxT on six datasets, \
          travelling heads s003001/s004001 and the simulated head, 2026-11-12/16)"),
     // ---------------------------------------------------------------- MEDI (#288)
@@ -2159,17 +2118,14 @@ pub static RULES: &[Rule] = &[
         unit: Unit::None,
         strength: Strength::Required,
         basis: Basis::Implementation,
-        reason: "MEDI-mSMV's vessel mask needs R2* from arlo.m, which needs at least three echoes; \
-                 the pipeline refuses fewer",
+        reason: "MEDI-mSMV's vessel mask needs an R2* map, which needs at least three echoes",
         source: "MEDI toolbox arlo.m:22-26; QSM.rs MediParams::msmv docs (#285)",
     },
     one_of("medi-msmv.bg-removal",
         &[inv(&[Choice("medi")]), method("inversion.medi.msmv", &[Bool(true)])],
         "bg_removal.algorithm", &[Choice("pdf"), Choice("vsharp"), Choice("lbv")],
         Strength::Reference, Basis::ReferenceChoice,
-        "The mSMV authors run it on a local field from PDF, V-SHARP or LBV (their README's \
-         example uses PDF; it lists these as examples, \"by PDF, VSHARP, LBV, etc.\", without \
-         recommending one)",
+        "The mSMV authors run it on a local field from PDF, V-SHARP or LBV, without recommending one",
         "agr78/mSMV README (in_file; MEDI example: PDF(...,0,100)); Roberts et al. 2024 MRM, Methods"),
     discourage("medi-msmv.prefilter",
         &[inv(&[Choice("medi")]), method("inversion.medi.msmv", &[Bool(true)])],
@@ -2180,19 +2136,13 @@ pub static RULES: &[Rule] = &[
     // ---------------------------------------------------------------- Boundary rim and in-vivo weights (v11, #437, #438)
     measured_better("iharperella.whole-rim", &[bg(&[Choice("iharperella")])],
         "bg_removal.iharperella.rim", &[Choice("whole")],
-        "On a field map the brain's boundary rim holds the step at the mask edge; zeroing the whole \
-         rim rather than STI's 20 % largest values made iHARPERELLA more reproducible across \
-         scanners (travelling heads, inter-scanner median |slope - 1| 7.1 vs 3.8 %) and better on \
-         the simulated head from a ROMEO field (XSIM 0.295 vs 0.244)",
+        "Zeroing the whole boundary rim, rather than STI Suite's largest 20 %, made iHARPERELLA more reproducible across scanners and better on the simulated head",
         "QSM.rs bgremove::harperella HarperellaRim docs (#438)"),
     // Not preselected (decision 201, 2026-11-20): HARPERELLA is a published method, and the gain
     // comes from one campaign. No toolbox pipeline runs HARPERELLA, so none is exempted.
     suggest("harperella.bg-iharperella", &[bg(&[Choice("harperella")])],
         "bg_removal.algorithm", &[Choice("iharperella")],
-        "iHARPERELLA (with the whole rim, as recommended for it) made scans of the same heads on \
-         different scanners agree better than HARPERELLA: travelling heads, 102 scans, \
-         inter-scanner median |slope - 1| 8.2 vs 4.9 % from a ROMEO field and 7.1 vs 5.1 % from a \
-         Laplacian field",
+        "iHARPERELLA with the whole rim made scans of the same heads on different scanners agree better than HARPERELLA",
         "QSM.rs bgremove::harperella docs (EMTP travelling heads, 2026-11-20)"),
     // NDI with auto-stop runs as FANSI's `ndi_auto.m`, whose own defaults differ from `ndi.m`'s
     // (decision 203): step 1 and alpha 1e-6 for stability, and 500 iterations as a cap the
@@ -2206,10 +2156,7 @@ pub static RULES: &[Rule] = &[
         "inversion.ndi.max_iter", &[Number(500.0)], NDI_AUTO_REASON, NDI_AUTO_SOURCE),
     suggest("ndi.weight-norm-in-vivo", &[inv(&[Choice("ndi")])],
         "inversion.ndi.weight_norm", &[Choice("mask-p999")],
-        "In vivo the magnitude's maximum is often outside the brain (2.3-5x the brain's 99.9th \
-         percentile), so FANSI's max-normalised weight, and NDI's scale, vary from scan to scan; \
-         normalising by the in-mask 99.9th percentile gave scales 1.04-1.07 against iLSQR (0.43-0.91). \
-         Slightly worse on the simulated head (NRMSE 53.9 vs 52.0 %), whose maximum is in the brain",
+        "In vivo the magnitude's maximum is often outside the brain, so NDI's scale varies from scan to scan. Normalising by the brain's 99.9th percentile made it consistent",
         "QSM.rs inversion::ndi NdiWeightNorm docs (#437)"),
     // WH-QSM's data weight inside the mask only (decision 120, 2026-11-12): Recommended and
     // preselected for all data, while the authors' whole-volume `Flat` stays QSM.rs's default and
@@ -2225,11 +2172,7 @@ pub static RULES: &[Rule] = &[
     measured_better("whqsm.flat-in-mask",
         &[inv(&[Choice("whqsm")]), method("inversion.whqsm.weight", &[Choice("flat")])],
         "inversion.whqsm.weight", &[Choice("flat-in-mask")],
-        "Weighting the data inside the brain only removes smooth shading that the flat weight's \
-         data outside the brain adds. It did better after every background removal on the \
-         simulated head (XSIM 0.535 vs 0.442 after PDF) and was more consistent across scanners \
-         (6.8 vs 8.6 % on travelling heads). The authors' flat weight did better only when given \
-         the true local field",
+        "Weighting the data inside the brain only removes smooth shading that data outside the brain adds. It did better after every background removal on the simulated head and was more consistent across scanners",
         "QSM.rs inversion::whqsm WhQsmWeight::FlatInMask docs (#437); decision 120"),
     // ---------------------------------------------------------------- Echo time of the ppm↔rad conversion (#276)
     // With one echo every choice is the same time, so these need several.
@@ -2262,16 +2205,16 @@ pub static RULES: &[Rule] = &[
          (XSIM 0.676 vs 0.638); FANSI's script converts at a TE difference with a magnitude-derived weight",
         "QSM.rs WhQsmParams::te docs (#276, #418); FANSI-toolbox script_DICOM_Philips.m L364, L436"),
     reference("star.te-sum", &[inv(&[Choice("star")]), MULTI_ECHO], "inversion.star.te", &[Choice("sum")],
-        "STI Suite's QSM_GUI gives QSM_star the summed phase with TE = ΣTE",
-        "STI Suite 3.0 QSM_GUI, probed (recorded in QSM.rs StarParams::te, #276)"),
+        "STI Suite gives STAR-QSM the summed phase of all echoes, converted at the summed echo time",
+        "STI Suite 3.0 QSM_GUI, probed (recorded in QSM.rs StarParams::te, #276); QSM_star(TissuePhase, NewMask, 'TE', sum_TE)"),
     reference("medi.te-spacing", &[inv(&[Choice("medi")]), MULTI_ECHO], "inversion.medi.te", &[Choice("spacing")],
-        "MEDI_L1 converts with delta_TE = TE(2) − TE(1)",
+        "MEDI converts the field to phase at the echo spacing",
         "MEDI toolbox 2024.11.26 MEDI_L1.m:202; Read_DICOM.m:166-168"),
     reference("tfi.te-spacing", &[inv(&[Choice("tfi")]), MULTI_ECHO], "inversion.tfi.te", &[Choice("spacing")],
-        "TFI runs through MEDI_L1, which converts with delta_TE",
+        "TFI converts the field to phase at the echo spacing, as MEDI does",
         "MEDI toolbox 2024.11.26 MEDI_L1.m:202 (QSM.rs TfiParams::te, #276)"),
     reference("heidi.te-last", &[HEIDI_ON, MULTI_ECHO], "inversion.heidi.te", &[Choice("last")],
-        "The authors' HEIDI pipeline converts at the last echo time",
+        "The HEIDI package converts the field at the last echo time",
         "qsm_heidi phase2susceptibilityfactor.m L70-71 (QSM.rs HeidiParams::te, #276)"),
     // ---------------------------------------------------------------- HEIDI after the inversion
     Rule {
@@ -2302,15 +2245,12 @@ pub static RULES: &[Rule] = &[
         unit: Unit::None,
         strength: Strength::Reference,
         basis: Basis::ReferenceChoice,
-        reason: "The HEIDI package first inverts the local field with LSQR, a least-squares fit with almost \
-                 no regularisation, and fills its ill-conditioned cone with HEIDI. Other methods with \
-                 little or no smoothing work as well as this first step",
+        reason: "The HEIDI package first inverts the local field with LSQR, a least-squares fit with almost no regularisation, which keeps the measured data that HEIDI builds on",
         source: "Schweser et al. 2012 NeuroImage 62:2083 (HEIDI); qsm_heidi makefile, inversion_lsqr.m then inversion_heidi.m (4592631); QSM.rs heidi.rs docs (Any seed: measured on QSM-CI's simulated head and in vivo, 2026-11-11)",
     },
     reference("heidi.denoise-itk-float", &[HEIDI_ON, inv(&[Choice("lsqr")])], "inversion.heidi.denoise_itk",
         &[Bool(true)],
-        "The HEIDI package denoises the field with ITK's GradientAnisotropicDiffusion executable, \
-         which works in float",
+        "The HEIDI package smooths the field with ITK's anisotropic diffusion filter, which computes in single precision",
         "qsm_heidi computesusceptibility_heidi.m L1439, diffusionimagefilter.m L129-134 (4592631); QSM.rs heidi.rs docs (AnisotropicDiffusionParams::reference_itk)"),
     // Not preselected (decided 2026-11-11): the reason is the HEIDI author's, but the measurements
     // (HEIDI module docs, *Any seed*) show no clear loss from keeping a regularised seed under
@@ -2326,9 +2266,7 @@ pub static RULES: &[Rule] = &[
         unit: Unit::None,
         strength: Strength::Suggested,
         basis: Basis::Stated,
-        reason: "This method smooths its result, which also changes the parts of the data that \
-                 HEIDI keeps as they are; HEIDI cannot undo that. HEIDI's author recommends a \
-                 method with little or no smoothing, such as LSQR or TKD",
+        reason: "This method smooths its result, which changes the data HEIDI keeps as they are, and HEIDI cannot undo that. HEIDI's author recommends a method with little or no smoothing, such as LSQR or TKD",
         source: "HEIDI's author (personal communication, 2026-11-11); Schweser et al. 2012 NeuroImage 62:2083 (HEIDI); QSM.rs heidi.rs docs (Any seed: measured on QSM-CI's simulated head and in vivo, 2026-11-11)",
     },
     heidi_truncation("heidi.tkd-cone", &[HEIDI_ON, inv(&[Choice("tkd")]), HEIDI_DEFAULT_CONE],
@@ -2338,11 +2276,11 @@ pub static RULES: &[Rule] = &[
     // ---------------------------------------------------------------- χ-separation inputs
     reference("chi-sep-ilsqr.qsm-ilsqr", &[sep(&[Choice("chi-sep-ilsqr")])], "inversion.algorithm",
         &[Choice("ilsqr")],
-        "The χ-separation toolbox feeds it STI Suite iLSQR QSM",
+        "The χ-separation toolbox starts the separation from STI Suite's iLSQR susceptibility map",
         "χ-separation toolbox v1.1.3 Chisep_script.m:145,170"),
     reference("chi-sep-medi.qsm-ilsqr", &[sep(&[Choice("chi-sep-medi")])], "inversion.algorithm",
         &[Choice("ilsqr")],
-        "The χ-separation toolbox initialises χ-separation-MEDI from STI Suite iLSQR QSM",
+        "The χ-separation toolbox starts χ-separation-MEDI from STI Suite's iLSQR susceptibility map",
         "χ-separation toolbox v1.1.3 Chisep_script.m:145,158"),
     // Chisep_script.m:87-93 picks r2star_arlo when use_arlo(TE) and r2star_nnls otherwise, and
     // documents TE as a row vector (l. 64). use_arlo is true only for a column vector of three or
@@ -2352,8 +2290,7 @@ pub static RULES: &[Rule] = &[
     // separation::chi_sep_medi docs, *Reference pipeline*.
     reference("chi-sep-medi.csf-r2star-nnls", &[sep(&[Choice("chi-sep-medi")])],
         "separation.chi_sep_medi.csf_r2star", &[Choice("nnls")],
-        "The χ-separation toolbox's script finds its CSF mask from an R2* fitted by NNLS; with the \
-         echo times written as the script documents them, it never uses ARLO",
+        "The χ-separation toolbox finds its CSF mask from an R2* map fitted by non-negative least squares",
         "χ-separation toolbox v1.1.3 Chisep_script.m:64,87-93,96; use_arlo.p probed 2026-11-10 in \
          MATLAB R2023b Update 5 (true only for a column of ≥ 3 equally spaced echo times); QSM.rs \
          separation::chi_sep_medi docs"),
@@ -2374,8 +2311,7 @@ pub static RULES: &[Rule] = &[
         unit: Unit::Voxels,
         strength: Strength::Reference,
         basis: Basis::ReferenceChoice,
-        reason: "DECOMPOSE's paper reconstructs each echo with STI Suite's functions and gives no \
-                 parameters, so STAR-QSM runs as the function does by default, without padding",
+        reason: "DECOMPOSE's paper gives no settings for STAR-QSM, so it runs with STAR-QSM's own default of no padding",
         source: "Chen et al. 2021 NeuroImage 242:118477 (DECOMPOSE), §3.6; STI Suite 3.0 QSM_star's \
                  own default, probed (QSM.rs StarParams::pad, QSM_STAR_DEFAULT_PAD); Ashley \
                  2026-11-10 (decision 56)",
@@ -2387,19 +2323,14 @@ pub static RULES: &[Rule] = &[
     measured_better("decompose.unwrap-7t",
         &[sep(&[Choice("decompose")]), fact_at_least(Fact::FieldStrength, DECOMPOSE_UNWRAP_FROM_T)],
         "separation.decompose.unwrap_phase", &[Bool(true)],
-        "DECOMPOSE was designed for 3 T (its χ bound keeps the phase under 2π at TE 25 ms and \
-         3 T); at 7 T the phase wraps between echoes and χ+ partly collapses unless the phase is \
-         unwrapped along the echoes (with decompose.chi-bound-7t's bound)",
+        "DECOMPOSE was designed for 3 T; at 7 T the phase wraps between echoes and the paramagnetic map partly collapses unless the phase is unwrapped along the echoes",
         "Chen et al. 2021 NeuroImage 242:118477 (DECOMPOSE), §2.2; measured on the QSM-CI 7 T \
          chisep phantom, χ+ r 0.48 off, 0.66 on, 0.90 on with the echo-spacing χ bound (QSM.rs \
          separation::decompose docs, At 7 T)"),
     measured_better("decompose.chi-bound-7t",
         &[sep(&[Choice("decompose")]), fact_at_least(Fact::FieldStrength, DECOMPOSE_UNWRAP_FROM_T)],
         "separation.decompose.chi_bound", &[Choice("echo-spacing")],
-        "A tuning value: bound the χ search at π / ((2/3)·γ·B0·ΔTE_max), computed from the scan \
-         (0.31 ppm at 7 T with 8 ms spacing), the largest |χ| whose phase step between echoes \
-         stays under π so that unwrapping along the echoes is unambiguous; the authors' 0.5 ppm \
-         was set for TE 25 ms at 3 T",
+        "A tuning value: limit the susceptibility search to the largest value whose phase step between echoes stays under π (0.31 ppm at 7 T with 8 ms spacing). The authors' 0.5 ppm was set for 3 T",
         "Chen et al. 2021 NeuroImage 242:118477 (DECOMPOSE), §2.2; measured on the QSM-CI 7 T \
          chisep phantom, χ− r 0.75 → 0.85 with this bound alone, χ+ r 0.66 → 0.90 with \
          unwrapping (QSM.rs separation::decompose docs, At 7 T)"),
@@ -2417,11 +2348,10 @@ pub static RULES: &[Rule] = &[
     // ---------------------------------------------------------------- Referencing
     // Toolboxes whose pipeline ends at the inversion's own output: nothing is subtracted after it.
     reference("medi.reference-none", &[inv(&[Choice("medi")])], "reference", &[Choice("none")],
-        "MEDI's pipeline references χ to the ventricular CSF inside MEDI_L1 (with three or more \
-         echoes), and not after it",
+        "MEDI references susceptibility to the ventricular CSF inside its inversion (with three or more echoes), and the pipeline does nothing after it",
         "MEDI toolbox 2024.11.26 MEDI_L1.m:204-207; arlo.m:22-26 (QSM.rs inversion::medi docs, MEDI+0)"),
     reference("qsmart.reference-none", &[inv(&[Choice("qsmart")])], "reference", &[Choice("none")],
-        "QSMART's result is adjust_offset's combined χ, which nothing references afterwards",
+        "QSMART's result is its combined susceptibility map, which nothing references afterwards",
         "QSMART QSMART.m l. 43-45; adjust_offset.m"),
     // STI Suite QSM_GUI keeps QSM_iLSQR's and QSM_star's output as they return it (the GUI's
     // stored χ equals the function's output exactly; probed 2026-11-11). Not DECOMPOSE, which
@@ -2429,10 +2359,10 @@ pub static RULES: &[Rule] = &[
     // χ-separation toolbox, whose script is its own pipeline (chi-sep.reference-none).
     reference("sti.reference-none", &[inv(STI), unless_sep(STI_NOT_REFERENCE_NONE), NOT_UKB], "reference",
         &[Choice("none")],
-        "STI Suite's QSM_GUI keeps the inversion's χ as it is, without referencing it",
+        "STI Suite keeps the inversion's susceptibility as it is, without referencing it",
         STI_GUI_MASK_SOURCE),
     reference("heidi.reference-none", &[HEIDI_ON, inv(&[Choice("lsqr")])], "reference", &[Choice("none")],
-        "The authors' LSQR/HEIDI pipeline saves HEIDI's χ in ppm without referencing it",
+        "The HEIDI package saves its susceptibility map without referencing it",
         "qsm_heidi inversion_heidi.m L55-65 (4592631)"),
     // The χ-separation toolbox's script reconstructs its QSM with STI Suite's QSM_iLSQR and hands
     // it straight to chi_sep_iLSQR / chi_sep_MEDI as option_data.qsm: nothing is subtracted. On the
@@ -2443,8 +2373,7 @@ pub static RULES: &[Rule] = &[
     // no QSM, and a QSM by another method is not the toolbox's.
     reference("chi-sep.reference-none",
         &[sep(CHI_SEP_TOOLBOX_ITERATIVE), inv(&[Choice("ilsqr")])], "reference", &[Choice("none")],
-        "The χ-separation toolbox's script uses its iLSQR QSM as QSM_iLSQR returns it, without \
-         referencing it",
+        "The χ-separation toolbox uses its iLSQR susceptibility map as it is, without referencing it",
         "χ-separation toolbox v1.1.3 Chisep_script.m:145,158,170; QSM-CI toolbox-pipeline-chisep \
          in vivo (QSM-CI#425)"),
     reference("susep-net.qsm-iqsm-plus", &[sep(&[Choice("susep-net")])], "inversion.algorithm",
@@ -3726,5 +3655,61 @@ mod tests {
         assert!(combined.ids().contains(&"sti.echo-weights"), "{:?}", combined.ids());
         let per_echo = Case { cfg: QsmPipelineConfig { qsm_per_echo: true, ..combined.cfg.clone() }, ..combined.clone() };
         assert!(!per_echo.ids().contains(&"sti.echo-weights"), "{:?}", per_echo.ids());
+    }
+}
+
+/// Why `reason` is not plain user text, or `None`: a host shows a rule's reason (and a pipeline's
+/// choice reasons) to users on pipeline pages, in pop-ups and in run logs, so it names steps in
+/// words and leaves code to `source`. At most two sentences, no file names, no backticks, no
+/// snake_case or `::` identifiers, no parenthesised code, no closing full stop.
+#[cfg(test)]
+pub(crate) fn reason_problem(reason: &str) -> Option<String> {
+    let words = || reason.split(|c: char| c.is_whitespace() || ",;:()".contains(c)).filter(|w| !w.is_empty());
+    if reason.trim().is_empty() || reason.trim() != reason { return Some("empty or untrimmed".into()); }
+    if reason.ends_with('.') { return Some("ends in a full stop".into()); }
+    if reason.contains('`') || reason.contains("::") { return Some("code identifier".into()); }
+    if let Some(w) = words().find(|w| {
+        let w = w.trim_end_matches(['.', '\'', '"']);
+        [".m", ".p", ".c", ".py", ".sh", ".txt"].iter().any(|e| w.len() > e.len() && w.ends_with(e))
+    }) { return Some(format!("file name {w:?}")); }
+    if let Some(w) = words().find(|w| w.contains('_')) { return Some(format!("identifier {w:?}")); }
+    let mut depth = 0;
+    for (i, c) in reason.char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            '=' | '[' | ']' | ':' | '\'' if depth > 0 && !(c == '\'' && reason[..i].ends_with(char::is_alphabetic)) => {
+                return Some("code in parentheses".into());
+            }
+            _ => {}
+        }
+    }
+    let sentences = 1 + reason.match_indices(". ").filter(|(i, _)| {
+        reason[i + 2..].starts_with(|c: char| c.is_uppercase())
+    }).count();
+    if sentences > 2 { return Some(format!("{sentences} sentences")); }
+    None
+}
+
+#[cfg(test)]
+mod reason_text_tests {
+    use super::{reason_problem, RULES};
+
+    /// Every rule's reason is plain user text (see [`reason_problem`]).
+    #[test]
+    fn rule_reasons_are_plain_text_of_at_most_two_sentences() {
+        let bad: Vec<String> = RULES.iter()
+            .filter_map(|r| reason_problem(r.reason).map(|p| format!("{}: {p}: {:?}", r.id, r.reason)))
+            .collect();
+        assert!(bad.is_empty(), "{}", bad.join("\n"));
+    }
+
+    #[test]
+    fn the_plain_text_check_catches_code() {
+        for code in ["MEDI's BET.m runs bet2", "calls QSM_iLSQR", "the kernel (-N/2:N/2-1)", "with `niter`",
+                     "One. Two. Three", "ends."] {
+            assert!(reason_problem(code).is_some(), "{code:?}");
+        }
+        assert_eq!(reason_problem("STI Suite's V-SHARP steps its kernel radius by 1 mm (also its default)"), None);
     }
 }
