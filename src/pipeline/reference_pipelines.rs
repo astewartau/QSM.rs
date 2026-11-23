@@ -184,9 +184,8 @@ const QSMART_DIFFERENCES: &[Difference] = &[
 const DECOMPOSE_DIFFERENCES: &[Difference] = &[Difference {
     what: "The steps before the fit follow the paper (Laplacian unwrapping, V-SHARP, STAR-QSM of each echo) at the \
            functions' own settings, without the extra settings of the authors' analysis script.",
-    why: "The paper is the method as published and gives no settings for these steps; the authors' script pads STAR-QSM \
-          by 12 voxels and sets V-SHARP's kernel per echo, which changed each echo's susceptibility by 2.6-5 % on QSM-CI's \
-          in-vivo scan.",
+    why: "The paper is the method as published and gives no settings for these steps; the authors' analysis script, which \
+          pads STAR-QSM by 12 voxels and runs V-SHARP with a 25 mm kernel on each echo, is a separate choice of settings.",
 }];
 
 /// UK Biobank's mask (decision 202, module docs, *UK Biobank's mask is HD-BET's, on purpose*).
