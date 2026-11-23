@@ -876,7 +876,7 @@ pub const BIPOLAR_SIGNATURE_MIN_VOXELS: usize = 1000;
 /// at most 0.01; bipolar scans before correction about 0.37; the same scans after MCPC-3D-S
 /// bipolar correction about 0.05, the correction's residue.
 ///
-/// [`BIPOLAR_SIGNATURE_RAD_PER_CM`] (0.06) is six times the largest monopolar value well below
+/// [`BIPOLAR_SIGNATURE_RAD_PER_CM`] (0.06) is six times the largest monopolar value, well below
 /// the bipolar one, and above what a corrected bipolar scan keeps, so corrected data are not
 /// flagged again. It is a heuristic on one dataset: hosts offer it as a suggestion
 /// (`Suggested`), not a required change.
