@@ -65,9 +65,10 @@ fn phantom() -> (Vec<Vec<f64>>, Vec<Vec<f64>>, Vec<u8>) {
     (phase, mag, brain)
 }
 
-fn cases() -> [(&'static str, bool, RomeoParams); 6] {
+fn cases() -> [(&'static str, bool, RomeoParams); 8] {
     let individual = RomeoParams { individual: true, correct_global: true, ..RomeoParams::default() };
     let template = RomeoParams { temporal_uncertain_unwrapping: 0.0, ..RomeoParams::default() };
+    let uncertain = RomeoParams { temporal_uncertain_unwrapping: 0.5, ..RomeoParams::default() };
     [
         ("MCPC-3D-S, individual, global correction", true, individual.clone()),
         ("MCPC-3D-S, individual", true, RomeoParams { correct_global: false, ..individual.clone() }),
@@ -75,6 +76,8 @@ fn cases() -> [(&'static str, bool, RomeoParams); 6] {
         ("MCPC-3D-S, template, global correction", true, RomeoParams { correct_global: true, ..template.clone() }),
         ("raw phase, individual, global correction", false, individual),
         ("raw phase, template", false, template),
+        ("MCPC-3D-S, template, uncertain re-unwrapping 0.5", true, uncertain.clone()),
+        ("raw phase, template, uncertain re-unwrapping 0.5", false, uncertain),
     ]
 }
 

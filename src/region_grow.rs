@@ -18,8 +18,9 @@
 //! last-in first-out bins, and like ROMEO.jl it grows along every valid edge without testing a
 //! mask (the weights hold it). With ROMEO.jl's weight bins
 //! ([`crate::unwrap::romeo`]) it reproduces ROMEO.jl's unwrapping exactly
-//! (`tests/romeo_romeojl_parity.rs`). [`grow_region_unwrap`] takes its seed from the caller and
-//! is not used by ROMEO.
+//! (`tests/romeo_romeojl_parity.rs`). [`grow_region_unwrap_from_seed_edges`] is ROMEO.jl's growth
+//! from a visited set, for template mode's re-unwrapping of uncertain voxels. [`grow_region_unwrap`]
+//! takes its seed from the caller and is not used by ROMEO.
 //! Nothing here depends on voxel size, field strength or orientation.
 
 use crate::priority_queue::BucketQueue;
@@ -178,110 +179,90 @@ pub fn grow_region_unwrap(
     processed
 }
 
-/// Region growing phase unwrapping starting from pre-visited boundary.
+/// ROMEO.jl's growth from a visited set, for the re-unwrapping of uncertain voxels after temporal
+/// unwrapping (`temporal_uncertain_unwrapping!`, `src/unwrapping.jl:95-109`, ROMEO.jl 08776d4).
 ///
-/// Similar to [`grow_region_unwrap`] but starts from all boundary edges between
-/// visited (mask=2) and unvisited (mask=1) voxels simultaneously. This is used
-/// for the temporal uncertain unwrapping fallback in ROMEO multi-echo mode,
-/// where certain voxels act as seeds for re-unwrapping uncertain neighbors.
+/// `visited` is ROMEO.jl's `BitArray`: `true` for the voxels that stay as they are (certain ones,
+/// and every voxel outside the mask), `false` for those to re-unwrap. Line for line:
+/// - the queue starts with ROMEO.jl's `getseededges(visited)` (`src/unwrapping.jl:117-129`): for
+///   each dimension in turn and each voxel `I` in linear order, the edge from `I` to `I + stride`
+///   when that index is in the array and exactly one of the two is visited, kept when its weight
+///   is non-zero (`filter(e -> weights[e] != 0, edges)`, l. 106) and queued in that order
+///   (`initqueue`, l. 132-137). The weights are the template echo's, so an edge counts when its
+///   first (lower-index) voxel is in the mask: an uncertain voxel can be re-unwrapped from a
+///   visited voxel outside the mask on its +x, +y or +z side.
+/// - the growth is `grow_region_unwrap!(phase, weights, visited, queue)` with its defaults
+///   (`src/algorithm.jl:1-46`): no seed search (the queue is not empty), each popped edge is
+///   oriented by which end is visited (`getvoxelsfromedge`), the new voxel is unwrapped by
+///   `unwrapedge!` with `wrap_addition = 0` and Julia's ties-to-even `round`, and its unvisited
+///   neighbours' edges are queued in `getnewedge`'s order (−x, +x, −y, +y, −z, +z).
 ///
-/// # Arguments
-/// * `phase` - Mutable slice of phase values, modified in-place
-/// * `weights` - Weight values (3 * nx * ny * nz), layout [dim][x][y][z]
-/// * `mask` - Visited array: 0 = not in ROI, 1 = uncertain (to unwrap), 2 = certain (seed)
-/// * `nx`, `ny`, `nz` - Array dimensions
+/// With `wrap_addition = 0`, `unwrapedge!`'s step `d` from the voxel behind is ±0, except that
+/// it is NaN when that voxel (visited, e.g. outside the mask) or the reference voxel is NaN; the
+/// new voxel is then NaN, as in ROMEO.jl. Index arithmetic is linear, as in ROMEO.jl
+/// (`checkbounds` on linear indices): an edge that would wrap to the next row has weight 0 and
+/// is never queued, so this is the same as testing the 3D bounds.
 ///
-/// # Returns
-/// Number of voxels processed
-pub fn grow_region_unwrap_from_visited(
+/// `weights`: 3 · nx · ny · nz, layout `[dim][x][y][z]`, 0 = no edge (ROMEO.jl's bins as
+/// `256 − bin`, see [`crate::unwrap::romeo`]). Returns the number of voxels unwrapped.
+pub fn grow_region_unwrap_from_seed_edges(
     phase: &mut [f64],
     weights: &[u8],
-    mask: &mut [u8],
+    visited: &mut [bool],
     nx: usize,
     ny: usize,
     nz: usize,
 ) -> usize {
-    let mut pq: BucketQueue<QueueItem> = BucketQueue::new(256);
-    let mut processed = 0usize;
-
-    // Find all boundary edges: visited (2) → unvisited (1)
-    for k in 0..nz {
-        for j in 0..ny {
-            for i in 0..nx {
-                let idx = idx3d(i, j, k, nx, ny);
-                if mask[idx] != 2 {
-                    continue;
-                }
-
-                for &(dim, di, dj, dk) in &NEIGHBOR_OFFSETS {
-                    let ni = i as i32 + di;
-                    let nj = j as i32 + dj;
-                    let nk = k as i32 + dk;
-
-                    if ni >= 0 && ni < nx as i32 && nj >= 0 && nj < ny as i32 && nk >= 0 && nk < nz as i32 {
-                        let ni = ni as usize;
-                        let nj = nj as usize;
-                        let nk = nk as usize;
-                        let n_idx = idx3d(ni, nj, nk, nx, ny);
-
-                        if mask[n_idx] == 1 {
-                            let ei = i.min(ni);
-                            let ej = j.min(nj);
-                            let ek = k.min(nk);
-                            let weight = weights[idx4d(dim, ei, ej, ek, nx, ny, nz)] as usize;
-
-                            if weight > 0 {
-                                pq.push(weight, (ni, nj, nk, i, j, k));
-                            }
-                        }
-                    }
+    let n = nx * ny * nz;
+    let stride = [1, nx, nx * ny];
+    // (dim, first voxel): ROMEO.jl's edge index `dim + 3(I − 1)`.
+    let mut pq: BucketQueue<(usize, usize)> = BucketQueue::new(256);
+    for (dim, &s) in stride.iter().enumerate() {
+        for i in 0..n.saturating_sub(s) {
+            if visited[i] != visited[i + s] {
+                let w = weights[dim * n + i];
+                if w != 0 {
+                    pq.push(w as usize, (dim, i));
                 }
             }
         }
     }
 
-    // Same growth loop as grow_region_unwrap
-    while let Some((ni, nj, nk, oi, oj, ok)) = pq.pop() {
-        let n_idx = idx3d(ni, nj, nk, nx, ny);
-
-        if mask[n_idx] != 1 {
+    let mut processed = 0usize;
+    while let Some((dim, v)) = pq.pop() {
+        let nb = v + stride[dim];
+        let (old, new) = if !visited[nb] { (v, nb) } else { (nb, v) };
+        if visited[new] {
             continue;
         }
-
-        let new_val = phase[n_idx];
-        let old_val = phase[idx3d(oi, oj, ok, nx, ny)];
-        let diff = new_val - old_val;
-        let n_wraps = (diff / TWO_PI).round();
-        phase[n_idx] = new_val - TWO_PI * n_wraps;
-
-        mask[n_idx] = 2;
+        // `unwrapedge!(wrapped, oldvox, newvox, visited, 0)` (`src/algorithm.jl:64-79`).
+        let mut d = 0.0;
+        let oo = 2 * old as isize - new as isize;
+        if oo >= 0 && (oo as usize) < n && visited[oo as usize] {
+            let x = 0.0;
+            let dv = phase[old] - phase[oo as usize];
+            d = if dv < -x { -x } else if dv > x { x } else { dv };
+        }
+        let reference = phase[old] + d;
+        phase[new] -= TWO_PI * ((phase[new] - reference) / TWO_PI).round_ties_even();
+        visited[new] = true;
         processed += 1;
-
-        for &(dim, di, dj, dk) in &NEIGHBOR_OFFSETS {
-            let nni = ni as i32 + di;
-            let nnj = nj as i32 + dj;
-            let nnk = nk as i32 + dk;
-
-            if nni >= 0 && nni < nx as i32 && nnj >= 0 && nnj < ny as i32 && nnk >= 0 && nnk < nz as i32 {
-                let nni = nni as usize;
-                let nnj = nnj as usize;
-                let nnk = nnk as usize;
-                let nn_idx = idx3d(nni, nnj, nnk, nx, ny);
-
-                if mask[nn_idx] == 1 {
-                    let ei = ni.min(nni);
-                    let ej = nj.min(nnj);
-                    let ek = nk.min(nnk);
-                    let weight = weights[idx4d(dim, ei, ej, ek, nx, ny, nz)] as usize;
-
-                    if weight > 0 {
-                        pq.push(weight, (nni, nnj, nnk, ni, nj, nk));
-                    }
+        // `getnewedge` (`src/algorithm.jl:81-89`): i = 1..6 is −x, +x, −y, +y, −z, +z.
+        for (dim, &s) in stride.iter().enumerate() {
+            if new >= s && !visited[new - s] {
+                let w = weights[dim * n + new - s];
+                if w > 0 {
+                    pq.push(w as usize, (dim, new - s));
+                }
+            }
+            if new + s < n && !visited[new + s] {
+                let w = weights[dim * n + new];
+                if w > 0 {
+                    pq.push(w as usize, (dim, new));
                 }
             }
         }
     }
-
     processed
 }
 
@@ -600,40 +581,73 @@ mod tests {
     }
 
     #[test]
-    fn test_grow_from_visited_unwraps_neighbors() {
+    fn seed_edges_reunwrap_an_unvisited_voxel_from_its_visited_neighbour() {
         let (nx, ny, nz) = (5, 5, 5);
         let n = nx * ny * nz;
         let weights = vec![255u8; 3 * n];
-
-        // Center voxel is visited (2), neighbors are uncertain (1)
-        let mut mask = vec![0u8; n];
-        let mut phase = vec![0.0f64; n];
-        let ci = 2; let cj = 2; let ck = 2;
-        let c_idx = idx3d(ci, cj, ck, nx, ny);
-        mask[c_idx] = 2;
-        phase[c_idx] = 1.0;
-
-        // Neighbor with a 2π wrap
+        let mut visited = vec![true; n];
+        let mut phase = vec![1.0f64; n];
         let n_idx = idx3d(3, 2, 2, nx, ny);
-        mask[n_idx] = 1;
+        visited[n_idx] = false;
         phase[n_idx] = 1.1 + TWO_PI;
 
-        let processed = grow_region_unwrap_from_visited(&mut phase, &weights, &mut mask, nx, ny, nz);
+        let processed = grow_region_unwrap_from_seed_edges(&mut phase, &weights, &mut visited, nx, ny, nz);
         assert_eq!(processed, 1);
-        assert_eq!(mask[n_idx], 2);
-        assert!((phase[n_idx] - 1.1).abs() < 0.5);
+        assert!(visited[n_idx]);
+        assert!((phase[n_idx] - 1.1).abs() < 1e-12);
     }
 
     #[test]
-    fn test_grow_from_visited_no_uncertain() {
+    fn seed_edges_need_a_weighted_edge_from_the_lower_index_side() {
+        // Only the edge from the voxel before it in x is weighted: the unvisited voxel is still
+        // reached, from that side.
+        let (nx, ny, nz) = (4, 3, 3);
+        let n = nx * ny * nz;
+        let target = idx3d(2, 1, 1, nx, ny);
+        let mut weights = vec![0u8; 3 * n];
+        weights[target - 1] = 200; // x edge (1,1,1) -> (2,1,1)
+        let mut visited = vec![true; n];
+        visited[target] = false;
+        let mut phase = vec![0.5f64; n];
+        phase[target - 1] = 2.0;
+        phase[target] = 2.2 - 2.0 * TWO_PI;
+        assert_eq!(grow_region_unwrap_from_seed_edges(&mut phase, &weights, &mut visited, nx, ny, nz), 1);
+        assert!((phase[target] - 2.2).abs() < 1e-12);
+
+        // Without any weighted edge it stays as it is.
+        let mut visited = vec![true; n];
+        visited[target] = false;
+        let mut phase2 = vec![0.5f64; n];
+        phase2[target] = 9.0;
+        let w0 = vec![0u8; 3 * n];
+        assert_eq!(grow_region_unwrap_from_seed_edges(&mut phase2, &w0, &mut visited, nx, ny, nz), 0);
+        assert_eq!(phase2[target], 9.0);
+    }
+
+    #[test]
+    fn seed_edges_propagate_a_nan_behind_the_reference_as_romeojl_does() {
+        // `unwrapedge!` with wrap_addition 0 takes d = v when v = phase[old] − phase[behind] is
+        // NaN, so a NaN visited voxel behind the reference makes the new voxel NaN.
+        let (nx, ny, nz) = (5, 1, 1);
+        let n = nx * ny * nz;
+        let mut weights = vec![0u8; 3 * n];
+        weights[1] = 255; // x edge 1 -> 2 only
+        let mut visited = vec![true; n];
+        visited[2] = false;
+        let mut phase = vec![0.0, 0.3, 0.4 + TWO_PI, 0.0, 0.0];
+        phase[0] = f64::NAN;
+        grow_region_unwrap_from_seed_edges(&mut phase, &weights, &mut visited, nx, ny, nz);
+        assert!(phase[2].is_nan());
+    }
+
+    #[test]
+    fn seed_edges_do_nothing_when_all_are_visited() {
         let (nx, ny, nz) = (3, 3, 3);
         let n = nx * ny * nz;
         let weights = vec![255u8; 3 * n];
-        let mut mask = vec![2u8; n]; // all visited
+        let mut visited = vec![true; n];
         let mut phase = vec![0.0f64; n];
-
-        let processed = grow_region_unwrap_from_visited(&mut phase, &weights, &mut mask, nx, ny, nz);
-        assert_eq!(processed, 0);
+        assert_eq!(grow_region_unwrap_from_seed_edges(&mut phase, &weights, &mut visited, nx, ny, nz), 0);
     }
 
     #[test]
