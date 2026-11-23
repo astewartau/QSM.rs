@@ -176,7 +176,8 @@ pub mod fieldmap {
         bipolar_correction, field_to_hz, nan_box_smooth_3d, nan_box_smooth_3d_phase, gaussian_box_sizes,
         PhaseOffsetParams, PhaseOffsetRemoval, CoilCombinationResult, LinearFitParams, LinearFitResult, B0WeightType,
         multi_echo_robust_fit, RobustFitParams, RobustFitResult, RobustLoss, EchoQuality,
-        fit_ppm_complex, fit_ppm_complex_noise, FitPpmComplexParams, FitPpmComplexResult,
+        fit_ppm_complex, fit_ppm_complex_bipolar, fit_ppm_complex_noise, FitPpmComplexParams, FitPpmComplexResult,
+        bipolar_signature, BipolarSignature, BIPOLAR_SIGNATURE_RAD_PER_CM,
         echo_spacing_problem, FIT_PPM_COMPLEX_SPACING_TOLERANCE_S,
     };
 }

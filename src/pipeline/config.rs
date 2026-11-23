@@ -263,8 +263,10 @@ pub enum B0EstimationMethod {
     /// root-sum-of-squares of the echo magnitudes) stays the default.
     ///
     /// This replaces the per-echo path rather than combining unwrapped echoes: the fit has its own
-    /// phase offset (`p0`), so `phase_offset_removal` does not apply and is not run;
-    /// `bipolar_correction` is refused (MEDI's `Fit_ppm_complex_bipolar` is not ported). Needs the
+    /// phase offset (`p0`), so `phase_offset_removal` does not apply and is not run. With
+    /// `bipolar_correction` on, the fit is MEDI's bipolar one, `Fit_ppm_complex_bipolar`
+    /// ([`fit_ppm_complex_bipolar`](crate::utils::fit_ppm_complex_bipolar)), which fits the even
+    /// echoes' extra phase in every voxel instead of MCPC-3D-S's correction. Needs the
     /// magnitude of every echo and evenly spaced echoes. Also returns the field's noise map
     /// ([`FieldMappingResult::field_noise_ppm`], MEDI's `N_std`).
     ComplexFit(FitPpmComplexParams),

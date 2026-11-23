@@ -1721,9 +1721,11 @@ pub static RULES: &[Rule] = &[
         "Laplacian unwrapping without phase-offset removal leaves part of each echo's offset in the field, which PDF and LBV keep. On the simulated head this more than halved the susceptibility map's similarity to the truth",
         "QSM.rs#439 (QSM-CI simulated head and harmonization travelling heads, v11); QSM.rs \
          pipeline::field_mapping docs (Phase offsets and Laplacian unwrapping)"),
+    // The complex fit runs no offset removal; with bipolar correction on it is MEDI's bipolar fit.
     discourage("field-mapping.bipolar-needs-offset-removal",
         &[method("field_mapping.bipolar_correction", &[Bool(true)]),
-          method("field_mapping.phase_offset_removal", &[Bool(false)])],
+          method("field_mapping.phase_offset_removal", &[Bool(false)]),
+          C::Unless { setting: "field_mapping.b0_estimation", is: Test::OneOf { values: COMPLEX_FIT } }],
         "field_mapping.bipolar_correction", &[Bool(true)], Bool(false), Basis::Implementation,
         "Bipolar correction is part of the phase-offset removal (MCPC-3D-S); with that off it is skipped",
         "MriResearchTools.jl mcpc3ds.jl:55; QSM.rs pipeline::field_mapping docs"),
@@ -3407,6 +3409,20 @@ mod tests {
     /// The complex fit (MEDI's Fit_ppm_complex) suggests MEDI's region-growing unwrapper as the
     /// authors' setting: a reference rule, silent once followed or without the complex fit, and
     /// ROMEO stays the default unwrapper.
+    /// Bipolar correction without offset removal is skipped, except with the complex fit, where
+    /// it is MEDI's bipolar fit.
+    #[test]
+    fn bipolar_correction_needs_offset_removal_except_with_the_complex_fit() {
+        let id = "field-mapping.bipolar-needs-offset-removal";
+        let with = |b0: B0EstimationMethod| Case::new(move |c| {
+            c.cfg.field_mapping.b0_estimation = b0.clone();
+            c.cfg.field_mapping.bipolar_correction = true;
+            c.cfg.field_mapping.phase_offset_removal = false;
+        }).ids().contains(&id);
+        assert!(with(B0EstimationMethod::default()));
+        assert!(!with(B0EstimationMethod::ComplexFit(Default::default())));
+    }
+
     #[test]
     fn complex_fit_suggests_medi_region_growing_as_the_authors_setting() {
         let id = "complex-fit.unwrap-region-growing";
