@@ -131,7 +131,7 @@
 
 use std::f64::consts::PI;
 
-use crate::region_grow::{grow_region_unwrap_from_visited, grow_region_unwrap_full};
+use crate::region_grow::{grow_region_unwrap_from_seed_edges, grow_region_unwrap_full};
 use crate::Grid;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
@@ -1066,29 +1066,32 @@ fn unwrap_template<P: AsRef<[f64]>, M: AsRef<[f64]>>(
         let iref = if ieco < template { ieco + 1 } else { ieco - 1 };
         let te_ratio = tes[ieco] / tes[iref];
 
-        // Temporal unwrap each voxel: align to TE-scaled reference
-        for i in 0..n_total {
-            if mask[i] > 0 {
-                let ref_value = result[iref][i] * te_ratio;
-                result[ieco][i] = unwrap_voxel(result[ieco][i], ref_value);
-            }
-        }
-
-        // Fallback: re-unwrap uncertain voxels spatially
         if params.temporal_uncertain_unwrapping > 0.0 {
-            // Build scaled reference for quality assessment
-            let ref_scaled: Vec<f64> = (0..n_total).map(|i| {
-                if mask[i] > 0 { result[iref][i] * te_ratio } else { 0.0 }
-            }).collect();
-
+            // ROMEO.jl (`src/unwrapping.jl:84-90`): `refvalue` and the temporal step over the whole
+            // array, not only the mask, because the re-unwrapping reads voxels outside the mask
+            // (their quality, and as visited seeds).
+            let refvalue: Vec<f64> = result[iref].iter().map(|&v| v * te_ratio).collect();
+            for (w, &r) in result[ieco].iter_mut().zip(&refvalue) {
+                *w = unwrap_voxel(*w, r);
+            }
             temporal_uncertain_rewrap(
                 &mut result[ieco],
-                &ref_scaled,
+                &refvalue,
                 &weights,
                 mask,
                 params.temporal_uncertain_unwrapping,
                 nx, ny, nz,
             );
+        } else {
+            // Without the re-unwrapping only the mask is unwrapped temporally; inside it this is
+            // ROMEO.jl's result, outside it the input phase is kept (ROMEO.jl unwraps every
+            // voxel there too).
+            for i in 0..n_total {
+                if mask[i] > 0 {
+                    let ref_value = result[iref][i] * te_ratio;
+                    result[ieco][i] = unwrap_voxel(result[ieco][i], ref_value);
+                }
+            }
         }
     }
 
@@ -1397,62 +1400,109 @@ fn merge_regions_post(
     remaining
 }
 
-/// Re-unwrap voxels that are uncertain after temporal unwrapping.
+/// ROMEO.jl's re-unwrapping of voxels left uncertain by temporal unwrapping
+/// (`temporal_uncertain_unwrapping!`, `src/unwrapping.jl:95-109`, ROMEO.jl 08776d4).
 ///
-/// Computes a quality metric comparing the unwrapped phase to the TE-scaled
-/// reference. Voxels with low quality (likely wrap errors) are re-unwrapped
-/// spatially using the certain voxels as seeds.
+/// - Quality: [`temporal_unwrapped_quality`], ROMEO.jl's `unwrapped_quality(phase, refvalue)`.
+/// - `visited = quality .> threshold`, then `visited[.!mask] .= true` (l. 97-103): voxels outside
+///   the mask count as certain, so they too seed the growth.
+/// - If some but not all voxels are visited, [`grow_region_unwrap_from_seed_edges`] re-unwraps
+///   the rest from the boundary edges whose template weight is non-zero (l. 104-107).
 ///
-/// Matches ROMEO.jl `temporal_uncertain_unwrapping!`.
+/// `phase` and `refvalue` hold every voxel (the temporal step ran over the whole array).
 fn temporal_uncertain_rewrap(
     phase: &mut [f64],
-    ref_scaled: &[f64],
+    refvalue: &[f64],
     weights: &[u8],
     mask: &[u8],
     threshold: f64,
     nx: usize, ny: usize, nz: usize,
 ) {
-    let n_total = nx * ny * nz;
+    let quality = temporal_unwrapped_quality(phase, refvalue, nx, ny, nz);
+    // A NaN quality compares false, as in ROMEO.jl (`NaN > t`).
+    let mut visited: Vec<bool> = quality.iter().zip(mask)
+        .map(|(&q, &m)| f64::from(q) > threshold || m == 0)
+        .collect();
+    if visited.iter().any(|&v| v) && !visited.iter().all(|&v| v) {
+        grow_region_unwrap_from_seed_edges(phase, weights, &mut visited, nx, ny, nz);
+    }
+}
 
-    // Compute quality: compare phase/2 with ref_scaled/2 using voxel quality
-    // (halving increases sensitivity to single-wrap errors)
-    // Matches ROMEO.jl: unwrapped_quality(phase, refphase) = voxelquality(phase/2; phase2=refphase/2, TEs=[1,1])
-    let half_phase: Vec<f64> = phase.iter().map(|&v| v * 0.5).collect();
-    let half_ref: Vec<f64> = ref_scaled.iter().map(|&v| v * 0.5).collect();
-
-    let grid = crate::Grid::new(nx, ny, nz, 1.0, 1.0, 1.0);
-    let quality = voxel_quality_romeo(
-        &half_phase, &[], Some(&half_ref), 1.0, 1.0,
-        mask, &grid,
-    );
-
-    // Build visited mask:
-    // quality > threshold*100 → certain (visited=2, acts as seed)
-    // quality <= threshold*100 → uncertain (visited=1, needs re-unwrapping)
-    // outside mask → 0
-    let threshold_scaled = threshold * 100.0; // voxel_quality_romeo returns 0-100
-    let mut visited = vec![0u8; n_total];
-    let mut any_uncertain = false;
-    let mut any_certain = false;
-
-    for i in 0..n_total {
-        if mask[i] == 0 {
-            visited[i] = 0;
-        } else if quality[i] > threshold_scaled {
-            visited[i] = 2;
-            any_certain = true;
-        } else {
-            visited[i] = 1;
-            any_uncertain = true;
+/// ROMEO.jl's `unwrapped_quality(phase, refphase) = voxelquality(phase ./ 2; phase2 = refphase
+/// ./ 2, TEs = [1, 1])` (`src/unwrapping.jl:111-115`; `voxelquality`, `src/voxelquality.jl:17-24`),
+/// in [0, 1] per voxel.
+///
+/// Halving the phase makes an ordinary 2π wrap a π step, which the weights penalise, so a voxel
+/// whose temporal unwrapping disagrees with its neighbours scores low. As in ROMEO.jl:
+/// - the edge weights are `calculateweights(phase/2; type = Float32, rescale = identity, phase2 =
+///   refvalue/2, TEs = [1, 1])` with the default `:romeo` flags, which without a magnitude are
+///   phase coherence, phase gradient coherence and phase linearity (`src/weights.jl:56-107`),
+///   whatever weights the unwrapping itself uses: computed in f64, stored as f32, not binned;
+/// - **no mask**: every edge in the array is weighted, and an edge leaving the array along its
+///   dimension (the last x, y or z plane) is 0 (`src/weights.jl:64-67`);
+/// - phase linearity uses linear indices as ROMEO.jl's `phaselinearity(P, i, j)` does
+///   (`src/weights.jl:29-38`): the triplets on both sides of the edge when `i − stride ≥ 0` and
+///   `j + stride < n`, otherwise 0.9 for the whole term (they may wrap to the neighbouring
+///   row or slice, as in ROMEO.jl);
+/// - per voxel, its three forward edges summed in f32, then its −x, −y and −z edges added in
+///   that order, divided by 6 (missing edges at the array border count 0, so border voxels
+///   score lower); a NaN phase makes its edges' weights, and so the quality, NaN.
+///
+/// This is not [`voxel_quality_romeo`] (binned weights inside a mask, averaged over in-mask
+/// neighbours), which QSM.rs used here until 2026-11 and which made voxels on the mask edge
+/// score higher than in ROMEO.jl.
+fn temporal_unwrapped_quality(phase: &[f64], refvalue: &[f64], nx: usize, ny: usize, nz: usize) -> Vec<f32> {
+    let n = nx * ny * nz;
+    let stride = [1, nx, nx * ny];
+    let p: Vec<f64> = phase.iter().map(|&v| v / 2.0).collect();
+    let p2: Vec<f64> = refvalue.iter().map(|&v| v / 2.0).collect();
+    let mut weights = vec![0.0f32; 3 * n];
+    for (dim, &s) in stride.iter().enumerate() {
+        let block = &mut weights[dim * n..(dim + 1) * n];
+        maybe_par_iter_mut!(block).enumerate().for_each(|(i, w)| {
+            let last = match dim {
+                0 => i % nx == nx - 1,
+                1 => (i / nx) % ny == ny - 1,
+                _ => i / (nx * ny) == nz - 1,
+            };
+            if last {
+                return;
+            }
+            let j = i + s;
+            // `getweight` (`src/weights.jl:2-14`) with flags 1-3.
+            let mut weight = 1.0_f64;
+            let pc = 1.0 - (gamma(p[i] - p[j]) / PI).abs();
+            weight *= 0.1 + 0.9 * pc;
+            // TEs = [1, 1]: `γ(P2[i] − P2[j]) * 1 / 1`.
+            let pgc = julia_max0(1.0 - (gamma(p[i] - p[j]) - gamma(p2[i] - p2[j])).abs());
+            weight *= 0.1 + 0.9 * pgc;
+            let pl = if i >= s && j + s < n {
+                phase_linearity_triplet(p[i - s], p[i], p[j]) * phase_linearity_triplet(p[i], p[j], p[j + s])
+            } else {
+                0.9
+            };
+            weight *= 0.1 + 0.9 * pl;
+            *w = weight as f32;
+        });
+    }
+    let (w0, rest) = weights.split_at(n);
+    let (w1, w2) = rest.split_at(n);
+    let mut q = vec![0.0f32; n];
+    maybe_par_iter_mut!(q).enumerate().for_each(|(i, q)| {
+        let (x, y, z) = (i % nx, (i / nx) % ny, i / (nx * ny));
+        let mut s = w0[i] + w1[i] + w2[i];
+        if x > 0 {
+            s += w0[i - 1];
         }
-    }
-
-    if !any_uncertain || !any_certain {
-        return;
-    }
-
-    // Re-unwrap uncertain voxels using spatial growing from the certain boundary
-    grow_region_unwrap_from_visited(phase, weights, &mut visited, nx, ny, nz);
+        if y > 0 {
+            s += w1[i - nx];
+        }
+        if z > 0 {
+            s += w2[i - nx * ny];
+        }
+        *q = s / 6.0;
+    });
+    q
 }
 
 #[cfg(test)]
@@ -1751,6 +1801,70 @@ mod tests {
     // =========================================================================
     // unwrap_romeo_multi_echo (4D template-based)
     // =========================================================================
+
+    #[test]
+    fn temporal_unwrapped_quality_is_romeojl_voxelquality_without_a_mask() {
+        // Constant phase: every edge weighs 1, except 0.1 + 0.9·0.9 where ROMEO.jl's linear
+        // indices for phase linearity run off the array; a voxel scores (sum of its edges) / 6.
+        let (nx, ny, nz) = (5, 5, 5);
+        let n = nx * ny * nz;
+        let phase = vec![0.3; n];
+        let q = temporal_unwrapped_quality(&phase, &phase, nx, ny, nz);
+        // The centre voxel: six edges whose linearity triplets all lie in the array.
+        assert_eq!(q[idx3d(2, 2, 2, nx, ny)], 1.0);
+        // (2,2,0): its +z edge's triplet behind (2,2,−1) is off the array, so ROMEO.jl's
+        // `phaselinearity` is 0.9 for that edge (weight 0.1 + 0.9·0.9), and it has no −z edge.
+        let a = (1.0f64 * (0.1 + 0.9 * 1.0) * (0.1 + 0.9 * 1.0) * (0.1 + 0.9 * 0.9)) as f32;
+        assert_eq!(q[idx3d(2, 2, 0, nx, ny)], (1.0f32 + 1.0 + a + 1.0 + 1.0) / 6.0);
+        // The last voxel has only its three backward edges, each with its ahead triplet past
+        // the end of the array (linear indices, as in ROMEO.jl).
+        assert_eq!(q[n - 1], (0.0f32 + a + a + a) / 6.0);
+        // NaN phase makes its own and its neighbours' quality NaN.
+        let mut p = phase.clone();
+        p[idx3d(1, 1, 1, nx, ny)] = f64::NAN;
+        let q = temporal_unwrapped_quality(&p, &phase, nx, ny, nz);
+        assert!(q[idx3d(1, 1, 1, nx, ny)].is_nan());
+        assert!(q[idx3d(2, 1, 1, nx, ny)].is_nan());
+        assert!(!q[idx3d(3, 2, 2, nx, ny)].is_nan());
+    }
+
+    /// Two echoes with one voxel outside a small mask: what the setting does there.
+    fn two_echo_with_outside_voxel() -> (Vec<Vec<f64>>, Vec<u8>, usize, usize) {
+        let n = 6;
+        let total = n * n * n;
+        let tes = [5.0, 10.0];
+        let phases: Vec<Vec<f64>> = tes.iter().map(|&te| {
+            (0..total).map(|i| wrap_angle(0.09 * te * (i % n) as f64 + 0.04 * te * ((i / n) % n) as f64)).collect()
+        }).collect();
+        let mut mask = vec![1u8; total];
+        let outside = idx3d(5, 5, 5, n, n);
+        mask[outside] = 0;
+        (phases, mask, outside, n)
+    }
+
+    #[test]
+    fn temporal_uncertain_unwrapping_0_leaves_voxels_outside_the_mask_as_input() {
+        // The 0 path (the CLI's and QSMxT's default) is unchanged: only the mask is unwrapped
+        // temporally, and ROMEO.jl's turns inside it are pinned by
+        // tests/romeo_validity_romeojl_parity.rs.
+        let (phases, mask, outside, n) = two_echo_with_outside_voxel();
+        let params = RomeoParams { temporal_uncertain_unwrapping: 0.0, ..RomeoParams::default() };
+        let out = unwrap_romeo_multi_echo(&phases, &Vec::<Vec<f64>>::new(), &[5.0, 10.0], &mask, &params, &grid(n));
+        assert_eq!(out[1][outside].to_bits(), phases[1][outside].to_bits());
+    }
+
+    #[test]
+    fn temporal_uncertain_unwrapping_unwraps_every_voxel_temporally_as_romeojl() {
+        // ROMEO.jl runs the temporal step over the whole array (`src/unwrapping.jl:84-86`) and
+        // treats voxels outside the mask as certain, so they keep that result.
+        let (phases, mask, outside, n) = two_echo_with_outside_voxel();
+        let params = RomeoParams { temporal_uncertain_unwrapping: 0.5, ..RomeoParams::default() };
+        let out = unwrap_romeo_multi_echo(&phases, &Vec::<Vec<f64>>::new(), &[5.0, 10.0], &mask, &params, &grid(n));
+        let want = unwrap_voxel(phases[1][outside], out[0][outside] * 2.0);
+        assert_eq!(out[1][outside].to_bits(), want.to_bits());
+        assert_ne!(out[1][outside], phases[1][outside], "the test voxel must need a temporal turn");
+    }
+
 
     #[test]
     fn test_multi_echo_template_output_sizes() {

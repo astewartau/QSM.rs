@@ -51,9 +51,9 @@ function phantom()
 end
 
 phase, mag, brain = phantom()
-# Template mode without the temporal re-unwrapping of uncertain voxels: QSM.rs's port of that
-# fallback (`temporal_uncertain_unwrapping!`) is not yet ROMEO.jl's (its voxel quality and seeding
-# differ), so it is left out here; see the ROMEO module docs in QSM.rs.
+# Template mode with and without the temporal re-unwrapping of uncertain voxels
+# (`temporal_uncertain_unwrapping!`; 0 is the CLI's default, 0.5 the API's). The 0.5 cases were
+# appended in 2026-11, so the earlier cases' bytes are unchanged.
 const CASES = [
     ("MCPC-3D-S, individual, global correction", true, (; individual=true, correctglobal=true)),
     ("MCPC-3D-S, individual", true, (; individual=true)),
@@ -61,6 +61,8 @@ const CASES = [
     ("MCPC-3D-S, template, global correction", true, (; correctglobal=true, temporal_uncertain_unwrapping=0.0)),
     ("raw phase, individual, global correction", false, (; individual=true, correctglobal=true)),
     ("raw phase, template", false, (; temporal_uncertain_unwrapping=0.0)),
+    ("MCPC-3D-S, template, uncertain re-unwrapping 0.5", true, (; temporal_uncertain_unwrapping=0.5)),
+    ("raw phase, template, uncertain re-unwrapping 0.5", false, (; temporal_uncertain_unwrapping=0.5)),
 ]
 
 open(ARGS[1], "w") do io
