@@ -107,9 +107,13 @@ pub static DIFFERENCES: &[SharedDifference] = &[
     // Decisions 31 and 149: a host sets `ScanMetadata::field_strength` from ImagingFrequency
     // (QSMxT does, for every run), toolbox pipelines and QSM-CI's references included. Not a
     // difference where the toolbox itself takes the centre frequency: the MEDI toolbox reads it
-    // from the DICOM (`Read_DICOM.m`: CF = ImagingFrequency), and the χ-separation toolbox's
-    // `params.CF` is the centre frequency (default 123.2 MHz, chi_sep_ilsqr.rs and
-    // chi_sep_medi.rs docs).
+    // from the DICOM (`Read_DICOM.m`: CF = ImagingFrequency). The χ-separation toolbox v1.1.3's
+    // `Chisep_script.m` takes "CF (central frequency)" as a user input (l. 60), with the example
+    // `CF = 123200000; in Hz unit` (l. 63): a Siemens 3 T scanner's actual frequency, not γ·3 T
+    // (127.7 MHz). Its separation steps convert with it (`params.CF = CF`, l. 154 and 168), and
+    // so does χ-sepnet (`chi_sepnet_general(..., CF, ...)`, l. 194). The script's QSM step for
+    // χ-separation-iLSQR and -MEDI takes a separate `B0_strength` instead (l. 145), which is
+    // CHISEP_QSM_FIELD below.
     SharedDifference {
         difference: Difference {
             what: "Where the original toolbox converts phase to ppm with the nominal field strength (such as 3 T), this \
@@ -188,6 +192,16 @@ pub struct ReferencePipeline {
     /// follows the reference rules the choices trigger, in [`RULES`](super::rules::RULES) order.
     pub reasoned: &'static [&'static str],
 }
+
+/// `Chisep_script.m` v1.1.3 l. 145 gives its QSM (STI Suite's `QSM_iLSQR`, the separation's
+/// `option_data.qsm`) `'B0', B0_strength`, a field strength the user types apart from `CF`
+/// (l. 60; no example value), while the separation converts with `CF`. QSM.rs converts both with
+/// the one field strength the host sets from the centre frequency.
+const CHISEP_QSM_FIELD: Difference = Difference {
+    what: "The QSM that the separation starts from is converted with the same centre frequency as the separation itself.",
+    why: "The toolbox's script gives that QSM step (STI Suite's iLSQR) a field strength typed separately from its centre \
+          frequency, which can be the nominal one; one value keeps the two steps consistent.",
+};
 
 /// QSMART's deliberate differences (QSM.rs `pipeline::qsmart` docs, *Agreement with the original*).
 const QSMART_DIFFERENCES: &[Difference] = &[
@@ -324,7 +338,7 @@ pub static REFERENCE_PIPELINES: &[ReferencePipeline] = &[
         name: "χ-separation toolbox · iLSQR",
         toolbox: "χ-separation toolbox 1.1.3",
         note: None,
-        differences: &[],
+        differences: &[CHISEP_QSM_FIELD],
         use_when: "You want paramagnetic and diamagnetic maps comparable with the χ-separation toolbox's script, solved with iLSQR, and have an R2′ map or a multi-echo spin-echo scan.",
         citations: &[SHIN2021CHISEP],
         qsmci_pair: Some("toolbox-pipeline-chisep-ilsqr"),
@@ -340,7 +354,7 @@ pub static REFERENCE_PIPELINES: &[ReferencePipeline] = &[
         name: "χ-separation toolbox · MEDI",
         toolbox: "χ-separation toolbox 1.1.3",
         note: None,
-        differences: &[],
+        differences: &[CHISEP_QSM_FIELD],
         use_when: "You want paramagnetic and diamagnetic maps comparable with the χ-separation toolbox's script, solved with MEDI, and have an R2′ map or a multi-echo spin-echo scan.",
         citations: &[SHIN2021CHISEP],
         qsmci_pair: Some("toolbox-pipeline-chisep-medi"),
