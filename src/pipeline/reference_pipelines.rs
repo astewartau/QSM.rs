@@ -244,16 +244,13 @@ pub static REFERENCE_PIPELINES: &[ReferencePipeline] = &[
         name: "MEDI toolbox",
         toolbox: "MEDI toolbox 2024.11.26",
         // For bipolar readouts the toolbox has Fit_ppm_complex_bipolar (QSMxT/QSMxT#564), which
-        // the complex fit runs when bipolar correction is on.
-        note: Some(
-            "For bipolar readouts, turn on bipolar correction: the complex fit is then the MEDI \
-             toolbox's bipolar echo fit (Fit_ppm_complex_bipolar).",
-        ),
+        // the complex fit runs when bipolar correction is on, so this is no longer a gap.
+        note: None,
         differences: &[],
         use_when: "You want results comparable with the MEDI toolbox's own pipeline: its complex echo fit, PDF and MEDI.",
         citations: &[LIU2011MEDI, LIU2011PDF],
         qsmci_pair: Some("toolbox-pipeline-medi-cornell"),
-        note_issue: Some("QSMxT/QSMxT#564"),
+        note_issue: None,
         qsmci_pair_issue: None,
         based_on: "The MEDI toolbox's example pipeline (README.m) · Liu et al. 2011",
         choose: &[("inversion.algorithm", Choice("medi"))],
