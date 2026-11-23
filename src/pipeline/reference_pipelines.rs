@@ -154,7 +154,8 @@ pub struct ReferencePipeline {
     /// The papers to cite for it, the main method's first.
     pub citations: &'static [Citation],
     /// The QSM-CI parity pair (`parity/thresholds.yml`) that checks this pipeline against the
-    /// toolbox's own, whose measured status a host shows; `None` where QSM-CI has none yet.
+    /// toolbox's own, whose measured status a host shows; `None` where QSM-CI has none yet
+    /// (`sti-suite-star`: QSMxT/QSM-CI#469; `chi-sepnet`: QSMxT/QSM-CI#470).
     pub qsmci_pair: Option<&'static str>,
     /// The method choices that start it, as rule settings and values ([`SETTINGS`](super::rules::SETTINGS)).
     pub choose: &'static [(&'static str, Value)],
@@ -245,7 +246,7 @@ pub static REFERENCE_PIPELINES: &[ReferencePipeline] = &[
         use_when: "You want results comparable with STI Suite's QSM_GUI run with STAR-QSM.",
         citations: &[WEI2015STAR, WU2012],
         // QSM-CI has a pair for STI Suite's iLSQR pipeline (`toolbox-pipeline-sti`) and for STAR-QSM
-        // alone (`star`), none yet for this pipeline end to end.
+        // alone (`star`), none yet for this pipeline end to end (QSMxT/QSM-CI#469).
         qsmci_pair: None,
         choose: &[("inversion.algorithm", Choice("star"))],
         source: "STI Suite 3.0 QSM_GUI, probed headless (QSM.rs star.rs and vsharp.rs docs)",
@@ -315,7 +316,7 @@ pub static REFERENCE_PIPELINES: &[ReferencePipeline] = &[
         use_when: "You want paramagnetic and diamagnetic maps from the χ-separation toolbox's network, from 3 T gradient-echo data alone or with a measured R2′.",
         citations: &[KIM2025CHISEPNET, SHIN2021CHISEP],
         // QSM-CI's `chisepnet` pair checks the network's route (`chi_sepnet_general`), not the
-        // toolbox's field chain before it; there is no whole-pipeline pair yet.
+        // toolbox's field chain before it; there is no whole-pipeline pair yet (QSMxT/QSM-CI#470).
         qsmci_pair: None,
         choose: &[("separation.algorithm", Choice("chi-sepnet")), ("separation.chi_sepnet.route", Choice("toolbox"))],
         source: "χ-separation toolbox v1.1.3 Chisep_script.m; Kim et al. 2025 (χ-sepnet)",

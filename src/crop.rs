@@ -34,11 +34,8 @@
 //!
 //! [`fft_pad_box`] has no such caveat: it discards nothing and only moves the boundary outward.
 //! It is still not a no-op. The dipole kernel is sampled at `k = n / (N·Δx)`, so a different `N`
-//! samples k-space at different points and the deconvolution changes with it. Measured end to
-//! end on the same UK Biobank acquisition (272×339×77 padded to 280×343×80), TKD against the
-//! unpadded run: median difference 4e-7 ppm, 99th percentile 9.4e-3 ppm (0.000 % and 5.7 % of
-//! the dynamic range; not public data). A direct inversion moves only where the deconvolution is ill-conditioned;
-//! an iterative one solves on a different grid and can move slightly everywhere. Neither shows
+//! samples k-space at different points and the deconvolution changes with it. A direct
+//! inversion moves only where the deconvolution is ill-conditioned; an iterative one solves on a different grid and can move slightly everywhere. Neither shows
 //! that padding is worse (finer k-space sampling, boundary further from the object), but nothing
 //! shows it is better either.
 
