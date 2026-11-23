@@ -1275,6 +1275,10 @@ const CHI_SEP_TOOLBOX_ITERATIVE: &[Value] = &[Choice("chi-sep-ilsqr"), Choice("c
 /// QSMnetME: the χ-separation toolbox's QSM network, trained on that toolbox's pipeline.
 const QSMNETME: &[Value] = &[Choice("qsmnetme")];
 const STI: &[Value] = &[Choice("star"), Choice("ilsqr")];
+/// Where `sti.unwrap-laplacian` does not fire: the χ-separation toolbox (ROMEO) and DECOMPOSE
+/// (its own rule sets the same unwrapping).
+const STI_UNWRAP_NOT: &[Value] =
+    &[Choice("chi-sep-ilsqr"), Choice("chi-sep-medi"), Choice("chi-sepnet"), Choice("decompose")];
 const STI_NOT_REFERENCE_NONE: &[Value] =
     &[Choice("decompose"), Choice("chi-sep-ilsqr"), Choice("chi-sep-medi"), Choice("chi-sepnet")];
 const STI_GUI_MASK_SOURCE: &str = "STI Suite 3.0 QSM_GUI driven headless with every call logged, licensed MATLAB \
@@ -1425,10 +1429,10 @@ pub static RULES: &[Rule] = &[
         "The MEDI toolbox runs its brain extraction on the magnitude combined over echoes",
         MEDI_MASK_SOURCE),
     reference("medi.mask-no-correction", &[inv(&[Choice("medi")])], "masking.inhomogeneity_correction",
-        &[Choice("none")], "The MEDI toolbox runs BET on the magnitude as read, with no bias-field correction",
+        &[Choice("none")], "The MEDI toolbox runs brain extraction on the magnitude as read, with no bias-field correction",
         MEDI_MASK_SOURCE),
     reference("medi.mask-no-erosion", &[inv(&[Choice("medi")])], "masking.erosion", &[Number(0.0)],
-        "The MEDI toolbox uses BET's mask as it is, without eroding it", MEDI_MASK_SOURCE),
+        "The MEDI toolbox uses the brain extraction's mask as it is, without eroding it", MEDI_MASK_SOURCE),
     reference("medi.bet-as-stored", &[inv(&[Choice("medi")])], "masking.bet.orientation", &[Choice("as-stored")],
         "The MEDI toolbox runs brain extraction on the image as stored, while FSL's own tool flips a neurologically stored image first; the two masks differ slightly at the brain's edge",
         MEDI_BET_SOURCE),
@@ -1436,10 +1440,10 @@ pub static RULES: &[Rule] = &[
         "The χ-separation toolbox runs brain extraction on the magnitude combined over echoes",
         CHI_SEP_MASK_SOURCE),
     reference("chi-sep.mask-no-correction", &[sep(CHI_SEP_TOOLBOX)], "masking.inhomogeneity_correction",
-        &[Choice("none")], "The χ-separation toolbox runs BET on the magnitude as read, with no bias-field correction",
+        &[Choice("none")], "The χ-separation toolbox runs brain extraction on the magnitude as read, with no bias-field correction",
         CHI_SEP_MASK_SOURCE),
     reference("chi-sep.mask-no-erosion", &[sep(CHI_SEP_TOOLBOX)], "masking.erosion", &[Number(0.0)],
-        "The χ-separation toolbox uses BET's mask as it is, without eroding it", CHI_SEP_MASK_SOURCE),
+        "The χ-separation toolbox uses the brain extraction's mask as it is, without eroding it", CHI_SEP_MASK_SOURCE),
     reference("chi-sep.bet-as-stored", &[sep(CHI_SEP_TOOLBOX)], "masking.bet.orientation", &[Choice("as-stored")],
         "The χ-separation toolbox runs brain extraction on the image as stored, while FSL's own tool flips a neurologically stored image first",
         "χ-separation toolbox v1.1.3 Chisep_script.m:82 (mask_brain = BET(mag, matrix_size, voxel_size)), \
@@ -1447,14 +1451,14 @@ pub static RULES: &[Rule] = &[
     // DECOMPOSE's paper describes BET on the first echo's magnitude and nothing more: no
     // correction before it and no erosion after it are stated, so none is what its pipeline runs.
     reference("decompose.mask-input", &[sep(&[Choice("decompose")])], "masking.input",
-        &[Choice("magnitude-first")], "DECOMPOSE's authors run BET on the first echo's GRE magnitude",
+        &[Choice("magnitude-first")], "DECOMPOSE's authors run brain extraction on the first echo's magnitude",
         DECOMPOSE_MASK_SOURCE),
     reference("decompose.mask-no-correction", &[sep(&[Choice("decompose")])],
         "masking.inhomogeneity_correction", &[Choice("none")],
-        "DECOMPOSE's authors run BET on the first echo's magnitude; no bias-field correction is described",
+        "DECOMPOSE's authors describe no bias-field correction before brain extraction",
         DECOMPOSE_MASK_SOURCE),
     reference("decompose.mask-no-erosion", &[sep(&[Choice("decompose")])], "masking.erosion", &[Number(0.0)],
-        "DECOMPOSE's authors extract the brain with BET; no erosion of its mask is described",
+        "DECOMPOSE's authors describe no erosion of the brain mask",
         DECOMPOSE_MASK_SOURCE),
     reference("qsmart.mask-input", &[inv(&[Choice("qsmart")])], "masking.input", &[Choice("magnitude-first")],
         "QSMART runs brain extraction on the first echo's magnitude",
@@ -1580,7 +1584,7 @@ pub static RULES: &[Rule] = &[
         "Chen et al. 2020 NeuroImage 207:116389 (QSMGAN), Methods"),
     reference("decompose.unwrap-laplacian", &[sep(&[Choice("decompose")])],
         "field_mapping.unwrapping_algorithm", LAPLACIAN,
-        "DECOMPOSE's pipeline uses Laplacian unwrapping",
+        "DECOMPOSE's authors unwrap each echo with STI Suite's Laplacian unwrapping",
         "Chen et al. 2021 NeuroImage 242:118477 (DECOMPOSE), §3.6"),
     reference("chi-sep.unwrap-romeo", &[sep(CHI_SEP_TOOLBOX)],
         "field_mapping.unwrapping_algorithm", ROMEO,
@@ -1616,9 +1620,11 @@ pub static RULES: &[Rule] = &[
     reference("qsmnetme.romeo-no-uncertain-rewrap", &[inv(QSMNETME), ROMEO_UNWRAPS, MULTI_ECHO],
         "field_mapping.romeo.temporal_uncertain_unwrapping", &[Number(0.0)], ROMEO_CLI_UNCERTAIN_REASON,
         ROMEO_CLI_SOURCE),
+    // Scoped out of DECOMPOSE too: `decompose.unwrap-laplacian` sets the same unwrapping and names
+    // STI Suite's in its reason, so the two would only repeat each other.
     // Scoped out of the χ-separation toolbox: it runs STI Suite's iLSQR (`chi-sep-*.qsm-ilsqr`)
     // but unwraps with ROMEO (`chi-sep.unwrap-romeo`), so this rule is not its pipeline's.
-    reference("sti.unwrap-laplacian", &[inv(STI), unless_sep(CHI_SEP_TOOLBOX), NOT_UKB],
+    reference("sti.unwrap-laplacian", &[inv(STI), unless_sep(STI_UNWRAP_NOT), NOT_UKB],
         "field_mapping.unwrapping_algorithm", LAPLACIAN,
         "STI Suite unwraps each echo with its Laplacian unwrapping",
         "STI Suite 3.0 QSM_GUI, probed headless (recorded in QSM.rs laplacian.rs docs)"),
@@ -1934,7 +1940,7 @@ pub static RULES: &[Rule] = &[
     // (reference_pipelines.rs, decision 202). No rule names its coil combination (MCPC-3D-S),
     // which is upstream of a coil-combined phase.
     measured_better("ukb.mask-hd-bet", &[UKB], "masking.generator", &[Choice("hd-bet")],
-        "UK Biobank's own mask comes from its T1 scan, which an SWI run does not have; HD-BET on the magnitude came closest to it of the masks the SWI alone can give",
+        "UK Biobank's own mask comes from its T1 scan, which an SWI run does not have; HD-BET on the magnitude came closest to it",
         "QSM.rs pipeline::reference_pipelines docs (UK Biobank, decision 202): SWI-only masks compared with \
          UK Biobank's registered T1 mask"),
     // The window mode the comparison above measured. HD-BET on the whole volume gave a mask
@@ -1943,7 +1949,7 @@ pub static RULES: &[Rule] = &[
     // HD-BET elsewhere may run on the whole volume.
     measured_better("ukb.mask-hd-bet-window", &[UKB, method("masking.generator", &[Choice("hd-bet")])],
         "masking.hd_bet.inference", &[Choice("sliding-window")],
-        "HD-BET runs in 192×192×96 sliding windows, as in the comparison that chose it; on the whole volume its mask was slightly smaller at the brain's inferior edge",
+        "HD-BET runs in sliding windows, as in the comparison that chose it",
         "QSM.rs pipeline::reference_pipelines docs (UK Biobank, decision 202); UK Biobank QSMxT v9 study"),
     reference("ukb.inversion-ilsqr", &[UKB], "inversion.algorithm", &[Choice("ilsqr")],
         "UK Biobank inverts its trimmed local field with STI Suite's iLSQR", UKB_SOURCE),
@@ -2087,7 +2093,7 @@ pub static RULES: &[Rule] = &[
     reference("qsmart.ilsqr-single",
         &[inv(&[Choice("qsmart")]), method("inversion.qsmart.inversion", &[Choice("ilsqr")])],
         "inversion.ilsqr.precision", &[Choice("single")],
-        "QSMART's iLSQR, STI Suite's, runs its least-squares solves in single precision",
+        "QSMART inverts with STI Suite's iLSQR, which runs its least-squares solves in single precision",
         "QSMART QSMART.m l. 32-39; STI Suite QSM_iLSQR, probed (QSM.rs ilsqr.rs docs, Performance and precision)"),
     reference("qsmart.offset-grid", &[inv(&[Choice("qsmart")])], "inversion.qsmart.offset_grid",
         &[Choice("qsmart-reference")],
@@ -2300,7 +2306,7 @@ pub static RULES: &[Rule] = &[
         "Dimov et al. 2022 Tomography 8:1544, Methods"),
     reference("decompose.qsm-star", &[sep(&[Choice("decompose")])], "inversion.algorithm",
         &[Choice("star")],
-        "DECOMPOSE's χ of each echo was reconstructed with STAR-QSM",
+        "DECOMPOSE's authors invert each echo's field with STAR-QSM",
         "Chen et al. 2021 NeuroImage 242:118477 (DECOMPOSE), §3.6"),
     Rule {
         id: "decompose.star-pad",
@@ -3235,10 +3241,12 @@ mod tests {
             assert!(applying(&case).iter().any(|r| r.id == "sti.vsharp-radius"), "{a:?}");
             assert!(!applying(&case).iter().any(|r| r.id == "sti.echo-weights"), "{a:?}");
         }
-        // Without χ-separation, and under DECOMPOSE (STAR-QSM with Laplacian, as STI Suite), they apply.
+        // Without χ-separation, and under DECOMPOSE (STAR-QSM with Laplacian, as STI Suite), they
+        // apply; under DECOMPOSE its own rule sets the unwrapping in place of `sti.unwrap-laplacian`.
         assert!(Case::new(inversion(InversionAlgorithm::Ilsqr)).ids().contains(&"sti.unwrap-laplacian"));
         let decompose = Case::new(|c| { separation(SeparationAlgorithm::Decompose)(c); inversion(InversionAlgorithm::Star)(c) });
-        assert!(applying(&decompose).iter().any(|r| r.id == "sti.unwrap-laplacian"));
+        assert!(applying(&decompose).iter().any(|r| r.id == "decompose.unwrap-laplacian"));
+        assert!(!applying(&decompose).iter().any(|r| r.id == "sti.unwrap-laplacian"));
         assert!(conflicts(&decompose).is_empty(), "{:?}", conflicts(&decompose));
     }
 

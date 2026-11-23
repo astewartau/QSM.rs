@@ -122,6 +122,8 @@
 //! methods, which run STI Suite's iLSQR but unwrap with ROMEO and weight the echoes their own
 //! way (`chi-sep.unwrap-romeo`, `chi-sep.echo-weights`); its V-SHARP is STI Suite's, so the
 //! V-SHARP rules do.
+//! Under DECOMPOSE, `decompose.unwrap-laplacian` sets the same unwrapping in place of
+//! `sti.unwrap-laplacian`, whose reason it names.
 
 use num_complex::Complex64;
 #[cfg(feature = "parallel")]
