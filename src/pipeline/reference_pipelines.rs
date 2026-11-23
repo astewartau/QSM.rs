@@ -101,12 +101,11 @@ pub static REFERENCE_PIPELINES: &[ReferencePipeline] = &[
         id: "medi-toolbox",
         name: "MEDI toolbox",
         toolbox: "MEDI toolbox 2024.11.26",
-        // README.m:98 fits bipolar data with Fit_ppm_complex_bipolar; QSMxT can't tell a scan is
-        // bipolar yet, and bipolar correction isn't supported with the complex fit
-        // (QSMxT/QSMxT#564).
+        // For bipolar readouts the toolbox has Fit_ppm_complex_bipolar (QSMxT/QSMxT#564), which
+        // the complex fit runs when bipolar correction is on.
         note: Some(
-            "For bipolar readouts, the MEDI toolbox uses a bipolar echo fit, which is not supported yet. \
-             This pipeline always uses the monopolar fit.",
+            "For bipolar readouts, turn on bipolar correction: the complex fit is then the MEDI \
+             toolbox's bipolar echo fit (Fit_ppm_complex_bipolar).",
         ),
         choose: &[("inversion.algorithm", Choice("medi"))],
         source: "MEDI toolbox 2024.11.26 README.m:80-144",

@@ -173,7 +173,9 @@
 //! What MEDI's own pipeline script (`README.m` of the 2024.11.26 release; the release has no
 //! `MEDI_full_process.m`) runs around `MEDI_L1`. Inputs, units and the CSF term are above.
 //! - Field map: `Fit_ppm_complex(iField)` on the complex echoes (evenly spaced; README.m:87),
-//!   which also gives `N_std`; `Fit_ppm_complex_bipolar` for bipolar readouts (README.m:98).
+//!   which also gives `N_std`. For bipolar readouts the toolbox has `Fit_ppm_complex_bipolar`
+//!   (not called from README.m; SEPIA's MEDI bipolar echo combination runs it), ported as
+//!   [`crate::utils::fit_ppm_complex_bipolar`] and run when bipolar correction is on.
 //!   Unwrapping: `unwrapPhase(iMag, iFreq_raw, matrix_size)`, MEDI's region-growing unwrapper
 //!   (README.m:93; graph-cut and Laplacian unwrapping are commented alternatives).
 //! - Brain mask: FSL BET via the bundled `bet2` MEX, `BET(iMag, matrix_size, voxel_size)` on the

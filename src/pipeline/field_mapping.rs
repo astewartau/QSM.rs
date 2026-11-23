@@ -3,7 +3,8 @@
 //! Multi-echo phase → B0 field map in ppm.
 //! Implements the canonical field mapping pipeline:
 //! phase offset removal → bipolar correction → unwrapping → B0 estimation,
-//! or MEDI's: complex fit of the wrapped echoes → unwrapping.
+//! or MEDI's: complex fit of the wrapped echoes → unwrapping (with bipolar correction on, MEDI's
+//! bipolar fit, `Fit_ppm_complex_bipolar`: [`crate::utils::fit_ppm_complex_bipolar`]).
 //!
 //! # Reference pipeline
 //!
@@ -922,14 +923,15 @@ fn field_mapping_complex_fit(
     if mags.len() != phases.len() {
         return Err(PipelineError::DimensionMismatch { expected: phases.len(), got: mags.len() });
     }
-    if config.bipolar_correction {
-        return Err(PipelineError::InvalidConfig(
-            "bipolar correction is not available with the complex fit (MEDI's \
-             Fit_ppm_complex_bipolar is not ported)".into(),
-        ));
-    }
     progress(1, 4);
-    let fit = crate::utils::fit_ppm_complex(mags, phases, &metadata.echo_times, params)?;
+    // With bipolar correction on, the fit is MEDI's own one for bipolar readouts,
+    // `Fit_ppm_complex_bipolar` (an odd/even phase term per voxel), in place of MCPC-3D-S's
+    // correction, which the complex fit does not run.
+    let fit = if config.bipolar_correction {
+        crate::utils::fit_ppm_complex_bipolar(mags, phases, &metadata.echo_times, params)?
+    } else {
+        crate::utils::fit_ppm_complex(mags, phases, &metadata.echo_times, params)?
+    };
 
     progress(2, 4);
     let (nx, ny, nz) = metadata.dims;
@@ -1510,19 +1512,44 @@ mod tests {
     }
 
     #[test]
-    fn complex_fit_needs_magnitudes_and_refuses_bipolar_correction() {
+    fn complex_fit_needs_magnitudes() {
         let meta = make_test_metadata(3);
         let n = 8 * 8 * 8;
         let mask = vec![1u8; n];
         let p = vec![0.1; n];
         let phases: Vec<&[f64]> = vec![&p, &p, &p];
         let fit = B0EstimationMethod::ComplexFit(crate::utils::FitPpmComplexParams::default());
-        let config = FieldMappingConfig { b0_estimation: fit.clone(), ..Default::default() };
+        let config = FieldMappingConfig { b0_estimation: fit, ..Default::default() };
         assert!(matches!(run_field_mapping(&phases, None, &mask, &meta, &config, &mut |_, _| {}),
             Err(PipelineError::InvalidInput(_))));
+    }
+
+    /// With bipolar correction on, the complex fit is MEDI's bipolar fit: on echoes whose even
+    /// ones carry an extra phase, it returns the true field where the monopolar fit does not.
+    #[test]
+    fn complex_fit_with_bipolar_correction_is_the_bipolar_fit() {
+        let meta = make_test_metadata(4);
+        let n = 8 * 8 * 8;
+        let mask = vec![1u8; n];
+        let tes = &meta.echo_times;
+        let omega = 40.0; // rad/s
+        // an even-echo offset that varies over the volume (a readout ramp)
+        let echoes: Vec<Vec<f64>> = (0..4).map(|e| (0..n).map(|i| {
+            let ramp = 0.3 * ((i % 8) as f64 - 3.5) / 3.5;
+            let wrapped = |x: f64| (x + PI).rem_euclid(2.0 * PI) - PI;
+            wrapped(0.2 + omega * tes[e] + if e % 2 == 1 { ramp } else { 0.0 })
+        }).collect()).collect();
+        let mag = vec![1.0; n];
+        let phases: Vec<&[f64]> = echoes.iter().map(|v| v.as_slice()).collect();
+        let mags: Vec<&[f64]> = vec![&mag; 4];
+        let fit = B0EstimationMethod::ComplexFit(crate::utils::FitPpmComplexParams::default());
         let config = FieldMappingConfig { b0_estimation: fit, bipolar_correction: true, ..Default::default() };
-        assert!(matches!(run_field_mapping(&phases, Some(&phases), &mask, &meta, &config, &mut |_, _| {}),
-            Err(PipelineError::InvalidConfig(_))));
+        let r = run_field_mapping(&phases, Some(&mags), &mask, &meta, &config, &mut |_, _| {}).unwrap();
+        let raw = r.complex_fit.as_ref().unwrap();
+        let dte = tes[1] - tes[0];
+        for (i, &p) in raw.field.iter().enumerate() {
+            assert!((p - omega * dte).abs() < 1e-6, "voxel {i}: {p} vs {}", omega * dte);
+        }
     }
 
     #[test]

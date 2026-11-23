@@ -813,6 +813,144 @@ pub fn bipolar_correction<P: AsMut<[f64]> + AsRef<[f64]>>(
 }
 
 
+// =========================================================================
+// Readout polarity: the bipolar signature of the echoes
+// =========================================================================
+
+/// The odd/even pattern a bipolar readout leaves in the echoes' phase ([`bipolar_signature`]).
+#[cfg_attr(feature = "introspection", derive(serde::Serialize))]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BipolarSignature {
+    /// Gradient of the phase difference between odd and even echoes along each voxel axis, in
+    /// radians per cm: what is left of `φ₁ − 2φ₂ + φ₃`, halved, once the field cancels.
+    pub gradient_rad_per_cm: [f64; 3],
+    /// How consistent that gradient is over the brain along each axis (0–1: the magnitude of
+    /// the mean unit phasor of neighbouring voxels' differences).
+    pub coherence: [f64; 3],
+    /// Voxels the estimate used.
+    pub voxels: usize,
+}
+
+impl BipolarSignature {
+    /// The largest odd/even gradient over the three axes, rad/cm.
+    pub fn max_gradient(&self) -> f64 {
+        self.gradient_rad_per_cm.iter().fold(0.0f64, |m, g| m.max(g.abs()))
+    }
+
+    /// Whether the echoes show a bipolar readout: [`Self::max_gradient`] of at least
+    /// [`BIPOLAR_SIGNATURE_RAD_PER_CM`].
+    pub fn looks_bipolar(&self) -> bool {
+        self.max_gradient() >= BIPOLAR_SIGNATURE_RAD_PER_CM
+    }
+}
+
+/// The odd/even phase gradient from which [`BipolarSignature::looks_bipolar`] holds, rad/cm.
+/// Set between the monopolar and bipolar scans of the EMTP travelling heads (see
+/// [`bipolar_signature`], *Calibration*).
+pub const BIPOLAR_SIGNATURE_RAD_PER_CM: f64 = 0.06;
+
+/// The fewest voxels [`bipolar_signature`] estimates from; with fewer it returns `None`.
+pub const BIPOLAR_SIGNATURE_MIN_VOXELS: usize = 1000;
+
+/// Measure the even/odd echo phase pattern of a bipolar (alternating-polarity) readout, for a
+/// host that does not know the readout polarity from the scan's metadata.
+///
+/// A bipolar readout reads odd and even echoes with opposite gradient polarity, so gradient
+/// delays and eddy currents give them phase errors of opposite sign: mostly a linear ramp along
+/// the readout, plus a constant (Eckstein 2021, PhD thesis, Section 3.1.3; Lu et al., MRM 2008,
+/// 60:198). With echoes evenly spaced, `φ₁ − 2φ₂ + φ₃` cancels the field and the
+/// echo-independent phase offset exactly, so what is left is four times the alternating error
+/// (and noise). This takes `u = exp(i(φ₁ − 2φ₂ + φ₃))` and, along each axis, the mean of
+/// `u(x+1)·conj(u(x))` over neighbouring voxels that are both in `mask` and brighter (echo 3's
+/// magnitude) than its 30th percentile in the mask; the angle of that mean, over 4 and over the
+/// voxel size, is the alternating error's gradient, doubled to give the odd–even difference.
+/// Nothing needs unwrapping. Its magnitude is the coherence.
+///
+/// Returns `None` with fewer than three echoes, echoes that are not evenly spaced
+/// ([`echo_spacing_problem`]), or fewer than [`BIPOLAR_SIGNATURE_MIN_VOXELS`] voxels to estimate
+/// from. Uses echoes 1–3 only.
+///
+/// # Calibration
+/// Measured 2026-11-23 (QSMxT/QSMxT#564) on the EMTP travelling heads, 102 acquisitions on 11
+/// scanners (Philips Achieva, Elition, Ingenia; Siemens Prisma, Skyra, Cima.X; GE MR750, MR750w),
+/// as packed for QSM-CI, plus the six bipolar GE MR750w acquisitions before their correction. The
+/// largest odd–even gradient, rad/cm:
+/// - known monopolar scans (every bridge protocol, the Philips and GE local protocols, the
+///   Skyra's): at most 0.01;
+/// - the bipolar MR750w before correction: 0.36–0.38; after MCPC-3D-S bipolar correction (as
+///   packed): 0.04–0.05, the correction's residue;
+/// - the 8-echo local protocols of two Siemens Prismas: 0.09–0.12, with a strong odd/even constant
+///   too. Their echo spacing (4.06 ms at 260 Hz/pixel, a 3.85 ms readout) leaves no time for a
+///   monopolar readout's flyback, so these are bipolar readouts.
+///
+/// [`BIPOLAR_SIGNATURE_RAD_PER_CM`] (0.06) is six times the largest monopolar value and below the
+/// smallest bipolar one, and above what a corrected bipolar scan keeps, so corrected data are not
+/// flagged again. It is a heuristic on one dataset: hosts offer it as a suggestion
+/// (`Suggested`), not a required change.
+pub fn bipolar_signature(
+    phases: &[&[f64]],
+    mags: &[&[f64]],
+    echo_times: &[f64],
+    mask: &[u8],
+    grid: &Grid,
+) -> Option<BipolarSignature> {
+    if phases.len() < 3 || mags.len() < 3 || echo_times.len() < 3 || echo_spacing_problem(&echo_times[..3]).is_some() {
+        return None;
+    }
+    let n = grid.n_total();
+    if phases[..3].iter().chain(&mags[..3]).any(|v| v.len() != n) || mask.len() != n {
+        return None;
+    }
+    let mut bright: Vec<f64> = (0..n).filter(|&i| mask[i] != 0 && mags[2][i].is_finite()).map(|i| mags[2][i]).collect();
+    if bright.len() < BIPOLAR_SIGNATURE_MIN_VOXELS {
+        return None;
+    }
+    let cut = bright.len() * 3 / 10;
+    let threshold = *bright.select_nth_unstable_by(cut, f64::total_cmp).1;
+    let good: Vec<bool> = (0..n)
+        .map(|i| mask[i] != 0 && mags[2][i] >= threshold && (0..3).all(|e| phases[e][i].is_finite()))
+        .collect();
+    let voxels = good.iter().filter(|&&g| g).count();
+    if voxels < BIPOLAR_SIGNATURE_MIN_VOXELS {
+        return None;
+    }
+    let u: Vec<num_complex::Complex64> = (0..n)
+        .map(|i| num_complex::Complex64::from_polar(1.0, phases[0][i] - 2.0 * phases[1][i] + phases[2][i]))
+        .collect();
+    let (nx, ny, nz) = grid.dims;
+    let vs = [grid.voxel_size.0, grid.voxel_size.1, grid.voxel_size.2];
+    let strides = [1, nx, nx * ny];
+    let mut gradient_rad_per_cm = [0.0; 3];
+    let mut coherence = [0.0; 3];
+    for ax in 0..3 {
+        let (mut sum, mut count) = (num_complex::Complex64::new(0.0, 0.0), 0usize);
+        for k in 0..nz {
+            for j in 0..ny {
+                for i in 0..nx {
+                    let at = [i, j, k];
+                    if at[ax] + 1 >= [nx, ny, nz][ax] {
+                        continue;
+                    }
+                    let a = i + j * nx + k * nx * ny;
+                    let b = a + strides[ax];
+                    if good[a] && good[b] {
+                        sum += u[b] * u[a].conj();
+                        count += 1;
+                    }
+                }
+            }
+        }
+        if count == 0 {
+            continue;
+        }
+        let mean = sum / count as f64;
+        // angle per voxel of 4ψ; the odd–even difference is 2ψ; per cm
+        gradient_rad_per_cm[ax] = mean.arg() / 2.0 / (vs[ax] / 10.0);
+        coherence[ax] = mean.norm();
+    }
+    Some(BipolarSignature { gradient_rad_per_cm, coherence, voxels })
+}
+
 //=============================================================================
 // Multi-Echo Linear Fit
 //=============================================================================
@@ -1694,6 +1832,10 @@ pub struct FitPpmComplexResult {
     pub echo_spacing: f64,
     /// Gauss-Newton iterations run (the same for every voxel, as in the reference).
     pub iterations: usize,
+    /// The bipolar fit's extra phase of the even echoes over the odd ones (radians;
+    /// `Fit_ppm_complex_bipolar.m`'s `p0_o2e`, sign as [`Self::phase0`]); `None` from the
+    /// monopolar fit ([`fit_ppm_complex`]).
+    pub odd_even_offset: Option<Vec<f64>>,
 }
 
 /// The inverse of the magnitude-weighted normal matrix of the fit of phase to echo index,
@@ -1812,9 +1954,9 @@ pub fn echo_spacing_problem(echo_times: &[f64]) -> Option<String> {
 /// the complex (coil-combined or per-channel) echoes with the default `opts`, unwraps `iFreq_raw`
 /// with `unwrapPhase(iMag, iFreq_raw, matrix_size)` (region-growing), and hands the field and
 /// `N_std` (both in radians per `delta_TE`) to `PDF` and `MEDI_L1`. For uneven echo spacing the
-/// toolbox has `Fit_ppm_complex_TE(iField, TE)` and for bipolar readouts
-/// `Fit_ppm_complex_bipolar` (unwrapped at twice the phase and halved, README.m:98-102); neither
-/// is ported. Nothing in the fit depends on the field strength.
+/// toolbox has `Fit_ppm_complex_TE(iField, TE)` (not ported) and for bipolar readouts
+/// `Fit_ppm_complex_bipolar` ([`fit_ppm_complex_bipolar`]). Nothing in the fit depends on the
+/// field strength.
 ///
 /// `magnitudes[e]` and `phases[e]` are echo `e` (phase in radians, wrapped or not).
 pub fn fit_ppm_complex(
@@ -1960,11 +2102,213 @@ pub fn fit_ppm_complex(
         .map(|&p| -(if (-PI..=PI).contains(&p) { p } else { (p + PI).rem_euclid(TWO_PI) - PI }))
         .collect();
     let phase0 = p0.iter().map(|&p| -p).collect();
-    Ok(FitPpmComplexResult { field, noise, phase0, relres, echo_spacing, iterations: iter })
+    Ok(FitPpmComplexResult { field, noise, phase0, relres, echo_spacing, iterations: iter, odd_even_offset: None })
+}
+
+
+/// The complex fit for a **bipolar** readout, a port of `Fit_ppm_complex_bipolar.m` (MEDI toolbox
+/// 2024.11.26, by Zhe Liu, 2018; identical in the release QSM-CI's MEDI reference uses): as
+/// [`fit_ppm_complex`], with one more unknown per voxel, the phase the even echoes carry over the
+/// odd ones (`p0_o2e`). The model is `Sₑ = |Sₑ| exp(i(p0 + [e odd]·p0_o2e + e·p1))` over echo indices
+/// `e = 0, 1, …` (so the 2nd, 4th, … echoes get `p0_o2e`). A bipolar readout gives odd and even
+/// echoes different phase errors (gradient delays, eddy currents); a monopolar fit then puts the
+/// difference into the field. The extra term absorbs it in each voxel, whatever its spatial shape.
+/// SEPIA's `Wrapper_EchoCombine_MEDInonlinearfit_bipolar.m` runs it in place of `Fit_ppm_complex`
+/// and unwraps its field as the monopolar one's, which [`run_field_mapping`](crate::pipeline::run_field_mapping)
+/// does when bipolar correction is on with the complex fit.
+///
+/// As in the reference:
+/// - with fewer than three echoes it is [`fit_ppm_complex`] (`p0_o2e = 0`; the reference warns);
+/// - the initial guess solves the 3×3 system exactly on the first three echoes: echoes 1 and 3
+///   temporally unwrapped as [`fit_ppm_complex`] does, echo 2 as it is;
+/// - **the weighted normal matrix's slope term is `a33 = Σ|Sₑ|²·e³`**, not `e²`. That is the
+///   reference's code (line `a33=sum(abs(M).^2.*(ones(s(1),1)*(v3.^3)),2)`); the Gauss-Newton step
+///   and the noise estimate (`dp1 = sqrt(ai33)`, MEDI's `N_std`) follow from it. It is ported as
+///   written, so the field (to which the iterations converge either way) and `N_std` match MEDI's.
+/// - the stopping test (`‖Δp1‖/‖p1₀‖ > reltol`, at most `max_iter` iterations) is global.
+///
+/// Sign as [`fit_ppm_complex`]: the conjugate is taken first and undone last.
+pub fn fit_ppm_complex_bipolar(
+    magnitudes: &[&[f64]],
+    phases: &[&[f64]],
+    echo_times: &[f64],
+    params: &FitPpmComplexParams,
+) -> Result<FitPpmComplexResult, InputError> {
+    use num_complex::Complex64;
+    let n_in = phases.len();
+    if n_in < 3 {
+        // `nechos < 3`: "Number of echoes too low. Running Fit_ppm_complex instead."
+        let mut r = fit_ppm_complex(magnitudes, phases, echo_times, params)?;
+        r.odd_even_offset = Some(vec![0.0; r.field.len()]);
+        return Ok(r);
+    }
+    if magnitudes.len() != n_in || echo_times.len() != n_in {
+        return Err(InputError(format!(
+            "fit_ppm_complex_bipolar: {} phase echoes, {} magnitude echoes and {} echo times",
+            n_in, magnitudes.len(), echo_times.len()
+        )));
+    }
+    let n = phases[0].len();
+    for e in 0..n_in {
+        check_len(&format!("fit_ppm_complex_bipolar: phase of echo {}", e + 1), phases[e].len(), n)?;
+        check_len(&format!("fit_ppm_complex_bipolar: magnitude of echo {}", e + 1), magnitudes[e].len(), n)?;
+    }
+    if let Some(problem) = echo_spacing_problem(echo_times) {
+        return Err(InputError(format!("fit_ppm_complex_bipolar {problem}")));
+    }
+    let echo_spacing = echo_times[1] - echo_times[0];
+    if !(params.reltol.is_finite() && params.reltol >= 0.0) {
+        return Err(InputError(format!("fit_ppm_complex_bipolar: reltol must be >= 0, got {}", params.reltol)));
+    }
+
+    // M = conj(mag .* exp(1i*phase))
+    let m: Vec<Vec<Complex64>> = (0..n_in)
+        .map(|e| (0..n).map(|i| Complex64::from_polar(magnitudes[e][i], phases[e][i]).conj()).collect())
+        .collect();
+    let abs_m: Vec<Vec<f64>> = m.iter().map(|me| me.iter().map(|z| z.norm()).collect()).collect();
+    let angle = |z: Complex64| if z.re == 0.0 && z.im == 0.0 { 0.0 } else { z.arg() };
+    // v1 = ones, v2 = [0 1 0 1 …] (even echoes, 1-based), v3 = 0:nechos-1
+    let v2 = |e: usize| if e % 2 == 1 { 1.0 } else { 0.0 };
+
+    // Initial guess on the first three echoes: Y_odd = angle(M(:, [1 3])) unwrapped against
+    // their wrapped difference, Y_even = angle(M(:, 2)); ip = A \ Y' with
+    // A = [1 0 0; 1 1 1; 1 0 2], i.e. p0 = y1, p1 = (y3 − y1)/2, p0_o2e = y2 − p0 − p1.
+    let mut p0 = vec![0.0f64; n];
+    let mut po = vec![0.0f64; n];
+    let mut p1 = vec![0.0f64; n];
+    for i in 0..n {
+        let (y1, y2, y3) = (angle(m[0][i]), angle(m[1][i]), angle(m[2][i]));
+        let mut c = y3 - y1;
+        let cands = [(c - 2.0 * PI).abs(), c.abs(), (c + 2.0 * PI).abs()];
+        let mut ind = 0;
+        for j in 1..3 {
+            if cands[j] < cands[ind] {
+                ind = j;
+            }
+        }
+        if ind == 0 {
+            c -= 2.0 * PI;
+        } else if ind == 2 {
+            c += 2.0 * PI;
+        }
+        // the loop's `cd = (Y(:,2) − Y(:,1)) − c` is then 0: Y_odd(:,2) = y1 + c
+        let y3u = y1 + c;
+        p0[i] = y1;
+        p1[i] = (y3u - y1) / 2.0;
+        po[i] = y2 - p0[i] - p1[i];
+    }
+
+    // Inverse of the weighted normal matrix, by cofactors as in the reference (a33 with e³).
+    let ai: Vec<[f64; 6]> = (0..n)
+        .map(|i| {
+            let (mut a11, mut a12, mut a13, mut a22, mut a23, mut a33) = (0.0f64, 0.0, 0.0, 0.0, 0.0, 0.0);
+            for (e, am) in abs_m.iter().enumerate() {
+                let w = am[i] * am[i];
+                let (t, o) = (e as f64, v2(e));
+                a11 += w;
+                a12 += w * o;
+                a13 += w * t;
+                a22 += w * (o * o);
+                a23 += w * (o * t);
+                a33 += w * t.powi(3);
+            }
+            let c11 = a22 * a33 - a23 * a23;
+            let c12 = -(a12 * a33 - a23 * a13);
+            let c13 = a12 * a23 - a22 * a13;
+            let c22 = a11 * a33 - a13 * a13;
+            let c23 = -(a11 * a23 - a12 * a13);
+            let c33 = a11 * a22 - a12 * a12;
+            let d = a11 * c11 + a12 * c12 + a13 * c13;
+            [c11 / d, c12 / d, c13 / d, c22 / d, c23 / d, c33 / d]
+        })
+        .collect();
+
+    let norm = |v: &[f64]| v.iter().map(|x| x * x).sum::<f64>().sqrt();
+    let tol = norm(&p1) * params.reltol;
+    let mut dp1 = p1.clone();
+    let mut iter = 0;
+    let fit = |i: usize, e: usize, p0: f64, po: f64, p1: f64| {
+        abs_m[e][i] * Complex64::new(0.0, p0 + po * v2(e) + p1 * e as f64).exp()
+    };
+    while norm(&dp1) > tol && iter < params.max_iter {
+        iter += 1;
+        for i in 0..n {
+            let (mut pr1, mut pr2, mut pr3) = (0.0f64, 0.0f64, 0.0f64);
+            for e in 0..n_in {
+                let w = fit(i, e, p0[i], po[i], p1[i]);
+                let g = (Complex64::i() * w).conj() * (m[e][i] - w);
+                pr1 += g.re;
+                pr2 += g.re * v2(e);
+                pr3 += g.re * e as f64;
+            }
+            let [a11, a12, a13, a22, a23, a33] = ai[i];
+            let nan0 = |x: f64| if x.is_nan() { 0.0 } else { x };
+            let d0 = nan0(a11 * pr1 + a12 * pr2 + a13 * pr3);
+            let d_o = nan0(a12 * pr1 + a22 * pr2 + a23 * pr3);
+            let d1 = nan0(a13 * pr1 + a23 * pr2 + a33 * pr3);
+            p0[i] += d0;
+            po[i] += d_o;
+            p1[i] += d1;
+            dp1[i] = d1;
+        }
+    }
+
+    let noise: Vec<f64> = ai.iter().map(|a| fit_ppm_complex_std(a[5])).collect();
+    let relres: Vec<f64> = (0..n)
+        .map(|i| {
+            let (mut num, mut den) = (0.0f64, 0.0f64);
+            for e in 0..n_in {
+                num += (m[e][i] - fit(i, e, p0[i], po[i], p1[i])).norm().powi(2);
+                den += abs_m[e][i].powi(2);
+            }
+            let r = num / den;
+            if r.is_nan() { 0.0 } else { r }
+        })
+        .collect();
+    let field = p1.iter()
+        .map(|&p| -(if (-PI..=PI).contains(&p) { p } else { (p + PI).rem_euclid(TWO_PI) - PI }))
+        .collect();
+    let phase0 = p0.iter().map(|&p| -p).collect();
+    let odd_even_offset = Some(po.iter().map(|&p| -p).collect());
+    Ok(FitPpmComplexResult { field, noise, phase0, relres, echo_spacing, iterations: iter, odd_even_offset })
 }
 
 #[cfg(test)]
 mod tests {
+    /// A synthetic bipolar readout (odd and even echoes with opposite linear readout ramps) is
+    /// found, with the right gradient, whatever the field; the same echoes without the ramp are
+    /// not.
+    #[test]
+    fn bipolar_signature_finds_an_alternating_ramp() {
+        let grid = super::Grid::new(24, 20, 16, 1.0, 1.0, 2.0);
+        let n = grid.n_total();
+        let tes = [0.004, 0.008, 0.012, 0.016];
+        let ramp = 0.05; // odd–even phase difference per voxel along x: 0.5 rad/cm
+        let make = |bipolar: bool| -> Vec<Vec<f64>> {
+            tes.iter().enumerate().map(|(e, &te)| (0..n).map(|i| {
+                let (x, y, z) = (i % 24, (i / 24) % 20, i / 480);
+                let field = 300.0 * ((x * y) as f64).sqrt() + 50.0 * z as f64; // rad/s
+                let psi = if bipolar { ramp / 2.0 * x as f64 * if e % 2 == 0 { 1.0 } else { -1.0 } } else { 0.0 };
+                super::wrap_to_pi(0.7 + field * te + psi)
+            }).collect()).collect()
+        };
+        let mag = vec![1.0; n];
+        let mags: Vec<&[f64]> = vec![&mag; 4];
+        let mask = vec![1u8; n];
+        let b = make(true);
+        let s = super::bipolar_signature(&b.iter().map(|v| v.as_slice()).collect::<Vec<_>>(), &mags, &tes, &mask, &grid).unwrap();
+        assert!((s.gradient_rad_per_cm[0].abs() - 0.5).abs() < 1e-9, "{s:?}");
+        assert!(s.gradient_rad_per_cm[1].abs() < 1e-9 && s.gradient_rad_per_cm[2].abs() < 1e-9, "{s:?}");
+        assert!(s.looks_bipolar());
+        let m = make(false);
+        let s = super::bipolar_signature(&m.iter().map(|v| v.as_slice()).collect::<Vec<_>>(), &mags, &tes, &mask, &grid).unwrap();
+        assert!(s.max_gradient() < 1e-9 && !s.looks_bipolar(), "{s:?}");
+        // uneven echoes or too few: no estimate
+        let refs: Vec<&[f64]> = m.iter().map(|v| v.as_slice()).collect();
+        assert!(super::bipolar_signature(&refs, &mags, &[0.004, 0.008, 0.013, 0.016], &mask, &grid).is_none());
+        assert!(super::bipolar_signature(&refs[..2], &mags[..2], &tes[..2], &mask, &grid).is_none());
+    }
+
     #[test]
     fn fit_ppm_complex_noise_matches_the_closed_form() {
         // two voxels, three echoes: |S| = (2, 1, 1) and a zero voxel
