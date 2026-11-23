@@ -1432,7 +1432,7 @@ pub static RULES: &[Rule] = &[
         &[Choice("none")], "The MEDI toolbox runs brain extraction on the magnitude as read, with no bias-field correction",
         MEDI_MASK_SOURCE),
     reference("medi.mask-no-erosion", &[inv(&[Choice("medi")])], "masking.erosion", &[Number(0.0)],
-        "The MEDI toolbox uses the brain extraction's mask as it is, without eroding it", MEDI_MASK_SOURCE),
+        "The MEDI toolbox uses the brain mask as it is, without eroding it", MEDI_MASK_SOURCE),
     reference("medi.bet-as-stored", &[inv(&[Choice("medi")])], "masking.bet.orientation", &[Choice("as-stored")],
         "The MEDI toolbox runs brain extraction on the image as stored, while FSL's own tool flips a neurologically stored image first; the two masks differ slightly at the brain's edge",
         MEDI_BET_SOURCE),
@@ -1443,7 +1443,7 @@ pub static RULES: &[Rule] = &[
         &[Choice("none")], "The χ-separation toolbox runs brain extraction on the magnitude as read, with no bias-field correction",
         CHI_SEP_MASK_SOURCE),
     reference("chi-sep.mask-no-erosion", &[sep(CHI_SEP_TOOLBOX)], "masking.erosion", &[Number(0.0)],
-        "The χ-separation toolbox uses the brain extraction's mask as it is, without eroding it", CHI_SEP_MASK_SOURCE),
+        "The χ-separation toolbox uses the brain mask as it is, without eroding it", CHI_SEP_MASK_SOURCE),
     reference("chi-sep.bet-as-stored", &[sep(CHI_SEP_TOOLBOX)], "masking.bet.orientation", &[Choice("as-stored")],
         "The χ-separation toolbox runs brain extraction on the image as stored, while FSL's own tool flips a neurologically stored image first",
         "χ-separation toolbox v1.1.3 Chisep_script.m:82 (mask_brain = BET(mag, matrix_size, voxel_size)), \
