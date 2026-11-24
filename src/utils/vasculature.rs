@@ -212,6 +212,18 @@ impl Default for VasculatureParams {
     }
 }
 
+/// One of the maps vasculature detection computes on the way to its mask, reported by
+/// [`generate_vasculature_mask_with_maps`]: the two `vasculature_mask.m` saves.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VesselMap {
+    /// The magnitude's morphological bottom-hat (closing minus the image, a sphere of
+    /// `sphere_radius` voxels) over the whole volume, in the magnitude's units: `test.nii`.
+    BottomHat,
+    /// Frangi's vesselness of the bottom-hat zeroed outside the brain mask (`enhanced.nii`).
+    /// Voxels above its Otsu threshold (`graythresh`, over the whole volume) are vessel.
+    Vesselness,
+}
+
 /// Generate vasculature mask from magnitude image
 ///
 /// # Arguments
@@ -233,12 +245,26 @@ pub fn generate_vasculature_mask(
     params: &VasculatureParams,
     progress_callback: impl Fn(usize, usize),
 ) -> Result<Vec<f64>, InputError> {
+    generate_vasculature_mask_with_maps(magnitude, mask, grid, params, progress_callback, &mut |_, _| {})
+}
+
+/// [`generate_vasculature_mask`], handing the bottom-hat and the vesselness ([`VesselMap`]) to
+/// `maps` as each is computed, as borrowed slices. Reporting them changes nothing in the mask.
+pub fn generate_vasculature_mask_with_maps(
+    magnitude: &[f64],
+    mask: &[u8],
+    grid: &Grid,
+    params: &VasculatureParams,
+    progress_callback: impl Fn(usize, usize),
+    maps: &mut dyn FnMut(VesselMap, &[f64]),
+) -> Result<Vec<f64>, InputError> {
     let (nx, ny, nz) = grid.dims;
     // Step 1: Apply morphological bottom-hat filter to enhance dark structures
     // Bottom-hat = closing(image) - image
     progress_callback(0, 4);
 
     let bottom_hat = morphological_bottom_hat(magnitude, nx, ny, nz, params.sphere_radius);
+    maps(VesselMap::BottomHat, &bottom_hat);
 
     // Step 2: Apply mask to bottom-hat result
     progress_callback(1, 4);
@@ -264,6 +290,7 @@ pub fn generate_vasculature_mask(
 
     let frangi_result = frangi_filter_3d(&masked_bottom_hat, grid, &frangi_params, |_, _| {})?;
     let enhanced = frangi_result.vesselness;
+    maps(VesselMap::Vesselness, &enhanced);
 
     // Step 4: Otsu threshold, as vasculature_mask.m does: `T = graythresh(enhanced)` over the
     // whole volume, vessels where `enhanced > T`, nothing outside the brain mask.

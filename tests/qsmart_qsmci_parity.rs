@@ -214,7 +214,7 @@ fn ilsqr_stages_match_qsmart() {
 fn offset_adjustment_matches_qsmart() {
     let f = load();
     let removed: Vec<f64> = mask_r0(&f).iter().zip(&f.vasc_only).map(|(m, v)| m - v).collect();
-    let mut chi = adjust_offset(&removed, &f.lfs1, &f.chi1, &f.chi2, &grid(), (0.0, 0.0, 1.0), 1.0, QsmartOffsetGrid::QsmartReference);
+    let mut chi = adjust_offset(&removed, &f.lfs1, &f.chi1, &f.chi2, &grid(), (0.0, 0.0, 1.0), 1.0, QsmartOffsetGrid::QsmartReference).chi;
     for (c, &m) in chi.iter_mut().zip(&f.mask) {
         if m == 0 {
             *c = 0.0;

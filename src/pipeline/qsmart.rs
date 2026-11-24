@@ -148,21 +148,78 @@ use super::config::*;
 use super::observer::{Observer, VolumeRef};
 
 /// Names of the intermediates [`run_qsmart`] reports through [`Observer::output`], in the order
-/// they are produced. Each is reported once per run.
+/// they are produced. Each is reported once per run, [`VESSEL_PROXIMITY_STAGE2`] only when stage
+/// 2's σ2 is above 0. All are in the field's grid; the maps the authors' toolbox saves are named
+/// with its file name (`QSMART_toolbox_v1.0`, written to its output folder as it runs).
+///
+/// [`VESSEL_PROXIMITY_STAGE2`]: outputs::VESSEL_PROXIMITY_STAGE2
 pub mod outputs {
+    /// The vessel magnitude's morphological bottom-hat, the input to Frangi's filter, over the
+    /// whole volume (`test.nii`; [`VesselMap::BottomHat`](crate::utils::VesselMap::BottomHat)).
+    pub const VESSEL_BOTTOM_HAT: &str = "vessel_bottom_hat";
+    /// Frangi's vesselness of the bottom-hat inside the brain mask (`enhanced.nii`); voxels above
+    /// its Otsu threshold are vessel
+    /// ([`VesselMap::Vesselness`](crate::utils::VesselMap::Vesselness)).
+    pub const VESSELNESS: &str = "vesselness";
     /// Vessels found by vasculature detection ([`VolumeRef::Mask`](super::VolumeRef::Mask),
-    /// 1 = vessel, always inside the brain mask). Stage 2 runs on the brain mask minus these.
+    /// 1 = vessel, always inside the brain mask; the complement of the toolbox's `vasc_only.nii`
+    /// inside the mask). Stage 2 runs on the brain mask minus these.
     pub const VESSEL_MASK: &str = "vessel_mask";
-    /// Stage-1 local field: SDF over the whole brain mask, vessels included (ppm).
+    /// Stage 1's initial proximity map `prox1`
+    /// ([`SdfMap::InitialProximity`](crate::bgremove::SdfMap::InitialProximity)).
+    pub const INITIAL_PROXIMITY_STAGE1: &str = "initial_proximity_stage1";
+    /// The scaled Gaussian curvature of the mask's surface, `curvI` (`curvature.nii`;
+    /// [`SdfMap::Curvature`](crate::bgremove::SdfMap::Curvature)). Both stages compute it from the
+    /// same mask (brain mask × `R_0`), so it is reported once, from stage 1.
+    pub const CURVATURE: &str = "curvature";
+    /// Stage 1's proximity map `prox` (`prox.nii` after stage 1;
+    /// [`SdfMap::Proximity`](crate::bgremove::SdfMap::Proximity)).
+    pub const PROXIMITY_STAGE1: &str = "proximity_stage1";
+    /// Stage 1's smoothing widths `alpha` in voxels (`alpha.nii` after stage 1;
+    /// [`SdfMap::Alpha`](crate::bgremove::SdfMap::Alpha)).
+    pub const ALPHA_STAGE1: &str = "alpha_stage1";
+    /// Stage-1 local field: SDF over the whole brain mask, vessels included (ppm;
+    /// `lfs_sdf_1.nii`, which the toolbox writes before converting to ppm).
     pub const LOCAL_FIELD_STAGE1: &str = "local_field_stage1";
     /// Stage-1 susceptibility: inner inversion of the stage-1 local field over the brain mask
-    /// (ppm, unreferenced).
+    /// (ppm, unreferenced; `QSM_1.nii`).
     pub const CHI_STAGE1: &str = "chi_stage1";
-    /// Stage-2 local field: vessel-aware SDF on the tissue-only field (ppm).
+    /// Stage 2's initial proximity map `prox1` (σ1 of stage 2).
+    pub const INITIAL_PROXIMITY_STAGE2: &str = "initial_proximity_stage2";
+    /// Stage 2's vessel proximity map `prox2`
+    /// ([`SdfMap::VesselProximity`](crate::bgremove::SdfMap::VesselProximity)).
+    pub const VESSEL_PROXIMITY_STAGE2: &str = "vessel_proximity_stage2";
+    /// Stage 2's proximity map `prox`, including `prox2` (`prox.nii` as the toolbox leaves it).
+    pub const PROXIMITY_STAGE2: &str = "proximity_stage2";
+    /// Stage 2's smoothing widths `alpha` in voxels, 1 in vessels (`alpha.nii` as the toolbox
+    /// leaves it).
+    pub const ALPHA_STAGE2: &str = "alpha_stage2";
+    /// Stage-2 local field: vessel-aware SDF on the tissue-only field (ppm; `lfs_sdf_2.nii`).
     pub const LOCAL_FIELD_STAGE2: &str = "local_field_stage2";
     /// Stage-2 susceptibility: inner inversion of the stage-2 local field over tissue only
-    /// (ppm, unreferenced, zero in vessels).
+    /// (ppm, unreferenced, zero in vessels; `QSM_2.nii`).
     pub const CHI_STAGE2: &str = "chi_stage2";
+    /// The two stages combined before the offset adjustment: stage-1 χ in the vessels, stage-2 χ
+    /// elsewhere (ppm, unreferenced; `combined_chi.nii`). The result is this plus one offset in
+    /// the vessels ([`adjust_offset`](crate::utils::adjust_offset)).
+    pub const CHI_COMBINED: &str = "chi_combined";
+}
+
+/// The name stage `stage` (1 or 2) of [`run_qsmart`] reports an SDF map under, if it reports it.
+fn sdf_output(stage: u8, map: crate::bgremove::SdfMap) -> Option<&'static str> {
+    use crate::bgremove::SdfMap as M;
+    Some(match (stage, map) {
+        (1, M::InitialProximity) => outputs::INITIAL_PROXIMITY_STAGE1,
+        (1, M::Curvature) => outputs::CURVATURE,
+        (1, M::Proximity) => outputs::PROXIMITY_STAGE1,
+        (1, M::Alpha) => outputs::ALPHA_STAGE1,
+        (2, M::InitialProximity) => outputs::INITIAL_PROXIMITY_STAGE2,
+        (2, M::VesselProximity) => outputs::VESSEL_PROXIMITY_STAGE2,
+        (2, M::Proximity) => outputs::PROXIMITY_STAGE2,
+        (2, M::Alpha) => outputs::ALPHA_STAGE2,
+        // Stage 1 has no vessel proximity; stage 2's curvature is stage 1's (same mask).
+        _ => return None,
+    })
 }
 
 /// Run QSMART two-stage QSM reconstruction.
@@ -258,8 +315,12 @@ pub fn run_qsmart(
         frangi_scale_ratio: qsmart_params.frangi_scale_ratio,
         frangi_c: qsmart_params.frangi_c,
     };
-    let vasc_mask = crate::utils::generate_vasculature_mask(
+    let vasc_mask = crate::utils::generate_vasculature_mask_with_maps(
         mag, mask, &grid, &vasc_params, |_, _| {},
+        &mut |map, v| observer.output(match map {
+            crate::utils::VesselMap::BottomHat => outputs::VESSEL_BOTTOM_HAT,
+            crate::utils::VesselMap::Vesselness => outputs::VESSELNESS,
+        }, VolumeRef::Real(v)),
     )
     .map_err(|e| PipelineError::InvalidConfig(format!("QSMART: {e}")))?;
     {
@@ -286,8 +347,9 @@ pub fn run_qsmart(
         use_curvature: true,
         vessel_proximity: false,
     };
-    let lfs1 = crate::bgremove::sdf::sdf(
+    let lfs1 = crate::bgremove::sdf_with_maps(
         field_ppm, &weighted_mask, &ones_vasc, &grid, &sdf_params1, |_, _| {},
+        &mut |map, v| if let Some(name) = sdf_output(1, map) { observer.output(name, VolumeRef::Real(v)) },
     );
     observer.output(outputs::LOCAL_FIELD_STAGE1, VolumeRef::Real(&lfs1));
 
@@ -311,8 +373,9 @@ pub fn run_qsmart(
         .zip(weighted_mask.iter())
         .map(|(&f, &m)| f * m)
         .collect();
-    let lfs2 = crate::bgremove::sdf::sdf(
+    let lfs2 = crate::bgremove::sdf_with_maps(
         &field_weighted, &weighted_mask, &vasc_mask, &grid, &sdf_params2, |_, _| {},
+        &mut |map, v| if let Some(name) = sdf_output(2, map) { observer.output(name, VolumeRef::Real(v)) },
     );
     observer.output(outputs::LOCAL_FIELD_STAGE2, VolumeRef::Real(&lfs2));
 
@@ -333,9 +396,11 @@ pub fn run_qsmart(
         .zip(vasc_mask.iter())
         .map(|(&m, &v)| m - v)
         .collect();
-    let mut chi = crate::utils::adjust_offset(
+    let crate::utils::QsmartOffset { mut chi, combined, .. } = crate::utils::adjust_offset(
         &removed_voxels, &lfs1, &chi1, &chi2, &grid, bdir, 1.0, qsmart_params.adjust_offset_grid,
     );
+    observer.output(outputs::CHI_COMBINED, VolumeRef::Real(&combined));
+    drop(combined);
     // QSMART susceptibility is only defined inside the brain mask.
     for (c, &m) in chi.iter_mut().zip(mask.iter()) {
         if m == 0 {
@@ -473,25 +538,46 @@ mod tests {
         assert_eq!(
             names,
             [
+                outputs::VESSEL_BOTTOM_HAT,
+                outputs::VESSELNESS,
                 outputs::VESSEL_MASK,
+                outputs::INITIAL_PROXIMITY_STAGE1,
+                outputs::CURVATURE,
+                outputs::PROXIMITY_STAGE1,
+                outputs::ALPHA_STAGE1,
                 outputs::LOCAL_FIELD_STAGE1,
                 outputs::CHI_STAGE1,
+                outputs::INITIAL_PROXIMITY_STAGE2,
+                outputs::VESSEL_PROXIMITY_STAGE2,
+                outputs::PROXIMITY_STAGE2,
+                outputs::ALPHA_STAGE2,
                 outputs::LOCAL_FIELD_STAGE2,
                 outputs::CHI_STAGE2,
+                outputs::CHI_COMBINED,
             ]
         );
+        let output = |name: &str| &rec.outputs.iter().find(|(n, _)| *n == name).unwrap().1;
         for (name, data) in &rec.outputs {
             assert_eq!(data.len(), n, "{name}");
             assert!(data.iter().all(|v| v.is_finite()), "{name}");
         }
-        // Stage 2 inverts tissue only, so its χ is zero in vessels.
-        let vessels = &rec.outputs[0].1;
-        let chi2 = &rec.outputs[4].1;
-        for (&v, &c) in vessels.iter().zip(chi2) {
+        // Stage 2 inverts tissue only, so its χ is zero in vessels, where its smoothing width is 1.
+        let vessels = output(outputs::VESSEL_MASK);
+        let chi2 = output(outputs::CHI_STAGE2);
+        let alpha2 = output(outputs::ALPHA_STAGE2);
+        for ((&v, &c), &a) in vessels.iter().zip(chi2).zip(alpha2) {
             assert!(v == 0.0 || v == 1.0);
             if v == 1.0 {
-                assert_eq!(c, 0.0);
+                assert_eq!((c, a), (0.0, 1.0));
             }
+        }
+        // Unreferenced, the result is the combined map plus one offset in the vessels.
+        let combined = output(outputs::CHI_COMBINED);
+        let offset: Vec<f64> = chi.iter().zip(combined).map(|(a, b)| a - b).collect();
+        assert!(vessels.contains(&1.0), "the phantom has vessels");
+        let in_vessels = offset.iter().zip(vessels).find(|(_, &v)| v == 1.0).map(|(o, _)| *o).unwrap();
+        for (&o, &v) in offset.iter().zip(vessels) {
+            assert!((o - if v == 1.0 { in_vessels } else { 0.0 }).abs() < 1e-12);
         }
 
         // A progress closure is an observer too.
@@ -530,7 +616,10 @@ mod tests {
         let config = InversionConfig { algorithm: InversionAlgorithm::Qsmart, qsmart, ..Default::default() };
         let mut rec = Chis::default();
         run_qsmart(&field, &mask, Some(&reliability), None, &meta, &config, QsmReference::None, &mut rec).unwrap();
-        for (name, v) in &rec.0 {
+        // Vessel detection runs on the brain mask, not mask × R_0, and the curvature map is 1 off
+        // the surface of mask × R_0 (inside it or not).
+        let on_mask = [outputs::VESSEL_BOTTOM_HAT, outputs::VESSELNESS, outputs::CURVATURE];
+        for (name, v) in rec.0.iter().filter(|(name, _)| !on_mask.contains(name)) {
             for i in (0..n).filter(|&i| reliability[i] == 0) {
                 assert_eq!(v[i], 0.0, "{name} at unreliable voxel {i}");
             }
