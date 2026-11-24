@@ -2368,7 +2368,7 @@ fn test_all_combinations() {
         let chi_qsmart_raw = adjust_offset(
             &removed_voxels, &lfs_stage1_ppm, &chi_stage1, &chi_stage2,
             &grid, data.b0_dir, ppm_factor, qsm_core::utils::QsmartOffsetGrid::Fft,
-        );
+        ).chi;
         let chi_qsmart: Vec<f64> = chi_qsmart_raw.iter().enumerate()
             .map(|(i, &v)| if data.mask[i] > 0 { v * scale_to_ppm } else { 0.0 }).collect();
 

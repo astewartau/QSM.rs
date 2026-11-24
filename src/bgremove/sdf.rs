@@ -123,6 +123,35 @@ impl SdfParams {
     }
 }
 
+/// One of the maps SDF computes on the way to its local field, reported by [`sdf_with_maps`].
+///
+/// They are the maps the authors' `sdf_curvature.m` and `calculate_curvature.m` save
+/// (`curvature.nii`, `prox.nii`, `alpha.nii`) and two of the factors of `prox` it does not save
+/// (`prox1`, `prox2`), all in the field's grid. Each is 0 outside the mask except
+/// [`SdfMap::Curvature`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SdfMap {
+    /// `prox1`: the mask smoothed with Gaussian widths `[σ1, 2σ1, 2σ1]` voxels, times the mask
+    /// (`sdf_curvature.m` l. 12). Below 1 near the brain's edge.
+    InitialProximity,
+    /// `curvI` (`calculate_curvature.m`, saved as `curvature.nii`): 1 everywhere except on the
+    /// mask's surface (the mask minus its erosion by a radius-1 sphere), where it is the Gaussian
+    /// curvature of the surface scaled so that the most negative is −`curv_constant` (500), a
+    /// positive curvature is 1 and a flat vertex 0. Reported only with `use_curvature`.
+    Curvature,
+    /// `prox2` (stage 2 only, `vessel_proximity`): the tissue mask (`vasc_only`, 0 in vessels)
+    /// smoothed with Gaussian width `σ2` voxels, times the mask. Below 1 near vessels.
+    VesselProximity,
+    /// `prox` (`prox.nii`): `prox1` times the curvature proximity (the smoothed `curvI`, at least
+    /// 0.5), raised to at least `lower_lim` (0.6), times the edge refinement (`prox4`), and in
+    /// stage 2 times `prox2`. The smoothing width is set from it.
+    Proximity,
+    /// `alpha` (`alpha.nii`): each voxel's Gaussian smoothing width in voxels,
+    /// `σ·round(prox^n, 2)` with `σ = √(σ1² + σ2²)` and `n = −ln σ / ln 0.5`; 1 in vessels. Where
+    /// it is 0 inside the mask, the local field is 0.
+    Alpha,
+}
+
 /// SDF background field removal
 ///
 /// Removes background field from total field shift using spatially dependent filtering.
@@ -145,6 +174,22 @@ pub fn sdf(
     params: &SdfParams,
     progress: impl Fn(usize, usize),
 ) -> Vec<f64> {
+    sdf_with_maps(tfs, mask, vasc_only, grid, params, progress, &mut |_, _| {})
+}
+
+/// [`sdf`], handing each map it computes on the way ([`SdfMap`]) to `maps` as soon as it exists,
+/// as a borrowed slice, in the order of [`SdfMap`]'s variants. Maps a configuration does not
+/// compute (the curvature without `use_curvature`, the vessel proximity without
+/// `vessel_proximity`) are not reported. Reporting them changes nothing in the result.
+pub fn sdf_with_maps(
+    tfs: &[f64],
+    mask: &[f64],
+    vasc_only: &[f64],
+    grid: &Grid,
+    params: &SdfParams,
+    progress: impl Fn(usize, usize),
+    maps: &mut dyn FnMut(SdfMap, &[f64]),
+) -> Vec<f64> {
     let (nx, ny, nz) = grid.dims;
     let n_total = nx * ny * nz;
 
@@ -162,10 +207,11 @@ pub fn sdf(
     } else {
         mask.to_vec()
     };
+    maps(SdfMap::InitialProximity, &prox1);
 
     // Calculate curvature-based proximity if enabled
     let prox = if params.use_curvature {
-        let (prox_curv, _curv_i) = calculate_curvature_proximity(
+        let (prox_curv, curv_i) = calculate_curvature_proximity(
             &mask_binary,
             &prox1,
             params.lower_lim,
@@ -173,6 +219,7 @@ pub fn sdf(
             params.sigma1,
             grid,
         );
+        maps(SdfMap::Curvature, &curv_i);
         prox_curv
     } else {
         // Even without curvature, clamp proximity to lower_lim to prevent
@@ -193,11 +240,13 @@ pub fn sdf(
     // Calculate vasculature proximity (prox2) for stage 2
     let prox_final = if params.vessel_proximity && params.sigma2 > 0.0 {
         let prox2 = gaussian_smooth_3d_masked_f64(vasc_only, mask, nx, ny, nz, &[params.sigma2, params.sigma2, params.sigma2]);
+        maps(SdfMap::VesselProximity, &prox2);
         // Multiply prox * prox2
         prox.iter().zip(prox2.iter()).map(|(&p, &p2)| p * p2).collect()
     } else {
         prox
     };
+    maps(SdfMap::Proximity, &prox_final);
 
     // alpha = sigma*round(prox.^n,2).*mask (sdf_curvature.m): each voxel's smoothing width
     let mut alpha: Vec<f64> = prox_final.iter()
@@ -212,6 +261,7 @@ pub fn sdf(
             alpha[i] = 1.0;
         }
     }
+    maps(SdfMap::Alpha, &alpha);
 
     // Get unique alpha values and sort
     let mut unique_alphas: Vec<f64> = alpha.iter()
@@ -536,6 +586,41 @@ mod tests {
     }
 
     use super::*;
+
+    /// The maps come in [`SdfMap`]'s order, one each, only those the settings compute, and
+    /// reporting them does not change the local field.
+    #[test]
+    fn maps_are_reported_in_order_without_changing_the_result() {
+        let (nx, ny, nz) = (12, 12, 12);
+        let n = nx * ny * nz;
+        let grid = Grid::new(nx, ny, nz, 1.0, 1.0, 1.0);
+        let mask: Vec<f64> = (0..n).map(|i| {
+            let (x, y, z) = ((i % nx) as f64 - 5.5, ((i / nx) % ny) as f64 - 5.5, (i / (nx * ny)) as f64 - 5.5);
+            f64::from(u8::from(x * x + y * y + z * z < 25.0))
+        }).collect();
+        let vasc: Vec<f64> = (0..n).map(|i| if i % 13 == 0 { 0.0 } else { 1.0 }).collect();
+        let tfs: Vec<f64> = (0..n).map(|i| 0.01 * (i % 7) as f64).collect();
+        let params = SdfParams { sigma1: 2.0, sigma2: 1.0, ..SdfParams::stage2() };
+        let mut seen = Vec::new();
+        let lfs = sdf_with_maps(&tfs, &mask, &vasc, &grid, &params, |_, _| {}, &mut |m, v| {
+            assert_eq!(v.len(), n);
+            seen.push((m, v.to_vec()));
+        });
+        assert_eq!(lfs, sdf(&tfs, &mask, &vasc, &grid, &params, |_, _| {}));
+        let kinds: Vec<SdfMap> = seen.iter().map(|(m, _)| *m).collect();
+        assert_eq!(kinds, [SdfMap::InitialProximity, SdfMap::Curvature, SdfMap::VesselProximity,
+                           SdfMap::Proximity, SdfMap::Alpha]);
+        // alpha.nii: 1 in vessels inside the mask, 0 outside it.
+        let alpha = &seen[4].1;
+        for i in 0..n {
+            if mask[i] == 0.0 { assert_eq!(alpha[i], 0.0) } else if vasc[i] == 0.0 { assert_eq!(alpha[i], 1.0) }
+        }
+
+        let mut kinds = Vec::new();
+        sdf_with_maps(&tfs, &mask, &vasc, &grid, &SdfParams { use_curvature: false, vessel_proximity: false, ..params },
+                      |_, _| {}, &mut |m, _| kinds.push(m));
+        assert_eq!(kinds, [SdfMap::InitialProximity, SdfMap::Proximity, SdfMap::Alpha]);
+    }
 
     #[test]
     fn test_sdf_simple() {

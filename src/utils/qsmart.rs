@@ -123,7 +123,7 @@ fn adjust_offset_kernel(grid: &crate::Grid, b0_dir: (f64, f64, f64)) -> Vec<f64>
 ///   for odd matrix dimensions)
 ///
 /// # Returns
-/// Combined and offset-adjusted susceptibility map
+/// The combined map before and after the offset adjustment, and the offset ([`QsmartOffset`]).
 pub fn adjust_offset(
     removed_voxels: &[f64],
     lfs_sdf: &[f64],
@@ -133,7 +133,7 @@ pub fn adjust_offset(
     b0_dir: (f64, f64, f64),
     ppm: f64,
     offset_grid: QsmartOffsetGrid,
-) -> Vec<f64> {
+) -> QsmartOffset {
     let (nx, ny, nz) = grid.dims;
     // Scale lfs_sdf back (it was multiplied by ppm in the QSMART pipeline)
     let lfs_scaled: Vec<f64> = lfs_sdf.iter().map(|&v| v / ppm).collect();
@@ -217,7 +217,18 @@ pub fn adjust_offset(
         .map(|(&c, &r)| c + offset * r)
         .collect();
 
-    adjusted
+    QsmartOffset { chi: adjusted, combined: combined_chi, offset }
+}
+
+/// What [`adjust_offset`] returns.
+pub struct QsmartOffset {
+    /// The combined map with the offset added in the removed voxels (`QSMART_adjusted_offset.nii`)
+    pub chi: Vec<f64>,
+    /// The combined map before the offset (`adjust_offset.m`'s `combined_chi.nii`): stage-1 χ in
+    /// the removed voxels plus stage-2 χ
+    pub combined: Vec<f64>,
+    /// The offset `o` added in the removed voxels, in the maps' units
+    pub offset: f64,
 }
 
 /// QSMART's proton gyromagnetic ratio in rad/s/T (`Demo_QSMART.m`'s `gyro`): the reference
@@ -661,7 +672,11 @@ mod tests {
             &g, (0.0, 0.0, 1.0), 1.0, QsmartOffsetGrid::Fft
         );
 
-        assert_eq!(result.len(), n_total);
+        assert_eq!(result.chi.len(), n_total);
+        // The adjusted map is the combined one plus the offset in the removed voxels.
+        for ((&c, &a), &r) in result.combined.iter().zip(&result.chi).zip(&removed) {
+            assert!((c + result.offset * r - a).abs() < 1e-12);
+        }
     }
 
     #[test]
